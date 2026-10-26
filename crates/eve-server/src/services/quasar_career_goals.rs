@@ -16,12 +16,12 @@ use eve_db::{IskCents, WorldRepository};
 use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, encode_zigzag64,
     DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleEmpty, GoogleTimestamp, QuasarMessage,
-    TYPE_GOOGLEAPIS_PREFIX,
+    WireMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
-/// Authentic V24 `res:/staticdata/careerpaths.fsdbinary` localization message IDs `(nameID, descriptionID)`:
+/// Authentic V24 `res:/staticdata/careerpaths.fsdbinary` base localization message IDs `(nameID, descriptionID)`:
 /// - `1` (`CAREER_EXPLORATION`, FSD key 4 `"Explorer"`): `(582_516, 582_517)`
 /// - `2` (`CAREER_INDUSTRIALIST`, FSD key 5 `"Industrialist"`): `(582_518, 582_519)`
 /// - `3` (`CAREER_ENFORCER`, FSD key 6 `"Enforcer"`): `(582_520, 582_521)`
@@ -33,6 +33,12 @@ pub const CAREER_PATH_MESSAGE_IDS: [(u32, u32, u32); 4] = [
     (4, 582_522, 582_523),
 ];
 
+/// DERIVED: AIR Career Program goal definition. Career path IDs (`1..=4`), activity groups, targets,
+/// career points, and ISK/SP rewards are synthesized from SDE (`careerpaths.fsdbinary`,
+/// `contributionmethods.fsdbinary`) and EVE University Wiki AIR Career Program tables; per-goal
+/// `name_message_id` (`582531..582689`, `665435..665481`), `description_message_id` (`696260..696439`),
+/// and `threat` are DERIVED offsets from client UI base localization IDs because individual goal
+/// definitions are served dynamically by live Quasar.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CareerGoalDef {
     pub uuid: [u8; 16],
@@ -58,8 +64,8 @@ pub struct CareerGoalDef {
 }
 
 impl CareerGoalDef {
-    /// Returns the localization message ID for `Attributes.name.sequential`, falling back to the
-    /// `res:/staticdata/careerpaths.fsdbinary` / `res:/staticdata/contributionmethods.fsdbinary` range.
+    /// DERIVED: Returns the localization message ID for `Attributes.name.sequential`, falling back
+    /// to a derived offset (`base + uuid[15]`) from the `careerpaths.fsdbinary` career path base ID.
     pub fn effective_name_message_id(&self) -> u32 {
         if self.name_message_id > 0 {
             return self.name_message_id;
@@ -72,7 +78,8 @@ impl CareerGoalDef {
         base + (self.uuid[15] as u32)
     }
 
-    /// Returns the localization message ID for `Attributes.description.sequential`.
+    /// DERIVED: Returns the localization message ID for `Attributes.description.sequential`, falling
+    /// back to a derived offset (`base + 1_000 + uuid[15]`) from the `careerpaths.fsdbinary` base ID.
     pub fn effective_description_message_id(&self) -> u32 {
         if self.description_message_id > 0 {
             return self.description_message_id;
@@ -410,10 +417,11 @@ impl CareerGoalManager {
         delta: u64,
         gateway: &PublicGatewayRouter,
     ) {
-        let now_unix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now_unix = self
+            .db
+            .as_ref()
+            .map(|db| db.clock().now_unix_secs())
+            .unwrap_or(0);
         let mut progressed = Vec::new();
         {
             let mut map = self
@@ -432,18 +440,18 @@ impl CareerGoalManager {
                         g.completed_time = Some(now_unix);
                     }
                     let just_completed = !prev && g.completed;
-                    progressed.push((g.uuid, delta, just_completed));
+                    progressed.push((g.uuid, g.progress, just_completed));
                 }
             }
         }
         self.save_to_db();
 
-        for (uuid, amount, just_completed) in progressed {
+        for (uuid, new_progress, just_completed) in progressed {
             let mut id_bytes = Vec::new();
             encode_career_goal_identifier(&uuid, &mut id_bytes);
             let mut not_bytes = Vec::new();
             encode_bytes_field(1, &id_bytes, &mut not_bytes);
-            encode_varint_field(2, amount, &mut not_bytes);
+            encode_varint_field(2, new_progress, &mut not_bytes);
 
             let _ = gateway.publish_notice(
                 crate::quasar_gateway::NoticeScope::Character(char_id),
@@ -569,10 +577,7 @@ impl CareerGoalManager {
                 ch.balance = new_bal;
                 ch.free_skill_points += sp;
                 if isk > 0 {
-                    let now_unix = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
+                    let now_unix = db.clock().now_unix_secs();
                     snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
                         owner_id: character_id as i64,
                         entry_type: "CAREER_PROGRAM_REWARD",
@@ -852,6 +857,59 @@ pub fn extract_uuid(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> Option<[u
     None
 }
 
+fn extract_target_character(
+    dyn_msg: &DynamicQuasarMessage,
+    any: &GoogleAny,
+    field_num: u32,
+    allow_scalar: bool,
+) -> Option<u32> {
+    if let Some(val) = dyn_msg.get(field_num) {
+        match val {
+            DynamicValue::Message(m) => {
+                if let Some(seq) = m.get(1) {
+                    match seq {
+                        DynamicValue::Uint32(u) if *u > 0 => return Some(*u),
+                        DynamicValue::Uint64(u) if *u > 0 => return Some(*u as u32),
+                        DynamicValue::Int32(i) if *i > 0 => return Some(*i as u32),
+                        DynamicValue::Int64(i) if *i > 0 => return Some(*i as u32),
+                        _ => {}
+                    }
+                }
+            }
+            DynamicValue::Uint32(u) if allow_scalar && *u >= 1_000_000 => return Some(*u),
+            DynamicValue::Uint64(u) if allow_scalar && *u >= 1_000_000 => return Some(*u as u32),
+            DynamicValue::Int32(i) if allow_scalar && *i >= 1_000_000 => return Some(*i as u32),
+            DynamicValue::Int64(i) if allow_scalar && *i >= 1_000_000 => return Some(*i as u32),
+            _ => {}
+        }
+    }
+    if let Ok(wm) = WireMessage::decode(&any.value) {
+        for f in wm.fields.iter().filter(|f| f.field_number == field_num) {
+            if let Some(b) = f.value.as_bytes() {
+                if let Ok(inner) = WireMessage::decode(b) {
+                    if let Some(v) = inner
+                        .fields
+                        .iter()
+                        .find(|sub| sub.field_number == 1)
+                        .and_then(|sub| sub.value.as_varint())
+                    {
+                        if v > 0 {
+                            return Some(v as u32);
+                        }
+                    }
+                }
+            } else if allow_scalar {
+                if let Some(v) = f.value.as_varint() {
+                    if v >= 1_000_000 {
+                        return Some(v as u32);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 // ============================================================================
 // Registration
 // ============================================================================
@@ -933,9 +991,12 @@ pub fn register_career_goal_handlers(
     let mgr = Arc::clone(&manager);
     router.register_handler(
         "eve_public.career.goal.api.admin.ProgressRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, any, dyn_msg| {
             crate::quasar_gateway::require_admin_role(ctx)?;
-            let Some(cid) = ctx.effective_character_id() else {
+            let Some(target_char) = extract_target_character(dyn_msg, any, 3, true)
+                .or_else(|| extract_target_character(dyn_msg, any, 2, false))
+                .or_else(|| ctx.effective_character_id())
+            else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
             let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
@@ -950,18 +1011,27 @@ pub fn register_career_goal_handlers(
                     DynamicValue::Int32(i) => Some(*i as u64),
                     _ => None,
                 })
+                .or_else(|| {
+                    WireMessage::decode(&any.value).ok().and_then(|wm| {
+                        wm.fields
+                            .iter()
+                            .find(|f| f.field_number == 3)
+                            .and_then(|f| f.value.as_varint())
+                            .filter(|&v| v < 1_000_000)
+                    })
+                })
                 .unwrap_or(1);
-            let updated = mgr.add_progress(cid, &target_uuid, delta, ctx.now_unix());
+            let updated = mgr.add_progress(target_char, &target_uuid, delta, ctx.now_unix());
             mgr.save_to_db();
 
-            if let Some((_goal, just_completed)) = updated {
+            if let Some((goal, just_completed)) = updated {
                 let mut not_bytes = Vec::new();
                 let mut id_bytes = Vec::new();
                 encode_career_goal_identifier(&target_uuid, &mut id_bytes);
                 encode_bytes_field(1, &id_bytes, &mut not_bytes);
-                encode_varint_field(2, delta, &mut not_bytes);
+                encode_varint_field(2, goal.progress, &mut not_bytes);
                 super::quasar_social_chat::ctx_queue_notice(
-                    crate::quasar_gateway::NoticeScope::Character(cid),
+                    crate::quasar_gateway::NoticeScope::Character(target_char),
                     GoogleAny {
                         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.ProgressedNotice"),
                         value: not_bytes,
@@ -973,7 +1043,7 @@ pub fn register_career_goal_handlers(
                     let mut comp_bytes = Vec::new();
                     encode_bytes_field(1, &id_bytes, &mut comp_bytes);
                     super::quasar_social_chat::ctx_queue_notice(
-                        crate::quasar_gateway::NoticeScope::Character(cid),
+                        crate::quasar_gateway::NoticeScope::Character(target_char),
                         GoogleAny {
                             type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.CompletedNotice"),
                             value: comp_bytes,
@@ -991,15 +1061,17 @@ pub fn register_career_goal_handlers(
     let mgr = Arc::clone(&manager);
     router.register_handler(
         "eve_public.career.goal.api.admin.CompleteRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, any, dyn_msg| {
             crate::quasar_gateway::require_admin_role(ctx)?;
-            let Some(cid) = ctx.effective_character_id() else {
+            let Some(target_char) = extract_target_character(dyn_msg, any, 2, true)
+                .or_else(|| ctx.effective_character_id())
+            else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
             let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
-            let _ = mgr.mark_completed(cid, &target_uuid, ctx.now_unix())?;
+            let _ = mgr.mark_completed(target_char, &target_uuid, ctx.now_unix())?;
             mgr.save_to_db();
 
             let mut not_bytes = Vec::new();
@@ -1007,7 +1079,7 @@ pub fn register_career_goal_handlers(
             encode_career_goal_identifier(&target_uuid, &mut id_bytes);
             encode_bytes_field(1, &id_bytes, &mut not_bytes);
             super::quasar_social_chat::ctx_queue_notice(
-                crate::quasar_gateway::NoticeScope::Character(cid),
+                crate::quasar_gateway::NoticeScope::Character(target_char),
                 GoogleAny {
                     type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.CompletedNotice"),
                     value: not_bytes,
@@ -1068,69 +1140,88 @@ pub fn register_career_goal_handlers(
         }),
     );
 
-    // 8. eve.career.goal.api.requests.GetDefinitionsRequest -> GetDefinitionsResponse
-    let mgr_eve_defs = Arc::clone(&manager);
-    router.register_handler(
+    // 8. eve.career.goal.api.GetDefinitionsRequest (and .requests. alias) -> GetDefinitionsResponse
+    for req_name in [
+        "eve.career.goal.api.GetDefinitionsRequest",
         "eve.career.goal.api.requests.GetDefinitionsRequest",
-        Arc::new(move |_ctx, _any, _dyn| {
-            let defs = mgr_eve_defs.load_definitions();
-            let mut out = Vec::new();
-            for def in &defs {
-                let mut gw = Vec::new();
-                encode_internal_career_goal_definition_wire(def, &mut gw);
-                encode_bytes_field(1, &gw, &mut out);
-            }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.career.goal.api.requests.GetDefinitionsResponse"
-                ),
-                value: out,
-            })
-        }),
-    );
+    ] {
+        let mgr_eve_defs = Arc::clone(&manager);
+        router.register_handler(
+            req_name,
+            Arc::new(move |_ctx, _any, _dyn| {
+                let defs = mgr_eve_defs.load_definitions();
+                let mut out = Vec::new();
+                for def in &defs {
+                    let mut gw = Vec::new();
+                    encode_internal_career_goal_definition_wire(def, &mut gw);
+                    encode_bytes_field(1, &gw, &mut out);
+                }
+                Ok(GoogleAny {
+                    type_url: format!(
+                        "{TYPE_GOOGLEAPIS_PREFIX}eve.career.goal.api.GetDefinitionsResponse"
+                    ),
+                    value: out,
+                })
+            }),
+        );
+    }
 
-    // 9. eve.career.goal.api.admin.requests.GetAllByCharacterRequest -> GetAllByCharacterResponse
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
+    // 9. eve.career.goal.api.admin.GetAllByCharacterRequest (and .requests. alias) -> GetAllByCharacterResponse
+    for req_name in [
+        "eve.career.goal.api.admin.GetAllByCharacterRequest",
         "eve.career.goal.api.admin.requests.GetAllByCharacterRequest",
-        Arc::new(move |ctx, _any, _dyn| {
-            crate::quasar_gateway::require_admin_role(ctx)?;
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
-            let goals = mgr.get_or_init_goals(cid);
-            let mut out = Vec::new();
-            for g in &goals {
-                let mut gw = Vec::new();
-                encode_career_goal_wire(g, &mut gw);
-                encode_bytes_field(1, &gw, &mut out);
-            }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.career.goal.api.admin.requests.GetAllByCharacterResponse"
-                ),
-                value: out,
-            })
-        }),
-    );
+    ] {
+        let mgr = Arc::clone(&manager);
+        router.register_handler(
+            req_name,
+            Arc::new(move |ctx, any, dyn_msg| {
+                crate::quasar_gateway::require_admin_role(ctx)?;
+                let Some(target_char) = extract_target_character(dyn_msg, any, 1, true)
+                    .or_else(|| ctx.effective_character_id())
+                else {
+                    return Err((STATUS_FORBIDDEN, "Active character required".into()));
+                };
+                let goals = mgr.get_or_init_goals(target_char);
+                let mut out = Vec::new();
+                for g in &goals {
+                    let mut gw = Vec::new();
+                    encode_career_goal_wire(g, &mut gw);
+                    encode_bytes_field(1, &gw, &mut out);
+                }
+                Ok(GoogleAny {
+                    type_url: format!(
+                        "{TYPE_GOOGLEAPIS_PREFIX}eve.career.goal.api.admin.GetAllByCharacterResponse"
+                    ),
+                    value: out,
+                })
+            }),
+        );
+    }
 
-    // 10. eve.career.goal.api.admin.requests.CompleteRequest -> CompleteResponse
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
+    // 10. eve.career.goal.api.admin.CompleteRequest (and .requests. alias) -> CompleteResponse
+    for req_name in [
+        "eve.career.goal.api.admin.CompleteRequest",
         "eve.career.goal.api.admin.requests.CompleteRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
-            crate::quasar_gateway::require_admin_role(ctx)?;
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
-            let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
-                return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
-            };
-            let _ = mgr.mark_completed(cid, &target_uuid, ctx.now_unix())?;
-            mgr.save_to_db();
-            Ok(GoogleEmpty.to_any())
-        }),
-    );
+    ] {
+        let mgr = Arc::clone(&manager);
+        router.register_handler(
+            req_name,
+            Arc::new(move |ctx, any, dyn_msg| {
+                crate::quasar_gateway::require_admin_role(ctx)?;
+                let Some(target_char) = extract_target_character(dyn_msg, any, 2, true)
+                    .or_else(|| ctx.effective_character_id())
+                else {
+                    return Err((STATUS_FORBIDDEN, "Active character required".into()));
+                };
+                let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
+                    return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
+                };
+                let _ = mgr.mark_completed(target_char, &target_uuid, ctx.now_unix())?;
+                mgr.save_to_db();
+                Ok(GoogleEmpty.to_any())
+            }),
+        );
+    }
 
     // 11. eve.character.career.goal.GetProgressRequest -> GetProgressResponse
     let mgr = Arc::clone(&manager);

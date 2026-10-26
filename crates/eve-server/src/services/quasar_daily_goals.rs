@@ -157,7 +157,8 @@ fn ensure_character_daily_goals_with_templates(
     goals: &mut Vec<CharacterDailyGoal>,
     templates: &[DailyGoalTemplate],
     now_unix: u64,
-) {
+) -> bool {
+    let mut changed = false;
     let day_bucket = now_unix / 86_400;
     for tpl in templates {
         if let Some(existing) = goals.iter_mut().find(|g| g.uuid == tpl.uuid) {
@@ -170,8 +171,10 @@ fn ensure_character_daily_goals_with_templates(
                 existing.completed_at_unix = None;
                 existing.claimed_at_unix = None;
                 existing.day_bucket = day_bucket;
+                changed = true;
             } else if existing.day_bucket == 0 && day_bucket > 0 {
                 existing.day_bucket = day_bucket;
+                changed = true;
             }
         } else {
             goals.push(CharacterDailyGoal {
@@ -185,8 +188,10 @@ fn ensure_character_daily_goals_with_templates(
                 claimed_at_unix: None,
                 day_bucket,
             });
+            changed = true;
         }
     }
+    changed
 }
 
 impl DailyGoalManager {
@@ -287,23 +292,38 @@ impl DailyGoalManager {
         self.templates.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    fn ensure_character_goals(&self, goals: &mut Vec<CharacterDailyGoal>, now_unix: u64) {
+    pub fn now_unix(&self) -> u64 {
+        self.db
+            .as_ref()
+            .map(|db| db.clock().now_unix_secs())
+            .unwrap_or(0)
+    }
+
+    fn ensure_character_goals(&self, goals: &mut Vec<CharacterDailyGoal>, now_unix: u64) -> bool {
         let tpls = self.templates.read().unwrap_or_else(|e| e.into_inner());
-        ensure_character_daily_goals_with_templates(goals, &tpls, now_unix);
+        ensure_character_daily_goals_with_templates(goals, &tpls, now_unix)
     }
 
     pub fn get_or_init_goals(&self, character_id: u32) -> Vec<CharacterDailyGoal> {
-        self.get_or_init_goals_at(character_id, 0)
+        self.get_or_init_goals_at(character_id, self.now_unix())
     }
 
     pub fn get_or_init_goals_at(&self, character_id: u32, now_unix: u64) -> Vec<CharacterDailyGoal> {
-        let mut map = self
-            .character_goals
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        let goals = map.entry(character_id).or_default();
-        self.ensure_character_goals(goals, now_unix);
-        goals.clone()
+        let effective_now = if now_unix > 0 { now_unix } else { self.now_unix() };
+        let (out, changed) = {
+            let mut map = self
+                .character_goals
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let is_new_char = !map.contains_key(&character_id);
+            let goals = map.entry(character_id).or_default();
+            let mutated = self.ensure_character_goals(goals, effective_now);
+            (goals.clone(), is_new_char || mutated)
+        };
+        if changed {
+            self.save_to_db();
+        }
+        out
     }
 
     pub fn add_progress(
@@ -544,10 +564,7 @@ impl DailyGoalManager {
         delta: u64,
         gateway: &PublicGatewayRouter,
     ) {
-        let now_unix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now_unix = self.now_unix();
         let mut progressed = Vec::new();
         {
             let mut map = self

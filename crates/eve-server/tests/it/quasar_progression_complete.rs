@@ -97,19 +97,22 @@ fn drain_notices(rx: &mut Receiver<EvePublicNotice>) -> Vec<EvePublicNotice> {
 }
 
 fn make_uuid_request(uuid: [u8; 16]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut id_bytes = Vec::new();
+    let (mut out, mut id_bytes) = (Vec::new(), Vec::new());
     encode_bytes_field(1, &uuid, &mut id_bytes);
     encode_bytes_field(1, &id_bytes, &mut out);
     out
 }
 
 fn make_admin_progress(uuid: [u8; 16], delta: u64) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut id_bytes = Vec::new();
-    encode_bytes_field(1, &uuid, &mut id_bytes);
-    encode_bytes_field(1, &id_bytes, &mut out);
+    let mut out = make_uuid_request(uuid);
     encode_varint_field(3, delta, &mut out);
+    out
+}
+
+fn make_char_field(field_num: u32, char_id: u32) -> Vec<u8> {
+    let (mut out, mut cb) = (Vec::new(), Vec::new());
+    encode_varint_field(1, char_id as u64, &mut cb);
+    encode_bytes_field(field_num, &cb, &mut out);
     out
 }
 
@@ -243,7 +246,11 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
     let rew_dyn = reg.decode_dynamic("eve_public.dailygoal.api.GetAllWithRewardsResponse", &rew_rsp.payload.unwrap().value).unwrap();
     assert!(matches!(rew_dyn.get(1), Some(eve_proto::quasar::DynamicValue::Repeated(items)) if items.len() == 1), "Completed unclaimed goal must appear in GetAllWithRewardsResponse");
 
-    // 5. Redeem goal #1 via eve_public.dailygoal.api.RedeemRequest (atomic: double redeem rejected)
+    // 5. Redeem goal #1: verify snapshot overflow rolls back claimed=false, then redeem atomically (double redeem rejected)
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&90_000_001).unwrap().balance = eve_db::IskCents(i64::MAX - 10); });
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.RedeemRequest", make_uuid_request(target_uuid)).await.status_code, eve_server::quasar_gateway::STATUS_BAD_REQUEST);
+    assert!(!ctx.quasar_gateway.progression.daily_goals.get_or_init_goals(90_000_001)[0].claimed, "Failed snapshot commit must roll back claimed=false");
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&90_000_001).unwrap().balance = eve_db::IskCents(initial_isk); });
     let redeem_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.RedeemRequest", make_uuid_request(target_uuid)).await;
     assert_eq!(redeem_rsp.status_code, STATUS_OK);
     let double_redeem = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.RedeemRequest", make_uuid_request(target_uuid)).await;
@@ -275,7 +282,7 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
     let red_dyn = reg.decode_dynamic("eve_public.dailygoal.api.RedeemedNotice", &red_notice.payload.as_ref().unwrap().value).expect("decode RedeemedNotice");
     assert!(red_dyn.get(1).is_some());
 
-    // 8. eve.dailygoal.api.GetRequest & GetAllRequest + daily rollover reset across 86,400s boundary
+    // 8. eve.dailygoal.api.GetRequest & GetAllRequest + daily rollover reset across 86,400s boundary (persisted to DB)
     let eve_get_rsp = quasar_rpc(&ctx, &mut sess, "eve.dailygoal.api.GetRequest", make_uuid_request(target_uuid)).await;
     assert_eq!(eve_get_rsp.status_code, STATUS_OK);
     assert!(reg.decode_dynamic("eve.dailygoal.api.GetResponse", &eve_get_rsp.payload.unwrap().value).unwrap().get(1).is_some());
@@ -286,7 +293,9 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
     let reset_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetAllCurrentRequest", Vec::new()).await;
     assert_eq!(reset_rsp.status_code, STATUS_OK);
     let reset_goals = ctx.quasar_gateway.progression.daily_goals.get_or_init_goals(90_000_001);
-    assert!(reset_goals.iter().all(|g| g.current_progress == 0 && !g.completed && !g.claimed), "Daily goals must reset after 86,400s day boundary");
+    assert!(reset_goals.iter().all(|g| g.current_progress == 0 && !g.completed && !g.claimed && g.day_bucket > 0), "Daily goals must reset after 86,400s day boundary");
+    let persisted_blob = ctx.db.with_snapshot(|s| s.quasar_state_blobs["quasar_daily_goals"].clone());
+    assert!(persisted_blob.contains("\"completed\":false") && !persisted_blob.contains("\"completed\":true"), "Rollover reset on GetAllCurrentRequest must persist to DB");
 }
 
 // ============================================================================
@@ -310,54 +319,23 @@ async fn quasar_career_goals_paths_and_milestones() {
     let mut sess = build_sess(10_002, 90_000_001, 98_000_001);
     let empty_kw = HashMap::new();
 
-    // Subscribe session for career notices
-    ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "Subscribe", &[], &empty_kw, None)
-        .await
-        .expect("Subscribe");
-    let mut stream_rx = ctx
-        .quasar_gateway
-        .take_stream_receiver(sess.session_id)
-        .expect("take_stream_receiver");
+    ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "Subscribe", &[], &empty_kw, None).await.expect("Subscribe");
+    let mut stream_rx = ctx.quasar_gateway.take_stream_receiver(sess.session_id).expect("take_stream_receiver");
 
     // 1. Query career paths and goals via eve_public.career.goal.api.GetAllRequest
-    let rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.career.goal.api.GetAllRequest",
-        Vec::new(),
-    )
-    .await;
+    let rsp = quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.GetAllRequest", Vec::new()).await;
     assert_eq!(rsp.status_code, STATUS_OK);
     let payload = rsp.payload.expect("payload present");
-    assert_eq!(
-        payload.normalized_type_name(),
-        "eve_public.career.goal.api.GetAllResponse"
-    );
-
+    assert_eq!(payload.normalized_type_name(), "eve_public.career.goal.api.GetAllResponse");
     let wm = WireMessage::decode(&payload.value).expect("decode GetAllResponse");
-    let goal_entries: Vec<&WireField> = wm.fields.iter().filter(|f| f.field_number == 1).collect();
-    assert!(
-        goal_entries.len() >= 4,
-        "Should return career goals for all 4 paths"
-    );
-
-    // Canonical UUID of first Enforcer career goal
+    assert!(wm.fields.iter().filter(|f| f.field_number == 1).count() >= 4, "Should return career goals for all 4 paths");
     let target_uuid = [0x43, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
 
     // 2. Query definitions via eve_public.career.goal.api.GetDefinitionsRequest and decode via DescriptorRegistry
-    let def_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.career.goal.api.GetDefinitionsRequest",
-        Vec::new(),
-    )
-    .await;
+    let def_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.GetDefinitionsRequest", Vec::new()).await;
     assert_eq!(def_rsp.status_code, STATUS_OK);
     let def_payload = def_rsp.payload.expect("GetDefinitionsResponse payload");
-    assert_eq!(
-        def_payload.normalized_type_name(),
-        "eve_public.career.goal.api.GetDefinitionsResponse"
-    );
+    assert_eq!(def_payload.normalized_type_name(), "eve_public.career.goal.api.GetDefinitionsResponse");
     let def_dyn = reg.decode_dynamic("eve_public.career.goal.api.GetDefinitionsResponse", &def_payload.value).expect("decode GetDefinitionsResponse");
     let first_def_goal = match def_dyn.get(1) {
         Some(eve_proto::quasar::DynamicValue::Repeated(items)) => match &items[0] {
@@ -381,26 +359,44 @@ async fn quasar_career_goals_paths_and_milestones() {
     assert!(matches!(first_attrs.get(6), Some(eve_proto::quasar::DynamicValue::Repeated(v)) if v.len() == 4), "Attributes.ui_annotations must carry group, subtype, name, description");
     assert!(matches!(first_attrs.get(12), Some(eve_proto::quasar::DynamicValue::Repeated(v)) if v.len() == 1), "Attributes.rewards must carry ISK reward");
 
-    // 3. Progress career goal via real NPC kill + eve_public.career.goal.api.admin.ProgressRequest
+    // 3. Progress career goal via real NPC kill + admin.ProgressRequest; verify ProgressedNotice carries cumulative progress (2)
     let npc_ball2 = eve_server::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity(&ctx, 30_000_142, 10035, "BeltRat", 1, Default::default()).await;
     eve_server::services::combat_crimewatch::combat_npc_ai::destroy_specialized_npc_and_queue_bounty(&ctx, 30_000_142, npc_ball2, 90_000_001).await;
     assert_eq!(ctx.quasar_gateway.progression.career_goals.get_or_init_goals(90_000_001)[0].progress, 1, "NPC kill must increment Enforcer combat career goal progress");
+    let _ = drain_notices(&mut stream_rx);
     let prog_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.admin.ProgressRequest", make_admin_progress(target_uuid, 1)).await;
     assert_eq!(prog_rsp.status_code, STATUS_OK);
+    let admin_prog_notifs = drain_notices(&mut stream_rx);
+    let admin_prog_wm = WireMessage::decode(&admin_prog_notifs.iter().find(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.career.goal.api.ProgressedNotice"))).unwrap().payload.as_ref().unwrap().value).unwrap();
+    assert_eq!(admin_prog_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(2), "ProgressedNotice field 2 must carry cumulative progress (2), not delta (1)");
 
-    // 4. Mark career goal completed via eve_public.career.goal.api.admin.CompleteRequest
+    // 4. Verify admin target-character routing (90_000_002 vs caller 90_000_001), then complete 90_000_001's goal
+    let mut admin_prog_other = make_admin_progress(target_uuid, 4);
+    admin_prog_other.extend_from_slice(&make_char_field(3, 90_000_002));
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.admin.ProgressRequest", admin_prog_other).await.status_code, STATUS_OK);
+    assert_eq!(ctx.quasar_gateway.progression.career_goals.get_or_init_goals(90_000_002)[0].progress, 4, "Admin ProgressRequest must advance target character 90_000_002");
+    assert_eq!(ctx.quasar_gateway.progression.career_goals.get_or_init_goals(90_000_001)[0].progress, 2, "Caller 90_000_001 must remain at progress 2");
+    let mut admin_comp_other = make_uuid_request(target_uuid);
+    admin_comp_other.extend_from_slice(&make_char_field(2, 90_000_002));
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.admin.CompleteRequest", admin_comp_other).await.status_code, STATUS_OK);
+    assert!(ctx.quasar_gateway.progression.career_goals.get_or_init_goals(90_000_002)[0].completed && !ctx.quasar_gateway.progression.career_goals.get_or_init_goals(90_000_001)[0].completed);
+    let get_other = quasar_rpc(&ctx, &mut sess, "eve.career.goal.api.admin.GetAllByCharacterRequest", make_char_field(1, 90_000_002)).await;
+    assert_eq!(get_other.status_code, STATUS_OK);
+
     let comp_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.admin.CompleteRequest", make_uuid_request(target_uuid)).await;
     assert_eq!(comp_rsp.status_code, STATUS_OK);
-
-    // Check notices and verify CompletedNotice carries only field 1 (goal Identifier)
     let notifs = drain_notices(&mut stream_rx);
-    assert!(!notifs.is_empty(), "Career notices should be emitted");
     let comp_not = notifs.iter().find(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.career.goal.api.CompletedNotice"))).expect("CompletedNotice");
     let comp_wm = WireMessage::decode(&comp_not.payload.as_ref().unwrap().value).expect("decode CompletedNotice");
     assert_eq!(comp_wm.fields.len(), 1, "CompletedNotice schema only defines field 1 (goal)");
 
-    // 5. Claim milestone reward via eve_public.career.goal.api.ClaimRewardRequest
+    // 5. Claim milestone reward: verify snapshot overflow rolls back claimed=false, then claim atomically
     ctx.quasar_gateway.progression.career_goals.on_gameplay_event(90_000_001, "combat", 20, &ctx.quasar_gateway);
+    let orig_bal = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance);
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&90_000_001).unwrap().balance = eve_db::IskCents(i64::MAX - 10); });
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.ClaimRewardRequest", make_uuid_request(target_uuid)).await.status_code, eve_server::quasar_gateway::STATUS_BAD_REQUEST);
+    assert!(!ctx.quasar_gateway.progression.career_goals.get_or_init_goals(90_000_001)[0].claimed, "Failed snapshot commit must roll back career claimed=false");
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&90_000_001).unwrap().balance = orig_bal; });
     let claim_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.ClaimRewardRequest", make_uuid_request(target_uuid)).await;
     assert_eq!(claim_rsp.status_code, STATUS_OK);
     let _ = drain_notices(&mut stream_rx);
