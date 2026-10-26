@@ -410,6 +410,20 @@ async fn test_char_skill_injection_and_extraction_invariants() {
     });
 
     // 4. Valid Skill Extraction with >= 5.5M allocated SP extracting exactly 500,000 SP:
+    // Also seed an active skill_queues entry for 3300 (level 5, start_sp = 200_000) to verify #4 queue reconciliation
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skill_queues.insert(
+            char_id,
+            vec![eve_db::SkillQueueEntry {
+                type_id: 3300,
+                target_level: 5,
+                start_sp: 200_000.0,
+                end_sp: 256_000.0,
+                duration_seconds: 1000.0,
+                started_at_unix: Some(ctx.now_unix()),
+            }],
+        );
+    });
     let extract_rep = rpc(
         &ctx,
         &mut sess,
@@ -425,6 +439,10 @@ async fn test_char_skill_injection_and_extraction_invariants() {
     )
     .await
     .expect("ExtractSkills valid Omega with >= 5.5M allocated SP");
+    assert!(
+        ctx.db.with_snapshot(|snap| snap.skill_queues.get(&char_id).map(|q| q.is_empty()).unwrap_or(true)),
+        "#4: invalidated higher-level skill queue entry must be pruned on extraction"
+    );
     let injector_item_id = extract_rep
         .dict_get("injectorItemID")
         .and_then(|v| v.as_i64())

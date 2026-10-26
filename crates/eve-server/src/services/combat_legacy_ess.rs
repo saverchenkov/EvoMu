@@ -1277,11 +1277,22 @@ pub async fn handle_legacy_and_ess(
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let is_reserve = method == "AttemptLinkToReserveBank";
-                let already_linked = snap
-                    .system_states
-                    .get(&sys_id)
-                    .map(|st| st.ess_linked_character_id == Some(char_id))
-                    .unwrap_or(false);
+                let mut pulse_st =
+                    crate::services::space_destiny::get_ess_reserve_pulses_from_blobs(
+                        &snap.service_state_blobs,
+                        sys_id,
+                    );
+                let already_linked = if is_reserve {
+                    pulse_st.reserve_linked_character_id == Some(char_id)
+                } else {
+                    snap.system_states
+                        .get(&sys_id)
+                        .map(|st| {
+                            st.ess_linked_character_id == Some(char_id)
+                                && pulse_st.reserve_linked_character_id != Some(char_id)
+                        })
+                        .unwrap_or(false)
+                };
                 // Reserve Bank links require and consume an ESS Reserve Security Key (type 57714..=57721, group 4102) (`feat:pve.ess-reserve`)
                 // Unless the reserve bank is currently unlocked by a prior key activation (`P1-01`).
                 if is_reserve && !already_linked && !is_unlocked {
@@ -1330,13 +1341,34 @@ pub async fn handle_legacy_and_ess(
                     });
                 }
 
-                // Step 1: If not yet linked, establish link and require 5 elapsed ticks before payout
-                if st.ess_linked_character_id != Some(char_id) {
+                // Step 1: If not yet linked to this bank, establish link and require 5 elapsed ticks before payout (#54)
+                if !already_linked {
+                    if is_reserve {
+                        pulse_st.reserve_linked_character_id = Some(char_id);
+                        pulse_st.reserve_link_started_tick = Some(current_tick);
+                        crate::services::space_destiny::set_ess_reserve_pulses_in_blobs(
+                            &mut snap.service_state_blobs,
+                            sys_id,
+                            &pulse_st,
+                        );
+                    } else if pulse_st.reserve_linked_character_id == Some(char_id) {
+                        pulse_st.reserve_linked_character_id = None;
+                        pulse_st.reserve_link_started_tick = None;
+                        crate::services::space_destiny::set_ess_reserve_pulses_in_blobs(
+                            &mut snap.service_state_blobs,
+                            sys_id,
+                            &pulse_st,
+                        );
+                    }
                     st.ess_linked_character_id = Some(char_id);
                     st.ess_link_started_tick = Some(current_tick);
                     return Ok((0.0, true));
                 }
-                let start_tick = st.ess_link_started_tick.unwrap_or(current_tick);
+                let start_tick = if is_reserve {
+                    pulse_st.reserve_link_started_tick.unwrap_or(current_tick)
+                } else {
+                    st.ess_link_started_tick.unwrap_or(current_tick)
+                };
                 if current_tick < start_tick.saturating_add(5) {
                     return Err(BridgeRpcError {
                         code: "EssLinkTimerNotElapsed".into(),
@@ -1344,7 +1376,8 @@ pub async fn handle_legacy_and_ess(
                     });
                 }
                 let bank = if is_reserve {
-                    let mut pulse_st = crate::services::space_destiny::get_ess_reserve_pulses_from_blobs(&snap.service_state_blobs, sys_id);
+                    pulse_st.reserve_linked_character_id = None;
+                    pulse_st.reserve_link_started_tick = None;
                     if pulse_st.pulses_remaining > 0 {
                         let rem = pulse_st.pulses_remaining.max(1) as i64;
                         let p = (st.ess_reserve_bank.0 / rem).max(1).min(st.ess_reserve_bank.0);
@@ -1354,6 +1387,7 @@ pub async fn handle_legacy_and_ess(
                         crate::services::space_destiny::set_ess_reserve_pulses_in_blobs(&mut snap.service_state_blobs, sys_id, &pulse_st);
                         IskCents(p)
                     } else {
+                        crate::services::space_destiny::set_ess_reserve_pulses_in_blobs(&mut snap.service_state_blobs, sys_id, &pulse_st);
                         let b = st.ess_reserve_bank; st.ess_reserve_bank = IskCents(0); b
                     }
                 } else {

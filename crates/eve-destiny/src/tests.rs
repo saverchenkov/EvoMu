@@ -503,3 +503,55 @@ fn test_interdiction_bubbles_trapping_nullifier_and_micro_jump() {
     );
     assert_eq!(park.balls[&1003].position, DVec3::new(150_000.0, 0.0, 0.0));
 }
+
+#[test]
+fn test_non_finite_coordinates_and_warp_speed_rejected() {
+    let mut park = Ballpark::new(30_000_142);
+    park.add_ball(Ball {
+        id: 1001,
+        type_id: 587,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 365.0,
+        inertia: 3.45,
+        mass: 1_000_000.0,
+        radius: 50.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::Stop,
+    });
+
+    assert!(park.goto_point(1001, DVec3::new(f64::NAN, 0.0, 0.0)).is_err());
+    assert!(park.goto_point(1001, DVec3::new(f64::INFINITY, 0.0, 0.0)).is_err());
+    assert!(!park.set_ball_position(1001, DVec3::new(0.0, f64::NAN, 0.0)));
+    assert!(!park.set_ball_radius(1001, f64::NAN));
+    assert!(!park.set_ball_radius(1001, -10.0));
+    assert!(park
+        .set_mode(
+            1001,
+            MovementMode::GotoDirection {
+                direction: DVec3::new(f64::NAN, 0.0, 0.0),
+            },
+        )
+        .is_err());
+    assert!(park
+        .set_mode(
+            1001,
+            MovementMode::Orbit {
+                target_id: 1001,
+                range: f64::NAN,
+            },
+        )
+        .is_err());
+    assert!(park
+        .set_mode(
+            1001,
+            MovementMode::new_warp(DVec3::ZERO, DVec3::new(1e9, 0.0, 0.0), f64::NAN),
+        )
+        .is_err());
+    assert!(park
+        .set_mode(
+            1001,
+            MovementMode::new_warp(DVec3::ZERO, DVec3::new(1e9, 0.0, 0.0), 0.0),
+        )
+        .is_err());
+}

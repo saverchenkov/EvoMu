@@ -16,6 +16,10 @@ pub struct EssReservePulseState {
     pub pulses_total: u32,
     pub pulses_remaining: u32,
     pub last_pulse_sec: Option<u64>,
+    #[serde(default)]
+    pub reserve_linked_character_id: Option<i64>,
+    #[serde(default)]
+    pub reserve_link_started_tick: Option<u64>,
 }
 
 pub fn get_ess_reserve_pulses_from_blobs(blobs: &HashMap<String, String>, sys_id: u32) -> EssReservePulseState {
@@ -150,8 +154,47 @@ pub fn record_session_change_timer(
     started_tick: u64,
     reason: &str,
 ) {
+    record_session_change_timer_with_invuln(
+        ctx,
+        char_id,
+        now_unix,
+        system_id,
+        started_tick,
+        reason,
+        true,
+    );
+}
+
+pub fn record_client_session_check_timer(
+    ctx: &ServerContext,
+    char_id: i64,
+    now_unix: u64,
+    system_id: u32,
+    started_tick: u64,
+    reason: &str,
+) {
+    record_session_change_timer_with_invuln(
+        ctx,
+        char_id,
+        now_unix,
+        system_id,
+        started_tick,
+        reason,
+        false,
+    );
+}
+
+fn record_session_change_timer_with_invuln(
+    ctx: &ServerContext,
+    char_id: i64,
+    now_unix: u64,
+    system_id: u32,
+    started_tick: u64,
+    reason: &str,
+    server_initiated: bool,
+) {
     let expires_unix = now_unix.saturating_add(10);
-    let location_change_invul_until = if reason == "jump_drive" {
+    let location_change_invul_until = if server_initiated && reason == "jump_drive" {
         let until = now_unix.saturating_add(60);
         grant_location_change_invulnerability(ctx, char_id, until);
         until
@@ -569,10 +612,7 @@ pub async fn handle(
                 return Some(Ok(PyRep::Bool(false)));
             };
             let is_linked = ctx.db.with_snapshot(|snap| {
-                snap.system_states
-                    .get(&sys_id)
-                    .map(|st| st.ess_linked_character_id == Some(char_id))
-                    .unwrap_or(false)
+                get_ess_reserve_pulses(snap, sys_id).reserve_linked_character_id == Some(char_id)
             });
             Some(Ok(PyRep::Bool(is_linked)))
         }
@@ -585,9 +625,35 @@ pub async fn handle(
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Ok(PyRep::Bool(true)));
             };
+            let is_reserve = method == "RequestReserveBankUnlink";
             let unlinked = ctx.db.with_mut_snapshot(|snap| {
+                let mut pulse_st =
+                    get_ess_reserve_pulses_from_blobs(&snap.service_state_blobs, sys_id);
+                if is_reserve {
+                    let was_reserve_linked =
+                        pulse_st.reserve_linked_character_id == Some(char_id);
+                    if was_reserve_linked {
+                        pulse_st.reserve_linked_character_id = None;
+                        pulse_st.reserve_link_started_tick = None;
+                        set_ess_reserve_pulses_in_blobs(
+                            &mut snap.service_state_blobs,
+                            sys_id,
+                            &pulse_st,
+                        );
+                    }
+                    if let Some(st) = snap.system_states.get_mut(&sys_id) {
+                        if st.ess_linked_character_id == Some(char_id) {
+                            st.ess_linked_character_id = None;
+                            st.ess_link_started_tick = None;
+                            return true;
+                        }
+                    }
+                    return was_reserve_linked;
+                }
                 if let Some(st) = snap.system_states.get_mut(&sys_id) {
-                    if st.ess_linked_character_id == Some(char_id) {
+                    if st.ess_linked_character_id == Some(char_id)
+                        && pulse_st.reserve_linked_character_id != Some(char_id)
+                    {
                         st.ess_linked_character_id = None;
                         st.ess_link_started_tick = None;
                         return true;
@@ -691,10 +757,13 @@ pub async fn handle(
                     _ => 15,
                 };
                 let pulses = ((duration_mins / 5).max(3)) as u32;
+                let prev_pulse = get_ess_reserve_pulses(snap, sys_id);
                 let pulse_st = EssReservePulseState {
                     pulses_total: pulses,
                     pulses_remaining: pulses,
                     last_pulse_sec: Some(ctx.now_unix()),
+                    reserve_linked_character_id: prev_pulse.reserve_linked_character_id,
+                    reserve_link_started_tick: prev_pulse.reserve_link_started_tick,
                 };
                 set_ess_reserve_pulses(snap, sys_id, &pulse_st);
                 Ok((key_type_id, duration_mins))

@@ -276,6 +276,16 @@ async fn test_sp4_stargate_capital_restriction_session_timers_and_jump_cloak_imm
                 .unwrap(),
             10
         );
+        if trigger == "jump_drive" {
+            assert!(
+                !eve_server::services::space_destiny::is_location_change_invulnerable(
+                    &ctx,
+                    char_id,
+                    ctx.now_unix()
+                ),
+                "#48: client SetSessionCheck(\"jump_drive\") must not grant location-change invulnerability"
+            );
+        }
 
         let blocked = ctx
             .dispatch_rpc(
