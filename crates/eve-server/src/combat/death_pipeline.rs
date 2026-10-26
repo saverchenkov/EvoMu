@@ -560,6 +560,7 @@ pub fn execute_death_pipeline_sync(
         ctx,
         attacker_char_id,
         victim_char_id,
+        sys_id,
         total_damage,
     );
 

@@ -601,7 +601,7 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     assert_eq!(rpc(&ctx, &mut p1, "pvpFilamentMgr", "AbyssalPVPEndGateActivation", &[PyRep::Integer(70001)]).await.unwrap_err().code, "MatchNotConcluded");
 
     // Resolve via the destruction-pipeline hook (real weapon kill covered in combat_entropic_pvp_atomicity.rs)
-    eve_server::services::pvp_filament_mgr::record_proving_grounds_combat_result_if_queued(&ctx, P1, P2, 1500.0);
+    eve_server::services::pvp_filament_mgr::record_proving_grounds_combat_result_if_queued(&ctx, P1, P2, 32000001, 1500.0);
 
     // After conclusion, gate activation fails when target gate is invalid or beyond 50km
     assert_eq!(rpc(&ctx, &mut p1, "pvpFilamentMgr", "AbyssalPVPEndGateActivation", &[PyRep::Integer(99999)]).await.unwrap_err().code, "TooFarFromGate");

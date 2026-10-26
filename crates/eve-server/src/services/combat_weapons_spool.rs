@@ -376,7 +376,8 @@ pub async fn handle_ship_or_npc_destruction(
                 ctx,
                 attacker_char_id,
                 vcid,
-                applied_dmg.max(1000.0),
+                sys_id,
+                applied_dmg.max(1000.0), // DERIVED: final-blow damage floor for PG damageDealt stats
             );
             let _ = ctx
                 .db
@@ -393,7 +394,8 @@ pub async fn handle_ship_or_npc_destruction(
             ctx,
             attacker_char_id,
             vcid,
-            applied_dmg.max(1000.0),
+            sys_id,
+            applied_dmg.max(1000.0), // DERIVED: final-blow damage floor for PG damageDealt stats
         );
         let cap_id = ctx.db.with_mut_snapshot(|snap| {
             snap.items.remove(&vship_id);

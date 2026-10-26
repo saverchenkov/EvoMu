@@ -374,25 +374,29 @@ pub fn record_proving_grounds_combat_result(
     Ok(())
 }
 
+/// Kill-pipeline hook (`P1-PG-RESULT-OUTSIDE-ARENA`): records a Proving Grounds win/loss ONLY when
+/// the kill happened in the arena system of an active (not yet concluded) match that has the attacker
+/// and victim on opposite teams. Pilots who are merely queued (still in their origin systems) never
+/// produce a result from a normal-space kill.
 pub fn record_proving_grounds_combat_result_if_queued(
     ctx: &ServerContext,
     attacker_char_id: i64,
     victim_char_id: i64,
+    kill_solar_system_id: u32,
     damage_done: f64,
 ) {
     if attacker_char_id == victim_char_id || attacker_char_id <= 0 || victim_char_id <= 0 {
         return;
     }
-    let queued = ctx.db.with_snapshot(|snap| {
-        let store = load_pvp_store(snap);
-        (store.queue.contains_key(&attacker_char_id) && store.queue.contains_key(&victim_char_id))
-            || store.active_matches.values().any(|m| {
-                m.active
-                    && ((m.team_a.contains(&attacker_char_id) && m.team_b.contains(&victim_char_id))
-                        || (m.team_b.contains(&attacker_char_id) && m.team_a.contains(&victim_char_id)))
-            })
+    let in_arena_match = ctx.db.with_snapshot(|snap| {
+        load_pvp_store(snap).active_matches.values().any(|m| {
+            m.active
+                && m.arena_solar_system_id == kill_solar_system_id
+                && ((m.team_a.contains(&attacker_char_id) && m.team_b.contains(&victim_char_id))
+                    || (m.team_b.contains(&attacker_char_id) && m.team_a.contains(&victim_char_id)))
+        })
     });
-    if queued {
+    if in_arena_match {
         let _ = record_proving_grounds_combat_result(ctx, attacker_char_id, victim_char_id, damage_done);
     }
 }
