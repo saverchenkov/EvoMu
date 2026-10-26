@@ -642,6 +642,12 @@ pub async fn handle_use_warp_vector(
             message: "warpVectorMgr.UseVector requires a positive vector itemID".into(),
         })?;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    if sys_handle.is_ball_scrambled_sync(ship_id) || sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
+        return Err(BridgeRpcError {
+            code: "WarpScrambled".into(),
+            message: "WarpScrambled: Warp drive disabled by warp disruption/scrambler effect".into(),
+        });
+    }
     let (_, ship_ball) = sys_handle
         .get_ball_snapshot(ship_id)
         .await
@@ -653,25 +659,40 @@ pub async fn handle_use_warp_vector(
             code: "ShipNotInSpace".into(),
             message: format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
         })?;
-    let target_ball_opt = sys_handle
+    let (_, target_ball) = sys_handle
         .get_ball_snapshot(target_id)
         .await
-        .ok()
-        .flatten()
-        .map(|(_, b)| b);
-    let item_exists = ctx.db.with_snapshot(|snap| snap.items.contains_key(&target_id));
-    if target_ball_opt.is_none() && !item_exists {
-        return Err(BridgeRpcError {
+        .map_err(|e| BridgeRpcError {
+            code: "DestinyQueryFailed".into(),
+            message: e,
+        })?
+        .ok_or_else(|| BridgeRpcError {
             code: "VectorItemNotFound".into(),
-            message: format!("Warp vector entity or item {target_id} not found"),
+            message: format!("Warp vector entity {target_id} is not in space in solar system {sys_id}"),
+        })?;
+    let dist = (target_ball.position - ship_ball.position).length();
+    const MAX_VECTOR_PROXIMITY_M: f64 = 100_000.0;
+    if dist > MAX_VECTOR_PROXIMITY_M {
+        return Err(BridgeRpcError {
+            code: "TargetNotInRange".into(),
+            message: format!("Warp vector entity {target_id} is out of activation range ({dist:.1} m > {MAX_VECTOR_PROXIMITY_M:.1} m)"),
         });
     }
     let explicit_vec = match args.get(1) {
-        Some(PyRep::Tuple(seq) | PyRep::List(seq)) if seq.len() >= 3 => Some(glam::DVec3::new(
-            seq[0].as_f64().unwrap_or(0.0),
-            seq[1].as_f64().unwrap_or(0.0),
-            seq[2].as_f64().unwrap_or(0.0),
-        )),
+        Some(PyRep::Tuple(seq) | PyRep::List(seq)) if seq.len() >= 3 => {
+            let v = glam::DVec3::new(
+                seq[0].as_f64().unwrap_or(0.0),
+                seq[1].as_f64().unwrap_or(0.0),
+                seq[2].as_f64().unwrap_or(0.0),
+            );
+            if !v.is_finite() {
+                return Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "Vector coordinates must be finite".into(),
+                });
+            }
+            Some(v)
+        }
         _ => None,
     };
     let dest_pos = if let Some(v) = explicit_vec.filter(|v| v.length() > 1e-6) {
@@ -680,15 +701,13 @@ pub async fn handle_use_warp_vector(
         } else {
             ship_ball.position + v.normalize() * 100_000.0
         }
-    } else if let Some(tb) = target_ball_opt {
-        let delta = tb.position - ship_ball.position;
-        if delta.length() > 1.0 {
-            tb.position + delta.normalize() * 100_000.0
-        } else {
-            tb.position + glam::DVec3::new(100_000.0, 0.0, 0.0)
-        }
     } else {
-        ship_ball.position + glam::DVec3::new(100_000.0, 0.0, 0.0)
+        let delta = target_ball.position - ship_ball.position;
+        if delta.length() > 1.0 {
+            target_ball.position + delta.normalize() * 100_000.0
+        } else {
+            target_ball.position + glam::DVec3::new(100_000.0, 0.0, 0.0)
+        }
     };
     let _ = sys_handle.set_ball_position(ship_id, dest_pos).await;
     Ok(PyRep::keyval([
@@ -711,6 +730,12 @@ pub fn handle_reset_last_clone_jump_time(
     ctx: &ServerContext,
     session: &SessionState,
 ) -> Result<PyRep, BridgeRpcError> {
+    if !session.has_gm_role() {
+        return Err(BridgeRpcError {
+            code: "GMRoleRequired".into(),
+            message: "jumpCloneSvc.ResetLastCloneJumpTime requires GM role".into(),
+        });
+    }
     let (_, char_id) = ServerContext::require_character(session)?;
     ctx.db.try_with_mut_snapshot(|snap| {
         let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
@@ -796,26 +821,13 @@ pub fn handle_contract_delete_notif(
         if c.status == "Outstanding" && c.expiration_unix > 0 && c.expiration_unix <= now_unix {
             let _ = snap.resolve_expired_contract(cid, now_unix);
         }
-        let mut mutated = false;
-        if let Some(cm) = snap.contracts.get_mut(&cid) {
-            if cm.current_bidder_id != Some(owner_id) || cm.status != "Outstanding" {
-                let before = cm.bid_history.len();
-                cm.bid_history.retain(|&(b, _, _)| b != owner_id && (!for_corp || b != char_id));
-                if cm.bid_history.len() != before {
-                    mutated = true;
-                }
-            }
-            if method == "DeleteNotification" && cm.assignee_id == owner_id && cm.status == "Outstanding" {
-                cm.assignee_id = 0;
-                mutated = true;
-            }
-        }
         let mut dismissed: Vec<String> = snap
             .quasar_state_blobs
             .get(DISMISSED_CONTRACT_NOTIFS_BLOB)
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
         let key = format!("{owner_id}:{cid}");
+        let mut mutated = false;
         if !dismissed.contains(&key) {
             dismissed.push(key);
             if let Ok(json) = serde_json::to_string(&dismissed) {

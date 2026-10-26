@@ -43,6 +43,12 @@ pub fn handle(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     // rpc-lint: allow devtools svc_dgmattr.pyj AttributeInspector remote call
     if service == "i2" {
+        if !session.has_gm_role() {
+            return Some(Err(BridgeRpcError {
+                code: "GMRoleRequired".into(),
+                message: "i2 requires GM role".into(),
+            }));
+        }
         let _ = match ServerContext::require_character(session) {
             Ok(v) => v,
             Err(e) => return Some(Err(e)),
@@ -53,8 +59,8 @@ pub fn handle(
             // rpc-lint: allow devtools svc_dgmattr.pyj AttributeInspector remote call
             .or_else(|| bound_entry.filter(|b| b.service == "i2").map(|b| b.object_id));
         return match method {
-            "IsPrimed" => Some(handle_i2_is_primed(ctx, target_id)),
-            "GetItem" => Some(handle_i2_get_item(ctx, target_id)),
+            "IsPrimed" => Some(handle_i2_is_primed(ctx, session, target_id)),
+            "GetItem" => Some(handle_i2_get_item(ctx, session, target_id)),
             _ => None,
         };
     }
@@ -242,7 +248,17 @@ fn self_inv_item(
 
 /// `i2.IsPrimed(itemID)`: checks whether the requested inventory item or container entity
 /// is primed in `WorldStateSnapshot` or SDE static world tables (`svc_dgmattr.pyj`).
-pub fn handle_i2_is_primed(ctx: &ServerContext, target_id: Option<i64>) -> Result<PyRep, BridgeRpcError> {
+pub fn handle_i2_is_primed(
+    ctx: &ServerContext,
+    session: &SessionState,
+    target_id: Option<i64>,
+) -> Result<PyRep, BridgeRpcError> {
+    if !session.has_gm_role() {
+        return Err(BridgeRpcError {
+            code: "GMRoleRequired".into(),
+            message: "i2.IsPrimed requires GM role".into(),
+        });
+    }
     let Some(item_id) = target_id.filter(|&id| id > 0) else {
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
@@ -263,7 +279,17 @@ pub fn handle_i2_is_primed(ctx: &ServerContext, target_id: Option<i64>) -> Resul
 /// `i2.GetItem(itemID)`: returns the inventory item representation (`KeyVal` with `.typeID`,
 /// `.itemID`, `.ownerID`, `.locationID`, `.flagID`, `.quantity`, `.groupID`, `.categoryID`,
 /// `.singleton`, `.stacksize`, `.customInfo`) from `WorldStateSnapshot`, or `None` if not found.
-pub fn handle_i2_get_item(ctx: &ServerContext, target_id: Option<i64>) -> Result<PyRep, BridgeRpcError> {
+pub fn handle_i2_get_item(
+    ctx: &ServerContext,
+    session: &SessionState,
+    target_id: Option<i64>,
+) -> Result<PyRep, BridgeRpcError> {
+    if !session.has_gm_role() {
+        return Err(BridgeRpcError {
+            code: "GMRoleRequired".into(),
+            message: "i2.GetItem requires GM role".into(),
+        });
+    }
     let Some(item_id) = target_id.filter(|&id| id > 0) else {
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),

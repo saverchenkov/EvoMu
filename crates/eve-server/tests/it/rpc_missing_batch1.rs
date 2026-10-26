@@ -216,6 +216,7 @@ async fn contract_proxy_notifications_bulk_delete_and_dockable_items() {
     assert_eq!(del_c_notif, PyRep::Bool(true));
     let bids_after = call_rpc(&ctx, &mut sess, "contractProxy", "GetMyBids", &[PyRep::Bool(false)]).await.expect("GetMyBids after");
     assert!(matches!(&bids_after, PyRep::List(l) if l.is_empty()));
+    assert_eq!(ctx.db.with_snapshot(|s| s.contracts[&7001].bid_history.len()), 1, "bid_history must not be mutated");
 
     // 3. DeleteNotification dismisses assigned contract 7002 from GetLoginInfo().assignedToMe
     let login_before = call_rpc(&ctx, &mut sess, "contractProxy", "GetLoginInfo", &[]).await.expect("GetLoginInfo before");
@@ -225,6 +226,7 @@ async fn contract_proxy_notifications_bulk_delete_and_dockable_items() {
     assert_eq!(del_notif, PyRep::Bool(true));
     let login_after = call_rpc(&ctx, &mut sess, "contractProxy", "GetLoginInfo", &[]).await.expect("GetLoginInfo after");
     assert!(matches!(dict_get(&login_after, "assignedToMe"), Some(PyRep::List(l)) if l.is_empty()));
+    assert_eq!(ctx.db.with_snapshot(|s| s.contracts[&7002].assignee_id), char_id, "assignee_id must remain intact");
 
     // 4. DeleteMultipleContracts returns (deletedIDs, failedIDs), refunds reward, and unlocks item_escrow
     let bal_before = ctx.db.get_character(char_id).unwrap().balance.0;
@@ -345,6 +347,16 @@ async fn repair_svc_quotes_station_structure_and_fuel_jettison() {
     assert_eq!(moved_fuel.location_id, *cont_id);
     assert_eq!(moved_fuel.flag, InventoryFlag::Cargo);
     assert_eq!(moved_fuel.quantity, 120);
+
+    let bad_fuel = call_rpc(
+        &ctx,
+        &mut sess,
+        "structure",
+        "JettisonStructureFuel",
+        &[PyRep::Integer(structure_id), PyRep::Integer(34), PyRep::Integer(50)],
+    )
+    .await;
+    assert!(matches!(bad_fuel, Err(e) if e.code == "ItemNotFuel"));
 }
 
 #[tokio::test]
@@ -410,7 +422,15 @@ async fn search_i2_jump_clone_reset_warp_vector_and_dev_indices() {
         .await.expect("search.QuickQuery");
     assert_eq!(qq_res, PyRep::List(vec![PyRep::Integer(char_id)]));
 
-    // 2. i2.IsPrimed & i2.GetItem
+    // 2. i2.IsPrimed & i2.GetItem require GM role
+    // rpc-lint: allow devtools svc_dgmattr.pyj AttributeInspector remote call
+    let err_prime = call_rpc(&ctx, &mut sess, "i2", "IsPrimed", &[PyRep::Integer(ship_id)]).await;
+    assert!(matches!(err_prime, Err(e) if e.code == "GMRoleRequired"));
+    // rpc-lint: allow devtools svc_dgmattr.pyj AttributeInspector remote call
+    let err_item = call_rpc(&ctx, &mut sess, "i2", "GetItem", &[PyRep::Integer(ship_id)]).await;
+    assert!(matches!(err_item, Err(e) if e.code == "GMRoleRequired"));
+
+    sess.role = eve_db::service_roles::ROLE_ADMIN;
     // rpc-lint: allow devtools svc_dgmattr.pyj AttributeInspector remote call
     let primed_yes = call_rpc(&ctx, &mut sess, "i2", "IsPrimed", &[PyRep::Integer(ship_id)])
         .await.expect("i2.IsPrimed(ship_id)");
@@ -426,14 +446,27 @@ async fn search_i2_jump_clone_reset_warp_vector_and_dev_indices() {
     assert_eq!(dict_get(&item_rep, "typeID"), Some(&PyRep::Integer(587)));
     assert_eq!(dict_get(&item_rep, "itemID"), Some(&PyRep::Integer(ship_id)));
 
-    // 3. jumpCloneSvc.ResetLastCloneJumpTime clears cooldown and emits OnCloneJumpUpdate
+    // 3. jumpCloneSvc.ResetLastCloneJumpTime requires GM role
+    sess.role = eve_db::service_roles::ROLE_PLAYER_DEFAULT;
+    let reset_denied = call_rpc(&ctx, &mut sess, "jumpCloneSvc", "ResetLastCloneJumpTime", &[]).await;
+    assert!(matches!(reset_denied, Err(e) if e.code == "GMRoleRequired"));
+
+    sess.role = eve_db::service_roles::ROLE_ADMIN;
     assert_eq!(ctx.db.get_character(char_id).unwrap().last_clone_jump_unix, 1_700_000_000);
     let _ = call_rpc(&ctx, &mut sess, "jumpCloneSvc", "ResetLastCloneJumpTime", &[]).await.expect("ResetLastCloneJumpTime");
     assert_eq!(ctx.db.get_character(char_id).unwrap().last_clone_jump_unix, 0);
     let jc_state = call_rpc(&ctx, &mut sess, "jumpCloneSvc", "GetCloneState", &[]).await.expect("GetCloneState");
     assert_eq!(dict_get(&jc_state, "timeLastJump"), Some(&PyRep::None));
 
-    // 4. warpVectorMgr.UseVector moves ship ball along the vector in space
+    // 4. warpVectorMgr.UseVector enforces scram check and moves ship ball along vector
+    sys_handle.try_add_mobile_warp_disruptor(888_001, DVec3::ZERO, 20_000.0);
+    let scram_err = call_rpc(&ctx, &mut sess, "warpVectorMgr", "UseVector", &[PyRep::Integer(vector_id)]).await;
+    assert!(matches!(scram_err, Err(e) if e.code == "WarpScrambled"));
+    sys_handle.try_remove_warp_bubble(888_001);
+
+    let missing_vec = call_rpc(&ctx, &mut sess, "warpVectorMgr", "UseVector", &[PyRep::Integer(888_888_888)]).await;
+    assert!(matches!(missing_vec, Err(e) if e.code == "VectorItemNotFound"));
+
     let vec_res = call_rpc(&ctx, &mut sess, "warpVectorMgr", "UseVector", &[PyRep::Integer(vector_id)]).await.expect("warpVectorMgr.UseVector");
     assert_eq!(dict_get(&vec_res, "shipID"), Some(&PyRep::Integer(ship_id)));
     let (_, after_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();

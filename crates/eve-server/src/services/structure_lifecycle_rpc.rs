@@ -689,7 +689,7 @@ pub async fn handle_jettison_structure_fuel(
                 let r = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
                 char_id == corp.ceo_id
                     || (r & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER)) != 0
-            }).unwrap_or(true);
+            }).unwrap_or(false);
             if !has_role {
                 return Err(err("CorpRoleDenied", "Jettisoning structure fuel requires Director or Station Manager role"));
             }
@@ -725,15 +725,20 @@ pub async fn handle_jettison_structure_fuel(
                     if it.location_id != structure_id {
                         return Err(err("ItemNotInFuelBay", format!("Item {iid} is not located in structure {structure_id}")));
                     }
+                    if it.owner_id != st.owner_corp_id {
+                        return Err(err("ItemOwnershipViolation", format!("Item {iid} is not owned by structure owner corp {}", st.owner_corp_id)));
+                    }
                     let is_fuel_type = ctx
                         .sde
                         .types
                         .get(&it.type_id)
                         .is_some_and(|t| fuel_groups.contains(&t.group_id));
-                    if it.flag != InventoryFlag::SpecializedFuelBay && it.flag as u16 != 163 && !is_fuel_type {
-                        return Err(err("ItemNotFuel", format!("Item {iid} (type {}) is not structure fuel", it.type_id)));
+                    let in_fuel_bay = it.flag == InventoryFlag::SpecializedFuelBay || it.flag as u16 == 163;
+                    if !(in_fuel_bay && is_fuel_type) {
+                        return Err(err("ItemNotFuel", format!("Item {iid} (type {}) is not structure fuel in fuel bay", it.type_id)));
                     }
-                    moved_blocks = moved_blocks.saturating_add(it.quantity.max(0) as u32);
+                    let qty_u32 = u32::try_from(it.quantity.max(0)).unwrap_or(0);
+                    moved_blocks = moved_blocks.saturating_add(qty_u32);
                     it.location_id = container_id;
                     it.flag = InventoryFlag::Cargo;
                     it.version += 1;
@@ -744,19 +749,34 @@ pub async fn handle_jettison_structure_fuel(
                 }
             } else {
                 let (fuel_tid, req_qty) = if args.len() >= 3 {
-                    let tid = args.get(1).and_then(|a| a.as_i64()).unwrap_or(4247) as u32;
+                    let tid = args.get(1).and_then(|a| a.as_i64()).unwrap_or(4247);
                     let q = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
                     (tid, q)
                 } else if args.len() == 2 {
-                    (4247u32, args.get(1).and_then(|a| a.as_i64()).unwrap_or(0))
+                    (4247i64, args.get(1).and_then(|a| a.as_i64()).unwrap_or(0))
                 } else {
-                    (4247u32, i64::from(st.fuel_blocks))
+                    (4247i64, i64::from(st.fuel_blocks))
                 };
-                if req_qty <= 0 || (req_qty as u32) > st.fuel_blocks {
+                let fuel_tid_u32 = u32::try_from(fuel_tid).map_err(|_| {
+                    err("InvalidArgument", format!("Invalid fuel typeID {fuel_tid}"))
+                })?;
+                let is_fuel_type = ctx
+                    .sde
+                    .types
+                    .get(&fuel_tid_u32)
+                    .is_some_and(|t| fuel_groups.contains(&t.group_id));
+                if !is_fuel_type {
+                    return Err(err("ItemNotFuel", format!("TypeID {fuel_tid} is not a valid structure fuel type")));
+                }
+                let req_qty_u32 = u32::try_from(req_qty).map_err(|_| {
+                    err("InvalidArgument", format!("Invalid fuel quantity {req_qty}"))
+                })?;
+                if req_qty_u32 == 0 || req_qty_u32 > st.fuel_blocks {
                     return Err(err("InsufficientStructureFuel", format!("Cannot jettison {req_qty} fuel blocks from structure {structure_id} (available: {})", st.fuel_blocks)));
                 }
+                let qty_i32 = i32::try_from(req_qty_u32).unwrap_or(i32::MAX);
                 if let Some(s) = snap.structures.get_mut(&structure_id) {
-                    s.fuel_blocks -= req_qty as u32;
+                    s.fuel_blocks -= req_qty_u32;
                 }
                 snap.next_entity_id += 1;
                 let fuel_item_id = snap.next_entity_id;
@@ -764,11 +784,11 @@ pub async fn handle_jettison_structure_fuel(
                     fuel_item_id,
                     eve_db::InventoryItemRecord {
                         item_id: fuel_item_id,
-                        type_id: fuel_tid,
+                        type_id: fuel_tid_u32,
                         owner_id: st.owner_corp_id,
                         location_id: container_id,
                         flag: InventoryFlag::Cargo,
-                        quantity: req_qty as i32,
+                        quantity: qty_i32,
                         singleton: false,
                         version: 1,
                         dynamic_attributes: std::collections::HashMap::new(),
