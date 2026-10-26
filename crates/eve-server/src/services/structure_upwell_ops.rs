@@ -633,9 +633,9 @@ pub fn evaluate_character_structure_access_in_snap(snap: &WorldStateSnapshot, st
             }
         }
         if prof.corp_only && owner_corp != 0 && char_corp != owner_corp { return false; }
-        let has_groups = !prof.access_group_ids.is_empty();
+        let has_group_allows = prof.access_group_ids.iter().any(|gid| ext.owner_groups.get(gid).is_some_and(|g| g.members.values().any(|&r| r >= 0)));
         let in_group = prof.access_group_ids.iter().any(|gid| ext.owner_groups.get(gid).is_some_and(|g| g.members.get(&char_id).is_some_and(|&r| r >= 0) || g.members.get(&char_corp).is_some_and(|&r| r >= 0) || (char_ally > 0 && g.members.get(&char_ally).is_some_and(|&r| r >= 0))));
-        let has_allow = !prof.allowed_characters.is_empty() || !prof.allowed_corporations.is_empty() || !prof.allowed_alliances.is_empty() || has_groups;
+        let has_allow = !prof.allowed_characters.is_empty() || !prof.allowed_corporations.is_empty() || !prof.allowed_alliances.is_empty() || has_group_allows;
         if has_allow && char_corp != owner_corp && !prof.allowed_characters.contains(&char_id) && !prof.allowed_corporations.contains(&char_corp) && (char_ally <= 0 || !prof.allowed_alliances.contains(&char_ally)) && !in_group {
             return false;
         }
