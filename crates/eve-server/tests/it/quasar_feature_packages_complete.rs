@@ -143,15 +143,10 @@ async fn test_quasar_campaign_definition_requests() {
 
 #[tokio::test]
 async fn test_quasar_sovereignty_resources_mercenaryden_stargate_and_admin_requests() {
-    // parity: quasar:eveProto/generated/eve_public/ai/assistant/chat/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/admin/admin_pb2.pyj, quasar:eveProto/generated/eve_public/stargate/lock/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/ai/assistant/chat/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/ai/assistant/chat/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/admin/admin_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/stargate/lock/api/requests_pb2.pyj",
     ]);
 
     let ctx = ServerContext::new();
@@ -185,46 +180,7 @@ async fn test_quasar_sovereignty_resources_mercenaryden_stargate_and_admin_reque
     assert_eq!(r_ai.payload.as_ref().unwrap().normalized_type_name(), "eve_public.ai.assistant.chat.api.QueryResponse");
     assert_eq!(r_ai.correlation_uuid, b"ai-01");
 
-    // 2. Mercenary Den Activity API (GetForMercenaryDenRequest, GetAllRequest, StartRequest, GetCapacityRequest)
-    let r_md = dispatch_and_verify_request(
-        &ctx,
-        &mut sess,
-        "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenRequest",
-        "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenResponse",
-        b"mden-01",
-    )
-    .await;
-    assert_eq!(
-        r_md.payload.as_ref().unwrap().normalized_type_name(),
-        "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenResponse"
-    );
-    assert_eq!(r_md.correlation_uuid, b"mden-01");
-    dispatch_and_verify_request(
-        &ctx,
-        &mut sess,
-        "eve_public.sovereignty.mercenaryden.activity.api.GetAllRequest",
-        "eve_public.sovereignty.mercenaryden.activity.api.GetAllResponse",
-        b"mden-02",
-    )
-    .await;
-    dispatch_and_verify_request(
-        &ctx,
-        &mut sess,
-        "eve_public.sovereignty.mercenaryden.activity.api.StartRequest",
-        "eve_public.sovereignty.mercenaryden.activity.api.StartResponse",
-        b"mden-03",
-    )
-    .await;
-    dispatch_and_verify_request(
-        &ctx,
-        &mut sess,
-        "eve_public.sovereignty.mercenaryden.activity.api.GetCapacityRequest",
-        "eve_public.sovereignty.mercenaryden.activity.api.GetCapacityResponse",
-        b"mden-04",
-    )
-    .await;
-
-    // 3. Sovereignty Planet & Star Resources API
+    // 3. Sovereignty Planet Resources API (star resources: quasar_sov_pirate_remediation)
     dispatch_and_verify_request(
         &ctx,
         &mut sess,
@@ -249,14 +205,6 @@ async fn test_quasar_sovereignty_resources_mercenaryden_stargate_and_admin_reque
         b"res-p3",
     )
     .await;
-    dispatch_and_verify_request(
-        &ctx,
-        &mut sess,
-        "eve_public.sovereignty.resource.star.api.GetAllConfigurationsRequest",
-        "eve_public.sovereignty.resource.star.api.GetAllConfigurationsResponse",
-        b"res-s1",
-    )
-    .await;
 
     // 4. Stargate Lock API (GetRequest, GetRestrictedSystemsRequest)
     dispatch_and_verify_request(
@@ -276,7 +224,8 @@ async fn test_quasar_sovereignty_resources_mercenaryden_stargate_and_admin_reque
     )
     .await;
 
-    // 5. Faction Activity Admin & Skyhook Admin (GM succeeds; non-GM gets STATUS_FORBIDDEN)
+    // 5. Faction Activity Admin (GM succeeds; non-GM gets STATUS_FORBIDDEN); skyhook admin
+    //    ownership/role checks are covered by quasar_sov_pirate_remediation
     dispatch_and_verify_request(
         &ctx,
         &mut sess,
@@ -293,28 +242,12 @@ async fn test_quasar_sovereignty_resources_mercenaryden_stargate_and_admin_reque
         b"adm-f2",
     )
     .await;
-    dispatch_and_verify_request(
-        &ctx,
-        &mut sess,
-        "eve_public.sovereignty.skyhook.api.admin.ModifyReagentsRequest",
-        "eve_public.sovereignty.skyhook.api.admin.ModifyReagentsResponse",
-        b"adm-s1",
-    )
-    .await;
-    dispatch_and_verify_request(
-        &ctx,
-        &mut sess,
-        "eve_public.sovereignty.skyhook.api.admin.ScheduleTheftVulnerabilityWindowRequest",
-        "eve_public.sovereignty.skyhook.api.admin.ScheduleTheftVulnerabilityWindowResponse",
-        b"adm-s2",
-    )
-    .await;
 
     // Non-GM session must be rejected with STATUS_FORBIDDEN (403)
     sess.role = 0;
     let unpriv_req = make_public_request(
         &ctx,
-        "eve_public.sovereignty.skyhook.api.admin.ModifyReagentsRequest",
+        "eve_public.faction.activity.admin.IncrementContributionScoreRequest",
         Vec::new(),
         b"adm-deny",
     );

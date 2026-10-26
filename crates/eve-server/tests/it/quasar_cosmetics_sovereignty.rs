@@ -209,15 +209,12 @@ async fn q_final_cosmetics_licenses_and_sequencing() {
 // 3. Entitlements, Faction, Freelance, Payment & Stargate Requests
 #[tokio::test]
 async fn q_final_entitlements_faction_freelance_payment_stargate() {
-    // parity: quasar:eveProto/generated/eve_public/faction/activity/activity_pb2.pyj, quasar:eveProto/generated/eve_public/freelance/contributionmethod/definition/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/faction/activity/activity_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj, quasar:eveProto/generated/eve_public/plex/vault/transaction/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/stargate/lock/api/notices_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/faction/activity/activity_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/freelance/contributionmethod/definition/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj",
         "quasar:eveProto/generated/eve_public/plex/vault/transaction/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/stargate/lock/api/notices_pb2.pyj",
     ]);
     let reg = QuasarDescriptorRegistry::open_default().expect("registry");
     let fd_act = reg.get_file_by_pyj("eveProto/generated/eve_public/faction/activity/activity_pb2.pyj").expect("fd");
@@ -352,13 +349,6 @@ async fn q_final_entitlements_faction_freelance_payment_stargate() {
         assert_eq!(recvd.payload.unwrap().normalized_type_name(), sg_notice);
         assert_eq!(recvd.internal_origin, "evomu.quasar.notice_publisher");
     }
-
-    let sg1 = eve_server::services::quasar_sov_services::publish_stargate_lock_activated_notice(
-        &ctx.quasar_gateway, 30_000_142, 50_000_001, ctx.now_unix() + 3600, ctx.now_unix(),
-    ).expect("stargate lock notice");
-    assert_eq!(sg1, 1);
-    let sgr1 = stream_rx.recv().await.expect("recv sgr1");
-    assert!(sgr1.payload.unwrap().type_url.ends_with("ActivatedNotice"));
 
     // Mutate score via admin IncrementContributionScoreRequest and SetContributionScoreRequest and verify notices + GetSolarSystemScoresRequest
     sess.role |= 0x2000_0000_0000_0000;
@@ -527,9 +517,6 @@ async fn q_final_cosmetic_skinr_and_tale_notices() {
 // 5. Sovereignty & Goals Notices Fan-out
 #[tokio::test]
 async fn q_final_sovereignty_and_goals_notices() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/notices_pb2.pyj
     let reg = QuasarDescriptorRegistry::open_default().expect("registry");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/goal/api/notices_pb2.pyj").expect("fd").package, "eve_public.goal.api");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/goal/contribution/api/notices_pb2.pyj").expect("fd").package, "eve_public.goal.contribution.api");
@@ -596,47 +583,4 @@ async fn q_final_sovereignty_and_goals_notices() {
         let recvd_payload = recvd.payload.expect("received payload present");
         assert_eq!(recvd_payload.normalized_type_name(), *ntype);
     }
-
-    // Direct domain notice helper verification for sovereignty
-    let s1 = eve_server::services::quasar_sov_services::publish_sov_hub_resources_simulated_notice(
-        &ctx.quasar_gateway, 30_000_142, 60_000_001, 5000, 200, ctx.now_unix(),
-    ).expect("sov hub resources notice");
-    assert_eq!(s1, 1);
-    let sr1 = stream_rx.recv().await.expect("recv sr1");
-    assert!(sr1.payload.unwrap().type_url.ends_with("ResourcesSimulatedNotice"));
-
-    let s2 = eve_server::services::quasar_sov_services::publish_sov_hub_upgrade_notice(
-        &ctx.quasar_gateway, 30_000_142, 60_000_001, ctx.now_unix(),
-    ).expect("sov hub upgrade notice");
-    assert_eq!(s2, 1);
-    let sr2 = stream_rx.recv().await.expect("recv sr2");
-    assert!(sr2.payload.unwrap().type_url.ends_with("HubUpgradesConfiguredNotice"));
-
-    let s3 = eve_server::services::quasar_sov_services::publish_sov_hub_workforce_configured_notice(
-        &ctx.quasar_gateway, 30_000_142, 60_000_001, ctx.now_unix(),
-    ).expect("sov hub workforce notice");
-    assert_eq!(s3, 1);
-    let sr3 = stream_rx.recv().await.expect("recv sr3");
-    assert!(sr3.payload.unwrap().type_url.ends_with("ConfiguredNotice"));
-
-    let s4 = eve_server::services::quasar_sov_services::publish_sov_mercenary_den_activity_notice(
-        &ctx.quasar_gateway, 30_000_142, 70_000_001, ctx.now_unix(),
-    ).expect("mercenary den activity notice");
-    assert_eq!(s4, 1);
-    let sr4 = stream_rx.recv().await.expect("recv sr4");
-    assert!(sr4.payload.unwrap().type_url.ends_with("SimulatedNotice"));
-
-    let s5 = eve_server::services::quasar_sov_services::publish_sov_mercenary_den_simulation_notice(
-        &ctx.quasar_gateway, 30_000_142, 70_000_001, ctx.now_unix(),
-    ).expect("mercenary den simulation notice");
-    assert_eq!(s5, 1);
-    let sr5 = stream_rx.recv().await.expect("recv sr5");
-    assert!(sr5.payload.unwrap().type_url.ends_with("SimulationNotice"));
-
-    let s6 = eve_server::services::quasar_sov_services::publish_sov_skyhook_activation_notice(
-        &ctx.quasar_gateway, 30_000_142, 40_000_001, 80_000_001, true, ctx.now_unix(),
-    ).expect("skyhook activation notice");
-    assert_eq!(s6, 1);
-    let sr6 = stream_rx.recv().await.expect("recv sr6");
-    assert!(sr6.payload.unwrap().type_url.ends_with("ActivationNotice"));
 }

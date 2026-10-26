@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+use crate::quasar_gateway::NoticeScope;
 use crate::router::NotificationTarget;
 use crate::router::ServerContext;
 pub use eve_db::{
@@ -11,6 +12,9 @@ pub use eve_db::{
     PersistedInsurgencyState as InsurgencyRuntimeState,
 };
 use eve_machonet::SessionState;
+use eve_proto::quasar::{
+    encode_bytes_field, encode_varint_field, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
+};
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
 
@@ -153,16 +157,26 @@ pub fn get_campaign_phase_and_timer(campaign: &InsurgencyCampaign, now: u64) -> 
     }
 }
 
+/// Insurgency stage (0..=5) for corruption / suppression points.
+///
+/// DERIVED (synthetic — the client stage table is not in the EvoMu SDE import): one stage per
+/// 200 points, mirrored by `quasar_space_services::INSURGENCY_STAGE_THRESHOLDS`.
+pub fn insurgency_stage(points: i64) -> u8 {
+    ((points.max(0) as f64 / 200.0).ceil() as u8).min(5)
+}
+
 /// Advances corruption points in a system and updates corruption stage (1..5).
 pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32, points: i64) -> (i64, u8) {
-    let (pts, stage, pirate_faction) = with_insurgency_runtime(ctx, |rt| {
+    let now = ctx.now_unix();
+    let (pts, stage, pirate_faction, campaign_active) = with_insurgency_runtime(ctx, |rt| {
         let Some(c) = rt.campaigns.get_mut(&campaign_id) else {
-            return (0, 1, FACTION_GURISTAS);
+            return (0, 1, FACTION_GURISTAS, false);
         };
+        let active = now < c.winddown_end_unix;
         let p = c.corruption_points.entry(sys_id).or_insert(0);
         *p = (*p + points).max(0);
-        let s = ((*p as f64 / 200.0).ceil() as u8).clamp(1, 5);
-        (*p, s, c.pirate_faction_id)
+        let s = insurgency_stage(*p).max(1);
+        (*p, s, c.pirate_faction_id, active)
     });
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -172,6 +186,37 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
     });
 
     emit_campaign_updated(ctx, sys_id, campaign_id, stage);
+
+    // Broadcast Quasar IncreasedNotice only when corruption actually increased on an active campaign
+    let old_pts = (pts - points).max(0);
+    if points > 0 && pts > old_pts && campaign_active {
+    let mut q_payload = Vec::new();
+    let mut id_buf = Vec::new();
+    encode_varint_field(1, sys_id as u64, &mut id_buf);
+    encode_bytes_field(1, &id_buf, &mut q_payload);
+
+    let mut old_f = Vec::new();
+    encode_varint_field(1, old_pts as u64, &mut old_f);
+    encode_varint_field(2, 1000, &mut old_f);
+    encode_bytes_field(2, &old_f, &mut q_payload);
+
+    let mut new_f = Vec::new();
+    encode_varint_field(1, pts as u64, &mut new_f);
+    encode_varint_field(2, 1000, &mut new_f);
+    encode_bytes_field(3, &new_f, &mut q_payload);
+
+    encode_varint_field(4, 1, &mut q_payload);
+    encode_varint_field(5, 0, &mut q_payload);
+
+    let _ = ctx.quasar_gateway.publish_notice(
+        NoticeScope::SolarSystem(sys_id),
+        GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.pirate.corruption.api.IncreasedNotice"),
+            value: q_payload,
+        },
+        ctx.now_unix(),
+    );
+    }
     if stage >= 5 {
         ctx.notify(
             NotificationTarget::SolarSystem(sys_id),
@@ -190,14 +235,16 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
 
 /// Advances suppression points in a system and updates suppression stage (1..5).
 pub fn add_system_suppression(ctx: &ServerContext, campaign_id: i64, sys_id: u32, points: i64) -> (i64, u8) {
-    let (pts, stage) = with_insurgency_runtime(ctx, |rt| {
+    let now = ctx.now_unix();
+    let (pts, stage, campaign_active) = with_insurgency_runtime(ctx, |rt| {
         let Some(c) = rt.campaigns.get_mut(&campaign_id) else {
-            return (0, 1);
+            return (0, 1, false);
         };
+        let active = now < c.winddown_end_unix;
         let p = c.suppression_points.entry(sys_id).or_insert(0);
         *p = (*p + points).max(0);
-        let s = ((*p as f64 / 200.0).ceil() as u8).clamp(1, 5);
-        (*p, s)
+        let s = insurgency_stage(*p).max(1);
+        (*p, s, active)
     });
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -207,6 +254,37 @@ pub fn add_system_suppression(ctx: &ServerContext, campaign_id: i64, sys_id: u32
     });
 
     emit_campaign_updated(ctx, sys_id, campaign_id, stage);
+
+    // Broadcast Quasar IncreasedNotice only when suppression actually increased on an active campaign
+    let old_pts = (pts - points).max(0);
+    if points > 0 && pts > old_pts && campaign_active {
+    let mut q_payload = Vec::new();
+    let mut id_buf = Vec::new();
+    encode_varint_field(1, sys_id as u64, &mut id_buf);
+    encode_bytes_field(1, &id_buf, &mut q_payload);
+
+    let mut old_f = Vec::new();
+    encode_varint_field(1, old_pts as u64, &mut old_f);
+    encode_varint_field(2, 1000, &mut old_f);
+    encode_bytes_field(2, &old_f, &mut q_payload);
+
+    let mut new_f = Vec::new();
+    encode_varint_field(1, pts as u64, &mut new_f);
+    encode_varint_field(2, 1000, &mut new_f);
+    encode_bytes_field(3, &new_f, &mut q_payload);
+
+    encode_varint_field(4, 1, &mut q_payload);
+    encode_varint_field(5, 0, &mut q_payload);
+
+    let _ = ctx.quasar_gateway.publish_notice(
+        NoticeScope::SolarSystem(sys_id),
+        GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.pirate.suppression.api.IncreasedNotice"),
+            value: q_payload,
+        },
+        ctx.now_unix(),
+    );
+    }
     if stage >= 5 {
         ctx.notify(
             NotificationTarget::SolarSystem(sys_id),
