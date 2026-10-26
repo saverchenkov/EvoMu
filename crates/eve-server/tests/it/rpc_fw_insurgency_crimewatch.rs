@@ -386,13 +386,14 @@ async fn test_killrights_hacking_and_interference() {
     });
 
     // 2a. hackingMgr.UsedUtilityElementOnVirus uses SelfRepair utility and updates virus coherence
+    // V24 client calls with 1 argument (index,)
     let util_rep = ctx
         .dispatch_rpc(
             &mut sess1,
             "hackingMgr",
             None,
             "UsedUtilityElementOnVirus",
-            &[PyRep::Integer(container_id), PyRep::Integer(0)],
+            &[PyRep::Integer(0)],
             &kw,
             None,
         )
@@ -400,6 +401,13 @@ async fn test_killrights_hacking_and_interference() {
         .expect("UsedUtilityElementOnVirus");
     assert_eq!(util_rep.dict_get("usedSlot"), Some(&PyRep::Integer(0)));
     assert_eq!(util_rep.dict_get("virusCoherence"), Some(&PyRep::Integer(90)));
+
+    // Verify utility slot was consumed in server-side game state
+    with_pve_exploration_reg(&ctx, |reg| {
+        let game = reg.hacking_games.get(&(p1_char, container_id)).expect("game exists");
+        assert_eq!(game.utilities.get(0), Some(&None), "Utility slot 0 consumed");
+        assert_eq!(game.virus_coherence, 90, "Virus coherence repaired to 90");
+    });
 
     // 2b. hackingMgr.QuitHackingAttempt requires explicit container_id argument
     let missing_arg_err = ctx
