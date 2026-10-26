@@ -423,12 +423,13 @@ pub fn safe_logoff_blocking_space_conditions(
     conds
 }
 
-/// Handles `ship.SafeLogoff` (0 args) (`plan:SP-6`).
+/// Handles `ship.SafeLogoff` (0 args) (`plan:SP-6`, `feat:character.safe-logoff`).
 /// - Refuses if docked, warp-scrambled, self-destructing, running active modules/cloak, controlling drones/fighters/probes,
 ///   or under an active Weapons, NPC, PvP, or Criminal timer:
 ///   emits `OnSafeLogoffFailed` with `vec![PyRep::List(failed_conditions)]` (`arity = 1`) and returns `PyRep::List(failed_conditions)`.
 /// - Otherwise starts a 30s countdown (`now_unix + 30`), emits `OnSafeLogoffTimerStarted` with
 ///   `vec![PyRep::Integer(unix_to_filetime(complete_at_unix))]` (`arity = 1`), and returns `PyRep::List(vec![])`.
+// parity: feat:character.safe-logoff
 pub async fn handle_safe_logoff(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -532,7 +533,8 @@ pub async fn handle_safe_logoff(
 }
 
 /// Aborts an active safe-logoff countdown on explicit request (`ship.AbortSafeLogoff`)
-/// and returns `PyRep::Bool(true)` (`plan:SP-6`).
+/// and returns `PyRep::Bool(true)` (`plan:SP-6`, `feat:character.safe-logoff`).
+// parity: feat:character.safe-logoff
 pub fn handle_abort_safe_logoff(
     ctx: &ServerContext,
     session: &mut SessionState,

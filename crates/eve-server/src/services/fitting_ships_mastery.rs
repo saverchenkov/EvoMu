@@ -1180,12 +1180,12 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             }
         }
 
-        // parity: plan:SP-6, rpc:ship.SafeLogoff
+        // parity: feat:character.safe-logoff, plan:SP-6, rpc:ship.SafeLogoff
         ("ship", "SafeLogoff") => {
             Some(crate::sp6_lifecycle::handle_safe_logoff(ctx, session).await)
         }
 
-        // parity: plan:SP-6, rpc:ship.AbortSafeLogoff
+        // parity: feat:character.safe-logoff, plan:SP-6, rpc:ship.AbortSafeLogoff
         ("ship", "AbortSafeLogoff") => Some(
             crate::sp6_lifecycle::handle_abort_safe_logoff(
                 ctx,

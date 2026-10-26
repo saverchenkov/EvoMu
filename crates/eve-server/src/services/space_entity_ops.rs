@@ -1166,4 +1166,4 @@ async fn handle_open_shipping_unit_storage(
     ]))
 }
 
-pub(crate) use crate::services::corp_medals_bulletins::{handle_corp_bulletins, handle_medal_queries};
+pub(crate) use crate::services::corp_medals_bulletins::{handle_corp_bulletins, handle_corp_medals};
