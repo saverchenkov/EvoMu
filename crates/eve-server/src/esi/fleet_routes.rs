@@ -282,33 +282,6 @@ fn ensure_online_ui_session(
     Ok(())
 }
 
-fn emit_ui_window_open(
-    ctx: &ServerContext,
-    caller_id: i64,
-    window_type: &str,
-    target_id: i64,
-    details: String,
-) {
-    ctx.esi_state.record_ui_event(
-        caller_id,
-        json!({
-            "window_type": window_type,
-            "target_id": target_id,
-            "details": details,
-        }),
-    );
-    ctx.notify(
-        NotificationTarget::Character(caller_id),
-        "OnWindowOpened",
-        "charid",
-        vec![
-            PyRep::String(window_type.to_string()),
-            PyRep::Integer(target_id),
-            PyRep::String(details),
-        ],
-    );
-}
-
 /// Returns `true` if `(method, path_pattern)` is one of the state-backed Fleet or OpenWindow UI operations.
 pub fn is_fleet_operation_implemented(method: &str, path_pattern: &str) -> bool {
     matches!(
@@ -1230,13 +1203,7 @@ pub fn dispatch_fleet_routes(
             if !ctx.db.with_snapshot(|snap| snap.contracts.contains_key(&contract_id)) {
                 return Some(RouteExecutionResult::error(404, format!("Contract {contract_id} not found")));
             }
-            emit_ui_window_open(ctx, caller_id, "contract", contract_id, format!("contract:{contract_id}"));
-            ctx.notify(
-                NotificationTarget::Character(caller_id),
-                "OnShowContract",
-                "charid",
-                vec![PyRep::Integer(contract_id)],
-            );
+            ctx.notify(NotificationTarget::Character(caller_id), "OnShowContract", "charid", vec![PyRep::Integer(contract_id)]);
             Some(RouteExecutionResult::no_content(0))
         }
 
@@ -1251,14 +1218,35 @@ pub fn dispatch_fleet_routes(
             let Some(target_id) = raw_tid.parse::<i64>().ok().filter(|&id| id > 0) else {
                 return Some(RouteExecutionResult::error(400, format!("Invalid target_id '{raw_tid}'")));
             };
-            emit_ui_window_open(ctx, caller_id, "information", target_id, format!("information:{target_id}"));
-            ctx.notify(
-                NotificationTarget::Character(caller_id),
-                "OnShowOwnerDetailsWindow",
-                "charid",
-                vec![PyRep::Integer(target_id)],
-            );
-            Some(RouteExecutionResult::no_content(0))
+            // The only V24 server push that opens an info window is `OnShowOwnerDetailsWindow(targetID)`
+            // (svc.info `__notifyevents__`, eve/client/script/ui/shared/info/infosvc.pyj:207). Its handler
+            // (infosvc.pyj:4455-4461) only opens characters, corporations and alliances.
+            let is_owner = ctx.db.with_snapshot(|s| {
+                s.characters.contains_key(&target_id)
+                    || s.corporations.contains_key(&target_id)
+                    || s.alliances.contains_key(&target_id)
+            }) || ctx.sde.npc_corporations.contains_key(&target_id)
+                || ctx.sde.agents.contains_key(&target_id);
+            if is_owner {
+                ctx.notify(NotificationTarget::Character(caller_id), "OnShowOwnerDetailsWindow", "charid", vec![PyRep::Integer(target_id)]);
+                return Some(RouteExecutionResult::no_content(0));
+            }
+            let exists = ctx.db.with_snapshot(|s| {
+                s.structures.contains_key(&target_id) || s.items.contains_key(&target_id)
+            }) || ctx.sde.stations.contains_key(&target_id)
+                || u32::try_from(target_id).ok().is_some_and(|tid| {
+                    ctx.sde.types.contains_key(&tid)
+                        || ctx.sde.solar_systems.contains_key(&tid)
+                        || ctx.sde.factions.contains_key(&tid)
+                });
+            if !exists {
+                return Some(RouteExecutionResult::error(404, format!("Target {target_id} not found")));
+            }
+            // No V24 client push entry point opens info windows for non-owner targets.
+            Some(RouteExecutionResult::error(
+                501,
+                format!("Opening the information window for non-owner target {target_id} has no V24 client push entry point"),
+            ))
         }
 
         ("POST", "/ui/openwindow/marketdetails") => {
@@ -1278,13 +1266,7 @@ pub fn dispatch_fleet_routes(
             if !ctx.sde.types.contains_key(&tid_u32) {
                 return Some(RouteExecutionResult::error(404, format!("Inventory type {type_id} not found")));
             }
-            emit_ui_window_open(ctx, caller_id, "marketdetails", type_id, format!("marketdetails:{type_id}"));
-            ctx.notify(
-                NotificationTarget::Character(caller_id),
-                "OnShowMarketDetails",
-                "charid",
-                vec![PyRep::Integer(type_id)],
-            );
+            ctx.notify(NotificationTarget::Character(caller_id), "OnShowMarketDetails", "charid", vec![PyRep::Integer(type_id)]);
             Some(RouteExecutionResult::no_content(0))
         }
 
@@ -1315,31 +1297,23 @@ pub fn dispatch_fleet_routes(
             if recipients.is_empty() || recipients.len() > 50 {
                 return Some(RouteExecutionResult::error(400, "newmail 'recipients' must contain 1..=50 entries"));
             }
-            let mut first_recipient = 0i64;
+            let mut recip_ids = Vec::new();
             for r in recipients {
                 let Some(rid) = r.as_i64().filter(|&v| v > 0) else {
                     return Some(RouteExecutionResult::error(400, "Each recipient in 'recipients' must be a positive integer"));
                 };
-                if first_recipient == 0 {
-                    first_recipient = rid;
-                }
+                recip_ids.push(PyRep::Integer(rid));
             }
             if payload.get("to_corp_or_alliance_id").is_some() && payload.get("to_mailing_list_id").is_some() {
-                return Some(RouteExecutionResult::error(
-                    422,
-                    "Cannot specify both 'to_corp_or_alliance_id' and 'to_mailing_list_id'",
-                ));
+                return Some(RouteExecutionResult::error(422, "Cannot specify both 'to_corp_or_alliance_id' and 'to_mailing_list_id'"));
             }
-            emit_ui_window_open(ctx, caller_id, "newmail", first_recipient, format!("{subject}:{body}"));
+            let corp_or_alliance = payload.get("to_corp_or_alliance_id").and_then(Value::as_i64).map(PyRep::Integer).unwrap_or(PyRep::None);
+            let to_list_id = payload.get("to_mailing_list_id").and_then(Value::as_i64).map(PyRep::Integer).unwrap_or(PyRep::None);
             ctx.notify(
                 NotificationTarget::Character(caller_id),
                 "OnCreateNewMailWindow",
                 "charid",
-                vec![
-                    PyRep::Integer(first_recipient),
-                    PyRep::String(subject.to_string()),
-                    PyRep::String(body.to_string()),
-                ],
+                vec![PyRep::List(recip_ids), corp_or_alliance, to_list_id, PyRep::String(subject.to_string()), PyRep::String(body.to_string())],
             );
             Some(RouteExecutionResult::no_content(0))
         }

@@ -102,7 +102,7 @@ async fn test_ch1_skill_training_queue_engine() {
                 title: String::new(),
                 gender: 0,
                 create_date_unix: 0,
-                fleet_id: None,
+                fleet_id: None, autopilot_waypoints: Vec::new(),
                 version: 1,
                 system_epoch: 1,
                 neural: NeuralAttributes {
@@ -156,7 +156,7 @@ async fn test_ch1_skill_training_queue_engine() {
                 title: String::new(),
                 gender: 0,
                 create_date_unix: 0,
-                fleet_id: None,
+                fleet_id: None, autopilot_waypoints: Vec::new(),
                 version: 1,
                 system_epoch: 1,
                 neural: NeuralAttributes {
@@ -320,7 +320,7 @@ async fn test_ch1_skill_training_queue_engine() {
                 title: String::new(),
                 gender: 0,
                 create_date_unix: 0,
-                fleet_id: None,
+                fleet_id: None, autopilot_waypoints: Vec::new(),
                 version: 1,
                 system_epoch: 1,
                 neural: NeuralAttributes {

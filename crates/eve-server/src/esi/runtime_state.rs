@@ -84,8 +84,6 @@ pub struct EsiRuntimeState {
     pub fleet_wing_names: RwLock<HashMap<(i64, i64), String>>,
     pub fleet_squads: RwLock<HashMap<(i64, i64), (i64, String)>>,
     pub fleet_member_meta: RwLock<HashMap<(i64, i64), (String, i64, i64)>>,
-    pub autopilot_waypoints: RwLock<HashMap<i64, Vec<i64>>>,
-    pub ui_open_window_events: RwLock<HashMap<i64, Vec<Value>>>,
     pub war_allies: RwLock<HashMap<i64, Vec<Value>>>,
     pub custom_item_names: RwLock<HashMap<i64, String>>,
     pub next_custom_id: AtomicI64,
@@ -119,8 +117,6 @@ impl EsiRuntimeState {
             fleet_wing_names: RwLock::new(HashMap::new()),
             fleet_squads: RwLock::new(HashMap::new()),
             fleet_member_meta: RwLock::new(HashMap::new()),
-            autopilot_waypoints: RwLock::new(HashMap::new()),
-            ui_open_window_events: RwLock::new(HashMap::new()),
             war_allies: RwLock::new(HashMap::new()),
             custom_item_names: RwLock::new(HashMap::new()),
             next_custom_id: AtomicI64::new(16),
@@ -191,56 +187,6 @@ impl EsiRuntimeState {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert((char_id, mail_id), meta);
-    }
-
-    pub fn update_autopilot_waypoint(
-        &self,
-        char_id: i64,
-        destination_id: i64,
-        add_to_beginning: bool,
-        clear_other_waypoints: bool,
-    ) -> Vec<i64> {
-        let mut map = self
-            .autopilot_waypoints
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        let list = map.entry(char_id).or_default();
-        if clear_other_waypoints {
-            list.clear();
-            list.push(destination_id);
-        } else if add_to_beginning {
-            list.insert(0, destination_id);
-        } else {
-            list.push(destination_id);
-        }
-        list.clone()
-    }
-
-    pub fn record_ui_event(&self, char_id: i64, event: Value) {
-        self.ui_open_window_events
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry(char_id)
-            .or_default()
-            .push(event);
-    }
-
-    pub fn get_ui_events(&self, char_id: i64) -> Vec<Value> {
-        self.ui_open_window_events
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&char_id)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    pub fn get_autopilot_waypoints(&self, char_id: i64) -> Vec<i64> {
-        self.autopilot_waypoints
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&char_id)
-            .cloned()
-            .unwrap_or_default()
     }
 
     pub fn set_custom_item_name(&self, item_id: i64, name: impl Into<String>) {

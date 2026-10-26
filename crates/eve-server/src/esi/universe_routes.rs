@@ -7,7 +7,6 @@ use crate::esi::sample_routes::{
 use crate::router::cache_notifications::NotificationTarget;
 use crate::router::ServerContext;
 use eve_db::{SsoTokenClaims, UpwellStructureRecord, WorldStateSnapshot};
-use eve_proto::PyRep;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1222,63 +1221,37 @@ pub fn dispatch_universe_and_nav(
                 for raw_name in &names {
                     let target_lc = raw_name.trim().to_ascii_lowercase();
                     for a in snap.alliances.values() {
-                        if a.name.to_ascii_lowercase() == target_lc {
-                            alliances.push(json!({ "id": a.alliance_id, "name": a.name }));
-                        }
+                        if a.name.to_ascii_lowercase() == target_lc { alliances.push(json!({ "id": a.alliance_id, "name": a.name })); }
                     }
                     for ch in snap.characters.values() {
-                        if ch.name.to_ascii_lowercase() == target_lc {
-                            characters.push(json!({ "id": ch.character_id, "name": ch.name }));
-                        }
+                        if ch.name.to_ascii_lowercase() == target_lc { characters.push(json!({ "id": ch.character_id, "name": ch.name })); }
                     }
                     for co in snap.corporations.values() {
-                        if co.name.to_ascii_lowercase() == target_lc {
-                            corporations.push(json!({ "id": co.corporation_id, "name": co.name }));
-                        }
+                        if co.name.to_ascii_lowercase() == target_lc { corporations.push(json!({ "id": co.corporation_id, "name": co.name })); }
                     }
                     for npc in ctx.sde.npc_corporations.values() {
-                        if npc.name.to_ascii_lowercase() == target_lc {
-                            corporations
-                                .push(json!({ "id": npc.corporation_id, "name": npc.name }));
-                        }
+                        if npc.name.to_ascii_lowercase() == target_lc { corporations.push(json!({ "id": npc.corporation_id, "name": npc.name })); }
                     }
                     for ag in ctx.sde.agents.values() {
-                        if ag.name.to_ascii_lowercase() == target_lc {
-                            agents.push(json!({ "id": ag.agent_id, "name": ag.name }));
-                        }
+                        if ag.name.to_ascii_lowercase() == target_lc { agents.push(json!({ "id": ag.agent_id, "name": ag.name })); }
                     }
                     for fac in ctx.sde.factions.values() {
-                        if fac.name.to_ascii_lowercase() == target_lc {
-                            factions.push(json!({ "id": fac.faction_id as i64, "name": fac.name }));
-                        }
+                        if fac.name.to_ascii_lowercase() == target_lc { factions.push(json!({ "id": fac.faction_id as i64, "name": fac.name })); }
                     }
                     for reg in ctx.sde.regions.values() {
-                        if reg.name.to_ascii_lowercase() == target_lc {
-                            regions.push(json!({ "id": reg.region_id as i64, "name": reg.name }));
-                        }
+                        if reg.name.to_ascii_lowercase() == target_lc { regions.push(json!({ "id": reg.region_id as i64, "name": reg.name })); }
                     }
                     for con in ctx.sde.constellations.values() {
-                        if con.name.to_ascii_lowercase() == target_lc {
-                            constellations.push(
-                                json!({ "id": con.constellation_id as i64, "name": con.name }),
-                            );
-                        }
+                        if con.name.to_ascii_lowercase() == target_lc { constellations.push(json!({ "id": con.constellation_id as i64, "name": con.name })); }
                     }
                     for sys in ctx.sde.solar_systems.values() {
-                        if sys.name.to_ascii_lowercase() == target_lc {
-                            systems
-                                .push(json!({ "id": sys.solar_system_id as i64, "name": sys.name }));
-                        }
+                        if sys.name.to_ascii_lowercase() == target_lc { systems.push(json!({ "id": sys.solar_system_id as i64, "name": sys.name })); }
                         for st in &sys.stations {
-                            if st.name.to_ascii_lowercase() == target_lc {
-                                stations.push(json!({ "id": st.station_id, "name": st.name }));
-                            }
+                            if st.name.to_ascii_lowercase() == target_lc { stations.push(json!({ "id": st.station_id, "name": st.name })); }
                         }
                     }
                     for t in ctx.sde.types.values() {
-                        if t.name.to_ascii_lowercase() == target_lc {
-                            inventory_types.push(json!({ "id": t.type_id as i64, "name": t.name }));
-                        }
+                        if t.name.to_ascii_lowercase() == target_lc { inventory_types.push(json!({ "id": t.type_id as i64, "name": t.name })); }
                     }
                 }
 
@@ -1327,10 +1300,7 @@ pub fn dispatch_universe_and_nav(
                 || ctx.sde.stations.contains_key(&destination_id)
                 || ctx.db.with_snapshot(|snap| snap.structures.contains_key(&destination_id));
             if !is_known_destination {
-                return RouteExecutionResult::error(
-                    404,
-                    format!("Destination {destination_id} is not a known solar system, station, or structure"),
-                );
+                return RouteExecutionResult::error(404, format!("Destination {destination_id} is not a known solar system, station, or structure"));
             }
             let caller_id = claims.map(|c| c.character_id).unwrap_or(0);
             let is_online = ctx
@@ -1338,32 +1308,25 @@ pub fn dispatch_universe_and_nav(
                 .with_snapshot(|snap| snap.characters.get(&caller_id).map(|ch| ch.user_id))
                 .is_some_and(|uid| ctx.db.get_online_session(uid).is_some());
             if !is_online {
-                return RouteExecutionResult::error(
-                    501,
-                    "Live client UI session routing for /ui/autopilot/waypoint is not active (ESI-7)",
-                );
+                return RouteExecutionResult::error(501, "Live client UI session routing for /ui/autopilot/waypoint is not active (ESI-7)");
             }
-            ctx.esi_state.update_autopilot_waypoint(
-                caller_id,
-                destination_id,
-                add_to_beginning,
-                clear_other_waypoints,
-            );
+            ctx.db.with_mut_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get_mut(&caller_id) {
+                    if clear_other_waypoints {
+                        ch.autopilot_waypoints.clear();
+                    }
+                    if add_to_beginning {
+                        ch.autopilot_waypoints.insert(0, destination_id);
+                    } else {
+                        ch.autopilot_waypoints.push(destination_id);
+                    }
+                }
+            });
             ctx.notify(
                 NotificationTarget::Character(caller_id),
                 "OnAutopilotUpdated",
                 "charid",
-                vec![
-                    PyRep::Integer(destination_id),
-                    PyRep::Bool(add_to_beginning),
-                    PyRep::Bool(clear_other_waypoints),
-                ],
-            );
-            ctx.notify(
-                NotificationTarget::Character(caller_id),
-                "OnDestinationSet",
-                "charid",
-                vec![PyRep::Integer(destination_id)],
+                vec![],
             );
             RouteExecutionResult::no_content(0)
         }

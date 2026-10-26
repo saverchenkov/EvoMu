@@ -444,15 +444,6 @@ pub async fn handle(
             // transfer queue or bazaar sale); EvoMu runs neither, so owned characters are unlocked.
             Some(Ok(PyRep::None))
         }
-        // ---- post-SelectCharacterID station entry bootstrap ----
-        ("seasonManager", "get_season_data_for_character") => {
-            if let Err(e) = ServerContext::require_character(session) {
-                return Some(Err(e));
-            }
-            // const-ok: `SeasonService._fetch_season_data` checks `if season_data is None: return None`;
-            // EvoMu has no active seasonal event running.
-            Some(Ok(PyRep::None))
-        }
         ("charMgr", "GetCharacterSettings") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
