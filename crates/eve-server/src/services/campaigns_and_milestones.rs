@@ -357,6 +357,7 @@ pub async fn handle(
         ("communityTrackMgr", "get_instance_attributes_public") => {
             Some(handle_community_track_get_attributes(ctx, session, args))
         }
+        // parity: rpc:communityTrackMgr.change_qa_mode
         ("communityTrackMgr", "change_qa_mode") => {
             Some(handle_community_track_change_qa_mode(ctx, session, args))
         }
@@ -986,6 +987,8 @@ fn handle_community_track_change_qa_mode(
         let mut ext = load_cosmetics_ui_state(snap);
         ext.community_track_qa_mode = qa_mode;
         save_cosmetics_ui_state(snap, &ext);
+        snap.service_state_blobs
+            .insert("community_track_qa_mode".to_string(), qa_mode.to_string());
     });
 
     Ok(PyRep::Bool(true))

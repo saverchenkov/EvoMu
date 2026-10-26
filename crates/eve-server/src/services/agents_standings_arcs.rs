@@ -936,16 +936,27 @@ pub async fn handle_extended(
 
         // parity: rpc:epicArcStatus.AgentHasEpicMissionsForCharacter
         ("epicArcStatus", "AgentHasEpicMissionsForCharacter") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let (_, session_char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(agent_id) = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArguments".into(),
                     message: "epicArcStatus.AgentHasEpicMissionsForCharacter requires a positive agentID".into(),
                 }));
             };
+            let char_id = session_char_id;
             let Some(agent) = ctx.sde.agents.get(&agent_id).filter(|a| a.agent_type_id == 10) else {
                 return Some(Ok(PyRep::Bool(false)));
             };
+            let has_active = ctx.db.with_snapshot(|snap| {
+                snap.active_missions.values().any(|m| {
+                    m.character_id == char_id
+                        && m.agent_id == agent_id
+                        && matches!(m.state.as_str(), "Offered" | "Accepted")
+                })
+            });
+            if has_active {
+                return Some(Ok(PyRep::Bool(true)));
+            }
             let (arc_id, faction_id) = resolve_epic_arc_id_for_agent(ctx, agent_id);
             let now_unix = ctx.now_unix();
             let available = ctx.db.with_snapshot(|snap| {

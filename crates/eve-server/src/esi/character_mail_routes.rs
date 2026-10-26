@@ -351,6 +351,7 @@ pub fn dispatch_character_mail_routes(
                 RouteExecutionResult::ok_json(json!(out), 3600)
             }))
         }
+        // DATA GAP: requires SDE/live store catalog import (esi:GET /loyalty/stores/{corporation_id}/offers, feat:esi.loyalty.offers)
         ("GET", "/loyalty/stores/{corporation_id}/offers") => {
             let corp_id = match parse_path_i64(path_params, "corporation_id") {
                 Ok(v) => v,
@@ -370,6 +371,27 @@ pub fn dispatch_character_mail_routes(
                     .get(&corp_id)
                     .cloned()
                     .unwrap_or_default();
+                if offers.is_empty() {
+                    let lp_offers = crate::services::lp_store::load_lp_store_offers(snap);
+                    for o in lp_offers.into_iter().filter(|o| o.corp_id == corp_id) {
+                        offers.push(eve_db::LoyaltyStoreOfferRecord {
+                            offer_id: o.offer_id,
+                            type_id: o.type_id as u32,
+                            quantity: o.quantity as i64,
+                            lp_cost: o.lp_cost,
+                            isk_cost: (o.isk_cost.0 / 100) as i64,
+                            ak_cost: if o.ak_cost > 0 { Some(o.ak_cost) } else { None },
+                            required_items: o
+                                .req_items
+                                .into_iter()
+                                .map(|(tid, qty)| eve_db::LoyaltyStoreOfferItemRecord {
+                                    type_id: tid as u32,
+                                    quantity: qty as i64,
+                                })
+                                .collect(),
+                        });
+                    }
+                }
                 offers.sort_by_key(|o| o.offer_id);
                 let out: Vec<Value> = offers
                     .into_iter()

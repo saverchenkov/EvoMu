@@ -14,7 +14,8 @@
 // parity: feat:lifecycle.lp-durable
 // parity: rpc:LPStoreMgr.GetAvailableOffersFromCorp
 // parity: rpc:LPStoreMgr.TakeOfferForCharacter, rpc:LPStoreMgr.TakeOfferForCorporation
-// parity: feat:lp.lp-store-offers, feat:lp.lp-store-buy
+// parity: feat:lp.lp-store-buy
+// DATA GAP: requires SDE/live store catalog import (feat:lp.lp-store-offers)
 
 #![forbid(unsafe_code)]
 
@@ -981,8 +982,15 @@ pub fn handle(
                     }));
                 }
             };
-            let lp_logs: Vec<LpRewardLogEntry> = ctx.db.with_snapshot(|snap| {
-                snap.char_lp_logs.get(&char_id).cloned().unwrap_or_default()
+            let (lp_logs, blob_rewards) = ctx.db.with_snapshot(|snap| {
+                let logs: Vec<LpRewardLogEntry> = snap.char_lp_logs.get(&char_id).cloned().unwrap_or_default();
+                let key = format!("delayed_rewards:{char_id}");
+                let blobs: std::collections::HashMap<String, Vec<serde_json::Value>> = snap
+                    .service_state_blobs
+                    .get(&key)
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                (logs, blobs)
             });
             let inc_logs = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
                 reg.incursion_lp_logs.get(&char_id).cloned().unwrap_or_default()
@@ -1019,6 +1027,20 @@ pub fn handle(
                             ("loyaltyPoints", PyRep::Integer(inc.concord_lp_earned)),
                             ("reason", PyRep::String(format!("Incursion {} ({})", inc.tier, inc.site_id))),
                             ("timestamp", PyRep::Integer(inc.timestamp_filetime)),
+                        ]));
+                    }
+                }
+                if let Some(items) = blob_rewards.get(&gid.to_string()) {
+                    for item in items {
+                        let isk = item.get("isk").and_then(|v| v.as_i64()).unwrap_or(0);
+                        let lp = item.get("lp").and_then(|v| v.as_i64()).unwrap_or(0);
+                        rewards.push(PyRep::keyval([
+                            ("rewardGroupID", PyRep::Integer(gid)),
+                            ("rewardQuantity", PyRep::Integer(lp)),
+                            ("amount", PyRep::Integer(isk)),
+                            ("loyaltyPoints", PyRep::Integer(lp)),
+                            ("isk", PyRep::Integer(isk)),
+                            ("lp", PyRep::Integer(lp)),
                         ]));
                     }
                 }

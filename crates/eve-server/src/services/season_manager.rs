@@ -691,6 +691,7 @@ pub fn handle_season_manager(
             });
             Some(Ok(PyRep::Integer(max_ch)))
         }
+        // DATA GAP: requires server-only season schedule and challenges (rpc:seasonManager.get_season_end_time)
         ("seasonManager", "get_season_end_time") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -712,6 +713,7 @@ pub fn handle_season_manager(
             });
             Some(Ok(PyRep::Integer(end_ft)))
         }
+        // DATA GAP: requires server-only season schedule and challenges (rpc:seasonManager.select_season)
         ("seasonManager", "select_season") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -730,6 +732,8 @@ pub fn handle_season_manager(
                 for ch in st.challenges.values_mut() {
                     ch.season_id = season_id;
                 }
+                snap.service_state_blobs
+                    .insert(format!("active_season:{char_id}"), season_id.to_string());
                 Ok(())
             });
             match res {
@@ -737,6 +741,7 @@ pub fn handle_season_manager(
                 Err(e) => Some(Err(e)),
             }
         }
+        // DATA GAP: requires server-only season schedule and challenges (rpc:seasonManager.get_season_data_for_character)
         ("seasonManager", "get_season_data_for_character") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -855,8 +860,7 @@ pub fn handle_season_manager(
             }
             let amount_opt = kwargs
                 .get("amount")
-                .and_then(|v| v.as_i64())
-                .or_else(|| args.get(1).and_then(|a| a.as_i64()));
+                .and_then(|v| v.as_i64());
             let amount = amount_opt.unwrap_or(1);
             if amount <= 0 {
                 return Some(Err(BridgeRpcError {
