@@ -10,7 +10,7 @@ use eve_dogma::{DogmaItemState, ShipFittingEngine};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{attr_ids, InvType, TypeId};
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 
 /// Computes Strontium Clathrates consumption for Siege Module based on Tactical Weapon Reconfiguration (`22043`).
 pub fn compute_siege_strontium_cost(skill_level: u8) -> u32 {
@@ -80,19 +80,65 @@ pub struct TacticalModulesState {
     pub tsb_self_penalty_until: HashMap<(usize, i64), u64>,
 }
 
-pub fn tactical_modules_state() -> &'static RwLock<TacticalModulesState> {
-    static STATE: OnceLock<RwLock<TacticalModulesState>> = OnceLock::new();
-    STATE.get_or_init(|| RwLock::new(TacticalModulesState::default()))
-}
-
 fn db_key_of(ctx: &ServerContext) -> usize { ctx.instance_id as usize }
 fn db_ptr_key(db: &Arc<eve_db::WorldRepository>) -> usize { Arc::as_ptr(db) as usize }
+
+fn is_combatant_ship_or_entity_ball(
+    sde_opt: Option<&Arc<eve_sde::SdeRegistry>>,
+    db_opt: Option<&Arc<eve_db::WorldRepository>>,
+    ball_id: i64,
+    ball_type_id: u32,
+) -> bool {
+    if (40_000_000..80_000_000).contains(&ball_id) {
+        return false;
+    }
+    let eff_tid = if ball_type_id != 0 {
+        ball_type_id
+    } else {
+        db_opt
+            .and_then(|db| db.with_snapshot(|s| s.items.get(&ball_id).map(|i| i.type_id)))
+            .unwrap_or(0)
+    };
+    if eff_tid != 0 {
+        if let Some(t) = sde_opt.and_then(|sde| sde.types.get(&eff_tid)) {
+            if matches!(t.group_id, 12 | 186 | 340 | 448 | 649) {
+                return false;
+            }
+            return matches!(t.category_id, 6 | 11 | 18 | 65 | 87);
+        }
+    }
+    true
+}
+
+fn is_player_ship_ball(
+    sde_opt: Option<&Arc<eve_sde::SdeRegistry>>,
+    db_opt: Option<&Arc<eve_db::WorldRepository>>,
+    ball_id: i64,
+    ball_type_id: u32,
+) -> bool {
+    if (40_000_000..80_000_000).contains(&ball_id) {
+        return false;
+    }
+    let eff_tid = if ball_type_id != 0 {
+        ball_type_id
+    } else {
+        db_opt
+            .and_then(|db| db.with_snapshot(|s| s.items.get(&ball_id).map(|i| i.type_id)))
+            .unwrap_or(0)
+    };
+    if eff_tid != 0 {
+        if let Some(t) = sde_opt.and_then(|sde| sde.types.get(&eff_tid)) {
+            return t.category_id == 6;
+        }
+    }
+    false
+}
 
 /// Returns `Err` if `ship_id` is under a Disruptive Lance 300s caster lock, 60s victim debuff, or active Entosis Link cycle.
 pub fn check_ship_navigation_lock(ctx: &ServerContext, ship_id: i64, action: &str) -> Result<(), BridgeRpcError> {
     let now_unix = ctx.now_unix_secs();
     let db_key = db_key_of(ctx);
-    let st = tactical_modules_state().read().unwrap_or_else(|e| e.into_inner());
+    let st = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
     if let Some(&until) = st.lance_caster_lock_until.get(&(db_key, ship_id)) {
         if now_unix < until {
             return Err(BridgeRpcError {
@@ -124,7 +170,7 @@ pub fn check_ship_navigation_lock(ctx: &ServerContext, ship_id: i64, action: &st
 pub fn incoming_remote_repair_multiplier(ctx: &ServerContext, target_ship_id: i64) -> f64 {
     let now_unix = ctx.now_unix_secs();
     let db_key = db_key_of(ctx);
-    let st = tactical_modules_state().read().unwrap_or_else(|e| e.into_inner());
+    let st = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
     if st.lance_victim_debuff_until.get(&(db_key, target_ship_id)).is_some_and(|&u| now_unix < u) {
         0.50
     } else {
@@ -135,7 +181,7 @@ pub fn incoming_remote_repair_multiplier(ctx: &ServerContext, target_ship_id: i6
 /// Clears Entosis Link warm-up state when `ship_id` unlocks `target_id` (or all targets when `target_id_opt` is `None`).
 pub fn clear_entosis_warmup_on_unlock(ctx: &ServerContext, ship_id: i64, target_id_opt: Option<i64>) {
     let db_key = db_key_of(ctx);
-    let mut st = tactical_modules_state().write().unwrap_or_else(|e| e.into_inner());
+    let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
     if let Some(tid) = target_id_opt {
         st.entosis_target_cycles.remove(&(db_key, tid, ship_id));
         if st.entosis_active_links.get(&(db_key, ship_id)).is_some_and(|e| e.target_id == tid) {
@@ -152,7 +198,7 @@ pub fn remove_projected_remote_assistance(ctx: &ServerContext, source_module_id:
     let db_key = db_key_of(ctx);
     let mut affected = Vec::new();
     {
-        let mut st = tactical_modules_state().write().unwrap_or_else(|e| e.into_inner());
+        let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
         for (&(k, tid), list) in st.remote_assistance.iter_mut() {
             if k == db_key {
                 let before = list.len();
@@ -247,7 +293,7 @@ pub fn apply_projected_remote_assistance(
         }
     };
     let db_key = db_key_of(ctx);
-    let mut st = tactical_modules_state().write().unwrap_or_else(|e| e.into_inner());
+    let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
     let list = st.remote_assistance.entry((db_key, target_id)).or_default();
     list.retain(|e| e.module_id != module_id);
     list.push(entry);
@@ -313,7 +359,7 @@ pub fn apply_tactical_module_ship_attributes(ctx: &ServerContext, ship_id: i64, 
 
     let db_key = db_key_of(ctx);
     let now_unix = ctx.now_unix_secs();
-    if tactical_modules_state().read().unwrap_or_else(|e| e.into_inner()).tsb_self_penalty_until.get(&(db_key, ship_id)).is_some_and(|&u| now_unix < u) {
+    if ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner()).tsb_self_penalty_until.get(&(db_key, ship_id)).is_some_and(|&u| now_unix < u) {
         if let Some(sr) = attrs.get_mut(&564) {
             *sr *= 0.75;
         }
@@ -367,7 +413,7 @@ pub fn apply_tactical_module_ship_attributes(ctx: &ServerContext, ship_id: i64, 
     }
 
     let assist_mult = attrs.get(&2135).copied().unwrap_or(1.0);
-    let proj_list = tactical_modules_state().read().unwrap_or_else(|e| e.into_inner()).remote_assistance.get(&(db_key, ship_id)).cloned().unwrap_or_default();
+    let proj_list = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner()).remote_assistance.get(&(db_key, ship_id)).cloned().unwrap_or_default();
     if !proj_list.is_empty() {
         let rs_extractors: [(u16, fn(&ProjectedRemoteAssistance) -> f64); 2] = [
             (76u16, |p: &ProjectedRemoteAssistance| p.max_target_range_bonus_pct),
@@ -395,7 +441,13 @@ pub fn apply_tactical_module_ship_attributes(ctx: &ServerContext, ship_id: i64, 
     }
 
     let db_key = db_key_of(ctx);
-    if let Some(debuff) = tactical_modules_state().read().unwrap_or_else(|e| e.into_inner()).active_wubble_debuffs.get(&(db_key, ship_id)) {
+    let ptr_key = db_ptr_key(&ctx.db);
+    let st_guard = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
+    if let Some(debuff) = st_guard
+        .active_wubble_debuffs
+        .get(&(db_key, ship_id))
+        .or_else(|| st_guard.active_wubble_debuffs.get(&(ptr_key, ship_id)))
+    {
         if debuff.remaining_s > 0.0 {
             if let Some(v) = attrs.get_mut(&37) {
                 *v *= debuff.velocity_multiplier;
@@ -407,7 +459,7 @@ pub fn apply_tactical_module_ship_attributes(ctx: &ServerContext, ship_id: i64, 
 /// Applies projected Remote Tracking Computer bonuses (with stacking penalty and `remoteAssistanceImpedance`) to module attributes.
 pub fn apply_projected_rtc_to_module_attrs(ctx: &ServerContext, ship_id: i64, mod_attrs: &mut HashMap<u16, f64>) {
     let db_key = db_key_of(ctx);
-    let proj_list = tactical_modules_state().read().unwrap_or_else(|e| e.into_inner()).remote_assistance.get(&(db_key, ship_id)).cloned().unwrap_or_default();
+    let proj_list = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner()).remote_assistance.get(&(db_key, ship_id)).cloned().unwrap_or_default();
     if proj_list.is_empty() {
         return;
     }
@@ -464,7 +516,7 @@ pub async fn activate_target_spectrum_breaker(
     let all_balls = sys.list_balls().await.unwrap_or_default();
     let mut locking_ships: Vec<(i64, f64)> = Vec::new();
     for b in &all_balls {
-        if b.id != ship_id && b.id < 700_000_000 {
+        if b.id != ship_id && is_combatant_ship_or_entity_ball(Some(&ctx.sde), Some(&ctx.db), b.id, b.type_id) {
             let locks = sys.get_target_locks(b.id).await.unwrap_or_default();
             if locks.iter().any(|l| l.target_id == ship_id) {
                 let sensor_str = ctx.db.with_snapshot(|snap| {
@@ -495,7 +547,7 @@ pub async fn activate_target_spectrum_breaker(
 
     let db_key = db_key_of(ctx);
     let now_unix = ctx.now_unix_secs();
-    tactical_modules_state().write().unwrap_or_else(|e| e.into_inner()).tsb_self_penalty_until.insert((db_key, ship_id), now_unix + (duration_s.round() as u64).max(12));
+    ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner()).tsb_self_penalty_until.insert((db_key, ship_id), now_unix + (duration_s.round() as u64).max(12));
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.insert(module_id);
     });
@@ -572,7 +624,7 @@ pub async fn activate_auto_targeting_system(
         }
         let is_eligible_hostile = if b.id >= 900_000_000 {
             true
-        } else if b.id < 700_000_000 {
+        } else if is_player_ship_ball(Some(&ctx.sde), Some(&ctx.db), b.id, b.type_id) {
             let owner = ctx.db.with_snapshot(|s| s.items.get(&b.id).map(|i| i.owner_id).unwrap_or(0));
             owner != char_id && !fleet_members.contains(&owner)
         } else {
@@ -747,7 +799,7 @@ pub async fn activate_superweapon_or_lance(
         let now_unix = ctx.now_unix_secs();
         let mut hit_targets = Vec::new();
         for b in all_balls {
-            if b.id != ship_id && (b.id < 700_000_000 || (b.id >= 1_895_000_000 && b.id < 1_900_000_000)) {
+            if b.id != ship_id && (is_combatant_ship_or_entity_ball(Some(&ctx.sde), Some(&ctx.db), b.id, b.type_id) || (b.id >= 1_895_000_000 && b.id < 1_900_000_000)) {
                 let to_ball = b.position - ship_pos;
                 let along_beam = to_ball.dot(beam_dir);
                 if along_beam >= 100.0 && along_beam <= effective_range {
@@ -768,7 +820,7 @@ pub async fn activate_superweapon_or_lance(
         }
         let db_key = db_key_of(ctx);
         {
-            let mut st = tactical_modules_state().write().unwrap_or_else(|e| e.into_inner());
+            let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
             st.lance_caster_lock_until.insert((db_key, ship_id), now_unix + 300);
             for &vid in &hit_targets {
                 st.lance_victim_debuff_until.insert((db_key, vid), now_unix + 60);
@@ -851,7 +903,7 @@ pub async fn activate_superweapon_or_lance(
         let all_balls = sys.list_balls().await.unwrap_or_default();
         let ship_pos = all_balls.iter().find(|b| b.id == ship_id).map(|b| b.position).unwrap_or(DVec3::ZERO);
         for b in all_balls {
-            if b.id != ship_id && (b.id < 700_000_000 || (b.id >= 1_895_000_000 && b.id < 1_900_000_000)) && (b.position - ship_pos).length() <= 100_000.0 {
+            if b.id != ship_id && (is_combatant_ship_or_entity_ball(Some(&ctx.sde), Some(&ctx.db), b.id, b.type_id) || (b.id >= 1_895_000_000 && b.id < 1_900_000_000)) && (b.position - ship_pos).length() <= 100_000.0 {
                 let _ = sys.apply_damage_with_attacker(b.id, dmg_vec, Some(char_id)).await;
                 hit_targets.push(b.id);
             }
@@ -942,7 +994,7 @@ pub async fn handle_entosis_link_activation(
     let db_key = db_key_of(ctx);
     let now_unix = ctx.now_unix_secs();
     {
-        let st = tactical_modules_state().read().unwrap_or_else(|e| e.into_inner());
+        let st = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = st.entosis_active_links.get(&(db_key, ship_id)) {
             if existing.module_id != module_id && now_unix < existing.expires_unix {
                 return Err(BridgeRpcError {
@@ -990,7 +1042,7 @@ pub async fn handle_entosis_link_activation(
     }
 
     let (cycle_index, is_warmup, is_paused, capture_rate, capture_time_s) = {
-        let mut st = tactical_modules_state().write().unwrap_or_else(|e| e.into_inner());
+        let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
         let c_idx = st.entosis_target_cycles.entry((db_key, target_id, ship_id)).and_modify(|c| *c += 1).or_insert(1);
         let cycle_index = *c_idx;
         let is_warmup = cycle_index == 1;
@@ -1322,7 +1374,7 @@ pub async fn activate_command_burst(
 /// Registers a newly launched Stasis Webification Probe (`56748`) with a `3.0s` arming delay.
 pub fn register_launched_wubble_probe(ctx: &ServerContext, probe_id: i64, solar_system_id: u32, position: DVec3, radius_m: f64) {
     let db_key = db_ptr_key(&ctx.db);
-    tactical_modules_state().write().unwrap_or_else(|e| e.into_inner()).pending_wubble_probes.push((
+    ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner()).pending_wubble_probes.push((
         db_key,
         PendingWubbleProbe {
             probe_id,
@@ -1338,12 +1390,18 @@ pub fn register_launched_wubble_probe(ctx: &ServerContext, probe_id: i64, solar_
 }
 
 /// Advances pending Stasis Webification Probes (3s arming delay) and active 30s non-stacking wubble debuffs.
-pub fn step_wubble_probes_and_debuffs(ballpark: &mut Ballpark, db_opt: &Option<Arc<eve_db::WorldRepository>>, dt: f64) {
+pub fn step_wubble_probes_and_debuffs(
+    ballpark: &mut Ballpark,
+    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    tactical_state: &RwLock<TacticalModulesState>,
+    dt: f64,
+) {
     let Some(db_ref) = db_opt else {
         return;
     };
     let db_key = db_ptr_key(db_ref);
-    let mut st = tactical_modules_state().write().unwrap_or_else(|e| e.into_inner());
+    let mut st = tactical_state.write().unwrap_or_else(|e| e.into_inner());
 
     let ship_ids: Vec<i64> = ballpark.balls.keys().copied().collect();
     for sid in &ship_ids {
@@ -1371,8 +1429,21 @@ pub fn step_wubble_probes_and_debuffs(ballpark: &mut Ballpark, db_opt: &Option<A
         st.pending_wubble_probes[idx].1.remaining_arming_s -= dt;
         if st.pending_wubble_probes[idx].1.remaining_arming_s <= 1e-6 {
             let (_, probe) = st.pending_wubble_probes.remove(idx);
-            for (&sid, ball) in ballpark.balls.iter_mut() {
-                if sid < 700_000_000 && (ball.position - probe.position).length() <= probe.radius_m {
+            let eligible_sids: Vec<i64> = ballpark
+                .balls
+                .iter()
+                .filter_map(|(&sid, ball)| {
+                    if is_combatant_ship_or_entity_ball(sde_opt.as_ref(), db_opt.as_ref(), sid, ball.type_id)
+                        && (ball.position - probe.position).length() <= probe.radius_m
+                    {
+                        Some(sid)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for sid in eligible_sids {
+                if let Some(ball) = ballpark.balls.get_mut(&sid) {
                     if let Some(existing) = st.active_wubble_debuffs.get_mut(&(db_key, sid)) {
                         existing.remaining_s = probe.duration_s;
                         ball.max_velocity = existing.base_max_velocity * probe.velocity_multiplier;

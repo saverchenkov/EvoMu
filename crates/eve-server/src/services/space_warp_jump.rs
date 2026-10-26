@@ -11,9 +11,9 @@ use glam::DVec3;
 use std::collections::HashMap;
 
 use super::{
-    check_session_change_timer_active, compute_ship_warp_speed_au_s, ctx_scope_id,
+    check_session_change_timer_active, compute_ship_warp_speed_au_s,
     record_session_change_timer, sync_ship_cloak_and_mjfg_from_fitting,
-    wormhole_item_id_for_signature, ACTIVE_WARPS, AU_IN_METERS,
+    wormhole_item_id_for_signature, AU_IN_METERS,
 };
 
 pub use crate::services::space_destiny::{
@@ -263,9 +263,11 @@ async fn handle_cmd_warp_to_stuff(
                     if let Some(sigs) = snap.cosmic_signatures.get(&sys_id) {
                         for s in sigs {
                             let wh_id = wormhole_item_id_for_signature(sys_id, &s.signature_id);
-                            if ((wh_id == target_id && (has_scanned || s.signal_strength >= 1.0))
+                            let eff_strength =
+                                ctx.effective_signature_signal_strength(char_id, sys_id, s);
+                            if ((wh_id == target_id && (has_scanned || eff_strength >= 1.0))
                                 || (target_str_opt == Some(s.signature_id.as_str())
-                                    && s.signal_strength >= 1.0))
+                                    && eff_strength >= 1.0))
                                 && !s.collapsed
                             {
                                 return Some(DVec3::from_array(s.position));
@@ -423,10 +425,10 @@ async fn handle_cmd_warp_to_stuff(
             let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_if_needed(
                 ctx, char_id, sys_id, dest_pos,
             );
-            ACTIVE_WARPS
+            ctx.active_warps
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .insert((ctx_scope_id(ctx), ship_id), char_id);
+                .insert(ship_id, char_id);
             ctx.db.with_mut_snapshot(|snap| {
                 let mut ext = crate::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
                 if !ext.characters_warped.contains(&char_id) {

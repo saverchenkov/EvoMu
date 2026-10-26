@@ -62,6 +62,7 @@ pub struct ServerContext {
     pub active_scanner_probes: RwLock<HashMap<i64, ActiveScannerProbe>>,
     pub active_moon_probes: RwLock<Vec<ActiveMoonSurveyProbe>>,
     pub scanned_signatures: RwLock<HashSet<(i64, u32, i64)>>,
+    pub character_scan_progress: RwLock<HashMap<(i64, u32, String), f64>>,
     pub invention_roll_override: RwLock<Option<f64>>,
     pub mechanic_rng: Arc<crate::rng::MechanicRng>, // seeded test RNG: shared with `systems`; OS CSPRNG unless seeded
     pub module_reactivation_cooldowns: RwLock<HashMap<(i64, i64), f64>>,
@@ -69,6 +70,10 @@ pub struct ServerContext {
     pub mining_cycles: RwLock<HashMap<i64, crate::services::mining_cycle::ActiveMiningCycle>>,
     pub crimewatch: crate::combat::crimewatch::CrimeWatchLock,
     pub(crate) combat_ephemeral: Arc<RwLock<crate::services::combat_crimewatch::CombatRuntimeState>>,
+    pub tactical_state: Arc<RwLock<crate::services::tactical_modules::TacticalModulesState>>,
+    pub session_change_timers: std::sync::Mutex<HashMap<i64, crate::services::space_destiny::SessionChangeTimerState>>,
+    pub active_warps: std::sync::Mutex<HashMap<i64, i64>>,
+    pub location_change_invuln: std::sync::Mutex<HashMap<i64, u64>>,
     pub feature_flags: crate::config::FeatureFlagsConfig,
     pub esi_port: u16,
     pub esi_state: Arc<crate::esi::runtime_state::EsiRuntimeState>,
@@ -146,7 +151,14 @@ impl ServerContext {
         let (notify_tx, _) = tokio::sync::broadcast::channel(256);
         let pending_notifications = Arc::new(RwLock::new(HashMap::new()));
         let mechanic_rng = Arc::new(crate::rng::MechanicRng::os());
-        let systems = Arc::new(SystemRegistry::with_sde_and_db(sde.clone(), Arc::clone(&db)).with_mechanic_rng(Arc::clone(&mechanic_rng)));
+        let tactical_state = Arc::new(RwLock::new(
+            crate::services::tactical_modules::TacticalModulesState::default(),
+        ));
+        let systems = Arc::new(
+            SystemRegistry::with_sde_and_db(sde.clone(), Arc::clone(&db))
+                .with_mechanic_rng(Arc::clone(&mechanic_rng))
+                .with_tactical_state(Arc::clone(&tactical_state)),
+        );
         let combat_ephemeral = Arc::new(RwLock::new(crate::services::combat_crimewatch::CombatRuntimeState::default()));
         let quasar_gateway = Arc::new(crate::quasar_gateway::PublicGatewayRouter::new(
             eve_proto::quasar::QuasarDescriptorRegistry::open_default_or_empty(),
@@ -251,12 +263,17 @@ impl ServerContext {
             active_scanner_probes: RwLock::new(HashMap::new()),
             active_moon_probes: RwLock::new(Vec::new()),
             scanned_signatures: RwLock::new(HashSet::new()),
+            character_scan_progress: RwLock::new(HashMap::new()),
             invention_roll_override: RwLock::new(None),
             mechanic_rng,
             module_reactivation_cooldowns: RwLock::new(HashMap::new()),
             mining_cycles: RwLock::new(HashMap::new()),
             crimewatch,
             combat_ephemeral,
+            tactical_state,
+            session_change_timers: std::sync::Mutex::new(HashMap::new()),
+            active_warps: std::sync::Mutex::new(HashMap::new()),
+            location_change_invuln: std::sync::Mutex::new(HashMap::new()),
             feature_flags: crate::config::FeatureFlagsConfig::default(),
             esi_port: 26_004,
             esi_state: Arc::new(crate::esi::runtime_state::EsiRuntimeState::new()),
@@ -408,6 +425,45 @@ impl ServerContext {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .contains(&(char_id, solar_system_id, sig_ball_id))
+    }
+
+    pub fn record_character_scan_progress(
+        &self,
+        char_id: i64,
+        solar_system_id: u32,
+        signature_id: &str,
+        strength: f64,
+    ) {
+        self.character_scan_progress
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                (char_id, solar_system_id, signature_id.to_string()),
+                strength,
+            );
+    }
+
+    pub fn get_character_scan_progress(
+        &self,
+        char_id: i64,
+        solar_system_id: u32,
+        signature_id: &str,
+    ) -> Option<f64> {
+        self.character_scan_progress
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(char_id, solar_system_id, signature_id.to_string()))
+            .copied()
+    }
+
+    pub fn effective_signature_signal_strength(
+        &self,
+        char_id: i64,
+        solar_system_id: u32,
+        sig: &eve_db::CosmicSignatureRecord,
+    ) -> f64 {
+        self.get_character_scan_progress(char_id, solar_system_id, &sig.signature_id)
+            .unwrap_or(sig.signal_strength)
     }
 
     pub fn character_skill_levels(&self, char_id: i64) -> HashMap<u32, u8> {

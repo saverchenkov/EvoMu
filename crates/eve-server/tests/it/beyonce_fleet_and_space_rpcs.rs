@@ -304,10 +304,10 @@ async fn test_beyonce_fleet_management_and_space_rpcs() {
     sess1.station_id = None;
 
     // BF-01: Navigation lock enforcement
-    eve_server::services::tactical_modules::tactical_modules_state().write().unwrap().lance_caster_lock_until.insert((ctx.instance_id as usize, ship1), ctx.now_unix_secs() + 300);
+    ctx.tactical_state.write().unwrap().lance_caster_lock_until.insert((ctx.instance_id as usize, ship1), ctx.now_unix_secs() + 300);
     let nav_err = ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGotoBookmark", &[PyRep::Integer(bm_far_id)], &HashMap::new(), None).await.unwrap_err();
     assert_eq!(nav_err.code, "LanceFiringLockActive");
-    eve_server::services::tactical_modules::tactical_modules_state().write().unwrap().lance_caster_lock_until.remove(&(ctx.instance_id as usize, ship1));
+    ctx.tactical_state.write().unwrap().lance_caster_lock_until.remove(&(ctx.instance_id as usize, ship1));
 
     // BF-01: Scrambled ship cannot initiate warp (>= 150km)
     handle.ballpark.write().unwrap().combat_states.get_mut(&ship1).unwrap().warp_scramble_strength = 2;

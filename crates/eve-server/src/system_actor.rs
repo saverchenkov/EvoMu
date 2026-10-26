@@ -69,6 +69,7 @@ pub struct SystemRegistry {
     /// PvE special-site balls (system, ball id) already spawned once into this registry's ballparks.
     /// Runtime-only (lives and dies with the ballparks), so no sentinel ball is needed in space.
     special_site_spawned_balls: std::sync::Mutex<std::collections::HashSet<(SolarSystemId, i64)>>,
+    pub tactical_state: Arc<RwLock<crate::services::tactical_modules::TacticalModulesState>>,
 }
 
 impl Default for SystemRegistry {
@@ -89,6 +90,7 @@ impl SystemRegistry {
             npc_death_hook: Arc::new(RwLock::new(None)),
             module_deactivation_hook: Arc::new(RwLock::new(None)),
             special_site_spawned_balls: std::sync::Mutex::new(std::collections::HashSet::new()),
+            tactical_state: Arc::new(RwLock::new(Default::default())),
         }
     }
 
@@ -103,6 +105,7 @@ impl SystemRegistry {
             npc_death_hook: Arc::new(RwLock::new(None)),
             module_deactivation_hook: Arc::new(RwLock::new(None)),
             special_site_spawned_balls: std::sync::Mutex::new(std::collections::HashSet::new()),
+            tactical_state: Arc::new(RwLock::new(Default::default())),
         }
     }
 
@@ -117,7 +120,16 @@ impl SystemRegistry {
             npc_death_hook: Arc::new(RwLock::new(None)),
             module_deactivation_hook: Arc::new(RwLock::new(None)),
             special_site_spawned_balls: std::sync::Mutex::new(std::collections::HashSet::new()),
+            tactical_state: Arc::new(RwLock::new(Default::default())),
         }
+    }
+
+    pub fn with_tactical_state(
+        mut self,
+        tactical_state: Arc<RwLock<crate::services::tactical_modules::TacticalModulesState>>,
+    ) -> Self {
+        self.tactical_state = tactical_state;
+        self
     }
 
     pub fn set_npc_death_hook(&self, hook: NpcDeathHook) {
@@ -285,6 +297,7 @@ impl SystemRegistry {
             pending_anchoring_disruptors: initial_pending_disruptors,
             sde_opt,
             db_opt,
+            tactical_state: self.tactical_state.clone(),
             ..Default::default()
         }));
         let actor_state_actor = actor_state_shared.clone();
@@ -307,6 +320,7 @@ impl SystemRegistry {
                     asteroid_templates,
                     sde_opt,
                     db_opt,
+                    tactical_state,
                 } = &mut *actor_st;
                 {
                     {
@@ -801,8 +815,8 @@ impl SystemRegistry {
                                 let destroyed_balls = step_cycles_and_capacitor(
                                     &mut ballpark, active_module_cycles, pending_anchoring_disruptors,
                                     active_nanite_repairs, ship_rack_heat, rah_incoming_damage,
-                                    &base_scramble_strengths, &base_core_strengths, &db_opt, dt,
-                                    deact_guard.as_ref(),
+                                    &base_scramble_strengths, &base_core_strengths, &sde_opt, &db_opt,
+                                    tactical_state, dt, deact_guard.as_ref(),
                                 );
                                 if let Some(db) = &db_opt {
                                     for (&bid, cs) in &ballpark.combat_states {

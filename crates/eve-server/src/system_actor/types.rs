@@ -150,6 +150,7 @@ pub(crate) struct SystemActorState {
     pub asteroid_templates: HashMap<BallId, (AsteroidState, Ball)>,
     pub sde_opt: Option<Arc<SdeRegistry>>,
     pub db_opt: Option<Arc<eve_db::WorldRepository>>,
+    pub tactical_state: Arc<std::sync::RwLock<crate::services::tactical_modules::TacticalModulesState>>,
 }
 
 pub enum SystemCommand {

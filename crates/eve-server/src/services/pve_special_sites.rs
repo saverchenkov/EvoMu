@@ -517,6 +517,168 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
 }
 
 
+fn build_special_site_npc_combat_state(
+    sde: &eve_sde::SdeRegistry,
+    type_id: u32,
+) -> eve_destiny::CombatState {
+    if let Some(t) = sde.types.get(&type_id) {
+        let a = &t.default_attributes;
+        let shield = a
+            .get(&eve_sde::attr_ids::SHIELD_CAPACITY)
+            .copied()
+            .unwrap_or(1_200.0)
+            .clamp(600.0, 10_000.0);
+        let armor = a
+            .get(&eve_sde::attr_ids::ARMOR_HP)
+            .copied()
+            .unwrap_or(1_200.0)
+            .clamp(600.0, 10_000.0);
+        let hull = a
+            .get(&9)
+            .copied()
+            .unwrap_or(1_000.0)
+            .clamp(600.0, 10_000.0);
+        let cap = a
+            .get(&eve_sde::attr_ids::CAPACITOR_CAPACITY)
+            .copied()
+            .unwrap_or(1_000.0);
+        let sig = a
+            .get(&eve_sde::attr_ids::SIGNATURE_RADIUS)
+            .copied()
+            .unwrap_or_else(|| t.radius.max(35.0));
+        return eve_destiny::CombatState {
+            shield_hp: shield,
+            max_shield_hp: shield,
+            armor_hp: armor,
+            max_armor_hp: armor,
+            structure_hp: hull,
+            max_structure_hp: hull,
+            capacitor: cap,
+            max_capacitor: cap,
+            signature_radius: sig,
+            shield_resonance: [
+                a.get(&eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
+                a.get(&eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
+                a.get(&eve_sde::attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
+                a.get(&eve_sde::attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
+            ],
+            armor_resonance: [
+                a.get(&eve_sde::attr_ids::ARMOR_EM_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
+                a.get(&eve_sde::attr_ids::ARMOR_THERMAL_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
+                a.get(&eve_sde::attr_ids::ARMOR_KINETIC_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
+                a.get(&eve_sde::attr_ids::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
+            ],
+            structure_resonance: [
+                a.get(&eve_sde::attr_ids::EM_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
+                a.get(&eve_sde::attr_ids::THERMAL_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
+                a.get(&eve_sde::attr_ids::KINETIC_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
+                a.get(&eve_sde::attr_ids::EXPLOSIVE_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
+            ],
+            ..eve_destiny::CombatState::default()
+        };
+    }
+    eve_destiny::CombatState {
+        shield_hp: 1_200.0,
+        max_shield_hp: 1_200.0,
+        armor_hp: 1_200.0,
+        max_armor_hp: 1_200.0,
+        structure_hp: 1_000.0,
+        max_structure_hp: 1_000.0,
+        ..eve_destiny::CombatState::default()
+    }
+}
+
+fn deposit_loot_into_ship_or_container_in_snapshot(
+    snap: &mut eve_db::WorldStateSnapshot,
+    sde: &eve_sde::SdeRegistry,
+    char_id: i64,
+    solar_system_id: SolarSystemId,
+    ship_id: i64,
+    items_to_award: &[(i64, u32, i32)],
+) -> Option<i64> {
+    let loot_vol: f64 = items_to_award
+        .iter()
+        .map(|&(_, tid, qty)| {
+            sde.types
+                .get(&tid)
+                .map(|t| t.volume.max(0.01))
+                .unwrap_or(0.1)
+                * f64::from(qty.max(1))
+        })
+        .sum();
+    let ship_can_hold = if ship_id > 0 {
+        if let Some(ship_item) = snap.items.get(&ship_id) {
+            if let Some(st) = sde.types.get(&ship_item.type_id) {
+                if st.category_id == 6 {
+                    let cap = st
+                        .capacity
+                        .max(st.default_attributes.get(&38).copied().unwrap_or(0.0));
+                    let used: f64 = snap
+                        .items
+                        .values()
+                        .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::Cargo)
+                        .map(|i| {
+                            sde.types
+                                .get(&i.type_id)
+                                .map(|t| t.volume.max(0.0))
+                                .unwrap_or(1.0)
+                                * f64::from(i.quantity.max(1))
+                        })
+                        .sum();
+                    cap <= 0.0 || used + loot_vol <= cap + 1e-4
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let (target_loc_id, spawned_container_id) = if ship_can_hold {
+        (ship_id, None)
+    } else {
+        snap.next_entity_id += 1;
+        let cid = snap.next_entity_id;
+        snap.items.insert(
+            cid,
+            InventoryItemRecord {
+                item_id: cid,
+                type_id: 23, // Cargo Container
+                owner_id: char_id,
+                location_id: solar_system_id as i64,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        (cid, Some(cid))
+    };
+
+    for &(iid, tid, qty) in items_to_award {
+        snap.items.insert(
+            iid,
+            InventoryItemRecord {
+                item_id: iid,
+                type_id: tid,
+                owner_id: char_id,
+                location_id: target_loc_id,
+                flag: InventoryFlag::Cargo,
+                quantity: qty,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    }
+    spawned_container_id
+}
+
 pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
     ensure_special_sites_initialized(ctx);
     let (general_to_spawn, hf_to_spawn, trig_to_spawn) = with_pve_special_reg(ctx, |reg| {
@@ -601,7 +763,12 @@ pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
         }
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
         if sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_none() {
-            let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, tid, pos)).await;
+            if tid == 42_538 {
+                let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, tid, pos)).await;
+            } else {
+                let cs = build_special_site_npc_combat_state(&ctx.sde, tid);
+                let _ = sys_handle.spawn_ball_with_combat(make_site_npc_ball(bid, tid, pos), cs).await;
+            }
         }
     }
     for (sys_id, bid, tid, pos) in trig_to_spawn {
@@ -711,7 +878,8 @@ pub async fn complete_special_dungeon_instance(
             if let Some(next_room) = next_to_spawn {
                 for (&bid, &tid) in next_room.npc_ball_ids.iter().zip(&next_room.npc_type_ids) {
                     ctx.systems.claim_special_site_ball(caller_sys, bid);
-                    let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, tid, DVec3::new(10_000.0, 0.0, 0.0))).await;
+                    let cs = build_special_site_npc_combat_state(&ctx.sde, tid);
+                    let _ = sys_handle.spawn_ball_with_combat(make_site_npc_ball(bid, tid, DVec3::new(10_000.0, 0.0, 0.0)), cs).await;
                 }
                 if next_room.beacon_ball_id != 0 {
                     ctx.systems.claim_special_site_ball(caller_sys, next_room.beacon_ball_id);
@@ -746,17 +914,20 @@ pub async fn complete_special_dungeon_instance(
             ]);
             (kv, next_iid, next_blue, h.element_type_id)
         });
-        let ship_id = session.ship_id.unwrap_or(char_id);
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.items.insert(iid, InventoryItemRecord {
-                item_id: iid, type_id: elem_tid, owner_id: char_id, location_id: ship_id,
-                flag: InventoryFlag::Cargo, quantity: 1, singleton: false, ..Default::default()
-            });
-            snap.items.insert(blue_iid, InventoryItemRecord {
-                item_id: blue_iid, type_id: 30_745, owner_id: char_id, location_id: ship_id, // Sleeper Data Library
-                flag: InventoryFlag::Cargo, quantity: 5, singleton: false, ..Default::default()
-            });
+        let ship_id = session.ship_id.unwrap_or(0);
+        let spawned_cid = ctx.db.with_mut_snapshot(|snap| {
+            deposit_loot_into_ship_or_container_in_snapshot(
+                snap,
+                &ctx.sde,
+                char_id,
+                caller_sys,
+                ship_id,
+                &[(iid, elem_tid, 1), (blue_iid, 30_745, 5)],
+            )
         });
+        if let Some(cid) = spawned_cid {
+            let _ = sys_handle.spawn_ball(make_site_npc_ball(cid, 23, DVec3::new(10_500.0, 0.0, 0.0))).await;
+        }
         return Ok(kv);
     }
 
@@ -774,10 +945,27 @@ pub async fn complete_special_dungeon_instance(
         if sys_handle.get_ball_snapshot(hf.boss_npc_ball_id).await.ok().flatten().is_some() {
             return Err(rpc_err("WaveNpcsRemaining", format!("Homefront site wave NPC {} is still alive", hf.boss_npc_ball_id)));
         }
-        let mult = if fleet_count == hf.optimal_fleet_size {
+        let actual_fleet_count = ctx.db.with_snapshot(|snap| {
+            let fleet_id = snap.characters.get(&char_id).and_then(|c| c.fleet_id);
+            if let Some(fid) = fleet_id {
+                snap.characters
+                    .values()
+                    .filter(|c| c.fleet_id == Some(fid) && c.solar_system_id == caller_sys)
+                    .count()
+                    .max(1)
+            } else {
+                1
+            }
+        });
+        let eff_fleet_count = if fleet_count == 0 {
+            actual_fleet_count
+        } else {
+            fleet_count.min(actual_fleet_count)
+        };
+        let mult = if eff_fleet_count == hf.optimal_fleet_size {
             1.0
-        } else if fleet_count < hf.optimal_fleet_size {
-            (fleet_count as f64) / (hf.optimal_fleet_size as f64)
+        } else if eff_fleet_count < hf.optimal_fleet_size {
+            (eff_fleet_count as f64) / (hf.optimal_fleet_size as f64)
         } else {
             0.75
         };
@@ -835,6 +1023,11 @@ pub async fn complete_special_dungeon_instance(
         if sys_handle.get_ball_snapshot(trig.boss_npc_ball_id).await.ok().flatten().is_some() {
             return Err(rpc_err("WaveNpcsRemaining", format!("Triglavian site wave NPC {} is still alive", trig.boss_npc_ball_id)));
         }
+        for &ebid in &trig.escort_ball_ids {
+            if sys_handle.get_ball_snapshot(ebid).await.ok().flatten().is_some() {
+                return Err(rpc_err("WaveNpcsRemaining", format!("Triglavian site escort NPC {ebid} is still alive")));
+            }
+        }
         let loot_iid = with_pve_special_reg(ctx, |reg| {
             let seq_id = 1_899_500_000 + next_spec_seq(reg);
             if let Some(list) = reg.triglavian_sites.get_mut(&trig.solar_system_id) {
@@ -845,8 +1038,8 @@ pub async fn complete_special_dungeon_instance(
             seq_id
         });
         let (gain_faction, lose_faction) = if trig.faction_owner_id == 500_027 { (500_026_i64, 500_027_i64) } else { (500_027_i64, 500_026_i64) };
-        let ship_id = session.ship_id.unwrap_or(char_id);
-        ctx.db.with_mut_snapshot(|snap| {
+        let ship_id = session.ship_id.unwrap_or(0);
+        let spawned_cid = ctx.db.with_mut_snapshot(|snap| {
             if let Some(ch) = snap.characters.get_mut(&char_id) {
                 let g = ch.standings.entry(gain_faction).or_insert(0.0);
                 *g = (*g + 0.15).clamp(-10.0, 10.0);
@@ -854,11 +1047,18 @@ pub async fn complete_special_dungeon_instance(
                 *l = (*l - 0.15).clamp(-10.0, 10.0);
                 ch.balance = ch.balance.checked_add(IskCents::from_isk(trig.base_isk)).unwrap_or(ch.balance);
             }
-            snap.items.insert(loot_iid, InventoryItemRecord {
-                item_id: loot_iid, type_id: 48_121, owner_id: char_id, location_id: ship_id,
-                flag: InventoryFlag::Cargo, quantity: trig.survey_db_drop as i32, singleton: false, ..Default::default()
-            });
+            deposit_loot_into_ship_or_container_in_snapshot(
+                snap,
+                &ctx.sde,
+                char_id,
+                caller_sys,
+                ship_id,
+                &[(loot_iid, 48_121, trig.survey_db_drop as i32)],
+            )
         });
+        if let Some(cid) = spawned_cid {
+            let _ = sys_handle.spawn_ball(make_site_npc_ball(cid, 23, DVec3::new(10_500.0, 0.0, 0.0))).await;
+        }
         return Ok(PyRep::keyval([
             ("instanceID", PyRep::Integer(trig.instance_id)),
             ("completed", PyRep::Bool(true)),
@@ -1223,8 +1423,9 @@ pub async fn on_special_site_npc_destroyed_core(
 
     if let Some((_inst_id, base_isk, db_drop, g_fac, l_fac, loot_id)) = trig_res {
         if let Some(cid) = killer_char_id {
-            db.with_mut_snapshot(|snap| {
+            let spawned_cid = db.with_mut_snapshot(|snap| {
                 let j_id = (snap.wallet_journal.len() as i64) + 965_000;
+                let mut ship_id = 0;
                 if let Some(ch) = snap.characters.get_mut(&cid) {
                     let g = ch.standings.entry(g_fac).or_insert(0.0);
                     *g = (*g + 0.15).clamp(-10.0, 10.0);
@@ -1233,7 +1434,7 @@ pub async fn on_special_site_npc_destroyed_core(
                     ch.balance = ch.balance.checked_add(IskCents::from_isk(base_isk)).unwrap_or(ch.balance);
                     let new_bal = ch.balance;
                     acct_changes.push((cid, new_bal.to_wire_f64()));
-                    let ship_id = ch.active_ship_id;
+                    ship_id = ch.active_ship_id;
                     snap.wallet_journal.push(eve_db::WalletJournalEntry {
                         entry_id: j_id,
                         character_id: cid,
@@ -1242,18 +1443,20 @@ pub async fn on_special_site_npc_destroyed_core(
                         balance_after: new_bal,
                         reason: "Triglavian Site Payout".into(),
                     });
-                    snap.items.insert(loot_id, InventoryItemRecord {
-                        item_id: loot_id,
-                        type_id: 48_121, // Sealed Survey Database
-                        owner_id: cid,
-                        location_id: if ship_id > 0 { ship_id } else { cid },
-                        flag: InventoryFlag::Cargo,
-                        quantity: db_drop as i32,
-                        singleton: false,
-                        ..Default::default()
-                    });
                 }
+                deposit_loot_into_ship_or_container_in_snapshot(
+                    snap,
+                    _sde,
+                    cid,
+                    solar_system_id,
+                    ship_id,
+                    &[(loot_id, 48_121, db_drop as i32)],
+                )
             });
+            if let Some(container_id) = spawned_cid {
+                let sys_handle = _systems.get_or_spawn(solar_system_id);
+                let _ = sys_handle.spawn_ball(make_site_npc_ball(container_id, 23, DVec3::new(10_500.0, 0.0, 0.0))).await;
+            }
         }
         return acct_changes;
     }
@@ -1310,7 +1513,8 @@ pub async fn on_special_site_npc_destroyed_core(
         let sys_handle = _systems.get_or_spawn(solar_system_id);
         for (&bid, &tid) in next_room.npc_ball_ids.iter().zip(&next_room.npc_type_ids) {
             _systems.claim_special_site_ball(solar_system_id, bid);
-            let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, tid, DVec3::new(10_000.0, 0.0, 0.0))).await;
+            let cs = build_special_site_npc_combat_state(_sde, tid);
+            let _ = sys_handle.spawn_ball_with_combat(make_site_npc_ball(bid, tid, DVec3::new(10_000.0, 0.0, 0.0)), cs).await;
         }
         if next_room.beacon_ball_id != 0 {
             _systems.claim_special_site_ball(solar_system_id, next_room.beacon_ball_id);
@@ -1320,29 +1524,21 @@ pub async fn on_special_site_npc_destroyed_core(
 
     if let Some((elem_tid, elem_id, blue_id)) = hive_loot {
         if let Some(cid) = killer_char_id {
-            db.with_mut_snapshot(|snap| {
-                let ship_id = snap.characters.get(&cid).map(|c| c.active_ship_id).unwrap_or(cid);
-                snap.items.insert(elem_id, InventoryItemRecord {
-                    item_id: elem_id,
-                    type_id: elem_tid,
-                    owner_id: cid,
-                    location_id: ship_id,
-                    flag: InventoryFlag::Cargo,
-                    quantity: 1,
-                    singleton: false,
-                    ..Default::default()
-                });
-                snap.items.insert(blue_id, InventoryItemRecord {
-                    item_id: blue_id,
-                    type_id: 30_745, // Sleeper Data Library
-                    owner_id: cid,
-                    location_id: ship_id,
-                    flag: InventoryFlag::Cargo,
-                    quantity: 5,
-                    singleton: false,
-                    ..Default::default()
-                });
+            let spawned_cid = db.with_mut_snapshot(|snap| {
+                let ship_id = snap.characters.get(&cid).map(|c| c.active_ship_id).unwrap_or(0);
+                deposit_loot_into_ship_or_container_in_snapshot(
+                    snap,
+                    _sde,
+                    cid,
+                    solar_system_id,
+                    ship_id,
+                    &[(elem_id, elem_tid, 1), (blue_id, 30_745, 5)],
+                )
             });
+            if let Some(container_id) = spawned_cid {
+                let sys_handle = _systems.get_or_spawn(solar_system_id);
+                let _ = sys_handle.spawn_ball(make_site_npc_ball(container_id, 23, DVec3::new(10_500.0, 0.0, 0.0))).await;
+            }
         }
     }
     acct_changes

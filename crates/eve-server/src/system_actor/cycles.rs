@@ -76,7 +76,9 @@ pub(crate) fn step_cycles_and_capacitor(
     rah_incoming_damage: &mut HashMap<BallId, [f64; 4]>,
     base_scramble_strengths: &HashMap<BallId, i32>,
     base_core_strengths: &HashMap<BallId, i32>,
+    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    tactical_state: &std::sync::RwLock<crate::services::tactical_modules::TacticalModulesState>,
     dt: f64,
     deactivation_hook: Option<&ModuleDeactivationHook>,
 ) -> Vec<(BallId, Option<CharacterId>)> {
@@ -84,7 +86,13 @@ pub(crate) fn step_cycles_and_capacitor(
     for cs in ballpark.combat_states.values_mut() {
         cs.capacitor = eve_dogma::simulate_capacitor(cs.capacitor, cs.max_capacitor, 250.0, dt);
     }
-    crate::services::tactical_modules::step_wubble_probes_and_debuffs(ballpark, db_opt, dt);
+    crate::services::tactical_modules::step_wubble_probes_and_debuffs(
+        ballpark,
+        sde_opt,
+        db_opt,
+        tactical_state,
+        dt,
+    );
 
     // Exponential rack heat dissipation when no modules in a rack are overloaded (`feat:dogma.heat-rack-thermodynamics`)
     let ship_ids_with_heat: Vec<BallId> = ship_rack_heat.keys().copied().collect();
@@ -979,7 +987,7 @@ impl SystemHandle {
         let SystemActorState {
             active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
-            asteroids, asteroid_templates, sde_opt, db_opt,
+            asteroids, asteroid_templates, sde_opt, db_opt, tactical_state,
         } = &mut *st;
         respawn_due_asteroids(&mut bp, asteroids, asteroid_templates, sde_opt, db_opt);
         sync_player_slim_items(&mut bp, db_opt);
@@ -988,8 +996,8 @@ impl SystemHandle {
         let deact_hook_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
         let destroyed = step_cycles_and_capacitor(
             &mut bp, active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
-            ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths, db_opt,
-            dt, deact_hook_guard.as_ref(),
+            ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
+            sde_opt, db_opt, tactical_state, dt, deact_hook_guard.as_ref(),
         );
         for (target_ball_id, owner_char_id) in destroyed {
             if let Some(fut) = on_ball_destroyed_by_damage(self.solar_system_id, target_ball_id, owner_char_id, hook_guard.as_ref()) {

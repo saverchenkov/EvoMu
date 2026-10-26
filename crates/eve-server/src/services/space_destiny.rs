@@ -65,27 +65,17 @@ pub struct SessionChangeTimerState {
     pub location_change_invul_until: u64,
 }
 
-pub(crate) fn ctx_scope_id(ctx: &ServerContext) -> usize {
-    ctx.instance_id as usize
-}
-
-pub(crate) static SESSION_CHANGE_TIMERS: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<(usize, i64), SessionChangeTimerState>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
-
-pub(crate) static ACTIVE_WARPS: std::sync::LazyLock<std::sync::Mutex<HashMap<(usize, i64), i64>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
-
 pub fn check_session_change_timer_active(
     ctx: &ServerContext,
     char_id: i64,
     now_unix: u64,
     current_tick_opt: Option<(u32, u64)>,
 ) -> Option<SessionChangeTimerState> {
-    let map = SESSION_CHANGE_TIMERS
+    let map = ctx
+        .session_change_timers
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let timer = map.get(&(ctx_scope_id(ctx), char_id))?;
+    let timer = map.get(&char_id)?;
     if now_unix >= timer.expires_unix {
         return None;
     }
@@ -97,22 +87,18 @@ pub fn check_session_change_timer_active(
     Some(timer.clone())
 }
 
-pub(crate) static LOCATION_CHANGE_INVULN: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<(usize, i64), u64>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
-
 pub fn grant_location_change_invulnerability(ctx: &ServerContext, char_id: i64, until_unix: u64) {
-    LOCATION_CHANGE_INVULN
+    ctx.location_change_invuln
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert((ctx_scope_id(ctx), char_id), until_unix);
+        .insert(char_id, until_unix);
 }
 
 pub fn break_location_change_invulnerability(ctx: &ServerContext, char_id: i64) {
-    LOCATION_CHANGE_INVULN
+    ctx.location_change_invuln
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .remove(&(ctx_scope_id(ctx), char_id));
+        .remove(&char_id);
 }
 
 pub fn is_location_change_invulnerable(
@@ -120,10 +106,11 @@ pub fn is_location_change_invulnerable(
     char_id: i64,
     now_unix: u64,
 ) -> bool {
-    let map = LOCATION_CHANGE_INVULN
+    let map = ctx
+        .location_change_invuln
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    map.get(&(ctx_scope_id(ctx), char_id))
+    map.get(&char_id)
         .map(|&until| now_unix < until)
         .unwrap_or(false)
 }
@@ -132,17 +119,18 @@ pub fn get_session_change_timer(
     ctx: &ServerContext,
     char_id: i64,
 ) -> Option<SessionChangeTimerState> {
-    let map = SESSION_CHANGE_TIMERS
+    let map = ctx
+        .session_change_timers
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    map.get(&(ctx_scope_id(ctx), char_id)).cloned()
+    map.get(&char_id).cloned()
 }
 
 pub fn clear_session_change_timer(ctx: &ServerContext, char_id: i64) {
-    SESSION_CHANGE_TIMERS
+    ctx.session_change_timers
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .remove(&(ctx_scope_id(ctx), char_id));
+        .remove(&char_id);
     break_location_change_invulnerability(ctx, char_id);
 }
 
@@ -199,18 +187,18 @@ fn record_session_change_timer_with_invuln(
         grant_location_change_invulnerability(ctx, char_id, until);
         until
     } else {
-        LOCATION_CHANGE_INVULN
+        ctx.location_change_invuln
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&(ctx_scope_id(ctx), char_id))
+            .get(&char_id)
             .copied()
             .unwrap_or(0)
     };
-    SESSION_CHANGE_TIMERS
+    ctx.session_change_timers
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(
-            (ctx_scope_id(ctx), char_id),
+            char_id,
             SessionChangeTimerState {
                 expires_unix,
                 system_id,
@@ -966,10 +954,11 @@ pub(crate) async fn handle_update_state_request(
         }
     };
     if matches!(ship_ball.mode, MovementMode::Stop) {
-        let finished_warp = ACTIVE_WARPS
+        let finished_warp = ctx
+            .active_warps
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(&(ctx_scope_id(ctx), ship_id))
+            .remove(&ship_id)
             .is_some();
         if finished_warp {
             ctx.notify(
