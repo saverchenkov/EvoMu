@@ -7,30 +7,6 @@
       "added_by": "20261024-062108"
     },
     {
-      "id": "esi:POST /ui/openwindow/contract",
-      "reason": "",
-      "evidence": "Same test, esi_ui_and_features.rs:496-526. The open-window endpoints record a private esi_state.ui_events list (:497-506) and emit the client-local 'OnWindowOpened' (triage.json:2398-2401 says it is never server-sent). This is invented wire behaviour, not the live UI push.",
-      "added_by": "20261024-062108"
-    },
-    {
-      "id": "esi:POST /ui/openwindow/information",
-      "reason": "",
-      "evidence": "esi_ui_and_features.rs:424-435,496-526: same invented ui_events store plus the client-local OnWindowOpened push (triage.json:2398-2401).",
-      "added_by": "20261024-062108"
-    },
-    {
-      "id": "esi:POST /ui/openwindow/marketdetails",
-      "reason": "",
-      "evidence": "esi_ui_and_features.rs:437-448,496-526: same invented ui_events store plus the client-local OnWindowOpened push (triage.json:2398-2401).",
-      "added_by": "20261024-062108"
-    },
-    {
-      "id": "esi:POST /ui/openwindow/newmail",
-      "reason": "",
-      "evidence": "esi_ui_and_features.rs:450-526: same invented ui_events store plus the client-local OnWindowOpened push (triage.json:2398-2401).",
-      "added_by": "20261024-062108"
-    },
-    {
       "evidence": "crates/eve-server/src/services/pve_dungeon_cache.rs:490-573 and `622-643` implement only read-only/synthetic stubs for `dungeon` and `keeper`: `DEGetRoomObjectPaletteData` (`490-521`) filters SDE types to 3 hardcoded groups (`10 | 310 | 366`), `DEGetRooms` (`523-573`) only reads `sde.dungeon_asteroids` and synthesizes `\"<dungeon> - Room <idx>\"` names, and `keeper.GetLevelEditor` (`622-643`) returns a static `KeyVal(boundOID, isEditorActive=true, sessionID)` with no room/object editing or level editor operations. Tested in `crates/eve-server/tests/it/rpc_dungeon_keeper_gm.rs:114-292`.",
       "id": "feat:admin.gm-dungeon-editor",
       "flagged_by_audit": "20261025-145713"
@@ -40,10 +16,6 @@
       "reason": "",
       "evidence": "Tagged by the same test (esi_ui_and_features.rs:264-273). Its emission contract includes the client-local OnDestinationSet (:515), which the repo triage says the server never sends (triage.json:618-621).",
       "added_by": "20261024-062108"
-    },
-    {
-      "evidence": "crates/eve-server/tests/it/esi_ui_and_features.rs:420-527 (test_esi_ui_autopilot_waypoint_and_open_windows) tests POST /ui/openwindow/contract, information, marketdetails, and newmail by asserting that the server records private ui_events and pushes OnWindowOpened (esi_ui_and_features.rs:514-525), which is a client-local scatter event (docs/parity/triage.json:1525 \u2014 notify:OnWindowOpened is triaged NA as client-internal sm.ScatterEvent), while its underlying esi:POST /ui/openwindow/* rows are already FLAGGED_FAKE in auditor_rows.json:14-35.",
-      "id": "feat:esi.ui.open-windows"
     },
     {
       "evidence": "In crates/eve-server/src/services/abyssal_void_mgr.rs:628-641, advancing to Room 2 or Room 3 via AbyssalRoomGateActivation spawns every room NPC ball using the gate type ID 47_956 via spawn_ball (without CombatState) and never spawns a Triglavian Bioadaptive Cache loot container in space; the tagged test in crates/eve-server/tests/it/abyssal_and_void_space_suite.rs:193-198 clears rooms by manually calling pocket_sys.remove_ball(npc_id).await instead of combat destruction, and crates/eve-server/tests/it/v24_remediations_audit_part1.rs:446-567 only tests entering Room 1.",
@@ -354,11 +326,6 @@
       "flagged_by_audit": "20261025-143546"
     },
     {
-      "evidence": "crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:480-566 manually constructs CreatedNotice, DeletedNotice, ClosedNotice, CompletedNotice, ProgressedNotice, NameChangedNotice, and DescriptionChangedNotice in the test via set_domain_attributes and publishes them directly to quasar_gateway, asserting only normalized_type_name() / type_url suffix.",
-      "flagged_by_audit": "20261022-091014",
-      "id": "quasar:eveProto/generated/eve_public/goal/api/notices_pb2.pyj"
-    },
-    {
       "evidence": "crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:480-573 manually constructs ContributedNotice in the test via set_domain_attributes and publishes it directly to quasar_gateway, asserting only normalized_type_name() / type_url suffix.",
       "flagged_by_audit": "20261022-091014",
       "id": "quasar:eveProto/generated/eve_public/goal/contribution/api/notices_pb2.pyj"
@@ -484,11 +451,6 @@
       "id": "quasar:eveProto/generated/eve_public/stargate/lock/api/requests_pb2.pyj"
     },
     {
-      "evidence": "crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:350-473 manually constructs StartedNotice and StoppedNotice in the test via set_domain_attributes and publishes them directly to quasar_gateway (plus calls standalone helper publish_tale_started_notice), asserting only normalized_type_name() / type_url suffix without any server-triggered tale lifecycle emission.",
-      "flagged_by_audit": "20261022-091014",
-      "id": "quasar:eveProto/generated/eve_public/tale/api/notices_pb2.pyj"
-    },
-    {
       "id": "rpc:ProjectDiscovery.get_total_needed_xp",
       "reason": "",
       "evidence": "crates/eve-server/src/services/project_discovery.rs:210-214 uses the invented formula rank*1000+500. It is not taken from Project Discovery rank data.",
@@ -598,6 +560,71 @@
       "evidence": "crates/eve-server/src/services/tourney_arena.rs:67-138 hardcodes tournament entries ((1, \"Alliance Tournament\"), (2, \"Open Arena Championship\")) and system labels (\"Local Tournament Grid\", \"Jita Arena\" for 30000142) instead of resolving solar system names from ctx.sde.solar_systems and persisted tournament setup state.",
       "id": "rpc:tourneyMgr.GetTourneySetup",
       "flagged_by_audit": "20261025-144746"
+    },
+    {
+      "evidence": "This branch moved the tag onto test_esi_ui_autopilot_waypoint_and_open_windows (esi_ui_and_features.rs:265,274). That test checks only the server-side CharacterRecord.autopilot_waypoints list written by the ESI route (universe_routes.rs:1313-1324). Route waypoints live in the client's StarMapSvc, which scatters OnDestinationSet/OnDestinationCleared locally (triage.json:614-621), so the test never reaches route-waypoint behaviour.",
+      "id": "feat:navigation.route-waypoints",
+      "flagged_by_audit": "20261025-191723"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/pve_hacking_sites.rs:279-344 (hackingMgr.ClickedOnTile) takes any client-supplied tile index (clamped 0..23, :285) and sets `t_ref.revealed = true` (:343-344) without checking that the node is adjacent to an already-revealed node. A hidden, non-adjacent System Core can be attacked on the first click. Virus stats are hardcoded (virus_coherence 85, base_virus_strength 30, :250-253) and fixed utilities are pre-granted (:255-259), instead of being read from the fitted Data/Relic Analyzer's SDE virusCoherence/virusStrength attributes. No active analyzer module is required. The new test helper hack_until_won (tests/it/pve_data_relic_ded_wormhole_remediated.rs:112-125) finds the SystemCore index in server state and clicks it directly until it wins, which shows the node-grid game isn't enforced.",
+      "id": "feat:pve.hacking-minigame",
+      "flagged_by_audit": "20261025-193849"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/lp_store.rs:83-260 get_catalog_offers() is a hand-written list of about 20 invented offers (IDs 1001-1004, 2001-2002, 3001-3002, 4001-4002, 5001-5002, 6001-6004, 7001+) for a handful of corps. LP/ISK costs are made up, e.g. 10,000 LP / 10M ISK for every navy frigate, and offer 1004 is a 100x Tritanium trade-in. Its comment (:83-85) labels it DERIVED. AGENTS.md says rows backed by synthesized data stay open. The test (tests/it/agents_missions_complete_part3.rs:467-533) asserts the invented offer 1002 (27361 x 1000, 500 LP), so it checks the fixture, not live LP-store data.",
+      "id": "rpc:LPStoreMgr.GetAvailableOffersFromCorp",
+      "flagged_by_audit": "20261025-193849"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/project_discovery.rs:371-374 returns the constant Real(250.0), commented 'SYNTHETIC_PROJECT_DISCOVERY_CONFIG'. It reads no state.",
+      "id": "rpc:ProjectDiscovery.get_tutorial_xp_reward",
+      "flagged_by_audit": "20261025-191723"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/project_discovery.rs:353-369 grants a hand-written 50 analysis kredits and 250 XP. No client or static data backs either value.",
+      "id": "rpc:ProjectDiscovery.give_tutorial_rewards",
+      "flagged_by_audit": "20261025-191723"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/project_discovery.rs:501-552. Grading uses an explicitly SYNTHETIC accuracy heuristic (:501-507); live servers delegate grading to MMOS. Rewards are hand-written: 25,000 ISK per bonus sample (:518-520), 150/75 XP and 50 kredits (:511-513, :549-550). Rank-up uses the synthetic XP curve already flagged fake (:122-131, :543).",
+      "id": "rpc:ProjectDiscovery.post_classification",
+      "flagged_by_audit": "20261025-191723"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/campaigns_and_milestones.rs:753-757 only stores ext.community_track_qa_mode, and nothing reads it. The claims file says so too ('Nothing currently writes community-track progress or reads the QA flag'). The test (rpc_campaigns_and_telemetry.rs:592-616) asserts Bool(true) and that progress stays 0, so no QA behaviour is exercised.",
+      "id": "rpc:communityTrackMgr.change_qa_mode",
+      "flagged_by_audit": "20261025-191723"
+    },
+    {
+      "evidence": "It only records a logon timestamp for the synthetic milestone catalog. The code itself admits that 'time played' is session time since the last logon, not accumulated play time (campaigns_and_milestones.rs:622-632), so milestone eligibility built on this call does not match live behaviour.",
+      "id": "rpc:milestoneMgr.ProcessCharacterLogon",
+      "flagged_by_audit": "20261025-191723"
+    },
+    {
+      "evidence": "Rewards come from the synthetic challenge table at crates/eve-server/src/services/season_manager.rs:215-271 (reward_type_id 43_682 and invented points), not from client season data.",
+      "id": "rpc:seasonManager.claim_challenge_rewards",
+      "flagged_by_audit": "20261025-191723"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/season_manager.rs:483-497 fills challenges from default_seasonal_challenge_definitions() (:215-271). Those 4 challenges (1001-1004) are labelled SYNTHETIC in the code, with invented titles, points and reward type 43682.",
+      "id": "rpc:seasonManager.fill_up_and_return_challenges_for_character",
+      "flagged_by_audit": "20261025-191723"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/season_manager.rs:499-516 reads challenges seeded from the synthetic definitions (:215-271). With no argument it falls back to the hardcoded challenge 1001 (:504).",
+      "id": "rpc:seasonManager.get_challenge",
+      "flagged_by_audit": "20261025-191723"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/season_manager.rs:442-447 returns now + 30 days on every call, so the season never ends. There is no season schedule.",
+      "id": "rpc:seasonManager.get_season_end_time",
+      "flagged_by_audit": "20261025-191723"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/season_manager.rs:455 accepts only a hardcoded season-ID range (1..=4) and reads no season data. The SeasonConfig default is a SYNTHETIC 'Yoiul Festival' with season_id 1 (:185-202).",
+      "id": "rpc:seasonManager.select_season",
+      "flagged_by_audit": "20261025-191723"
     }
   ],
   "rejected_triage": [
