@@ -121,6 +121,9 @@ async fn goal_notices_follow_project_lifecycle_and_contributions() {
     let names: Vec<&str> = progressed.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(names, ["eve_public.goal.api.ProgressedNotice"]);
     assert_eq!(varint(&progressed[0].1, 2), Some(1));
+    let same = goal_req(&uuid, |b| encode_varint_field(3, 1, b));
+    assert_eq!(quasar_rpc(&ctx, &mut creator, "eve_public.goal.api.SetCurrentProgressRequest", same).await.status_code, STATUS_OK);
+    assert!(drain(&mut rx_mate, "eve_public.goal").is_empty(), "re-setting an unchanged value emits no ProgressedNotice");
 
     // Two server-observed NPC kills by a corp mate contribute 1 -> 2 -> 3 and complete the goal.
     drain(&mut rx_creator, "eve_public.goal");
@@ -294,4 +297,14 @@ async fn incursion_tale_notices_follow_seeding_and_mothership_defeat() {
     assert_eq!(varint(&sub(&stopped[0].1, 1), 1), Some(tale_id));
     assert_eq!(varint(&sub(&stopped[0].1, 2), 1), Some(5158));
     assert_eq!(varint(&sub(&stopped[0].1, 3), 1), Some(staging));
+
+    // A second completion report for the same ended incursion (e.g. ctx wrapper after the death
+    // hook) must not announce the stop again.
+    let ms_site = with_pve_special_reg(&ctx, |reg| reg.incursions[&cid].sites.iter().find(|s| s.tier == "Mothership").unwrap().site_id.clone());
+    let again = eve_server::services::pve_incursion_sites::IncursionCompletionResult {
+        site_id: ms_site, tier: "Mothership".into(), fleet_size: 1, fleet_scale_factor: 1.0, isk_per_pilot: 0,
+        concord_lp_per_pilot: 0, influence: 0.0, state: "Ended".into(), mothership_spawned: true, incursion_ended: true,
+    };
+    eve_server::services::pve_incursion_sites::publish_incursion_tale_stopped_if_ended(&ctx.quasar_gateway, &ctx.db, &again);
+    assert!(drain(&mut rx, "eve_public.tale").is_empty(), "StoppedNotice is published at most once per incursion");
 }

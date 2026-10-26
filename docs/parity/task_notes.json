@@ -261,7 +261,7 @@
   },
   "Q-4": {
     "assessment": "PARTIAL",
-    "note": "Quasar Daily Goals, Career Program, Achievements, Skill Plans, and Community Track gateway handlers implemented; remaining open quasar:* endpoint rows and Phase Q real-client journeys pending."
+    "note": "Daily/career goals, achievements, skill plans, tracks, goal+tale notices live. Data gap: incursion tale template/IDs synthetic (absent from client/SDE). Open quasar rows remain."
   },
   "Q-5": {
     "assessment": "PARTIAL",

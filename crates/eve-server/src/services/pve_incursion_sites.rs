@@ -101,6 +101,10 @@ pub struct IncursionTaleRecord {
     pub sites: Vec<IncursionSiteEntry>,
     #[serde(default)]
     pub lockout_until_filetime: Option<i64>,
+    /// Set once the tale `StoppedNotice` for this incursion's end has been published, so the
+    /// NPC death hook and the ctx-level completion wrappers can never announce the stop twice.
+    #[serde(default)]
+    pub tale_stop_published: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,6 +263,8 @@ pub fn seed_incursion_for_constellation(
     reg: &mut PveSpecialSitesRegistry,
     constellation_id: ConstellationId,
 ) {
+    // DERIVED (synthetic — no tale IDs exist in the V24 client code or the SDE; live tale IDs are
+    // allocated by CCP's tale service): one stable tale per constellation, 800_000 + constellation.
     let tale_id = 800_000 + (constellation_id as i64);
     let constellation_name = ctx
         .sde
@@ -355,6 +361,7 @@ pub fn seed_incursion_for_constellation(
             mothership_defeated: false,
             sites,
             lockout_until_filetime: None,
+            tale_stop_published: false,
         },
     );
 }
@@ -396,7 +403,10 @@ pub struct IncursionCompletionResult {
     pub incursion_ended: bool,
 }
 
-/// Tale spawn-template ID the server reports for Sansha incursions (`taleMgr` world-event tales).
+/// DERIVED (synthetic — the V24 client code and SDE contain no tale spawn-template table, so the
+/// real Sansha incursion template ID is unknown): EvoMu reuses 5158, which in the client is the
+/// dungeon ID of the Sansha mothership encounter (`talecommon/const.pyj` `INCURSION_INFO_BY_DUNGEONID`),
+/// as the incursion tale's spawn-template identifier in `taleMgr` results and tale notices.
 pub const INCURSION_TALE_TEMPLATE_ID: u64 = 5158;
 
 /// Publishes `eve_public.tale.api.StartedNotice` / `StoppedNotice` for an incursion tale.
@@ -429,9 +439,14 @@ pub fn publish_incursion_tale_stopped_if_ended(
     let now = db.clock().now_unix_secs();
     let ended = with_pve_special_reg_db(db, now, |reg| {
         reg.incursions
-            .values()
+            .values_mut()
             .find(|inc| inc.sites.iter().any(|s| s.site_id == result.site_id))
-            .map(|inc| (inc.tale_id, inc.staging_solar_system_id))
+            .filter(|inc| !inc.tale_stop_published)
+            .map(|inc| {
+                // Claimed under the registry lock: only the first caller for this end publishes.
+                inc.tale_stop_published = true;
+                (inc.tale_id, inc.staging_solar_system_id)
+            })
     });
     if let Some((tale_id, staging)) = ended {
         publish_incursion_tale_notice(gateway, false, tale_id, staging, now);
