@@ -1,63 +1,14 @@
 {
   "fake_done": [
     {
-      "id": "esi:POST /ui/autopilot/waypoint",
-      "reason": "",
-      "evidence": "crates/eve-server/tests/it/esi_ui_and_features.rs:508-526 requires the server to push 'OnDestinationSet' and 'OnWindowOpened' to the client. The repo's own triage says both are client-only local scatters that the server never sends (docs/parity/triage.json:618-621 OnDestinationSet = starMapSvc local scatter; :2398-2401 OnWindowOpened = local window-manager scatter). The server sends events the client never receives on the wire, and their payloads don't match the local handlers' signatures.",
-      "added_by": "20261024-062108"
-    },
-    {
       "evidence": "crates/eve-server/src/services/pve_dungeon_cache.rs:490-573 and `622-643` implement only read-only/synthetic stubs for `dungeon` and `keeper`: `DEGetRoomObjectPaletteData` (`490-521`) filters SDE types to 3 hardcoded groups (`10 | 310 | 366`), `DEGetRooms` (`523-573`) only reads `sde.dungeon_asteroids` and synthesizes `\"<dungeon> - Room <idx>\"` names, and `keeper.GetLevelEditor` (`622-643`) returns a static `KeyVal(boundOID, isEditorActive=true, sessionID)` with no room/object editing or level editor operations. Tested in `crates/eve-server/tests/it/rpc_dungeon_keeper_gm.rs:114-292`.",
       "id": "feat:admin.gm-dungeon-editor",
       "flagged_by_audit": "20261025-145713"
     },
     {
-      "id": "feat:esi.ui.autopilot",
-      "reason": "",
-      "evidence": "Tagged by the same test (esi_ui_and_features.rs:264-273). Its emission contract includes the client-local OnDestinationSet (:515), which the repo triage says the server never sends (triage.json:618-621).",
-      "added_by": "20261024-062108"
-    },
-    {
       "evidence": "In crates/eve-server/src/services/abyssal_void_mgr.rs:628-641, advancing to Room 2 or Room 3 via AbyssalRoomGateActivation spawns every room NPC ball using the gate type ID 47_956 via spawn_ball (without CombatState) and never spawns a Triglavian Bioadaptive Cache loot container in space; the tagged test in crates/eve-server/tests/it/abyssal_and_void_space_suite.rs:193-198 clears rooms by manually calling pocket_sys.remove_ball(npc_id).await instead of combat destruction, and crates/eve-server/tests/it/v24_remediations_audit_part1.rs:446-567 only tests entering Room 1.",
       "id": "feat:pve.abyssal-pocket",
       "flagged_by_audit": "20261025-145316"
-    },
-    {
-      "id": "feat:pve.combat-anomalies",
-      "evidence": "crates/eve-server/src/services/pve_exploration.rs:142-229, 336-391, and 884-972 stores anomalies in a non-persistent process-global PVE_EXPLORATION_STATE static, hardcodes every non-wormhole system to 2 Angel Cartel dungeons (2132/1214/1228/2115/2311) with 2-4 generic type 10962 balls regardless of region/faction or SDE dungeon rooms (sde.dungeon_rooms/sde.dungeon_objects are never read), and drives site entry/wave progression through non-catalog RPCs scanSvc.GetCombatAnomalyInstances and scanSvc.EnterCombatAnomaly (crates/eve-server/tests/it/pve_exploration_complete.rs:124-215) instead of real warp/NPC destruction triggers.",
-      "flagged_by_audit": "20261022-154932"
-    },
-    {
-      "id": "feat:pve.combat-signatures",
-      "evidence": "crates/eve-server/src/services/pve_exploration.rs:393-533 and 975-1044 seeds a single fixed signature list per system in volatile PVE_EXPLORATION_STATE and tests scanning via non-catalog RPCs scanSvc.GetSignatureInstances and scanSvc.ScanSignature(sig_id, probe_strength) (crates/eve-server/tests/it/pve_exploration_complete.rs:300-405), which simply adds probe_strength directly to site.signal_strength (pve_exploration.rs:1026) without probe positions, trilateration, or scanSvc.RequestScans.",
-      "flagged_by_audit": "20261022-154932"
-    },
-    {
-      "id": "feat:pve.data-sites",
-      "evidence": "crates/eve-server/src/services/pve_exploration.rs:438-448 seeds one hardcoded Data signature (DAT-{solar_system_id}, dungeon 1133/3729) with 3 cans in volatile PVE_EXPLORATION_STATE, and crates/eve-server/src/services/pve_hacking_sites.rs:134-140 uses a 4-item hardcoded loot slice instead of SDE loot tables (crates/eve-server/tests/it/pve_exploration_complete.rs:462-560).",
-      "flagged_by_audit": "20261022-154932"
-    },
-    {
-      "id": "feat:pve.ded-complexes",
-      "evidence": "crates/eve-server/src/services/pve_exploration.rs:232-272, 393-434, and 1047-1138 hardcodes 10 dungeon IDs (ded_complex_for_rating), never reads SDE dungeon rooms/acceleration gates/overseer NPCs, drops Overseer's Personal Effects directly into the pilot's ship cargo (pve_exploration.rs:723, 793-807) instead of an overseer wreck, and advances rooms via non-catalog keeper.EnterNextDungeonRoom (crates/eve-server/tests/it/pve_exploration_complete.rs:344-456).",
-      "flagged_by_audit": "20261022-154932"
-    },
-    {
-      "id": "feat:pve.drifter-hives",
-      "evidence": "crates/eve-server/src/services/pve_special_sites.rs:386-401, 616-655, and 1242-1264 seeds 5 hardcoded Drifter Hive records in volatile PVE_SPECIAL_STATE, completes all 3 rooms in a single call to keeper.EnterNextDungeonRoom(31_000_001) (crates/eve-server/tests/it/pve_exploration_complete.rs:1173-1187), and queries them by overloading dungeonInstanceCacheMgr.GetTriglavianSiteInstances.",
-      "flagged_by_audit": "20261022-154932"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/pve_exploration.rs:816-850, 1166-1197 and crates/eve-server/tests/it/pve_exploration_complete.rs:97-127 \u2014 Escalations are only generated inside advance_pve_site_wave when invoked via the invented non-client RPCs scanSvc.EnterCombatAnomaly / keeper.EnterNextDungeonRoom, using a hardcoded 4-arm match on dungeon_id (2132 | 1214 | 1228 => 1422 'Chasing the Dragon', 2115 => 2525, 2311 => 2396, _ => 2403 'The Maze') that deterministically escalates 100% of completed sites rather than rolling escalation chance on real in-space NPC wave/overseer kills.",
-      "id": "feat:pve.escalations"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/pve_exploration.rs:816-850 and crates/eve-server/tests/it/pve_exploration_complete.rs:97-127 \u2014 Shares the synthetic escalation block in advance_pve_site_wave (only reachable via the invented non-client RPC scanSvc.EnterCombatAnomaly in the tagged test), hardcodes step_index: 1, total_steps: 4 and 4 fixed expedition dungeon IDs (1422, 2525, 2396, 2403), and never spawns a playable expedition dungeon at destination_solar_system_id or progresses multi-step expeditions.",
-      "id": "feat:pve.expeditions"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/pve_exploration.rs:416-430, 598-658 and crates/eve-server/tests/it/pve_exploration_complete_part2.rs:380-417 \u2014 ensure_system_pve_seeded hardcodes a single 'GHO-{sys}' signature (dungeon_id: 2350, 'Lesser Serpentis Covert Research Facility') in every K-space system; the tagged test starts the hidden timer via the invented non-client RPC scanSvc.ScanSignature (pve_exploration_complete_part2.rs:381-392) and only checks timer expiry when the player subsequently calls hackingMgr.StartNewGameInstance rather than detonating on an active server timer or failed hack.",
-      "id": "feat:pve.ghost-sites"
     },
     {
       "id": "feat:pve.homefront-ops",
@@ -71,35 +22,10 @@
       "added_by": "20261024-072426"
     },
     {
-      "id": "feat:pve.loot-spew",
-      "evidence": "Loot spew was removed from live EVE in Odyssey 1.1 / Rubicon; moreover crates/eve-server/src/services/pve_hacking_sites.rs:104-166 and 596-666 implements it in volatile memory via non-catalog hackingMgr.HackContainer (crates/eve-server/tests/it/pve_exploration_complete.rs:514-558, 608-652) rather than placing loot inside the hacked container in WorldRepository.",
-      "flagged_by_audit": "20261022-154932"
-    },
-    {
-      "id": "feat:pve.relic-sites",
-      "evidence": "crates/eve-server/src/services/pve_exploration.rs:449-459 seeds one hardcoded Relic signature (REL-{solar_system_id}, dungeon 1286/3722) with 3 cans in volatile PVE_EXPLORATION_STATE, and crates/eve-server/src/services/pve_hacking_sites.rs:126-133 uses a 4-item hardcoded salvage slice (crates/eve-server/tests/it/pve_exploration_complete.rs:562-653).",
-      "flagged_by_audit": "20261022-154932"
-    },
-    {
       "id": "feat:pve.seasonal-login",
       "reason": "",
       "evidence": "crates/eve-server/src/services/cosmetics_ui_ops.rs:1028-1064: campaignID 202, daysRemaining 14 and 15_000 SP per claim are all hardcoded, and the end date is always now+14d. The test at navigation_pve_closure.rs:670-691 asserts these constants.",
       "added_by": "20261024-072426"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/pve_exploration.rs:432-446, 668-735 and crates/eve-server/tests/it/pve_exploration_complete_part2.rs:418-502 \u2014 ensure_system_pve_seeded hardcodes a single 'SLC-{sys}' signature (dungeon_id: 2355, 'Limited Sleeper Cache') in every K-space system (Standard and Superior Sleeper Caches are unimplemented), and the tagged test exercises scanning and room passage via the invented non-client RPCs scanSvc.ScanSignature (pve_exploration_complete_part2.rs:419-430) and keeper.EnterNextDungeonRoom (pve_exploration_complete_part2.rs:436-501) gated only by a boolean sleeper_puzzle_solved flag toggled by hacking any container.",
-      "id": "feat:pve.sleeper-caches"
-    },
-    {
-      "id": "feat:pve.triglavian-sites",
-      "reason": "",
-      "evidence": "`crates/eve-server/src/services/pve_special_sites.rs:319-336` hardcodes two static fixtures (`instance_id: 720_001` in Jita `30_000_142` and `720_002` in `30_000_144`) with hardcoded `base_isk: 25_000_000` and `survey_db_drop: 18`. In `pve_special_sites.rs:1030-1061`, `dungeonInstanceCacheMgr.GetTriglavianSiteInstances` and `GetTriglavianMinorVictorySystems` share a single handler arm that branches on wormhole system IDs `31_000_001..=31_000_005` to return a Drifter Hive `KeyVal` instead of Triglavian sites, and returns site instances instead of minor victory system IDs for `GetTriglavianMinorVictorySystems`. Tagged test `test_pve_homefront_storms_drifter_hives_triglavian_and_interference` in `crates/eve-server/tests/it/pve_exploration_complete.rs:1066-1088` manually calls `jita_sys.remove_ball(1_897_720_001)` (line 1078) and `keeper.EnterNextDungeonRoom(720_001)` (line 1079).",
-      "added_by": "20261024-190728"
-    },
-    {
-      "evidence": "Fixture-driven site/NPC/loot tables, with wave progression through an invented RPC instead of kill triggers. Evidence: crates/eve-server/src/services/pve_exploration.rs:193 (anomaly_dungeons_for_system: 2 hardcoded dungeons per class band), :563 (build_wave_npc_balls: one NPC type per class, 2-4 balls), :733-735 (blue loot by class), :884/:932 (scanSvc.GetCombatAnomalyInstances / EnterCombatAnomaly); test: test_pve_ghost_sites_sleeper_caches_and_wormhole_sites (tests/it/pve_exploration_complete.rs:656, WH part at :790+) \u2014 clears wave NPCs with a helper, then advances waves via the invented scanSvc.EnterCombatAnomaly(siteID, True), and asserts blue loot in droppedLoot. It does not test killing Sleepers.; live: wiki:Wormhole_space; rpc_service_catalog.json (EnterCombatAnomaly absent) Expected behaviour: In a C3 system, the anomaly list contains C3 Sleeper combat sites. Warping in spawns Sleeper NPCs whose types match the site's dungeon. Destroying the wave trigger NPC through combat spawns the next wave without any client RPC. Sleeper wrecks contain Sleeper loot (e.g. Sleeper Data Library 30745) and no bounty is paid.",
-      "flagged_by_audit": "supervisor-20261022-F-weak-done",
-      "id": "feat:pve.wormhole-sites"
     },
     {
       "evidence": "crates/eve-server/src/services/quasar_career_goals.rs:37-133 hardcodes 8 synthetic AIR Career Program goals (default_career_goal_definitions(), UUIDs [0x43, 0x47, 0x01..0x04, ..., 1..2]) with invented names, targets, career points, ISK, and SP rewards (labelled 'DERIVED: server-configured AIR Career Program goal definitions'), and quasar_career_goals.rs:393-424, 450-495 encodes custom encode_career_goal_wire fields into GetAllResponse and GetDefinitionsResponse; tested in crates/eve-server/tests/it/quasar_progression_complete.rs:271-423.",
@@ -121,46 +47,8 @@
       "added_by": "20261024-113904"
     },
     {
-      "id": "quasar:eveProto/generated/eve_public/campaign/api/notices_pb2.pyj",
-      "reason": "",
-      "evidence": "crates/eve-server/tests/it/quasar_extended_endpoints_part2.rs:256-303 manually constructs `StartedNotice` and `CompletedNotice` in the test body and calls `ctx.quasar_gateway.publish_notice(...)` directly to its own `stream_rx` channel; no server campaign handler in `crates/eve-server/src/services/quasar_daily_goals.rs:312-439` emits `eve_public.campaign.api.StartedNotice` or `CompletedNotice`.",
-      "added_by": "20261024-183934"
-    },
-    {
-      "evidence": "In crates/eve-server/src/services/quasar_daily_goals.rs:312-363, eve_public.campaign.api.GetAllRequest and GetRequest read only from test-injected in-memory CampaignRecord entries (which are empty unless seeded via register_campaign in tests) and encode custom synthetic fields (encode_string_field(2, &c.name), encode_string_field(3, &c.description), encode_varint_field(4, c.active)) that do not match the V24 protobuf schema (GetAllResponse has repeated Identifier campaigns = 1; GetResponse has Attributes campaign = 1). In crates/eve-server/tests/it/quasar_feature_packages_complete.rs:112-146, the test manually seeds a synthetic CampaignRecord and asserts only status_code == STATUS_OK and normalized_type_name().",
-      "id": "quasar:eveProto/generated/eve_public/campaign/api/requests_pb2.pyj",
-      "flagged_by_audit": "20261025-142653"
-    },
-    {
-      "id": "quasar:eveProto/generated/eve_public/campaign/objective/api/notices_pb2.pyj",
-      "reason": "",
-      "evidence": "crates/eve-server/tests/it/quasar_extended_endpoints_part2.rs:390-442 manually constructs `eve_public.campaign.objective.api.ContributedNotice` in the test body and calls `ctx.quasar_gateway.publish_notice(...)` directly to its own channel; `eve_public.campaign.objective.api.CommitRequest` in `crates/eve-server/src/services/quasar_daily_goals.rs:365-385` never emits `ContributedNotice`.",
-      "added_by": "20261024-183934"
-    },
-    {
-      "evidence": "In crates/eve-server/src/services/quasar_daily_goals.rs:365-413, eve_public.campaign.objective.api.GetRequest and CommitRequest operate only on test-injected CampaignObjectiveRecord fixtures, and CommitRequest (lines 387-413) unconditionally increments obj.current_progress by a hardcoded 10 without checking any objective criteria or player inventory. In crates/eve-server/tests/it/quasar_feature_packages_complete.rs:166-192, the test calls GetRequest and CommitRequest on test-seeded objective 101 and asserts only status_code == STATUS_OK and normalized_type_name().",
-      "id": "quasar:eveProto/generated/eve_public/campaign/objective/api/requests_pb2.pyj",
-      "flagged_by_audit": "20261025-142653"
-    },
-    {
-      "id": "quasar:eveProto/generated/eve_public/campaign/track/api/notices_pb2.pyj",
-      "reason": "",
-      "evidence": "crates/eve-server/tests/it/quasar_extended_endpoints_part2.rs:416-442 manually constructs `eve_public.campaign.track.api.ContributedNotice` in the test body and calls `ctx.quasar_gateway.publish_notice(...)` directly to its own channel; no server campaign handler in `crates/eve-server/src/services/quasar_daily_goals.rs:365-439` emits `eve_public.campaign.track.api.ContributedNotice`.",
-      "added_by": "20261024-183934"
-    },
-    {
-      "evidence": "In crates/eve-server/src/services/quasar_daily_goals.rs:415-439, eve_public.campaign.track.api.GetTickingContributionsPredictionRequest sums current_progress across test-seeded campaign_objectives and adds a hardcoded 10 (let predicted = total_progress + 10) encoded into raw varint fields 1 and 2 instead of computing ticking contribution predictions from campaign track state. In crates/eve-server/tests/it/quasar_feature_packages_complete.rs:178-210, the test asserts only status_code == STATUS_OK and normalized_type_name().",
-      "id": "quasar:eveProto/generated/eve_public/campaign/track/api/requests_pb2.pyj",
-      "flagged_by_audit": "20261025-142653"
-    },
-    {
       "evidence": "crates/eve-server/src/services/quasar_career_goals.rs:37-133, 450-514 serves 8 hardcoded synthetic career goal definitions (default_career_goal_definitions()) with custom wire encoding (encode_career_goal_wire at quasar_career_goals.rs:393-424), tested in crates/eve-server/tests/it/quasar_progression_complete.rs:271-423.",
       "id": "quasar:eveProto/generated/eve_public/career/goal/api/requests_pb2.pyj"
-    },
-    {
-      "evidence": "crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:350-424 manually constructs GrantedNotice, RevokedNotice, SetNotice, and SetAllInBubbleNotice in the test via set_domain_attributes and publishes them directly to quasar_gateway (plus calls standalone helper publish_cosmetic_title_granted_notice at crates/eve-server/src/services/quasar_cosmetics_services.rs:857-868 which is never invoked by any handler), asserting only normalized_type_name() / type_url suffix.",
-      "flagged_by_audit": "20261022-091014",
-      "id": "quasar:eveProto/generated/eve_public/cosmetic/character/title/api/notices_pb2.pyj"
     },
     {
       "evidence": "crates/eve-server/src/services/quasar_cosmetics_services.rs:543-815 registers a single shared closure in a 46-endpoint loop where title.definition.api.GetLatestRequest and GetAllRequest ignore _dyn_msg and return set_domain_attributes(reg, resp, skin_id, corp_id, \"SKINRParagon\"); crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:87-157 sends Vec::new() and asserts only status_code == STATUS_OK and normalized_type_name().",
@@ -324,11 +212,6 @@
       "evidence": "crates/eve-server/src/services/quasar_social_freelance.rs:1144-1176 implements eve_public.freelance.contributionmethod.definition.api.GetAllLatestRequest and GetAllLatestWithinMajorRequest via the generic dummy schema-filler encode_domain_message + set_domain_attributes(reg, resp, 1, 1, \"all_latest\") / \"all_latest_within_major\" instead of reading SDE contribution method definitions (sde.contribution_methods()). Its tagged test q_final_entitlements_faction_freelance_payment_stargate in crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:261-303 sends an empty Vec::new() payload and asserts only status_code == STATUS_OK and normalized_type_name().",
       "id": "quasar:eveProto/generated/eve_public/freelance/contributionmethod/definition/api/requests_pb2.pyj",
       "flagged_by_audit": "20261025-143546"
-    },
-    {
-      "evidence": "crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:480-573 manually constructs ContributedNotice in the test via set_domain_attributes and publishes it directly to quasar_gateway, asserting only normalized_type_name() / type_url suffix.",
-      "flagged_by_audit": "20261022-091014",
-      "id": "quasar:eveProto/generated/eve_public/goal/contribution/api/notices_pb2.pyj"
     },
     {
       "id": "quasar:eveProto/generated/eve_public/operation/recommendation/recommendation_pb2.pyj",
@@ -625,6 +508,31 @@
       "evidence": "crates/eve-server/src/services/season_manager.rs:455 accepts only a hardcoded season-ID range (1..=4) and reads no season data. The SeasonConfig default is a SYNTHETIC 'Yoiul Festival' with season_id 1 (:185-202).",
       "id": "rpc:seasonManager.select_season",
       "flagged_by_audit": "20261025-191723"
+    },
+    {
+      "evidence": "tests/it/esi_fleets.rs:380-434 (test_esi_fleets_settings_members_invite_move_and_kick_roundtrip, tagged at :103). The POST invite returns 204, and GET /fleets/{id}/members immediately lists the invitee as a squad member, with join_time equal to the invite time (:421-433). The wingman can then read his fleet (:437+). The live ESI operation only invites the character ('Invite a character into the fleet'): the client receives a fleet invite and must accept it before becoming a member. The emulation turns the invite into a forced instant join, which is the wrong semantics for the operation.",
+      "id": "esi:POST /fleets/{fleet_id}/members",
+      "flagged_by_audit": "20261025-193217"
+    },
+    {
+      "evidence": "In production, Triglavian sites are seeded only for minor-victory systems (pve_special_sites.rs:461-463), and that list is always empty (pve_special_sites.rs:289-291). So the handler at pve_special_sites.rs:800-822 returns unwrap_or_default() == [] for every real system. The tagged test (tests/it/pve_exploration_complete.rs:264-267; also pve_incursions_triglavian_remediated.rs:576-579) gets a non-empty list only by calling the internal seeder ensure_triglavian_sites_for_system(reg, 30_000_200) directly. The seeder injects 2 hand-written records (pve_special_sites.rs:293-333: dungeon 8922/8802, base_isk 35M/25M, survey drops 150/100, fixed Leshak/Damavik type IDs). This is fixture-driven, and the data does not come from the SDE.",
+      "id": "rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances",
+      "flagged_by_audit": "20261025-193217"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/map_service.rs:177-187 is tagged '// const-ok: No active invasion campaigns configured' and returns reg.edencom_fortress_systems. That field is declared in PveSpecialSitesRegistry and never assigned in ensure_special_sites_initialized (pve_special_sites.rs:335-476), so the RPC always returns []. wiki:EDENCOM_systems says EDENCOM Fortress systems have a 'permanent presence' won in Invasion chapter 3, so the live server returns a non-empty list and the const-ok reason is wrong. Tagged test: test_rpc_map_svc_part1_batch.",
+      "id": "rpc:map.GetEdencomFortressSystems",
+      "flagged_by_audit": "20261025-193217"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/map_service.rs:189-199 is the same const-ok pattern. reg.edencom_minor_victory_systems is never filled anywhere in pve_special_sites.rs init (:335-476), so the RPC always returns []. wiki:EDENCOM_systems says 'EDENCOM systems come in two varieties: Minor victory and Fortress', both permanent in live. Tagged test: test_rpc_map_svc_part1_batch.",
+      "id": "rpc:map.GetEdencomMinorVictorySystems",
+      "flagged_by_audit": "20261025-193217"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/map_service.rs:459-469 returns reg.triglavian_minor_victory_systems. That field is only filled at pve_special_sites.rs:398-400, from triglavian_minor_victory_systems() at pve_special_sites.rs:285-291, which returns Vec::new() and is labelled 'DATA GAP'. So the handler always returns []. The tagged test test_rpc_map_svc_part2_batch and tests/it/pve_incursions_triglavian_remediated.rs:563-564 / pve_exploration_complete.rs:250-253 assert the empty list. wiki:Triglavian_minor_victory says these systems are a permanent live feature, so a constant empty answer the code itself calls a data gap cannot close the row.",
+      "id": "rpc:map.GetTriglavianMinorVictorySystems",
+      "flagged_by_audit": "20261025-193217"
     }
   ],
   "rejected_triage": [
