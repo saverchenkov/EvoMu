@@ -739,11 +739,26 @@ async fn handle_get_system_scan_mgr(
     service: &str,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, _char_id) = match ServerContext::require_character(session) {
+    let (_, char_id) = match ServerContext::require_character(session) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let sys_id = args.first().and_then(|a| a.as_i64()).map(|v| v as u32).or(session.solar_system_id).unwrap_or(30_000_142);
+    let caller_sys = session
+        .solar_system_id
+        .or_else(|| {
+            ctx.db
+                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
+        })
+        .unwrap_or(30_000_142);
+    if let Some(arg_sys) = args.first().and_then(|a| a.as_i64()).map(|v| v as u32) {
+        if arg_sys != caller_sys && !session.has_gm_role() {
+            return Some(Err(BridgeRpcError {
+                code: "AccessDenied".into(),
+                message: "Cannot query scan manager for a remote solar system".into(),
+            }));
+        }
+    }
+    let sys_id = caller_sys;
     let now_unix = ctx.now_unix();
     let (sigs, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
     let bound_id = match ctx.bind_object(session, service, sys_id as i64) {
@@ -756,6 +771,8 @@ async fn handle_get_system_scan_mgr(
         .into_iter()
         .filter(|s| !s.collapsed && (s.lifetime_seconds == 0 || now_unix < s.created_unix.saturating_add(s.lifetime_seconds)))
         .map(|s| {
+            let eff_strength = ctx.effective_signature_signal_strength(char_id, sys_id, &s);
+            let resolved = eff_strength >= 1.0;
             let wh_item_id = wormhole_item_id_for_signature(sys_id, &s.signature_id);
             let (mass_stage, wh_size, life_stage, wh_age, is_collapsed) =
                 compute_wormhole_stages(&s, now_unix);
@@ -765,7 +782,7 @@ async fn handle_get_system_scan_mgr(
                 ("targetID", PyRep::Integer(wh_item_id)),
                 (
                     "group",
-                    PyRep::String(if s.signal_strength >= 0.25 {
+                    PyRep::String(if eff_strength >= 0.25 {
                         s.sig_group
                     } else {
                         "Unknown".into()
@@ -773,13 +790,13 @@ async fn handle_get_system_scan_mgr(
                 ),
                 (
                     "type",
-                    PyRep::String(if s.signal_strength >= 1.0 {
+                    PyRep::String(if resolved {
                         s.type_name
                     } else {
                         "Unidentified Signature".into()
                     }),
                 ),
-                ("signalStrength", PyRep::Real(s.signal_strength)),
+                ("signalStrength", PyRep::Real(eff_strength)),
                 (
                     "typeID",
                     s.wormhole_type_id
@@ -788,9 +805,13 @@ async fn handle_get_system_scan_mgr(
                 ),
                 (
                     "destinationSystemID",
-                    s.destination_system_id
-                        .map(|d| PyRep::Integer(d as i64))
-                        .unwrap_or(PyRep::None),
+                    if resolved {
+                        s.destination_system_id
+                            .map(|d| PyRep::Integer(d as i64))
+                            .unwrap_or(PyRep::None)
+                    } else {
+                        PyRep::None
+                    },
                 ),
                 ("massStage", PyRep::String(mass_stage.into())),
                 ("wormholeSize", PyRep::Real(wh_size)),
@@ -799,9 +820,9 @@ async fn handle_get_system_scan_mgr(
                 ("remainingMassKg", PyRep::Real(s.remaining_mass_kg)),
                 ("maxJumpMassKg", PyRep::Real(s.max_jump_mass_kg)),
                 ("collapsed", PyRep::Bool(is_collapsed)),
-                ("x", PyRep::Real(s.position[0])),
-                ("y", PyRep::Real(s.position[1])),
-                ("z", PyRep::Real(s.position[2])),
+                ("x", if resolved { PyRep::Real(s.position[0]) } else { PyRep::None }),
+                ("y", if resolved { PyRep::Real(s.position[1]) } else { PyRep::None }),
+                ("z", if resolved { PyRep::Real(s.position[2]) } else { PyRep::None }),
             ])
         })
         .collect();
@@ -830,13 +851,26 @@ async fn handle_get_anomalies(
     session: &mut SessionState,
     bound_entry: Option<&BoundObjectEntry>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    if let Err(e) = ServerContext::require_character(session) {
-        return Some(Err(e));
-    }
-    let sys_id = bound_entry
-        .map(|b| b.object_id as u32)
-        .or(session.solar_system_id)
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let caller_sys = session
+        .solar_system_id
+        .or_else(|| {
+            ctx.db
+                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
+        })
         .unwrap_or(30_000_142);
+    if let Some(b) = bound_entry {
+        if (b.object_id as u32) != caller_sys && !session.has_gm_role() {
+            return Some(Err(BridgeRpcError {
+                code: "AccessDenied".into(),
+                message: "Cannot query anomalies for a remote solar system".into(),
+            }));
+        }
+    }
+    let sys_id = caller_sys;
     let now_unix = ctx.now_unix();
     let (_, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
     Some(Ok(PyRep::List(format_anomalies(anomalies, now_unix))))
@@ -865,10 +899,22 @@ async fn handle_request_scans(
         return None;
     }
 
-    let sys_id = bound_entry
-        .map(|b| b.object_id as u32)
-        .or(session.solar_system_id)
+    let caller_sys = session
+        .solar_system_id
+        .or_else(|| {
+            ctx.db
+                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
+        })
         .unwrap_or(30_000_142);
+    if let Some(b) = bound_entry {
+        if (b.object_id as u32) != caller_sys && !session.has_gm_role() {
+            return Some(Err(BridgeRpcError {
+                code: "AccessDenied".into(),
+                message: "Cannot request probe scans for a remote solar system".into(),
+            }));
+        }
+    }
+    let sys_id = caller_sys;
     let _ = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
     let now_unix = ctx.now_unix();
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -1029,12 +1075,10 @@ async fn handle_request_scans(
     });
     let skill_mult = (1.0 + 0.05 * astro_lvl as f64) * (1.0 + 0.05 * rangefinding_lvl as f64);
 
-    let scan_results = ctx
-        .db
-        .try_with_mut_snapshot(|snap| {
-            let sigs = snap.cosmic_signatures.entry(sys_id).or_default();
-            let mut out = Vec::new();
-            for sig in sigs.iter_mut() {
+    let scan_results = ctx.db.with_snapshot(|snap| {
+        let mut out = Vec::new();
+        if let Some(sigs) = snap.cosmic_signatures.get(&sys_id) {
+            for sig in sigs {
                 if sig.collapsed {
                     continue;
                 }
@@ -1066,17 +1110,19 @@ async fn handle_request_scans(
                     _ => 1.0,
                 };
                 let raw_strength = (total_effective_strength / 25.0).min(trilateration_cap);
-                sig.signal_strength = raw_strength.clamp(0.0, trilateration_cap);
-                let resolved = sig.signal_strength >= 1.0;
-                let wh_item_id = wormhole_item_id_for_signature(sys_id, &sig.signature_id);
-                out.push((sig.clone(), wh_item_id, covering_probes, resolved));
+                let mut scanned_sig = sig.clone();
+                scanned_sig.signal_strength = raw_strength.clamp(0.0, trilateration_cap);
+                let resolved = scanned_sig.signal_strength >= 1.0;
+                let wh_item_id = wormhole_item_id_for_signature(sys_id, &scanned_sig.signature_id);
+                out.push((scanned_sig, wh_item_id, covering_probes, resolved));
             }
-            Ok::<_, std::convert::Infallible>(out)
-        })
-        .unwrap();
+        }
+        out
+    });
 
     let mut rows = Vec::new();
     for (sig, wh_item_id, covering_probes, resolved) in scan_results {
+        ctx.record_character_scan_progress(char_id, sys_id, &sig.signature_id, sig.signal_strength);
         if resolved {
             ctx.mark_signature_scanned(char_id, sys_id, wh_item_id);
         }

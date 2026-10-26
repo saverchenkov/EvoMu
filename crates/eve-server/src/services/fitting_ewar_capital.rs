@@ -207,7 +207,16 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         let balls = sys.list_balls().await.unwrap_or_default();
                         let dyn_ship_ids: Vec<i64> = balls
                             .iter()
-                            .filter(|b| b.id < 700_000_000)
+                            .filter(|b| {
+                                b.id > 0
+                                    && (ctx.sde.types.get(&b.type_id).is_some_and(|t| t.category_id == 6)
+                                        || ctx.db.with_snapshot(|s| {
+                                            s.items
+                                                .get(&b.id)
+                                                .and_then(|it| ctx.sde.types.get(&it.type_id))
+                                                .is_some_and(|t| t.category_id == 6)
+                                        }))
+                            })
                             .map(|b| b.id)
                             .collect();
                         let mut dbuff_mods: Vec<(u16, f64)> = Vec::new();
@@ -608,7 +617,14 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         .iter()
                         .filter(|b| {
                             b.id != ship_id
-                                && b.id < 700_000_000
+                                && b.id > 0
+                                && (ctx.sde.types.get(&b.type_id).is_some_and(|t| t.category_id == 6)
+                                    || ctx.db.with_snapshot(|s| {
+                                        s.items
+                                            .get(&b.id)
+                                            .and_then(|it| ctx.sde.types.get(&it.type_id))
+                                            .is_some_and(|t| t.category_id == 6)
+                                    }))
                                 && (b.position - burst_center).length() <= burst_radius
                         })
                         .map(|b| b.id)

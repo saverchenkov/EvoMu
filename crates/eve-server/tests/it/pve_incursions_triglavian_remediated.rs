@@ -668,3 +668,117 @@ async fn test_pve_triglavian_sites_and_minor_victory_systems() {
     assert!(edencom_standing > 0.0, "EDENCOM standing must increase (+0.15)");
     assert!(trig_standing < 0.0, "Triglavian standing must decrease (-0.15)");
 }
+
+#[tokio::test]
+async fn test_p1_track_d_regressions_issues_12_55_56_57() {
+    let ctx1 = ServerContext::new();
+    let ctx2 = ServerContext::new();
+    let kw = HashMap::new();
+
+    // 1. Issue #55: ServerContext-scoped tactical and session-change timer state isolation
+    eve_server::services::space_destiny::record_session_change_timer(&ctx1, 90_000_001, ctx1.now_unix_secs(), 30_000_142, 1, "jump");
+    assert!(eve_server::services::space_destiny::get_session_change_timer(&ctx1, 90_000_001).is_some());
+    assert!(eve_server::services::space_destiny::get_session_change_timer(&ctx2, 90_000_001).is_none());
+
+    ctx1.tactical_state
+        .write()
+        .unwrap()
+        .lance_caster_lock_until
+        .insert((ctx1.instance_id as usize, 750_000_101), ctx1.now_unix_secs() + 300);
+    assert!(eve_server::services::tactical_modules::check_ship_navigation_lock(&ctx1, 750_000_101, "warp").is_err());
+    assert!(eve_server::services::tactical_modules::check_ship_navigation_lock(&ctx2, 750_000_101, "warp").is_ok());
+
+    // 2. Issue #56: Probe scan system scoping, coordinate/destination redaction below 1.0, and per-character scan progress
+    ctx1.db.with_mut_snapshot(|snap| {
+        if let Some(ch2) = snap.characters.get_mut(&90_000_002) {
+            ch2.user_id = 1;
+        }
+    });
+    let mut sess_a = create_in_space_session(&ctx1, 9501, 90_000_001, 30_000_142, 750_000_201, 587).await;
+
+    // Cross-system scan query rejected
+    let remote_err = ctx1
+        .dispatch_rpc(&mut sess_a, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(30_002_187)], &kw, None)
+        .await
+        .expect_err("Remote solar system scan query must be denied");
+    assert_eq!(remote_err.code, "AccessDenied");
+
+    // Seed an unscanned signature (strength 0.0) with a destination system
+    let now_u = ctx1.now_unix();
+    ctx1.db.with_mut_snapshot(|snap| {
+        snap.cosmic_signatures.entry(30_000_142).or_default().push(eve_db::CosmicSignatureRecord {
+            signature_id: "SEC-56".into(),
+            solar_system_id: 30_000_142,
+            sig_group: "Wormhole".into(),
+            type_name: "Unstable Wormhole".into(),
+            signal_strength: 0.0,
+            position: [123_456.0, 234_567.0, 345_678.0],
+            wormhole_type_id: Some(30_643),
+            destination_system_id: Some(31_000_005),
+            remaining_mass_kg: 2_000_000_000.0,
+            max_mass_kg: 2_000_000_000.0,
+            max_jump_mass_kg: 300_000_000.0,
+            created_unix: now_u,
+            lifetime_seconds: 86_400,
+            collapsed: false,
+        });
+    });
+
+    // Unscanned signature redacts coordinates, group, type, and destinationSystemID
+    let scan_unscanned = ctx1
+        .dispatch_rpc(&mut sess_a, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(30_000_142)], &kw, None)
+        .await
+        .expect("GetSystemScanMgr");
+    let Some(PyRep::List(sigs_a0)) = scan_unscanned.dict_get("signatures") else { panic!("signatures list") };
+    let sec_sig_a0 = sigs_a0.iter().find(|s| s.dict_get("signatureID") == Some(&PyRep::String("SEC-56".into()))).expect("SEC-56");
+    assert_eq!(sec_sig_a0.dict_get("x"), Some(&PyRep::None));
+    assert_eq!(sec_sig_a0.dict_get("destinationSystemID"), Some(&PyRep::None));
+    assert_eq!(sec_sig_a0.dict_get("group"), Some(&PyRep::String("Unknown".into())));
+
+    // Record 100% scan progress for Pilot A only; Pilot B still sees 0.0 and redacted coordinates
+    ctx1.record_character_scan_progress(90_000_001, 30_000_142, "SEC-56", 1.0);
+    let scan_a1 = ctx1
+        .dispatch_rpc(&mut sess_a, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(30_000_142)], &kw, None)
+        .await
+        .unwrap();
+    let Some(PyRep::List(sigs_a1)) = scan_a1.dict_get("signatures") else { panic!() };
+    let sec_sig_a1 = sigs_a1.iter().find(|s| s.dict_get("signatureID") == Some(&PyRep::String("SEC-56".into()))).unwrap();
+    assert_eq!(sec_sig_a1.dict_get("x"), Some(&PyRep::Real(123_456.0)));
+    assert_eq!(sec_sig_a1.dict_get("destinationSystemID"), Some(&PyRep::Integer(31_000_005)));
+
+    let mut sess_b = create_in_space_session(&ctx1, 9502, 90_000_002, 30_000_142, 750_000_202, 587).await;
+    let scan_b1 = ctx1
+        .dispatch_rpc(&mut sess_b, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(30_000_142)], &kw, None)
+        .await
+        .unwrap();
+    let Some(PyRep::List(sigs_b1)) = scan_b1.dict_get("signatures") else { panic!() };
+    let sec_sig_b1 = sigs_b1.iter().find(|s| s.dict_get("signatureID") == Some(&PyRep::String("SEC-56".into()))).unwrap();
+    assert_eq!(sec_sig_b1.dict_get("x"), Some(&PyRep::None));
+    assert_eq!(sec_sig_b1.dict_get("destinationSystemID"), Some(&PyRep::None));
+
+    // 3. Issue #57: Drifter Hive NPCs have SDE-derived CombatState (> default 450/450/350 HP)
+    ensure_special_sites_spawned(&ctx1).await;
+    let hive = get_drifter_hive_for_system(&ctx1, 31_000_001).expect("Barbican hive");
+    let wh_sys = ctx1.systems.get_or_spawn(31_000_001);
+    let first_npc_bid = hive.rooms[0].npc_ball_ids[0];
+    let npc_cs = wh_sys.get_combat_state(first_npc_bid).await.unwrap().expect("Drifter NPC must have CombatState");
+    assert!(npc_cs.max_shield_hp >= 600.0 && npc_cs.max_armor_hp >= 600.0 && npc_cs.max_structure_hp >= 600.0);
+
+    // Homefront completion ignores spoofed fleet_count when solo
+    let hf_inst_id = with_pve_special_reg(&ctx1, |reg| {
+        let s = &reg.homefront_sites[&30_000_142][0];
+        (s.instance_id, s.boss_npc_ball_id, s.base_pilot_isk, s.optimal_fleet_size)
+    });
+    let jita_sys = ctx1.systems.get_or_spawn(30_000_142);
+    jita_sys.try_remove_ball(hf_inst_id.1);
+    let hf_done = eve_server::services::pve_special_sites::complete_special_dungeon_instance(
+        &ctx1,
+        &mut sess_b,
+        hf_inst_id.0,
+        hf_inst_id.3, // spoofed optimal fleet size while solo
+    )
+    .await
+    .expect("complete_special_dungeon_instance");
+    let expected_solo_isk = ((hf_inst_id.2 as f64) * (1.0 / (hf_inst_id.3 as f64))).round() as i64;
+    assert_eq!(hf_done.dict_get("rewardPaidIsk"), Some(&PyRep::Integer(expected_solo_isk)));
+}

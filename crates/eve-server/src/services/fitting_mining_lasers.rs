@@ -100,7 +100,16 @@ pub(crate) async fn handle_mining_and_deactivate(
                     let balls = sys.list_balls().await.unwrap_or_default();
                     let dyn_ship_ids: Vec<i64> = balls
                         .iter()
-                        .filter(|b| b.id < 700_000_000)
+                        .filter(|b| {
+                            b.id > 0
+                                && (ctx.sde.types.get(&b.type_id).is_some_and(|t| t.category_id == 6)
+                                    || ctx.db.with_snapshot(|s| {
+                                        s.items
+                                            .get(&b.id)
+                                            .and_then(|it| ctx.sde.types.get(&it.type_id))
+                                            .is_some_and(|t| t.category_id == 6)
+                                    }))
+                        })
                         .map(|b| b.id)
                         .collect();
                     ctx.db.with_mut_snapshot(|snap| {
