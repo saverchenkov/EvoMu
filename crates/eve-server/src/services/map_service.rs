@@ -174,7 +174,8 @@ pub fn handle(
             Some(Ok(desc.build_crowset(rows)))
         }
 
-        // const-ok: No active invasion campaigns configured
+        // DATA GAP: full Tranquility Chapter 3 EDENCOM Fortress system list (~60 systems) is not in SDE;
+        // returns wiki-verified systems (`Arshat` `30_002_253`) plus any runtime entries in PveSpecialSitesRegistry.
         ("map", "GetEdencomFortressSystems") => {
             crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
             let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
@@ -186,7 +187,8 @@ pub fn handle(
             Some(Ok(PyRep::List(list)))
         }
 
-        // const-ok: No active invasion campaigns configured
+        // DATA GAP: full Tranquility Chapter 3 EDENCOM Minor Victory system list (~69 systems) is not in SDE;
+        // returns wiki-verified systems (`Bei` `30_002_048`) plus any runtime entries in PveSpecialSitesRegistry.
         ("map", "GetEdencomMinorVictorySystems") => {
             crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
             let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {

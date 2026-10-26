@@ -594,54 +594,66 @@ pub fn dispatch_fleet_routes(
                 _ => None,
             };
             let now = ctx.now_unix();
-            let res: Result<(), RouteExecutionResult> = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(f) = snap.fleets.get(&fleet_id) else {
-                    return Err(RouteExecutionResult::error(404, format!("Fleet {fleet_id} not found")));
-                };
-                let (resolved_wing, resolved_squad) =
-                    validate_wing_and_squad(f, fleet_id, role, wing_id, squad_id, false)?;
-                if let Some(c) = claims {
-                    if !can_invite_member(f, c.character_id, role, resolved_wing, resolved_squad) {
+            let inviter_id = claims.map(|c| c.character_id).unwrap_or(0);
+            let res: Result<(i64, i64, i64), RouteExecutionResult> =
+                ctx.db.try_with_mut_snapshot(|snap| {
+                    let Some(f) = snap.fleets.get(&fleet_id) else {
+                        return Err(RouteExecutionResult::error(404, format!("Fleet {fleet_id} not found")));
+                    };
+                    let (resolved_wing, resolved_squad) =
+                        validate_wing_and_squad(f, fleet_id, role, wing_id, squad_id, false)?;
+                    if let Some(c) = claims {
+                        if !can_invite_member(f, c.character_id, role, resolved_wing, resolved_squad) {
+                            return Err(RouteExecutionResult::error(
+                                403,
+                                format!(
+                                    "Character {} lacks fleet commander/boss permissions for fleet {fleet_id}",
+                                    c.character_id
+                                ),
+                            ));
+                        }
+                    }
+                    if !snap.characters.contains_key(&invitee_id) {
                         return Err(RouteExecutionResult::error(
-                            403,
-                            format!(
-                                "Character {} lacks fleet commander/boss permissions for fleet {fleet_id}",
-                                c.character_id
-                            ),
+                            404,
+                            format!("Invited character {invitee_id} not found"),
                         ));
                     }
-                }
-                if !snap.characters.contains_key(&invitee_id) {
-                    return Err(RouteExecutionResult::error(
-                        404,
-                        format!("Invited character {invitee_id} not found"),
-                    ));
-                }
-                let f = snap.fleets.get_mut(&fleet_id).unwrap();
-                if !f.members.contains(&invitee_id) {
-                    f.members.push(invitee_id);
-                }
-                f.invites.insert(invitee_id);
-                let (_, rname) = fleet_role_to_str(role);
-                f.member_details.insert(
-                    invitee_id,
-                    FleetMemberRecord {
-                        character_id: invitee_id,
-                        role,
-                        wing_id: resolved_wing,
-                        squad_id: resolved_squad,
-                        takes_fleet_warp: true,
-                        accepts_regroup: true,
-                        accepts_conduit_jumps: true,
-                        job: 0,
-                        role_name: rname.to_string(),
-                        join_time_unix: now,
-                    },
-                );
-                Ok(())
-            });
+                    let f = snap.fleets.get_mut(&fleet_id).unwrap();
+                    let wid = resolved_wing.unwrap_or_else(|| f.wings.first().copied().unwrap_or(1));
+                    let sid = resolved_squad.unwrap_or_else(|| f.squads.first().copied().unwrap_or(1));
+                    let effective_inviter = if inviter_id > 0 { inviter_id } else { f.boss_id };
+                    f.invites.insert(invitee_id);
+                    Ok((wid, sid, effective_inviter))
+                });
             Some(match res {
-                Ok(()) => RouteExecutionResult::no_content(0),
+                Ok((wid, sid, effective_inviter)) => {
+                    let role_num = match role {
+                        FleetRole::FleetCommander => 1,
+                        FleetRole::WingCommander => 2,
+                        FleetRole::SquadCommander => 3,
+                        FleetRole::SquadMember => 4,
+                    };
+                    {
+                        let mut ex = ctx.fleet_extras.lock().unwrap();
+                        ex.invite_details
+                            .insert((fleet_id, invitee_id), (wid, sid, role, effective_inviter));
+                        ex.invite_timestamps.insert((fleet_id, invitee_id), now);
+                    }
+                    ctx.notify(
+                        NotificationTarget::Character(invitee_id),
+                        "OnFleetInvite",
+                        "charid",
+                        vec![
+                            PyRep::Integer(fleet_id),
+                            PyRep::Integer(effective_inviter),
+                            PyRep::Integer(wid),
+                            PyRep::Integer(sid),
+                            PyRep::Integer(role_num),
+                        ],
+                    );
+                    RouteExecutionResult::no_content(0)
+                }
                 Err(e) => e,
             })
         }

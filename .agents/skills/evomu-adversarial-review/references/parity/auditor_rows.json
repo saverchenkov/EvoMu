@@ -11,11 +11,6 @@
       "flagged_by_audit": "20261025-145316"
     },
     {
-      "id": "feat:pve.homefront-ops",
-      "evidence": "crates/eve-server/src/services/pve_special_sites.rs:357-371 and 658-697 seeds 2 hardcoded sites (710_001 and 710_002) only in Jita (30_000_142) in volatile PVE_SPECIAL_STATE, with completion driven by calling keeper.EnterNextDungeonRoom with fake instance ID 710_001 and a caller-supplied fleet_count integer argument (crates/eve-server/tests/it/pve_exploration_complete.rs:1149-1161) instead of actual fleet/site objective mechanics.",
-      "flagged_by_audit": "20261022-154932"
-    },
-    {
       "id": "feat:pve.login-campaign",
       "reason": "",
       "evidence": "crates/eve-server/src/services/cosmetics_ui_ops.rs:989-1026: campaignID is hardcoded to 101 and every claim grants a flat 5_000 free SP, with no campaign/reward-track data. The test at navigation_pve_closure.rs:638,658 asserts the invented 5_000.0.",
@@ -41,12 +36,6 @@
       "id": "quasar:eveProto/generated/eve_public/ai/assistant/chat/api/requests_pb2.pyj"
     },
     {
-      "id": "quasar:eveProto/generated/eve_public/assetholding/entitlement/api/notices_pb2.pyj",
-      "reason": "",
-      "evidence": "In `crates/eve-server/src/services/quasar_assetholding_entitlements.rs:167-191`, the handler for `eve_public.assetholding.entitlement.api.RedeemRequest` (and `eve.assetholding.entitlement.api.RedeemRequest`) ignores `_ctx`, `_any`, and `_dyn_msg`, mutates no entitlement or inventory state, and returns an empty `RedeemResponse` without publishing any notice. The standalone helper functions `publish_entitlement_granted_notice` (`crates/eve-server/src/services/quasar_assetholding_entitlements.rs:307-327`) and `publish_entitlement_redeemed_notice` (`crates/eve-server/src/services/quasar_assetholding_entitlements.rs:330-350`) are never invoked by any server flow; instead, `crates/eve-server/tests/it/quasar_economy_complete.rs:566-574` calls those helpers directly from the test harness with hardcoded IDs (`90_000_001, 101, 1`) and asserts only `type_url.ends_with(\"GrantedNotice\")` / `type_url.ends_with(\"RedeemedNotice\")`.",
-      "added_by": "20261024-113904"
-    },
-    {
       "evidence": "crates/eve-server/src/services/quasar_career_goals.rs:37-133, 450-514 serves 8 hardcoded synthetic career goal definitions (default_career_goal_definitions()) with custom wire encoding (encode_career_goal_wire at quasar_career_goals.rs:393-424), tested in crates/eve-server/tests/it/quasar_progression_complete.rs:271-423.",
       "id": "quasar:eveProto/generated/eve_public/career/goal/api/requests_pb2.pyj"
     },
@@ -59,11 +48,6 @@
       "evidence": "crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:350-431 manually constructs CheckVersionNotice in the test via set_domain_attributes and publishes it directly to quasar_gateway (plus calls standalone helper publish_cosmetic_title_version_notice at crates/eve-server/src/services/quasar_cosmetics_services.rs:871-884 which is never invoked by any handler), asserting only normalized_type_name() / type_url suffix.",
       "flagged_by_audit": "20261022-091014",
       "id": "quasar:eveProto/generated/eve_public/cosmetic/character/title/definition/version/api/notices_pb2.pyj"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/quasar_cosmetics_services.rs:543-815 registers a single shared closure in a 46-endpoint loop where corporation.palette.api.GetRequest, GetWhoCanModifyRequest, and SetMetadataRequest share a generic set_domain_attributes(reg, resp, skin_id, corp_id, \"SKINRParagon\") response; crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:87-157 sends Vec::new() for GetRequest and asserts only status_code == STATUS_OK and normalized_type_name().",
-      "flagged_by_audit": "20261022-091014",
-      "id": "quasar:eveProto/generated/eve_public/cosmetic/corporation/palette/api/requests_pb2.pyj"
     },
     {
       "evidence": "crates/eve-server/src/services/quasar_cosmetics_services.rs:543-815 registers a single shared closure in a 46-endpoint loop where market.api.GetBrokerFeesRequest, GetTaxRateRequest, and GetBuyerFeeRequest ignore _dyn_msg and return set_domain_attributes(reg, resp, skin_id, corp_id, \"SKINRParagon\"); crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:87-157 sends Vec::new() for GetBrokerFeesRequest only and asserts only status_code == STATUS_OK and normalized_type_name().",
@@ -89,21 +73,6 @@
       "evidence": "crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:350-438 manually constructs TransactionFailedNotice and TransactionSucceededNotice in the test via set_domain_attributes and publishes them directly to quasar_gateway (plus calls standalone helper publish_cosmetic_market_transaction_notice at crates/eve-server/src/services/quasar_cosmetics_services.rs:887-897 which is never invoked by any handler), asserting only normalized_type_name() / type_url suffix.",
       "flagged_by_audit": "20261022-091014",
       "id": "quasar:eveProto/generated/eve_public/cosmetic/market/transaction/api/notices_pb2.pyj"
-    },
-    {
-      "evidence": "crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:350-445 manually constructs SetNotice and SetAllInBubbleNotice in the test via set_domain_attributes and publishes them directly to quasar_gateway (plus calls standalone helper publish_cosmetic_ship_set_notice at crates/eve-server/src/services/quasar_cosmetics_services.rs:900-910 which is never invoked by any handler), asserting only normalized_type_name() / type_url suffix.",
-      "flagged_by_audit": "20261022-091014",
-      "id": "quasar:eveProto/generated/eve_public/cosmetic/ship/api/notice_pb2.pyj"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/quasar_cosmetics_services.rs:543-815 registers a single shared closure in a 46-endpoint loop for cosmetic.ship.api.GetRequest and GetAllInBubbleRequest returning set_domain_attributes(reg, resp, skin_id, corp_id, \"SKINRParagon\"); crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:87-157 sends Vec::new() for GetRequest only and asserts only status_code == STATUS_OK and normalized_type_name().",
-      "flagged_by_audit": "20261022-091014",
-      "id": "quasar:eveProto/generated/eve_public/cosmetic/ship/api/request_pb2.pyj"
-    },
-    {
-      "id": "quasar:eveProto/generated/eve_public/cosmetic/ship/logo/logo_pb2.pyj",
-      "evidence": "crates/eve-server/src/services/quasar_cosmetics_services.rs:48-82 implements DisplayRequest and ClearRequest by ignoring _dyn_msg (ship ID, logo slot/emblem), mutating no ship cosmetic state, emitting no notice, and calling generic schema-filler set_domain_attributes(reg, resp, char_id as u64, corp_id as u64, \"ShipLogoDisplayed\") / \"ShipLogoCleared\". In crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:36-38 and 555-618, the test sends Vec::new() and asserts only status_code == STATUS_OK and normalized_type_name().",
-      "flagged_by_audit": "20261022-154932"
     },
     {
       "evidence": "crates/eve-server/src/services/quasar_cosmetics_services.rs:543-815 registers a single shared closure in a 46-endpoint loop for ship.skin.thirdparty.api.GetRequest returning set_domain_attributes(reg, resp, skin_id, corp_id, \"SKINRParagon\"); crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:87-157 sends Vec::new() and asserts only status_code == STATUS_OK and normalized_type_name().",
@@ -174,16 +143,6 @@
       "evidence": "crates/eve-server/src/services/quasar_cosmetics_services.rs:543-815 registers a single shared closure in a 46-endpoint loop where sequencing.job.api.GetRequest, GetAllActiveRequest, InitiateRequest, CompleteEarlyRequest, and GetExpeditePricingRequest ignore _dyn_msg and return set_domain_attributes(reg, resp, skin_id, corp_id, \"SKINRParagon\"); crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:164-234 sends Vec::new() for GetAllActiveRequest and asserts only status_code == STATUS_OK and normalized_type_name().",
       "flagged_by_audit": "20261022-091014",
       "id": "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/job/api/requests_pb2.pyj"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/quasar_cosmetics_services.rs:543-815 registers a single shared closure in a 46-endpoint loop where structure.paintwork.license.api.admin.IssueRequest and RevokeRequest ignore _dyn_msg, mutate no paintwork license state, and return set_domain_attributes(reg, resp, skin_id, corp_id, \"SKINRParagon\"); crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:87-157 sends Vec::new() for IssueRequest only and asserts only status_code == STATUS_OK and normalized_type_name().",
-      "flagged_by_audit": "20261022-091014",
-      "id": "quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/api/admin/admin_pb2.pyj"
-    },
-    {
-      "id": "quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/api/api_pb2.pyj",
-      "evidence": "crates/eve-server/src/services/quasar_cosmetics_services.rs:466-497 implements GetRequest and GetAllInSolarSystemRequest without reading any structure paintwork state, echoing structure_id (default 1_000_000_001) or sys_id (default 30_000_142) into field 1 via set_domain_field. In crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:36-38 and 647-708, the test sends Vec::new() via encode_id_req and asserts only status_code == STATUS_OK and normalized_type_name().",
-      "flagged_by_audit": "20261022-154932"
     },
     {
       "id": "quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/license/api/api_pb2.pyj",
@@ -312,11 +271,6 @@
       "flagged_by_audit": "20261025-124626"
     },
     {
-      "evidence": "crates/eve-server/src/services/industry_pi.rs:620-640 returns a flat PyRep::KeyVal (planetID, resourceTypeID, numBands, inRange, proximity, data) with a synthetic hash array (((planet_id * 31 + req_res_tid * 17 + b) % 100) / 100.0) instead of the (inRange, newData) 2-tuple unpacked by clientPlanet.pyj, and its tagged tests in crates/eve-server/tests/it/pi_planet_mgr_rpc_part2.rs:134-165 and crates/eve-server/tests/it/pi_planet_mgr_rpc_part3.rs:278-293 only match PyRep::Dict(_) | PyRep::KeyVal(_) | PyRep::List(_) without asserting any field or value.",
-      "id": "rpc:planetMgr.GetResourceData",
-      "flagged_by_audit": "20261025-144746"
-    },
-    {
       "id": "rpc:pvpFilamentMgr.GetActiveEvents",
       "reason": "",
       "evidence": "crates/eve-server/src/services/pvp_filament_mgr.rs:57-94 (`ensure_events`) seeds 3 hardcoded synthetic events (`\"Frigate Proving Grounds\"`, `\"1v1 Cruiser Proving Grounds\"`, `\"Destroyer 2v2 Proving Grounds\"`) with rolling timestamps relative to `now_unix` (`now_unix - 2d .. now_unix + 5d`) so event ID 2 is perpetually active whenever queried.",
@@ -383,11 +337,6 @@
       "evidence": "crates/eve-server/src/services/operations_manager_helpers.rs:106-127 (`load_survey_catalog`) hardcodes 3 synthetic surveys (`(1, \"Career Introduction Survey\", ..., 10_000.0, 0)`, `(2, \"Career Specialization Survey\", ..., 25_000.0, 250_000)`, `(3, \"Exploration & Combat Survey\", ..., 15_000.0, 100_000)`) with synthetic eligibility rules (`operations_manager_helpers.rs:201-214`), and `crates/eve-server/src/services/operations_manager.rs:1028-1053` returns those hardcoded IDs. Tested in `crates/eve-server/tests/it/rpc_operations_dungeons.rs:327-372`.",
       "id": "rpc:survey.PerformSurveyChecks",
       "flagged_by_audit": "20261025-145713"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/tourney_arena.rs:67-138 hardcodes tournament entries ((1, \"Alliance Tournament\"), (2, \"Open Arena Championship\")) and system labels (\"Local Tournament Grid\", \"Jita Arena\" for 30000142) instead of resolving solar system names from ctx.sde.solar_systems and persisted tournament setup state.",
-      "id": "rpc:tourneyMgr.GetTourneySetup",
-      "flagged_by_audit": "20261025-144746"
     },
     {
       "evidence": "This branch moved the tag onto test_esi_ui_autopilot_waypoint_and_open_windows (esi_ui_and_features.rs:265,274). That test checks only the server-side CharacterRecord.autopilot_waypoints list written by the ESI route (universe_routes.rs:1313-1324). Route waypoints live in the client's StarMapSvc, which scatters OnDestinationSet/OnDestinationCleared locally (triage.json:614-621), so the test never reaches route-waypoint behaviour.",

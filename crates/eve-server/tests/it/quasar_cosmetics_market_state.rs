@@ -11,9 +11,13 @@ use eve_proto::quasar::{
     QuasarDescriptorRegistry, WireMessage,
 };
 use eve_proto::PyRep;
-use eve_server::quasar_gateway::{STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_OK};
+use eve_server::quasar_gateway::{
+    STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_OK, STATUS_PRECONDITION_FAILED,
+};
 use eve_server::router::ServerContext;
-use eve_server::services::quasar_cosmetics_market::{BUYER_FEES_VERSION, PARAGON_CORP_ID};
+use eve_server::services::quasar_cosmetics_market::{
+    skin_tier_for_hex, BUYER_FEES_VERSION, PARAGON_CORP_ID,
+};
 use std::collections::HashMap;
 
 const CORP_A: u32 = 98_000_901;
@@ -34,6 +38,7 @@ fn seed_char(ctx: &ServerContext, cid: i64, corp: u32, isk: i64, plex: i64) {
         ch.corporation_id = corp as i64;
         ch.balance = IskCents::from_isk(isk);
         ch.plex_balance = plex;
+        ch.loyalty_points.insert(PARAGON_CORP_ID as i64, 50_000);
         ch.station_id = Some(60_003_760);
     });
 }
@@ -70,13 +75,7 @@ async fn paragon_hub_cosmetic_market_fees_and_component_listings() {
     encode_varint_field(1, 1, &mut pub_target);
     let mut req_pub = Vec::new();
     encode_bytes_field(1, &pub_target, &mut req_pub);
-    let rsp_bf_pub = quasar_rpc(
-        &ctx,
-        &mut buyer,
-        "eve_public.cosmetic.market.api.GetBrokerFeesRequest",
-        req_pub.clone(),
-    )
-    .await;
+    let rsp_bf_pub = quasar_rpc(&ctx, &mut buyer, "eve_public.cosmetic.market.api.GetBrokerFeesRequest", req_pub.clone()).await;
     assert_eq!(rsp_bf_pub.status_code, STATUS_OK);
     let wm_bf_pub = decode(&rsp_bf_pub);
     let per_dur_pub: Vec<_> = wm_bf_pub.fields.iter().filter(|f| f.field_number == 2).collect();
@@ -87,50 +86,22 @@ async fn paragon_hub_cosmetic_market_fees_and_component_listings() {
     seq(2, CORP_A as u64, &mut corp_target);
     let mut req_corp = Vec::new();
     encode_bytes_field(1, &corp_target, &mut req_corp);
-    let rsp_bf_corp = quasar_rpc(
-        &ctx,
-        &mut buyer,
-        "eve_public.cosmetic.market.api.GetBrokerFeesRequest",
-        req_corp.clone(),
-    )
-    .await;
+    let rsp_bf_corp = quasar_rpc(&ctx, &mut buyer, "eve_public.cosmetic.market.api.GetBrokerFeesRequest", req_corp.clone()).await;
     assert_eq!(rsp_bf_corp.status_code, STATUS_OK);
     let first_corp_fee = varint(&sub(&sub(&sub(&decode(&rsp_bf_corp), 2), 2), 2), 1).expect("corp fee");
     assert_eq!(first_corp_fee * 2, first_pub_fee, "Branded listing broker fee is 50% of public");
 
     // 2. GetTaxRateRequest: sint64 units = 20 (public) vs 10 (branded).
-    let rsp_tr_pub = quasar_rpc(
-        &ctx,
-        &mut buyer,
-        "eve_public.cosmetic.market.api.GetTaxRateRequest",
-        req_pub,
-    )
-    .await;
+    let rsp_tr_pub = quasar_rpc(&ctx, &mut buyer, "eve_public.cosmetic.market.api.GetTaxRateRequest", req_pub).await;
     assert_eq!(rsp_tr_pub.status_code, STATUS_OK);
-    let dyn_tr_pub = reg
-        .decode_dynamic(
-            "eve_public.cosmetic.market.api.GetTaxRateResponse",
-            &rsp_tr_pub.payload.as_ref().unwrap().value,
-        )
-        .expect("decode GetTaxRateResponse");
+    let dyn_tr_pub = reg.decode_dynamic("eve_public.cosmetic.market.api.GetTaxRateResponse", &rsp_tr_pub.payload.as_ref().unwrap().value).expect("decode GetTaxRateResponse");
     if let Some(DynamicValue::Message(tr)) = dyn_tr_pub.get(1) {
         assert_eq!(tr.get(1), Some(&DynamicValue::Sint64(20)));
     } else {
         panic!("Expected tax_rate message");
     }
-    let rsp_tr_corp = quasar_rpc(
-        &ctx,
-        &mut buyer,
-        "eve_public.cosmetic.market.api.GetTaxRateRequest",
-        req_corp.clone(),
-    )
-    .await;
-    let dyn_tr_corp = reg
-        .decode_dynamic(
-            "eve_public.cosmetic.market.api.GetTaxRateResponse",
-            &rsp_tr_corp.payload.as_ref().unwrap().value,
-        )
-        .expect("decode GetTaxRateResponse");
+    let rsp_tr_corp = quasar_rpc(&ctx, &mut buyer, "eve_public.cosmetic.market.api.GetTaxRateRequest", req_corp.clone()).await;
+    let dyn_tr_corp = reg.decode_dynamic("eve_public.cosmetic.market.api.GetTaxRateResponse", &rsp_tr_corp.payload.as_ref().unwrap().value).expect("decode GetTaxRateResponse");
     if let Some(DynamicValue::Message(tr)) = dyn_tr_corp.get(1) {
         assert_eq!(tr.get(1), Some(&DynamicValue::Sint64(10)));
     }
@@ -140,41 +111,20 @@ async fn paragon_hub_cosmetic_market_fees_and_component_listings() {
     let mut skin_id = Vec::new();
     encode_string_field(1, "cafebabe1234", &mut skin_id);
     encode_bytes_field(2, &skin_id, &mut req_buyer_fee);
-    let rsp_buyer_fee = quasar_rpc(
-        &ctx,
-        &mut buyer,
-        "eve_public.cosmetic.market.api.GetBuyerFeeRequest",
-        req_buyer_fee,
-    )
-    .await;
+    let rsp_buyer_fee = quasar_rpc(&ctx, &mut buyer, "eve_public.cosmetic.market.api.GetBuyerFeeRequest", req_buyer_fee).await;
     assert_eq!(rsp_buyer_fee.status_code, STATUS_OK);
     let lp_msg = sub(&sub(&decode(&rsp_buyer_fee), 1), 1);
     assert_eq!(varint(&sub(&lp_msg, 1), 1), Some(PARAGON_CORP_ID));
     assert!(varint(&lp_msg, 2).unwrap_or(0) >= 2_500);
 
-    let rsp_defs = quasar_rpc(
-        &ctx,
-        &mut buyer,
-        "eve_public.cosmetic.market.api.GetBuyerFeesDefinitionRequest",
-        Vec::new(),
-    )
-    .await;
+    let rsp_defs = quasar_rpc(&ctx, &mut buyer, "eve_public.cosmetic.market.api.GetBuyerFeesDefinitionRequest", Vec::new()).await;
     assert_eq!(rsp_defs.status_code, STATUS_OK);
     let wm_defs = decode(&rsp_defs);
     assert_eq!(wm_defs.fields.iter().filter(|f| f.field_number == 1).count(), 5);
-    assert_eq!(
-        std::str::from_utf8(&bytes(&wm_defs, 2)).unwrap(),
-        BUYER_FEES_VERSION
-    );
+    assert_eq!(std::str::from_utf8(&bytes(&wm_defs, 2)).unwrap(), BUYER_FEES_VERSION);
 
     // 4. Component listings GetAllRequest + InitiatePurchaseListingRequest.
-    let rsp_comp_all = quasar_rpc(
-        &ctx,
-        &mut buyer,
-        "eve_public.cosmetic.market.component.listing.api.GetAllRequest",
-        Vec::new(),
-    )
-    .await;
+    let rsp_comp_all = quasar_rpc(&ctx, &mut buyer, "eve_public.cosmetic.market.component.listing.api.GetAllRequest", Vec::new()).await;
     assert_eq!(rsp_comp_all.status_code, STATUS_OK);
     let wm_comp = decode(&rsp_comp_all);
     let entries: Vec<_> = wm_comp.fields.iter().filter(|f| f.field_number == 1).collect();
@@ -188,6 +138,18 @@ async fn paragon_hub_cosmetic_market_fees_and_component_listings() {
         Some(4726),
         "Seeded component listing must reference an authentic SDE group 4726 type"
     );
+
+    let mut overflow_buy_req = Vec::new();
+    uuid_field(1, &first_uuid, &mut overflow_buy_req);
+    encode_varint_field(2, u64::MAX, &mut overflow_buy_req);
+    let rsp_overflow = quasar_rpc(
+        &ctx,
+        &mut buyer,
+        "eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingRequest",
+        overflow_buy_req,
+    )
+    .await;
+    assert_eq!(rsp_overflow.status_code, STATUS_BAD_REQUEST);
 
     let mut buy_req = Vec::new();
     uuid_field(1, &first_uuid, &mut buy_req);
@@ -253,12 +215,13 @@ async fn paragon_hub_skin_listings_lifecycle_admin_and_transaction_notices() {
     let mut buyer = player(72_002, buyer_cid, CORP_B);
     let mut poor_buyer = player(72_003, poor_cid, CORP_B);
     let mut gm = build_sess(72_004, 90_000_001, CORP_A);
+    let mut seller_gm = build_sess(72_005, seller_cid, CORP_A);
 
     let mut seller_rx = subscribe(&ctx, &mut seller).await;
     let mut buyer_rx = subscribe(&ctx, &mut buyer).await;
     let mut poor_rx = subscribe(&ctx, &mut poor_buyer).await;
 
-    // 1. Negative validation on InitiateCreateListingRequest (empty request -> 400).
+    // 1. Negative validation on InitiateCreateListingRequest (empty -> 400, unowned skin -> 412, overflow qty -> 400).
     let bad_create = quasar_rpc(
         &ctx,
         &mut seller,
@@ -289,6 +252,39 @@ async fn paragon_hub_skin_listings_lifecycle_admin_and_transaction_notices() {
         encode_bytes_field(6, &target, &mut req);
         req
     };
+    let rsp_unowned = quasar_rpc(
+        &ctx,
+        &mut seller,
+        "eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest",
+        build_create_req("deadbeefcafebabe", 3),
+    )
+    .await;
+    assert_eq!(rsp_unowned.status_code, STATUS_PRECONDITION_FAILED);
+    let rsp_overflow_qty = quasar_rpc(
+        &ctx,
+        &mut seller,
+        "eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest",
+        build_create_req("deadbeefcafebabe", u64::MAX),
+    )
+    .await;
+    assert_eq!(rsp_overflow_qty.status_code, STATUS_BAD_REQUEST);
+
+    for (hex, count) in [("deadbeefcafebabe", 4u64), ("feedface00112233", 2u64)] {
+        let mut grant_req = Vec::new();
+        let mut skin_id = Vec::new();
+        encode_string_field(1, hex, &mut skin_id);
+        encode_bytes_field(1, &skin_id, &mut grant_req);
+        encode_varint_field(2, count, &mut grant_req);
+        let rsp_grant = quasar_rpc(
+            &ctx,
+            &mut seller_gm,
+            "eve_public.cosmetic.ship.skin.thirdparty.license.api.admin.GrantRequest",
+            grant_req,
+        )
+        .await;
+        assert_eq!(rsp_grant.status_code, STATUS_OK);
+    }
+
     let rsp_create = quasar_rpc(
         &ctx,
         &mut seller,
@@ -380,6 +376,11 @@ async fn paragon_hub_skin_listings_lifecycle_admin_and_transaction_notices() {
         assert_eq!(
             s.characters[&(buyer_cid as i64)].balance,
             IskCents::from_isk(4_000_000)
+        );
+        let expected_em_fee = skin_tier_for_hex("deadbeefcafebabe") as i64 * 1_000 * 2;
+        assert_eq!(
+            s.characters[&(buyer_cid as i64)].loyalty_points[&(PARAGON_CORP_ID as i64)],
+            50_000 - expected_em_fee
         );
         // Seller had 1,000,000 - 100,000 broker fee + 800,000 (80% of 1,000,000) = 1,700,000 ISK.
         assert_eq!(

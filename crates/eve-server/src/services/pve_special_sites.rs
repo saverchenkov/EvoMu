@@ -282,10 +282,20 @@ pub fn record_system_interference_activity(
     }
 }
 
-/// DATA GAP: the real Triglavian minor-victory system list (empire-space systems won during the
-/// Triglavian invasion chapter 3, which are NOT Pochven) is not present in the imported SDE or in any
-/// client static data available to this repo, so no systems are returned. Recorded in
-/// docs/parity/task_notes.json (Z-5). Pochven is deliberately not substituted: it is a different set.
+/// DATA GAP: the full Tranquility Chapter 3 invasion outcome lists (~60 EDENCOM Fortress systems,
+/// ~69 EDENCOM Minor Victory systems, ~31 Triglavian Minor Victory systems) are external live-server
+/// history (`kybernaut.space/invasions` in `eve-wiki/articles/EDENCOM_systems.md:49`) not present in
+/// the imported V24.01 SDE or client `.fsdbinary` tables. Only systems explicitly named by outcome in
+/// `eve-wiki` are seeded (`Arshat` `30_002_253` for EDENCOM Fortress per `Triglavian_Invasion_(Chapter_3).md:174`;
+/// `Bei` `30_002_048` for EDENCOM Minor Victory per `Topology.md:45`).
+pub fn edencom_fortress_systems() -> Vec<SolarSystemId> {
+    vec![30_002_253] // Arshat (Domain, security 0.58)
+}
+
+pub fn edencom_minor_victory_systems() -> Vec<SolarSystemId> {
+    vec![30_002_048] // Bei (Metropolis, security 0.56)
+}
+
 pub fn triglavian_minor_victory_systems() -> Vec<SolarSystemId> {
     Vec::new()
 }
@@ -300,10 +310,11 @@ pub fn ensure_triglavian_sites_for_system(reg: &mut PveSpecialSitesRegistry, sys
         vec![
             TriglavianSiteRecord {
                 instance_id: base_inst + 1,
-                dungeon_id: 8922,
-                dungeon_name: "Observatory Flashpoint".into(),
+                dungeon_id: 8808, // sde_dungeons:8808 "EDENCOM Field Base" (faction 500027)
+                dungeon_name: "EDENCOM Field Base".into(),
                 solar_system_id: sys_id,
                 faction_owner_id: 500_027,
+                // SYNTHETIC: per-site Chapter 3 payout/drop tables are server-authored in CCP backend
                 base_isk: 35_000_000,
                 survey_db_drop: 150,
                 completed: false,
@@ -315,10 +326,11 @@ pub fn ensure_triglavian_sites_for_system(reg: &mut PveSpecialSitesRegistry, sys
             },
             TriglavianSiteRecord {
                 instance_id: base_inst + 2,
-                dungeon_id: 8802,
+                dungeon_id: 8802, // sde_dungeons:8802 "Major Conduit" (faction 500026)
                 dungeon_name: "Major Conduit".into(),
                 solar_system_id: sys_id,
                 faction_owner_id: 500_026,
+                // SYNTHETIC: per-site Chapter 3 payout/drop tables are server-authored in CCP backend
                 base_isk: 25_000_000,
                 survey_db_drop: 100,
                 completed: false,
@@ -395,6 +407,12 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
             seed_incursion_for_constellation(ctx, reg, cid);
         }
 
+        if reg.edencom_fortress_systems.is_empty() {
+            reg.edencom_fortress_systems = edencom_fortress_systems();
+        }
+        if reg.edencom_minor_victory_systems.is_empty() {
+            reg.edencom_minor_victory_systems = edencom_minor_victory_systems();
+        }
         if reg.triglavian_minor_victory_systems.is_empty() {
             reg.triglavian_minor_victory_systems = triglavian_minor_victory_systems();
         }
@@ -458,7 +476,13 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
             );
         }
 
-        for sys_id in reg.triglavian_minor_victory_systems.clone() {
+        for sys_id in reg
+            .edencom_minor_victory_systems
+            .iter()
+            .chain(reg.triglavian_minor_victory_systems.iter())
+            .copied()
+            .collect::<Vec<_>>()
+        {
             ensure_triglavian_sites_for_system(reg, sys_id);
         }
         reg.incursions

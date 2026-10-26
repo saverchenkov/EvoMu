@@ -86,6 +86,8 @@ pub mod quasar_cosmetics_live;
 pub mod quasar_cosmetics_market;
 pub mod quasar_cosmetics_services;
 pub mod quasar_cosmetics_drafts;
+pub mod quasar_cosmetics_skinr;
+pub mod quasar_cosmetics_skinr_seq;
 pub mod quasar_daily_goals;
 pub mod quasar_economy_planetary_industry;
 pub mod quasar_entitlement_membership;

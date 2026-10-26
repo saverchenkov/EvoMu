@@ -16,10 +16,11 @@
 
 #![forbid(unsafe_code)]
 
+use super::quasar_cosmetics_skinr::{SkinrCosmeticsData, ThirdPartySkinLicense, SKINR_BLOB_KEY};
 use super::quasar_social_chat::ctx_queue_notice;
 use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
-    STATUS_NOT_FOUND,
+    STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED,
 };
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldRepository};
 use eve_proto::quasar::{
@@ -37,6 +38,10 @@ pub const PARAGON_CORP_ID: u64 = 1_000_419;
 const GROUP_SHIP_SKIN_DESIGN_ELEMENT: u32 = 4726;
 /// Current Paragon Hub buyer fee schedule version string.
 pub const BUYER_FEES_VERSION: &str = "v24.01.1";
+/// Maximum allowed unit or total price in ISK or PLEX cents (`10_000_000_000_000` = 10 trillion).
+pub const MAX_LISTING_PRICE_UNITS: u64 = 10_000_000_000_000;
+/// Maximum allowed listing or purchase quantity (`1_000_000`).
+pub const MAX_LISTING_QUANTITY: u32 = 1_000_000;
 /// Standard Paragon Hub listing durations in seconds (`tradingUtil.pyj`: 1, 3, 7, 14, 30, 90 days).
 const LISTING_DURATIONS_SECS: [(u64, u64); 6] = [
     (86_400, 100_000),
@@ -245,14 +250,86 @@ fn as_u64(v: &DynamicValue) -> Option<u64> {
     match v {
         DynamicValue::Uint64(u) => Some(*u),
         DynamicValue::Uint32(u) => Some(*u as u64),
-        DynamicValue::Int64(i) | DynamicValue::Sint64(i) => {
-            u64::try_from(*i).ok().or_else(|| Some(((*i << 1) ^ (*i >> 63)) as u64))
-        }
-        DynamicValue::Int32(i) | DynamicValue::Sint32(i) => {
-            u64::try_from(*i).ok().or_else(|| Some((((i64::from(*i)) << 1) ^ ((i64::from(*i)) >> 63)) as u64))
-        }
+        DynamicValue::Int64(i) | DynamicValue::Sint64(i) => u64::try_from(*i).ok(),
+        DynamicValue::Int32(i) | DynamicValue::Sint32(i) => u64::try_from(*i).ok(),
         _ => None,
     }
+}
+
+fn checked_isk_cents(isk_units: u64) -> Option<IskCents> {
+    if isk_units > MAX_LISTING_PRICE_UNITS {
+        return None;
+    }
+    let cents_u64 = isk_units.checked_mul(100)?;
+    let cents_i64 = i64::try_from(cents_u64).ok()?;
+    Some(IskCents(cents_i64))
+}
+
+fn sync_and_get_available_skin_licenses(
+    st: &CosmeticsMarketState,
+    data: &mut CosmeticsMarketData,
+    cid: u32,
+    skin_hex: &str,
+) -> u32 {
+    let skinr_unactivated = st.db.with_snapshot(|s| {
+        s.quasar_state_blobs
+            .get(SKINR_BLOB_KEY)
+            .and_then(|j| serde_json::from_str::<SkinrCosmeticsData>(j).ok())
+            .and_then(|d| {
+                d.skin_licenses
+                    .get(&format!("{cid}:{skin_hex}"))
+                    .map(|l| u32::try_from(l.unactivated).unwrap_or(u32::MAX))
+            })
+    });
+    let char_map = data.owned_skin_licenses.entry(cid).or_default();
+    match (char_map.get(skin_hex).copied(), skinr_unactivated) {
+        (Some(local), Some(remote)) => {
+            let merged = local.max(remote);
+            char_map.insert(skin_hex.to_string(), merged);
+            merged
+        }
+        (Some(local), None) => local,
+        (None, Some(remote)) => {
+            char_map.insert(skin_hex.to_string(), remote);
+            remote
+        }
+        (None, None) => 0,
+    }
+}
+
+fn update_skinr_license_blob(
+    st: &CosmeticsMarketState,
+    cid: u32,
+    skin_hex: &str,
+    new_unactivated: u32,
+    delta_escrowed: i64,
+    now_unix: u64,
+) {
+    st.db.with_mut_snapshot(|s| {
+        let mut d: SkinrCosmeticsData = s
+            .quasar_state_blobs
+            .get(SKINR_BLOB_KEY)
+            .and_then(|j| serde_json::from_str(j).ok())
+            .unwrap_or_default();
+        let key = format!("{cid}:{skin_hex}");
+        let entry = d.skin_licenses.entry(key).or_insert(ThirdPartySkinLicense {
+            character_id: cid,
+            skin_hex: skin_hex.to_string(),
+            activated: false,
+            unactivated: u64::from(new_unactivated),
+            escrowed: 0,
+            first_acquired_unix: now_unix,
+        });
+        entry.unactivated = u64::from(new_unactivated);
+        if delta_escrowed >= 0 {
+            entry.escrowed = entry.escrowed.saturating_add(delta_escrowed as u64);
+        } else {
+            entry.escrowed = entry.escrowed.saturating_sub((-delta_escrowed) as u64);
+        }
+        if let Ok(json) = serde_json::to_string(&d) {
+            s.quasar_state_blobs.insert(SKINR_BLOB_KEY.into(), json);
+        }
+    });
 }
 
 fn as_bool(v: &DynamicValue) -> Option<bool> {
@@ -405,7 +482,7 @@ fn broker_fee_for(duration_secs: u64, target: &ListingTargetRecord) -> u64 {
     }
 }
 
-fn skin_tier_for_hex(skin_hex: &str) -> u32 {
+pub fn skin_tier_for_hex(skin_hex: &str) -> u32 {
     let sum: u32 = skin_hex.bytes().map(u32::from).sum();
     (sum % 5) + 1
 }
@@ -538,11 +615,11 @@ fn component_initiate_purchase(
     let cid = require_char(ctx)?;
     let uuid = uuid_of(msg, 1)
         .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing component listing UUID".to_string()))?;
-    let quantity = msg.get(2).and_then(as_u64).unwrap_or(0) as u32;
-    if quantity == 0 {
+    let quantity_u64 = msg.get(2).and_then(as_u64).unwrap_or(0);
+    if quantity_u64 == 0 || quantity_u64 > u64::from(MAX_LISTING_QUANTITY) {
         return Err((
             STATUS_BAD_REQUEST,
-            "Purchase quantity must be positive".to_string(),
+            format!("Purchase quantity must be in 1..={MAX_LISTING_QUANTITY}"),
         ));
     }
     let immediately_activate = msg.get(3).and_then(as_bool).unwrap_or(false);
@@ -558,54 +635,86 @@ fn component_initiate_purchase(
         let tx = next_uuid(&mut data, b"COSMTXID");
         (l, tx)
     };
+
+    let granted_qty_u64 = listing
+        .bundle_size
+        .checked_mul(quantity_u64)
+        .filter(|&q| q > 0)
+        .ok_or_else(|| (STATUS_BAD_REQUEST, "Component bundle quantity overflow".to_string()))?;
+    let granted_qty = i32::try_from(granted_qty_u64)
+        .map_err(|_| (STATUS_BAD_REQUEST, "Component bundle quantity exceeds i32::MAX".to_string()))?;
+    let checked_isk_total = match listing.price_isk {
+        Some(isk_unit) => Some(
+            isk_unit
+                .checked_mul(quantity_u64)
+                .and_then(checked_isk_cents)
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Component ISK total overflows".to_string()))?,
+        ),
+        None => None,
+    };
+    let checked_plex_total = match listing.price_plex_cents {
+        Some(plex_cents) => {
+            let cents = plex_cents
+                .checked_mul(quantity_u64)
+                .filter(|&c| c <= MAX_LISTING_PRICE_UNITS)
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Component PLEX total overflows".to_string()))?;
+            let units = cents
+                .checked_add(99)
+                .map(|v| v / 100)
+                .and_then(|v| i64::try_from(v).ok())
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Component PLEX units overflow".to_string()))?;
+            Some(units)
+        }
+        None => None,
+    };
     st.save();
 
-        let succeeded = st.db.with_mut_snapshot(|s| {
-            let Some(ch) = s.characters.get_mut(&(cid as i64)) else {
+    let succeeded = st.db.with_mut_snapshot(|s| {
+        let Some(ch) = s.characters.get_mut(&(cid as i64)) else {
+            return false;
+        };
+        if let Some(total_cost) = checked_isk_total {
+            let Some(rem) = ch.balance.checked_sub(total_cost) else {
                 return false;
             };
-            if let Some(isk_unit) = listing.price_isk {
-                let total = IskCents::from_isk((isk_unit * u64::from(quantity)) as i64);
-                let Some(rem) = ch.balance.checked_sub(total) else {
-                    return false;
-                };
-                ch.balance = rem;
-            } else if let Some(plex_cents) = listing.price_plex_cents {
-                let total_plex = ((plex_cents * u64::from(quantity)) + 99) / 100;
-                if (ch.plex_balance as u64) < total_plex {
-                    return false;
-                }
-                ch.plex_balance -= total_plex as i64;
+            ch.balance = rem;
+        } else if let Some(total_plex) = checked_plex_total {
+            if ch.plex_balance < total_plex {
+                return false;
             }
-            let location_id = ch
-                .station_id
-                .or(ch.structure_id)
-                .unwrap_or(ch.home_station_id.max(60_003_760));
-            let item_id = s
-                .items
-                .keys()
-                .copied()
-                .max()
-                .unwrap_or(990_000_000)
-                .max(990_000_000)
-                + 1;
-            let granted_qty = (listing.bundle_size * u64::from(quantity)).max(1) as i32;
-            s.items.insert(
+            let Some(rem_plex) = ch.plex_balance.checked_sub(total_plex) else {
+                return false;
+            };
+            ch.plex_balance = rem_plex;
+        }
+        let location_id = ch
+            .station_id
+            .or(ch.structure_id)
+            .unwrap_or(ch.home_station_id.max(60_003_760));
+        let item_id = s
+            .items
+            .keys()
+            .copied()
+            .max()
+            .unwrap_or(990_000_000)
+            .max(990_000_000)
+            + 1;
+        s.items.insert(
+            item_id,
+            InventoryItemRecord {
                 item_id,
-                InventoryItemRecord {
-                    item_id,
-                    type_id: listing.component_item_type_id,
-                    owner_id: cid as i64,
-                    location_id,
-                    flag: InventoryFlag::Hangar,
-                    quantity: granted_qty,
-                    singleton: false,
-                    version: 1,
-                    ..Default::default()
-                },
-            );
-            true
-        });
+                type_id: listing.component_item_type_id,
+                owner_id: cid as i64,
+                location_id,
+                flag: InventoryFlag::Hangar,
+                quantity: granted_qty,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        true
+    });
 
     queue_transaction_notice(cid, &tx_uuid, succeeded, now);
     let mut out = Vec::new();
@@ -769,28 +878,48 @@ fn skin_initiate_create(
             "Listing duration must be positive".to_string(),
         ));
     }
-    let quantity = msg.get(5).and_then(as_u64).unwrap_or(0) as u32;
-    if quantity == 0 {
+    let quantity_u64 = msg.get(5).and_then(as_u64).unwrap_or(0);
+    if quantity_u64 == 0 || quantity_u64 > u64::from(MAX_LISTING_QUANTITY) {
         return Err((
             STATUS_BAD_REQUEST,
-            "Listing quantity must be positive".to_string(),
+            format!("Listing quantity must be in 1..={MAX_LISTING_QUANTITY}"),
         ));
     }
-    let target = parse_listing_target(sub(msg, 6));
-    let broker_fee = IskCents::from_isk(broker_fee_for(duration_secs, &target) as i64);
-    let now = ctx.now_unix();
-
-    let tx_uuid = {
-        let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
-        let avail = data
-            .owned_skin_licenses
-            .entry(cid)
-            .or_default()
-            .entry(skin_hex.clone())
-            .or_insert(5);
-        if *avail < quantity {
+    let quantity = quantity_u64 as u32;
+    if let Some(isk_unit) = price_isk {
+        if isk_unit > MAX_LISTING_PRICE_UNITS
+            || isk_unit.checked_mul(quantity_u64).and_then(checked_isk_cents).is_none()
+        {
             return Err((
                 STATUS_BAD_REQUEST,
+                "Listing ISK price exceeds maximum safe bounds".to_string(),
+            ));
+        }
+    }
+    if let Some(plex_cents) = price_plex_cents {
+        if plex_cents > MAX_LISTING_PRICE_UNITS
+            || plex_cents
+                .checked_mul(quantity_u64)
+                .filter(|&v| v <= MAX_LISTING_PRICE_UNITS)
+                .is_none()
+        {
+            return Err((
+                STATUS_BAD_REQUEST,
+                "Listing PLEX price exceeds maximum safe bounds".to_string(),
+            ));
+        }
+    }
+    let target = parse_listing_target(sub(msg, 6));
+    let broker_fee = checked_isk_cents(broker_fee_for(duration_secs, &target))
+        .ok_or_else(|| (STATUS_BAD_REQUEST, "Broker fee overflows".to_string()))?;
+    let now = ctx.now_unix();
+
+    let (tx_uuid, new_avail) = {
+        let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
+        let avail = sync_and_get_available_skin_licenses(st, &mut data, cid, &skin_hex);
+        if avail < quantity {
+            return Err((
+                STATUS_PRECONDITION_FAILED,
                 "Insufficient unactivated SKIN licenses for listing".to_string(),
             ));
         }
@@ -816,12 +945,11 @@ fn skin_initiate_create(
                 out,
             ));
         }
-        *data
-            .owned_skin_licenses
+        let rem_avail = avail - quantity;
+        data.owned_skin_licenses
             .entry(cid)
             .or_default()
-            .entry(skin_hex.clone())
-            .or_insert(5) -= quantity;
+            .insert(skin_hex.clone(), rem_avail);
         let listing_uuid = next_uuid(&mut data, b"SKINLIST");
         let rec = SkinListingRecord {
             uuid: listing_uuid,
@@ -830,14 +958,15 @@ fn skin_initiate_create(
             expires_unix: now.saturating_add(duration_secs),
             price_isk,
             price_plex_cents,
-            skin_hex,
+            skin_hex: skin_hex.clone(),
             quantity,
             branded: target.is_branded(),
             target,
         };
         data.skin_listings.insert(hex(&listing_uuid), rec);
-        tx
+        (tx, rem_avail)
     };
+    update_skinr_license_blob(st, cid, &skin_hex, new_avail, i64::from(quantity), now);
     st.save();
     queue_transaction_notice(cid, &tx_uuid, true, now);
     let mut out = Vec::new();
@@ -857,7 +986,8 @@ fn skin_cancel_listing(
     let uuid = uuid_of(msg, 1)
         .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing skin listing UUID".to_string()))?;
     let key = hex(&uuid);
-    {
+    let now = ctx.now_unix();
+    let restored = {
         let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
         let Some(existing) = data.skin_listings.get(&key) else {
             return Err((STATUS_NOT_FOUND, "Skin listing not found".to_string()));
@@ -869,14 +999,19 @@ fn skin_cancel_listing(
             ));
         }
         if let Some(removed) = data.skin_listings.remove(&key) {
-            let entry = data
-                .owned_skin_licenses
+            let cur = sync_and_get_available_skin_licenses(st, &mut data, cid, &removed.skin_hex);
+            let new_avail = cur.saturating_add(removed.quantity);
+            data.owned_skin_licenses
                 .entry(cid)
                 .or_default()
-                .entry(removed.skin_hex)
-                .or_insert(0);
-            *entry = entry.saturating_add(removed.quantity);
+                .insert(removed.skin_hex.clone(), new_avail);
+            Some((removed.skin_hex, new_avail, removed.quantity))
+        } else {
+            None
         }
+    };
+    if let Some((skin_hex, new_avail, qty)) = restored {
+        update_skinr_license_blob(st, cid, &skin_hex, new_avail, -i64::from(qty), now);
     }
     st.save();
     Ok(any(
@@ -893,13 +1028,14 @@ fn skin_initiate_purchase(
     let cid = require_char(ctx)?;
     let uuid = uuid_of(msg, 1)
         .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing skin listing UUID".to_string()))?;
-    let quantity = msg.get(2).and_then(as_u64).unwrap_or(0) as u32;
-    if quantity == 0 {
+    let quantity_u64 = msg.get(2).and_then(as_u64).unwrap_or(0);
+    if quantity_u64 == 0 || quantity_u64 > u64::from(MAX_LISTING_QUANTITY) {
         return Err((
             STATUS_BAD_REQUEST,
-            "Purchase quantity must be positive".to_string(),
+            format!("Purchase quantity must be in 1..={MAX_LISTING_QUANTITY}"),
         ));
     }
+    let quantity = quantity_u64 as u32;
     if let Some(ver) = msg.get(3).and_then(as_str) {
         if !ver.is_empty() && ver != BUYER_FEES_VERSION {
             return Err((
@@ -941,57 +1077,142 @@ fn skin_initiate_purchase(
     };
 
     let tax_pct: u64 = if listing.branded { 10 } else { 20 };
+    let tier = u64::from(skin_tier_for_hex(&listing.skin_hex));
+    let fee_per_unit = if listing.branded { tier * 2_500 } else { tier * 1_000 };
+    let buyer_lp_fee = fee_per_unit
+        .checked_mul(quantity_u64)
+        .and_then(|v| i64::try_from(v).ok())
+        .ok_or_else(|| (STATUS_BAD_REQUEST, "Buyer EverMark fee overflows".to_string()))?;
+
+    let checked_isk_settlement = match listing.price_isk {
+        Some(isk_unit) => {
+            let total_isk = isk_unit
+                .checked_mul(quantity_u64)
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Total ISK price overflows".to_string()))?;
+            let total_cost = checked_isk_cents(total_isk)
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Total ISK price exceeds limit".to_string()))?;
+            let tax_isk = total_isk
+                .checked_mul(tax_pct)
+                .map(|v| v / 100)
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "ISK tax calculation overflows".to_string()))?;
+            let net_isk = total_isk
+                .checked_sub(tax_isk)
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "ISK net calculation underflows".to_string()))?;
+            let net_credit = checked_isk_cents(net_isk)
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Net ISK credit exceeds limit".to_string()))?;
+            Some((total_cost, net_credit))
+        }
+        None => None,
+    };
+    let checked_plex_settlement = match listing.price_plex_cents {
+        Some(plex_cents) => {
+            let total_cents = plex_cents
+                .checked_mul(quantity_u64)
+                .filter(|&c| c <= MAX_LISTING_PRICE_UNITS)
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Total PLEX price overflows".to_string()))?;
+            let total_plex = total_cents
+                .checked_add(99)
+                .map(|v| v / 100)
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Total PLEX units overflow".to_string()))?;
+            let total_plex_i64 = i64::try_from(total_plex)
+                .map_err(|_| (STATUS_BAD_REQUEST, "Total PLEX units exceed i64".to_string()))?;
+            let tax_plex = total_plex
+                .checked_mul(tax_pct)
+                .map(|v| v / 100)
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "PLEX tax calculation overflows".to_string()))?;
+            let net_plex_i64 = i64::try_from(total_plex.saturating_sub(tax_plex))
+                .map_err(|_| (STATUS_BAD_REQUEST, "Net PLEX credit exceeds i64".to_string()))?;
+            Some((total_plex_i64, net_plex_i64))
+        }
+        None => None,
+    };
+
     let settled = st.db.with_mut_snapshot(|s| {
         let Some(buyer) = s.characters.get(&(cid as i64)) else {
             return false;
         };
-        if let Some(isk_unit) = listing.price_isk {
-            let total_isk = isk_unit * u64::from(quantity);
-            let total_cost = IskCents::from_isk(total_isk as i64);
-            if buyer.balance < total_cost {
+        let cur_lp = buyer
+            .loyalty_points
+            .get(&(PARAGON_CORP_ID as i64))
+            .copied()
+            .unwrap_or(0);
+        if cur_lp < buyer_lp_fee {
+            return false;
+        }
+        if let Some((total_cost, net_credit)) = checked_isk_settlement {
+            if buyer.balance.checked_sub(total_cost).is_none() {
                 return false;
             }
+            if let Some(seller) = s.characters.get(&(listing.seller_id as i64)) {
+                if seller.balance.checked_add(net_credit).is_none() {
+                    return false;
+                }
+            }
             if let Some(b) = s.characters.get_mut(&(cid as i64)) {
-                b.balance = b.balance.checked_sub(total_cost).unwrap_or(IskCents::from_isk(0));
+                b.balance = b.balance.checked_sub(total_cost).unwrap_or(b.balance);
+                if let Some(lp) = b.loyalty_points.get_mut(&(PARAGON_CORP_ID as i64)) {
+                    *lp -= buyer_lp_fee;
+                }
             }
-            let net_isk = total_isk.saturating_sub((total_isk * tax_pct) / 100);
             if let Some(seller) = s.characters.get_mut(&(listing.seller_id as i64)) {
-                seller.balance = seller
-                    .balance
-                    .checked_add(IskCents::from_isk(net_isk as i64))
-                    .unwrap_or(seller.balance);
+                seller.balance = seller.balance.checked_add(net_credit).unwrap_or(seller.balance);
             }
-        } else if let Some(plex_cents) = listing.price_plex_cents {
-            let total_plex = ((plex_cents * u64::from(quantity)) + 99) / 100;
-            if (buyer.plex_balance as u64) < total_plex {
+        } else if let Some((total_plex, net_plex)) = checked_plex_settlement {
+            if buyer.plex_balance < total_plex {
                 return false;
             }
+            if let Some(seller) = s.characters.get(&(listing.seller_id as i64)) {
+                if seller.plex_balance.checked_add(net_plex).is_none() {
+                    return false;
+                }
+            }
             if let Some(b) = s.characters.get_mut(&(cid as i64)) {
-                b.plex_balance -= total_plex as i64;
+                b.plex_balance -= total_plex;
+                if let Some(lp) = b.loyalty_points.get_mut(&(PARAGON_CORP_ID as i64)) {
+                    *lp -= buyer_lp_fee;
+                }
             }
-            let net_plex = total_plex.saturating_sub((total_plex * tax_pct) / 100);
             if let Some(seller) = s.characters.get_mut(&(listing.seller_id as i64)) {
-                seller.plex_balance += net_plex as i64;
+                seller.plex_balance += net_plex;
             }
+        } else {
+            return false;
         }
         true
     });
 
     if settled {
-        let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(l) = data.skin_listings.get_mut(&key) {
-            l.quantity = l.quantity.saturating_sub(quantity);
-            if l.quantity == 0 {
-                data.skin_listings.remove(&key);
+        let (buyer_new_avail, seller_avail) = {
+            let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(l) = data.skin_listings.get_mut(&key) {
+                l.quantity = l.quantity.saturating_sub(quantity);
+                if l.quantity == 0 {
+                    data.skin_listings.remove(&key);
+                }
             }
-        }
-        let buyer_entry = data
-            .owned_skin_licenses
-            .entry(cid)
-            .or_default()
-            .entry(listing.skin_hex)
-            .or_insert(0);
-        *buyer_entry = buyer_entry.saturating_add(quantity);
+            let b_cur = sync_and_get_available_skin_licenses(st, &mut data, cid, &listing.skin_hex);
+            let b_new = b_cur.saturating_add(quantity);
+            data.owned_skin_licenses
+                .entry(cid)
+                .or_default()
+                .insert(listing.skin_hex.clone(), b_new);
+            let s_cur = sync_and_get_available_skin_licenses(
+                st,
+                &mut data,
+                listing.seller_id,
+                &listing.skin_hex,
+            );
+            (b_new, s_cur)
+        };
+        update_skinr_license_blob(
+            st,
+            listing.seller_id,
+            &listing.skin_hex,
+            seller_avail,
+            -i64::from(quantity),
+            now,
+        );
+        update_skinr_license_blob(st, cid, &listing.skin_hex, buyer_new_avail, 0, now);
     }
     st.save();
     queue_transaction_notice(cid, &tx_uuid, settled, now);

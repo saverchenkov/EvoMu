@@ -131,6 +131,7 @@ mod quasar_space_cosmetics_complete;
 mod quasar_extended_endpoints;
 mod quasar_extended_endpoints_part2;
 mod quasar_cosmetics_sovereignty;
+mod quasar_cosmetics_skinr_state;
 mod quasar_fw_occupancy;
 mod quasar_sov_equinox_hub;
 mod quasar_sov_pirate_remediation;
