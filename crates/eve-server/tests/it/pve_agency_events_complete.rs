@@ -338,10 +338,38 @@ async fn test_agency_warp_and_keeper_room_navigation() {
         .expect("warp_to_content");
     assert_eq!(warp_rep, PyRep::None);
 
-    // Verify ship is in warp in Ballpark
+    // Verify ship is in warp in Ballpark to the authentic server site position
     let hek_handle = ctx.systems.get_or_spawn(HEK);
     let (_, ship_ball) = hek_handle.get_ball_snapshot(ship_id).await.unwrap().expect("ship ball in space");
-    assert!(matches!(ship_ball.mode, MovementMode::Warp { .. }), "Ship must be in Warp mode");
+    let target_iid = pieces[0].dict_get("instanceID").and_then(|v| v.as_i64()).unwrap();
+    let expected_pos = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system
+            .get(&HEK)
+            .and_then(|sites| {
+                sites.iter().find(|s| eve_server::services::pve_dungeon_cache::registry_instance_id(&s.site_id) == target_iid)
+            })
+            .map(|s| glam::DVec3::from_array(s.position))
+    }).expect("resolved server site position");
+
+    match ship_ball.mode {
+        MovementMode::Warp { destination, .. } => {
+            assert_eq!(destination, expected_pos, "Warp destination must match server site position");
+            assert_ne!(destination, glam::DVec3::new(250_000_000.0, 0.0, 250_000_000.0), "Must not use hardcoded fallback");
+        }
+        ref other => panic!("Ship must be in Warp mode, got {other:?}"),
+    }
+
+    // Attempting to warp to a non-existent site returns SiteNotFound
+    let non_existent = PyRep::keyval([
+        ("instanceID", PyRep::Integer(999_999_999)),
+        ("dungeonID", PyRep::Integer(999_999)),
+    ]);
+    let not_found_err = ctx
+        .dispatch_rpc(&mut sess, "custom_agency_provider", None, "warp_to_content", &[non_existent], &kw, None)
+        .await
+        .unwrap_err();
+    // rpc-lint: allow error code check
+    assert_eq!(not_found_err.code, "SiteNotFound");
 
     // 2. keeper.PlayDungeon and keeper.GotoRoom (requires GM role)
     sess.role = eve_db::service_roles::ROLE_GM_DEFAULT;

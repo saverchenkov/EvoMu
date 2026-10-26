@@ -410,11 +410,13 @@ impl ServerContext {
     }
 
     pub fn character_skill_levels(&self, char_id: i64) -> HashMap<u32, u8> {
+        let now_ft = self.now_blueos_filetime_ticks();
         self.db.with_snapshot(|snap| {
             let ch = snap.characters.get(&char_id);
             let is_alpha = ch.map(|c| c.clone_grade <= 1).unwrap_or(false);
             let race_id = ch.map(|c| c.race_id).unwrap_or(1);
-            snap.skills
+            let mut levels: HashMap<u32, u8> = snap
+                .skills
                 .get(&char_id)
                 .map(|m| {
                     m.iter()
@@ -431,7 +433,16 @@ impl ServerContext {
                         })
                         .collect()
                 })
-                .unwrap_or_default()
+                .unwrap_or_default();
+
+            let es_skills = crate::services::character_expert_systems::get_active_expert_system_skills(
+                snap, char_id, now_ft,
+            );
+            for (skill_id, level) in es_skills {
+                let entry = levels.entry(skill_id).or_insert(0);
+                *entry = (*entry).max(level);
+            }
+            levels
         })
     }
 

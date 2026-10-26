@@ -817,32 +817,78 @@ pub async fn handle(
             }));
         };
 
-        let mut dest_pos = glam::DVec3::new(250_000_000.0, 0.0, 250_000_000.0);
-        let mut resolved = false;
-
-        if let Some(rep) = args.first() {
-            let x = rep.dict_get("x").and_then(|v| v.as_f64());
-            let y = rep.dict_get("y").and_then(|v| v.as_f64());
-            let z = rep.dict_get("z").and_then(|v| v.as_f64());
-            if let (Some(x), Some(y), Some(z)) = (x, y, z) {
-                dest_pos = glam::DVec3::new(x, y, z);
-                resolved = true;
+        // Extract content identifier from argument (no client raw coordinates accepted)
+        let (target_iid, target_did) = match args.first() {
+            Some(PyRep::Integer(id)) => (Some(*id), None),
+            Some(rep) if matches!(rep, PyRep::Dict(_) | PyRep::KeyVal { .. }) => {
+                let iid = rep.dict_get("instanceID").and_then(|v| v.as_i64());
+                let did = rep.dict_get("dungeonID").and_then(|v| v.as_i64().map(|d| d as u32));
+                (iid, did)
             }
+            _ => {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "custom_agency_provider.warp_to_content requires contentPiece or contentID".into(),
+                }));
+            }
+        };
+
+        ensure_system_pve_sites_seeded(ctx, sys_id).await;
+        seed_system_mining_sites_from_sde(ctx, sys_id).await;
+
+        let mut resolved_pos: Option<glam::DVec3> = with_pve_exploration_reg(ctx, |reg| {
+            for s in reg.sites_by_system.get(&sys_id).into_iter().flatten() {
+                let iid = registry_instance_id(&s.site_id);
+                if Some(iid) == target_iid || (target_iid.is_none() && Some(s.dungeon_id) == target_did) {
+                    return Some(glam::DVec3::from_array(s.position));
+                }
+            }
+            None
+        });
+
+        if resolved_pos.is_none() {
+            resolved_pos = ctx.db.with_snapshot(|snap| {
+                for a in snap.cosmic_anomalies.get(&sys_id).into_iter().flatten() {
+                    if let Some((did, iid)) = parse_dng_site_id(&a.anomaly_id) {
+                        if Some(iid) == target_iid || (target_iid.is_none() && Some(did) == target_did) {
+                            return Some(glam::DVec3::from_array(a.position));
+                        }
+                    }
+                }
+                for s in snap.cosmic_signatures.get(&sys_id).into_iter().flatten() {
+                    if let Some((did, iid)) = parse_dng_site_id(&s.signature_id) {
+                        if Some(iid) == target_iid || (target_iid.is_none() && Some(did) == target_did) {
+                            return Some(glam::DVec3::from_array(s.position));
+                        }
+                    }
+                }
+                None
+            });
         }
 
-        if !resolved {
-            let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            if let Some(cel) = ctx.sde.celestials_in_system(sys_id).iter().find(|c| c.celestial_id == target_id) {
-                dest_pos = cel.position;
-                resolved = true;
-            }
-            if !resolved {
-                let ball_pos = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(target_id).await.ok().flatten().map(|(_, b)| b.position);
-                if let Some(pos) = ball_pos {
-                    dest_pos = pos;
+        if resolved_pos.is_none() {
+            if let Some(target_id) = target_iid {
+                if let Some(cel) = ctx.sde.celestials_in_system(sys_id).iter().find(|c| c.celestial_id == target_id) {
+                    resolved_pos = Some(cel.position);
                 }
             }
         }
+
+        let dest_pos = match resolved_pos {
+            Some(p) if p.is_finite() => p,
+            Some(_) => {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidCoordinates".into(),
+                    message: "Resolved site coordinates are not finite".into(),
+                }));
+            }
+            None => {
+                return Some(Err(BridgeRpcError {
+                    code: "SiteNotFound".into(),
+                    message: format!("Target content site ({target_iid:?}, {target_did:?}) not found in system {sys_id}"),
+                }));
+            }
+        };
 
         let handle = ctx.systems.get_or_spawn(sys_id);
         let Some((_, current_ball)) = (match handle.get_ball_snapshot(ship_id).await {
@@ -855,7 +901,37 @@ pub async fn handle(
             }));
         };
 
-        let warp_speed = 3.0;
+        let warp_dist = current_ball.position.distance(dest_pos);
+        if warp_dist < 150_000.0 {
+            return Some(Err(BridgeRpcError {
+                code: "WarpDistanceTooShort".into(),
+                message: format!("Cannot warp {:.1} m (minimum warp distance is 150,000 m)", warp_dist),
+            }));
+        }
+
+        if handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
+            return Some(Err(BridgeRpcError {
+                code: "WarpScrambled".into(),
+                message: "WarpScrambled: Warp drive disabled by warp disruption/scrambler effect".into(),
+            }));
+        }
+
+        let mut is_covert_cloaked = false;
+        if let Ok(Some(cs_check)) = handle.get_combat_state(ship_id).await {
+            if cs_check.is_cloaked && cs_check.gate_cloak_remaining_ticks == 0 && !cs_check.is_covert_cloak {
+                return Some(Err(BridgeRpcError {
+                    code: "CloakedCannotWarp".into(),
+                    message: "Cannot initiate warp while cloaked without a Covert Ops Cloaking Device".into(),
+                }));
+            }
+            is_covert_cloaked = cs_check.is_cloaked && cs_check.is_covert_cloak && cs_check.gate_cloak_remaining_ticks == 0;
+        }
+
+        let warp_speed = crate::services::space_destiny::compute_ship_warp_speed_au_s(ctx, current_ball.type_id);
+        if !is_covert_cloaked {
+            let _ = handle.break_gate_cloak(ship_id).await;
+        }
+
         let mode = eve_destiny::MovementMode::new_warp(current_ball.position, dest_pos, warp_speed);
         if let Err(e) = handle.set_movement_mode(ship_id, mode).await {
             return Some(Err(BridgeRpcError {
@@ -863,6 +939,7 @@ pub async fn handle(
                 message: e,
             }));
         }
+        let _ = handle.stop_non_warp_module_cycles(ship_id).await;
 
         ctx.notify(
             crate::router::NotificationTarget::Character(char_id),
