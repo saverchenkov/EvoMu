@@ -209,11 +209,6 @@
       "added_by": "20261024-201931"
     },
     {
-      "evidence": "crates/eve-server/src/services/quasar_social_freelance.rs:1144-1176 implements eve_public.freelance.contributionmethod.definition.api.GetAllLatestRequest and GetAllLatestWithinMajorRequest via the generic dummy schema-filler encode_domain_message + set_domain_attributes(reg, resp, 1, 1, \"all_latest\") / \"all_latest_within_major\" instead of reading SDE contribution method definitions (sde.contribution_methods()). Its tagged test q_final_entitlements_faction_freelance_payment_stargate in crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:261-303 sends an empty Vec::new() payload and asserts only status_code == STATUS_OK and normalized_type_name().",
-      "id": "quasar:eveProto/generated/eve_public/freelance/contributionmethod/definition/api/requests_pb2.pyj",
-      "flagged_by_audit": "20261025-143546"
-    },
-    {
       "id": "quasar:eveProto/generated/eve_public/operation/recommendation/recommendation_pb2.pyj",
       "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:577-592 implements GetRequest by ignoring character state/progression and calling generic schema-filler set_domain_attributes(reg, resp, cid, 30_000_142, \"AIRDailyOperation\"). In crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:490-544, the test sends Vec::new() and asserts only status_code == STATUS_OK and normalized_type_name().",
       "flagged_by_audit": "20261022-154932"
@@ -239,38 +234,13 @@
       "flagged_by_audit": "20261022-154932"
     },
     {
-      "evidence": "crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:480-580 manually constructs ResourcesSimulatedNotice in the test via set_domain_attributes and publishes it directly to quasar_gateway (plus calls standalone helper publish_sov_hub_resources_simulated_notice at crates/eve-server/src/services/quasar_sov_services.rs:730-738 which is never invoked by any handler), asserting only normalized_type_name() / type_url suffix.",
-      "flagged_by_audit": "20261022-091014",
-      "id": "quasar:eveProto/generated/eve_public/sovereignty/hub/api/notices_pb2.pyj"
-    },
-    {
       "evidence": "GetResourcesRequest is handled by the shared catch-all closure at quasar_sov_services.rs:594-712. Thirteen unrelated request types share it, and it returns set_domain_attributes(sys_id, fac_id, \"SovResourceState\") for all of them.",
       "flagged_by_audit": "20261022-133752",
       "id": "quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj"
     },
     {
-      "id": "quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj",
-      "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:163-199 and crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:384-403 \u2014 Sov hub fuel AddRequest and GetRequest ignore WorldRepository state and return hardcoded constants (1_000_000_010, 10_000, \"SovHubFuel\") without deducting fuel items or persisting fuel levels; test sends empty request bytes and only checks status_code == STATUS_OK.",
-      "flagged_by_audit": "20261022-153253"
-    },
-    {
-      "evidence": "crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:480-587 manually constructs UninstalledNotice, HubUpgradesConfiguredNotice, and HubUpgradesSimulatedNotice in the test via set_domain_attributes and publishes them directly to quasar_gateway (plus calls standalone helper publish_sov_hub_upgrade_notice at crates/eve-server/src/services/quasar_sov_services.rs:741-747 which is never invoked by any handler), asserting only normalized_type_name() / type_url suffix.",
-      "flagged_by_audit": "20261022-091014",
-      "id": "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/notices_pb2.pyj"
-    },
-    {
       "id": "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj",
       "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:273-332 and crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:443-478 \u2014 Sov hub upgrade GetHubUpgradesRequest, InstallRequest, UninstallRequest, and ProcessConfigurationRequest do not read or mutate installed upgrades or persisted order, returning hardcoded constants (81_201, 500); test sends empty request bytes and only checks status_code == STATUS_OK.",
-      "flagged_by_audit": "20261022-153253"
-    },
-    {
-      "evidence": "crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:480-594 manually constructs ConfiguredNotice and StateChangedNotice in the test via set_domain_attributes and publishes them directly to quasar_gateway (plus calls standalone helper publish_sov_hub_workforce_configured_notice at crates/eve-server/src/services/quasar_sov_services.rs:750-757 which is never invoked by any handler), asserting only normalized_type_name() / type_url suffix.",
-      "flagged_by_audit": "20261022-091014",
-      "id": "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/notices_pb2.pyj"
-    },
-    {
-      "id": "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj",
-      "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:201-271 and crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:405-441 \u2014 Sov hub workforce ConfigureRequest, GetConfigurationRequest, GetStateRequest, and GetNetworkableHubsRequest neither persist configuration nor compute workforce state, returning hardcoded constants (1_000_000_010, 2_500); test sends empty request bytes and only checks status_code == STATUS_OK.",
       "flagged_by_audit": "20261022-153253"
     },
     {
@@ -304,34 +274,9 @@
       "id": "quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj"
     },
     {
-      "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:595-713 registers a single shared closure in a 13-endpoint loop for ModifyReagentsRequest and ScheduleTheftVulnerabilityWindowRequest that ignores _dyn_msg, performs no skyhook reagent or vulnerability window mutation, and returns set_domain_attributes(reg, resp, sys_id, fac_id, \"SovResourceState\"); crates/eve-server/tests/it/quasar_feature_packages_complete.rs:346-361 sends empty Vec::new() payloads and asserts only status_code == STATUS_OK and normalized_type_name().",
-      "flagged_by_audit": "20261022-091014",
-      "id": "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/admin/admin_pb2.pyj"
-    },
-    {
-      "evidence": "crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:480-615 manually constructs 9 skyhook notices in the test via set_domain_attributes and publishes them directly to quasar_gateway (plus calls standalone helper publish_sov_skyhook_activation_notice at crates/eve-server/src/services/quasar_sov_services.rs:779-786 which is never invoked by any handler), asserting only normalized_type_name() / type_url suffix.",
-      "flagged_by_audit": "20261022-091014",
-      "id": "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/notices_pb2.pyj"
-    },
-    {
-      "id": "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/requests_pb2.pyj",
-      "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:48-159 and crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:36-38, 341-482 \u2014 Skyhook handlers (GetRequest, GetAllInSolarSystemRequest, GetSolarSystemsWithTheftVulnerableSkyhooksRequest, GetAllCorporationModifiedRequest, ModifyReagentSimulationsRequest, ActivateRequest, DeactivateRequest) neither read nor mutate WorldRepository state, returning hardcoded IDs (1_000_000_001, 30_000_142); test sends empty Vec::new() requests and only asserts status_code == STATUS_OK and normalized_type_name().",
-      "flagged_by_audit": "20261022-153253"
-    },
-    {
       "id": "quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj",
       "evidence": "crates/eve-server/src/services/quasar_space_services.rs:760-802 registers eve_public.space.api.cdn.GetUpdateRequest in the same shared 4-endpoint loop as stargate.lock.api.GetRequest and ai.assistant.chat.api.QueryRequest (both already flagged fake), ignoring _dyn_msg and calling generic schema-filler set_domain_attributes(reg, resp, req_id, owner_corp, \"evomu-tranquility\").",
       "flagged_by_audit": "20261022-154932"
-    },
-    {
-      "evidence": "crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:320-343 manually constructs RestrictedSystemsNotice, ActivatedNotice, and DeactivatedNotice in the test via set_domain_attributes and publishes them directly to quasar_gateway (plus calls standalone helper publish_stargate_lock_activated_notice at crates/eve-server/src/services/quasar_sov_services.rs:789-800 which is never invoked by any server mechanic or handler), asserting only normalized_type_name() / type_url suffix.",
-      "flagged_by_audit": "20261022-091014",
-      "id": "quasar:eveProto/generated/eve_public/stargate/lock/api/notices_pb2.pyj"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/quasar_space_services.rs:760-802 shares a single loop handler with ai.assistant.chat.api.QueryRequest and space.api.cdn.GetUpdateRequest that ignores _dyn_msg and populates fields 1..3 via set_domain_attributes(reg, resp, req_id, owner_corp, \"evomu-tranquility\") without consulting stargate lock state; crates/eve-server/tests/it/quasar_feature_packages_complete.rs:311-328 sends empty Vec::new() payloads and asserts only status_code == STATUS_OK and normalized_type_name().",
-      "flagged_by_audit": "20261022-091014",
-      "id": "quasar:eveProto/generated/eve_public/stargate/lock/api/requests_pb2.pyj"
     },
     {
       "id": "rpc:ProjectDiscovery.get_total_needed_xp",
@@ -533,6 +478,31 @@
       "evidence": "crates/eve-server/src/services/map_service.rs:459-469 returns reg.triglavian_minor_victory_systems. That field is only filled at pve_special_sites.rs:398-400, from triglavian_minor_victory_systems() at pve_special_sites.rs:285-291, which returns Vec::new() and is labelled 'DATA GAP'. So the handler always returns []. The tagged test test_rpc_map_svc_part2_batch and tests/it/pve_incursions_triglavian_remediated.rs:563-564 / pve_exploration_complete.rs:250-253 assert the empty list. wiki:Triglavian_minor_victory says these systems are a permanent live feature, so a constant empty answer the code itself calls a data gap cannot close the row.",
       "id": "rpc:map.GetTriglavianMinorVictorySystems",
       "flagged_by_audit": "20261025-193217"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:222-330 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:236-300 \u2014 default_store_catalog() is a hardcoded 4-category, 4-product (101..=104), 4-offer (1001..=1004) fixture table explicitly commented as DERIVED.",
+      "id": "feat:wallet.nes-store",
+      "flagged_by_audit": "20261025-200428"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:222-254 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:246-256 \u2014 store.category.api handlers serve the 4-entry hardcoded category fixture in default_store_catalog().",
+      "id": "quasar:eveProto/generated/eve_public/store/category/api_pb2.pyj",
+      "flagged_by_audit": "20261025-200428"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:290-328 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:283-300 \u2014 store.offer.api handlers serve the 4-entry hardcoded offer fixture (1001..=1004) in default_store_catalog().",
+      "id": "quasar:eveProto/generated/eve_public/store/offer/api_pb2.pyj",
+      "flagged_by_audit": "20261025-200428"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:255-289 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:258-281 \u2014 store.product.api handlers serve the 4-entry hardcoded product fixture (101..=104) in default_store_catalog().",
+      "id": "quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj",
+      "flagged_by_audit": "20261025-200428"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/season_manager.rs:710-732 and crates/eve-server/tests/it/rpc_discovery_seasons.rs:398-402 \u2014 get_loot_table_by_typeID does not query seasonal loot tables; instead it reads ctx.sde.type_materials (reprocessing mineral outputs, e.g. Rifter type 587 reprocessing minerals) and wraps each material with hardcoded probability: 1.0, falling back to vec![(type_id, 1)] when no reprocessing materials exist.",
+      "id": "rpc:seasonManager.get_loot_table_by_typeID",
+      "flagged_by_audit": "20261025-200428"
     }
   ],
   "rejected_triage": [
