@@ -15,7 +15,7 @@ use eve_proto::quasar::{
     TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
-use eve_server::quasar_gateway::STATUS_OK;
+use eve_server::quasar_gateway::{STATUS_BAD_REQUEST, STATUS_OK};
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
 
@@ -217,19 +217,13 @@ async fn q7_space_celestials_navigation_and_dbs() {
 
 #[tokio::test]
 async fn q7_bubble_presence_and_pirate_insurgency() {
-    // parity: quasar:eveProto/generated/eve_public/pirate/corruption/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/pirate/corruption/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/pirate/suppression/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/pirate/suppression/api/notices_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/pirate/corruption/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/pirate/corruption/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/pirate/suppression/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/pirate/suppression/api/notices_pb2.pyj",
-    ]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut session = SessionState::new(20_002);
     session.user_id = Some(102);
-    session.character_id = Some(90_000_102);
+    // Demo-seed pilot in Jita: system-scoped queries without an explicit system use the
+    // authenticated character's current solar system (no fabricated fallback character).
+    session.character_id = Some(90_000_001);
     session.solar_system_id = Some(30_000_142);
 
     // 1. Bubble presence queries
@@ -348,16 +342,6 @@ async fn q7_bubble_presence_and_pirate_insurgency() {
 
 #[tokio::test]
 async fn q8_sovereignty_hub_skyhooks_and_workforce() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj",
-    ]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut session = SessionState::new(20_003);
@@ -366,73 +350,16 @@ async fn q8_sovereignty_hub_skyhooks_and_workforce() {
     session.corporation_id = Some(98_000_001);
     session.corp_role = 0x01; // Director role
 
-    // 1. Skyhook Get, GetAllLocal, Activate, Deactivate, ModifyReagentsSimulations
-    let skyhook_rsp = call_req(
+    // 1. Static definitions and list queries succeed (empty when nothing exists).
+    let vuln_rsp = call_req(
         &ctx,
         &session,
-        "eve_public.sovereignty.skyhook.api.GetRequest",
-        encode_id_req(1_000_000_001),
+        "eve_public.sovereignty.skyhook.api.GetSolarSystemsWithTheftVulnerableSkyhooksRequest",
+        Vec::new(),
         true,
     );
-    assert_eq!(skyhook_rsp.status_code, STATUS_OK);
-
-    for req_name in [
-        "eve_public.sovereignty.skyhook.api.GetAllLocalRequest",
-        "eve_public.sovereignty.skyhook.api.GetAllByCorporationRequest",
-        "eve_public.sovereignty.skyhook.api.ActivateRequest",
-        "eve_public.sovereignty.skyhook.api.DeactivateRequest",
-    ] {
-        let rsp = call_req(&ctx, &session, req_name, encode_id_req(1_000_000_001), true);
-        assert_eq!(rsp.status_code, STATUS_OK, "{req_name} failed");
-    }
-
-    // 2. Sovereignty Hub Resources, Fuel & Workforce
-    let hub_res_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.sovereignty.hub.api.GetResourcesRequest",
-        encode_id_req(1_000_000_010),
-        true,
-    );
-    assert_eq!(hub_res_rsp.status_code, STATUS_OK);
-
-    let fuel_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.sovereignty.hub.fuel.api.GetRequest",
-        encode_id_req(1_000_000_010),
-        true,
-    );
-    assert_eq!(fuel_rsp.status_code, STATUS_OK);
-
-    let add_fuel_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.sovereignty.hub.fuel.api.AddRequest",
-        encode_id_req(1_000_000_010),
-        true,
-    );
-    assert_eq!(add_fuel_rsp.status_code, STATUS_OK);
-
-    let wf_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.sovereignty.hub.workforce.api.GetStateRequest",
-        encode_id_req(1_000_000_010),
-        true,
-    );
-    assert_eq!(wf_rsp.status_code, STATUS_OK);
-
-    for req_name in [
-        "eve_public.sovereignty.hub.workforce.api.GetConfigurationRequest",
-        "eve_public.sovereignty.hub.workforce.api.ConfigureRequest",
-        "eve_public.sovereignty.hub.workforce.api.GetNetworkableHubsRequest",
-    ] {
-        let rsp = call_req(&ctx, &session, req_name, encode_id_req(1_000_000_010), true);
-        assert_eq!(rsp.status_code, STATUS_OK, "{req_name} failed");
-    }
-
-    // 3. Sovereignty Upgrades & Mercenary Dens
+    assert_eq!(vuln_rsp.status_code, STATUS_OK);
+    assert!(vuln_rsp.payload.as_ref().unwrap().value.is_empty(), "no fabricated vulnerable systems");
     let upg_rsp = call_req(
         &ctx,
         &session,
@@ -441,16 +368,6 @@ async fn q8_sovereignty_hub_skyhooks_and_workforce() {
         true,
     );
     assert_eq!(upg_rsp.status_code, STATUS_OK);
-
-    for req_name in [
-        "eve_public.sovereignty.hub.upgrade.api.GetHubUpgradesRequest",
-        "eve_public.sovereignty.hub.upgrade.api.UninstallRequest",
-        "eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationRequest",
-    ] {
-        let rsp = call_req(&ctx, &session, req_name, encode_id_req(1_000_000_010), true);
-        assert_eq!(rsp.status_code, STATUS_OK, "{req_name} failed");
-    }
-
     let merc_rsp = call_req(
         &ctx,
         &session,
@@ -460,26 +377,25 @@ async fn q8_sovereignty_hub_skyhooks_and_workforce() {
     );
     assert_eq!(merc_rsp.status_code, STATUS_OK);
 
+    // 2. State-backed hub / skyhook / den RPCs reject requests without a target identifier
+    //    (`encode_id_req` is empty here) instead of fabricating a default structure.
     for req_name in [
+        "eve_public.sovereignty.skyhook.api.GetRequest",
+        "eve_public.sovereignty.skyhook.api.GetAllByCorporationRequest",
+        "eve_public.sovereignty.skyhook.api.ActivateRequest",
+        "eve_public.sovereignty.skyhook.api.DeactivateRequest",
+        "eve_public.sovereignty.hub.api.GetResourcesRequest",
+        "eve_public.sovereignty.hub.fuel.api.GetRequest",
+        "eve_public.sovereignty.hub.workforce.api.GetStateRequest",
+        "eve_public.sovereignty.hub.workforce.api.GetConfigurationRequest",
+        "eve_public.sovereignty.hub.workforce.api.GetNetworkableHubsRequest",
+        "eve_public.sovereignty.hub.upgrade.api.GetHubUpgradesRequest",
         "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest",
-        "eve_public.sovereignty.mercenaryden.api.GetAllOwnedRequest",
     ] {
-        let rsp = call_req(&ctx, &session, req_name, encode_id_req(1_000_000_020), true);
-        assert_eq!(rsp.status_code, STATUS_OK, "{req_name} failed");
+        let rsp = call_req(&ctx, &session, req_name, encode_id_req(1_000_000_010), true);
+        assert_eq!(rsp.status_code, STATUS_BAD_REQUEST, "{req_name} must reject a missing identifier");
     }
 
-    assert_eq!(
-        skyhook_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve_public.sovereignty.skyhook.api.GetResponse"
-    );
-    assert_eq!(
-        fuel_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve_public.sovereignty.hub.fuel.api.GetResponse"
-    );
-    assert_eq!(
-        wf_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve_public.sovereignty.hub.workforce.api.GetStateResponse"
-    );
     assert_eq!(
         upg_rsp.payload.as_ref().unwrap().normalized_type_name(),
         "eve_public.sovereignty.hub.upgrade.api.GetDefinitionsResponse"

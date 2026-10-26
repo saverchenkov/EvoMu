@@ -19,12 +19,14 @@
 #![forbid(unsafe_code)]
 
 use crate::quasar_gateway::{
-    PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_INTERNAL_ERROR,
+    PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
+    STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
-    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, FieldDescriptorProto, FieldLabel,
-    FieldType, GoogleAny, QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    encode_bytes_field, encode_varint_field, AuthoritativeContext, DynamicQuasarMessage,
+    DynamicValue, FieldDescriptorProto, FieldLabel, FieldType, GoogleAny,
+    QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::Arc;
@@ -35,6 +37,36 @@ pub fn effective_roles(ctx: &AuthoritativeContext) -> u64 {
         .as_ref()
         .and_then(|id| id.roles.as_ref().map(|r| r.bitmask))
         .unwrap_or(0)
+}
+
+/// DERIVED (synthetic — the client's insurgency corruption / suppression stage table is not part
+/// of the EvoMu SDE import): five equal 200-point stages out of a 1000-point scale, matching the
+/// stage formula in `insurgency_services::insurgency_stage`.
+pub const INSURGENCY_STAGE_THRESHOLDS: [u64; 5] = [200, 400, 600, 800, 1000];
+
+/// Authenticated character id, or `STATUS_UNAUTHORIZED`.
+fn require_character(ctx: &AuthoritativeContext) -> Result<i64, (u32, String)> {
+    ctx.effective_character_id()
+        .map(i64::from)
+        .ok_or((STATUS_UNAUTHORIZED, "Authenticated character required".to_string()))
+}
+
+/// Current solar system of the authenticated caller (`STATUS_UNAUTHORIZED` / `STATUS_NOT_FOUND`).
+fn caller_solar_system(ctx: &AuthoritativeContext, db: &WorldRepository) -> Result<u32, (u32, String)> {
+    let cid = require_character(ctx)?;
+    db.with_snapshot(|s| s.characters.get(&cid).map(|c| c.solar_system_id))
+        .ok_or((STATUS_NOT_FOUND, format!("Character {cid} not found")))
+}
+
+fn encode_id_field(field_num: u32, id: u64, out: &mut Vec<u8>) {
+    let mut buf = Vec::new();
+    encode_varint_field(1, id, &mut buf);
+    encode_bytes_field(field_num, &buf, out);
+}
+
+fn encode_fraction(num: u64, den: u64, out: &mut Vec<u8>) {
+    encode_varint_field(1, num, out);
+    encode_varint_field(2, den, out);
 }
 
 fn build_field_value(
@@ -565,66 +597,123 @@ pub fn register_handlers(
 
     // 8. eve_public.pirate.corruption.api.GetSystemInfoRequest & GetStageThresholdsRequest
     {
-        let d = Arc::clone(&desc);
+        let db_c = Arc::clone(&db);
         router.register_handler(
             "eve_public.pirate.corruption.api.GetSystemInfoRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
-                let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u32;
-                encode_domain_message(
-                    &d,
-                    "eve_public.pirate.corruption.api.GetSystemInfoResponse",
-                    |reg, resp| {
-                        set_domain_attributes(reg, resp, sys_id as u64, 2, "CorruptionStage2");
-                    },
-                )
+            Arc::new(move |ctx, _any, dyn_msg| {
+                let sys_id = match get_identifier_or_int(dyn_msg, 1) {
+                    Some(v) if v > 0 => v as u32,
+                    _ => caller_solar_system(ctx, &db_c)?,
+                };
+                let (c_pts, c_stage) = db_c.with_snapshot(|snap| {
+                    let mut pts = 0i64;
+                    for camp in snap.insurgency_runtime.campaigns.values() {
+                        if let Some(&p) = camp.corruption_points.get(&sys_id) {
+                            pts = pts.max(p);
+                        }
+                    }
+                    let st = snap.system_states.get(&sys_id);
+                    let stage = st.map(|s| s.insurgency_corruption_stage as u32).unwrap_or(0)
+                        .max(u32::from(crate::services::insurgency_services::insurgency_stage(pts)));
+                    (pts, stage)
+                });
+                let mut out = Vec::new();
+                let mut f1 = Vec::new();
+                encode_fraction(c_pts.max(0) as u64, 1000, &mut f1);
+                encode_bytes_field(1, &f1, &mut out);
+
+                let mut f2 = Vec::new();
+                encode_fraction(c_pts.max(0) as u64, 1000, &mut f2);
+                encode_bytes_field(2, &f2, &mut out);
+
+                let mut f3 = Vec::new();
+                encode_fraction(0, 1000, &mut f3);
+                encode_bytes_field(3, &f3, &mut out);
+
+                encode_varint_field(4, c_stage as u64, &mut out);
+                Ok(GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.pirate.corruption.api.GetSystemInfoResponse"),
+                    value: out,
+                })
             }),
         );
     }
     {
-        let d = Arc::clone(&desc);
         router.register_handler(
             "eve_public.pirate.corruption.api.GetStageThresholdsRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                encode_domain_message(
-                    &d,
-                    "eve_public.pirate.corruption.api.GetStageThresholdsResponse",
-                    |reg, resp| {
-                        set_domain_attributes(reg, resp, 10_000, 100_000, "CorruptionThresholds");
-                    },
-                )
+                let mut out = Vec::new();
+                for threshold in INSURGENCY_STAGE_THRESHOLDS {
+                    let mut th = Vec::new();
+                    encode_fraction(threshold, 1000, &mut th);
+                    encode_bytes_field(1, &th, &mut out);
+                }
+                Ok(GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.pirate.corruption.api.GetStageThresholdsResponse"),
+                    value: out,
+                })
             }),
         );
     }
 
     // 9. eve_public.pirate.suppression.api.GetSystemInfoRequest & GetStageThresholdsRequest
     {
-        let d = Arc::clone(&desc);
+        let db_s = Arc::clone(&db);
         router.register_handler(
             "eve_public.pirate.suppression.api.GetSystemInfoRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
-                let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u32;
-                encode_domain_message(
-                    &d,
-                    "eve_public.pirate.suppression.api.GetSystemInfoResponse",
-                    |reg, resp| {
-                        set_domain_attributes(reg, resp, sys_id as u64, 1, "SuppressionStage1");
-                    },
-                )
+            Arc::new(move |ctx, _any, dyn_msg| {
+                let sys_id = match get_identifier_or_int(dyn_msg, 1) {
+                    Some(v) if v > 0 => v as u32,
+                    _ => caller_solar_system(ctx, &db_s)?,
+                };
+                let (s_pts, s_stage) = db_s.with_snapshot(|snap| {
+                    let mut pts = 0i64;
+                    for camp in snap.insurgency_runtime.campaigns.values() {
+                        if let Some(&p) = camp.suppression_points.get(&sys_id) {
+                            pts = pts.max(p);
+                        }
+                    }
+                    let st = snap.system_states.get(&sys_id);
+                    let stage = st.map(|s| s.insurgency_suppression_stage as u32).unwrap_or(0)
+                        .max(u32::from(crate::services::insurgency_services::insurgency_stage(pts)));
+                    (pts, stage)
+                });
+                let mut out = Vec::new();
+                let mut f1 = Vec::new();
+                encode_fraction(s_pts.max(0) as u64, 1000, &mut f1);
+                encode_bytes_field(1, &f1, &mut out);
+
+                encode_varint_field(2, s_stage as u64, &mut out);
+
+                let mut f3 = Vec::new();
+                encode_fraction(s_pts.max(0) as u64, 1000, &mut f3);
+                encode_bytes_field(3, &f3, &mut out);
+
+                let mut f4 = Vec::new();
+                encode_fraction(0, 1000, &mut f4);
+                encode_bytes_field(4, &f4, &mut out);
+
+                Ok(GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.pirate.suppression.api.GetSystemInfoResponse"),
+                    value: out,
+                })
             }),
         );
     }
     {
-        let d = Arc::clone(&desc);
         router.register_handler(
             "eve_public.pirate.suppression.api.GetStageThresholdsRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                encode_domain_message(
-                    &d,
-                    "eve_public.pirate.suppression.api.GetStageThresholdsResponse",
-                    |reg, resp| {
-                        set_domain_attributes(reg, resp, 10_000, 100_000, "SuppressionThresholds");
-                    },
-                )
+                let mut out = Vec::new();
+                for threshold in INSURGENCY_STAGE_THRESHOLDS {
+                    let mut th = Vec::new();
+                    encode_fraction(threshold, 1000, &mut th);
+                    encode_bytes_field(1, &th, &mut out);
+                }
+                Ok(GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.pirate.suppression.api.GetStageThresholdsResponse"),
+                    value: out,
+                })
             }),
         );
     }
@@ -756,16 +845,57 @@ pub fn register_handlers(
         );
     }
 
-    // 13. Public stargate lock API, AI assistant, and space CDN update
-    for (req_name, rsp_name) in [
-        (
+    // 13. Public stargate lock API
+    {
+        let db_lock = Arc::clone(&db);
+        router.register_handler(
             "eve_public.stargate.lock.api.GetRequest",
-            "eve_public.stargate.lock.api.GetResponse",
-        ),
-        (
+            Arc::new(move |ctx, _any, _dyn_msg| {
+                let cid = require_character(ctx)?;
+                let now = ctx.now_unix();
+                let lock_info = db_lock.with_snapshot(|snap| {
+                    snap.zarzakh_gate_locks.get(&cid).copied().filter(|(_, expires_at)| *expires_at > now)
+                });
+                let mut out = Vec::new();
+                if let Some((gate_id, expiry_unix)) = lock_info {
+                    encode_id_field(1, gate_id as u64, &mut out);
+                    let mut exp_bytes = Vec::new();
+                    encode_varint_field(1, expiry_unix, &mut exp_bytes);
+                    encode_bytes_field(2, &exp_bytes, &mut out);
+                }
+                Ok(GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.stargate.lock.api.GetResponse"),
+                    value: out,
+                })
+            }),
+        );
+    }
+    {
+        let db_lock = Arc::clone(&db);
+        router.register_handler(
             "eve_public.stargate.lock.api.GetRestrictedSystemsRequest",
-            "eve_public.stargate.lock.api.GetRestrictedSystemsResponse",
-        ),
+            Arc::new(move |ctx, _any, _dyn_msg| {
+                // Systems whose exit gates are currently restricted for the caller: Zarzakh while
+                // an unexpired `zarzakh_gate_locks` entry (created by `CmdStargateJump`) exists.
+                let cid = require_character(ctx)?;
+                let now = ctx.now_unix();
+                let locked = db_lock.with_snapshot(|snap| {
+                    snap.zarzakh_gate_locks.get(&cid).is_some_and(|(_, expires_at)| *expires_at > now)
+                });
+                let mut out = Vec::new();
+                if locked {
+                    encode_id_field(1, u64::from(crate::services::space_destiny::space_warp_jump::SOLAR_SYSTEM_ZARZAKH), &mut out);
+                }
+                Ok(GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.stargate.lock.api.GetRestrictedSystemsResponse"),
+                    value: out,
+                })
+            }),
+        );
+    }
+
+    // 14. AI assistant and space CDN update
+    for (req_name, rsp_name) in [
         (
             "eve_public.ai.assistant.chat.api.QueryRequest",
             "eve_public.ai.assistant.chat.api.QueryResponse",
@@ -781,7 +911,7 @@ pub fn register_handlers(
         router.register_handler(
             req_name,
             Arc::new(move |ctx, _any, dyn_msg| {
-                let cid = ctx.effective_character_id().unwrap_or(90_000_001) as i64;
+                let cid = require_character(ctx)?;
                 let (sys_id, station_id) = db_svc.with_snapshot(|s| {
                     s.characters
                         .get(&cid)

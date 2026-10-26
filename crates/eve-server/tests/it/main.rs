@@ -131,6 +131,8 @@ mod quasar_extended_endpoints;
 mod quasar_extended_endpoints_part2;
 mod quasar_cosmetics_sovereignty;
 mod quasar_fw_occupancy;
+mod quasar_sov_equinox_hub;
+mod quasar_sov_pirate_remediation;
 mod regressions_b01_b15;
 mod regressions_r6;
 mod regressions_r8;

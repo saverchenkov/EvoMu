@@ -24,7 +24,7 @@ pub use crate::services::space_destiny::{
 const BEYONCE_SVC: &str = "beyonce";
 
 /// Zarzakh solar system ID (mirrors the V24 client constant `solarSystemZarzakh`).
-const SOLAR_SYSTEM_ZARZAKH: u32 = 30_100_000;
+pub(crate) const SOLAR_SYSTEM_ZARZAKH: u32 = 30_100_000;
 /// Zarzakh entry-gate lock duration: 6 hours (EVE wiki `Zarzakh.md`).
 const ZARZAKH_GATE_LOCK_SECS: u64 = 21_600;
 
@@ -608,16 +608,19 @@ async fn handle_cmd_stargate_jump(
     }
 
     let dest_sys_id = jump.to_solar_system_id;
+    let mut zarzakh_lock_expiry = None;
     if dest_sys_id == SOLAR_SYSTEM_ZARZAKH {
+        let expiry = now_unix.saturating_add(ZARZAKH_GATE_LOCK_SECS);
         ctx.db.with_mut_snapshot(|snap| {
             snap.zarzakh_gate_locks.insert(
                 char_id,
                 (
                     jump.destination_stargate_id,
-                    now_unix.saturating_add(ZARZAKH_GATE_LOCK_SECS),
+                    expiry,
                 ),
             );
         });
+        zarzakh_lock_expiry = Some(expiry);
     }
     let dest_gate_pos = ctx
         .sde
@@ -685,6 +688,17 @@ async fn handle_cmd_stargate_jump(
     crate::services::map_service::record_solar_system_visit(ctx, char_id, dest_sys_id);
     let _ = crate::services::combat_npc_police::check_and_spawn_faction_police(ctx, dest_sys_id).await;
     ctx.quasar_gateway.on_session_changed(session, now_unix);
+    // Published only after the session (and its Quasar gateway mirror) is in the destination
+    // system, so the jumping pilot's own stream receives the SolarSystem-scoped notice.
+    if let Some(expiry) = zarzakh_lock_expiry {
+        let _ = crate::services::quasar_sov_services::publish_stargate_lock_activated_notice(
+            &ctx.quasar_gateway,
+            dest_sys_id,
+            jump.destination_stargate_id as u64,
+            expiry,
+            now_unix,
+        );
+    }
 
     record_session_change_timer(
         ctx,

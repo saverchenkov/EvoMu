@@ -10,7 +10,6 @@
 //! - `eve/freelance/project/api/admin/requests.proto`
 
 use super::quasar_social_chat::{ctx_now_unix, ctx_queue_notice};
-use super::quasar_space_services::{encode_domain_message, set_domain_attributes};
 use crate::quasar_gateway::{
     NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
     STATUS_UNAUTHORIZED,
@@ -1143,37 +1142,130 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
 
     // 21. eve_public.freelance.contributionmethod.definition.api.GetAllLatestRequest
     {
-        let d = Arc::clone(&router.descriptors);
+        let sde = Arc::clone(&router.sde);
         router.register_handler(
             "eve_public.freelance.contributionmethod.definition.api.GetAllLatestRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                encode_domain_message(
-                    &d,
-                    "eve_public.freelance.contributionmethod.definition.api.GetAllLatestResponse",
-                    |reg, resp| {
-                        set_domain_attributes(reg, resp, 1, 1, "all_latest");
-                    },
-                )
+                Ok(encode_freelance_contribution_methods(
+                    &sde,
+                    &format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.contributionmethod.definition.api.GetAllLatestResponse"),
+                    true,
+                    1,
+                ))
             }),
         );
     }
 
     // 22. eve_public.freelance.contributionmethod.definition.api.GetAllLatestWithinMajorRequest
     {
-        let d = Arc::clone(&router.descriptors);
+        let sde = Arc::clone(&router.sde);
         router.register_handler(
             "eve_public.freelance.contributionmethod.definition.api.GetAllLatestWithinMajorRequest",
-            Arc::new(move |_ctx, _any, _dyn_msg| {
-                encode_domain_message(
-                    &d,
-                    "eve_public.freelance.contributionmethod.definition.api.GetAllLatestWithinMajorResponse",
-                    |reg, resp| {
-                        set_domain_attributes(reg, resp, 1, 1, "all_latest_within_major");
-                    },
-                )
+            Arc::new(move |_ctx, _any, dyn_msg| {
+                let major = dyn_msg.get(1).and_then(|v| match v {
+                    DynamicValue::Uint32(n) => Some(*n),
+                    DynamicValue::Int32(n) => Some(*n as u32),
+                    DynamicValue::Uint64(n) => Some(*n as u32),
+                    DynamicValue::Int64(n) => Some(*n as u32),
+                    _ => None,
+                }).unwrap_or(1);
+                let include_defs = major == 0 || major == 1;
+                Ok(encode_freelance_contribution_methods(
+                    &sde,
+                    &format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.contributionmethod.definition.api.GetAllLatestWithinMajorResponse"),
+                    include_defs,
+                    if major == 0 { 1 } else { major },
+                ))
             }),
         );
     }
+}
+
+fn encode_freelance_contribution_methods(
+    sde: &eve_sde::SdeRegistry,
+    rsp_type_url: &str,
+    include_defs: bool,
+    major: u32,
+) -> GoogleAny {
+    let mut out = Vec::new();
+    // `contributionmethods.fsdbinary` carries no semantic version, so the static SDE set is
+    // published as `<major>.0.0` (minor / patch have no source data to vary from).
+    let mut ver_bytes = Vec::new();
+    encode_varint_field(1, major as u64, &mut ver_bytes);
+    encode_varint_field(2, 0, &mut ver_bytes);
+    encode_varint_field(3, 0, &mut ver_bytes);
+    encode_bytes_field(1, &ver_bytes, &mut out);
+
+    // Definitions come exclusively from SDE `res:/staticdata/contributionmethods.fsdbinary`; when
+    // the table cannot be loaded the response carries no definitions (no embedded fallback table).
+    if include_defs {
+        if let Ok(methods) = sde.contribution_methods() {
+            for (name, val) in &methods {
+                encode_single_freelance_def(name, val, &mut out);
+            }
+        }
+    }
+
+    GoogleAny {
+        type_url: rsp_type_url.to_string(),
+        value: out,
+    }
+}
+
+fn encode_loc_id(field: u32, val: &serde_json::Value, key: &str, out: &mut Vec<u8>) {
+    if let Some(id) = val.get(key).and_then(|v| v.as_u64()).filter(|v| *v > 0) {
+        let mut b = Vec::new();
+        encode_varint_field(1, id, &mut b);
+        encode_bytes_field(field, &b, out);
+    }
+}
+
+fn encode_name_id(field: u32, name: &str, out: &mut Vec<u8>) {
+    if !name.is_empty() {
+        let mut b = Vec::new();
+        encode_string_field(1, name, &mut b);
+        encode_bytes_field(field, &b, out);
+    }
+}
+
+/// Encodes one SDE contribution method record as
+/// `eve_public.freelance.contributionmethod.definition.api.*Response.Definition`.
+fn encode_single_freelance_def(name: &str, val: &serde_json::Value, out: &mut Vec<u8>) {
+    let mut id_bytes = Vec::new();
+    encode_string_field(1, name, &mut id_bytes);
+
+    let mut attr = Vec::new();
+    encode_loc_id(1, val, "titleID", &mut attr);
+    encode_loc_id(2, val, "descriptionID", &mut attr);
+    encode_loc_id(3, val, "progressDescriptionID", &mut attr);
+    encode_loc_id(4, val, "targetValueDescriptionID", &mut attr);
+    encode_loc_id(5, val, "rewardingDescriptionID", &mut attr);
+    encode_name_id(6, val.get("icon").and_then(|v| v.as_str()).unwrap_or(""), &mut attr);
+    for tag in val.get("contentTags").and_then(|v| v.as_array()).into_iter().flatten() {
+        encode_name_id(7, tag.as_str().unwrap_or(""), &mut attr);
+    }
+    // SDE parameters -> `definition.Parameter { matcher = MatcherParameter }` (key, type, icon,
+    // optional, max_entries). Their `title` / `info` are label paths, not message ids, so they
+    // are not encoded as `localization.message.Identifier`.
+    for p in val.get("parameters").and_then(|v| v.as_array()).into_iter().flatten() {
+        let mut m = Vec::new();
+        encode_string_field(1, p.get("parameterKey").and_then(|v| v.as_str()).unwrap_or(""), &mut m);
+        encode_string_field(2, p.get("parameterType").and_then(|v| v.as_str()).unwrap_or(""), &mut m);
+        encode_name_id(5, p.get("icon").and_then(|v| v.as_str()).unwrap_or(""), &mut m);
+        let required = p.get("isRequired").and_then(|v| v.as_u64()).unwrap_or(0) != 0;
+        encode_varint_field(8, u64::from(!required), &mut m);
+        if let Some(max) = p.get("maxEntries").and_then(|v| v.as_u64()) {
+            encode_varint_field(9, max, &mut m);
+        }
+        let mut param = Vec::new();
+        encode_bytes_field(1, &m, &mut param);
+        encode_bytes_field(11, &param, &mut attr);
+    }
+
+    let mut def_bytes = Vec::new();
+    encode_bytes_field(1, &id_bytes, &mut def_bytes);
+    encode_bytes_field(2, &attr, &mut def_bytes);
+    encode_bytes_field(2, &def_bytes, out);
 }
 
 fn extract_uuid(val: Option<&DynamicValue>) -> Option<Vec<u8>> {

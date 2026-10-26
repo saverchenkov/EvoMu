@@ -2,7 +2,7 @@
 
 use crate::types::IskCents;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 pub mod tuple_map_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -236,6 +236,77 @@ pub struct PersistedFwState {
     pub battlefield_instances: Vec<PersistedBattlefieldRecord>,
 }
 
+/// One upgrade installed into a Sovereignty Hub (`eve_public.sovereignty.hub.upgrade`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedHubUpgrade {
+    /// SDE installation type (`invTypes` row in a Sovereignty Hub upgrade group).
+    pub type_id: u32,
+    /// Operator-requested online flag (`UpgradeConfiguration.online`).
+    pub online: bool,
+    /// `true` while the upgrade is starved of fuel / power (`POWER_STATE_LOW`).
+    #[serde(default)]
+    pub low_power: bool,
+}
+
+/// Workforce transfer mode of a Sovereignty Hub (`eve_public.sovereignty.hub.workforce.Configuration`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PersistedWorkforceMode {
+    #[default]
+    Inactive,
+    Import { sources: Vec<u32> },
+    Export { destination: Option<u32>, amount: u64 },
+    Transit,
+}
+
+/// Mutable Equinox runtime state of a Sovereignty Hub structure.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedSovHubData {
+    pub hub_id: i64,
+    #[serde(default)]
+    pub upgrades: Vec<PersistedHubUpgrade>,
+    /// Fuel bay: fuel type id -> units.
+    #[serde(default)]
+    pub fuel: BTreeMap<u32, u32>,
+    #[serde(default)]
+    pub workforce: PersistedWorkforceMode,
+    /// Unix seconds of the last fuel-burn simulation / configuration change.
+    #[serde(default)]
+    pub last_updated_unix: u64,
+}
+
+/// Mercenary Den runtime state (`eve_public.sovereignty.mercenaryden`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedMercenaryDen {
+    pub den_id: i64,
+    pub type_id: u32,
+    pub owner_char_id: i64,
+    pub skyhook_id: i64,
+    pub solar_system_id: u32,
+    pub planet_id: i64,
+    pub enabled: bool,
+    pub cargo_extraction_enabled: bool,
+    pub development_level: u32,
+    pub anarchy_level: u32,
+    pub infomorphs: u32,
+    pub simulated_at_unix: u64,
+    pub next_activity_generation_unix: u64,
+}
+
+/// Mercenary Tactical Operation offered by a den (`eve_public.sovereignty.mercenaryden.activity`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedMercenaryActivity {
+    pub uuid: Vec<u8>,
+    pub den_id: i64,
+    pub solar_system_id: u32,
+    pub dungeon_id: u32,
+    pub started: bool,
+    pub started_by: i64,
+    pub expiry_unix: u64,
+    pub development_impact: i32,
+    pub anarchy_impact: i32,
+    pub infomorph_bonus: u32,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedSovState {
     #[serde(default)]
@@ -246,6 +317,18 @@ pub struct PersistedSovState {
     pub skyhook_reagents: HashMap<i64, (u32, u64)>,
     #[serde(default)]
     pub skyhook_hackable: HashMap<i64, bool>,
+    /// Scheduled skyhook theft vulnerability windows: skyhook id -> (start, end) unix seconds.
+    #[serde(default)]
+    pub skyhook_theft_windows: HashMap<i64, (u64, u64)>,
+    #[serde(default)]
+    pub sov_hubs: HashMap<i64, PersistedSovHubData>,
+    #[serde(default)]
+    pub mercenary_dens: HashMap<i64, PersistedMercenaryDen>,
+    /// Activities keyed by hex-encoded UUID.
+    #[serde(default)]
+    pub mercenary_activities: BTreeMap<String, PersistedMercenaryActivity>,
+    #[serde(default)]
+    pub next_mercenary_activity_seq: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
