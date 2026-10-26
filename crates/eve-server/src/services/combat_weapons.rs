@@ -459,6 +459,67 @@ pub async fn handle_weapons(
                 }
             }
 
+            // Weapon classification & pre-validation
+            let is_missile_launcher = matches!(
+                mod_type.group_id,
+                506..=511 | 524 | 1674 | 4500 | 4805 | 4807
+            );
+            let is_breacher_pod = matches!(mod_type.group_id, 4500 | 4805 | 4807);
+            let is_entropic = mod_type.group_id == 1986;
+            let is_vorton = mod_type.group_id == 4060;
+
+            // Turret range validation BEFORE capacitor and ammo deduction (P1-ENTROPIC-PARTIAL-MUTATION-AND-AMMO-DEPLETION):
+            // Calling dogmaIM.Activate out of range must fail without draining capacitor or ammo.
+            let range_mult = charge_type
+                .default_attributes
+                .get(&120)
+                .copied()
+                .unwrap_or(1.0);
+            let optimal_range = mod_type
+                .default_attributes
+                .get(&54)
+                .copied()
+                .unwrap_or(5_000.0)
+                * range_mult;
+            let falloff_range = mod_type
+                .default_attributes
+                .get(&158)
+                .copied()
+                .unwrap_or(5_000.0);
+            let dist = attacker_ball.position.distance(target_ball.position);
+
+            if !is_missile_launcher && dist > optimal_range + 3.0 * falloff_range {
+                return Some(Err(BridgeRpcError {
+                    code: "TargetOutOfRange".into(),
+                    message: format!(
+                        "Target {target_ball_id} is {dist:.1} m away (exceeds range {:.1} m)",
+                        optimal_range + 3.0 * falloff_range
+                    ),
+                }));
+            }
+
+            // Entropic Disintegrator pre-validation (P1-ENTROPIC-PARTIAL-MUTATION-AND-AMMO-DEPLETION):
+            // Activating an already active entropic module on the same target must fail with AlreadyActive
+            // BEFORE deducting capacitor or consuming ammo.
+            if is_entropic {
+                let is_already_active = {
+                    let is_active_in_db = ctx.db.with_snapshot(|snap| {
+                        snap.module_active_states.contains(&module_id)
+                    });
+                    is_active_in_db && with_combat_runtime(ctx, |rt| {
+                        rt.entropic_spools
+                            .get(&(ship_id, module_id))
+                            .is_some_and(|entry| entry.target_id == target_ball_id)
+                    })
+                };
+                if is_already_active {
+                    return Some(Err(BridgeRpcError {
+                        code: "AlreadyActive".into(),
+                        message: format!("Module {module_id} is already active"),
+                    }));
+                }
+            }
+
             // Capacitor check & deduction:
             // Projectile turrets (`group_id == 55`) and Missile Launchers require 0 capacitor!
             // Hybrid turrets (`74`), Energy Lasers (`53`), Entropic Disintegrators (`1986`), and Vorton Projectors (`4060`) consume capacitor.
@@ -571,14 +632,7 @@ pub async fn handle_weapons(
                 });
             }
 
-            // Weapon kind & damage calculation
-            let is_missile_launcher = matches!(
-                mod_type.group_id,
-                506..=511 | 524 | 1674 | 4500 | 4805 | 4807
-            );
-            let is_breacher_pod = matches!(mod_type.group_id, 4500 | 4805 | 4807);
-            let is_entropic = mod_type.group_id == 1986;
-            let is_vorton = mod_type.group_id == 4060;
+            // Weapon damage calculation
 
             let dmg_mult = {
                 let m_mult = mod_state.get_attribute(64, &ctx.sde);
@@ -634,28 +688,12 @@ pub async fn handle_weapons(
                     .await,
                 );
             }
-            // Turret range, tracking, hit chance, Entropic spooling, and Vorton arc chaining
-            let range_mult = charge_type
-                .default_attributes
-                .get(&120)
-                .copied()
-                .unwrap_or(1.0);
+            // Turret tracking, hit chance, Entropic spooling, and Vorton arc chaining
             let tracking_mult = charge_type
                 .default_attributes
                 .get(&244)
                 .copied()
                 .unwrap_or(1.0);
-            let optimal_range = mod_type
-                .default_attributes
-                .get(&54)
-                .copied()
-                .unwrap_or(5_000.0)
-                * range_mult;
-            let falloff_range = mod_type
-                .default_attributes
-                .get(&158)
-                .copied()
-                .unwrap_or(5_000.0);
             let tracking_speed = mod_type
                 .default_attributes
                 .get(&160)
@@ -667,17 +705,6 @@ pub async fn handle_weapons(
                 .get(&620)
                 .copied()
                 .unwrap_or(40_000.0);
-
-            let dist = attacker_ball.position.distance(target_ball.position);
-            if dist > optimal_range + 3.0 * falloff_range {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetOutOfRange".into(),
-                    message: format!(
-                        "Target {target_ball_id} is {dist:.1} m away (exceeds range {:.1} m)",
-                        optimal_range + 3.0 * falloff_range
-                    ),
-                }));
-            }
 
             let angular_vel = eve_destiny::combat::compute_angular_velocity(
                 attacker_ball.position,

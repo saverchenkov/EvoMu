@@ -34,6 +34,7 @@ mod combat;
 mod combat_death_crimewatch;
 mod combat_drones_npcs;
 mod combat_fighters_insurance_bounties;
+mod combat_entropic_pvp_atomicity;
 mod combat_npc_crimewatch;
 mod combat_pve;
 mod combat_sleepers_pochven_zarzakh;
