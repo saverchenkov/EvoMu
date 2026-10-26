@@ -585,6 +585,17 @@ async fn handle_abyssal_gate_activation(
 
     // 2. BF-03: Verify that NPCs spawned for the current room have been cleared
     let abyss_handle = ctx.systems.get_or_spawn(abyss_sys);
+
+    // BF-PVE-ABYSS-GATE-VALIDATION-01: Validate gate_id against active room's gate
+    let expected_gate_id = 1_895_000_000 + pid * 10 + (curr_room as i64);
+    let alt_gate_id = 1_895_000_000 + (curr_room as i64);
+    if gate_id != expected_gate_id && gate_id != alt_gate_id {
+        return Err(BridgeRpcError {
+            code: "InvalidGate".into(),
+            message: format!("Gate {gate_id} is not the active transfer gate for room {curr_room}"),
+        });
+    }
+
     if !room_already_cleared && !curr_room_npcs.is_empty() {
         let mut alive_count = 0;
         for &npc_id in &curr_room_npcs {
@@ -596,6 +607,32 @@ async fn handle_abyssal_gate_activation(
             return Err(BridgeRpcError {
                 code: "GateLocked".into(),
                 message: format!("Transfer gate locked: {alive_count} hostile entities remaining in room {curr_room}"),
+            });
+        }
+    }
+
+    // BF-PVE-ABYSS-GATE-VALIDATION-01: Enforce standard gate proximity (<= 2500m surface distance)
+    let actual_gate_id = if abyss_handle.get_ball_snapshot(expected_gate_id).await.ok().flatten().is_some() {
+        expected_gate_id
+    } else {
+        alt_gate_id
+    };
+    let ship_ball = abyss_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .map_err(|e| BridgeRpcError { code: "SystemError".into(), message: e })?
+        .map(|(_, b)| b);
+    let gate_ball = abyss_handle
+        .get_ball_snapshot(actual_gate_id)
+        .await
+        .map_err(|e| BridgeRpcError { code: "SystemError".into(), message: e })?
+        .map(|(_, b)| b);
+    if let (Some(sb), Some(gb)) = (ship_ball, gate_ball) {
+        let surface_dist = (sb.position.distance(gb.position) - sb.radius - gb.radius).max(0.0);
+        if surface_dist > 2_500.0 {
+            return Err(BridgeRpcError {
+                code: "GateOutOfRange".into(),
+                message: format!("Distance {surface_dist:.1} m exceeds 2,500 m gate activation proximity"),
             });
         }
     }
@@ -670,7 +707,7 @@ async fn handle_abyssal_end_gate_activation(
     }
 
     // 1. Inspect pocket: check collapse timer, verify p.current_room == 3, check room 3 NPCs
-    let (origin_sys, origin_pos, saved_attrs, r3_npcs, r3_cleared) = {
+    let (origin_sys, origin_pos, saved_attrs, r3_npcs, r3_cleared, pid) = {
         let inspect = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
             let p = reg.abyssal_pockets.get_mut(&char_id)?;
             if p.completed || p.collapsed_destroyed {
@@ -700,6 +737,7 @@ async fn handle_abyssal_end_gate_activation(
                 p.saved_ship_attrs.clone(),
                 r3_npcs,
                 r3_cleared,
+                p.pocket_id,
             )))
         });
 
@@ -714,6 +752,17 @@ async fn handle_abyssal_end_gate_activation(
 
     // 2. BF-03: verify Room 3 NPCs are cleared
     let abyss_handle = ctx.systems.get_or_spawn(pocket_sys);
+
+    // BF-PVE-ABYSS-GATE-VALIDATION-01: Validate gate_id against active room 3 exit conduit
+    let expected_gate_id = 1_895_000_000 + pid * 10 + 3;
+    let alt_gate_id = 1_895_000_000 + 3;
+    if gate_id != expected_gate_id && gate_id != alt_gate_id {
+        return Err(BridgeRpcError {
+            code: "InvalidGate".into(),
+            message: format!("Gate {gate_id} is not the active exit conduit for room 3"),
+        });
+    }
+
     if !r3_cleared && !r3_npcs.is_empty() {
         let mut alive_count = 0;
         for &npc_id in &r3_npcs {
@@ -725,6 +774,32 @@ async fn handle_abyssal_end_gate_activation(
             return Err(BridgeRpcError {
                 code: "GateLocked".into(),
                 message: format!("Exit conduit locked: {alive_count} hostiles remaining in room 3"),
+            });
+        }
+    }
+
+    // BF-PVE-ABYSS-GATE-VALIDATION-01: Enforce standard gate proximity (<= 2500m surface distance)
+    let actual_gate_id = if abyss_handle.get_ball_snapshot(expected_gate_id).await.ok().flatten().is_some() {
+        expected_gate_id
+    } else {
+        alt_gate_id
+    };
+    let ship_ball = abyss_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .map_err(|e| BridgeRpcError { code: "SystemError".into(), message: e })?
+        .map(|(_, b)| b);
+    let gate_ball = abyss_handle
+        .get_ball_snapshot(actual_gate_id)
+        .await
+        .map_err(|e| BridgeRpcError { code: "SystemError".into(), message: e })?
+        .map(|(_, b)| b);
+    if let (Some(sb), Some(gb)) = (ship_ball, gate_ball) {
+        let surface_dist = (sb.position.distance(gb.position) - sb.radius - gb.radius).max(0.0);
+        if surface_dist > 2_500.0 {
+            return Err(BridgeRpcError {
+                code: "GateOutOfRange".into(),
+                message: format!("Distance {surface_dist:.1} m exceeds 2,500 m gate activation proximity"),
             });
         }
     }

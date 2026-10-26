@@ -142,17 +142,36 @@ async fn test_pve_hacking_minigame_complete() {
 
     // Seed exploration sites in system
     ensure_system_pve_sites_seeded(&ctx, SYS_JITA).await;
-    let can_id = with_pve_exploration_reg(&ctx, |reg| {
+    let (can_id, site_pos) = with_pve_exploration_reg(&ctx, |reg| {
         let site = reg.sites_by_system[&SYS_JITA]
             .iter()
             .find(|s| s.site_category == "Data" || s.site_category == "Relic")
             .expect("seeded exploration site");
-        site.hackable_can_ids[0]
+        (site.hackable_can_ids[0], site.position)
     });
 
-    // 1. StartNewGameInstance starts node-grid minigame
-    let start_rep = ctx
+    // BF-PVE-HACK-PROXIMITY-01: Out-of-range rejection when ship is at [0,0,0] (>40,000 km from site)
+    let range_err = ctx
         .dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can_id)], &kw, None)
+        .await
+        .expect_err("StartNewGameInstance out of analyzer range must fail");
+    assert_eq!(range_err.code, "OutOfRange");
+
+    // Missing container ID in args rejected
+    let no_target_err = ctx
+        .dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::None], &kw, None)
+        .await
+        .expect_err("StartNewGameInstance without container ID must fail");
+    assert_eq!(no_target_err.code, "TargetNotFound");
+
+    // Move pilot ship to within analyzer maxRange of container
+    let jita_sys_handle = ctx.systems.get_or_spawn(SYS_JITA);
+    let close_pos = DVec3::from_array(site_pos) + DVec3::new(500.0, 0.0, 0.0);
+    let _ = jita_sys_handle.set_ball_position(ship_id, close_pos).await;
+
+    // 1. StartNewGameInstance starts node-grid minigame with V24 [None, containerID] args
+    let start_rep = ctx
+        .dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::None, PyRep::Integer(can_id)], &kw, None)
         .await
         .expect("StartNewGameInstance");
 
@@ -320,6 +339,13 @@ async fn test_pve_abyssal_gates_and_tiers_complete() {
         .expect("ClientIsReady");
     assert_eq!(ready_rep.dict_get("ready"), Some(&PyRep::Bool(true)));
 
+    // BF-PVE-ABYSS-GATE-VALIDATION-01: Invalid gate ID rejected
+    let bad_gate_err = ctx
+        .dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalGateActivation", &[PyRep::Integer(999_999)], &kw, None)
+        .await
+        .expect_err("AbyssalGateActivation with invalid gate ID must fail");
+    assert_eq!(bad_gate_err.code, "InvalidGate");
+
     // Verify Room 1 gate lock: AbyssalGateActivation blocked while Room 1 hostile entities alive
     let locked_r1 = ctx
         .dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalGateActivation", &[PyRep::Integer(1_895_000_001)], &kw, None)
@@ -337,6 +363,17 @@ async fn test_pve_abyssal_gates_and_tiers_complete() {
     // Clear Room 1 NPCs and check cache loot (T1 Calm filament -> 2 Survey Databases)
     crate::abyssal_room_combat::assert_room_cache_loot(&ctx, PILOT_ABYSS, 0, 2, fil_type_t1).await;
     crate::abyssal_room_combat::destroy_room_npcs_via_damage(&ctx, PILOT_ABYSS, 0).await;
+
+    // BF-PVE-ABYSS-GATE-VALIDATION-01: Proximity check rejects gate activation outside 2500m
+    let abyss_sys = sess.solar_system_id.unwrap();
+    let abyss_handle = ctx.systems.get_or_spawn(abyss_sys);
+    let _ = abyss_handle.set_ball_position(ship_id, DVec3::new(0.0, 0.0, -10_000.0)).await;
+    let far_gate_err = ctx
+        .dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalGateActivation", &[PyRep::Integer(1_895_000_001)], &kw, None)
+        .await
+        .expect_err("AbyssalGateActivation outside 2500m must fail");
+    assert_eq!(far_gate_err.code, "GateOutOfRange");
+    let _ = abyss_handle.set_ball_position(ship_id, DVec3::new(100.0, 0.0, 0.0)).await;
 
     // 5. AbyssalGateActivation advances to Room 2
     let gate1_rep = ctx
@@ -361,6 +398,13 @@ async fn test_pve_abyssal_gates_and_tiers_complete() {
     crate::abyssal_room_combat::assert_room_cache_loot(&ctx, PILOT_ABYSS, 2, 2, fil_type_t1).await;
     crate::abyssal_room_combat::destroy_room_npcs_via_damage(&ctx, PILOT_ABYSS, 2).await;
 
+    // BF-PVE-ABYSS-GATE-VALIDATION-01: Invalid gate ID for exit conduit rejected
+    let bad_exit = ctx
+        .dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEndGateActivation", &[PyRep::Integer(999_999)], &kw, None)
+        .await
+        .expect_err("End gate invalid ID");
+    assert_eq!(bad_exit.code, "InvalidGate");
+
     // 7. AbyssalEndGateActivation exits Abyssal Deadspace and returns ship to Jita
     let exit_rep = ctx
         .dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEndGateActivation", &[PyRep::Integer(1_895_000_003)], &kw, None)
@@ -383,6 +427,7 @@ async fn test_pve_abyssal_gates_and_tiers_complete() {
         .dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(trace3_id)], &kw, None)
         .await
         .expect("AbyssalEntranceGateActivation T3");
+    let t3_pid = enter3_rep.dict_get("pocketID").and_then(|v| v.as_i64()).unwrap();
     assert_eq!(enter3_rep.dict_get("currentRoom"), Some(&PyRep::Integer(1)));
     assert_eq!(enter3_rep.dict_get("tier"), Some(&PyRep::Integer(3)));
     assert_eq!(enter3_rep.dict_get("timerSeconds"), Some(&PyRep::Integer(1200)));
@@ -399,15 +444,15 @@ async fn test_pve_abyssal_gates_and_tiers_complete() {
     crate::abyssal_room_combat::destroy_room_npcs_via_damage(&ctx, PILOT_ABYSS, 0).await;
 
     // Advance through T3 rooms and exit
-    let _ = ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalGateActivation", &[PyRep::Integer(1_895_000_011)], &kw, None).await.expect("T3 Gate R1->R2");
+    let _ = ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalGateActivation", &[PyRep::Integer(1_895_000_000 + t3_pid * 10 + 1)], &kw, None).await.expect("T3 Gate R1->R2");
     crate::abyssal_room_combat::assert_room_cache_loot(&ctx, PILOT_ABYSS, 1, 4, fil_type_t3).await;
     crate::abyssal_room_combat::destroy_room_npcs_via_damage(&ctx, PILOT_ABYSS, 1).await;
 
-    let _ = ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalGateActivation", &[PyRep::Integer(1_895_000_012)], &kw, None).await.expect("T3 Gate R2->R3");
+    let _ = ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalGateActivation", &[PyRep::Integer(1_895_000_000 + t3_pid * 10 + 2)], &kw, None).await.expect("T3 Gate R2->R3");
     crate::abyssal_room_combat::assert_room_cache_loot(&ctx, PILOT_ABYSS, 2, 4, fil_type_t3).await;
     crate::abyssal_room_combat::destroy_room_npcs_via_damage(&ctx, PILOT_ABYSS, 2).await;
 
-    let exit3_rep = ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEndGateActivation", &[PyRep::Integer(1_895_000_013)], &kw, None).await.expect("T3 AbyssalEndGateActivation");
+    let exit3_rep = ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEndGateActivation", &[PyRep::Integer(1_895_000_000 + t3_pid * 10 + 3)], &kw, None).await.expect("T3 AbyssalEndGateActivation");
     assert_eq!(exit3_rep.dict_get("solarSystemID"), Some(&PyRep::Integer(SYS_JITA as i64)));
     assert!(!with_pve_special_reg(&ctx, |reg| reg.abyssal_pockets.contains_key(&PILOT_ABYSS)));
 }
@@ -429,6 +474,16 @@ async fn test_pve_insurgency_campaigns_and_strongholds_complete() {
 
     // 1. Initialize insurgency campaign with FOB system
     init_insurgency_campaign(&ctx, camp_id, FACTION_GURISTAS, 500_001, fob_sys, vec![camp_sys]);
+
+    // BF-PVE-STRONGHOLD-VULN-NOTIFY-01: Stronghold is invulnerable in Forecasting phase
+    let stronghold_id = ensure_stronghold_in_space(&ctx, camp_id).await.expect("ensure stronghold in space");
+    let fob_handle = ctx.systems.get_or_spawn(fob_sys);
+    let early_destroy = eve_server::services::insurgency_services::on_insurgency_stronghold_destroyed_core(
+        &ctx.systems, &ctx.db, fob_sys, stronghold_id, Some(PILOT_INSURGENT),
+    ).await;
+    assert!(early_destroy.is_none(), "Stronghold cannot be destroyed during Forecasting phase");
+
+    // Transition campaign to Active phase
     let now = ctx.now_unix();
     with_insurgency_runtime(&ctx, |rt| {
         if let Some(c) = rt.campaigns.get_mut(&camp_id) {
@@ -436,9 +491,6 @@ async fn test_pve_insurgency_campaigns_and_strongholds_complete() {
         }
     });
 
-    // 2. Ensure Stronghold spawned in FOB system in space with real CombatState
-    let stronghold_id = ensure_stronghold_in_space(&ctx, camp_id).await.expect("ensure stronghold in space");
-    let fob_handle = ctx.systems.get_or_spawn(fob_sys);
     let (_, sh_ball) = fob_handle.get_ball_snapshot(stronghold_id).await.unwrap().expect("Stronghold ball in space");
     assert_eq!(sh_ball.type_id, PIRATE_STRONGHOLD_GURISTAS_TYPE);
     let sh_cs = fob_handle.get_combat_state(stronghold_id).await.unwrap().expect("Stronghold has CombatState");
@@ -503,12 +555,21 @@ async fn test_pve_insurgency_campaigns_and_strongholds_complete() {
         .await
         .expect("Join Guristas");
 
-    // Advance tick and trigger capture pulse
+    // Advance tick and trigger capture pulse via step_system_insurgency_capture_tick
     let _ = camp_handle.step_manual(1.0).await.unwrap();
+    let pulse_c = eve_server::services::insurgency_services::step_system_insurgency_capture_tick(&ctx, camp_sys, ship_id, 500_010).await;
+    assert!(pulse_c, "Guristas capture pulse awards corruption");
+
+    // BF-PVE-INSURGENCY-GET-MUTATES-01: GetLocalCampaignClientSnapshot is strictly read-only
     let snap_c = ctx
         .dispatch_rpc(&mut sess, "insurgencySolarsystem", None, "GetLocalCampaignClientSnapshot", &[], &kw, None)
         .await
         .expect("GetLocalCampaignClientSnapshot after corruption pulse");
+    let snap_c2 = ctx
+        .dispatch_rpc(&mut sess, "insurgencySolarsystem", None, "GetLocalCampaignClientSnapshot", &[], &kw, None)
+        .await
+        .expect("GetLocalCampaignClientSnapshot second read");
+    assert_eq!(snap_c, snap_c2, "GetLocalCampaignClientSnapshot must not mutate campaign state on read");
     let PyRep::Tuple(snap_c_tup) = snap_c else { panic!("Expected Tuple") };
     let c_pts = snap_c_tup[1].dict_get("corruptionPoints").and_then(|v| v.as_i64()).unwrap_or(0);
     assert!(c_pts > 0, "Guristas complex capture pulse near beacon awards corruption points");
@@ -522,6 +583,8 @@ async fn test_pve_insurgency_campaigns_and_strongholds_complete() {
         .await
         .expect("Join Caldari");
     let _ = camp_handle.step_manual(1.0).await.unwrap();
+    let pulse_s = eve_server::services::insurgency_services::step_system_insurgency_capture_tick(&ctx, camp_sys, ship_id, 500_001).await;
+    assert!(pulse_s, "Caldari capture pulse awards suppression");
 
     let snap_s = ctx
         .dispatch_rpc(&mut sess, "insurgencySolarsystem", None, "GetLocalCampaignClientSnapshot", &[], &kw, None)
@@ -566,4 +629,9 @@ async fn test_pve_insurgency_campaigns_and_strongholds_complete() {
     // FOB wreck ball (type 79386) spawned in space
     let wreck_ball = fob_handle.ballpark.read().ok().and_then(|bp| bp.balls.values().find(|b| b.type_id == PIRATE_STRONGHOLD_WRECK_TYPE).cloned());
     assert!(wreck_ball.is_some(), "FOB wreck ball (type 79386) spawned in space upon stronghold destruction");
+
+    // BF-PVE-STRONGHOLD-VULN-NOTIFY-01: Stronghold destruction queued Machonet notification
+    let notifs = ctx.pending_notifications.read().unwrap();
+    let pilot_notifs = notifs.get(&PILOT_INSURGENT).expect("notifications for pilot");
+    assert!(pilot_notifs.iter().any(|n| n.event == "OnInsurgencyCampaignUpdatedForLocation"), "Campaign updated notification emitted");
 }

@@ -45,7 +45,7 @@ pub fn resolve_fitted_analyzer_virus_stats(
     session: &SessionState,
     char_id: i64,
     is_relic: bool,
-) -> Result<(i32, i32, usize), BridgeRpcError> {
+) -> Result<(i32, i32, usize, f64), BridgeRpcError> {
     let ship_id = session
         .ship_id
         .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id)))
@@ -104,7 +104,8 @@ pub fn resolve_fitted_analyzer_virus_stats(
     let base_coh = inv_type.default_attributes.get(&1909).copied().unwrap_or(40.0) as i32;
     let base_str = inv_type.default_attributes.get(&1910).copied().unwrap_or(20.0) as i32;
     let slots = inv_type.default_attributes.get(&1911).copied().unwrap_or(3.0).max(1.0) as usize;
-    Ok((base_coh + skill_level * 10, base_str, slots))
+    let max_range = inv_type.default_attributes.get(&54).copied().unwrap_or(5_000.0).max(1_000.0);
+    Ok((base_coh + skill_level * 10, base_str, slots, max_range))
 }
 
 pub fn build_hacking_grid(container_id: ItemId, is_relic: bool) -> Vec<HackingTileState> {
@@ -279,7 +280,12 @@ pub async fn handle_pve_hacking(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
             let container_id = if let Some(explicit_id) = args
                 .first()
@@ -287,6 +293,8 @@ pub async fn handle_pve_hacking(
                 .filter(|&id| args.len() == 1 || id >= 1_000_000)
             {
                 explicit_id
+            } else if let Some(second_id) = args.get(1).and_then(|a| a.as_i64()).filter(|&id| id >= 1_000_000) {
+                second_id
             } else {
                 find_active_hacking_container(ctx, char_id).unwrap_or_else(|| {
                     with_pve_exploration_reg(ctx, |reg| {
@@ -303,6 +311,12 @@ pub async fn handle_pve_hacking(
                     })
                 })
             };
+            if container_id == 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "TargetNotFound".into(),
+                    message: "Target container not specified".into(),
+                }));
+            }
 
             let site_res = with_pve_exploration_reg(ctx, |reg| {
                 let sites = reg.sites_by_system.get_mut(&sys_id).ok_or_else(|| BridgeRpcError {
@@ -342,19 +356,41 @@ pub async fn handle_pve_hacking(
                 let is_relic = s.site_category == "Relic";
                 let is_sleeper_cache = s.site_category == "SleeperCache";
                 let site_id = s.site_id.clone();
-                Ok((site_id, is_relic, is_ghost, is_sleeper_cache))
+                let site_pos = s.position;
+                Ok((site_id, is_relic, is_ghost, is_sleeper_cache, site_pos))
             });
 
-            let (site_id, is_relic, is_ghost, is_sleeper_cache) = match site_res {
+            let (site_id, is_relic, is_ghost, is_sleeper_cache, site_pos) = match site_res {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
 
-            let (virus_coh, virus_str, utility_slots) =
+            let (virus_coh, virus_str, utility_slots, analyzer_max_range) =
                 match resolve_fitted_analyzer_virus_stats(ctx, session, char_id, is_relic) {
                     Ok(v) => v,
                     Err(e) => return Some(Err(e)),
                 };
+
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            if let Some(ship_id) = session.ship_id {
+                if let Ok(Some((_, sb))) = sys_handle.get_ball_snapshot(ship_id).await {
+                    let can_pos = if let Ok(Some((_, cb))) = sys_handle.get_ball_snapshot(container_id).await {
+                        cb.position
+                    } else if let Some(pos) = ctx.db.with_snapshot(|s| s.item_positions.get(&container_id).copied()) {
+                        glam::DVec3::from_array(pos)
+                    } else {
+                        glam::DVec3::from_array(site_pos)
+                    };
+                    let can_radius = sys_handle.get_ball_snapshot(container_id).await.ok().flatten().map(|(_, b)| b.radius).unwrap_or(0.0);
+                    let dist = (sb.position.distance(can_pos) - sb.radius - can_radius).max(0.0);
+                    if dist > analyzer_max_range {
+                        return Some(Err(BridgeRpcError {
+                            code: "OutOfRange".into(),
+                            message: format!("Target container is {dist:.1} m away (analyzer max range is {analyzer_max_range:.1} m)"),
+                        }));
+                    }
+                }
+            }
 
             let ghost_expired = with_pve_exploration_reg(ctx, |reg| {
                 let now = now_sec(reg);
@@ -767,10 +803,23 @@ pub async fn handle_pve_hacking(
                             .keys()
                             .find(|(cid, _)| *cid == char_id)
                             .map(|(_, cont_id)| *cont_id)
-                    }).unwrap_or(1_870_000_000);
-                    (active_cid, *a as usize)
+                    });
+                    match active_cid {
+                        Some(cid) => (cid, *a as usize),
+                        None => {
+                            return Some(Err(BridgeRpcError {
+                                code: "TargetNotFound".into(),
+                                message: "Target container not specified".into(),
+                            }));
+                        }
+                    }
                 }
-                _ => (1_870_000_000, 0),
+                _ => {
+                    return Some(Err(BridgeRpcError {
+                        code: "TargetNotFound".into(),
+                        message: "Target container not specified".into(),
+                    }));
+                }
             };
 
             let res = with_pve_exploration_reg(ctx, |reg| {
@@ -827,7 +876,15 @@ pub async fn handle_pve_hacking(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let container_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1_870_000_000);
+            let container_id = match args.first().and_then(|a| a.as_i64()) {
+                Some(id) => id,
+                None => {
+                    return Some(Err(BridgeRpcError {
+                        code: "TargetNotFound".into(),
+                        message: "Target container not specified".into(),
+                    }));
+                }
+            };
             let tiles = with_pve_exploration_reg(ctx, |reg| {
                 reg.hacking_games.get(&(char_id, container_id)).map(|g| {
                     g.tiles.iter().map(|t| {

@@ -38,6 +38,15 @@ pub async fn destroy_room_npcs_via_damage(ctx: &ServerContext, char_id: i64, roo
         assert!(matches!(res, Ok(Some((_, true, _)))), "NPC {bid} must be destroyed by damage: {res:?}");
         assert!(h.get_ball_snapshot(bid).await.unwrap().is_none(), "destroyed NPC {bid} removed from ballpark");
     }
+    // Approach room transfer/exit gate within proximity (<= 2500m)
+    let (pid, curr_room) = with_pve_special_reg(ctx, |reg| {
+        let p = reg.abyssal_pockets.get(&char_id).expect("pocket");
+        (p.pocket_id, p.current_room)
+    });
+    let gate_id = 1_895_000_000 + pid * 10 + (curr_room as i64);
+    if let Ok(Some((_, gb))) = h.get_ball_snapshot(gate_id).await {
+        let _ = h.set_ball_position(ship_id, gb.position + glam::DVec3::new(100.0, 0.0, 0.0)).await;
+    }
 }
 
 /// Verifies the room's Bioadaptive Cache in space, destroys it via combat damage, and verifies its loot transfers to the wreck.

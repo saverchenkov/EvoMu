@@ -545,7 +545,126 @@ pub async fn ensure_stronghold_in_space(ctx: &ServerContext, campaign_id: i64) -
     Some(stronghold_id)
 }
 
+#[derive(Debug, Clone)]
+pub struct StrongholdDestructionInfo {
+    pub campaign_id: i64,
+    pub solar_system_id: u32,
+    pub old_suppression: i64,
+    pub new_suppression: i64,
+    pub new_suppression_stage: u8,
+}
+
+/// Broadcasts Machonet notifications and Quasar IncreasedNotice when pirate stronghold destruction awards suppression.
+pub fn notify_stronghold_destruction(
+    db: &eve_db::WorldRepository,
+    gw: Option<&crate::quasar_gateway::PublicGatewayRouter>,
+    pending_notifications: Option<&std::sync::RwLock<HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>>>,
+    notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::cache_notifications::PendingMachoNotification)>>,
+    info: &StrongholdDestructionInfo,
+) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    if let Some(gw) = gw {
+        let q_payload = encode_pirate_increased_notice(
+            info.solar_system_id,
+            info.old_suppression as u64,
+            info.new_suppression as u64,
+        );
+        let _ = gw.publish_notice(
+            NoticeScope::SolarSystem(info.solar_system_id),
+            GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.pirate.suppression.api.IncreasedNotice"),
+                value: q_payload,
+            },
+            now,
+        );
+    }
+
+    let system_chars = db.with_snapshot(|snap| {
+        snap.characters
+            .values()
+            .filter(|c| c.solar_system_id == info.solar_system_id)
+            .map(|c| c.character_id)
+            .collect::<Vec<_>>()
+    });
+
+    let now_ft = db.clock().now_blueos_filetime_ticks();
+    let update_args = vec![
+        PyRep::Integer(i64::from(info.solar_system_id)),
+        PyRep::Integer(info.campaign_id),
+        PyRep::Integer(i64::from(info.new_suppression_stage)),
+    ];
+
+    let full_supp_args = if info.new_suppression_stage >= 5 {
+        Some(vec![
+            PyRep::Integer(i64::from(info.solar_system_id)),
+            PyRep::Integer(info.new_suppression),
+            PyRep::Integer(1000),
+        ])
+    } else {
+        None
+    };
+
+    for cid in system_chars {
+        let (packet, marshaled_packet) = crate::router::ServerContext::build_macho_notification_packet(
+            cid,
+            None,
+            "OnInsurgencyCampaignUpdatedForLocation",
+            "solarsystemid",
+            update_args.clone(),
+        );
+        let notif = crate::router::cache_notifications::PendingMachoNotification {
+            recipient_char_id: cid,
+            event: "OnInsurgencyCampaignUpdatedForLocation".into(),
+            id_type: "solarsystemid".into(),
+            args: update_args.clone(),
+            packet,
+            marshaled_packet,
+            created_filetime: now_ft,
+        };
+        if let Some(pend) = pending_notifications {
+            if let Ok(mut map) = pend.write() {
+                map.entry(cid).or_default().push(notif.clone());
+            }
+        }
+        if let Some(tx) = notify_tx {
+            let _ = tx.send((cid, notif));
+        }
+
+        if let Some(ref fs_args) = full_supp_args {
+            let (packet_fs, marshaled_packet_fs) = crate::router::ServerContext::build_macho_notification_packet(
+                cid,
+                None,
+                "OnSystemFullySuppressedForFaction",
+                "solarsystemid",
+                fs_args.clone(),
+            );
+            let notif_fs = crate::router::cache_notifications::PendingMachoNotification {
+                recipient_char_id: cid,
+                event: "OnSystemFullySuppressedForFaction".into(),
+                id_type: "solarsystemid".into(),
+                args: fs_args.clone(),
+                packet: packet_fs,
+                marshaled_packet: marshaled_packet_fs,
+                created_filetime: now_ft,
+            };
+            if let Some(pend) = pending_notifications {
+                if let Ok(mut map) = pend.write() {
+                    map.entry(cid).or_default().push(notif_fs.clone());
+                }
+            }
+            if let Some(tx) = notify_tx {
+                let _ = tx.send((cid, notif_fs));
+            }
+        }
+    }
+}
+
 /// Handles combat destruction of a pirate stronghold in space:
+/// verifies the campaign is in `Active` phase (strongholds are invulnerable during `Forecasting` or `WindDown`),
 /// marks the site completed, transitions campaign phase to `WindDown`,
 /// awards +500 suppression to the FOB solar system, and spawns the FOB wreck (type 79386).
 // parity: feat:pve.pirate-strongholds
@@ -555,13 +674,13 @@ pub async fn on_insurgency_stronghold_destroyed_core(
     solar_system_id: u32,
     ball_id: i64,
     killer_char_id: Option<i64>,
-) -> bool {
+) -> Option<StrongholdDestructionInfo> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let destruction_info = db.with_mut_snapshot(|snap| {
-        let mut matched_camp_id = None;
+        let mut matched = None;
         for camp in snap.insurgency_runtime.campaigns.values_mut() {
             if camp.fob_solar_system_id == solar_system_id {
                 let is_sh_id = ball_id == 1_898_000_000 + camp.campaign_id * 10 + 1;
@@ -573,22 +692,28 @@ pub async fn on_insurgency_stronghold_destroyed_core(
                         && !s.completed
                 });
                 if has_site_match || is_sh_id || is_sh_type {
-                    matched_camp_id = Some(camp.campaign_id);
+                    let (phase, _) = get_campaign_phase_and_timer(camp, now);
+                    if phase != PHASE_ACTIVE {
+                        return None;
+                    }
                     camp.forecasting_end_unix = camp.forecasting_end_unix.min(now);
                     camp.active_end_unix = now;
                     camp.winddown_end_unix = now + WINDDOWN_DURATION_SECS;
 
                     let p = camp.suppression_points.entry(solar_system_id).or_insert(0);
+                    let old_supp = *p;
                     *p = (*p + 500).max(0);
+                    let new_supp = *p;
                     let s_stage = insurgency_stage(*p).max(1);
                     if let Some(st) = snap.system_states.get_mut(&solar_system_id) {
                         st.insurgency_suppression_stage = s_stage;
                     }
+                    matched = Some((camp.campaign_id, old_supp, new_supp, s_stage));
                     break;
                 }
             }
         }
-        let Some(camp_id) = matched_camp_id else {
+        let Some((camp_id, old_supp, new_supp, s_stage)) = matched else {
             return None;
         };
 
@@ -616,11 +741,17 @@ pub async fn on_insurgency_stronghold_destroyed_core(
         });
         snap.item_positions.insert(wreck_id, pos);
 
-        Some((camp_id, wreck_id, pos))
+        Some((StrongholdDestructionInfo {
+            campaign_id: camp_id,
+            solar_system_id,
+            old_suppression: old_supp,
+            new_suppression: new_supp,
+            new_suppression_stage: s_stage,
+        }, wreck_id, pos))
     });
 
-    let Some((_camp_id, wreck_id, pos)) = destruction_info else {
-        return false;
+    let Some((info, wreck_id, pos)) = destruction_info else {
+        return None;
     };
 
     let sys_handle = systems.get_or_spawn(solar_system_id);
@@ -637,7 +768,7 @@ pub async fn on_insurgency_stronghold_destroyed_core(
         mode: eve_destiny::MovementMode::Stop,
     };
     let _ = sys_handle.spawn_ball(wreck_ball).await;
-    true
+    Some(info)
 }
 
 /// Destroys a pirate stronghold, marking the site completed and affecting campaign state.
@@ -652,6 +783,10 @@ pub fn destroy_pirate_stronghold(
     let now = ctx.now_unix();
     let fob_sys = with_insurgency_runtime(ctx, |rt| {
         let camp = rt.campaigns.get_mut(&campaign_id)?;
+        let (phase, _) = get_campaign_phase_and_timer(camp, now);
+        if phase != PHASE_ACTIVE {
+            return None;
+        }
         let fob = camp.fob_solar_system_id;
         if camp.active_end_unix > now {
             camp.forecasting_end_unix = camp.forecasting_end_unix.min(now);
@@ -672,6 +807,45 @@ pub fn destroy_pirate_stronghold(
     if let Some(sys_id) = fob_sys {
         let (_pts, stage) = add_system_suppression(ctx, campaign_id, sys_id, 500);
         emit_campaign_updated(ctx, sys_id, campaign_id, stage);
+        true
+    } else {
+        false
+    }
+}
+
+/// Advances insurgency capture progression for an active ship near a FW complex beacon.
+/// Can be invoked by system tick / capture hooks.
+pub async fn step_system_insurgency_capture_tick(
+    ctx: &ServerContext,
+    sys_id: u32,
+    ship_id: i64,
+    fid: i64,
+) -> bool {
+    let Ok(Some((tick, ship_ball))) = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(ship_id).await else {
+        return false;
+    };
+    let effective_tick = tick.max(1);
+    let camp_pulse = ctx.db.with_mut_snapshot(|snap| {
+        let camp = snap.insurgency_runtime.campaigns.values().find(|c| c.systems.contains(&sys_id))?;
+        let camp_id = camp.campaign_id;
+        let pirate_fac = camp.pirate_faction_id;
+        let st = snap.system_states.get_mut(&sys_id)?;
+        let beacon = glam::DVec3::from_array(st.fw_complex_position?);
+        if ship_ball.position.distance(beacon) > 30_000.0 || effective_tick <= st.last_fw_capture_tick {
+            return None;
+        }
+        let delta = if st.last_fw_capture_tick == 0 { 1 } else { effective_tick.saturating_sub(st.last_fw_capture_tick).clamp(1, 30) };
+        let duration = st.fw_capture_duration_seconds.max(600);
+        st.last_fw_capture_tick = effective_tick;
+        let pts_delta = ((u64::from(delta) * 1000) / u64::from(duration)).max(50) as i64;
+        Some((camp_id, pirate_fac, pts_delta))
+    });
+    if let Some((camp_id, pirate_fac, pts_delta)) = camp_pulse {
+        if fid == pirate_fac || fid == FACTION_GURISTAS || fid == FACTION_ANGEL_CARTEL {
+            let _ = add_system_corruption(ctx, camp_id, sys_id, pts_delta);
+        } else {
+            let _ = add_system_suppression(ctx, camp_id, sys_id, pts_delta);
+        }
         true
     } else {
         false
@@ -718,36 +892,6 @@ pub async fn handle(
                     message: "Session has no active solar system".into(),
                 }));
             };
-
-            if session.station_id.is_none() && session.structure_id.is_none() {
-                if let (Some(ship_id), Some(fid)) = (session.ship_id, session.war_faction_id) {
-                    if let Ok(Some((tick, ship_ball))) = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(ship_id).await {
-                        let effective_tick = tick.max(1);
-                        let camp_pulse = ctx.db.with_mut_snapshot(|snap| {
-                            let camp = snap.insurgency_runtime.campaigns.values().find(|c| c.systems.contains(&sys_id))?;
-                            let camp_id = camp.campaign_id;
-                            let pirate_fac = camp.pirate_faction_id;
-                            let st = snap.system_states.get_mut(&sys_id)?;
-                            let beacon = glam::DVec3::from_array(st.fw_complex_position?);
-                            if ship_ball.position.distance(beacon) > 30_000.0 || effective_tick <= st.last_fw_capture_tick {
-                                return None;
-                            }
-                            let delta = if st.last_fw_capture_tick == 0 { 1 } else { effective_tick.saturating_sub(st.last_fw_capture_tick).clamp(1, 30) };
-                            let duration = st.fw_capture_duration_seconds.max(600);
-                            st.last_fw_capture_tick = effective_tick;
-                            let pts_delta = ((u64::from(delta) * 1000) / u64::from(duration)).max(50) as i64;
-                            Some((camp_id, pirate_fac, pts_delta))
-                        });
-                        if let Some((camp_id, pirate_fac, pts_delta)) = camp_pulse {
-                            if fid == pirate_fac || fid == FACTION_GURISTAS || fid == FACTION_ANGEL_CARTEL {
-                                let _ = add_system_corruption(ctx, camp_id, sys_id, pts_delta);
-                            } else {
-                                let _ = add_system_suppression(ctx, camp_id, sys_id, pts_delta);
-                            }
-                        }
-                    }
-                }
-            }
 
             let snapshot = read_insurgency_runtime(ctx, |rt| {
                 rt.campaigns

@@ -210,7 +210,15 @@ impl ServerContext {
                             crate::services::pve_exploration::notify_pve_destruction_events(&db, &pws, &tx, kid, clr, esc, step);
                         }
                     }
-                    crate::services::insurgency_services::on_insurgency_stronghold_destroyed_core(&sys, &db, sys_id, npc_id, killer_opt).await;
+                    if let Some(sh_info) = crate::services::insurgency_services::on_insurgency_stronghold_destroyed_core(&sys, &db, sys_id, npc_id, killer_opt).await {
+                        crate::services::insurgency_services::notify_stronghold_destruction(
+                            &db,
+                            gww.upgrade().as_deref(),
+                            pw.upgrade().as_deref(),
+                            Some(&tx),
+                            &sh_info,
+                        );
+                    }
                 }
             })
         }));
