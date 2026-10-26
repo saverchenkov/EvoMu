@@ -552,6 +552,9 @@ pub fn handle_clones_and_sheet(
             Some(crate::services::jump_clone_names::get_ship_clone_state(ctx, session, args))
         }
 
+        ("jumpCloneSvc", "ResetLastCloneJumpTime") => {
+            Some(crate::services::sov_services::handle_reset_last_clone_jump_time(ctx, session))
+        }
         ("jumpCloneSvc", "GetCloneState") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,

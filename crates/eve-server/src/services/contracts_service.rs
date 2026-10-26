@@ -1299,8 +1299,13 @@ pub fn handle(
                 }
                 let cids: Vec<i64> = snap.contracts.keys().copied().collect();
                 for cid in cids { let _ = snap.resolve_expired_contract(cid, now_unix); }
+                let dismissed: std::collections::HashSet<String> = snap.quasar_state_blobs.get("contract_dismissed_notifs")
+                    .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok()).unwrap_or_default().into_iter().collect();
                 let mut list: Vec<ContractRecord> = snap.contracts.values().filter(|c| {
                     if c.contract_type != "Auction" { return false; }
+                    if dismissed.contains(&format!("{owner_id}:{}", c.contract_id)) || dismissed.contains(&format!("{char_id}:{}", c.contract_id)) {
+                        return false;
+                    }
                     let has_bid = c.current_bidder_id == Some(owner_id) || c.bid_history.iter().any(|&(b, _, _)| b == owner_id)
                         || (owner_id != char_id && c.for_corp && (c.current_bidder_id == Some(char_id) || c.bid_history.iter().any(|&(b, _, _)| b == char_id)));
                     if !has_bid { return false; }
@@ -1321,8 +1326,12 @@ pub fn handle(
             let caller_corp = session.corporation_id.unwrap_or(0);
             let now_unix = ctx.now_unix();
             let info = ctx.db.with_snapshot(|snap| {
+                let dismissed: std::collections::HashSet<String> = snap.quasar_state_blobs.get("contract_dismissed_notifs")
+                    .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok()).unwrap_or_default().into_iter().collect();
+                let is_dismissed = |cid: i64| dismissed.contains(&format!("{char_id}:{cid}")) || (caller_corp != 0 && dismissed.contains(&format!("{caller_corp}:{cid}")));
                 let (mut assigned, mut needs_attention, mut in_progress) = (Vec::new(), Vec::new(), Vec::new());
                 for c in snap.contracts.values() {
+                    if is_dismissed(c.contract_id) { continue; }
                     if c.status == "Outstanding" && c.issuer_id != char_id && (c.assignee_id == char_id || (caller_corp != 0 && c.assignee_id == caller_corp)) {
                         assigned.push(PyRep::keyval([("contractID", PyRep::Integer(c.contract_id)), ("issuerID", PyRep::Integer(c.issuer_id))]));
                     } else if c.status == "Outstanding" && (c.issuer_id == char_id || c.acceptor_id == Some(char_id)) && c.expiration_unix <= now_unix {

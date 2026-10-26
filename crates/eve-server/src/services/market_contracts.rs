@@ -1116,12 +1116,11 @@ pub fn handle(
             Some(Ok(PyRep::Integer(cnt)))
         }
         ("contractProxy", "DeleteContractNotification")
-        | ("contractProxy", "DeleteNotification")
-        | ("contractProxy", "DeleteMultipleContracts") => {
-            Some(Err(BridgeRpcError {
-                code: "UnimplementedRPC".into(),
-                message: format!("RPC '{service}.{method}' is not implemented"),
-            }))
+        | ("contractProxy", "DeleteNotification") => {
+            Some(crate::services::sov_services::handle_contract_delete_notif(ctx, session, method, args))
+        }
+        ("contractProxy", "DeleteMultipleContracts") => {
+            Some(crate::services::sov_services::handle_contract_delete_multiple(ctx, session, args))
         }
         ("contractProxy", "FinishAuction") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
@@ -1176,10 +1175,7 @@ pub fn handle(
             Some(Ok(PyRep::List(rows)))
         }
         ("contractProxy", "GetItemsInDockableLocation") => {
-            Some(Err(BridgeRpcError {
-                code: "UnimplementedRPC".into(),
-                message: "contractProxy.GetItemsInDockableLocation is not implemented".into(),
-            }))
+            Some(crate::services::sov_services::handle_contract_get_items_in_dockable(ctx, session, args))
         }
         ("contractProxy", "GetMyContractEscrow") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
