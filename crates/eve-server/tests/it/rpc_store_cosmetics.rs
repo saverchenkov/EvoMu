@@ -263,6 +263,7 @@ async fn test_store_manager_categories_offers_and_purchases() {
 
 #[tokio::test]
 async fn test_ship_cosmetics_manager_licenses_and_first_party() {
+    // parity: feat:cosmetics.first-party-skins
     // parity: rpc:shipCosmeticsMgr.GMExpireSkinLicense
     // parity: rpc:shipCosmeticsMgr.GetFirstPartySkinData
     // parity: rpc:shipCosmeticsMgr.GetLicencedSkins
