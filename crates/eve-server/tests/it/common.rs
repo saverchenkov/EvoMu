@@ -147,8 +147,6 @@ pub fn seed_test_nes_store_catalog(ctx: &ServerContext) {
 /// Time then only moves via `ctx.advance_secs` / explicit tick deltas.
 #[allow(dead_code)]
 pub fn pin_clock(ctx: &ServerContext) {
-    seed_test_lp_store_offers(ctx);
-    seed_test_nes_store_catalog(ctx);
     ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(
         TEST_CLOCK_BASE_UNIX,
     )));
@@ -209,8 +207,6 @@ pub async fn login_pilot(
     username: &str,
     password: &str,
 ) {
-    seed_test_lp_store_offers(ctx);
-    seed_test_nes_store_catalog(ctx);
     let kw = HashMap::new();
     ctx.dispatch_rpc(
         sess,

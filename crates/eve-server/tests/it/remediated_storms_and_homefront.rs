@@ -205,17 +205,42 @@ async fn test_homefront_site_instances_v24_registry_and_completion() {
     let d_archetype = ctx.sde.dungeons.get(&did).and_then(|d| d.archetype_id);
     assert_eq!(d_archetype, Some(70), "Homefront dungeon must belong to SDE archetype 70");
 
-    // 2. Complete the Homefront site via boss destruction and keeper.EnterNextDungeonRoom
-    let boss_bid = with_pve_special_reg(&ctx, |reg| {
-        reg.homefront_sites[&jita]
+    // 2. Complete the Homefront site via in-space combat destruction of the SDE-backed boss NPC
+    let (boss_bid, boss_tid) = with_pve_special_reg(&ctx, |reg| {
+        let s = reg.homefront_sites[&jita]
             .iter()
             .find(|s| s.instance_id == target_instance_id)
-            .unwrap()
-            .boss_npc_ball_id
+            .unwrap();
+        (s.boss_npc_ball_id, s.boss_type_id)
     });
+    assert!(ctx.sde.types.contains_key(&boss_tid), "Homefront boss must use a real SDE NPC type");
+
     let jita_sys = ctx.systems.get_or_spawn(jita);
-    let _ = jita_sys
-        .apply_damage(
+    let boss_snap = jita_sys
+        .get_ball_snapshot(boss_bid)
+        .await
+        .expect("get_ball_snapshot")
+        .expect("Homefront boss ball must be spawned");
+    assert_eq!(boss_snap.1.type_id, boss_tid);
+
+    let boss_combat = jita_sys
+        .get_combat_state(boss_bid)
+        .await
+        .expect("get_combat_state")
+        .expect("Homefront boss ball must have combat state");
+    assert!(
+        boss_combat.max_shield_hp > 0.0
+            && boss_combat.max_armor_hp > 0.0
+            && boss_combat.max_structure_hp > 0.0,
+        "Homefront boss ball must have SDE-backed CombatState HP"
+    );
+
+    let init_balance = ctx.db.with_snapshot(|s| s.characters[&90_000_002].balance.0);
+    let init_journal_len = ctx.db.with_snapshot(|s| s.wallet_journal.len());
+    let _ = ctx.drain_notifications_for_char(90_000_002);
+
+    let kill_evt = jita_sys
+        .apply_damage_with_attacker(
             boss_bid,
             DamageVector {
                 em: 50_000.0,
@@ -223,26 +248,32 @@ async fn test_homefront_site_instances_v24_registry_and_completion() {
                 kinetic: 50_000.0,
                 explosive: 50_000.0,
             },
-        )
-        .await;
-
-    let init_balance = ctx.db.with_snapshot(|s| s.characters[&90_000_002].balance.0);
-    let complete_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "keeper",
-            None,
-            "EnterNextDungeonRoom",
-            &[PyRep::Integer(target_instance_id), PyRep::Integer(5)],
-            &kw,
-            None,
+            Some(90_000_002),
         )
         .await
-        .expect("Complete Homefront site");
-    assert_eq!(complete_rep.dict_get("completed").and_then(|v| v.as_bool()), Some(true));
+        .expect("apply_damage_with_attacker")
+        .expect("Homefront boss hit result");
+    assert!(kill_evt.1, "Homefront boss must be destroyed by combat damage");
 
     let final_balance = ctx.db.with_snapshot(|s| s.characters[&90_000_002].balance.0);
-    assert!(final_balance > init_balance, "Pilot must receive ISK payout for Homefront completion");
+    assert!(final_balance > init_balance, "Pilot must receive ISK payout from in-space Homefront completion");
+
+    let journal_after = ctx.db.with_snapshot(|s| s.wallet_journal.clone());
+    assert!(
+        journal_after.len() > init_journal_len
+            && journal_after.iter().any(|j| {
+                j.character_id == 90_000_002
+                    && j.entry_type == "CorporateRewardPayout"
+                    && j.reason.contains("Homefront Operation Payout")
+            }),
+        "Homefront completion must record a CorporateRewardPayout wallet journal entry"
+    );
+
+    let notifs = ctx.drain_notifications_for_char(90_000_002);
+    assert!(
+        notifs.iter().any(|n| n.event == "OnAccountChange"),
+        "Homefront payout must emit OnAccountChange notification"
+    );
 
     // 3. Query GetHomefrontSiteInstances again: the completed instance is no longer returned in the active registry list
     let hf_after_rep = ctx

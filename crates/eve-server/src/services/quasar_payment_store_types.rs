@@ -225,6 +225,9 @@ pub fn save_store_catalog(snap: &mut eve_db::WorldStateSnapshot, catalog: &Store
     }
 }
 
+/// Read persisted New Eden Store catalog from `WorldStateSnapshot.service_state_blobs["nes_store_catalog"]`.
+///
+/// DATA GAP: NES store catalog (categories, products, offers) is live Quasar backend data not present in V24 client FSD.
 pub fn read_store_catalog(snap: &eve_db::WorldStateSnapshot) -> StoreCatalog {
     snap.service_state_blobs
         .get("nes_store_catalog")

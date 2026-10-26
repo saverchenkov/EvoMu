@@ -60,6 +60,9 @@ pub fn ensure_homefront_sites_for_system_locked(
         .map(|d| d.name.clone())
         .unwrap_or_else(|| "Homefront Operation".into());
 
+    // DERIVED: EVE University Wiki "Homefront Operations" highsec optimal 5-pilot payout
+    // (17,230,000 ISK per pilot for Empire Raid / Abyssal Artifact Recovery; 15,500,000 ISK for secondary operations).
+    // Hostile wave boss NPC types use real SDE Abyssal/Triglavian combat entities (48090 Starving Damavik, 48092 Striking Damavik).
     reg.homefront_sites.insert(
         sys_id,
         vec![
@@ -73,6 +76,7 @@ pub fn ensure_homefront_sites_for_system_locked(
                 completed: false,
                 reward_paid_isk: 0,
                 boss_npc_ball_id: 1_897_700_000 + (base_inst + 1),
+                boss_type_id: 48_090,
             },
             HomefrontSiteRecord {
                 instance_id: base_inst + 2,
@@ -84,6 +88,7 @@ pub fn ensure_homefront_sites_for_system_locked(
                 completed: false,
                 reward_paid_isk: 0,
                 boss_npc_ball_id: 1_897_700_000 + (base_inst + 2),
+                boss_type_id: 48_092,
             },
         ],
     );

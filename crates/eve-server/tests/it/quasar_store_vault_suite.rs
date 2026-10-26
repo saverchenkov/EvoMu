@@ -234,10 +234,8 @@ async fn test_unified_plex_vault_and_transactions() {
 
 #[tokio::test]
 async fn test_quasar_store_catalog_products_and_offers() {
-    // parity: feat:wallet.nes-store
-    // parity: quasar:eveProto/generated/eve_public/store/category/api_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/store/offer/api_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj
+    // DATA GAP: feat:wallet.nes-store, eve_public/store/{category,offer,product}/api_pb2.pyj
+    // (NES store catalog is live Quasar backend data not present in V24 client FSD)
     // parity: quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj
     let ctx = ServerContext::new();
     let mut sess = build_sess(3502, 1, 90_000_001);
@@ -248,6 +246,7 @@ async fn test_quasar_store_catalog_products_and_offers() {
     assert!(empty_cats.payload.as_ref().unwrap().value.is_empty());
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.store.offer.api.GetRequest", make_str_id_request("1001")).await.status_code, STATUS_NOT_FOUND);
     common::pin_clock(&ctx);
+    common::seed_test_nes_store_catalog(&ctx);
 
     // 1. GetAllRequest (categories) & 2. GetRequest (category 1)
     let cat_all = quasar_rpc(&ctx, &mut sess, "eve_public.store.category.api.GetAllRequest", vec![]).await;
@@ -327,6 +326,7 @@ async fn test_payment_schedules_tokens_and_user_license() {
     // parity: quasar:eveProto/generated/eve_public/user/license/api/notices_pb2.pyj
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
+    common::seed_test_nes_store_catalog(&ctx);
     let (uid, cid) = (1u64, 90_000_001);
     let mut sess = build_sess(3503, uid, cid);
     let mut notice_rx = ctx.quasar_gateway.subscribe_session(&sess, vec![], ctx.now_unix());

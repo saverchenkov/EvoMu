@@ -30,8 +30,7 @@ async fn test_project_discovery_state_and_tasks() {
     // parity: rpc:ProjectDiscovery.get_data_from_url, rpc:ProjectDiscovery.get_new_task
     // parity: rpc:ProjectDiscovery.get_player_state, rpc:ProjectDiscovery.get_player_statistics
     // parity: rpc:ProjectDiscovery.get_project_id, rpc:ProjectDiscovery.get_remaining_bonus_samples
-    // parity: rpc:ProjectDiscovery.get_total_needed_xp, rpc:ProjectDiscovery.new_training_task
-    // parity: rpc:ProjectDiscovery.post_classification
+    // parity: rpc:ProjectDiscovery.new_training_task
     eve_testkit::attest(&[
         "rpc:ProjectDiscovery.fix_task_id",
         "rpc:ProjectDiscovery.get_current_task_index",
@@ -41,9 +40,7 @@ async fn test_project_discovery_state_and_tasks() {
         "rpc:ProjectDiscovery.get_player_statistics",
         "rpc:ProjectDiscovery.get_project_id",
         "rpc:ProjectDiscovery.get_remaining_bonus_samples",
-        "rpc:ProjectDiscovery.get_total_needed_xp",
         "rpc:ProjectDiscovery.new_training_task",
-        "rpc:ProjectDiscovery.post_classification",
     ]);
 
     let ctx = ServerContext::new();
@@ -144,6 +141,7 @@ async fn test_project_discovery_state_and_tasks() {
     assert_eq!(post.dict_get("experience_reward").and_then(|v| v.as_f64()), Some(150.0));
     assert_eq!(post.dict_get("kredits_reward").and_then(|v| v.as_i64()), Some(50));
     assert_eq!(post.dict_get("ISK_Reward").and_then(|v| v.as_f64()), Some(1_000.0));
+    assert!(ctx.drain_notifications_for_char(P1).iter().any(|n| n.event == "OnProjectDiscoveryExperience"));
 
     assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("get_player_analysis_kredits post"), PyRep::Integer(50));
     assert!(eve_server::services::project_discovery::spend_analysis_kredits(&ctx, P1, 100).is_err());
@@ -163,8 +161,6 @@ async fn test_project_discovery_tutorial_and_rewards() {
     // parity: rpc:ProjectDiscovery.get_player_analysis_kredits
     // parity: rpc:ProjectDiscovery.get_tutorial_completion_status
     // parity: rpc:ProjectDiscovery.get_tutorial_level
-    // parity: rpc:ProjectDiscovery.get_tutorial_xp_reward
-    // parity: rpc:ProjectDiscovery.give_tutorial_rewards
     // parity: rpc:ProjectDiscovery.increase_tutorial_level
     // parity: rpc:ProjectDiscovery.reset_tutorial
     // parity: rpc:ProjectDiscovery.skip_tutorial
@@ -174,8 +170,6 @@ async fn test_project_discovery_tutorial_and_rewards() {
         "rpc:ProjectDiscovery.get_player_analysis_kredits",
         "rpc:ProjectDiscovery.get_tutorial_completion_status",
         "rpc:ProjectDiscovery.get_tutorial_level",
-        "rpc:ProjectDiscovery.get_tutorial_xp_reward",
-        "rpc:ProjectDiscovery.give_tutorial_rewards",
         "rpc:ProjectDiscovery.increase_tutorial_level",
         "rpc:ProjectDiscovery.reset_tutorial",
         "rpc:ProjectDiscovery.skip_tutorial",

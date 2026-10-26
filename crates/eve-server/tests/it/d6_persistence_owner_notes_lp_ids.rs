@@ -342,6 +342,7 @@ async fn test_d6_lp_durable_and_atomic_failed_purchase_across_sqlite_restart() {
     // === RESTART SERVER FROM SQLITE ===
     {
         let ctx = open_ctx_at(&path, 1_750_100_060);
+        crate::common::seed_test_lp_store_offers(&ctx);
         let mut sess = login_select(&ctx, 7102, "demo", "demo-secret", P1).await;
 
         let corp_lp_after = call(&ctx, &mut sess, "LPSvc", "GetAllMyCorporationWalletLPBalances", &[]).await.unwrap();

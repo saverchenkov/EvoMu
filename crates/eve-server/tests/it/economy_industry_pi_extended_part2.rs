@@ -951,6 +951,7 @@ async fn test_wallet_evermarks_and_item_trader() {
     let em_earned = get_lp(&ctx, &mut sess, paragon_corp_id).await;
     assert_eq!(em_earned, mission_em + 1_000);
 
+    crate::common::seed_test_lp_store_offers(&ctx);
     let take_emblem = ctx
         .dispatch_rpc(
             &mut sess,

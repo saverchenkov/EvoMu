@@ -1,5 +1,4 @@
 //! Integration tests for LPStoreMgr RPCs:
-//! - `rpc:LPStoreMgr.GetAvailableOffersFromCorp`
 //! - `rpc:LPStoreMgr.TakeOfferForCharacter`
 //! - `rpc:LPStoreMgr.TakeOfferForCorporation`
 //! - `feat:lp.lp-store-offers`
@@ -61,10 +60,8 @@ async fn setup_docked_session(ctx: &ServerContext) -> SessionState {
 
 #[tokio::test]
 async fn test_lp_store_mgr_get_available_offers() {
-    // parity: rpc:LPStoreMgr.GetAvailableOffersFromCorp
     // parity: feat:lp.lp-store-offers
     eve_testkit::attest(&[
-        "rpc:LPStoreMgr.GetAvailableOffersFromCorp",
         "feat:lp.lp-store-offers",
     ]);
 
@@ -73,9 +70,6 @@ async fn test_lp_store_mgr_get_available_offers() {
     let mut sess = setup_docked_session(&ctx).await;
 
     // 0. Before LP store offers are registered in WorldStateSnapshot, GetAvailableOffersFromCorp returns an empty list
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.remove("lp_store_offers");
-    });
     let empty_rep = rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[PyRep::Integer(CALDARI_NAVY_CORP)])
         .await.expect("GetAvailableOffersFromCorp unseeded");
     assert_eq!(empty_rep, PyRep::List(vec![]));
@@ -147,6 +141,7 @@ async fn test_lp_store_mgr_take_offer_for_character() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let mut sess = setup_docked_session(&ctx).await;
+    common::seed_test_lp_store_offers(&ctx);
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.retain(|_, it| !(it.owner_id == CHAR_ID && it.type_id == TRITANIUM_TYPE_ID));
@@ -279,6 +274,7 @@ async fn test_lp_store_mgr_take_offer_for_corporation() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let mut sess = setup_docked_session(&ctx).await;
+    common::seed_test_lp_store_offers(&ctx);
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {

@@ -44,6 +44,9 @@ pub struct LPOffer {
     pub ak_cost: i64,
 }
 
+/// Load persisted LP store offers from `WorldStateSnapshot.service_state_blobs["lp_store_offers"]`.
+///
+/// DATA GAP: LP store corporation offer catalog is server-only and not present in V24 client FSD.
 pub fn load_lp_store_offers(snap: &eve_db::WorldStateSnapshot) -> Vec<LPOffer> {
     snap.service_state_blobs
         .get(LP_STORE_OFFERS_KEY)

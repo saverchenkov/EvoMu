@@ -178,6 +178,9 @@ pub fn set_project_discovery_task_consensus(
 }
 
 /// Resolve cumulative XP threshold for `rank` from persisted `ProjectDiscoveryStore` MMOS configuration.
+///
+/// DATA GAP: Project Discovery XP curve, tutorial reward, and MMOS classification grading live on the
+/// external MMOS backend and are not in V24 client static data.
 pub fn project_discovery_total_needed_xp_from_store(
     store: &ProjectDiscoveryStore,
     rank: i64,
@@ -193,6 +196,20 @@ pub fn project_discovery_total_needed_xp_from_store(
     } else {
         0.0
     }
+}
+
+/// Resolve the player's rank for a given cumulative `experience` using `ProjectDiscoveryStore`.
+pub fn rank_for_xp(store: &ProjectDiscoveryStore, experience: f64, current_rank: i64) -> i64 {
+    let mut rank = current_rank.max(1);
+    loop {
+        let needed = project_discovery_total_needed_xp_from_store(store, rank);
+        if needed > 0.0 && experience >= needed {
+            rank += 1;
+        } else {
+            break;
+        }
+    }
+    rank
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -420,7 +437,7 @@ pub fn handle_project_discovery(
         "give_tutorial_rewards" => {
             // V24 `projectdiscovery/client/projects/subcellular/tutorial.pyj:601`:
             // `give_tutorial_rewards()` grants `get_tutorial_xp_reward()` XP (`AK_Reward = 0`, `ISK_Reward = 0`, `LP_Reward = 0`).
-            let granted = with_player_state(ctx, char_id, |st, snap| {
+            let (granted, xp_gained, new_xp, old_rank, new_rank) = with_player_state(ctx, char_id, |st, snap| {
                 if st.tutorial_complete
                     && st.tutorial_level >= 5
                     && !st.tutorial_reward_claimed
@@ -428,16 +445,35 @@ pub fn handle_project_discovery(
                 {
                     let store = load_discovery_store(snap);
                     st.tutorial_reward_claimed = true;
-                    st.experience += store.tutorial_xp_reward.max(0.0);
-                    let needed = project_discovery_total_needed_xp_from_store(&store, st.rank);
-                    if needed > 0.0 && st.experience >= needed {
-                        st.rank += 1;
-                    }
-                    true
+                    let xp_reward = store.tutorial_xp_reward.max(0.0);
+                    let prev_rank = st.rank;
+                    st.experience += xp_reward;
+                    st.rank = rank_for_xp(&store, st.experience, st.rank);
+                    (true, xp_reward, st.experience, prev_rank, st.rank)
                 } else {
-                    false
+                    (false, 0.0, st.experience, st.rank, st.rank)
                 }
             });
+            if granted {
+                let xp_args = vec![PyRep::Real(xp_gained), PyRep::Real(new_xp)];
+                session.push_notification("OnProjectDiscoveryExperience", xp_args.clone());
+                let _ = ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnProjectDiscoveryExperience",
+                    "charid",
+                    xp_args,
+                );
+                if new_rank > old_rank {
+                    let lvl_args = vec![PyRep::Integer(new_rank)];
+                    session.push_notification("OnProjectDiscoveryLevelUp", lvl_args.clone());
+                    let _ = ctx.notify(
+                        crate::router::NotificationTarget::Character(char_id),
+                        "OnProjectDiscoveryLevelUp",
+                        "charid",
+                        lvl_args,
+                    );
+                }
+            }
             Some(Ok(PyRep::Bool(granted)))
         }
 
@@ -579,12 +615,7 @@ pub fn handle_project_discovery(
                     .task_consensus_by_index
                     .get(&req_task_index)
                     .copied()
-                    .unwrap_or_else(|| match classification_arg {
-                        PyRep::List(items) | PyRep::Tuple(items) => items.iter().all(|v| {
-                            v.as_f64().map(|f| f.is_finite() && f >= 0.0).unwrap_or(true)
-                        }),
-                        _ => true,
-                    });
+                    .unwrap_or(false);
                 st.accuracy = (((st.accuracy * 9.0) + if is_accurate { 1.0 } else { 0.0 }) / 10.0)
                     .clamp(0.0, 1.0);
                 st.score = (st.score + if is_accurate { 2.5 } else { -5.0 }).clamp(0.0, 1000.0);
@@ -598,6 +629,7 @@ pub fn handle_project_discovery(
                 } else {
                     0
                 };
+                let prev_rank = st.rank;
                 st.experience += xp_gain;
                 st.analysis_kredits = st.analysis_kredits.saturating_add(ak_gain);
 
@@ -641,10 +673,10 @@ pub fn handle_project_discovery(
                     (eve_db::IskCents(0), None)
                 };
 
-                let needed_xp = project_discovery_total_needed_xp_from_store(&store, st.rank);
+                let new_rank = rank_for_xp(&store, st.experience, st.rank);
                 let mut crates_granted = Vec::new();
-                if needed_xp > 0.0 && st.experience >= needed_xp {
-                    st.rank += 1;
+                if new_rank > st.rank {
+                    st.rank = new_rank;
                     let crate_type_id = if st.rank >= NEEDED_LEVEL_FOR_SUPERIOR_CRATES {
                         SUPERIOR_LOOT_CRATE_TYPE_ID
                     } else {
@@ -673,13 +705,31 @@ pub fn handle_project_discovery(
                     ("player", PyRep::keyval([("score", PyRep::Real(st.accuracy))])),
                     ("rank", PyRep::Integer(st.rank)),
                 ]);
-                Ok((rep, new_bal))
+                Ok((rep, new_bal, xp_gain, st.experience, prev_rank, st.rank))
             });
 
             match res {
-                Ok((rep, new_bal)) => {
+                Ok((rep, new_bal, xp_gain, total_xp, old_rank, new_rank)) => {
                     if let Some(bal) = new_bal {
                         let _ = ctx.notify_account_change(char_id, "cash", char_id, bal.to_wire_f64());
+                    }
+                    let xp_args = vec![PyRep::Real(xp_gain), PyRep::Real(total_xp)];
+                    session.push_notification("OnProjectDiscoveryExperience", xp_args.clone());
+                    let _ = ctx.notify(
+                        crate::router::NotificationTarget::Character(char_id),
+                        "OnProjectDiscoveryExperience",
+                        "charid",
+                        xp_args,
+                    );
+                    if new_rank > old_rank {
+                        let lvl_args = vec![PyRep::Integer(new_rank)];
+                        session.push_notification("OnProjectDiscoveryLevelUp", lvl_args.clone());
+                        let _ = ctx.notify(
+                            crate::router::NotificationTarget::Character(char_id),
+                            "OnProjectDiscoveryLevelUp",
+                            "charid",
+                            lvl_args,
+                        );
                     }
                     Some(Ok(rep))
                 }

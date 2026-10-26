@@ -30,6 +30,8 @@ pub struct HomefrontSiteRecord {
     pub instance_id: i64, pub dungeon_id: u32, pub dungeon_name: String, pub solar_system_id: SolarSystemId,
     pub optimal_fleet_size: usize, pub base_pilot_isk: i64, pub completed: bool,
     pub reward_paid_isk: i64, pub boss_npc_ball_id: i64,
+    #[serde(default)]
+    pub boss_type_id: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -502,7 +504,7 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
 
 pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
     ensure_special_sites_initialized(ctx);
-    let (general_to_spawn, trig_to_spawn) = with_pve_special_reg(ctx, |reg| {
+    let (general_to_spawn, hf_to_spawn, trig_to_spawn) = with_pve_special_reg(ctx, |reg| {
         let mut g_list = Vec::new();
         for inc in reg.incursions.values() {
             if inc.state == "Ended" { continue; }
@@ -519,10 +521,12 @@ pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
                 }
             }
         }
+        let mut hf_list = Vec::new();
         for sites in reg.homefront_sites.values() {
             for s in sites {
                 if !s.completed {
-                    g_list.push((s.solar_system_id, s.boss_npc_ball_id, 10_962, DVec3::new(10_000.0, 0.0, 0.0)));
+                    let boss_tid = if s.boss_type_id != 0 { s.boss_type_id } else { 48_090 };
+                    hf_list.push((s.solar_system_id, s.boss_npc_ball_id, boss_tid, DVec3::new(10_000.0, 0.0, 0.0)));
                 }
             }
         }
@@ -554,12 +558,22 @@ pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
                 }
             }
         }
-        (g_list, t_list)
+        (g_list, hf_list, t_list)
     });
 
     // Per-ball "already spawned" tracking on the SystemRegistry (no sentinel ball in space):
     // a ball is spawned the first time it is seen in this ballpark, and never re-spawned after
     // being destroyed. Sites seeded later in any system are picked up on the next call.
+    for (sys_id, bid, tid, pos) in hf_to_spawn {
+        if !ctx.systems.claim_special_site_ball(sys_id, bid) {
+            continue;
+        }
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        if sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_none() {
+            let cs = ctx.build_type_combat_state(tid);
+            let _ = sys_handle.spawn_ball_with_combat(make_site_npc_ball(bid, tid, pos), cs).await;
+        }
+    }
     for (sys_id, bid, tid, pos) in general_to_spawn.into_iter().chain(trig_to_spawn) {
         if !ctx.systems.claim_special_site_ball(sys_id, bid) {
             continue;
@@ -567,6 +581,34 @@ pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
         if sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_none() {
             let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, tid, pos)).await;
+        }
+    }
+}
+
+pub async fn on_warp_to_homefront_site(
+    ctx: &ServerContext,
+    solar_system_id: SolarSystemId,
+    instance_id: i64,
+) {
+    ensure_special_sites_initialized(ctx);
+    let to_spawn = with_pve_special_reg(ctx, |reg| {
+        if let Some(sites) = reg.homefront_sites.get(&solar_system_id) {
+            if let Some(s) = sites.iter().find(|s| s.instance_id == instance_id) {
+                if !s.completed {
+                    let boss_tid = if s.boss_type_id != 0 { s.boss_type_id } else { 48_090 };
+                    return Some((s.boss_npc_ball_id, boss_tid, DVec3::new(10_000.0, 0.0, 0.0)));
+                }
+            }
+        }
+        None
+    });
+    if let Some((bid, tid, pos)) = to_spawn {
+        if ctx.systems.claim_special_site_ball(solar_system_id, bid) {
+            let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+            if sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_none() {
+                let cs = ctx.build_type_combat_state(tid);
+                let _ = sys_handle.spawn_ball_with_combat(make_site_npc_ball(bid, tid, pos), cs).await;
+            }
         }
     }
 }
@@ -710,11 +752,32 @@ pub async fn complete_special_dungeon_instance(
                 }
             }
         });
+        let mut new_bal_isk = 0.0;
         ctx.db.with_mut_snapshot(|snap| {
+            let j_id = (snap.wallet_journal.len() as i64) + 960_000;
             if let Some(ch) = snap.characters.get_mut(&char_id) {
                 ch.balance = ch.balance.checked_add(IskCents::from_isk(reward_paid)).unwrap_or(ch.balance);
+                let new_bal = ch.balance;
+                new_bal_isk = new_bal.to_wire_f64();
+                snap.wallet_journal.push(eve_db::WalletJournalEntry {
+                    entry_id: j_id,
+                    character_id: char_id,
+                    entry_type: "CorporateRewardPayout".into(),
+                    amount: IskCents::from_isk(reward_paid),
+                    balance_after: new_bal,
+                    reason: format!("Homefront Operation Payout ({})", hf.dungeon_name),
+                });
             }
         });
+        let _ = ctx.notify_account_change(char_id, "cash", char_id, new_bal_isk);
+        session.push_notification(
+            "OnAccountChange",
+            vec![
+                PyRep::String("cash".into()),
+                PyRep::Integer(char_id),
+                PyRep::Real(new_bal_isk),
+            ],
+        );
         return Ok(PyRep::keyval([
             ("instanceID", PyRep::Integer(hf.instance_id)),
             ("completed", PyRep::Bool(true)),
@@ -817,7 +880,9 @@ pub async fn handle_pve_special_sites(
     match (service, method) {
         // parity: feat:pve.homefront-ops, rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances
         ("dungeonInstanceCacheMgr", "GetHomefrontSiteInstances") => {
-            Some(handle_get_homefront_site_instances(ctx, session, args))
+            let res = handle_get_homefront_site_instances(ctx, session, args);
+            ensure_special_sites_spawned(ctx).await;
+            Some(res)
         }
 
         // parity: feat:pve.triglavian-sites
@@ -975,6 +1040,45 @@ pub fn get_all_drifter_hives(
     with_pve_special_reg(ctx, |reg| reg.drifter_hives.values().cloned().collect())
 }
 
+pub fn notify_special_site_account_changes(
+    db: &eve_db::WorldRepository,
+    pending_notifications: &std::sync::RwLock<std::collections::HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>>,
+    notify_tx: &tokio::sync::broadcast::Sender<(i64, crate::router::cache_notifications::PendingMachoNotification)>,
+    changes: &[(i64, f64)],
+) {
+    if changes.is_empty() {
+        return;
+    }
+    let now_ft = db.clock().now_blueos_filetime_ticks();
+    for &(char_id, new_balance_isk) in changes {
+        let args = vec![
+            PyRep::String("cash".into()),
+            PyRep::Integer(char_id),
+            PyRep::Real(new_balance_isk),
+        ];
+        let (packet, marshaled_packet) = crate::router::ServerContext::build_macho_notification_packet(
+            char_id,
+            None,
+            "OnAccountChange",
+            "charid",
+            args.clone(),
+        );
+        let notif = crate::router::cache_notifications::PendingMachoNotification {
+            recipient_char_id: char_id,
+            event: "OnAccountChange".into(),
+            id_type: "charid".into(),
+            args,
+            packet,
+            marshaled_packet,
+            created_filetime: now_ft,
+        };
+        if let Ok(mut map) = pending_notifications.write() {
+            map.entry(char_id).or_default().push(notif.clone());
+        }
+        let _ = notify_tx.send((char_id, notif));
+    }
+}
+
 pub async fn on_special_site_npc_destroyed_core(
     _systems: &Arc<crate::system_actor::SystemRegistry>,
     db: &Arc<WorldRepository>,
@@ -982,8 +1086,73 @@ pub async fn on_special_site_npc_destroyed_core(
     solar_system_id: SolarSystemId,
     npc_ball_id: i64,
     killer_char_id: Option<CharacterId>,
-) {
+) -> Vec<(CharacterId, f64)> {
     let now_sec = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let mut acct_changes = Vec::new();
+
+    // 0. Check Homefront sites when destroyed with attacker attribution in space
+    if let Some(cid) = killer_char_id {
+        let fleet_pilots: Vec<CharacterId> = db.with_snapshot(|snap| {
+            let fleet_id = snap.characters.get(&cid).and_then(|c| c.fleet_id);
+            if let Some(fid) = fleet_id {
+                let mut members: Vec<CharacterId> = snap
+                    .characters
+                    .values()
+                    .filter(|c| c.fleet_id == Some(fid) && c.solar_system_id == solar_system_id)
+                    .map(|c| c.character_id)
+                    .collect();
+                if !members.contains(&cid) {
+                    members.push(cid);
+                }
+                members.sort_unstable();
+                members
+            } else {
+                vec![cid]
+            }
+        });
+        let fleet_count = fleet_pilots.len().max(1);
+        let hf_res = with_pve_special_reg_db(db, now_sec, |reg| {
+            if let Some(list) = reg.homefront_sites.get_mut(&solar_system_id) {
+                for site in list.iter_mut() {
+                    if site.boss_npc_ball_id == npc_ball_id && !site.completed {
+                        let mult = if fleet_count == site.optimal_fleet_size {
+                            1.0
+                        } else if fleet_count < site.optimal_fleet_size {
+                            (fleet_count as f64) / (site.optimal_fleet_size as f64)
+                        } else {
+                            0.75
+                        };
+                        let reward_paid = ((site.base_pilot_isk as f64) * mult).round() as i64;
+                        site.completed = true;
+                        site.reward_paid_isk = reward_paid;
+                        return Some((site.dungeon_name.clone(), reward_paid));
+                    }
+                }
+            }
+            None
+        });
+        if let Some((dungeon_name, reward_paid)) = hf_res {
+            db.with_mut_snapshot(|snap| {
+                for &pid in &fleet_pilots {
+                    let j_id = (snap.wallet_journal.len() as i64) + 960_000;
+                    if let Some(ch) = snap.characters.get_mut(&pid) {
+                        ch.balance = ch.balance.checked_add(IskCents::from_isk(reward_paid)).unwrap_or(ch.balance);
+                        let new_bal = ch.balance;
+                        acct_changes.push((pid, new_bal.to_wire_f64()));
+                        snap.wallet_journal.push(eve_db::WalletJournalEntry {
+                            entry_id: j_id,
+                            character_id: pid,
+                            entry_type: "CorporateRewardPayout".into(),
+                            amount: IskCents::from_isk(reward_paid),
+                            balance_after: new_bal,
+                            reason: format!("Homefront Operation Payout ({dungeon_name})"),
+                        });
+                    }
+                }
+            });
+            return acct_changes;
+        }
+    }
 
     // 1. Check Triglavian sites
     let trig_res = with_pve_special_reg_db(db, now_sec, |reg| {
@@ -1012,13 +1181,24 @@ pub async fn on_special_site_npc_destroyed_core(
     if let Some((_inst_id, base_isk, db_drop, g_fac, l_fac, loot_id)) = trig_res {
         if let Some(cid) = killer_char_id {
             db.with_mut_snapshot(|snap| {
+                let j_id = (snap.wallet_journal.len() as i64) + 965_000;
                 if let Some(ch) = snap.characters.get_mut(&cid) {
                     let g = ch.standings.entry(g_fac).or_insert(0.0);
                     *g = (*g + 0.15).clamp(-10.0, 10.0);
                     let l = ch.standings.entry(l_fac).or_insert(0.0);
                     *l = (*l - 0.15).clamp(-10.0, 10.0);
                     ch.balance = ch.balance.checked_add(IskCents::from_isk(base_isk)).unwrap_or(ch.balance);
+                    let new_bal = ch.balance;
+                    acct_changes.push((cid, new_bal.to_wire_f64()));
                     let ship_id = ch.active_ship_id;
+                    snap.wallet_journal.push(eve_db::WalletJournalEntry {
+                        entry_id: j_id,
+                        character_id: cid,
+                        entry_type: "CorporateRewardPayout".into(),
+                        amount: IskCents::from_isk(base_isk),
+                        balance_after: new_bal,
+                        reason: "Triglavian Site Payout".into(),
+                    });
                     snap.items.insert(loot_id, InventoryItemRecord {
                         item_id: loot_id,
                         type_id: 48_121, // Sealed Survey Database
@@ -1032,7 +1212,7 @@ pub async fn on_special_site_npc_destroyed_core(
                 }
             });
         }
-        return;
+        return acct_changes;
     }
 
     // 2. Check Drifter Hives
@@ -1122,4 +1302,5 @@ pub async fn on_special_site_npc_destroyed_core(
             });
         }
     }
+    acct_changes
 }
