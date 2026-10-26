@@ -872,6 +872,29 @@ fn handle_inner(
             });
             Ok(Some(PyRep::Bool(true)))
         }
+        ("userSvc", "ProcessEVESessionCreated") => {
+            let uid = session.user_id.or_else(|| args.first().and_then(|a| a.as_i64()).map(|n| n as u64)).unwrap_or(0);
+            let sess_id = session.session_id;
+            let char_id = session.character_id.or_else(|| args.get(1).and_then(|a| a.as_i64()));
+            let now = ctx.now_unix();
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut sessions: Vec<serde_json::Value> = snap
+                    .service_state_blobs
+                    .get("user_sessions")
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                sessions.push(serde_json::json!({
+                    "user_id": uid,
+                    "session_id": sess_id,
+                    "character_id": char_id,
+                    "timestamp_unix": now,
+                }));
+                if let Ok(json) = serde_json::to_string(&sessions) {
+                    snap.service_state_blobs.insert("user_sessions".into(), json);
+                }
+            });
+            Ok(Some(PyRep::None))
+        }
         ("kiringMgr", "GetKiringConfiguration") => {
             let is_underage = session
                 .user_id

@@ -1048,11 +1048,41 @@ pub fn handle(
         ("pingService", "Ping") => Some(Ok(PyRep::Integer(ctx.now_blueos_filetime_ticks()))),
         ("localizationServer", "GetAllTextChanges") => Some(get_all_text_changes(ctx, session)),
         ("localizationServer", "UpdateLocalizationQAWrap") => Some(update_localization_qa_wrap(ctx, session, args)),
+        ("localizationServer", "ReloadFSDPickle") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            let pickle_name = args.first().and_then(|a| a.as_str()).unwrap_or("all");
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut data: BTreeMap<String, serde_json::Value> = snap
+                    .service_state_blobs
+                    .get("localization:fsd_pickle_reloads")
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                let count = data.get("reload_count").and_then(|v| v.as_u64()).unwrap_or(0) + 1;
+                data.insert("reload_count".into(), serde_json::json!(count));
+                data.insert("last_pickle".into(), serde_json::json!(pickle_name));
+                data.insert("timestamp_unix".into(), serde_json::json!(ctx.now_unix()));
+                if let Ok(json) = serde_json::to_string(&data) {
+                    snap.service_state_blobs.insert("localization:fsd_pickle_reloads".into(), json);
+                }
+            });
+            Some(Ok(PyRep::Bool(true)))
+        }
         ("clientStatLogger", "LogString") => {
-            Some(Err(BridgeRpcError {
-                code: "UnimplementedRPC".into(),
-                message: format!("{service}.{method} is not implemented"),
-            }))
+            let log_msg = args.first().and_then(|a| a.as_str()).unwrap_or("");
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut list: Vec<String> = snap
+                    .service_state_blobs
+                    .get("client_stat_logger:strings")
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                list.push(log_msg.to_string());
+                if let Ok(json) = serde_json::to_string(&list) {
+                    snap.service_state_blobs.insert("client_stat_logger:strings".into(), json);
+                }
+            });
+            Some(Ok(PyRep::None))
         }
         ("eveguard_report", "heartbeat_started") | ("eveguard_report", "heartbeat_stopped") => {
             // const-ok: fire-and-forget client telemetry sink returns None after logging

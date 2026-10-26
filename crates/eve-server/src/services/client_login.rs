@@ -31,6 +31,11 @@ fn stack_trace_registry() -> &'static Mutex<HashMap<i64, (i64, &'static str)>> {
     REG.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn error_log_modes() -> &'static Mutex<HashMap<i64, String>> {
+    static MODES: OnceLock<Mutex<HashMap<i64, String>>> = OnceLock::new();
+    MODES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 static NEXT_ERROR_ID: AtomicI64 = AtomicI64::new(1);
 
 /// Total error occurrences delivered by clients through `alert.BeanDelivery`, per errorID.
@@ -180,11 +185,115 @@ pub async fn handle(
                 return Some(Err(e));
             }
             let err_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            if let Some(mode) = error_log_modes().lock().ok().and_then(|m| m.get(&err_id).cloned()) {
+                return Some(Ok(PyRep::Tuple(vec![PyRep::Integer(err_id), PyRep::ascii_bytes(&mode)])));
+            }
             let entry = stack_trace_registry()
                 .lock()
                 .ok()
                 .and_then(|m| m.values().find(|(id, _)| *id == err_id).copied());
             Some(Ok(log_mode_tuple(entry)))
+        }
+        ("alert", "LogModeChanged") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            let (error_id, log_mode) = match args {
+                [PyRep::Integer(id), PyRep::String(m)] => (*id, m.clone()),
+                [PyRep::Tuple(items) | PyRep::List(items), ..] if items.len() >= 2 => (
+                    items[0].as_i64().unwrap_or(0),
+                    items[1].as_str().unwrap_or("B").to_string(),
+                ),
+                _ => (
+                    args.first().and_then(|a| a.as_i64()).unwrap_or(0),
+                    args.get(1).and_then(|a| a.as_str()).unwrap_or("B").to_string(),
+                ),
+            };
+            if error_id <= 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArguments".into(),
+                    message: "alert.LogModeChanged expects (errorID, logMode)".into(),
+                }));
+            }
+            if let Ok(mut modes) = error_log_modes().lock() {
+                modes.insert(error_id, log_mode.clone());
+            }
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut modes: HashMap<String, String> = snap
+                    .service_state_blobs
+                    .get("alert_log_modes")
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                modes.insert(error_id.to_string(), log_mode);
+                if let Ok(json) = serde_json::to_string(&modes) {
+                    snap.service_state_blobs.insert("alert_log_modes".into(), json);
+                }
+            });
+            Some(Ok(PyRep::None))
+        }
+        ("alert", "SendProxyStackTraceAlert") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            let (hash, stack_key) = match args.first() {
+                Some(PyRep::Tuple(items) | PyRep::List(items)) => (
+                    items.first().and_then(|v| v.as_i64()),
+                    items.get(1).and_then(|v| v.as_str()).unwrap_or(""),
+                ),
+                Some(PyRep::Integer(v)) => (Some(*v), ""),
+                _ => (None, ""),
+            };
+            let Some(hash) = hash else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArguments".into(),
+                    message: "alert.SendProxyStackTraceAlert expects (stackID, stackTrace, mode, ...)"
+                        .into(),
+                }));
+            };
+            let trace = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
+            let mode = args.get(2).and_then(|v| v.as_str()).unwrap_or(LOGGING_BATCHED);
+            let mut reg = stack_trace_registry().lock().ok()?;
+            let entry = match reg.get(&hash) {
+                Some(e) => *e,
+                None => {
+                    let e = (NEXT_ERROR_ID.fetch_add(1, Ordering::Relaxed), LOGGING_BATCHED);
+                    if reg.len() >= ALERT_REGISTRY_CAP {
+                        if let Some(oldest) = reg.keys().next().copied() {
+                            reg.remove(&oldest);
+                        }
+                    }
+                    reg.insert(hash, e);
+                    e
+                }
+            };
+            drop(reg);
+
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut traces: Vec<serde_json::Value> = snap
+                    .service_state_blobs
+                    .get("alert_proxy_traces")
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                traces.push(serde_json::json!({
+                    "stack_id": hash,
+                    "stack_key": stack_key,
+                    "error_id": entry.0,
+                    "mode": mode,
+                    "user_id": session.user_id,
+                    "trace_preview": trace.chars().take(200).collect::<String>(),
+                    "timestamp_unix": ctx.now_unix(),
+                }));
+                if let Ok(json) = serde_json::to_string(&traces) {
+                    snap.service_state_blobs.insert("alert_proxy_traces".into(), json);
+                }
+            });
+
+            info!(
+                user_id = ?session.user_id, error_id = entry.0, stack_hash = hash,
+                stack_key = stack_key,
+                "proxy stack trace reported"
+            );
+            Some(Ok(log_mode_tuple(Some(entry))))
         }
         ("alert", "GroupBeanDelivery") => {
             if let Err(e) = ServerContext::require_auth(session) {

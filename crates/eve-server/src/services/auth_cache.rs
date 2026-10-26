@@ -152,6 +152,57 @@ pub async fn handle(
             ])))
         }
 
+        ("cache", "Rowset") => {
+            let table_name = args.first().and_then(|a| a.as_str()).unwrap_or("roles");
+            let (columns, rows) = if table_name == "roles" {
+                (
+                    vec!["roleID".into(), "roleName".into()],
+                    vec![
+                        vec![PyRep::Integer(1), PyRep::String("Director".into())],
+                        vec![PyRep::Integer(1 << 7), PyRep::String("Personnel Manager".into())],
+                        vec![PyRep::Integer(1 << 8), PyRep::String("Accountant".into())],
+                        vec![PyRep::Integer(1 << 9), PyRep::String("Security Officer".into())],
+                        vec![PyRep::Integer(1 << 10), PyRep::String("Factory Manager".into())],
+                        vec![PyRep::Integer(1 << 11), PyRep::String("Station Manager".into())],
+                        vec![PyRep::Integer(1 << 12), PyRep::String("Auditor".into())],
+                    ],
+                )
+            } else {
+                (
+                    vec!["roleID".into(), "roleName".into()],
+                    vec![vec![PyRep::Integer(1), PyRep::String("DefaultRole".into())]],
+                )
+            };
+            Some(Ok(PyRep::Rowset { columns, rows }))
+        }
+
+        ("cache", "Setting") => {
+            let (section, key, new_val) = match args {
+                [PyRep::String(s), PyRep::String(k), PyRep::String(v), ..] => (s.as_str(), k.as_str(), Some(v.as_str())),
+                [PyRep::String(s), PyRep::String(k)] => (s.as_str(), k.as_str(), None),
+                [PyRep::String(k)] => ("zsystem", k.as_str(), None),
+                _ => ("zsystem", "SP-Allowed-Extensions", None),
+            };
+            let val = ctx.db.with_mut_snapshot(|snap| {
+                let blob_key = format!("cache_setting:{section}:{key}");
+                if let Some(v) = new_val {
+                    snap.service_state_blobs.insert(blob_key.clone(), v.to_string());
+                    v.to_string()
+                } else if let Some(existing) = snap.service_state_blobs.get(&blob_key) {
+                    existing.clone()
+                } else {
+                    let default_val = if key == "SP-Allowed-Extensions" {
+                        "txt,csv,log,png,jpg,dds,json,yaml".to_string()
+                    } else {
+                        "1".to_string()
+                    };
+                    snap.service_state_blobs.insert(blob_key, default_val.clone());
+                    default_val
+                }
+            });
+            Some(Ok(PyRep::String(val)))
+        }
+
         ("authentication", "Login") => {
             if args.len() != 2 {
                 return Some(Err(BridgeRpcError {

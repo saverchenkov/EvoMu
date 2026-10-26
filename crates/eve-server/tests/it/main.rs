@@ -280,3 +280,4 @@ mod quasar_cosmetics_live_state;
 mod quasar_cosmetics_market_state;
 mod rpc_missing_batch1;
 mod character_skill_features_t12;
+mod rpc_missing_batch3_tests;
