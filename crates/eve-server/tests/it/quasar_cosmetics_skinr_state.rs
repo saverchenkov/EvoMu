@@ -210,6 +210,12 @@ async fn skinr_component_licenses_and_item_consumption() {
     // 4. ConsumeRequest consumes inventory item stack and grants component license charges
     let item_id = 770_001i64;
     ctx.db.with_mut_snapshot(|s| {
+        let mut ch = s.characters.get(&90_000_001).cloned().expect("seeded char");
+        ch.character_id = cid1 as i64;
+        ch.corporation_id = 98_000_001;
+        ch.solar_system_id = 30_000_142;
+        ch.station_id = Some(60_003_760);
+        s.characters.insert(cid1 as i64, ch);
         s.items.insert(item_id, InventoryItemRecord {
             item_id, type_id: coating_item_type_id, owner_id: cid1 as i64, location_id: 60_003_760,
             flag: InventoryFlag::Hangar, quantity: 3, singleton: false, version: 1,

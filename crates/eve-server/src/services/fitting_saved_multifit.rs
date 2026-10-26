@@ -1041,12 +1041,12 @@ pub(crate) async fn handle_ships_and_services(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if session.station_id.is_none() && session.structure_id.is_none() {
+            let Some(dock_id) = session.station_id.or(session.structure_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "NotDocked".into(),
                     message: "Repairing ship and modules requires being docked".into(),
                 }));
-            }
+            };
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
@@ -1060,29 +1060,81 @@ pub(crate) async fn handle_ships_and_services(
                 Some(PyRep::Integer(id)) => vec![*id],
                 _ => Vec::new(),
             };
+            let loc_check = ctx.db.with_snapshot(|snap| {
+                let ship_at_dock = snap
+                    .items
+                    .get(&ship_id)
+                    .is_some_and(|sh| sh.owner_id == char_id && sh.location_id == dock_id);
+                for &eid in &explicit_ids {
+                    let Some(it) = snap.items.get(&eid) else {
+                        return Err(BridgeRpcError {
+                            code: "ItemNotFound".into(),
+                            message: format!("Item {eid} not found"),
+                        });
+                    };
+                    if it.owner_id != char_id {
+                        return Err(BridgeRpcError {
+                            code: "ItemOwnershipViolation".into(),
+                            message: format!("Item {eid} is not owned by character {char_id}"),
+                        });
+                    }
+                    let at_dock = it.location_id == dock_id
+                        || snap
+                            .items
+                            .get(&it.location_id)
+                            .is_some_and(|parent| parent.owner_id == char_id && parent.location_id == dock_id);
+                    if !at_dock {
+                        return Err(BridgeRpcError {
+                            code: "ItemNotAtStation".into(),
+                            message: format!("Item {eid} is not located at docked facility {dock_id}"),
+                        });
+                    }
+                }
+                Ok(ship_at_dock)
+            });
+            let ship_at_dock = match loc_check {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
                 Ok(f) => f,
                 Err(e) => return Some(Err(e)),
             };
             let mut total_repaired_hp = 0.0;
-            for m in fit.modules.values_mut() {
-                if m.damage_hp > 0.0 {
-                    total_repaired_hp += m.damage_hp;
-                    m.damage_hp = 0.0;
+            if ship_at_dock {
+                for m in fit.modules.values_mut() {
+                    if m.damage_hp > 0.0 {
+                        total_repaired_hp += m.damage_hp;
+                        m.damage_hp = 0.0;
+                    }
+                }
+                for h in &mut fit.rack_heat {
+                    *h = 0.0;
                 }
             }
-            for h in &mut fit.rack_heat {
-                *h = 0.0;
-            }
-            let dyn_repaired_hp = ctx.db.with_snapshot(|snap| {
+            let target_item_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
                 snap.items
                     .values()
                     .filter(|i| {
-                        i.owner_id == char_id
-                            && (i.item_id == ship_id
-                                || i.location_id == ship_id
-                                || explicit_ids.contains(&i.item_id))
+                        if i.owner_id != char_id {
+                            return false;
+                        }
+                        let on_active = ship_at_dock && (i.item_id == ship_id || i.location_id == ship_id);
+                        let in_explicit = (explicit_ids.contains(&i.item_id) || explicit_ids.contains(&i.location_id))
+                            && (i.location_id == dock_id
+                                || snap
+                                    .items
+                                    .get(&i.location_id)
+                                    .is_some_and(|parent| parent.owner_id == char_id && parent.location_id == dock_id));
+                        on_active || in_explicit
                     })
+                    .map(|i| i.item_id)
+                    .collect()
+            });
+            let dyn_repaired_hp = ctx.db.with_snapshot(|snap| {
+                target_item_ids
+                    .iter()
+                    .filter_map(|id| snap.items.get(id))
                     .map(|i| {
                         i.dynamic_attributes
                             .get(&attr_ids::DAMAGE)
@@ -1109,14 +1161,12 @@ pub(crate) async fn handle_ships_and_services(
                         message: "Insufficient ISK to pay repair bill".into(),
                     })?;
                 }
-                for item in snap.items.values_mut() {
-                    if item.owner_id == char_id
-                        && (item.item_id == ship_id
-                            || item.location_id == ship_id
-                            || explicit_ids.contains(&item.item_id))
-                    {
-                        item.dynamic_attributes.remove(&attr_ids::DAMAGE);
-                        item.dynamic_attributes.remove(&attr_ids::ARMOR_DAMAGE);
+                for &id in &target_item_ids {
+                    if let Some(item) = snap.items.get_mut(&id) {
+                        if item.owner_id == char_id {
+                            item.dynamic_attributes.remove(&attr_ids::DAMAGE);
+                            item.dynamic_attributes.remove(&attr_ids::ARMOR_DAMAGE);
+                        }
                     }
                 }
                 Ok(())
@@ -1124,18 +1174,10 @@ pub(crate) async fn handle_ships_and_services(
             if let Err(e) = debit_res {
                 return Some(Err(e));
             }
-            ctx.store_ship_fitting(ship_id, fit);
-            let repaired_count = ctx.db.with_snapshot(|snap| {
-                snap.items
-                    .values()
-                    .filter(|i| {
-                        i.owner_id == char_id
-                            && (i.item_id == ship_id
-                                || i.location_id == ship_id
-                                || explicit_ids.contains(&i.item_id))
-                    })
-                    .count()
-            });
+            if ship_at_dock {
+                ctx.store_ship_fitting(ship_id, fit);
+            }
+            let repaired_count = target_item_ids.len();
             Some(Ok(PyRep::keyval([
                 ("characterID", PyRep::Integer(char_id)),
                 ("shipID", PyRep::Integer(ship_id)),

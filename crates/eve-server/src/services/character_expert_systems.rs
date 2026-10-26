@@ -125,9 +125,11 @@ pub fn handle(
             };
 
             let now_ft = ctx.now_blueos_filetime_ticks();
+            let current_dock = session.station_id.or(session.structure_id);
+            let current_ship = session.ship_id;
 
             let consume_res = ctx.db.try_with_mut_snapshot(|snap| {
-                let item = match snap.items.get_mut(&item_id) {
+                let item = match snap.items.get(&item_id) {
                     Some(it) => it,
                     None => {
                         return Err(BridgeRpcError {
@@ -140,6 +142,25 @@ pub fn handle(
                     return Err(BridgeRpcError {
                         code: "ItemNotOwned".into(),
                         message: format!("Item {item_id} is not owned by caller"),
+                    });
+                }
+                let effective_dock = current_dock.or_else(|| {
+                    snap.characters
+                        .get(&char_id)
+                        .and_then(|c| c.station_id.or(c.structure_id))
+                });
+                let effective_ship = current_ship.or_else(|| {
+                    snap.characters
+                        .get(&char_id)
+                        .map(|c| c.active_ship_id)
+                        .filter(|&sid| sid > 0)
+                });
+                if !snap.is_item_consumable_by(item, char_id, effective_dock, effective_ship) {
+                    return Err(BridgeRpcError {
+                        code: "ItemNotReachable".into(),
+                        message: format!(
+                            "Item {item_id} is not reachable in your hangar/cargo or is locked in a contract"
+                        ),
                     });
                 }
                 let resolved_type_id = item.type_id as i64;
@@ -176,10 +197,13 @@ pub fn handle(
                     }
                 }
 
-                if item.quantity > 1 {
-                    item.quantity -= 1;
-                } else {
-                    snap.items.remove(&item_id);
+                if let Some(item_mut) = snap.items.get_mut(&item_id) {
+                    if item_mut.quantity > 1 {
+                        item_mut.quantity -= 1;
+                        item_mut.version += 1;
+                    } else {
+                        snap.items.remove(&item_id);
+                    }
                 }
 
                 let mut records = load_expert_systems(snap, char_id);

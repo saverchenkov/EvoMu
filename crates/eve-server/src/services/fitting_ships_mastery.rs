@@ -834,7 +834,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
 
         ("shipKillCounter", "GetItemKillCountPlayer")
         | ("shipKillCounter", "SetShipKillCounter") => {
-            let (_, _char_id) = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -844,15 +844,24 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 .or(session.ship_id)
                 .unwrap_or(0);
             if method == "SetShipKillCounter" {
-                let kills = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
-                ctx.db.with_mut_snapshot(|snap| {
-                    if let Some(it) = snap.items.get_mut(&ship_id) {
-                        it.dynamic_attributes.insert(9998, kills as f64);
-                    } else {
-                        snap.item_custom_names.insert(-8_900_000 - ship_id, kills.to_string());
+                let kills = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).max(0);
+                let res = ctx.db.try_with_mut_snapshot(|snap| {
+                    let Some(it) = snap.items.get_mut(&ship_id) else {
+                        return Err(BridgeRpcError {
+                            code: "ItemNotFound".into(),
+                            message: format!("Ship {ship_id} not found"),
+                        });
+                    };
+                    if it.owner_id != char_id {
+                        return Err(BridgeRpcError {
+                            code: "ShipOwnershipViolation".into(),
+                            message: format!("Ship {ship_id} is not owned by character {char_id}"),
+                        });
                     }
+                    it.dynamic_attributes.insert(9998, kills as f64);
+                    Ok(PyRep::Integer(kills))
                 });
-                return Some(Ok(PyRep::Integer(kills)));
+                return Some(res);
             }
             let kills = ctx.db.with_snapshot(|snap| {
                 snap.items
@@ -1146,9 +1155,10 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
         }
 
         ("ship", "ResetDirtTimestamp") => {
-            if let Err(e) = ServerContext::require_character(session) {
-                return Some(Err(e));
-            }
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let Some(ship_id) = args
                 .first()
                 .and_then(|a| a.as_i64())
@@ -1161,23 +1171,24 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             };
             let now = ctx.now_blueos_filetime_ticks();
             let ts_i64 = (now as f64) as i64;
-            let updated = ctx.db.with_mut_snapshot(|snap| {
-                if let Some(item) = snap.items.get_mut(&ship_id) {
-                    item.dynamic_attributes.insert(1969, ts_i64 as f64);
-                    item.version += 1;
-                    true
-                } else {
-                    false
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(item) = snap.items.get_mut(&ship_id) else {
+                    return Err(BridgeRpcError {
+                        code: "ItemNotFound".into(),
+                        message: format!("ship {ship_id} not found"),
+                    });
+                };
+                if item.owner_id != char_id {
+                    return Err(BridgeRpcError {
+                        code: "ShipOwnershipViolation".into(),
+                        message: format!("Ship {ship_id} is not owned by character {char_id}"),
+                    });
                 }
+                item.dynamic_attributes.insert(1969, ts_i64 as f64);
+                item.version += 1;
+                Ok(PyRep::Integer(ts_i64))
             });
-            if updated {
-                Some(Ok(PyRep::Integer(ts_i64)))
-            } else {
-                Some(Err(BridgeRpcError {
-                    code: "ItemNotFound".into(),
-                    message: format!("ship {ship_id} not found"),
-                }))
-            }
+            Some(res)
         }
 
         // parity: feat:character.safe-logoff, plan:SP-6, rpc:ship.SafeLogoff

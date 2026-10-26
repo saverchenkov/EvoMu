@@ -276,36 +276,58 @@ pub(crate) async fn handle_mining_and_deactivate(
                 })
                 .unwrap_or(0);
 
+            let mod_check = ctx.db.with_snapshot(|snap| {
+                let Some(m_item) = snap.items.get(&module_id) else {
+                    return Err(BridgeRpcError {
+                        code: "ModuleNotFound".into(),
+                        message: format!("Module {module_id} not found"),
+                    });
+                };
+                if m_item.owner_id != char_id
+                    || m_item.location_id != ship_id
+                    || !matches!(m_item.flag as u16, 11..=34 | 92..=94 | 125..=132)
+                {
+                    return Err(BridgeRpcError {
+                        code: "ModuleOwnershipViolation".into(),
+                        message: format!(
+                            "Module {module_id} is not fitted on active ship {ship_id} owned by character {char_id}"
+                        ),
+                    });
+                }
+                let active = snap.module_active_states.contains(&module_id);
+                let dmg = m_item
+                    .dynamic_attributes
+                    .get(&attr_ids::DAMAGE)
+                    .copied()
+                    .unwrap_or(0.0);
+                let hp = m_item
+                    .dynamic_attributes
+                    .get(&attr_ids::HP_STRUCT)
+                    .copied()
+                    .or_else(|| {
+                        ctx.sde
+                            .types
+                            .get(&m_item.type_id)
+                            .and_then(|t| t.default_attributes.get(&attr_ids::HP_STRUCT).copied())
+                    })
+                    .unwrap_or(40.0);
+                let base_cost = ctx
+                    .sde
+                    .types
+                    .get(&m_item.type_id)
+                    .and_then(|t| t.default_attributes.get(&1231).copied())
+                    .unwrap_or(4.0)
+                    .max(1.0);
+                let sk = snap.skills.get(&char_id);
+                let op_lvl = sk.and_then(|m| m.get(&28879)).map(|r| r.level).unwrap_or(0);
+                let int_lvl = sk.and_then(|m| m.get(&28880)).map(|r| r.level).unwrap_or(0);
+                Ok((active, dmg, hp, base_cost, op_lvl, int_lvl))
+            });
             let (is_active, cur_dmg, max_hp, base_paste_cost, nanite_op_lvl, nanite_interfacing_lvl) =
-                ctx.db.with_snapshot(|snap| {
-                    let active = snap.module_active_states.contains(&module_id);
-                    let m_opt = snap.items.get(&module_id);
-                    let dmg = m_opt
-                        .and_then(|i| i.dynamic_attributes.get(&attr_ids::DAMAGE).copied())
-                        .unwrap_or(0.0);
-                    let hp = m_opt
-                        .and_then(|i| {
-                            i.dynamic_attributes
-                                .get(&attr_ids::HP_STRUCT)
-                                .copied()
-                                .or_else(|| {
-                                    ctx.sde
-                                        .types
-                                        .get(&i.type_id)
-                                        .and_then(|t| t.default_attributes.get(&attr_ids::HP_STRUCT).copied())
-                                })
-                        })
-                        .unwrap_or(40.0);
-                    let base_cost = m_opt
-                        .and_then(|i| ctx.sde.types.get(&i.type_id))
-                        .and_then(|t| t.default_attributes.get(&1231).copied())
-                        .unwrap_or(4.0)
-                        .max(1.0);
-                    let sk = snap.skills.get(&char_id);
-                    let op_lvl = sk.and_then(|m| m.get(&28879)).map(|r| r.level).unwrap_or(0);
-                    let int_lvl = sk.and_then(|m| m.get(&28880)).map(|r| r.level).unwrap_or(0);
-                    (active, dmg, hp, base_cost, op_lvl, int_lvl)
-                });
+                match mod_check {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
 
             if is_active {
                 return Some(Err(BridgeRpcError {
@@ -333,25 +355,48 @@ pub(crate) async fn handle_mining_and_deactivate(
                 eve_dogma::thermodynamics::nanite_paste_required(cur_dmg, effective_paste_per_hp)
                     .max(1) as i32;
 
-            let deduct_res: Result<(), String> = ctx.db.try_with_mut_snapshot(|snap| {
+            let deduct_res: Result<(), BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(m_item) = snap.items.get(&module_id) else {
+                    return Err(BridgeRpcError {
+                        code: "ModuleNotFound".into(),
+                        message: format!("Module {module_id} not found"),
+                    });
+                };
+                if m_item.owner_id != char_id
+                    || m_item.location_id != ship_id
+                    || !matches!(m_item.flag as u16, 11..=34 | 92..=94 | 125..=132)
+                {
+                    return Err(BridgeRpcError {
+                        code: "ModuleOwnershipViolation".into(),
+                        message: format!(
+                            "Module {module_id} is not fitted on active ship {ship_id} owned by character {char_id}"
+                        ),
+                    });
+                }
                 let paste_item_id = snap
                     .items
                     .values()
                     .find(|i| {
-                        i.location_id == ship_id
+                        i.owner_id == char_id
+                            && i.location_id == ship_id
                             && i.flag == InventoryFlag::Cargo
                             && i.type_id == 28668
                             && i.quantity >= paste_needed
+                            && !snap.is_item_locked_in_contract_or_job(i.item_id)
                     })
                     .map(|i| i.item_id);
                 let Some(pid) = paste_item_id else {
-                    return Err(format!(
-                        "Need {paste_needed} Nanite Repair Paste (type 28668) in ship cargo"
-                    ));
+                    return Err(BridgeRpcError {
+                        code: "NotEnoughNanitePaste".into(),
+                        message: format!(
+                            "Need {paste_needed} Nanite Repair Paste (type 28668) in ship cargo"
+                        ),
+                    });
                 };
                 let mut rem = 0;
                 if let Some(p_item) = snap.items.get_mut(&pid) {
                     p_item.quantity -= paste_needed;
+                    p_item.version += 1;
                     rem = p_item.quantity;
                 }
                 if rem == 0 {
@@ -359,11 +404,8 @@ pub(crate) async fn handle_mining_and_deactivate(
                 }
                 Ok(())
             });
-            if let Err(msg) = deduct_res {
-                return Some(Err(BridgeRpcError {
-                    code: "NotEnoughNanitePaste".into(),
-                    message: msg,
-                }));
+            if let Err(e) = deduct_res {
+                return Some(Err(e));
             }
 
             let repair_rate_hp_per_s = 0.67 * (1.0 + 0.20 * (nanite_interfacing_lvl as f64));
@@ -382,7 +424,12 @@ pub(crate) async fn handle_mining_and_deactivate(
             } else {
                 ctx.db.with_mut_snapshot(|snap| {
                     if let Some(m_item) = snap.items.get_mut(&module_id) {
-                        m_item.dynamic_attributes.remove(&attr_ids::DAMAGE);
+                        if m_item.owner_id == char_id
+                            && m_item.location_id == ship_id
+                            && matches!(m_item.flag as u16, 11..=34 | 92..=94 | 125..=132)
+                        {
+                            m_item.dynamic_attributes.remove(&attr_ids::DAMAGE);
+                        }
                     }
                 });
             }

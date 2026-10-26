@@ -976,22 +976,41 @@ pub(crate) async fn handle_dogma_im(
                 }));
             };
 
-            let charge_info_opt = ctx.db.with_snapshot(|snap| {
-                snap.items.get(&first_charge_id).map(|i| (i.type_id, i.quantity, i.owner_id))
+            let charge_check = ctx.db.with_snapshot(|snap| {
+                let Some(stack) = snap.items.get(&first_charge_id) else {
+                    return Err(BridgeRpcError {
+                        code: "ItemNotFound".into(),
+                        message: format!("Charge item {first_charge_id} not found"),
+                    });
+                };
+                if stack.owner_id != char_id {
+                    return Err(BridgeRpcError {
+                        code: "ItemOwnershipViolation".into(),
+                        message: format!("Charge item {first_charge_id} is not owned by character {char_id}"),
+                    });
+                };
+                let current_dock = session.station_id.or(session.structure_id).or_else(|| {
+                    snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id))
+                });
+                let in_ship_ammo_hold = stack.owner_id == char_id
+                    && stack.quantity > 0
+                    && stack.flag != InventoryFlag::Locked
+                    && stack.location_id == ship_id
+                    && matches!(stack.flag, InventoryFlag::Cargo | InventoryFlag::SpecializedAmmoHold)
+                    && snap.is_ship_colocated_with_character(char_id, ship_id, current_dock)
+                    && !snap.is_item_locked_in_contract_or_job(first_charge_id);
+                if !snap.is_item_consumable_by(stack, char_id, current_dock, Some(ship_id)) && !in_ship_ammo_hold {
+                    return Err(BridgeRpcError {
+                        code: "AmmoNotReachable".into(),
+                        message: format!("Charge item {first_charge_id} must be unlocked in your current station hangar or active ship cargo/ammo hold and not in a contract"),
+                    });
+                }
+                Ok((stack.type_id, stack.quantity))
             });
-            let Some((charge_type_id, avail_qty, charge_owner_id)) = charge_info_opt else {
-                return Some(Err(BridgeRpcError {
-                    code: "ItemNotFound".into(),
-                    message: format!("Charge item {first_charge_id} not found"),
-                }));
+            let (charge_type_id, avail_qty) = match charge_check {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
             };
-            if charge_owner_id != char_id {
-                return Some(Err(BridgeRpcError {
-                    code: "ItemOwnershipViolation".into(),
-                    message: format!("Charge item {first_charge_id} is not owned by character {char_id}"),
-                }));
-            }
-
             let charge_vol = ctx.sde.types.get(&charge_type_id).map(|t| t.volume.max(0.0001)).unwrap_or(0.0025);
 
             let all_target_modules: Vec<i64> = ctx.db.with_snapshot(|snap| {
@@ -999,7 +1018,7 @@ pub(crate) async fn handle_dogma_im(
                 for &req_id in &requested_module_ids {
                     let resolved_mod_id = if snap.items.contains_key(&req_id) {
                         req_id
-                    } else if let Some(found) = snap.items.values().find(|i| i.location_id == ship_id && (i.flag as i64) == req_id) {
+                    } else if let Some(found) = snap.items.values().find(|i| i.owner_id == char_id && i.location_id == ship_id && (i.flag as i64) == req_id) {
                         found.item_id
                     } else {
                         req_id
@@ -1016,33 +1035,36 @@ pub(crate) async fn handle_dogma_im(
                 }
                 out
             });
+            if all_target_modules.is_empty() {
+                return Some(Ok(PyRep::None));
+            }
 
             for &mod_id in &all_target_modules {
-                if let Some(mod_item) = ctx.db.with_snapshot(|snap| snap.items.get(&mod_id).cloned()) {
-                    if let (Some(wt), Some(ct)) = (ctx.sde.types.get(&mod_item.type_id), ctx.sde.types.get(&charge_type_id)) {
-                        let aar_paste_ok = matches!(wt.group_id, 1199 | 1698) && ct.type_id == 28668;
-                        let cap_booster_ok = matches!(wt.group_id, 76 | 1156 | 1697)
-                            && ct.group_id == 87
-                            && ct.volume <= wt.capacity.max(1.0) + 1e-6;
-                        let wubble_probe_ok = wt.group_id == 589
-                            && matches!(ct.group_id, 548 | 4088)
-                            && ct.volume <= wt.capacity.max(1.0) + 1e-6;
-                        if !ServerContext::is_charge_compatible_with_weapon(wt, ct)
-                            && !aar_paste_ok
-                            && !cap_booster_ok
-                            && !wubble_probe_ok
-                        {
-                            return Some(Err(BridgeRpcError {
-                                code: "IncompatibleAmmo".into(),
-                                message: format!("Charge {} is incompatible with weapon {}", ct.name, wt.name),
-                            }));
-                        }
-                        if matches!(ct.group_id, 482 | 663) {
-                            if let Err(e) = ctx.db.with_snapshot(|snap| {
-                                ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, charge_type_id)
-                            }) {
-                                return Some(Err(e));
-                            }
+                let Some(mod_item) = ctx.db.with_snapshot(|snap| snap.items.get(&mod_id).cloned()) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "ModuleNotFound".into(),
+                        message: format!("Target module {mod_id} not found"),
+                    }));
+                };
+                if mod_item.owner_id != char_id || mod_item.location_id != ship_id || !matches!(mod_item.flag as u16, 11..=34 | 125..=132) {
+                    return Some(Err(BridgeRpcError {
+                        code: "ModuleOwnershipViolation".into(),
+                        message: format!("Target module {mod_id} is not fitted on ship {ship_id} owned by character {char_id}"),
+                    }));
+                }
+                if let (Some(wt), Some(ct)) = (ctx.sde.types.get(&mod_item.type_id), ctx.sde.types.get(&charge_type_id)) {
+                    let aar_paste_ok = matches!(wt.group_id, 1199 | 1698) && ct.type_id == 28668;
+                    let cap_booster_ok = matches!(wt.group_id, 76 | 1156 | 1697) && ct.group_id == 87 && ct.volume <= wt.capacity.max(1.0) + 1e-6;
+                    let wubble_probe_ok = wt.group_id == 589 && matches!(ct.group_id, 548 | 4088) && ct.volume <= wt.capacity.max(1.0) + 1e-6;
+                    if !ServerContext::is_charge_compatible_with_weapon(wt, ct) && !aar_paste_ok && !cap_booster_ok && !wubble_probe_ok {
+                        return Some(Err(BridgeRpcError {
+                            code: "IncompatibleAmmo".into(),
+                            message: format!("Charge {} is incompatible with weapon {}", ct.name, wt.name),
+                        }));
+                    }
+                    if matches!(ct.group_id, 482 | 663) {
+                        if let Err(e) = ctx.db.with_snapshot(|snap| ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, charge_type_id)) {
+                            return Some(Err(e));
                         }
                     }
                 }
@@ -1061,12 +1083,7 @@ pub(crate) async fn handle_dogma_im(
                             reload_time_ms = rt;
                         }
                         if mod_t.group_id == 1770 {
-                            let cbs_lvl = ctx
-                                .character_skill_levels(char_id)
-                                .get(&43728)
-                                .copied()
-                                .unwrap_or(0)
-                                .min(5);
+                            let cbs_lvl = ctx.character_skill_levels(char_id).get(&43728).copied().unwrap_or(0).min(5);
                             reload_time_ms = 60_000.0 * (1.0 - 0.10 * (cbs_lvl as f64));
                         }
                     }
@@ -1076,7 +1093,7 @@ pub(crate) async fn handle_dogma_im(
                 rounds_per_mod = 1;
             }
 
-            let num_mods = (all_target_modules.len() as i32).max(1);
+            let num_mods = all_target_modules.len() as i32;
             if avail_qty < num_mods {
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientQuantity".into(),
@@ -1088,26 +1105,27 @@ pub(crate) async fn handle_dogma_im(
 
             ctx.db.with_mut_snapshot(|snap| {
                 if let Some(stack) = snap.items.get_mut(&first_charge_id) {
-                    stack.quantity -= total_needed;
+                    if stack.quantity > total_needed {
+                        stack.quantity -= total_needed;
+                        stack.version += 1;
+                    } else {
+                        snap.items.remove(&first_charge_id);
+                    }
                 }
                 for &mod_id in &all_target_modules {
                     let Some(mod_item) = snap.items.get(&mod_id).cloned() else {
                         continue;
                     };
+                    if mod_item.owner_id != char_id || mod_item.location_id != ship_id || !matches!(mod_item.flag as u16, 11..=34 | 125..=132) {
+                        continue;
+                    }
                     let slot_flag = mod_item.flag;
-                    let prev_charges: Vec<i64> = snap
-                        .items
-                        .values()
-                        .filter(|i| i.location_id == ship_id && i.flag == slot_flag && i.item_id != mod_id)
-                        .map(|i| i.item_id)
-                        .collect();
-
+                    let prev_charges: Vec<i64> = snap.items.values().filter(|i| i.location_id == ship_id && i.flag == slot_flag && i.item_id != mod_id).map(|i| i.item_id).collect();
                     for pid in prev_charges {
                         if let Some(pi) = snap.items.get_mut(&pid) {
                             pi.flag = InventoryFlag::Cargo;
                         }
                     }
-
                     snap.next_entity_id += 1;
                     let new_charge_id = snap.next_entity_id;
                     snap.items.insert(

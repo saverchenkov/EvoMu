@@ -142,19 +142,22 @@ fn booster_slot(sde: &SdeRegistry, type_id: TypeId) -> Option<i64> {
 
 fn item_is_in_pilot_location(
     snap: &WorldStateSnapshot,
+    session: &SessionState,
     char_id: i64,
     item: &InventoryItemRecord,
 ) -> bool {
-    let Some(ch) = snap.characters.get(&char_id) else {
-        return false;
-    };
-    let docked_loc = ch.station_id.or(ch.structure_id);
-    let in_hangar = docked_loc.is_some_and(|loc| {
-        item.location_id == loc && item.flag == InventoryFlag::Hangar
-    });
-    let in_ship_cargo =
-        item.location_id == ch.active_ship_id && item.flag == InventoryFlag::Cargo;
-    in_hangar || in_ship_cargo
+    let current_dock = snap
+        .characters
+        .get(&char_id)
+        .and_then(|ch| ch.station_id.or(ch.structure_id))
+        .or_else(|| session.station_id.or(session.structure_id));
+    let current_ship = snap
+        .characters
+        .get(&char_id)
+        .map(|ch| ch.active_ship_id)
+        .filter(|&sid| sid > 0)
+        .or(session.ship_id);
+    snap.is_item_consumable_by(item, char_id, current_dock, current_ship)
 }
 
 /// Derives the set of booster side-effect penalty attribute IDs from SDE skill `25538` (`Neurotoxin Control`).
@@ -364,11 +367,11 @@ pub fn inject_implant(
                 message: format!("Implant {item_id} is already plugged in"),
             });
         }
-        if !item_is_in_pilot_location(snap, char_id, &item) || item.quantity < 1 {
+        if !item_is_in_pilot_location(snap, session, char_id, &item) || item.quantity < 1 {
             return Err(BridgeRpcError {
                 code: "ItemNotReachable".into(),
                 message: format!(
-                    "Implant {item_id} must be in your active ship cargo or docked hangar"
+                    "Implant {item_id} must be unlocked in your active ship cargo or docked hangar and not in a contract"
                 ),
             });
         }
@@ -591,11 +594,11 @@ pub fn use_booster(
                     });
                 }
             }
-            if !item_is_in_pilot_location(snap, char_id, &item) || item.quantity < 1 {
+            if !item_is_in_pilot_location(snap, session, char_id, &item) || item.quantity < 1 {
                 return Err(BridgeRpcError {
                     code: "ItemNotReachable".into(),
                     message: format!(
-                        "Booster {item_id} must be in your active ship cargo or docked hangar"
+                        "Booster {item_id} must be unlocked in your active ship cargo or docked hangar and not in a contract"
                     ),
                 });
             }

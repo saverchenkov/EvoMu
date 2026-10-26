@@ -12,7 +12,7 @@
 use super::quasar_social_chat::ctx_queue_notice;
 use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
-    STATUS_NOT_FOUND,
+    STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED,
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
@@ -910,38 +910,63 @@ fn handle_item_consume(
         return Err((STATUS_BAD_REQUEST, "ConsumeRequest requires valid item ID and quantity > 0".into()));
     }
 
-    let item_info = state.db.with_snapshot(|s| {
-        s.items
-            .get(&(item_id as i64))
-            .map(|it| (it.owner_id, it.type_id, it.quantity))
-    });
-    let Some((owner_id, type_id, stack_qty)) = item_info else {
-        return Err((STATUS_NOT_FOUND, "Component license item not found in inventory".into()));
-    };
-    if owner_id != cid as i64 {
-        return Err((STATUS_FORBIDDEN, "Character does not own component license item".into()));
-    }
-    if (stack_qty as u64) < quantity {
-        return Err((STATUS_BAD_REQUEST, "Insufficient component license item stack quantity".into()));
-    }
-    let Some(&(comp_id, uses_granted)) = state.catalog.item_type_to_component.get(&type_id) else {
-        return Err((STATUS_BAD_REQUEST, format!("Item type {type_id} is not a SKINR component license")));
-    };
-    let is_pattern = state
-        .catalog
-        .components
-        .get(&comp_id)
-        .is_some_and(SdeSkinComponent::is_pattern);
-
-    state.db.with_mut_snapshot(|s| {
-        if let Some(it) = s.items.get_mut(&(item_id as i64)) {
-            if (it.quantity as u64) <= quantity {
-                s.items.remove(&(item_id as i64));
-            } else {
-                it.quantity -= quantity as i32;
+    let (comp_id, uses_granted, is_pattern) = state
+        .db
+        .try_with_mut_snapshot(|s| -> Result<(u32, i32, bool), eve_proto::BridgeRpcError> {
+            let Some(item) = s.items.get(&(item_id as i64)) else {
+                return Err(eve_proto::BridgeRpcError {
+                    code: STATUS_NOT_FOUND.to_string(),
+                    message: "Component license item not found in inventory".into(),
+                });
+            };
+            if item.owner_id != cid as i64 {
+                return Err(eve_proto::BridgeRpcError {
+                    code: STATUS_FORBIDDEN.to_string(),
+                    message: "Character does not own component license item".into(),
+                });
             }
-        }
-    });
+            let (current_dock, current_ship) = match s.characters.get(&(cid as i64)) {
+                Some(ch) => (
+                    ch.station_id.or(ch.structure_id),
+                    (ch.active_ship_id > 0).then_some(ch.active_ship_id),
+                ),
+                None => (Some(60_003_760), None),
+            };
+            if !s.is_item_consumable_by(item, cid as i64, current_dock, current_ship) {
+                return Err(eve_proto::BridgeRpcError {
+                    code: STATUS_PRECONDITION_FAILED.to_string(),
+                    message: "Component license item is not reachable in your hangar/cargo or is locked in a contract".into(),
+                });
+            }
+            if item.quantity <= 0 || (item.quantity as u64) < quantity {
+                return Err(eve_proto::BridgeRpcError {
+                    code: STATUS_BAD_REQUEST.to_string(),
+                    message: "Insufficient component license item stack quantity".into(),
+                });
+            }
+            let type_id = item.type_id;
+            let Some(&(comp_id, uses_granted)) = state.catalog.item_type_to_component.get(&type_id) else {
+                return Err(eve_proto::BridgeRpcError {
+                    code: STATUS_BAD_REQUEST.to_string(),
+                    message: format!("Item type {type_id} is not a SKINR component license"),
+                });
+            };
+            let is_pattern = state
+                .catalog
+                .components
+                .get(&comp_id)
+                .is_some_and(SdeSkinComponent::is_pattern);
+            if let Some(it) = s.items.get_mut(&(item_id as i64)) {
+                if (it.quantity as u64) <= quantity {
+                    s.items.remove(&(item_id as i64));
+                } else {
+                    it.quantity -= quantity as i32;
+                    it.version += 1;
+                }
+            }
+            Ok((comp_id, uses_granted, is_pattern))
+        })
+        .map_err(|e| (e.code.parse::<u32>().unwrap_or(500), e.message))?;
 
     let now = ctx.now_unix();
     let key = SkinrCosmeticsState::comp_key(cid, is_pattern, comp_id);

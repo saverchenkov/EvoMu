@@ -120,6 +120,12 @@ pub async fn handle_fit_ships(
                     message: format!("Target {ship_id} must be an owned ship at station {station_id}"),
                 });
             }
+            if sh.flag == InventoryFlag::Locked || snap.is_item_locked_in_contract_or_job(ship_id) {
+                return Err(BridgeRpcError {
+                    code: "ItemLocked".into(),
+                    message: format!("Target ship {ship_id} is locked in an active contract or container"),
+                });
+            }
             if let Some(exp_type) = expected_ship_type_id {
                 if sh.type_id != exp_type {
                     return Err(BridgeRpcError {
@@ -606,6 +612,7 @@ pub async fn handle_fit_ships(
                             && i.flag == InventoryFlag::Hangar
                             && i.type_id == tid
                             && i.quantity > 0
+                            && !snap.is_item_locked_in_contract_or_job(i.item_id)
                     })
                     .map(|i| (i.item_id, i.quantity))
                     .collect();
