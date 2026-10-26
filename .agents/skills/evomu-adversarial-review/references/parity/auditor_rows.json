@@ -6,23 +6,6 @@
    "flagged_by_audit": "20261025-191723"
   },
   {
-   "evidence": "crates/eve-server/src/services/pve_hacking_sites.rs:279-344 (hackingMgr.ClickedOnTile) takes any client-supplied tile index (clamped 0..23, :285) and sets `t_ref.revealed = true` (:343-344) without checking that the node is adjacent to an already-revealed node. A hidden, non-adjacent System Core can be attacked on the first click. Virus stats are hardcoded (virus_coherence 85, base_virus_strength 30, :250-253) and fixed utilities are pre-granted (:255-259), instead of being read from the fitted Data/Relic Analyzer's SDE virusCoherence/virusStrength attributes. No active analyzer module is required. The new test helper hack_until_won (tests/it/pve_data_relic_ded_wormhole_remediated.rs:112-125) finds the SystemCore index in server state and clicks it directly until it wins, which shows the node-grid game isn't enforced.",
-   "id": "feat:pve.hacking-minigame",
-   "flagged_by_audit": "20261025-193849"
-  },
-  {
-   "id": "feat:pve.login-campaign",
-   "reason": "",
-   "evidence": "crates/eve-server/src/services/cosmetics_ui_ops.rs:989-1026: campaignID is hardcoded to 101 and every claim grants a flat 5_000 free SP, with no campaign/reward-track data. The test at navigation_pve_closure.rs:638,658 asserts the invented 5_000.0.",
-   "added_by": "20261024-072426"
-  },
-  {
-   "id": "feat:pve.seasonal-login",
-   "reason": "",
-   "evidence": "crates/eve-server/src/services/cosmetics_ui_ops.rs:1028-1064: campaignID 202, daysRemaining 14 and 15_000 SP per claim are all hardcoded, and the end date is always now+14d. The test at navigation_pve_closure.rs:670-691 asserts these constants.",
-   "added_by": "20261024-072426"
-  },
-  {
    "evidence": "crates/eve-server/src/services/quasar_career_goals.rs:37-133 hardcodes 8 synthetic AIR Career Program goals (default_career_goal_definitions(), UUIDs [0x43, 0x47, 0x01..0x04, ..., 1..2]) with invented names, targets, career points, ISK, and SP rewards (labelled 'DERIVED: server-configured AIR Career Program goal definitions'), and quasar_career_goals.rs:393-424, 450-495 encodes custom encode_career_goal_wire fields into GetAllResponse and GetDefinitionsResponse; tested in crates/eve-server/tests/it/quasar_progression_complete.rs:271-423.",
    "id": "feat:quasar.career"
   },
@@ -50,11 +33,6 @@
    "reason": "",
    "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:703-715 handles `eve.factionwarfare.warzone.api.GetAllRequest` by ignoring all warzone/SDE state and calling generic schema-filler `set_domain_attributes(reg, resp, 1, 500_001, \"CaldariGallenteWarzone\")`; crates/eve-server/tests/it/quasar_fw_occupancy.rs:14-60 tags this row but only sends `faction.activity` and `pirate.insurgency` requests and never invokes `factionwarfare.warzone.api`.",
    "added_by": "20261024-201931"
-  },
-  {
-   "id": "quasar:eveProto/generated/eve_public/operation/recommendation/recommendation_pb2.pyj",
-   "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:577-592 implements GetRequest by ignoring character state/progression and calling generic schema-filler set_domain_attributes(reg, resp, cid, 30_000_142, \"AIRDailyOperation\"). In crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:490-544, the test sends Vec::new() and asserts only status_code == STATUS_OK and normalized_type_name().",
-   "flagged_by_audit": "20261022-154932"
   },
   {
    "id": "quasar:eveProto/generated/eve_public/pirate/corruption/api/requests_pb2.pyj",
@@ -158,18 +136,6 @@
    "flagged_by_audit": "20261025-193217"
   },
   {
-   "id": "rpc:loginCampaignManager.claim_reward",
-   "reason": "",
-   "evidence": "cosmetics_ui_ops.rs:891-912 grants a constant 5,000 free SP every UTC day under the hardcoded campaign 101. There is no daily reward table, Alpha/Omega track or item reward. The test (rpc_missions_industry_campaigns.rs:295-303) asserts spGranted == 5000.",
-   "added_by": "20261024-033120"
-  },
-  {
-   "id": "rpc:loginCampaignManager.get_client_campaign_state",
-   "reason": "",
-   "evidence": "cosmetics_ui_ops.rs:875-889 returns the hardcoded campaignID 101 with no reward track or day schedule. The test (rpc_missions_industry_campaigns.rs:288-292) asserts campaignID 101.",
-   "added_by": "20261024-033120"
-  },
-  {
    "evidence": "crates/eve-server/src/services/map_service.rs:177-187 is tagged '// const-ok: No active invasion campaigns configured' and returns reg.edencom_fortress_systems. That field is declared in PveSpecialSitesRegistry and never assigned in ensure_special_sites_initialized (pve_special_sites.rs:335-476), so the RPC always returns []. wiki:EDENCOM_systems says EDENCOM Fortress systems have a 'permanent presence' won in Invasion chapter 3, so the live server returns a non-empty list and the const-ok reason is wrong. Tagged test: test_rpc_map_svc_part1_batch.",
    "id": "rpc:map.GetEdencomFortressSystems",
    "flagged_by_audit": "20261025-193217"
@@ -238,19 +204,9 @@
    "flagged_by_audit": "20261025-191723"
   },
   {
-   "evidence": "crates/eve-server/src/services/operations_manager.rs:1055-1135 (`ClaimSurveyRewards`) claims rewards from the 3 hardcoded synthetic surveys in `operations_manager_helpers.rs:106-127` and records the ISK payout in the wallet journal with `entry_type: \"MarketEscrow\"` (`operations_manager.rs:1112-1119`), which the test `crates/eve-server/tests/it/rpc_operations_dungeons.rs:365-371` explicitly asserts on.",
-   "id": "rpc:survey.ClaimSurveyRewards",
-   "flagged_by_audit": "20261025-145713"
-  },
-  {
-   "evidence": "crates/eve-server/src/services/operations_manager.rs:1014-1026 (`GetActiveSurveyID`) and `operations_manager_helpers.rs:106-127` (`load_survey_catalog`) rely on the 3 hardcoded synthetic surveys (IDs 1, 2, 3) seeded by `PerformSurveyChecks`. Tested in `crates/eve-server/tests/it/rpc_operations_dungeons.rs:327-372`.",
-   "id": "rpc:survey.GetActiveSurveyID",
-   "flagged_by_audit": "20261025-145713"
-  },
-  {
-   "evidence": "crates/eve-server/src/services/operations_manager_helpers.rs:106-127 (`load_survey_catalog`) hardcodes 3 synthetic surveys (`(1, \"Career Introduction Survey\", ..., 10_000.0, 0)`, `(2, \"Career Specialization Survey\", ..., 25_000.0, 250_000)`, `(3, \"Exploration & Combat Survey\", ..., 15_000.0, 100_000)`) with synthetic eligibility rules (`operations_manager_helpers.rs:201-214`), and `crates/eve-server/src/services/operations_manager.rs:1028-1053` returns those hardcoded IDs. Tested in `crates/eve-server/tests/it/rpc_operations_dungeons.rs:327-372`.",
-   "id": "rpc:survey.PerformSurveyChecks",
-   "flagged_by_audit": "20261025-145713"
+   "evidence": "crates/eve-server/tests/it/rpc_missing_batch1.rs:1822-1850 and crates/eve-server/src/services/structure_lifecycle_rpc.rs:1251-1451: In the V24 client (eve/client/script/ui/services/menuSvcExtras/invItemFunctions.pyj:77, client_expectations.json:100584-100602), Moniker('structure', solarSystemID).JettisonStructureFuel(itemIDs) takes 1 argument (a list of fuel itemIDs in the structure's fuel bay). Although handle_jettison_structure_fuel has an explicit_item_ids branch (lines 1280-1399), the tagged test at rpc_missing_batch1.rs:1822-1850 never seeds fuel items in InventoryFlag::SpecializedFuelBay or passes [itemIDs]; instead it calls JettisonStructureFuel(structure_id, 4247, 120) with 3 integers, exercising only the synthetic 3-arg fallback branch (lines 1400-1451) that mints a new InventoryItemRecord from st.fuel_blocks.",
+   "id": "rpc:structure.JettisonStructureFuel",
+   "flagged_by_audit": "20261026-071427"
   }
  ],
  "rejected_triage": [
