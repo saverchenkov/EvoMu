@@ -17,6 +17,14 @@ fn make_sequential_id_request(id: u32) -> Vec<u8> {
     out
 }
 
+/// `StartTaleRequest { spawn_template = 1, solar_system = 2 }`.
+fn make_tale_start(template: u32, system: u32) -> Vec<u8> {
+    let (mut out, mut sys) = (make_sequential_id_request(template), Vec::new());
+    eve_proto::quasar::encode_varint_field(1, system as u64, &mut sys);
+    encode_bytes_field(2, &sys, &mut out);
+    out
+}
+
 fn make_id_request(id: u32) -> Vec<u8> {
     let (mut out, mut id_bytes, mut uuid_bytes) = (Vec::new(), Vec::new(), [0u8; 16]);
     uuid_bytes[12..16].copy_from_slice(&id.to_be_bytes());
@@ -226,7 +234,7 @@ async fn quasar_community_progression_tales_and_goals() {
         &ctx,
         &mut sess,
         "eve.tale.api.StartTaleRequest",
-        make_sequential_id_request(1),
+        make_tale_start(1, 30_000_142),
     )
     .await;
     assert_eq!(start_rsp.status_code, STATUS_OK);
@@ -582,7 +590,7 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
     assert_eq!(call_req(&ctx, &session, "eve_public.achievement.reward.api.ClaimRequest", claim_bytes, true).status_code, STATUS_OK);
 
     // 5. Mutate Tales, Career Goals, and Corp Skill Plans before reload
-    assert_eq!(call_req(&ctx, &session, "eve.tale.api.StartTaleRequest", make_sequential_id_request(42), true).status_code, STATUS_OK);
+    assert_eq!(call_req(&ctx, &session, "eve.tale.api.StartTaleRequest", make_tale_start(42, 30_000_142), true).status_code, STATUS_OK);
     let mut prog_req = make_uuid_request([0x43, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
     eve_proto::quasar::encode_varint_field(2, 5, &mut prog_req);
     assert_eq!(call_req(&ctx, &session, "eve_public.career.goal.api.admin.ProgressRequest", prog_req, true).status_code, STATUS_OK);

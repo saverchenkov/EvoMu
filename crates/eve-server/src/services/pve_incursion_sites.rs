@@ -396,6 +396,48 @@ pub struct IncursionCompletionResult {
     pub incursion_ended: bool,
 }
 
+/// Tale spawn-template ID the server reports for Sansha incursions (`taleMgr` world-event tales).
+pub const INCURSION_TALE_TEMPLATE_ID: u64 = 5158;
+
+/// Publishes `eve_public.tale.api.StartedNotice` / `StoppedNotice` for an incursion tale.
+pub fn publish_incursion_tale_notice(
+    gateway: &crate::quasar_gateway::PublicGatewayRouter,
+    started: bool,
+    tale_id: i64,
+    staging_solar_system_id: SolarSystemId,
+    now_unix: u64,
+) {
+    use crate::services::quasar_goal_tale_notices as notices;
+    let payload = notices::tale_lifecycle(
+        started,
+        tale_id.max(0) as u64,
+        INCURSION_TALE_TEMPLATE_ID,
+        staging_solar_system_id as u64,
+    );
+    let _ = gateway.publish_notice(notices::tale_scope(), payload, now_unix);
+}
+
+/// When a site completion ended its incursion (mothership defeated), announces the tale stop.
+pub fn publish_incursion_tale_stopped_if_ended(
+    gateway: &crate::quasar_gateway::PublicGatewayRouter,
+    db: &Arc<WorldRepository>,
+    result: &IncursionCompletionResult,
+) {
+    if !result.incursion_ended {
+        return;
+    }
+    let now = db.clock().now_unix_secs();
+    let ended = with_pve_special_reg_db(db, now, |reg| {
+        reg.incursions
+            .values()
+            .find(|inc| inc.sites.iter().any(|s| s.site_id == result.site_id))
+            .map(|inc| (inc.tale_id, inc.staging_solar_system_id))
+    });
+    if let Some((tale_id, staging)) = ended {
+        publish_incursion_tale_notice(gateway, false, tale_id, staging, now);
+    }
+}
+
 pub async fn process_incursion_site_completion_and_payout_core(
     systems: &Arc<SystemRegistry>,
     db: &Arc<WorldRepository>,
@@ -788,7 +830,7 @@ pub async fn process_incursion_site_completion_and_payout(
     site_id: &str,
     candidate_pilots: Option<&[CharacterId]>,
 ) -> Result<IncursionCompletionResult, BridgeRpcError> {
-    process_incursion_site_completion_and_payout_core(
+    let res = process_incursion_site_completion_and_payout_core(
         &ctx.systems,
         &ctx.db,
         &ctx.sde,
@@ -798,7 +840,11 @@ pub async fn process_incursion_site_completion_and_payout(
         site_id,
         candidate_pilots,
     )
-    .await
+    .await;
+    if let Ok(r) = &res {
+        publish_incursion_tale_stopped_if_ended(&ctx.quasar_gateway, &ctx.db, r);
+    }
+    res
 }
 
 pub async fn check_and_complete_incursion_wave_server_side_core(
@@ -939,7 +985,7 @@ pub async fn on_incursion_boss_destroyed(
     npc_ball_id: i64,
     killer_char_id: Option<CharacterId>,
 ) -> Option<Result<IncursionCompletionResult, BridgeRpcError>> {
-    on_incursion_boss_destroyed_core(
+    let res = on_incursion_boss_destroyed_core(
         &ctx.systems,
         &ctx.db,
         &ctx.sde,
@@ -947,7 +993,11 @@ pub async fn on_incursion_boss_destroyed(
         npc_ball_id,
         killer_char_id,
     )
-    .await
+    .await;
+    if let Some(Ok(r)) = &res {
+        publish_incursion_tale_stopped_if_ended(&ctx.quasar_gateway, &ctx.db, r);
+    }
+    res
 }
 
 pub async fn handle_incursion_rpc(

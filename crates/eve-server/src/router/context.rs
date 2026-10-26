@@ -147,6 +147,14 @@ impl ServerContext {
         let mechanic_rng = Arc::new(crate::rng::MechanicRng::os());
         let systems = Arc::new(SystemRegistry::with_sde_and_db(sde.clone(), Arc::clone(&db)).with_mechanic_rng(Arc::clone(&mechanic_rng)));
         let combat_ephemeral = Arc::new(RwLock::new(crate::services::combat_crimewatch::CombatRuntimeState::default()));
+        let quasar_gateway = Arc::new(crate::quasar_gateway::PublicGatewayRouter::new(
+            eve_proto::quasar::QuasarDescriptorRegistry::open_default_or_empty(),
+            Arc::clone(&db),
+            Arc::clone(&sde),
+        ));
+        // The NPC death hook publishes Quasar notices (e.g. incursion tale stop), so it holds a
+        // weak gateway handle alongside the other weak service handles.
+        let gw_w = Arc::downgrade(&quasar_gateway);
         let (sys_w, db_w, sde_w, rng_w, pend_w, ntx, ce_w) = (
             Arc::downgrade(&systems),
             Arc::downgrade(&db),
@@ -157,6 +165,7 @@ impl ServerContext {
             Arc::downgrade(&combat_ephemeral),
         );
         systems.set_npc_death_hook(Arc::new(move |sys_id, npc_id, killer_opt| {
+            let gww = gw_w.clone();
             let (sw, dw, sdw, rw, pw, tx, cew) = (
                 sys_w.clone(),
                 db_w.clone(),
@@ -168,7 +177,10 @@ impl ServerContext {
             );
             Box::pin(async move {
                 if let (Some(sys), Some(db), Some(sde)) = (sw.upgrade(), dw.upgrade(), sdw.upgrade()) {
-                    let _ = crate::services::pve_incursion_sites::on_incursion_boss_destroyed_core(&sys, &db, &sde, sys_id, npc_id, killer_opt).await;
+                    let inc = crate::services::pve_incursion_sites::on_incursion_boss_destroyed_core(&sys, &db, &sde, sys_id, npc_id, killer_opt).await;
+                    if let (Some(Ok(r)), Some(gw)) = (&inc, gww.upgrade()) {
+                        crate::services::pve_incursion_sites::publish_incursion_tale_stopped_if_ended(&gw, &db, r);
+                    }
                     crate::services::pve_special_sites::on_special_site_npc_destroyed_core(&sys, &db, &sde, sys_id, npc_id, killer_opt).await;
                     crate::services::agents_missions::on_mission_npc_destroyed_core(&db, sys_id, npc_id, killer_opt);
                     if let Some(ce) = cew.upgrade() {
@@ -183,11 +195,6 @@ impl ServerContext {
                 }
             })
         }));
-        let quasar_gateway = Arc::new(crate::quasar_gateway::PublicGatewayRouter::new(
-            eve_proto::quasar::QuasarDescriptorRegistry::open_default_or_empty(),
-            Arc::clone(&db),
-            Arc::clone(&sde),
-        ));
         let persisted_notifications = db.with_snapshot(|snap| {
             let mut list: Vec<crate::router::cache_notifications::NotificationRecord> = snap
                 .owner_notes
