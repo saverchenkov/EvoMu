@@ -674,24 +674,29 @@ impl ProgressionExtraManager {
 
     /// `RedeemRewardsRequest`: pays every unredeemed ISK interval of the objective into the wallet.
     pub fn redeem_objective_rewards(&self, char_id: u32, oid: u64) -> Result<i64, (u32, String)> {
+        // Reserve (take) the unredeemed intervals under the write guard so a concurrent redeem
+        // sees zero; restore them if the wallet credit fails.
         let (units, per) = {
-            let objs = self.campaign_objectives.read().unwrap_or_else(|e| e.into_inner());
-            let obj = objs.get(&oid).ok_or((STATUS_NOT_FOUND, "Campaign objective not found".to_string()))?;
-            (obj.contributors.get(&char_id).map(|e| e.1).unwrap_or(0), obj.isk_reward_per_interval)
+            let mut objs = self.campaign_objectives.write().unwrap_or_else(|e| e.into_inner());
+            let obj = objs.get_mut(&oid).ok_or((STATUS_NOT_FOUND, "Campaign objective not found".to_string()))?;
+            let per = obj.isk_reward_per_interval;
+            let Some(e) = obj.contributors.get_mut(&char_id).filter(|e| e.1 > 0 && per > 0) else {
+                return Err((STATUS_PRECONDITION_FAILED, "No unredeemed campaign objective rewards".into()));
+            };
+            (std::mem::take(&mut e.1), per)
         };
-        if units <= 0 || per <= 0 {
-            return Err((STATUS_PRECONDITION_FAILED, "No unredeemed campaign objective rewards".into()));
-        }
         let payout = units.saturating_mul(per);
-        self.credit_campaign_reward(char_id, payout, format!("Campaign objective {oid} reward ({units} intervals)"))?;
-        if let Some(e) = self
-            .campaign_objectives
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .get_mut(&oid)
-            .and_then(|o| o.contributors.get_mut(&char_id))
-        {
-            e.1 = 0;
+        if let Err(err) = self.credit_campaign_reward(char_id, payout, format!("Campaign objective {oid} reward ({units} intervals)")) {
+            if let Some(e) = self
+                .campaign_objectives
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_mut(&oid)
+                .and_then(|o| o.contributors.get_mut(&char_id))
+            {
+                e.1 = e.1.saturating_add(units);
+            }
+            return Err(err);
         }
         self.save_to_db();
         Ok(payout)
@@ -699,18 +704,29 @@ impl ProgressionExtraManager {
 
     /// `RedeemParticipantRewardsRequest`: pays unredeemed participant-contribution intervals.
     pub fn redeem_track_rewards(&self, char_id: u32, tid: u64) -> Result<i64, (u32, String)> {
+        // Advance `redeemed_intervals` under the write guard before crediting; roll back on failure.
         let (units, per) = {
-            let trks = self.campaign_tracks.read().unwrap_or_else(|e| e.into_inner());
-            let t = trks.get(&tid).ok_or((STATUS_NOT_FOUND, "Campaign track not found".to_string()))?;
-            (Self::track_unredeemed_intervals(t, char_id), t.isk_reward_per_interval)
-        };
-        if units == 0 || per <= 0 {
-            return Err((STATUS_PRECONDITION_FAILED, "No unredeemed campaign track rewards".into()));
-        }
-        let payout = (units as i64).saturating_mul(per);
-        self.credit_campaign_reward(char_id, payout, format!("Campaign track {tid} participant reward ({units} intervals)"))?;
-        if let Some(t) = self.campaign_tracks.write().unwrap_or_else(|e| e.into_inner()).get_mut(&tid) {
+            let mut trks = self.campaign_tracks.write().unwrap_or_else(|e| e.into_inner());
+            let t = trks.get_mut(&tid).ok_or((STATUS_NOT_FOUND, "Campaign track not found".to_string()))?;
+            let units = Self::track_unredeemed_intervals(t, char_id);
+            if units == 0 || t.isk_reward_per_interval <= 0 {
+                return Err((STATUS_PRECONDITION_FAILED, "No unredeemed campaign track rewards".into()));
+            }
             *t.redeemed_intervals.entry(char_id).or_insert(0) += units;
+            (units, t.isk_reward_per_interval)
+        };
+        let payout = (units as i64).saturating_mul(per);
+        if let Err(err) = self.credit_campaign_reward(char_id, payout, format!("Campaign track {tid} participant reward ({units} intervals)")) {
+            if let Some(r) = self
+                .campaign_tracks
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_mut(&tid)
+                .and_then(|t| t.redeemed_intervals.get_mut(&char_id))
+            {
+                *r = r.saturating_sub(units);
+            }
+            return Err(err);
         }
         self.save_to_db();
         Ok(payout)
