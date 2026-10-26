@@ -501,12 +501,10 @@ pub async fn handle_pve_site_npc_destruction_core(
                 rating,
             ).await;
         } else if let Some(wh_c) = wh_class {
-            let blue_tid = match wh_c {
-                1 | 2 => 30_744,
-                3 | 4 => 30_745,
-                _ => 30_746,
-            };
-            drop_site_loot_into_space_core(db, systems, solar_system_id, killer_char_id, pos, blue_tid, (wh_c as i64) * 3).await;
+            // Site-completion Blue Loot from SDE group 880 "Sleeper Components" (class-scaled pick).
+            if let Some((blue_tid, _)) = crate::services::pve_exploration_sites::sleeper_blue_loot_for_class(sde, wh_c) {
+                drop_site_loot_into_space_core(db, systems, solar_system_id, killer_char_id, pos, blue_tid, (wh_c as i64) * 3).await;
+            }
         } else if site_category == "CombatAnomaly" || site_category == "CombatSignature" {
             let (cmd_tid, _) = crate::services::pve_exploration_seeding::pirate_commander_loot_for_system(sde, solar_system_id);
             drop_site_loot_into_space_core(db, systems, solar_system_id, killer_char_id, pos, cmd_tid, 1).await;
@@ -803,12 +801,11 @@ pub async fn advance_site_wave_or_complete(
 
         // DED Overseer wrecks are only dropped by the real overseer kill in `handle_pve_site_npc_destruction_core`.
         if let Some(wh_c) = wh_class.filter(|_| ded_rating.is_none()) {
-            let (blue_tid, blue_qty, blue_name) = match wh_c {
-                1 | 2 => (30_744, (wh_c as i64) * 4, "Neural Network Analyzer"),
-                3 | 4 => (30_745, (wh_c as i64) * 3, "Sleeper Data Library"),
-                _ => (30_746, (wh_c as i64) * 3, "Ancient Coordinates Database"),
-            };
-            loot_specs.push((blue_tid, blue_qty, blue_name.into()));
+            // Site-completion Blue Loot from SDE group 880 "Sleeper Components".
+            if let Some((blue_tid, _)) = crate::services::pve_exploration_sites::sleeper_blue_loot_for_class(&ctx.sde, wh_c) {
+                let blue_name = ctx.sde.types.get(&blue_tid).map(|t| t.name.clone()).unwrap_or_default();
+                loot_specs.push((blue_tid, (wh_c as i64) * 3, blue_name));
+            }
         } else if matches!(site_category.as_str(), "CombatAnomaly" | "CombatSignature") {
             let (cmd_tid, cmd_name) = crate::services::pve_exploration_seeding::pirate_commander_loot_for_system(&ctx.sde, solar_system_id);
             loot_specs.push((cmd_tid, 1, cmd_name.to_string()));
@@ -1148,8 +1145,12 @@ pub async fn handle_pve_exploration(
             }
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
 
-            let (rating_to_check, sleeper_info, site_pos_opt) = with_pve_exploration_reg(ctx, |reg| {
-                let site = reg.sites_by_system.get(&sys_id).and_then(|l| l.iter().find(|s| s.site_id == site_id));
+            let (rating_to_check, sleeper_info, site_pos_opt, canonical_site_id) = with_pve_exploration_reg(ctx, |reg| {
+                // Same site predicate as `advance_site_wave_or_complete`, so a `str(dungeon_id)` alias resolves to
+                // the same site and goes through the same hull / proximity / Sleeper-cache checks.
+                let site = reg.sites_by_system.get(&sys_id).and_then(|l| {
+                    l.iter().find(|s| s.site_id == site_id || s.dungeon_id.to_string() == site_id)
+                });
                 // Hull rating is always the server-side site rating; clients cannot override it.
                 let r = site.and_then(|s| s.ded_rating);
                 let s_info = site.and_then(|s| {
@@ -1162,8 +1163,11 @@ pub async fn handle_pve_exploration(
                     }
                 });
                 let pos = site.map(|s| s.position);
-                (r, s_info, pos)
+                (r, s_info, pos, site.map(|s| s.site_id.clone()))
             });
+            if let Some(cid) = canonical_site_id {
+                site_id = cid;
+            }
 
             if let Some(rating) = rating_to_check {
                 let ship = session.ship_id.and_then(|sid| {
