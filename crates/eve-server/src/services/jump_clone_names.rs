@@ -332,6 +332,14 @@ pub(crate) fn extract_skills(
                 message: "Skill Extractor must be located in character station hangar or active ship cargo".into(),
             });
         }
+        if snap.is_item_locked_in_contract_or_job(extractor_item_id)
+            || extractor.flag == eve_db::InventoryFlag::Locked
+        {
+            return Err(BridgeRpcError {
+                code: "SkillExtractorLocked".into(),
+                message: "Skill Extractor is locked in an active contract or industry job".into(),
+            });
+        }
 
         let ch_rec = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
@@ -453,17 +461,81 @@ pub(crate) fn extract_skills(
             }
         }
 
-        // 8. Apply extraction and level updates
+        // 8. Apply extraction and level updates, and reconcile snap.skill_queues (#4)
         let mut removed_skills = Vec::new();
+        let mut extracted_new_sp: std::collections::HashMap<u32, (u8, f64, f64)> =
+            std::collections::HashMap::new();
         for &(tid, take) in &requested {
             let rec = skills_map.get_mut(&tid).unwrap();
-            rec.skill_points -= take;
+            rec.skill_points = (rec.skill_points - take).max(0.0);
+            let rem_sp = rec.skill_points;
             let new_lvl = projected_levels[&tid];
             rec.level = new_lvl;
+            let rank = ctx
+                .sde
+                .types
+                .get(&tid)
+                .and_then(|t| {
+                    t.default_attributes
+                        .get(&eve_dogma::attr_ids::SKILL_TIME_CONSTANT)
+                        .copied()
+                })
+                .unwrap_or(1.0);
             if rec.skill_points <= 0.5 && new_lvl == 0 {
                 skills_map.remove(&tid);
             }
+            extracted_new_sp.insert(tid, (new_lvl, rem_sp, rank));
             removed_skills.push((tid, new_lvl));
+        }
+
+        if let Some(queue) = snap.skill_queues.get_mut(&char_id) {
+            let mut valid_next_lvl: std::collections::HashMap<u32, u8> = projected_levels.clone();
+            queue.retain_mut(|q| {
+                // Drop queued skills whose prerequisites are no longer met after extraction
+                if let Some(skill_type) = ctx.sde.types.get(&q.type_id) {
+                    for (req_attr, req_lvl_attr) in eve_dogma::REQUIRED_SKILL_ATTR_IDS
+                        .into_iter()
+                        .zip(eve_dogma::REQUIRED_SKILL_LEVEL_ATTR_IDS)
+                    {
+                        if let Some(&req_tid_f) = skill_type.default_attributes.get(&req_attr) {
+                            let req_tid = req_tid_f as u32;
+                            if req_tid > 0 {
+                                let req_lvl = skill_type
+                                    .default_attributes
+                                    .get(&req_lvl_attr)
+                                    .copied()
+                                    .unwrap_or(1.0)
+                                    .max(1.0) as u8;
+                                let have_lvl = valid_next_lvl.get(&req_tid).copied().unwrap_or(0);
+                                if have_lvl < req_lvl {
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(&(new_lvl, rem_sp, rank)) = extracted_new_sp.get(&q.type_id) {
+                    let expected_prev = valid_next_lvl.get(&q.type_id).copied().unwrap_or(new_lvl);
+                    if q.target_level <= new_lvl || q.target_level != expected_prev + 1 {
+                        return false;
+                    }
+                    let lvl_base_sp = if q.target_level <= 1 {
+                        0.0
+                    } else {
+                        crate::formulas::sp_for_skill_level(rank, q.target_level - 1)
+                    };
+                    let new_start_sp = if q.target_level == new_lvl + 1 {
+                        rem_sp.clamp(lvl_base_sp, q.end_sp)
+                    } else {
+                        lvl_base_sp
+                    };
+                    let old_needed = (q.end_sp - q.start_sp).max(1.0);
+                    q.start_sp = new_start_sp;
+                    q.duration_seconds *= ((q.end_sp - q.start_sp).max(0.0)) / old_needed;
+                }
+                valid_next_lvl.insert(q.type_id, q.target_level);
+                true
+            });
         }
 
         // 8. Consume extractor item

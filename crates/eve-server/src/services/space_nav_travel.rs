@@ -217,9 +217,9 @@ pub(crate) async fn handle_cmd_goto_point(
     let ship_id = session
         .ship_id
         .ok_or_else(|| err("NoActiveShip", "Session has no active ship".into()))?;
-    let coord = |i: usize| args.get(i).and_then(|a| a.as_f64());
+    let coord = |i: usize| args.get(i).and_then(|a| a.as_f64()).filter(|v| v.is_finite());
     let (Some(x), Some(y), Some(z)) = (coord(0), coord(1), coord(2)) else {
-        return Err(err("InvalidArguments", "CmdGotoPoint expects (x, y, z)".into()));
+        return Err(err("InvalidArguments", "CmdGotoPoint expects finite (x, y, z)".into()));
     };
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let handle = ctx.systems.get_or_spawn(sys_id);
@@ -544,6 +544,12 @@ pub(crate) async fn handle_cmd_goto_direction(
     let x = args.first().and_then(|a| a.as_f64()).unwrap_or(0.0);
     let y = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0);
     let z = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.0);
+    if !x.is_finite() || !y.is_finite() || !z.is_finite() {
+        return Err(BridgeRpcError {
+            code: "InvalidArguments".into(),
+            message: "Direction coordinates must be finite".into(),
+        });
+    }
     let dir = DVec3::new(x, y, z).normalize_or_zero();
     let direction = if dir.length_squared() > 1e-6 { dir } else { DVec3::X };
     let handle = ctx.systems.get_or_spawn(sys_id);

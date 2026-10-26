@@ -209,6 +209,39 @@ async fn test_ess_mgr_telemetry_links_and_thefts() {
         .expect("IsClientLinkedToReserveBank before link");
     assert_eq!(linked_before, PyRep::Bool(false));
 
+    // #54: Verify linking to Main Bank cannot be used to bypass Reserve Bank Security Key check
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "essMgr",
+            None,
+            "AttemptLinkToMainBank",
+            &[PyRep::Integer(ESS_BALL_ID)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("AttemptLinkToMainBank start before keyless reserve attempt");
+    for _ in 0..5 {
+        let _ = sys_handle.step_manual(1.0).await.unwrap();
+    }
+    let keyless_reserve_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "essMgr",
+            None,
+            "AttemptLinkToReserveBank",
+            &[PyRep::Integer(ESS_BALL_ID)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("#54: AttemptLinkToReserveBank without key must fail even when linked to Main Bank");
+    assert_eq!(keyless_reserve_err.code, "MissingEssReserveSecurityKey");
+    let _ = ctx
+        .dispatch_rpc(&mut sess, "essMgr", None, "RequestMainBankUnlink", &[], &kw, None)
+        .await;
+
     // 3. AttemptLinkToReserveBank: requires ESS Reserve Security Key in cargo
     let key_item_id = 950_001;
     ctx.db.with_mut_snapshot(|snap| {

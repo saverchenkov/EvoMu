@@ -1111,7 +1111,7 @@ async fn handle_set_session_check(
         });
     }
     let tick = cur_tick_opt.map(|(_, t)| t).unwrap_or(0);
-    record_session_change_timer(ctx, char_id, now_unix, sys_id, tick, reason);
+    super::record_client_session_check_timer(ctx, char_id, now_unix, sys_id, tick, reason);
     Ok(PyRep::keyval([
         ("sessionChangeTimerSeconds", PyRep::Integer(10)),
         ("trigger", PyRep::String(reason.to_string())),

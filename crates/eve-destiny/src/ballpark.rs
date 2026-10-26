@@ -828,6 +828,9 @@ impl Ballpark {
 
     /// Sets `ball_id`'s movement toward `point` and emits [`DestinyEvent::GotoPoint`] (`destiny:GotoPoint`).
     pub fn goto_point(&mut self, ball_id: BallId, point: DVec3) -> Result<(), String> {
+        if !point.is_finite() {
+            return Err("InvalidPoint: GotoPoint coordinates must be finite".to_string());
+        }
         let Some(ball) = self.balls.get_mut(&ball_id) else {
             return Err(format!("Ball {ball_id} not found"));
         };
@@ -850,6 +853,9 @@ impl Ballpark {
 
     /// Updates `ball_id`'s radius and emits [`DestinyEvent::SetBallRadius`] (`destiny:SetBallRadius`).
     pub fn set_ball_radius(&mut self, ball_id: BallId, radius: f64) -> bool {
+        if !radius.is_finite() || radius <= 0.0 {
+            return false;
+        }
         let Some(ball) = self.balls.get_mut(&ball_id) else {
             return false;
         };
@@ -867,6 +873,9 @@ impl Ballpark {
 
     /// Moves `ball_id` to `new_position` and reconciles its [`GridBubble`] membership.
     pub fn set_ball_position(&mut self, ball_id: BallId, new_position: DVec3) -> bool {
+        if !new_position.is_finite() {
+            return false;
+        }
         let Some(ball) = self.balls.get_mut(&ball_id) else {
             return false;
         };
@@ -899,6 +908,40 @@ impl Ballpark {
     pub fn set_mode(&mut self, ball_id: BallId, mut mode: MovementMode) -> Result<(), String> {
         if !self.balls.contains_key(&ball_id) {
             return Err(format!("Ball {ball_id} not found in ballpark"));
+        }
+
+        match &mode {
+            MovementMode::GotoDirection { direction } => {
+                if !direction.is_finite() {
+                    return Err("InvalidDirection: GotoDirection vector must be finite".to_string());
+                }
+            }
+            MovementMode::Follow { range, .. } | MovementMode::Orbit { range, .. } => {
+                if !range.is_finite() || *range < 0.0 {
+                    return Err("InvalidRange: Follow/Orbit range must be finite and non-negative".to_string());
+                }
+            }
+            MovementMode::Warp {
+                origin,
+                destination,
+                warp_speed_au_s,
+                total_distance,
+                elapsed_warp_time,
+                ..
+            } => {
+                if !origin.is_finite()
+                    || !destination.is_finite()
+                    || !warp_speed_au_s.is_finite()
+                    || *warp_speed_au_s <= 0.0
+                    || !total_distance.is_finite()
+                    || *total_distance < 0.0
+                    || !elapsed_warp_time.is_finite()
+                    || *elapsed_warp_time < 0.0
+                {
+                    return Err("InvalidWarpParameters: Warp coordinates, distance, and speed must be finite".to_string());
+                }
+            }
+            _ => {}
         }
 
         // Reject warp if scrambled or cloaked with a non-covert cloaking device (`feat:modules.cloak-prototype`, `feat:modules.covert-ops-cloak`)
