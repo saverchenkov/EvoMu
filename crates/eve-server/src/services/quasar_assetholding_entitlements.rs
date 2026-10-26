@@ -7,7 +7,8 @@
 //! - `eve.assetholding.entitlement.api.admin.*` (`RedeemRequest`, `ExpireRequest`, `AutoRedeemRequest`,
 //!   `RedeliverStaleEntitlementsRequest`);
 //! - `eve_public.assetholding.asset.api.*` (`GetRequest`, `FiniteCapacityClaimedNotice`, `DeletedNotice`);
-//! - `eve_public.assetholding.entitlement.api.*` (`GetRequest`, `RedeemRequest`, `GrantedNotice`, `RedeemedNotice`);
+//! - `eve_public.assetholding.entitlement.api.*` (`GetRequest`, `RedeemRequest`, `GrantedNotice`, `RedeemedNotice`)
+//!   and `SpawnRequest` / `DirectDeliveryRequest` are ledger-backed in `quasar_entitlement_ledger`;
 //! - `eve_public.assetholding.entitlement.api.admin.*` (`ExpireRequest`, `AutoRedeemRequest`).
 
 #![forbid(unsafe_code)]
@@ -102,19 +103,6 @@ pub fn register_assetholding_handlers(
         }),
     );
 
-    // 4. eve.assetholding.asset.api.SpawnRequest
-    router.register_handler(
-        "eve.assetholding.asset.api.SpawnRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.assetholding.asset.api.SpawnResponse"
-                ),
-                value: Vec::new(),
-            })
-        }),
-    );
-
     // 5. eve.assetholding.asset.api.CreateRequest
     router.register_handler(
         "eve.assetholding.asset.api.CreateRequest",
@@ -147,23 +135,6 @@ pub fn register_assetholding_handlers(
         }),
     );
 
-    // 7. eve_public.assetholding.entitlement.api.GetRequest -> eve_public.assetholding.entitlement.api.GetResponse
-    router.register_handler(
-        "eve_public.assetholding.entitlement.api.GetRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            let attrs = Vec::new();
-            let mut out = Vec::new();
-            encode_bytes_field(2, &attrs, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.assetholding.entitlement.api.GetResponse"
-                ),
-                value: out,
-            })
-        }),
-    );
-
     // 8. eve.assetholding.entitlement.api.RedeemRequest
     router.register_handler(
         "eve.assetholding.entitlement.api.RedeemRequest",
@@ -171,32 +142,6 @@ pub fn register_assetholding_handlers(
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve.assetholding.entitlement.api.RedeemResponse"
-                ),
-                value: Vec::new(),
-            })
-        }),
-    );
-
-    // 9. eve_public.assetholding.entitlement.api.RedeemRequest
-    router.register_handler(
-        "eve_public.assetholding.entitlement.api.RedeemRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.assetholding.entitlement.api.RedeemResponse"
-                ),
-                value: Vec::new(),
-            })
-        }),
-    );
-
-    // 10. eve.assetholding.entitlement.api.DirectDeliveryRequest
-    router.register_handler(
-        "eve.assetholding.entitlement.api.DirectDeliveryRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.assetholding.entitlement.api.DirectDeliveryResponse"
                 ),
                 value: Vec::new(),
             })
@@ -301,52 +246,9 @@ pub fn register_assetholding_handlers(
             })
         }),
     );
-}
 
-/// Helper for broadcasting `GrantedNotice` (`eve_public.assetholding.entitlement.api.GrantedNotice`).
-pub fn publish_entitlement_granted_notice(
-    gateway: &PublicGatewayRouter,
-    character_id: u32,
-    entitlement_id: u64,
-    quantity: u32,
-    now_unix: u64,
-) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut payload = Vec::new();
-    encode_identifier(1, entitlement_id, &mut payload);
-    encode_varint_field(2, quantity as u64, &mut payload);
-
-    let any = GoogleAny {
-        type_url: format!(
-            "{TYPE_GOOGLEAPIS_PREFIX}eve_public.assetholding.entitlement.api.GrantedNotice"
-        ),
-        value: payload,
-    };
-    let (_, delivered) =
-        gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix)?;
-    Ok(delivered)
-}
-
-/// Helper for broadcasting `RedeemedNotice` (`eve_public.assetholding.entitlement.api.RedeemedNotice`).
-pub fn publish_entitlement_redeemed_notice(
-    gateway: &PublicGatewayRouter,
-    character_id: u32,
-    entitlement_id: u64,
-    quantity: u32,
-    now_unix: u64,
-) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut payload = Vec::new();
-    encode_identifier(1, entitlement_id, &mut payload);
-    encode_varint_field(2, quantity as u64, &mut payload);
-
-    let any = GoogleAny {
-        type_url: format!(
-            "{TYPE_GOOGLEAPIS_PREFIX}eve_public.assetholding.entitlement.api.RedeemedNotice"
-        ),
-        value: payload,
-    };
-    let (_, delivered) =
-        gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix)?;
-    Ok(delivered)
+    // Ledger-backed asset spawn, entitlement delivery, lookup and redemption.
+    super::quasar_entitlement_ledger::register(router, _db, _sde);
 }
 
 /// Helper for broadcasting `FiniteCapacityClaimedNotice`.

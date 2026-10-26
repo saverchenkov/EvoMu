@@ -92,63 +92,7 @@ pub fn register_handlers(
     let state = QuasarCosmeticsState::from_db(Arc::clone(&db));
     let desc = Arc::clone(&router.descriptors);
 
-    // 1. eve_public.cosmetic.ship.logo handlers (emblem display/clear)
-    {
-        let d = Arc::clone(&desc);
-        let st = Arc::clone(&state);
-        let db_logo = Arc::clone(&db);
-        router.register_handler(
-            "eve_public.cosmetic.ship.logo.DisplayRequest",
-            Arc::new(move |ctx, _any, _dyn_msg| {
-                let char_id = match ctx.effective_character_id() {
-                    Some(c) => c,
-                    None => return Err((STATUS_FORBIDDEN, "Active character required".into())),
-                };
-                let corp_id = ctx.effective_corporation_id().unwrap_or(98_000_001);
-                let ship_id = db_logo.with_snapshot(|snap| {
-                    snap.characters.get(&(char_id as i64)).map(|c| c.active_ship_id as u64).unwrap_or(1_000_001)
-                });
-                {
-                    let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
-                    data.ship_logos.insert(ship_id, (char_id, corp_id));
-                }
-                st.sync_to_db();
-                encode_domain_message(
-                    &d,
-                    "eve_public.cosmetic.ship.logo.DisplayResponse",
-                    |reg, resp| {
-                        set_domain_attributes(reg, resp, char_id as u64, corp_id as u64, "ShipLogoDisplayed");
-                    },
-                )
-            }),
-        );
-    }
-    {
-        let d = Arc::clone(&desc);
-        let st = Arc::clone(&state);
-        let db_logo = Arc::clone(&db);
-        router.register_handler(
-            "eve_public.cosmetic.ship.logo.ClearRequest",
-            Arc::new(move |ctx, _any, _dyn_msg| {
-                let char_id = match ctx.effective_character_id() {
-                    Some(c) => c,
-                    None => return Err((STATUS_FORBIDDEN, "Active character required".into())),
-                };
-                let corp_id = ctx.effective_corporation_id().unwrap_or(98_000_001);
-                let ship_id = db_logo.with_snapshot(|snap| {
-                    snap.characters.get(&(char_id as i64)).map(|c| c.active_ship_id as u64).unwrap_or(1_000_001)
-                });
-                {
-                    let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
-                    data.ship_logos.remove(&ship_id);
-                }
-                st.sync_to_db();
-                encode_domain_message(&d, "eve_public.cosmetic.ship.logo.ClearResponse", |reg, resp| {
-                    set_domain_attributes(reg, resp, char_id as u64, corp_id as u64, "ShipLogoCleared");
-                })
-            }),
-        );
-    }
+    // 1. Ship logo display/clear: see `quasar_cosmetics_live` (state-backed handlers).
 
     // 2. eve.cosmetic.ship.api.request.GetRequest & GetAllInBubbleRequest
     {
@@ -394,55 +338,7 @@ pub fn register_handlers(
 
 
 
-    // 9. eve_public.cosmetic.structure.paintwork.api handlers
-    {
-        let d = Arc::clone(&desc);
-        router.register_handler(
-            "eve_public.cosmetic.structure.paintwork.api.GetRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
-                let structure_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_000_001) as u64;
-                encode_domain_message(
-                    &d,
-                    "eve_public.cosmetic.structure.paintwork.api.GetResponse",
-                    |reg, resp| {
-                        set_domain_field(reg, resp, 1, structure_id, "");
-                    },
-                )
-            }),
-        );
-    }
-    {
-        let d = Arc::clone(&desc);
-        router.register_handler(
-            "eve_public.cosmetic.structure.paintwork.api.GetAllInSolarSystemRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
-                let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u64;
-                encode_domain_message(
-                    &d,
-                    "eve_public.cosmetic.structure.paintwork.api.GetAllInSolarSystemResponse",
-                    |reg, resp| {
-                        set_domain_field(reg, resp, 1, sys_id, "");
-                    },
-                )
-            }),
-        );
-    }
-    {
-        let d = Arc::clone(&desc);
-        router.register_handler(
-            "eve_public.cosmetic.structure.paintwork.license.api.GetAllOwnedByCorporationRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
-                let corp_id = get_int_field(dyn_msg, 1).unwrap_or(98_000_001) as u64;
-                encode_domain_message(
-                    &d,
-                    "eve_public.cosmetic.structure.paintwork.license.api.GetAllOwnedByCorporationResponse",
-                    |reg, resp| {
-                        set_domain_field(reg, resp, 1, corp_id, "");
-                    },
-                )
-            }),
-        );
-    }
+    // 9. Structure paintwork + licenses: see `quasar_cosmetics_live`.
 
     // 10. eve.quasar.config.api.GetRequest
     {
@@ -473,22 +369,6 @@ pub fn register_handlers(
 
     // 12. Public eve_public.cosmetic.* request packages (market, SKINR, licenses, sequencing, palette)
     for (req_name, rsp_name) in [
-        (
-            "eve_public.cosmetic.corporation.palette.api.GetRequest",
-            "eve_public.cosmetic.corporation.palette.api.GetResponse",
-        ),
-        (
-            "eve_public.cosmetic.corporation.palette.api.GetOwnRequest",
-            "eve_public.cosmetic.corporation.palette.api.GetOwnResponse",
-        ),
-        (
-            "eve_public.cosmetic.corporation.palette.api.SetRequest",
-            "eve_public.cosmetic.corporation.palette.api.SetResponse",
-        ),
-        (
-            "eve_public.cosmetic.corporation.palette.api.CanEditRequest",
-            "eve_public.cosmetic.corporation.palette.api.CanEditResponse",
-        ),
         (
             "eve_public.cosmetic.market.api.GetBrokerFeesRequest",
             "eve_public.cosmetic.market.api.GetBrokerFeesResponse",
@@ -540,14 +420,6 @@ pub fn register_handlers(
         (
             "eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest",
             "eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingResponse",
-        ),
-        (
-            "eve_public.cosmetic.ship.api.GetAllInBubbleRequest",
-            "eve_public.cosmetic.ship.api.GetAllInBubbleResponse",
-        ),
-        (
-            "eve_public.cosmetic.ship.api.GetRequest",
-            "eve_public.cosmetic.ship.api.GetResponse",
         ),
         (
             "eve_public.cosmetic.ship.skin.thirdparty.api.GetRequest",
@@ -640,22 +512,6 @@ pub fn register_handlers(
         (
             "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.CompleteEarlyRequest",
             "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.CompleteEarlyResponse",
-        ),
-        (
-            "eve_public.cosmetic.structure.paintwork.license.api.admin.IssueRequest",
-            "eve_public.cosmetic.structure.paintwork.license.api.admin.IssueResponse",
-        ),
-        (
-            "eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeRequest",
-            "eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeResponse",
-        ),
-        (
-            "eve_public.cosmetic.structure.paintwork.api.admin.IssueRequest",
-            "eve_public.cosmetic.structure.paintwork.license.api.admin.IssueResponse",
-        ),
-        (
-            "eve_public.cosmetic.structure.paintwork.api.admin.RevokeRequest",
-            "eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeResponse",
         ),
     ] {
         let d = Arc::clone(&desc);
@@ -812,6 +668,12 @@ pub fn register_handlers(
             }),
         );
     }
+
+    // 13. State-backed ship logo / ship SKIN state / palette / structure paintwork handlers.
+    super::quasar_cosmetics_live::register(
+        router,
+        super::quasar_cosmetics_live::CosmeticsLiveState::load(Arc::clone(&db), Arc::clone(&sde)),
+    );
 }
 
 fn encode_id_field(field_num: u32, id: u64, out: &mut Vec<u8>) {
@@ -869,26 +731,6 @@ pub fn publish_cosmetic_market_transaction_notice(
     encode_id_field(1, transaction_id, &mut payload);
     let any = GoogleAny {
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.market.transaction.api.TransactionSucceededNotice"),
-        value: payload,
-    };
-    gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix).map(|(_, n)| n)
-}
-
-/// Helper for broadcasting `SetNotice` (`eve_public.cosmetic.ship.api.SetNotice`).
-pub fn publish_cosmetic_ship_set_notice(
-    gateway: &PublicGatewayRouter,
-    character_id: u32,
-    ship_id: u64,
-    skin_id: u64,
-    now_unix: u64,
-) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut state_buf = Vec::new();
-    encode_id_field(1, ship_id, &mut state_buf);
-    encode_id_field(2, skin_id, &mut state_buf);
-    let mut payload = Vec::new();
-    encode_bytes_field(1, &state_buf, &mut payload);
-    let any = GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.ship.api.SetNotice"),
         value: payload,
     };
     gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix).map(|(_, n)| n)

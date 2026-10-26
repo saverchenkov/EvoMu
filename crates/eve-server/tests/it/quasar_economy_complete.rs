@@ -28,7 +28,6 @@ use eve_server::quasar_gateway::STATUS_OK;
 use eve_server::router::ServerContext;
 use eve_server::services::quasar_assetholding_entitlements::{
     publish_asset_capacity_claimed_notice, publish_asset_deleted_notice,
-    publish_entitlement_granted_notice, publish_entitlement_redeemed_notice,
 };
 use eve_server::services::quasar_market::publish_market_new_entry_notice;
 use std::collections::HashMap;
@@ -433,10 +432,6 @@ async fn test_quasar_inventory_asset_container_blueprint_ore() {
 
 #[tokio::test]
 async fn test_quasar_assetholding_entitlements() {
-    // parity: quasar:eveProto/generated/eve_public/assetholding/entitlement/api/notices_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/assetholding/entitlement/api/notices_pb2.pyj",
-    ]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -467,7 +462,8 @@ async fn test_quasar_assetholding_entitlements() {
     let req = make_request("eve.assetholding.asset.api.SpawnRequest", Vec::new(), b"ah-04");
     let rep = ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None).await.expect("rpc");
     let rsp = extract_response_proto(&rep);
-    assert_eq!(rsp.status_code, STATUS_OK, "Status: {}, message: {}", rsp.status_code, rsp.status_message);
+    // Ledger-backed: unknown/empty assets and non-GM callers are rejected (see quasar_cosmetics_live_state.rs).
+    assert_ne!(rsp.status_code, STATUS_OK, "SpawnRequest without GM role / stacks must fail");
 
     let req = make_request("eve.assetholding.asset.api.CreateRequest", Vec::new(), b"ah-05");
     let rep = ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None).await.expect("rpc");
@@ -498,17 +494,17 @@ async fn test_quasar_assetholding_entitlements() {
     let req = make_request("eve_public.assetholding.entitlement.api.GetRequest", ent_payload.clone(), b"ah-07");
     let rep = ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None).await.expect("rpc");
     let rsp = extract_response_proto(&rep);
-    assert_eq!(rsp.status_code, STATUS_OK, "Status: {}, message: {}", rsp.status_code, rsp.status_message);
+    assert_ne!(rsp.status_code, STATUS_OK, "unknown entitlement must not resolve");
 
     let req = make_request("eve_public.assetholding.entitlement.api.RedeemRequest", ent_payload.clone(), b"ah-09");
     let rep = ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None).await.expect("rpc");
     let rsp = extract_response_proto(&rep);
-    assert_eq!(rsp.status_code, STATUS_OK, "Status: {}, message: {}", rsp.status_code, rsp.status_message);
+    assert_ne!(rsp.status_code, STATUS_OK, "unknown entitlement cannot be redeemed");
 
     let req = make_request("eve.assetholding.entitlement.api.DirectDeliveryRequest", Vec::new(), b"ah-10");
     let rep = ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None).await.expect("rpc");
     let rsp = extract_response_proto(&rep);
-    assert_eq!(rsp.status_code, STATUS_OK, "Status: {}, message: {}", rsp.status_code, rsp.status_message);
+    assert_ne!(rsp.status_code, STATUS_OK, "empty DirectDelivery without GM role must fail");
 
     let req = make_request("eve.assetholding.entitlement.api.DeleteRequest", ent_payload.clone(), b"ah-11");
     let rep = ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None).await.expect("rpc");
@@ -562,16 +558,6 @@ async fn test_quasar_assetholding_entitlements() {
         .quasar_gateway
         .take_stream_receiver(sess.session_id)
         .expect("stream_rx");
-
-    let d1 = publish_entitlement_granted_notice(&ctx.quasar_gateway, 90_000_001, 101, 1, ctx.now_unix()).expect("n1");
-    assert_eq!(d1, 1);
-    let msg1 = stream_rx.try_recv().expect("recv msg1");
-    assert!(msg1.payload.unwrap().type_url.ends_with("GrantedNotice"));
-
-    let d2 = publish_entitlement_redeemed_notice(&ctx.quasar_gateway, 90_000_001, 101, 1, ctx.now_unix()).expect("n2");
-    assert_eq!(d2, 1);
-    let msg2 = stream_rx.try_recv().expect("recv msg2");
-    assert!(msg2.payload.unwrap().type_url.ends_with("RedeemedNotice"));
 
     let d3 = publish_asset_capacity_claimed_notice(&ctx.quasar_gateway, 90_000_001, 501, 10, 5, ctx.now_unix()).expect("n3");
     assert_eq!(d3, 1);

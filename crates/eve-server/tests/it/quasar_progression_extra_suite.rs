@@ -298,11 +298,9 @@ async fn quasar_community_progression_tales_and_goals() {
 
 #[tokio::test]
 async fn q9_corp_palette_titles_structure_paintwork_and_app_infra() {
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/character/title/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/api/api_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/license/api/api_pb2.pyj, quasar:eveProto/generated/eve_public/app/eveonline/career/goal_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/cosmetic/character/title/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/app/eveonline/career/goal_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/cosmetic/character/title/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/api/api_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/license/api/api_pb2.pyj",
         "quasar:eveProto/generated/eve_public/app/eveonline/career/goal_pb2.pyj",
     ]);
 
@@ -334,27 +332,7 @@ async fn q9_corp_palette_titles_structure_paintwork_and_app_infra() {
         assert_eq!(rsp.status_code, STATUS_OK, "{req_name} failed");
     }
 
-    // 3. Structure paintwork & paintwork licenses
-    let pnt_rsp = call_req(&ctx, &session, "eve_public.cosmetic.structure.paintwork.api.GetRequest", Vec::new(), true);
-    assert_eq!(pnt_rsp.status_code, STATUS_OK);
-
-    let pnt_sys_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.cosmetic.structure.paintwork.api.GetAllInSolarSystemRequest",
-        Vec::new(),
-        true,
-    );
-    assert_eq!(pnt_sys_rsp.status_code, STATUS_OK);
-
-    let pnt_lic_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.cosmetic.structure.paintwork.license.api.GetAllOwnedByCorporationRequest",
-        Vec::new(),
-        true,
-    );
-    assert_eq!(pnt_lic_rsp.status_code, STATUS_OK);
+    // 3. Structure paintwork & licenses: covered state-backed in quasar_cosmetics_live_state.rs
 
     // 4. Quasar configuration
     let cfg_rsp = call_req(
@@ -384,10 +362,6 @@ async fn q9_corp_palette_titles_structure_paintwork_and_app_infra() {
         "eve_public.cosmetic.character.title.api.GetOwnedResponse"
     );
     assert_eq!(
-        pnt_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve_public.cosmetic.structure.paintwork.api.GetResponse"
-    );
-    assert_eq!(
         cfg_rsp.payload.as_ref().unwrap().normalized_type_name(),
         "eve.quasar.config.api.GetResponse"
     );
@@ -397,14 +371,12 @@ async fn q9_corp_palette_titles_structure_paintwork_and_app_infra() {
     );
     assert!(!WireMessage::decode(&pal_rsp.payload.as_ref().unwrap().value).unwrap().fields.is_empty());
     assert!(!WireMessage::decode(&tit_rsp.payload.as_ref().unwrap().value).unwrap().fields.is_empty());
-    assert!(!WireMessage::decode(&pnt_rsp.payload.as_ref().unwrap().value).unwrap().fields.is_empty());
 }
 
 #[tokio::test]
 async fn q9_ship_cosmetics_skinr_and_emblems() {
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/ship/logo/logo_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/draft/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/draft/api/requests_pb2.pyj
     eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/cosmetic/ship/logo/logo_pb2.pyj",
         "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/draft/api/requests_pb2.pyj",
     ]);
 
@@ -415,11 +387,7 @@ async fn q9_ship_cosmetics_skinr_and_emblems() {
     session.character_id = Some(90_000_105);
     session.solar_system_id = Some(30_000_142);
 
-    // 1. Ship logo display & clear
-    for req_name in ["eve_public.cosmetic.ship.logo.DisplayRequest", "eve_public.cosmetic.ship.logo.ClearRequest"] {
-        let rsp = call_req(&ctx, &session, req_name, Vec::new(), true);
-        assert_eq!(rsp.status_code, STATUS_OK, "{req_name}: {}", rsp.status_message);
-    }
+    // 1. Ship logo display & clear: covered state-backed in quasar_cosmetics_live_state.rs
 
     // 2. SKINR third-party sequencing pricing & jobs
     let seq_rsp = call_req(&ctx, &session, "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingRequest", Vec::new(), true);

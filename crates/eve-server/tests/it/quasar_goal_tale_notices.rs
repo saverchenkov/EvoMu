@@ -19,7 +19,7 @@ use tokio::sync::mpsc::Receiver;
 const CORP: u32 = 98_000_777;
 const OTHER_CORP: u32 = 98_000_778;
 
-async fn subscribe(ctx: &ServerContext, sess: &mut SessionState) -> Receiver<EvePublicNotice> {
+pub(crate) async fn subscribe(ctx: &ServerContext, sess: &mut SessionState) -> Receiver<EvePublicNotice> {
     let kw: HashMap<String, PyRep> = HashMap::new();
     ctx.dispatch_rpc(sess, "publicGatewaySvc", None, "Subscribe", &[], &kw, None).await.expect("Subscribe");
     let mut rx = ctx.quasar_gateway.take_stream_receiver(sess.session_id).expect("stream receiver");
@@ -28,7 +28,7 @@ async fn subscribe(ctx: &ServerContext, sess: &mut SessionState) -> Receiver<Eve
 }
 
 /// Drains the stream and returns `(type name, payload)` of every notice in `prefix`.
-fn drain(rx: &mut Receiver<EvePublicNotice>, prefix: &str) -> Vec<(String, WireMessage)> {
+pub(crate) fn drain(rx: &mut Receiver<EvePublicNotice>, prefix: &str) -> Vec<(String, WireMessage)> {
     let mut out = Vec::new();
     while let Ok(n) = rx.try_recv() {
         let p = n.payload.expect("notice payload");
@@ -40,14 +40,14 @@ fn drain(rx: &mut Receiver<EvePublicNotice>, prefix: &str) -> Vec<(String, WireM
     out
 }
 
-fn sub(wm: &WireMessage, field: u32) -> WireMessage {
+pub(crate) fn sub(wm: &WireMessage, field: u32) -> WireMessage {
     let f = wm.fields.iter().find(|f| f.field_number == field).unwrap_or_else(|| panic!("field {field}"));
     WireMessage::decode(f.value.as_bytes().expect("bytes")).expect("nested")
 }
-fn varint(wm: &WireMessage, field: u32) -> Option<u64> {
+pub(crate) fn varint(wm: &WireMessage, field: u32) -> Option<u64> {
     wm.fields.iter().find(|f| f.field_number == field).and_then(|f| f.value.as_varint())
 }
-fn bytes(wm: &WireMessage, field: u32) -> Vec<u8> {
+pub(crate) fn bytes(wm: &WireMessage, field: u32) -> Vec<u8> {
     wm.fields.iter().find(|f| f.field_number == field).and_then(|f| f.value.as_bytes()).expect("bytes").to_vec()
 }
 fn text(wm: &WireMessage, field: u32) -> String {
@@ -62,7 +62,7 @@ fn goal_req(uuid: &[u8], extra: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
     out
 }
 
-fn seq(field: u32, id: u64, out: &mut Vec<u8>) {
+pub(crate) fn seq(field: u32, id: u64, out: &mut Vec<u8>) {
     let mut b = Vec::new();
     encode_varint_field(1, id, &mut b);
     encode_bytes_field(field, &b, out);
