@@ -142,6 +142,21 @@
       "evidence": "crates/eve-server/tests/it/structure_acl_and_features_complete.rs:230-248 asserts docking access by invoking an internal Rust helper `verify_structure_docking_acl` directly rather than exercising any client docking RPC (`stationSvc.Dock`). In crates/eve-server/src/services/structure_acl_defense_rules.rs:200-213, `verify_structure_docking_acl` is unrouted and never invoked by any RPC handler.",
       "id": "feat:structures.docking-acl",
       "flagged_by_audit": "20261026-094345"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/character_certificates.rs:120-168 \u2014 derive_certificate_levels computes certificate levels by matching cert.group_id with a wildcard (_ => ...) and looping over a fixed set of 5 hardcoded skill IDs ([3300, 3392, 3426, 3449, 3402]), taking their maximum level up to 5 and assigning it to every certificate in the SDE bundle (or assigning max_skill_lvl.min(5) to dummy certificate IDs 1..=20 if SDE load fails). It completely ignores each certificate's actual skill prerequisites defined in certificates.fsdbinary. Furthermore, the service is built around Crucible-era certificateMgr (character_certificates.rs:179-182), which is bypassed via `rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json`. The tagged test crates/eve-server/tests/it/skills_parity_complete.rs:378-450 never asserts certificate derivation from trained skills per the acceptance text (\"certificateMgr reports certificate levels derived from trained skills\"); it only asserts certificates 101 and 202 that were manually pushed using mock setter RPCs (GrantCertificate, BatchCertificateGrant, BatchCertificateUpdate).",
+      "id": "feat:skills.certificates",
+      "flagged_by_audit": "20261026-104051"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/character_skill_plans.rs:886-919, 930-1170 \u2014 implements 7 invented RPC methods on skillMgr2 (SaveSkillPlan, CreateSkillPlan, GetPersonalSkillPlans, GetCorpSkillPlans, GetCertifiedSkillPlans, GetSharedSkillPlan, TrackSkillPlan, GetTrackedSkillPlan), all suppressed with `// rpc-lint: allow parity audit feat:skills.skill-plans`. None of these RPC methods exist on skillMgr2 in the V24 client bytecode; skill plans in live V24 are managed through the public gateway via Quasar (quasar:skill). Furthermore, default_certified_plans() in character_skill_plans.rs:886-919 hardcodes 3 synthetic fixture plans (cert-plan-enforcer-core, cert-plan-industrialist, cert-plan-explorer) with hand-written skill vectors instead of reading client static data (res:/staticdata/skillplans.fsdbinary), and TrackSkillPlan broadcasts OnSelectedSkillPlanChanged, which is already triaged in docs/parity/triage.json:2002 as client-local UI scatter.",
+      "id": "feat:skills.skill-plans",
+      "flagged_by_audit": "20261026-104051"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/character_skill_ops.rs:745-805, 843-850 \u2014 invents skillMgr2.RefundObsoleteSkill (suppressed with `// rpc-lint: allow parity audit feat:skills.skill-remove-obsolete`), an RPC method not present in the V24 client. The tagged test crates/eve-server/tests/it/skills_parity_complete.rs:340-360 only exercises this invented RPC fixture to refund skill 3400 rather than exercising any live-server obsolete skill refund mechanism.",
+      "id": "feat:skills.skill-remove-obsolete",
+      "flagged_by_audit": "20261026-104051"
     }
   ],
   "rejected_triage": [
