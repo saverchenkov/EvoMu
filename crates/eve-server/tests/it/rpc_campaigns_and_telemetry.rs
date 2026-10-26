@@ -431,6 +431,7 @@ async fn test_info_gathering_telemetry_rpcs() {
 
 #[tokio::test]
 // parity: rpc:communityTrackMgr.get_instance_attributes_public
+// parity: feat:ui.community-track
 async fn test_milestones_and_community_tracks() {
     let ctx = ServerContext::new();
 

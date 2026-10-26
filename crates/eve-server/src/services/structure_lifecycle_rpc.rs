@@ -742,7 +742,7 @@ pub async fn handle_jettison_structure_fuel(
                 return Err(err("NotDockedInStructure", format!("Must be docked in or in the same solar system as structure {structure_id} to jettison fuel")));
             }
             if !has_structure_manager_role(snap, session, char_id, caller_corp) {
-                return Err(err("CorpRoleDenied", "Jettisoning structure fuel requires Director or Station Manager role"));
+                return Err(err("InsufficientRoles", "Jettisoning structure fuel requires Director or Station Manager role"));
             }
 
             snap.next_entity_id += 1;

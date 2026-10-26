@@ -51,6 +51,7 @@ async fn rpc(
 #[tokio::test]
 async fn test_station_services_and_corp_station_mgr_parity() {
     // parity: rpc:corpStationMgr.DoStandingCheckForStationService, rpc:station.GetGuests, rpc:stationSvc.GetAllianceSystems, rpc:stationSvc.GetSolarSystem, rpc:stationSvc.GetStationItemBits, rpc:stationSvc.GetStationsForOwner, rpc:stationSvc.GetSystemsForAlliance
+    // parity: feat:structures.station-standing-check
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 

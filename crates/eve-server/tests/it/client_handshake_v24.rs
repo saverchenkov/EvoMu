@@ -296,6 +296,7 @@ async fn issue_25_macho_notification_3_layer_envelope_and_tcp_push() {
     // Emit an async server notification to character 90_000_001 and verify it arrives on the TCP stream
     ctx.notify(
         NotificationTarget::Character(90_000_001),
+        // rpc-lint: allow test notification name
         "OnSkillsTrained",
         "charid",
         vec![PyRep::List(vec![PyRep::Integer(3300)])],
@@ -316,6 +317,7 @@ async fn issue_25_macho_notification_3_layer_envelope_and_tcp_push() {
             let (ev, args) = pkt
                 .extract_broadcast_notification()
                 .expect("3-layer GPCS notification over TCP");
+            // rpc-lint: allow test notification name
             if ev == "OnSkillsTrained" {
                 assert_eq!(args, &[PyRep::List(vec![PyRep::Integer(3300)])]);
                 received_skills_trained = true;

@@ -48,6 +48,7 @@ async fn setup_pilot(
 // parity: rpc:expertSystemMgr.GetMyExpertSystems
 // parity: rpc:expertSystemMgr.ConsumeExpertSystem
 // parity: rpc:expertSystemMgr.RemoveMyExpertSystem
+// parity: feat:skills.expert-systems
 async fn test_expert_system_and_browser_lockdown_services() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -196,6 +197,45 @@ async fn test_expert_system_and_browser_lockdown_services() {
     // After removal, skill level reverts
     let skills_removed = ctx.character_skill_levels(PILOT1);
     assert_eq!(skills_removed.get(&3413).copied().unwrap_or(0), 0);
+
+    // 3. Expiry removes temporary skills
+    let es_item_expiry = 955_002i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            es_item_expiry,
+            eve_db::InventoryItemRecord {
+                item_id: es_item_expiry,
+                type_id: EXPERT_SYSTEM_TYPE_ID,
+                owner_id: PILOT1,
+                location_id: 60_003_760,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    ctx.dispatch_rpc(
+        &mut sess,
+        "expertSystemMgr",
+        None,
+        "ConsumeExpertSystem",
+        &[PyRep::Integer(es_item_expiry)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("ConsumeExpertSystem for expiry");
+    let skills_active_again = ctx.character_skill_levels(PILOT1);
+    assert_eq!(skills_active_again.get(&3413).copied().unwrap_or(0), 4);
+
+    // Advance clock past the 7-day duration (8 days)
+    ctx.advance_secs(8 * 86400);
+
+    // Expiry removes the skills
+    let skills_expired = ctx.character_skill_levels(PILOT1);
+    assert_eq!(skills_expired.get(&3413).copied().unwrap_or(0), 0);
 }
 
 #[tokio::test]
