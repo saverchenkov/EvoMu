@@ -15,7 +15,7 @@ use crate::formulas::{
 };
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::industry_pi::{
-    ATTR_BLUEPRINT_ME, ATTR_BLUEPRINT_TE, compute_industry_job_costs_for_char,
+    ATTR_BLUEPRINT_ME, ATTR_BLUEPRINT_TE, IndustryJobCostMeta, compute_industry_job_costs_for_char,
     format_industry_job_pyrep, has_custom_facility_taxes, is_fulcrum_pirate_ship_bonus_applicable,
     is_structure_industry_service_online, load_job_cost_meta, resolve_decryptor_modifiers,
     resolve_facility_modifiers_and_system, resolve_structure_rig_bonus, save_job_cost_meta,
@@ -26,6 +26,28 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::TypeId;
 use std::collections::HashMap;
+
+fn restore_blueprint_flag(bp_owner_id: i64, meta: &IndustryJobCostMeta) -> InventoryFlag {
+    match meta.blueprint_original_flag {
+        Some(f)
+            if matches!(
+                f,
+                InventoryFlag::CorpSAG1
+                    | InventoryFlag::CorpSAG2
+                    | InventoryFlag::CorpSAG3
+                    | InventoryFlag::CorpSAG4
+                    | InventoryFlag::CorpSAG5
+                    | InventoryFlag::CorpSAG6
+                    | InventoryFlag::CorpSAG7
+            ) =>
+        {
+            f
+        }
+        _ if meta.use_corp && bp_owner_id == meta.owner_id => InventoryFlag::CorpSAG1,
+        Some(f) if f != InventoryFlag::Locked && f != InventoryFlag::None => f,
+        _ => InventoryFlag::Hangar,
+    }
+}
 
 fn emit_industry_job(ctx: &ServerContext, char_id: i64, owner_id: i64, job_id: i64, bp_iid: i64, status: i64, runs: i64) {
     let eff_owner = if owner_id > 0 { owner_id } else { char_id };
@@ -91,9 +113,11 @@ pub fn handle_industry_jobs(
                 .filter(|&id| id > 0)
                 .map(|id| id as TypeId);
             let mut use_corp: bool = lookup_first("useCorp")
-                .and_then(|v| v.as_bool())
+                .or_else(|| lookup_first("isCorpJob"))
+                .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|n| n != 0)))
                 .unwrap_or(false);
             let explicit_owner_id: Option<i64> = lookup_first("ownerID")
+                .or_else(|| lookup_first("corporationID"))
                 .and_then(|v| v.as_i64())
                 .filter(|&id| id > 0);
 
@@ -230,13 +254,52 @@ pub fn handle_industry_jobs(
                     .get(&char_id)
                     .map(|c| c.corporation_id)
                     .or(session.corporation_id)
-                    .unwrap_or(1_000_009);
-                let job_owner_id = if let Some(oid) = explicit_owner_id {
-                    if oid == char_corp_id {
+                    .unwrap_or(0);
+                if let Some(oid) = explicit_owner_id {
+                    if !use_corp && oid == char_corp_id && char_corp_id > 0 {
                         use_corp = true;
                     }
-                    oid
-                } else if use_corp {
+                    let expected_owner = if use_corp { char_corp_id } else { char_id };
+                    if oid != expected_owner || expected_owner <= 0 {
+                        return Err(BridgeRpcError {
+                            code: "OwnerAccessDenied".into(),
+                            message: format!(
+                                "Cannot install industry job for owner {oid} (caller {char_id}, corp {char_corp_id})"
+                            ),
+                        });
+                    }
+                }
+                let job_owner_id = if use_corp {
+                    if char_corp_id <= 0 {
+                        return Err(BridgeRpcError {
+                            code: "OwnerAccessDenied".into(),
+                            message: "Character does not belong to a corporation".into(),
+                        });
+                    }
+                    const FACTORY_ROLES: u64 = eve_db::corp_roles::ROLE_DIRECTOR
+                        | eve_db::corp_roles::ROLE_FACTORY_MANAGER
+                        | eve_db::corp_roles::ROLE_RENT_FACTORY_FACILITY
+                        | eve_db::corp_roles::ROLE_RENT_RESEARCH_FACILITY;
+                    let has_factory_role = session.has_gm_role()
+                        || (session.corp_role & FACTORY_ROLES) != 0
+                        || snap.corporations.get(&char_corp_id).is_some_and(|c| {
+                            c.ceo_id == char_id
+                                || c.member_roles
+                                    .get(&char_id)
+                                    .is_some_and(|&r| (r & FACTORY_ROLES) != 0)
+                        })
+                        || snap
+                            .corp_role_assignments
+                            .get(&(char_corp_id, char_id))
+                            .is_some_and(|a| (a.roles & FACTORY_ROLES) != 0);
+                    if !has_factory_role {
+                        return Err(BridgeRpcError {
+                            code: "CrpAccessDenied".into(),
+                            message:
+                                "Installing a corporation industry job requires Factory Manager or Director role"
+                                    .into(),
+                        });
+                    }
                     char_corp_id
                 } else {
                     char_id
@@ -819,6 +882,8 @@ pub fn handle_industry_jobs(
                 }
 
                 if let Some(bp_mut) = snap.items.get_mut(&bp_iid) {
+                    cost_meta.blueprint_original_flag =
+                        Some(bp_mut.flag).filter(|f| *f != InventoryFlag::Locked);
                     bp_mut.singleton = true;
                     bp_mut.flag = InventoryFlag::Locked;
                     bp_mut.version += 1;
@@ -957,11 +1022,41 @@ pub fn handle_industry_jobs(
                         message: format!("Industry job {job_id} does not exist"),
                     });
                 };
+                let meta = load_job_cost_meta(snap, job_id).unwrap_or_default();
+                let char_corp = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .or(session.corporation_id)
+                    .unwrap_or(0);
                 if job.installer_id != char_id {
-                    return Err(BridgeRpcError {
-                        code: "JobOwnershipViolation".into(),
-                        message: format!("Industry job {job_id} does not belong to character {char_id}"),
-                    });
+                    let can_cancel_corp = meta.use_corp
+                        && meta.owner_id == char_corp
+                        && (session.has_gm_role()
+                            || (session.corp_role
+                                & (eve_db::corp_roles::ROLE_DIRECTOR
+                                    | eve_db::corp_roles::ROLE_FACTORY_MANAGER
+                                    | eve_db::corp_roles::ROLE_RENT_FACTORY_FACILITY
+                                    | eve_db::corp_roles::ROLE_RENT_RESEARCH_FACILITY))
+                                != 0
+                            || snap.corporations.get(&char_corp).is_some_and(|c| {
+                                c.ceo_id == char_id
+                                    || c.member_roles.get(&char_id).is_some_and(|&r| {
+                                        (r & (eve_db::corp_roles::ROLE_DIRECTOR
+                                            | eve_db::corp_roles::ROLE_FACTORY_MANAGER
+                                            | eve_db::corp_roles::ROLE_RENT_FACTORY_FACILITY
+                                            | eve_db::corp_roles::ROLE_RENT_RESEARCH_FACILITY))
+                                            != 0
+                                    })
+                            }));
+                    if !can_cancel_corp {
+                        return Err(BridgeRpcError {
+                            code: "JobOwnershipViolation".into(),
+                            message: format!(
+                                "Industry job {job_id} does not belong to character {char_id}"
+                            ),
+                        });
+                    }
                 }
                 if !matches!(job.status.as_str(), "Active" | "Paused") {
                     return Err(BridgeRpcError {
@@ -973,7 +1068,7 @@ pub fn handle_industry_jobs(
                     j_mut.status = "Cancelled".into();
                 }
                 if let Some(bp_mut) = snap.items.get_mut(&job.blueprint_item_id) {
-                    bp_mut.flag = InventoryFlag::Hangar;
+                    bp_mut.flag = restore_blueprint_flag(bp_mut.owner_id, &meta);
                     bp_mut.version += 1;
                 }
                 Ok(job)
@@ -1075,10 +1170,11 @@ pub fn handle_industry_jobs(
                     if job.activity_id == 8 {
                         let mut remove_bpc = true;
                         if let Some(bp_mut) = snap.items.get_mut(&job.blueprint_item_id) {
+                            let unlocked_flag = restore_blueprint_flag(bp_mut.owner_id, &meta);
                             if is_ancient_relic && !bp_mut.is_blueprint_copy {
                                 if bp_mut.quantity > job.runs as i32 {
                                     bp_mut.quantity -= job.runs as i32;
-                                    bp_mut.flag = InventoryFlag::Hangar;
+                                    bp_mut.flag = unlocked_flag;
                                     bp_mut.version += 1;
                                     remove_bpc = false;
                                 }
@@ -1086,7 +1182,7 @@ pub fn handle_industry_jobs(
                                 let rem = bp_mut.blueprint_runs_remaining.unwrap_or(1).saturating_sub(job.runs as i32);
                                 if rem > 0 {
                                     bp_mut.blueprint_runs_remaining = Some(rem);
-                                    bp_mut.flag = InventoryFlag::Hangar;
+                                    bp_mut.flag = unlocked_flag;
                                     bp_mut.version += 1;
                                     remove_bpc = false;
                                 }
@@ -1155,7 +1251,7 @@ pub fn handle_industry_jobs(
                     let mut bp_location_id = job.facility_id;
                     if let Some(bp_mut) = snap.items.get_mut(&job.blueprint_item_id) {
                         bp_location_id = bp_mut.location_id;
-                        bp_mut.flag = InventoryFlag::Hangar;
+                        bp_mut.flag = restore_blueprint_flag(bp_mut.owner_id, &meta);
                         if matches!(job.activity_id, 1 | 9) && bp_mut.is_blueprint_copy {
                             let rem = bp_mut.blueprint_runs_remaining.unwrap_or(1).saturating_sub(job.runs as i32);
                             if rem <= 0 {

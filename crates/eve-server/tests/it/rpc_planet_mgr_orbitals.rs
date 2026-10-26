@@ -190,11 +190,12 @@ async fn test_planet_mgr_launches_commodities_and_lifecycle() {
     assert!(delivered_id > 0);
     assert!(get_f64(&flush_rep, "pocoExportTaxISK").is_some());
 
-    // Verify item deposited in hangar
+    // Verify extracted commodity deposited in colony pin storage (not duplicated into station hangar)
     let item_found = ctx.db.with_snapshot(|snap| {
-        snap.items.get(&delivered_id).map(|it| {
-            it.owner_id == char_id && it.location_id == JITA_STATION_ID && it.flag == InventoryFlag::Hangar && it.quantity > 0
-        }).unwrap_or(false)
+        let net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
+        net.pins
+            .iter()
+            .any(|p| p.pin_id == delivered_id && p.contents.get(&produced_p0_tid).copied().unwrap_or(0) > 0)
     });
     assert!(item_found);
 
