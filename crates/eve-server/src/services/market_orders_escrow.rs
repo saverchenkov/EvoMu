@@ -311,7 +311,11 @@ pub fn handle_orders_escrow(
                         })?;
                     let is_sellable_item = |snap_ref: &eve_db::WorldStateSnapshot, i: &InventoryItemRecord| {
                         snap_ref.is_item_consumable_by(i, char_id, Some(station_id), None)
-                            || (use_corp && i.owner_id == caller_corp_id && i.location_id == station_id)
+                            || (use_corp
+                                && i.owner_id == caller_corp_id
+                                && i.location_id == station_id
+                                && i.flag != InventoryFlag::Locked
+                                && !snap_ref.is_item_locked_in_contract_or_job(i.item_id))
                     };
                     let is_courier_item = |iid: i64| snap.item_custom_names.get(&iid).map_or(false, |s| s.starts_with("courier_cargo:"));
 
@@ -461,6 +465,11 @@ pub fn handle_orders_escrow(
                         let uncovered = fill_gross.checked_sub(from_escrow).unwrap_or(IskCents(0));
                         if !resting.is_npc && uncovered.0 > 0 {
                             // Margin Trading order: cover shortfall from buyer's wallet or cancel order if insolvent
+                            let r_meta = load_market_order_meta(snap, &resting, now_unix);
+                            let r_div_id = r_meta
+                                .account_key
+                                .map(|ak| (ak.saturating_sub(999)).clamp(1, 7) as u8)
+                                .unwrap_or(1);
                             let covered = if let Some(buyer_ch) =
                                 snap.characters.get_mut(&resting.owner_id)
                             {
@@ -480,10 +489,26 @@ pub fn handle_orders_escrow(
                             } else if let Some(buyer_corp) =
                                 snap.corporations.get_mut(&resting.owner_id)
                             {
-                                if let Some(new_bal) =
-                                    buyer_corp.master_wallet.checked_sub(uncovered)
-                                {
+                                buyer_corp.ensure_wallet_divisions();
+                                let div_bal = buyer_corp
+                                    .wallet_divisions
+                                    .iter()
+                                    .find(|d| d.division_id == r_div_id)
+                                    .map(|d| d.balance)
+                                    .unwrap_or(buyer_corp.master_wallet);
+                                if div_bal.0 >= uncovered.0 && buyer_corp.master_wallet.0 >= uncovered.0 {
+                                    let new_bal = buyer_corp
+                                        .master_wallet
+                                        .checked_sub(uncovered)
+                                        .unwrap_or(IskCents(0));
                                     buyer_corp.master_wallet = new_bal;
+                                    if let Some(d) = buyer_corp
+                                        .wallet_divisions
+                                        .iter_mut()
+                                        .find(|d| d.division_id == r_div_id)
+                                    {
+                                        d.balance = d.balance.checked_sub(uncovered).unwrap_or(IskCents(0));
+                                    }
                                     snap.append_journal(
                                         resting.owner_id,
                                         "MarketEscrowCover",
@@ -507,6 +532,24 @@ pub fn handle_orders_escrow(
                                             .balance
                                             .checked_add(resting.escrow)
                                             .unwrap_or(buyer_ch.balance);
+                                    } else if let Some(buyer_corp) =
+                                        snap.corporations.get_mut(&resting.owner_id)
+                                    {
+                                        buyer_corp.ensure_wallet_divisions();
+                                        buyer_corp.master_wallet = buyer_corp
+                                            .master_wallet
+                                            .checked_add(resting.escrow)
+                                            .unwrap_or(buyer_corp.master_wallet);
+                                        if let Some(d) = buyer_corp
+                                            .wallet_divisions
+                                            .iter_mut()
+                                            .find(|d| d.division_id == r_div_id)
+                                        {
+                                            d.balance = d
+                                                .balance
+                                                .checked_add(resting.escrow)
+                                                .unwrap_or(d.balance);
+                                        }
                                     }
                                 }
                                 if let Some(o_mut) = snap.market_orders.get_mut(&oid) {
@@ -695,10 +738,14 @@ pub fn handle_orders_escrow(
                         let owner_share = structure_owner_broker_share(snap, docked_station_id, broker_fee);
                         if owner_share.0 > 0 {
                             if let Some(str_corp) = snap.corporations.get_mut(&owner_corp_id) {
+                                str_corp.ensure_wallet_divisions();
                                 str_corp.master_wallet = str_corp
                                     .master_wallet
                                     .checked_add(owner_share)
                                     .unwrap_or(str_corp.master_wallet);
+                                if let Some(d) = str_corp.wallet_divisions.iter_mut().find(|d| d.division_id == 1) {
+                                    d.balance = d.balance.checked_add(owner_share).unwrap_or(d.balance);
+                                }
                             }
                         }
                     }
@@ -752,6 +799,9 @@ pub fn handle_orders_escrow(
                             closed_unix: None,
                         },
                     );
+                    if let Some(m) = snap.market_order_meta.get_mut(&new_oid) {
+                        m.issued_by = Some(char_id);
+                    }
                     order_ids.push(PyRep::Integer(new_oid));
                 }
 
@@ -844,6 +894,27 @@ pub fn handle_orders_escrow(
                         code: "OrderOwnershipViolation".into(),
                         message: format!("Order {order_id} does not belong to character {char_id}"),
                     });
+                }
+                if is_corp_order {
+                    let Some(corp) = snap.corporations.get(&caller_corp_id) else {
+                        return Err(BridgeRpcError {
+                            code: "CorporationNotFound".into(),
+                            message: "Corporation not found".into(),
+                        });
+                    };
+                    let role_mask = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+                    let issued_by = snap.market_order_meta.get(&order_id).and_then(|m| m.issued_by);
+                    if issued_by != Some(char_id)
+                        && corp.ceo_id != char_id
+                        && !eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_TRADER)
+                        && !eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_ACCOUNTANT)
+                        && !eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT)
+                    {
+                        return Err(BridgeRpcError {
+                            code: "CorpRoleRequired".into(),
+                            message: "Character lacks corporation trader/accountant role to cancel corporate order".into(),
+                        });
+                    }
                 }
                 if order.vol_remaining <= 0 {
                     return Err(BridgeRpcError {

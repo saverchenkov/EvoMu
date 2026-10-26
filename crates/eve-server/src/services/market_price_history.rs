@@ -86,6 +86,7 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
                 let refund = IskCents(escrow_released - fill_cost.0);
                 if is_corp_order {
                     if let Some(corp_mut) = snap.corporations.get_mut(&caller_corp_id) {
+                        corp_mut.ensure_wallet_divisions();
                         corp_mut.master_wallet = corp_mut.master_wallet.checked_add(refund).unwrap_or(corp_mut.master_wallet);
                         let div_id = meta.account_key.map(|ak| (ak.saturating_sub(999)).clamp(1, 7) as u8).unwrap_or(1);
                         if let Some(d) = corp_mut.wallet_divisions.iter_mut().find(|d| d.division_id == div_id) {
@@ -103,17 +104,18 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
                         code: "CorporationNotFound".into(),
                         message: "Corporation not found".into(),
                     })?;
+                    corp_mut.ensure_wallet_divisions();
                     let div_bal = corp_mut.wallet_divisions.iter().find(|d| d.division_id == div_id).map(|d| d.balance).unwrap_or(corp_mut.master_wallet);
-                    if div_bal.0 < uncovered.0 && corp_mut.master_wallet.0 < uncovered.0 {
+                    if div_bal.0 < uncovered.0 || corp_mut.master_wallet.0 < uncovered.0 {
                         return Err(BridgeRpcError {
                             code: "InsufficientFunds".into(),
                             message: "Character does not have sufficient funds to cover margin shortfall".into(),
                         });
                     }
                     if let Some(div) = corp_mut.wallet_divisions.iter_mut().find(|d| d.division_id == div_id) {
-                        div.balance = IskCents((div.balance.0 - uncovered.0).max(0));
+                        div.balance = div.balance.checked_sub(uncovered).unwrap_or(IskCents(0));
                     }
-                    corp_mut.master_wallet = IskCents((corp_mut.master_wallet.0 - uncovered.0).max(0));
+                    corp_mut.master_wallet = corp_mut.master_wallet.checked_sub(uncovered).unwrap_or(IskCents(0));
                     let bal_after = corp_mut.master_wallet;
                     snap.append_journal(caller_corp_id, "MarketEscrowShortfall", uncovered, bal_after, format!("Margin shortfall for fill of order {order_id}"));
                 } else {
@@ -212,6 +214,11 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
             // Buyer escrow release and margin shortfall coverage
             let from_escrow = bid.escrow.min(fill_cost);
             let uncovered = fill_cost.checked_sub(from_escrow).unwrap_or(IskCents(0));
+            let b_meta = load_market_order_meta(snap, &bid, now_unix);
+            let b_div_id = b_meta
+                .account_key
+                .map(|ak| (ak.saturating_sub(999)).clamp(1, 7) as u8)
+                .unwrap_or(1);
             if !bid.is_npc && uncovered.0 > 0 {
                 let covered = if let Some(buyer_ch) = snap.characters.get_mut(&bid.owner_id) {
                     if let Some(new_bal) = buyer_ch.balance.checked_sub(uncovered) {
@@ -220,8 +227,19 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
                         true
                     } else { false }
                 } else if let Some(buyer_corp) = snap.corporations.get_mut(&bid.owner_id) {
-                    if let Some(new_bal) = buyer_corp.master_wallet.checked_sub(uncovered) {
-                        buyer_corp.master_wallet = new_bal;
+                    buyer_corp.ensure_wallet_divisions();
+                    let div_bal = buyer_corp
+                        .wallet_divisions
+                        .iter()
+                        .find(|d| d.division_id == b_div_id)
+                        .map(|d| d.balance)
+                        .unwrap_or(buyer_corp.master_wallet);
+                    if div_bal.0 >= uncovered.0 && buyer_corp.master_wallet.0 >= uncovered.0 {
+                        buyer_corp.master_wallet = buyer_corp.master_wallet.checked_sub(uncovered).unwrap_or(IskCents(0));
+                        if let Some(div) = buyer_corp.wallet_divisions.iter_mut().find(|d| d.division_id == b_div_id) {
+                            div.balance = div.balance.checked_sub(uncovered).unwrap_or(IskCents(0));
+                        }
+                        let new_bal = buyer_corp.master_wallet;
                         snap.append_journal(bid.owner_id, "MarketEscrowCover", uncovered, new_bal, format!("Covered margin escrow shortfall for buy order {bid_id}"));
                         true
                     } else { false }
@@ -231,6 +249,12 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
                     if bid.escrow.0 > 0 {
                         if let Some(buyer_ch) = snap.characters.get_mut(&bid.owner_id) {
                             buyer_ch.balance = buyer_ch.balance.checked_add(bid.escrow).unwrap_or(buyer_ch.balance);
+                        } else if let Some(buyer_corp) = snap.corporations.get_mut(&bid.owner_id) {
+                            buyer_corp.ensure_wallet_divisions();
+                            buyer_corp.master_wallet = buyer_corp.master_wallet.checked_add(bid.escrow).unwrap_or(buyer_corp.master_wallet);
+                            if let Some(div) = buyer_corp.wallet_divisions.iter_mut().find(|d| d.division_id == b_div_id) {
+                                div.balance = div.balance.checked_add(bid.escrow).unwrap_or(div.balance);
+                            }
                         }
                     }
                     if let Some(o_mut) = snap.market_orders.get_mut(&bid_id) {
@@ -247,6 +271,7 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
             let mut seller_bal = None;
             if is_corp_order {
                 if let Some(corp_mut) = snap.corporations.get_mut(&caller_corp_id) {
+                    corp_mut.ensure_wallet_divisions();
                     corp_mut.master_wallet = corp_mut.master_wallet.checked_add(seller_net).unwrap_or(corp_mut.master_wallet);
                     let div_id = meta.account_key.map(|ak| (ak.saturating_sub(999)).clamp(1, 7) as u8).unwrap_or(1);
                     if let Some(d) = corp_mut.wallet_divisions.iter_mut().find(|d| d.division_id == div_id) {

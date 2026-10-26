@@ -588,8 +588,25 @@ pub fn handle(
                             .items
                             .get(&item_id)
                             .ok_or_else(|| rpc_err("ItemNotFound", "Item not found"))?;
-                        if item.owner_id != char_id || item.location_id != tr.station_id {
-                            return Err(rpc_err("InvalidTradeItem", "Item must be owned by caller in station hangar"));
+                        let active_ship_id = snap
+                            .characters
+                            .get(&char_id)
+                            .map(|c| c.active_ship_id);
+                        let has_contents = snap
+                            .items
+                            .values()
+                            .any(|child| child.item_id != item_id && child.location_id == item_id && child.quantity > 0);
+                        if item.owner_id != char_id
+                            || item.location_id != tr.station_id
+                            || item.flag != InventoryFlag::Hangar
+                            || Some(item_id) == active_ship_id
+                            || snap.is_item_locked_in_contract_or_job(item_id)
+                            || has_contents
+                        {
+                            return Err(rpc_err(
+                                "InvalidTradeItem",
+                                "Item must be an unlocked, empty item in station hangar (not active ship)",
+                            ));
                         }
                         if snap.item_custom_names.get(&item_id).is_some_and(|s| s.starts_with("courier_cargo:")) {
                             return Err(rpc_err("InvalidTradeItem", "Courier mission items cannot be traded"));
@@ -674,11 +691,24 @@ pub fn handle(
                             if bal_a < tr.money_a_cents || bal_b < tr.money_b_cents {
                                 return Err(rpc_err("NotEnoughMoney", "Participant lacks ISK to complete trade"));
                             }
+                            let active_ship_a = snap.characters.get(&tr.char_a).map(|c| c.active_ship_id);
+                            let active_ship_b = snap.characters.get(&tr.char_b).map(|c| c.active_ship_id);
                             for &(iid, q) in &tr.items_a {
                                 let Some(it) = snap.items.get(&iid) else {
                                     return Err(rpc_err("ItemNotFound", "Offered item missing"));
                                 };
-                                if it.owner_id != tr.char_a || it.location_id != tr.station_id || it.quantity < q {
+                                let has_contents = snap
+                                    .items
+                                    .values()
+                                    .any(|child| child.item_id != iid && child.location_id == iid && child.quantity > 0);
+                                if it.owner_id != tr.char_a
+                                    || it.location_id != tr.station_id
+                                    || it.flag != InventoryFlag::Hangar
+                                    || it.quantity < q
+                                    || Some(iid) == active_ship_a
+                                    || snap.is_item_locked_in_contract_or_job(iid)
+                                    || has_contents
+                                {
                                     return Err(rpc_err("InvalidTradeItem", "Offered item no longer available"));
                                 }
                                 if it.singleton && q != it.quantity {
@@ -689,7 +719,18 @@ pub fn handle(
                                 let Some(it) = snap.items.get(&iid) else {
                                     return Err(rpc_err("ItemNotFound", "Offered item missing"));
                                 };
-                                if it.owner_id != tr.char_b || it.location_id != tr.station_id || it.quantity < q {
+                                let has_contents = snap
+                                    .items
+                                    .values()
+                                    .any(|child| child.item_id != iid && child.location_id == iid && child.quantity > 0);
+                                if it.owner_id != tr.char_b
+                                    || it.location_id != tr.station_id
+                                    || it.flag != InventoryFlag::Hangar
+                                    || it.quantity < q
+                                    || Some(iid) == active_ship_b
+                                    || snap.is_item_locked_in_contract_or_job(iid)
+                                    || has_contents
+                                {
                                     return Err(rpc_err("InvalidTradeItem", "Offered item no longer available"));
                                 }
                                 if it.singleton && q != it.quantity {
@@ -971,10 +1012,25 @@ pub fn handle(
                     .get(&item_id)
                     .cloned()
                     .ok_or_else(|| rpc_err("ItemNotFound", "Raffle item not found"))?;
-                if item.owner_id != char_id || item.location_id != station_id || item.quantity < 1 {
+                let active_ship_id = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.active_ship_id);
+                let has_contents = snap
+                    .items
+                    .values()
+                    .any(|child| child.item_id != item_id && child.location_id == item_id && child.quantity > 0);
+                if item.owner_id != char_id
+                    || item.location_id != station_id
+                    || item.flag != InventoryFlag::Hangar
+                    || item.quantity < 1
+                    || Some(item_id) == active_ship_id
+                    || snap.is_item_locked_in_contract_or_job(item_id)
+                    || has_contents
+                {
                     return Err(rpc_err(
                         "InvalidRaffleItem",
-                        "Raffle item must be owned by creator in station hangar",
+                        "Raffle item must be an unlocked, empty item in station hangar (not active ship)",
                     ));
                 }
                 let core_item_id = snap
@@ -983,8 +1039,10 @@ pub fn handle(
                     .find(|i| {
                         i.owner_id == char_id
                             && i.location_id == station_id
+                            && i.flag == InventoryFlag::Hangar
                             && i.type_id == HYPERCORE_TYPE_ID
                             && i.quantity >= required_cores
+                            && !snap.is_item_locked_in_contract_or_job(i.item_id)
                     })
                     .map(|i| i.item_id)
                     .ok_or_else(|| {

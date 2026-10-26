@@ -702,18 +702,28 @@ pub async fn handle(
                 }));
             }
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            if let Ok(Some((_, ship_ball))) = sys_handle.get_ball_snapshot(ship_id).await {
-                let balls = sys_handle.list_balls().await.unwrap_or_default();
-                let ess_ball = balls.into_iter().find(|b| b.type_id == 32882 || b.id == 820_000_000 + sys_id as i64);
-                if let Some(ess) = ess_ball {
-                    let dist = ship_ball.position.distance(ess.position);
-                    if dist > 2_500.0 {
-                        return Some(Err(BridgeRpcError {
-                            code: "OutsideEssLinkRange".into(),
-                            message: format!("Ship is {:.1} m from ESS beacon (must be <= 2500 m)", dist),
-                        }));
-                    }
-                }
+            let Some((_, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
+                return Some(Err(BridgeRpcError {
+                    code: "OutsideEssLinkRange".into(),
+                    message: "Active ship is not present in system space near the ESS beacon".into(),
+                }));
+            };
+            let balls = sys_handle.list_balls().await.unwrap_or_default();
+            let ess_ball = balls
+                .into_iter()
+                .find(|b| b.type_id == 32882 || b.type_id == 56002 || b.id == 820_000_000 + sys_id as i64);
+            let Some(ess) = ess_ball else {
+                return Some(Err(BridgeRpcError {
+                    code: "OutsideEssLinkRange".into(),
+                    message: "ESS beacon is not present in system space".into(),
+                }));
+            };
+            let dist = ship_ball.position.distance(ess.position);
+            if dist > 2_500.0 {
+                return Some(Err(BridgeRpcError {
+                    code: "OutsideEssLinkRange".into(),
+                    message: format!("Ship is {:.1} m from ESS beacon (must be <= 2500 m)", dist),
+                }));
             }
             let key_item_id_arg = args.first().and_then(|a| a.as_i64());
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -1070,7 +1080,14 @@ async fn handle_call_component_from_client(
             code: "InvalidRecipeID".into(),
             message: "ProcessTrade requires a positive recipeID".into(),
         })? as u32;
-    let multiplier = args.get(4).and_then(|a| a.as_i64()).unwrap_or(1).max(1) as i32;
+    let raw_mult = args.get(4).and_then(|a| a.as_i64()).unwrap_or(1);
+    let multiplier = u32::try_from(raw_mult)
+        .ok()
+        .filter(|&m| (1..=100_000).contains(&m))
+        .ok_or_else(|| BridgeRpcError {
+            code: "InvalidMultiplier".into(),
+            message: "ProcessTrade multiplier must be between 1 and 100,000".into(),
+        })? as i32;
 
     let handle = ctx.systems.get_or_spawn(sys_id);
     let ship_ball = handle
@@ -1122,16 +1139,20 @@ async fn handle_call_component_from_client(
             code: "NotAnItemTrader".into(),
             message: format!("Type {trader_type_id} does not have an itemTrader component"),
         })?;
-    if let (Some(sb), Some(tpos)) = (&ship_ball, trader_pos) {
-        let surface_dist = (sb.position.distance(tpos) - sb.radius - trader_radius).max(0.0);
-        if surface_dist > range_m {
-            return Err(BridgeRpcError {
-                code: "ItemTraderOutOfRange".into(),
-                message: format!(
-                    "Ship is {surface_dist:.0} m from item trader {trader_id} (max {range_m:.0} m)"
-                ),
-            });
-        }
+    let (Some(sb), Some(tpos)) = (&ship_ball, trader_pos) else {
+        return Err(BridgeRpcError {
+            code: "ItemTraderOutOfRange".into(),
+            message: format!("Ship or item trader {trader_id} does not have a valid position in system {sys_id}"),
+        });
+    };
+    let surface_dist = (sb.position.distance(tpos) - sb.radius - trader_radius).max(0.0);
+    if surface_dist > range_m {
+        return Err(BridgeRpcError {
+            code: "ItemTraderOutOfRange".into(),
+            message: format!(
+                "Ship is {surface_dist:.0} m from item trader {trader_id} (max {range_m:.0} m)"
+            ),
+        });
     }
     if !allowed_recipes.contains(&recipe_id) {
         return Err(BridgeRpcError {
@@ -1164,7 +1185,15 @@ async fn handle_call_component_from_client(
     if let Some(in_obj) = recipe_val.get("inputItems").and_then(|v| v.as_object()) {
         for (k, v) in in_obj {
             if let (Ok(tid), Some(qty)) = (k.parse::<u32>(), v.as_i64()) {
-                req_inputs.push((tid, (qty as i32).saturating_mul(multiplier)));
+                let q = i32::try_from(qty)
+                    .ok()
+                    .filter(|&q| q > 0)
+                    .and_then(|q| q.checked_mul(multiplier))
+                    .ok_or_else(|| BridgeRpcError {
+                        code: "InvalidMultiplier".into(),
+                        message: "Item trader input quantity overflow".into(),
+                    })?;
+                req_inputs.push((tid, q));
             }
         }
     }
@@ -1172,11 +1201,24 @@ async fn handle_call_component_from_client(
     if let Some(out_obj) = recipe_val.get("outputItems").and_then(|v| v.as_object()) {
         for (k, v) in out_obj {
             if let (Ok(tid), Some(qty)) = (k.parse::<u32>(), v.as_i64()) {
-                out_items.push((tid, (qty as i32).saturating_mul(multiplier)));
+                let q = i32::try_from(qty)
+                    .ok()
+                    .filter(|&q| q > 0)
+                    .and_then(|q| q.checked_mul(multiplier))
+                    .ok_or_else(|| BridgeRpcError {
+                        code: "InvalidMultiplier".into(),
+                        message: "Item trader output quantity overflow".into(),
+                    })?;
+                out_items.push((tid, q));
             }
         }
     }
 
+    let eval_cargo_cap = ctx
+        .get_or_rebuild_ship_fitting(char_id, ship_id)
+        .ok()
+        .map(|f| f.evaluated_context(&ctx.sde).ship.get_attribute(38, &ctx.sde))
+        .filter(|&c| c > 0.0);
     let cost_cents = eve_db::IskCents::from_f64_isk(input_isk);
     ctx.db.try_with_mut_snapshot(|snap| {
         if cost_cents.0 > 0 {
@@ -1201,6 +1243,7 @@ async fn handle_call_component_from_client(
                         && it.location_id == ship_id
                         && it.flag == eve_db::InventoryFlag::Cargo
                         && it.type_id == in_tid
+                        && !snap.is_item_locked_in_contract_or_job(it.item_id)
                 })
                 .map(|it| it.quantity)
                 .sum();
@@ -1211,6 +1254,59 @@ async fn handle_call_component_from_client(
                         "Recipe {recipe_id} requires {req_qty}x type {in_tid} in ship cargo (have {have_qty})"
                     ),
                 });
+            }
+        }
+        if let Some(ship_item) = snap.items.get(&ship_id) {
+            if let Some(st) = ctx.sde.types.get(&ship_item.type_id) {
+                let cargo_cap =
+                    crate::services::fitting_saved_apply::get_ship_hold_capacity(5, st, eval_cargo_cap);
+                if cargo_cap > 0.0
+                {
+                    let used_vol: f64 = snap
+                        .items
+                        .values()
+                        .filter(|it| it.location_id == ship_id && it.flag == eve_db::InventoryFlag::Cargo)
+                        .map(|it| {
+                            ctx.sde
+                                .types
+                                .get(&it.type_id)
+                                .map(|t| t.volume.max(0.0))
+                                .unwrap_or(1.0)
+                                * f64::from(it.quantity.max(1))
+                        })
+                        .sum();
+                    let in_vol: f64 = req_inputs
+                        .iter()
+                        .map(|&(tid, q)| {
+                            ctx.sde
+                                .types
+                                .get(&tid)
+                                .map(|t| t.volume.max(0.0))
+                                .unwrap_or(1.0)
+                                * f64::from(q)
+                        })
+                        .sum();
+                    let out_vol: f64 = out_items
+                        .iter()
+                        .map(|&(tid, q)| {
+                            ctx.sde
+                                .types
+                                .get(&tid)
+                                .map(|t| t.volume.max(0.0))
+                                .unwrap_or(1.0)
+                                * f64::from(q)
+                        })
+                        .sum();
+                    let projected_vol = (used_vol - in_vol).max(0.0) + out_vol;
+                    if projected_vol > cargo_cap + 1e-4 {
+                        return Err(BridgeRpcError {
+                            code: "NotEnoughCargoSpace".into(),
+                            message: format!(
+                                "Item trader output volume ({projected_vol:.1} m3) exceeds ship cargo capacity ({cargo_cap:.1} m3)"
+                            ),
+                        });
+                    }
+                }
             }
         }
         if cost_cents.0 > 0 {
@@ -1235,6 +1331,7 @@ async fn handle_call_component_from_client(
                         && it.location_id == ship_id
                         && it.flag == eve_db::InventoryFlag::Cargo
                         && it.type_id == in_tid
+                        && !snap.is_item_locked_in_contract_or_job(it.item_id)
                 })
                 .map(|it| it.item_id)
                 .collect();

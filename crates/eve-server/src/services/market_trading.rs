@@ -77,13 +77,19 @@ pub(crate) fn save_market_order_meta(
     };
     let is_corp = meta.account_key.is_some();
     let wallet_div = meta.account_key.map(|k| ((k.saturating_sub(999)).clamp(1, 7)) as i64);
-    let issued_by = snap.market_orders.get(&order_id).and_then(|o| {
-        if is_corp {
-            snap.corporations.get(&o.owner_id).map(|c| c.ceo_id)
-        } else {
-            Some(o.owner_id)
-        }
-    });
+    let issued_by = snap
+        .market_order_meta
+        .get(&order_id)
+        .and_then(|m| m.issued_by)
+        .or_else(|| {
+            snap.market_orders.get(&order_id).and_then(|o| {
+                if is_corp {
+                    snap.corporations.get(&o.owner_id).map(|c| c.ceo_id)
+                } else {
+                    Some(o.owner_id)
+                }
+            })
+        });
     snap.market_order_meta.insert(
         order_id,
         eve_db::MarketOrderMeta {
@@ -1000,10 +1006,16 @@ pub fn handle(
                         let owner_share = structure_owner_broker_share(snap, station_id, broker_fee);
                         if owner_share.0 > 0 {
                             if let Some(corp_mut) = snap.corporations.get_mut(&st_corp_id) {
+                                if corp_mut.wallet_divisions.is_empty() {
+                                    corp_mut.ensure_wallet_divisions();
+                                }
                                 corp_mut.master_wallet = corp_mut
                                     .master_wallet
                                     .checked_add(owner_share)
                                     .unwrap_or(corp_mut.master_wallet);
+                                if let Some(d) = corp_mut.wallet_divisions.iter_mut().find(|d| d.division_id == 1) {
+                                    d.balance = d.balance.checked_add(owner_share).unwrap_or(d.balance);
+                                }
                                 let c_bal = corp_mut.master_wallet;
                                 snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
                                     owner_id: st_corp_id,
@@ -1293,6 +1305,9 @@ pub fn handle(
                         closed_unix: None,
                     },
                 );
+                if let Some(m) = snap.market_order_meta.get_mut(&new_oid) {
+                    m.issued_by = Some(char_id);
+                }
                 if let (Some(bal), true) = (escrow_bal, escrow.0 > 0) {
                     snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
                         owner_id: order_owner_id,

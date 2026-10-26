@@ -155,11 +155,10 @@ pub(crate) fn sweep_expired_orders(
                     });
                 } else if let Some(corp) = snap.corporations.get_mut(&order.owner_id) {
                     corp.master_wallet = corp.master_wallet.checked_add(order.escrow).unwrap_or(corp.master_wallet);
-                    if let Some(ak) = meta.account_key {
-                        let div_id = (ak.saturating_sub(999)).clamp(1, 7) as u8;
-                        corp.ensure_wallet_divisions();
-                        if let Some(div) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == div_id)
-                        { div.balance = div.balance.checked_add(order.escrow).unwrap_or(div.balance); }
+                    let div_id = meta.account_key.map(|ak| (ak.saturating_sub(999)).clamp(1, 7) as u8).unwrap_or(1);
+                    corp.ensure_wallet_divisions();
+                    if let Some(div) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == div_id) {
+                        div.balance = div.balance.checked_add(order.escrow).unwrap_or(div.balance);
                     }
                     let bal = corp.master_wallet;
                     snap.append_journal(
@@ -609,20 +608,30 @@ pub fn handle(
                     if order.owner_id != char_id && !is_corp_order {
                         return Err(rpc_err("OrderOwnershipViolation", format!("Order {order_id} does not belong to character {char_id}")));
                     }
+                    let mut meta = load_market_order_meta(snap, &order, 0);
                     if is_corp_order {
                         let Some(corp) = snap.corporations.get(&caller_corp_id) else {
                             return Err(rpc_err("CorporationNotFound", "Corporation not found"));
                         };
                         let role_mask = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-                        if corp.ceo_id != char_id
-                            && !eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_ACCOUNTANT,)
-                            && !eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT,)
+                        let is_original_placer = snap
+                            .market_order_meta
+                            .get(&order_id)
+                            .and_then(|m| m.issued_by)
+                            == Some(char_id);
+                        if !is_original_placer
+                            && corp.ceo_id != char_id
+                            && !eve_db::corp_roles::has_role(
+                                role_mask,
+                                eve_db::corp_roles::ROLE_TRADER
+                                    | eve_db::corp_roles::ROLE_ACCOUNTANT
+                                    | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT,
+                            )
                         {
                             return Err(rpc_err("CorpRoleRequired", "Character lacks corporation accountant/trader role to modify corporate order"));
                         }
                     }
 
-                    let mut meta = load_market_order_meta(snap, &order, 0);
                     if now_unix < meta.issue_unix.saturating_add(300) {
                         return Err(rpc_err("OrderModificationCooldown", "Orders cannot be modified within 5 minutes (300 seconds) of creation or last modification"));
                     }
@@ -673,7 +682,11 @@ pub fn handle(
                         }
                         meta.range = new_r;
                     }
-                    if let Some(ak) = account_key_opt { meta.account_key = Some(ak); }
+                    if meta.account_key.is_none() {
+                        if let Some(ak) = account_key_opt {
+                            meta.account_key = Some(ak);
+                        }
+                    }
 
                     // Resolve station vs Upwell structure broker rate & 0.5% SCC surcharge
                     let structure_info = snap.structures.get(&order.station_id).filter(|st| st.state != "Destroyed")
@@ -705,11 +718,25 @@ pub fn handle(
                     } else { IskCents(0)
                     };
 
-                    // Calculate buy order escrow delta
-                    let escrow_fraction = if adv_broker_lvl > 0 {
+                    // Calculate buy order escrow delta, preserving any existing Margin Trading escrow ratio
+                    let skill_escrow_fraction = if adv_broker_lvl > 0 {
                         0.75_f64.powi(adv_broker_lvl.min(5) as i32)
-                    } else { 1.0
+                    } else {
+                        1.0
                     };
+                    let old_total = old_price
+                        .checked_mul_qty(order.vol_remaining as i64)
+                        .unwrap_or(IskCents(0));
+                    let existing_ratio = if order.is_bid
+                        && old_total.0 > 0
+                        && order.escrow.0 > 0
+                        && order.escrow.0 < old_total.0
+                    {
+                        (order.escrow.0 as f64 / old_total.0 as f64).clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    let escrow_fraction = skill_escrow_fraction.min(existing_ratio);
                     let new_escrow = if order.is_bid {
                         let full = new_price.checked_mul_qty(order.vol_remaining as i64)
                             .ok_or_else(|| rpc_err("MarketOrderOverflow", "Modified order cost overflows 64-bit ISK cents"))?;
@@ -730,12 +757,12 @@ pub fn handle(
                             let req = IskCents(net_wallet_debit_cents);
                             let div_bal = corp_mut.wallet_divisions.iter().find(|d| d.division_id == div_id)
                                 .map(|d| d.balance).unwrap_or(corp_mut.master_wallet);
-                            if div_bal.0 < req.0 && corp_mut.master_wallet.0 < req.0 {
+                            if div_bal.0 < req.0 || corp_mut.master_wallet.0 < req.0 {
                                 return Err(rpc_err("InsufficientFunds", "Not enough corporation ISK for order modification relist fee and escrow"));
                             }
                             if let Some(div) = corp_mut.wallet_divisions.iter_mut().find(|d| d.division_id == div_id)
-                            { div.balance = IskCents((div.balance.0 - req.0).max(0)); }
-                            corp_mut.master_wallet = IskCents((corp_mut.master_wallet.0 - req.0).max(0));
+                            { div.balance = div.balance.checked_sub(req).unwrap_or(IskCents(0)); }
+                            corp_mut.master_wallet = corp_mut.master_wallet.checked_sub(req).unwrap_or(IskCents(0));
                         } else if net_wallet_debit_cents < 0 { let refund = IskCents(-net_wallet_debit_cents);
                             if let Some(div) = corp_mut.wallet_divisions.iter_mut().find(|d| d.division_id == div_id)
                             { div.balance = div.balance.checked_add(refund).unwrap_or(div.balance); }
@@ -780,8 +807,12 @@ pub fn handle(
                         let owner_share = relist_fee.checked_sub(scc_surcharge).unwrap_or(IskCents(0));
                         if owner_share.0 > 0 {
                             if let Some(st_corp) = snap.corporations.get_mut(&st_corp_id) {
+                                st_corp.ensure_wallet_divisions();
                                 st_corp.master_wallet = st_corp.master_wallet.checked_add(owner_share)
                                     .unwrap_or(st_corp.master_wallet);
+                                if let Some(d1) = st_corp.wallet_divisions.iter_mut().find(|d| d.division_id == 1) {
+                                    d1.balance = d1.balance.checked_add(owner_share).unwrap_or(d1.balance);
+                                }
                             }
                         }
                     }
@@ -959,12 +990,21 @@ pub fn handle(
                     let vault_plex = snap.plex_vault_balance(char_id);
                     if vault_plex >= quantity {
                         let _ = snap.adjust_plex_vault(char_id, -quantity);
-                    } else { let hangar_item_id = snap.items.values().find(|i| {
+                    } else {
+                        let hangar_item_id = snap
+                            .items
+                            .values()
+                            .find(|i| {
                                 i.owner_id == char_id
+                                    && i.location_id == station_id
+                                    && i.flag == InventoryFlag::Hangar
                                     && i.type_id == PLEX_TYPE_ID
                                     && i.quantity >= qty_i32
                                     && !i.singleton
-                            }).map(|i| i.item_id);
+                                    && i.flag != InventoryFlag::Locked
+                                    && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                            })
+                            .map(|i| i.item_id);
                         let Some(hid) = hangar_item_id else {
                             return Err(BridgeRpcError {
                                 code: "InsufficientPlexBalance".into(),
@@ -998,9 +1038,101 @@ pub fn handle(
                     for (bid_oid, _) in candidate_bids {
                         if rem_qty <= 0 { break; }
                         let Some(resting) = snap.market_orders.get(&bid_oid).cloned() else { continue; };
+                        let required_min = resting.min_volume.max(1).min(resting.vol_remaining);
+                        if rem_qty < required_min { continue; }
                         let fill_qty = rem_qty.min(resting.vol_remaining);
                         if fill_qty <= 0 { continue; }
                         let Some(fill_gross) = resting.price.checked_mul_qty(fill_qty as i64) else { continue; };
+
+                        // Margin Trading escrow shortfall coverage (`feat:market.margin-trading-escrow`)
+                        let from_escrow = resting.escrow.min(fill_gross);
+                        let uncovered = fill_gross.checked_sub(from_escrow).unwrap_or(IskCents(0));
+                        let resting_meta = load_market_order_meta(snap, &resting, now_unix);
+                        let resting_div_id = resting_meta
+                            .account_key
+                            .map(|ak| (ak.saturating_sub(999)).clamp(1, 7) as u8)
+                            .unwrap_or(1);
+                        if !resting.is_npc && uncovered.0 > 0 {
+                            let covered = if let Some(buyer_ch) = snap.characters.get_mut(&resting.owner_id) {
+                                if let Some(new_bal) = buyer_ch.balance.checked_sub(uncovered) {
+                                    buyer_ch.balance = new_bal;
+                                    snap.append_journal(
+                                        resting.owner_id,
+                                        "MarketEscrowCover",
+                                        uncovered,
+                                        new_bal,
+                                        format!("Covered margin escrow shortfall for PLEX buy order {bid_oid}"),
+                                    );
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else if let Some(buyer_corp) = snap.corporations.get_mut(&resting.owner_id) {
+                                buyer_corp.ensure_wallet_divisions();
+                                let div_bal = buyer_corp
+                                    .wallet_divisions
+                                    .iter()
+                                    .find(|d| d.division_id == resting_div_id)
+                                    .map(|d| d.balance)
+                                    .unwrap_or(buyer_corp.master_wallet);
+                                if div_bal.0 >= uncovered.0 && buyer_corp.master_wallet.0 >= uncovered.0 {
+                                    buyer_corp.master_wallet = buyer_corp
+                                        .master_wallet
+                                        .checked_sub(uncovered)
+                                        .unwrap_or(IskCents(0));
+                                    if let Some(div) = buyer_corp
+                                        .wallet_divisions
+                                        .iter_mut()
+                                        .find(|d| d.division_id == resting_div_id)
+                                    {
+                                        div.balance = div.balance.checked_sub(uncovered).unwrap_or(IskCents(0));
+                                    }
+                                    let new_bal = buyer_corp.master_wallet;
+                                    snap.append_journal(
+                                        resting.owner_id,
+                                        "MarketEscrowCover",
+                                        uncovered,
+                                        new_bal,
+                                        format!("Covered margin escrow shortfall for PLEX buy order {bid_oid}"),
+                                    );
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+
+                            if !covered {
+                                if resting.escrow.0 > 0 {
+                                    if let Some(buyer_ch) = snap.characters.get_mut(&resting.owner_id) {
+                                        buyer_ch.balance = buyer_ch
+                                            .balance
+                                            .checked_add(resting.escrow)
+                                            .unwrap_or(buyer_ch.balance);
+                                    } else if let Some(buyer_corp) = snap.corporations.get_mut(&resting.owner_id) {
+                                        buyer_corp.ensure_wallet_divisions();
+                                        buyer_corp.master_wallet = buyer_corp
+                                            .master_wallet
+                                            .checked_add(resting.escrow)
+                                            .unwrap_or(buyer_corp.master_wallet);
+                                        if let Some(div) = buyer_corp
+                                            .wallet_divisions
+                                            .iter_mut()
+                                            .find(|d| d.division_id == resting_div_id)
+                                        {
+                                            div.balance = div.balance.checked_add(resting.escrow).unwrap_or(div.balance);
+                                        }
+                                    }
+                                }
+                                if let Some(o_mut) = snap.market_orders.get_mut(&bid_oid) {
+                                    o_mut.vol_remaining = 0;
+                                    o_mut.escrow = IskCents(0);
+                                }
+                                continue;
+                            }
+                        }
+
                         let fill_tax = compute_sales_tax_cents(fill_gross, acct_lvl);
                         total_tax = total_tax.checked_add(fill_tax).unwrap_or(total_tax);
                         let seller_net = fill_gross.checked_sub(fill_tax).unwrap_or(IskCents(0));
@@ -1029,7 +1161,7 @@ pub fn handle(
                         }
                         if let Some(o_mut) = snap.market_orders.get_mut(&bid_oid) {
                             o_mut.vol_remaining -= fill_qty;
-                            o_mut.escrow = o_mut.escrow.checked_sub(fill_gross).unwrap_or(IskCents(0));
+                            o_mut.escrow = o_mut.escrow.checked_sub(from_escrow).unwrap_or(IskCents(0));
                         }
                         rem_qty -= fill_qty;
                         if first_matched_oid.is_none() { first_matched_oid = Some(bid_oid); }
