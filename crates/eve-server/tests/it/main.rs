@@ -277,3 +277,4 @@ mod npc_encounters_remediation;
 mod quasar_goal_tale_notices;
 mod quasar_cosmetics_live_state;
 mod quasar_cosmetics_market_state;
+mod rpc_missing_batch1;

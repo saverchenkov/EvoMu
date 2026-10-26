@@ -1295,6 +1295,9 @@ pub async fn handle(
                 );
                 return Some(res);
             }
+            if service == "structure" && method == "JettisonStructureFuel" {
+                return Some(structure_lifecycle_rpc::handle_jettison_structure_fuel(ctx, session, args).await);
+            }
             structure_upwell_ops::handle(ctx, session, service, method, args, kwargs).await
         }
     }

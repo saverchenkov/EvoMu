@@ -122,7 +122,10 @@ impl ServerContext {
                 session.station_id == Some(object_id) || session.structure_id == Some(object_id)
             }
             "skillMgr2" | "charMgr" | "jumpCloneSvc" => {
-                Some(object_id) == session.character_id || object_id == 0
+                Some(object_id) == session.character_id
+                    || session.station_id == Some(object_id)
+                    || session.structure_id == Some(object_id)
+                    || object_id == 0
             }
             "crimewatch" => {
                 Some(object_id) == session.character_id
@@ -132,7 +135,9 @@ impl ServerContext {
             }
             "agentMgr" | "keeper" | "planetMgr" | "posMgr" | "fleetObjectHandler"
             | "corpRegistry" | "corpmgr" | "allianceRegistry" | "warRegistry" | "warStatisticMgr"
-            | "trademgr" | "voucher" => object_id > 0,
+            | "trademgr" | "voucher" | "structure" | "i2" | "devIndexManager" | "contractProxy" => {
+                object_id > 0
+            }
             _ => false,
         };
 

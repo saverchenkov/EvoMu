@@ -481,6 +481,58 @@ pub async fn handle(
             Some(Ok(res))
         }
 
+        ("devIndexManager", "GetDevelopmentIndicesForSystem") => {
+            let _ = match ServerContext::require_auth(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let raw_sys = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or_else(|| session.solar_system_id.map(i64::from))
+                .unwrap_or(0);
+            let Some(sys_id) = u32::try_from(raw_sys)
+                .ok()
+                .filter(|id| ctx.sde.solar_systems.contains_key(id))
+            else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSolarSystem".into(),
+                    message: format!("Solar system {raw_sys} does not exist"),
+                }));
+            };
+            let res = ctx.db.with_snapshot(|snap| {
+                let st = snap.system_states.get(&sys_id);
+                let mil_lvl = st.map(|s| i64::from(s.military_index)).unwrap_or(0);
+                let ind_lvl = st.map(|s| i64::from(s.industrial_index)).unwrap_or(0);
+                let strat_lvl = st.map(|s| i64::from(s.strategic_index)).unwrap_or(0);
+                let mil_pts = mil_lvl * 20_000;
+                let ind_pts = ind_lvl * 20_000;
+                let strat_pts = strat_lvl * 20_000;
+                let inc = i64::from(st.and_then(|s| s.sov_alliance_id).is_some());
+                let mk = |attr_id: i64, pts: i64, lvl: i64| {
+                    (
+                        PyRep::Integer(attr_id),
+                        PyRep::keyval([
+                            ("attributeID", PyRep::Integer(attr_id)),
+                            ("points", PyRep::Integer(pts)),
+                            ("level", PyRep::Integer(lvl)),
+                            ("increasing", PyRep::Integer(inc)),
+                        ]),
+                    )
+                };
+                PyRep::Dict(vec![
+                    mk(1583, mil_pts, mil_lvl),
+                    mk(1584, ind_pts, ind_lvl),
+                    mk(1615, strat_pts, strat_lvl),
+                ])
+            });
+            Some(Ok(res))
+        }
+
+        ("warpVectorMgr", "UseVector") => {
+            Some(handle_use_warp_vector(ctx, session, args).await)
+        }
+
         ("map", "GetCurrentSovData") => {
             let sov_data = ctx.db.with_snapshot(|snap| {
                 let list = snap
@@ -557,4 +609,608 @@ pub async fn handle(
 
         _ => None,
     }
+}
+
+/// `warpVectorMgr.UseVector(itemID)` (`menuFunctions.pyj:586`): validates that the character is
+/// undocked in space and applies the directional warp/jump vector to the active ship ball.
+pub async fn handle_use_warp_vector(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, _char_id) = ServerContext::require_character(session)?;
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(BridgeRpcError {
+            code: "ShipDocked".into(),
+            message: "Cannot activate a warp vector while docked".into(),
+        });
+    }
+    let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError {
+        code: "NoActiveShip".into(),
+        message: "Session has no active ship in space".into(),
+    })?;
+    let sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError {
+        code: "NoSolarSystem".into(),
+        message: "Session has no active solar system".into(),
+    })?;
+    let target_id = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .filter(|&id| id > 0)
+        .ok_or_else(|| BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "warpVectorMgr.UseVector requires a positive vector itemID".into(),
+        })?;
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let (_, ship_ball) = sys_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .map_err(|e| BridgeRpcError {
+            code: "DestinyQueryFailed".into(),
+            message: e,
+        })?
+        .ok_or_else(|| BridgeRpcError {
+            code: "ShipNotInSpace".into(),
+            message: format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
+        })?;
+    let target_ball_opt = sys_handle
+        .get_ball_snapshot(target_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|(_, b)| b);
+    let item_exists = ctx.db.with_snapshot(|snap| snap.items.contains_key(&target_id));
+    if target_ball_opt.is_none() && !item_exists {
+        return Err(BridgeRpcError {
+            code: "VectorItemNotFound".into(),
+            message: format!("Warp vector entity or item {target_id} not found"),
+        });
+    }
+    let explicit_vec = match args.get(1) {
+        Some(PyRep::Tuple(seq) | PyRep::List(seq)) if seq.len() >= 3 => Some(glam::DVec3::new(
+            seq[0].as_f64().unwrap_or(0.0),
+            seq[1].as_f64().unwrap_or(0.0),
+            seq[2].as_f64().unwrap_or(0.0),
+        )),
+        _ => None,
+    };
+    let dest_pos = if let Some(v) = explicit_vec.filter(|v| v.length() > 1e-6) {
+        if v.length() >= 1_000.0 {
+            ship_ball.position + v
+        } else {
+            ship_ball.position + v.normalize() * 100_000.0
+        }
+    } else if let Some(tb) = target_ball_opt {
+        let delta = tb.position - ship_ball.position;
+        if delta.length() > 1.0 {
+            tb.position + delta.normalize() * 100_000.0
+        } else {
+            tb.position + glam::DVec3::new(100_000.0, 0.0, 0.0)
+        }
+    } else {
+        ship_ball.position + glam::DVec3::new(100_000.0, 0.0, 0.0)
+    };
+    let _ = sys_handle.set_ball_position(ship_id, dest_pos).await;
+    Ok(PyRep::keyval([
+        ("shipID", PyRep::Integer(ship_id)),
+        ("vectorItemID", PyRep::Integer(target_id)),
+        (
+            "destination",
+            PyRep::Tuple(vec![
+                PyRep::Real(dest_pos.x),
+                PyRep::Real(dest_pos.y),
+                PyRep::Real(dest_pos.z),
+            ]),
+        ),
+    ]))
+}
+
+/// `jumpCloneSvc.ResetLastCloneJumpTime()` (`insider.pyj:2142`): resets the character's
+/// `last_clone_jump_unix` timestamp to `0` in `WorldStateSnapshot` and emits `OnCloneJumpUpdate`.
+pub fn handle_reset_last_clone_jump_time(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    ctx.db.try_with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
+            code: "CharacterNotFound".into(),
+            message: format!("Character {char_id} not found"),
+        })?;
+        ch.last_clone_jump_unix = 0;
+        ch.version += 1;
+        Ok(())
+    })?;
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnCloneJumpUpdate",
+        "charid",
+        vec![],
+    );
+    Ok(PyRep::Integer(0))
+}
+
+const DISMISSED_CONTRACT_NOTIFS_BLOB: &str = "contract_dismissed_notifs";
+
+/// `contractProxy.DeleteContractNotification(contractID, forCorp)` and
+/// `contractProxy.DeleteNotification(contractID, forCorp)` (`contracts.pyj:881,1032`).
+pub fn handle_contract_delete_notif(
+    ctx: &ServerContext,
+    session: &SessionState,
+    method: &str,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let cid = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .filter(|&v| v > 0)
+        .ok_or_else(|| BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: format!("contractProxy.{method} requires a positive contractID"),
+        })?;
+    let for_corp = args
+        .get(1)
+        .is_some_and(|v| v.as_bool() == Some(true) || v.as_i64().unwrap_or(0) != 0);
+    let caller_corp = session.corporation_id.unwrap_or(0);
+    let owner_id = if for_corp { caller_corp } else { char_id };
+    let now_unix = ctx.now_unix();
+    let changed = ctx.db.try_with_mut_snapshot(|snap| {
+        if for_corp {
+            if caller_corp < 98_000_000 {
+                return Err(BridgeRpcError {
+                    code: "CrpAccessDenied".into(),
+                    message: "Corporation contract notifications require a player corporation".into(),
+                });
+            }
+            let allowed = snap.corporations.get(&caller_corp).is_some_and(|corp| {
+                let r = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
+                char_id == corp.ceo_id
+                    || (r & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_CONTRACT_MANAGER)) != 0
+            });
+            if !allowed {
+                return Err(BridgeRpcError {
+                    code: "CrpAccessDenied".into(),
+                    message: "Deleting corporation contract notifications requires Contract Manager or Director role".into(),
+                });
+            }
+        }
+        let Some(c) = snap.contracts.get(&cid).cloned() else {
+            return Err(BridgeRpcError {
+                code: "ContractNotFound".into(),
+                message: format!("Contract {cid} does not exist"),
+            });
+        };
+        let is_related = c.issuer_id == owner_id
+            || c.issuer_corp_id == owner_id
+            || c.assignee_id == owner_id
+            || c.acceptor_id == Some(owner_id)
+            || c.current_bidder_id == Some(owner_id)
+            || c.bid_history.iter().any(|&(b, _, _)| b == owner_id || b == char_id);
+        if !is_related {
+            return Err(BridgeRpcError {
+                code: "ContractAccessDenied".into(),
+                message: format!("Owner {owner_id} is not associated with contract {cid}"),
+            });
+        }
+        if c.status == "Outstanding" && c.expiration_unix > 0 && c.expiration_unix <= now_unix {
+            let _ = snap.resolve_expired_contract(cid, now_unix);
+        }
+        let mut mutated = false;
+        if let Some(cm) = snap.contracts.get_mut(&cid) {
+            if cm.current_bidder_id != Some(owner_id) || cm.status != "Outstanding" {
+                let before = cm.bid_history.len();
+                cm.bid_history.retain(|&(b, _, _)| b != owner_id && (!for_corp || b != char_id));
+                if cm.bid_history.len() != before {
+                    mutated = true;
+                }
+            }
+            if method == "DeleteNotification" && cm.assignee_id == owner_id && cm.status == "Outstanding" {
+                cm.assignee_id = 0;
+                mutated = true;
+            }
+        }
+        let mut dismissed: Vec<String> = snap
+            .quasar_state_blobs
+            .get(DISMISSED_CONTRACT_NOTIFS_BLOB)
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        let key = format!("{owner_id}:{cid}");
+        if !dismissed.contains(&key) {
+            dismissed.push(key);
+            if let Ok(json) = serde_json::to_string(&dismissed) {
+                snap.quasar_state_blobs
+                    .insert(DISMISSED_CONTRACT_NOTIFS_BLOB.to_string(), json);
+            }
+            mutated = true;
+        }
+        Ok(mutated)
+    })?;
+    Ok(PyRep::Bool(changed))
+}
+
+/// `contractProxy.DeleteMultipleContracts(contractIDs)` (`contracts.pyj:561`): deletes all
+/// eligible `Outstanding` contracts in `contractIDs`, returning `(deletedIDs, failedIDs)`.
+pub fn handle_contract_delete_multiple(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let cids: Vec<i64> = match args.first() {
+        Some(PyRep::List(list) | PyRep::Tuple(list)) => {
+            list.iter().filter_map(|v| v.as_i64()).collect()
+        }
+        Some(PyRep::Integer(id)) => vec![*id],
+        _ => Vec::new(),
+    };
+    if cids.is_empty() {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "contractProxy.DeleteMultipleContracts requires a non-empty list of contractIDs".into(),
+        });
+    }
+    let caller_corp = session.corporation_id.unwrap_or(0);
+    let (deleted, failed) = ctx.db.try_with_mut_snapshot(|snap| {
+        let corp_mgr = snap.corporations.get(&caller_corp).is_some_and(|corp| {
+            let r = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
+            char_id == corp.ceo_id
+                || (r & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_CONTRACT_MANAGER)) != 0
+        });
+        let mut del = Vec::new();
+        let mut fail = Vec::new();
+        for cid in cids {
+            let Some(c) = snap.contracts.get(&cid).cloned() else {
+                fail.push(PyRep::Integer(cid));
+                continue;
+            };
+            let owns = c.issuer_id == char_id
+                || (c.for_corp && c.issuer_corp_id == caller_corp && corp_mgr);
+            let has_bids = c.contract_type == "Auction" && c.current_bidder_id.is_some();
+            if c.status == "Outstanding" && owns && !has_bids {
+                snap.credit_contract_issuer(&c, c.reward);
+                for iid in &c.item_ids {
+                    if let Some(it) = snap.items.get_mut(iid) {
+                        it.owner_id = c.issuer_id;
+                        it.location_id = c.start_station_id;
+                        it.flag = eve_db::InventoryFlag::Hangar;
+                        it.version += 1;
+                    }
+                }
+                if let Some(cm) = snap.contracts.get_mut(&cid) {
+                    cm.status = "Deleted".into();
+                }
+                del.push(PyRep::Integer(cid));
+            } else {
+                fail.push(PyRep::Integer(cid));
+            }
+        }
+        Ok::<_, BridgeRpcError>((del, fail))
+    })?;
+    Ok(PyRep::Tuple(vec![PyRep::List(deleted), PyRep::List(failed)]))
+}
+
+/// `contractProxy.GetItemsInDockableLocation(stationID, forCorp)` (`contracts.pyj:872`):
+/// returns inventory items owned by the character (or corporation) at `stationID` / `structureID`.
+pub fn handle_contract_get_items_in_dockable(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let loc_id = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .or_else(|| session.station_id.or(session.structure_id))
+        .filter(|&id| id > 0)
+        .ok_or_else(|| BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "contractProxy.GetItemsInDockableLocation requires a valid dockable locationID".into(),
+        })?;
+    let for_corp = args
+        .get(1)
+        .is_some_and(|v| v.as_bool() == Some(true) || v.as_i64().unwrap_or(0) != 0);
+    let owner_id = if for_corp {
+        session.corporation_id.unwrap_or(0)
+    } else {
+        char_id
+    };
+    let rows = ctx.db.with_snapshot(|snap| {
+        let mut items: Vec<_> = snap
+            .items
+            .values()
+            .filter(|i| {
+                i.owner_id == owner_id
+                    && i.location_id == loc_id
+                    && Some(i.item_id) != session.ship_id
+                    && i.flag != eve_db::InventoryFlag::Locked
+                    && !snap.is_item_locked_in_contract_or_job(i.item_id)
+            })
+            .collect();
+        items.sort_by_key(|i| i.item_id);
+        items
+            .into_iter()
+            .map(|i| {
+                let (gid, cid) = ctx
+                    .sde
+                    .types
+                    .get(&i.type_id)
+                    .map(|t| (i64::from(t.group_id), i64::from(t.category_id)))
+                    .unwrap_or((0, 0));
+                let singleton_val = if i.is_blueprint_copy {
+                    2
+                } else if i.singleton {
+                    1
+                } else {
+                    0
+                };
+                let qty_val = if i.is_blueprint_copy {
+                    -2
+                } else if i.singleton {
+                    -1
+                } else {
+                    i64::from(i.quantity)
+                };
+                PyRep::keyval([
+                    ("itemID", PyRep::Integer(i.item_id)),
+                    ("typeID", PyRep::Integer(i64::from(i.type_id))),
+                    ("groupID", PyRep::Integer(gid)),
+                    ("categoryID", PyRep::Integer(cid)),
+                    ("stacksize", PyRep::Integer(i64::from(i.quantity))),
+                    ("quantity", PyRep::Integer(qty_val)),
+                    ("flagID", PyRep::Integer(i.flag as i64)),
+                    ("singleton", PyRep::Integer(singleton_val)),
+                    ("ownerID", PyRep::Integer(i.owner_id)),
+                    ("locationID", PyRep::Integer(i.location_id)),
+                ])
+            })
+            .collect::<Vec<_>>()
+    });
+    Ok(PyRep::List(rows))
+}
+
+fn item_repair_metrics(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    item: &eve_db::InventoryItemRecord,
+) -> (f64, f64, f64) {
+    let mut dmg = item
+        .dynamic_attributes
+        .get(&eve_sde::attr_ids::DAMAGE)
+        .copied()
+        .unwrap_or(0.0)
+        + item
+            .dynamic_attributes
+            .get(&eve_sde::attr_ids::ARMOR_DAMAGE)
+            .copied()
+            .unwrap_or(0.0);
+    if let Ok(fits) = ctx.ship_fittings.read() {
+        if let Some(fit) = fits.get(&item.location_id) {
+            if let Some(m) = fit.modules.values().find(|m| m.item_id == item.item_id) {
+                dmg = dmg.max(m.damage_hp);
+            }
+        }
+    }
+    let t_opt = ctx.sde.types.get(&item.type_id);
+    let max_hp = t_opt
+        .map(|t| {
+            let hp = t.default_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied().unwrap_or(0.0);
+            let armor = t.default_attributes.get(&eve_sde::attr_ids::ARMOR_HP).copied().unwrap_or(0.0);
+            (hp + armor).max(40.0)
+        })
+        .unwrap_or(100.0);
+    let base_price = t_opt.map(|t| t.base_price).unwrap_or(10_000.0).max(1_000.0);
+    let _ = snap;
+    let cost_per_unit = ((base_price * 0.0125) / max_hp).max(1.0);
+    (dmg, max_hp, cost_per_unit)
+}
+
+/// `repairSvc.GetRepairQuotes(itemIDs)` (`base_repairshop.pyj:65`): returns a `Dict` mapping each
+/// requested `itemID` to a `List` of `KeyVal` damage quote rows (`itemID`, `typeID`, `groupID`,
+/// `damage`, `maxHealth`, `costToRepairOneUnitOfDamage`, `totalRepairCost`).
+pub fn handle_repair_get_quotes(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let mut item_ids: Vec<i64> = match args.first() {
+        Some(PyRep::List(list) | PyRep::Tuple(list)) => {
+            list.iter().filter_map(|v| v.as_i64()).collect()
+        }
+        Some(PyRep::Integer(id)) => vec![*id],
+        _ => Vec::new(),
+    };
+    if item_ids.is_empty() {
+        if let Some(sid) = session.ship_id {
+            item_ids.push(sid);
+        }
+    }
+    let corp_id = session.corporation_id;
+    let dict_entries = ctx.db.with_snapshot(|snap| {
+        let mut out = Vec::with_capacity(item_ids.len());
+        for req_id in item_ids {
+            let mut sub_items: Vec<&eve_db::InventoryItemRecord> = snap
+                .items
+                .values()
+                .filter(|i| {
+                    (i.owner_id == char_id || Some(i.owner_id) == corp_id)
+                        && (i.item_id == req_id || i.location_id == req_id)
+                })
+                .collect();
+            sub_items.sort_by_key(|i| i.item_id);
+            let mut rows = Vec::new();
+            for it in sub_items {
+                let (dmg, max_hp, cpu) = item_repair_metrics(ctx, snap, it);
+                let gid = ctx.sde.types.get(&it.type_id).map(|t| i64::from(t.group_id)).unwrap_or(0);
+                let total = (dmg.ceil() * cpu).round();
+                rows.push(PyRep::keyval([
+                    ("itemID", PyRep::Integer(it.item_id)),
+                    ("typeID", PyRep::Integer(i64::from(it.type_id))),
+                    ("groupID", PyRep::Integer(gid)),
+                    ("damage", PyRep::Real(dmg)),
+                    ("maxHealth", PyRep::Integer(max_hp.round() as i64)),
+                    ("costToRepairOneUnitOfDamage", PyRep::Real(cpu)),
+                    ("totalRepairCost", PyRep::Real(total)),
+                    ("discount", PyRep::Real(0.0)),
+                    ("serviceCharge", PyRep::Real(0.0)),
+                ]));
+            }
+            out.push((PyRep::Integer(req_id), PyRep::List(rows)));
+        }
+        out
+    });
+    Ok(PyRep::Dict(dict_entries))
+}
+
+/// `repairSvc.RepairItemsInStation(itemIDs, iskRepairValue)` and
+/// `repairSvc.RepairItemsInStructure(itemIDs)` (`base_repairshop.pyj:69,71`).
+pub fn handle_repair_items_in_location(
+    ctx: &ServerContext,
+    session: &SessionState,
+    is_structure: bool,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let loc_id = if is_structure {
+        session.structure_id.ok_or_else(|| BridgeRpcError {
+            code: "NotInStructure".into(),
+            message: "RepairItemsInStructure requires being docked in an Upwell structure".into(),
+        })?
+    } else {
+        session.station_id.ok_or_else(|| BridgeRpcError {
+            code: "NotInStation".into(),
+            message: "RepairItemsInStation requires being docked in a station".into(),
+        })?
+    };
+    let item_ids: Vec<i64> = match args.first() {
+        Some(PyRep::List(list) | PyRep::Tuple(list)) => {
+            list.iter().filter_map(|v| v.as_i64()).collect()
+        }
+        Some(PyRep::Integer(id)) => vec![*id],
+        _ => Vec::new(),
+    };
+    if item_ids.is_empty() {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "RepairItems requires a non-empty list of itemIDs".into(),
+        });
+    }
+    let isk_budget = args.get(1).and_then(|a| a.as_f64());
+    if isk_budget.is_some_and(|v| v < 0.0) {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "iskRepairValue cannot be negative".into(),
+        });
+    }
+    let corp_id = session.corporation_id;
+    let active_ship = session.ship_id;
+    let (repaired_ids, total_cost, new_bal) = ctx.db.try_with_mut_snapshot(|snap| {
+        let mut target_ids = Vec::new();
+        let mut total_isk = 0.0;
+        for &req_id in &item_ids {
+            let Some(root) = snap.items.get(&req_id) else {
+                return Err(BridgeRpcError {
+                    code: "ItemNotFound".into(),
+                    message: format!("Item {req_id} not found"),
+                });
+            };
+            if root.owner_id != char_id && Some(root.owner_id) != corp_id {
+                return Err(BridgeRpcError {
+                    code: "NotItemOwner".into(),
+                    message: format!("Character {char_id} does not own item {req_id}"),
+                });
+            }
+            if root.location_id != loc_id && Some(root.location_id) != active_ship {
+                return Err(BridgeRpcError {
+                    code: "ItemNotAtLocation".into(),
+                    message: format!("Item {req_id} is not located at dockable location {loc_id}"),
+                });
+            }
+            for it in snap.items.values() {
+                if (it.owner_id == char_id || Some(it.owner_id) == corp_id)
+                    && (it.item_id == req_id || it.location_id == req_id)
+                    && !target_ids.contains(&it.item_id)
+                {
+                    let (dmg, _, cpu) = item_repair_metrics(ctx, snap, it);
+                    if dmg > 0.0 {
+                        total_isk += (dmg.ceil() * cpu).round();
+                    }
+                    target_ids.push(it.item_id);
+                }
+            }
+        }
+        if total_isk > 0.0 {
+            if let Some(budget) = isk_budget {
+                if budget + 1e-6 < total_isk {
+                    return Err(BridgeRpcError {
+                        code: "InsufficientFunds".into(),
+                        message: format!("Provided iskRepairValue {budget:.2} is less than repair cost {total_isk:.2}"),
+                    });
+                }
+            }
+        }
+        let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
+            code: "CharacterNotFound".into(),
+            message: format!("Character {char_id} not found"),
+        })?;
+        let fee = eve_db::IskCents::from_f64_isk(total_isk);
+        if fee.0 > 0 {
+            ch.balance = ch.balance.checked_sub(fee).ok_or_else(|| BridgeRpcError {
+                code: "InsufficientFunds".into(),
+                message: "Insufficient ISK to pay repair bill".into(),
+            })?;
+            let bal = ch.balance;
+            snap.append_journal(
+                char_id,
+                "RepairBill",
+                eve_db::IskCents(-fee.0),
+                bal,
+                format!("Repaired {} item(s) at {loc_id}", target_ids.len()),
+            );
+        }
+        let bal = snap.characters.get(&char_id).map(|c| c.balance.to_wire_f64()).unwrap_or(0.0);
+        for tid in &target_ids {
+            if let Some(it) = snap.items.get_mut(tid) {
+                it.dynamic_attributes.remove(&eve_sde::attr_ids::DAMAGE);
+                it.dynamic_attributes.remove(&eve_sde::attr_ids::ARMOR_DAMAGE);
+                it.version += 1;
+            }
+        }
+        Ok((target_ids, total_isk, bal))
+    })?;
+    if let Ok(mut fits) = ctx.ship_fittings.write() {
+        for fit in fits.values_mut() {
+            for m in fit.modules.values_mut() {
+                if repaired_ids.contains(&m.item_id) {
+                    m.damage_hp = 0.0;
+                }
+            }
+        }
+    }
+    if total_cost > 0.0 {
+        ctx.notify(
+            crate::router::NotificationTarget::Character(char_id),
+            "OnAccountChange",
+            "charid",
+            vec![
+                PyRep::String("cash".into()),
+                PyRep::Integer(char_id),
+                PyRep::Real(new_bal),
+            ],
+        );
+    }
+    for iid in &repaired_ids {
+        ctx.notify(
+            crate::router::NotificationTarget::Character(char_id),
+            "OnModuleRepaired",
+            "charid",
+            vec![PyRep::Integer(*iid)],
+        );
+    }
+    Ok(PyRep::keyval([
+        ("locationID", PyRep::Integer(loc_id)),
+        ("repairedItemIDs", PyRep::List(repaired_ids.into_iter().map(PyRep::Integer).collect())),
+        ("totalCostISK", PyRep::Real(total_cost)),
+    ]))
 }

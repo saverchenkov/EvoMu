@@ -41,6 +41,23 @@ pub fn handle(
     args: &[PyRep],
     caller_trace: Option<&str>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    // rpc-lint: allow devtools svc_dgmattr.pyj AttributeInspector remote call
+    if service == "i2" {
+        let _ = match ServerContext::require_character(session) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+        let target_id = args
+            .first()
+            .and_then(|a| a.as_i64())
+            // rpc-lint: allow devtools svc_dgmattr.pyj AttributeInspector remote call
+            .or_else(|| bound_entry.filter(|b| b.service == "i2").map(|b| b.object_id));
+        return match method {
+            "IsPrimed" => Some(handle_i2_is_primed(ctx, target_id)),
+            "GetItem" => Some(handle_i2_get_item(ctx, target_id)),
+            _ => None,
+        };
+    }
     if service != "invbroker"
         || !matches!(
             method,
@@ -221,4 +238,129 @@ fn self_inv_item(
         code: "UnimplementedRPC".into(),
         message: format!("invbroker.GetSelfInvItem for inventory {object_id} is not yet implemented"),
     })
+}
+
+/// `i2.IsPrimed(itemID)`: checks whether the requested inventory item or container entity
+/// is primed in `WorldStateSnapshot` or SDE static world tables (`svc_dgmattr.pyj`).
+pub fn handle_i2_is_primed(ctx: &ServerContext, target_id: Option<i64>) -> Result<PyRep, BridgeRpcError> {
+    let Some(item_id) = target_id.filter(|&id| id > 0) else {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "i2.IsPrimed requires a positive itemID".into(),
+        });
+    };
+    let primed = ctx.db.with_snapshot(|snap| {
+        snap.items.contains_key(&item_id)
+            || snap.characters.contains_key(&item_id)
+            || snap.structures.contains_key(&item_id)
+    }) || ctx.sde.stations.contains_key(&item_id)
+        || u32::try_from(item_id)
+            .ok()
+            .is_some_and(|id| ctx.sde.solar_systems.contains_key(&id));
+    Ok(PyRep::Bool(primed))
+}
+
+/// `i2.GetItem(itemID)`: returns the inventory item representation (`KeyVal` with `.typeID`,
+/// `.itemID`, `.ownerID`, `.locationID`, `.flagID`, `.quantity`, `.groupID`, `.categoryID`,
+/// `.singleton`, `.stacksize`, `.customInfo`) from `WorldStateSnapshot`, or `None` if not found.
+pub fn handle_i2_get_item(ctx: &ServerContext, target_id: Option<i64>) -> Result<PyRep, BridgeRpcError> {
+    let Some(item_id) = target_id.filter(|&id| id > 0) else {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "i2.GetItem requires a positive itemID".into(),
+        });
+    };
+    if let Some(item) = ctx.db.get_item(item_id) {
+        let (group_id, category_id) = ctx
+            .sde
+            .types
+            .get(&item.type_id)
+            .map(|t| (i64::from(t.group_id), i64::from(t.category_id)))
+            .unwrap_or((0, 0));
+        let singleton_val = if item.is_blueprint_copy {
+            2
+        } else if item.singleton {
+            1
+        } else {
+            0
+        };
+        let qty_val = if item.is_blueprint_copy {
+            -2
+        } else if item.singleton {
+            -1
+        } else {
+            i64::from(item.quantity)
+        };
+        return Ok(PyRep::keyval([
+            ("itemID", PyRep::Integer(item.item_id)),
+            ("typeID", PyRep::Integer(i64::from(item.type_id))),
+            ("ownerID", PyRep::Integer(item.owner_id)),
+            ("locationID", PyRep::Integer(item.location_id)),
+            ("flagID", PyRep::Integer(item.flag as i64)),
+            ("quantity", PyRep::Integer(qty_val)),
+            ("stacksize", PyRep::Integer(i64::from(item.quantity))),
+            ("singleton", PyRep::Integer(singleton_val)),
+            ("groupID", PyRep::Integer(group_id)),
+            ("categoryID", PyRep::Integer(category_id)),
+            ("customInfo", PyRep::String(String::new())),
+        ]));
+    }
+    if let Some(row) = ctx.db.with_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get(&item_id) {
+            let loc = ch.station_id.or(ch.structure_id).unwrap_or(i64::from(ch.solar_system_id));
+            return Some(PyRep::keyval([
+                ("itemID", PyRep::Integer(ch.character_id)),
+                ("typeID", PyRep::Integer(1373)),
+                ("ownerID", PyRep::Integer(ch.corporation_id)),
+                ("locationID", PyRep::Integer(loc)),
+                ("flagID", PyRep::Integer(0)),
+                ("quantity", PyRep::Integer(-1)),
+                ("stacksize", PyRep::Integer(1)),
+                ("singleton", PyRep::Integer(1)),
+                ("groupID", PyRep::Integer(1)),
+                ("categoryID", PyRep::Integer(1)),
+                ("customInfo", PyRep::String(ch.name.clone())),
+            ]));
+        }
+        if let Some(st) = snap.structures.get(&item_id) {
+            let (gid, cid) = ctx
+                .sde
+                .types
+                .get(&st.type_id)
+                .map(|t| (i64::from(t.group_id), i64::from(t.category_id)))
+                .unwrap_or((1657, 65));
+            return Some(PyRep::keyval([
+                ("itemID", PyRep::Integer(st.structure_id)),
+                ("typeID", PyRep::Integer(i64::from(st.type_id))),
+                ("ownerID", PyRep::Integer(st.owner_corp_id)),
+                ("locationID", PyRep::Integer(i64::from(st.solar_system_id))),
+                ("flagID", PyRep::Integer(0)),
+                ("quantity", PyRep::Integer(-1)),
+                ("stacksize", PyRep::Integer(1)),
+                ("singleton", PyRep::Integer(1)),
+                ("groupID", PyRep::Integer(gid)),
+                ("categoryID", PyRep::Integer(cid)),
+                ("customInfo", PyRep::String(st.name.clone())),
+            ]));
+        }
+        None
+    }) {
+        return Ok(row);
+    }
+    if let Some(st) = ctx.sde.stations.get(&item_id) {
+        return Ok(PyRep::keyval([
+            ("itemID", PyRep::Integer(st.station_id)),
+            ("typeID", PyRep::Integer(i64::from(st.station_type_id))),
+            ("ownerID", PyRep::Integer(st.owner_corporation_id)),
+            ("locationID", PyRep::Integer(i64::from(st.solar_system_id))),
+            ("flagID", PyRep::Integer(0)),
+            ("quantity", PyRep::Integer(-1)),
+            ("stacksize", PyRep::Integer(1)),
+            ("singleton", PyRep::Integer(1)),
+            ("groupID", PyRep::Integer(15)),
+            ("categoryID", PyRep::Integer(3)),
+            ("customInfo", PyRep::String(st.name.clone())),
+        ]));
+    }
+    Ok(PyRep::None)
 }

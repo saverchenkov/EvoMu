@@ -608,3 +608,199 @@ pub fn handle_structure_module_online(ctx: &ServerContext, session: &mut Session
         ("online", PyRep::Bool(set_online)),
     ]))
 }
+
+/// `structure.JettisonStructureFuel(itemIDs)` (`invItemFunctions.pyj:77`): validates that the
+/// caller has Director or Station Manager (Fuel Technician) role in the structure's owning corp,
+/// removes fuel blocks from the structure's fuel bay, and places them into a jettisoned cargo
+/// container in space outside the structure.
+pub async fn handle_jettison_structure_fuel(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let bound_struct_id = ctx
+        .bound_objects
+        .read()
+        .ok()
+        .and_then(|map| {
+            map.values()
+                .find(|b| b.session_id == session.session_id && b.service == "structure")
+                .map(|b| b.object_id)
+        });
+    let mut explicit_item_ids = Vec::new();
+    for a in args {
+        match a {
+            PyRep::List(list) | PyRep::Tuple(list) => {
+                for v in list {
+                    if let Some(id) = v.as_i64() {
+                        explicit_item_ids.push(id);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let fuel_groups = life::service_fuel_groups(ctx);
+    let (structure_id, sys_id, container_id, jettisoned_ids, remaining_fuel, pos) =
+        ctx.db.try_with_mut_snapshot(|snap| {
+            let mut st_id_opt = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .filter(|id| snap.structures.contains_key(id));
+            if st_id_opt.is_none() {
+                if let Some(&first_iid) = explicit_item_ids.first() {
+                    if let Some(it) = snap.items.get(&first_iid) {
+                        if snap.structures.contains_key(&it.location_id) {
+                            st_id_opt = Some(it.location_id);
+                        }
+                    }
+                } else if let Some(first_int) = args.first().and_then(|a| a.as_i64()) {
+                    if let Some(it) = snap.items.get(&first_int) {
+                        if snap.structures.contains_key(&it.location_id) {
+                            explicit_item_ids.push(first_int);
+                            st_id_opt = Some(it.location_id);
+                        }
+                    }
+                }
+            }
+            let structure_id = st_id_opt
+                .or(bound_struct_id)
+                .or(session.structure_id)
+                .ok_or_else(|| err("MissingStructureId", "JettisonStructureFuel requires an active or bound structureID"))?;
+            let st = snap
+                .structures
+                .get(&structure_id)
+                .cloned()
+                .ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
+            if st.state == life::STATE_DESTROYED {
+                return Err(err("StructureDestroyed", format!("Structure {structure_id} is destroyed")));
+            }
+            let caller_corp = snap
+                .characters
+                .get(&char_id)
+                .map(|c| c.corporation_id)
+                .or(session.corporation_id)
+                .unwrap_or(0);
+            if caller_corp != st.owner_corp_id {
+                return Err(err("StructureOwnershipViolation", format!("Character {char_id} does not belong to structure owning corp {}", st.owner_corp_id)));
+            }
+            let has_role = snap.corporations.get(&caller_corp).map(|corp| {
+                let r = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
+                char_id == corp.ceo_id
+                    || (r & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER)) != 0
+            }).unwrap_or(true);
+            if !has_role {
+                return Err(err("CorpRoleDenied", "Jettisoning structure fuel requires Director or Station Manager role"));
+            }
+
+            snap.next_entity_id += 1;
+            let container_id = snap.next_entity_id;
+            snap.items.insert(
+                container_id,
+                eve_db::InventoryItemRecord {
+                    item_id: container_id,
+                    type_id: 23, // Cargo Container
+                    owner_id: st.owner_corp_id,
+                    location_id: i64::from(st.solar_system_id),
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    dynamic_attributes: std::collections::HashMap::new(),
+                    source_mutaplasmid_id: None,
+                    insured_payout_isk: 0.0,
+                    is_blueprint_copy: false,
+                    blueprint_runs_remaining: None,
+                },
+            );
+
+            let mut moved_ids = Vec::new();
+            let mut moved_blocks = 0u32;
+            if !explicit_item_ids.is_empty() {
+                for iid in &explicit_item_ids {
+                    let Some(it) = snap.items.get_mut(iid) else {
+                        return Err(err("ItemNotFound", format!("Fuel item {iid} not found")));
+                    };
+                    if it.location_id != structure_id {
+                        return Err(err("ItemNotInFuelBay", format!("Item {iid} is not located in structure {structure_id}")));
+                    }
+                    let is_fuel_type = ctx
+                        .sde
+                        .types
+                        .get(&it.type_id)
+                        .is_some_and(|t| fuel_groups.contains(&t.group_id));
+                    if it.flag != InventoryFlag::SpecializedFuelBay && it.flag as u16 != 163 && !is_fuel_type {
+                        return Err(err("ItemNotFuel", format!("Item {iid} (type {}) is not structure fuel", it.type_id)));
+                    }
+                    moved_blocks = moved_blocks.saturating_add(it.quantity.max(0) as u32);
+                    it.location_id = container_id;
+                    it.flag = InventoryFlag::Cargo;
+                    it.version += 1;
+                    moved_ids.push(*iid);
+                }
+                if let Some(s) = snap.structures.get_mut(&structure_id) {
+                    s.fuel_blocks = s.fuel_blocks.saturating_sub(moved_blocks);
+                }
+            } else {
+                let (fuel_tid, req_qty) = if args.len() >= 3 {
+                    let tid = args.get(1).and_then(|a| a.as_i64()).unwrap_or(4247) as u32;
+                    let q = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
+                    (tid, q)
+                } else if args.len() == 2 {
+                    (4247u32, args.get(1).and_then(|a| a.as_i64()).unwrap_or(0))
+                } else {
+                    (4247u32, i64::from(st.fuel_blocks))
+                };
+                if req_qty <= 0 || (req_qty as u32) > st.fuel_blocks {
+                    return Err(err("InsufficientStructureFuel", format!("Cannot jettison {req_qty} fuel blocks from structure {structure_id} (available: {})", st.fuel_blocks)));
+                }
+                if let Some(s) = snap.structures.get_mut(&structure_id) {
+                    s.fuel_blocks -= req_qty as u32;
+                }
+                snap.next_entity_id += 1;
+                let fuel_item_id = snap.next_entity_id;
+                snap.items.insert(
+                    fuel_item_id,
+                    eve_db::InventoryItemRecord {
+                        item_id: fuel_item_id,
+                        type_id: fuel_tid,
+                        owner_id: st.owner_corp_id,
+                        location_id: container_id,
+                        flag: InventoryFlag::Cargo,
+                        quantity: req_qty as i32,
+                        singleton: false,
+                        version: 1,
+                        dynamic_attributes: std::collections::HashMap::new(),
+                        source_mutaplasmid_id: None,
+                        insured_payout_isk: 0.0,
+                        is_blueprint_copy: false,
+                        blueprint_runs_remaining: None,
+                    },
+                );
+                moved_ids.push(fuel_item_id);
+            }
+            let rem = snap.structures.get(&structure_id).map(|s| s.fuel_blocks).unwrap_or(0);
+            Ok((structure_id, st.solar_system_id, container_id, moved_ids, rem, st.position))
+        })?;
+
+    let ball = eve_destiny::Ball {
+        id: container_id,
+        type_id: 23,
+        position: DVec3::from_array(pos) + DVec3::new(500.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1000.0,
+        radius: 25.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    };
+    let _ = ctx.systems.get_or_spawn(sys_id).spawn_ball(ball).await;
+    Ok(PyRep::keyval([
+        ("structureID", PyRep::Integer(structure_id)),
+        ("containerID", PyRep::Integer(container_id)),
+        ("jettisonedItemIDs", PyRep::List(jettisoned_ids.into_iter().map(PyRep::Integer).collect())),
+        ("remainingFuelBlocks", PyRep::Integer(i64::from(remaining_fuel))),
+    ]))
+}

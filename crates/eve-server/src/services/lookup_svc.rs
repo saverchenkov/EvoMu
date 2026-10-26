@@ -37,9 +37,9 @@ pub fn handle(
     service: &str,
     method: &str,
     args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    if service != "lookupSvc" && service != "bannedwords" {
+    if service != "lookupSvc" && service != "bannedwords" && service != "search" {
         return None;
     }
     if let Err(e) = ServerContext::require_auth(session) {
@@ -484,6 +484,226 @@ pub fn handle(
             }
         }
 
+        ("search", "Query") => Some(handle_search_query(ctx, args, kwargs)),
+        ("search", "QuickQuery") => Some(handle_search_quick_query(ctx, args, kwargs)),
+
         _ => None,
     }
+}
+
+fn flag_arg(v: Option<&PyRep>) -> bool {
+    v.is_some_and(|r| r.as_bool() == Some(true) || r.as_i64().unwrap_or(0) != 0)
+}
+
+fn parse_search_query_params(
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+    is_quick: bool,
+) -> Result<(String, Vec<i64>, bool, bool, bool), BridgeRpcError> {
+    let query = args
+        .first()
+        .and_then(|a| a.as_str())
+        .or_else(|| kwargs.get("searchStr").and_then(|a| a.as_str()))
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if query.is_empty() {
+        return Err(BridgeRpcError {
+            code: "SearchStringTooShort".into(),
+            message: "Search string must contain at least 1 non-whitespace character".into(),
+        });
+    }
+    let groups: Vec<i64> = match args.get(1).or_else(|| kwargs.get("groupIDList")) {
+        Some(PyRep::List(list) | PyRep::Tuple(list)) => {
+            list.iter().filter_map(|v| v.as_i64()).collect()
+        }
+        Some(PyRep::Integer(g)) => vec![*g],
+        _ => vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+    };
+    let groups = if groups.is_empty() {
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    } else {
+        groups
+    };
+    let exact = kwargs
+        .get("exact")
+        .map(|v| flag_arg(Some(v)))
+        .unwrap_or_else(|| if is_quick { flag_arg(args.get(4)) } else { flag_arg(args.get(2)) });
+    let hide_npc = kwargs
+        .get("hideNPC")
+        .map(|v| flag_arg(Some(v)))
+        .unwrap_or_else(|| if is_quick { flag_arg(args.get(2)) } else { flag_arg(args.get(3)) });
+    let only_alt = kwargs
+        .get("onlyAltName")
+        .map(|v| flag_arg(Some(v)))
+        .unwrap_or_else(|| if is_quick { flag_arg(args.get(3)) } else { flag_arg(args.get(4)) });
+    Ok((query, groups, exact, hide_npc, only_alt))
+}
+
+fn search_ids_for_group(
+    ctx: &ServerContext,
+    group_id: i64,
+    query: &str,
+    exact: bool,
+    hide_npc: bool,
+    only_alt: bool,
+) -> Vec<i64> {
+    let mut ids: Vec<i64> = match group_id {
+        1 => {
+            if hide_npc {
+                Vec::new()
+            } else {
+                ctx.sde
+                    .agents
+                    .values()
+                    .filter(|a| matches_query(&a.name, query, exact))
+                    .map(|a| a.agent_id)
+                    .collect()
+            }
+        }
+        2 => ctx.db.with_snapshot(|snap| {
+            snap.characters
+                .values()
+                .filter(|c| (!hide_npc || c.character_id >= 90_000_000) && matches_query(&c.name, query, exact))
+                .map(|c| c.character_id)
+                .collect()
+        }),
+        3 => {
+            let mut out = ctx.db.with_snapshot(|snap| {
+                snap.corporations
+                    .values()
+                    .filter(|c| {
+                        if only_alt {
+                            matches_query(&c.ticker, query, exact)
+                        } else {
+                            matches_query(&c.name, query, exact) || matches_query(&c.ticker, query, exact)
+                        }
+                    })
+                    .map(|c| c.corporation_id)
+                    .collect::<Vec<_>>()
+            });
+            if !hide_npc {
+                for npc in ctx.sde.npc_corporations.values() {
+                    let ok = if only_alt {
+                        matches_query(&npc.ticker_name, query, exact)
+                    } else {
+                        matches_query(&npc.name, query, exact) || matches_query(&npc.ticker_name, query, exact)
+                    };
+                    if ok {
+                        out.push(npc.corporation_id);
+                    }
+                }
+            }
+            out
+        }
+        4 | 32 => ctx.db.with_snapshot(|snap| {
+            snap.alliances
+                .values()
+                .filter(|a| {
+                    if only_alt {
+                        matches_query(&a.short_name, query, exact)
+                    } else {
+                        matches_query(&a.name, query, exact) || matches_query(&a.short_name, query, exact)
+                    }
+                })
+                .map(|a| a.alliance_id)
+                .collect()
+        }),
+        5 | 19 => {
+            if hide_npc {
+                Vec::new()
+            } else {
+                ctx.sde
+                    .factions
+                    .values()
+                    .filter(|f| matches_query(&f.name, query, exact))
+                    .map(|f| i64::from(f.faction_id))
+                    .collect()
+            }
+        }
+        6 => ctx
+            .sde
+            .constellations
+            .values()
+            .filter(|c| matches_query(&c.name, query, exact))
+            .map(|c| i64::from(c.constellation_id))
+            .collect(),
+        7 => ctx
+            .sde
+            .solar_systems
+            .values()
+            .filter(|s| matches_query(&s.name, query, exact))
+            .map(|s| i64::from(s.solar_system_id))
+            .collect(),
+        8 => ctx
+            .sde
+            .regions
+            .values()
+            .filter(|r| matches_query(&r.name, query, exact))
+            .map(|r| i64::from(r.region_id))
+            .collect(),
+        9 | 15 => ctx
+            .sde
+            .stations
+            .values()
+            .filter(|st| matches_query(&st.name, query, exact))
+            .map(|st| st.station_id)
+            .collect(),
+        10 => ctx
+            .sde
+            .types
+            .values()
+            .filter(|t| t.published && matches_query(&t.name, query, exact))
+            .map(|t| i64::from(t.type_id))
+            .collect(),
+        11 | 1404 | 1657 => ctx.db.with_snapshot(|snap| {
+            snap.structures
+                .values()
+                .filter(|st| st.state != "Destroyed" && matches_query(&st.name, query, exact))
+                .map(|st| st.structure_id)
+                .collect()
+        }),
+        _ => Vec::new(),
+    };
+    ids.sort_unstable();
+    ids.dedup();
+    ids.truncate(500);
+    ids
+}
+
+/// `search.Query(searchStr, groupIDList, exact=0, hideNPC=0, onlyAltName=0)` (`searchUtil.pyj:306`).
+pub fn handle_search_query(
+    ctx: &ServerContext,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (query, groups, exact, hide_npc, only_alt) = parse_search_query_params(args, kwargs, false)?;
+    let mut dict_entries = Vec::with_capacity(groups.len());
+    for gid in groups {
+        let ids = search_ids_for_group(ctx, gid, &query, exact, hide_npc, only_alt);
+        dict_entries.push((
+            PyRep::Integer(gid),
+            PyRep::List(ids.into_iter().map(PyRep::Integer).collect()),
+        ));
+    }
+    Ok(PyRep::Dict(dict_entries))
+}
+
+/// `search.QuickQuery(searchStr, groupIDList, hideNPC=0, onlyAltName=0, exact=0)` (`searchUtil.pyj:327`).
+pub fn handle_search_quick_query(
+    ctx: &ServerContext,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (query, groups, exact, hide_npc, only_alt) = parse_search_query_params(args, kwargs, true)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for gid in groups {
+        for id in search_ids_for_group(ctx, gid, &query, exact, hide_npc, only_alt) {
+            if seen.insert(id) {
+                out.push(PyRep::Integer(id));
+            }
+        }
+    }
+    Ok(PyRep::List(out))
 }
