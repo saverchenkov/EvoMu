@@ -259,7 +259,14 @@ async fn corporation_palette_requires_editor_roles() {
 
 #[tokio::test]
 async fn structure_paintwork_follows_license_issue_and_revoke() {
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/api/api_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/api/admin/admin_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/api/api_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/api/admin/admin_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/license/api/api_pb2.pyj
+    eve_testkit::attest(&[
+        "quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/api/api_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/api/admin/admin_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/license/api/api_pb2.pyj",
+    ]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let system = 30_000_142u32;
@@ -271,12 +278,15 @@ async fn structure_paintwork_follows_license_issue_and_revoke() {
             quantum_core_installed: true, fuel_blocks: 100, shield_hp: 5_000.0, armor_hp: 5_000.0, hull_hp: 5_000.0,
             reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
         });
+        s.corp_lp_balances.insert((CORP as i64, 1_000_419), 5_000);
     });
     place_char(&ctx, 90_000_002, CORP, Some(system));
     place_char(&ctx, 90_000_003, OTHER_CORP, Some(system));
+    place_char(&ctx, 90_000_004, CORP, Some(system));
     let mut gm = build_sess(64_001, 90_000_001, CORP);
     let mut member = player(64_002, 90_000_002, CORP, 0);
     let mut outsider = player(64_003, 90_000_003, OTHER_CORP, 0);
+    let mut director = player(64_004, 90_000_004, CORP, eve_db::corp_roles::ROLE_DIRECTOR);
     let mut rx = subscribe(&ctx, &mut outsider).await;
 
     let issue = |structure: i64, secs: u64| {
@@ -320,18 +330,36 @@ async fn structure_paintwork_follows_license_issue_and_revoke() {
 
     // Corporation-scoped license views.
     let lic_api = "eve_public.cosmetic.structure.paintwork.license.api";
+    let cat = decode(&quasar_rpc(&ctx, &mut member, &format!("{lic_api}.GetCatalogueRequest"), Vec::new()).await);
+    assert!(!cat.fields.is_empty(), "paintwork licence catalogue is non-empty");
     let owned = decode(&quasar_rpc(&ctx, &mut member, &format!("{lic_api}.GetAllOwnedByCorporationRequest"), Vec::new()).await);
     assert_eq!(bytes(&sub(&sub(&owned, 1), 1), 1), uuid);
     let foreign = decode(&quasar_rpc(&ctx, &mut outsider, &format!("{lic_api}.GetAllOwnedByCorporationRequest"), Vec::new()).await);
     assert!(foreign.fields.is_empty(), "other corporations own no licenses");
     assert_eq!(quasar_rpc(&ctx, &mut outsider, &format!("{lic_api}.GetRequest"), wrap(1, &wrap(1, &uuid))).await.status_code, 404);
+    let lic_get = decode(&quasar_rpc(&ctx, &mut member, &format!("{lic_api}.GetRequest"), wrap(1, &wrap(1, &uuid))).await);
+    assert_eq!(varint(&sub(&sub(&lic_get, 2), 1), 1), Some(CORP as u64));
     assert_eq!(quasar_rpc(&ctx, &mut member, &format!("{lic_api}.RevokeRequest"), wrap(1, &wrap(1, &uuid))).await.status_code, 403);
+    assert_eq!(quasar_rpc(&ctx, &mut member, &format!("{lic_api}.IssueRequest"), issue(structure, 2_592_000)).await.status_code, 403);
 
-    // GM revoke: the structure reverts to an all-empty paintwork for everyone in the system.
-    assert_eq!(quasar_rpc(&ctx, &mut gm, &format!("{admin}.RevokeRequest"), wrap(1, &wrap(1, &uuid))).await.status_code, STATUS_OK);
+    // Non-catalogue duration returns 400 Bad Request.
+    assert_eq!(quasar_rpc(&ctx, &mut director, &format!("{lic_api}.IssueRequest"), issue(structure, 12_345)).await.status_code, 400);
+
+    // Insufficient EverMarks returns 403 Forbidden.
+    ctx.db.with_mut_snapshot(|s| { s.corp_lp_balances.insert((CORP as i64, 1_000_419), 0); });
+    assert_eq!(quasar_rpc(&ctx, &mut director, &format!("{lic_api}.IssueRequest"), issue(structure, 2_592_000)).await.status_code, 403);
+    ctx.db.with_mut_snapshot(|s| { s.corp_lp_balances.insert((CORP as i64, 1_000_419), 5_000); });
+
+    // Corporation director issue: public gateway IssueRequest works, re-issues license, and deducts catalogue EverMarks.
+    let dir_issue = quasar_rpc(&ctx, &mut director, &format!("{lic_api}.IssueRequest"), issue(structure, 2_592_000)).await;
+    assert_eq!(dir_issue.status_code, STATUS_OK);
+    assert_eq!(ctx.db.with_snapshot(|s| s.corp_lp_balances.get(&(CORP as i64, 1_000_419)).copied()), Some(4_000));
+    let new_lic = sub(&decode(&dir_issue), 1);
+    let new_uuid = bytes(&sub(&new_lic, 1), 1);
+
+    // Corporation director revoke: the structure reverts to default paintwork.
+    assert_eq!(quasar_rpc(&ctx, &mut director, &format!("{lic_api}.RevokeRequest"), wrap(1, &wrap(1, &new_uuid))).await.status_code, STATUS_OK);
     let cleared = drain(&mut rx, "eve_public.cosmetic.structure");
-    assert_eq!(cleared.len(), 1);
-    assert_eq!(varint(&sub(&sub(&cleared[0].1, 2), 5), 2), Some(1), "primary slot empty");
-    assert_eq!(quasar_rpc(&ctx, &mut gm, &format!("{admin}.RevokeRequest"), wrap(1, &wrap(1, &uuid))).await.status_code, 404);
+    assert_eq!(cleared.len(), 2, "SetNotice emitted on director issue and revoke");
     assert_eq!(quasar_rpc(&ctx, &mut outsider, "eve_public.cosmetic.structure.paintwork.api.GetRequest", st_req(structure)).await.status_code, 404);
 }
