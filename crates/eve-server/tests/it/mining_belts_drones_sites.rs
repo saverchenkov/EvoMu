@@ -370,45 +370,9 @@ async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
     // ------------------------------------------------------------------------
     // 2. Hidden ore signature via 2-pass probe scanning (feat:mining.ore-signatures)
     // ------------------------------------------------------------------------
-    let mut wide_probes = Vec::new();
-    for &sx in &[-1.0_f64, 1.0] {
-        for &sy in &[-1.0_f64, 1.0] {
-            for &sz in &[-1.0_f64, 1.0] {
-                wide_probes.push(PyRep::Tuple(vec![
-                    PyRep::Real(sx * 6.0 * au),
-                    PyRep::Real(sy * 4.0 * au),
-                    PyRep::Real(sz * 6.0 * au),
-                    PyRep::Real(12.0 * au),
-                ]));
-            }
-        }
-    }
-    let pass1_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "scanSvc",
-            None,
-            "RequestScans",
-            &[PyRep::List(wide_probes)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("scanSvc.RequestScans wide pass 1");
-    let PyRep::Rowset {
-        rows: pass1_rows, ..
-    } = pass1_rep
-    else {
-        panic!("Expected Rowset from scanSvc.RequestScans");
-    };
-    let ore_pass1 = pass1_rows
-        .iter()
-        .find(|r| r[2].as_str() == Some("Ore"))
-        .expect("Wide scan must detect Ore signature group");
-    let ore_sig_id = ore_pass1[1].as_str().unwrap().to_string();
-    let ore_x = ore_pass1[6].as_f64().expect("Rough X revealed at >= 0.25");
-    let ore_y = ore_pass1[7].as_f64().expect("Rough Y revealed at >= 0.25");
-    let ore_z = ore_pass1[8].as_f64().expect("Rough Z revealed at >= 0.25");
+    let (ore_sig_id, ore_pos) = ctx.db.with_snapshot(|s| s.cosmic_signatures[&sys_id].iter().find(|g| g.sig_group == "Ore").map(|g| (g.signature_id.clone(), DVec3::from_array(g.position))).unwrap());
+    let pass1_rows = crate::common::probe_scan(&ctx, &mut sess, DVec3::ZERO, 12.0 * au).await;
+    assert!(crate::common::scan_row_field(&pass1_rows, &ore_sig_id, "signalStrength").as_f64().unwrap() < 1.0, "Wide pass leaves Ore unresolved");
 
     let pre_pinpoint = ctx
         .dispatch_rpc(&mut sess, "scanSvc", None, "GetScanResults", &[], &kw, None)
@@ -424,44 +388,10 @@ async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
     assert_eq!(pre_sig.dict_get("warpable").and_then(|v| v.as_bool()), Some(false));
     assert_eq!(pre_sig.dict_get("oreTypes"), Some(&PyRep::List(vec![])));
 
-    let mut pinpoint_ore_probes = Vec::new();
-    for &sx in &[-1.0_f64, 1.0] {
-        for &sy in &[-1.0_f64, 1.0] {
-            for &sz in &[-1.0_f64, 1.0] {
-                pinpoint_ore_probes.push(PyRep::Tuple(vec![
-                    PyRep::Real(ore_x + sx * 2_000.0),
-                    PyRep::Real(ore_y + sy * 2_000.0),
-                    PyRep::Real(ore_z + sz * 2_000.0),
-                    PyRep::Real(0.5 * au),
-                ]));
-            }
-        }
-    }
-    let pass2_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "scanSvc",
-            None,
-            "RequestScans",
-            &[PyRep::List(pinpoint_ore_probes)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("scanSvc.RequestScans pinpoint pass 2");
-    let PyRep::Rowset {
-        rows: pass2_rows, ..
-    } = pass2_rep
-    else {
-        panic!("Expected Rowset from scanSvc.RequestScans pass 2");
-    };
-    let ore_pass2 = pass2_rows
-        .iter()
-        .find(|r| r[1].as_str() == Some(&ore_sig_id))
-        .unwrap();
-    assert_eq!(ore_pass2[5].as_f64(), Some(1.0), "Pinpoint scan resolves the signature to 100%");
-    assert_eq!(ore_pass2[3].as_str(), Some("Ore"));
-    assert_eq!(ore_pass2[4].as_str(), Some("Hidden Omber Deposit"));
+    let pass2_rows = crate::common::probe_scan(&ctx, &mut sess, ore_pos, 0.25 * au).await;
+    assert_eq!(crate::common::scan_row_field(&pass2_rows, &ore_sig_id, "signalStrength").as_f64(), Some(1.0), "Pinpoint scanMgr.RequestScans resolves the signature to 100%");
+    assert_eq!(crate::common::scan_row_field(&pass2_rows, &ore_sig_id, "group").as_str(), Some("Ore"));
+    assert_eq!(crate::common::scan_row_field(&pass2_rows, &ore_sig_id, "type").as_str(), Some("Hidden Omber Deposit"));
 
     let sig_results = ctx
         .dispatch_rpc(&mut sess, "scanSvc", None, "GetScanResults", &[], &kw, None)
@@ -585,83 +515,10 @@ async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
         ]
     );
 
-    let mut ls_wide_probes = Vec::new();
-    for &sx in &[-1.0_f64, 1.0] {
-        for &sy in &[-1.0_f64, 1.0] {
-            for &sz in &[-1.0_f64, 1.0] {
-                ls_wide_probes.push(PyRep::Tuple(vec![
-                    PyRep::Real(sx * 6.0 * au),
-                    PyRep::Real(sy * 4.0 * au),
-                    PyRep::Real(sz * 6.0 * au),
-                    PyRep::Real(12.0 * au),
-                ]));
-            }
-        }
-    }
-    let ls_pass1 = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "scanSvc",
-            None,
-            "RequestScans",
-            &[PyRep::List(ls_wide_probes)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Low-sec wide scan pass 1");
-    let PyRep::Rowset {
-        rows: ls_p1_rows, ..
-    } = ls_pass1
-    else {
-        panic!("Expected Rowset");
-    };
-    let gas_p1 = ls_p1_rows
-        .iter()
-        .find(|r| r[2].as_str() == Some("Gas"))
-        .expect("Wide scan must detect Gas signature");
-    let gas_sig_id = gas_p1[1].as_str().unwrap().to_string();
-    let gas_x = gas_p1[6].as_f64().unwrap();
-    let gas_y = gas_p1[7].as_f64().unwrap();
-    let gas_z = gas_p1[8].as_f64().unwrap();
-
-    let mut pinpoint_gas_probes = Vec::new();
-    for &sx in &[-1.0_f64, 1.0] {
-        for &sy in &[-1.0_f64, 1.0] {
-            for &sz in &[-1.0_f64, 1.0] {
-                pinpoint_gas_probes.push(PyRep::Tuple(vec![
-                    PyRep::Real(gas_x + sx * 2_000.0),
-                    PyRep::Real(gas_y + sy * 2_000.0),
-                    PyRep::Real(gas_z + sz * 2_000.0),
-                    PyRep::Real(0.5 * au),
-                ]));
-            }
-        }
-    }
-    let ls_pass2 = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "scanSvc",
-            None,
-            "RequestScans",
-            &[PyRep::List(pinpoint_gas_probes)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Low-sec pinpoint scan pass 2");
-    let PyRep::Rowset {
-        rows: ls_p2_rows, ..
-    } = ls_pass2
-    else {
-        panic!("Expected Rowset");
-    };
-    let gas_p2 = ls_p2_rows
-        .iter()
-        .find(|r| r[1].as_str() == Some(&gas_sig_id))
-        .unwrap();
-    assert_eq!(gas_p2[5].as_f64(), Some(1.0), "Gas site signature must resolve to 100%");
-    assert_eq!(gas_p2[4].as_str(), Some("Saintly Nebula"));
+    let (gas_sig_id, gas_pos) = ctx.db.with_snapshot(|s| s.cosmic_signatures[&lowsec_sys_id].iter().find(|g| g.sig_group == "Gas").map(|g| (g.signature_id.clone(), DVec3::from_array(g.position))).unwrap());
+    let ls_p2_rows = crate::common::probe_scan(&ctx, &mut sess, gas_pos, 0.25 * au).await;
+    assert_eq!(crate::common::scan_row_field(&ls_p2_rows, &gas_sig_id, "signalStrength").as_f64(), Some(1.0), "Gas site signature must resolve to 100%");
+    assert_eq!(crate::common::scan_row_field(&ls_p2_rows, &gas_sig_id, "type").as_str(), Some("Saintly Nebula"));
 
     let pre_gas_scan = ctx
         .dispatch_rpc(&mut sess, "scanSvc", None, "GetScanResults", &[], &kw, None)
@@ -784,45 +641,11 @@ async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
         })
         .await
         .unwrap();
-    let mut wh_wide_probes = Vec::new();
-    for &sx in &[-1.0_f64, 1.0] {
-        for &sy in &[-1.0_f64, 1.0] {
-            for &sz in &[-1.0_f64, 1.0] {
-                wh_wide_probes.push(PyRep::Tuple(vec![
-                    PyRep::Real(sx * 6.0 * au),
-                    PyRep::Real(sy * 4.0 * au),
-                    PyRep::Real(sz * 6.0 * au),
-                    PyRep::Real(12.0 * au),
-                ]));
-            }
-        }
-    }
-    let PyRep::Rowset { rows: wh_p1_rows, .. } = ctx
-        .dispatch_rpc(&mut sess, "scanSvc", None, "RequestScans", &[PyRep::List(wh_wide_probes)], &kw, None)
-        .await
-        .expect("W-space wide scan")
-    else {
-        panic!();
-    };
-    let wh_gas_p1 = wh_p1_rows.iter().find(|r| r[2].as_str() == Some("Gas")).expect("W-space Gas signature");
-    let wh_gas_sig_id = wh_gas_p1[1].as_str().unwrap().to_string();
-    let (wx, wy, wz) = (wh_gas_p1[6].as_f64().unwrap(), wh_gas_p1[7].as_f64().unwrap(), wh_gas_p1[8].as_f64().unwrap());
-    let mut wh_pinpoint = Vec::new();
-    for &sx in &[-1.0_f64, 1.0] {
-        for &sy in &[-1.0_f64, 1.0] {
-            for &sz in &[-1.0_f64, 1.0] {
-                wh_pinpoint.push(PyRep::Tuple(vec![
-                    PyRep::Real(wx + sx * 2_000.0),
-                    PyRep::Real(wy + sy * 2_000.0),
-                    PyRep::Real(wz + sz * 2_000.0),
-                    PyRep::Real(0.5 * au),
-                ]));
-            }
-        }
-    }
-    ctx.dispatch_rpc(&mut sess, "scanSvc", None, "RequestScans", &[PyRep::List(wh_pinpoint)], &kw, None)
-        .await
-        .expect("W-space pinpoint scan");
+    let wh_wide_rows = crate::common::probe_scan(&ctx, &mut sess, DVec3::ZERO, 12.0 * au).await;
+    assert!(!wh_wide_rows.is_empty(), "W-space wide scan returns signatures");
+    let (wh_gas_sig_id, wh_gas_pos) = ctx.db.with_snapshot(|s| s.cosmic_signatures[&wh_sys_id].iter().find(|g| g.sig_group == "Gas").map(|g| (g.signature_id.clone(), DVec3::from_array(g.position))).unwrap());
+    let wh_rows = crate::common::probe_scan(&ctx, &mut sess, wh_gas_pos, 0.25 * au).await;
+    assert_eq!(crate::common::scan_row_field(&wh_rows, &wh_gas_sig_id, "signalStrength").as_f64(), Some(1.0));
     let wh_pre_delay = ctx
         .dispatch_rpc(&mut sess, "scanSvc", None, "GetScanResults", &[], &kw, None)
         .await

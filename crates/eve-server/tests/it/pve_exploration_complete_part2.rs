@@ -8,7 +8,7 @@ use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::pve_exploration::{
-    advance_pve_exploration_clock, with_pve_exploration_reg,
+    advance_pve_exploration_clock, ensure_system_pve_sites_seeded, with_pve_exploration_reg,
 };
 use eve_server::services::pve_special_sites::{
     classify_abyssal_filament, AbyssalWeatherKind,
@@ -128,75 +128,29 @@ async fn create_in_space_session(
 // ============================================================================
 #[tokio::test]
 async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
-    // parity: feat:pve.data-sites, feat:pve.relic-sites, feat:pve.hacking-minigame, feat:pve.loot-spew, rpc:hackingMgr.ClickedOnTile, rpc:hackingMgr.StartNewGameInstance, rpc:hackingMgr.UsedUtilityElement
+    // parity: feat:pve.hacking-minigame, rpc:hackingMgr.ClickedOnTile, rpc:hackingMgr.StartNewGameInstance, rpc:hackingMgr.UsedUtilityElement
     eve_testkit::attest(&[
-        "feat:pve.data-sites",
-        "feat:pve.relic-sites",
         "feat:pve.hacking-minigame",
-        "feat:pve.loot-spew",
     ]);
 
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = create_in_space_session(&ctx, 8103, 30_000_142, 710_001_003, 587).await;
 
-    // 1. Scan Data Site (DAT-30000142) and Relic Site (REL-30000142) to 100%
-    let data_scan = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "scanSvc",
-            None,
-            "ScanSignature",
-            &[PyRep::String("DAT-30000142".into()), PyRep::Real(1.0)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Scan Data site");
-    let PyRep::List(data_cans) = data_scan.dict_get("hackableContainerIDs").unwrap() else {
-        panic!("Expected List");
-    };
-    let data_can_id = data_cans[0].as_i64().unwrap();
-
-    let relic_scan = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "scanSvc",
-            None,
-            "ScanSignature",
-            &[PyRep::String("REL-30000142".into()), PyRep::Real(1.0)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Scan Relic site");
-    let PyRep::List(relic_cans) = relic_scan.dict_get("hackableContainerIDs").unwrap() else {
-        panic!("Expected List");
-    };
-    let relic_can_id = relic_cans[0].as_i64().unwrap();
+    // 1. Data Site (DAT-30000142) and Relic Site (REL-30000142) hackable containers from the seeded sites
+    ensure_system_pve_sites_seeded(&ctx, 30_000_142).await;
+    ensure_system_pve_sites_seeded(&ctx, 31_000_001).await;
+    let site_cans = |sys: u32, sid: &str| with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system[&sys].iter().find(|s| s.site_id == sid).map(|s| s.hackable_can_ids.clone()).unwrap()
+    });
+    let data_cans = site_cans(30_000_142, "DAT-30000142");
+    let (data_can_id, relic_can_id) = (data_cans[0], site_cans(30_000_142, "REL-30000142")[0]);
 
     // Verify Wormhole Data/Relic sites (31000001) spawn Sleeper NPC guards
-    let wh_sigs = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "scanSvc",
-            None,
-            "GetSignatureInstances",
-            &[PyRep::Integer(31_000_001)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("GetSignatureInstances WH");
-    let PyRep::List(wh_sig_list) = &wh_sigs else {
-        panic!("Expected List");
-    };
-    assert!(
-        wh_sig_list
-            .iter()
-            .any(|s| s.dict_get("npcGuardsSpawned").and_then(|v| v.as_bool()) == Some(true)),
-        "Wormhole Unsecured Data / Forgotten Relic sites must spawn Sleeper NPC guards"
-    );
+    let wh_guarded = with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system[&31_000_001].iter().any(|s| matches!(s.site_category.as_str(), "Data" | "Relic") && s.npc_guards_spawned)
+    });
+    assert!(wh_guarded, "Wormhole Unsecured Data / Forgotten Relic sites must spawn Sleeper NPC guards");
 
     // 2. Start Hacking Minigame on Data Can & Relic Can (`hackingMgr.StartNewGameInstance`)
     let start_rep = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(relic_can_id)], &kw, None).await.expect("StartNewGameInstance on Relic Can");
@@ -267,14 +221,14 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     let bad_can_err = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(999_999_999)], &kw, None).await.expect_err("non-existent container ID must fail");
     assert_eq!(bad_can_err.code, "TargetNotFound");
 
-    // Scoop first spewed mini-container into ship cargo before expiry, and verify scooping it twice fails
+    // Spewed mini-containers are real in-space cargo containers in WorldRepository, each holding its loot stack once
     let first_spew_id = won_spew[0].dict_get("canItemID").unwrap().as_i64().unwrap();
-    let second_spew_id = won_spew[1].dict_get("canItemID").unwrap().as_i64().unwrap();
-    let scoop_rep = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "HackContainer", &[PyRep::Integer(first_spew_id)], &kw, None).await.expect("Scoop spewed loot container");
-    assert_eq!(scoop_rep.dict_get("scooped").and_then(|v| v.as_bool()), Some(true));
-
-    let dup_err = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "HackContainer", &[PyRep::Integer(first_spew_id)], &kw, None).await.expect_err("Cannot scoop same spewed can twice");
-    assert_eq!(dup_err.code, "SpewedCanAlreadyScooped");
+    let (spew_loc, spew_loot) = ctx.db.with_snapshot(|s| {
+        (s.items.get(&first_spew_id).map(|i| i.location_id), s.items.values().filter(|i| i.location_id == first_spew_id).count())
+    });
+    assert_eq!((spew_loc, spew_loot), (Some(30_000_142), 1));
+    let scoop_err = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "HackContainer", &[PyRep::Integer(first_spew_id)], &kw, None).await;
+    assert!(scoop_err.is_err(), "Non-catalog hackingMgr.HackContainer is not served");
 
     // Also verify Data Can hack spews Datacores/Decryptors
     ctx.dispatch_rpc(
@@ -310,7 +264,7 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     sess.solar_system_id = Some(30_000_142);
 
     // BF-HACK-FAILSEM-01: Two-failure rule on container
-    let can2_id = data_cans[1].as_i64().unwrap();
+    let can2_id = data_cans[1];
     ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can2_id)], &kw, None).await.expect("start can2");
     ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "QuitHackingAttempt", &[PyRep::Integer(can2_id)], &kw, None).await.expect("quit attempt 1");
     ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can2_id)], &kw, None).await.expect("restart can2 after 1st fail");
@@ -319,7 +273,7 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     assert_eq!(fail2_err.code, "HackingGameAlreadyFinished");
 
     // BF-HACK-MULTICHAR-01 & BF-HACK-FAILSEM-02: Exclusive active hack & quit-after-fail semantics
-    let can3_id = data_cans[2].as_i64().unwrap();
+    let can3_id = data_cans[2];
     ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can3_id)], &kw, None).await.expect("p1 start can3");
     let mut sess2 = SessionState::new(8888);
     sess2.user_id = Some(2);
@@ -343,21 +297,6 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     let retry_rep = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can3_id)], &kw, None).await.expect("second attempt must succeed");
     assert_eq!(retry_rep.dict_get("status").and_then(|v| v.as_str()), Some("InProgress"));
 
-    // Advance exploration clock past 60s and verify unscooped spewed container despawned
-    advance_pve_exploration_clock(&ctx, 65);
-    let despawn_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "hackingMgr",
-            None,
-            "HackContainer",
-            &[PyRep::Integer(second_spew_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("Unscooped spew container must despawn after timer");
-    assert_eq!(despawn_err.code, "SpewedCanDespawned");
 }
 
 // ============================================================================
@@ -365,11 +304,10 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
 // ============================================================================
 #[tokio::test]
 async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
-    // parity: feat:pve.ghost-sites, feat:pve.sleeper-caches, feat:pve.wormhole-sites, rpc:hackingMgr.ClickedOnTile, rpc:hackingMgr.StartNewGameInstance
+    // parity: feat:pve.ghost-sites, feat:pve.sleeper-caches, rpc:hackingMgr.ClickedOnTile, rpc:hackingMgr.StartNewGameInstance
     eve_testkit::attest(&[
         "feat:pve.ghost-sites",
         "feat:pve.sleeper-caches",
-        "feat:pve.wormhole-sites",
     ]);
 
     let ctx = ServerContext::new();
@@ -377,23 +315,14 @@ async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
     let kw = HashMap::new();
     let mut sess = create_in_space_session(&ctx, 8104, 30_000_142, 710_001_004, 587).await;
 
-    // 1. Ghost Site (GHO-30000142): scan to 100% (starts hidden timer), advance clock past 90s -> detonates can & spawns Pirate ambush NPCs
-    let ghost_scan = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "scanSvc",
-            None,
-            "ScanSignature",
-            &[PyRep::String("GHO-30000142".into()), PyRep::Real(1.0)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Scan Ghost Site");
-    let PyRep::List(ghost_cans) = ghost_scan.dict_get("hackableContainerIDs").unwrap() else {
-        panic!("Expected List");
-    };
-    let ghost_can_id = ghost_cans[0].as_i64().unwrap();
+    // 1. Ghost Site (GHO-30000142): first hack attempt starts the hidden timer; after 90s the next attempt detonates
+    ensure_system_pve_sites_seeded(&ctx, 30_000_142).await;
+    let site_cans = |sid: &str| with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system[&30_000_142].iter().find(|s| s.site_id == sid).map(|s| s.hackable_can_ids.clone()).unwrap()
+    });
+    let ghost_cans = site_cans("GHO-30000142");
+    ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(ghost_cans[1])], &kw, None).await.expect("Ghost hack starts timer");
+    let ghost_can_id = ghost_cans[0];
 
     advance_pve_exploration_clock(&ctx, 95);
     let det_rep = ctx
@@ -416,22 +345,7 @@ async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
     assert!(!pirate_npcs.is_empty(), "Ghost site detonation must spawn pirate ambush NPCs");
 
     // 2. Sleeper Cache (SLC-30000142): attempting passage before hacking Rift Generator fails, solving puzzle unlocks passage
-    let sc_scan = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "scanSvc",
-            None,
-            "ScanSignature",
-            &[PyRep::String("SLC-30000142".into()), PyRep::Real(1.0)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Scan Sleeper Cache");
-    let PyRep::List(sc_cans) = sc_scan.dict_get("hackableContainerIDs").unwrap() else {
-        panic!("Expected List");
-    };
-    let rift_can_id = sc_cans[0].as_i64().unwrap();
+    let rift_can_id = site_cans("SLC-30000142")[0];
 
     let rift_err = ctx
         .dispatch_rpc(

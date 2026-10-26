@@ -63,6 +63,7 @@ pub mod pve_dungeon_cache;
 pub mod pve_expeditions;
 pub mod pve_exploration;
 pub mod pve_exploration_seeding;
+pub mod pve_exploration_sites;
 pub mod pve_hacking_sites;
 pub mod pve_homefront_sites;
 pub mod pve_incursion_sites;

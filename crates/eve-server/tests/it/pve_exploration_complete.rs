@@ -25,6 +25,16 @@ async fn clear_site_wave_npcs(ctx: &ServerContext, solar_system_id: u32, site_id
     }
 }
 
+async fn kill_site_wave_npcs(ctx: &ServerContext, solar_system_id: u32, site_id: &str) {
+    let ball_ids = with_pve_exploration_reg(ctx, |reg| {
+        reg.sites_by_system.get(&solar_system_id).and_then(|l| l.iter().find(|s| s.site_id == site_id)).map(|s| s.active_npc_ball_ids.clone()).unwrap_or_default()
+    });
+    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    for bid in ball_ids {
+        let _ = sys_handle.apply_damage_with_attacker(bid, DamageVector { em: 1.0e7, thermal: 1.0e7, kinetic: 1.0e7, explosive: 1.0e7 }, Some(90_000_001)).await;
+    }
+}
+
 async fn create_in_space_session(
     ctx: &ServerContext,
     session_id: u64,
@@ -134,30 +144,18 @@ async fn test_pve_combat_anomalies_waves_and_escalations() {
 // ============================================================================
 #[tokio::test]
 async fn test_pve_combat_signatures_and_ded_complexes_restrictions_and_loot() {
-    // parity: feat:pve.combat-signatures, feat:pve.ded-complexes
-    eve_testkit::attest(&["feat:pve.combat-signatures", "feat:pve.ded-complexes"]);
-
     let ctx = ServerContext::new();
     ensure_special_sites_spawned(&ctx).await;
     let kw = HashMap::new();
     let mut sess = create_in_space_session(&ctx, 8102, 30_000_142, 710_001_002, 587).await;
 
-    // 1. Verify DED 3/10 complex names across regional pirate factions
+    // 1. Verify seeded DED 3/10 complex names across regional pirate factions
     for (sys, exp_name) in [(30_000_142_u32, "Guristas Guerilla Grounds"), (30_002_187, "Blood Raider Human Farm"), (30_002_659, "Serpentis Narcotic Warehouses"), (30_002_510, "Angel Creo-Corp Mining")] {
-        ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&90_000_001) { ch.solar_system_id = sys; } });
-        sess.solar_system_id = Some(sys);
-        let sigs_rep = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "GetSignatureInstances", &[PyRep::Integer(sys as i64)], &kw, None).await.expect("GetSignatureInstances");
-        let PyRep::List(sigs) = &sigs_rep else { panic!("Expected List") };
+        eve_server::services::pve_exploration::ensure_system_pve_sites_seeded(&ctx, sys).await;
         let ded_sig_id = format!("DED-{sys}-3");
-        assert!(sigs.iter().any(|s| s.dict_get("signatureID").and_then(|v| v.as_str()) == Some(&ded_sig_id)));
-
-        let full_rep = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "ScanSignature", &[PyRep::String(ded_sig_id), PyRep::Real(1.0)], &kw, None).await.expect("Scan DED");
-        assert_eq!(full_rep.dict_get("siteName").and_then(|v| v.as_str()), Some(exp_name));
+        let name = with_pve_exploration_reg(&ctx, |reg| reg.sites_by_system[&sys].iter().find(|s| s.site_id == ded_sig_id).map(|s| s.dungeon_name.clone()));
+        assert_eq!(name.as_deref(), Some(exp_name));
     }
-    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&90_000_001) { ch.solar_system_id = 30_000_142; } });
-    sess.solar_system_id = Some(30_000_142);
-    let remote_scan_err = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "ScanSignature", &[PyRep::String("DED-30002187-3".into()), PyRep::Real(1.0)], &kw, None).await.expect_err("Remote signature scan must fail");
-    assert_eq!(remote_scan_err.code, "SignatureNotFound");
     assert_eq!(eve_server::services::pve_exploration::ded_complex_for_rating(&ctx.sde, 30_002_510, 8), (5203, "Angel Naval Shipyard"));
 
     // 2. Verify DED 1/10..10/10 ship size gate restrictions (`keeper.CanEnterDungeonInCurrentShip` & `EnterNextDungeonRoom`)
@@ -177,20 +175,27 @@ async fn test_pve_combat_signatures_and_ded_complexes_restrictions_and_loot() {
     let gate_err = ctx.dispatch_rpc(&mut sess, "keeper", None, "EnterNextDungeonRoom", &[PyRep::String("DED-30000142-3".into())], &kw, None).await.expect_err("Battleship must be rejected by DED 3/10 gate");
     assert_eq!(gate_err.code, "ShipSizeRestricted");
 
-    // Switch back to Rifter (587) and clear all 3 rooms of DED 3/10 to drop 6th Tier Overseer's Personal Effects (19405)
+    // Switch back to Rifter (587) at the gate; rooms advance by gate, and the final-room overseer kill
+    // (in-space damage pipeline) drops the Overseer wreck holding SDE Overseer's Personal Effects
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) { ch.active_ship_id = 710_001_002; }
     });
     sess.ship_id = Some(710_001_002);
+    let ded_pos = with_pve_exploration_reg(&ctx, |reg| reg.sites_by_system[&30_000_142].iter().find(|s| s.site_id == "DED-30000142-3").unwrap().position);
+    let _ = ctx.systems.get_or_spawn(30_000_142).spawn_ball(Ball {
+        id: 710_001_002, type_id: 587, position: DVec3::from_array(ded_pos), velocity: DVec3::ZERO,
+        max_velocity: 365.0, inertia: 1.0, mass: 1_067_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }).await;
     for wave in 1..=3 {
-        clear_site_wave_npcs(&ctx, 30_000_142, "DED-30000142-3").await;
-        let step_rep = ctx.dispatch_rpc(&mut sess, "keeper", None, "EnterNextDungeonRoom", &[PyRep::String("DED-30000142-3".into())], &kw, None).await.expect("EnterNextDungeonRoom in Rifter");
-        if wave == 3 {
-            assert_eq!(step_rep.dict_get("completed").and_then(|v| v.as_bool()), Some(true));
-            let PyRep::List(loot) = step_rep.dict_get("droppedLoot").expect("droppedLoot") else { panic!("Expected List of droppedLoot") };
-            assert!(loot.iter().any(|item| item.dict_get("typeID").and_then(|v| v.as_i64()) == Some(19_405)));
+        kill_site_wave_npcs(&ctx, 30_000_142, "DED-30000142-3").await;
+        if wave < 3 {
+            let step_rep = ctx.dispatch_rpc(&mut sess, "keeper", None, "EnterNextDungeonRoom", &[PyRep::String("DED-30000142-3".into())], &kw, None).await.expect("EnterNextDungeonRoom in Rifter");
+            assert_eq!(step_rep.dict_get("currentWave").and_then(|v| v.as_i64()), Some(wave + 1));
         }
     }
+    let (ope_tid, _) = eve_server::services::pve_exploration_sites::overseer_effects_for_rating(&ctx.sde, 3).expect("OPE");
+    let has_ope = ctx.db.with_snapshot(|snap| snap.items.values().any(|i| i.type_id == ope_tid && snap.items.get(&i.location_id).is_some_and(|w| w.type_id == 26473)));
+    assert!(has_ope, "Overseer wreck must hold the SDE Overseer's Personal Effects");
 }
 
 

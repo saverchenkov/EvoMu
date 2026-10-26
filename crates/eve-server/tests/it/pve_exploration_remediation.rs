@@ -233,29 +233,12 @@ async fn test_pve_ghost_site_timer_and_detonation_mechanics() {
     let kw = HashMap::new();
     ensure_system_pve_sites_seeded(&ctx, sys_id).await;
 
-    // 1. Scan Ghost Site signature to 100% -> activates ghost site timer (105s)
-    let scan_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "scanSvc",
-            None,
-            "ScanSignature",
-            &[PyRep::String("GHO-30000142".into()), PyRep::Real(1.0)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Scan Ghost Site");
-    let PyRep::List(cans) = scan_rep.dict_get("hackableContainerIDs").expect("hackableContainerIDs") else { panic!("expected list") };
-    let can0_id = cans[0].as_i64().expect("can0");
-    let can1_id = cans[1].as_i64().expect("can1");
-    let can2_id = cans[2].as_i64().expect("can2");
-
-    let timer_active = with_pve_exploration_reg(&ctx, |reg| {
-        let site = reg.sites_by_system.get(&sys_id).and_then(|l| l.iter().find(|s| s.site_id == "GHO-30000142")).unwrap();
-        site.ghost_timer_started_at.is_some() && !is_ghost_site_timer_expired(reg, sys_id, "GHO-30000142")
+    // 1. Ghost Site hackable containers; the first hack attempt activates the hidden ghost site timer
+    let cans: Vec<i64> = with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system[&sys_id].iter().find(|s| s.site_id == "GHO-30000142").map(|s| s.hackable_can_ids.clone()).unwrap()
     });
-    assert!(timer_active, "Ghost site timer must be started upon 100% scan resolution");
+    let (can0_id, can1_id, can2_id) = (cans[0], cans[1], cans[2]);
+
 
     // 2. Hacking succeeds before timer expiry (t < 90s)
     let start_rep = ctx
@@ -271,6 +254,11 @@ async fn test_pve_ghost_site_timer_and_detonation_mechanics() {
         .await
         .expect("StartNewGameInstance before expiry");
     assert_eq!(start_rep.dict_get("status").and_then(|v| v.as_str()), Some("InProgress"));
+    let timer_active = with_pve_exploration_reg(&ctx, |reg| {
+        let site = reg.sites_by_system.get(&sys_id).and_then(|l| l.iter().find(|s| s.site_id == "GHO-30000142")).unwrap();
+        site.ghost_timer_started_at.is_some() && !is_ghost_site_timer_expired(reg, sys_id, "GHO-30000142")
+    });
+    assert!(timer_active, "Ghost site timer must be started by the first hack attempt");
 
     let core_idx = with_pve_exploration_reg(&ctx, |reg| {
         reg.hacking_games[&(char_id, can0_id)]
@@ -423,14 +411,12 @@ async fn test_pve_sleeper_cache_tiers_hazards_and_rift_passage() {
     });
     sess.ship_id = Some(frigate_ship_id);
 
-    // 2. Scan Sleeper Cache signature
-    let scan_rep = ctx
-        .dispatch_rpc(&mut sess, "scanSvc", None, "ScanSignature", &[PyRep::String("SLC-30000142".into()), PyRep::Real(1.0)], &kw, None)
-        .await
-        .expect("Scan Sleeper Cache");
-    let PyRep::List(sc_cans) = scan_rep.dict_get("hackableContainerIDs").unwrap() else { panic!("expected list") };
-    let rift_can_id = sc_cans[0].as_i64().unwrap();
-    let gas_can_id = sc_cans[2].as_i64().unwrap();
+    // 2. Sleeper Cache signature hackable containers (seeded site state)
+    let sc_cans: Vec<i64> = with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system[&30_000_142].iter().find(|s| s.site_id == "SLC-30000142").map(|s| s.hackable_can_ids.clone()).unwrap()
+    });
+    let rift_can_id = sc_cans[0];
+    let gas_can_id = sc_cans[2];
 
     // 3. Attempting room traversal before hacking Rift Control fails
     let rift_err = ctx

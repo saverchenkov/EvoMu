@@ -12,10 +12,9 @@ use crate::services::pve_exploration::{
     with_pve_exploration_reg, HackingGameSession, HackingNodeKind, HackingTileState,
     HackingUtilityKind, PveExplorationRegistry, SpewedLootCan,
 };
-use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use eve_sde::{SolarSystemId, TypeId};
+use eve_sde::SolarSystemId;
 use std::collections::HashMap;
 
 type ItemId = i64;
@@ -110,39 +109,15 @@ pub fn spawn_loot_spew_for_container(
     is_relic: bool,
     center: [f64; 3],
 ) -> Vec<SpewedLootCan> {
-    let true_sec = ctx
-        .sde
-        .solar_systems
-        .get(&solar_system_id)
-        .map(|s| s.security_status)
-        .unwrap_or(0.5);
-    let sec_mult: i64 = if solar_system_id >= 31_000_000 || true_sec <= 0.0 {
-        4
-    } else if true_sec < 0.5 {
-        2
-    } else {
-        1
-    };
-
-    let loot_table: &[(TypeId, i64)] = if is_relic {
-        &[
-            (25_595, 6 * sec_mult), // Alloyed Tritanium Bar
-            (25_605, 4 * sec_mult), // Armor Plates
-            (25_619, 2 * sec_mult), // Intact Armor Plates
-            (31_056, 1),            // Small Core Defense Field Extender II Blueprint
-        ]
-    } else {
-        &[
-            (20_171, 3 * sec_mult), // Datacore - Hydromagnetic Physics
-            (20_410, 3 * sec_mult), // Datacore - Gallentean Starship Engineering
-            (34_201, sec_mult),     // Accelerant Decryptor
-            (34_203, sec_mult),     // Augmentation Decryptor
-        ]
-    };
+    let loot_items = crate::services::pve_exploration_sites::generate_exploration_container_loot(
+        &ctx.sde,
+        solar_system_id,
+        is_relic,
+    );
 
     let now = now_sec(reg);
-    let mut cans = Vec::with_capacity(loot_table.len());
-    for (idx, &(loot_tid, loot_qty)) in loot_table.iter().enumerate() {
+    let mut cans = Vec::with_capacity(loot_items.len());
+    for (idx, (loot_tid, loot_qty, _)) in loot_items.into_iter().enumerate() {
         let can_id = 1_890_000_000 + next_pve_seq(reg);
         let can_pos = [
             center[0] + ((idx as f64) - 1.5) * 800.0,
@@ -482,6 +457,13 @@ pub async fn handle_pve_hacking(
                     let count: i64 = s.service_state_blobs.get(&k).and_then(|v| v.parse().ok()).unwrap_or(0);
                     s.service_state_blobs.insert(k, (count + 1).to_string());
                 });
+                // Loot exists only in the spewed cans (real in-space containers); the parent container stays empty.
+                crate::services::pve_exploration_sites::materialize_spewed_cans_core(
+                    &ctx.db,
+                    &ctx.systems,
+                    char_id,
+                    &spewed_cans,
+                ).await;
             }
 
             session.push_notification(
@@ -669,79 +651,6 @@ pub async fn handle_pve_hacking(
                 }
             });
             Some(Ok(res))
-        }
-
-        // parity: feat:pve.loot-spew
-        ("hackingMgr", "HackContainer") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let can_item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let caller_sys = session.solar_system_id;
-            let scoop_res = with_pve_exploration_reg(ctx, |reg| {
-                let now = now_sec(reg);
-                let Some(can) = reg.spewed_cans.get_mut(&can_item_id) else {
-                    return Err(BridgeRpcError {
-                        code: "SpewedCanNotFound".into(),
-                        message: format!("Spewed mini-container {can_item_id} not found"),
-                    });
-                };
-                if caller_sys != Some(can.solar_system_id) {
-                    return Err(BridgeRpcError {
-                        code: "NotInSiteSystem".into(),
-                        message: "Caller must be in the container's solar system to scoop spewed loot".into(),
-                    });
-                }
-                if can.scooped {
-                    return Err(BridgeRpcError {
-                        code: "SpewedCanAlreadyScooped".into(),
-                        message: format!("Spewed mini-container {can_item_id} has already been scooped"),
-                    });
-                }
-                if now >= can.despawn_at_sec {
-                    reg.spewed_cans.remove(&can_item_id);
-                    return Err(BridgeRpcError {
-                        code: "SpewedCanDespawned".into(),
-                        message: format!(
-                            "Spewed mini-container {can_item_id} despawned before being scooped"
-                        ),
-                    });
-                }
-                can.scooped = true;
-                let loot_tid = can.loot_type_id;
-                let loot_qty = can.loot_quantity;
-                let new_item_id = 1_895_000_000 + next_pve_seq(reg);
-                Ok((new_item_id, loot_tid, loot_qty))
-            });
-            let (new_item_id, loot_tid, loot_qty) = match scoop_res {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-
-            let ship_id = session.ship_id.unwrap_or(char_id);
-            ctx.db.with_mut_snapshot(|snap| {
-                snap.items.insert(
-                    new_item_id,
-                    InventoryItemRecord {
-                        item_id: new_item_id,
-                        type_id: loot_tid,
-                        owner_id: char_id,
-                        location_id: ship_id,
-                        flag: InventoryFlag::Cargo,
-                        quantity: loot_qty as i32,
-                        singleton: false,
-                        ..Default::default()
-                    },
-                );
-            });
-            Some(Ok(PyRep::keyval([
-                ("canItemID", PyRep::Integer(can_item_id)),
-                ("scoopedItemID", PyRep::Integer(new_item_id)),
-                ("typeID", PyRep::Integer(loot_tid as i64)),
-                ("quantity", PyRep::Integer(loot_qty)),
-                ("scooped", PyRep::Bool(true)),
-            ])))
         }
 
         _ => None,
