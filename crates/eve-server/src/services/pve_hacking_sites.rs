@@ -360,37 +360,27 @@ pub async fn handle_pve_hacking(
                 Ok((site_id, is_relic, is_ghost, is_sleeper_cache, site_pos))
             });
 
-            let (site_id, is_relic, is_ghost, is_sleeper_cache, site_pos) = match site_res {
+            let (site_id, is_relic, is_ghost, is_sleeper_cache, _site_pos) = match site_res {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
 
-            let (virus_coh, virus_str, utility_slots, analyzer_max_range) =
-                match resolve_fitted_analyzer_virus_stats(ctx, session, char_id, is_relic) {
-                    Ok(v) => v,
-                    Err(e) => return Some(Err(e)),
-                };
-
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            if let Some(ship_id) = session.ship_id {
-                if let Ok(Some((_, sb))) = sys_handle.get_ball_snapshot(ship_id).await {
-                    let can_pos = if let Ok(Some((_, cb))) = sys_handle.get_ball_snapshot(container_id).await {
-                        cb.position
-                    } else if let Some(pos) = ctx.db.with_snapshot(|s| s.item_positions.get(&container_id).copied()) {
-                        glam::DVec3::from_array(pos)
-                    } else {
-                        glam::DVec3::from_array(site_pos)
-                    };
-                    let can_radius = sys_handle.get_ball_snapshot(container_id).await.ok().flatten().map(|(_, b)| b.radius).unwrap_or(0.0);
-                    let dist = (sb.position.distance(can_pos) - sb.radius - can_radius).max(0.0);
-                    if dist > analyzer_max_range {
-                        return Some(Err(BridgeRpcError {
-                            code: "OutOfRange".into(),
-                            message: format!("Target container is {dist:.1} m away (analyzer max range is {analyzer_max_range:.1} m)"),
-                        }));
-                    }
-                }
+            // BF-PVE-HACK-PROXIMITY-FAILOPEN-04: Explicitly reject hacking while docked or without a ship in space
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipDocked".into(),
+                    message: "Cannot initiate hacking minigame while docked".into(),
+                }));
             }
+            let ship_id = match session.ship_id {
+                Some(sid) if sid > 0 => sid,
+                _ => {
+                    return Some(Err(BridgeRpcError {
+                        code: "NoActiveShip".into(),
+                        message: "Session has no active ship".into(),
+                    }));
+                }
+            };
 
             let ghost_expired = with_pve_exploration_reg(ctx, |reg| {
                 let now = now_sec(reg);
@@ -422,6 +412,33 @@ pub async fn handle_pve_hacking(
                         PyRep::List(npcs.into_iter().map(PyRep::Integer).collect()),
                     ),
                 ])));
+            }
+
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let sb = match sys_handle.get_ball_snapshot(ship_id).await {
+                Ok(Some((_, ball))) => ball,
+                _ => {
+                    return Some(Err(BridgeRpcError {
+                        code: "ShipNotInSpace".into(),
+                        message: format!("Ship {ship_id} is not spawned in space in system {sys_id}"),
+                    }));
+                }
+            };
+
+            let (virus_coh, virus_str, utility_slots, analyzer_max_range) =
+                match resolve_fitted_analyzer_virus_stats(ctx, session, char_id, is_relic) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+
+            if let Ok(Some((_, cb))) = sys_handle.get_ball_snapshot(container_id).await {
+                let dist = (sb.position.distance(cb.position) - sb.radius - cb.radius).max(0.0);
+                if dist > analyzer_max_range {
+                    return Some(Err(BridgeRpcError {
+                        code: "OutOfRange".into(),
+                        message: format!("Target container is {dist:.1} m away (analyzer max range is {analyzer_max_range:.1} m)"),
+                    }));
+                }
             }
 
             let game = with_pve_exploration_reg(ctx, |reg| {

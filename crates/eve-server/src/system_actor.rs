@@ -780,7 +780,17 @@ impl SystemRegistry {
                                 let _ = reply.send((ballpark.current_tick, events, pyrep));
                             }
                             SystemCommand::ApplyDamage { ball_id, damage, reply } => {
-                                if let Some((applied, destroyed, ball_opt)) = ballpark.apply_damage_to_ball(ball_id, damage) {
+                                let is_invuln_stronghold = db_opt
+                                    .as_ref()
+                                    .map(|db| crate::services::insurgency_services::is_stronghold_invulnerable_in_db(db, solar_system_id, ball_id))
+                                    .unwrap_or(false);
+                                if is_invuln_stronghold {
+                                    if let Some(b) = ballpark.balls.get(&ball_id).cloned() {
+                                        let _ = reply.send(Some((0.0, false, b)));
+                                    } else {
+                                        let _ = reply.send(None);
+                                    }
+                                } else if let Some((applied, destroyed, ball_opt)) = ballpark.apply_damage_to_ball(ball_id, damage) {
                                     if applied > 0.0 || damage.total() > 0.0 {
                                         let entry = rah_incoming_damage.entry(ball_id).or_insert([0.0; 4]);
                                         entry[0] += damage.em;

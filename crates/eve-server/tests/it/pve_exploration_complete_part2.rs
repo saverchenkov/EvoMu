@@ -120,19 +120,25 @@ async fn create_in_space_session(
     });
 
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    let mut cs = ctx.build_type_combat_state(ship_type_id);
+    cs.shield_hp = 50_000.0;
+    cs.max_shield_hp = 50_000.0;
     let _ = sys_handle
-        .spawn_ball(Ball {
-            id: ship_id,
-            type_id: ship_type_id,
-            position: DVec3::ZERO,
-            velocity: DVec3::ZERO,
-            max_velocity: 365.0,
-            inertia: 1.0,
-            mass: 1_067_000.0,
-            radius: 40.0,
-            speed_fraction: 0.0,
-            mode: MovementMode::Stop,
-        })
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: ship_type_id,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 365.0,
+                inertia: 1.0,
+                mass: 1_067_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            cs,
+        )
         .await;
 
     sess

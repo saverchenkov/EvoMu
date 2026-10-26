@@ -773,7 +773,10 @@ pub async fn step_system_entropic_spools(
             // Apply scaled damage to target
             let scaled_dmg = shot_dmg.scaled(state.current_multiplier);
             let (applied_dmg, destroyed) = if scaled_dmg.total() > 0.0 {
-                if let Ok(Some((app, dest, _))) = sys_handle
+                let is_invuln = crate::services::insurgency_services::is_insurgency_stronghold_invulnerable(ctx, solar_system_id, state.target_id);
+                if is_invuln {
+                    (0.0, false)
+                } else if let Ok(Some((app, dest, _))) = sys_handle
                     .apply_damage_with_attacker(state.target_id, scaled_dmg, Some(state.attacker_char_id))
                     .await
                 {

@@ -1056,6 +1056,7 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
                 mgr.step_ai_sync(ctx, sys_id, tick, 1.0);
             }
         }
+        let _ = crate::services::insurgency_services::step_system_insurgency_tick(ctx, sys_id).await;
         let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::step_wreck_and_jetcan_decay(
             ctx, sys_id, now_unix,
         )

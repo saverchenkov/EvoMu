@@ -149,6 +149,29 @@ async fn test_pve_hacking_minigame_complete() {
             .expect("seeded exploration site");
         (site.hackable_can_ids[0], site.position)
     });
+    let jita_sys_handle = ctx.systems.get_or_spawn(SYS_JITA);
+    let _ = jita_sys_handle.spawn_ball(Ball {
+        id: can_id, type_id: 28359, position: DVec3::from_array(site_pos),
+        velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1000.0, radius: 20.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }).await;
+
+    // BF-PVE-HACK-PROXIMITY-FAILOPEN-04: Reject hacking while docked, without ship, or ship not in space
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&PILOT_HACKER).unwrap().station_id = Some(60_003_760); });
+    let docked_err = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can_id)], &kw, None).await.unwrap_err();
+    assert_eq!(docked_err.code, "ShipDocked");
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&PILOT_HACKER).unwrap().station_id = None; });
+
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&PILOT_HACKER).unwrap().active_ship_id = 0; });
+    sess.ship_id = None;
+    let no_ship_err = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can_id)], &kw, None).await.unwrap_err();
+    assert_eq!(no_ship_err.code, "NoActiveShip");
+
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&PILOT_HACKER).unwrap().active_ship_id = 999_888_777; });
+    sess.ship_id = Some(999_888_777);
+    let no_ball_err = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can_id)], &kw, None).await.unwrap_err();
+    assert_eq!(no_ball_err.code, "ShipNotInSpace");
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&PILOT_HACKER).unwrap().active_ship_id = ship_id; });
+    sess.ship_id = Some(ship_id);
 
     // BF-PVE-HACK-PROXIMITY-01: Out-of-range rejection when ship is at [0,0,0] (>40,000 km from site)
     let range_err = ctx
@@ -165,7 +188,6 @@ async fn test_pve_hacking_minigame_complete() {
     assert_eq!(no_target_err.code, "TargetNotFound");
 
     // Move pilot ship to within analyzer maxRange of container
-    let jita_sys_handle = ctx.systems.get_or_spawn(SYS_JITA);
     let close_pos = DVec3::from_array(site_pos) + DVec3::new(500.0, 0.0, 0.0);
     let _ = jita_sys_handle.set_ball_position(ship_id, close_pos).await;
 
@@ -483,6 +505,15 @@ async fn test_pve_insurgency_campaigns_and_strongholds_complete() {
     ).await;
     assert!(early_destroy.is_none(), "Stronghold cannot be destroyed during Forecasting phase");
 
+    // BF-PVE-STRONGHOLD-INVULN-02: Combat damage during Forecasting phase is zeroed and ball survives
+    let sh_cs_before = fob_handle.get_combat_state(stronghold_id).await.unwrap().expect("CS before damage");
+    let test_dmg = eve_destiny::DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 };
+    let (dmg_app, dmg_dest, _) = fob_handle.apply_damage_with_attacker(stronghold_id, test_dmg, Some(PILOT_INSURGENT)).await.unwrap().expect("damage response");
+    assert_eq!(dmg_app, 0.0, "Damage to stronghold during Forecasting must be 0");
+    assert!(!dmg_dest, "Stronghold survives damage during Forecasting");
+    let sh_cs_after = fob_handle.get_combat_state(stronghold_id).await.unwrap().expect("CS after damage");
+    assert_eq!(sh_cs_after.structure_hp, sh_cs_before.structure_hp);
+
     // Transition campaign to Active phase
     let now = ctx.now_unix();
     with_insurgency_runtime(&ctx, |rt| {
@@ -555,10 +586,9 @@ async fn test_pve_insurgency_campaigns_and_strongholds_complete() {
         .await
         .expect("Join Guristas");
 
-    // Advance tick and trigger capture pulse via step_system_insurgency_capture_tick
+    // BF-PVE-INSURGENCY-CAPTURE-UNWIRED-01: Advance tick and trigger capture pulse via production system tick
     let _ = camp_handle.step_manual(1.0).await.unwrap();
-    let pulse_c = eve_server::services::insurgency_services::step_system_insurgency_capture_tick(&ctx, camp_sys, ship_id, 500_010).await;
-    assert!(pulse_c, "Guristas capture pulse awards corruption");
+    eve_server::services::insurgency_services::step_system_insurgency_tick(&ctx, camp_sys).await;
 
     // BF-PVE-INSURGENCY-GET-MUTATES-01: GetLocalCampaignClientSnapshot is strictly read-only
     let snap_c = ctx
@@ -583,8 +613,7 @@ async fn test_pve_insurgency_campaigns_and_strongholds_complete() {
         .await
         .expect("Join Caldari");
     let _ = camp_handle.step_manual(1.0).await.unwrap();
-    let pulse_s = eve_server::services::insurgency_services::step_system_insurgency_capture_tick(&ctx, camp_sys, ship_id, 500_001).await;
-    assert!(pulse_s, "Caldari capture pulse awards suppression");
+    eve_server::services::insurgency_services::step_system_insurgency_tick(&ctx, camp_sys).await;
 
     let snap_s = ctx
         .dispatch_rpc(&mut sess, "insurgencySolarsystem", None, "GetLocalCampaignClientSnapshot", &[], &kw, None)
@@ -601,6 +630,9 @@ async fn test_pve_insurgency_campaigns_and_strongholds_complete() {
         }
     });
     sess.solar_system_id = Some(fob_sys);
+
+    // BF-PVE-STRONGHOLD-NOTIFY-TEST-03: Drain prior notifications before destruction
+    ctx.drain_notifications_for_char(PILOT_INSURGENT);
 
     let dmg = eve_destiny::DamageVector { em: 1.0e7, thermal: 1.0e7, kinetic: 1.0e7, explosive: 1.0e7 };
     let res = fob_handle.apply_damage_with_attacker(stronghold_id, dmg, Some(PILOT_INSURGENT)).await;
@@ -630,8 +662,18 @@ async fn test_pve_insurgency_campaigns_and_strongholds_complete() {
     let wreck_ball = fob_handle.ballpark.read().ok().and_then(|bp| bp.balls.values().find(|b| b.type_id == PIRATE_STRONGHOLD_WRECK_TYPE).cloned());
     assert!(wreck_ball.is_some(), "FOB wreck ball (type 79386) spawned in space upon stronghold destruction");
 
-    // BF-PVE-STRONGHOLD-VULN-NOTIFY-01: Stronghold destruction queued Machonet notification
-    let notifs = ctx.pending_notifications.read().unwrap();
-    let pilot_notifs = notifs.get(&PILOT_INSURGENT).expect("notifications for pilot");
-    assert!(pilot_notifs.iter().any(|n| n.event == "OnInsurgencyCampaignUpdatedForLocation"), "Campaign updated notification emitted");
+    // BF-PVE-STRONGHOLD-NOTIFY-TEST-03 / BF-PVE-INSURGENCY-NOTIFY-SHAPE-01: Stronghold destruction queued Machonet & Quasar notifications
+    let notifs = ctx.drain_notifications_for_char(PILOT_INSURGENT);
+    let updated_notif = notifs
+        .iter()
+        .find(|n| n.event == "OnInsurgencyCampaignUpdatedForLocation")
+        .expect("Campaign updated notification emitted");
+    assert_eq!(updated_notif.args.len(), 1, "Must carry 1 argument (campaignSnapshot)");
+    assert_eq!(updated_notif.args[0].dict_get("campaignID"), Some(&PyRep::Integer(camp_id)));
+    assert!(updated_notif.args[0].dict_get("coveredSolarsystemIDs").is_some());
+
+    let q_entries = ctx.quasar_gateway.routing_cache.read().unwrap();
+    assert!(q_entries.entries.iter().any(|e| {
+        e.notice.payload.as_ref().map(|p| p.type_url.contains("eve_public.pirate.suppression.api.IncreasedNotice")).unwrap_or(false)
+    }), "IncreasedNotice published to Quasar gateway");
 }

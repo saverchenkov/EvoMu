@@ -61,18 +61,50 @@ pub fn emit_campaign_started(ctx: &ServerContext, sys_id: u32, campaign_id: i64)
     );
 }
 
+/// Builds the campaign snapshot dictionary expected by client `insurgencyCampaignSvc`.
+pub fn build_campaign_snapshot_for_system(c: &InsurgencyCampaign, sys_id: u32, now: u64) -> PyRep {
+    let (phase, end_time) = get_campaign_phase_and_timer(c, now);
+    let c_pts = c.corruption_points.get(&sys_id).copied().unwrap_or(0);
+    let s_pts = c.suppression_points.get(&sys_id).copied().unwrap_or(0);
+    let c_stage = if c_pts == 0 { 0 } else { ((c_pts as f64 / 200.0).ceil() as u8).clamp(1, 5) };
+    let s_stage = if s_pts == 0 { 0 } else { ((s_pts as f64 / 200.0).ceil() as u8).clamp(1, 5) };
+    let is_fob = c.fob_solar_system_id == sys_id;
+    let sys_reps: Vec<PyRep> = c.systems.iter().map(|&s| PyRep::Integer(i64::from(s))).collect();
+
+    PyRep::keyval([
+        ("campaignID", PyRep::Integer(c.campaign_id)),
+        ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+        ("pirateFactionID", PyRep::Integer(c.pirate_faction_id)),
+        ("targetFactionID", PyRep::Integer(c.target_faction_id)),
+        ("fobSolarSystemID", PyRep::Integer(i64::from(c.fob_solar_system_id))),
+        ("fsmState", PyRep::String(phase.into())),
+        ("phase", PyRep::String(phase.into())),
+        ("phaseEndTime", PyRep::Integer(end_time as i64)),
+        ("isFobSystem", PyRep::Bool(is_fob)),
+        ("isFobVulnerable", PyRep::Bool(phase == PHASE_ACTIVE)),
+        ("corruptionStage", PyRep::Integer(i64::from(c_stage))),
+        ("suppressionStage", PyRep::Integer(i64::from(s_stage))),
+        ("corruptionPoints", PyRep::Integer(c_pts)),
+        ("suppressionPoints", PyRep::Integer(s_pts)),
+        ("coveredSolarsystemIDs", PyRep::List(sys_reps.clone())),
+        ("systems", PyRep::List(sys_reps)),
+    ])
+}
+
 /// Broadcasts `OnInsurgencyCampaignUpdatedForLocation` notification.
-pub fn emit_campaign_updated(ctx: &ServerContext, sys_id: u32, campaign_id: i64, stage: u8) {
-    ctx.notify(
-        NotificationTarget::SolarSystem(sys_id),
-        "OnInsurgencyCampaignUpdatedForLocation",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(i64::from(sys_id)),
-            PyRep::Integer(campaign_id),
-            PyRep::Integer(i64::from(stage)),
-        ],
-    );
+pub fn emit_campaign_updated(ctx: &ServerContext, sys_id: u32, campaign_id: i64, _stage: u8) {
+    let now = ctx.now_unix();
+    let snap = read_insurgency_runtime(ctx, |rt| {
+        rt.campaigns.get(&campaign_id).map(|c| build_campaign_snapshot_for_system(c, sys_id, now))
+    });
+    if let Some(snap) = snap {
+        ctx.notify(
+            NotificationTarget::SolarSystem(sys_id),
+            "OnInsurgencyCampaignUpdatedForLocation",
+            "solarsystemid",
+            vec![snap],
+        );
+    }
 }
 
 /// Initializes a pirate insurgency campaign with starting systems.
@@ -549,9 +581,55 @@ pub async fn ensure_stronghold_in_space(ctx: &ServerContext, campaign_id: i64) -
 pub struct StrongholdDestructionInfo {
     pub campaign_id: i64,
     pub solar_system_id: u32,
+    pub killer_char_id: Option<i64>,
     pub old_suppression: i64,
     pub new_suppression: i64,
     pub new_suppression_stage: u8,
+}
+
+/// Returns true if `ball_id` in `solar_system_id` is an insurgency stronghold that is currently invulnerable
+/// (i.e. its campaign is NOT in `Active` phase).
+// parity: feat:pve.pirate-strongholds
+pub fn is_stronghold_invulnerable_in_db(
+    db: &eve_db::WorldRepository,
+    solar_system_id: u32,
+    ball_id: i64,
+) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    db.with_snapshot(|snap| {
+        for camp in snap.insurgency_runtime.campaigns.values() {
+            if camp.fob_solar_system_id == solar_system_id {
+                let is_sh_id = ball_id == 1_898_000_000 + camp.campaign_id * 10 + 1;
+                let is_sh_type = snap.items.get(&ball_id).map(|it| {
+                    it.type_id == PIRATE_STRONGHOLD_GURISTAS_TYPE || it.type_id == PIRATE_STRONGHOLD_ANGEL_TYPE
+                }).unwrap_or(false);
+                let has_site_match = snap.insurgency_runtime.insurgency_instances.iter().any(|s| {
+                    s.solar_system_id == solar_system_id
+                        && s.site_type == "PirateStronghold"
+                        && (s.instance_id == ball_id || is_sh_id || is_sh_type)
+                        && !s.completed
+                });
+                if has_site_match || is_sh_id || is_sh_type {
+                    let (phase, _) = get_campaign_phase_and_timer(camp, now);
+                    return phase != PHASE_ACTIVE;
+                }
+            }
+        }
+        false
+    })
+}
+
+/// Returns true if `target_id` is an insurgency stronghold in `sys_id` that is invulnerable.
+// parity: feat:pve.pirate-strongholds
+pub fn is_insurgency_stronghold_invulnerable(
+    ctx: &ServerContext,
+    sys_id: u32,
+    target_id: i64,
+) -> bool {
+    is_stronghold_invulnerable_in_db(&ctx.db, sys_id, target_id)
 }
 
 /// Broadcasts Machonet notifications and Quasar IncreasedNotice when pirate stronghold destruction awards suppression.
@@ -583,20 +661,38 @@ pub fn notify_stronghold_destruction(
         );
     }
 
-    let system_chars = db.with_snapshot(|snap| {
+    let mut system_chars = db.with_snapshot(|snap| {
+        let camp_systems = snap.insurgency_runtime.campaigns.get(&info.campaign_id).map(|c| c.systems.clone()).unwrap_or_default();
         snap.characters
             .values()
-            .filter(|c| c.solar_system_id == info.solar_system_id)
+            .filter(|c| c.solar_system_id == info.solar_system_id || camp_systems.contains(&c.solar_system_id))
             .map(|c| c.character_id)
             .collect::<Vec<_>>()
     });
+    if let Some(kid) = info.killer_char_id {
+        if !system_chars.contains(&kid) {
+            system_chars.push(kid);
+        }
+    }
 
     let now_ft = db.clock().now_blueos_filetime_ticks();
-    let update_args = vec![
-        PyRep::Integer(i64::from(info.solar_system_id)),
-        PyRep::Integer(info.campaign_id),
-        PyRep::Integer(i64::from(info.new_suppression_stage)),
-    ];
+    let snap_rep = db.with_snapshot(|snap| {
+        snap.insurgency_runtime
+            .campaigns
+            .get(&info.campaign_id)
+            .map(|c| build_campaign_snapshot_for_system(c, info.solar_system_id, now))
+    }).unwrap_or_else(|| {
+        let sys_reps = vec![PyRep::Integer(i64::from(info.solar_system_id))];
+        PyRep::keyval([
+            ("campaignID", PyRep::Integer(info.campaign_id)),
+            ("solarSystemID", PyRep::Integer(i64::from(info.solar_system_id))),
+            ("suppressionStage", PyRep::Integer(i64::from(info.new_suppression_stage))),
+            ("suppressionPoints", PyRep::Integer(info.new_suppression)),
+            ("coveredSolarsystemIDs", PyRep::List(sys_reps.clone())),
+            ("systems", PyRep::List(sys_reps)),
+        ])
+    });
+    let update_args = vec![snap_rep];
 
     let full_supp_args = if info.new_suppression_stage >= 5 {
         Some(vec![
@@ -744,6 +840,7 @@ pub async fn on_insurgency_stronghold_destroyed_core(
         Some((StrongholdDestructionInfo {
             campaign_id: camp_id,
             solar_system_id,
+            killer_char_id,
             old_suppression: old_supp,
             new_suppression: new_supp,
             new_suppression_stage: s_stage,
@@ -852,6 +949,35 @@ pub async fn step_system_insurgency_capture_tick(
     }
 }
 
+/// Steps insurgency capture progression for all active player ships in `sys_id`.
+/// Invoked by cluster / system simulation tick (`feat:pve.insurgency`).
+// parity: feat:pve.insurgency
+pub async fn step_system_insurgency_tick(ctx: &ServerContext, sys_id: u32) {
+    let has_campaign = read_insurgency_runtime(ctx, |rt| {
+        rt.campaigns.values().any(|c| c.systems.contains(&sys_id))
+    });
+    if !has_campaign {
+        return;
+    }
+    let ships: Vec<(i64, i64)> = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .values()
+            .filter(|c| c.solar_system_id == sys_id && c.station_id.is_none() && c.structure_id.is_none())
+            .filter_map(|c| {
+                let fid = c.war_faction_id.unwrap_or(0);
+                if fid != 0 {
+                    Some((c.active_ship_id, fid))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    });
+    for (ship_id, fid) in ships {
+        let _ = step_system_insurgency_capture_tick(ctx, sys_id, ship_id, fid).await;
+    }
+}
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -893,33 +1019,22 @@ pub async fn handle(
                 }));
             };
 
+            if session.station_id.is_none() && session.structure_id.is_none() {
+                if let (Some(ship_id), Some(char_id)) = (session.ship_id, session.character_id) {
+                    let fid = ctx.db.with_snapshot(|s| {
+                        s.characters.get(&char_id).and_then(|c| c.war_faction_id).unwrap_or(0)
+                    });
+                    if fid != 0 {
+                        let _ = step_system_insurgency_capture_tick(ctx, sys_id, ship_id, fid).await;
+                    }
+                }
+            }
+
             let snapshot = read_insurgency_runtime(ctx, |rt| {
                 rt.campaigns
                     .values()
                     .find(|c| c.systems.contains(&sys_id))
-                    .map(|c| {
-                        let (phase, end_time) = get_campaign_phase_and_timer(c, now);
-                        let c_pts = c.corruption_points.get(&sys_id).copied().unwrap_or(0);
-                        let s_pts = c.suppression_points.get(&sys_id).copied().unwrap_or(0);
-                        let c_stage = if c_pts == 0 { 0 } else { ((c_pts as f64 / 200.0).ceil() as u8).clamp(1, 5) };
-                        let s_stage = if s_pts == 0 { 0 } else { ((s_pts as f64 / 200.0).ceil() as u8).clamp(1, 5) };
-                        let is_fob = c.fob_solar_system_id == sys_id;
-
-                        PyRep::keyval([
-                            ("campaignID", PyRep::Integer(c.campaign_id)),
-                            ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
-                            ("pirateFactionID", PyRep::Integer(c.pirate_faction_id)),
-                            ("targetFactionID", PyRep::Integer(c.target_faction_id)),
-                            ("fsmState", PyRep::String(phase.into())),
-                            ("phase", PyRep::String(phase.into())),
-                            ("phaseEndTime", PyRep::Integer(end_time as i64)),
-                            ("isFobSystem", PyRep::Bool(is_fob)),
-                            ("corruptionStage", PyRep::Integer(i64::from(c_stage))),
-                            ("suppressionStage", PyRep::Integer(i64::from(s_stage))),
-                            ("corruptionPoints", PyRep::Integer(c_pts)),
-                            ("suppressionPoints", PyRep::Integer(s_pts)),
-                        ])
-                    })
+                    .map(|c| build_campaign_snapshot_for_system(c, sys_id, now))
             });
 
             Some(Ok(PyRep::Tuple(vec![
