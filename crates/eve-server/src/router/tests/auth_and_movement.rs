@@ -221,8 +221,8 @@ async fn test_authentication_and_ownership_enforcement() {
     let PyRep::KeyVal(cj_kv) = cj_res else {
         panic!("Expected CloneJump KeyVal");
     };
-    // Same-station clone swap applies 0s cooldown and places character in a Capsule (type_id 670)
-    assert_eq!(cj_kv.get("cooldownSeconds"), Some(&PyRep::Integer(0)));
+    // CloneJump in NPC station incurs standard 72,000s cooldown (Issue #39) and places character in a Capsule (type_id 670)
+    assert_eq!(cj_kv.get("cooldownSeconds"), Some(&PyRep::Integer(72_000)));
     assert_ne!(session.ship_id, Some(100_000_001));
     // Re-board Rifter 100_000_001 in station hangar via ship.Board
     ctx.advance_secs(12);
