@@ -84,10 +84,34 @@ async fn test_quasar_market_complete() {
     let mut sess = SessionState::new(1001);
     sess.user_id = Some(1);
     sess.character_id = Some(90_000_001);
+    sess.corporation_id = Some(1_000_009);
+    sess.corp_role = eve_db::corp_roles::ROLE_ACCOUNTANT;
+    sess.corporation_id = Some(98_000_001);
+    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
     sess.solar_system_id = Some(30_000_142);
 
     // Seed market orders in repository
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.corporation_id = 98_000_001;
+        }
+        snap.market_orders.insert(
+            7003,
+            eve_db::MarketOrderRecord {
+                order_id: 7003,
+                owner_id: 98_000_001,
+                station_id: 60_003_760,
+                region_id: 10_000_002,
+                type_id: 34,
+                is_bid: false,
+                price: eve_db::IskCents(450),
+                vol_entered: 1000,
+                vol_remaining: 1000,
+                min_volume: 1,
+                is_npc: false,
+                escrow: eve_db::IskCents(0),
+            },
+        );
         snap.market_orders.insert(
             7001,
             eve_db::MarketOrderRecord {
@@ -226,7 +250,9 @@ async fn test_quasar_market_complete() {
     assert_eq!(rsp.status_code, STATUS_OK, "Status: {}, message: {}", rsp.status_code, rsp.status_message);
 
     // 14. corporation.sellorder.GetRequest
-    let req = make_request("eve.market.corporation.sellorder.GetRequest", payload, b"m-14");
+    let mut corp_order_payload = Vec::new();
+    encode_id_field(1, 7003, &mut corp_order_payload);
+    let req = make_request("eve.market.corporation.sellorder.GetRequest", corp_order_payload, b"m-14");
     let rep = ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None).await.expect("rpc");
     let rsp = extract_response_proto(&rep);
     assert_eq!(rsp.status_code, STATUS_OK, "Status: {}, message: {}", rsp.status_code, rsp.status_message);
@@ -274,6 +300,8 @@ async fn test_quasar_inventory_asset_container_blueprint_ore() {
     let mut sess = SessionState::new(1001);
     sess.user_id = Some(1);
     sess.character_id = Some(90_000_001);
+    sess.corporation_id = Some(1_000_009);
+    sess.corp_role = eve_db::corp_roles::ROLE_ACCOUNTANT;
 
     // Seed inventory item in DB
     ctx.db.with_mut_snapshot(|snap| {
@@ -439,6 +467,8 @@ async fn test_quasar_assetholding_entitlements() {
     let mut sess = SessionState::new(1001);
     sess.user_id = Some(1);
     sess.character_id = Some(90_000_001);
+    sess.corporation_id = Some(1_000_009);
+    sess.corp_role = eve_db::corp_roles::ROLE_ACCOUNTANT;
 
     // 1. Asset API (Get, Hold, Spawn, Create, eve_public.Get)
     let mut asset_payload = Vec::new();
@@ -577,6 +607,8 @@ async fn test_quasar_accounting_loyalty_contracts() {
     let mut sess = SessionState::new(1001);
     sess.user_id = Some(1);
     sess.character_id = Some(90_000_001);
+    sess.corporation_id = Some(1_000_009);
+    sess.corp_role = eve_db::corp_roles::ROLE_ACCOUNTANT;
 
     // Seed wallet journal entry
     ctx.db.with_mut_snapshot(|snap| {
@@ -640,6 +672,8 @@ async fn test_quasar_industry_planetary_moon_asteroidbelt() {
     let mut sess = SessionState::new(1001);
     sess.user_id = Some(1);
     sess.character_id = Some(90_000_001);
+    sess.corporation_id = Some(1_000_009);
+    sess.corp_role = eve_db::corp_roles::ROLE_ACCOUNTANT;
 
     // 1. Industry (jobs, facilities, cost indices)
     let mut char_payload = Vec::new();
@@ -751,5 +785,232 @@ async fn test_quasar_industry_planetary_moon_asteroidbelt() {
     let rep = ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None).await.expect("rpc");
     let rsp = extract_response_proto(&rep);
     assert_eq!(rsp.status_code, STATUS_OK, "Status: {}, message: {}", rsp.status_code, rsp.status_message);
+}
+
+#[tokio::test]
+async fn test_p1_track_a_regressions_issues_20_21_22() {
+    let ctx = ServerContext::new();
+    let empty_kw = HashMap::new();
+
+    // 1. Issue #20: Contract Creation Fees with empty title / 14+ args & Corporate Auction FinishAuction payout
+    let mut sess_corp = SessionState::new(2001);
+    sess_corp.user_id = Some(1);
+    sess_corp.character_id = Some(90_000_001);
+    sess_corp.corporation_id = Some(98_000_001);
+    sess_corp.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    sess_corp.station_id = Some(60_003_760);
+
+    let (item_id_fee, item_id_auc) = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.corporation_id = 98_000_001;
+            ch.station_id = Some(60_003_760);
+            ch.balance = eve_db::IskCents::from_isk(100_000_000);
+        }
+        snap.corporations.insert(
+            98_000_001,
+            eve_db::CorporationRecord {
+                corporation_id: 98_000_001,
+                name: "Test Corp".into(),
+                ticker: "TSTC".into(),
+                ceo_id: 90_000_001,
+                master_wallet: eve_db::IskCents::from_isk(50_000_000),
+                ..Default::default()
+            },
+        );
+        snap.next_entity_id += 1;
+        let i1 = snap.next_entity_id;
+        snap.items.insert(
+            i1,
+            eve_db::InventoryItemRecord {
+                item_id: i1,
+                type_id: 34,
+                owner_id: 90_000_001,
+                location_id: 60_003_760,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.next_entity_id += 1;
+        let i2 = snap.next_entity_id;
+        snap.items.insert(
+            i2,
+            eve_db::InventoryItemRecord {
+                item_id: i2,
+                type_id: 34,
+                owner_id: 90_000_001,
+                location_id: 60_003_760,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        (i1, i2)
+    });
+
+    let bal_before = ctx.db.get_character(90_000_001).unwrap().balance.0;
+    let create_rep = ctx
+        .dispatch_rpc(
+            &mut sess_corp,
+            "contractProxy",
+            None,
+            "CreateContract",
+            &[
+                PyRep::Integer(1), // ItemExchange
+                PyRep::Integer(0), // Public
+                PyRep::Integer(0),
+                PyRep::Integer(1440),
+                PyRep::Integer(1),
+                PyRep::Integer(60_003_760),
+                PyRep::Integer(60_003_760),
+                PyRep::Real(1_000_000.0),
+                PyRep::Real(0.0),
+                PyRep::Real(0.0),
+                PyRep::String("".into()), // Empty title!
+                PyRep::String("".into()),
+                PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(item_id_fee), PyRep::Integer(100)])]),
+                PyRep::Integer(4), // 14th arg!
+            ],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("CreateContract with empty title and 14 args");
+    let _ = create_rep;
+    let bal_after = ctx.db.get_character(90_000_001).unwrap().balance.0;
+    assert!(
+        bal_after < bal_before,
+        "Issue #20: CreateContract must charge broker fee + deposit even when title is empty and 14+ args are passed"
+    );
+
+    // Corporate auction FinishAuction routes proceeds to corporation wallet
+    let corp_auc_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let cid = snap.next_entity_id;
+        if let Some(it) = snap.items.get_mut(&item_id_auc) {
+            it.location_id = cid;
+            it.flag = eve_db::InventoryFlag::Locked;
+        }
+        snap.contracts.insert(
+            cid,
+            eve_db::ContractRecord {
+                contract_id: cid,
+                issuer_id: 90_000_001,
+                issuer_corp_id: 98_000_001,
+                contract_type: "Auction".into(),
+                status: "Outstanding".into(),
+                availability: "Public".into(),
+                start_station_id: 60_003_760,
+                end_station_id: 60_003_760,
+                price: eve_db::IskCents::from_isk(1_000_000),
+                current_bid: eve_db::IskCents::from_isk(2_500_000),
+                current_bidder_id: Some(90_000_002),
+                item_ids: vec![item_id_auc],
+                expiration_unix: 100,
+                for_corp: true,
+                ..Default::default()
+            },
+        );
+        cid
+    });
+    let corp_bal_before = ctx.db.with_snapshot(|snap| snap.corporations[&98_000_001].master_wallet.0);
+    let char_bal_before = ctx.db.get_character(90_000_001).unwrap().balance.0;
+    ctx.dispatch_rpc(
+        &mut sess_corp,
+        "contractProxy",
+        None,
+        "FinishAuction",
+        &[PyRep::Integer(corp_auc_id)],
+        &empty_kw,
+        None,
+    )
+    .await
+    .expect("FinishAuction on corporate auction");
+    let corp_bal_after = ctx.db.with_snapshot(|snap| snap.corporations[&98_000_001].master_wallet.0);
+    let char_bal_after = ctx.db.get_character(90_000_001).unwrap().balance.0;
+    assert_eq!(
+        corp_bal_after - corp_bal_before,
+        250_000_000,
+        "Issue #20: Corporate auction FinishAuction must credit the selling corporation's master wallet"
+    );
+    assert_eq!(
+        char_bal_after, char_bal_before,
+        "Issue #20: Corporate auction FinishAuction must not credit the personal character wallet"
+    );
+
+    // 2. Issue #22: Quasar Financial Data Authorization
+    let mut sess_other = SessionState::new(2002);
+    sess_other.user_id = Some(2);
+    sess_other.character_id = Some(90_000_002);
+    sess_other.corporation_id = Some(1_000_009);
+    sess_other.corp_role = 0;
+
+    let mut target_char_payload = Vec::new();
+    encode_id_field(1, 90_000_001, &mut target_char_payload);
+    let req_other_journal = make_request(
+        "eve.accounting.character.journal.GetCharacterEntriesRequest",
+        target_char_payload.clone(),
+        b"sec-22-1",
+    );
+    let rep = ctx
+        .dispatch_rpc(
+            &mut sess_other,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(req_other_journal.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("rpc");
+    let rsp = extract_response_proto(&rep);
+    assert_eq!(rsp.status_code, 403, "Issue #22: Cross-character wallet journal query must return 403");
+
+    let req_other_orders = make_request(
+        "eve.market.orders.GetOpenForCharacterRequest",
+        target_char_payload,
+        b"sec-22-2",
+    );
+    let rep = ctx
+        .dispatch_rpc(
+            &mut sess_other,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(req_other_orders.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("rpc");
+    let rsp = extract_response_proto(&rep);
+    assert_eq!(rsp.status_code, 403, "Issue #22: Cross-character market order query must return 403");
+
+    let mut target_corp_payload = Vec::new();
+    encode_id_field(1, 98_000_001, &mut target_corp_payload);
+    let req_corp_orders = make_request(
+        "eve.market.orders.GetOpenForCorporationRequest",
+        target_corp_payload,
+        b"sec-22-3",
+    );
+    let rep = ctx
+        .dispatch_rpc(
+            &mut sess_other,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(req_corp_orders.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("rpc");
+    let rsp = extract_response_proto(&rep);
+    assert_eq!(rsp.status_code, 403, "Issue #22: Cross-corporation market order query must return 403");
 }
 

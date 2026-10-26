@@ -306,7 +306,7 @@ async fn test_review_r8_regressions() {
     let cid_exp = cexp_kv.get("contractID").unwrap().as_i64().unwrap();
     assert_eq!(
         ctx.db.get_character(90_000_001).unwrap().balance.0,
-        s1_bal_pre - 500_000
+        s1_bal_pre - 11_500_000
     );
     ctx.advance_virtual_clock(86_405);
     let acc_exp = ctx
@@ -321,10 +321,10 @@ async fn test_review_r8_regressions() {
         )
         .await;
     assert_eq!(acc_exp.unwrap_err().code, "ContractExpired");
-    // Escrowed 5,000 ISK reward was durably refunded to issuer s1
+    // Escrowed 5,000 ISK reward was durably refunded to issuer s1 (110,000 ISK broker fee + deposit retained)
     assert_eq!(
         ctx.db.get_character(90_000_001).unwrap().balance.0,
-        s1_bal_pre
+        s1_bal_pre - 11_000_000
     );
 
     // R9-P1-1: InProgress Courier contract resets delivery deadline on acceptance; on expiry, issuer gets collateral + reward and contracted item transfers to acceptor at its current location (not teleported back to issuer)
@@ -399,10 +399,10 @@ async fn test_review_r8_regressions() {
         )
         .await;
     assert_eq!(comp_exp.unwrap_err().code, "ContractExpired");
-    // Issuer s1 received back the 5,000 ISK reward + 20,000 ISK forfeited collateral (+2,000,000 cents net over s1_bal_pre)
+    // Issuer s1 received back the 5,000 ISK reward + 20,000 ISK forfeited collateral (+2,000,000 cents over 2x 11,000,000 cents public contract fees)
     assert_eq!(
         ctx.db.get_character(90_000_001).unwrap().balance.0,
-        s1_bal_pre + 2_000_000
+        s1_bal_pre - 20_000_000
     );
     // Contracted item 100_000_003 stayed in s2's ship (100_000_002) and transferred ownership to s2 (90_000_002)
     let forfeited_item = ctx.db.get_item(100_000_003).unwrap();

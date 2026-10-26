@@ -279,17 +279,41 @@ fn take_offer(
         }
 
         // Verify required trade-in items (`req_items`) in hangar/cargo at `delivery_loc_id`
-        let mut unlocked_tradein_ids_per_req: Vec<(i32, Vec<i64>)> = Vec::with_capacity(offer.req_items.len());
+        let active_ship_id = session
+            .ship_id
+            .or_else(|| Some(ch.active_ship_id).filter(|&id| id > 0));
+        let mut aggregated_req_items: Vec<(TypeId, i32)> = Vec::with_capacity(offer.req_items.len());
         for &(req_tid, req_unit_qty) in &offer.req_items {
+            if req_unit_qty <= 0 {
+                return Err(BridgeRpcError {
+                    code: "InvalidQuantity".into(),
+                    message: "LP store required trade-in item quantity must be positive".into(),
+                });
+            }
             let Some(needed) = req_unit_qty.checked_mul(qty_i32) else {
                 return Err(BridgeRpcError {
                     code: "InvalidQuantity".into(),
                     message: "LP store required trade-in item quantity overflows i32".into(),
                 });
             };
+            if let Some(existing) = aggregated_req_items.iter_mut().find(|(t, _)| *t == req_tid) {
+                existing.1 = existing.1.checked_add(needed).ok_or_else(|| BridgeRpcError {
+                    code: "InvalidQuantity".into(),
+                    message: "LP store required trade-in item quantity overflows i32".into(),
+                })?;
+            } else {
+                aggregated_req_items.push((req_tid, needed));
+            }
+        }
+        let mut unlocked_tradein_ids_per_req: Vec<(i32, Vec<i64>)> =
+            Vec::with_capacity(aggregated_req_items.len());
+        for (req_tid, needed) in aggregated_req_items {
             let mut matching_ids = Vec::new();
             let mut available: i32 = 0;
             for it in snap.items.values() {
+                if it.quantity <= 0 || it.type_id != req_tid {
+                    continue;
+                }
                 let owner_matches = if is_corp_take {
                     it.owner_id == ch.corporation_id
                 } else {
@@ -311,10 +335,24 @@ fn take_offer(
                 } else {
                     it.flag == delivery_flag
                 };
+                let is_active_ship =
+                    Some(it.item_id) == active_ship_id || it.item_id == ch.active_ship_id;
+                let has_contained_items = snap.items.values().any(|child| {
+                    child.item_id != it.item_id
+                        && child.location_id == it.item_id
+                        && child.quantity > 0
+                });
+                let is_courier_cargo = snap
+                    .item_custom_names
+                    .get(&it.item_id)
+                    .is_some_and(|name| name.starts_with("courier_cargo:"));
                 if owner_matches
                     && it.location_id == delivery_loc_id
-                    && it.type_id == req_tid
                     && flag_matches
+                    && it.flag != InventoryFlag::Locked
+                    && !is_active_ship
+                    && !has_contained_items
+                    && !is_courier_cargo
                     && !snap.is_item_locked_in_contract_or_job(it.item_id)
                 {
                     available = available.saturating_add(it.quantity);

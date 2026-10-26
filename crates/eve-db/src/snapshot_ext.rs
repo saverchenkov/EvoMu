@@ -1046,7 +1046,9 @@ impl WorldStateSnapshot {
         if c.for_corp {
             if let Some(corp) = self.corporations.get_mut(&c.issuer_corp_id) {
                 corp.master_wallet = corp.master_wallet.checked_add(amount).unwrap_or(corp.master_wallet);
-                if let Some(div) = corp.wallet_divisions.first_mut() {
+                if corp.wallet_divisions.is_empty() {
+                    corp.ensure_wallet_divisions();
+                } else if let Some(div) = corp.wallet_divisions.first_mut() {
                     div.balance = div.balance.checked_add(amount).unwrap_or(div.balance);
                 }
                 return;

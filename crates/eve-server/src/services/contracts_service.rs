@@ -325,7 +325,6 @@ pub fn handle(
                 .any(|s| s.stations.iter().any(|st| st.station_id == end_station_id));
             let now_unix = ctx.now_unix();
             let active_ship = session.ship_id;
-            let charge_fees = args.len() == 13 && !title.is_empty();
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let start_valid = start_sde_valid
@@ -394,11 +393,10 @@ pub fn handle(
                         return Err(rpc_err("CrpAccessDenied", "Creating corporation contracts requires ROLE_CONTRACT_MANAGER or ROLE_DIRECTOR"));
                     }
                 }
-                let fee_cents = if charge_fees {
-                    IskCents::from_f64_isk(broker_fee_isk + deposit_isk)
-                } else { IskCents(0)
-                };
-                let total_upfront = reward.checked_add(fee_cents).unwrap_or(reward);
+                let fee_cents = IskCents::from_f64_isk(broker_fee_isk + deposit_isk);
+                let total_upfront = reward
+                    .checked_add(fee_cents)
+                    .ok_or_else(|| rpc_err("InvalidContractParameters", "Contract reward and fee overflow"))?;
                 if total_upfront.0 > 0 {
                     if for_corp {
                         let corp = snap.corporations.get_mut(&issuer_corp_id).unwrap();
@@ -532,6 +530,10 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let cid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let accept_for_corp = args
+                .get(1)
+                .map(|a| a.as_bool().unwrap_or(false) || a.as_i64().unwrap_or(0) != 0)
+                .unwrap_or(false);
             let caller_station = session.station_id.or(session.structure_id);
             let caller_ship = session.ship_id;
             let caller_corp = session.corporation_id.unwrap_or(0);
@@ -564,10 +566,22 @@ pub fn handle(
                         format!("Contract type '{}' cannot be directly accepted via AcceptContract", c.contract_type),
                     ));
                 }
-                if c.issuer_id == char_id {
+                let effective_caller_corp = if caller_corp != 0 {
+                    caller_corp
+                } else {
+                    snap.characters.get(&char_id).map(|ch| ch.corporation_id).unwrap_or(0)
+                };
+                let is_self_corp_contract = c.for_corp
+                    && c.issuer_corp_id != 0
+                    && c.issuer_corp_id == effective_caller_corp
+                    && (accept_for_corp
+                        || (c.assignee_id != char_id
+                            && c.assignee_id != effective_caller_corp
+                            && !c.availability.eq_ignore_ascii_case("Corporation")));
+                if c.issuer_id == char_id || is_self_corp_contract {
                     return Err(rpc_err("CannotAcceptOwnContract", "Issuer cannot accept their own contract"));
                 }
-                if !check_contract_visibility(&c, char_id, caller_corp, caller_alliance) {
+                if !check_contract_visibility(&c, char_id, effective_caller_corp, caller_alliance) {
                     return Err(rpc_err(
                         "ContractAccessDenied",
                         format!("Character {char_id} is not authorized to accept private contract {cid}"),
@@ -598,7 +612,23 @@ pub fn handle(
 
                 let mut requested_transfers: Vec<(i64, i32)> = Vec::new();
                 if c.contract_type == "ItemExchange" && !c.requested_items.is_empty() {
+                    let mut aggregated_reqs: Vec<(u32, i32)> = Vec::new();
                     for &(req_tid, req_qty) in &c.requested_items {
+                        if req_qty <= 0 {
+                            continue;
+                        }
+                        if let Some(entry) = aggregated_reqs.iter_mut().find(|(t, _)| *t == req_tid) {
+                            entry.1 = entry.1.checked_add(req_qty).ok_or_else(|| {
+                                rpc_err("ContractOverflow", "Requested item quantity overflow")
+                            })?;
+                        } else {
+                            aggregated_reqs.push((req_tid, req_qty));
+                        }
+                    }
+                    let active_ship = caller_ship.or_else(|| {
+                        snap.characters.get(&char_id).map(|ch| ch.active_ship_id).filter(|&id| id > 0)
+                    });
+                    for (req_tid, req_qty) in aggregated_reqs {
                         let mut needed = req_qty;
                         let mut candidate_ids: Vec<(i64, i32)> = snap.items.values().filter(|it| {
                                 it.owner_id == char_id
@@ -606,8 +636,13 @@ pub fn handle(
                                     && it.flag == InventoryFlag::Hangar
                                     && it.type_id == req_tid
                                     && it.quantity > 0
-                                    && Some(it.item_id) != caller_ship
+                                    && Some(it.item_id) != active_ship
                                     && !snap.is_item_locked_in_contract_or_job(it.item_id)
+                                    && !snap.items.values().any(|child| {
+                                        child.item_id != it.item_id
+                                            && child.location_id == it.item_id
+                                            && child.quantity > 0
+                                    })
                                     && !snap.item_custom_names.get(&it.item_id).is_some_and(|name| name.starts_with("courier_cargo:"))
                             }).map(|it| (it.item_id, it.quantity)).collect();
                         candidate_ids.sort_by_key(|(id, _)| *id);
@@ -856,11 +891,22 @@ pub fn handle(
                 let mut new_status = "Outstanding";
                 if is_buyout {
                     snap.credit_contract_issuer(&c, effective_bid);
-                    if !c.for_corp {
-                        if let Some(issuer_ch) = snap.characters.get(&c.issuer_id) {
-                            let bal_after = issuer_ch.balance;
-                            snap.append_journal(c.issuer_id, "ContractAuctionSold", effective_bid, bal_after, format!("Auction contract {cid} bought out by {char_id}"));
-                        }
+                    if c.for_corp {
+                        let bal_after = snap
+                            .corporations
+                            .get(&c.issuer_corp_id)
+                            .map(|corp| corp.master_wallet)
+                            .unwrap_or(IskCents(0));
+                        snap.append_journal(
+                            c.issuer_corp_id,
+                            "ContractAuctionSold",
+                            effective_bid,
+                            bal_after,
+                            format!("Auction contract {cid} bought out by {char_id}"),
+                        );
+                    } else if let Some(issuer_ch) = snap.characters.get(&c.issuer_id) {
+                        let bal_after = issuer_ch.balance;
+                        snap.append_journal(c.issuer_id, "ContractAuctionSold", effective_bid, bal_after, format!("Auction contract {cid} bought out by {char_id}"));
                     }
                     for iid in &c.item_ids {
                         if let Some(item) = snap.items.get_mut(iid) {
