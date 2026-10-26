@@ -556,8 +556,8 @@ async fn test_structure_ewar_immunity_and_mobile_cyno_inhibitor() {
         })
         .await;
 
-    // Unlocked target -> dogmaIM.Activate returns TargetNotLocked error
-    let unlocked_err = eve_server::services::combat_crimewatch::dispatch_combat_rpc(
+    // Unlocked target -> dogmaIM.Activate returns TargetNotLocked error via top-level router
+    let unlocked_err = rpc(
         &ctx,
         &mut sess,
         "dogmaIM",
@@ -567,13 +567,12 @@ async fn test_structure_ewar_immunity_and_mobile_cyno_inhibitor() {
             PyRep::String("decreaseTargetSpeed".into()),
             PyRep::Integer(struct_id),
         ],
-        &HashMap::new(),
     )
     .await
     .unwrap_err();
     assert_eq!(unlocked_err.code, "TargetNotLocked");
 
-    // Lock the structure and activate Stasis Webifier I -> Upwell structure is immune end-to-end
+    // Lock the structure and activate Stasis Webifier I -> Upwell structure is immune end-to-end via top-level router
     let _ = sys_handle
         .add_target_lock(
             ship_id,
@@ -587,7 +586,7 @@ async fn test_structure_ewar_immunity_and_mobile_cyno_inhibitor() {
         )
         .await;
 
-    let act_rep = eve_server::services::combat_crimewatch::dispatch_combat_rpc(
+    let act_rep = rpc(
         &ctx,
         &mut sess,
         "dogmaIM",
@@ -597,10 +596,9 @@ async fn test_structure_ewar_immunity_and_mobile_cyno_inhibitor() {
             PyRep::String("decreaseTargetSpeed".into()),
             PyRep::Integer(struct_id),
         ],
-        &HashMap::new(),
     )
     .await
-    .expect("dogmaIM.Activate webifier against Upwell structure");
+    .expect("dogmaIM.Activate webifier against Upwell structure via top-level router");
 
     assert_eq!(kv_entry(&act_rep, "moduleID"), Some(&PyRep::Integer(web_mod_id)));
     assert_eq!(kv_entry(&act_rep, "targetID"), Some(&PyRep::Integer(struct_id)));

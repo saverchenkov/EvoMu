@@ -710,6 +710,17 @@ pub(crate) async fn handle_module_cycles(
                             return Some(Err(BridgeRpcError { code: "TargetNotLocked".into(), message: format!("Target {target_id} is not locked") }));
                         }
                     }
+                    if matches!(mod_type.group_id, 52 | 65 | 68 | 71 | 201 | 208 | 291 | 379 | 1672)
+                        && ctx.db.with_snapshot(|s| crate::services::structure_acl_defense_rules::is_structure_immune_to_ewar(s, target_id))
+                    {
+                        return Some(Ok(PyRep::keyval([
+                            ("moduleID", PyRep::Integer(module_id)),
+                            ("targetID", PyRep::Integer(target_id)),
+                            ("ewarAssistRecorded", PyRep::Bool(false)),
+                            ("immune", PyRep::Bool(true)),
+                            ("damageDealt", PyRep::Real(0.0)),
+                        ])));
+                    }
                 }
                 let is_overloaded = method == "Overload" || m.state == eve_dogma::ModuleState::Overloaded;
                 if method == "Overload"
