@@ -3,6 +3,7 @@
 //! and mobile cynosural inhibitors (`feat:structures.*`).
 
 use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord};
+use eve_destiny::{Ball, TargetLock};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
@@ -487,6 +488,125 @@ async fn test_structure_ewar_immunity_and_mobile_cyno_inhibitor() {
         let ship_immune = acl_rules::is_structure_immune_to_ewar(snap, ship_id);
         assert_eq!(ship_immune, false, "Regular ship must not be immune to EWAR");
     });
+
+    // Live dogmaIM.Activate RPC with an EWAR module (Stasis Webifier I, group 65) against Upwell structure asserting immune: true end-to-end
+    let char_id = 90_000_001;
+    let mut sess = login(&ctx, 401, "demo", "demo-secret", char_id).await;
+    let web_mod_id = 100_008;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.station_id = None;
+            ch.solar_system_id = sys_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        snap.items.insert(
+            web_mod_id,
+            InventoryItemRecord {
+                item_id: web_mod_id,
+                type_id: 526, // Stasis Webifier I (group 65)
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+    sess.ship_id = Some(ship_id);
+    sess.station_id = None;
+    sess.solar_system_id = Some(sys_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::new(10_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 3.0,
+            mass: 1_200_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+
+    // Unlocked target -> dogmaIM.Activate returns TargetNotLocked error
+    let unlocked_err = eve_server::services::combat_crimewatch::dispatch_combat_rpc(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(web_mod_id),
+            PyRep::String("decreaseTargetSpeed".into()),
+            PyRep::Integer(struct_id),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(unlocked_err.code, "TargetNotLocked");
+
+    // Lock the structure and activate Stasis Webifier I -> Upwell structure is immune end-to-end
+    let _ = sys_handle
+        .add_target_lock(
+            ship_id,
+            TargetLock {
+                target_id: struct_id,
+                lock_time_ms: 1000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
+
+    let act_rep = eve_server::services::combat_crimewatch::dispatch_combat_rpc(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(web_mod_id),
+            PyRep::String("decreaseTargetSpeed".into()),
+            PyRep::Integer(struct_id),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .expect("dogmaIM.Activate webifier against Upwell structure");
+
+    assert_eq!(kv_entry(&act_rep, "moduleID"), Some(&PyRep::Integer(web_mod_id)));
+    assert_eq!(kv_entry(&act_rep, "targetID"), Some(&PyRep::Integer(struct_id)));
+    assert_eq!(kv_entry(&act_rep, "immune"), Some(&PyRep::Bool(true)));
+    assert_eq!(kv_entry(&act_rep, "ewarAssistRecorded"), Some(&PyRep::Bool(false)));
+    assert_eq!(kv_entry(&act_rep, "damageDealt"), Some(&PyRep::Real(0.0)));
 
     // 2. Test feat:structures.mobile-cyno-inhibitor
     assert_eq!(acl_rules::TYPE_MOBILE_CYNO_INHIBITOR, 33476);

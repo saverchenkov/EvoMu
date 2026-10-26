@@ -357,7 +357,7 @@ async fn light_cyno(
     let is_inhibited = ctx.db.with_snapshot(|snap| {
         crate::services::structure_acl_defense_rules::is_cyno_inhibited(ctx, snap, sys_id, ship_pos)
     });
-    if is_inhibited {
+    if !is_covert && is_inhibited {
         return Err(err(
             "CynoInhibited",
             "A Mobile Cynosural Inhibitor is active within range (100 km), preventing cynosural field activation",
