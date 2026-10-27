@@ -312,4 +312,5 @@ mod corp_lifecycle_governance_closure;
 mod corp_projects_welcome_alliance_closure;
 mod fleet_tactical_movement_closure;
 mod combat_r4_regressions;
+mod combat_r5_regressions;
 mod structures_mining_r4_regressions;

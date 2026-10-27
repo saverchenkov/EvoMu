@@ -105,7 +105,7 @@ pub async fn handle_fighters(
     }
     match (service, method) {
         ("fighterMgr", "GetFightersForShip") => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -115,6 +115,21 @@ pub async fn handle_fighters(
                     message: "Session has no active ship".into(),
                 }));
             };
+            let authorized = session.ship_id == Some(ship_id)
+                || ctx.db.with_snapshot(|snap| {
+                    let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                    snap.items.get(&ship_id).is_some_and(|i| i.owner_id == char_id)
+                        || snap
+                            .structures
+                            .get(&ship_id)
+                            .is_some_and(|s| s.owner_corp_id == char_corp)
+                });
+            if !authorized {
+                return Some(Err(BridgeRpcError {
+                    code: "AccessDenied".into(),
+                    message: format!("Character {char_id} does not control ship or structure {ship_id}"),
+                }));
+            }
             let mut tube_pairs: Vec<(usize, i64)> = ctx
                 .fighter_tube_loads
                 .read()
@@ -668,7 +683,7 @@ pub async fn handle_fighters(
         }
 
         ("fighterMgr", "RecallFightersToTubes") => {
-            let (_, _char_id) = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -762,9 +777,11 @@ pub async fn handle_fighters(
                             .filter(|i| {
                                 i.location_id == ship_id
                                     && i.flag == InventoryFlag::FighterBay
+                                    && i.owner_id == char_id
                                     && i.type_id == f.type_id
                                     && i.item_id != f.item_id
                                     && !loaded_tube_ids.contains(&i.item_id)
+                                    && !snap.is_item_locked_in_contract_or_job(i.item_id)
                                     && i.quantity > 0
                             })
                             .map(|i| i.item_id)
@@ -796,7 +813,8 @@ pub async fn handle_fighters(
                 ctx.fighter_tube_loads
                     .write()
                     .unwrap()
-                    .insert((ship_id, f.tube_index), f.item_id);
+                    .entry((ship_id, f.tube_index))
+                    .or_insert(f.item_id);
                 with_mut_combat_runtime(ctx, |rt| {
                     rt.fighter_tube_rearm_until.insert((ship_id, f.tube_index), ctx.now_unix() + 15);
                 });

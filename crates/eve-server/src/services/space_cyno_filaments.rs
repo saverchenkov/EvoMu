@@ -471,6 +471,18 @@ async fn handle_random_jump_filament(
         None
     }.unwrap_or(DVec3::new(100_000_000.0, 0.0, 0.0));
 
+    if old_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
+        return Err(BridgeRpcError {
+            code: "ShipWarpScrambled".into(),
+            message: "Cannot activate filament while warp scrambled".into(),
+        });
+    }
+    if matches!(current_ball.mode, MovementMode::Warp { .. }) {
+        return Err(BridgeRpcError {
+            code: "CannotActivateFilamentInWarp".into(),
+            message: "Cannot activate filament while in warp".into(),
+        });
+    }
     let mut jumpers = vec![(char_id, ship_id, current_ball)];
     for mate_id in fleet_members {
         if mate_id == char_id || jumpers.len() >= max_capacity { continue; }
@@ -481,8 +493,13 @@ async fn handle_random_jump_filament(
         let Some((m_ship_id, m_type_id)) = mate_ship_info else { continue; };
         let m_grp = ctx.sde.types.get(&m_type_id).map(|t| t.group_id).unwrap_or(0);
         if matches!(m_grp, 30 | 485 | 547 | 659 | 883 | 1538 | 4594) { continue; }
-        if crate::sp6_lifecycle::require_no_pvp_timer_for_filament(ctx, mate_id).is_err() { continue; }
-        if let Ok(Some((_, m_ball))) = old_handle.get_ball_snapshot(m_ship_id).await {
+        if crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, mate_id, m_ship_id, old_sys).is_err() { continue; }
+        if crate::services::space_destiny::check_session_change_timer_active(ctx, mate_id, now_unix, Some((old_sys, cur_tick))).is_some() { continue; }
+        if old_handle.is_ball_scrambled(m_ship_id).await.unwrap_or(false) { continue; }
+        if old_handle.get_combat_state(m_ship_id).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) { continue; }
+        if let Ok(Some((_, mut m_ball))) = old_handle.get_ball_snapshot(m_ship_id).await {
+            if matches!(m_ball.mode, MovementMode::Warp { .. }) { continue; }
+            if crate::services::tactical_modules::prepare_ship_for_wormhole_jump(ctx, &old_handle, mate_id, m_ship_id, &mut m_ball).await.is_err() { continue; }
             if caller_pos.distance(m_ball.position) <= 6_000.0 {
                 jumpers.push((mate_id, m_ship_id, m_ball));
             }
@@ -511,6 +528,7 @@ async fn handle_random_jump_filament(
     let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
     let pvp_until = now_unix.saturating_add(crate::sp6_lifecycle::PVP_TIMER_SECS);
     for (j_idx, (p_char, p_ship, mut b)) in jumpers.into_iter().enumerate() {
+        let prev_cs = old_handle.get_combat_state(p_ship).await.ok().flatten();
         crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, p_char, p_ship, old_sys);
         let _ = old_handle.remove_ball(p_ship).await;
         crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, p_char, p_ship);
@@ -522,6 +540,12 @@ async fn handle_random_jump_filament(
         b.speed_fraction = 0.0;
         b.mode = MovementMode::Stop;
         let mut combat_state = ctx.build_ship_combat_state(p_char, p_ship, b.type_id);
+        if let Some(pcs) = prev_cs {
+            combat_state.shield_hp = pcs.shield_hp.min(combat_state.max_shield_hp);
+            combat_state.armor_hp = pcs.armor_hp.min(combat_state.max_armor_hp);
+            combat_state.structure_hp = pcs.structure_hp.min(combat_state.max_structure_hp);
+            combat_state.capacitor = pcs.capacitor.min(combat_state.max_capacitor);
+        }
         combat_state.is_cloaked = true;
         combat_state.gate_cloak_remaining_ticks = 60;
         combat_state.undock_invulnerable_remaining_ticks = 60;
@@ -776,6 +800,7 @@ async fn handle_cmd_jump_to_structure_beacon(
         }
     });
 
+    let prev_cs = cur_sys_handle.get_combat_state(ship_id).await.ok().flatten();
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys_id);
     let _ = cur_sys_handle.remove_ball(ship_id).await;
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
@@ -794,6 +819,12 @@ async fn handle_cmd_jump_to_structure_beacon(
         mode: MovementMode::Stop,
     };
     let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, current_ball.type_id);
+    if let Some(pcs) = prev_cs {
+        combat_state.shield_hp = pcs.shield_hp.min(combat_state.max_shield_hp);
+        combat_state.armor_hp = pcs.armor_hp.min(combat_state.max_armor_hp);
+        combat_state.structure_hp = pcs.structure_hp.min(combat_state.max_structure_hp);
+        combat_state.capacitor = pcs.capacitor.min(combat_state.max_capacitor);
+    }
     combat_state.is_cloaked = true;
     combat_state.gate_cloak_remaining_ticks = 60;
     combat_state.undock_invulnerable_remaining_ticks = 60;
@@ -1238,6 +1269,7 @@ async fn handle_cmd_beacon_jump_fleet(
         }
     });
 
+    let prev_cs = cur_sys_handle.get_combat_state(ship_id).await.ok().flatten();
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys_id);
     let _ = cur_sys_handle.remove_ball(ship_id).await;
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
@@ -1256,6 +1288,12 @@ async fn handle_cmd_beacon_jump_fleet(
         mode: MovementMode::Stop,
     };
     let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, current_ball.type_id);
+    if let Some(pcs) = prev_cs {
+        combat_state.shield_hp = pcs.shield_hp.min(combat_state.max_shield_hp);
+        combat_state.armor_hp = pcs.armor_hp.min(combat_state.max_armor_hp);
+        combat_state.structure_hp = pcs.structure_hp.min(combat_state.max_structure_hp);
+        combat_state.capacitor = pcs.capacitor.min(combat_state.max_capacitor);
+    }
     combat_state.is_cloaked = true;
     combat_state.gate_cloak_remaining_ticks = 60;
     combat_state.undock_invulnerable_remaining_ticks = 60;

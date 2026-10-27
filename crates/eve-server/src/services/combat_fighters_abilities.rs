@@ -330,17 +330,89 @@ async fn activate_single_fighter_ability(
             }));
         }
 
+        let victim_char_opt = ctx.db.with_snapshot(|snap| {
+            if snap.characters.contains_key(&tid) {
+                Some(tid)
+            } else if let Some(item) = snap.items.get(&tid) {
+                if snap.characters.contains_key(&item.owner_id) {
+                    Some(item.owner_id)
+                } else {
+                    None
+                }
+            } else if let Some(ch) = snap.characters.values().find(|c| c.active_ship_id == tid) {
+                Some(ch.character_id)
+            } else {
+                None
+            }
+        });
+
+        if let Some(victim_char_id) = victim_char_opt {
+            if crate::services::space_destiny::is_location_change_invulnerable(ctx, victim_char_id, now_unix) {
+                return Some(Err(BridgeRpcError {
+                    code: "TargetInvulnerable".into(),
+                    message: format!("Target character {victim_char_id} is invulnerable due to recent location change"),
+                }));
+            }
+            if victim_char_id != char_id {
+                let is_legal = ctx.db.with_snapshot(|snap| {
+                    is_legal_war_or_suspect_target(snap, char_id, victim_char_id, now_unix)
+                }) || {
+                    let cw = ctx.crimewatch.read().unwrap();
+                    cw.states
+                        .get(&victim_char_id)
+                        .map(|s| s.is_suspect(now_unix) || s.is_criminal(now_unix))
+                        .unwrap_or(false)
+                } || with_combat_runtime(ctx, |rt| {
+                    rt.has_limited_engagement_with(victim_char_id, char_id, now_unix)
+                });
+                if !is_legal {
+                    let safety = with_combat_runtime(ctx, |rt| {
+                        rt.safety_levels
+                            .get(&char_id)
+                            .copied()
+                            .unwrap_or(SafetyLevel::Red)
+                    });
+                    let is_pod_target = target_ball.type_id == 670;
+                    let would_be_criminal = sec >= 0.45 || (sec > 0.0 && is_pod_target);
+                    let would_be_suspect = sec > 0.0 && sec < 0.45 && !is_pod_target;
+                    if (safety == SafetyLevel::Green && (would_be_criminal || would_be_suspect))
+                        || (safety == SafetyLevel::Yellow && would_be_criminal)
+                    {
+                        return Some(Err(BridgeRpcError {
+                            code: "SafetyLevelRestricted".into(),
+                            message: "Ship safety prevents illegal fighter ability aggression".into(),
+                        }));
+                    }
+                }
+            }
+        }
+
         // Check if target is a fighter ball (for anti-fighter missiles bonus)
         let is_target_fighter = ctx.active_fighters.read().unwrap().contains_key(&tid);
 
         let dmg = match ability_id {
             19..=27 | 29..=32 => {
                 let dmg_mult = attr(2178).unwrap_or(1.0) * squad_mult;
-                DamageVector {
-                    em: attr(2171).unwrap_or(0.0) * dmg_mult,
-                    thermal: attr(2172).unwrap_or(0.0) * dmg_mult,
-                    kinetic: attr(2173).unwrap_or(0.0) * dmg_mult,
-                    explosive: attr(2174).unwrap_or(0.0) * dmg_mult,
+                let (em, th, ki, ex) = (
+                    attr(2171).unwrap_or(0.0),
+                    attr(2172).unwrap_or(0.0),
+                    attr(2173).unwrap_or(0.0),
+                    attr(2174).unwrap_or(0.0),
+                );
+                if em + th + ki + ex > 0.0 {
+                    DamageVector {
+                        em: em * dmg_mult,
+                        thermal: th * dmg_mult,
+                        kinetic: ki * dmg_mult,
+                        explosive: ex * dmg_mult,
+                    }
+                } else {
+                    DamageVector {
+                        em: 20.0 * dmg_mult,
+                        thermal: 20.0 * dmg_mult,
+                        kinetic: 20.0 * dmg_mult,
+                        explosive: 20.0 * dmg_mult,
+                    }
                 }
             }
             44 | 45 => {
@@ -437,28 +509,59 @@ async fn activate_single_fighter_ability(
             _ => DamageVector::default(),
         };
 
+        let is_ewar = matches!(ability_id, 2 | 10 | 11 | 12 | 14 | 17 | 18 | 36);
         if dmg.em + dmg.thermal + dmg.kinetic + dmg.explosive > 0.0 {
-            let _ = sys_handle.apply_damage_with_attacker(tid, dmg, Some(char_id)).await;
+            if let Ok(Some((applied, destroyed, _))) =
+                sys_handle.apply_damage_with_attacker(tid, dmg, Some(char_id)).await
+            {
+                super::combat_wrecks_killmails::record_killmail_assist_action(
+                    ctx,
+                    tid,
+                    char_id,
+                    fighter.type_id,
+                    fighter.type_id,
+                    applied,
+                    false,
+                    now_unix,
+                );
+                if applied > 0.0 {
+                    super::combat_npc_ai::record_npc_threat_event(
+                        ctx,
+                        tid,
+                        fighter.parent_ship_id,
+                        applied,
+                        false,
+                        false,
+                    );
+                }
+                if destroyed {
+                    super::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(
+                        ctx,
+                        sys_id,
+                        char_id,
+                        tid,
+                        target_ball.type_id,
+                        target_ball.position,
+                        now_unix,
+                    )
+                    .await;
+                }
+            }
+        } else if is_ewar {
+            super::combat_wrecks_killmails::record_killmail_assist_action(
+                ctx,
+                tid,
+                char_id,
+                fighter.type_id,
+                fighter.type_id,
+                0.0,
+                true,
+                now_unix,
+            );
         }
 
         // CrimeWatch: trigger weapon timer and track combat aggression
         ctx.crimewatch.write().unwrap().trigger_weapon_timer(char_id, now_unix);
-
-        let victim_char_opt = ctx.db.with_snapshot(|snap| {
-            if snap.characters.contains_key(&tid) {
-                Some(tid)
-            } else if let Some(item) = snap.items.get(&tid) {
-                if snap.characters.contains_key(&item.owner_id) {
-                    Some(item.owner_id)
-                } else {
-                    None
-                }
-            } else if let Some(ch) = snap.characters.values().find(|c| c.active_ship_id == tid) {
-                Some(ch.character_id)
-            } else {
-                None
-            }
-        });
 
         if let Some(victim_char_id) = victim_char_opt {
             if victim_char_id != char_id {
@@ -477,7 +580,9 @@ async fn activate_single_fighter_ability(
                     } else {
                         false
                     }
-                };
+                } || with_combat_runtime(ctx, |rt| {
+                    rt.has_limited_engagement_with(victim_char_id, char_id, now_unix)
+                });
                 let _ = ctx.crimewatch.write().unwrap().handle_combat_aggression(
                     char_id,
                     victim_char_id,
@@ -632,7 +737,11 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
             message: "Session has no active solar system".into(),
         }));
     };
-    let fighter_ball_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+    let fighter_ball_id = match args.first() {
+        Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => items.first().and_then(|i| i.as_i64()).unwrap_or(0),
+        Some(other) => other.as_i64().unwrap_or(0),
+        None => 0,
+    };
     let slot_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0) as u32;
 
     let target_point = match args.get(2) {
@@ -687,6 +796,15 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
             message: format!("Fighter ability {} not found in SDE", slot_def.ability_id),
         }));
     };
+    if fa.target_mode != "pointTargeted" || slot_def.charges.is_none() {
+        return Some(Err(BridgeRpcError {
+            code: "InvalidTargetMode".into(),
+            message: format!(
+                "Fighter ability {} (targetMode='{}') is not a point-targeted bomb ability",
+                slot_def.ability_id, fa.target_mode
+            ),
+        }));
+    }
 
     let sys_sec = ctx
         .sde
@@ -699,6 +817,20 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
             code: "BombForbiddenInHighSec".into(),
             message: "Point-targeted fighter bomb abilities cannot be used in high-security space".into(),
         }));
+    }
+    if sys_sec > 0.0 {
+        let safety = with_combat_runtime(ctx, |rt| {
+            rt.safety_levels
+                .get(&char_id)
+                .copied()
+                .unwrap_or(SafetyLevel::Red)
+        });
+        if safety == SafetyLevel::Green {
+            return Some(Err(BridgeRpcError {
+                code: "SafetyLevelRestricted".into(),
+                message: "Ship safety is set to Green; point-targeted AoE bombs in low-security space are prevented".into(),
+            }));
+        }
     }
 
     let now_unix = ctx.now_unix();
@@ -716,13 +848,22 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
     }
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    if let Ok(Some((_, fb))) = sys_handle.get_ball_snapshot(fighter_ball_id).await {
-        if fb.position.distance(target_point) > 100_000.0 {
-            return Some(Err(BridgeRpcError {
-                code: "TargetOutOfRange".into(),
-                message: "Target point is out of fighter ability range".into(),
-            }));
-        }
+    let Some((_, fb)) = sys_handle
+        .get_ball_snapshot(fighter_ball_id)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return Some(Err(BridgeRpcError {
+            code: "FighterNotInSystem".into(),
+            message: format!("Fighter squadron {fighter_ball_id} is not in solar system {sys_id}"),
+        }));
+    };
+    if fb.position.distance(target_point) > 100_000.0 {
+        return Some(Err(BridgeRpcError {
+            code: "TargetOutOfRange".into(),
+            message: "Target point is out of fighter ability range".into(),
+        }));
     }
 
     let charge_count = slot_def.charges.as_ref().map(|c| c.charge_count).unwrap_or(1);
@@ -748,23 +889,95 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
 
     // Apply AoE damage to entities near target_point
     if let Ok(balls) = sys_handle.list_balls().await {
+        let safety = with_combat_runtime(ctx, |rt| {
+            rt.safety_levels
+                .get(&char_id)
+                .copied()
+                .unwrap_or(SafetyLevel::Red)
+        });
         for b in balls {
-            if b.id != fighter_ball_id && b.id != fighter.parent_ship_id {
+            if b.id != fighter_ball_id
+                && b.id != fighter.parent_ship_id
+                && super::combat_missiles_aoe::is_combatant_ship_or_entity_ball(ctx, b.id, b.type_id)
+            {
                 let d = b.position.distance(target_point);
                 if d <= aoe_radius {
                     let bomb_vic = ctx.db.with_snapshot(|snap| {
-                        snap.characters.values().find(|c| c.active_ship_id == b.id).map(|c| c.character_id)
-                            .or_else(|| snap.items.get(&b.id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
+                        snap.characters
+                            .values()
+                            .find(|c| c.active_ship_id == b.id)
+                            .map(|c| c.character_id)
+                            .or_else(|| {
+                                snap.items
+                                    .get(&b.id)
+                                    .map(|i| i.owner_id)
+                                    .filter(|oid| snap.characters.contains_key(oid))
+                            })
                     });
                     if let Some(vcid) = bomb_vic {
                         if crate::services::space_destiny::is_location_change_invulnerable(ctx, vcid, now_unix) {
                             continue;
                         }
+                        if vcid != char_id && sys_sec > 0.0 && b.type_id == 670 && safety == SafetyLevel::Yellow {
+                            continue;
+                        }
                     }
-                    if let Ok(Some((app, destroyed, _))) = sys_handle.apply_damage_with_attacker(b.id, bomb_dmg, Some(char_id)).await {
+                    if let Ok(Some((app, destroyed, _))) =
+                        sys_handle.apply_damage_with_attacker(b.id, bomb_dmg, Some(char_id)).await
+                    {
                         if app > 0.0 {
+                            super::combat_wrecks_killmails::record_killmail_assist_action(
+                                ctx,
+                                b.id,
+                                char_id,
+                                fighter.type_id,
+                                fighter.type_id,
+                                app,
+                                false,
+                                now_unix,
+                            );
                             if let Some(vcid) = bomb_vic.filter(|&v| v != char_id) {
-                                crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, now_unix);
+                                crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
+                                    ctx, char_id, vcid, now_unix,
+                                );
+                                let is_legal = ctx.db.with_snapshot(|snap| {
+                                    is_legal_war_or_suspect_target(snap, char_id, vcid, now_unix)
+                                }) || {
+                                    let cw = ctx.crimewatch.read().unwrap();
+                                    cw.states
+                                        .get(&vcid)
+                                        .map(|s| s.is_suspect(now_unix) || s.is_criminal(now_unix))
+                                        .unwrap_or(false)
+                                } || with_combat_runtime(ctx, |rt| {
+                                    rt.has_limited_engagement_with(vcid, char_id, now_unix)
+                                });
+                                let _ = ctx.crimewatch.write().unwrap().handle_combat_aggression(
+                                    char_id,
+                                    vcid,
+                                    fighter.parent_ship_id,
+                                    sys_id,
+                                    sys_sec,
+                                    is_legal,
+                                    now_unix,
+                                );
+                                if !is_legal && sys_sec > 0.0 {
+                                    let old_sec = ctx.db.with_snapshot(|snap| {
+                                        snap.characters
+                                            .get(&char_id)
+                                            .map(|c| c.security_status)
+                                            .unwrap_or(0.0)
+                                    });
+                                    let loss = crate::combat::crimewatch::compute_sec_status_loss(
+                                        old_sec,
+                                        b.type_id == 670,
+                                        sys_sec,
+                                    );
+                                    ctx.db.with_mut_snapshot(|snap| {
+                                        if let Some(ch) = snap.characters.get_mut(&char_id) {
+                                            ch.security_status = (old_sec - loss).clamp(-10.0, 10.0);
+                                        }
+                                    });
+                                }
                             }
                         }
                         if destroyed {

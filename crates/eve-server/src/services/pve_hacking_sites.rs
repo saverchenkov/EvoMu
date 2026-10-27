@@ -34,14 +34,7 @@ pub fn are_hacking_tiles_adjacent(a: u32, b: u32) -> bool {
 }
 
 pub fn is_blocking_defensive_tile(t: &HackingTileState) -> bool {
-    t.coherence > 0
-        && matches!(
-            t.kind,
-            HackingNodeKind::Firewall
-                | HackingNodeKind::Antivirus
-                | HackingNodeKind::VirusSuppressor
-                | HackingNodeKind::RestorationNode
-        )
+    t.coherence > 0 && matches!(t.kind, HackingNodeKind::Firewall | HackingNodeKind::Antivirus | HackingNodeKind::VirusSuppressor | HackingNodeKind::RestorationNode)
 }
 
 /// Resolves a fitted Data/Relic/Integrated Analyzer module (SDE group 538 or dogma `virusCoherence` attr 1909)
@@ -66,11 +59,7 @@ pub fn resolve_fitted_analyzer_virus_stats(
             .filter(|i| i.location_id == ship_id && (11..=34).contains(&(i.flag as u16)))
             .filter_map(|i| {
                 let t = ctx.sde.get_type(i.type_id)?;
-                if t.group_id == 538 || t.default_attributes.get(&1909).copied().unwrap_or(0.0) > 0.0 {
-                    Some(i.type_id)
-                } else {
-                    None
-                }
+                (t.group_id == 538 || t.default_attributes.get(&1909).copied().unwrap_or(0.0) > 0.0).then_some(i.type_id)
             })
             .collect();
 
@@ -86,23 +75,13 @@ pub fn resolve_fitted_analyzer_virus_stats(
             let relic_mod = t.default_attributes.get(&183) == Some(&13278.0)
                 || t.default_attributes.contains_key(&1331)
                 || t.name.contains("Relic");
-            if is_relic {
-                relic_mod
-            } else {
-                !relic_mod
-            }
+            if is_relic { relic_mod } else { !relic_mod }
         });
 
         let lvl = snap
             .skills
             .get(&char_id)
-            .and_then(|m| {
-                if is_relic {
-                    m.get(&13278)
-                } else {
-                    m.get(&21718)
-                }
-            })
+            .and_then(|m| if is_relic { m.get(&13278) } else { m.get(&21718) })
             .map(|s| s.level as i32)
             .unwrap_or(0);
         (matching, lvl)
@@ -112,12 +91,8 @@ pub fn resolve_fitted_analyzer_virus_stats(
         return Err(BridgeRpcError::user_error("AnalyzerModuleRequired"));
     };
     let inv_type = ctx.sde.get_type(mod_tid);
-    let base_coh = inv_type
-        .and_then(|t| t.default_attributes.get(&1909).copied())
-        .unwrap_or(40.0) as i32;
-    let base_str = inv_type
-        .and_then(|t| t.default_attributes.get(&1910).copied())
-        .unwrap_or(20.0) as i32;
+    let base_coh = inv_type.and_then(|t| t.default_attributes.get(&1909).copied()).unwrap_or(40.0) as i32;
+    let base_str = inv_type.and_then(|t| t.default_attributes.get(&1910).copied()).unwrap_or(20.0) as i32;
     let slots = inv_type
         .and_then(|t| t.default_attributes.get(&1911).copied())
         .unwrap_or(3.0)
@@ -749,6 +724,49 @@ pub async fn handle_pve_hacking(
                 return Some(Err(BridgeRpcError::user_error("InvalidTileIndex")));
             }
             let tile_idx = raw_tile_idx as u32;
+            let ship_id = session.ship_id.unwrap_or_else(|| {
+                ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0))
+            });
+            let game_meta = with_pve_exploration_reg(ctx, |reg| {
+                reg.hacking_games.get(&(char_id, container_id)).map(|g| {
+                    let spos = reg
+                        .sites_by_system
+                        .get(&g.solar_system_id)
+                        .and_then(|l| l.iter().find(|s| s.site_id == g.site_id))
+                        .map(|s| s.position)
+                        .unwrap_or([0.0, 0.0, 0.0]);
+                    (g.solar_system_id, g.is_relic, spos)
+                })
+            });
+            if let Some((g_sys_id, g_is_relic, site_pos)) = game_meta {
+                let sys_handle = ctx.systems.get_or_spawn(g_sys_id);
+                if sys_handle.get_combat_state(ship_id).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) {
+                    return Some(Err(BridgeRpcError {
+                        code: "CannotHackWhileCloaked".into(),
+                        message: "Cannot continue hacking minigame while cloaked".into(),
+                    }));
+                }
+                if let Ok(Some((_, sb))) = sys_handle.get_ball_snapshot(ship_id).await {
+                    let max_range = resolve_fitted_analyzer_virus_stats(ctx, session, char_id, g_is_relic)
+                        .map(|v| v.3)
+                        .unwrap_or(6_000.0);
+                    let can_pos = if let Ok(Some((_, cb))) = sys_handle.get_ball_snapshot(container_id).await {
+                        cb.position
+                    } else if let Some(pos) = ctx.db.with_snapshot(|s| s.item_positions.get(&container_id).copied()) {
+                        glam::DVec3::from_array(pos)
+                    } else {
+                        glam::DVec3::from_array(site_pos)
+                    };
+                    let can_radius = sys_handle.get_ball_snapshot(container_id).await.ok().flatten().map(|(_, b)| b.radius).unwrap_or(0.0);
+                    let dist = (sb.position.distance(can_pos) - sb.radius - can_radius).max(0.0);
+                    if dist > max_range {
+                        return Some(Err(BridgeRpcError {
+                            code: "OutOfRange".into(),
+                            message: format!("Target container is {dist:.1} m away (analyzer max range is {max_range:.1} m)"),
+                        }));
+                    }
+                }
+            }
 
             let step_res = with_pve_exploration_reg(ctx, |reg| {
                 let _now = now_sec(reg);
@@ -921,65 +939,38 @@ pub async fn handle_pve_hacking(
                 let dist_to_core = hacking_tile_distance_to_core(tile_idx, &game.tiles);
                 let detonate = game.is_ghost_site && (game.status == "Failed" || timer_expired);
                 let out_tuple = (
-                    game.solar_system_id,
-                    game.site_id.clone(),
-                    game.is_relic,
-                    game.status.clone(),
-                    game.virus_coherence,
-                    eff_str,
-                    kind_name,
-                    rem_coh,
-                    dist_to_core,
-                    spewed,
-                    detonate,
-                    failed_twice,
-                    puzzle_solved,
-                    already_hacked,
+                    game.solar_system_id, game.site_id.clone(), game.is_relic, game.status.clone(),
+                    game.virus_coherence, eff_str, kind_name, rem_coh, dist_to_core, spewed,
+                    detonate, failed_twice, puzzle_solved, already_hacked,
                 );
                 reg.hacking_games.insert((char_id, container_id), game);
                 Ok(out_tuple)
             });
 
             let (
-                sys_id,
-                site_id,
-                is_relic,
-                status,
-                virus_coh,
-                eff_strength,
-                tile_kind_str,
-                tile_coh,
-                dist_to_core,
-                spewed_cans,
-                trigger_ghost_detonation,
-                trigger_second_fail_explosion,
-                sleeper_puzzle_solved,
-                already_hacked,
+                sys_id, site_id, is_relic, status, virus_coh, eff_strength, tile_kind_str, tile_coh,
+                dist_to_core, spewed_cans, trigger_ghost_detonation, trigger_second_fail_explosion,
+                sleeper_puzzle_solved, already_hacked,
             ) = match step_res {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
 
-            let mut ghost_dmg = 0.0;
-            let mut ghost_npcs = Vec::new();
-            if trigger_ghost_detonation {
-                let (dmg, npcs) = detonate_ghost_site(ctx, session, sys_id, &site_id).await;
-                ghost_dmg = dmg;
-                ghost_npcs = npcs;
-            }
+            let (ghost_dmg, ghost_npcs) = if trigger_ghost_detonation {
+                detonate_ghost_site(ctx, session, sys_id, &site_id).await
+            } else {
+                (0.0, Vec::new())
+            };
             let (can_exploded, can_explosion_dmg, damaged_ships, destroyed_loot_count) =
                 if trigger_second_fail_explosion {
-                    handle_second_hack_failure_explosion(ctx, sys_id, &site_id, container_id, is_relic)
-                        .await
+                    handle_second_hack_failure_explosion(ctx, sys_id, &site_id, container_id, is_relic).await
                 } else {
                     (false, 0.0, Vec::new(), 0)
                 };
 
             if status == "Won" {
                 crate::services::inventory_fitting::fitting_scanners_superweapons::mark_hacking_container_unlocked(
-                    ctx,
-                    char_id,
-                    container_id,
+                    ctx, char_id, container_id,
                 );
             }
             if status == "Won" && !already_hacked {
@@ -988,12 +979,8 @@ pub async fn handle_pve_hacking(
                     let count: i64 = s.service_state_blobs.get(&k).and_then(|v| v.parse().ok()).unwrap_or(0);
                     s.service_state_blobs.insert(k, (count + 1).to_string());
                 });
-                // Loot exists only in the spewed cans (real in-space containers); the parent container stays empty.
                 crate::services::pve_exploration_sites::materialize_spewed_cans_core(
-                    &ctx.db,
-                    &ctx.systems,
-                    char_id,
-                    &spewed_cans,
+                    &ctx.db, &ctx.systems, char_id, &spewed_cans,
                 ).await;
             }
 
@@ -1081,9 +1068,10 @@ pub async fn handle_pve_hacking(
                     message: "No active hacking game for character".into(),
                 }));
             };
-            let (removed, second_fail_info) = with_pve_exploration_reg(ctx, |reg| {
+            let (removed, second_fail_info, ghost_detonate_info) = with_pve_exploration_reg(ctx, |reg| {
                 if let Some(game) = reg.hacking_games.remove(&(char_id, container_id)) {
                     let mut explode_info = None;
+                    let mut ghost_info = None;
                     if game.status == "InProgress" {
                         let sid = game.solar_system_id;
                         let fc = reg.failure_counts.entry((sid, container_id)).or_insert(0);
@@ -1091,13 +1079,15 @@ pub async fn handle_pve_hacking(
                         if *fc >= 2 || game.is_ghost_site {
                             reg.hacked_containers.insert((sid, container_id));
                         }
-                        if *fc >= 2 && !game.is_ghost_site {
+                        if game.is_ghost_site {
+                            ghost_info = Some((sid, game.site_id.clone()));
+                        } else if *fc >= 2 {
                             explode_info = Some((sid, game.site_id.clone(), game.is_relic));
                         }
                     }
-                    (true, explode_info)
+                    (true, explode_info, ghost_info)
                 } else {
-                    (false, None)
+                    (false, None, None)
                 }
             });
             if !removed {
@@ -1106,9 +1096,11 @@ pub async fn handle_pve_hacking(
                     message: format!("No active hacking game on container {container_id}"),
                 }));
             }
+            if let Some((sid, site_id)) = ghost_detonate_info {
+                let _ = detonate_ghost_site(ctx, session, sid, &site_id).await;
+            }
             if let Some((sid, site_id, is_relic)) = second_fail_info {
-                let _ = handle_second_hack_failure_explosion(ctx, sid, &site_id, container_id, is_relic)
-                    .await;
+                let _ = handle_second_hack_failure_explosion(ctx, sid, &site_id, container_id, is_relic).await;
             }
             Some(Ok(PyRep::Bool(true)))
         }
@@ -1125,20 +1117,15 @@ pub async fn handle_pve_hacking(
                 }
                 [PyRep::Integer(a)] => {
                     let active_cid = with_pve_exploration_reg(ctx, |reg| {
-                        reg.hacking_games
-                            .keys()
-                            .find(|(cid, _)| *cid == char_id)
-                            .map(|(_, cont_id)| *cont_id)
+                        reg.hacking_games.keys().find(|(cid, _)| *cid == char_id).map(|(_, cont_id)| *cont_id)
                     });
-                    match active_cid {
-                        Some(cid) => (cid, *a as usize),
-                        None => {
-                            return Some(Err(BridgeRpcError {
-                                code: "TargetNotFound".into(),
-                                message: "Target container not specified".into(),
-                            }));
-                        }
-                    }
+                    let Some(cid) = active_cid else {
+                        return Some(Err(BridgeRpcError {
+                            code: "TargetNotFound".into(),
+                            message: "Target container not specified".into(),
+                        }));
+                    };
+                    (cid, *a as usize)
                 }
                 _ => {
                     return Some(Err(BridgeRpcError {
@@ -1170,16 +1157,11 @@ pub async fn handle_pve_hacking(
                 };
                 match util {
                     HackingUtilityKind::SelfRepair => {
-                        game.virus_coherence =
-                            (game.virus_coherence + 30).min(game.max_virus_coherence);
+                        game.virus_coherence = (game.virus_coherence + 30).min(game.max_virus_coherence);
                     }
                     HackingUtilityKind::KernelRot => {
                         if let Some(tid) = target_tile_opt {
-                            if let Some(t) = game
-                                .tiles
-                                .iter_mut()
-                                .find(|t| t.tile_index == tid && t.revealed && t.coherence > 0)
-                            {
+                            if let Some(t) = game.tiles.iter_mut().find(|t| t.tile_index == tid && t.revealed && t.coherence > 0) {
                                 t.coherence = (t.coherence / 2).max(1);
                             }
                         } else if let Some(t) = game.tiles.iter_mut().find(|t| t.revealed && t.coherence > 0) {
@@ -1191,18 +1173,8 @@ pub async fn handle_pve_hacking(
                     }
                     HackingUtilityKind::SecondaryVector => {
                         let chosen_tile = target_tile_opt
-                            .and_then(|tid| {
-                                game.tiles
-                                    .iter()
-                                    .find(|t| t.tile_index == tid && t.revealed && t.coherence > 0)
-                                    .map(|t| t.tile_index)
-                            })
-                            .or_else(|| {
-                                game.tiles
-                                    .iter()
-                                    .find(|t| t.revealed && t.coherence > 0)
-                                    .map(|t| t.tile_index)
-                            })
+                            .and_then(|tid| game.tiles.iter().find(|t| t.tile_index == tid && t.revealed && t.coherence > 0).map(|t| t.tile_index))
+                            .or_else(|| game.tiles.iter().find(|t| t.revealed && t.coherence > 0).map(|t| t.tile_index))
                             .unwrap_or(0);
                         game.secondary_vector_target = Some((chosen_tile, 3));
                     }
@@ -1211,10 +1183,7 @@ pub async fn handle_pve_hacking(
                     ("containerID", PyRep::Integer(container_id)),
                     ("usedSlot", PyRep::Integer(slot_idx as i64)),
                     ("virusCoherence", PyRep::Integer(game.virus_coherence as i64)),
-                    (
-                        "polymorphicShieldCharges",
-                        PyRep::Integer(game.polymorphic_shield_charges as i64),
-                    ),
+                    ("polymorphicShieldCharges", PyRep::Integer(game.polymorphic_shield_charges as i64)),
                 ]))
             });
             Some(res)
@@ -1225,14 +1194,11 @@ pub async fn handle_pve_hacking(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let container_id = match args.first().and_then(|a| a.as_i64()) {
-                Some(id) => id,
-                None => {
-                    return Some(Err(BridgeRpcError {
-                        code: "TargetNotFound".into(),
-                        message: "Target container not specified".into(),
-                    }));
-                }
+            let Some(container_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "TargetNotFound".into(),
+                    message: "Target container not specified".into(),
+                }));
             };
             let tiles = with_pve_exploration_reg(ctx, |reg| {
                 reg.hacking_games.get(&(char_id, container_id)).map(|g| {
@@ -1300,8 +1266,7 @@ pub async fn handle_pve_hacking(
                 };
                 match util {
                     HackingUtilityKind::SelfRepair => {
-                        game.virus_coherence =
-                            (game.virus_coherence + 30).min(game.max_virus_coherence);
+                        game.virus_coherence = (game.virus_coherence + 30).min(game.max_virus_coherence);
                     }
                     HackingUtilityKind::KernelRot => {
                         let Some(t) = game.tiles.get_mut(target_tile_idx) else {
@@ -1333,10 +1298,7 @@ pub async fn handle_pve_hacking(
                     ("containerID", PyRep::Integer(container_id)),
                     ("usedSlot", PyRep::Integer(slot_idx as i64)),
                     ("virusCoherence", PyRep::Integer(game.virus_coherence as i64)),
-                    (
-                        "polymorphicShieldCharges",
-                        PyRep::Integer(game.polymorphic_shield_charges as i64),
-                    ),
+                    ("polymorphicShieldCharges", PyRep::Integer(game.polymorphic_shield_charges as i64)),
                 ]))
             });
             Some(res)

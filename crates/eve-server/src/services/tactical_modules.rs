@@ -96,7 +96,7 @@ pub struct TacticalModulesState {
 fn db_key_of(ctx: &ServerContext) -> usize { ctx.instance_id as usize }
 fn db_ptr_key(db: &Arc<eve_db::WorldRepository>) -> usize { Arc::as_ptr(db) as usize }
 
-fn is_combatant_ship_or_entity_ball(
+pub(crate) fn is_combatant_ship_or_entity_ball(
     sde_opt: Option<&Arc<eve_sde::SdeRegistry>>,
     db_opt: Option<&Arc<eve_db::WorldRepository>>,
     ball_id: i64,
@@ -154,26 +154,17 @@ pub fn check_ship_navigation_lock(ctx: &ServerContext, ship_id: i64, action: &st
     let st = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
     if let Some(&until) = st.lance_caster_lock_until.get(&(db_key, ship_id)) {
         if now_unix < until {
-            return Err(BridgeRpcError {
-                code: "LanceFiringLockActive".into(),
-                message: format!("Cannot {action} while Disruptive Lance 5-minute firing lock is active ({}s remaining)", until - now_unix),
-            });
+            return Err(BridgeRpcError { code: "LanceFiringLockActive".into(), message: format!("Cannot {action} while Disruptive Lance 5-minute firing lock is active ({}s remaining)", until - now_unix) });
         }
     }
     if let Some(&until) = st.lance_victim_debuff_until.get(&(db_key, ship_id)) {
         if now_unix < until {
-            return Err(BridgeRpcError {
-                code: "DisruptiveLanceDebuffActive".into(),
-                message: format!("Cannot {action} while Disruptive Lance debuff is active ({}s remaining)", until - now_unix),
-            });
+            return Err(BridgeRpcError { code: "DisruptiveLanceDebuffActive".into(), message: format!("Cannot {action} while Disruptive Lance debuff is active ({}s remaining)", until - now_unix) });
         }
     }
     if let Some(ent) = st.entosis_active_links.get(&(db_key, ship_id)) {
         if now_unix < ent.expires_unix {
-            return Err(BridgeRpcError {
-                code: "EntosisLinkActive".into(),
-                message: format!("Cannot {action} while Entosis Link cycle is active ({}s remaining)", ent.expires_unix - now_unix),
-            });
+            return Err(BridgeRpcError { code: "EntosisLinkActive".into(), message: format!("Cannot {action} while Entosis Link cycle is active ({}s remaining)", ent.expires_unix - now_unix) });
         }
     }
     Ok(())
@@ -184,11 +175,7 @@ pub fn incoming_remote_repair_multiplier(ctx: &ServerContext, target_ship_id: i6
     let now_unix = ctx.now_unix_secs();
     let db_key = db_key_of(ctx);
     let st = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
-    if st.lance_victim_debuff_until.get(&(db_key, target_ship_id)).is_some_and(|&u| now_unix < u) {
-        0.50
-    } else {
-        1.0
-    }
+    if st.lance_victim_debuff_until.get(&(db_key, target_ship_id)).is_some_and(|&u| now_unix < u) { 0.50 } else { 1.0 }
 }
 
 /// Clears Entosis Link warm-up state when `ship_id` unlocks `target_id` (or all targets when `target_id_opt` is `None`).
@@ -216,15 +203,11 @@ pub fn remove_projected_remote_assistance(ctx: &ServerContext, source_module_id:
             if k == db_key {
                 let before = list.len();
                 list.retain(|e| e.module_id != source_module_id);
-                if list.len() != before {
-                    affected.push(tid);
-                }
+                if list.len() != before { affected.push(tid); }
             }
         }
     }
-    for tid in affected {
-        ctx.invalidate_ship_fitting(tid);
-    }
+    for tid in affected { ctx.invalidate_ship_fitting(tid); }
 }
 
 /// Validates and projects a Remote Sensor Booster (`group 290`) or Remote Tracking Computer (`group 209`) onto `target_id`.
@@ -724,69 +707,79 @@ pub async fn activate_superweapon_or_lance(
     is_slash: bool,
     target_id_opt: Option<i64>,
 ) -> Result<PyRep, BridgeRpcError> {
-    let (ship_group_id, mod_type_id, has_active_siege) = ctx.db.with_snapshot(|snap| {
-        let sg = snap.items.get(&ship_id).and_then(|s| ctx.sde.types.get(&s.type_id)).map(|t| t.group_id).unwrap_or(0);
+    if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
+        return Err(BridgeRpcError { code: "ModuleInReactivationDelay".into(), message: format!("Module {module_id} is in reactivation delay") });
+    }
+    let (ship_type_id, ship_group_id, mod_type_id, has_active_siege) = ctx.db.with_snapshot(|snap| {
+        let st = snap.items.get(&ship_id).map(|s| s.type_id).unwrap_or(0);
+        let sg = ctx.sde.types.get(&st).map(|t| t.group_id).unwrap_or(0);
         let mt = snap.items.get(&module_id).filter(|m| m.location_id == ship_id).map(|m| m.type_id).unwrap_or(0);
         let sieged = snap.items.values().any(|i| i.location_id == ship_id && snap.module_active_states.contains(&i.item_id) && matches!(i.type_id, 20280 | 4292));
-        (sg, mt, sieged)
+        (st, sg, mt, sieged)
     });
 
     let is_lancer = ship_group_id == 4594 || matches!(mod_type_id, 77398..=77401);
     if ship_group_id != 30 && !is_lancer {
-        return Err(BridgeRpcError {
-            code: "InvalidShipGroup".into(),
-            message: "Superweapons can only be activated on Titans (group 30) or Lancer Dreadnoughts (group 4594)".into(),
-        });
+        return Err(BridgeRpcError { code: "InvalidShipGroup".into(), message: "Superweapons can only be activated on Titans (group 30) or Lancer Dreadnoughts (group 4594)".into() });
     }
     let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.0);
     if sys_sec >= 0.45 {
-        return Err(BridgeRpcError {
-            code: "CannotActivateDoomsdayInHighSec".into(),
-            message: format!("Superweapons and Disruptive Lances cannot be activated in high-sec (system {sys_id} security {sys_sec:.2})"),
-        });
+        return Err(BridgeRpcError { code: "CannotActivateDoomsdayInHighSec".into(), message: format!("Superweapons and Disruptive Lances cannot be activated in high-sec (system {sys_id} security {sys_sec:.2})") });
     }
     let Some(mod_type) = ctx.sde.types.get(&mod_type_id) else {
-        return Err(BridgeRpcError {
-            code: "ModuleNotFound".into(),
-            message: format!("Superweapon module {module_id} not found on ship"),
-        });
+        return Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Superweapon module {module_id} not found on ship") });
     };
     if mod_type.group_id != 588 {
-        return Err(BridgeRpcError {
-            code: "InvalidModuleGroup".into(),
-            message: format!("Module {module_id} is not a Super Weapon (group 588)"),
-        });
+        return Err(BridgeRpcError { code: "InvalidModuleGroup".into(), message: format!("Module {module_id} is not a Super Weapon (group 588)") });
     }
 
     let sys = ctx.systems.get_or_spawn(sys_id);
+    let now_unix = ctx.now_unix_secs();
 
     if is_lancer {
         if !has_active_siege {
-            return Err(BridgeRpcError {
-                code: "SiegeRequiredForLance".into(),
-                message: "Disruptive Lance can only be activated while a Siege Module is active".into(),
-            });
+            return Err(BridgeRpcError { code: "SiegeRequiredForLance".into(), message: "Disruptive Lance can only be activated while a Siege Module is active".into() });
         }
         let skills = ctx.character_skill_levels(char_id);
         let op_lvl = skills.get(&77738).copied().unwrap_or(0);
         let lancer_lvl = skills.get(&77739).copied().or_else(|| skills.get(&76079).copied()).unwrap_or(0);
         if op_lvl == 0 || lancer_lvl == 0 {
-            return Err(BridgeRpcError {
-                code: "SkillMissing".into(),
-                message: "Activating a Disruptive Lance requires Disruptive Lance Operation (77738) and Lancer Dreadnought (77739)".into(),
-            });
+            return Err(BridgeRpcError { code: "SkillMissing".into(), message: "Activating a Disruptive Lance requires Disruptive Lance Operation (77738) and Lancer Dreadnought (77739)".into() });
         }
 
         let base_cap = mod_type.default_attributes.get(&6).copied().unwrap_or(30_000.0);
         let cap_cost = base_cap * (1.0 - 0.05 * (op_lvl.min(5) as f64));
-        if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
+        let cur_cap_opt = if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
             if cs.capacitor + 1e-4 < cap_cost {
-                return Err(BridgeRpcError {
-                    code: "NotEnoughCapacitor".into(),
-                    message: format!("Insufficient capacitor for Disruptive Lance: need {cap_cost:.1} GJ"),
-                });
+                return Err(BridgeRpcError { code: "NotEnoughCapacitor".into(), message: format!("Insufficient capacitor for Disruptive Lance: need {cap_cost:.1} GJ") });
             }
-            let _ = sys.set_capacitor(ship_id, (cs.capacitor - cap_cost).max(0.0)).await;
+            Some(cs.capacitor)
+        } else {
+            None
+        };
+
+        // Pre-validate and consume 25,000 isotopes BEFORE applying capacitor drain, beam damage, or debuffs (#203)
+        let consumed_fuel = ctx.db.with_mut_snapshot(|snap| {
+            let cand = snap.items.values().find(|i| i.location_id == ship_id && matches!(i.type_id, 16274 | 17887..=17889) && i.quantity >= 25_000)
+                .or_else(|| snap.items.values().find(|i| i.location_id == ship_id && matches!(i.type_id, 16274 | 17887..=17889) && i.quantity > 0))
+                .map(|i| (i.item_id, i.quantity));
+            match cand {
+                Some((fid, avail)) if avail >= 25_000 => {
+                    let mut rem = 0;
+                    if let Some(it) = snap.items.get_mut(&fid) {
+                        it.quantity -= 25_000;
+                        rem = it.quantity;
+                    }
+                    if rem <= 0 { snap.items.remove(&fid); }
+                    Ok(25_000)
+                }
+                Some((_, avail)) => Err(format!("Insufficient lance fuel: need 25000, have {avail}")),
+                None => Err("Missing required lance isotopes".to_string()),
+            }
+        }).map_err(|message| BridgeRpcError { code: "InsufficientFuel".into(), message })?;
+
+        if let Some(cur_cap) = cur_cap_opt {
+            let _ = sys.set_capacitor(ship_id, (cur_cap - cap_cost).max(0.0)).await;
         }
 
         let base_range = mod_type.default_attributes.get(&54).copied().unwrap_or(50_000.0);
@@ -809,25 +802,25 @@ pub async fn activate_superweapon_or_lance(
         let beam_delta = target_pos - ship_pos;
         let beam_dir = if beam_delta.length_squared() > 1e-4 { beam_delta.normalize() } else { DVec3::new(1.0, 0.0, 0.0) };
         let beam_radius = mod_type.default_attributes.get(&2263).copied().unwrap_or(2_500.0);
-        let now_unix = ctx.now_unix_secs();
         let mut hit_targets = Vec::new();
         for b in all_balls {
             if b.id != ship_id && (is_combatant_ship_or_entity_ball(Some(&ctx.sde), Some(&ctx.db), b.id, b.type_id) || (b.id >= 1_895_000_000 && b.id < 1_900_000_000)) {
                 let to_ball = b.position - ship_pos;
                 let along_beam = to_ball.dot(beam_dir);
-                if along_beam >= 100.0 && along_beam <= effective_range {
-                    let perp_dist = (to_ball - beam_dir * along_beam).length();
-                    if perp_dist <= beam_radius {
-                        let _ = sys.apply_damage_with_attacker(b.id, dmg_vec, Some(char_id)).await;
-                        if let Ok(Some(mut v_cs)) = sys.get_combat_state(b.id).await {
-                            v_cs.capacitor = (v_cs.capacitor - 10_000.0).max(0.0);
-                            v_cs.warp_scramble_strength = v_cs.warp_scramble_strength.max(100);
-                            v_cs.is_mwd_mjd_disabled = true;
-                            v_cs.is_tethered = false;
-                            let _ = sys.set_combat_state(b.id, v_cs).await;
-                        }
-                        hit_targets.push(b.id);
+                if along_beam >= 100.0 && along_beam <= effective_range && (to_ball - beam_dir * along_beam).length() <= beam_radius {
+                    let (applied, destroyed) = sys.apply_damage_with_attacker(b.id, dmg_vec, Some(char_id)).await.ok().flatten().map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
+                    crate::services::combat_crimewatch::record_killmail_assist_action(ctx, b.id, char_id, ship_type_id, mod_type_id, applied, false, now_unix);
+                    if let Ok(Some(mut v_cs)) = sys.get_combat_state(b.id).await {
+                        v_cs.capacitor = (v_cs.capacitor - 10_000.0).max(0.0);
+                        v_cs.warp_scramble_strength = v_cs.warp_scramble_strength.max(100);
+                        v_cs.is_mwd_mjd_disabled = true;
+                        v_cs.is_tethered = false;
+                        let _ = sys.set_combat_state(b.id, v_cs).await;
                     }
+                    if destroyed {
+                        crate::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(ctx, sys_id, char_id, b.id, b.type_id, b.position, now_unix).await;
+                    }
+                    hit_targets.push(b.id);
                 }
             }
         }
@@ -842,42 +835,52 @@ pub async fn activate_superweapon_or_lance(
         ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).get_or_create(char_id).weapon_timer_until_unix = now_unix + 60;
         ctx.record_module_reactivation_delay(ship_id, module_id, 300.0);
 
-        let consumed_fuel = ctx.db.with_mut_snapshot(|snap| {
-            let cand = snap.items.values().find(|i| i.location_id == ship_id && matches!(i.type_id, 16274 | 17887..=17889) && i.quantity >= 25_000)
-                .or_else(|| snap.items.values().find(|i| i.location_id == ship_id && matches!(i.type_id, 16274 | 17887..=17889) && i.quantity > 0))
-                .map(|i| (i.item_id, i.quantity));
-            match cand {
-                Some((fid, avail)) if avail >= 25_000 => {
-                    if let Some(it) = snap.items.get_mut(&fid) {
-                        it.quantity -= 25_000;
-                    }
-                    Ok(25_000)
-                }
-                Some((_, avail)) => Err(format!("Insufficient lance fuel: need 25000, have {avail}")),
-                None => Err("Missing required lance isotopes".to_string()),
-            }
-        }).map_err(|message| BridgeRpcError { code: "InsufficientFuel".into(), message })?;
-
         return Ok(PyRep::keyval([
-            ("moduleID", PyRep::Integer(module_id)),
-            ("shipID", PyRep::Integer(ship_id)),
-            ("slashMode", PyRep::Bool(true)),
-            ("totalDamageApplied", PyRep::Real(lance_damage)),
-            ("titanLanceBaseDamage", PyRep::Real(titan_lance_base)),
-            ("capacitorCost", PyRep::Real(cap_cost)),
-            ("effectiveRangeMeters", PyRep::Real(effective_range)),
-            ("neutralizerAmountGJ", PyRep::Real(10_000.0)),
-            ("remoteRepairMultiplier", PyRep::Real(0.50)),
-            ("remoteRepairImpedance", PyRep::Real(0.50)),
-            ("jumpDockTetherCloakLockSeconds", PyRep::Real(300.0)),
-            ("casterLockSeconds", PyRep::Integer(300)),
-            ("victimPointDurationSeconds", PyRep::Real(60.0)),
-            ("victimDebuffSeconds", PyRep::Integer(60)),
-            ("hitCount", PyRep::Integer(hit_targets.len() as i64)),
+            ("moduleID", PyRep::Integer(module_id)), ("shipID", PyRep::Integer(ship_id)), ("slashMode", PyRep::Bool(true)),
+            ("totalDamageApplied", PyRep::Real(lance_damage)), ("titanLanceBaseDamage", PyRep::Real(titan_lance_base)),
+            ("capacitorCost", PyRep::Real(cap_cost)), ("effectiveRangeMeters", PyRep::Real(effective_range)),
+            ("neutralizerAmountGJ", PyRep::Real(10_000.0)), ("remoteRepairMultiplier", PyRep::Real(0.50)),
+            ("remoteRepairImpedance", PyRep::Real(0.50)), ("jumpDockTetherCloakLockSeconds", PyRep::Real(300.0)),
+            ("casterLockSeconds", PyRep::Integer(300)), ("victimPointDurationSeconds", PyRep::Real(60.0)),
+            ("victimDebuffSeconds", PyRep::Integer(60)), ("hitCount", PyRep::Integer(hit_targets.len() as i64)),
             ("hitTargetIDs", PyRep::List(hit_targets.into_iter().map(PyRep::Integer).collect())),
             ("fuelConsumed", PyRep::Integer(consumed_fuel as i64)),
         ]));
     }
+
+    let all_balls = sys.list_balls().await.unwrap_or_default();
+    let ship_pos = all_balls.iter().find(|b| b.id == ship_id).map(|b| b.position).unwrap_or(DVec3::ZERO);
+    let single_target_ball = if !is_slash {
+        let Some(tid) = target_id_opt else {
+            return Err(BridgeRpcError { code: "TargetRequired".into(), message: "Single-point Doomsday requires a targetID".into() });
+        };
+        if tid == ship_id {
+            return Err(BridgeRpcError { code: "InvalidTarget".into(), message: "Cannot fire Doomsday at own ship".into() });
+        }
+        let Some(tb) = all_balls.iter().find(|b| b.id == tid).cloned() else {
+            return Err(BridgeRpcError { code: "TargetNotInSpace".into(), message: format!("Target {tid} is not in space") });
+        };
+        let locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
+        if !locks.is_empty() && !locks.iter().any(|l| l.target_id == tid && l.locked) {
+            return Err(BridgeRpcError { code: "TargetNotLocked".into(), message: format!("Target {tid} is not locked") });
+        }
+        let max_dd_range = mod_type.default_attributes.get(&54).copied().unwrap_or(250_000.0).max(100_000.0);
+        if (tb.position - ship_pos).length() > max_dd_range {
+            return Err(BridgeRpcError { code: "TargetOutOfRange".into(), message: format!("Target {tid} exceeds Doomsday range ({max_dd_range:.0}m)") });
+        }
+        let vic_char_opt = ctx.db.with_snapshot(|snap| {
+            snap.characters.values().find(|c| c.active_ship_id == tid).map(|c| c.character_id)
+                .or_else(|| snap.items.get(&tid).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
+        });
+        if let Some(vcid) = vic_char_opt {
+            if crate::services::space_destiny::is_location_change_invulnerable(ctx, vcid, now_unix) {
+                return Err(BridgeRpcError { code: "TargetInvulnerable".into(), message: format!("Target character {vcid} is invulnerable") });
+            }
+        }
+        Some(tb)
+    } else {
+        None
+    };
 
     let fuel_tid = mod_type.default_attributes.get(&713).map(|&v| v as u32).unwrap_or(16274);
     let fuel_qty = mod_type.default_attributes.get(&714).map(|&v| v.round() as i32).unwrap_or(50_000);
@@ -890,9 +893,7 @@ pub async fn activate_superweapon_or_lance(
                     it.quantity -= fuel_qty;
                     rem = it.quantity;
                 }
-                if rem == 0 {
-                    snap.items.remove(&fid);
-                }
+                if rem == 0 { snap.items.remove(&fid); }
                 Ok(fuel_qty)
             }
             Some((_, avail)) => Err(format!("Insufficient superweapon fuel (type {fuel_tid}): need {fuel_qty}, have {avail}")),
@@ -913,26 +914,25 @@ pub async fn activate_superweapon_or_lance(
 
     let mut hit_targets = Vec::new();
     if is_slash {
-        let all_balls = sys.list_balls().await.unwrap_or_default();
-        let ship_pos = all_balls.iter().find(|b| b.id == ship_id).map(|b| b.position).unwrap_or(DVec3::ZERO);
         for b in all_balls {
             if b.id != ship_id && (is_combatant_ship_or_entity_ball(Some(&ctx.sde), Some(&ctx.db), b.id, b.type_id) || (b.id >= 1_895_000_000 && b.id < 1_900_000_000)) && (b.position - ship_pos).length() <= 100_000.0 {
-                let _ = sys.apply_damage_with_attacker(b.id, dmg_vec, Some(char_id)).await;
+                let (app, destroyed) = sys.apply_damage_with_attacker(b.id, dmg_vec, Some(char_id)).await.ok().flatten().map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
+                crate::services::combat_crimewatch::record_killmail_assist_action(ctx, b.id, char_id, ship_type_id, mod_type_id, app, false, now_unix);
+                if destroyed {
+                    crate::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(ctx, sys_id, char_id, b.id, b.type_id, b.position, now_unix).await;
+                }
                 hit_targets.push(b.id);
             }
         }
-    } else {
-        let Some(tid) = target_id_opt else {
-            return Err(BridgeRpcError {
-                code: "TargetRequired".into(),
-                message: "Single-point Doomsday requires a targetID".into(),
-            });
-        };
-        let _ = sys.apply_damage_with_attacker(tid, dmg_vec, Some(char_id)).await;
-        hit_targets.push(tid);
+    } else if let Some(tb) = single_target_ball {
+        let (app, destroyed) = sys.apply_damage_with_attacker(tb.id, dmg_vec, Some(char_id)).await.ok().flatten().map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
+        crate::services::combat_crimewatch::record_killmail_assist_action(ctx, tb.id, char_id, ship_type_id, mod_type_id, app, false, now_unix);
+        if destroyed {
+            crate::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(ctx, sys_id, char_id, tb.id, tb.type_id, tb.position, now_unix).await;
+        }
+        hit_targets.push(tb.id);
     }
 
-    let now_unix = ctx.now_unix_secs();
     ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).get_or_create(char_id).weapon_timer_until_unix = now_unix + 60;
     ctx.record_module_reactivation_delay(ship_id, module_id, 300.0);
 
@@ -941,13 +941,9 @@ pub async fn activate_superweapon_or_lance(
     ctx.notify(NotificationTarget::Character(char_id), "OnDamageMessages", "charid", vec![PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(module_id), PyRep::Real(total_raw_damage)])])]);
 
     Ok(PyRep::keyval([
-        ("moduleID", PyRep::Integer(module_id)),
-        ("shipID", PyRep::Integer(ship_id)),
-        ("slashMode", PyRep::Bool(is_slash)),
-        ("totalDamageApplied", PyRep::Real(total_raw_damage)),
-        ("fuelConsumed", PyRep::Integer(consumed_fuel as i64)),
-        ("immobilizeSeconds", PyRep::Real(30.0)),
-        ("jumpBlockSeconds", PyRep::Real(300.0)),
+        ("moduleID", PyRep::Integer(module_id)), ("shipID", PyRep::Integer(ship_id)), ("slashMode", PyRep::Bool(is_slash)),
+        ("totalDamageApplied", PyRep::Real(total_raw_damage)), ("fuelConsumed", PyRep::Integer(consumed_fuel as i64)),
+        ("immobilizeSeconds", PyRep::Real(30.0)), ("jumpBlockSeconds", PyRep::Real(300.0)),
         ("hitTargetIDs", PyRep::List(hit_targets.into_iter().map(PyRep::Integer).collect())),
     ]))
 }
@@ -963,10 +959,7 @@ pub async fn handle_entosis_link_activation(
     target_id_opt: Option<i64>,
 ) -> Result<PyRep, BridgeRpcError> {
     let Some(target_id) = target_id_opt else {
-        return Err(BridgeRpcError {
-            code: "TargetRequired".into(),
-            message: "Entosis Link requires a locked target sovereignty structure or node".into(),
-        });
+        return Err(BridgeRpcError { code: "TargetRequired".into(), message: "Entosis Link requires a locked target sovereignty structure or node".into() });
     };
 
     let (ship_group_id, side_id, is_vulnerable, adm, stront_avail_id) = ctx.db.with_snapshot(|snap| {
@@ -974,17 +967,7 @@ pub async fn handle_entosis_link_activation(
         let ch = snap.characters.get(&char_id);
         let side = ch.and_then(|c| c.alliance_id).or_else(|| ch.map(|c| c.corporation_id)).unwrap_or(char_id);
         let sys_id = ch.map(|c| c.solar_system_id).unwrap_or(30000142);
-        let adm_val = snap
-            .system_states
-            .get(&sys_id)
-            .map(|st| {
-                crate::services::sov_services::calculate_adm(
-                    st.military_index,
-                    st.industrial_index,
-                    st.strategic_index,
-                )
-            })
-            .unwrap_or(1.0);
+        let adm_val = snap.system_states.get(&sys_id).map(|st| crate::services::sov_services::calculate_adm(st.military_index, st.industrial_index, st.strategic_index)).unwrap_or(1.0);
         let vuln_item = snap.items.get(&target_id).and_then(|i| i.dynamic_attributes.get(&2110).copied()).unwrap_or(1.0) > 0.0;
         let vuln_struct = snap.structures.get(&target_id).map(|s| !matches!(s.state.as_str(), "ShieldReinforced" | "ArmorReinforced" | "Invulnerable")).unwrap_or(true);
         let stront_id = snap.items.values().find(|i| i.location_id == ship_id && i.type_id == 16275 && i.quantity >= 1).map(|i| i.item_id);
@@ -992,37 +975,22 @@ pub async fn handle_entosis_link_activation(
     });
 
     if ship_group_id == 831 {
-        return Err(BridgeRpcError {
-            code: "InterceptorCannotActivateEntosis".into(),
-            message: "Interceptors (group 831) cannot activate Entosis Links".into(),
-        });
+        return Err(BridgeRpcError { code: "InterceptorCannotActivateEntosis".into(), message: "Interceptors (group 831) cannot activate Entosis Links".into() });
     }
     if !is_vulnerable {
-        return Err(BridgeRpcError {
-            code: "TargetNotVulnerable".into(),
-            message: format!("Target {target_id} is outside its vulnerability window"),
-        });
+        return Err(BridgeRpcError { code: "TargetNotVulnerable".into(), message: format!("Target {target_id} is outside its vulnerability window") });
     }
 
     let db_key = db_key_of(ctx);
     let now_unix = ctx.now_unix_secs();
-    {
-        let st = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
-        if let Some(existing) = st.entosis_active_links.get(&(db_key, ship_id)) {
-            if existing.module_id != module_id && now_unix < existing.expires_unix {
-                return Err(BridgeRpcError {
-                    code: "MaxGroupActiveExceeded".into(),
-                    message: "Only 1 Entosis Link can be active per ship".into(),
-                });
-            }
+    if let Some(existing) = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner()).entosis_active_links.get(&(db_key, ship_id)) {
+        if existing.module_id != module_id && now_unix < existing.expires_unix {
+            return Err(BridgeRpcError { code: "MaxGroupActiveExceeded".into(), message: "Only 1 Entosis Link can be active per ship".into() });
         }
     }
 
     let Some(stront_item_id) = stront_avail_id else {
-        return Err(BridgeRpcError {
-            code: "InsufficientFuel".into(),
-            message: "Entosis Link requires 1 Strontium Clathrates (16275) per cycle".into(),
-        });
+        return Err(BridgeRpcError { code: "InsufficientFuel".into(), message: "Entosis Link requires 1 Strontium Clathrates (16275) per cycle".into() });
     };
     ctx.db.with_mut_snapshot(|snap| {
         let mut rem = 0;
@@ -1030,9 +998,7 @@ pub async fn handle_entosis_link_activation(
             it.quantity -= 1;
             rem = it.quantity;
         }
-        if rem <= 0 {
-            snap.items.remove(&stront_item_id);
-        }
+        if rem <= 0 { snap.items.remove(&stront_item_id); }
         snap.module_active_states.insert(module_id);
     });
 
@@ -1048,9 +1014,7 @@ pub async fn handle_entosis_link_activation(
     }
     if let Ok(Some(mut cs)) = sys.get_combat_state(ship_id).await {
         cs.warp_scramble_strength = cs.warp_scramble_strength.max(100);
-        if is_capital {
-            cs.disallow_assistance = true;
-        }
+        if is_capital { cs.disallow_assistance = true; }
         let _ = sys.set_combat_state(ship_id, cs).await;
     }
 
@@ -1061,16 +1025,7 @@ pub async fn handle_entosis_link_activation(
         let is_warmup = cycle_index == 1;
         let expires_unix = now_unix + (cycle_duration_s.round() as u64);
         st.entosis_active_links.insert((db_key, ship_id), ActiveEntosisLinkState {
-            ship_id,
-            char_id,
-            side_id,
-            module_id,
-            target_id,
-            cycle_index,
-            cycle_duration_s,
-            started_unix: now_unix,
-            expires_unix,
-            is_capital,
+            ship_id, char_id, side_id, module_id, target_id, cycle_index, cycle_duration_s, started_unix: now_unix, expires_unix, is_capital,
         });
         let mut active_sides = Vec::new();
         for (&(k, _), link) in st.entosis_active_links.iter() {
@@ -1087,26 +1042,15 @@ pub async fn handle_entosis_link_activation(
     ctx.invalidate_ship_fitting(ship_id);
 
     Ok(PyRep::keyval([
-        ("moduleID", PyRep::Integer(module_id)),
-        ("targetID", PyRep::Integer(target_id)),
-        ("active", PyRep::Bool(true)),
-        ("strontiumConsumed", PyRep::Integer(1)),
-        ("cycleDurationSeconds", PyRep::Real(cycle_duration_s)),
-        ("maxVelocityCap", PyRep::Real(4_000.0)),
-        ("disallowAssistance", PyRep::Bool(is_capital)),
-        ("cannotWarp", PyRep::Bool(true)),
-        ("cannotCloak", PyRep::Bool(true)),
-        ("cannotDockOrJump", PyRep::Bool(true)),
-        ("cycleIndex", PyRep::Integer(cycle_index as i64)),
-        ("isWarmupCycle", PyRep::Bool(is_warmup)),
-        ("isWarmup", PyRep::Bool(is_warmup)),
-        ("progressDelta", PyRep::Real(capture_rate)),
-        ("structureContested", PyRep::Bool(!is_warmup)),
-        ("isPaused", PyRep::Bool(is_paused)),
-        ("contested", PyRep::Bool(is_paused)),
+        ("moduleID", PyRep::Integer(module_id)), ("targetID", PyRep::Integer(target_id)), ("active", PyRep::Bool(true)),
+        ("strontiumConsumed", PyRep::Integer(1)), ("cycleDurationSeconds", PyRep::Real(cycle_duration_s)),
+        ("maxVelocityCap", PyRep::Real(4_000.0)), ("disallowAssistance", PyRep::Bool(is_capital)),
+        ("cannotWarp", PyRep::Bool(true)), ("cannotCloak", PyRep::Bool(true)), ("cannotDockOrJump", PyRep::Bool(true)),
+        ("cycleIndex", PyRep::Integer(cycle_index as i64)), ("isWarmupCycle", PyRep::Bool(is_warmup)),
+        ("isWarmup", PyRep::Bool(is_warmup)), ("progressDelta", PyRep::Real(capture_rate)),
+        ("structureContested", PyRep::Bool(!is_warmup)), ("isPaused", PyRep::Bool(is_paused)), ("contested", PyRep::Bool(is_paused)),
         ("remoteAssistanceImpedance", PyRep::Real(if is_capital { 0.15 } else { 1.0 })),
-        ("captureRateMultiplier", PyRep::Real(capture_rate)),
-        ("captureTimeSeconds", PyRep::Real(capture_time_s)),
+        ("captureRateMultiplier", PyRep::Real(capture_rate)), ("captureTimeSeconds", PyRep::Real(capture_time_s)),
     ]))
 }
 
@@ -1138,12 +1082,8 @@ pub async fn activate_command_burst(
                         rig_bonus += t.default_attributes.get(&2542).copied().unwrap_or(1.0).round() as usize;
                     }
                     if snap.module_active_states.contains(&item.item_id) {
-                        if t.group_id == 1770 && item.item_id != module_id {
-                            act_bursts += 1;
-                        }
-                        if matches!(item.type_id, 28583 | 42890 | 58945 | 58950 | 62590 | 62591) {
-                            ind_core = Some(item.type_id);
-                        }
+                        if t.group_id == 1770 && item.item_id != module_id { act_bursts += 1; }
+                        if matches!(item.type_id, 28583 | 42890 | 58945 | 58950 | 62590 | 62591) { ind_core = Some(item.type_id); }
                     }
                 }
             }
@@ -1152,17 +1092,11 @@ pub async fn activate_command_burst(
     });
 
     if clone_grade == 0 {
-        return Err(BridgeRpcError {
-            code: "OmegaRequiredForCommandBurst".into(),
-            message: "Alpha clones cannot activate Command Burst modules".into(),
-        });
+        return Err(BridgeRpcError { code: "OmegaRequiredForCommandBurst".into(), message: "Alpha clones cannot activate Command Burst modules".into() });
     }
     let max_active_allowed = 2 + cmd_rig_bonus;
     if active_burst_count >= max_active_allowed {
-        return Err(BridgeRpcError {
-            code: "MaxGroupActiveExceeded".into(),
-            message: format!("Cannot activate more than {max_active_allowed} Command Burst module(s) without additional Command Processor rigs"),
-        });
+        return Err(BridgeRpcError { code: "MaxGroupActiveExceeded".into(), message: format!("Cannot activate more than {max_active_allowed} Command Burst module(s) without additional Command Processor rigs") });
     }
 
     let (charge_tid, charge_item_id_opt) = ctx.db.with_snapshot(|snap| {
@@ -1171,22 +1105,14 @@ pub async fn activate_command_burst(
             i.location_id == ship_id && i.item_id != module_id && i.quantity > 0
                 && ctx.sde.types.get(&i.type_id).is_some_and(|t| matches!(t.group_id, 1769 | 1771 | 1772 | 1773 | 1774 | 4905))
         };
-        if let Some(found) = snap
-            .items
-            .values()
-            .find(|i| Some(i.flag) == mod_flag && is_burst_charge(i))
-            .or_else(|| snap.items.values().find(|i| is_burst_charge(i)))
-        {
+        if let Some(found) = snap.items.values().find(|i| Some(i.flag) == mod_flag && is_burst_charge(i)).or_else(|| snap.items.values().find(|i| is_burst_charge(i))) {
             (Some(found.type_id), Some(found.item_id))
         } else {
             (charge_tid_opt, None)
         }
     });
     let Some(c_tid) = charge_tid else {
-        return Err(BridgeRpcError {
-            code: "NoChargesLoaded".into(),
-            message: "Command Burst module requires a loaded Command Burst charge".into(),
-        });
+        return Err(BridgeRpcError { code: "NoChargesLoaded".into(), message: "Command Burst module requires a loaded Command Burst charge".into() });
     };
 
     let skills = &fit.character_skills;
@@ -1207,16 +1133,11 @@ pub async fn activate_command_burst(
     let command_lvl = skills.get(&command_skill_id).copied().unwrap_or(0).min(5);
     let specialist_lvl = skills.get(&specialist_skill_id).copied()
         .or_else(|| mod_type.default_attributes.get(&184).and_then(|&sid| skills.get(&(sid as u32)).copied()))
-        .unwrap_or(0)
-        .min(5);
+        .unwrap_or(0).min(5);
     if is_t2_module && specialist_lvl == 0 {
-        return Err(BridgeRpcError {
-            code: "SkillMissing".into(),
-            message: format!("Tech II Command Burst {} requires Specialist skill {specialist_skill_id}", mod_type.name),
-        });
+        return Err(BridgeRpcError { code: "SkillMissing".into(), message: format!("Tech II Command Burst {} requires Specialist skill {specialist_skill_id}", mod_type.name) });
     }
 
-    let _leadership_lvl = skills.get(&3348).copied().unwrap_or(0).min(5);
     let wing_cmd_lvl = skills.get(&11574).or_else(|| skills.get(&11572)).copied().unwrap_or(0).min(5);
     let fleet_cmd_lvl = skills.get(&24764).or_else(|| skills.get(&3354)).copied().unwrap_or(0).min(5);
     let ship_range_mult = match ship_group_id {
@@ -1228,19 +1149,9 @@ pub async fn activate_command_burst(
         _ => 1.0,
     };
     let ind_core_range_bonus = match active_ind_core_tid {
-        Some(62590) => 0.45,
-        Some(62591) => 0.60,
-        Some(58945) => 0.75,
-        Some(58950) => 1.00,
-        Some(28583) => 2.00,
-        Some(42890) => 2.50,
-        _ => 0.0,
+        Some(62590) => 0.45, Some(62591) => 0.60, Some(58945) => 0.75, Some(58950) => 1.00, Some(28583) => 2.00, Some(42890) => 2.50, _ => 0.0,
     };
-    let aoe_range = 15_000.0
-        * ship_range_mult
-        * (1.0 + 0.10 * (wing_cmd_lvl as f64))
-        * (1.0 + 0.05 * (fleet_cmd_lvl as f64))
-        * (1.0 + ind_core_range_bonus);
+    let aoe_range = 15_000.0 * ship_range_mult * (1.0 + 0.10 * (wing_cmd_lvl as f64)) * (1.0 + 0.05 * (fleet_cmd_lvl as f64)) * (1.0 + ind_core_range_bonus);
     let cycle_duration_s = 15.0 * (1.0 + 0.10 * (command_lvl as f64));
 
     let mod_strength_bonus = if is_t2_module { 0.25 } else { 0.0 };
@@ -1255,22 +1166,10 @@ pub async fn activate_command_burst(
     let mindlink_strength_bonus = if has_mindlink { 0.25 } else { 0.0 };
     let ind_core_strength_bonus = if is_mining_burst {
         match active_ind_core_tid {
-            Some(62590) => 0.05,
-            Some(62591) => 0.075,
-            Some(58945) => 0.10,
-            Some(58950) => 0.15,
-            Some(28583) => 0.30,
-            Some(42890) => 0.35,
-            _ => 0.0,
+            Some(62590) => 0.05, Some(62591) => 0.075, Some(58945) => 0.10, Some(58950) => 0.15, Some(28583) => 0.30, Some(42890) => 0.35, _ => 0.0,
         }
-    } else {
-        0.0
-    };
-    let total_strength_mult = (1.0 + 0.10 * (specialist_lvl as f64))
-        * (1.0 + mod_strength_bonus)
-        * (1.0 + ship_strength_bonus)
-        * (1.0 + mindlink_strength_bonus)
-        * (1.0 + ind_core_strength_bonus);
+    } else { 0.0 };
+    let total_strength_mult = (1.0 + 0.10 * (specialist_lvl as f64)) * (1.0 + mod_strength_bonus) * (1.0 + ship_strength_bonus) * (1.0 + mindlink_strength_bonus) * (1.0 + ind_core_strength_bonus);
 
     let mindlink_duration_bonus = if has_mindlink { 0.25 } else { 0.0 };
     let buff_duration_s = 60.0 * (1.0 + 0.10 * (command_lvl as f64)) * (1.0 + mindlink_duration_bonus);
@@ -1286,12 +1185,7 @@ pub async fn activate_command_burst(
             if dbuff_id > 0 {
                 let mod_val = mod_state.get_attribute(mod_val_attr, &ctx.sde);
                 let mult = c_type.default_attributes.get(&mult_attr).copied().unwrap_or(0.0);
-                let val = if mod_val < 0.0 {
-                    mod_val
-                } else {
-                    mult * total_strength_mult
-                };
-                raw_buffs.push((dbuff_id, val));
+                raw_buffs.push((dbuff_id, if mod_val < 0.0 { mod_val } else { mult * total_strength_mult }));
             }
         }
     }
@@ -1302,9 +1196,7 @@ pub async fn activate_command_burst(
         for fl in snap.fleets.values() {
             if fl.members.contains(&char_id) {
                 for &m_id in &fl.members {
-                    if !fleet_chars.contains(&m_id) {
-                        fleet_chars.push(m_id);
-                    }
+                    if !fleet_chars.contains(&m_id) { fleet_chars.push(m_id); }
                 }
             }
         }
@@ -1316,18 +1208,14 @@ pub async fn activate_command_burst(
                 }
             }
         }
-        if !ships.iter().any(|&(_, sid)| sid == ship_id) {
-            ships.push((char_id, ship_id));
-        }
+        if !ships.iter().any(|&(_, sid)| sid == ship_id) { ships.push((char_id, ship_id)); }
         ships
     });
 
     let booster_pos = sys.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(DVec3::ZERO);
     let mut affected_ships = Vec::new();
     for (member_char_id, member_ship_id) in candidate_ship_ids {
-        if affected_ships.len() >= 256 {
-            break;
-        }
+        if affected_ships.len() >= 256 { break; }
         let in_range = if member_ship_id == ship_id {
             true
         } else if let Ok(Some((_, m_ball))) = sys.get_ball_snapshot(member_ship_id).await {
@@ -1335,9 +1223,7 @@ pub async fn activate_command_burst(
         } else {
             true
         };
-        if in_range {
-            affected_ships.push((member_char_id, member_ship_id));
-        }
+        if in_range { affected_ships.push((member_char_id, member_ship_id)); }
     }
 
     {
@@ -1346,12 +1232,7 @@ pub async fn activate_command_burst(
             let list = st.ship_dbuffs.entry((ctx.instance_id, target_sid)).or_default();
             for &(dbuff_id, val) in &raw_buffs {
                 list.retain(|e| !(e.dbuff_id == dbuff_id && e.source_module_id == module_id));
-                list.push(ActiveDbuffEntry {
-                    dbuff_id,
-                    value: val,
-                    expires_at_unix,
-                    source_module_id: module_id,
-                });
+                list.push(ActiveDbuffEntry { dbuff_id, value: val, expires_at_unix, source_module_id: module_id });
             }
         }
     }
@@ -1366,19 +1247,11 @@ pub async fn activate_command_burst(
         if let Some(cid) = charge_item_id_opt {
             if let Some(ci) = snap.items.get_mut(&cid) {
                 ci.quantity = ci.quantity.saturating_sub(1);
-                if ci.quantity == 0 {
-                    exhausted = true;
-                }
+                if ci.quantity == 0 { exhausted = true; }
             }
-            if exhausted {
-                snap.items.remove(&cid);
-            }
+            if exhausted { snap.items.remove(&cid); }
         }
-        if exhausted {
-            snap.module_active_charges.remove(&module_id);
-        } else {
-            snap.module_active_charges.insert(module_id, c_tid);
-        }
+        if exhausted { snap.module_active_charges.remove(&module_id); } else { snap.module_active_charges.insert(module_id, c_tid); }
     });
     for &(member_cid, member_sid) in &affected_ships {
         ctx.invalidate_ship_fitting(member_sid);
@@ -1386,22 +1259,13 @@ pub async fn activate_command_burst(
     }
 
     Ok(PyRep::keyval([
-        ("moduleID", PyRep::Integer(module_id)),
-        ("active", PyRep::Bool(true)),
-        ("chargeTypeID", PyRep::Integer(c_tid as i64)),
-        ("dbuffIDs", PyRep::List(dbuff_id_reps)),
-        ("affectedShipIDs", PyRep::List(affected_ship_reps)),
-        ("affectedMemberIDs", PyRep::List(affected_member_reps)),
-        ("buffStrength", PyRep::Real(primary_buff_strength)),
-        ("buffStrengthMultiplier", PyRep::Real(total_strength_mult)),
-        ("burstStrengthMultiplier", PyRep::Real(total_strength_mult)),
-        ("buffDurationSeconds", PyRep::Real(buff_duration_s)),
-        ("durationSeconds", PyRep::Real(cycle_duration_s)),
-        ("cycleDurationSeconds", PyRep::Real(cycle_duration_s)),
-        ("reloadTimeSeconds", PyRep::Real(reload_time_s)),
-        ("expiresAtUnix", PyRep::Integer(expires_at_unix as i64)),
-        ("aoeRangeMeters", PyRep::Real(aoe_range)),
-        ("aoeRange", PyRep::Real(aoe_range)),
+        ("moduleID", PyRep::Integer(module_id)), ("active", PyRep::Bool(true)), ("chargeTypeID", PyRep::Integer(c_tid as i64)),
+        ("dbuffIDs", PyRep::List(dbuff_id_reps)), ("affectedShipIDs", PyRep::List(affected_ship_reps)),
+        ("affectedMemberIDs", PyRep::List(affected_member_reps)), ("buffStrength", PyRep::Real(primary_buff_strength)),
+        ("buffStrengthMultiplier", PyRep::Real(total_strength_mult)), ("burstStrengthMultiplier", PyRep::Real(total_strength_mult)),
+        ("buffDurationSeconds", PyRep::Real(buff_duration_s)), ("durationSeconds", PyRep::Real(cycle_duration_s)),
+        ("cycleDurationSeconds", PyRep::Real(cycle_duration_s)), ("reloadTimeSeconds", PyRep::Real(reload_time_s)),
+        ("expiresAtUnix", PyRep::Integer(expires_at_unix as i64)), ("aoeRangeMeters", PyRep::Real(aoe_range)), ("aoeRange", PyRep::Real(aoe_range)),
     ]))
 }
 
@@ -1410,16 +1274,7 @@ pub fn register_launched_wubble_probe(ctx: &ServerContext, probe_id: i64, solar_
     let db_key = db_ptr_key(&ctx.db);
     ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner()).pending_wubble_probes.push((
         db_key,
-        PendingWubbleProbe {
-            probe_id,
-            solar_system_id,
-            position,
-            radius_m,
-            remaining_arming_s: 3.0,
-            duration_s: 30.0,
-            velocity_multiplier: 0.70,
-            detonated: false,
-        },
+        PendingWubbleProbe { probe_id, solar_system_id, position, radius_m, remaining_arming_s: 3.0, duration_s: 30.0, velocity_multiplier: 0.70, detonated: false },
     ));
 }
 
@@ -1431,9 +1286,7 @@ pub fn step_wubble_probes_and_debuffs(
     tactical_state: &RwLock<TacticalModulesState>,
     dt: f64,
 ) {
-    let Some(db_ref) = db_opt else {
-        return;
-    };
+    let Some(db_ref) = db_opt else { return; };
     let db_key = db_ptr_key(db_ref);
     let mut st = tactical_state.write().unwrap_or_else(|e| e.into_inner());
 
@@ -1442,15 +1295,11 @@ pub fn step_wubble_probes_and_debuffs(
         let mut expired_base = None;
         if let Some(debuff) = st.active_wubble_debuffs.get_mut(&(db_key, *sid)) {
             debuff.remaining_s -= dt;
-            if debuff.remaining_s <= 1e-6 {
-                expired_base = Some(debuff.base_max_velocity);
-            }
+            if debuff.remaining_s <= 1e-6 { expired_base = Some(debuff.base_max_velocity); }
         }
         if let Some(base_vel) = expired_base {
             st.active_wubble_debuffs.remove(&(db_key, *sid));
-            if let Some(ball) = ballpark.balls.get_mut(sid) {
-                ball.max_velocity = base_vel;
-            }
+            if let Some(ball) = ballpark.balls.get_mut(sid) { ball.max_velocity = base_vel; }
         }
     }
 
@@ -1463,19 +1312,11 @@ pub fn step_wubble_probes_and_debuffs(
         st.pending_wubble_probes[idx].1.remaining_arming_s -= dt;
         if st.pending_wubble_probes[idx].1.remaining_arming_s <= 1e-6 {
             let (_, probe) = st.pending_wubble_probes.remove(idx);
-            let eligible_sids: Vec<i64> = ballpark
-                .balls
-                .iter()
-                .filter_map(|(&sid, ball)| {
-                    if is_combatant_ship_or_entity_ball(sde_opt.as_ref(), db_opt.as_ref(), sid, ball.type_id)
-                        && (ball.position - probe.position).length() <= probe.radius_m
-                    {
-                        Some(sid)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+            let eligible_sids: Vec<i64> = ballpark.balls.iter().filter_map(|(&sid, ball)| {
+                if is_combatant_ship_or_entity_ball(sde_opt.as_ref(), db_opt.as_ref(), sid, ball.type_id) && (ball.position - probe.position).length() <= probe.radius_m {
+                    Some(sid)
+                } else { None }
+            }).collect();
             for sid in eligible_sids {
                 if let Some(ball) = ballpark.balls.get_mut(&sid) {
                     if let Some(existing) = st.active_wubble_debuffs.get_mut(&(db_key, sid)) {
@@ -1485,9 +1326,7 @@ pub fn step_wubble_probes_and_debuffs(
                         let base_vel = ball.max_velocity;
                         ball.max_velocity = base_vel * probe.velocity_multiplier;
                         st.active_wubble_debuffs.insert((db_key, sid), ActiveWubbleDebuff {
-                            remaining_s: probe.duration_s,
-                            velocity_multiplier: probe.velocity_multiplier,
-                            base_max_velocity: base_vel,
+                            remaining_s: probe.duration_s, velocity_multiplier: probe.velocity_multiplier, base_max_velocity: base_vel,
                         });
                     }
                 }
