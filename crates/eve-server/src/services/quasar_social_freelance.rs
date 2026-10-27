@@ -274,13 +274,15 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 return Err((STATUS_BAD_REQUEST, "Missing or invalid item delivery required_type_id or batch_size".into()));
             }
 
-            let budget_isk: i64 = match dyn_msg.get(10) {
+            let budget_isk: i64 = match dyn_msg.get(10).or_else(|| dyn_msg.get(5)) {
                 Some(DynamicValue::Message(rew)) => rew.get(1).and_then(|c| match c {
                     DynamicValue::Message(cm) => cm.get(1).and_then(|u| match u {
                         DynamicValue::Uint64(v) => i64::try_from(*v).ok().map(|v| v.saturating_mul(target_prog)),
                         DynamicValue::Int64(v) => Some(v.saturating_mul(target_prog)),
                         _ => None,
                     }),
+                    DynamicValue::Uint64(v) => i64::try_from(*v).ok(),
+                    DynamicValue::Int64(v) => Some(*v),
                     _ => None,
                 }).unwrap_or(50_000_000),
                 _ => 50_000_000,
@@ -928,12 +930,17 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     .get_mut(&cid)
                     .ok_or_else(|| (STATUS_BAD_REQUEST, "No contributor progress for freelance project".into()))?;
                 let unredeemed = entry.1.max(0);
-                let available_units = p.reward_isk.max(0) / 100_000;
+                let unit_reward = if p.reward_isk != 50_000_000 && p.target_progress > 0 && p.reward_isk >= p.target_progress {
+                    (p.reward_isk / (p.target_progress / p.batch_size.max(1)).max(1)).max(1)
+                } else {
+                    100_000
+                };
+                let available_units = p.reward_isk.max(0) / unit_reward;
                 let units = unredeemed.min(available_units);
                 if units <= 0 {
                     return Err((STATUS_BAD_REQUEST, "No redeemable freelance rewards available".into()));
                 }
-                let payout = units.saturating_mul(100_000);
+                let payout = units.saturating_mul(unit_reward);
                 entry.1 = entry.1.saturating_sub(units);
                 p.reward_isk = p.reward_isk.saturating_sub(payout);
                 (units, payout)
@@ -1002,7 +1009,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let uuid = extract_uuid(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
 
             // 1. Verify project state == 1 (Active) and caller is committed participant before touching DB
-            let (target_type_id, batch_size, corpid) = {
+            let (target_type_id, batch_size, corpid, rem_progress) = {
                 let projects = state_deliver.projects.read().unwrap_or_else(|e| e.into_inner());
                 let Some(p) = projects.get(&uuid) else {
                     return Err((STATUS_NOT_FOUND, "Freelance project not found".into()));
@@ -1010,7 +1017,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 if p.state != 1 || !p.committed_participants.contains(&cid) {
                     return Err((STATUS_BAD_REQUEST, "Project not active or caller not committed".into()));
                 };
-                (p.required_type_id, p.batch_size.max(1), p.owner_corp_id)
+                let rem = (p.target_progress - p.current_progress).max(0);
+                if rem <= 0 {
+                    return Err((STATUS_BAD_REQUEST, "Project target progress already reached".into()));
+                }
+                (p.required_type_id, p.batch_size.max(1), p.owner_corp_id, rem)
             };
             let req_qty = dyn_msg.get(4).and_then(|v| match v {
                 DynamicValue::Uint64(u) => Some(*u as i64),
@@ -1018,7 +1029,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 DynamicValue::Uint32(u) => Some(*u as i64),
                 DynamicValue::Int32(i) => Some(*i as i64),
                 _ => None,
-            }).unwrap_or(25).max(batch_size);
+            }).unwrap_or(25).max(batch_size).min(rem_progress);
 
             // 2. Consume stack of required_type_id in station/structure hangar without holding projects lock
             let Some(db) = &state_deliver.db else {

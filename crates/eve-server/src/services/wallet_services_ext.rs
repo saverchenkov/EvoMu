@@ -571,6 +571,16 @@ pub fn handle(
                 if !is_a && tr.char_b != char_id {
                     return Err(rpc_err("AccessDenied", "Character is not a participant in this trade"));
                 }
+                if matches!(method, "AddItem" | "OfferMoney" | "MakeOffer") {
+                    let docked_a = snap.characters.get(&tr.char_a).and_then(|c| c.station_id.or(c.structure_id));
+                    let docked_b = snap.characters.get(&tr.char_b).and_then(|c| c.station_id.or(c.structure_id));
+                    if docked_a != Some(tr.station_id) || docked_b != Some(tr.station_id) {
+                        return Err(rpc_err(
+                            "NotDockedAtStation",
+                            "Both trade participants must remain docked at the trade station",
+                        ));
+                    }
+                }
 
                 match method {
                     "List" => {}

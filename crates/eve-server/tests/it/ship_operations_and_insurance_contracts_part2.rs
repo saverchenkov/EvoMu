@@ -395,3 +395,56 @@ async fn test_ship_bays_scoop_store_board_space_and_password() {
     let PyRep::KeyVal(ff_s_kv) = ff_store_ok else { panic!("expected KeyVal") };
     assert_eq!(ff_s_kv.get("storedShipID").and_then(|v| v.as_i64()), Some(second_frigate_id));
 }
+
+#[tokio::test]
+async fn test_r2_track5_economy_market_and_trading() {
+    let ctx = new_test_ctx();
+    let mut sess = SessionState::new(8951);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let kw = HashMap::new();
+    let char_id = 90_000_001i64;
+    let station_id = 60_003_760i64;
+    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None).await.unwrap();
+
+    // 1. Issue #96: GetCorporationOrders rejects foreign corp_id
+    let foreign_corp_err = ctx.dispatch_rpc(&mut sess, "marketProxy", None, "GetCorporationOrders", &[PyRep::Integer(98_999_999)], &kw, None).await.unwrap_err();
+    assert_eq!(foreign_corp_err.code, "AccessDenied");
+
+    // 2. Issue #99: WithdrawPlexFromVault rejects i32::MAX + 10 overflow BEFORE debiting vault
+    ctx.db.with_mut_snapshot(|s| {
+        s.adjust_plex_vault(char_id, 5_000_000_000);
+    });
+    let bal_before = ctx.db.with_snapshot(|s| s.plex_vault_balance(char_id));
+    let overflow_qty = (i32::MAX as i64) + 10;
+    let plex_err = ctx.dispatch_rpc(&mut sess, "invbroker", None, "WithdrawPlexFromVault", &[PyRep::Integer(overflow_qty), PyRep::Integer(station_id), PyRep::Integer(4)], &kw, None).await.unwrap_err();
+    assert_eq!(plex_err.code, "InvalidArgument");
+    let bal_after = ctx.db.with_snapshot(|s| s.plex_vault_balance(char_id));
+    assert_eq!(bal_before, bal_after, "PLEX vault must not be debited on i32 overflow");
+
+    // Also reject invalid fitted flag (e.g. LoSlot0 = 11)
+    let flag_err = ctx.dispatch_rpc(&mut sess, "invbroker", None, "WithdrawPlexFromVault", &[PyRep::Integer(10), PyRep::Integer(station_id), PyRep::Integer(11)], &kw, None).await.unwrap_err();
+    assert_eq!(flag_err.code, "InvalidFlag");
+
+    // 3. Issue #100: Direct trade rejects OfferMoney / MakeOffer if a participant undocks
+    let char_b = 90_000_002i64;
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(cb) = s.characters.get_mut(&char_b) {
+            cb.station_id = Some(station_id);
+        }
+    });
+    let init_res = ctx.dispatch_rpc(&mut sess, "trademgr", None, "InitiateTrade", &[PyRep::Integer(char_b)], &kw, None).await.unwrap();
+    let trade_id = match init_res {
+        PyRep::KeyVal(kv) => kv.get("tradeContainerID").or_else(|| kv.get("tradeID")).and_then(|v| v.as_i64()).unwrap_or(0),
+        PyRep::Integer(id) => id,
+        _ => 0,
+    };
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(cb) = s.characters.get_mut(&char_b) {
+            cb.station_id = None;
+            cb.structure_id = None;
+        }
+    });
+    let trade_err = ctx.dispatch_rpc(&mut sess, "trademgr", None, "OfferMoney", &[PyRep::Integer(trade_id), PyRep::Real(1000.0)], &kw, None).await.unwrap_err();
+    assert_eq!(trade_err.code, "NotDockedAtStation");
+}
+

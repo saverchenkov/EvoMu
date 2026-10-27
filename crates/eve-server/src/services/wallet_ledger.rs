@@ -395,10 +395,10 @@ fn withdraw_plex(
     if qty <= 0 {
         if let Some(first_num) = args.first().and_then(|a| a.as_i64()) {
             if let Some(sec_num) = args.get(1).and_then(|a| a.as_i64()) {
-                if first_num > 10_000_000 && sec_num <= 10_000_000 {
-                    location_id_opt = Some(first_num);
-                    qty = sec_num;
-                } else if sec_num > 10_000_000 && first_num <= 10_000_000 {
+                let sec_is_loc = session.station_id == Some(sec_num)
+                    || session.structure_id == Some(sec_num)
+                    || session.ship_id == Some(sec_num);
+                if sec_is_loc || (sec_num > 10_000_000 && first_num <= 10_000_000) {
                     qty = first_num;
                     location_id_opt = Some(sec_num);
                 } else {
@@ -417,6 +417,9 @@ fn withdraw_plex(
     if qty <= 0 {
         return Err(rpc_err("InvalidArgument", "Withdraw quantity must be positive"));
     }
+    let qty_i32 = i32::try_from(qty).map_err(|_| {
+        rpc_err("InvalidArgument", "Withdraw quantity exceeds maximum stack size (i32::MAX)")
+    })?;
 
     let (target_location, target_flag) = match location_id_opt {
         Some(loc) => {
@@ -435,6 +438,14 @@ fn withdraw_plex(
                     InventoryFlag::Hangar
                 }
             });
+            let valid_flag = (is_docked && fl == InventoryFlag::Hangar)
+                || (is_active_ship && fl == InventoryFlag::Cargo);
+            if !valid_flag {
+                return Err(rpc_err(
+                    "InvalidFlag",
+                    "PLEX can only be withdrawn into Hangar (4) or Cargo (5)",
+                ));
+            }
             (loc, fl)
         }
         None => {
@@ -459,6 +470,25 @@ fn withdraw_plex(
                 format!("Insufficient PLEX in account vault ({vault_bal} available, {qty} requested)"),
             ));
         }
+        let existing_item = snap
+            .items
+            .values()
+            .find(|i| {
+                i.owner_id == char_id
+                    && i.location_id == target_location
+                    && i.flag == target_flag
+                    && i.type_id == PLEX_TYPE_ID
+                    && !i.singleton
+            })
+            .map(|i| (i.item_id, i.quantity));
+        if let Some((_, cur_q)) = existing_item {
+            if cur_q.checked_add(qty_i32).is_none() {
+                return Err(rpc_err(
+                    "InvalidArgument",
+                    "Merged PLEX stack would overflow i32::MAX",
+                ));
+            }
+        }
         let rem_plex = snap.adjust_plex_vault(char_id, -qty)
             .ok_or_else(|| rpc_err("VaultError", "Failed to deduct PLEX from vault"))?;
         snap.next_entity_id += 1;
@@ -474,21 +504,9 @@ fn withdraw_plex(
             ctx.now_unix(),
         );
 
-        let existing_item = snap
-            .items
-            .values()
-            .find(|i| {
-                i.owner_id == char_id
-                    && i.location_id == target_location
-                    && i.flag == target_flag
-                    && i.type_id == PLEX_TYPE_ID
-                    && !i.singleton
-            })
-            .map(|i| i.item_id);
-
-        let final_item_id = if let Some(eid) = existing_item {
+        let final_item_id = if let Some((eid, _)) = existing_item {
             let it = snap.items.get_mut(&eid).unwrap();
-            it.quantity = it.quantity.saturating_add(qty as i32);
+            it.quantity += qty_i32;
             it.version += 1;
             eid
         } else {
@@ -502,7 +520,7 @@ fn withdraw_plex(
                     owner_id: char_id,
                     location_id: target_location,
                     flag: target_flag,
-                    quantity: qty as i32,
+                    quantity: qty_i32,
                     singleton: false,
                     version: 1,
                     ..Default::default()

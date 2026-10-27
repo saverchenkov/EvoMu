@@ -249,8 +249,10 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                     .push(ent_name.clone());
             });
 
+            let mut id_bytes = Vec::new();
+            encode_string_field(1, &ent_name, &mut id_bytes);
             let mut notice_bytes = Vec::new();
-            encode_string_field(1, &ent_name, &mut notice_bytes);
+            encode_bytes_field(1, &id_bytes, &mut notice_bytes);
             router_pending
                 .write()
                 .unwrap_or_else(|e| e.into_inner())

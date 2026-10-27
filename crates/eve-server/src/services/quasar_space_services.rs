@@ -859,10 +859,16 @@ pub fn register_handlers(
         let db_lock = Arc::clone(&db);
         router.register_handler(
             "eve_public.stargate.lock.api.GetRequest",
-            Arc::new(move |ctx, _any, _dyn_msg| {
+            Arc::new(move |ctx, _any, dyn_msg| {
                 let cid = require_character(ctx)?;
+                let req_sys_id = get_identifier_or_int(dyn_msg, 1).filter(|&v| v > 0);
                 let now = ctx.now_unix();
                 let lock_info = db_lock.with_snapshot(|snap| {
+                    if let Some(sys) = req_sys_id {
+                        if sys != 30_100_000 {
+                            return None;
+                        }
+                    }
                     snap.zarzakh_gate_locks.get(&cid).copied().filter(|(_, expires_at)| *expires_at > now)
                 });
                 let mut out = Vec::new();

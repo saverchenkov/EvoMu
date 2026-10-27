@@ -292,17 +292,33 @@ pub fn handle_pi_orbitals(
                     player_poco_rate,
                 );
                 let tax_cents = IskCents::from_f64_isk(export_tax);
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    let new_bal =
-                        ch.balance
-                            .checked_sub(tax_cents)
-                            .ok_or_else(|| BridgeRpcError {
-                                code: "InsufficientFunds".into(),
-                                message: format!(
-                                    "Insufficient ISK to pay POCO export tax ({export_tax:.2} ISK)"
-                                ),
-                            })?;
-                    ch.balance = new_bal;
+                if tax_cents.0 > 0 {
+                    if let Some(ch) = snap.characters.get_mut(&char_id) {
+                        let new_bal =
+                            ch.balance
+                                .checked_sub(tax_cents)
+                                .ok_or_else(|| BridgeRpcError {
+                                    code: "InsufficientFunds".into(),
+                                    message: format!(
+                                        "Insufficient ISK to pay POCO export tax ({export_tax:.2} ISK)"
+                                    ),
+                                })?;
+                        ch.balance = new_bal;
+                        let bal_after = ch.balance;
+                        snap.append_journal(
+                            char_id,
+                            "CustomOfficeTax",
+                            tax_cents,
+                            bal_after,
+                            format!("POCO export tax for flush on planet {planet_id}"),
+                        );
+                    }
+                    if let Some(cfg) = load_orbital_settings(snap, planet_id) {
+                        let player_share = IskCents::from_f64_isk(tax_base * player_poco_rate);
+                        if let Some(corp) = snap.corporations.get_mut(&cfg.owner_corp_id) {
+                            corp.master_wallet = corp.master_wallet.checked_add(player_share).unwrap_or(corp.master_wallet);
+                        }
+                    }
                 }
 
                 let delivered_item_id = if let Some(idx) = ext_idx {

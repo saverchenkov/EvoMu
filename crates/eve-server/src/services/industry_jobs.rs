@@ -480,7 +480,7 @@ pub fn handle_industry_jobs(
                     .values()
                     .filter(|i| {
                         (i.owner_id == char_id || (use_corp && i.owner_id == job_owner_id))
-                            && (i.location_id == station_id || i.location_id == docked_id)
+                            && i.location_id == station_id
                             && i.type_id == bp_type_id
                             && explicit_bp_item_id.map(|eid| i.item_id == eid).unwrap_or(true)
                             && i.quantity >= 1
@@ -651,9 +651,10 @@ pub fn handle_industry_jobs(
                         .values()
                         .find(|i| {
                             (i.owner_id == char_id || (use_corp && i.owner_id == job_owner_id))
-                                && (i.location_id == station_id || i.location_id == docked_id)
+                                && i.location_id == station_id
                                 && i.type_id == mat_tid
                                 && i.quantity >= req_qty
+                                && !i.singleton
                                 && i.flag != InventoryFlag::Locked
                                 && !snap.is_item_locked_in_contract_or_job(i.item_id)
                         })
@@ -721,9 +722,10 @@ pub fn handle_industry_jobs(
                         && sde_inv_mats.iter().all(|(tid, q)| {
                             snap.items.values().any(|i| {
                                 (i.owner_id == char_id || (use_corp && i.owner_id == job_owner_id))
-                                    && (i.location_id == station_id || i.location_id == docked_id)
+                                    && i.location_id == station_id
                                     && i.type_id == *tid
                                     && i.quantity >= *q
+                                    && !i.singleton
                                     && i.flag != InventoryFlag::Locked
                             })
                         });
@@ -1154,12 +1156,11 @@ pub fn handle_industry_jobs(
                         return Err(BridgeRpcError { code: "JobNotYetComplete".into(), message: format!("Industry job {job_id} completes at {ready_at} (now {now_unix})") });
                     }
 
-                    let docked_loc = session.station_id.or(session.structure_id);
                     let out_owner_id = if meta.use_corp && meta.owner_id > 0 { meta.owner_id } else { char_id };
                     let is_ancient_relic = ctx.sde.types.get(&job.blueprint_type_id).map(|t| t.group_id == 971).unwrap_or(false);
                     let bp_valid = snap.items.get(&job.blueprint_item_id).map(|bp| {
                         (bp.owner_id == char_id || bp.owner_id == out_owner_id)
-                            && (bp.location_id == job.facility_id || Some(bp.location_id) == docked_loc)
+                            && bp.location_id == job.facility_id
                             && bp.flag == InventoryFlag::Locked
                             && (is_ancient_relic || !bp.is_blueprint_copy || !matches!(job.activity_id, 1 | 8) || bp.blueprint_runs_remaining.unwrap_or(0) >= job.runs as i32)
                     }).unwrap_or(false);
@@ -1248,9 +1249,8 @@ pub fn handle_industry_jobs(
 
                     let mut parent_dyn_attrs = HashMap::new();
                     let mut remove_consumed_bpc = false;
-                    let mut bp_location_id = job.facility_id;
+                    let bp_location_id = job.facility_id;
                     if let Some(bp_mut) = snap.items.get_mut(&job.blueprint_item_id) {
-                        bp_location_id = bp_mut.location_id;
                         bp_mut.flag = restore_blueprint_flag(bp_mut.owner_id, &meta);
                         if matches!(job.activity_id, 1 | 9) && bp_mut.is_blueprint_copy {
                             let rem = bp_mut.blueprint_runs_remaining.unwrap_or(1).saturating_sub(job.runs as i32);

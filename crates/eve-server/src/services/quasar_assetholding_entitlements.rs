@@ -77,7 +77,8 @@ pub fn register_assetholding_handlers(
     router.register_handler(
         "eve_public.assetholding.asset.api.GetRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            let attrs = Vec::new();
+            let mut attrs = Vec::new();
+            encode_string_field(1, "asset", &mut attrs);
             let mut out = Vec::new();
             encode_bytes_field(2, &attrs, &mut out);
 

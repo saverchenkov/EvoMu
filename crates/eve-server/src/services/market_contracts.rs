@@ -407,22 +407,40 @@ pub fn handle(
                     Ok(v) => v,
                     Err(e) => return Some(Err(e)),
                 };
+                let caller_corp_id = session
+                    .corporation_id
+                    .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id)))
+                    .unwrap_or(0);
+                if let Some(req_corp_id) = args.first().and_then(|a| a.as_i64()).filter(|&v| v > 0) {
+                    if req_corp_id != caller_corp_id && !session.has_gm_role() {
+                        return Some(Err(rpc_err(
+                            "AccessDenied",
+                            "Cannot query market orders of a foreign corporation",
+                        )));
+                    }
+                }
                 let now_unix = ctx.now_unix();
                 let swept = ctx.db.with_mut_snapshot(|snap| sweep_expired_orders(snap, now_unix));
                 if !swept.is_empty() { emit_expired_order_notifications(ctx, &swept); }
                 let rows = ctx.db.with_snapshot(|snap| {
                     let corp_id = args.first().and_then(|a| a.as_i64()).filter(|&v| v > 0)
-                        .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id)).unwrap_or(0);
+                        .unwrap_or(caller_corp_id);
                     let mut orders: Vec<&MarketOrderRecord> = snap.market_orders.values()
                         .filter(|o| o.owner_id == corp_id && !o.is_npc && o.vol_remaining > 0).collect();
                     orders.sort_by_key(|o| o.order_id);
                     orders.into_iter().map(|o| {
                             let meta = load_market_order_meta(snap, o, now_unix);
                             let acct_key = meta.account_key.unwrap_or(1000) as i64;
+                            let issued_by = snap
+                                .corporations
+                                .get(&corp_id)
+                                .map(|c| c.ceo_id)
+                                .filter(|&id| id > 0)
+                                .unwrap_or(char_id);
                             vec![
                                 PyRep::Integer(o.order_id),
                                 PyRep::Integer(o.type_id as i64),
-                                PyRep::Integer(char_id),
+                                PyRep::Integer(issued_by),
                                 PyRep::Integer(o.region_id as i64),
                                 PyRep::Integer(o.station_id),
                                 PyRep::Integer(meta.range),
