@@ -498,8 +498,8 @@ async fn test_encounter_site_destruction_trigger_and_wave_progression() {
     let encounter_id = 77_001u32;
     let origin_pos = DVec3::new(100_000.0, 0.0, 0.0);
 
-    // Wave 1: [3751, 3752], Wave 2: [3753, 3754]
-    let wave_defs = vec![vec![3751, 3752], vec![3753, 3754]];
+    // Wave 1: [2370, 2372] (Serpentis Initiate, Angel Rogue), Wave 2: [2379, 2381] (Serpentis Spy, Serpentis Chief Spy)
+    let wave_defs = vec![vec![2370, 2372], vec![2379, 2381]];
     let wave1_balls = create_custom_encounter_site(
         &ctx,
         encounter_id,
@@ -531,7 +531,7 @@ async fn test_encounter_site_destruction_trigger_and_wave_progression() {
     assert!(dmg_res.is_ok(), "apply_damage must succeed");
 
     // Hull reduced to 0; handle_npc_destroyed_in_space runs via npc_death_hook
-    // Verify Wave 2 spawned with authentic types [3753, 3754]
+    // Verify Wave 2 spawned with authentic types [2379, 2381]
     let (wave2_balls, trigger_ball_2) = with_combat_runtime(&ctx, |rt| {
         let enc = rt.encounter_waves.get(&encounter_id).expect("Encounter director");
         assert_eq!(enc.current_wave, 2, "Wave 2 must be triggered upon trigger NPC destruction");
@@ -554,7 +554,7 @@ async fn test_encounter_site_destruction_trigger_and_wave_progression() {
         for &bid in &wave2_new_balls {
             let entity = rt.npc_entities.get(&bid).expect("Wave 2 entity");
             assert!(
-                entity.type_id == 3753 || entity.type_id == 3754,
+                entity.type_id == 2379 || entity.type_id == 2381,
                 "Wave 2 NPC must have authentic types from wave definition"
             );
             assert!(

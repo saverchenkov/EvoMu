@@ -50,14 +50,6 @@ pub fn execute_death_pipeline_sync(
                 ship.type_id
             ));
         }
-        if let Some(ch) = snap.characters.get(&victim_char_id) {
-            if ch.active_ship_id > 0 && ch.active_ship_id != victim_ship_id {
-                return Err(format!(
-                    "Ship {victim_ship_id} is not character {victim_char_id}'s active ship ({})",
-                    ch.active_ship_id
-                ));
-            }
-        }
         let base = ctx
             .sde
             .types

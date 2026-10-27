@@ -371,6 +371,8 @@ pub struct CombatRuntimeState {
     pub ess_reserve_bank_thefts: HashMap<u32, Vec<(i64, f64, u64)>>,
     pub ess_reserve_unlocked_until: HashMap<u32, u64>,
     pub clone_soldier_cooldown_until: HashMap<u32, u64>,
+    pub bounty_credited_balls: std::collections::HashSet<i64>,
+    pub destroyed_npc_cache: HashMap<i64, ExtendedNpcEntity>,
 }
 
 #[derive(Debug, Clone)]

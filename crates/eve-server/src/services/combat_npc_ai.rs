@@ -187,9 +187,7 @@ pub async fn spawn_specialized_npc_entity(
     let orb_range = (opt_range * 0.6).clamp(2_500.0, 20_000.0);
     let bounty = match archetype {
         "Sleeper" => 0.0, // Sleepers pay 0 direct bounty and drop blue loot (`feat:npc.sleepers`)
-        "Officer" => attr(481).unwrap_or(50_000_000.0).max(25_000_000.0),
-        "CloneSoldier" => attr(481).unwrap_or(0.0),
-        _ => attr(481).unwrap_or(120_000.0),
+        _ => attr(481).unwrap_or(0.0),
     };
     let resolved_faction_id = sde_type.and_then(|t| t.faction_id).unwrap_or_else(|| match archetype {
         "Navy" | "FactionPolice" | "Police" => if (500_001..=500_030).contains(&spawn_group_id) { spawn_group_id } else { 500_001 },
@@ -245,14 +243,14 @@ pub async fn spawn_specialized_npc_entity(
     let (web_factor, web_range, scram_str, scram_range) = if archetype == "CloneSoldier" {
         let name = sde_type.map(|t| t.name.as_str()).unwrap_or("");
         if name.contains("Transporter") {
-            (attr(20).unwrap_or(-55.0), attr(580).unwrap_or(10_000.0).min(10_000.0), 0.0, 0.0)
+            (attr(20).unwrap_or(-60.0), attr(514).unwrap_or(10_000.0), 0.0, 0.0)
         } else if name.contains("Negotiator") {
-            (0.0, 0.0, attr(105).unwrap_or(2.0).max(2.0), attr(582).unwrap_or(24_000.0).max(24_000.0))
+            (0.0, 0.0, attr(105).unwrap_or(2.0).max(2.0), attr(103).unwrap_or(24_000.0))
         } else {
-            (attr(20).unwrap_or(0.0), attr(580).unwrap_or(10_000.0), 0.0, 0.0)
+            (attr(20).unwrap_or(0.0), attr(514).unwrap_or(10_000.0), 0.0, 0.0)
         }
     } else {
-        (attr(20).unwrap_or(-50.0), attr(580).unwrap_or(10_000.0), attr(105).unwrap_or(2.0), attr(582).unwrap_or(20_000.0))
+        (attr(20).unwrap_or(-50.0), attr(514).or_else(|| attr(580)).unwrap_or(10_000.0), attr(105).unwrap_or(2.0), attr(103).or_else(|| attr(582)).unwrap_or(20_000.0))
     };
 
     let mut cs = ctx.build_type_combat_state(npc_type_id);
@@ -685,8 +683,8 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 let sig = st.and_then(|t| t.default_attributes.get(&552).copied()).unwrap_or(40.0);
                 let mut ewar = false;
                 let mut logi = false;
-                for it in snap.items.values() {
-                    if it.location_id == cand_id && snap.module_active_states.contains(&it.item_id) {
+                for &aid in &snap.module_active_states {
+                    if let Some(it) = snap.items.get(&aid).filter(|i| i.location_id == cand_id) {
                         if let Some(mt) = ctx.sde.types.get(&it.type_id) {
                             if matches!(mt.group_id, 52 | 65 | 201 | 208 | 291 | 357) { ewar = true; }
                             if matches!(mt.group_id, 41 | 325 | 585) { logi = true; }
@@ -889,7 +887,11 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
     let pos = ball_opt.as_ref().map(|b| b.position).unwrap_or(DVec3::ZERO);
     let _ = sys_handle.remove_ball(npc_ball_id).await;
 
-    let npc_opt = with_mut_combat_runtime(ctx, |rt| rt.npc_entities.remove(&npc_ball_id));
+    let npc_opt = with_mut_combat_runtime(ctx, |rt| {
+        rt.npc_entities
+            .remove(&npc_ball_id)
+            .or_else(|| rt.destroyed_npc_cache.remove(&npc_ball_id))
+    });
     let convoy_opt = ctx.living_world.get_convoy(npc_ball_id);
     let sde_bounty = |tid: u32| -> f64 {
         ctx.sde.types.get(&tid).and_then(|t| t.default_attributes.get(&481).copied()).unwrap_or(0.0)
@@ -924,11 +926,13 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
         bounty_isk
     };
 
-    if effective_bounty > 0.0 {
+    if effective_bounty > 0.0 && killer_char_id > 0 {
         with_mut_combat_runtime(ctx, |rt| {
-            *rt.pending_bounty_ticks
-                .entry((solar_system_id, killer_char_id))
-                .or_insert(0.0) += effective_bounty;
+            if rt.bounty_credited_balls.insert(npc_ball_id) {
+                *rt.pending_bounty_ticks
+                    .entry((solar_system_id, killer_char_id))
+                    .or_insert(0.0) += effective_bounty;
+            }
         });
     }
 

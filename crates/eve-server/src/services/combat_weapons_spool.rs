@@ -600,9 +600,12 @@ pub async fn handle_ship_or_npc_destruction(
             .unwrap_or(0.0);
         if bounty > 0.0 {
             with_mut_combat_runtime(ctx, |rt| {
-                *rt.pending_bounty_ticks
-                    .entry((sys_id, attacker_char_id))
-                    .or_insert(0.0) += bounty;
+                let _ = rt.destroyed_npc_cache.remove(&target_ball_id);
+                if attacker_char_id > 0 && rt.bounty_credited_balls.insert(target_ball_id) {
+                    *rt.pending_bounty_ticks
+                        .entry((sys_id, attacker_char_id))
+                        .or_insert(0.0) += bounty;
+                }
             });
             let old_sec = ctx.db.with_snapshot(|snap| {
                 snap.characters

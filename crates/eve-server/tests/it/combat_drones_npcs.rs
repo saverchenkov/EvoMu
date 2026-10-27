@@ -1195,7 +1195,7 @@ async fn test_c4_npc_archetypes_triglavian_drifter_sleeper_edencom_clone_soldier
     assert!(officer_bounty >= 25_000_000.0, "Officer NPC must have high bounty");
     assert!(officer_loot.contains(&14254), "Officer NPC must drop officer faction module");
 
-    // Clone Soldier Negotiator (`33175`) warp scrambles at 24 km and drops Negotiator Tag (`35664`)
+    // Clone Soldier Negotiator (`33175`) warp scrambles at 24 km and drops Negotiator Tag (`33141`)
     let cs_neg = spawn_specialized_npc_entity(
         &ctx,
         sys_id,
@@ -1215,7 +1215,7 @@ async fn test_c4_npc_archetypes_triglavian_drifter_sleeper_edencom_clone_soldier
     assert!(scram_str >= 2, "Clone Soldier Negotiator must apply warp scramble EWAR");
     let (_csw, _csb, cs_loot) =
         destroy_specialized_npc_and_queue_bounty(&ctx, sys_id, cs_neg, char_id).await;
-    assert!(cs_loot.contains(&35664), "Clone Soldier Negotiator must drop Negotiator Tag (35664)");
+    assert!(cs_loot.contains(&33141), "Clone Soldier Negotiator must drop Negotiator Tag (33141)");
 }
 
 #[tokio::test]

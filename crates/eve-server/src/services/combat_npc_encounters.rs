@@ -229,7 +229,7 @@ pub async fn handle_npc_destroyed_in_space(
             let shield = attr(eve_sde::attr_ids::SHIELD_CAPACITY).unwrap_or(500.0);
             let armor = attr(eve_sde::attr_ids::ARMOR_HP).unwrap_or(500.0);
             let hull = attr(eve_sde::attr_ids::HP_STRUCT).unwrap_or(500.0);
-            let bounty = attr(481).unwrap_or(50_000.0);
+            let bounty = attr(481).unwrap_or(0.0);
             let max_vel = attr(37).unwrap_or(250.0);
             let opt_range = attr(54).unwrap_or(15_000.0).max(5_000.0);
             let orb_range = (opt_range * 0.6).clamp(2_500.0, 20_000.0);
@@ -326,17 +326,23 @@ pub async fn handle_npc_destroyed_in_space(
         }
     }
 
-    // 2. Remove from npc_entities and award bounty if present
+    // 2. Remove from npc_entities, cache metadata for wreck/loot creation, and award bounty once
     let npc_opt = {
         let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
         rt.npc_entities.remove(&killed_ball_id)
     };
     if let Some(npc) = npc_opt {
-        if npc.bounty_isk > 0.0 && killer > 0 {
-            let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
+        let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
+        if solar_system_id < 31_000_000
+            && npc.archetype != "Sleeper"
+            && npc.bounty_isk > 0.0
+            && killer > 0
+            && rt.bounty_credited_balls.insert(killed_ball_id)
+        {
             *rt.pending_bounty_ticks
                 .entry((solar_system_id, killer))
                 .or_insert(0.0) += npc.bounty_isk;
         }
+        rt.destroyed_npc_cache.insert(killed_ball_id, npc);
     }
 }

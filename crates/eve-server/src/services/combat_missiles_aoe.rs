@@ -106,8 +106,9 @@ pub(crate) async fn handle_destroyed_ball_from_missile_or_aoe(
             now_unix,
         )
         .await;
-    } else if with_combat_runtime(ctx, |rt| rt.npc_entities.contains_key(&ball_id))
-        || ctx.living_world.get_convoy(ball_id).is_some()
+    } else if with_combat_runtime(ctx, |rt| {
+        rt.npc_entities.contains_key(&ball_id) || rt.destroyed_npc_cache.contains_key(&ball_id)
+    }) || ctx.living_world.get_convoy(ball_id).is_some()
         || ctx
             .sde
             .types

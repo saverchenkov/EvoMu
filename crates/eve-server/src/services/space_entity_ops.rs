@@ -96,7 +96,7 @@ pub async fn handle(
                         it.owner_id = 0;
                         it.version += 1;
                     }
-                    let child_ids: Vec<i64> = snap.items.values().filter(|c| c.location_id == tid).map(|c| c.item_id).collect();
+                    let child_ids: Vec<i64> = snap.items.values().filter(|c| c.location_id == tid && c.owner_id == char_id).map(|c| c.item_id).collect();
                     for cid in child_ids {
                         if let Some(c) = snap.items.get_mut(&cid) {
                             c.owner_id = 0;

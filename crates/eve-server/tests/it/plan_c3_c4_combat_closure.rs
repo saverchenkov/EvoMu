@@ -16,7 +16,6 @@ use eve_proto::PyRep;
 use eve_server::combat::death_pipeline::{execute_death_pipeline, execute_death_pipeline_sync};
 use eve_server::combat::npc_ai::{
     clone_soldier_type_for_security, clone_soldier_type_for_security_and_faction, regional_pirate_faction_id,
-    NpcSpawnManager,
 };
 use eve_server::router::{BoundObjectEntry, ServerContext};
 use eve_server::services::combat_crimewatch::combat_npc_ai::{
@@ -504,7 +503,12 @@ async fn test_c3_courier_package_destroyed_and_missile_death_pipeline() {
     step_combat_system(&ctx, sys_id, 1.0).await;
     assert!(sys_handle.get_ball_snapshot(drone_id).await.unwrap().is_none(), "Destroyed drone ball must be removed");
     assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&issuer_id).unwrap().active_ship_id), issuer_ship_before, "Destroying a player's drone must not pod the player");
-    assert!(with_combat_runtime(&ctx, |rt| rt.pending_bounty_ticks.get(&(sys_id, attacker_id)).is_some_and(|&isk| isk > 0.0)), "Missile kill of NPC must queue SDE bounty tick");
+    let sde_33132_bounty = ctx.sde.types.get(&33132).and_then(|t| t.default_attributes.get(&481).copied()).unwrap();
+    assert_eq!(with_combat_runtime(&ctx, |rt| rt.pending_bounty_ticks.get(&(sys_id, attacker_id)).copied()), Some(sde_33132_bounty), "Missile kill of NPC must queue exact 1x SDE bounty");
+    let turret_npc_id = spawn_specialized_npc_entity(&ctx, sys_id, 33132, "CloneSoldier", 500_010, DVec3::new(620.0, 0.0, 0.0)).await;
+    let (_, _, turret_npc_ball) = sys_handle.apply_damage_with_attacker(turret_npc_id, DamageVector::new(50_000.0, 50_000.0, 50_000.0, 50_000.0), Some(attacker_id)).await.unwrap().unwrap();
+    let _ = handle_ship_or_npc_destruction(&ctx, &sys_handle, attacker_id, 610_030_003, 587, 2905, turret_npc_id, &turret_npc_ball, None, sys_id, 50_000.0, ctx.now_unix()).await;
+    assert_eq!(with_combat_runtime(&ctx, |rt| rt.pending_bounty_ticks.get(&(sys_id, attacker_id)).copied()), Some(sde_33132_bounty * 2.0), "Turret kill of NPC must queue exact 1x SDE bounty without doubling");
 
     // Verify Contract 1 & jettisoned Contract 3 failed, collateral paid to issuer, and no orphaned items remain
     ctx.db.with_mut_snapshot(|snap| {
@@ -558,20 +562,22 @@ async fn test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns() {
 
     let lowsec_sys_id = ctx.sde.solar_systems.values().find(|s| (0.10..0.45).contains(&(s.security_status as f64))).map(|s| s.solar_system_id).unwrap_or(30_002_537);
     let expected_faction = regional_pirate_faction_id(&ctx, lowsec_sys_id);
+    assert_eq!(regional_pirate_faction_id(&ctx, 30_000_001), 500_019, "Derelik system must resolve to Sansha's Nation via SDE faction_id");
     assert!(clone_soldier_type_for_security_and_faction(&ctx.sde, 0.3, expected_faction).is_some());
 
-    let mut spawn_mgr = NpcSpawnManager::new();
-    let spawned_ids = spawn_mgr.spawn_belt_rats_for_system(&ctx, lowsec_sys_id).await.expect("spawn_belt_rats_for_system must succeed");
-    assert!(!spawned_ids.is_empty());
+    // Drive belt, gate, and Clone Soldier spawning through the real SP-7 production scheduler (`tick_background_cluster`)
+    let lowsec_handle = ctx.systems.get_or_spawn(lowsec_sys_id);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    assert!(ctx.npc_spawns.read().unwrap().get(&lowsec_sys_id).is_some_and(|m| !m.entities.is_empty()), "SP-7 tick must populate ctx.npc_spawns belt/gate waves");
 
-    let cs_ball_id = *spawned_ids.last().expect("clone soldier ball spawned");
-    let cs_npc = with_combat_runtime(&ctx, |rt| rt.npc_entities.get(&cs_ball_id).cloned()).expect("Clone Soldier registered in extended NPC runtime");
+    let (cs_ball_id, cs_npc) = with_combat_runtime(&ctx, |rt| {
+        rt.npc_entities.iter().find(|(_, n)| n.solar_system_id == lowsec_sys_id && n.archetype == "CloneSoldier").map(|(&id, n)| (id, n.clone()))
+    }).expect("SP-7 tick must spawn a Clone Soldier in low-sec");
     assert_eq!((cs_npc.archetype.as_str(), cs_npc.faction_id), ("CloneSoldier", expected_faction));
     let tag_tid = cs_npc.tag_drop_type_id.expect("Clone Soldier must have a security tag drop");
     assert!(matches!(tag_tid, 33138..=33141) && ctx.sde.types.get(&tag_tid).map(|t| t.group_id) == Some(1206));
     assert!(matches!(ctx.sde.types.get(&cs_npc.type_id).map(|t| t.group_id), Some(551 | 552 | 556 | 566 | 574)));
 
-    let lowsec_handle = ctx.systems.get_or_spawn(lowsec_sys_id);
     let cs_combat = lowsec_handle.get_combat_state(cs_ball_id).await.unwrap().expect("Clone Soldier CombatState present");
     let sde_combat = ctx.build_type_combat_state(cs_npc.type_id);
     assert_eq!((cs_combat.shield_resonance, cs_combat.armor_resonance), (sde_combat.shield_resonance, sde_combat.armor_resonance));
@@ -580,12 +586,12 @@ async fn test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns() {
     let (cs_wreck_id, bounty, dropped_types) = destroy_specialized_npc_and_queue_bounty(&ctx, lowsec_sys_id, cs_ball_id, killer_id).await;
     assert_eq!(bounty, ctx.sde.types.get(&cs_npc.type_id).and_then(|t| t.default_attributes.get(&481).copied()).unwrap_or(0.0));
     assert!(dropped_types.contains(&tag_tid) && ctx.db.with_snapshot(|snap| snap.items.values().any(|i| i.location_id == cs_wreck_id && i.type_id == tag_tid)));
-    let cooldown_spawns = spawn_mgr.spawn_belt_rats_for_system(&ctx, lowsec_sys_id).await.unwrap();
-    assert!(cooldown_spawns.iter().all(|id| with_combat_runtime(&ctx, |rt| !rt.npc_entities.contains_key(id))), "Clone Soldier must not respawn during 1200s cooldown");
-    spawn_mgr.clone_soldier_respawn_timers.insert(lowsec_sys_id, 0);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    assert!(with_combat_runtime(&ctx, |rt| !rt.npc_entities.values().any(|n| n.solar_system_id == lowsec_sys_id && n.archetype == "CloneSoldier")), "Clone Soldier must not respawn during 1200s cooldown");
+    ctx.npc_spawns.write().unwrap().get_mut(&lowsec_sys_id).unwrap().clone_soldier_respawn_timers.insert(lowsec_sys_id, 0);
     with_mut_combat_runtime(&ctx, |rt| { rt.clone_soldier_cooldown_until.insert(lowsec_sys_id, 0); });
-    let post_cd_spawns = spawn_mgr.spawn_belt_rats_for_system(&ctx, lowsec_sys_id).await.unwrap();
-    assert!(post_cd_spawns.iter().any(|id| with_combat_runtime(&ctx, |rt| rt.npc_entities.get(id).is_some_and(|n| n.archetype == "CloneSoldier"))), "Clone Soldier must respawn after cooldown expires");
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    assert!(with_combat_runtime(&ctx, |rt| rt.npc_entities.values().any(|n| n.solar_system_id == lowsec_sys_id && n.archetype == "CloneSoldier")), "Clone Soldier must respawn via SP-7 tick after cooldown expires");
 
     // 2. Test NpcSpawnManager::step_ai (Idle -> Chase -> Orbit/Attack), SP-7 timer scheduling, and target switching
     let sys_id = 30_000_142u32;
@@ -607,10 +613,10 @@ async fn test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns() {
     for &(bid, tid) in &[(ship_a, 587u32), (ship_b, 587u32), (drone_a, 2454u32)] {
         let _ = sys_handle.spawn_ball_with_combat(new_ball(bid, tid, DVec3::new(5_000.0, 0.0, 0.0)), ctx.build_type_combat_state(tid)).await;
     }
-    let belt_rats = spawn_mgr.spawn_belt_rats_for_system(&ctx, sys_id).await.unwrap();
-    spawn_mgr.step_ai(&ctx, sys_id, 1, 1.0).await;
-    let _ = spawn_mgr.handle_npc_destroyed(&ctx, sys_id, belt_rats[0], char_a, ctx.now_unix()).unwrap();
-    assert!(!spawn_mgr.respawn_timers.is_empty());
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    let first_belt_rat = *ctx.npc_spawns.read().unwrap()[&sys_id].entities.keys().next().unwrap();
+    let _ = ctx.npc_spawns.write().unwrap().get_mut(&sys_id).unwrap().handle_npc_destroyed(&ctx, sys_id, first_belt_rat, char_a, ctx.now_unix()).unwrap();
+    assert!(!ctx.npc_spawns.read().unwrap()[&sys_id].respawn_timers.is_empty());
 
     let transporter_id = spawn_specialized_npc_entity(&ctx, sys_id, 33163, "CloneSoldier", 500_010, DVec3::new(900_000.0, 0.0, 0.0)).await;
     let npc_id = spawn_specialized_npc_entity(&ctx, sys_id, 33175, "CloneSoldier", 500_010, DVec3::ZERO).await;

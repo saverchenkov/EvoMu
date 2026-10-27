@@ -51,13 +51,29 @@ pub fn regional_pirate_faction_id(ctx: &ServerContext, solar_system_id: u32) -> 
     let Some(sys) = ctx.sde.solar_systems.get(&solar_system_id) else {
         return 500_010;
     };
+    let sde_faction = ctx
+        .sde
+        .constellations
+        .get(&sys.constellation_id)
+        .and_then(|c| c.faction_id)
+        .or_else(|| ctx.sde.regions.get(&sys.region_id).and_then(|r| r.faction_id));
+    if let Some(fid) = sde_faction {
+        match fid {
+            500_010 | 500_001 => return 500_010, // Guristas / Caldari State
+            500_011 | 500_002 | 500_015 => return 500_011, // Angel Cartel / Minmatar / Thukker
+            500_012 | 500_003 | 500_008 => return 500_012, // Blood Raiders / Amarr / Khanid
+            500_019 | 500_007 => return 500_019, // Sansha's Nation / Ammatar Mandate
+            500_020 | 500_004 | 500_009 | 500_014 => return 500_020, // Serpentis / Gallente / Syndicate / ORE
+            _ => {}
+        }
+    }
     match sys.region_id {
-        10_000_001 | 10_000_002 | 10_000_003 | 10_000_010 | 10_000_015 | 10_000_016
+        10_000_002 | 10_000_003 | 10_000_010 | 10_000_015 | 10_000_016
         | 10_000_023 | 10_000_033 | 10_000_051 | 10_000_069 => 500_010, // Guristas
         10_000_020 | 10_000_036 | 10_000_038 | 10_000_043 | 10_000_052 | 10_000_054
         | 10_000_065 | 10_000_067 => 500_012, // Blood Raiders
-        10_000_031 | 10_000_037 | 10_000_039 | 10_000_047 | 10_000_050 | 10_000_056
-        | 10_000_063 => 500_019, // Sansha's Nation
+        10_000_001 | 10_000_031 | 10_000_037 | 10_000_039 | 10_000_047 | 10_000_050
+        | 10_000_056 | 10_000_063 => 500_019, // Sansha's Nation
         10_000_027 | 10_000_032 | 10_000_035 | 10_000_041 | 10_000_044 | 10_000_046
         | 10_000_048 | 10_000_055 | 10_000_057 | 10_000_058 | 10_000_059 | 10_000_060
         | 10_000_064 | 10_000_068 => 500_020, // Serpentis
@@ -326,12 +342,17 @@ impl NpcSpawnManager {
 
         let mut all_spawned = Vec::new();
         if !candidate_groups.is_empty() {
-            for (idx, &belt_pos) in belt_positions.iter().enumerate() {
+            for (idx, &belt_pos) in belt_positions.iter().take(3).enumerate() {
                 let group_id = candidate_groups[idx % candidate_groups.len()];
-                if self
-                    .respawn_timers
-                    .get(&(sys_id, group_id))
-                    .is_some_and(|&until| now_unix < until)
+                let belt_alive = self
+                    .entities
+                    .values()
+                    .any(|e| e.spawn_pos.distance(belt_pos) < 25_000.0);
+                if belt_alive
+                    || self
+                        .respawn_timers
+                        .get(&(sys_id, group_id))
+                        .is_some_and(|&until| now_unix < until)
                 {
                     continue;
                 }
@@ -349,10 +370,15 @@ impl NpcSpawnManager {
                     .collect();
                 if let Some(&gate_pos) = gate_positions.first() {
                     let gate_group_id = candidate_groups[belt_positions.len() % candidate_groups.len()];
-                    if !self
-                        .respawn_timers
-                        .get(&(sys_id, gate_group_id))
-                        .is_some_and(|&until| now_unix < until)
+                    let gate_alive = self
+                        .entities
+                        .values()
+                        .any(|e| e.spawn_pos.distance(gate_pos) < 25_000.0);
+                    if !gate_alive
+                        && !self
+                            .respawn_timers
+                            .get(&(sys_id, gate_group_id))
+                            .is_some_and(|&until| now_unix < until)
                     {
                         if let Ok(spawned) =
                             self.spawn_group(ctx, sys_id, gate_group_id, gate_pos).await
@@ -432,11 +458,12 @@ impl NpcSpawnManager {
         let ball_positions: HashMap<i64, DVec3> =
             all_balls.iter().map(|b| (b.id, b.position)).collect();
 
-        // Find potential player targets (ships that are not NPCs, not cloaked, not warping, and alive)
+        // Find potential player targets (ships that are not NPCs, not capsules, not cloaked, not warping, and alive)
         let player_targets: Vec<(i64, DVec3, f64)> = all_balls
             .into_iter()
             .filter(|b| {
                 !self.entities.contains_key(&b.id)
+                    && b.type_id != 670
                     && b.max_velocity > 0.0
                     && !matches!(b.mode, MovementMode::Warp { .. })
                     && !cloaked_or_dead.contains(&b.id)
@@ -446,8 +473,8 @@ impl NpcSpawnManager {
                     let sig = ctx.sde.types.get(&b.type_id).and_then(|t| t.default_attributes.get(&552).copied()).unwrap_or(40.0);
                     let mut ewar = false;
                     let mut logi = false;
-                    for it in snap.items.values() {
-                        if it.location_id == b.id && snap.module_active_states.contains(&it.item_id) {
+                    for &aid in &snap.module_active_states {
+                        if let Some(it) = snap.items.get(&aid).filter(|i| i.location_id == b.id) {
                             if let Some(mt) = ctx.sde.types.get(&it.type_id) {
                                 if matches!(mt.group_id, 52 | 65 | 201 | 208 | 291 | 357) { ewar = true; }
                                 if matches!(mt.group_id, 41 | 325 | 585) { logi = true; }
@@ -566,8 +593,24 @@ impl NpcSpawnManager {
             );
         }
 
+        let now_unix = ctx.now_unix();
         for dead_id in to_remove {
-            self.entities.remove(&dead_id);
+            if let Some(dead_ent) = self.entities.remove(&dead_id) {
+                let until = now_unix.saturating_add(1_200);
+                if crate::services::combat_crimewatch::combat_npc_ai::derive_npc_archetype(
+                    ctx,
+                    dead_ent.type_id,
+                ) == "CloneSoldier"
+                {
+                    self.clone_soldier_respawn_timers.insert(sys_id, until);
+                    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                        rt.clone_soldier_cooldown_until.insert(sys_id, until);
+                    });
+                } else {
+                    self.respawn_timers
+                        .insert((sys_id, dead_ent.spawn_group_id), until);
+                }
+            }
         }
     }
 

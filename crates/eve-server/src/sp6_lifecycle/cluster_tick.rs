@@ -1101,6 +1101,19 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     let active_handles = ctx.systems.active_system_handles();
     for (sys_id, handle) in active_handles {
         let _ = crate::services::combat_npc_police::check_and_spawn_faction_police(ctx, sys_id).await;
+        {
+            let mut mgr = ctx
+                .npc_spawns
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&sys_id)
+                .unwrap_or_default();
+            let _ = mgr.spawn_belt_rats_for_system(ctx, sys_id).await;
+            ctx.npc_spawns
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(sys_id, mgr);
+        }
         if !handle.take_auto_stepped_at(now_unix) {
             let _tick = handle
                 .step_manual(1.0)
