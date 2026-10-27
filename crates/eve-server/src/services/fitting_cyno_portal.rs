@@ -596,15 +596,7 @@ async fn caller_in_space(ctx: &ServerContext, session: &SessionState) -> Result<
         .unwrap_or_else(|e| e.into_inner())
         .bridges
         .get(&(ctx_key(ctx), char_id))
-        .and_then(|b| {
-            let is_covert_portal = ctx
-                .sde
-                .types
-                .get(&b.portal_module_type_id)
-                .is_some_and(|t| type_attr(ctx, t, ATTR_IS_COVERT) > 0.0 || t.type_id == 28652);
-            (b.bridger_ship_id == ship_id && (b.expires_at_unix <= now || is_covert_portal))
-                .then_some(b.portal_module_id)
-        });
+        .and_then(|b| (b.bridger_ship_id == ship_id).then_some(b.portal_module_id));
     if let Some(pmod_id) = release_portal_mod {
         let _ = handle.remove_module_cycle(ship_id, pmod_id).await;
     }
