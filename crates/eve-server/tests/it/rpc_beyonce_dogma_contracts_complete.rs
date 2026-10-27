@@ -390,7 +390,7 @@ async fn test_rpc_dogma_im_implants_boosters_and_skill_injection() {
     let boost = rpc(&ctx, &mut s1, "dogmaIM", "UseBooster", &[PyRep::Integer(883_002)]).await;
     assert_eq!(boost.dict_get("typeID"), Some(&PyRep::Integer(28674)));
 
-    seed_item(&ctx, 883_003, 3412, C1, JITA_44, InventoryFlag::Hangar, 1);
+    grant_req_skills(&ctx, C1, 3412); seed_item(&ctx, 883_003, 3412, C1, JITA_44, InventoryFlag::Hangar, 1);
     ctx.db.with_mut_snapshot(|s| { s.skills.entry(C1).or_default().remove(&3412); });
     let skill_res = rpc(&ctx, &mut s1, "dogmaIM", "InjectSkillIntoBrain", &[PyRep::List(vec![PyRep::Integer(883_003)])]).await;
     assert_eq!(skill_res.dict_get("typeID"), Some(&PyRep::Integer(3412)));

@@ -1233,11 +1233,16 @@ pub async fn handle_gm_qa_rpcs(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     if (service, method) == ("slash", "SlashCmd") {
         let (_, cid) = ServerContext::require_character(session).ok()?;
-        if !session.has_gm_role() {
+        let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();
+        let req_role = crate::services::auth_cache::required_slash_role(cmd);
+        if (session.role & req_role) == 0 {
             return None;
         }
-        let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();
-        return handle_gm_slash_ext(ctx, session, cid, cmd).await;
+        if let Some(ext_res) = handle_gm_slash_ext(ctx, session, cid, cmd).await {
+            crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, ext_res.is_ok());
+            return Some(ext_res);
+        }
+        return None;
     }
     match (service, method) {
         ("publicQaToolsServer", "SlashCmd") => {
@@ -1245,31 +1250,21 @@ pub async fn handle_gm_qa_rpcs(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let has_gm_or_qa = session.has_gm_role()
-                || (session.role & eve_machonet::service_roles::ROLE_QA) != 0;
-            if !has_gm_or_qa {
+            let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();
+            let req_role = crate::services::auth_cache::required_slash_role(cmd);
+            if (session.role & req_role) == 0 {
+                crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, false);
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
-                    message: "publicQaToolsServer.SlashCmd requires GM/QA role".into(),
+                    message: format!("publicQaToolsServer.SlashCmd '{cmd}' requires role mask 0x{req_role:x}"),
                 }));
             }
-            let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();
-            if session.has_gm_role() {
-                if let Some(ext_res) = handle_gm_slash_ext(ctx, session, cid, cmd).await {
-                    return Some(ext_res);
-                }
-            } else if cmd.starts_with("/moveme ")
-                || cmd.starts_with("/translocate ")
-                || cmd == "/online"
-                || cmd.starts_with("/online ")
-                || cmd == "/survey"
-                || cmd.starts_with("/survey ")
-            {
-                if let Some(ext_res) = handle_gm_slash_ext(ctx, session, cid, cmd).await {
-                    return Some(ext_res);
-                }
+            if let Some(ext_res) = handle_gm_slash_ext(ctx, session, cid, cmd).await {
+                crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, ext_res.is_ok());
+                return Some(ext_res);
             }
             let _ = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&cid));
+            crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, false);
             Some(Err(BridgeRpcError {
                 code: "UnknownSlashCommand".into(),
                 message: format!("Unknown or unsupported QA slash command '{cmd}'"),
@@ -1288,62 +1283,7 @@ pub async fn handle_gm_qa_rpcs(
                     message: "publicQaToolsServer.MoveMeTo requires GM/QA role".into(),
                 }));
             }
-            let dest_raw = args
-                .first()
-                .and_then(|a| a.as_i64().or_else(|| a.as_str().and_then(|s| s.trim().parse::<i64>().ok())))
-                .unwrap_or(0);
-            let dest_sys_id = if ctx.sde.solar_systems.contains_key(&(dest_raw as u32)) {
-                dest_raw as u32
-            } else if let Some(st) = ctx.sde.stations.get(&dest_raw) {
-                st.solar_system_id
-            } else {
-                return Some(Err(BridgeRpcError {
-                    code: "DestinationNotFound".into(),
-                    message: format!("Destination {dest_raw} not found in SDE"),
-                }));
-            };
-            let (old_sys_id, ship_id) = ctx
-                .db
-                .with_snapshot(|snap| snap.characters.get(&cid).map(|c| (c.solar_system_id, c.active_ship_id)))
-                .unwrap_or((30_000_142, 0));
-            let updated_ch = match ctx.db.set_character_solar_system(cid, dest_sys_id, &ctx.sde) {
-                Ok(c) => c,
-                Err(e) => return Some(Err(BridgeRpcError { code: "TeleportFailed".into(), message: e.to_string() })),
-            };
-            if old_sys_id != dest_sys_id && ship_id > 0 {
-                let old_handle = ctx.systems.get_or_spawn(old_sys_id);
-                let existing_ball = old_handle.remove_ball(ship_id).await;
-                let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
-                let mut new_ball = existing_ball.unwrap_or(Ball {
-                    id: ship_id,
-                    type_id: 601,
-                    position: DVec3::ZERO,
-                    velocity: DVec3::ZERO,
-                    max_velocity: 300.0,
-                    inertia: 0.5,
-                    mass: 1_000_000.0,
-                    radius: 50.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                });
-                new_ball.position = DVec3::new(10_000.0, 0.0, 0.0);
-                new_ball.velocity = DVec3::ZERO;
-                let combat_state = ctx.build_ship_combat_state(cid, ship_id, new_ball.type_id);
-                let slim_meta = ctx.build_ship_slim_meta(cid, new_ball.type_id);
-                let _ = new_handle.spawn_ball_with_meta(new_ball, combat_state, slim_meta).await;
-            }
-            session.solar_system_id = Some(dest_sys_id);
-            session.constellation_id = Some(updated_ch.constellation_id);
-            session.region_id = Some(updated_ch.region_id);
-            session.station_id = None;
-            session.structure_id = None;
-            Some(Ok(PyRep::keyval([
-                ("characterID", PyRep::Integer(cid)),
-                ("solarSystemID", PyRep::Integer(dest_sys_id as i64)),
-                ("constellationID", PyRep::Integer(updated_ch.constellation_id as i64)),
-                ("regionID", PyRep::Integer(updated_ch.region_id as i64)),
-                ("moved", PyRep::Bool(true)),
-            ])))
+            Some(crate::services::jump_clone_names::handle_qa_move_me_to(ctx, session, cid, args).await)
         }
         ("publicQaToolsServer", "CanGiveItemForMultifit") => {
             let (_, cid) = match ServerContext::require_character(session) {

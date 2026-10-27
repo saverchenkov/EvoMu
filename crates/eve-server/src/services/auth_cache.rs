@@ -30,6 +30,46 @@ pub fn get_init_vals(ctx: &ServerContext) -> PyRep {
     ])
 }
 
+pub fn required_slash_role(cmd: &str) -> u64 {
+    use eve_machonet::service_roles::{
+        ROLE_ADMIN, ROLE_GMH, ROLE_GMS, ROLE_GM_MASK, ROLE_QA, ROLE_ROLEADMIN, ROLE_SPAWN,
+    };
+    let tok = cmd.split_whitespace().next().unwrap_or("");
+    match tok {
+        "/online" | "/location" | "/getattr" | "/survey" | "/moveme" | "/translocate" => {
+            ROLE_QA | ROLE_GM_MASK
+        }
+        "/spawn" | "/unspawn" | "/despawn" | "/spawnnpc" => ROLE_SPAWN | ROLE_GM_MASK,
+        "/createccpevent" | "/role" => ROLE_GMH | ROLE_GMS | ROLE_ADMIN | ROLE_ROLEADMIN,
+        _ => ROLE_GM_MASK,
+    }
+}
+
+pub fn record_gm_audit(ctx: &ServerContext, char_id: i64, cmd: &str, ok: bool) {
+    let ts = ctx.now_unix();
+    tracing::info!(char_id, cmd, ts, ok, "GM slash command audit");
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut logs: Vec<serde_json::Value> = snap
+            .service_state_blobs
+            .get("gm_audit_log")
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        logs.push(serde_json::json!({
+            "char_id": char_id,
+            "cmd": cmd,
+            "ts": ts,
+            "ok": ok,
+        }));
+        if logs.len() > 256 {
+            let drain_n = logs.len() - 256;
+            logs.drain(0..drain_n);
+        }
+        if let Ok(serialized) = serde_json::to_string(&logs) {
+            snap.service_state_blobs.insert("gm_audit_log".into(), serialized);
+        }
+    });
+}
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -514,13 +554,16 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if !session.has_gm_role() {
+            let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();
+            let req_role = required_slash_role(cmd);
+            if (session.role & req_role) == 0 {
+                record_gm_audit(ctx, cid, cmd, false);
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
-                    message: "slash.SlashCmd requires GM/Admin role (ROLE_GMS/ROLE_GML/ROLE_GMH/ROLE_ADMIN/ROLE_WORLDMOD)".into(),
+                    message: format!("slash.SlashCmd '{cmd}' requires role mask 0x{req_role:x}"),
                 }));
             }
-            let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();
+            record_gm_audit(ctx, cid, cmd, true);
             if let Some(rest) = cmd.strip_prefix("/giveisk ") {
                 let Ok(amount) = rest.trim().parse::<i64>() else {
                     return Some(Err(BridgeRpcError {

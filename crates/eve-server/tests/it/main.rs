@@ -288,3 +288,4 @@ mod esi_loyalty_and_final_rpcs;
 mod skills_parity_complete;
 mod fw_parity_complete;
 mod pve_parity_complete;
+mod plan_char_dogma_social_esi;

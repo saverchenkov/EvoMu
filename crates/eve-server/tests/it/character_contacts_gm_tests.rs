@@ -11,8 +11,8 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_ch5_gm_command_dispatcher() {
-    // parity: feat:admin.slash-dispatcher, feat:admin.gm-giveskill, feat:admin.gm-giveisk, feat:admin.gm-createitem, feat:admin.gm-tr, rpc:charUnboundMgr.SelectCharacterID, rpc:slash.SlashCmd
-    eve_testkit::attest(&["feat:admin.slash-dispatcher", "feat:admin.gm-giveskill", "feat:admin.gm-giveisk", "feat:admin.gm-createitem", "feat:admin.gm-tr"]);
+    // parity: feat:admin.slash-dispatcher, feat:admin.gm-giveskill, feat:admin.gm-giveisk, feat:admin.gm-createitem, feat:admin.gm-tr, plan:CH-5, rpc:charUnboundMgr.SelectCharacterID, rpc:slash.SlashCmd
+    eve_testkit::attest(&["feat:admin.slash-dispatcher", "feat:admin.gm-giveskill", "feat:admin.gm-giveisk", "feat:admin.gm-createitem", "feat:admin.gm-tr", "plan:CH-5"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
 
@@ -155,23 +155,63 @@ async fn test_ch5_gm_command_dispatcher() {
     );
     assert_eq!(gm_sess.solar_system_id, Some(30002537));
 
-    // 7. /heal
+    // 7. /heal (damages ship first, calls /heal, verifies HP restored to full and GM audit log recorded)
+    let gm_ship_id = ctx.db.with_snapshot(|s| s.characters[&gm_char_id].active_ship_id);
+    let sys = ctx.systems.get_or_spawn(30002537);
+    sys.set_combat_state(gm_ship_id, eve_destiny::CombatState {
+        shield_hp: 50.0,
+        max_shield_hp: 500.0,
+        armor_hp: 60.0,
+        max_armor_hp: 400.0,
+        structure_hp: 70.0,
+        max_structure_hp: 300.0,
+        capacitor: 80.0,
+        max_capacitor: 200.0,
+        ..Default::default()
+    }).await.unwrap();
+    let cs_damaged = sys.get_combat_state(gm_ship_id).await.unwrap().unwrap();
+    assert_eq!(cs_damaged.shield_hp, 50.0);
+
     let heal_rep = ctx
-        .dispatch_rpc(
-            &mut gm_sess,
-            "slash",
-            None,
-            "SlashCmd",
-            &[PyRep::String("/heal".into())],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut gm_sess, "slash", None, "SlashCmd", &[PyRep::String("/heal".into())], &kw, None)
         .await
         .expect("/heal");
     let PyRep::KeyVal(heal_kv) = heal_rep else {
         panic!("Expected KeyVal from /heal");
     };
     assert_eq!(heal_kv.get("healed").unwrap().as_bool(), Some(true));
+
+    let cs_healed = sys.get_combat_state(gm_ship_id).await.unwrap().unwrap();
+    assert_eq!(cs_healed.shield_hp, 500.0, "Shield HP must be restored to max");
+    assert_eq!(cs_healed.armor_hp, 400.0, "Armor HP must be restored to max");
+    assert_eq!(cs_healed.structure_hp, 300.0, "Structure HP must be restored to max");
+
+    // Verify per-command role checks (ROLE_QA allowed on /location, rejected on /giveisk; ROLE_GML rejected on /role)
+    let saved_role = gm_sess.role;
+    gm_sess.role = eve_machonet::service_roles::ROLE_QA;
+    ctx.dispatch_rpc(&mut gm_sess, "slash", None, "SlashCmd", &[PyRep::String("/location".into())], &kw, None)
+        .await
+        .expect("ROLE_QA must be allowed on /location");
+    let qa_deny = ctx
+        .dispatch_rpc(&mut gm_sess, "slash", None, "SlashCmd", &[PyRep::String("/giveisk 100".into())], &kw, None)
+        .await
+        .expect_err("ROLE_QA must be rejected on /giveisk");
+    assert_eq!(qa_deny.code, "InsufficientRole");
+    gm_sess.role = eve_machonet::service_roles::ROLE_GML;
+    let gml_deny = ctx
+        .dispatch_rpc(&mut gm_sess, "slash", None, "SlashCmd", &[PyRep::String("/role demo ADMIN".into())], &kw, None)
+        .await
+        .expect_err("ROLE_GML must be rejected on /role");
+    assert_eq!(gml_deny.code, "InsufficientRole");
+    gm_sess.role = saved_role;
+
+    // Verify structured GM command audit log (char_id, cmd, ts, ok)
+    let audit_log = ctx.db.with_snapshot(|s| s.service_state_blobs.get("gm_audit_log").cloned()).expect("gm_audit_log must exist");
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&audit_log).expect("valid audit JSON");
+    assert!(entries.iter().all(|e| e.get("ts").and_then(|v| v.as_u64()).unwrap_or(0) > 0 && e.get("char_id").is_some() && e.get("ok").is_some()));
+    for expected in ["/giveisk", "/giveskill", "/createitem", "/tr", "/heal", "/location"] {
+        assert!(audit_log.contains(expected), "Audit log must contain {expected}");
+    }
 }
 
 #[tokio::test]
@@ -423,8 +463,8 @@ async fn test_ch3_ch4_paperdoll_contacts_blocklist_labels_and_watchlist() {
 
 #[tokio::test]
 async fn test_ch5_gm_spawn_attr_fit_kill_location_online_and_qa_tools() {
-    // parity: feat:admin.gm-heal, feat:admin.gm-spawn, feat:admin.gm-attr, feat:admin.gm-fit, feat:admin.gm-kill, feat:admin.gm-location-online, feat:admin.gm-qa-tools, rpc:charUnboundMgr.SelectCharacterID, rpc:publicQaToolsServer.CanGiveItemForMultifit, rpc:publicQaToolsServer.MoveMeTo, rpc:slash.SlashCmd
-    eve_testkit::attest(&["feat:admin.gm-heal", "feat:admin.gm-spawn", "feat:admin.gm-attr", "feat:admin.gm-fit", "feat:admin.gm-kill", "feat:admin.gm-location-online", "feat:admin.gm-qa-tools"]);
+    // parity: plan:CH-5, feat:admin.gm-heal, feat:admin.gm-spawn, feat:admin.gm-attr, feat:admin.gm-fit, feat:admin.gm-kill, feat:admin.gm-location-online, feat:admin.gm-qa-tools, rpc:charUnboundMgr.SelectCharacterID, rpc:publicQaToolsServer.CanGiveItemForMultifit, rpc:publicQaToolsServer.MoveMeTo, rpc:slash.SlashCmd
+    eve_testkit::attest(&["plan:CH-5", "feat:admin.gm-heal", "feat:admin.gm-spawn", "feat:admin.gm-attr", "feat:admin.gm-fit", "feat:admin.gm-kill", "feat:admin.gm-location-online", "feat:admin.gm-qa-tools"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut gm_sess = SessionState::new(943);
@@ -616,34 +656,18 @@ async fn test_ch5_gm_spawn_attr_fit_kill_location_online_and_qa_tools() {
     assert!(online_kv.get("onlineCount").and_then(|v| v.as_i64()).unwrap_or(0) >= 1);
 
     // 6. publicQaToolsServer (feat:admin.gm-qa-tools)
-    let can_give = ctx
-        .dispatch_rpc(
-            &mut gm_sess,
-            "publicQaToolsServer",
-            None,
-            "CanGiveItemForMultifit",
-            &[],
-            &kw,
-            None,
-        )
-        .await
-        .expect("CanGiveItemForMultifit");
+    let can_give = ctx.dispatch_rpc(&mut gm_sess, "publicQaToolsServer", None, "CanGiveItemForMultifit", &[], &kw, None).await.expect("CanGiveItemForMultifit");
     assert_eq!(can_give, PyRep::Bool(true));
 
-    let move_rep = ctx
-        .dispatch_rpc(
-            &mut gm_sess,
-            "publicQaToolsServer",
-            None,
-            "MoveMeTo",
-            &[PyRep::Integer(30_002_537)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("MoveMeTo");
-    let PyRep::KeyVal(move_kv) = move_rep else {
-        panic!("Expected KeyVal from MoveMeTo");
-    };
+    let move_rep = ctx.dispatch_rpc(&mut gm_sess, "publicQaToolsServer", None, "MoveMeTo", &[PyRep::Integer(30_002_537)], &kw, None).await.expect("MoveMeTo");
+    let PyRep::KeyVal(move_kv) = move_rep else { panic!("Expected KeyVal from MoveMeTo") };
     assert_eq!(move_kv.get("solarSystemID").and_then(|v| v.as_i64()), Some(30_002_537));
+
+    // Verify structured GM command audit log for /spawn, /unspawn, /setattr, /getattr, /fit, /kill, /location, /online
+    let audit_log = ctx.db.with_snapshot(|s| s.service_state_blobs.get("gm_audit_log").cloned()).expect("gm_audit_log must exist");
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&audit_log).expect("valid audit JSON");
+    assert!(entries.iter().all(|e| e.get("ts").and_then(|v| v.as_u64()).unwrap_or(0) > 0 && e.get("ok") == Some(&serde_json::Value::Bool(true))));
+    for expected in ["/spawn", "/unspawn", "/setattr", "/getattr", "/fit", "/kill", "/location", "/online"] {
+        assert!(audit_log.contains(expected), "Audit log must contain {expected}");
+    }
 }

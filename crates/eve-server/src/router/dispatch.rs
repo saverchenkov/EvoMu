@@ -263,7 +263,13 @@ impl ServerContext {
             || method.starts_with("GM_");
         if is_gm_only_surface {
             let _ = Self::require_auth(session)?;
-            if !session.has_gm_role() {
+            let slash_subrole = effective_service == "slash"
+                && (session.role
+                    & (eve_machonet::service_roles::ROLE_QA
+                        | eve_machonet::service_roles::ROLE_SPAWN
+                        | eve_machonet::service_roles::ROLE_ROLEADMIN))
+                    != 0;
+            if !session.has_gm_role() && !slash_subrole {
                 return Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: format!(

@@ -6,7 +6,7 @@ use eve_db::{
     corp_roles, AllianceRecord, CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents,
     MiningLedgerRecord, WorldRepository,
 };
-use eve_destiny::{Ball, CombatState, MovementMode};
+use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::esi::{EsiHttpRequest, EsiRouter};
@@ -68,6 +68,8 @@ async fn rpc(
 
 #[tokio::test]
 async fn test_c2_dogma_shield_recharge_curve_and_damage_state() {
+    // parity: feat:dogma.shield-recharge, plan:C-2
+    eve_testkit::attest(&["feat:dogma.shield-recharge", "plan:C-2"]);
 
     // 1. Verify EVE's non-linear passive shield recharge curve peaks at ~25% shield capacity
     let (max_sh, tau_s) = (2_000.0, 200.0);
@@ -82,50 +84,51 @@ async fn test_c2_dogma_shield_recharge_curve_and_damage_state() {
     assert!(r_25 > r_05 && r_25 > r_10 && r_25 > r_50 && r_25 > r_90);
     assert_eq!(r_full, 0.0);
 
-    // 2. Step passive shield recharge on an in-space ship and verify CombatState + OnDamageStateChange
-    let ctx = ServerContext::new();
+    // 2. Real Undock initializes CombatState from dogma attributes, applies 4-layer damage, steps recharge, and persists across restart
+    let db_path = temp_sqlite_path("c2_combat_persist");
+    let repo = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
+    let ctx = ServerContext::with_repository(repo);
+    let demo = WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
+    ctx.db.with_mut_snapshot(|snap| *snap = demo);
     crate::common::pin_clock(&ctx);
     let mut sess = SessionState::new(7101);
-    let _ = rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)])
-        .await
-        .expect("SelectCharacterID");
+    let _ = rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)]).await.expect("SelectCharacterID");
     let ship_id = sess.ship_id.unwrap_or(100_000_001);
-    let handle = ctx.systems.get_or_spawn(JITA_SYSTEM_ID);
-    handle
-        .spawn_ball_with_combat(
-            Ball {
-                id: ship_id,
-                type_id: 587,
-                position: DVec3::ZERO,
-                velocity: DVec3::ZERO,
-                max_velocity: 350.0,
-                inertia: 2.5,
-                mass: 1_200_000.0,
-                radius: 40.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            CombatState {
-                shield_hp: 500.0,
-                max_shield_hp: 2_000.0,
-                armor_hp: 1_000.0,
-                max_armor_hp: 1_000.0,
-                structure_hp: 1_000.0,
-                max_structure_hp: 1_000.0,
-                shield_recharge_time_ms: 200_000.0,
-                ..CombatState::default()
-            },
-        )
-        .await
-        .expect("spawn_ball_with_combat");
+    let _ = rpc(&ctx, &mut sess, "ship", "Undock", &[]).await.expect("Undock");
 
-    let (after_hp, delta_hp) =
-        step_passive_shield_recharge(&ctx, JITA_SYSTEM_ID, Some(90_000_001), ship_id, 200.0, 10.0)
-            .await
-            .expect("step_passive_shield_recharge");
-    assert!(delta_hp > 200.0 && after_hp > 700.0);
-    let cs = handle.get_combat_state(ship_id).await.unwrap().expect("combat state");
-    assert!((cs.shield_hp - after_hp).abs() < 1e-6);
+    let ship_info = rpc(&ctx, &mut sess, "dogmaIM", "ItemGetInfo", &[PyRep::Integer(ship_id)]).await.expect("ItemGetInfo");
+    let PyRep::Dict(attr_entries) = ship_info.dict_get("attributes").expect("attributes dict") else { panic!("expected Dict") };
+    let get_dogma_attr = |aid: i64| -> f64 {
+        attr_entries.iter().find(|(k, _)| k.as_i64() == Some(aid)).and_then(|(_, v)| v.as_f64()).unwrap_or(0.0)
+    };
+    let (dogma_sh, dogma_ar, dogma_hu, dogma_sh_em, dogma_ar_em) = (get_dogma_attr(263), get_dogma_attr(265), get_dogma_attr(9), get_dogma_attr(271), get_dogma_attr(267));
+
+    let handle = ctx.systems.get_or_spawn(JITA_SYSTEM_ID);
+    let mut cs = handle.get_combat_state(ship_id).await.unwrap().expect("undocked combat state");
+    assert!((cs.max_shield_hp - dogma_sh).abs() < 1e-4 && (cs.max_armor_hp - dogma_ar).abs() < 1e-4 && (cs.max_structure_hp - dogma_hu).abs() < 1e-4);
+    assert!((cs.shield_resonance[0] - dogma_sh_em).abs() < 1e-4 && (cs.armor_resonance[0] - dogma_ar_em).abs() < 1e-4);
+
+    cs.undock_invulnerable_remaining_ticks = 0;
+    let (_, destroyed) = cs.apply_damage(eve_destiny::DamageVector::new(260.0, 260.0, 260.0, 260.0));
+    assert!(!destroyed && cs.shield_hp < cs.max_shield_hp && cs.armor_hp < cs.max_armor_hp);
+    cs.shield_hp = cs.max_shield_hp * 0.25;
+    let start_shield = cs.shield_hp;
+    let tau_ship_s = (cs.shield_recharge_time_ms / 1_000.0).max(1.0);
+    handle.set_combat_state(ship_id, cs.clone()).await.expect("set_combat_state");
+    let _ = ctx.drain_notifications_for_char(90_000_001);
+
+    let (after_hp, delta_hp) = step_passive_shield_recharge(&ctx, JITA_SYSTEM_ID, Some(90_000_001), ship_id, tau_ship_s, 10.0).await.expect("step_passive_shield_recharge");
+    assert!(delta_hp > 0.0 && after_hp > start_shield);
+    let cs_after = handle.get_combat_state(ship_id).await.unwrap().expect("combat state");
+    assert!((cs_after.shield_hp - after_hp).abs() < 1e-6);
+    assert!(ctx.drain_notifications_for_char(90_000_001).iter().any(|n| n.event == "OnDamageStateChange"));
+
+    eve_server::sp6_lifecycle::persist_ship_combat_hp_in_db(&ctx.db, ship_id, &cs_after);
+    drop(ctx);
+    let ctx2 = ServerContext::with_repository(Arc::new(WorldRepository::open_sqlite(&db_path).expect("reopen sqlite")));
+    let reloaded_cs = ctx2.build_ship_combat_state(90_000_001, ship_id, 587);
+    assert!((reloaded_cs.shield_hp - cs_after.shield_hp).abs() < 1e-4 && (reloaded_cs.armor_hp - cs_after.armor_hp).abs() < 1e-4);
+    let _ = std::fs::remove_file(&db_path);
 }
 
 #[tokio::test]
@@ -300,6 +303,8 @@ async fn test_dg4_module_cycles_stop_on_leave_space_and_dock() {
 
 #[tokio::test]
 async fn test_e3_corp_contract_wallet_roles_and_issuer_departure() {
+    // parity: feat:lifecycle.corp-contract-wallet, plan:E-3
+    eve_testkit::attest(&["feat:lifecycle.corp-contract-wallet", "plan:E-3"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -430,6 +435,38 @@ async fn test_e3_corp_contract_wallet_roles_and_issuer_departure() {
         corp_bal_after.0 - corp_bal_mid.0,
         IskCents::from_f64_isk(500_000.0).0
     );
+
+    // Second for_corp contract: cancel refund credits reward back to corp wallet; third for_corp courier: failure credits collateral to corp wallet
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) { ch.corporation_id = corp_id; }
+        for iid in [880_002_002_i64, 880_002_003_i64] {
+            snap.items.insert(iid, InventoryItemRecord {
+                item_id: iid, type_id: 34, owner_id: 90_000_001, location_id: JITA_STATION_ID,
+                flag: InventoryFlag::Hangar, quantity: 100, singleton: false, version: 1, ..Default::default()
+            });
+        }
+    });
+    s1.corporation_id = Some(corp_id);
+    let courier_args = |iid: i64| [
+        PyRep::Integer(3), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(1440),
+        PyRep::Integer(1), PyRep::Integer(JITA_STATION_ID), PyRep::Integer(60_003_766),
+        PyRep::Real(0.0), PyRep::Real(50_000.0), PyRep::Real(100_000.0),
+        PyRep::String("Cancel & Collateral Test".into()), PyRep::String(String::new()), PyRep::List(vec![PyRep::Integer(iid)]),
+    ];
+    let created2 = ctx.dispatch_rpc(&mut s1, "contractProxy", None, "CreateContract", &courier_args(880_002_002), &kw, None).await.expect("CreateContract 2");
+    let cid2 = created2.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let corp_bal_pre_cancel = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet);
+    let _ = rpc(&ctx, &mut s1, "contractProxy", "DeleteContract", &[PyRep::Integer(cid2)]).await.expect("DeleteContract");
+    let corp_bal_post_cancel = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet);
+    assert_eq!(corp_bal_post_cancel.0 - corp_bal_pre_cancel.0, IskCents::from_f64_isk(150_000.0).0, "Cancel must credit reward + deposit refund to corp wallet");
+
+    let created3 = ctx.dispatch_rpc(&mut s1, "contractProxy", None, "CreateContract", &courier_args(880_002_003), &kw, None).await.expect("CreateContract 3");
+    let cid3 = created3.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let _ = rpc(&ctx, &mut s2, "contractProxy", "AcceptContract", &[PyRep::Integer(cid3)]).await.expect("AcceptContract 3");
+    let corp_bal_pre_fail = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet);
+    let _ = rpc(&ctx, &mut s2, "contractProxy", "FailContract", &[PyRep::Integer(cid3)]).await.expect("FailContract 3");
+    let corp_bal_post_fail = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet);
+    assert_eq!(corp_bal_post_fail.0 - corp_bal_pre_fail.0, IskCents::from_f64_isk(150_000.0).0, "Courier failure must credit collateral + reward refund to corp wallet");
 }
 
 // parity: feat:lifecycle.secure_container-anchor

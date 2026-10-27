@@ -758,8 +758,17 @@ async fn test_ch2_skill_handling_and_prerequisites() {
         snap.skills.entry(char_id).or_default().remove(&3302);
     });
 
-    // Inject succeeds even though prerequisite (Gunnery I) is not yet trained:
-    // consumes item and adds skill at level 0 (0 SP)
+    // Inject fails when prerequisite (Gunnery I) is not yet trained, leaving skillbook intact;
+    // once Gunnery I is present, injection consumes item and adds skill at level 0 (0 SP).
+    let inject_unprereq_err = ctx
+        .dispatch_rpc(&mut sess, "skillMgr2", None, "InjectSkillIntoBrain", &[PyRep::Integer(book_item_id)], &kw, None)
+        .await
+        .expect_err("InjectSkillIntoBrain must reject missing prerequisites");
+    assert_eq!(inject_unprereq_err.code, "SkillPrerequisiteNotMet");
+    assert!(ctx.db.with_snapshot(|snap| snap.items.contains_key(&book_item_id)), "Skillbook item must not be consumed on failed injection");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(3300, TrainedSkillRecord { type_id: 3300, level: 1, skill_points: 250.0 });
+    });
     let inject_ok = ctx
         .dispatch_rpc(
             &mut sess,
@@ -771,8 +780,11 @@ async fn test_ch2_skill_handling_and_prerequisites() {
             None,
         )
         .await
-        .expect("InjectSkillIntoBrain succeeds without prerequisites trained");
+        .expect("InjectSkillIntoBrain succeeds with prerequisites trained");
     assert!(matches!(inject_ok, PyRep::KeyVal(_)));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().remove(&3300);
+    });
 
     ctx.db.with_snapshot(|snap| {
         assert!(

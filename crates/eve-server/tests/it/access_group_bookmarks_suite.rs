@@ -292,8 +292,10 @@ async fn test_access_group_bookmark_folders_and_subfolders_lifecycle() {
 // parity: rpc:accessGroupBookmarkMgr.AddToKnownFolders
 // parity: rpc:accessGroupBookmarkMgr.UpdateKnownFolderState
 // parity: rpc:accessGroupBookmarkMgr.DeleteBookmarks
+// parity: plan:SO-4
 #[tokio::test]
 async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
+    eve_testkit::attest(&["plan:SO-4"]);
     let ctx = create_test_context();
     let mut sess1 = login_select(&ctx, PILOT1, 7201).await;
     sess1.corporation_id = Some(CORP_ID);
@@ -650,4 +652,16 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
     assert!(!uk_exp_bms.iter().any(|b| b.dict_get("bookmarkID") == Some(&PyRep::Integer(temp_bm_id))));
     let warp_err = rpc_err(&ctx, &mut sess2, "beyonce", "CmdWarpToStuff", &[PyRep::String("bookmark".into()), PyRep::Integer(temp_bm_id)]).await;
     assert!(warp_err.code.contains("Expired"));
+
+    // Positive warp-to-bookmark test: valid deep-space bookmark > 150 km away enters MovementMode::Warp (action_plan.md:356)
+    let valid_create = rpc(&ctx, &mut sess1, "accessGroupBookmarkMgr", "BookmarkStaticLocation", &[PyRep::Integer(sys_id as i64), PyRep::Integer(folder_id), PyRep::String("Deep Safe".into()), PyRep::String("Safe spot".into()), PyRep::Integer(0)]).await;
+    let PyRep::Tuple(valid_parts) = &valid_create else { panic!("expected Tuple from BookmarkStaticLocation") };
+    let valid_bm_id = valid_parts[0].as_i64().unwrap();
+    let safe_pos = glam::DVec3::new(850_000.0, 320_000.0, -140_000.0);
+    ctx.db.with_mut_snapshot(|s| { if let Some(b) = s.bookmarks.get_mut(&valid_bm_id) { (b.x, b.y, b.z) = (safe_pos.x, safe_pos.y, safe_pos.z); } });
+    let _ = rpc(&ctx, &mut sess1, "beyonce", "CmdWarpToStuff", &[PyRep::String("bookmark".into()), PyRep::Integer(valid_bm_id)]).await;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let (_, ball) = sys.get_ball_snapshot(ship_id).await.unwrap().expect("ship ball exists");
+    let eve_destiny::MovementMode::Warp { destination, .. } = ball.mode else { panic!("ship must enter MovementMode::Warp") };
+    assert!(destination.length() > 900_000.0 && destination.distance(safe_pos) < 1.0, "Warp destination must match non-zero safe spot coordinates");
 }

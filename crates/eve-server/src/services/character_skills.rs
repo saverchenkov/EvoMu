@@ -2,13 +2,9 @@
 
 #![forbid(unsafe_code)]
 
-use crate::formulas::{
-    skill_training_time_seconds, sp_for_skill_level,
-};
+use crate::formulas::{skill_training_time_seconds, sp_for_skill_level};
 use crate::router::ServerContext;
-use eve_db::{
-    InventoryFlag, SkillHistoryEntry, SkillQueueEntry, TrainedSkillRecord,
-};
+use eve_db::{SkillHistoryEntry, SkillQueueEntry, TrainedSkillRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{attr_ids, TypeId};
@@ -30,154 +26,12 @@ pub mod character_contacts_gm {
     pub use super::character_gm_tools::*;
 }
 
-pub fn alpha_skill_cap_for_character(
-    sde: &eve_sde::SdeRegistry,
-    race_id: u32,
-    skill_type_id: TypeId,
-) -> u8 {
-    sde.clone_grades
-        .get(&race_id)
-        .and_then(|cg| cg.alpha_skill_caps.get(&skill_type_id).copied())
-        .or_else(|| {
-            sde.clone_grades
-                .values()
-                .filter_map(|cg| cg.alpha_skill_caps.get(&skill_type_id).copied())
-                .max()
-        })
-        .unwrap_or(0)
-}
-
-pub(crate) fn is_valid_doll_or_portrait_payload(rep: &PyRep) -> bool {
-    match rep {
-        PyRep::KeyVal(map) => !map.is_empty(),
-        PyRep::Dict(entries) => !entries.is_empty(),
-        PyRep::Object { .. } | PyRep::ObjectEx { .. } => true,
-        PyRep::Tuple(items) | PyRep::List(items) => !items.is_empty(),
-        PyRep::String(s) => {
-            let trimmed = s.trim();
-            !trimmed.is_empty()
-                && (trimmed.starts_with("doll:") || trimmed.starts_with("portrait:") || trimmed.contains('='))
-                && trimmed != "doll_info_placeholder"
-                && trimmed != "portrait_info_placeholder"
-        }
-        _ => false,
-    }
-}
-
-pub(crate) fn serialize_doll_pyrep(rep: &PyRep) -> String {
-    match rep {
-        PyRep::String(s) => s.clone(),
-        PyRep::Integer(v) => v.to_string(),
-        PyRep::Real(v) => v.to_string(),
-        PyRep::Bool(v) => v.to_string(),
-        PyRep::None => String::new(),
-        PyRep::Tuple(items) | PyRep::List(items) => {
-            let parts: Vec<String> = items.iter().map(serialize_doll_pyrep).collect();
-            format!("[{}]", parts.join(","))
-        }
-        PyRep::KeyVal(map) => {
-            let mut entries: Vec<(&String, &PyRep)> = map.iter().collect();
-            entries.sort_by_key(|(k, _)| *k);
-            let parts: Vec<String> = entries
-                .into_iter()
-                .map(|(k, v)| format!("{k}={}", serialize_doll_pyrep(v)))
-                .collect();
-            parts.join("&")
-        }
-        PyRep::Dict(entries) => {
-            let parts: Vec<String> = entries
-                .iter()
-                .map(|(k, v)| format!("{}={}", serialize_doll_pyrep(k), serialize_doll_pyrep(v)))
-                .collect();
-            parts.join("&")
-        }
-        _ => String::from("paperdoll"),
-    }
-}
-
-/// Computes effective character attributes `(charisma, intelligence, memory, perception, willpower)`
-/// combining base/remapped neural attributes + plugged-in implants (`175..=179`) + active cerebral accelerators (`InventoryFlag::Booster`) (`feat:attributes.attributes-base`).
-pub fn effective_character_attributes(
-    sde: &eve_sde::SdeRegistry,
-    snap: &eve_db::WorldStateSnapshot,
-    char_id: i64,
-) -> (f64, f64, f64, f64, f64) {
-    let (mut cha, mut int, mut mem, mut per, mut wil) = snap.characters.get(&char_id)
-        .map(|c| (c.neural.charisma as f64, c.neural.intelligence as f64, c.neural.memory as f64, c.neural.perception as f64, c.neural.willpower as f64))
-        .unwrap_or((19.0, 20.0, 20.0, 20.0, 20.0));
-
-    let active_implant_types = snap
-        .active_implants
-        .get(&char_id)
-        .cloned()
-        .unwrap_or_default();
-    for &tid in &active_implant_types {
-        if let Some(t) = sde.types.get(&tid) {
-            cha += t.default_attributes.get(&175).copied().unwrap_or(0.0);
-            int += t.default_attributes.get(&176).copied().unwrap_or(0.0);
-            mem += t.default_attributes.get(&177).copied().unwrap_or(0.0);
-            per += t.default_attributes.get(&178).copied().unwrap_or(0.0);
-            wil += t.default_attributes.get(&179).copied().unwrap_or(0.0);
-        }
-    }
-
-    for item in snap.items.values() {
-        if item.owner_id != char_id || item.location_id != char_id {
-            continue;
-        }
-        if item.flag == InventoryFlag::Implant && !active_implant_types.contains(&item.type_id) {
-            let get_bonus = |attr_id: u16| -> f64 {
-                item.dynamic_attributes
-                    .get(&attr_id)
-                    .copied()
-                    .or_else(|| {
-                        sde.types
-                            .get(&item.type_id)
-                            .and_then(|t| t.default_attributes.get(&attr_id).copied())
-                    })
-                    .unwrap_or(0.0)
-            };
-            cha += get_bonus(175);
-            int += get_bonus(176);
-            mem += get_bonus(177);
-            per += get_bonus(178);
-            wil += get_bonus(179);
-        } else if item.flag == InventoryFlag::Booster {
-            if item.dynamic_attributes.get(&crate::services::implant_plugging::DYN_ATTR_BOOSTER_EXPIRY_UNIX).is_some_and(|&exp| exp > 0.0 && (eve_db::clock::host_wall_unix_secs_and_nanos().0 as f64) >= exp) {
-                continue;
-            }
-            let get_bonus = |bonus_id: u16, direct_id: u16| -> f64 {
-                item.dynamic_attributes.get(&bonus_id).copied()
-                    .or_else(|| item.dynamic_attributes.get(&direct_id).copied())
-                    .or_else(|| sde.types.get(&item.type_id).and_then(|t| {
-                        t.default_attributes.get(&bonus_id).copied().or_else(|| t.default_attributes.get(&direct_id).copied())
-                    }))
-                    .unwrap_or(0.0)
-            };
-            cha += get_bonus(175, 164);
-            int += get_bonus(176, 165);
-            mem += get_bonus(177, 166);
-            per += get_bonus(178, 167);
-            wil += get_bonus(179, 168);
-        }
-    }
-
-    (cha, int, mem, per, wil)
-}
-
-pub fn lookup_effective_attr_from_tuple(
-    attrs: (f64, f64, f64, f64, f64),
-    attr_id: u32,
-) -> f64 {
-    match attr_id {
-        164 | 175 => attrs.0, // charisma
-        165 | 176 => attrs.1, // intelligence
-        166 | 177 => attrs.2, // memory
-        167 | 178 => attrs.3, // perception
-        168 | 179 => attrs.4, // willpower
-        _ => attrs.1,
-    }
-}
+pub use super::jump_clone_names::{
+    alpha_skill_cap_for_character, effective_character_attributes, lookup_effective_attr_from_tuple,
+};
+pub(crate) use super::jump_clone_names::{
+    is_valid_doll_or_portrait_payload, serialize_doll_pyrep, skill_queue_rowset,
+};
 
 /// Offline / login skill queue catch-up (`feat:skills.skill-catch-up`):
 /// computes elapsed time since `started_at_unix` on the head of `char_id`'s queue,
@@ -187,223 +41,242 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
     let now_ft = ctx.now_blueos_filetime_ticks();
     let sde = ctx.sde.clone();
 
-    let (ship_to_invalidate, completed_events, paused_by_lapse) = ctx.db.with_mut_snapshot(|snap| {
-        let Some(ch) = snap.characters.get(&char_id).cloned() else {
-            return (None, Vec::new(), false);
-        };
-        let exp_opt = crate::services::account_services::subscription_expiry_for_user(snap, ch.user_id);
-        let omega_lapsed_at = exp_opt.filter(|&until| until <= now_unix && ch.clone_grade >= 2);
+    let (ship_to_invalidate, completed_events, paused_by_lapse) =
+        ctx.db.with_mut_snapshot(|snap| {
+            let Some(ch) = snap.characters.get(&char_id).cloned() else {
+                return (None, Vec::new(), false);
+            };
+            let exp_opt =
+                crate::services::account_services::subscription_expiry_for_user(snap, ch.user_id);
+            let omega_lapsed_at = exp_opt.filter(|&until| until <= now_unix && ch.clone_grade >= 2);
 
-        if snap.paused_skill_queues.contains(&char_id) {
-            if omega_lapsed_at.is_some() {
-                for c in snap.characters.values_mut().filter(|c| c.user_id == ch.user_id) {
-                    if c.clone_grade != 1 {
-                        c.clone_grade = 1;
-                        c.version += 1;
+            if snap.paused_skill_queues.contains(&char_id) {
+                if omega_lapsed_at.is_some() {
+                    for c in snap
+                        .characters
+                        .values_mut()
+                        .filter(|c| c.user_id == ch.user_id)
+                    {
+                        if c.clone_grade != 1 {
+                            c.clone_grade = 1;
+                            c.version += 1;
+                        }
+                        snap.paused_skill_queues.insert(c.character_id);
                     }
-                    snap.paused_skill_queues.insert(c.character_id);
                 }
+                return (None, Vec::new(), false);
             }
-            return (None, Vec::new(), false);
-        }
-        let Some(started_unix) = snap
-            .skill_queues
-            .get(&char_id)
-            .and_then(|q| q.first())
-            .and_then(|q| q.started_at_unix)
-        else {
-            if omega_lapsed_at.is_some() {
-                for c in snap.characters.values_mut().filter(|c| c.user_id == ch.user_id) {
-                    if c.clone_grade != 1 {
-                        c.clone_grade = 1;
-                        c.version += 1;
+            let Some(started_unix) = snap
+                .skill_queues
+                .get(&char_id)
+                .and_then(|q| q.first())
+                .and_then(|q| q.started_at_unix)
+            else {
+                if omega_lapsed_at.is_some() {
+                    for c in snap
+                        .characters
+                        .values_mut()
+                        .filter(|c| c.user_id == ch.user_id)
+                    {
+                        if c.clone_grade != 1 {
+                            c.clone_grade = 1;
+                            c.version += 1;
+                        }
+                        snap.paused_skill_queues.insert(c.character_id);
                     }
-                    snap.paused_skill_queues.insert(c.character_id);
                 }
+                return (None, Vec::new(), omega_lapsed_at.is_some());
+            };
+            let effective_end_unix = omega_lapsed_at.unwrap_or(now_unix);
+            if effective_end_unix <= started_unix && omega_lapsed_at.is_none() {
+                return (None, Vec::new(), false);
             }
-            return (None, Vec::new(), omega_lapsed_at.is_some());
-        };
-        let effective_end_unix = omega_lapsed_at.unwrap_or(now_unix);
-        if effective_end_unix <= started_unix && omega_lapsed_at.is_none() {
-            return (None, Vec::new(), false);
-        }
-        let elapsed_secs = effective_end_unix.saturating_sub(started_unix) as f64;
-        let is_alpha = omega_lapsed_at.is_none() && ch.clone_grade <= 1;
-        let current_char_sp = ch.skill_points + ch.free_skill_points;
-        if is_alpha && current_char_sp >= 5_000_000.0 {
-            if let Some(q) = snap.skill_queues.get_mut(&char_id) {
-                if let Some(head) = q.first_mut() {
-                    head.started_at_unix = Some(now_unix);
+            let elapsed_secs = effective_end_unix.saturating_sub(started_unix) as f64;
+            let is_alpha = omega_lapsed_at.is_none() && ch.clone_grade <= 1;
+            let current_char_sp = ch.skill_points + ch.free_skill_points;
+            if is_alpha && current_char_sp >= 5_000_000.0 {
+                if let Some(q) = snap.skill_queues.get_mut(&char_id) {
+                    if let Some(head) = q.first_mut() {
+                        head.started_at_unix = Some(now_unix);
+                    }
                 }
+                snap.paused_skill_queues.insert(char_id);
+                return (None, Vec::new(), false);
             }
-            snap.paused_skill_queues.insert(char_id);
-            return (None, Vec::new(), false);
-        }
 
-        let eff_attrs = effective_character_attributes(&sde, snap, char_id);
-        let queue = snap
-            .skill_queues
-            .get(&char_id)
-            .cloned()
-            .unwrap_or_default();
-        let mut rem_secs = elapsed_secs;
-        let mut remaining_queue = Vec::new();
-        let mut total_sp_gained = 0.0;
-        let mut completed = Vec::new();
-        let mut history_to_append = Vec::new();
-        let mut hit_alpha_cap = false;
-        let skills_map = snap.skills.entry(char_id).or_default();
+            let eff_attrs = effective_character_attributes(&sde, snap, char_id);
+            let queue = snap.skill_queues.get(&char_id).cloned().unwrap_or_default();
+            let mut rem_secs = elapsed_secs;
+            let mut remaining_queue = Vec::new();
+            let mut total_sp_gained = 0.0;
+            let mut completed = Vec::new();
+            let mut history_to_append = Vec::new();
+            let mut hit_alpha_cap = false;
+            let skills_map = snap.skills.entry(char_id).or_default();
 
-        for mut q in queue {
-            if rem_secs <= 0.0 {
-                remaining_queue.push(q);
-                continue;
-            }
-            if is_alpha && (current_char_sp + total_sp_gained) >= 5_000_000.0 {
-                rem_secs = 0.0;
-                hit_alpha_cap = true;
-                remaining_queue.push(q);
-                continue;
-            }
-            if is_alpha {
-                let alpha_cap = alpha_skill_cap_for_character(&sde, ch.race_id, q.type_id);
-                if q.target_level > alpha_cap {
+            for mut q in queue {
+                if rem_secs <= 0.0 {
+                    remaining_queue.push(q);
+                    continue;
+                }
+                if is_alpha && (current_char_sp + total_sp_gained) >= 5_000_000.0 {
                     rem_secs = 0.0;
                     hit_alpha_cap = true;
                     remaining_queue.push(q);
                     continue;
                 }
-            }
-
-            let skill_type = sde.types.get(&q.type_id);
-            let p_attr_id = skill_type
-                .and_then(|t| t.default_attributes.get(&attr_ids::PRIMARY_ATTRIBUTE))
-                .copied()
-                .map(|v| v as u32)
-                .unwrap_or(attr_ids::PERCEPTION as u32);
-            let s_attr_id = skill_type
-                .and_then(|t| t.default_attributes.get(&attr_ids::SECONDARY_ATTRIBUTE))
-                .copied()
-                .map(|v| v as u32)
-                .unwrap_or(attr_ids::WILLPOWER as u32);
-            let p_val = lookup_effective_attr_from_tuple(eff_attrs, p_attr_id);
-            let s_val = lookup_effective_attr_from_tuple(eff_attrs, s_attr_id);
-            let clone_mult = if !is_alpha { 1.0 } else { 0.5 };
-            let sp_min = crate::formulas::sp_per_minute(p_val, s_val, clone_mult).max(1e-6);
-            let sp_sec = sp_min / 60.0;
-
-            let needed_sp = (q.end_sp - q.start_sp).max(0.0);
-            let time_for_needed = (needed_sp / sp_sec).max(0.0);
-            let max_allowed_sp = if is_alpha {
-                (5_000_000.0 - (current_char_sp + total_sp_gained)).max(0.0)
-            } else {
-                f64::INFINITY
-            };
-
-            if rem_secs >= time_for_needed && needed_sp <= max_allowed_sp {
-                rem_secs = (rem_secs - time_for_needed).max(0.0);
-                total_sp_gained += needed_sp;
-                skills_map.insert(
-                    q.type_id,
-                    TrainedSkillRecord {
-                        type_id: q.type_id,
-                        level: q.target_level,
-                        skill_points: q.end_sp,
-                    },
-                );
-                completed.push((q.type_id, q.target_level));
-                history_to_append.push(SkillHistoryEntry {
-                    log_date_ft: now_ft,
-                    event_type_id: 37,
-                    skill_type_id: q.type_id,
-                    skill_level: q.target_level,
-                    absolute_points: q.end_sp,
-                });
-            } else {
-                let mut sp_advance = (rem_secs * sp_sec).min(needed_sp);
-                if sp_advance > max_allowed_sp {
-                    sp_advance = max_allowed_sp;
-                }
-                rem_secs = 0.0;
-                q.start_sp += sp_advance;
-                let rem_sp = (q.end_sp - q.start_sp).max(0.0);
-                q.duration_seconds = rem_sp / sp_sec;
-                q.started_at_unix = Some(effective_end_unix);
-                total_sp_gained += sp_advance;
-
-                let current_lvl = skills_map.get(&q.type_id).map(|s| s.level).unwrap_or(0);
-                let mut achieved_lvl = current_lvl;
-                if let Some(rank) = skill_type.and_then(|t| {
-                    t.default_attributes
-                        .get(&attr_ids::SKILL_TIME_CONSTANT)
-                        .copied()
-                }) {
-                    for lvl in (current_lvl + 1)..=q.target_level {
-                        if q.start_sp + 0.5 >= sp_for_skill_level(rank, lvl) {
-                            achieved_lvl = lvl;
-                        } else {
-                            break;
-                        }
+                if is_alpha {
+                    let alpha_cap = alpha_skill_cap_for_character(&sde, ch.race_id, q.type_id);
+                    if q.target_level > alpha_cap {
+                        rem_secs = 0.0;
+                        hit_alpha_cap = true;
+                        remaining_queue.push(q);
+                        continue;
                     }
                 }
-                if achieved_lvl > current_lvl {
-                    completed.push((q.type_id, achieved_lvl));
+
+                let skill_type = sde.types.get(&q.type_id);
+                let p_attr_id = skill_type
+                    .and_then(|t| t.default_attributes.get(&attr_ids::PRIMARY_ATTRIBUTE))
+                    .copied()
+                    .map(|v| v as u32)
+                    .unwrap_or(attr_ids::PERCEPTION as u32);
+                let s_attr_id = skill_type
+                    .and_then(|t| t.default_attributes.get(&attr_ids::SECONDARY_ATTRIBUTE))
+                    .copied()
+                    .map(|v| v as u32)
+                    .unwrap_or(attr_ids::WILLPOWER as u32);
+                let p_val = lookup_effective_attr_from_tuple(eff_attrs, p_attr_id);
+                let s_val = lookup_effective_attr_from_tuple(eff_attrs, s_attr_id);
+                let clone_mult = if !is_alpha { 1.0 } else { 0.5 };
+                let sp_min = crate::formulas::sp_per_minute(p_val, s_val, clone_mult).max(1e-6);
+                let sp_sec = sp_min / 60.0;
+
+                let needed_sp = (q.end_sp - q.start_sp).max(0.0);
+                let time_for_needed = (needed_sp / sp_sec).max(0.0);
+                let max_allowed_sp = if is_alpha {
+                    (5_000_000.0 - (current_char_sp + total_sp_gained)).max(0.0)
+                } else {
+                    f64::INFINITY
+                };
+
+                if rem_secs >= time_for_needed && needed_sp <= max_allowed_sp {
+                    rem_secs = (rem_secs - time_for_needed).max(0.0);
+                    total_sp_gained += needed_sp;
+                    skills_map.insert(
+                        q.type_id,
+                        TrainedSkillRecord {
+                            type_id: q.type_id,
+                            level: q.target_level,
+                            skill_points: q.end_sp,
+                        },
+                    );
+                    completed.push((q.type_id, q.target_level));
                     history_to_append.push(SkillHistoryEntry {
                         log_date_ft: now_ft,
                         event_type_id: 37,
                         skill_type_id: q.type_id,
-                        skill_level: achieved_lvl,
-                        absolute_points: q.start_sp,
+                        skill_level: q.target_level,
+                        absolute_points: q.end_sp,
                     });
+                } else {
+                    let mut sp_advance = (rem_secs * sp_sec).min(needed_sp);
+                    if sp_advance > max_allowed_sp {
+                        sp_advance = max_allowed_sp;
+                    }
+                    rem_secs = 0.0;
+                    q.start_sp += sp_advance;
+                    let rem_sp = (q.end_sp - q.start_sp).max(0.0);
+                    q.duration_seconds = rem_sp / sp_sec;
+                    q.started_at_unix = Some(effective_end_unix);
+                    total_sp_gained += sp_advance;
+
+                    let current_lvl = skills_map.get(&q.type_id).map(|s| s.level).unwrap_or(0);
+                    let mut achieved_lvl = current_lvl;
+                    if let Some(rank) = skill_type.and_then(|t| {
+                        t.default_attributes
+                            .get(&attr_ids::SKILL_TIME_CONSTANT)
+                            .copied()
+                    }) {
+                        for lvl in (current_lvl + 1)..=q.target_level {
+                            if q.start_sp + 0.5 >= sp_for_skill_level(rank, lvl) {
+                                achieved_lvl = lvl;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    if achieved_lvl > current_lvl {
+                        completed.push((q.type_id, achieved_lvl));
+                        history_to_append.push(SkillHistoryEntry {
+                            log_date_ft: now_ft,
+                            event_type_id: 37,
+                            skill_type_id: q.type_id,
+                            skill_level: achieved_lvl,
+                            absolute_points: q.start_sp,
+                        });
+                    }
+                    skills_map.insert(
+                        q.type_id,
+                        TrainedSkillRecord {
+                            type_id: q.type_id,
+                            level: achieved_lvl,
+                            skill_points: q.start_sp,
+                        },
+                    );
+                    remaining_queue.push(q);
                 }
-                skills_map.insert(
-                    q.type_id,
-                    TrainedSkillRecord {
-                        type_id: q.type_id,
-                        level: achieved_lvl,
-                        skill_points: q.start_sp,
-                    },
-                );
-                remaining_queue.push(q);
             }
-        }
-        if let Some(head) = remaining_queue.first_mut() {
-            head.started_at_unix = Some(effective_end_unix);
-        }
-        snap.skill_queues.insert(char_id, remaining_queue);
-        if !history_to_append.is_empty() {
-            snap.skill_history
-                .entry(char_id)
-                .or_default()
-                .extend(history_to_append);
-        }
-        let mut ship_inv = None;
-        if total_sp_gained > 0.0 {
-            if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
-                ch_mut.skill_points += total_sp_gained;
-                ship_inv = Some(ch_mut.active_ship_id);
+            if let Some(head) = remaining_queue.first_mut() {
+                head.started_at_unix = Some(effective_end_unix);
             }
-        }
-        if omega_lapsed_at.is_some() {
-            for c in snap.characters.values_mut().filter(|c| c.user_id == ch.user_id) {
-                if c.clone_grade != 1 {
-                    c.clone_grade = 1;
-                    c.version += 1;
+            snap.skill_queues.insert(char_id, remaining_queue);
+            if !history_to_append.is_empty() {
+                snap.skill_history
+                    .entry(char_id)
+                    .or_default()
+                    .extend(history_to_append);
+            }
+            let mut ship_inv = None;
+            if total_sp_gained > 0.0 {
+                if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
+                    ch_mut.skill_points += total_sp_gained;
+                    ship_inv = Some(ch_mut.active_ship_id);
                 }
-                snap.paused_skill_queues.insert(c.character_id);
             }
-        } else if hit_alpha_cap {
-            snap.paused_skill_queues.insert(char_id);
-        }
-        (ship_inv, completed, omega_lapsed_at.is_some() || hit_alpha_cap)
-    });
+            if omega_lapsed_at.is_some() {
+                for c in snap
+                    .characters
+                    .values_mut()
+                    .filter(|c| c.user_id == ch.user_id)
+                {
+                    if c.clone_grade != 1 {
+                        c.clone_grade = 1;
+                        c.version += 1;
+                    }
+                    snap.paused_skill_queues.insert(c.character_id);
+                }
+            } else if hit_alpha_cap {
+                snap.paused_skill_queues.insert(char_id);
+            }
+            (
+                ship_inv,
+                completed,
+                omega_lapsed_at.is_some() || hit_alpha_cap,
+            )
+        });
 
     if paused_by_lapse {
         let _ = ctx.notify_skill_queue_paused_server(char_id);
     }
     for (skill_type_id, lvl) in completed_events {
         let _ = ctx.notify_skill_trained(char_id, 0, skill_type_id, lvl);
-        super::jump_clone_names::emit_server_skills_changed(ctx, char_id, &[skill_type_id], Some("SkillTrained"));
+        super::jump_clone_names::emit_server_skills_changed(
+            ctx,
+            char_id,
+            &[skill_type_id],
+            Some("SkillTrained"),
+        );
     }
     if let Some(ship_id) = ship_to_invalidate {
         ctx.invalidate_ship_fitting(ship_id);
@@ -426,7 +299,9 @@ pub fn handle(
             };
             catch_up_skill_queue(ctx, char_id);
             let rows = ctx.db.with_snapshot(|snap| {
-                let (clone_grade, race_id) = snap.characters.get(&char_id)
+                let (clone_grade, race_id) = snap
+                    .characters
+                    .get(&char_id)
                     .map(|c| (c.clone_grade, c.race_id))
                     .unwrap_or((2, 1));
                 snap.skills
@@ -435,7 +310,9 @@ pub fn handle(
                         m.values()
                             .map(|s| {
                                 let active_lvl = if clone_grade <= 1 {
-                                    s.level.min(alpha_skill_cap_for_character(&ctx.sde, race_id, s.type_id))
+                                    s.level.min(alpha_skill_cap_for_character(
+                                        &ctx.sde, race_id, s.type_id,
+                                    ))
                                 } else {
                                     s.level
                                 };
@@ -471,26 +348,39 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             catch_up_skill_queue(ctx, char_id);
-            let (rows, free_sp) = ctx.db.with_snapshot(|snap| {
-                let fsp = snap.characters.get(&char_id).map(|c| c.free_skill_points).unwrap_or(0.0);
-                let q_rows = snap.skill_queues.get(&char_id).map(|q| {
-                    q.iter().map(|e| vec![
-                        PyRep::Integer(e.type_id as i64),
-                        PyRep::Integer(e.target_level as i64),
-                        PyRep::Real(e.start_sp),
-                        PyRep::Real(e.end_sp),
-                        PyRep::Real(e.duration_seconds),
-                    ]).collect()
-                }).unwrap_or_default();
-                (q_rows, fsp)
+            let free_sp = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| c.free_skill_points)
+                    .unwrap_or(0.0)
             });
             Some(Ok(PyRep::Tuple(vec![
-                PyRep::rowset(
-                    vec!["trainingTypeID", "trainingToLevel", "trainingStartSP", "trainingDestinationSP", "durationSeconds"],
-                    rows,
-                ),
+                skill_queue_rowset(ctx, char_id),
                 PyRep::Real(free_sp),
             ])))
+        }
+
+        ("skillMgr2", "GetEndOfTraining") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            catch_up_skill_queue(ctx, char_id);
+            let end_ft = ctx.db.with_snapshot(|snap| {
+                if snap.paused_skill_queues.contains(&char_id) {
+                    return None;
+                }
+                let q = snap.skill_queues.get(&char_id).filter(|q| !q.is_empty())?;
+                let head = q.first()?;
+                let base_unix = head.started_at_unix.unwrap_or_else(|| ctx.now_unix());
+                let elapsed = ctx.now_unix().saturating_sub(base_unix) as f64;
+                let head_rem = (head.duration_seconds - elapsed).max(0.0);
+                let tail_secs: f64 = q.iter().skip(1).map(|e| e.duration_seconds.max(0.0)).sum();
+                let base_ft = (base_unix as i64 * 10_000_000) + 116_444_736_000_000_000;
+                let end_ticks = base_ft + ((elapsed + head_rem + tail_secs) * 10_000_000.0) as i64;
+                Some(end_ticks)
+            });
+            Some(Ok(end_ft.map(PyRep::Integer).unwrap_or(PyRep::None)))
         }
 
         ("skillMgr2", "SaveSkillQueue") => {
@@ -507,12 +397,27 @@ pub fn handle(
                         match it {
                             PyRep::Tuple(pair) | PyRep::List(pair) => {
                                 if let Some(tid) = pair.first().and_then(|a| a.as_i64()) {
-                                    skills_to_queue.push((tid as TypeId, pair.get(1).and_then(|a| a.as_i64()).unwrap_or(1).clamp(1, 5) as u8));
+                                    skills_to_queue.push((
+                                        tid as TypeId,
+                                        pair.get(1)
+                                            .and_then(|a| a.as_i64())
+                                            .unwrap_or(1)
+                                            .clamp(1, 5)
+                                            as u8,
+                                    ));
                                 }
                             }
                             single_val => {
                                 if let Some(tid) = single_val.as_i64() {
-                                    skills_to_queue.push((tid as TypeId, items.get(1).and_then(|a| a.as_i64()).unwrap_or(1).clamp(1, 5) as u8));
+                                    skills_to_queue.push((
+                                        tid as TypeId,
+                                        items
+                                            .get(1)
+                                            .and_then(|a| a.as_i64())
+                                            .unwrap_or(1)
+                                            .clamp(1, 5)
+                                            as u8,
+                                    ));
                                     break;
                                 }
                             }
@@ -521,7 +426,13 @@ pub fn handle(
                 }
                 _ => {
                     if let Some(tid) = args.first().and_then(|a| a.as_i64()) {
-                        skills_to_queue.push((tid as TypeId, args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).clamp(1, 5) as u8));
+                        skills_to_queue.push((
+                            tid as TypeId,
+                            args.get(1)
+                                .and_then(|a| a.as_i64())
+                                .unwrap_or(1)
+                                .clamp(1, 5) as u8,
+                        ));
                     }
                 }
             }
@@ -534,8 +445,11 @@ pub fn handle(
                             let hist = snap.skill_history.entry(char_id).or_default();
                             for q in old_q {
                                 hist.push(SkillHistoryEntry {
-                                    log_date_ft: now_ft, event_type_id: 38,
-                                    skill_type_id: q.type_id, skill_level: q.target_level, absolute_points: q.start_sp,
+                                    log_date_ft: now_ft,
+                                    event_type_id: 38,
+                                    skill_type_id: q.type_id,
+                                    skill_level: q.target_level,
+                                    absolute_points: q.start_sp,
                                 });
                             }
                         }
@@ -747,7 +661,8 @@ pub fn handle(
 
             match res {
                 Ok((tid, lvl, esp, dur)) => {
-                    let _ = ctx.notify_new_skill_queue_saved(char_id, skill_queue_rowset(ctx, char_id));
+                    let _ =
+                        ctx.notify_new_skill_queue_saved(char_id, skill_queue_rowset(ctx, char_id));
                     Some(Ok(PyRep::keyval([
                         ("typeID", PyRep::Integer(tid as i64)),
                         ("targetLevel", PyRep::Integer(lvl as i64)),
@@ -951,7 +866,12 @@ pub fn handle(
                         if let Some(sid) = session.ship_id {
                             ctx.invalidate_ship_fitting(sid);
                         }
-                        super::jump_clone_names::emit_server_skills_changed(ctx, char_id, &[skill_type_id], None);
+                        super::jump_clone_names::emit_server_skills_changed(
+                            ctx,
+                            char_id,
+                            &[skill_type_id],
+                            None,
+                        );
                         ctx.notify(
                             crate::router::NotificationTarget::Character(char_id),
                             "OnFreeSkillPointsChanged",
@@ -1114,9 +1034,9 @@ pub fn handle(
             }
         }
 
-        ("skillMgr2", "InjectSkillpoints") => {
-            Some(crate::services::implant_plugging::inject_skillpoints(ctx, session, args))
-        }
+        ("skillMgr2", "InjectSkillpoints") => Some(
+            crate::services::implant_plugging::inject_skillpoints(ctx, session, args),
+        ),
 
         ("skillMgr2", "AbortTraining") => {
             let (_, char_id) = match ServerContext::require_character(session) {
@@ -1218,15 +1138,44 @@ pub fn handle(
                     });
                 }
 
-                // Note: In EVE Online (Skills_and_learning), a skillbook can be injected into the brain
-                // at any time without having trained its prerequisite skills; prerequisites are enforced
-                // when adding the skill to the training queue (SaveSkillQueue).
                 if let Some(skills_map) = snap.skills.get(&char_id) {
                     if skills_map.contains_key(&skill_type_id) {
                         return Err(BridgeRpcError {
                             code: "SkillAlreadyInjected".into(),
                             message: format!("Skill {} is already known to character", skill_type.name),
                         });
+                    }
+                }
+
+                for (skill_attr, level_attr) in eve_dogma::REQUIRED_SKILL_ATTR_IDS
+                    .into_iter()
+                    .zip(eve_dogma::REQUIRED_SKILL_LEVEL_ATTR_IDS)
+                {
+                    if let Some(&req_skill_f) = skill_type.default_attributes.get(&skill_attr) {
+                        let req_skill_id = req_skill_f as TypeId;
+                        if req_skill_id > 0 {
+                            let req_lvl = skill_type
+                                .default_attributes
+                                .get(&level_attr)
+                                .copied()
+                                .unwrap_or(1.0)
+                                .max(1.0) as u8;
+                            let trained_lvl = snap
+                                .skills
+                                .get(&char_id)
+                                .and_then(|m| m.get(&req_skill_id))
+                                .map(|s| s.level)
+                                .unwrap_or(0);
+                            if trained_lvl < req_lvl {
+                                return Err(BridgeRpcError {
+                                    code: "SkillPrerequisiteNotMet".into(),
+                                    message: format!(
+                                        "Skill {} (type {skill_type_id}) requires prerequisite skill {req_skill_id} at level {req_lvl}",
+                                        skill_type.name
+                                    ),
+                                });
+                            }
+                        }
                     }
                 }
 
@@ -1288,7 +1237,12 @@ pub fn handle(
 
             match res {
                 Ok(tid) => {
-                    super::jump_clone_names::emit_server_skills_changed(ctx, char_id, &[tid], Some("SkillInjected"));
+                    super::jump_clone_names::emit_server_skills_changed(
+                        ctx,
+                        char_id,
+                        &[tid],
+                        Some("SkillInjected"),
+                    );
                     Some(Ok(PyRep::keyval([
                         ("typeID", PyRep::Integer(tid as i64)),
                         ("injected", PyRep::Bool(true)),
@@ -1298,7 +1252,9 @@ pub fn handle(
             }
         }
 
-        ("skillMgr2", "ExtractSkills") => Some(super::jump_clone_names::extract_skills(ctx, session, args)),
+        ("skillMgr2", "ExtractSkills") => {
+            Some(super::jump_clone_names::extract_skills(ctx, session, args))
+        }
 
         ("skillMgr2", "GetRespecInfo") => {
             let (_, char_id) = match ServerContext::require_character(session) {
@@ -1338,21 +1294,21 @@ pub fn handle(
             ])))
         }
 
-        ("skillMgr2", "GetImplants") => {
-            Some(crate::services::implant_plugging::get_implants(ctx, session))
-        }
-        ("skillMgr2", "GetBoosters") => {
-            Some(crate::services::implant_plugging::get_boosters(ctx, session))
-        }
-        ("dogmaIM", "InjectImplant") => {
-            Some(crate::services::implant_plugging::inject_implant(ctx, session, args))
-        }
-        ("dogmaIM", "DestroyImplant") => {
-            Some(crate::services::implant_plugging::destroy_implant(ctx, session, args))
-        }
-        ("dogmaIM", "UseBooster") => {
-            Some(crate::services::implant_plugging::use_booster(ctx, session, args))
-        }
+        ("skillMgr2", "GetImplants") => Some(crate::services::implant_plugging::get_implants(
+            ctx, session,
+        )),
+        ("skillMgr2", "GetBoosters") => Some(crate::services::implant_plugging::get_boosters(
+            ctx, session,
+        )),
+        ("dogmaIM", "InjectImplant") => Some(crate::services::implant_plugging::inject_implant(
+            ctx, session, args,
+        )),
+        ("dogmaIM", "DestroyImplant") => Some(crate::services::implant_plugging::destroy_implant(
+            ctx, session, args,
+        )),
+        ("dogmaIM", "UseBooster") => Some(crate::services::implant_plugging::use_booster(
+            ctx, session, args,
+        )),
 
         _ => crate::services::implant_plugging::handle_skill_notifications_and_injections(
             ctx, session, service, method,
@@ -1363,37 +1319,4 @@ pub fn handle(
             )
         }),
     }
-}
-
-/// Skill queue rowset as returned by `skillMgr2.GetSkillQueue`; also the `newQueue` payload of
-/// `OnNewSkillQueueSaved` (`skillQueueSvc.OnNewSkillQueueSaved(newQueue)` stores it as the queue).
-pub(crate) fn skill_queue_rowset(ctx: &ServerContext, char_id: i64) -> PyRep {
-    let rows = ctx.db.with_snapshot(|snap| {
-        snap.skill_queues
-            .get(&char_id)
-            .map(|q| {
-                q.iter()
-                    .map(|e| {
-                        vec![
-                            PyRep::Integer(e.type_id as i64),
-                            PyRep::Integer(e.target_level as i64),
-                            PyRep::Real(e.start_sp),
-                            PyRep::Real(e.end_sp),
-                            PyRep::Real(e.duration_seconds),
-                        ]
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    });
-    PyRep::rowset(
-        vec![
-            "trainingTypeID",
-            "trainingToLevel",
-            "trainingStartSP",
-            "trainingDestinationSP",
-            "durationSeconds",
-        ],
-        rows,
-    )
 }

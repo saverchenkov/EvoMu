@@ -3,8 +3,10 @@
 #![forbid(unsafe_code)]
 
 use crate::router::{NotificationTarget, ServerContext};
+use eve_db::InventoryFlag;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
+use eve_sde::TypeId;
 use std::collections::HashMap;
 
 /// Private JSON side-store key in `item_custom_names` (jumpCloneID -> label).
@@ -33,19 +35,32 @@ pub fn set_jump_clone_name(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let clone_id = args.first().and_then(|a| a.as_i64()).ok_or_else(|| BridgeRpcError {
-        code: "InvalidJumpCloneID".into(),
-        message: "SetJumpCloneName requires cloneID".into(),
-    })?;
-    let name = args.get(1).and_then(|a| a.as_str()).unwrap_or("").trim().to_string();
+    let clone_id = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .ok_or_else(|| BridgeRpcError {
+            code: "InvalidJumpCloneID".into(),
+            message: "SetJumpCloneName requires cloneID".into(),
+        })?;
+    let name = args
+        .get(1)
+        .and_then(|a| a.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if name.chars().count() > MAX_JUMP_CLONE_NAME_LEN {
         return Err(BridgeRpcError {
             code: "JumpCloneNameTooLong".into(),
-            message: format!("Jump clone names are limited to {MAX_JUMP_CLONE_NAME_LEN} characters"),
+            message: format!(
+                "Jump clone names are limited to {MAX_JUMP_CLONE_NAME_LEN} characters"
+            ),
         });
     }
     ctx.db.try_with_mut_snapshot(|snap| {
-        let owns = snap.jump_clones.get(&char_id).is_some_and(|l| l.iter().any(|c| c.jump_clone_id == clone_id));
+        let owns = snap
+            .jump_clones
+            .get(&char_id)
+            .is_some_and(|l| l.iter().any(|c| c.jump_clone_id == clone_id));
         if !owns {
             return Err(BridgeRpcError {
                 code: "JumpCloneNotFound".into(),
@@ -59,7 +74,8 @@ pub fn set_jump_clone_name(
             names.insert(clone_id, name.clone());
         }
         if let Ok(json) = serde_json::to_string(&names) {
-            snap.item_custom_names.insert(JUMP_CLONE_NAMES_STORE_KEY, json);
+            snap.item_custom_names
+                .insert(JUMP_CLONE_NAMES_STORE_KEY, json);
         }
         Ok(())
     })?;
@@ -77,16 +93,31 @@ pub fn validate_install_jump_clone(
     if session.station_id.is_none() && session.structure_id.is_none() {
         return Err(BridgeRpcError {
             code: "MustBeDocked".into(),
-            message: "ValidateInstallJumpClone requires being docked at an NPC station or structure".into(),
+            message:
+                "ValidateInstallJumpClone requires being docked at an NPC station or structure"
+                    .into(),
         });
     }
     let (clone_count, max_clones, balance) = ctx.db.with_snapshot(|snap| {
         let count = snap.jump_clones.get(&char_id).map(|v| v.len()).unwrap_or(0);
-        let bal = snap.characters.get(&char_id).map(|c| c.balance.0).unwrap_or(0);
+        let bal = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.balance.0)
+            .unwrap_or(0);
         let skills = snap.skills.get(&char_id);
-        let info_lvl = skills.and_then(|m| m.get(&24242)).map(|s| s.level as usize).unwrap_or(0);
-        let adv_lvl = skills.and_then(|m| m.get(&33407)).map(|s| s.level as usize).unwrap_or(0);
-        let elite_lvl = skills.and_then(|m| m.get(&73910)).map(|s| s.level as usize).unwrap_or(0);
+        let info_lvl = skills
+            .and_then(|m| m.get(&24242))
+            .map(|s| s.level as usize)
+            .unwrap_or(0);
+        let adv_lvl = skills
+            .and_then(|m| m.get(&33407))
+            .map(|s| s.level as usize)
+            .unwrap_or(0);
+        let elite_lvl = skills
+            .and_then(|m| m.get(&73910))
+            .map(|s| s.level as usize)
+            .unwrap_or(0);
         (count, info_lvl + adv_lvl + elite_lvl, bal)
     });
     // Canonical jump clone installation fee: 900,000 ISK = 90,000,000 cents
@@ -198,18 +229,16 @@ pub(crate) fn emit_server_skills_changed(
         "charid",
         vec![
             PyRep::Dict(entries),
-            event.map(|s| PyRep::String(s.into())).unwrap_or(PyRep::None),
+            event
+                .map(|s| PyRep::String(s.into()))
+                .unwrap_or(PyRep::None),
             PyRep::Integer(now_ft),
         ],
     );
 }
 
 /// Emits `OnServerSkillsRemoved(skillInfos, timeStamp)` matching `SkillsSvc.OnServerSkillsRemoved`.
-pub(crate) fn emit_server_skills_removed(
-    ctx: &ServerContext,
-    char_id: i64,
-    removed: &[(u32, u8)],
-) {
+pub(crate) fn emit_server_skills_removed(ctx: &ServerContext, char_id: i64, removed: &[(u32, u8)]) {
     if removed.is_empty() {
         return;
     }
@@ -720,3 +749,290 @@ pub(crate) fn emit_ship_clone_accepted(
     );
 }
 
+pub fn alpha_skill_cap_for_character(
+    sde: &eve_sde::SdeRegistry,
+    race_id: u32,
+    skill_type_id: TypeId,
+) -> u8 {
+    sde.clone_grades
+        .get(&race_id)
+        .and_then(|cg| cg.alpha_skill_caps.get(&skill_type_id).copied())
+        .or_else(|| {
+            sde.clone_grades
+                .values()
+                .filter_map(|cg| cg.alpha_skill_caps.get(&skill_type_id).copied())
+                .max()
+        })
+        .unwrap_or(0)
+}
+
+pub(crate) fn is_valid_doll_or_portrait_payload(rep: &PyRep) -> bool {
+    match rep {
+        PyRep::KeyVal(map) => !map.is_empty(),
+        PyRep::Dict(entries) => !entries.is_empty(),
+        PyRep::Object { .. } | PyRep::ObjectEx { .. } => true,
+        PyRep::Tuple(items) | PyRep::List(items) => !items.is_empty(),
+        PyRep::String(s) => {
+            let trimmed = s.trim();
+            !trimmed.is_empty()
+                && (trimmed.starts_with("doll:")
+                    || trimmed.starts_with("portrait:")
+                    || trimmed.contains('='))
+                && trimmed != "doll_info_placeholder"
+                && trimmed != "portrait_info_placeholder"
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn serialize_doll_pyrep(rep: &PyRep) -> String {
+    match rep {
+        PyRep::String(s) => s.clone(),
+        PyRep::Integer(v) => v.to_string(),
+        PyRep::Real(v) => v.to_string(),
+        PyRep::Bool(v) => v.to_string(),
+        PyRep::None => String::new(),
+        PyRep::Tuple(items) | PyRep::List(items) => {
+            let parts: Vec<String> = items.iter().map(serialize_doll_pyrep).collect();
+            format!("[{}]", parts.join(","))
+        }
+        PyRep::KeyVal(map) => {
+            let mut entries: Vec<(&String, &PyRep)> = map.iter().collect();
+            entries.sort_by_key(|(k, _)| *k);
+            let parts: Vec<String> = entries
+                .into_iter()
+                .map(|(k, v)| format!("{k}={}", serialize_doll_pyrep(v)))
+                .collect();
+            parts.join("&")
+        }
+        PyRep::Dict(entries) => {
+            let parts: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| format!("{}={}", serialize_doll_pyrep(k), serialize_doll_pyrep(v)))
+                .collect();
+            parts.join("&")
+        }
+        _ => String::from("paperdoll"),
+    }
+}
+
+/// Computes effective character attributes `(charisma, intelligence, memory, perception, willpower)`
+/// combining base/remapped neural attributes + plugged-in implants (`175..=179`) + active cerebral accelerators (`InventoryFlag::Booster`) (`feat:attributes.attributes-base`).
+pub fn effective_character_attributes(
+    sde: &eve_sde::SdeRegistry,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+) -> (f64, f64, f64, f64, f64) {
+    let (mut cha, mut int, mut mem, mut per, mut wil) = snap
+        .characters
+        .get(&char_id)
+        .map(|c| {
+            (
+                c.neural.charisma as f64,
+                c.neural.intelligence as f64,
+                c.neural.memory as f64,
+                c.neural.perception as f64,
+                c.neural.willpower as f64,
+            )
+        })
+        .unwrap_or((19.0, 20.0, 20.0, 20.0, 20.0));
+
+    let active_implant_types = snap
+        .active_implants
+        .get(&char_id)
+        .cloned()
+        .unwrap_or_default();
+    for &tid in &active_implant_types {
+        if let Some(t) = sde.types.get(&tid) {
+            cha += t.default_attributes.get(&175).copied().unwrap_or(0.0);
+            int += t.default_attributes.get(&176).copied().unwrap_or(0.0);
+            mem += t.default_attributes.get(&177).copied().unwrap_or(0.0);
+            per += t.default_attributes.get(&178).copied().unwrap_or(0.0);
+            wil += t.default_attributes.get(&179).copied().unwrap_or(0.0);
+        }
+    }
+
+    for item in snap.items.values() {
+        if item.owner_id != char_id || item.location_id != char_id {
+            continue;
+        }
+        if item.flag == InventoryFlag::Implant && !active_implant_types.contains(&item.type_id) {
+            let get_bonus = |attr_id: u16| -> f64 {
+                item.dynamic_attributes
+                    .get(&attr_id)
+                    .copied()
+                    .or_else(|| {
+                        sde.types
+                            .get(&item.type_id)
+                            .and_then(|t| t.default_attributes.get(&attr_id).copied())
+                    })
+                    .unwrap_or(0.0)
+            };
+            cha += get_bonus(175);
+            int += get_bonus(176);
+            mem += get_bonus(177);
+            per += get_bonus(178);
+            wil += get_bonus(179);
+        } else if item.flag == InventoryFlag::Booster {
+            if item
+                .dynamic_attributes
+                .get(&crate::services::implant_plugging::DYN_ATTR_BOOSTER_EXPIRY_UNIX)
+                .is_some_and(|&exp| {
+                    exp > 0.0 && (eve_db::clock::host_wall_unix_secs_and_nanos().0 as f64) >= exp
+                })
+            {
+                continue;
+            }
+            let get_bonus = |bonus_id: u16, direct_id: u16| -> f64 {
+                item.dynamic_attributes
+                    .get(&bonus_id)
+                    .copied()
+                    .or_else(|| item.dynamic_attributes.get(&direct_id).copied())
+                    .or_else(|| {
+                        sde.types.get(&item.type_id).and_then(|t| {
+                            t.default_attributes
+                                .get(&bonus_id)
+                                .copied()
+                                .or_else(|| t.default_attributes.get(&direct_id).copied())
+                        })
+                    })
+                    .unwrap_or(0.0)
+            };
+            cha += get_bonus(175, 164);
+            int += get_bonus(176, 165);
+            mem += get_bonus(177, 166);
+            per += get_bonus(178, 167);
+            wil += get_bonus(179, 168);
+        }
+    }
+
+    (cha, int, mem, per, wil)
+}
+
+pub fn lookup_effective_attr_from_tuple(attrs: (f64, f64, f64, f64, f64), attr_id: u32) -> f64 {
+    match attr_id {
+        164 | 175 => attrs.0, // charisma
+        165 | 176 => attrs.1, // intelligence
+        166 | 177 => attrs.2, // memory
+        167 | 178 => attrs.3, // perception
+        168 | 179 => attrs.4, // willpower
+        _ => attrs.1,
+    }
+}
+
+/// Skill queue rowset as returned by `skillMgr2.GetSkillQueue`; also the `newQueue` payload of
+/// `OnNewSkillQueueSaved` (`skillQueueSvc.OnNewSkillQueueSaved(newQueue)` stores it as the queue).
+pub(crate) fn skill_queue_rowset(ctx: &ServerContext, char_id: i64) -> PyRep {
+    let rows = ctx.db.with_snapshot(|snap| {
+        snap.skill_queues
+            .get(&char_id)
+            .map(|q| {
+                q.iter()
+                    .map(|e| {
+                        vec![
+                            PyRep::Integer(e.type_id as i64),
+                            PyRep::Integer(e.target_level as i64),
+                            PyRep::Real(e.start_sp),
+                            PyRep::Real(e.end_sp),
+                            PyRep::Real(e.duration_seconds),
+                        ]
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    PyRep::rowset(
+        vec![
+            "trainingTypeID",
+            "trainingToLevel",
+            "trainingStartSP",
+            "trainingDestinationSP",
+            "durationSeconds",
+        ],
+        rows,
+    )
+}
+
+pub(crate) async fn handle_qa_move_me_to(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    cid: i64,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let dest_raw = args
+        .first()
+        .and_then(|a| {
+            a.as_i64()
+                .or_else(|| a.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+        })
+        .unwrap_or(0);
+    let dest_sys_id = if ctx.sde.solar_systems.contains_key(&(dest_raw as u32)) {
+        dest_raw as u32
+    } else if let Some(st) = ctx.sde.stations.get(&dest_raw) {
+        st.solar_system_id
+    } else {
+        return Err(BridgeRpcError {
+            code: "DestinationNotFound".into(),
+            message: format!("Destination {dest_raw} not found in SDE"),
+        });
+    };
+    let (old_sys_id, ship_id) = ctx
+        .db
+        .with_snapshot(|snap| {
+            snap.characters
+                .get(&cid)
+                .map(|c| (c.solar_system_id, c.active_ship_id))
+        })
+        .unwrap_or((30_000_142, 0));
+    let updated_ch = match ctx
+        .db
+        .set_character_solar_system(cid, dest_sys_id, &ctx.sde)
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(BridgeRpcError {
+                code: "TeleportFailed".into(),
+                message: e.to_string(),
+            })
+        }
+    };
+    if old_sys_id != dest_sys_id && ship_id > 0 {
+        let old_handle = ctx.systems.get_or_spawn(old_sys_id);
+        let existing_ball = old_handle.remove_ball(ship_id).await;
+        let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
+        let mut new_ball = existing_ball.unwrap_or(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 601,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 0.5,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        });
+        new_ball.position = glam::DVec3::new(10_000.0, 0.0, 0.0);
+        new_ball.velocity = glam::DVec3::ZERO;
+        let combat_state = ctx.build_ship_combat_state(cid, ship_id, new_ball.type_id);
+        let slim_meta = ctx.build_ship_slim_meta(cid, new_ball.type_id);
+        let _ = new_handle
+            .spawn_ball_with_meta(new_ball, combat_state, slim_meta)
+            .await;
+    }
+    session.solar_system_id = Some(dest_sys_id);
+    session.constellation_id = Some(updated_ch.constellation_id);
+    session.region_id = Some(updated_ch.region_id);
+    session.station_id = None;
+    session.structure_id = None;
+    Ok(PyRep::keyval([
+        ("characterID", PyRep::Integer(cid)),
+        ("solarSystemID", PyRep::Integer(dest_sys_id as i64)),
+        (
+            "constellationID",
+            PyRep::Integer(updated_ch.constellation_id as i64),
+        ),
+        ("regionID", PyRep::Integer(updated_ch.region_id as i64)),
+        ("moved", PyRep::Bool(true)),
+    ]))
+}
