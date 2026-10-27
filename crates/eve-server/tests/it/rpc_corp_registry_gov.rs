@@ -82,6 +82,8 @@ fn set_corp_balance(ctx: &ServerContext, corp_id: i64, isk: f64) {
 
 #[tokio::test]
 async fn test_corp_shares_dividends_and_ceo_transition() {
+    // parity: feat:corporation.dividends
+    // parity: feat:corporation.share-transfer
     // parity: rpc:corpRegistry.MoveCompanyShares
     // parity: rpc:corpRegistry.MovePrivateShares
     // parity: rpc:corpRegistry.GetShareholders
@@ -90,231 +92,253 @@ async fn test_corp_shares_dividends_and_ceo_transition() {
     // parity: rpc:corpRegistry.PayoutDividend
     // parity: rpc:corpRegistry.ResignFromCEO
     // parity: rpc:corpRegistry.GetNumberOfPotentialCEOs
+    eve_testkit::attest(&[
+        "feat:corporation.dividends",
+        "feat:corporation.share-transfer",
+        "rpc:corpRegistry.MoveCompanyShares",
+        "rpc:corpRegistry.MovePrivateShares",
+        "rpc:corpRegistry.GetShareholders",
+        "rpc:corpRegistry.GetSharesByShareholder",
+        "rpc:corpRegistry.GetMemberIDsWithMoreThanAvgShares",
+        "rpc:corpRegistry.PayoutDividend",
+        "rpc:corpRegistry.ResignFromCEO",
+        "rpc:corpRegistry.GetNumberOfPotentialCEOs",
+    ]);
 
     let ctx = ServerContext::new();
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch3 = snap.characters.get(&PILOT_2).cloned().expect("PILOT_2");
+        ch3.character_id = PILOT_3;
+        ch3.user_id = 3;
+        ch3.name = "Third Pilot".into();
+        ch3.balance = IskCents(0);
+        snap.characters.insert(PILOT_3, ch3);
+    });
     let mut sess1 = select_pilot(&ctx, 61_001, "demo", "demo-secret", PILOT_1).await;
 
-    let created = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "AddCorporation",
-        &[
-            PyRep::String("Titan Holdings".into()),
-            PyRep::String("TITAN".into()),
-            PyRep::Real(0.05),
-        ],
-    )
-    .await
-    .expect("AddCorporation");
-    let corp_id = field(&created, "corporationID")
-        .as_i64()
-        .expect("corporationID");
+    let created = rpc(&ctx, &mut sess1, "corpRegistry", "AddCorporation", &[PyRep::String("Titan Holdings".into()), PyRep::String("TITAN".into()), PyRep::Real(0.05)]).await.expect("AddCorporation");
+    let corp_id = field(&created, "corporationID").as_i64().expect("corporationID");
 
-    // 1. MoveCompanyShares
-    let move_corp = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "MoveCompanyShares",
-        &[
-            PyRep::Integer(corp_id),
-            PyRep::Integer(PILOT_2),
-            PyRep::Integer(200),
-        ],
-    )
-    .await
-    .expect("MoveCompanyShares");
+    // 1. Initial state: AddCorporation sets 1000 shares in corporation itself (treasury)
+    let init_corp_sh = rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(corp_id), PyRep::Integer(corp_id)]).await.expect("GetSharesByShareholder corp");
+    assert_eq!(rowset_data(&init_corp_sh).1[0][2], PyRep::Integer(1_000));
+
+    // 1b. MoveCompanyShares: transfer company shares from corp treasury to PILOT_1 and PILOT_2
+    let move_p1 = rpc(&ctx, &mut sess1, "corpRegistry", "MoveCompanyShares", &[PyRep::Integer(corp_id), PyRep::Integer(PILOT_1), PyRep::Integer(350)]).await.expect("MoveCompanyShares PILOT_1");
+    assert_eq!(field(&move_p1, "sharesTransferred"), PyRep::Integer(350));
+    let move_corp = rpc(&ctx, &mut sess1, "corpRegistry", "MoveCompanyShares", &[PyRep::Integer(corp_id), PyRep::Integer(PILOT_2), PyRep::Integer(200)]).await.expect("MoveCompanyShares PILOT_2");
     assert_eq!(field(&move_corp, "sharesTransferred"), PyRep::Integer(200));
 
-    // 2. MovePrivateShares
-    let move_priv = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "MovePrivateShares",
-        &[
-            PyRep::Integer(corp_id),
-            PyRep::Integer(PILOT_3),
-            PyRep::Integer(50),
-        ],
-    )
-    .await
-    .expect("MovePrivateShares");
+    // 2. MovePrivateShares: transfer 50 shares from PILOT_1 to PILOT_3 (character-to-character)
+    let move_priv = rpc(&ctx, &mut sess1, "corpRegistry", "MovePrivateShares", &[PyRep::Integer(corp_id), PyRep::Integer(PILOT_3), PyRep::Integer(50)]).await.expect("MovePrivateShares PILOT_3");
     assert_eq!(field(&move_priv, "sharesTransferred"), PyRep::Integer(50));
 
-    // 3. GetShareholders
-    let sh_res = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "GetShareholders",
-        &[PyRep::Integer(corp_id)],
-    )
-    .await
-    .expect("GetShareholders");
+    // 2b. MovePrivateShares: transfer 20 shares from PILOT_1 back to corp treasury (character-to-corp)
+    let move_to_corp = rpc(&ctx, &mut sess1, "corpRegistry", "MovePrivateShares", &[PyRep::Integer(corp_id), PyRep::Integer(corp_id), PyRep::Integer(20)]).await.expect("MovePrivateShares corp");
+    assert_eq!(field(&move_to_corp, "sharesTransferred"), PyRep::Integer(20));
+
+    // Reject unknown recipient in MoveCompanyShares and MovePrivateShares
+    let err_c_unknown = rpc(&ctx, &mut sess1, "corpRegistry", "MoveCompanyShares", &[PyRep::Integer(corp_id), PyRep::Integer(99_999_888), PyRep::Integer(10)]).await.unwrap_err();
+    assert_eq!(err_c_unknown.code, "TargetNotFound");
+    let err_p_unknown = rpc(&ctx, &mut sess1, "corpRegistry", "MovePrivateShares", &[PyRep::Integer(corp_id), PyRep::Integer(99_999_888), PyRep::Integer(10)]).await.unwrap_err();
+    assert_eq!(err_p_unknown.code, "TargetNotFound");
+
+    // 3. GetShareholders: 4 shareholders total; zero-share entries omitted
+    ctx.db.with_mut_snapshot(|snap| { snap.corp_governance.entry(corp_id).or_default().shares.insert(999_998, 0); });
+    let sh_res = rpc(&ctx, &mut sess1, "corpRegistry", "GetShareholders", &[PyRep::Integer(corp_id)]).await.expect("GetShareholders");
     let (s_cols, s_rows) = rowset_data(&sh_res);
     assert!(s_cols.contains(&"shareholderID".to_string()));
-    assert!(s_rows.len() >= 2);
+    assert_eq!(s_rows.len(), 4, "zero-share entry omitted");
 
-    // 4. GetSharesByShareholder
-    let by_sh = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "GetSharesByShareholder",
-        &[PyRep::Integer(corp_id), PyRep::Integer(PILOT_2)],
-    )
-    .await
-    .expect("GetSharesByShareholder");
-    let (_, bsh_rows) = rowset_data(&by_sh);
-    assert_eq!(bsh_rows.len(), 1);
-    assert_eq!(bsh_rows[0][2], PyRep::Integer(200));
+    // 4. GetSharesByShareholder: verify exact holdings
+    let by_sh_corp = rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(corp_id), PyRep::Integer(corp_id)]).await.expect("GetSharesByShareholder corp");
+    assert_eq!(rowset_data(&by_sh_corp).1[0][2], PyRep::Integer(470));
+    let by_sh_p1 = rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(corp_id), PyRep::Integer(PILOT_1)]).await.expect("GetSharesByShareholder PILOT_1");
+    assert_eq!(rowset_data(&by_sh_p1).1[0][2], PyRep::Integer(280));
+    let by_sh = rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(corp_id), PyRep::Integer(PILOT_2)]).await.expect("GetSharesByShareholder PILOT_2");
+    assert_eq!(rowset_data(&by_sh).1[0][2], PyRep::Integer(200));
+    let by_sh_p3 = rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(corp_id), PyRep::Integer(PILOT_3)]).await.expect("GetSharesByShareholder PILOT_3");
+    assert_eq!(rowset_data(&by_sh_p3).1[0][2], PyRep::Integer(50));
+    let by_sh_none = rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(corp_id), PyRep::Integer(999_999)]).await.expect("GetSharesByShareholder non-holder");
+    assert!(rowset_data(&by_sh_none).1.is_empty());
 
-    let by_sh_p3 = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "GetSharesByShareholder",
-        &[PyRep::Integer(corp_id), PyRep::Integer(PILOT_3)],
-    )
-    .await
-    .expect("GetSharesByShareholder PILOT_3");
-    let (_, bsh_p3_rows) = rowset_data(&by_sh_p3);
-    assert_eq!(bsh_p3_rows.len(), 1);
-    assert_eq!(bsh_p3_rows[0][0], PyRep::Integer(PILOT_3));
-    assert_eq!(bsh_p3_rows[0][2], PyRep::Integer(50));
+    // 4b. GetSharesByShareholder 1-arg form (corpShares: bool / int)
+    let by_sh_bf = rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Bool(false)]).await.expect("GetSharesByShareholder false");
+    assert_eq!(rowset_data(&by_sh_bf).1[0][2], PyRep::Integer(280));
+    let by_sh_bt = rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Bool(true)]).await.expect("GetSharesByShareholder true");
+    assert_eq!(rowset_data(&by_sh_bt).1[0][2], PyRep::Integer(470));
+    let by_sh_i0 = rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(0)]).await.expect("GetSharesByShareholder 0");
+    assert_eq!(rowset_data(&by_sh_i0).1[0][2], PyRep::Integer(280));
+    let by_sh_i1 = rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(1)]).await.expect("GetSharesByShareholder 1");
+    assert_eq!(rowset_data(&by_sh_i1).1[0][2], PyRep::Integer(470));
 
-    let by_sh_none = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "GetSharesByShareholder",
-        &[PyRep::Integer(corp_id), PyRep::Integer(999_999)],
-    )
-    .await
-    .expect("GetSharesByShareholder non-holder");
-    let (_, bsh_none_rows) = rowset_data(&by_sh_none);
-    assert!(bsh_none_rows.is_empty());
+    // 4c. Cross-corp GetSharesByShareholder: non-member sees their shares across corps
+    let mut sess_p3 = SessionState::new(61_098);
+    sess_p3.user_id = Some(3);
+    sess_p3.character_id = Some(PILOT_3);
+    sess_p3.corporation_id = Some(1000044);
+    let by_sh_cross = rpc(&ctx, &mut sess_p3, "corpRegistry", "GetSharesByShareholder", &[PyRep::Bool(false)]).await.expect("cross-corp GetSharesByShareholder");
+    assert_eq!(rowset_data(&by_sh_cross).1[0], vec![PyRep::Integer(PILOT_3), PyRep::Integer(corp_id), PyRep::Integer(50)]);
 
-    // 5. GetMemberIDsWithMoreThanAvgShares
-    let avg_sh = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "GetMemberIDsWithMoreThanAvgShares",
-        &[PyRep::Integer(corp_id)],
-    )
-    .await
-    .expect("GetMemberIDsWithMoreThanAvgShares");
+    // 5. GetMemberIDsWithMoreThanAvgShares (0 args; only PILOT_1 is member, avg = 280; non-members PILOT_2 and PILOT_3 excluded)
+    let avg_sh = rpc(&ctx, &mut sess1, "corpRegistry", "GetMemberIDsWithMoreThanAvgShares", &[]).await.expect("GetMemberIDsWithMoreThanAvgShares");
     let PyRep::List(sh_list) = avg_sh else { panic!("expected list") };
     assert!(sh_list.contains(&PyRep::Integer(PILOT_1)));
+    assert!(!sh_list.contains(&PyRep::Integer(PILOT_2)), "PILOT_2 is non-member shareholder; must be excluded");
+    assert!(!sh_list.contains(&PyRep::Integer(PILOT_3)), "PILOT_3 is non-member shareholder; must be excluded");
+    assert!(!sh_list.contains(&PyRep::Integer(corp_id)), "corp treasury must be excluded");
 
-    // 6. PayoutDividend
+    // 5b. Share-weighted voting: verify vote weighting uses transferred share distribution (PILOT_2 has 200 shares)
+    let opt_rows = vec![
+        vec![PyRep::Integer(1), PyRep::String("Elect PILOT_2".into()), PyRep::Integer(PILOT_2)],
+        vec![PyRep::Integer(2), PyRep::String("Reject".into()), PyRep::Integer(0)],
+    ];
+    let custom_options = PyRep::rowset(vec!["optionID", "optionText", "parameter"], opt_rows);
+    let vc_res = rpc(&ctx, &mut sess1, "voteManager", "InsertVoteCase", &[
+        PyRep::String("CEO Election".into()), PyRep::String("Vote for candidate".into()),
+        PyRep::Integer(24), PyRep::Integer(1), PyRep::Integer(PILOT_2), custom_options,
+    ]).await.expect("InsertVoteCase");
+    let case_id = field(&vc_res, "voteCaseID").as_i64().expect("voteCaseID");
+
+    let mut sess_p2 = SessionState::new(61_096);
+    sess_p2.user_id = Some(2);
+    sess_p2.character_id = Some(PILOT_2);
+    sess_p2.corporation_id = Some(corp_id);
+    let v_res = rpc(&ctx, &mut sess_p2, "voteManager", "InsertVote", &[PyRep::Integer(case_id), PyRep::Integer(1)]).await.expect("InsertVote");
+    assert_eq!(field(&v_res, "weight"), PyRep::Integer(200), "vote weight must match shareholder's 200 shares");
+
+    // 5c. Negative and zero share creation votes rejected
+    let err_neg_shares = rpc(&ctx, &mut sess1, "voteManager", "InsertVoteCase", &[
+        PyRep::String("Create Shares".into()), PyRep::String("Neg".into()), PyRep::Integer(5), PyRep::Integer(1), PyRep::Integer(-100),
+    ]).await.unwrap_err();
+    assert_eq!(err_neg_shares.code, "InvalidArgument");
+    let err_zero_shares = rpc(&ctx, &mut sess1, "voteManager", "InsertVoteCase", &[
+        PyRep::String("Create Shares".into()), PyRep::String("Zero".into()), PyRep::Integer(5), PyRep::Integer(1), PyRep::Integer(0),
+    ]).await.unwrap_err();
+    assert_eq!(err_zero_shares.code, "InvalidArgument");
+
+    // 6. PayoutDividend: test V24 [payShareholders, payoutAmount] layout, wallet journaling, balances and error handling
     set_corp_balance(&ctx, corp_id, 10_000_000.0);
-    let div_res = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "PayoutDividend",
-        &[
-            PyRep::Real(1_000_000.0),
-            PyRep::Bool(true),
-            PyRep::Integer(1),
-        ],
-    )
-    .await
-    .expect("PayoutDividend");
-    assert_eq!(field(&div_res, "corporationID"), PyRep::Integer(corp_id));
-    assert_eq!(field(&div_res, "totalPayoutISK"), PyRep::Real(1_000_000.0));
+    let (p1_b0, p2_b0, p3_b0) = ctx.db.with_snapshot(|snap| (
+        snap.characters.get(&PILOT_1).map(|c| c.balance.0).unwrap_or(0),
+        snap.characters.get(&PILOT_2).map(|c| c.balance.0).unwrap_or(0),
+        snap.characters.get(&PILOT_3).map(|c| c.balance.0).unwrap_or(0),
+    ));
 
+    // 6a. payShareholders=true: pays per share to external shareholders; corp division deducted only actual paid sum
+    let div_res = rpc(&ctx, &mut sess1, "corpRegistry", "PayoutDividend", &[PyRep::Bool(true), PyRep::Real(1_000_000.0)]).await.expect("PayoutDividend per share");
+    assert_eq!(field(&div_res, "corporationID"), PyRep::Integer(corp_id));
+    assert_eq!(field(&div_res, "recipientCount"), PyRep::Integer(3));
+
+    let (p1_b1, p2_b1, p3_b1, corp_b1) = ctx.db.with_snapshot(|snap| (
+        snap.characters.get(&PILOT_1).map(|c| c.balance.0).unwrap_or(0),
+        snap.characters.get(&PILOT_2).map(|c| c.balance.0).unwrap_or(0),
+        snap.characters.get(&PILOT_3).map(|c| c.balance.0).unwrap_or(0),
+        snap.corporations.get(&corp_id).map(|c| c.wallet_divisions[0].balance.0).unwrap_or(0),
+    ));
+    assert_eq!(p1_b1 - p1_b0, 28_000_000, "PILOT_1 credited 280,000 ISK for 280 shares");
+    assert_eq!(p2_b1 - p2_b0, 20_000_000, "PILOT_2 credited 200,000 ISK for 200 shares");
+    assert_eq!(p3_b1 - p3_b0, 5_000_000, "PILOT_3 credited 50,000 ISK for 50 shares");
+    assert_eq!(corp_b1, 947_000_000, "Corp division 1 debited exactly 53,000,000 cents (actual paid)");
+
+    let (has_corp_j, has_p1_j, has_p2_j, has_p3_j) = ctx.db.with_snapshot(|snap| {
+        let c_j = snap.wallet_journal.iter().any(|j| j.character_id == corp_id && j.entry_type == "CorporationDividendPayout" && j.amount == eve_db::IskCents(-53_000_000) && j.balance_after == eve_db::IskCents(947_000_000));
+        let p1_j = snap.wallet_journal.iter().any(|j| j.character_id == PILOT_1 && j.entry_type == "CorporationDividendPayment" && j.amount == eve_db::IskCents(28_000_000));
+        let p2_j = snap.wallet_journal.iter().any(|j| j.character_id == PILOT_2 && j.entry_type == "CorporationDividendPayment" && j.amount == eve_db::IskCents(20_000_000));
+        let p3_j = snap.wallet_journal.iter().any(|j| j.character_id == PILOT_3 && j.entry_type == "CorporationDividendPayment" && j.amount == eve_db::IskCents(5_000_000));
+        (c_j, p1_j, p2_j, p3_j)
+    });
+    assert!(has_corp_j && has_p1_j && has_p2_j && has_p3_j, "both corp division deduction and shareholder additions journaled");
+
+    // 6b. payShareholders=false: pays equally to all corporation members (PILOT_1 and PILOT_2)
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&PILOT_2) {
-            ch.corporation_id = corp_id;
-        }
+        if let Some(ch) = snap.characters.get_mut(&PILOT_2) { ch.corporation_id = corp_id; }
         if let Some(corp) = snap.corporations.get_mut(&corp_id) {
             corp.members.insert(PILOT_2);
             corp.member_roles.insert(PILOT_2, 0);
         }
     });
 
+    // 6b-2. GetMemberIDsWithMoreThanAvgShares after PILOT_2 joins: members are PILOT_1 (280) and PILOT_2 (200), avg = 240
+    let avg_sh2 = rpc(&ctx, &mut sess1, "corpRegistry", "GetMemberIDsWithMoreThanAvgShares", &[]).await.expect("GetMemberIDsWithMoreThanAvgShares post-join");
+    let PyRep::List(sh_list2) = avg_sh2 else { panic!("expected list") };
+    assert!(sh_list2.contains(&PyRep::Integer(PILOT_1)), "PILOT_1 has 280 >= 240 avg member shares");
+    assert!(!sh_list2.contains(&PyRep::Integer(PILOT_2)), "PILOT_2 has 200 < 240 avg member shares");
+    assert!(!sh_list2.contains(&PyRep::Integer(PILOT_3)), "PILOT_3 is non-member shareholder");
+
+    let div_member = rpc(&ctx, &mut sess1, "corpRegistry", "PayoutDividend", &[PyRep::Bool(false), PyRep::Real(500_000.0)]).await.expect("PayoutDividend per member");
+    assert_eq!(field(&div_member, "recipientCount"), PyRep::Integer(2));
+    let (p1_b2, p2_b2, corp_b2) = ctx.db.with_snapshot(|snap| (
+        snap.characters.get(&PILOT_1).map(|c| c.balance.0).unwrap_or(0),
+        snap.characters.get(&PILOT_2).map(|c| c.balance.0).unwrap_or(0),
+        snap.corporations.get(&corp_id).map(|c| c.wallet_divisions[0].balance.0).unwrap_or(0),
+    ));
+    assert_eq!(p1_b2 - p1_b1, 25_000_000, "PILOT_1 credited 250,000 ISK member dividend");
+    assert_eq!(p2_b2 - p2_b1, 25_000_000, "PILOT_2 credited 250,000 ISK member dividend");
+    assert_eq!(corp_b2, 897_000_000, "Corp division 1 debited 50,000,000 cents for member payout");
+
+    // 6c. Orphaned shareholder: uncredited orphaned shareholder ISK is NOT debited from corp wallet
+    const ORPHAN_ID: i64 = 99_999_777;
+    ctx.db.with_mut_snapshot(|snap| { snap.corp_governance.entry(corp_id).or_default().shares.insert(ORPHAN_ID, 100); });
+    let corp_b_before_orphan = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].wallet_divisions[0].balance.0);
+    let div_orphan = rpc(&ctx, &mut sess1, "corpRegistry", "PayoutDividend", &[PyRep::Bool(true), PyRep::Real(1_000_000.0)]).await.expect("PayoutDividend with orphan");
+    assert_eq!(field(&div_orphan, "recipientCount"), PyRep::Integer(3));
+    let corp_b_after_orphan = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].wallet_divisions[0].balance.0);
+    assert_eq!(corp_b_before_orphan - corp_b_after_orphan, 48_181_817, "Corp division debited only for sum of credited dividends; orphaned shareholder shares preserved in wallet");
+
+    // 6d. Negative test: Insufficient funds fails with InsufficientFunds
+    let err_funds = rpc(&ctx, &mut sess1, "corpRegistry", "PayoutDividend", &[PyRep::Bool(true), PyRep::Real(100_000_000_000.0)]).await.unwrap_err();
+    assert_eq!(err_funds.code, "InsufficientFunds");
+
+    // 6e. Negative test: Missing CEO/Director role fails with CorpRoleDenied
+    let mut sess_unauth = SessionState::new(61_097);
+    sess_unauth.user_id = Some(3);
+    sess_unauth.character_id = Some(PILOT_3);
+    sess_unauth.corporation_id = Some(corp_id);
+    let err_role = rpc(&ctx, &mut sess_unauth, "corpRegistry", "PayoutDividend", &[PyRep::Bool(true), PyRep::Real(10_000.0)]).await.unwrap_err();
+    assert_eq!(err_role.code, "CorpRoleDenied");
+
+    // 6f. Negative test: Invalid division ID (< 1 or > 7) fails with InvalidArgument
+    let err_div9 = rpc(&ctx, &mut sess1, "corpRegistry", "PayoutDividend", &[PyRep::Bool(true), PyRep::Real(1_000.0), PyRep::Integer(9)]).await.unwrap_err();
+    assert_eq!(err_div9.code, "InvalidArgument");
+    let err_div0 = rpc(&ctx, &mut sess1, "corpRegistry", "PayoutDividend", &[PyRep::Bool(true), PyRep::Real(1_000.0), PyRep::Integer(0)]).await.unwrap_err();
+    assert_eq!(err_div0.code, "InvalidArgument");
+
+    // 6g. Full-balance payout: drops wallet_divisions[0] and master_wallet to 0; ensure_wallet_divisions cannot restore funds
+    set_corp_balance(&ctx, corp_id, 100_000.0);
+    let div_full = rpc(&ctx, &mut sess1, "corpRegistry", "PayoutDividend", &[PyRep::Bool(false), PyRep::Real(100_000.0), PyRep::Integer(1)]).await.expect("PayoutDividend full");
+    assert_eq!(field(&div_full, "recipientCount"), PyRep::Integer(2));
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.get_mut(&corp_id).unwrap();
+        assert_eq!(corp.wallet_divisions[0].balance, eve_db::IskCents(0));
+        assert_eq!(corp.master_wallet, eve_db::IskCents(0));
+        corp.ensure_wallet_divisions();
+        assert_eq!(corp.division_balance(1), eve_db::IskCents(0));
+    });
+
     // 7. GetNumberOfPotentialCEOs
-    let num_ceos = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "GetNumberOfPotentialCEOs",
-        &[PyRep::Integer(corp_id)],
-    )
-    .await
-    .expect("GetNumberOfPotentialCEOs");
+    let num_ceos = rpc(&ctx, &mut sess1, "corpRegistry", "GetNumberOfPotentialCEOs", &[PyRep::Integer(corp_id)]).await.expect("GetNumberOfPotentialCEOs");
     assert_eq!(num_ceos, PyRep::Integer(1));
 
     // 8. ResignFromCEO
-    let resign = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "ResignFromCEO",
-        &[PyRep::Integer(PILOT_2)],
-    )
-    .await
-    .expect("ResignFromCEO");
+    let resign = rpc(&ctx, &mut sess1, "corpRegistry", "ResignFromCEO", &[PyRep::Integer(PILOT_2)]).await.expect("ResignFromCEO");
     assert_eq!(field(&resign, "newCeoID"), PyRep::Integer(PILOT_2));
 
     // 9. Issue #43 security checks: non-director cannot MoveCompanyShares; cannot exceed treasury balance
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-            corp.member_roles.insert(PILOT_1, 0);
-        }
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) { corp.member_roles.insert(PILOT_1, 0); }
     });
-    let err_non_dir = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "MoveCompanyShares",
-        &[
-            PyRep::Integer(corp_id),
-            PyRep::Integer(PILOT_3),
-            PyRep::Integer(10),
-        ],
-    )
-    .await
-    .unwrap_err();
+    let err_non_dir = rpc(&ctx, &mut sess1, "corpRegistry", "MoveCompanyShares", &[PyRep::Integer(corp_id), PyRep::Integer(PILOT_3), PyRep::Integer(10)]).await.unwrap_err();
     assert_eq!(err_non_dir.code, "CorpRoleDenied");
 
     let mut sess2 = SessionState::new(61_099);
     sess2.user_id = Some(2);
     sess2.character_id = Some(PILOT_2);
     sess2.corporation_id = Some(corp_id);
-    let err_insuff_corp = rpc(
-        &ctx,
-        &mut sess2,
-        "corpRegistry",
-        "MoveCompanyShares",
-        &[
-            PyRep::Integer(corp_id),
-            PyRep::Integer(PILOT_3),
-            PyRep::Integer(10_000),
-        ],
-    )
-    .await
-    .unwrap_err();
+    let err_insuff_corp = rpc(&ctx, &mut sess2, "corpRegistry", "MoveCompanyShares", &[PyRep::Integer(corp_id), PyRep::Integer(PILOT_3), PyRep::Integer(10_000)]).await.unwrap_err();
     assert_eq!(err_insuff_corp.code, "InsufficientShares");
 
-    let err_insuff_priv = rpc(
-        &ctx,
-        &mut sess2,
-        "corpRegistry",
-        "MovePrivateShares",
-        &[
-            PyRep::Integer(corp_id),
-            PyRep::Integer(PILOT_3),
-            PyRep::Integer(10_000),
-        ],
-    )
-    .await
-    .unwrap_err();
+    let err_insuff_priv = rpc(&ctx, &mut sess2, "corpRegistry", "MovePrivateShares", &[PyRep::Integer(corp_id), PyRep::Integer(PILOT_3), PyRep::Integer(10_000)]).await.unwrap_err();
     assert_eq!(err_insuff_priv.code, "InsufficientShares");
 }
 
@@ -478,30 +502,14 @@ async fn test_corp_titles_and_bulletins() {
     );
 
     // 3. UpdateBulletinOrder (V24 list of (bulletinID, sortOrder) pairs)
-    let reorder_res = rpc(
-        &ctx,
-        &mut sess,
-        "corpRegistry",
-        "UpdateBulletinOrder",
-        &[PyRep::List(vec![
-            PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(10)]),
-            PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(20)]),
-        ])],
-    )
-    .await
-    .expect("UpdateBulletinOrder");
+    let reorder_res = rpc(&ctx, &mut sess, "corpRegistry", "UpdateBulletinOrder", &[PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(10)]),
+        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(20)]),
+    ])]).await.expect("UpdateBulletinOrder");
     assert_eq!(reorder_res, PyRep::Bool(true));
 
     // 4. GetBulletins (verify sortOrder column and reordered rows [3, 1])
-    let bulletins = rpc(
-        &ctx,
-        &mut sess,
-        "corpRegistry",
-        "GetBulletins",
-        &[PyRep::Integer(corp_id)],
-    )
-    .await
-    .expect("GetBulletins");
+    let bulletins = rpc(&ctx, &mut sess, "corpRegistry", "GetBulletins", &[PyRep::Integer(corp_id)]).await.expect("GetBulletins");
     let (b_cols, b_rows) = rowset_data(&bulletins);
     assert!(b_cols.contains(&"sortOrder".to_string()));
     assert_eq!(b_rows.len(), 2);
@@ -509,15 +517,7 @@ async fn test_corp_titles_and_bulletins() {
     assert_eq!(b_rows[1][0], PyRep::Integer(1));
 
     // 5. RegisterNewAggressionSettings + GetAggressionSettings 24h delay & RegisterNewAcceptStructureSettings + DoesMyCorpAcceptStructures
-    let reg_agg = rpc(
-        &ctx,
-        &mut sess,
-        "corpRegistry",
-        "RegisterNewAggressionSettings",
-        &[PyRep::Bool(true)],
-    )
-    .await
-    .expect("RegisterNewAggressionSettings");
+    let reg_agg = rpc(&ctx, &mut sess, "corpRegistry", "RegisterNewAggressionSettings", &[PyRep::Bool(true)]).await.expect("RegisterNewAggressionSettings");
     assert!(field(&reg_agg, "_enableAfter").as_i64().unwrap_or(0) > 0);
     let agg_before = rpc(
         &ctx,

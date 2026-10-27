@@ -156,39 +156,24 @@ async fn test_d6_corp_governance_and_employment_history_persist_and_rollback() {
 
         rpc(&ctx, &mut sess, "corpRegistry", "UpdateTitle", &[PyRep::Integer(1), PyRep::String("Chief Archivist".into()), PyRep::Integer(corp_roles::ROLE_DIRECTOR as i64)]).await;
         rpc(
-            &ctx,
-            &mut sess,
-            "corpRegistry",
-            "UpdateDivisionNames",
+            &ctx, &mut sess, "corpRegistry", "UpdateDivisionNames",
             &[
-                PyRep::String("Hangar Alpha".into()),
-                PyRep::String("Hangar Beta".into()),
-                PyRep::String("Hangar 3".into()),
-                PyRep::String("Hangar 4".into()),
-                PyRep::String("Hangar 5".into()),
-                PyRep::String("Hangar 6".into()),
-                PyRep::String("Hangar 7".into()),
-                PyRep::String("Treasury Prime".into()),
-                PyRep::String("Ops Wallet".into()),
-                PyRep::String("Div 3".into()),
-                PyRep::String("Div 4".into()),
-                PyRep::String("Div 5".into()),
-                PyRep::String("Div 6".into()),
-                PyRep::String("Div 7".into()),
+                PyRep::String("Hangar Alpha".into()), PyRep::String("Hangar Beta".into()), PyRep::String("Hangar 3".into()),
+                PyRep::String("Hangar 4".into()), PyRep::String("Hangar 5".into()), PyRep::String("Hangar 6".into()), PyRep::String("Hangar 7".into()),
+                PyRep::String("Treasury Prime".into()), PyRep::String("Ops Wallet".into()), PyRep::String("Div 3".into()),
+                PyRep::String("Div 4".into()), PyRep::String("Div 5".into()), PyRep::String("Div 6".into()), PyRep::String("Div 7".into()),
             ],
         )
         .await;
 
         let vc = rpc(
-            &ctx,
-            &mut sess,
-            "voteManager",
-            "InsertVoteCase",
+            &ctx, &mut sess, "voteManager", "InsertVoteCase",
             &[PyRep::String("Expand Share Capital".into()), PyRep::String("Create 500 new shares".into()), PyRep::Integer(5), PyRep::Integer(500)],
         )
         .await;
         let vote_case_id = vc.dict_get("voteCaseID").and_then(|v| v.as_i64()).unwrap_or(1);
         rpc(&ctx, &mut sess, "voteManager", "InsertVote", &[PyRep::Integer(vote_case_id), PyRep::Integer(1)]).await;
+        rpc(&ctx, &mut sess, "corpRegistry", "MoveCompanyShares", &[PyRep::Integer(corp_id), PyRep::Integer(PILOT), PyRep::Integer(750)]).await;
         rpc(&ctx, &mut sess, "corpRegistry", "MoveCompanyShares", &[PyRep::Integer(corp_id), PyRep::Integer(OTHER), PyRep::Integer(250)]).await;
 
         rpc(&ctx, &mut sess, "corpRegistry", "AddBulletin", &[PyRep::String("D6 Bulletin".into()), PyRep::String("Durable MOTD".into())]).await;

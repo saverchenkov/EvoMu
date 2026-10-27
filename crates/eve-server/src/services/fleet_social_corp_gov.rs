@@ -170,13 +170,9 @@ pub(super) fn handle_add_corporation(
             ch_mut.alliance_id = None;
         }
 
-        let wallet_divisions: Vec<CorpWalletDivisionRecord> = (1..=7)
-            .map(|d| CorpWalletDivisionRecord {
-                division_id: d,
-                name: if d == 1 { "Master Wallet".into() } else { format!("Division {d}") },
-                balance: IskCents(0),
-            })
-            .collect();
+        let wallet_divisions: Vec<CorpWalletDivisionRecord> = (1..=7).map(|d| CorpWalletDivisionRecord {
+            division_id: d, name: if d == 1 { "Master Wallet".into() } else { format!("Division {d}") }, balance: IskCents(0),
+        }).collect();
 
         let mut member_roles = HashMap::new();
         member_roles.insert(char_id, u64::MAX);
@@ -202,8 +198,8 @@ pub(super) fn handle_add_corporation(
         );
         snap.chat_channels.insert(format!("corpid:{cid}"), ChatChannelRecord { channel_id: format!("corpid:{cid}"), name: name.to_string(), motd: String::new(), owner_id: Some(char_id), members: HashSet::from([char_id]), is_system_local: false, solar_system_id: None, is_private: false, operators: HashSet::from([char_id]), password: None, is_delayed_local: false });
         let state = snap.corp_governance.entry(cid).or_default();
-        state.shares.insert(char_id, 1_000);
-        state.company_shares = 0;
+        state.shares.insert(cid, 1_000);
+        state.company_shares = 1_000;
         state.logo = (shape1, shape2, shape3, color1);
         state.logo_extra_colors = (color2, color3);
         state.applications_enabled = Some(apps_enabled);
@@ -213,8 +209,8 @@ pub(super) fn handle_add_corporation(
         snap.corp_shareholders.insert(
             cid,
             vec![eve_db::snapshot_ext::CorpShareholderEntry {
-                shareholder_id: char_id,
-                shareholder_type: "character".into(),
+                shareholder_id: cid,
+                shareholder_type: "corporation".into(),
                 share_count: 1_000,
             }],
         );
@@ -295,11 +291,7 @@ pub(super) fn handle_get_wallet_divisions_info(
                     .find(|w| w.division_id == d)
                     .map(|w| w.name.clone())
                     .unwrap_or_else(|| if d == 1 { "Master Wallet".into() } else { format!("Division {d}") });
-                vec![
-                    PyRep::Integer(d as i64),
-                    PyRep::String(name),
-                    PyRep::Real(corp.division_balance(d).to_wire_f64()),
-                ]
+                vec![PyRep::Integer(d as i64), PyRep::String(name), PyRep::Real(corp.division_balance(d).to_wire_f64())]
             })
             .collect();
         Ok(rows)
@@ -346,17 +338,9 @@ pub(super) fn handle_corp_gov(
                 return deny_role("MoveCompanyShares requires CEO or Director role");
             }
             let (target_corp_id, target_id, qty) = if args.len() >= 3 {
-                (
-                    args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id),
-                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(char_id),
-                    args.get(2).and_then(|a| a.as_i64()).unwrap_or(0),
-                )
+                (args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id), args.get(1).and_then(|a| a.as_i64()).unwrap_or(char_id), args.get(2).and_then(|a| a.as_i64()).unwrap_or(0))
             } else {
-                (
-                    corp_id,
-                    args.first().and_then(|a| a.as_i64()).unwrap_or(char_id),
-                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(0),
-                )
+                (corp_id, args.first().and_then(|a| a.as_i64()).unwrap_or(char_id), args.get(1).and_then(|a| a.as_i64()).unwrap_or(0))
             };
             if target_corp_id != corp_id {
                 return deny_role("Cannot move company shares of another corporation");
@@ -368,38 +352,21 @@ pub(super) fn handle_corp_gov(
                 }));
             }
             let tx_res = ctx.db.try_with_mut_snapshot(|snap| {
+                if !snap.characters.contains_key(&target_id) && !snap.corporations.contains_key(&target_id) {
+                    return Err(BridgeRpcError { code: "TargetNotFound".into(), message: format!("Share transfer recipient {target_id} does not exist") });
+                }
                 let state = snap.corp_governance.entry(corp_id).or_default();
-                let corp_share_entry = state.shares.get(&corp_id).copied().unwrap_or(0);
-                let char_share_entry = state.shares.get(&char_id).copied().unwrap_or(0);
-                let (from_holder_id, old_f, new_f) = if corp_share_entry >= qty {
-                    let from_count = state.shares.entry(corp_id).or_insert(0);
-                    let of = *from_count;
-                    *from_count -= qty;
-                    let nf = *from_count;
-                    if state.company_shares > 0 {
-                        state.company_shares = (state.company_shares - qty).max(0);
-                    }
-                    (corp_id, of, nf)
-                } else if state.company_shares >= qty && char_share_entry < qty {
-                    let of = state.company_shares;
-                    state.company_shares -= qty;
-                    let nf = state.company_shares;
-                    (corp_id, of, nf)
-                } else if char_share_entry >= qty {
-                    let from_count = state.shares.entry(char_id).or_insert(0);
-                    let of = *from_count;
-                    *from_count -= qty;
-                    let nf = *from_count;
-                    if state.company_shares > 0 {
-                        state.company_shares = (state.company_shares - qty).max(0);
-                    }
-                    (char_id, of, nf)
-                } else {
+                let from_count = state.shares.entry(corp_id).or_insert(0);
+                if *from_count < qty {
                     return Err(BridgeRpcError {
                         code: "InsufficientShares".into(),
                         message: "Not enough company shares to transfer".into(),
                     });
-                };
+                }
+                let old_f = *from_count;
+                *from_count -= qty;
+                let new_f = *from_count;
+                state.company_shares = *from_count;
                 let to_entry = state.shares.entry(target_id).or_insert(0);
                 let old_t = *to_entry;
                 *to_entry += qty;
@@ -410,7 +377,7 @@ pub(super) fn handle_corp_gov(
                     .filter(|&(_, &cnt)| cnt > 0)
                     .map(|(&sid, &cnt)| eve_db::snapshot_ext::CorpShareholderEntry {
                         shareholder_id: sid,
-                        shareholder_type: if (98_000_000..99_000_000).contains(&sid) {
+                        shareholder_type: if (98_000_000..99_000_000).contains(&sid) || sid == corp_id || snap.corporations.contains_key(&sid) {
                             "corporation".into()
                         } else {
                             "character".into()
@@ -420,7 +387,7 @@ pub(super) fn handle_corp_gov(
                     .collect();
                 holders.sort_by_key(|s| s.shareholder_id);
                 snap.corp_shareholders.insert(corp_id, holders);
-                Ok((from_holder_id, old_f, new_f, old_t, new_t))
+                Ok((corp_id, old_f, new_f, old_t, new_t))
             });
             let (from_holder_id, old_from, new_from, old_to, new_to) = match tx_res {
                 Ok(v) => v,
@@ -450,26 +417,14 @@ pub(super) fn handle_corp_gov(
             if !target_in_corp {
                 ctx.notify(NotificationTarget::Character(target_id), "OnShareChange", "charid", to_args);
             }
-            Some(Ok(PyRep::keyval([
-                ("corporationID", PyRep::Integer(corp_id)),
-                ("toShareholderID", PyRep::Integer(target_id)),
-                ("sharesTransferred", PyRep::Integer(qty)),
-            ])))
+            Some(Ok(PyRep::keyval([("corporationID", PyRep::Integer(corp_id)), ("toShareholderID", PyRep::Integer(target_id)), ("sharesTransferred", PyRep::Integer(qty))])))
         }
 
         ("corpRegistry", "MovePrivateShares") => {
             let (target_corp_id, target_id, qty) = if args.len() >= 3 {
-                (
-                    args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id),
-                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(char_id),
-                    args.get(2).and_then(|a| a.as_i64()).unwrap_or(0),
-                )
+                (args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id), args.get(1).and_then(|a| a.as_i64()).unwrap_or(char_id), args.get(2).and_then(|a| a.as_i64()).unwrap_or(0))
             } else {
-                (
-                    corp_id,
-                    args.first().and_then(|a| a.as_i64()).unwrap_or(char_id),
-                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(0),
-                )
+                (corp_id, args.first().and_then(|a| a.as_i64()).unwrap_or(char_id), args.get(1).and_then(|a| a.as_i64()).unwrap_or(0))
             };
             if target_id <= 0 || qty <= 0 {
                 return Some(Err(BridgeRpcError {
@@ -478,6 +433,9 @@ pub(super) fn handle_corp_gov(
                 }));
             }
             let tx_res = ctx.db.try_with_mut_snapshot(|snap| {
+                if !snap.characters.contains_key(&target_id) && !snap.corporations.contains_key(&target_id) {
+                    return Err(BridgeRpcError { code: "TargetNotFound".into(), message: format!("Share transfer recipient {target_id} does not exist") });
+                }
                 let state = snap.corp_governance.entry(target_corp_id).or_default();
                 let from_count = state.shares.entry(char_id).or_insert(0);
                 if *from_count < qty {
@@ -493,13 +451,16 @@ pub(super) fn handle_corp_gov(
                 let old_t = *to_entry;
                 *to_entry += qty;
                 let new_t = *to_entry;
+                if target_id == target_corp_id {
+                    state.company_shares = *to_entry;
+                }
                 let mut holders: Vec<eve_db::snapshot_ext::CorpShareholderEntry> = state
                     .shares
                     .iter()
                     .filter(|&(_, &cnt)| cnt > 0)
                     .map(|(&sid, &cnt)| eve_db::snapshot_ext::CorpShareholderEntry {
                         shareholder_id: sid,
-                        shareholder_type: if (98_000_000..99_000_000).contains(&sid) {
+                        shareholder_type: if (98_000_000..99_000_000).contains(&sid) || sid == target_corp_id || snap.corporations.contains_key(&sid) {
                             "corporation".into()
                         } else {
                             "character".into()
@@ -516,21 +477,10 @@ pub(super) fn handle_corp_gov(
                 Err(e) => return Some(Err(e)),
             };
             if target_id != char_id {
-                let from_change = PyRep::Dict(vec![(
-                    PyRep::String(("shares").into()),
-                    PyRep::Tuple(vec![PyRep::Integer(old_from), PyRep::Integer(new_from)]),
-                )]);
-                ctx.notify(
-                    NotificationTarget::Corporation(target_corp_id),
-                    "OnShareChange",
-                    "corpid",
-                    vec![PyRep::Integer(char_id), PyRep::Integer(target_corp_id), from_change],
-                );
+                let from_change = PyRep::Dict(vec![(PyRep::String("shares".into()), PyRep::Tuple(vec![PyRep::Integer(old_from), PyRep::Integer(new_from)]))]);
+                ctx.notify(NotificationTarget::Corporation(target_corp_id), "OnShareChange", "corpid", vec![PyRep::Integer(char_id), PyRep::Integer(target_corp_id), from_change]);
             }
-            let to_change = PyRep::Dict(vec![(
-                PyRep::String(("shares").into()),
-                PyRep::Tuple(vec![PyRep::Integer(old_to), PyRep::Integer(new_to)]),
-            )]);
+            let to_change = PyRep::Dict(vec![(PyRep::String("shares".into()), PyRep::Tuple(vec![PyRep::Integer(old_to), PyRep::Integer(new_to)]))]);
             let to_args = vec![PyRep::Integer(target_id), PyRep::Integer(target_corp_id), to_change];
             ctx.notify(NotificationTarget::Corporation(target_corp_id), "OnShareChange", "corpid", to_args.clone());
             let target_in_corp = ctx.db.with_snapshot(|snap| {
@@ -539,29 +489,27 @@ pub(super) fn handle_corp_gov(
             if !target_in_corp {
                 ctx.notify(NotificationTarget::Character(target_id), "OnShareChange", "charid", to_args);
             }
-            Some(Ok(PyRep::keyval([
-                ("corporationID", PyRep::Integer(target_corp_id)),
-                ("toShareholderID", PyRep::Integer(target_id)),
-                ("sharesTransferred", PyRep::Integer(qty)),
-            ])))
+            Some(Ok(PyRep::keyval([("corporationID", PyRep::Integer(target_corp_id)), ("toShareholderID", PyRep::Integer(target_id)), ("sharesTransferred", PyRep::Integer(qty))])))
         }
 
         ("corpRegistry", "GetSharesByShareholder") => {
-            let target_sh_id = if args.len() >= 2 {
-                args.get(1).and_then(|a| a.as_i64()).unwrap_or(char_id)
-            } else {
-                args.first().and_then(|a| a.as_i64()).unwrap_or(char_id)
+            let target_sh_id = match args {
+                [PyRep::Bool(true) | PyRep::Integer(1)] => corp_id,
+                [PyRep::Bool(false) | PyRep::Integer(0)] => char_id,
+                [PyRep::Integer(n)] => *n,
+                [_, second, ..] => second.as_i64().unwrap_or(char_id),
+                _ => char_id,
             };
             let rows: Vec<Vec<PyRep>> = with_corp_gov(ctx, |g| {
-                let Some(state) = g.get(&corp_id) else {
-                    return Vec::new();
-                };
-                state
-                    .shares
-                    .iter()
-                    .filter(|(&oid, _)| oid == target_sh_id)
-                    .map(|(&oid, &cnt)| vec![PyRep::Integer(oid), PyRep::Integer(corp_id), PyRep::Integer(cnt)])
-                    .collect()
+                let mut out = Vec::new();
+                for (&cid, cgov) in g.iter() {
+                    if let Some(&cnt) = cgov.shares.get(&target_sh_id) {
+                        if cnt > 0 {
+                            out.push(vec![PyRep::Integer(target_sh_id), PyRep::Integer(cid), PyRep::Integer(cnt)]);
+                        }
+                    }
+                }
+                out
             });
             Some(Ok(PyRep::rowset(vec!["shareholderID", "corporationID", "shares"], rows)))
         }
@@ -572,110 +520,131 @@ pub(super) fn handle_corp_gov(
                 g.get(&corp_id).map(|s| s.shares.clone()).unwrap_or_default()
             });
             if method == "GetMemberIDsWithMoreThanAvgShares" {
-                if shares.is_empty() {
-                    return Some(Ok(PyRep::List(Vec::new())));
-                }
-                let total: i64 = shares.values().sum();
-                let avg = total / (shares.len().max(1) as i64);
-                let ids: Vec<PyRep> = shares
-                    .iter()
-                    .filter(|(_, &cnt)| cnt >= avg)
-                    .map(|(&oid, _)| PyRep::Integer(oid))
-                    .collect();
+                let members = ctx.db.with_snapshot(|snap| snap.corporations.get(&corp_id).map(|c| c.members.clone()).unwrap_or_default());
+                let member_shares: Vec<(i64, i64)> = shares.into_iter().filter(|&(oid, cnt)| members.contains(&oid) && cnt > 0).collect();
+                if member_shares.is_empty() { return Some(Ok(PyRep::List(Vec::new()))); }
+                let total: i64 = member_shares.iter().map(|(_, cnt)| *cnt).sum();
+                let avg = total / (member_shares.len() as i64);
+                let ids: Vec<PyRep> = member_shares.into_iter().filter(|&(_, cnt)| cnt >= avg).map(|(oid, _)| PyRep::Integer(oid)).collect();
                 return Some(Ok(PyRep::List(ids)));
             }
-            let rows: Vec<Vec<PyRep>> = shares
-                .iter()
-                .map(|(&oid, &cnt)| vec![PyRep::Integer(oid), PyRep::Integer(corp_id), PyRep::Integer(cnt)])
-                .collect();
+            let rows: Vec<Vec<PyRep>> = shares.iter().filter(|(_, &cnt)| cnt > 0)
+                .map(|(&oid, &cnt)| vec![PyRep::Integer(oid), PyRep::Integer(corp_id), PyRep::Integer(cnt)]).collect();
             Some(Ok(PyRep::rowset(vec!["shareholderID", "corporationID", "shares"], rows)))
         }
 
         ("corpRegistry", "PayoutDividend") => {
-            let total_isk = args.first().and_then(|a| a.as_f64()).unwrap_or(0.0);
-            let to_shareholders = matches!(args.get(1), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
-            let div_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1) as u8;
+            let (to_shareholders, total_isk, raw_div) = if matches!(args.first(), Some(PyRep::Bool(_))) {
+                (args.first().and_then(|a| a.as_bool()).unwrap_or(false), args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0), args.get(2))
+            } else if matches!(args.get(1), Some(PyRep::Bool(_))) {
+                (args.get(1).and_then(|a| a.as_bool()).unwrap_or(false), args.first().and_then(|a| a.as_f64()).unwrap_or(0.0), args.get(2))
+            } else if args.len() >= 2 && matches!(args.first(), Some(PyRep::Integer(0 | 1))) && matches!(args.get(1), Some(PyRep::Real(_))) {
+                (args.first().and_then(|a| a.as_i64()).unwrap_or(0) != 0, args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0), args.get(2))
+            } else {
+                (matches!(args.get(1), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1))), args.first().and_then(|a| a.as_f64()).unwrap_or(0.0), args.get(2))
+            };
+            let div_id: u8 = match raw_div {
+                Some(arg) => match u8::try_from(arg.as_i64().unwrap_or(0)) {
+                    Ok(val @ 1..=7) => val,
+                    _ => return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Wallet division ID must be between 1 and 7".into() })),
+                },
+                None => 1,
+            };
             if total_isk <= 0.0 || !total_isk.is_finite() {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "Dividend payout amount must be positive".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Dividend payout amount must be positive".into() }));
             }
             let payout_cents = IskCents::from_f64_isk(total_isk);
+            if payout_cents.0 <= 0 {
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Dividend payout amount must be positive".into() }));
+            }
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(corp) = snap.corporations.get_mut(&corp_id) else {
-                    return Err(BridgeRpcError {
-                        code: "CorporationNotFound".into(),
-                        message: format!("Corporation {corp_id} not found"),
-                    });
+                let (cur_bal, member_ids) = {
+                    let Some(corp) = snap.corporations.get_mut(&corp_id) else {
+                        return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
+                    };
+                    let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+                    if char_id != corp.ceo_id && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
+                        return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Paying dividends requires CEO or Director role".into() });
+                    }
+                    corp.ensure_wallet_divisions();
+                    let cur_bal = if div_id == 1 {
+                        corp.division_balance(1).min(corp.master_wallet)
+                    } else {
+                        corp.division_balance(div_id)
+                    };
+                    if cur_bal < payout_cents {
+                        return Err(BridgeRpcError { code: "InsufficientFunds".into(), message: "Insufficient corporation wallet funds for dividend payout".into() });
+                    }
+                    let mids: Vec<i64> = corp.members.iter().copied().collect();
+                    (cur_bal, mids)
                 };
-                let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-                if char_id != corp.ceo_id && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
-                    return Err(BridgeRpcError {
-                        code: "CorpRoleDenied".into(),
-                        message: "Paying dividends requires CEO or Director role".into(),
-                    });
-                }
-                corp.ensure_wallet_divisions();
-                let dpos = corp
-                    .wallet_divisions
-                    .iter()
-                    .position(|d| d.division_id == div_id)
-                    .unwrap_or(0);
-                let cur_bal = corp.wallet_divisions[dpos].balance;
-                let new_bal = cur_bal.checked_sub(payout_cents).ok_or_else(|| BridgeRpcError {
-                    code: "InsufficientDivisionFunds".into(),
-                    message: "Insufficient corporation wallet funds for dividend payout".into(),
-                })?;
-                corp.wallet_divisions[dpos].balance = new_bal;
-                if div_id == 1 {
-                    corp.master_wallet = new_bal;
-                }
-                let member_ids: Vec<i64> = corp.members.iter().copied().collect();
 
                 let recipients: Vec<(i64, i64)> = if to_shareholders {
                     let state = snap.corp_governance.entry(corp_id).or_default();
                     let shares_snapshot = state.shares.clone();
-                    let total_shares: i64 = shares_snapshot.values().sum::<i64>().max(1);
-                    shares_snapshot
-                        .into_iter()
-                        .filter(|(_, s)| *s > 0)
-                        .map(|(oid, s)| (oid, (payout_cents.0 * s) / total_shares))
-                        .collect()
+                    let total_shares = shares_snapshot.iter().filter(|&(_, &s)| s > 0).try_fold(0i64, |acc, (_, &s)| acc.checked_add(s)).ok_or_else(|| BridgeRpcError { code: "ArithmeticOverflow".into(), message: "Total shares overflowed".into() })?;
+                    if total_shares <= 0 {
+                        Vec::new()
+                    } else {
+                        shares_snapshot
+                            .into_iter()
+                            .filter(|&(oid, s)| oid != corp_id && s > 0)
+                            .filter_map(|(oid, s)| {
+                                let c = (payout_cents.0 as i128 * s as i128) / (total_shares as i128);
+                                i64::try_from(c).ok().filter(|&cents| cents > 0).map(|cents| (oid, cents))
+                            })
+                            .collect()
+                    }
                 } else {
                     let mcount = (member_ids.len() as i64).max(1);
-                    member_ids
-                        .into_iter()
-                        .map(|mid| (mid, payout_cents.0 / mcount))
-                        .collect()
+                    let per_member = payout_cents.0 / mcount;
+                    if per_member > 0 { member_ids.into_iter().map(|mid| (mid, per_member)).collect() } else { Vec::new() }
                 };
 
+                let mut actual_cents: i64 = 0;
+                let mut credited_count: i64 = 0;
                 for &(rid, cents) in &recipients {
-                    if let Some(ch) = snap.characters.get_mut(&rid) {
-                        ch.balance = IskCents(ch.balance.0 + cents);
-                        let new_ch_bal = ch.balance;
-                        snap.next_entity_id += 1;
-                        let jid = snap.next_entity_id;
-                        snap.wallet_journal.push(WalletJournalEntry {
-                            entry_id: jid,
-                            character_id: rid,
-                            entry_type: "CorporationDividendPayment".into(),
-                            amount: IskCents(cents),
-                            balance_after: new_ch_bal,
-                            reason: format!("Dividend payout from corporation {corp_id}"),
-                        });
-                    }
+                    let bal_after = if let Some(ch) = snap.characters.get_mut(&rid) {
+                        ch.balance = IskCents(ch.balance.0.saturating_add(cents));
+                        ch.balance
+                    } else if let Some(tc) = snap.corporations.get_mut(&rid) {
+                        let b = IskCents(tc.division_balance(1).0.saturating_add(cents));
+                        tc.set_division_balance(1, b);
+                        b
+                    } else {
+                        continue;
+                    };
+                    actual_cents = actual_cents.checked_add(cents).ok_or_else(|| BridgeRpcError { code: "ArithmeticOverflow".into(), message: "Dividend cents overflowed".into() })?;
+                    credited_count += 1;
+                    snap.next_entity_id += 1;
+                    snap.wallet_journal.push(WalletJournalEntry {
+                        entry_id: snap.next_entity_id, character_id: rid, entry_type: "CorporationDividendPayment".into(),
+                        amount: IskCents(cents), balance_after: bal_after, reason: format!("Dividend payout from corporation {corp_id}"),
+                    });
                 }
-                Ok(recipients.len() as i64)
+
+                let new_bal_cents = cur_bal.0.checked_sub(actual_cents).ok_or_else(|| BridgeRpcError {
+                    code: "InsufficientFunds".into(),
+                    message: "Insufficient corporation wallet funds for dividend payout".into(),
+                })?;
+                let new_bal = IskCents(new_bal_cents);
+                if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+                    corp.set_division_balance(div_id, new_bal);
+                }
+                if actual_cents > 0 {
+                    snap.next_entity_id += 1;
+                    let corp_jid = snap.next_entity_id;
+                    snap.wallet_journal.push(WalletJournalEntry {
+                        entry_id: corp_jid, character_id: corp_id, entry_type: "CorporationDividendPayout".into(),
+                        amount: IskCents(-actual_cents), balance_after: new_bal, reason: format!("Dividend payout from division {div_id}"),
+                    });
+                }
+                Ok(credited_count)
             });
 
             match res {
-                Ok(cnt) => Some(Ok(PyRep::keyval([
-                    ("corporationID", PyRep::Integer(corp_id)),
-                    ("recipientCount", PyRep::Integer(cnt)),
-                    ("totalPayoutISK", PyRep::Real(total_isk)),
-                ]))),
+                Ok(cnt) => Some(Ok(PyRep::keyval([("corporationID", PyRep::Integer(corp_id)), ("recipientCount", PyRep::Integer(cnt)), ("totalPayoutISK", PyRep::Real(total_isk))]))),
                 Err(e) => Some(Err(e)),
             }
         }
@@ -869,7 +838,7 @@ pub(super) fn handle_corp_gov(
             let mut old_ceo_id = char_id;
             let mut new_ceo_id = char_id;
             let mut is_ceo_vote = false;
-            let mut share_delta: Option<(i64, i64)> = None;
+            let mut share_delta: Option<(i64, i64, i64)> = None;
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                 let (passed, win_param, _) = {
                     let vc = snap.corp_vote_cases.get(&case_id).ok_or_else(|| BridgeRpcError { code: "VoteCaseNotFound".into(), message: format!("Vote case {case_id} not found") })?;
@@ -888,19 +857,25 @@ pub(super) fn handle_corp_gov(
                 vc.executed = true;
                 vc.parameter = win_param;
                 if vc.vote_type == 5 {
+                    if vc.parameter <= 0 {
+                        return Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Share creation amount must be positive".into() });
+                    }
                     let state = snap.corp_governance.entry(corp_id).or_default();
-                    state.company_shares += vc.parameter;
-                    let entry = state.shares.entry(char_id).or_insert(0);
+                    let entry = state.shares.entry(corp_id).or_insert(0);
                     let old_s = *entry;
-                    *entry += vc.parameter;
-                    share_delta = Some((old_s, *entry));
+                    let new_s = entry.checked_add(vc.parameter).filter(|&s| s <= 10_000_000_000).ok_or_else(|| {
+                        BridgeRpcError { code: "InvalidArgument".into(), message: "Share creation amount exceeds maximum limit".into() }
+                    })?;
+                    *entry = new_s;
+                    state.company_shares = *entry;
+                    share_delta = Some((corp_id, old_s, *entry));
                     let shareholders = snap.corp_shareholders.entry(corp_id).or_default();
-                    if let Some(sh) = shareholders.iter_mut().find(|s| s.shareholder_id == char_id) {
-                        sh.share_count += vc.parameter;
+                    if let Some(sh) = shareholders.iter_mut().find(|s| s.shareholder_id == corp_id) {
+                        sh.share_count = sh.share_count.saturating_add(vc.parameter);
                     } else {
                         shareholders.push(eve_db::snapshot_ext::CorpShareholderEntry {
-                            shareholder_id: char_id,
-                            shareholder_type: "character".into(),
+                            shareholder_id: corp_id,
+                            shareholder_type: "corporation".into(),
                             share_count: vc.parameter,
                         });
                     }
@@ -929,9 +904,9 @@ pub(super) fn handle_corp_gov(
             match res {
                 Ok(()) => {
                     ctx.notify(NotificationTarget::Corporation(corp_id), "OnSanctionedActionChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(case_id)]);
-                    if let Some((old_s, new_s)) = share_delta {
+                    if let Some((holder_id, old_s, new_s)) = share_delta {
                         let s_change = PyRep::Dict(vec![(PyRep::String(("shares").into()), PyRep::Tuple(vec![PyRep::Integer(old_s), PyRep::Integer(new_s)]))]);
-                        ctx.notify(NotificationTarget::Corporation(corp_id), "OnShareChange", "corpid", vec![PyRep::Integer(char_id), PyRep::Integer(corp_id), s_change]);
+                        ctx.notify(NotificationTarget::Corporation(corp_id), "OnShareChange", "corpid", vec![PyRep::Integer(holder_id), PyRep::Integer(corp_id), s_change]);
                     }
                     if is_ceo_vote {
                         let change = PyRep::Dict(vec![(PyRep::String(("ceoID").into()), PyRep::Tuple(vec![PyRep::Integer(old_ceo_id), PyRep::Integer(new_ceo_id)]))]);
@@ -1290,21 +1265,9 @@ pub(super) fn handle_corp_gov(
 
         ("corpRegistry", "GetLabels") => {
             let mut rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
-                snap.corp_contact_labels
-                    .get(&corp_id)
-                    .map(|labels| {
-                        labels
-                            .iter()
-                            .map(|(lid, name, color)| {
-                                vec![
-                                    PyRep::Integer(*lid),
-                                    PyRep::String(name.clone()),
-                                    PyRep::Integer(*color as i64),
-                                ]
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
+                snap.corp_contact_labels.get(&corp_id).map(|labels| {
+                    labels.iter().map(|(lid, name, color)| vec![PyRep::Integer(*lid), PyRep::String(name.clone()), PyRep::Integer(*color as i64)]).collect()
+                }).unwrap_or_default()
             });
             rows.sort_by_key(|r| r[0].as_i64());
             Some(Ok(PyRep::rowset(vec!["labelID", "name", "color"], rows)))
@@ -1319,22 +1282,14 @@ pub(super) fn handle_corp_gov(
                 g.entry(corp_id).or_default().welcome_mail = (enabled, subject.to_string(), body.to_string());
             });
             ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationWelcomeMailChanged", "corpid", vec![PyRep::Integer(char_id), PyRep::Integer(now_unix as i64)]);
-            Some(Ok(PyRep::keyval([
-                ("enabled", PyRep::Bool(enabled)),
-                ("subject", PyRep::String(subject.to_string())),
-                ("body", PyRep::String(body.to_string())),
-            ])))
+            Some(Ok(PyRep::keyval([("enabled", PyRep::Bool(enabled)), ("subject", PyRep::String(subject.to_string())), ("body", PyRep::String(body.to_string()))])))
         }
 
         ("corpRegistry", "GetCorpWelcomeMail") => {
             let (enabled, subject, body) = read_corp_gov(ctx, |g| {
                 g.get(&corp_id).map(|s| s.welcome_mail.clone()).unwrap_or((false, String::new(), String::new()))
             });
-            Some(Ok(PyRep::keyval([
-                ("enabled", PyRep::Bool(enabled)),
-                ("subject", PyRep::String(subject)),
-                ("body", PyRep::String(body)),
-            ])))
+            Some(Ok(PyRep::keyval([("enabled", PyRep::Bool(enabled)), ("subject", PyRep::String(subject)), ("body", PyRep::String(body))])))
         }
         ("corpRegistry", "RegisterNewCorpMailRestrictionSettings") => {
             if !has_comms { return deny_role("Updating corporation mail restriction settings requires Communications Officer or Director role"); }

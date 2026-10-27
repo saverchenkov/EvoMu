@@ -315,7 +315,8 @@ async fn test_corp_registry_governance_structures_contacts_and_reinforce() {
         .expect("AddCorporation");
     let corp_id = s1.corporation_id.expect("corp_id");
 
-    // 1. MovePrivateShares & Shareholder queries
+    // 1. MoveCompanyShares, MovePrivateShares & Shareholder queries
+    ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "MoveCompanyShares", &[PyRep::Integer(corp_id), PyRep::Integer(P1), PyRep::Integer(500)], &kw, None).await.expect("MoveCompanyShares");
     let move_sh = ctx
         .dispatch_rpc(&mut s1, "corpRegistry", None, "MovePrivateShares", &[PyRep::Integer(P1), PyRep::Integer(100)], &kw, None)
         .await

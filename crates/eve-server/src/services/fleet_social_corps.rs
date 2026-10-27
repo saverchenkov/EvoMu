@@ -1253,67 +1253,29 @@ pub(super) fn handle_corps(
             let transfer_amount = IskCents::from_f64_isk(amount_isk);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
-                    return Err(BridgeRpcError {
-                        code: "CorporationNotFound".into(),
-                        message: format!("Corporation {corp_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
                 };
                 let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-                if char_id != corp.ceo_id
-                    && !corp_roles::has_role(caller_role, corp_roles::ROLE_ACCOUNTANT)
-                {
-                    return Err(BridgeRpcError {
-                        code: "CorpRoleDenied".into(),
-                        message:
-                            "Transferring between corp wallet divisions requires Accountant role"
-                                .into(),
-                    });
+                if char_id != corp.ceo_id && !corp_roles::has_role(caller_role, corp_roles::ROLE_ACCOUNTANT) {
+                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Transferring between corp wallet divisions requires Accountant role".into() });
                 }
                 corp.ensure_wallet_divisions();
-                let from_pos = corp
-                    .wallet_divisions
-                    .iter()
-                    .position(|d| d.division_id == from_div)
-                    .ok_or_else(|| BridgeRpcError {
-                        code: "DivisionNotFound".into(),
-                        message: format!("Source wallet division {from_div} not found"),
-                    })?;
-                let to_pos = corp
-                    .wallet_divisions
-                    .iter()
-                    .position(|d| d.division_id == to_div)
-                    .ok_or_else(|| BridgeRpcError {
-                        code: "DivisionNotFound".into(),
-                        message: format!("Target wallet division {to_div} not found"),
-                    })?;
+                let from_pos = corp.wallet_divisions.iter().position(|d| d.division_id == from_div)
+                    .ok_or_else(|| BridgeRpcError { code: "DivisionNotFound".into(), message: format!("Source wallet division {from_div} not found") })?;
+                let to_pos = corp.wallet_divisions.iter().position(|d| d.division_id == to_div)
+                    .ok_or_else(|| BridgeRpcError { code: "DivisionNotFound".into(), message: format!("Target wallet division {to_div} not found") })?;
                 let source_bal = corp.wallet_divisions[from_pos].balance;
-                let new_source =
-                    source_bal
-                        .checked_sub(transfer_amount)
-                        .ok_or_else(|| BridgeRpcError {
-                            code: "InsufficientDivisionFunds".into(),
-                            message: "Insufficient funds in source wallet division".into(),
-                        })?;
-                let new_target = corp.wallet_divisions[to_pos]
-                    .balance
-                    .checked_add(transfer_amount)
-                    .unwrap_or(corp.wallet_divisions[to_pos].balance);
+                let new_source = source_bal.checked_sub(transfer_amount)
+                    .ok_or_else(|| BridgeRpcError { code: "InsufficientDivisionFunds".into(), message: "Insufficient funds in source wallet division".into() })?;
+                let new_target = corp.wallet_divisions[to_pos].balance.checked_add(transfer_amount).unwrap_or(corp.wallet_divisions[to_pos].balance);
                 corp.wallet_divisions[from_pos].balance = new_source;
                 corp.wallet_divisions[to_pos].balance = new_target;
-                if from_div == 1 {
-                    corp.master_wallet = new_source;
-                }
-                if to_div == 1 {
-                    corp.master_wallet = new_target;
-                }
+                if from_div == 1 { corp.master_wallet = new_source; }
+                if to_div == 1 { corp.master_wallet = new_target; }
                 Ok(())
             });
             match res {
-                Ok(()) => Some(Ok(PyRep::keyval([
-                    ("fromDivisionID", PyRep::Integer(from_div as i64)),
-                    ("toDivisionID", PyRep::Integer(to_div as i64)),
-                    ("transferredISK", PyRep::Real(amount_isk)),
-                ]))),
+                Ok(()) => Some(Ok(PyRep::keyval([("fromDivisionID", PyRep::Integer(from_div as i64)), ("toDivisionID", PyRep::Integer(to_div as i64)), ("transferredISK", PyRep::Real(amount_isk))]))),
                 Err(e) => Some(Err(e)),
             }
         }
@@ -1385,7 +1347,13 @@ pub(super) fn handle_insert_vote_case(
                     }
                 }
             }
-            let target_id = args.get(3).and_then(|a| a.as_i64()).or_else(|| options.first().map(|o| o.2)).unwrap_or(char_id);
+            let target_id = options.first().map(|o| o.2)
+                .or_else(|| if args.len() >= 5 { args.get(4).and_then(|a| a.as_i64()) } else { None })
+                .or_else(|| args.get(3).and_then(|a| a.as_i64()))
+                .unwrap_or(char_id);
+            if vote_type == 5 && (target_id <= 0 || target_id > 10_000_000_000) {
+                return Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Share creation amount must be positive and bounded".into() });
+            }
             if options.is_empty() {
                 if vote_type == 0 {
                     if !snap.corporations.get(&corp_id).is_some_and(|c| c.members.contains(&target_id)) {
@@ -1399,41 +1367,17 @@ pub(super) fn handle_insert_vote_case(
             }
             snap.next_entity_id += 1;
             let cid = snap.next_entity_id;
-            snap.corp_vote_cases.insert(
-                cid,
-                eve_db::CorpVoteCaseRecord {
-                    case_id: cid,
-                    corporation_id: corp_id,
-                    vote_type,
-                    text: text.to_string(),
-                    description: desc.to_string(),
-                    parameter: target_id,
-                    start_ts: now_unix,
-                    end_ts: now_unix + 86_400,
-                    executed: false,
-                    options,
-                },
-            );
+            snap.corp_vote_cases.insert(cid, eve_db::CorpVoteCaseRecord {
+                case_id: cid, corporation_id: corp_id, vote_type, text: text.to_string(),
+                description: desc.to_string(), parameter: target_id, start_ts: now_unix,
+                end_ts: now_unix + 86_400, executed: false, options,
+            });
             Ok((cid, target_id))
         }) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    ctx.notify(
-        NotificationTarget::Corporation(corp_id),
-        "OnVoteCaseChanged",
-        "corpid",
-        vec![PyRep::Integer(corp_id), PyRep::Integer(case_id)],
-    );
-    ctx.notify(
-        NotificationTarget::Corporation(corp_id),
-        "OnSanctionedActionChanged",
-        "corpid",
-        vec![PyRep::Integer(corp_id), PyRep::Integer(case_id)],
-    );
-    Some(Ok(PyRep::keyval([
-        ("voteCaseID", PyRep::Integer(case_id)),
-        ("voteType", PyRep::Integer(vote_type)),
-        ("parameter", PyRep::Integer(target_id)),
-    ])))
+    ctx.notify(NotificationTarget::Corporation(corp_id), "OnVoteCaseChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(case_id)]);
+    ctx.notify(NotificationTarget::Corporation(corp_id), "OnSanctionedActionChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(case_id)]);
+    Some(Ok(PyRep::keyval([("voteCaseID", PyRep::Integer(case_id)), ("voteType", PyRep::Integer(vote_type)), ("parameter", PyRep::Integer(target_id))])))
 }

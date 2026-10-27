@@ -498,7 +498,7 @@ async fn test_corporation_governance_shares_titles_votes_and_medals_notification
     .expect("MoveCompanyShares");
     let expected_shares = vec![
         vec![
-            PyRep::Integer(P1),
+            PyRep::Integer(corp_id),
             PyRep::Integer(corp_id),
             PyRep::Dict(vec![(PyRep::String(("shares").into()), PyRep::Tuple(vec![PyRep::Integer(1_000), PyRep::Integer(600)]))]),
         ],
@@ -593,7 +593,7 @@ async fn test_corporation_governance_shares_titles_votes_and_medals_notification
     );
     assert!(ctx.drain_notifications_for_char(p3).is_empty());
     let expected_minted = vec![vec![
-        PyRep::Integer(P1),
+        PyRep::Integer(corp_id),
         PyRep::Integer(corp_id),
         PyRep::Dict(vec![(PyRep::String(("shares").into()), PyRep::Tuple(vec![PyRep::Integer(600), PyRep::Integer(1_100)]))]),
     ]];
