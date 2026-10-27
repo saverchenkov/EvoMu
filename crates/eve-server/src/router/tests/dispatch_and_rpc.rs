@@ -588,7 +588,7 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
             None,
         )
         .await;
-    assert_eq!(goal_res.unwrap_err().code, "UnimplementedRPC"); // rpc-lint: allow legacy/negative-test RPC (seasonManager.UnimplementedRPC)
+    assert_eq!(goal_res.unwrap_err().code, "GoalProgressIncomplete");
 
     // Verify unimplemented methods on cataloged services strictly return UnimplementedRPC (no catch-all stub)
     assert_eq!(ctx.cataloged_services.len(), 216);

@@ -340,39 +340,39 @@ fn deliver_login_reward(
             snap.service_state_blobs.insert(key, json);
         }
     }
-    let tok_id = crate::services::account_services::enqueue_redeem_token_in_snapshot(
-        snap,
-        uid,
-        rw.type_id,
-        rw.quantity.max(1) as i32,
-        format!("Campaign {campaign_id} login reward"),
-        docked_station_id,
-        expire_date_time,
-    );
-    let Some(station_id) = docked_station_id else {
-        return tok_id;
-    };
-    snap.next_entity_id += 1;
-    let item_id = snap.next_entity_id;
-    snap.items.insert(
-        item_id,
-        eve_db::InventoryItemRecord {
+    if let Some(station_id) = docked_station_id {
+        snap.next_entity_id += 1;
+        let item_id = snap.next_entity_id;
+        snap.items.insert(
             item_id,
-            type_id: rw.type_id,
-            owner_id: char_id,
-            location_id: station_id,
-            flag: eve_db::InventoryFlag::Hangar,
-            quantity: rw.quantity.max(1) as i32,
-            singleton: rw.quantity == 1,
-            version: 1,
-            dynamic_attributes: HashMap::new(),
-            source_mutaplasmid_id: None,
-            insured_payout_isk: 0.0,
-            is_blueprint_copy: rw.blueprint_runs.is_some(),
-            blueprint_runs_remaining: rw.blueprint_runs.map(|r| r as i32),
-        },
-    );
-    item_id
+            eve_db::InventoryItemRecord {
+                item_id,
+                type_id: rw.type_id,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: rw.quantity.max(1) as i32,
+                singleton: rw.quantity == 1,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: rw.blueprint_runs.is_some(),
+                blueprint_runs_remaining: rw.blueprint_runs.map(|r| r as i32),
+            },
+        );
+        item_id
+    } else {
+        crate::services::account_services::enqueue_redeem_token_in_snapshot(
+            snap,
+            uid,
+            rw.type_id,
+            rw.quantity.max(1) as i32,
+            format!("Campaign {campaign_id} login reward"),
+            None,
+            expire_date_time,
+        )
+    }
 }
 
 pub async fn handle(

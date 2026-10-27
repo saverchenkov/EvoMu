@@ -19,12 +19,20 @@ pub async fn destroy_room_npcs_via_damage(ctx: &ServerContext, char_id: i64, roo
     });
     assert!(!npcs.is_empty(), "room {} must have NPCs", room_idx + 1);
     let h = ctx.systems.get_or_spawn(sys);
+    if let Ok(Some(mut cs)) = h.get_combat_state(ship_id).await {
+        if cs.max_shield_hp < 50_000.0 {
+            cs.max_shield_hp = 50_000.0;
+            cs.shield_hp = 50_000.0;
+            let _ = h.set_combat_state(ship_id, cs).await;
+        }
+    }
     let ship_before = h.get_combat_state(ship_id).await.unwrap().expect("pilot ship has CombatState");
     let hp_before = ship_before.shield_hp + ship_before.armor_hp + ship_before.structure_hp;
     step_extended_npc_ai_sync(ctx, sys);
     let ship_after = h.get_combat_state(ship_id).await.unwrap().expect("pilot ship CombatState after AI tick");
     let hp_after = ship_after.shield_hp + ship_after.armor_hp + ship_after.structure_hp;
     assert!(hp_after < hp_before, "Triglavian room NPC AI tick must damage pilot ship ({hp_after} < {hp_before})");
+    let _ = h.heal_combat_state(ship_id).await;
     for bid in npcs {
         let (_, ball) = h.get_ball_snapshot(bid).await.unwrap().expect("room NPC ball spawned");
         assert!(ABYSSAL_ROOM_NPC_TYPES.contains(&ball.type_id), "NPC {bid} has real Abyssal type, got {}", ball.type_id);

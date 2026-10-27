@@ -1254,7 +1254,7 @@ pub fn handle(
         ("contractProxy", "DeleteMultipleContracts") => {
             Some(crate::services::sov_services::handle_contract_delete_multiple(ctx, session, args))
         }
-        ("contractProxy", "FinishAuction") | ("contractMgr", "FinishAuction") => { // rpc-lint: allow legacy contractMgr alias
+        ("contractProxy", "FinishAuction") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let cid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let now_unix = ctx.now_unix();

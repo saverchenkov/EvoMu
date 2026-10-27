@@ -1103,8 +1103,10 @@ pub fn handle_season_manager(
                 let is_mining_career = milestone
                     .as_ref()
                     .is_some_and(|m| m.career_id == Some(2))
-                    || sde_goal
-                        .is_some_and(|g| g.career_path.eq_ignore_ascii_case("Industrialist"));
+                    || sde_goal.is_some_and(|g| {
+                        g.career_path.eq_ignore_ascii_case("Industrialist")
+                            && g.name.to_lowercase().contains("mine")
+                    });
                 let res = with_season_state(ctx, char_id, |st, snap| {
                     let defs = load_challenge_definitions(snap);
                     ensure_character_challenges(st, &defs, snap, char_id, ctx.now_blueos_filetime_ticks());
@@ -1176,10 +1178,12 @@ pub fn handle_season_manager(
                 .map(|m| m.sp_reward)
                 .unwrap_or(50_000.0);
             let resolved = if let Some(g) = ctx.sde.career_goals.get(&goal_id) {
+                let is_mining = g.career_path.eq_ignore_ascii_case("Industrialist")
+                    && g.name.to_lowercase().contains("mine");
                 Some((
                     g.target_progress,
                     g.sp_reward as f64,
-                    g.career_path.eq_ignore_ascii_case("Industrialist"),
+                    is_mining,
                 ))
             } else {
                 milestones

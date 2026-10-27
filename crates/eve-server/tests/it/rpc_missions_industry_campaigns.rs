@@ -371,3 +371,111 @@ async fn test_industry_and_campaign_mgr_rpcs() {
         other => panic!("expected Dict from get_claim_history, got {other:?}"),
     }
 }
+
+#[tokio::test]
+// parity: feat:account.redeem-tokens
+// parity: rpc:seasonalLoginCampaignManager.claim_reward
+// parity: rpc:userSvc.ClaimRedeemTokens
+// parity: rpc:userSvc.GetRedeemTokens
+async fn test_docked_login_reward_does_not_enqueue_redeem_token() {
+    let ctx = ServerContext::new();
+    let pilot_id: i64 = PILOT_1;
+    let mut sess = login_pilot_char(&ctx, 28_006, "demo", "demo-secret", pilot_id).await;
+
+    // 1. Claim login reward while docked
+    assert!(sess.station_id.is_some());
+    let init_items = ctx.db.with_snapshot(|s| s.items.len());
+    let seasonal_claim = rpc(
+        &ctx,
+        &mut sess,
+        "seasonalLoginCampaignManager",
+        "claim_reward",
+        &[],
+    )
+    .await
+    .expect("claim seasonal reward while docked");
+    assert_eq!(seasonal_claim, PyRep::Bool(true));
+
+    // Confirm items were delivered directly to hangar
+    ctx.db.with_snapshot(|s| {
+        assert!(s.items.len() > init_items);
+        assert!(s.items.values().any(|it| it.owner_id == pilot_id && it.type_id == 87_900));
+    });
+
+    // P0-LOGIN-REWARD-DUP: Ensure no redeem tokens were created for the docked claim
+    let tokens_rep = rpc(&ctx, &mut sess, "userSvc", "GetRedeemTokens", &[])
+        .await
+        .expect("GetRedeemTokens");
+    let PyRep::List(tokens) = tokens_rep else {
+        panic!("expected List from GetRedeemTokens");
+    };
+    assert!(tokens.is_empty(), "no redeem tokens should exist after docked claim");
+
+    let claim_err = rpc(
+        &ctx,
+        &mut sess,
+        "userSvc",
+        "ClaimRedeemTokens",
+        &[PyRep::List(vec![PyRep::Integer(999_999)]), PyRep::Integer(pilot_id)],
+    )
+    .await
+    .expect_err("claiming non-existent redeem token must fail");
+    assert_eq!(claim_err.code, "RedeemTokenNotFound");
+
+    // 2. Test expiration check in ClaimRedeemTokens
+    let uid = sess.user_id.unwrap();
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let expired_tok_id = ctx.db.with_mut_snapshot(|snap| {
+        eve_server::services::account_services::enqueue_redeem_token_in_snapshot(
+            snap,
+            uid,
+            34, // Tritanium
+            100,
+            "Expired Token".into(),
+            None,
+            Some(now_ft - 1_000_000), // Expired in past
+        )
+    });
+
+    // Claiming expired token should fail with RedeemTokenNotFound
+    let expired_claim_err = rpc(
+        &ctx,
+        &mut sess,
+        "userSvc",
+        "ClaimRedeemTokens",
+        &[PyRep::List(vec![PyRep::Integer(expired_tok_id)]), PyRep::Integer(pilot_id)],
+    )
+    .await
+    .expect_err("claiming expired token must fail");
+    assert_eq!(expired_claim_err.code, "RedeemTokenNotFound");
+
+    // 3. Test unexpired token can still be claimed
+    let valid_tok_id = ctx.db.with_mut_snapshot(|snap| {
+        eve_server::services::account_services::enqueue_redeem_token_in_snapshot(
+            snap,
+            uid,
+            34,
+            500,
+            "Valid Token".into(),
+            None,
+            Some(now_ft + 86_400 * 10_000_000), // Future expiry
+        )
+    });
+    let valid_claim = rpc(
+        &ctx,
+        &mut sess,
+        "userSvc",
+        "ClaimRedeemTokens",
+        &[PyRep::List(vec![PyRep::Integer(valid_tok_id)]), PyRep::Integer(pilot_id)],
+    )
+    .await
+    .expect("claiming valid token must succeed");
+    let PyRep::KeyVal(kv) = valid_claim else {
+        panic!("expected KeyVal from ClaimRedeemTokens");
+    };
+    let Some(PyRep::List(claimed)) = kv.get("claimedTokenIDs") else {
+        panic!("claimedTokenIDs");
+    };
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].as_i64(), Some(valid_tok_id));
+}

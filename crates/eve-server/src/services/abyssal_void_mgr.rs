@@ -627,14 +627,18 @@ async fn handle_abyssal_gate_activation(
         .await
         .map_err(|e| BridgeRpcError { code: "SystemError".into(), message: e })?
         .map(|(_, b)| b);
-    if let (Some(sb), Some(gb)) = (ship_ball, gate_ball) {
-        let surface_dist = (sb.position.distance(gb.position) - sb.radius - gb.radius).max(0.0);
-        if surface_dist > 2_500.0 {
-            return Err(BridgeRpcError {
-                code: "GateOutOfRange".into(),
-                message: format!("Distance {surface_dist:.1} m exceeds 2,500 m gate activation proximity"),
-            });
-        }
+    let (Some(sb), Some(gb)) = (ship_ball, gate_ball) else {
+        return Err(BridgeRpcError {
+            code: "GateNotFound".into(),
+            message: "Gate or ship ball not found in space".into(),
+        });
+    };
+    let surface_dist = (sb.position.distance(gb.position) - sb.radius - gb.radius).max(0.0);
+    if surface_dist > 2_500.0 {
+        return Err(BridgeRpcError {
+            code: "GateOutOfRange".into(),
+            message: format!("Distance {surface_dist:.1} m exceeds 2,500 m gate activation proximity"),
+        });
     }
 
     // 3. Mark current room cleared and advance current_room in registry
@@ -794,14 +798,18 @@ async fn handle_abyssal_end_gate_activation(
         .await
         .map_err(|e| BridgeRpcError { code: "SystemError".into(), message: e })?
         .map(|(_, b)| b);
-    if let (Some(sb), Some(gb)) = (ship_ball, gate_ball) {
-        let surface_dist = (sb.position.distance(gb.position) - sb.radius - gb.radius).max(0.0);
-        if surface_dist > 2_500.0 {
-            return Err(BridgeRpcError {
-                code: "GateOutOfRange".into(),
-                message: format!("Distance {surface_dist:.1} m exceeds 2,500 m gate activation proximity"),
-            });
-        }
+    let (Some(sb), Some(gb)) = (ship_ball, gate_ball) else {
+        return Err(BridgeRpcError {
+            code: "GateNotFound".into(),
+            message: "Gate or ship ball not found in space".into(),
+        });
+    };
+    let surface_dist = (sb.position.distance(gb.position) - sb.radius - gb.radius).max(0.0);
+    if surface_dist > 2_500.0 {
+        return Err(BridgeRpcError {
+            code: "GateOutOfRange".into(),
+            message: format!("Distance {surface_dist:.1} m exceeds 2,500 m gate activation proximity"),
+        });
     }
 
     // 3. Remove pocket from registry and mark completed

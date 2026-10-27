@@ -705,8 +705,13 @@ fn handle_inner(
                 let mut claimed_toks = Vec::new();
                 let mut created_items = Vec::new();
                 let mut remaining = Vec::new();
+                let now_ft = ctx.now_blueos_filetime_ticks();
                 for tok in list.drain(..) {
                     if token_ids.contains(&tok.token_id) {
+                        if tok.expire_date_time.is_some_and(|exp| now_ft > exp) {
+                            remaining.push(tok);
+                            continue;
+                        }
                         snap.next_entity_id += 1;
                         let item_id = snap.next_entity_id;
                         let is_ship = ctx
