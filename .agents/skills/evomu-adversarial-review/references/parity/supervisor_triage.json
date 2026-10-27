@@ -1,6 +1,10 @@
 {
   "_about": "Supervisor-maintained NA triage: (1) 1,112 Quasar proto modules unreachable from V24 code.ccp (all 1,048 internal eve/* protos + 64 unreachable eve_public/* protos); (2) 94 feat:quasar.<pkg> rows whose packages have 0 reachable Request/Notice RPC protos in V24 code.ccp (66 internal-only packages + 28 shared identifier/value-type-only packages); (3) 55 rpc:* rows that are client-side Python util.Moniker wrapper methods (Bind, Unbind, QuickBind, SetSessionCheck, clear_memoized) or dict/list/DBRowset/KeyVal attribute accesses (.columns, .header, .itervalues, .iteritems, .iterkeys, .keys, .values, .append, .remove, .get, .description, .dictatorial, .url, .deleted, .colonies, .id) mis-scraped from chained client expressions.",
   "rows": {
+    "notify:OnModuleActivated": {
+      "disposition": "client_local",
+      "evidence": "dogma/client/clientDogmaLocation.pyj ClientDogmaLocation._NotifyOfEffectActivation(): sm.ScatterEvent('OnModuleActivated', ...) — client-only local scatter derived from OnGodmaShipEffect(active=1); never sent by server."
+    },
     "feat:quasar.academy": {
       "disposition": "dead_client_code",
       "evidence": "All 2 Quasar proto files in package 'academy' (e.g. eveProto/generated/eve/academy/ships/events_pb2.pyj, eveProto/generated/eve_public/academy/ships/events_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."

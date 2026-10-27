@@ -321,22 +321,57 @@ pub fn static_npc_faction_standings() -> Vec<(i64, i64, f64)> {
         (500_001, 500_003, 0.5),
         (500_001, 500_004, -0.5),
         (500_001, 500_002, -0.3),
+        (500_001, 500_007, 0.4),
+        (500_001, 500_008, 0.5),
         (500_001, 500_010, -0.8),
+        (500_001, 500_019, -1.0),
         // Minmatar Republic (500002)
         (500_002, 500_004, 0.5),
         (500_002, 500_003, -0.5),
         (500_002, 500_001, -0.3),
+        (500_002, 500_007, -0.7),
         (500_002, 500_011, -0.8),
+        (500_002, 500_015, 0.5),
+        (500_002, 500_019, -1.0),
         // Amarr Empire (500003)
         (500_003, 500_001, 0.5),
         (500_003, 500_002, -0.5),
         (500_003, 500_004, -0.3),
+        (500_003, 500_007, 0.8),
+        (500_003, 500_008, 0.7),
         (500_003, 500_012, -0.8),
+        (500_003, 500_019, -1.0),
         // Gallente Federation (500004)
         (500_004, 500_002, 0.5),
         (500_004, 500_001, -0.5),
         (500_004, 500_003, -0.3),
+        (500_004, 500_016, 0.4),
         (500_004, 500_020, -0.8),
+        (500_004, 500_019, -1.0),
+        // CONCORD Assembly (500006)
+        (500_006, 500_001, 0.5),
+        (500_006, 500_002, 0.5),
+        (500_006, 500_003, 0.5),
+        (500_006, 500_004, 0.5),
+        (500_006, 500_010, -1.0),
+        (500_006, 500_011, -1.0),
+        (500_006, 500_012, -1.0),
+        (500_006, 500_019, -1.0),
+        (500_006, 500_020, -1.0),
+        // Ammatar Mandate (500007) & Khanid Kingdom (500008)
+        (500_007, 500_003, 0.8),
+        (500_007, 500_002, -0.7),
+        (500_008, 500_003, 0.7),
+        (500_008, 500_001, 0.5),
+        // Pirate factions (Guristas 500010, Angel 500011, Blood Raiders 500012, Sansha 500019, Serpentis 500020)
+        (500_010, 500_001, -0.8),
+        (500_011, 500_002, -0.8),
+        (500_012, 500_003, -0.8),
+        (500_019, 500_001, -1.0),
+        (500_019, 500_002, -1.0),
+        (500_019, 500_003, -1.0),
+        (500_019, 500_004, -1.0),
+        (500_020, 500_004, -0.8),
         // Triglavian Collective (500026) <-> EDENCOM (500027)
         (500_026, 500_027, -1.0),
         (500_027, 500_026, -1.0),
@@ -449,12 +484,13 @@ pub fn notify_standing_changes(
     }
     let mods: Vec<PyRep> = changes
         .iter()
-        .map(|&(from_id, new_val, delta)| {
+        .map(|&(from_id, _new_val, delta)| {
             PyRep::Tuple(vec![
                 PyRep::Integer(from_id),
                 PyRep::Integer(char_id),
                 PyRep::Real(delta),
-                PyRep::Real(new_val),
+                PyRep::Real(-10.0),
+                PyRep::Real(10.0),
             ])
         })
         .collect();
@@ -923,15 +959,24 @@ pub async fn handle_extended(
                 load_epic_arc_states(snap, char_id)
                     .into_iter()
                     .map(|a| {
-                        PyRep::keyval([
-                            ("epicArcID", PyRep::Integer(a.epic_arc_id as i64)),
-                            ("agentID", PyRep::Integer(a.agent_id)),
-                            ("message", PyRep::String(format!("Epic Arc {} chapter {} briefing (branch: {:?})", a.epic_arc_id, a.chapter, a.chosen_branch))),
-                        ])
+                        (
+                            PyRep::Integer(a.epic_arc_id as i64),
+                            PyRep::keyval([
+                                ("epicArcID", PyRep::Integer(a.epic_arc_id as i64)),
+                                ("agentID", PyRep::Integer(a.agent_id)),
+                                (
+                                    "message",
+                                    PyRep::String(format!(
+                                        "Epic Arc {} chapter {} briefing (branch: {:?})",
+                                        a.epic_arc_id, a.chapter, a.chosen_branch
+                                    )),
+                                ),
+                            ]),
+                        )
                     })
                     .collect::<Vec<_>>()
             });
-            Some(Ok(PyRep::List(msgs)))
+            Some(Ok(PyRep::Dict(msgs)))
         }
 
         // parity: rpc:epicArcStatus.AgentHasEpicMissionsForCharacter
@@ -1001,6 +1046,13 @@ pub async fn handle_extended(
                             ("currentRoomID", PyRep::Integer(m.current_room_id as i64)),
                             ("npcsRemaining", PyRep::Integer(m.npcs_remaining as i64)),
                             ("objectivesCompleted", PyRep::Bool(obj_completed)),
+                            (
+                                "info",
+                                PyRep::String(format!(
+                                    "Mission {} for agent {}",
+                                    m.mission_id, m.agent_id
+                                )),
+                            ),
                         ])
                     })
                     .collect();
@@ -1058,8 +1110,13 @@ pub async fn handle_extended(
         ("standingMgr", "GetStandingCompositions") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let target_from = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0);
+            let target_to = args
+                .get(1)
+                .and_then(|a| a.as_i64())
+                .filter(|&id| id > 0)
+                .unwrap_or(char_id);
             let res = ctx.db.with_snapshot(|snap| {
-                let Some(ch) = snap.characters.get(&char_id) else {
+                let Some(ch) = snap.characters.get(&target_to).or_else(|| snap.characters.get(&char_id)) else {
                     return PyRep::List(vec![]);
                 };
                 let mut entities: Vec<i64> = if let Some(fid) = target_from {
@@ -1074,11 +1131,11 @@ pub async fn handle_extended(
                         let raw = ch.standings.get(&from_id).copied().unwrap_or(0.0);
                         let has_entry = ch.standings.contains_key(&from_id);
                         let (eff, conn_b, dip_b, crim_b) = compute_effective_standing_breakdown(
-                            ctx, snap, char_id, from_id, raw, has_entry,
+                            ctx, snap, ch.character_id, from_id, raw, has_entry,
                         );
                         PyRep::keyval([
                             ("fromID", PyRep::Integer(from_id)),
-                            ("toID", PyRep::Integer(char_id)),
+                            ("toID", PyRep::Integer(target_to)),
                             ("rawStanding", PyRep::Real(raw)),
                             ("standing", PyRep::Real(raw)),
                             ("effectiveStanding", PyRep::Real(eff)),

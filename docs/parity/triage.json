@@ -83,6 +83,10 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/shared/neocom/journal.pyj:267 JournalSvc.OnAgentMissionChange(): sm.ScatterEvent('OnAgentMissionChanged', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnAgentMissionChanged' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnModuleActivated": {
+    "disposition": "client_local",
+    "evidence": "dogma/client/clientDogmaLocation.pyj ClientDogmaLocation._NotifyOfEffectActivation(): sm.ScatterEvent('OnModuleActivated', ...) \u2014 client-only local scatter derived from OnGodmaShipEffect(active=1); never sent by server."
+  },
   "notify:OnAirNPEFocusChanged": {
     "disposition": "client_local",
     "evidence": "jobboard/client/features/storylines/job.pyj:30 StorylineJob.OnExpandedMissionChanged(): sm.ScatterEvent('OnAirNPEFocusChanged', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnAirNPEFocusChanged' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."

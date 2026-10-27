@@ -96,6 +96,26 @@
       "flagged_by_audit": "20261025-200428"
     },
     {
+      "evidence": "crates/eve-server/src/services/agents_missions_helpers.rs:248-314 computes mission ISK rewards using the DERIVED heuristic base_isk = base_lp * 1000 and bonus_reward = isk_reward / 2 because per-mission ISK reward tables are server-authored and not in V24 client FSD.",
+      "id": "plan:E-5",
+      "flagged_by_audit": "20261026-171500"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/agents_missions_helpers.rs:248-314 computes mission ISK rewards using the DERIVED heuristic base_isk = base_lp * 1000 and bonus_reward = isk_reward / 2 because per-mission ISK reward tables are server-authored and not in V24 client FSD.",
+      "id": "feat:pve.mission-lp-isk-reward-formula",
+      "flagged_by_audit": "20261026-171500"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/agents_standings_arcs.rs:318-378 static_npc_faction_standings() is a static table of inter-faction standings because crpNPCCorporations/chrFactions inter-faction standings are not included in the runtime SDE bundle.",
+      "id": "rpc:standingMgr.GetNPCNPCStandings",
+      "flagged_by_audit": "20261026-171500"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/agents_standings_arcs.rs:318-378 static_npc_faction_standings() is a static table of inter-faction standings because crpNPCCorporations/chrFactions inter-faction standings are not included in the runtime SDE bundle.",
+      "id": "feat:standings.npc-npc-standings",
+      "flagged_by_audit": "20261026-171500"
+    },
+    {
       "evidence": "Category membership is a hand-written match over achievement IDs: crates/eve-server/src/services/quasar_achievements.rs:166-171 and :278-283 ('Industry / Mining', 'Exploration / Navigation', 'Enforcer / Combat', default 4). It is labelled DERIVED, not imported. Achievement names are also a hardcoded match table (:63-135) instead of being read from static data. The category score served by GetRequest comes from this invented bucketing.",
       "id": "quasar:eveProto/generated/eve_public/achievement/category/api/requests_pb2.pyj",
       "flagged_by_audit": "20261026-153450"

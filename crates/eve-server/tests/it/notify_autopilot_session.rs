@@ -105,11 +105,11 @@ async fn test_agent_mission_change_notifications() {
     let ev_offered = events_from(&n_offer, "OnAgentMissionChange");
     assert_eq!(
         ev_offered,
-        vec![vec![PyRep::String("offered".into()), PyRep::Integer(dist_agent_id), PyRep::None]],
-        "Action 1 must emit OnAgentMissionChange(offered, agent_id, None)"
+        vec![vec![PyRep::String("offered".into()), PyRep::Integer(dist_agent_id)]],
+        "Action 1 must emit OnAgentMissionChange(offered, agent_id)"
     );
 
-    // B. Action 3: Accept mission -> OnAgentMissionChange("offer_accepted", agent_id, None)
+    // B. Action 3: Accept mission -> OnAgentMissionChange("offer_accepted", agent_id)
     call(
         &ctx,
         &mut s1,
@@ -122,8 +122,8 @@ async fn test_agent_mission_change_notifications() {
     let ev_accepted = events_from(&n_accept, "OnAgentMissionChange");
     assert_eq!(
         ev_accepted,
-        vec![vec![PyRep::String("offer_accepted".into()), PyRep::Integer(dist_agent_id), PyRep::None]],
-        "Action 3 must emit OnAgentMissionChange(offer_accepted, agent_id, None)"
+        vec![vec![PyRep::String("offer_accepted".into()), PyRep::Integer(dist_agent_id)]],
+        "Action 3 must emit OnAgentMissionChange(offer_accepted, agent_id)"
     );
 
     // C. Action 6: Complete mission -> OnAgentMissionChange("completed", agent_id, None)
@@ -166,8 +166,8 @@ async fn test_agent_mission_change_notifications() {
     let ev_completed = events_from(&n_complete, "OnAgentMissionChange");
     assert_eq!(
         ev_completed,
-        vec![vec![PyRep::String("completed".into()), PyRep::Integer(dist_agent_id), PyRep::None]],
-        "Action 6 must emit OnAgentMissionChange(completed, agent_id, None)"
+        vec![vec![PyRep::String("completed".into()), PyRep::Integer(dist_agent_id)]],
+        "Action 6 must emit OnAgentMissionChange(completed, agent_id)"
     );
 
     // Clean up active mission record and return to agent station
@@ -181,7 +181,7 @@ async fn test_agent_mission_change_notifications() {
     s1.solar_system_id = Some(dist_sys_id);
     s1.station_id = Some(dist_station_id);
 
-    // D. Action 11: Offer, Accept, and Quit mission -> OnAgentMissionChange("quit", agent_id, None)
+    // D. Action 11: Offer, Accept, and Quit mission -> OnAgentMissionChange("quit", agent_id)
     let m_offer2 = call(
         &ctx,
         &mut s1,
@@ -213,7 +213,7 @@ async fn test_agent_mission_change_notifications() {
     let ev_quit = events_from(&n_quit, "OnAgentMissionChange");
     assert_eq!(
         ev_quit,
-        vec![vec![PyRep::String("quit".into()), PyRep::Integer(dist_agent_id), PyRep::None]],
-        "Action 11 must emit OnAgentMissionChange(quit, agent_id, None)"
+        vec![vec![PyRep::String("quit".into()), PyRep::Integer(dist_agent_id)]],
+        "Action 11 must emit OnAgentMissionChange(quit, agent_id)"
     );
 }

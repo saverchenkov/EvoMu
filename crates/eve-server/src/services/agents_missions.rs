@@ -614,7 +614,7 @@ pub async fn handle(
                             let (isk_reward, lp_reward, bonus_reward) =
                                 compute_character_mission_rewards(ctx, char_id, agent_id, mission_id, sys_id);
 
-                            ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String("offered".into()), PyRep::Integer(agent_id), PyRep::None]);
+                            ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String("offered".into()), PyRep::Integer(agent_id)]);
                             let mut offer_kvs = vec![
                                 ("missionID", PyRep::Integer(mission_id as i64)),
                                 ("contentID", PyRep::Integer(mission_id as i64)),
@@ -942,7 +942,7 @@ pub async fn handle(
                     let active_agent_id = ctx.db.with_snapshot(|snap| {
                         snap.active_missions.get(&(char_id, mission_id)).map_or(agent_id, |m| m.agent_id)
                     });
-                    ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String("offer_accepted".into()), PyRep::Integer(active_agent_id), PyRep::None]);
+                    ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String("offer_accepted".into()), PyRep::Integer(active_agent_id)]);
                     Some(Ok(PyRep::keyval([
                         ("missionID", PyRep::Integer(mission_id as i64)),
                         ("contentID", PyRep::Integer(mission_id as i64)),
@@ -1017,7 +1017,7 @@ pub async fn handle(
                             );
                         });
                         ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionObjectivesFailed", "charid", vec![PyRep::Integer(active_agent_id)]);
-                        ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String("failed".into()), PyRep::Integer(active_agent_id), PyRep::None]);
+                        ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String("failed".into()), PyRep::Integer(active_agent_id)]);
                         return Some(Err(BridgeRpcError {
                             code: "MissionExpired".into(),
                             message: format!("Mission {mission_id} has expired and failed"),
@@ -1291,7 +1291,7 @@ pub async fn handle(
                         Ok((new_standing, tally, storyline_offered, bonus_paid, st_changes)) => {
                             notify_standing_changes(ctx, char_id, &st_changes);
                             ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionObjectivesCompleted", "charid", vec![PyRep::Integer(active_agent_id)]);
-                            ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String("completed".into()), PyRep::Integer(active_agent_id), PyRep::None]);
+                            ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String("completed".into()), PyRep::Integer(active_agent_id)]);
                             Some(Ok(PyRep::keyval([
                                 ("missionID", PyRep::Integer(mission_id as i64)),
                                 ("contentID", PyRep::Integer(mission_id as i64)),
@@ -1323,7 +1323,7 @@ pub async fn handle(
                                 ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionObjectivesFailed", "charid", vec![PyRep::Integer(active_agent_id)]);
                             }
                             let action_str = if was_accepted { "quit" } else { "offer_declined" };
-                            ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String(action_str.into()), PyRep::Integer(active_agent_id), PyRep::None]);
+                            ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String(action_str.into()), PyRep::Integer(active_agent_id)]);
                             Some(Ok(PyRep::keyval([
                                 ("missionID", PyRep::Integer(mission_id as i64)),
                                 ("contentID", PyRep::Integer(mission_id as i64)),
