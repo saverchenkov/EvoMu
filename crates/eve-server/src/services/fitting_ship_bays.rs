@@ -730,7 +730,7 @@ pub(crate) async fn ship_scoop_and_store(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let dock_id = session.station_id.or(session.structure_id);
-    let _supplied_password = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
+    let supplied_password = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
     if method == "StoreVessel" {
         let (target_ship_id, host_ship_id) = if args.len() >= 2 {
             (args[0].as_i64().unwrap_or(0), args[1].as_i64().unwrap_or(0))
@@ -785,7 +785,7 @@ pub(crate) async fn ship_scoop_and_store(
                 if has_non_charge {
                     return Err(err("ShipHasNonChargeCargo", "Cannot store ship in Ship Maintenance Bay while it carries cargo other than charges/ammo"));
                 }
-                if !fitting_containers_ships::can_character_access_ship_bay_snap(snap, char_id, host_ship_id, host.owner_id, true) {
+                if !fitting_containers_ships::can_character_access_ship_bay_with_password_snap(snap, char_id, host_ship_id, host.owner_id, true, supplied_password) {
                     return Err(err("SMAAccessDenied", "Ship Maintenance Bay access denied by ship configuration"));
                 }
                 let Some(host_type) = ctx.sde.types.get(&host.type_id) else {
@@ -894,7 +894,7 @@ pub(crate) async fn ship_scoop_and_store(
                 if sma_cap <= 0.0 {
                     return Err(err("NoShipMaintenanceBay", format!("Ship {} does not have a Ship Maintenance Bay", host_type.name)));
                 }
-                if !fitting_containers_ships::can_character_access_ship_bay_snap(snap, char_id, host_ship_id, host.owner_id, true) {
+                if !fitting_containers_ships::can_character_access_ship_bay_with_password_snap(snap, char_id, host_ship_id, host.owner_id, true, supplied_password) {
                     return Err(err("SMAAccessDenied", "Ship Maintenance Bay access denied by ship configuration"));
                 }
                 let target_vol = fitting_containers_ships::effective_item_unit_volume(&ctx.sde, target) * (target.quantity as f64);
@@ -1054,7 +1054,7 @@ pub(crate) async fn ship_scoop_and_store(
                 if sma_cap <= 0.0 {
                     return Err(err("NoShipMaintenanceBay", format!("Ship {} does not have a Ship Maintenance Bay", host_type.name)));
                 }
-                if !fitting_containers_ships::can_character_access_ship_bay_snap(snap, char_id, host_ship_id, host.owner_id, true) {
+                if !fitting_containers_ships::can_character_access_ship_bay_with_password_snap(snap, char_id, host_ship_id, host.owner_id, true, supplied_password) {
                     return Err(err("SMAAccessDenied", "Ship Maintenance Bay access denied by ship configuration"));
                 }
                 let target_vol = fitting_containers_ships::effective_item_unit_volume(&ctx.sde, target) * (target.quantity as f64);

@@ -657,6 +657,32 @@ pub async fn handle(
                     }
                     let tmpl_opt = ctx.sde.missions.get(&mission_id).cloned();
                     let agent_info_opt = ctx.sde.agents.get(&actual_agent_id).cloned();
+                    if action_id == 3 {
+                        if let Some(ref agent_info) = agent_info_opt {
+                            let station_has_local_agents = session.station_id.is_some_and(|sid| {
+                                ctx.sde.agents.values().any(|a| {
+                                    a.solar_system_id == Some(sys_id)
+                                        && a.station_id == Some(sid)
+                                        && !is_storyline_agent_type(a.agent_type_id)
+                                        && !is_unsupported_direct_agent_type(a.agent_type_id)
+                                })
+                            });
+                            if agent_info.solar_system_id != Some(sys_id)
+                                || (session.station_id.is_some()
+                                    && (explicit_agent || station_has_local_agents)
+                                    && agent_info.station_id.is_some()
+                                    && agent_info.station_id != session.station_id)
+                            {
+                                return Some(Err(BridgeRpcError {
+                                    code: "AgentNotCoLocated".into(),
+                                    message: format!(
+                                        "Agent {actual_agent_id} is in system {:?} / station {:?}, not character's current location (system {sys_id}, station {:?})",
+                                        agent_info.solar_system_id, agent_info.station_id, session.station_id
+                                    ),
+                                }));
+                            }
+                        }
+                    }
                     let enc_opt = tmpl_opt.as_ref().and_then(|t| {
                         agent_info_opt
                             .as_ref()
@@ -739,7 +765,9 @@ pub async fn handle(
                         let mut need_npc = false;
                         if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
                             m.state = "Accepted".into();
-                            m.solar_system_id = sys_id;
+                            if m.solar_system_id == 0 {
+                                m.solar_system_id = sys_id;
+                            }
                             need_npc = m.npcs_remaining > 0;
                         }
                         if need_npc {

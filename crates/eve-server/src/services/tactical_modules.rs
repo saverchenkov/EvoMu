@@ -1165,17 +1165,22 @@ pub async fn activate_command_burst(
         });
     }
 
-    let charge_tid = charge_tid_opt.or_else(|| {
-        ctx.db.with_snapshot(|snap| {
-            let mod_flag = snap.items.get(&module_id).map(|i| i.flag);
-            let is_burst_charge = |i: &eve_db::InventoryItemRecord| {
-                i.location_id == ship_id && i.item_id != module_id && i.quantity > 0
-                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| matches!(t.group_id, 1769 | 1771 | 1772 | 1773 | 1774 | 4905))
-            };
-            snap.items.values().find(|i| Some(i.flag) == mod_flag && is_burst_charge(i))
-                .or_else(|| snap.items.values().find(|i| is_burst_charge(i)))
-                .map(|i| i.type_id)
-        })
+    let (charge_tid, charge_item_id_opt) = ctx.db.with_snapshot(|snap| {
+        let mod_flag = snap.items.get(&module_id).map(|i| i.flag);
+        let is_burst_charge = |i: &eve_db::InventoryItemRecord| {
+            i.location_id == ship_id && i.item_id != module_id && i.quantity > 0
+                && ctx.sde.types.get(&i.type_id).is_some_and(|t| matches!(t.group_id, 1769 | 1771 | 1772 | 1773 | 1774 | 4905))
+        };
+        if let Some(found) = snap
+            .items
+            .values()
+            .find(|i| Some(i.flag) == mod_flag && is_burst_charge(i))
+            .or_else(|| snap.items.values().find(|i| is_burst_charge(i)))
+        {
+            (Some(found.type_id), Some(found.item_id))
+        } else {
+            (charge_tid_opt, None)
+        }
     });
     let Some(c_tid) = charge_tid else {
         return Err(BridgeRpcError {
@@ -1357,7 +1362,23 @@ pub async fn activate_command_burst(
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.insert(module_id);
-        snap.module_active_charges.insert(module_id, c_tid);
+        let mut exhausted = false;
+        if let Some(cid) = charge_item_id_opt {
+            if let Some(ci) = snap.items.get_mut(&cid) {
+                ci.quantity = ci.quantity.saturating_sub(1);
+                if ci.quantity == 0 {
+                    exhausted = true;
+                }
+            }
+            if exhausted {
+                snap.items.remove(&cid);
+            }
+        }
+        if exhausted {
+            snap.module_active_charges.remove(&module_id);
+        } else {
+            snap.module_active_charges.insert(module_id, c_tid);
+        }
     });
     for &(member_cid, member_sid) in &affected_ships {
         ctx.invalidate_ship_fitting(member_sid);

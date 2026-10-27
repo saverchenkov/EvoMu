@@ -844,6 +844,12 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 .or(session.ship_id)
                 .unwrap_or(0);
             if method == "SetShipKillCounter" {
+                if !session.has_gm_role() {
+                    return Some(Err(BridgeRpcError {
+                        code: "GMRoleRequired".into(),
+                        message: "SetShipKillCounter requires GM role".into(),
+                    }));
+                }
                 let kills = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).max(0);
                 let res = ctx.db.try_with_mut_snapshot(|snap| {
                     let Some(it) = snap.items.get_mut(&ship_id) else {

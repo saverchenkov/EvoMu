@@ -1200,29 +1200,33 @@ pub(crate) async fn handle_dogma_im(
                 }
             }
 
-            let mut rounds_per_mod = 1i32;
             let mut reload_time_ms = 10_000.0;
             let mut first_mod_group_id = 0u32;
-            if let Some(&first_mod_id) = all_target_modules.first() {
-                if let Some(mod_item) = ctx.db.with_snapshot(|snap| snap.items.get(&first_mod_id).cloned()) {
+            let mut per_mod_caps: Vec<(i64, i32)> = Vec::with_capacity(all_target_modules.len());
+            for (idx, &mod_id) in all_target_modules.iter().enumerate() {
+                let mut cap_rounds = 1i32;
+                if let Some(mod_item) = ctx.db.with_snapshot(|snap| snap.items.get(&mod_id).cloned()) {
                     if let Some(mod_t) = ctx.sde.types.get(&mod_item.type_id) {
-                        first_mod_group_id = mod_t.group_id;
+                        if idx == 0 {
+                            first_mod_group_id = mod_t.group_id;
+                            if let Some(&rt) = mod_t.default_attributes.get(&1795) {
+                                reload_time_ms = rt;
+                            }
+                            if mod_t.group_id == 1770 {
+                                let cbs_lvl = ctx.character_skill_levels(char_id).get(&43728).copied().unwrap_or(0).min(5);
+                                reload_time_ms = 60_000.0 * (1.0 - 0.10 * (cbs_lvl as f64));
+                            }
+                        }
                         let cap = mod_t.capacity.max(0.0);
                         if cap > 0.0 {
-                            rounds_per_mod = (cap / charge_vol).floor() as i32;
-                        }
-                        if let Some(&rt) = mod_t.default_attributes.get(&1795) {
-                            reload_time_ms = rt;
-                        }
-                        if mod_t.group_id == 1770 {
-                            let cbs_lvl = ctx.character_skill_levels(char_id).get(&43728).copied().unwrap_or(0).min(5);
-                            reload_time_ms = 60_000.0 * (1.0 - 0.10 * (cbs_lvl as f64));
+                            cap_rounds = (cap / charge_vol).floor() as i32;
                         }
                     }
                 }
-            }
-            if rounds_per_mod <= 0 {
-                rounds_per_mod = 1;
+                if cap_rounds <= 0 {
+                    cap_rounds = 1;
+                }
+                per_mod_caps.push((mod_id, cap_rounds));
             }
 
             let num_mods = all_target_modules.len() as i32;
@@ -1232,10 +1236,75 @@ pub(crate) async fn handle_dogma_im(
                     message: format!("Need at least {num_mods} charges, but only {avail_qty} available in stack"),
                 }));
             }
-            let actual_per_mod = rounds_per_mod.min(avail_qty / num_mods).max(1);
-            let total_needed = actual_per_mod * num_mods;
+            let fair_share = (avail_qty / num_mods).max(1);
+            let mut mod_allocations: Vec<(i64, i32)> = Vec::with_capacity(per_mod_caps.len());
+            let mut total_needed = 0i32;
+            for &(mod_id, cap_rounds) in &per_mod_caps {
+                let alloc = cap_rounds.min(fair_share).max(1);
+                mod_allocations.push((mod_id, alloc));
+                total_needed += alloc;
+            }
 
-            ctx.db.with_mut_snapshot(|snap| {
+            let cargo_cap_opt = ctx
+                .get_or_rebuild_ship_fitting(char_id, ship_id)
+                .ok()
+                .map(|f| f.evaluated_context(&ctx.sde).ship.get_attribute(38, &ctx.sde))
+                .filter(|&c| c > 0.0)
+                .or_else(|| {
+                    ctx.db.with_snapshot(|snap| {
+                        snap.items
+                            .get(&ship_id)
+                            .and_then(|s| ctx.sde.types.get(&s.type_id))
+                            .map(|t| t.capacity)
+                            .filter(|&c| c > 0.0)
+                    })
+                });
+
+            let load_res = ctx.db.try_with_mut_snapshot(|snap| {
+                if let Some(cargo_cap) = cargo_cap_opt {
+                    let source_in_cargo = snap
+                        .items
+                        .get(&first_charge_id)
+                        .is_some_and(|s| s.location_id == ship_id && s.flag == InventoryFlag::Cargo);
+                    let current_cargo_used: f64 = snap
+                        .items
+                        .values()
+                        .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::Cargo)
+                        .map(|i| {
+                            let v = ctx.sde.types.get(&i.type_id).map(|t| t.volume).unwrap_or(0.0);
+                            v * (i.quantity as f64)
+                        })
+                        .sum();
+                    let removed_from_cargo_vol = if source_in_cargo {
+                        charge_vol * (total_needed as f64)
+                    } else {
+                        0.0
+                    };
+                    let mut unloaded_to_cargo_vol = 0.0;
+                    for &(mod_id, _) in &mod_allocations {
+                        if let Some(mod_item) = snap.items.get(&mod_id) {
+                            let slot_flag = mod_item.flag;
+                            for prev in snap.items.values().filter(|i| {
+                                i.location_id == ship_id && i.flag == slot_flag && i.item_id != mod_id
+                            }) {
+                                let pv = ctx.sde.types.get(&prev.type_id).map(|t| t.volume).unwrap_or(0.0);
+                                unloaded_to_cargo_vol += pv * (prev.quantity as f64);
+                            }
+                        }
+                    }
+                    if unloaded_to_cargo_vol > 0.0
+                        && (current_cargo_used - removed_from_cargo_vol + unloaded_to_cargo_vol)
+                            > cargo_cap + 1e-4
+                    {
+                        return Err(BridgeRpcError {
+                            code: "NotEnoughCargoSpace".into(),
+                            message: format!(
+                                "Not enough cargo space on ship {ship_id} to unload existing charges ({unloaded_to_cargo_vol:.1} m³ needed)"
+                            ),
+                        });
+                    }
+                }
+
                 if let Some(stack) = snap.items.get_mut(&first_charge_id) {
                     if stack.quantity > total_needed {
                         stack.quantity -= total_needed;
@@ -1244,7 +1313,7 @@ pub(crate) async fn handle_dogma_im(
                         snap.items.remove(&first_charge_id);
                     }
                 }
-                for &mod_id in &all_target_modules {
+                for &(mod_id, alloc_qty) in &mod_allocations {
                     let Some(mod_item) = snap.items.get(&mod_id).cloned() else {
                         continue;
                     };
@@ -1268,7 +1337,7 @@ pub(crate) async fn handle_dogma_im(
                             owner_id: char_id,
                             location_id: ship_id,
                             flag: slot_flag,
-                            quantity: actual_per_mod,
+                            quantity: alloc_qty,
                             singleton: false,
                             version: 1,
                             dynamic_attributes: HashMap::new(),
@@ -1279,7 +1348,11 @@ pub(crate) async fn handle_dogma_im(
                         },
                     );
                 }
+                Ok(())
             });
+            if let Err(e) = load_res {
+                return Some(Err(e));
+            }
 
             let is_in_space = session.station_id.is_none() && session.structure_id.is_none();
             let is_script = ctx.sde.types.get(&charge_type_id).is_some_and(|t| t.group_id == 908);

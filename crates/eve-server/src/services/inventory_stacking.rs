@@ -133,22 +133,58 @@ pub(super) fn handle_stack_ops(
                 }));
             }
             let mut updated_records = Vec::with_capacity(ops.len());
+            let alsc_locked_set = fitting_containers_ships::read_container_ship_state(ctx).alsc_locked_items;
             for (mut src_id, dst_id, qty_opt) in ops {
-                let has_courier_tag = ctx.db.with_snapshot(|snap| {
-                    let is_courier = |id| snap.item_custom_names.get(&id).map_or(false, |s| s.starts_with("courier_cargo:"));
-                    is_courier(src_id) || is_courier(dst_id)
-                });
-                if has_courier_tag {
+                if alsc_locked_set.contains(&src_id) || alsc_locked_set.contains(&dst_id) {
                     return Some(Err(BridgeRpcError {
-                        code: "StackFailed".into(),
-                        message: "Cannot merge courier mission cargo".into(),
+                        code: "ALSCItemLocked".into(),
+                        message: "Cannot merge items locked in an Audit Log Secure Container".into(),
                     }));
                 }
+                let pre_check = ctx.db.with_snapshot(|snap| {
+                    let is_courier = |id| snap.item_custom_names.get(&id).map_or(false, |s| s.starts_with("courier_cargo:"));
+                    if is_courier(src_id) || is_courier(dst_id) {
+                        return Err("Cannot merge courier mission cargo".to_string());
+                    }
+                    if snap.is_item_locked_in_contract_or_job(src_id) || snap.is_item_locked_in_contract_or_job(dst_id) {
+                        return Err("Cannot merge locked items".to_string());
+                    }
+                    let Some(src) = snap.items.get(&src_id) else {
+                        return Err(format!("Source item {src_id} not found"));
+                    };
+                    let Some(dst) = snap.items.get(&dst_id) else {
+                        return Err(format!("Destination item {dst_id} not found"));
+                    };
+                    if src_id == dst_id {
+                        return Err("Cannot merge stack into itself".to_string());
+                    }
+                    if src.owner_id != char_id || dst.owner_id != char_id {
+                        return Err("Stack ownership mismatch".to_string());
+                    }
+                    if src.type_id != dst.type_id || src.location_id != dst.location_id || src.flag != dst.flag {
+                        return Err("Incompatible stacks for merge".to_string());
+                    }
+                    if src.singleton || dst.singleton || src.is_blueprint_copy || dst.is_blueprint_copy {
+                        return Err("Cannot merge singleton or BPC items".to_string());
+                    }
+                    if !src.dynamic_attributes.is_empty() || !dst.dynamic_attributes.is_empty() || src.source_mutaplasmid_id.is_some() || dst.source_mutaplasmid_id.is_some() {
+                        return Err("Cannot merge mutated/dynamic items".to_string());
+                    }
+                    if src.flag == InventoryFlag::Locked || dst.flag == InventoryFlag::Locked {
+                        return Err("Cannot merge locked items".to_string());
+                    }
+                    Ok(src.quantity)
+                });
+                let src_qty = match pre_check {
+                    Ok(q) => q,
+                    Err(msg) => {
+                        return Some(Err(BridgeRpcError {
+                            code: "StackFailed".into(),
+                            message: msg,
+                        }));
+                    }
+                };
                 if let Some(req_qty) = qty_opt {
-                    let src_qty = ctx
-                        .db
-                        .with_snapshot(|snap| snap.items.get(&src_id).map(|i| i.quantity))
-                        .unwrap_or(0);
                     if req_qty <= 0 || req_qty > src_qty {
                         return Some(Err(BridgeRpcError {
                             code: "StackFailed".into(),
@@ -225,6 +261,7 @@ pub(super) fn handle_stack_ops(
                 .map(|f| InventoryFlag::from_u16(f as u16))
                 .unwrap_or(default_flag);
 
+            let alsc_locked_set = fitting_containers_ships::read_container_ship_state(ctx).alsc_locked_items;
             let groups: HashMap<TypeId, Vec<i64>> = ctx.db.with_snapshot(|snap| {
                 let mut by_type: HashMap<TypeId, Vec<i64>> = HashMap::new();
                 for item in snap.items.values() {
@@ -236,6 +273,8 @@ pub(super) fn handle_stack_ops(
                         && item.dynamic_attributes.is_empty()
                         && item.source_mutaplasmid_id.is_none()
                         && item.quantity > 0
+                        && !alsc_locked_set.contains(&item.item_id)
+                        && !snap.is_item_locked_in_contract_or_job(item.item_id)
                         && !snap.item_custom_names.get(&item.item_id).map_or(false, |s| s.starts_with("courier_cargo:"))
                     {
                         by_type.entry(item.type_id).or_default().push(item.item_id);
@@ -481,7 +520,24 @@ pub(crate) async fn handle_multi_add(
                     message: format!("Item {item_id} not found"),
                 });
             };
-            if item.owner_id != char_id && !looted_from_space_ids.contains(&item_id) {
+            let is_corp_item = ch.corporation_id > 0 && item.owner_id == ch.corporation_id;
+            if is_corp_item && (116..=122).contains(&(item.flag as i64)) {
+                let (is_ceo, roles) = get_effective_corp_roles_at_location(
+                    ctx,
+                    ch.corporation_id,
+                    char_id,
+                    Some(item.location_id),
+                );
+                let div_idx = ((item.flag as i64) - 116) as u32;
+                let req_take_role = 1u64 << (13 + div_idx);
+                if !is_ceo && !eve_db::corp_roles::has_role(roles, req_take_role) {
+                    return Err(BridgeRpcError {
+                        code: "CorpRoleDenied".into(),
+                        message: format!("Corporation role denied for division {} take", div_idx + 1),
+                    });
+                }
+            }
+            if item.owner_id != char_id && !is_corp_item && !looted_from_space_ids.contains(&item_id) {
                 return Err(BridgeRpcError {
                     code: "ItemOwnershipViolation".into(),
                     message: format!("Character {char_id} is not authorized to move item {item_id}"),
@@ -707,8 +763,11 @@ pub(crate) async fn handle_multi_add(
                 message: format!("Item {item_id} not found"),
             })?;
             let old_flag_u16 = it.flag as u16;
-            if it.location_id != new_loc {
-                old_containers.insert(it.location_id);
+            let old_loc = it.location_id;
+            let it_tid = it.type_id;
+            let it_qty = it.quantity;
+            if old_loc != new_loc {
+                old_containers.insert((old_loc, item_id, it_tid, it_qty));
             }
             it.location_id = new_loc;
             it.flag = flag;
@@ -725,13 +784,22 @@ pub(crate) async fn handle_multi_add(
             snap.module_online_states.remove(&item_id);
             snap.module_active_states.remove(&item_id);
             snap.module_active_charges.remove(&item_id);
-            moved.push(item_id);
+            moved.push((item_id, it_tid, it_qty));
         }
         Ok((moved, old_containers))
     })?;
-    for old_cont in old_containers {
+    let mut despawn_set = HashSet::new();
+    for (old_cont, item_id, it_tid, it_qty) in old_containers {
+        fitting_containers_ships::record_container_take_log(ctx, char_id, item_id, it_tid, it_qty, old_cont);
+        despawn_set.insert(old_cont);
+    }
+    for &(item_id, it_tid, it_qty) in &moved {
+        fitting_containers_ships::record_container_add_log(ctx, char_id, item_id, it_tid, it_qty, new_loc);
+    }
+    for old_cont in despawn_set {
         let _ = despawn_empty_jetcan_if_needed(ctx, session.solar_system_id, old_cont).await;
     }
+    let moved: Vec<i64> = moved.into_iter().map(|(id, _, _)| id).collect();
     let mut source_ships = HashSet::new();
     for &(old_loc, item_id, _) in &fitted_unfit_ids {
         ctx.remove_projected_ewar_by_module(item_id);
@@ -974,29 +1042,90 @@ pub(super) fn handle_list(
             }
         }
     }
-    let is_deployable_or_shipping_unit = ctx.db.with_snapshot(|snap| {
+    {
+        let mut st = fitting_containers_ships::read_container_ship_state(ctx);
+        if let Some(req_pw) = st.container_passwords.get(&bound_loc_id).cloned() {
+            if !req_pw.is_empty()
+                && !st.unlocked_containers.contains(&(bound_loc_id, char_id))
+                && !st.unlocked_containers.contains(&(char_id, bound_loc_id))
+            {
+                let supplied_pw = kwargs
+                    .get("password")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| args.iter().find_map(|a| a.as_str()));
+                if supplied_pw == Some(req_pw.as_str()) {
+                    st.unlocked_containers.insert((bound_loc_id, char_id));
+                    fitting_containers_ships::save_container_ship_state(ctx, &st);
+                } else {
+                    return Err(BridgeRpcError {
+                        code: "ALSCPasswordRequired".into(),
+                        message: format!("Password required to list contents of container {bound_loc_id}"),
+                    });
+                }
+            }
+        }
+    }
+    let unit_check: Result<bool, BridgeRpcError> = ctx.db.with_snapshot(|snap| {
         if let Some(it) = snap.items.get(&bound_loc_id) {
             let cat = ctx.sde.types.get(&it.type_id).map(|t| t.category_id).unwrap_or(0);
             let grp = ctx.sde.types.get(&it.type_id).map(|t| t.group_id).unwrap_or(0);
             let is_personal = cat == 22 || grp == 340;
-            let is_unit = cat == 22 || matches!(grp, 12 | 340 | 448 | 649);
+            let is_unit = cat == 22 || matches!(grp, 12 | 340 | 448 | 649) || it.type_id == 23;
             let is_fleet_auth = !is_personal
                 && snap.fleets.values().any(|f| f.members.contains(&char_id) && f.members.contains(&it.owner_id))
                 && crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
                     rt.authorized_shipping_storage.contains(&(bound_loc_id, char_id))
                 });
             let is_auth = session.has_gm_role() || it.owner_id == char_id || it.owner_id == 0 || is_fleet_auth;
-            if !is_unit || !is_auth { return false; }
-            if it.owner_id != char_id && !session.has_gm_role() {
+            if !is_unit || !is_auth {
+                return Ok(false);
+            }
+            if (30_000_000..=39_999_999).contains(&it.location_id) && !session.has_gm_role() {
                 let sys_id = session.solar_system_id.unwrap_or(0);
-                if sys_id == 0 || it.location_id != sys_id as i64 { return false; }
+                if session.station_id.is_some()
+                    || session.structure_id.is_some()
+                    || sys_id == 0
+                    || it.location_id != sys_id as i64
+                {
+                    return Err(BridgeRpcError {
+                        code: "NotInSameSolarSystem".into(),
+                        message: format!("Caller must be in space in system {} to list container {bound_loc_id}", it.location_id),
+                    });
+                }
                 let sys_handle = ctx.systems.get_or_spawn(sys_id);
-                let s_pos = sys_handle.get_ball_position_sync(session.ship_id.unwrap_or(0));
-                let u_pos = sys_handle.get_ball_position_sync(bound_loc_id);
-                s_pos.zip(u_pos).map(|(s, u)| s.distance(u) <= 5_000.0).unwrap_or(false)
-            } else { true }
-        } else { false }
+                let ship_id = session.ship_id.unwrap_or(0);
+                let s_pos = sys_handle
+                    .get_ball_position_sync(ship_id)
+                    .or_else(|| snap.item_positions.get(&ship_id).copied().map(glam::DVec3::from));
+                let u_pos = sys_handle
+                    .get_ball_position_sync(bound_loc_id)
+                    .or_else(|| snap.item_positions.get(&bound_loc_id).copied().map(glam::DVec3::from));
+                let max_range = if cat == 22 { 5_000.0 } else { 2_500.0 };
+                if let Some((s, u)) = s_pos.zip(u_pos) {
+                    let ship_r = snap
+                        .items
+                        .get(&ship_id)
+                        .and_then(|si| ctx.sde.types.get(&si.type_id))
+                        .map(|t| t.radius)
+                        .unwrap_or(0.0);
+                    let cont_r = ctx.sde.types.get(&it.type_id).map(|t| t.radius).unwrap_or(0.0);
+                    let edge_dist = (s.distance(u) - ship_r - cont_r).max(0.0);
+                    if edge_dist > max_range {
+                        return Err(BridgeRpcError {
+                            code: "OutOfRange".into(),
+                            message: format!("Container {bound_loc_id} is out of range ({edge_dist:.1}m > {max_range:.0}m)"),
+                        });
+                    }
+                } else if it.owner_id != char_id {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     });
+    let is_deployable_or_shipping_unit = unit_check?;
     let rows = if is_deployable_or_shipping_unit {
         ctx.db.with_snapshot(|snap| {
             snap.items

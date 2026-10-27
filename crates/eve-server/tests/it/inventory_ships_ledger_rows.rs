@@ -913,7 +913,9 @@ async fn test_rename_ship_kill_counter_ship_tree_and_masteries() {
 
     // 2. Kill counter: starts at 0, records kills, resets on repackage.
     assert_eq!(call(&ctx, &mut s1, "shipKillCounter", "GetItemKillCountPlayer", vec![PyRep::Integer(100_000_001)]).await.unwrap().as_i64(), Some(0));
+    s1.role |= eve_db::service_roles::ROLE_GMH;
     call(&ctx, &mut s1, "shipKillCounter", "SetShipKillCounter", vec![PyRep::Integer(100_000_001), PyRep::Integer(23)]).await.unwrap();
+    s1.role &= !eve_db::service_roles::ROLE_GMH;
     assert_eq!(call(&ctx, &mut s1, "shipKillCounter", "GetItemKillCountPlayer", vec![PyRep::Integer(100_000_001)]).await.unwrap().as_i64(), Some(23));
 
     // 3. Ship tree skill requirements & Mastery levels 1..=5 from trained skills/certificates.

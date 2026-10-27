@@ -898,6 +898,7 @@ pub(crate) async fn handle_module_cycles(
                     for &tid in &linked_turrets {
                         let tflag = snap.items.get(&tid).map(|i| i.flag);
                         if let Some(tf) = tflag {
+                            let mut remove_cid: Option<i64> = None;
                             if let Some(charge_item) = snap.items.values_mut().find(|i| {
                                 i.location_id == ship_id
                                     && i.flag == tf
@@ -920,8 +921,11 @@ pub(crate) async fn handle_module_cycles(
                                     } else {
                                         vol_chance.clamp(0.0, 1.0)
                                     };
-                                } else if mod_type.group_id != 1770 || charge_item.quantity > 1 {
+                                } else {
                                     charge_item.quantity = charge_item.quantity.saturating_sub(1);
+                                    if charge_item.quantity == 0 {
+                                        remove_cid = Some(charge_item.item_id);
+                                    }
                                 }
                             } else if mod_type.group_id == 1770 && active_burst_charge_tid.is_none() {
                                 if let Some(cargo_charge) = snap.items.values_mut().find(|i| {
@@ -931,10 +935,15 @@ pub(crate) async fn handle_module_cycles(
                                         && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 1771)
                                 }) {
                                     active_burst_charge_tid = Some(cargo_charge.type_id);
-                                    if cargo_charge.quantity > 1 {
-                                        cargo_charge.quantity = cargo_charge.quantity.saturating_sub(1);
+                                    cargo_charge.quantity = cargo_charge.quantity.saturating_sub(1);
+                                    if cargo_charge.quantity == 0 {
+                                        remove_cid = Some(cargo_charge.item_id);
                                     }
                                 }
+                            }
+                            if let Some(rcid) = remove_cid {
+                                snap.items.remove(&rcid);
+                                snap.module_active_charges.remove(&tid);
                             }
                         }
                     }

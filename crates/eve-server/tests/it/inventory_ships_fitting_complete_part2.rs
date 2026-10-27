@@ -184,6 +184,7 @@ async fn test_ships_board_eject_corvette_insurance_repair_killmarks_mastery_t3c(
     )
     .await
     .expect("SetLabel");
+    sess.role |= eve_db::service_roles::ROLE_GMH;
     ctx.dispatch_rpc(
         &mut sess,
         "shipKillCounter",
@@ -195,6 +196,7 @@ async fn test_ships_board_eject_corvette_insurance_repair_killmarks_mastery_t3c(
     )
     .await
     .expect("SetShipKillCounter");
+    sess.role &= !eve_db::service_roles::ROLE_GMH;
     let kills = ctx
         .dispatch_rpc(
             &mut sess,
