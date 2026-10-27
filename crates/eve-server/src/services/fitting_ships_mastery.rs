@@ -1029,161 +1029,76 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         .map(|b| b.object_id)
                         .filter(|&id| id >= 60_000_000),
                 };
-                let current_sys = if char_sys > 0 {
-                    char_sys
-                } else {
-                    session.solar_system_id.map(|s| s as i64).unwrap_or(0)
-                };
+                let current_sys = if char_sys > 0 { char_sys } else { session.solar_system_id.map(|s| s as i64).unwrap_or(0) };
                 let mut trashed: Vec<(i64, i64)> = Vec::with_capacity(item_ids.len());
                 for &item_id in &item_ids {
                     let Some(item) = snap.items.get(&item_id) else {
-                        return Err(BridgeRpcError {
-                            code: "DeleteFailed".into(),
-                            message: format!("Item {item_id} not found"),
-                        });
+                        return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Item {item_id} not found") });
                     };
                     if item.owner_id != char_id {
-                        return Err(BridgeRpcError {
-                            code: "DeleteFailed".into(),
-                            message: format!("Item {item_id} is not owned by character {char_id}"),
-                        });
+                        return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Item {item_id} is not owned by character {char_id}") });
                     }
                     if item_id == active_ship_id {
-                        return Err(BridgeRpcError {
-                            code: "DeleteFailed".into(),
-                            message: format!("Cannot trash active ship {item_id}"),
-                        });
+                        return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Cannot trash active ship {item_id}") });
                     }
-                    let is_fitted = matches!(
-                        item.flag as u16,
-                        11..=34 | 87 | 92..=94 | 125..=132 | 158 | 164..=171
-                    );
-                    if is_fitted {
-                        return Err(BridgeRpcError {
-                            code: "CannotTrashFittedItem".into(),
-                            message: format!("Cannot trash fitted item {item_id}"),
-                        });
-                    }
-                    if item.flag == InventoryFlag::Locked
-                        || alsc_locked.contains(&item_id)
-                        || snap.is_item_locked_in_contract_or_job(item_id)
+                    if (30_000_000..=50_000_000).contains(&item.location_id)
+                        && ctx.sde.types.get(&item.type_id).is_some_and(|t| matches!(t.category_id, 6 | 65))
                     {
-                        return Err(BridgeRpcError {
-                            code: "ItemLocked".into(),
-                            message: format!(
-                                "Item {item_id} is locked by an active contract, industry job, or container"
-                            ),
-                        });
+                        return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Cannot trash in-space ship or structure {item_id}") });
+                    }
+                    let is_fitted = matches!(item.flag as u16, 11..=34 | 87 | 92..=94 | 125..=132 | 158 | 164..=171);
+                    if is_fitted {
+                        return Err(BridgeRpcError { code: "CannotTrashFittedItem".into(), message: format!("Cannot trash fitted item {item_id}") });
+                    }
+                    if item.flag == InventoryFlag::Locked || alsc_locked.contains(&item_id) || snap.is_item_locked_in_contract_or_job(item_id) {
+                        return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} is locked by an active contract, industry job, or container") });
                     }
                     if item.flag as u16 == 36 {
-                        return Err(BridgeRpcError {
-                            code: "DeleteFailed".into(),
-                            message: format!("Cannot trash item {item_id} in Asset Safety"),
-                        });
+                        return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Cannot trash item {item_id} in Asset Safety") });
                     }
                     if let Some(st_id) = expected_station {
-                        let in_station = item.location_id == st_id
-                            || snap
-                                .items
-                                .get(&item.location_id)
-                                .is_some_and(|parent| parent.location_id == st_id);
+                        let in_station = item.location_id == st_id || snap.items.get(&item.location_id).is_some_and(|parent| parent.location_id == st_id);
                         if current_dock != Some(st_id) || !in_station {
-                            return Err(BridgeRpcError {
-                                code: "DeleteFailed".into(),
-                                message: format!(
-                                    "Item {item_id} is located at {}, not accessible station {st_id}",
-                                    item.location_id
-                                ),
-                            });
+                            return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Item {item_id} is located at {}, not accessible station {st_id}", item.location_id) });
                         }
                     } else if let Some(dock_id) = current_dock {
-                        let active_ship_at_dock = active_ship_id > 0
-                            && snap
-                                .items
-                                .get(&active_ship_id)
-                                .is_some_and(|s| s.location_id == dock_id);
+                        let active_ship_at_dock = active_ship_id > 0 && snap.items.get(&active_ship_id).is_some_and(|s| s.location_id == dock_id);
                         let in_accessible_hangar = item.location_id == dock_id
                             || (active_ship_at_dock && item.location_id == active_ship_id)
                             || snap.items.get(&item.location_id).is_some_and(|parent| {
-                                parent.location_id == dock_id
-                                    || (active_ship_at_dock && parent.location_id == active_ship_id)
+                                parent.location_id == dock_id || (active_ship_at_dock && parent.location_id == active_ship_id)
                             });
                         if !in_accessible_hangar {
-                            return Err(BridgeRpcError {
-                                code: "DeleteFailed".into(),
-                                message: format!(
-                                    "Item {item_id} at {} is not in an accessible hangar at {dock_id}",
-                                    item.location_id
-                                ),
-                            });
+                            return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Item {item_id} at {} is not in an accessible hangar at {dock_id}", item.location_id) });
                         }
                     } else {
-                        let active_ship_in_sys = active_ship_id > 0
-                            && snap
-                                .items
-                                .get(&active_ship_id)
-                                .is_some_and(|s| s.location_id == current_sys);
+                        let active_ship_in_sys = active_ship_id > 0 && snap.items.get(&active_ship_id).is_some_and(|s| s.location_id == current_sys);
                         let in_active_ship = active_ship_in_sys
-                            && (item.location_id == active_ship_id
-                                || snap
-                                    .items
-                                    .get(&item.location_id)
-                                    .is_some_and(|parent| parent.location_id == active_ship_id));
-                        let space_entity_id = if current_sys > 0 && item.location_id == current_sys
-                        {
+                            && (item.location_id == active_ship_id || snap.items.get(&item.location_id).is_some_and(|parent| parent.location_id == active_ship_id));
+                        let space_entity_id = if current_sys > 0 && item.location_id == current_sys {
                             Some(item_id)
-                        } else if current_sys > 0
-                            && snap
-                                .items
-                                .get(&item.location_id)
-                                .is_some_and(|parent| parent.location_id == current_sys)
-                        {
+                        } else if current_sys > 0 && snap.items.get(&item.location_id).is_some_and(|parent| parent.location_id == current_sys) {
                             Some(item.location_id)
                         } else {
                             None
                         };
                         let in_nearby_space = if let Some(ent_id) = space_entity_id {
                             let sys_handle = ctx.systems.get_or_spawn(current_sys as u32);
-                            let ship_pos = sys_handle
-                                .get_ball_position_sync(active_ship_id)
-                                .or_else(|| {
-                                    snap.item_positions
-                                        .get(&active_ship_id)
-                                        .copied()
-                                        .map(glam::DVec3::from)
-                                });
-                            let ent_pos = sys_handle
-                                .get_ball_position_sync(ent_id)
-                                .or_else(|| {
-                                    snap.item_positions
-                                        .get(&ent_id)
-                                        .copied()
-                                        .map(glam::DVec3::from)
-                                });
+                            let ship_pos = sys_handle.get_ball_position_sync(active_ship_id).or_else(|| snap.item_positions.get(&active_ship_id).copied().map(glam::DVec3::from));
+                            let ent_pos = sys_handle.get_ball_position_sync(ent_id).or_else(|| snap.item_positions.get(&ent_id).copied().map(glam::DVec3::from));
                             match (ship_pos, ent_pos) {
                                 (Some(sp), Some(ep)) => sp.distance(ep) <= 2_500.0,
-                                _ => true,
+                                _ => false,
                             }
                         } else {
                             false
                         };
                         if !in_active_ship && !in_nearby_space {
-                            return Err(BridgeRpcError {
-                                code: "DeleteFailed".into(),
-                                message: format!(
-                                    "Item {item_id} at {} is not accessible while undocked in system {current_sys}",
-                                    item.location_id
-                                ),
-                            });
+                            return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Item {item_id} at {} is not accessible while undocked in system {current_sys}", item.location_id) });
                         }
                     }
                     if snap.items.values().any(|child| child.location_id == item_id) {
-                        return Err(BridgeRpcError {
-                            code: "DeleteFailed".into(),
-                            message: format!(
-                                "Cannot trash non-empty container or fitted ship {item_id}"
-                            ),
-                        });
+                        return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Cannot trash non-empty container or fitted ship {item_id}") });
                     }
                     trashed.push((item_id, item.location_id));
                 }

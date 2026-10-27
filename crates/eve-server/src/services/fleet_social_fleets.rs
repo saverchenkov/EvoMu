@@ -502,10 +502,10 @@ pub(super) async fn handle_fleets(
                         message: "Caller is not in fleet".into(),
                     });
                 };
-                if char_id != fleet.boss_id && role_to_i64(caller_member.role) > 3 {
+                if char_id != fleet.boss_id && (role_to_i64(caller_member.role) > 3 || role_to_i64(caller_member.role) >= role_to_i64(role)) {
                     return Err(BridgeRpcError {
                         code: "FleetPermissionDenied".into(),
-                        message: "Only Fleet Boss or a Commander can invite members".into(),
+                        message: "Only Fleet Boss or a higher-ranking Commander can invite to this role".into(),
                     });
                 };
                 if fleet.members.len() >= max_size as usize {
@@ -542,6 +542,20 @@ pub(super) async fn handle_fleets(
                         .or_else(|| fleet.squads.first().copied())
                         .unwrap_or(1)
                 });
+                let pos_occupied = match role {
+                    FleetRole::FleetCommander => fleet.member_details.values().any(|m| m.role == FleetRole::FleetCommander),
+                    FleetRole::WingCommander => fleet.wing_details.get(&wid).and_then(|w| w.commander_id).is_some()
+                        || fleet.member_details.values().any(|m| m.role == FleetRole::WingCommander && m.wing_id == Some(wid)),
+                    FleetRole::SquadCommander => fleet.squad_details.get(&sid).and_then(|s| s.commander_id).is_some()
+                        || fleet.member_details.values().any(|m| m.role == FleetRole::SquadCommander && m.squad_id == Some(sid)),
+                    FleetRole::SquadMember => false,
+                };
+                if pos_occupied {
+                    return Err(BridgeRpcError {
+                        code: "PositionOccupied".into(),
+                        message: "The requested fleet commander position is already occupied".into(),
+                    });
+                }
                 fleet.invites.insert(target_char_id);
                 Ok((wid, sid))
             });
@@ -633,7 +647,12 @@ pub(super) async fn handle_fleets(
                         message: format!("Fleet has reached its maximum size of {max_size}"),
                     });
                 }
-                fleet.invites.remove(&char_id);
+                if !fleet.invites.remove(&char_id) {
+                    return Err(BridgeRpcError {
+                        code: "InviteExpired".into(),
+                        message: "No active fleet invitation found".into(),
+                    });
+                }
                 let (wid, sid, role) = invite_detail.map(|(w, s, r, _)| (w, s, r)).unwrap_or_else(|| {
                     let w = fleet.wings.first().copied().unwrap_or(1);
                     let s = auto_squad
@@ -647,14 +666,28 @@ pub(super) async fn handle_fleets(
                         .unwrap_or(1);
                     (w, s, FleetRole::SquadMember)
                 });
+                let pos_occupied = match role {
+                    FleetRole::FleetCommander => fleet.member_details.values().any(|m| m.role == FleetRole::FleetCommander),
+                    FleetRole::WingCommander => fleet.wing_details.get(&wid).and_then(|w| w.commander_id).is_some()
+                        || fleet.member_details.values().any(|m| m.role == FleetRole::WingCommander && m.wing_id == Some(wid)),
+                    FleetRole::SquadCommander => fleet.squad_details.get(&sid).and_then(|s| s.commander_id).is_some()
+                        || fleet.member_details.values().any(|m| m.role == FleetRole::SquadCommander && m.squad_id == Some(sid)),
+                    FleetRole::SquadMember => false,
+                };
+                if pos_occupied {
+                    return Err(BridgeRpcError {
+                        code: "PositionOccupied".into(),
+                        message: "The invited fleet commander position is already occupied".into(),
+                    });
+                }
 
                 if role == FleetRole::WingCommander {
                     if let Some(wing) = fleet.wing_details.get_mut(&wid) {
                         wing.commander_id = Some(char_id);
                     }
                 }
-                if let Some(sq) = fleet.squad_details.get_mut(&sid) {
-                    if role == FleetRole::SquadCommander || sq.commander_id.is_none() {
+                if role == FleetRole::SquadCommander {
+                    if let Some(sq) = fleet.squad_details.get_mut(&sid) {
                         sq.commander_id = Some(char_id);
                     }
                 }

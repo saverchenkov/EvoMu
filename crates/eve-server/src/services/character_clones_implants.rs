@@ -396,6 +396,13 @@ pub fn handle_clones_and_sheet(
                     });
                 };
                 ch.balance = new_bal;
+                snap.append_journal(
+                    char_id,
+                    "JumpCloneInstallationFee",
+                    IskCents(-install_fee.0),
+                    new_bal,
+                    format!("Installed jump clone at station {station_id}"),
+                );
 
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;
@@ -529,6 +536,13 @@ pub fn handle_clones_and_sheet(
                     });
                 };
                 ch.balance = new_bal;
+                snap.append_journal(
+                    char_id,
+                    "JumpCloneInstallationFee",
+                    IskCents(-install_fee.0),
+                    new_bal,
+                    format!("Installed jump clone at structure {structure_id}"),
+                );
 
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;

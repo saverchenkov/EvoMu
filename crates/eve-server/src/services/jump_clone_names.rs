@@ -274,6 +274,7 @@ pub(crate) fn extract_skills(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    crate::services::character_skills::catch_up_skill_queue(ctx, char_id);
 
     // 1. Validate extractor item ID argument first (R-SKX-02)
     let Some(extractor_item_id) = args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
@@ -577,10 +578,18 @@ pub(crate) fn extract_skills(
                     let old_needed = (q.end_sp - q.start_sp).max(1.0);
                     q.start_sp = new_start_sp;
                     q.duration_seconds *= ((q.end_sp - q.start_sp).max(0.0)) / old_needed;
+                    if q.started_at_unix.is_some() {
+                        q.started_at_unix = Some(ctx.now_unix());
+                    }
                 }
                 valid_next_lvl.insert(q.type_id, q.target_level);
                 true
             });
+            if !snap.paused_skill_queues.contains(&char_id) {
+                if let Some(head) = queue.first_mut() {
+                    head.started_at_unix.get_or_insert(ctx.now_unix());
+                }
+            }
         }
 
         let now_ft = ctx.now_blueos_filetime_ticks();
@@ -631,6 +640,9 @@ pub(crate) fn extract_skills(
         Ok((removed_skills, new_id))
     })?;
 
+    if let Some(sid) = session.ship_id {
+        ctx.invalidate_ship_fitting(sid);
+    }
     emit_server_skills_removed(ctx, char_id, &removed);
     Ok(PyRep::keyval([
         ("injectorItemID", PyRep::Integer(injector_id)),

@@ -531,14 +531,24 @@ pub fn handle_special_dialogue_action(
             let Some(agent_info) = ctx.sde.agents.get(&agent_id) else {
                 return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE") }));
             };
-            if agent_info.agent_type_id != 4 && agent_info.division_id != 18 {
+            if agent_info.agent_type_id != 4 {
                 return Some(Err(BridgeRpcError { code: "NotResearchAgent".into(), message: format!("Agent {agent_id} is not an R&D research agent") }));
+            }
+            if agent_info.solar_system_id.is_some_and(|asys| asys != sys_id)
+                || (session.station_id.is_some()
+                    && agent_info.station_id.is_some()
+                    && agent_info.station_id != session.station_id)
+            {
+                return Some(Err(BridgeRpcError { code: "AgentNotCoLocated".into(), message: format!("Must be co-located with R&D agent {agent_id} to start research") }));
             }
             let req_field_skill = args
                 .get(2)
                 .and_then(|a| a.as_i64())
                 .map(|v| v as TypeId)
                 .unwrap_or(11448); // Minmatar Starship Engineering
+            if !ctx.sde.types.get(&req_field_skill).is_some_and(|t| t.group_id == 270 && t.type_id != 3402) {
+                return Some(Err(BridgeRpcError { code: "InvalidResearchSkill".into(), message: format!("Type {req_field_skill} is not a valid R&D science field skill") }));
+            }
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let skill_lvl = snap.skills.get(&char_id)
@@ -620,8 +630,17 @@ pub fn handle_special_dialogue_action(
                     message: "Datacore quantity must be between 1 and 100,000".into(),
                 }));
             };
+            if let Some(agent_info) = ctx.sde.agents.get(&agent_id) {
+                if agent_info.solar_system_id.is_some_and(|asys| asys != sys_id)
+                    || (session.station_id.is_some()
+                        && agent_info.station_id.is_some()
+                        && agent_info.station_id != session.station_id)
+                {
+                    return Some(Err(BridgeRpcError { code: "AgentNotCoLocated".into(), message: format!("Must be co-located with R&D agent {agent_id} to redeem datacores") }));
+                }
+            }
             let now_unix = ctx.now_unix();
-            let station_id = session.station_id.unwrap_or(60_003_760);
+            let station_id = ctx.sde.agents.get(&agent_id).and_then(|a| a.station_id).or(session.station_id).unwrap_or(60_003_760);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut entries = load_rnd_research_entries(snap, char_id);
                 let Some(entry) = entries.iter_mut().find(|e| e.agent_id == agent_id) else {
@@ -634,11 +653,22 @@ pub fn handle_special_dialogue_action(
                     return Err(BridgeRpcError { code: "InsufficientResearchPoints".into(), message: format!("Buying {qty} datacore(s) requires {rp_cost:.1} RP, character has {total_rp:.1} RP") });
                 }
                 let isk_cost = IskCents::from_isk(10_000 * i64::from(qty));
+                let mut bal_after_opt = None;
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     if ch.balance < isk_cost {
                         return Err(BridgeRpcError { code: "InsufficientFunds".into(), message: "Insufficient ISK to redeem R&D datacores".into() });
                     }
                     ch.balance = ch.balance.checked_sub(isk_cost).unwrap_or(IskCents(0));
+                    bal_after_opt = Some(ch.balance);
+                }
+                if let Some(bal_after) = bal_after_opt {
+                    snap.append_journal(
+                        char_id,
+                        "DatacoreFee",
+                        IskCents(-isk_cost.0),
+                        bal_after,
+                        format!("Redeemed {qty} datacore(s) from R&D agent {agent_id}"),
+                    );
                 }
                 let rem_rp = (total_rp - rp_cost).max(0.0);
                 entry.initial_points = rem_rp;

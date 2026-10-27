@@ -843,6 +843,11 @@ pub fn handle(
                             }
                         });
                     }
+                    if !snap.paused_skill_queues.contains(&char_id) {
+                        if let Some(head) = snap.skill_queues.get_mut(&char_id).and_then(|q| q.first_mut()) {
+                            head.started_at_unix.get_or_insert(ctx.now_unix());
+                        }
+                    }
                     snap.skill_history
                         .entry(char_id)
                         .or_default()
@@ -1002,6 +1007,11 @@ pub fn handle(
                         remaining_queue.push(q);
                     } else {
                         remaining_queue.push(q);
+                    }
+                }
+                if !snap.paused_skill_queues.contains(&char_id) {
+                    if let Some(head) = remaining_queue.first_mut() {
+                        head.started_at_unix.get_or_insert(ctx.now_unix());
                     }
                 }
                 snap.skill_queues.insert(char_id, remaining_queue);

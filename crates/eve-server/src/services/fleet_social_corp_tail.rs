@@ -418,6 +418,20 @@ pub(crate) fn handle_update_members(
                 .role_audit_log
                 .push((target_char_id, char_id, old_roles, new_roles, now_unix));
             if let Some(tm) = sp.title_mask_opt {
+                let mut new_title_hangar = 0u64;
+                for (&tid, &(_, troles)) in &state.titles {
+                    let bit = 1u64 << ((tid - 1).clamp(0, 62) as u64);
+                    if (tm & bit) != 0 || tm == tid as u64 {
+                        new_title_hangar |= troles & HANGAR_DIV_MASK;
+                    }
+                }
+                let newly_title_hangar = new_title_hangar & !(old_roles & HANGAR_DIV_MASK);
+                if newly_title_hangar != 0 {
+                    state.pending_role_grants.insert(
+                        target_char_id,
+                        (effective_roles | pending_hangar | newly_title_hangar, now_unix + 86_400),
+                    );
+                }
                 state.member_titles.insert(target_char_id, tm);
                 let mut tids: Vec<i64> = (0..16u64)
                     .filter(|&b| (tm & (1u64 << b)) != 0)
@@ -930,12 +944,13 @@ pub(super) fn handle_insert_vote_case(
     now_unix: u64,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let args = if args.first().and_then(|a| a.as_i64()).is_some()
-        && args.get(1).and_then(|a| a.as_str()).is_some()
-    {
-        &args[1..]
+    let (corp_id, args) = if let (Some(arg_cid), Some(_)) = (
+        args.first().and_then(|a| a.as_i64()),
+        args.get(1).and_then(|a| a.as_str()),
+    ) {
+        (arg_cid, &args[1..])
     } else {
-        args
+        (corp_id, args)
     };
     let text = args.first().and_then(|a| a.as_str()).unwrap_or("CEO Election");
     let desc = args.get(1).and_then(|a| a.as_str()).unwrap_or("Vote for new CEO");
@@ -950,6 +965,22 @@ pub(super) fn handle_insert_vote_case(
     let (case_id, target_id) = match ctx
         .db
         .try_with_mut_snapshot(|snap| -> Result<(i64, i64), BridgeRpcError> {
+            let Some(corp) = snap.corporations.get(&corp_id) else {
+                return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
+            };
+            if !corp.members.contains(&char_id) {
+                return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Caller is not a member of the corporation".into() });
+            }
+            let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+            let is_ceo_or_dir = char_id == corp.ceo_id || corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR);
+            if vote_type == 0 {
+                let caller_shares = snap.corp_governance.get(&corp_id).and_then(|g| g.shares.get(&char_id).copied()).unwrap_or(0);
+                if !is_ceo_or_dir && caller_shares <= 0 {
+                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Proposing a CEO election requires holding corporation shares or Director role".into() });
+                }
+            } else if !is_ceo_or_dir {
+                return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Inserting a corporation vote case requires CEO or Director role".into() });
+            }
             let mut options: Vec<(i64, String, i64)> = Vec::new();
             if let Some(opt_rep) = opts_arg {
                 let items: Vec<PyRep> = match opt_rep {

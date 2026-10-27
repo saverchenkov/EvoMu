@@ -215,7 +215,7 @@ pub fn handle_clone_jump(
 
         // feat:clones.same-location-clone-swap: jumping to clone stored in the same Upwell structure
         // with an online Standup Cloning Center I incurs no cooldown and is allowed while cooldown is active.
-        if !same_station
+        if !same_structure_swap
             && ch_check.last_clone_jump_unix > 0
             && now_unix < ch_check.last_clone_jump_unix.saturating_add(full_cooldown_sec)
         {
@@ -409,8 +409,8 @@ pub fn handle_clone_jump(
 
         // feat:clones.clone-jump-preconditions-and-fees:
         // Leaving current body behind at an NPC station costs 900,000 ISK, debited and journaled.
-        // At an Upwell structure the owner sets the fee per standing, minimum 1 ISK.
-        if !same_station {
+        // At an Upwell structure the owner sets the fee per standing, minimum 1 ISK (in-structure swap is free).
+        if !same_structure_swap {
             let leave_behind_fee = if departure_loc_id >= 1_000_000_000_000 {
                 let owner_corp = snap.structures.get(&departure_loc_id).map(|s| s.owner_corp_id).unwrap_or(0);
                 let standing = snap
@@ -446,18 +446,20 @@ pub fn handle_clone_jump(
                     "Clone jump leave-behind body fee at NPC station".into()
                 },
             );
-                if departure_loc_id >= 1_000_000_000_000 {
-                    let owner_corp_opt = snap.structures.get(&departure_loc_id).map(|st| st.owner_corp_id);
-                    if let Some(owner_corp_id) = owner_corp_opt {
-                        if let Some(corp) = snap.corporations.get_mut(&owner_corp_id) {
-                            corp.master_wallet = corp
-                                .master_wallet
-                                .checked_add(leave_behind_fee)
-                                .unwrap_or(corp.master_wallet);
-                        }
+            if departure_loc_id >= 1_000_000_000_000 {
+                let owner_corp_opt = snap.structures.get(&departure_loc_id).map(|st| st.owner_corp_id);
+                if let Some(owner_corp_id) = owner_corp_opt {
+                    if let Some(corp) = snap.corporations.get_mut(&owner_corp_id) {
+                        let new_corp_bal = corp
+                            .master_wallet
+                            .checked_add(leave_behind_fee)
+                            .unwrap_or(corp.master_wallet);
+                        corp.master_wallet = new_corp_bal;
+                        corp.set_division_balance(1, new_corp_bal);
                     }
                 }
             }
+        }
 
         // Swap clone record to departure station (old body becomes jump clone at departure_loc_id)
         let jc_idx = {

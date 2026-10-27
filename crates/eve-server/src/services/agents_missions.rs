@@ -134,7 +134,7 @@ pub async fn handle(
             if a.is_locator {
                 services.push(PyRep::String("locator".into()));
             }
-            if a.agent_type_id == 4 || a.division_id == 18 {
+            if a.agent_type_id == 4 {
                 services.push(PyRep::String("research".into()));
             }
             Some(Ok(PyRep::keyval([
@@ -142,10 +142,7 @@ pub async fn handle(
                 ("agentTypeID", PyRep::Integer(a.agent_type_id as i64)),
                 ("divisionID", PyRep::Integer(a.division_id as i64)),
                 ("corporationID", PyRep::Integer(a.corporation_id)),
-                (
-                    "solarSystemID",
-                    a.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None),
-                ),
+                ("solarSystemID", a.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None)),
                 ("stationID", a.station_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ("level", PyRep::Integer(a.level as i64)),
                 ("quality", PyRep::Integer(20)),
@@ -159,17 +156,11 @@ pub async fn handle(
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
             };
-            let agent_id = if let Some(first) = args.first().and_then(|a| a.as_i64()) {
-                first
-            } else {
-                resolve_target_agent_id(ctx, session, char_id, sys_id, args, _kwargs).0
-            };
+            let agent_id = args.first().and_then(|a| a.as_i64()).unwrap_or_else(|| resolve_target_agent_id(ctx, session, char_id, sys_id, args, _kwargs).0);
             let Some(a) = ctx.sde.agents.get(&agent_id) else {
                 return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE") }));
             };
-            Some(Ok(
-                a.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None),
-            ))
+            Some(Ok(a.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None)))
         }
 
         ("agentMgr", "GetMyJournalDetails") => {
@@ -657,7 +648,7 @@ pub async fn handle(
                     }
                     let tmpl_opt = ctx.sde.missions.get(&mission_id).cloned();
                     let agent_info_opt = ctx.sde.agents.get(&actual_agent_id).cloned();
-                    if action_id == 3 {
+                    if matches!(action_id, 3 | 4) {
                         if let Some(ref agent_info) = agent_info_opt {
                             let station_has_local_agents = session.station_id.is_some_and(|sid| {
                                 ctx.sde.agents.values().any(|a| {
@@ -667,9 +658,10 @@ pub async fn handle(
                                         && !is_unsupported_direct_agent_type(a.agent_type_id)
                                 })
                             });
+                            let has_active_offer = ctx.db.with_snapshot(|snap| snap.active_missions.contains_key(&(char_id, mission_id)));
                             if agent_info.solar_system_id != Some(sys_id)
                                 || (session.station_id.is_some()
-                                    && (explicit_agent || station_has_local_agents)
+                                    && (explicit_agent || station_has_local_agents || has_active_offer)
                                     && agent_info.station_id.is_some()
                                     && agent_info.station_id != session.station_id)
                             {
@@ -683,40 +675,28 @@ pub async fn handle(
                             }
                         }
                     }
-                    let enc_opt = tmpl_opt.as_ref().and_then(|t| {
-                        agent_info_opt
-                            .as_ref()
-                            .map(|a| resolve_security_mission_encounter(ctx, t, a, sys_id))
-                    });
-
+                    let enc_opt = tmpl_opt.as_ref().and_then(|t| agent_info_opt.as_ref().map(|a| resolve_security_mission_encounter(ctx, t, a, sys_id)));
                     let handle = ctx.systems.get_or_spawn(sys_id);
                     let existing_accepted = ctx.db.with_snapshot(|snap| {
                         snap.active_missions.get(&(char_id, mission_id)).filter(|m| m.state == "Accepted" && m.npcs_remaining > 0).map(|m| (m.solar_system_id, m.spawned_npc_ball_ids.clone()))
                     });
-                    let can_respawn_missing =
-                        if let Some((m_sys_id, prev_balls)) = existing_accepted {
-                            if m_sys_id == sys_id && !prev_balls.is_empty() {
-                                let m_handle = ctx.systems.get_or_spawn(m_sys_id);
-                                let mut all_missing = true;
-                                for bid in prev_balls {
-                                    if m_handle
-                                        .get_ball_snapshot(bid)
-                                        .await
-                                        .ok()
-                                        .flatten()
-                                        .is_some()
-                                    {
-                                        all_missing = false;
-                                        break;
-                                    }
+                    let can_respawn_missing = if let Some((m_sys_id, prev_balls)) = existing_accepted {
+                        if m_sys_id == sys_id && !prev_balls.is_empty() {
+                            let m_handle = ctx.systems.get_or_spawn(m_sys_id);
+                            let mut all_missing = true;
+                            for bid in prev_balls {
+                                if m_handle.get_ball_snapshot(bid).await.ok().flatten().is_some() {
+                                    all_missing = false;
+                                    break;
                                 }
-                                all_missing
-                            } else {
-                                false
                             }
+                            all_missing
                         } else {
                             false
-                        };
+                        }
+                    } else {
+                        false
+                    };
 
                     let now = ctx.now_unix();
                     let accept_dur = 604_800_u64;
@@ -737,16 +717,10 @@ pub async fn handle(
                                     }
                                     reclaim_courier_cargo(snap, char_id, mission_id);
                                 });
-                                return Some(Err(BridgeRpcError {
-                                    code: "MissionOfferExpired".into(),
-                                    message: format!("Mission {mission_id} offer has expired"),
-                                }));
+                                return Some(Err(BridgeRpcError { code: "MissionOfferExpired".into(), message: format!("Mission {mission_id} offer has expired") }));
                             }
                         } else if !(state == "Accepted" && sys == sys_id && can_respawn_missing) {
-                            return Some(Err(BridgeRpcError {
-                                code: "InvalidMissionState".into(),
-                                message: format!("Mission {mission_id} is in state '{state}' (system {sys}), not Offered"),
-                            }));
+                            return Some(Err(BridgeRpcError { code: "InvalidMissionState".into(), message: format!("Mission {mission_id} is in state '{state}' (system {sys}), not Offered") }));
                         }
                     }
 
@@ -754,20 +728,14 @@ pub async fn handle(
                         let Some(m_check) = snap.active_missions.get(&(char_id, mission_id)) else {
                             return Err(BridgeRpcError { code: "MissionNotOffered".into(), message: format!("Mission {mission_id} has not been offered to character {char_id}") });
                         };
-                        if m_check.state != "Offered"
-                            && !(m_check.state == "Accepted"
-                                && m_check.solar_system_id == sys_id
-                                && can_respawn_missing)
-                        {
+                        if m_check.state != "Offered" && !(m_check.state == "Accepted" && m_check.solar_system_id == sys_id && can_respawn_missing) {
                             return Err(BridgeRpcError { code: "InvalidMissionState".into(), message: format!("Mission {mission_id} is in state '{}' (system {}), not Offered", m_check.state, m_check.solar_system_id) });
                         }
                         let mut spawned_npcs: Vec<(i64, eve_db::TypeId)> = Vec::new();
                         let mut need_npc = false;
                         if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
                             m.state = "Accepted".into();
-                            if m.solar_system_id == 0 {
-                                m.solar_system_id = sys_id;
-                            }
+                            if m.solar_system_id == 0 { m.solar_system_id = sys_id; }
                             need_npc = m.npcs_remaining > 0;
                         }
                         if need_npc {
@@ -777,11 +745,7 @@ pub async fn handle(
                             for i in 0..count {
                                 snap.next_entity_id += 1;
                                 let npc_id = 700_000_000_i64.saturating_add(snap.next_entity_id);
-                                let tid = if !pool.is_empty() {
-                                    pool[i % pool.len()]
-                                } else {
-                                    resolve_mission_npc_type(ctx)
-                                };
+                                let tid = if !pool.is_empty() { pool[i % pool.len()] } else { resolve_mission_npc_type(ctx) };
                                 ball_ids.push(npc_id);
                                 spawned_npcs.push((npc_id, tid));
                             }
@@ -797,37 +761,17 @@ pub async fn handle(
                             let is_trade = tmpl_opt.as_ref().is_some_and(|t| t.content_template.as_deref().unwrap_or_default().contains("Trade"));
                             let is_courier = !is_trade && tmpl_opt.as_ref().is_some_and(|t| t.is_courier || t.content_template.as_deref().unwrap_or_default().contains("BasicCourier"));
                             if is_courier && meta.granted_courier_item_id.is_none() {
-                                let cargo_tid = meta.required_delivery_type_id.ok_or_else(|| BridgeRpcError {
-                                    code: "InvalidMissionLocation".into(),
-                                    message: format!("Courier mission {mission_id} has no delivery item type specified"),
-                                })?;
+                                let cargo_tid = meta.required_delivery_type_id.ok_or_else(|| BridgeRpcError { code: "InvalidMissionLocation".into(), message: format!("Courier mission {mission_id} has no delivery item type specified") })?;
                                 let cargo_qty = meta.required_delivery_qty.max(1);
                                 let agent_station = meta.origin_station_id
                                     .or_else(|| ctx.sde.agents.get(&meta.agent_id).and_then(|a| a.station_id))
-                                    .or_else(|| {
-                                        ctx.sde.agents.get(&meta.agent_id).and_then(|a| a.solar_system_id).and_then(|sys| {
-                                            ctx.sde.stations.values().filter(|st| st.solar_system_id == sys).map(|st| st.station_id).min()
-                                        })
-                                    })
-                                    .ok_or_else(|| BridgeRpcError {
-                                        code: "InvalidMissionLocation".into(),
-                                        message: "Agent has no valid station location".into(),
-                                    })?;
+                                    .or_else(|| ctx.sde.agents.get(&meta.agent_id).and_then(|a| a.solar_system_id).and_then(|sys| ctx.sde.stations.values().filter(|st| st.solar_system_id == sys).map(|st| st.station_id).min()))
+                                    .ok_or_else(|| BridgeRpcError { code: "InvalidMissionLocation".into(), message: "Agent has no valid station location".into() })?;
                                 snap.next_entity_id += 1;
                                 let cid = snap.next_entity_id;
                                 snap.items.insert(
                                     cid,
-                                    InventoryItemRecord {
-                                        item_id: cid,
-                                        type_id: cargo_tid,
-                                        owner_id: char_id,
-                                        location_id: agent_station,
-                                        flag: InventoryFlag::Hangar,
-                                        quantity: cargo_qty,
-                                        singleton: false,
-                                        version: 1,
-                                        ..Default::default()
-                                    },
+                                    InventoryItemRecord { item_id: cid, type_id: cargo_tid, owner_id: char_id, location_id: agent_station, flag: InventoryFlag::Hangar, quantity: cargo_qty, singleton: false, version: 1, ..Default::default() },
                                 );
                                 snap.item_custom_names.insert(cid, format!("courier_cargo:{char_id}:{mission_id}"));
                                 meta.granted_courier_item_id = Some(cid);
@@ -842,17 +786,8 @@ pub async fn handle(
 
                     if !spawned_npcs.is_empty() {
                         let origin = if let Some(ship_id) = session.ship_id {
-                            handle
-                                .get_ball_snapshot(ship_id)
-                                .await
-                                .ok()
-                                .flatten().map(|(_, b)| b.position)
-                                .unwrap_or_else(|| {
-                                    ctx.sde.solar_systems.get(&sys_id).and_then(|s| {
-                                            s.stations
-                                                .first().map(|st| st.position + DVec3::new(1_500.0, 0.0, 0.0))
-                                        }).unwrap_or(DVec3::ZERO)
-                                })
+                            handle.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position)
+                                .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).and_then(|s| s.stations.first().map(|st| st.position + DVec3::new(1_500.0, 0.0, 0.0))).unwrap_or(DVec3::ZERO))
                         } else {
                             DVec3::ZERO
                         };
@@ -862,105 +797,49 @@ pub async fn handle(
                                 (mv, inv.mass.max(1.0), inv.radius.max(1.0))
                             }).unwrap_or((300.0, 100_000.0, 30.0));
                             let pocket_offset = ((npc_id % 40) as f64) * 35.0 + (idx as f64) * 350.0;
-                            let _ = handle
-                                .spawn_ball_with_combat(
-                                    Ball { id: npc_id, type_id: tid, position: origin + DVec3::new(800.0 + pocket_offset, (idx as f64) * 120.0, 0.0), velocity: DVec3::ZERO, max_velocity, inertia: 2.5, mass, radius, speed_fraction: 0.0, mode: MovementMode::Stop, },
-                                    ctx.build_type_combat_state(tid),
-                                )
-                                .await;
+                            let _ = handle.spawn_ball_with_combat(
+                                Ball { id: npc_id, type_id: tid, position: origin + DVec3::new(800.0 + pocket_offset, (idx as f64) * 120.0, 0.0), velocity: DVec3::ZERO, max_velocity, inertia: 2.5, mass, radius, speed_fraction: 0.0, mode: MovementMode::Stop },
+                                ctx.build_type_combat_state(tid),
+                            ).await;
                         }
                     }
 
-                    let is_rnd = ctx.db.with_snapshot(|snap| {
-                        load_mission_meta(snap, char_id, mission_id)
-                            .and_then(|m| ctx.sde.agents.get(&m.agent_id))
-                            .is_some_and(is_rnd_agent)
-                    });
-                    let is_mining_mission = !is_rnd && ctx.sde.missions.get(&mission_id).map_or(false, |m| {
-                        let c = m
-                            .content_template
-                            .as_deref().unwrap_or_default();
-                        let is_kill = c.contains("Kill") || c.contains("Encounter");
-                        let is_trade = c.contains("Trade");
-                        let is_courier = m.is_courier || c.contains("Courier");
-                        if is_kill || is_trade || is_courier {
+                    let is_rnd = ctx.db.with_snapshot(|snap| load_mission_meta(snap, char_id, mission_id).and_then(|m| ctx.sde.agents.get(&m.agent_id)).is_some_and(is_rnd_agent));
+                    let is_mining_mission = !is_rnd && ctx.sde.missions.get(&mission_id).is_some_and(|m| {
+                        let c = m.content_template.as_deref().unwrap_or_default();
+                        if c.contains("Kill") || c.contains("Encounter") || c.contains("Trade") || m.is_courier || c.contains("Courier") {
                             return false;
                         }
-                        let agent_div = ctx.db.with_snapshot(|snap| {
-                            load_mission_meta(snap, char_id, mission_id)
-                                .and_then(|meta| ctx.sde.agents.get(&meta.agent_id))
-                                .map(|a| a.division_id)
-                        }).unwrap_or(0);
-                        agent_div == 23 || {
-                            let t = m.title.to_lowercase();
-                            let c_lower = c.to_lowercase();
-                            c_lower.contains("mining")
-                                || t.contains("mining")
-                                || t.contains("mineral")
-                                || t.contains("ore")
-                        }
+                        let agent_div = ctx.db.with_snapshot(|snap| load_mission_meta(snap, char_id, mission_id).and_then(|meta| ctx.sde.agents.get(&meta.agent_id)).map(|a| a.division_id)).unwrap_or(0);
+                        let t = m.title.to_lowercase();
+                        let c_lower = c.to_lowercase();
+                        agent_div == 23 || c_lower.contains("mining") || t.contains("mining") || t.contains("mineral") || t.contains("ore")
                     });
                     if is_mining_mission {
-                        let ore_tid = ctx.db.with_snapshot(|snap| {
-                            load_mission_meta(snap, char_id, mission_id)
-                                .and_then(|m| m.required_delivery_type_id)
-                                .unwrap_or(1230)
-                        });
+                        let ore_tid = ctx.db.with_snapshot(|snap| load_mission_meta(snap, char_id, mission_id).and_then(|m| m.required_delivery_type_id).unwrap_or(1230));
                         let ore_vol = ctx.sde.types.get(&ore_tid).map(|t| t.volume.max(0.01)).unwrap_or(0.1);
                         let origin = if let Some(ship_id) = session.ship_id {
-                            handle
-                                .get_ball_snapshot(ship_id)
-                                .await
-                                .ok()
-                                .flatten().map(|(_, b)| b.position).unwrap_or(DVec3::ZERO)
+                            handle.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(DVec3::ZERO)
                         } else {
                             DVec3::ZERO
                         };
                         let ast_id = 910_000_000 + (mission_id as i64) * 1000 + 1;
                         let ast_pos = origin + DVec3::new(8_000.0, 1_000.0, -5_000.0);
                         ctx.db.with_mut_snapshot(|snap| {
-                            snap.asteroids.insert(
-                                ast_id,
-                                eve_db::AsteroidRecord {
-                                    asteroid_id: ast_id,
-                                    solar_system_id: sys_id,
-                                    belt_id: 0,
-                                    type_id: ore_tid,
-                                    quantity: 5_000,
-                                    initial_quantity: 5_000,
-                                    position: (ast_pos.x, ast_pos.y, ast_pos.z),
-                                    radius: 50.0,
-                                },
-                            );
+                            snap.asteroids.insert(ast_id, eve_db::AsteroidRecord { asteroid_id: ast_id, solar_system_id: sys_id, belt_id: 0, type_id: ore_tid, quantity: 5_000, initial_quantity: 5_000, position: (ast_pos.x, ast_pos.y, ast_pos.z), radius: 50.0 });
                         });
-                        let ast_ball = Ball { id: ast_id, type_id: ore_tid, position: ast_pos, velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 50_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop, };
-                        let ast_state = crate::system_actor::AsteroidState { asteroid_id: ast_id, belt_id: 0, type_id: ore_tid, initial_units: 5_000, remaining_units: 5_000, unit_volume: ore_vol, depleted: false, respawn_at_tick: None, };
+                        let ast_ball = Ball { id: ast_id, type_id: ore_tid, position: ast_pos, velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 50_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop };
+                        let ast_state = crate::system_actor::AsteroidState { asteroid_id: ast_id, belt_id: 0, type_id: ore_tid, initial_units: 5_000, remaining_units: 5_000, unit_volume: ore_vol, depleted: false, respawn_at_tick: None };
                         let _ = handle.spawn_asteroid(ast_state, ast_ball).await;
                     }
 
                     let expiry_unix = now + accept_dur;
                     let bonus_expiry_unix = now + bonus_dur;
-                    let mission_title = ctx.sde.missions.get(&mission_id).map(|m| m.title.clone())
-                        .unwrap_or_else(|| format!("Mission {mission_id}"));
+                    let mission_title = ctx.sde.missions.get(&mission_id).map(|m| m.title.clone()).unwrap_or_else(|| format!("Mission {mission_id}"));
                     let bookmark_id = ctx.db.with_mut_snapshot(|snap| {
                         snap.next_entity_id += 1;
                         let bmid = snap.next_entity_id;
-                        snap.bookmarks.insert(
-                            bmid,
-                            eve_db::BookmarkRecord {
-                                bookmark_id: bmid,
-                                owner_id: char_id,
-                                solar_system_id: sys_id,
-                                label: format!("Mission: {mission_title}"),
-                                x: 50_000.0,
-                                y: 0.0,
-                                z: 0.0,
-                                item_id: None,
-                                memo: "Mission Pocket Destination".into(),
-                                folder_id: None,
-                                is_shared: false,
-                            },
-                        );
+                        snap.bookmarks.insert(bmid, eve_db::BookmarkRecord { bookmark_id: bmid, owner_id: char_id, solar_system_id: sys_id, label: format!("Mission: {mission_title}"), x: 50_000.0, y: 0.0, z: 0.0, item_id: None, memo: "Mission Pocket Destination".into(), folder_id: None, is_shared: false });
                         bmid
                     });
                     let dialogue = PyRep::List(vec![

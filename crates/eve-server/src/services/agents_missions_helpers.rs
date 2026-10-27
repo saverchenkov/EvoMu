@@ -34,7 +34,7 @@ pub fn is_unsupported_direct_agent_type(agent_type_id: u32) -> bool {
 }
 
 pub fn is_rnd_agent(agent: &eve_sde::AgentInfo) -> bool {
-    agent.agent_type_id == 4 || agent.division_id == 18
+    agent.agent_type_id == 4
 }
 
 pub fn is_fw_agent(agent: &eve_sde::AgentInfo) -> bool {

@@ -313,3 +313,4 @@ mod corp_projects_welcome_alliance_closure;
 mod fleet_tactical_movement_closure;
 mod combat_r4_regressions;
 mod structures_mining_r4_regressions;
+mod skills_fitting_corp_r5_regressions;
