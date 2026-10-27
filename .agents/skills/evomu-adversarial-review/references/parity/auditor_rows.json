@@ -402,6 +402,31 @@
       "evidence": "SKINR sequencing studio job pricing and durations rely on derived PLEX/duration formulas in quasar_cosmetics_skinr_seq.rs.",
       "id": "feat:cosmetics.skinr-sequencing-studio",
       "flagged_by_audit": "20261026-170000"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/campaigns_and_milestones.rs:35-37 hardcodes DEFAULT_LOGIN_CAMPAIGN_ID = 2261 ('Capsuleer Day XXI', a seasonal event track). Every character gets it through unwrap_or(DEFAULT_LOGIN_CAMPAIGN_ID) at :386-388 and :474-476, so which daily campaign is active never comes from a live schedule or from static data. The 'once per day' boundary is UTC midnight, today = now_unix()/86_400 (:381, :469), not EVE downtime. The claim path falls back to the hardcoded Jita station 60_003_760 (:492). The tagged test admits the gap itself, '// DATA GAP: requires live login campaign schedule' (crates/eve-server/tests/it/rpc_campaigns_and_telemetry.rs:72), and only checks campaign 2261 rewards after advancing a pinned clock by 86_400 s (:193). Rows backed by an invented active-campaign choice stay open under AGENTS.md.",
+      "id": "feat:pve.login-campaign",
+      "flagged_by_audit": "20261026-174136"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/project_discovery.rs:369-391 fills the per-project dict's 'score' with st.accuracy (:372). Statistics for a new player come from invented defaults, score 100.0 and accuracy 0.95 (:252-253), which contradict the client constant INITIAL_PLAYER_SCORE = 0.0 at :17. These are the same defaults behind the already-flagged get_player_state. The tagged test (crates/eve-server/tests/it/rpc_discovery_seasons.rs:64-68) only checks that project.score is present and that projects is non-empty.",
+      "id": "rpc:ProjectDiscovery.get_player_statistics",
+      "flagged_by_audit": "20261026-174136"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/project_discovery.rs:552-568 builds a training task from nothing: the id is format!(\"training_task_{task_num:02}\") and the solution is the constant [1] (:566). It reads no client or MMOS training data. The test (crates/eve-server/tests/it/rpc_discovery_seasons.rs:133-137) asserts the synthesized id 'training_task_03' and only checks that 'solution' is present.",
+      "id": "rpc:ProjectDiscovery.new_training_task",
+      "flagged_by_audit": "20261026-174136"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/campaigns_and_milestones.rs:536-549 returns duplicated snake_case/camelCase keys (typeID/type_id, campaign_id/campaignID). The reward_event is fabricated, with event_id set to the campaign id (:559-564). A repeat claim on the same UTC day silently returns None (:499-501; the test asserts PyRep::None at rpc_campaigns_and_telemetry.rs:187-190) instead of raising the live UserError the acceptance text requires. The campaign is the hardcoded default 2261 (:474-476), and the home-station fallback is the hardcoded Jita 60_003_760 (:492).",
+      "id": "rpc:loginCampaignManager.claim_reward",
+      "flagged_by_audit": "20261026-174136"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/campaigns_and_milestones.rs:447-459 returns the same field under both snake_case and camelCase names (campaign_id/campaignID, can_claim_today/canClaimToday, current_day/currentDay, total_days_claimed/totalDaysClaimed). That is guessing the shape, not reproducing what loginrewards/client/loginCampaignService.pyj consumes. is_rookie_campaign is the constant False (:430). Every reward's labelMessageID is just the campaign name id (:421). The active campaign is the hardcoded 2261 (:386-388), as for feat:pve.login-campaign. The test (rpc_campaigns_and_telemetry.rs:128-139) only asserts campaign 2261 values: titleMessageID 709_008, reward_count 30.",
+      "id": "rpc:loginCampaignManager.get_client_campaign_state",
+      "flagged_by_audit": "20261026-174136"
     }
   ],
   "rejected_triage": [
