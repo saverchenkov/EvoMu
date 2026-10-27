@@ -682,6 +682,37 @@ pub(crate) async fn handle_module_cycles(
             }
 
             {
+                let already_active = matches!(
+                    m.state,
+                    eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
+                ) || ctx.db.with_snapshot(|s| s.module_active_states.contains(&module_id));
+                if method == "Overload"
+                    && (already_active
+                        || (target_id_opt.is_none()
+                            && matches!(
+                                mod_type.group_id,
+                                291 | 208 | 379 | 65 | 1672 | 52 | 201 | 41 | 325 | 2018 | 585 | 67 | 74 | 55 | 53 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807
+                            )))
+                {
+                    let _ = sys.update_module_overload(ship_id, module_id, true).await;
+                    if let Some(fm) = fit.modules.get_mut(&module_id) {
+                        fm.state = eve_dogma::ModuleState::Overloaded;
+                    }
+                    fit.recalculate_stats(&ctx.sde);
+                    let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
+                    ctx.store_ship_fitting(ship_id, fit);
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(char_id),
+                        "OnHeatAdded",
+                        "charid",
+                        vec![PyRep::Integer(module_id)],
+                    );
+                    return Some(Ok(PyRep::keyval([
+                        ("moduleID", PyRep::Integer(module_id)),
+                        ("overloaded", PyRep::Bool(true)),
+                        ("effectiveMaxVelocity", PyRep::Real(max_vel)),
+                    ])));
+                }
                 if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
                     return Some(Err(BridgeRpcError { code: "ModuleReactivationDelay".into(), message: format!("Module {module_id} cannot reactivate before delay expires") }));
                 }
@@ -723,29 +754,6 @@ pub(crate) async fn handle_module_cycles(
                     }
                 }
                 let is_overloaded = method == "Overload" || m.state == eve_dogma::ModuleState::Overloaded;
-                if method == "Overload"
-                    && target_id_opt.is_none()
-                    && matches!(mod_type.group_id, 291 | 208 | 379 | 65 | 1672 | 52 | 201 | 41 | 325 | 2018 | 585 | 67 | 74 | 55 | 53 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807)
-                {
-                    let _ = sys.update_module_overload(ship_id, module_id, true).await;
-                    if let Some(fm) = fit.modules.get_mut(&module_id) {
-                        fm.state = eve_dogma::ModuleState::Overloaded;
-                    }
-                    fit.recalculate_stats(&ctx.sde);
-                    let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
-                    ctx.store_ship_fitting(ship_id, fit);
-                    ctx.notify(
-                        crate::router::NotificationTarget::Character(char_id),
-                        "OnHeatAdded",
-                        "charid",
-                        vec![PyRep::Integer(module_id)],
-                    );
-                    return Some(Ok(PyRep::keyval([
-                        ("moduleID", PyRep::Integer(module_id)),
-                        ("overloaded", PyRep::Bool(true)),
-                        ("effectiveMaxVelocity", PyRep::Real(max_vel)),
-                    ])));
-                }
                 let mod_state = fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde);
 
                 let ship_group_id = ctx
@@ -1088,13 +1096,36 @@ pub(crate) async fn handle_module_cycles(
                 cap_need_per_cycle: cap_need,
                 speed_boost_factor,
                 original_max_velocity: None,
-                linked_turrets,
+                linked_turrets: linked_turrets.clone(),
                 ammo_type_id: active_burst_charge_tid,
                 damage_vector: if matches!(
                     mod_type.group_id,
                     53 | 55 | 74 | 506 | 507 | 508 | 509 | 510 | 511 | 512 | 524 | 771 | 862 | 1245 | 1986
                 ) {
-                    eve_destiny::DamageVector::new(20.0, 20.0, 20.0, 20.0)
+                    let dmg_mult = mod_state.get_attribute(64, &ctx.sde).max(1.0)
+                        * (linked_turrets.len().max(1) as f64);
+                    let (em, therm, kin, exp) = if let Some(ct) =
+                        active_burst_charge_tid.and_then(|cid| ctx.sde.types.get(&cid))
+                    {
+                        (
+                            ct.default_attributes.get(&114).copied().unwrap_or(0.0) * dmg_mult,
+                            ct.default_attributes.get(&118).copied().unwrap_or(0.0) * dmg_mult,
+                            ct.default_attributes.get(&117).copied().unwrap_or(0.0) * dmg_mult,
+                            ct.default_attributes.get(&116).copied().unwrap_or(0.0) * dmg_mult,
+                        )
+                    } else {
+                        (
+                            mod_state.get_attribute(114, &ctx.sde) * dmg_mult,
+                            mod_state.get_attribute(118, &ctx.sde) * dmg_mult,
+                            mod_state.get_attribute(117, &ctx.sde) * dmg_mult,
+                            mod_state.get_attribute(116, &ctx.sde) * dmg_mult,
+                        )
+                    };
+                    if em + therm + kin + exp > 0.0 {
+                        eve_destiny::DamageVector::new(em, therm, kin, exp)
+                    } else {
+                        eve_destiny::DamageVector::new(20.0, 20.0, 20.0, 20.0)
+                    }
                 } else {
                     eve_destiny::DamageVector::new(0.0, 0.0, 0.0, 0.0)
                 },

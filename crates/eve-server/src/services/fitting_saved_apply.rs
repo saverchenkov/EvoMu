@@ -135,35 +135,74 @@ pub async fn handle_fit_ships(
                 }
             }
             let ship_type = ctx.sde.types.get(&sh.type_id);
-            let low_slots = ship_type
-                .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::LOW_SLOTS))
-                .copied()
-                .unwrap_or(0.0) as u16;
-            let med_slots = ship_type
-                .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::MED_SLOTS))
-                .copied()
-                .unwrap_or(0.0) as u16;
-            let hi_slots = ship_type
-                .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::HI_SLOTS))
-                .copied()
-                .unwrap_or(0.0) as u16;
-            let rig_slots = ship_type
-                .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::RIG_SLOTS))
-                .copied()
-                .unwrap_or(0.0) as u16;
+            let mut slot_preview_engine = eve_dogma::ShipFittingEngine::from_sde(ship_id, sh.type_id, &ctx.sde);
+            for it in snap.items.values() {
+                if it.location_id == ship_id && matches!(it.flag as u16, 125..=132) {
+                    let _ = slot_preview_engine.fit_module_with_state(it.item_id, it.type_id, it.flag as u16, true, &ctx.sde);
+                }
+            }
+            for (idx, &(tid, flag, _)) in desired_items.iter().enumerate() {
+                let flag_u16 = flag as u16;
+                if matches!(flag_u16, 125..=132) {
+                    let _ = slot_preview_engine.fit_module_with_state(
+                        900_000_000 + idx as i64,
+                        tid,
+                        flag_u16,
+                        true,
+                        &ctx.sde,
+                    );
+                }
+            }
+            let low_slots = slot_preview_engine
+                .ship
+                .get_attribute(eve_sde::attr_ids::LOW_SLOTS, &ctx.sde)
+                .max(0.0) as u16;
+            let med_slots = slot_preview_engine
+                .ship
+                .get_attribute(eve_sde::attr_ids::MED_SLOTS, &ctx.sde)
+                .max(0.0) as u16;
+            let hi_slots = slot_preview_engine
+                .ship
+                .get_attribute(eve_sde::attr_ids::HI_SLOTS, &ctx.sde)
+                .max(0.0) as u16;
+            let rig_slots = slot_preview_engine
+                .ship
+                .get_attribute(eve_sde::attr_ids::RIG_SLOTS, &ctx.sde)
+                .max(0.0) as u16;
 
-            let occupied_slots: HashSet<InventoryFlag> = snap
+            let occupied_mod_slots: HashSet<InventoryFlag> = snap
                 .items
                 .values()
-                .filter(|i| i.location_id == ship_id && matches!(i.flag as u16, 11..=34 | 92..=94 | 125..=132))
+                .filter(|i| {
+                    i.location_id == ship_id
+                        && matches!(i.flag as u16, 11..=34 | 92..=94 | 125..=132)
+                        && ctx.sde.types.get(&i.type_id).map(|t| t.category_id) != Some(8)
+                })
+                .map(|i| i.flag)
+                .collect();
+            let occupied_charge_slots: HashSet<InventoryFlag> = snap
+                .items
+                .values()
+                .filter(|i| {
+                    i.location_id == ship_id
+                        && matches!(i.flag as u16, 11..=34)
+                        && ctx.sde.types.get(&i.type_id).map(|t| t.category_id) == Some(8)
+                })
                 .map(|i| i.flag)
                 .collect();
 
-            let mut planned_slots = HashSet::new();
-            for &(_tid, flag, _) in &desired_items {
+            let mut planned_mod_slots = HashSet::new();
+            let mut planned_charge_slots = HashSet::new();
+            for &(tid, flag, _) in &desired_items {
                 let flag_u16 = flag as u16;
                 if matches!(flag_u16, 11..=34 | 92..=94 | 125..=132) {
-                    if occupied_slots.contains(&flag) || !planned_slots.insert(flag) {
+                    let is_charge = ctx.sde.types.get(&tid).map(|t| t.category_id) == Some(8);
+                    let dup = if is_charge {
+                        occupied_charge_slots.contains(&flag) || !planned_charge_slots.insert(flag)
+                    } else {
+                        occupied_mod_slots.contains(&flag) || !planned_mod_slots.insert(flag)
+                    };
+                    if dup {
                         return Err(BridgeRpcError {
                             code: "UserError".into(),
                             message: "SlotAlreadyOccupied".into(),
@@ -217,13 +256,17 @@ pub async fn handle_fit_ships(
                             message: format!("Type {tid} (qty {req_qty}) cannot be fitted to slot {flag_u16}"),
                         });
                     }
-                    let req_eff = match flag_u16 {
-                        11..=18 => 11_u16, // loPower
-                        19..=26 => 13_u16, // medPower
-                        27..=34 => 12_u16, // hiPower
-                        92..=94 => 2663_u16, // rigSlot
-                        125..=132 => 3772_u16, // subSystem
-                        _ => 0,
+                    let req_eff = if m_type.category_id == 8 {
+                        0
+                    } else {
+                        match flag_u16 {
+                            11..=18 => 11_u16, // loPower
+                            19..=26 => 13_u16, // medPower
+                            27..=34 => 12_u16, // hiPower
+                            92..=94 => 2663_u16, // rigSlot
+                            125..=132 => 3772_u16, // subSystem
+                            _ => 0,
+                        }
                     };
                     if req_eff > 0 && !m_type.effect_ids.contains(&req_eff) {
                         return Err(BridgeRpcError {
@@ -277,10 +320,10 @@ pub async fn handle_fit_ships(
             }
 
             // Hardpoints limits check (turrets 102, launchers 101)
-            let max_turrets = ship_type
-                .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::TURRET_SLOTS_LEFT))
-                .copied()
-                .unwrap_or(0.0) as usize;
+            let max_turrets = slot_preview_engine
+                .ship
+                .get_attribute(eve_sde::attr_ids::TURRET_SLOTS_LEFT, &ctx.sde)
+                .max(0.0) as usize;
             let existing_turrets = snap.items.values()
                 .filter(|i| i.location_id == ship_id && matches!(i.flag as u16, 27..=34))
                 .filter(|i| ctx.sde.types.get(&i.type_id).is_some_and(|t| t.effect_ids.contains(&42)))
@@ -296,10 +339,10 @@ pub async fn handle_fit_ships(
                 });
             }
 
-            let max_launchers = ship_type
-                .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::LAUNCHER_SLOTS_LEFT))
-                .copied()
-                .unwrap_or(0.0) as usize;
+            let max_launchers = slot_preview_engine
+                .ship
+                .get_attribute(eve_sde::attr_ids::LAUNCHER_SLOTS_LEFT, &ctx.sde)
+                .max(0.0) as usize;
             let existing_launchers = snap.items.values()
                 .filter(|i| i.location_id == ship_id && matches!(i.flag as u16, 27..=34))
                 .filter(|i| ctx.sde.types.get(&i.type_id).is_some_and(|t| t.effect_ids.contains(&40)))
@@ -535,7 +578,8 @@ pub async fn handle_fit_ships(
                 }
             }
         }
-        let mut seen_slots = std::collections::HashSet::new();
+        let mut seen_mod_slots = std::collections::HashSet::new();
+        let mut seen_charge_slots = std::collections::HashSet::new();
         for &(tid, flag, req_qty) in &desired_items {
             if req_qty <= 0 {
                 return Err(BridgeRpcError {
@@ -555,17 +599,22 @@ pub async fn handle_fit_ships(
                 });
             }
             if matches!(flag_u16, 11..=34 | 92..=94 | 125..=132) {
-                if !seen_slots.insert(flag_u16) {
-                    return Err(BridgeRpcError {
-                        code: "SlotAlreadyOccupied".into(),
-                        message: format!("Duplicate assignment to slot flag {flag_u16}"),
-                    });
-                }
                 let cat = ctx.sde.types.get(&tid).map(|t| t.category_id).unwrap_or(0);
                 if !matches!(cat, 7 | 8 | 32) || (cat != 8 && req_qty != 1) {
                     return Err(BridgeRpcError {
                         code: "ItemNotFittableModule".into(),
                         message: format!("Type {tid} (qty {req_qty}) cannot be fitted to slot {flag_u16}"),
+                    });
+                }
+                let seen_ok = if cat == 8 {
+                    seen_charge_slots.insert(flag_u16)
+                } else {
+                    seen_mod_slots.insert(flag_u16)
+                };
+                if !seen_ok {
+                    return Err(BridgeRpcError {
+                        code: "SlotAlreadyOccupied".into(),
+                        message: format!("Duplicate assignment to slot flag {flag_u16}"),
                     });
                 }
             }
@@ -575,6 +624,22 @@ pub async fn handle_fit_ships(
     if let Err(e) = ship_check {
         return Some(Err(e));
     }
+
+    let mut sorted_desired = desired_items.clone();
+    sorted_desired.sort_by_key(|&(tid, flag, _)| {
+        let cat = ctx.sde.types.get(&tid).map(|t| t.category_id).unwrap_or(0);
+        if cat == 8 {
+            return (5u8, flag as u16);
+        }
+        match flag as u16 {
+            125..=132 => (0u8, flag as u16),
+            92..=94 => (1u8, flag as u16),
+            11..=18 => (2u8, flag as u16),
+            19..=26 => (3u8, flag as u16),
+            27..=34 => (4u8, flag as u16),
+            f => (6u8, f),
+        }
+    });
 
     let mut fitted_count = 0_i64;
     let mut missing: HashMap<TypeId, i64> = HashMap::new();
@@ -586,7 +651,10 @@ pub async fn handle_fit_ships(
             let mut engine = eve_dogma::ShipFittingEngine::from_sde(ship_id, ship_type_id, &ctx.sde)
                 .with_character_skills(char_skills.clone());
             for it in snap.items.values() {
-                if it.location_id == ship_id && matches!(it.flag as u16, 11..=34 | 92..=94 | 125..=132) {
+                if it.location_id == ship_id
+                    && matches!(it.flag as u16, 11..=34 | 92..=94 | 125..=132)
+                    && ctx.sde.types.get(&it.type_id).map(|t| t.category_id) != Some(8)
+                {
                     let is_on = snap.module_online_states.get(&it.item_id).copied().unwrap_or(true);
                     let _ = engine.fit_module_with_state(it.item_id, it.type_id, it.flag as u16, is_on, &ctx.sde);
                 }
@@ -597,10 +665,17 @@ pub async fn handle_fit_ships(
                 sh.version += 1;
             }
             let mut ship_fitted = false;
-            for &(tid, flag, req_qty) in &desired_items {
+            for &(tid, flag, req_qty) in &sorted_desired {
                 let flag_u16 = flag as u16;
-                let is_mod = matches!(flag_u16, 11..=34 | 92..=94 | 125..=132);
-                if is_mod && snap.items.values().any(|i| i.location_id == ship_id && i.flag == flag) {
+                let cat = ctx.sde.types.get(&tid).map(|t| t.category_id).unwrap_or(0);
+                let is_mod = matches!(flag_u16, 11..=34 | 92..=94 | 125..=132) && cat != 8;
+                if is_mod
+                    && snap.items.values().any(|i| {
+                        i.location_id == ship_id
+                            && i.flag == flag
+                            && ctx.sde.types.get(&i.type_id).map(|t| t.category_id) != Some(8)
+                    })
+                {
                     continue;
                 }
                 let matching_stacks: Vec<(i64, i32)> = snap

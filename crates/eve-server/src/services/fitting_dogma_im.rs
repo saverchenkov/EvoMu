@@ -389,13 +389,29 @@ pub(crate) async fn handle_dogma_im(
                     message: "DestroyFitting requires itemID".into(),
                 }));
             };
-            let loc_opt = ctx.db.with_mut_snapshot(|snap| {
+            let destroy_res = ctx.db.try_with_mut_snapshot(|snap| {
                 if let Some(item) = snap.items.get(&item_id) {
                     if item.owner_id != char_id {
-                        return None;
+                        return Ok(None);
+                    }
+                    let loc = item.location_id;
+                    let flag_u16 = item.flag as u16;
+                    if (125..=129).contains(&flag_u16) {
+                        let has_fitted_modules = snap.items.values().any(|other| {
+                            other.location_id == loc
+                                && other.item_id != item_id
+                                && (11..=34).contains(&(other.flag as u16))
+                                && ctx.sde.types.get(&other.type_id).is_none_or(|t| t.category_id != 8)
+                        });
+                        if has_fitted_modules {
+                            return Err(BridgeRpcError {
+                                code: "SubsystemHasFittedModules".into(),
+                                message: "Cannot destroy a T3 Strategic Cruiser subsystem while modules are fitted".into(),
+                            });
+                        }
                     }
                     let found = (
-                        item.location_id,
+                        loc,
                         item.flag as i64,
                         item.type_id as i64,
                         item.quantity as i64,
@@ -404,13 +420,22 @@ pub(crate) async fn handle_dogma_im(
                     snap.module_online_states.remove(&item_id);
                     snap.module_active_states.remove(&item_id);
                     snap.module_active_charges.remove(&item_id);
-                    Some(found)
+                    Ok(Some(found))
                 } else {
-                    None
+                    Ok(None)
                 }
             });
+            let loc_opt = match destroy_res {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             if let Some((loc, flag, type_id, qty)) = loc_opt {
+                if let Some(sys_id) = session.solar_system_id {
+                    let sys = ctx.systems.get_or_spawn(sys_id);
+                    let _ = sys.remove_module_cycle(loc, item_id).await;
+                }
                 ctx.invalidate_ship_fitting(loc);
+                let _ = ctx.get_or_rebuild_ship_fitting(char_id, loc);
                 // V24 client derives `OnModuleUnfitted` from this `OnItemChange` (`ixFlag` change).
                 let _ = ctx.notify_fitted_item_trashed(char_id, item_id, type_id, qty, loc, flag);
             }
@@ -516,14 +541,30 @@ pub(crate) async fn handle_dogma_im(
                     message: e,
                 }));
             }
+            let offline_mod_ids: Vec<i64> = fit
+                .modules
+                .values()
+                .filter(|m| m.state == eve_dogma::ModuleState::Offline)
+                .map(|m| m.item_id)
+                .collect();
             ctx.store_ship_fitting(ship_id, fit);
             ctx.db.with_mut_snapshot(|snap| {
                 snap.module_online_states.insert(module_id, false);
+                snap.module_active_states.remove(&module_id);
+                for &mid in &offline_mod_ids {
+                    snap.module_online_states.insert(mid, false);
+                    snap.module_active_states.remove(&mid);
+                }
             });
             ctx.invalidate_ship_fitting(ship_id);
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
                 let _ = sys.remove_module_cycle(ship_id, module_id).await;
+                for &mid in &offline_mod_ids {
+                    if mid != module_id {
+                        let _ = sys.remove_module_cycle(ship_id, mid).await;
+                    }
+                }
             }
 
             // V24 client derives `OnModuleOnlineChange` from the `isOnline` attribute change.
@@ -775,11 +816,31 @@ pub(crate) async fn handle_dogma_im(
         }
 
         ("dogmaIM", "GetTargeters") => {
-            // const-ok: client targeting UI query, empty list when no active locks
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if session.station_id.is_none() && session.structure_id.is_none() {
+                if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
+                    let sys = ctx.systems.get_or_spawn(sys_id);
+                    let targeter_ids: Vec<PyRep> = {
+                        let bp = sys.ballpark.read().unwrap_or_else(|e| e.into_inner());
+                        bp.target_locks
+                            .iter()
+                            .filter_map(|(&source_id, locks)| {
+                                if source_id != ship_id
+                                    && locks.iter().any(|l| l.target_id == ship_id)
+                                {
+                                    Some(PyRep::Integer(source_id))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    };
+                    return Some(Ok(PyRep::List(targeter_ids)));
+                }
+            }
             Some(Ok(PyRep::List(Vec::new())))
         }
 
@@ -796,6 +857,29 @@ pub(crate) async fn handle_dogma_im(
                     return Err(BridgeRpcError {
                         code: "ShipOwnershipViolation".into(),
                         message: format!("Ship {ship_id} is not owned by {char_id}"),
+                    });
+                }
+                let Some(master_it) = snap.items.get(&master_id) else {
+                    return Err(BridgeRpcError {
+                        code: "InvalidWeaponGroup".into(),
+                        message: format!("Master module {master_id} not found"),
+                    });
+                };
+                let Some(slave_it) = snap.items.get(&slave_id) else {
+                    return Err(BridgeRpcError {
+                        code: "InvalidWeaponGroup".into(),
+                        message: format!("Slave module {slave_id} not found"),
+                    });
+                };
+                if master_it.location_id != ship_id
+                    || slave_it.location_id != ship_id
+                    || !matches!(master_it.flag as u16, 27..=34)
+                    || !matches!(slave_it.flag as u16, 27..=34)
+                    || master_it.type_id != slave_it.type_id
+                {
+                    return Err(BridgeRpcError {
+                        code: "InvalidWeaponGroup".into(),
+                        message: "Only identical high-slot weapons fitted to the ship can be grouped".into(),
                     });
                 }
                 let banks = snap.weapon_banks.entry(ship_id).or_default();
@@ -821,6 +905,29 @@ pub(crate) async fn handle_dogma_im(
                     return Err(BridgeRpcError {
                         code: "ShipOwnershipViolation".into(),
                         message: format!("Ship {ship_id} is not owned by {char_id}"),
+                    });
+                }
+                let Some(new_it) = snap.items.get(&new_mod_id) else {
+                    return Err(BridgeRpcError {
+                        code: "InvalidWeaponGroup".into(),
+                        message: format!("Module {new_mod_id} not found"),
+                    });
+                };
+                let Some(target_it) = snap.items.get(&target_bank_mod_id) else {
+                    return Err(BridgeRpcError {
+                        code: "InvalidWeaponGroup".into(),
+                        message: format!("Target bank module {target_bank_mod_id} not found"),
+                    });
+                };
+                if new_it.location_id != ship_id
+                    || target_it.location_id != ship_id
+                    || !matches!(new_it.flag as u16, 27..=34)
+                    || !matches!(target_it.flag as u16, 27..=34)
+                    || new_it.type_id != target_it.type_id
+                {
+                    return Err(BridgeRpcError {
+                        code: "InvalidWeaponGroup".into(),
+                        message: "Only identical high-slot weapons fitted to the ship can be grouped".into(),
                     });
                 }
                 let banks = snap.weapon_banks.entry(ship_id).or_default();
@@ -854,6 +961,29 @@ pub(crate) async fn handle_dogma_im(
                     return Err(BridgeRpcError {
                         code: "ShipOwnershipViolation".into(),
                         message: format!("Ship {ship_id} is not owned by {char_id}"),
+                    });
+                }
+                let Some(m1) = snap.items.get(&master_id) else {
+                    return Err(BridgeRpcError {
+                        code: "InvalidWeaponGroup".into(),
+                        message: format!("Master module {master_id} not found"),
+                    });
+                };
+                let Some(m2) = snap.items.get(&other_master_id) else {
+                    return Err(BridgeRpcError {
+                        code: "InvalidWeaponGroup".into(),
+                        message: format!("Module {other_master_id} not found"),
+                    });
+                };
+                if m1.location_id != ship_id
+                    || m2.location_id != ship_id
+                    || !matches!(m1.flag as u16, 27..=34)
+                    || !matches!(m2.flag as u16, 27..=34)
+                    || m1.type_id != m2.type_id
+                {
+                    return Err(BridgeRpcError {
+                        code: "InvalidWeaponGroup".into(),
+                        message: "Only identical high-slot weapons fitted to the ship can be merged".into(),
                     });
                 }
                 let banks = snap.weapon_banks.entry(ship_id).or_default();
@@ -1199,25 +1329,81 @@ pub(crate) async fn handle_dogma_im(
                 out
             });
 
-            ctx.db.with_mut_snapshot(|snap| {
+            let ship_cargo_cap = ctx
+                .get_or_rebuild_ship_fitting(char_id, ship_id)
+                .ok()
+                .map(|f| f.ship.get_attribute(attr_ids::CAPACITY, &ctx.sde))
+                .or_else(|| {
+                    ctx.db.with_snapshot(|s| {
+                        s.items
+                            .get(&ship_id)
+                            .and_then(|sh| ctx.sde.types.get(&sh.type_id))
+                            .map(|t| t.capacity)
+                    })
+                })
+                .unwrap_or(1_000_000.0);
+
+            let unload_res = ctx.db.try_with_mut_snapshot(|snap| {
+                let mut used_cargo: f64 = snap
+                    .items
+                    .values()
+                    .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::Cargo)
+                    .map(|i| {
+                        ctx.sde
+                            .types
+                            .get(&i.type_id)
+                            .map(|t| t.volume * (i.quantity.max(1) as f64))
+                            .unwrap_or(0.0)
+                    })
+                    .sum();
+
                 for &mod_id in &all_target_modules {
                     let Some(mod_item) = snap.items.get(&mod_id).cloned() else {
                         continue;
                     };
+                    if mod_item.location_id != ship_id
+                        || !matches!(mod_item.flag as u16, 11..=34 | 125..=132)
+                    {
+                        continue;
+                    }
                     let slot_flag = mod_item.flag;
-                    let charges: Vec<i64> = snap
+                    let charges: Vec<(i64, f64)> = snap
                         .items
                         .values()
-                        .filter(|i| i.location_id == ship_id && i.flag == slot_flag && i.item_id != mod_id)
-                        .map(|i| i.item_id)
+                        .filter(|i| {
+                            i.location_id == ship_id
+                                && i.flag == slot_flag
+                                && i.item_id != mod_id
+                                && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 8)
+                        })
+                        .map(|i| {
+                            let vol = ctx
+                                .sde
+                                .types
+                                .get(&i.type_id)
+                                .map(|t| t.volume * (i.quantity.max(1) as f64))
+                                .unwrap_or(0.0);
+                            (i.item_id, vol)
+                        })
                         .collect();
-                    for cid in charges {
+                    for (cid, vol) in charges {
+                        if ship_cargo_cap > 0.0 && used_cargo + vol > ship_cargo_cap + 1e-4 {
+                            return Err(BridgeRpcError {
+                                code: "NotEnoughCargoSpace".into(),
+                                message: "Not enough cargo space to unload ammo".into(),
+                            });
+                        }
                         if let Some(ci) = snap.items.get_mut(&cid) {
                             ci.flag = InventoryFlag::Cargo;
+                            used_cargo += vol;
                         }
                     }
                 }
+                Ok(())
             });
+            if let Err(e) = unload_res {
+                return Some(Err(e));
+            }
 
             ctx.invalidate_ship_fitting(ship_id);
             Some(Ok(PyRep::None))

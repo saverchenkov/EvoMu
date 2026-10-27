@@ -689,6 +689,64 @@ impl ShipFittingEngine {
         Ok(())
     }
 
+    /// Automatically forces excess online modules offline when CPU or Powergrid usage exceeds output
+    /// (e.g., after offlining or unfitting a Co-Processor, RCU, ACR rig, or T3C Subsystem).
+    /// Returns the item IDs of any modules that were forced offline.
+    pub fn enforce_post_unfit_or_offline_constraints(&mut self, sde: &SdeRegistry) -> Vec<i64> {
+        let mut forced_offline = Vec::new();
+        while self.ship.get_attribute(attr_ids::CPU_LOAD, sde)
+            > self.ship.get_attribute(attr_ids::CPU_OUTPUT, sde) + 1e-4
+            || self.ship.get_attribute(attr_ids::POWER_LOAD, sde)
+                > self.ship.get_attribute(attr_ids::POWER_OUTPUT, sde) + 1e-4
+        {
+            // Prefer offlining high/med slot modules (19..=34) with the highest CPU+PG load first,
+            // then low slot modules (11..=18). Never offline rigs (92..=94) or subsystems (125..=129).
+            let mut candidates: Vec<(i64, u8, f64)> = self
+                .modules
+                .values()
+                .filter(|m| {
+                    m.state != ModuleState::Offline
+                        && matches!(m.flag_id, 11..=34 | 130..=132)
+                })
+                .map(|m| {
+                    let priority = if (27..=34).contains(&m.flag_id) {
+                        0u8
+                    } else if (19..=26).contains(&m.flag_id) {
+                        1u8
+                    } else {
+                        2u8
+                    };
+                    let (cpu, pg) = sde
+                        .types
+                        .get(&m.type_id)
+                        .map(|t| {
+                            (
+                                t.default_attributes.get(&attr_ids::CPU).copied().unwrap_or(0.0),
+                                t.default_attributes.get(&attr_ids::POWER).copied().unwrap_or(0.0),
+                            )
+                        })
+                        .unwrap_or((0.0, 0.0));
+                    (m.item_id, priority, cpu + pg)
+                })
+                .collect();
+            if candidates.is_empty() {
+                break;
+            }
+            candidates.sort_by(|a, b| {
+                a.1.cmp(&b.1)
+                    .then_with(|| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
+                    .then_with(|| b.0.cmp(&a.0))
+            });
+            let victim_id = candidates[0].0;
+            if let Some(m) = self.modules.get_mut(&victim_id) {
+                m.state = ModuleState::Offline;
+                forced_offline.push(victim_id);
+            }
+            self.recalculate_stats(sde);
+        }
+        forced_offline
+    }
+
     /// Takes an online fitted module offline, removing its CPU/PG and online effects.
     pub fn take_module_offline(
         &mut self,
@@ -701,6 +759,7 @@ impl ShipFittingEngine {
             .ok_or_else(|| format!("Module {module_item_id} is not fitted"))?;
         m.state = ModuleState::Offline;
         self.recalculate_stats(sde);
+        let _ = self.enforce_post_unfit_or_offline_constraints(sde);
         Ok(())
     }
 
@@ -715,6 +774,26 @@ impl ShipFittingEngine {
             .remove(&module_item_id)
             .ok_or_else(|| format!("Module {module_item_id} is not fitted"))?;
         self.recalculate_stats(sde);
+        if (125..=129).contains(&removed.flag_id) {
+            let max_lo = self.ship.get_attribute(attr_ids::LOW_SLOTS, sde).max(0.0) as u16;
+            let max_med = self.ship.get_attribute(attr_ids::MED_SLOTS, sde).max(0.0) as u16;
+            let max_hi = self.ship.get_attribute(attr_ids::HI_SLOTS, sde).max(0.0) as u16;
+            let slot_overflow = self.modules.values().any(|m| match m.flag_id {
+                11..=18 => (m.flag_id - 11) >= max_lo,
+                19..=26 => (m.flag_id - 19) >= max_med,
+                27..=34 => (m.flag_id - 27) >= max_hi,
+                _ => false,
+            });
+            if slot_overflow {
+                self.modules.insert(module_item_id, removed);
+                self.recalculate_stats(sde);
+                return Err(
+                    "SubsystemHasFittedModules: Cannot unfit subsystem while modules occupy its slots"
+                        .to_string(),
+                );
+            }
+        }
+        let _ = self.enforce_post_unfit_or_offline_constraints(sde);
         Ok(removed)
     }
 
