@@ -446,7 +446,9 @@ pub fn handle(
                     let Some(item) = snap.items.get_mut(&iid) else {
                         return Err(rpc_err("ContractItemNotFound", format!("Contract item {iid} not found")));
                     };
-                    if item.owner_id != char_id || item.location_id != start_station_id {
+                    let valid_item_owner = item.owner_id == char_id
+                        || (for_corp && issuer_corp_id != 0 && item.owner_id == issuer_corp_id);
+                    if !valid_item_owner || item.location_id != start_station_id {
                         return Err(rpc_err(
                             "ContractItemOwnershipOrLocationInvalid",
                             format!("Item {iid} must be owned by issuer at station {start_station_id}"),
@@ -469,6 +471,14 @@ pub fn handle(
                         "CourierContractRequiresItems",
                         "Courier contracts must contain at least one item to wrap",
                     ));
+                }
+
+                let deposit_cents = IskCents::from_f64_isk(deposit_isk);
+                if deposit_cents.0 > 0 {
+                    snap.service_state_blobs.insert(
+                        format!("contract_deposit:{id}"),
+                        deposit_cents.0.to_string(),
+                    );
                 }
 
                 let exp_unix = now_unix.saturating_add(duration_secs);
@@ -679,11 +689,16 @@ pub fn handle(
                 snap.credit_contract_issuer(&c, c.price);
 
                 if c.contract_type == "ItemExchange" {
+                    let issuer_entity_id = if c.for_corp && c.issuer_corp_id != 0 {
+                        c.issuer_corp_id
+                    } else {
+                        c.issuer_id
+                    };
                     for (cand_id, take_qty) in requested_transfers {
                         let cur_qty = snap.items.get(&cand_id).map(|i| i.quantity).unwrap_or(0);
                         if take_qty >= cur_qty {
                             if let Some(it) = snap.items.get_mut(&cand_id) {
-                                it.owner_id = c.issuer_id;
+                                it.owner_id = issuer_entity_id;
                                 it.location_id = c.start_station_id;
                                 it.flag = InventoryFlag::Hangar;
                                 it.version += 1;
@@ -698,7 +713,7 @@ pub fn handle(
                                 InventoryItemRecord {
                                     item_id: split_id,
                                     type_id: tid,
-                                    owner_id: c.issuer_id,
+                                    owner_id: issuer_entity_id,
                                     location_id: c.start_station_id,
                                     flag: InventoryFlag::Hangar,
                                     quantity: take_qty,
@@ -1012,9 +1027,14 @@ pub fn handle(
                         return Err(rpc_err("CourierPackageMissing", format!("Courier Plastic Wrap package for item {iid} is not present at destination")));
                     }
                 }
+                let issuer_entity_id = if c.for_corp && c.issuer_corp_id != 0 {
+                    c.issuer_corp_id
+                } else {
+                    c.issuer_id
+                };
                 for iid in &c.item_ids {
                     if let Some(item) = snap.items.get_mut(iid) {
-                        item.owner_id = c.issuer_id;
+                        item.owner_id = issuer_entity_id;
                         item.location_id = c.end_station_id;
                         item.flag = InventoryFlag::Hangar;
                         item.version += 1;
@@ -1022,6 +1042,11 @@ pub fn handle(
                 }
                 for wid in wraps_to_remove { snap.items.remove(&wid); }
                 if let Some(c_mut) = snap.contracts.get_mut(&cid) { c_mut.status = "Completed".into(); }
+                if let Some(dep_str) = snap.service_state_blobs.remove(&format!("contract_deposit:{cid}")) {
+                    if let Ok(dep_raw) = dep_str.parse::<i64>() {
+                        snap.credit_contract_issuer(&c, IskCents(dep_raw));
+                    }
+                }
                 let total_return = c.collateral.checked_add(c.reward).unwrap_or(c.collateral);
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.balance = ch.balance.checked_add(total_return).unwrap_or(ch.balance);
@@ -1130,6 +1155,24 @@ pub fn handle(
                 let Some(c) = snap.contracts.get(&cid).cloned() else {
                     return Err(rpc_err("ContractNotFound", format!("Contract {cid} does not exist")));
                 };
+                let issuer_entity_id = if c.for_corp && c.issuer_corp_id != 0 {
+                    c.issuer_corp_id
+                } else {
+                    c.issuer_id
+                };
+                let has_caller_corp_contract_role = caller_corp != 0
+                    && ((session.corp_role
+                        & (eve_db::corp_roles::ROLE_CONTRACT_MANAGER
+                            | eve_db::corp_roles::ROLE_DIRECTOR))
+                        != 0
+                        || snap.corporations.get(&caller_corp).is_some_and(|corp| {
+                            corp.ceo_id == char_id
+                                || corp.member_roles.get(&char_id).is_some_and(|&r| {
+                                    (r & (eve_db::corp_roles::ROLE_CONTRACT_MANAGER
+                                        | eve_db::corp_roles::ROLE_DIRECTOR))
+                                        != 0
+                                })
+                        }));
                 if method == "RejectContract" {
                     let is_assignee = c.assignee_id != 0
                         && (c.assignee_id == char_id || c.assignee_id == caller_corp);
@@ -1139,10 +1182,19 @@ pub fn handle(
                             format!("Character {char_id} cannot reject contract {cid} in state '{}'", c.status),
                         ));
                     }
+                    if c.assignee_id == caller_corp
+                        && c.assignee_id != char_id
+                        && !has_caller_corp_contract_role
+                    {
+                        return Err(rpc_err(
+                            "CrpAccessDenied",
+                            "Corporate Contract Manager or Director role required to reject a corporate contract",
+                        ));
+                    }
                     snap.credit_contract_issuer(&c, c.reward);
                     for iid in &c.item_ids {
                         if let Some(item) = snap.items.get_mut(iid) {
-                            item.owner_id = c.issuer_id;
+                            item.owner_id = issuer_entity_id;
                             item.location_id = c.start_station_id;
                             item.flag = InventoryFlag::Hangar;
                             item.version += 1;
@@ -1152,7 +1204,12 @@ pub fn handle(
                     return Ok(("Rejected", c.issuer_id));
                 }
 
-                if c.issuer_id != char_id && c.acceptor_id != Some(char_id) {
+                let can_manage_as_issuer = c.issuer_id == char_id
+                    || (c.for_corp
+                        && c.issuer_corp_id != 0
+                        && c.issuer_corp_id == caller_corp
+                        && has_caller_corp_contract_role);
+                if !can_manage_as_issuer && c.acceptor_id != Some(char_id) {
                     return Err(rpc_err(
                         "ContractOwnershipViolation",
                         format!("Character {char_id} is neither issuer nor acceptor of contract {cid}"),
@@ -1163,7 +1220,7 @@ pub fn handle(
                 }
                 if method == "DeleteContract"
                     && (c.status == "Outstanding" || c.status == "Expired")
-                    && c.issuer_id == char_id
+                    && can_manage_as_issuer
                 {
                     if c.status == "Outstanding"
                         && c.contract_type == "Auction"
@@ -1176,9 +1233,14 @@ pub fn handle(
                     }
                     if c.status == "Outstanding" {
                         snap.credit_contract_issuer(&c, c.reward);
+                        if let Some(dep_str) = snap.service_state_blobs.remove(&format!("contract_deposit:{cid}")) {
+                            if let Ok(dep_raw) = dep_str.parse::<i64>() {
+                                snap.credit_contract_issuer(&c, IskCents(dep_raw));
+                            }
+                        }
                         for iid in &c.item_ids {
                             if let Some(item) = snap.items.get_mut(iid) {
-                                item.owner_id = c.issuer_id;
+                                item.owner_id = issuer_entity_id;
                                 item.location_id = c.start_station_id;
                                 item.flag = InventoryFlag::Hangar;
                                 item.version += 1;
@@ -1187,7 +1249,7 @@ pub fn handle(
                     }
                     for item in snap.items.values_mut() {
                         if item.location_id == cid {
-                            item.owner_id = c.issuer_id;
+                            item.owner_id = issuer_entity_id;
                             item.location_id = c.start_station_id;
                             item.flag = InventoryFlag::Hangar;
                             item.version += 1;

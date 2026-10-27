@@ -965,9 +965,11 @@ pub fn handle_orders_escrow(
                         }
                     }
                 } else {
-                    // Sell order: return remaining items to seller's station hangar or corp deliveries (PLEX goes back to the PLEX Vault)
-                    if order.type_id == crate::services::market_contracts::PLEX_TYPE_ID {
-                        let _ = snap.adjust_plex_vault(char_id, remaining_qty as i64);
+                    // Sell order: return remaining items to seller's station hangar or corp deliveries (personal PLEX goes back to the PLEX Vault)
+                    if order.type_id == crate::services::market_contracts::PLEX_TYPE_ID
+                        && !is_corp_order
+                    {
+                        let _ = snap.adjust_plex_vault(order.owner_id, remaining_qty as i64);
                     } else {
                         let target_flag = if is_corp_order { InventoryFlag::Deliveries } else { InventoryFlag::Hangar };
                         let existing_item = snap
@@ -1149,6 +1151,44 @@ pub fn handle_orders_escrow(
             let now_unix = ctx.now_unix();
             let region_id = session.region_id.unwrap_or(10_000_002);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                if station_id >= 1_000_000_000_000
+                    && !is_structure_market_online(snap, station_id)
+                {
+                    return Err(BridgeRpcError {
+                        code: "MarketServiceOffline".into(),
+                        message: format!(
+                            "Structure {station_id} does not have an online Standup Market Hub I service"
+                        ),
+                    });
+                }
+                let vis_lvl = snap
+                    .skills
+                    .get(&char_id)
+                    .and_then(|m| m.get(&3447))
+                    .map(|s| s.level)
+                    .unwrap_or(0);
+                let max_vis_jumps =
+                    crate::services::market_contracts::max_remote_jumps_for_skill_level(vis_lvl);
+                for (_, _, _, ent_st, ord_rng) in &parsed_requests {
+                    if *ent_st >= 1_000_000_000_000
+                        && !is_structure_market_online(snap, *ent_st)
+                    {
+                        return Err(BridgeRpcError {
+                            code: "MarketServiceOffline".into(),
+                            message: format!(
+                                "Structure {ent_st} does not have an online Standup Market Hub I service"
+                            ),
+                        });
+                    }
+                    if *ord_rng > max_vis_jumps {
+                        return Err(BridgeRpcError {
+                            code: "InsufficientVisibilitySkill".into(),
+                            message: format!(
+                                "Order range {ord_rng} exceeds Visibility skill limit {max_vis_jumps}"
+                            ),
+                        });
+                    }
+                }
                 let mut avail_isk = snap
                     .characters
                     .get(&char_id)
@@ -1286,9 +1326,22 @@ pub fn handle_orders_escrow(
 
                     let mut resting_completed = false;
                     let resting_clone = snap.market_orders.get(&oid).cloned();
+                    let is_npc_skillbook_or_bpo = is_npc
+                        && seller_id < 90_000_000
+                        && ctx
+                            .sde
+                            .types
+                            .get(&fill_tid)
+                            .is_some_and(|t| matches!(t.category_id, 9 | 16));
                     if let Some(o_mut) = snap.market_orders.get_mut(&oid) {
-                        o_mut.vol_remaining -= fill_qty;
-                        if o_mut.vol_remaining == 0 && !o_mut.is_npc { resting_completed = true; }
+                        if is_npc_skillbook_or_bpo {
+                            o_mut.vol_remaining = o_mut.vol_entered.max(1);
+                        } else {
+                            o_mut.vol_remaining -= fill_qty;
+                            if o_mut.vol_remaining == 0 && !o_mut.is_npc {
+                                resting_completed = true;
+                            }
+                        }
                     }
                     if resting_completed {
                         if let Some(rc) = resting_clone {

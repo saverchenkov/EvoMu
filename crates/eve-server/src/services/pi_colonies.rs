@@ -868,22 +868,52 @@ pub fn handle_pi_colonies(
                                     });
                                 };
                                 let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
+                                if path_ids.len() < 2 {
+                                    return Err(BridgeRpcError {
+                                        code: "InvalidRoutePath".into(),
+                                        message: "PI route path must contain at least 2 connected pins".into(),
+                                    });
+                                }
                                 let unit_vol = ctx.sde.types.get(&ctype).map(|t| t.volume.max(0.01)).unwrap_or(0.38);
                                 let route_bw = (qty as f64) * unit_vol;
                                 for win in path_ids.windows(2) {
                                     let (u, v) = (win[0], win[1]);
-                                    if let Some(link) = net.links.iter().find(|l| {
+                                    let Some(link) = net.links.iter().find(|l| {
                                         (l.source_pin_id == u && l.dest_pin_id == v)
                                             || (l.source_pin_id == v && l.dest_pin_id == u)
-                                    }) {
-                                        if route_bw > link.bandwidth + 1e-6 {
-                                            return Err(BridgeRpcError {
-                                                code: "InsufficientLinkBandwidth".into(),
-                                                message: "Route exceeds link bandwidth".into(),
-                                            });
-                                        }
+                                    }) else {
+                                        return Err(BridgeRpcError {
+                                            code: "RouteLinkNotFound".into(),
+                                            message: format!("No PI link exists between pins {u} and {v}"),
+                                        });
+                                    };
+                                    let existing_bw: f64 = net
+                                        .routes
+                                        .iter()
+                                        .filter(|r| {
+                                            r.route_id != route_id
+                                                && r.path.windows(2).any(|w| {
+                                                    (w[0] == u && w[1] == v) || (w[0] == v && w[1] == u)
+                                                })
+                                        })
+                                        .map(|r| {
+                                            let r_vol = ctx
+                                                .sde
+                                                .types
+                                                .get(&r.commodity_type_id)
+                                                .map(|t| t.volume.max(0.01))
+                                                .unwrap_or(0.38);
+                                            (r.quantity as f64) * r_vol
+                                        })
+                                        .sum();
+                                    if existing_bw + route_bw > link.bandwidth + 1e-6 {
+                                        return Err(BridgeRpcError {
+                                            code: "InsufficientLinkBandwidth".into(),
+                                            message: "Route exceeds link bandwidth".into(),
+                                        });
                                     }
                                 }
+                                net.routes.retain(|r| r.route_id != route_id);
                                 net.routes.push(PiRouteState {
                                     route_id,
                                     path: path_ids,

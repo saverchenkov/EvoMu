@@ -1069,6 +1069,11 @@ impl WorldStateSnapshot {
         if c.expiration_unix == 0 || now_unix < c.expiration_unix {
             return None;
         }
+        let issuer_entity_id = if c.for_corp && c.issuer_corp_id != 0 {
+            c.issuer_corp_id
+        } else {
+            c.issuer_id
+        };
         match c.status.as_str() {
             "Outstanding" => {
                 if c.contract_type == "Auction" {
@@ -1078,6 +1083,11 @@ impl WorldStateSnapshot {
                         .filter(|&id| id > 0 && c.current_bid.0 > 0)
                     {
                         self.credit_contract_issuer(&c, c.current_bid);
+                        if let Some(dep_str) = self.service_state_blobs.remove(&format!("contract_deposit:{contract_id}")) {
+                            if let Ok(dep_raw) = dep_str.parse::<i64>() {
+                                self.credit_contract_issuer(&c, IskCents(dep_raw));
+                            }
+                        }
                         for iid in &c.item_ids {
                             if let Some(item) = self.items.get_mut(iid) {
                                 item.owner_id = winner_id;
@@ -1102,9 +1112,14 @@ impl WorldStateSnapshot {
                     }
                 }
                 self.credit_contract_issuer(&c, c.reward);
+                if let Some(dep_str) = self.service_state_blobs.remove(&format!("contract_deposit:{contract_id}")) {
+                    if let Ok(dep_raw) = dep_str.parse::<i64>() {
+                        self.credit_contract_issuer(&c, IskCents(dep_raw));
+                    }
+                }
                 for iid in &c.item_ids {
                     if let Some(item) = self.items.get_mut(iid) {
-                        item.owner_id = c.issuer_id;
+                        item.owner_id = issuer_entity_id;
                         item.location_id = c.start_station_id;
                         item.flag = InventoryFlag::Hangar;
                         item.version += 1;
@@ -1112,7 +1127,7 @@ impl WorldStateSnapshot {
                 }
                 for item in self.items.values_mut() {
                     if item.location_id == contract_id {
-                        item.owner_id = c.issuer_id;
+                        item.owner_id = issuer_entity_id;
                         item.location_id = c.start_station_id;
                         item.flag = InventoryFlag::Hangar;
                         item.version += 1;
@@ -1148,14 +1163,14 @@ impl WorldStateSnapshot {
                         .unwrap_or(false);
                     if let Some(item) = self.items.get_mut(iid) {
                         if c.collateral.0 > 0 {
-                            item.owner_id = c.acceptor_id.unwrap_or(c.issuer_id);
+                            item.owner_id = c.acceptor_id.unwrap_or(issuer_entity_id);
                             item.flag = if in_ship_container {
                                 InventoryFlag::Cargo
                             } else {
                                 InventoryFlag::Hangar
                             };
                         } else {
-                            item.owner_id = c.issuer_id;
+                            item.owner_id = issuer_entity_id;
                             item.location_id = c.start_station_id;
                             item.flag = InventoryFlag::Hangar;
                         }
@@ -1207,6 +1222,11 @@ impl WorldStateSnapshot {
         if c.contract_type != "Courier" || c.status != "InProgress" {
             return false;
         }
+        let issuer_entity_id = if c.for_corp && c.issuer_corp_id != 0 {
+            c.issuer_corp_id
+        } else {
+            c.issuer_id
+        };
         let refund_and_collateral =
             c.collateral.checked_add(c.reward).unwrap_or(c.collateral);
         self.credit_contract_issuer(&c, refund_and_collateral);
@@ -1231,14 +1251,14 @@ impl WorldStateSnapshot {
                 .unwrap_or(false);
             if let Some(item) = self.items.get_mut(iid) {
                 if c.collateral.0 > 0 {
-                    item.owner_id = c.acceptor_id.unwrap_or(c.issuer_id);
+                    item.owner_id = c.acceptor_id.unwrap_or(issuer_entity_id);
                     item.flag = if in_ship_container {
                         InventoryFlag::Cargo
                     } else {
                         InventoryFlag::Hangar
                     };
                 } else {
-                    item.owner_id = c.issuer_id;
+                    item.owner_id = issuer_entity_id;
                     item.location_id = c.start_station_id;
                     item.flag = InventoryFlag::Hangar;
                 }

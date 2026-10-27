@@ -285,12 +285,16 @@ pub fn handle_pi_orbitals(
                     0.0
                 };
                 let tax_base = p0_unit_tax_value * (produced_qty as f64);
-                let export_tax = compute_poco_export_tax(
-                    tax_base,
-                    npc_customs_tax_rate,
-                    customs_code_expertise_level,
-                    player_poco_rate,
-                );
+                let export_tax = if ext_idx.is_some() {
+                    0.0
+                } else {
+                    compute_poco_export_tax(
+                        tax_base,
+                        npc_customs_tax_rate,
+                        customs_code_expertise_level,
+                        player_poco_rate,
+                    )
+                };
                 let tax_cents = IskCents::from_f64_isk(export_tax);
                 if tax_cents.0 > 0 {
                     if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -316,7 +320,9 @@ pub fn handle_pi_orbitals(
                     if let Some(cfg) = load_orbital_settings(snap, planet_id) {
                         let player_share = IskCents::from_f64_isk(tax_base * player_poco_rate);
                         if let Some(corp) = snap.corporations.get_mut(&cfg.owner_corp_id) {
+                            corp.ensure_wallet_divisions();
                             corp.master_wallet = corp.master_wallet.checked_add(player_share).unwrap_or(corp.master_wallet);
+                            corp.wallet_divisions[0].balance = corp.master_wallet;
                         }
                     }
                 }
