@@ -25,10 +25,7 @@ pub(crate) async fn handle_dogma_im(
                 .filter(|&id| ctx.db.get_item(id).is_some())
                 .or(session.ship_id)
             else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "No active ship in session".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "No active ship in session".into() }));
             };
 
             let fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
@@ -126,16 +123,10 @@ pub(crate) async fn handle_dogma_im(
                 .or_else(|| bound_entry.map(|b| b.object_id))
                 .or(session.ship_id)
             else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "No active ship in session".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "No active ship in session".into() }));
             };
             let Some(stance_type_id) = stance_type_id_opt.filter(|&id| id > 0) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidShipStance".into(),
-                    message: "SetShipStance requires a valid stance typeID".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidShipStance".into(), message: "SetShipStance requires a valid stance typeID".into() }));
             };
             let now_ms = ctx.now_unix_secs().saturating_mul(1000);
             let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
@@ -152,10 +143,7 @@ pub(crate) async fn handle_dogma_im(
                 } else {
                     "InvalidShipStance"
                 };
-                return Some(Err(BridgeRpcError {
-                    code: code.into(),
-                    message: e,
-                }));
+                return Some(Err(BridgeRpcError { code: code.into(), message: e }));
             }
             ctx.store_ship_fitting(ship_id, fit);
             ctx.notify(
@@ -178,10 +166,7 @@ pub(crate) async fn handle_dogma_im(
         | ("invbroker", "GetDynamicItemInfo")
         | ("dogmaIM", "GetDynamicItemInfo") => {
             let Some(raw_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "ItemGetInfo requires itemID or typeID".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "ItemGetInfo requires itemID or typeID".into() }));
             };
 
             // 1. Check if raw_id is an item in the world DB or a launched space drone ball
@@ -218,10 +203,7 @@ pub(crate) async fn handle_dogma_im(
             };
 
             let Some(show_info) = ctx.sde.show_info_for_type(type_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "TypeNotFound".into(),
-                    message: format!("Type {type_id} not found in SDE"),
-                }));
+                return Some(Err(BridgeRpcError { code: "TypeNotFound".into(), message: format!("Type {type_id} not found in SDE") }));
             };
 
             // Merge default attributes with dynamic attributes
@@ -384,10 +366,7 @@ pub(crate) async fn handle_dogma_im(
                 Err(e) => return Some(Err(e)),
             };
             let Some(item_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "DestroyFitting requires itemID".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "DestroyFitting requires itemID".into() }));
             };
             let destroy_res = ctx.db.try_with_mut_snapshot(|snap| {
                 if let Some(item) = snap.items.get(&item_id) {
@@ -404,10 +383,7 @@ pub(crate) async fn handle_dogma_im(
                                 && ctx.sde.types.get(&other.type_id).is_none_or(|t| t.category_id != 8)
                         });
                         if has_fitted_modules {
-                            return Err(BridgeRpcError {
-                                code: "SubsystemHasFittedModules".into(),
-                                message: "Cannot destroy a T3 Strategic Cruiser subsystem while modules are fitted".into(),
-                            });
+                            return Err(BridgeRpcError { code: "SubsystemHasFittedModules".into(), message: "Cannot destroy a T3 Strategic Cruiser subsystem while modules are fitted".into() });
                         }
                     }
                     let found = (
@@ -461,10 +437,7 @@ pub(crate) async fn handle_dogma_im(
             }
             let owns_ship = ctx.db.with_snapshot(|s| s.items.get(&ship_id).is_some_and(|sh| sh.owner_id == char_id));
             if !owns_ship {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipOwnershipViolation".into(),
-                    message: format!("Ship {ship_id} is not owned by character {char_id}"),
-                }));
+                return Some(Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by character {char_id}") }));
             }
 
             if session.station_id.is_none() && session.structure_id.is_none() {
@@ -489,10 +462,7 @@ pub(crate) async fn handle_dogma_im(
                 Err(e) => return Some(Err(e)),
             };
             if let Err(e) = fit.set_module_online(module_id, &ctx.sde) {
-                return Some(Err(BridgeRpcError {
-                    code: "FittingValidationFailed".into(),
-                    message: e,
-                }));
+                return Some(Err(BridgeRpcError { code: "FittingValidationFailed".into(), message: e }));
             }
             ctx.store_ship_fitting(ship_id, fit);
             ctx.db.with_mut_snapshot(|snap| {
@@ -525,10 +495,7 @@ pub(crate) async fn handle_dogma_im(
             }
             let owns_ship = ctx.db.with_snapshot(|s| s.items.get(&ship_id).is_some_and(|sh| sh.owner_id == char_id));
             if !owns_ship {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipOwnershipViolation".into(),
-                    message: format!("Ship {ship_id} is not owned by character {char_id}"),
-                }));
+                return Some(Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by character {char_id}") }));
             }
 
             let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
@@ -536,10 +503,7 @@ pub(crate) async fn handle_dogma_im(
                 Err(e) => return Some(Err(e)),
             };
             if let Err(e) = fit.take_module_offline(module_id, &ctx.sde) {
-                return Some(Err(BridgeRpcError {
-                    code: "FittingValidationFailed".into(),
-                    message: e,
-                }));
+                return Some(Err(BridgeRpcError { code: "FittingValidationFailed".into(), message: e }));
             }
             let offline_mod_ids: Vec<i64> = fit
                 .modules
@@ -582,16 +546,10 @@ pub(crate) async fn handle_dogma_im(
                 Err(e) => return Some(Err(e)),
             };
             let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "No active ship in session".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "No active ship in session".into() }));
             };
             let Some(target_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "AddTarget requires integer targetID".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "AddTarget requires integer targetID".into() }));
             };
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session is not in space".into() }));
@@ -601,16 +559,10 @@ pub(crate) async fn handle_dogma_im(
             }
             let sys = ctx.systems.get_or_spawn(sys_id);
             let Some((_, ship_ball)) = sys.get_ball_snapshot(ship_id).await.unwrap_or(None) else {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetingFailed".into(),
-                    message: format!("Ship ball {ship_id} not found in system"),
-                }));
+                return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: format!("Ship ball {ship_id} not found in system") }));
             };
             let Some((_, target_ball)) = sys.get_ball_snapshot(target_id).await.unwrap_or(None) else {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetingFailed".into(),
-                    message: format!("Target ball {target_id} not found in system"),
-                }));
+                return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: format!("Target ball {target_id} not found in system") }));
             };
 
             let target_char_id = ctx.db.with_snapshot(|snap| {
@@ -623,10 +575,7 @@ pub(crate) async fn handle_dogma_im(
             if let Some(t_char) = target_char_id {
                 let now_unix = ctx.now_unix();
                 if crate::services::space_destiny::is_location_change_invulnerable(ctx, t_char, now_unix) {
-                    return Some(Err(BridgeRpcError {
-                        code: "TargetInvulnerable".into(),
-                        message: format!("Target character {t_char} is invulnerable due to recent location change"),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "TargetInvulnerable".into(), message: format!("Target character {t_char} is invulnerable due to recent location change") }));
                 }
             }
             crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
@@ -638,20 +587,14 @@ pub(crate) async fn handle_dogma_im(
 
             if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
                 if cs.ecm_jammed_remaining_s > 0.0 {
-                    return Some(Err(BridgeRpcError {
-                        code: "ShipJammed".into(),
-                        message: "Targeting systems are jammed by ECM".into(),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "ShipJammed".into(), message: "Targeting systems are jammed by ECM".into() }));
                 }
             }
 
             let max_range = fit.ship.get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde);
             let dist = (ship_ball.position - target_ball.position).length();
             if dist > max_range {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetingFailed".into(),
-                    message: format!("Target distance ({dist:.1} m) exceeds maxTargetRange ({max_range:.1} m)"),
-                }));
+                return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: format!("Target distance ({dist:.1} m) exceeds maxTargetRange ({max_range:.1} m)") }));
             }
 
             let triage_bonus: usize = fit
@@ -675,10 +618,7 @@ pub(crate) async fn handle_dogma_im(
             let max_locked = eve_dogma::compute_effective_max_locked_targets(ship_max, tm_lvl, atm_lvl) + triage_bonus;
             let current_locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
             if current_locks.len() >= max_locked {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetingFailed".into(),
-                    message: format!("Max locked targets exceeded ({max_locked})"),
-                }));
+                return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: format!("Max locked targets exceeded ({max_locked})") }));
             }
 
             let scan_res = fit.ship.get_attribute(attr_ids::SCAN_RESOLUTION, &ctx.sde).max(1.0);
@@ -694,10 +634,7 @@ pub(crate) async fn handle_dogma_im(
                 max_range_m: Some(max_range),
             };
             if let Err(e) = sys.add_target_lock(ship_id, lock).await {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetingFailed".into(),
-                    message: e,
-                }));
+                return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: e }));
             }
 
             ctx.notify(
@@ -745,22 +682,17 @@ pub(crate) async fn handle_dogma_im(
                 Err(e) => return Some(Err(e)),
             };
             let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "No active ship in session".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "No active ship in session".into() }));
             };
             let Some(target_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "RemoveTarget requires targetID".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "RemoveTarget requires targetID".into() }));
             };
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
                 let _ = sys.remove_target_lock(ship_id, target_id).await;
             }
             crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(target_id));
+            crate::services::combat_weapons_spool::clear_entropic_spools_on_target_unlock(ctx, ship_id, char_id, Some(target_id));
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
                 "OnTarget",
@@ -776,16 +708,14 @@ pub(crate) async fn handle_dogma_im(
                 Err(e) => return Some(Err(e)),
             };
             let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "No active ship in session".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "No active ship in session".into() }));
             };
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
                 let _ = sys.clear_target_locks(ship_id).await;
             }
             crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, None);
+            crate::services::combat_weapons_spool::clear_entropic_spools_on_target_unlock(ctx, ship_id, char_id, None);
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
                 "OnTargetClear",
@@ -854,22 +784,13 @@ pub(crate) async fn handle_dogma_im(
             let slave_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
-                    return Err(BridgeRpcError {
-                        code: "ShipOwnershipViolation".into(),
-                        message: format!("Ship {ship_id} is not owned by {char_id}"),
-                    });
+                    return Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}") });
                 }
                 let Some(master_it) = snap.items.get(&master_id) else {
-                    return Err(BridgeRpcError {
-                        code: "InvalidWeaponGroup".into(),
-                        message: format!("Master module {master_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "InvalidWeaponGroup".into(), message: format!("Master module {master_id} not found") });
                 };
                 let Some(slave_it) = snap.items.get(&slave_id) else {
-                    return Err(BridgeRpcError {
-                        code: "InvalidWeaponGroup".into(),
-                        message: format!("Slave module {slave_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "InvalidWeaponGroup".into(), message: format!("Slave module {slave_id} not found") });
                 };
                 if master_it.location_id != ship_id
                     || slave_it.location_id != ship_id
@@ -877,10 +798,7 @@ pub(crate) async fn handle_dogma_im(
                     || !matches!(slave_it.flag as u16, 27..=34)
                     || master_it.type_id != slave_it.type_id
                 {
-                    return Err(BridgeRpcError {
-                        code: "InvalidWeaponGroup".into(),
-                        message: "Only identical high-slot weapons fitted to the ship can be grouped".into(),
-                    });
+                    return Err(BridgeRpcError { code: "InvalidWeaponGroup".into(), message: "Only identical high-slot weapons fitted to the ship can be grouped".into() });
                 }
                 let banks = snap.weapon_banks.entry(ship_id).or_default();
                 let bank = banks.entry(master_id).or_insert_with(|| vec![master_id]);
@@ -902,22 +820,13 @@ pub(crate) async fn handle_dogma_im(
             let target_bank_mod_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
-                    return Err(BridgeRpcError {
-                        code: "ShipOwnershipViolation".into(),
-                        message: format!("Ship {ship_id} is not owned by {char_id}"),
-                    });
+                    return Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}") });
                 }
                 let Some(new_it) = snap.items.get(&new_mod_id) else {
-                    return Err(BridgeRpcError {
-                        code: "InvalidWeaponGroup".into(),
-                        message: format!("Module {new_mod_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "InvalidWeaponGroup".into(), message: format!("Module {new_mod_id} not found") });
                 };
                 let Some(target_it) = snap.items.get(&target_bank_mod_id) else {
-                    return Err(BridgeRpcError {
-                        code: "InvalidWeaponGroup".into(),
-                        message: format!("Target bank module {target_bank_mod_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "InvalidWeaponGroup".into(), message: format!("Target bank module {target_bank_mod_id} not found") });
                 };
                 if new_it.location_id != ship_id
                     || target_it.location_id != ship_id
@@ -925,10 +834,7 @@ pub(crate) async fn handle_dogma_im(
                     || !matches!(target_it.flag as u16, 27..=34)
                     || new_it.type_id != target_it.type_id
                 {
-                    return Err(BridgeRpcError {
-                        code: "InvalidWeaponGroup".into(),
-                        message: "Only identical high-slot weapons fitted to the ship can be grouped".into(),
-                    });
+                    return Err(BridgeRpcError { code: "InvalidWeaponGroup".into(), message: "Only identical high-slot weapons fitted to the ship can be grouped".into() });
                 }
                 let banks = snap.weapon_banks.entry(ship_id).or_default();
                 let mut found_master = None;
@@ -958,22 +864,13 @@ pub(crate) async fn handle_dogma_im(
             let other_master_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
-                    return Err(BridgeRpcError {
-                        code: "ShipOwnershipViolation".into(),
-                        message: format!("Ship {ship_id} is not owned by {char_id}"),
-                    });
+                    return Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}") });
                 }
                 let Some(m1) = snap.items.get(&master_id) else {
-                    return Err(BridgeRpcError {
-                        code: "InvalidWeaponGroup".into(),
-                        message: format!("Master module {master_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "InvalidWeaponGroup".into(), message: format!("Master module {master_id} not found") });
                 };
                 let Some(m2) = snap.items.get(&other_master_id) else {
-                    return Err(BridgeRpcError {
-                        code: "InvalidWeaponGroup".into(),
-                        message: format!("Module {other_master_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "InvalidWeaponGroup".into(), message: format!("Module {other_master_id} not found") });
                 };
                 if m1.location_id != ship_id
                     || m2.location_id != ship_id
@@ -981,10 +878,7 @@ pub(crate) async fn handle_dogma_im(
                     || !matches!(m2.flag as u16, 27..=34)
                     || m1.type_id != m2.type_id
                 {
-                    return Err(BridgeRpcError {
-                        code: "InvalidWeaponGroup".into(),
-                        message: "Only identical high-slot weapons fitted to the ship can be merged".into(),
-                    });
+                    return Err(BridgeRpcError { code: "InvalidWeaponGroup".into(), message: "Only identical high-slot weapons fitted to the ship can be merged".into() });
                 }
                 let banks = snap.weapon_banks.entry(ship_id).or_default();
                 let other_modules = banks.remove(&other_master_id).unwrap_or_else(|| vec![other_master_id]);
@@ -1008,10 +902,7 @@ pub(crate) async fn handle_dogma_im(
             let mod_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
-                    return Err(BridgeRpcError {
-                        code: "ShipOwnershipViolation".into(),
-                        message: format!("Ship {ship_id} is not owned by {char_id}"),
-                    });
+                    return Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}") });
                 }
                 if let Some(banks) = snap.weapon_banks.get_mut(&ship_id) {
                     for list in banks.values_mut() {
@@ -1033,10 +924,7 @@ pub(crate) async fn handle_dogma_im(
             let master_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
-                    return Err(BridgeRpcError {
-                        code: "ShipOwnershipViolation".into(),
-                        message: format!("Ship {ship_id} is not owned by {char_id}"),
-                    });
+                    return Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}") });
                 }
                 if let Some(banks) = snap.weapon_banks.get_mut(&ship_id) {
                     banks.remove(&master_id);
@@ -1064,10 +952,7 @@ pub(crate) async fn handle_dogma_im(
             let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
-                    return Err(BridgeRpcError {
-                        code: "ShipOwnershipViolation".into(),
-                        message: format!("Ship {ship_id} is not owned by {char_id}"),
-                    });
+                    return Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}") });
                 }
                 snap.weapon_banks.remove(&ship_id);
                 Ok(PyRep::None)
@@ -1083,10 +968,7 @@ pub(crate) async fn handle_dogma_im(
             let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
             let owns_ship = ctx.db.with_snapshot(|s| s.items.get(&ship_id).is_some_and(|sh| sh.owner_id == char_id));
             if !owns_ship {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipOwnershipViolation".into(),
-                    message: format!("Ship {ship_id} is not owned by character {char_id}"),
-                }));
+                return Some(Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by character {char_id}") }));
             }
             let requested_module_ids: Vec<i64> = match args.get(1) {
                 Some(PyRep::List(v) | PyRep::Tuple(v)) => v.iter().filter_map(|x| x.as_i64()).collect(),
@@ -1100,24 +982,15 @@ pub(crate) async fn handle_dogma_im(
             };
 
             let Some(&first_charge_id) = charge_item_ids.first() else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "LoadAmmo requires charge itemID".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "LoadAmmo requires charge itemID".into() }));
             };
 
             let charge_check = ctx.db.with_snapshot(|snap| {
                 let Some(stack) = snap.items.get(&first_charge_id) else {
-                    return Err(BridgeRpcError {
-                        code: "ItemNotFound".into(),
-                        message: format!("Charge item {first_charge_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Charge item {first_charge_id} not found") });
                 };
                 if stack.owner_id != char_id {
-                    return Err(BridgeRpcError {
-                        code: "ItemOwnershipViolation".into(),
-                        message: format!("Charge item {first_charge_id} is not owned by character {char_id}"),
-                    });
+                    return Err(BridgeRpcError { code: "ItemOwnershipViolation".into(), message: format!("Charge item {first_charge_id} is not owned by character {char_id}") });
                 };
                 let current_dock = session.station_id.or(session.structure_id).or_else(|| {
                     snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id))
@@ -1130,10 +1003,7 @@ pub(crate) async fn handle_dogma_im(
                     && snap.is_ship_colocated_with_character(char_id, ship_id, current_dock)
                     && !snap.is_item_locked_in_contract_or_job(first_charge_id);
                 if !snap.is_item_consumable_by(stack, char_id, current_dock, Some(ship_id)) && !in_ship_ammo_hold {
-                    return Err(BridgeRpcError {
-                        code: "AmmoNotReachable".into(),
-                        message: format!("Charge item {first_charge_id} must be unlocked in your current station hangar or active ship cargo/ammo hold and not in a contract"),
-                    });
+                    return Err(BridgeRpcError { code: "AmmoNotReachable".into(), message: format!("Charge item {first_charge_id} must be unlocked in your current station hangar or active ship cargo/ammo hold and not in a contract") });
                 }
                 Ok((stack.type_id, stack.quantity))
             });
@@ -1171,26 +1041,17 @@ pub(crate) async fn handle_dogma_im(
 
             for &mod_id in &all_target_modules {
                 let Some(mod_item) = ctx.db.with_snapshot(|snap| snap.items.get(&mod_id).cloned()) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "ModuleNotFound".into(),
-                        message: format!("Target module {mod_id} not found"),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Target module {mod_id} not found") }));
                 };
                 if mod_item.owner_id != char_id || mod_item.location_id != ship_id || !matches!(mod_item.flag as u16, 11..=34 | 125..=132) {
-                    return Some(Err(BridgeRpcError {
-                        code: "ModuleOwnershipViolation".into(),
-                        message: format!("Target module {mod_id} is not fitted on ship {ship_id} owned by character {char_id}"),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "ModuleOwnershipViolation".into(), message: format!("Target module {mod_id} is not fitted on ship {ship_id} owned by character {char_id}") }));
                 }
                 if let (Some(wt), Some(ct)) = (ctx.sde.types.get(&mod_item.type_id), ctx.sde.types.get(&charge_type_id)) {
                     let aar_paste_ok = matches!(wt.group_id, 1199 | 1698) && ct.type_id == 28668;
                     let cap_booster_ok = matches!(wt.group_id, 76 | 1156 | 1697) && ct.group_id == 87 && ct.volume <= wt.capacity.max(1.0) + 1e-6;
                     let wubble_probe_ok = wt.group_id == 589 && matches!(ct.group_id, 548 | 4088) && ct.volume <= wt.capacity.max(1.0) + 1e-6;
                     if !ServerContext::is_charge_compatible_with_weapon(wt, ct) && !aar_paste_ok && !cap_booster_ok && !wubble_probe_ok {
-                        return Some(Err(BridgeRpcError {
-                            code: "IncompatibleAmmo".into(),
-                            message: format!("Charge {} is incompatible with weapon {}", ct.name, wt.name),
-                        }));
+                        return Some(Err(BridgeRpcError { code: "IncompatibleAmmo".into(), message: format!("Charge {} is incompatible with weapon {}", ct.name, wt.name) }));
                     }
                     if matches!(ct.group_id, 482 | 663) {
                         if let Err(e) = ctx.db.with_snapshot(|snap| ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, charge_type_id)) {
@@ -1231,10 +1092,7 @@ pub(crate) async fn handle_dogma_im(
 
             let num_mods = all_target_modules.len() as i32;
             if avail_qty < num_mods {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientQuantity".into(),
-                    message: format!("Need at least {num_mods} charges, but only {avail_qty} available in stack"),
-                }));
+                return Some(Err(BridgeRpcError { code: "InsufficientQuantity".into(), message: format!("Need at least {num_mods} charges, but only {avail_qty} available in stack") }));
             }
             let fair_share = (avail_qty / num_mods).max(1);
             let mut mod_allocations: Vec<(i64, i32)> = Vec::with_capacity(per_mod_caps.len());

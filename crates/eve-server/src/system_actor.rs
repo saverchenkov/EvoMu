@@ -67,6 +67,7 @@ pub struct SystemRegistry {
     mechanic_rng: Arc<crate::rng::MechanicRng>,
     pub(crate) npc_death_hook: Arc<RwLock<Option<NpcDeathHook>>>,
     pub(crate) module_deactivation_hook: Arc<RwLock<Option<ModuleDeactivationHook>>>,
+    pub(crate) system_step_hook: Arc<RwLock<Option<SystemStepHook>>>,
     /// PvE special-site balls (system, ball id) already spawned once into this registry's ballparks.
     /// Runtime-only (lives and dies with the ballparks), so no sentinel ball is needed in space.
     special_site_spawned_balls: std::sync::Mutex<std::collections::HashSet<(SolarSystemId, i64)>>,
@@ -90,6 +91,7 @@ impl SystemRegistry {
             mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
             npc_death_hook: Arc::new(RwLock::new(None)),
             module_deactivation_hook: Arc::new(RwLock::new(None)),
+            system_step_hook: Arc::new(RwLock::new(None)),
             special_site_spawned_balls: std::sync::Mutex::new(std::collections::HashSet::new()),
             tactical_state: Arc::new(RwLock::new(Default::default())),
         }
@@ -105,6 +107,7 @@ impl SystemRegistry {
             mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
             npc_death_hook: Arc::new(RwLock::new(None)),
             module_deactivation_hook: Arc::new(RwLock::new(None)),
+            system_step_hook: Arc::new(RwLock::new(None)),
             special_site_spawned_balls: std::sync::Mutex::new(std::collections::HashSet::new()),
             tactical_state: Arc::new(RwLock::new(Default::default())),
         }
@@ -120,6 +123,7 @@ impl SystemRegistry {
             mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
             npc_death_hook: Arc::new(RwLock::new(None)),
             module_deactivation_hook: Arc::new(RwLock::new(None)),
+            system_step_hook: Arc::new(RwLock::new(None)),
             special_site_spawned_balls: std::sync::Mutex::new(std::collections::HashSet::new()),
             tactical_state: Arc::new(RwLock::new(Default::default())),
         }
@@ -139,6 +143,10 @@ impl SystemRegistry {
 
     pub fn set_module_deactivation_hook(&self, hook: ModuleDeactivationHook) {
         *self.module_deactivation_hook.write().unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+
+    pub fn set_system_step_hook(&self, hook: SystemStepHook) {
+        *self.system_step_hook.write().unwrap_or_else(|e| e.into_inner()) = Some(hook);
     }
 
     /// Shares `rng` as this registry's game-mechanic RNG (seeded test RNG).
@@ -1099,6 +1107,7 @@ impl SystemRegistry {
             last_auto_stepped_unix,
             npc_death_hook: Arc::clone(&self.npc_death_hook),
             module_deactivation_hook: Arc::clone(&self.module_deactivation_hook),
+            system_step_hook: Arc::clone(&self.system_step_hook),
         };
         let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = guard.get(&solar_system_id) {

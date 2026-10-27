@@ -1168,7 +1168,7 @@ pub async fn handle_cmd_reconnect_to_drones(
         ctx.invalidate_ship_fitting(ship_id);
         ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
     }
-    let (max_drones_allowed, ship_bw) = crate::services::combat_crimewatch::combat_npcs_drones::pilot_drone_capacity(ctx, char_id, ship_id, ship_fit_opt.as_ref());
+    let (max_drones_allowed, ship_bw, _) = crate::services::combat_crimewatch::combat_npcs_drones::pilot_drone_capacity(ctx, char_id, ship_id, ship_fit_opt.as_ref());
     let (mut cur_count, mut cur_bw) = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
         let active: Vec<&crate::services::combat_crimewatch::DroneSpaceState> = rt
             .active_drones_in_space.values().filter(|d| d.parent_ship_id == ship_id && !d.is_abandoned).collect();

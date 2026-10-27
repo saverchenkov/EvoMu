@@ -532,6 +532,11 @@ async fn test_mn02_ice_harvesting_and_gas_harvesting_cycles() {
     let (_, ship_ball) = jita.get_ball_snapshot(ship_id).await.unwrap().unwrap();
 
     // 1. Ice harvesting cycle: Clear Icicle (type 16262, group 465, unit volume 1000.0 m3)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.type_id = 654; // Kryos (Specialized Ice Hold 30,000 m3)
+        }
+    });
     let ice_ast_id = 750_000_465i64;
     jita.spawn_asteroid(
         AsteroidState {

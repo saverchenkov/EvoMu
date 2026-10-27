@@ -601,7 +601,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
     );
     assert!(ess_done_kv.get("stolenISK").unwrap().as_f64().unwrap() > 0.0);
     // Jump back VFK-IV (30002904) -> Tama (30002813) via wormhole, then stargates (50014002 -> 50000805 -> 50013925 -> 50013927 -> Jita 30000142) -> Dock at Jita 4-4 (60003760)
-    ctx.advance_secs(12);
+    ctx.advance_secs(300);
     let jb_tama = ctx
         .dispatch_rpc(
             &mut sess,

@@ -210,6 +210,14 @@ async fn test_jetcan_wreck_sma_and_fleet_hangar() {
     seed_item(&ctx, spare_rifter_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
     let orca_id = 820_020i64;
     seed_item(&ctx, orca_id, 28606, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    ctx.db.with_mut_snapshot(|snap| {
+        let sk = snap.skills.entry(char_id).or_default();
+        sk.insert(29637, eve_db::TrainedSkillRecord { type_id: 29637, level: 5, skill_points: 256_000.0 });
+        sk.insert(3327, eve_db::TrainedSkillRecord { type_id: 3327, level: 5, skill_points: 256_000.0 });
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2;
+        }
+    });
     ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "ship", None, "Board", &[PyRep::Integer(orca_id)], &kw, None)
         .await

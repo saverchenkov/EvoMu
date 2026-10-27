@@ -222,7 +222,7 @@ async fn test_d6_industry_pi_and_market_wallet_history_durable_across_sqlite_res
         let sell_res = call(&ctx, &mut sess_p1, "marketProxy", "PlaceMultiSellOrder", &[PyRep::List(vec![PyRep::Dict(vec![(PyRep::String("itemID".into()), PyRep::Integer(910_003)), (PyRep::String("typeID".into()), PyRep::Integer(TRITANIUM as i64)), (PyRep::String("price".into()), PyRep::Real(4.50)), (PyRep::String("quantity".into()), PyRep::Integer(1_000)), (PyRep::String("stationID".into()), PyRep::Integer(JITA_STATION_ID)), (PyRep::String("duration".into()), PyRep::Integer(90))])]), PyRep::Bool(false)]).await.expect("PlaceMultiSellOrder");
         let sell_oid = sell_res.dict_get("orderID").and_then(|v| v.as_i64()).unwrap();
 
-        call(&ctx, &mut sess_p2, "marketProxy", "PlaceBuyOrder", &[PyRep::Integer(JITA_STATION_ID), PyRep::Integer(TRITANIUM as i64), PyRep::Real(4.50), PyRep::Integer(400), PyRep::Integer(32767), PyRep::Integer(1), PyRep::Integer(90), PyRep::Bool(false)]).await.expect("PlaceBuyOrder");
+        call(&ctx, &mut sess_p2, "marketProxy", "PlaceBuyOrder", &[PyRep::Integer(JITA_STATION_ID), PyRep::Integer(TRITANIUM as i64), PyRep::Real(4.50), PyRep::Integer(400), PyRep::Integer(-1), PyRep::Integer(1), PyRep::Integer(90), PyRep::Bool(false)]).await.expect("PlaceBuyOrder");
         let old_hist = call(&ctx, &mut sess_p1, "marketProxy", "GetOldPriceHistory", &[PyRep::Integer(TRITANIUM as i64)]).await.expect("GetOldPriceHistory");
         call_kw(&ctx, &mut sess_p1, "account", "GiveCashFromCorpAccount", &[PyRep::Integer(P2), PyRep::Real(50_000.0), PyRep::Integer(1000)], &[("reason", PyRep::String("Corp dividend".into()))]).await.expect("GiveCashFromCorpAccount");
 

@@ -48,6 +48,17 @@ async fn test_market_orders_limit_escrow_queries_cancellation() {
     let mut s1 = setup_pilot(&ctx, 201, "demo", "demo-secret", 90_000_001).await;
     let mut s2 = setup_pilot(&ctx, 202, "other", "other-secret", 90_000_002).await;
 
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(90_000_001).or_default().insert(
+            3447,
+            TrainedSkillRecord {
+                type_id: 3447,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+    });
+
     // Verify PlaceBuyOrder stores station (-1), solar system (0), N jumps (5), and region (32767) ranges
     for &rng in &[-1_i64, 0, 32767] {
         let r_ord = ctx.dispatch_rpc(

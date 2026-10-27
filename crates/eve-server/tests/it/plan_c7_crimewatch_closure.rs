@@ -354,7 +354,7 @@ async fn test_plan_c7_gecko_augmented_mutated_subverted_drones() {
     let bw_err = dispatch_combat_rpc(
         &ctx, &mut sess, "ship", "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(sub1), PyRep::Integer(sub2), PyRep::Integer(sub3)])], &kw,
     ).await.expect_err("3 x 20 Mbit/s Subverted drones must exceed 50 Mbit/s bandwidth");
-    assert_eq!(bw_err.code, "InsufficientDroneBandwidth");
+    assert_eq!(bw_err.code, "MaxBandwidthExceeded");
 
     let launch_two = dispatch_combat_rpc(
         &ctx, &mut sess, "ship", "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(sub1), PyRep::Integer(sub2)])], &kw,

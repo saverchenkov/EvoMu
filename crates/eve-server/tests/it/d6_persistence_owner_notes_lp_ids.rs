@@ -160,6 +160,7 @@ async fn test_d3_owner_notes_persistence_market_industry_and_pi_across_sqlite_re
             }
             seed_item(snap, RIFTER_BP_TYPE_ID, corp_id, JITA_STATION_ID, InventoryFlag::Hangar, 1, true);
             seed_item(snap, TRITANIUM, corp_id, JITA_STATION_ID, InventoryFlag::Hangar, 100_000, false);
+            snap.skills.entry(P1).or_default().insert(3447, TrainedSkillRecord { type_id: 3447, level: 5, skill_points: 256_000.0 });
         });
 
         let mut sess = login_select(&ctx, 7001, "demo", "demo-secret", P1).await;

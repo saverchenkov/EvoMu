@@ -706,6 +706,7 @@ pub async fn handle_crimewatch(
             )))
         }
 
+        // parity: feat:crimewatch.safety-setting-action-block
         ("crimewatch", "SetSafetyLevel") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -729,6 +730,7 @@ pub async fn handle_crimewatch(
             ])))
         }
 
+        // parity: feat:crimewatch.limited-engagement-duel
         ("crimewatch", "StartDuelChallenge") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,

@@ -627,6 +627,10 @@ pub async fn handle(
                 }));
             }
 
+            if let Err(e) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "dock") {
+                return Some(Err(e));
+            }
+
             let target_pos = if is_structure {
                 let st_opt = ctx
                     .db

@@ -774,6 +774,78 @@ impl ServerContext {
             }
         }));
     }
+
+    /// Constructs a lightweight `ServerContext` handle referencing shared core components for system step execution.
+    pub fn from_step_components(
+        systems: std::sync::Arc<crate::system_actor::SystemRegistry>,
+        db: std::sync::Arc<eve_db::WorldRepository>,
+        sde: std::sync::Arc<eve_sde::SdeRegistry>,
+        mechanic_rng: std::sync::Arc<crate::rng::MechanicRng>,
+        ship_fittings: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<i64, eve_dogma::ShipFittingEngine>>>,
+        pending_notifications: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<i64, Vec<super::cache_notifications::PendingMachoNotification>>>>,
+        notify_tx: tokio::sync::broadcast::Sender<(i64, super::cache_notifications::PendingMachoNotification)>,
+        combat_ephemeral: std::sync::Arc<std::sync::RwLock<crate::services::combat_crimewatch::CombatRuntimeState>>,
+        quasar_gateway: std::sync::Arc<crate::quasar_gateway::PublicGatewayRouter>,
+        invention_roll_override: std::sync::Arc<std::sync::RwLock<Option<f64>>>,
+    ) -> Self {
+        let crimewatch = crate::combat::crimewatch::CrimeWatchLock::new(std::sync::Arc::clone(&db));
+        let clock = std::sync::RwLock::new(db.clock());
+        let living_world = std::sync::Arc::new(crate::living_world::LivingWorldDirector::new());
+        let esi_state = std::sync::Arc::new(crate::esi::runtime_state::EsiRuntimeState::new());
+        let cluster_state = std::sync::Arc::new(std::sync::RwLock::new(crate::services::macho_cluster_mgmt::MachoClusterState::default()));
+        let tactical_state = std::sync::Arc::new(std::sync::RwLock::new(crate::services::tactical_modules::TacticalModulesState::default()));
+        Self {
+            instance_id: super::context::next_ctx_instance_id(),
+            sde,
+            db,
+            clock,
+            systems,
+            living_world,
+            quasar_gateway,
+            cataloged_services: std::collections::HashSet::new(),
+            quasar_domains: std::collections::HashSet::new(),
+            bound_objects: std::sync::RwLock::new(std::collections::HashMap::new()),
+            object_cache: std::sync::RwLock::new(std::collections::HashMap::new()),
+            object_cache_timestamps: std::sync::RwLock::new(std::collections::HashMap::new()),
+            notification_records: std::sync::RwLock::new(Vec::new()),
+            pending_notifications,
+            notify_tx,
+            map_landmarks: std::sync::RwLock::new(Vec::new()),
+            session_closers: std::sync::RwLock::new(std::collections::HashMap::new()),
+            ship_fittings,
+            projected_ewar: std::sync::RwLock::new(std::collections::HashMap::new()),
+            weapon_cycle_state: std::sync::RwLock::new(std::collections::HashMap::new()),
+            fighter_cooldown_state: std::sync::RwLock::new(std::collections::HashMap::new()),
+            fighter_charge_state: std::sync::RwLock::new(std::collections::HashMap::new()),
+            active_fighters: std::sync::RwLock::new(std::collections::HashMap::new()),
+            fighter_tube_loads: std::sync::RwLock::new(std::collections::HashMap::new()),
+            active_scanner_probes: std::sync::RwLock::new(std::collections::HashMap::new()),
+            active_moon_probes: std::sync::RwLock::new(Vec::new()),
+            scanned_signatures: std::sync::RwLock::new(std::collections::HashSet::new()),
+            character_scan_progress: std::sync::RwLock::new(std::collections::HashMap::new()),
+            invention_roll_override,
+            mechanic_rng,
+            module_reactivation_cooldowns: std::sync::RwLock::new(std::collections::HashMap::new()),
+            mining_cycles: std::sync::RwLock::new(std::collections::HashMap::new()),
+            crimewatch,
+            combat_ephemeral,
+            tactical_state,
+            session_change_timers: std::sync::Mutex::new(std::collections::HashMap::new()),
+            active_warps: std::sync::Mutex::new(std::collections::HashMap::new()),
+            location_change_invuln: std::sync::Mutex::new(std::collections::HashMap::new()),
+            feature_flags: crate::config::FeatureFlagsConfig::default(),
+            esi_port: 0,
+            esi_state,
+            fleet_extras: std::sync::Mutex::new(Default::default()),
+            social_extras: std::sync::Mutex::new(Default::default()),
+            cluster_misc_state: std::sync::Mutex::new(Default::default()),
+            cluster_state,
+            global_config_values: std::sync::RwLock::new(std::collections::HashMap::new()),
+            alert_telemetry: std::sync::Mutex::new(Default::default()),
+            npc_spawns: std::sync::RwLock::new(std::collections::HashMap::new()),
+            combat_rng_seq: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
 }
 
 /// Helper to determine the effect ID for a module given its type ID and optional effect name.

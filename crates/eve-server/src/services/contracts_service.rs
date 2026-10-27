@@ -1375,11 +1375,14 @@ pub fn handle(
         "GetMyCurrentContractList" | "GetContractList" | "GetContractListForOwner" => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let caller_corp = session.corporation_id.unwrap_or(0);
-            let is_corp_query = args
-                .first()
-                .and_then(|a| a.as_bool())
-                .or_else(|| kwargs.get("forCorp").and_then(|v| v.as_bool()))
-                .unwrap_or(false);
+            let is_corp_query = if method == "GetContractListForOwner" {
+                kwargs.get("forCorp").and_then(|v| match v { PyRep::Bool(b) => Some(*b), _ => None }).unwrap_or(false)
+            } else {
+                args.first()
+                    .and_then(|a| match a { PyRep::Bool(b) => Some(*b), _ => None })
+                    .or_else(|| kwargs.get("forCorp").and_then(|v| match v { PyRep::Bool(b) => Some(*b), _ => None }))
+                    .unwrap_or(false)
+            };
             let owner_id = if is_corp_query && caller_corp != 0 {
                 caller_corp
             } else {

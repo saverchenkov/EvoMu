@@ -219,11 +219,43 @@ pub fn execute_death_pipeline_sync(
             });
         }
 
+        // parity: feat:ships.frigate-escape-bay
+        let escape_frigate_id: Option<i64> = if !is_pod {
+            let has_feb = ctx
+                .sde
+                .types
+                .get(&victim_ship_type_id)
+                .and_then(|t| t.default_attributes.get(&3020).copied())
+                .unwrap_or(0.0)
+                > 0.0;
+            if has_feb {
+                snap.items
+                    .values()
+                    .find(|i| {
+                        i.location_id == victim_ship_id
+                            && i.singleton
+                            && (i.flag as u16) == 179
+                            && ctx.sde.types.get(&i.type_id).is_some_and(|t| {
+                                matches!(
+                                    t.group_id,
+                                    25 | 324 | 830 | 831 | 834 | 893 | 1283 | 1527 | 2001
+                                )
+                            })
+                    })
+                    .map(|i| i.item_id)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let mut child_item_ids: Vec<i64> = snap
             .items
             .values()
             .filter(|i| {
                 i.location_id == victim_ship_id
+                    && Some(i.item_id) != escape_frigate_id
                     && matches!(
                         i.flag as u16,
                         4 | 5 | 11..=34 | 87 | 89 | 90 | 92..=94 | 125..=185
@@ -307,6 +339,18 @@ pub fn execute_death_pipeline_sync(
                 });
             }
         }
+        if let Some(esc_id) = escape_frigate_id {
+            if let Some(esc_item) = snap.items.get(&esc_id) {
+                // parity: feat:ships.frigate-escape-bay - frigate survives and is recorded on killmail
+                dropped_km.push(eve_db::KillmailItemEntry {
+                    type_id: esc_item.type_id,
+                    flag: 179,
+                    qty_dropped: 0,
+                    qty_destroyed: 0,
+                    singleton: true,
+                });
+            }
+        }
         if is_pod {
             let mut imp_tids: Vec<u32> = snap
                 .active_implants
@@ -347,34 +391,51 @@ pub fn execute_death_pipeline_sync(
         snap.item_positions.remove(&victim_ship_id);
 
         let cap_id = if !is_pod {
-            snap.next_entity_id += 1;
-            let cid = snap.next_entity_id;
-            snap.items.insert(
-                cid,
-                InventoryItemRecord {
-                    item_id: cid,
-                    type_id: 670,
-                    owner_id: victim_char_id,
-                    location_id: sys_id as i64,
-                    flag: InventoryFlag::None,
-                    quantity: 1,
-                    singleton: true,
-                    version: 1,
-                    dynamic_attributes: HashMap::new(),
-                    source_mutaplasmid_id: None,
-                    insured_payout_isk: 0.0,
-                    is_blueprint_copy: false,
-                    blueprint_runs_remaining: None,
-                },
-            );
-            snap.item_positions
-                .insert(cid, [victim_pos.x, victim_pos.y, victim_pos.z]);
-            if let Some(vic) = snap.characters.get_mut(&victim_char_id) {
-                vic.active_ship_id = cid;
-                vic.version += 1;
-                vic.system_epoch += 1;
+            if let Some(esc_id) = escape_frigate_id {
+                if let Some(esc_item) = snap.items.get_mut(&esc_id) {
+                    esc_item.location_id = sys_id as i64;
+                    esc_item.flag = InventoryFlag::None;
+                    esc_item.owner_id = victim_char_id;
+                    esc_item.version += 1;
+                }
+                snap.item_positions
+                    .insert(esc_id, [victim_pos.x, victim_pos.y, victim_pos.z]);
+                if let Some(vic) = snap.characters.get_mut(&victim_char_id) {
+                    vic.active_ship_id = esc_id;
+                    vic.version += 1;
+                    vic.system_epoch += 1;
+                }
+                Some(esc_id)
+            } else {
+                snap.next_entity_id += 1;
+                let cid = snap.next_entity_id;
+                snap.items.insert(
+                    cid,
+                    InventoryItemRecord {
+                        item_id: cid,
+                        type_id: 670,
+                        owner_id: victim_char_id,
+                        location_id: sys_id as i64,
+                        flag: InventoryFlag::None,
+                        quantity: 1,
+                        singleton: true,
+                        version: 1,
+                        dynamic_attributes: HashMap::new(),
+                        source_mutaplasmid_id: None,
+                        insured_payout_isk: 0.0,
+                        is_blueprint_copy: false,
+                        blueprint_runs_remaining: None,
+                    },
+                );
+                snap.item_positions
+                    .insert(cid, [victim_pos.x, victim_pos.y, victim_pos.z]);
+                if let Some(vic) = snap.characters.get_mut(&victim_char_id) {
+                    vic.active_ship_id = cid;
+                    vic.version += 1;
+                    vic.system_epoch += 1;
+                }
+                Some(cid)
             }
-            Some(cid)
         } else {
             None
         };
@@ -610,22 +671,32 @@ pub fn execute_death_pipeline_sync(
         },
     );
     if let Some(cid) = ejected_cap_id {
+        let esc_type_id = ctx
+            .db
+            .with_snapshot(|s| s.items.get(&cid).map(|i| i.type_id))
+            .unwrap_or(670);
+        let esc_sde = ctx.sde.types.get(&esc_type_id);
+        let esc_grp = esc_sde.map(|t| t.group_id).unwrap_or(29);
         sys_handle.try_spawn_ball_with_meta(
             Ball {
                 id: cid,
-                type_id: 670,
+                type_id: esc_type_id,
                 position: victim_pos,
                 velocity: DVec3::ZERO,
-                max_velocity: 335.0,
-                inertia: 0.25,
-                mass: 16_000.0,
-                radius: 15.0,
+                max_velocity: esc_sde
+                    .and_then(|t| t.default_attributes.get(&37).copied())
+                    .unwrap_or(335.0),
+                inertia: esc_sde
+                    .and_then(|t| t.default_attributes.get(&70).copied())
+                    .unwrap_or(0.25),
+                mass: esc_sde.map(|t| t.mass.max(1_000.0)).unwrap_or(16_000.0),
+                radius: esc_sde.map(|t| t.radius.max(15.0)).unwrap_or(15.0),
                 speed_fraction: 0.0,
                 mode: MovementMode::Stop,
             },
-            ctx.build_type_combat_state(670),
+            ctx.build_ship_combat_state(victim_char_id, cid, esc_type_id),
             SlimItemMeta {
-                group_id: 29,
+                group_id: esc_grp,
                 category_id: 6,
                 owner_id: victim_char_id,
                 char_id: Some(victim_char_id),

@@ -263,6 +263,7 @@ impl CrimeWatchDirector {
     /// - High-sec unprovoked attack (`sys_sec >= 0.45`): Criminal flag (15m), weapon timer (60s), PvP timer (15m), schedules CONCORD.
     /// - Low-sec unprovoked attack (`0.0 < sys_sec < 0.45`): Suspect flag (15m), weapon timer (60s), PvP timer (15m).
     /// - Legal aggression (active war or suspect victim): Weapon timer (60s), PvP timer (15m).
+    // parity: feat:crimewatch.concord-response-scaling
     pub fn handle_combat_aggression(
         &mut self,
         character_id: i64,
@@ -293,7 +294,14 @@ impl CrimeWatchDirector {
         if sys_sec >= 0.45 {
             // High-sec illegal attack -> Criminal flag + CONCORD response
             st.criminal_flag_until_unix = now_unix.saturating_add(900);
-            let delay_sec = concord_response_delay_sec(sys_sec);
+            let delay_sec = match (sys_sec * 10.0).round() as i32 {
+                10 | 9 => 6.0,
+                8 => 8.0,
+                7 => 11.0,
+                6 => 14.0,
+                5 => 19.0,
+                _ => concord_response_delay_sec(sys_sec),
+            };
             let arrival_unix = now_unix.saturating_add(delay_sec.ceil() as u64);
             st.pending_concord_arrival = Some((sys_id, arrival_unix, ship_id, victim_char_id));
 
@@ -312,9 +320,11 @@ impl CrimeWatchDirector {
     }
 
     /// Checks and executes any pending CONCORD response arrivals:
-    /// - Spawns real CONCORD police battleships (Police Commander, type 11957).
+    /// - Spawns real CONCORD police battleships (Police Commander, type 11957) with complete invulnerability.
+    /// - Applies 100% web, warp scramble, capacitor drain, and ECM jam to the criminal ship.
     /// - Destroys the criminal's ship via the real death pipeline (`C-3`), removing instant ball deletion!
     /// - Grants 30-day Kill Right to the victim and applies security status penalty.
+    // parity: feat:crimewatch.concord-response-scaling
     pub async fn step_concord(
         &mut self,
         ctx: &ServerContext,
@@ -344,7 +354,7 @@ impl CrimeWatchDirector {
                 .map(|(_, b)| b.position)
                 .unwrap_or(DVec3::ZERO);
 
-            // 1. Spawn real CONCORD Police Battleship in the ballpark
+            // 1. Spawn real CONCORD Police Battleship in the ballpark (completely invulnerable to damage)
             let concord_ball_id = ctx.db.with_mut_snapshot(|snap| {
                 snap.next_entity_id += 1;
                 snap.next_entity_id
@@ -362,9 +372,20 @@ impl CrimeWatchDirector {
                 speed_fraction: 1.0,
                 mode: MovementMode::Stop,
             };
+            let mut concord_cs = ctx.build_type_combat_state(11957);
+            concord_cs.shield_resonance = [0.0; 4];
+            concord_cs.armor_resonance = [0.0; 4];
+            concord_cs.structure_resonance = [0.0; 4];
             let _ = sys_handle
-                .spawn_ball_with_combat(concord_ball, ctx.build_type_combat_state(11957))
+                .spawn_ball_with_combat(concord_ball, concord_cs)
                 .await;
+
+            // 1b. CONCORD applies 100% web, warp scramble, capacitor drain, and ECM jam to the criminal ship
+            let _ = sys_handle.set_speed_fraction(criminal_ship_id, 0.0).await;
+            let _ = sys_handle.set_warp_scramble_strength(criminal_ship_id, 100).await;
+            let _ = sys_handle.set_capacitor(criminal_ship_id, 0.0).await;
+            let _ = sys_handle.apply_ecm_jam(criminal_ship_id, 60.0).await;
+            let _ = sys_handle.clear_target_locks(criminal_ship_id).await;
 
             // 2. CONCORD destroys the criminal ship through the canonical death pipeline (C-3)
             let death_res = execute_death_pipeline(

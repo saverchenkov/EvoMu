@@ -67,6 +67,7 @@ impl DroneSpaceState {
     /// Computes the turret-style hit multiplier `(0.05..=1.0]` for this drone engaging `target_ball`
     /// using `effective_tracking_speed` (`attr 160`), `optimal_range` (`attr 54`), `effective_falloff_range` (`attr 158`),
     /// angular velocity `omega`, and target signature radius (`attr 552`).
+    // parity: feat:drones.sentry-drone-stationary-tracking
     pub fn compute_combat_hit_multiplier(
         &self,
         ctx: &ServerContext,
@@ -439,33 +440,29 @@ pub(crate) fn pilot_drone_capacity(
     char_id: i64,
     ship_id: i64,
     ship_fit: Option<&eve_dogma::ShipFittingEngine>,
-) -> (usize, f64) {
+) -> (usize, f64, f64) {
     let max_drones = ctx.db.with_snapshot(|s| {
-        s.skills.get(&char_id).and_then(|m| m.get(&3436)).map(|sk| (sk.level as usize).clamp(1, 5)).unwrap_or(5)
+        s.skills.get(&char_id)
+            .and_then(|m| m.get(&3436))
+            .map(|sk| (sk.level as usize).min(5))
+            .unwrap_or(0)
     });
     let triage = ship_fit.is_some_and(|f| {
-        f.modules.values().any(|m| {
-            matches!(m.state, eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded)
-                && matches!(m.type_id, 27951 | 4294)
-        })
+        f.modules.values().any(|m| matches!(m.state, eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded) && matches!(m.type_id, 27951 | 4294))
     });
-    let bw = if triage {
-        0.0
-    } else {
-        ship_fit
-            .map(|f| f.ship.get_attribute(1271, &ctx.sde))
-            .filter(|&b| b > 0.0)
-            .unwrap_or_else(|| {
-                ctx.db.with_snapshot(|s| {
-                    s.items
-                        .get(&ship_id)
-                        .and_then(|i| ctx.sde.types.get(&i.type_id))
-                        .and_then(|t| t.default_attributes.get(&1271).copied())
-                })
-                .unwrap_or(50.0)
-            })
+    let bw = if triage { 0.0 } else {
+        ship_fit.map(|f| f.ship.get_attribute(1271, &ctx.sde)).filter(|&b| b > 0.0).unwrap_or_else(|| {
+            ctx.db.with_snapshot(|s| s.items.get(&ship_id).and_then(|i| ctx.sde.types.get(&i.type_id)).and_then(|t| t.default_attributes.get(&1271).copied())).unwrap_or(50.0)
+        })
     };
-    (max_drones, bw)
+    let cap = ctx.db.with_snapshot(|s| {
+        s.items.get(&ship_id).and_then(|i| i.dynamic_attributes.get(&283).copied())
+    }).or_else(|| {
+        ship_fit.map(|f| f.ship.get_attribute(283, &ctx.sde)).filter(|&c| c > 0.0)
+    }).unwrap_or_else(|| {
+        ctx.db.with_snapshot(|s| s.items.get(&ship_id).and_then(|i| ctx.sde.types.get(&i.type_id)).and_then(|t| t.default_attributes.get(&283).copied())).unwrap_or(0.0)
+    });
+    (max_drones, bw, cap)
 }
 
 /// Handles all V24 client Drone RPCs (`ship.LaunchDrones`, `ship.ScoopToDroneBay`, `entity.CmdReturnBay`,
@@ -522,7 +519,8 @@ pub async fn handle_npcs_drones(
                 ctx.invalidate_ship_fitting(ship_id);
                 ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
             }
-            let (max_drones_allowed, ship_bw) = pilot_drone_capacity(ctx, char_id, ship_id, ship_fit_opt.as_ref());
+            // parity: feat:drones.bandwidth-and-bay-constraints
+            let (max_drones_allowed, ship_bw, _ship_drone_cap) = pilot_drone_capacity(ctx, char_id, ship_id, ship_fit_opt.as_ref());
             let (cur_count, cur_bw) = with_combat_runtime(ctx, |rt| {
                 let active: Vec<&DroneSpaceState> = rt
                     .active_drones_in_space
@@ -533,16 +531,15 @@ pub async fn handle_npcs_drones(
             });
 
             if cur_count + drone_ids.len() > max_drones_allowed {
-                return Some(Err(BridgeRpcError {
-                    code: "MaxActiveDronesExceeded".into(),
-                    message: format!(
-                        "Cannot control more than {max_drones_allowed} active drones (currently {cur_count}, requested {})",
-                        drone_ids.len()
-                    ),
-                }));
+                let code = if max_drones_allowed == 0 {
+                    "NoDroneManagementAbilities"
+                } else {
+                    "NoDroneManagementAbilitiesLeft"
+                };
+                return Some(Err(BridgeRpcError::user_error(code)));
             }
 
-            let drone_records: Vec<InventoryItemRecord> = match ctx.db.with_snapshot(|snap| {
+            let drone_records = match ctx.db.with_snapshot(|snap| {
                 let mut recs = Vec::new();
                 for &did in &drone_ids {
                     let Some(it) = snap.items.get(&did).cloned() else {
@@ -551,20 +548,11 @@ pub async fn handle_npcs_drones(
                             message: format!("Drone item {did} not found"),
                         });
                     };
-                    if it.owner_id != char_id
-                        || it.location_id != ship_id
-                        || it.flag != InventoryFlag::DroneBay
-                    {
-                        return Err(BridgeRpcError {
-                            code: "DroneNotInBay".into(),
-                            message: format!("Drone {did} is not in ship {ship_id}'s drone bay"),
-                        });
+                    if it.owner_id != char_id || it.location_id != ship_id || it.flag != InventoryFlag::DroneBay {
+                        return Err(BridgeRpcError { code: "DroneNotInBay".into(), message: format!("Drone {did} is not in ship {ship_id}'s drone bay") });
                     }
                     if !ctx.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 18) {
-                        return Err(BridgeRpcError {
-                            code: "NotADrone".into(),
-                            message: format!("Item {did} (type {}) is not a drone", it.type_id),
-                        });
+                        return Err(BridgeRpcError { code: "NotADrone".into(), message: format!("Item {did} (type {}) is not a drone", it.type_id) });
                     }
                     recs.push(it);
                 }
@@ -587,13 +575,7 @@ pub async fn handle_npcs_drones(
                 })
                 .sum();
             if cur_bw + req_bw > ship_bw + 1e-4 {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientDroneBandwidth".into(),
-                    message: format!(
-                        "Launching requires {:.1} Mbit/s bandwidth (ship has {:.1} Mbit/s, {:.1} Mbit/s already in use)",
-                        req_bw, ship_bw, cur_bw
-                    ),
-                }));
+                return Some(Err(BridgeRpcError::user_error("MaxBandwidthExceeded")));
             }
 
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -628,9 +610,9 @@ pub async fn handle_npcs_drones(
                         fit_eff.or(sde_base)
                     }
                 };
+                // parity: feat:drones.sentry-drone-stationary-tracking
                 let raw_vel = attr(37).unwrap_or(1_500.0);
-                let is_sentry = raw_vel < 1.0
-                    || matches!(rec.type_id, 23559 | 23561 | 23525 | 23563 | 28292 | 28294);
+                let is_sentry = raw_vel < 1.0;
                 let max_vel = if is_sentry { 0.0 } else { raw_vel };
                 let bw_used = attr(1272).unwrap_or(5.0);
                 let opt_range = attr(54).unwrap_or(5_000.0);
@@ -677,6 +659,10 @@ pub async fn handle_npcs_drones(
                     (bid, actual_item_id)
                 });
                 let mut cs = ctx.build_type_combat_state(rec.type_id);
+                if cs.structure_hp <= 0.0 {
+                    cs.structure_hp = 200.0;
+                    cs.max_structure_hp = 200.0;
+                }
                 if let Some(&mut_hp) = rec.dynamic_attributes.get(&9) {
                     cs.structure_hp = mut_hp;
                     cs.max_structure_hp = mut_hp;
@@ -1023,6 +1009,9 @@ pub async fn handle_npcs_drones(
                         };
                         if let Ok(Some((app, _, _))) = sys_handle.apply_damage_with_attacker(target_id, scaled_dmg, Some(char_id)).await {
                             total_dmg_dealt += app;
+                            if app > 0.0 {
+                                super::combat_npc_ai::record_npc_threat_event(ctx, target_id, d.ball_id, app, false, false);
+                            }
                             record_killmail_assist_action(ctx, target_id, char_id, d.type_id, d.type_id, app, false, now_unix);
                         }
                     }
@@ -1064,9 +1053,7 @@ pub async fn handle_npcs_drones(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let _ = ctx
-                .db
-                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.character_id));
+            let _ = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.character_id));
             let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let is_assist = method == "CmdAssist";
             let mut updated = 0;
@@ -1074,15 +1061,9 @@ pub async fn handle_npcs_drones(
             with_mut_combat_runtime(ctx, |rt| {
                 for d in rt.active_drones_in_space.values_mut() {
                     if d.owner_char_id == char_id && !d.is_abandoned {
-                        if is_assist {
-                            d.assist_char_id = Some(target_char_id);
-                            d.guard_char_id = None;
-                            d.activity_state = 6;
-                        } else {
-                            d.guard_char_id = Some(target_char_id);
-                            d.assist_char_id = None;
-                            d.activity_state = 7;
-                        }
+                        d.assist_char_id = is_assist.then_some(target_char_id);
+                        d.guard_char_id = (!is_assist).then_some(target_char_id);
+                        d.activity_state = if is_assist { 6 } else { 7 };
                         updated += 1;
                         drone_events.push((d.ball_id, d.type_id));
                     }

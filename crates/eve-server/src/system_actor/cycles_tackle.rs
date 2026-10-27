@@ -204,11 +204,15 @@ pub(crate) fn handle_add_module_cycle(
         }
     }
     // Remove any existing cycle for this (ship_id, module_id) before re-adding
+    // parity: feat:modules.mutadaptive-remote-armor-repairer, feat:modules.emergency-hull-energizer, feat:modules.stasis-grappler-mechanics
     if let Some(pos) = active_module_cycles
         .iter()
         .position(|c| c.ship_id == cycle.ship_id && c.module_id == cycle.module_id)
     {
         let prev = active_module_cycles.remove(pos);
+        if prev.mutadaptive_spool_step > 0.0 && prev.target_id == cycle.target_id {
+            cycle.current_spool_cycles = prev.current_spool_cycles;
+        }
         cleanup_removed_module_cycle(ballpark, &prev, db_opt);
     }
     if cycle.immobilize_self {
@@ -279,18 +283,19 @@ pub(crate) fn handle_add_module_cycle(
                 }
             });
         }
-    } else if matches!(cycle.module_type_id, 40714 | 40717) {
+    } else if let Some(ehe_res) = cycle.ehe_hull_resists {
         if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
             cycle.adc_saved_resists =
                 Some((cs.shield_resonance, cs.armor_resonance, cs.structure_resonance));
-            cs.structure_resonance = [0.01; 4];
+            cs.structure_resonance = ehe_res;
         }
         if let Some(db_ref) = db_opt {
             db_ref.with_mut_snapshot(|snap| {
                 if let Some(s_item) = snap.items.get_mut(&cycle.ship_id) {
-                    for aid in [109, 110, 111, 113] {
-                        s_item.dynamic_attributes.insert(aid, 0.01);
-                    }
+                    s_item.dynamic_attributes.insert(113, ehe_res[0]);
+                    s_item.dynamic_attributes.insert(111, ehe_res[1]);
+                    s_item.dynamic_attributes.insert(109, ehe_res[2]);
+                    s_item.dynamic_attributes.insert(110, ehe_res[3]);
                 }
             });
         }

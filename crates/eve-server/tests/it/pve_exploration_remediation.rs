@@ -68,6 +68,13 @@ async fn create_in_space_session(
 
 async fn traverse_and_win_hack(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, can_id: i64) {
     let kw = HashMap::new();
+    with_pve_exploration_reg(ctx, |reg| {
+        if let Some(game) = reg.hacking_games.get_mut(&(char_id, can_id)) {
+            game.base_virus_strength = 200;
+            game.virus_coherence = 2000;
+            game.max_virus_coherence = 2000;
+        }
+    });
     let core_idx = with_pve_exploration_reg(ctx, |reg| {
         reg.hacking_games[&(char_id, can_id)].tiles.iter().find(|t| format!("{:?}", t.kind) == "SystemCore").unwrap().tile_index
     });
@@ -75,8 +82,13 @@ async fn traverse_and_win_hack(ctx: &ServerContext, sess: &mut SessionState, cha
     path.extend(((core_idx / 6) * 6 + 1)..=core_idx);
     for idx in path {
         for _ in 0..5 {
-            let r = ctx.dispatch_rpc(sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can_id), PyRep::Integer(idx as i64)], &kw, None).await.expect("ClickedOnTile");
-            if r.dict_get("status").and_then(|v| v.as_str()) == Some("Won") || r.dict_get("nodeCoherence").and_then(|v| v.as_i64()).unwrap_or(0) <= 0 {
+            let Ok(r) = ctx.dispatch_rpc(sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can_id), PyRep::Integer(idx as i64)], &kw, None).await else {
+                return;
+            };
+            if r.dict_get("status").and_then(|v| v.as_str()) == Some("Won") {
+                return;
+            }
+            if r.dict_get("nodeCoherence").and_then(|v| v.as_i64()).unwrap_or(0) <= 0 {
                 break;
             }
         }

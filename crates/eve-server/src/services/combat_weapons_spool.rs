@@ -15,6 +15,7 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::InvType;
 
 /// Gets the current spool multiplier for an entropic module on a ship (defaults to 1.0).
+// parity: feat:modules.entropic-disintegrator-damage-spool
 pub fn get_entropic_spool_multiplier(ctx: &ServerContext, ship_id: i64, module_id: i64) -> f64 {
     with_combat_runtime(ctx, |rt| {
         rt.entropic_spools
@@ -86,6 +87,26 @@ pub fn stop_entropic_spool_and_deactivate(
         "charid",
         vec![PyRep::Integer(module_id), PyRep::String("online".into()), PyRep::Bool(false)],
     );
+}
+
+/// Clears active entropic disintegrator spools and deactivates modules when target locks are lost or cleared.
+/// If `target_id_opt` is Some(tid), only spools targeting `tid` are stopped; if None, all spools for `ship_id` are stopped.
+pub fn clear_entropic_spools_on_target_unlock(
+    ctx: &ServerContext,
+    ship_id: i64,
+    char_id: i64,
+    target_id_opt: Option<i64>,
+) {
+    let to_stop: Vec<i64> = with_combat_runtime(ctx, |rt| {
+        rt.entropic_spools
+            .iter()
+            .filter(|((s, _), st)| *s == ship_id && target_id_opt.map_or(true, |tid| st.target_id == tid))
+            .map(|((_, m), _)| *m)
+            .collect()
+    });
+    for mod_id in to_stop {
+        stop_entropic_spool_and_deactivate(ctx, char_id, ship_id, mod_id);
+    }
 }
 
 /// Handles entropic disintegrator activation:
@@ -256,6 +277,7 @@ pub async fn handle_ship_or_npc_destruction(
 
     let mut dropped_entries = Vec::new();
     let mut destroyed_entries = Vec::new();
+    let mut escape_frigate_id: Option<i64> = None;
     ctx.db.with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
         generated_wreck_id = snap.next_entity_id;
@@ -346,7 +368,43 @@ pub async fn handle_ship_or_npc_destruction(
             snap.items.remove(&wid);
         }
 
-        let mut contained: Vec<eve_db::InventoryItemRecord> = snap.items.values().filter(|i| i.location_id == target_ball_id).cloned().collect();
+        // parity: feat:ships.frigate-escape-bay
+        escape_frigate_id = if !is_pod_target {
+            let has_feb = ctx
+                .sde
+                .types
+                .get(&target_ball.type_id)
+                .and_then(|t| t.default_attributes.get(&3020).copied())
+                .unwrap_or(0.0)
+                > 0.0;
+            if has_feb {
+                snap.items
+                    .values()
+                    .find(|i| {
+                        i.location_id == target_ball_id
+                            && i.singleton
+                            && (i.flag as u16) == 179
+                            && ctx.sde.types.get(&i.type_id).is_some_and(|t| {
+                                matches!(
+                                    t.group_id,
+                                    25 | 324 | 830 | 831 | 834 | 893 | 1283 | 1527 | 2001
+                                )
+                            })
+                    })
+                    .map(|i| i.item_id)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let mut contained: Vec<eve_db::InventoryItemRecord> = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == target_ball_id && Some(i.item_id) != escape_frigate_id)
+            .cloned()
+            .collect();
         contained.sort_by_key(|i| i.item_id);
 
         let drop_threshold = if ctx.sde.solar_systems.get(&sys_id).is_some_and(|s| s.region_id == 10_000_070) { 0.60 } else { 0.50 };
@@ -375,6 +433,18 @@ pub async fn handle_ship_or_npc_destruction(
                     }
                 }
                 destroyed_entries.push(eve_db::KillmailItemEntry { type_id: item.type_id, flag: item.flag as u16, qty_dropped: 0, qty_destroyed: item.quantity, singleton: item.singleton });
+            }
+        }
+        if let Some(esc_id) = escape_frigate_id {
+            if let Some(esc_item) = snap.items.get(&esc_id) {
+                // parity: feat:ships.frigate-escape-bay - frigate survives and is recorded on killmail
+                dropped_entries.push(eve_db::KillmailItemEntry {
+                    type_id: esc_item.type_id,
+                    flag: 179,
+                    qty_dropped: 0,
+                    qty_destroyed: 0,
+                    singleton: true,
+                });
             }
         }
 
@@ -514,9 +584,32 @@ pub async fn handle_ship_or_npc_destruction(
             sys_id,
             applied_dmg.max(1000.0), // DERIVED: final-blow damage floor for PG damageDealt stats
         );
-        let cap_id = ctx.db.with_mut_snapshot(|snap| {
+        let (cap_id, esc_type_id) = ctx.db.with_mut_snapshot(|snap| {
+            let esc_opt = escape_frigate_id.and_then(|esc_id| snap.items.get(&esc_id).map(|i| (i.item_id, i.type_id)));
             snap.items.remove(&vship_id);
             snap.item_positions.remove(&vship_id);
+            if let Some((esc_id, esc_tid)) = esc_opt {
+                if let Some(esc_item) = snap.items.get_mut(&esc_id) {
+                    esc_item.location_id = sys_id as i64;
+                    esc_item.flag = eve_db::InventoryFlag::None;
+                    esc_item.owner_id = vcid;
+                    esc_item.version += 1;
+                }
+                snap.item_positions.insert(
+                    esc_id,
+                    [
+                        target_ball.position.x,
+                        target_ball.position.y,
+                        target_ball.position.z,
+                    ],
+                );
+                if let Some(vch) = snap.characters.get_mut(&vcid) {
+                    vch.active_ship_id = esc_id;
+                    vch.version += 1;
+                    vch.system_epoch += 1;
+                }
+                return (esc_id, esc_tid);
+            }
             snap.next_entity_id += 1;
             let cid = snap.next_entity_id;
             snap.items.insert(
@@ -550,25 +643,31 @@ pub async fn handle_ship_or_npc_destruction(
                 vch.version += 1;
                 vch.system_epoch += 1;
             }
-            cid
+            (cid, 670)
         });
+        let esc_sde = ctx.sde.types.get(&esc_type_id);
+        let esc_grp = esc_sde.map(|t| t.group_id).unwrap_or(29);
         let _ = sys_handle
             .spawn_ball_with_meta(
                 eve_destiny::Ball {
                     id: cap_id,
-                    type_id: 670,
+                    type_id: esc_type_id,
                     position: target_ball.position,
                     velocity: DVec3::ZERO,
-                    max_velocity: 335.0,
-                    inertia: 0.25,
-                    mass: 16_000.0,
-                    radius: 15.0,
+                    max_velocity: esc_sde
+                        .and_then(|t| t.default_attributes.get(&37).copied())
+                        .unwrap_or(335.0),
+                    inertia: esc_sde
+                        .and_then(|t| t.default_attributes.get(&70).copied())
+                        .unwrap_or(0.25),
+                    mass: esc_sde.map(|t| t.mass.max(1_000.0)).unwrap_or(16_000.0),
+                    radius: esc_sde.map(|t| t.radius.max(15.0)).unwrap_or(15.0),
                     speed_fraction: 0.0,
                     mode: eve_destiny::MovementMode::Stop,
                 },
-                ctx.build_type_combat_state(670),
+                ctx.build_ship_combat_state(vcid, cap_id, esc_type_id),
                 eve_destiny::SlimItemMeta {
-                    group_id: 29,
+                    group_id: esc_grp,
                     category_id: 6,
                     owner_id: vcid,
                     char_id: Some(vcid),
@@ -711,20 +810,26 @@ pub async fn handle_ship_or_npc_destruction(
 }
 
 /// Steps all active entropic disintegrator spools in a solar system by `dt` seconds.
-/// Fires repeated cycles against target_id, deducting capacitor and ammo, verifying range/tracking/hit roll,
-/// emitting combat logs, updating weapon timers, and applying damage scaled by the current multiplier.
+/// - Validates target lock, distance, ammo, capacitor
+/// - Applies continuous cycle damage scaling upward with each consecutive cycle
+/// - Renews CrimeWatch weapon and PvP/aggression timers
+/// - On destruction: invokes canonical death pipeline (handle_ship_or_npc_destruction)
+/// - On cycle stop or destruction: stop_entropic_spool_and_deactivate
 pub async fn step_system_entropic_spools(
     ctx: &ServerContext,
     solar_system_id: u32,
     dt: f64,
 ) {
-    let active_spool_keys: Vec<(i64, i64)> = with_combat_runtime(ctx, |rt| {
-        rt.entropic_spools
+    let active_spool_keys: Vec<(i64, i64)> = {
+        let mut guard = ctx.combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
+        ctx.db.with_snapshot(|s| guard.sync_from_persisted(&s.combat_crimewatch_state));
+        guard
+            .entropic_spools
             .iter()
             .filter(|(_, state)| state.solar_system_id == solar_system_id)
             .map(|(&key, _)| key)
             .collect()
-    });
+    };
 
     if active_spool_keys.is_empty() {
         return;
@@ -733,9 +838,13 @@ pub async fn step_system_entropic_spools(
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
 
     for (ship_id, module_id) in active_spool_keys {
-        let spool_state = with_combat_runtime(ctx, |rt| {
-            rt.entropic_spools.get(&(ship_id, module_id)).cloned()
-        });
+        let spool_state = ctx
+            .combat_ephemeral
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .entropic_spools
+            .get(&(ship_id, module_id))
+            .cloned();
         let Some(mut state) = spool_state else {
             continue;
         };
@@ -757,9 +866,9 @@ pub async fn step_system_entropic_spools(
             continue;
         };
 
-        // Verify target remains locked if locks exist on the ship
+        // Verify target remains locked on the ship
         let locks = sys_handle.get_target_locks(state.attacker_ship_id).await.unwrap_or_default();
-        if !locks.is_empty() && !locks.iter().any(|l| l.target_id == state.target_id) {
+        if !locks.iter().any(|l| l.target_id == state.target_id) {
             stop_entropic_spool_and_deactivate(ctx, state.attacker_char_id, ship_id, module_id);
             continue;
         }
@@ -786,7 +895,6 @@ pub async fn step_system_entropic_spools(
                         return Some(ci.type_id);
                     }
                 }
-                // Fallback: look up compatible charge loaded in the module's slot flag on the ship
                 let mod_flag = snap.items.get(&module_id).map(|m| m.flag);
                 if let (Some(flag), Some(mod_type)) = (mod_flag, mod_type_opt) {
                     snap.items.values().find(|i| {
@@ -824,8 +932,7 @@ pub async fn step_system_entropic_spools(
                 state.elapsed_in_cycle = 0.0;
             }
 
-            // Pre-validate range and ammo availability BEFORE mutating capacitor or inventory
-            // (P1-ENTROPIC-PARTIAL-MUTATION-AND-AMMO-DEPLETION): a failing cycle must not drain anything.
+            // Pre-validate range
             let dist = attacker_ball.position.distance(target_ball.position);
             if dist > optimal_range + 3.0 * falloff_range {
                 stop_entropic_spool_and_deactivate(ctx, state.attacker_char_id, ship_id, module_id);
@@ -833,8 +940,7 @@ pub async fn step_system_entropic_spools(
                 break;
             }
 
-            // Resolve the loaded charge stack from real inventory (handles a single round consumed
-            // on activation, or a reload into the module's slot flag).
+            // Resolve loaded charge
             let ammo_cid = ctx.db.with_snapshot(|snap| {
                 state
                     .charge_item_id
@@ -870,7 +976,7 @@ pub async fn step_system_entropic_spools(
                 }
             }
 
-            // Consume one round from the resolved inventory stack
+            // Consume one round
             state.charge_item_id = ctx.db.with_mut_snapshot(|snap| {
                 match snap.items.get_mut(&ammo_cid) {
                     Some(ci) if ci.quantity > 1 => {
@@ -885,7 +991,7 @@ pub async fn step_system_entropic_spools(
                 }
             });
 
-            // Calculate hit probability & damage roll with player MWD signature bloom
+            // Target signature with player MWD bloom
             let player_target_info = ctx.db.with_snapshot(|snap| {
                 snap.characters.iter().find(|(_, ch)| ch.active_ship_id == state.target_id).map(|(&cid, _)| (cid, state.target_id))
             });
@@ -900,6 +1006,7 @@ pub async fn step_system_entropic_spools(
             } else {
                 target_ball.radius.max(35.0)
             };
+
             let angular_vel = eve_destiny::combat::compute_angular_velocity(
                 attacker_ball.position,
                 attacker_ball.velocity,
@@ -918,13 +1025,10 @@ pub async fn step_system_entropic_spools(
             let hit_roll = ctx.next_invention_roll(state.attacker_ship_id as u64, state.target_id as u64, state.cycles as u64);
             let (shot_dmg, is_wrecking) = crate::formulas::turret_shot_damage(state.base_damage, p_hit, hit_roll);
 
-            // Advance cycle count and scale multiplier:
-            // current_multiplier = (1.0 + cycles * step).min(max_mult)
             state.cycles = state.cycles.saturating_add(1);
             let max_mult = 1.0 + state.max_bonus;
-            state.current_multiplier = (1.0 + (state.cycles as f64) * state.per_cycle_bonus).min(max_mult);
+            state.current_multiplier = (1.0f64 + (state.cycles as f64) * state.per_cycle_bonus).min(max_mult);
 
-            // Apply scaled damage to target
             let scaled_dmg = shot_dmg.scaled(state.current_multiplier);
             let (applied_dmg, destroyed) = if scaled_dmg.total() > 0.0 {
                 let is_invuln = crate::services::insurgency_services::is_insurgency_stronghold_invulnerable(ctx, solar_system_id, state.target_id);
@@ -967,7 +1071,7 @@ pub async fn step_system_entropic_spools(
                 hr,
             );
 
-            // Record attacker damage in 15-minute assist log
+            // Record attacker damage in assist log
             if applied_dmg > 0.0 {
                 let now_unix = ctx.now_unix();
                 crate::services::combat_crimewatch::combat_wrecks_killmails::record_killmail_assist_action(
@@ -996,7 +1100,7 @@ pub async fn step_system_entropic_spools(
                 }
             }
 
-            // Trigger weapon timer on attacker and renew CrimeWatch PvP / NPC aggression timers
+            // Renew CrimeWatch weapon timer and PvP/logoff timers
             let now_unix = ctx.now_unix();
             ctx.crimewatch
                 .write()
@@ -1042,11 +1146,11 @@ pub async fn step_system_entropic_spools(
         }
 
         if !stopped {
-            with_mut_combat_runtime(ctx, |rt| {
-                if let Some(entry) = rt.entropic_spools.get_mut(&(ship_id, module_id)) {
-                    *entry = state;
-                }
-            });
+            ctx.combat_ephemeral
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .entropic_spools
+                .insert((ship_id, module_id), state);
         }
     }
 }

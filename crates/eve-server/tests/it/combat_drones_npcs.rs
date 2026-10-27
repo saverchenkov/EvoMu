@@ -85,6 +85,7 @@ async fn setup_pilot_session(
                 system_epoch: 0,
             },
         );
+        snap.skills.entry(char_id).or_default().insert(3436, eve_db::TrainedSkillRecord { type_id: 3436, level: 5, skill_points: 256_000.0 });
         snap.items.insert(
             ship_id,
             InventoryItemRecord {
@@ -555,7 +556,7 @@ async fn test_c7_drone_lifecycle_bandwidth_control_range_sentries_salvage_logi_e
     )
     .await
     .expect_err("2 Geckos exceed 75 Mbit/s Vexor bandwidth");
-    assert_eq!(bw_err.code, "InsufficientDroneBandwidth");
+    assert_eq!(bw_err.code, "MaxBandwidthExceeded");
 
     // 2. Launch 1 Gecko (50 Mbit/s) + 1 'Subverted' JVN-UC49 (20 Mbit/s) + 1 Light Armor Bot (5 Mbit/s) = 75 Mbit/s
     let launch_res = dispatch_combat_rpc(

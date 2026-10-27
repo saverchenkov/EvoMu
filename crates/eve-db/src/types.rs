@@ -253,6 +253,8 @@ impl InventoryFlag {
     #[allow(non_upper_case_globals)]
     pub const MobileDepotHold: InventoryFlag = InventoryFlag::SpecializedMobileDepotHold;
     #[allow(non_upper_case_globals)]
+    pub const FrigateEscapeBay: InventoryFlag = InventoryFlag::SpecializedMobileDepotHold;
+    #[allow(non_upper_case_globals)]
     pub const InfrastructureHold: InventoryFlag = InventoryFlag::SpecializedInfrastructureHold;
     #[allow(non_upper_case_globals)]
     pub const Wardrobe: InventoryFlag = InventoryFlag::Pilot;

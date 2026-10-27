@@ -13,45 +13,27 @@ const CONTAINER_SHIP_NOTE_OWNER_ID: i64 = -84;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AlscLogEntry {
-    pub timestamp_unix: u64,
-    pub actor_id: i64,
-    pub action: String,
-    pub item_id: i64,
-    pub item_type_id: u32,
-    pub quantity: i32,
+    pub timestamp_unix: u64, pub actor_id: i64, pub action: String,
+    pub item_id: i64, pub item_type_id: u32, pub quantity: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct InsuranceContractRecord {
-    pub ship_id: i64,
-    pub ship_type_id: u32,
-    pub owner_id: i64,
-    pub level_name: String,
-    pub level_fraction: f64,
-    pub cost_isk: f64,
-    pub payout_isk: f64,
-    pub start_unix: u64,
-    pub end_unix: u64,
+    pub ship_id: i64, pub ship_type_id: u32, pub owner_id: i64,
+    pub level_name: String, pub level_fraction: f64, pub cost_isk: f64,
+    pub payout_isk: f64, pub start_unix: u64, pub end_unix: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ShipAccessConfig {
-    pub allow_fleet_smb: bool,
-    pub allow_corp_smb: bool,
-    pub allow_fleet_hangar: bool,
-    pub allow_corp_hangar: bool,
+    pub allow_fleet_smb: bool, pub allow_corp_smb: bool,
+    pub allow_fleet_hangar: bool, pub allow_corp_hangar: bool,
     pub password: Option<String>,
 }
 
 impl Default for ShipAccessConfig {
     fn default() -> Self {
-        Self {
-            allow_fleet_smb: true,
-            allow_corp_smb: true,
-            allow_fleet_hangar: true,
-            allow_corp_hangar: true,
-            password: None,
-        }
+        Self { allow_fleet_smb: true, allow_corp_smb: true, allow_fleet_hangar: true, allow_corp_hangar: true, password: None }
     }
 }
 
@@ -69,60 +51,32 @@ pub(crate) struct ContainerShipRuntimeState {
 }
 
 pub(crate) fn read_container_ship_state_snap(snap: &eve_db::WorldStateSnapshot) -> ContainerShipRuntimeState {
-    snap.owner_notes
-        .get(&CONTAINER_SHIP_NOTE_ID)
-        .and_then(|n| serde_json::from_str::<ContainerShipRuntimeState>(&n.note).ok())
-        .unwrap_or_default()
+    snap.owner_notes.get(&CONTAINER_SHIP_NOTE_ID).and_then(|n| serde_json::from_str::<ContainerShipRuntimeState>(&n.note).ok()).unwrap_or_default()
 }
 
 pub(crate) fn read_container_ship_state(ctx: &ServerContext) -> ContainerShipRuntimeState {
     ctx.db.with_snapshot(read_container_ship_state_snap)
 }
 
-pub(crate) fn write_container_ship_state_snap<R>(
-    snap: &mut eve_db::WorldStateSnapshot,
-    f: impl FnOnce(&mut ContainerShipRuntimeState) -> R,
-) -> R {
+pub(crate) fn write_container_ship_state_snap<R>(snap: &mut eve_db::WorldStateSnapshot, f: impl FnOnce(&mut ContainerShipRuntimeState) -> R) -> R {
     let mut state = read_container_ship_state_snap(snap);
     let out = f(&mut state);
     if let Ok(json) = serde_json::to_string(&state) {
-        let ts = snap
-            .owner_notes
-            .get(&CONTAINER_SHIP_NOTE_ID)
-            .map(|n| n.timestamp_unix)
-            .unwrap_or(0);
-        snap.owner_notes.insert(
-            CONTAINER_SHIP_NOTE_ID,
-            eve_db::OwnerNoteRecord {
-                note_id: CONTAINER_SHIP_NOTE_ID,
-                character_id: CONTAINER_SHIP_NOTE_OWNER_ID,
-                item_id: 0,
-                label: "S:CONTAINER_SHIP_RUNTIME_STATE".to_string(),
-                note: json,
-                timestamp_unix: ts,
-            },
-        );
+        let ts = snap.owner_notes.get(&CONTAINER_SHIP_NOTE_ID).map(|n| n.timestamp_unix).unwrap_or(0);
+        snap.owner_notes.insert(CONTAINER_SHIP_NOTE_ID, eve_db::OwnerNoteRecord {
+            note_id: CONTAINER_SHIP_NOTE_ID, character_id: CONTAINER_SHIP_NOTE_OWNER_ID, item_id: 0,
+            label: "S:CONTAINER_SHIP_RUNTIME_STATE".to_string(), note: json, timestamp_unix: ts,
+        });
     }
     out
 }
 
-pub(crate) fn save_container_ship_state_snap(
-    snap: &mut eve_db::WorldStateSnapshot,
-    now_unix: u64,
-    state: &ContainerShipRuntimeState,
-) {
+pub(crate) fn save_container_ship_state_snap(snap: &mut eve_db::WorldStateSnapshot, now_unix: u64, state: &ContainerShipRuntimeState) {
     if let Ok(json) = serde_json::to_string(state) {
-        snap.owner_notes.insert(
-            CONTAINER_SHIP_NOTE_ID,
-            eve_db::OwnerNoteRecord {
-                note_id: CONTAINER_SHIP_NOTE_ID,
-                character_id: CONTAINER_SHIP_NOTE_OWNER_ID,
-                item_id: 0,
-                label: "S:CONTAINER_SHIP_RUNTIME_STATE".to_string(),
-                note: json,
-                timestamp_unix: now_unix,
-            },
-        );
+        snap.owner_notes.insert(CONTAINER_SHIP_NOTE_ID, eve_db::OwnerNoteRecord {
+            note_id: CONTAINER_SHIP_NOTE_ID, character_id: CONTAINER_SHIP_NOTE_OWNER_ID, item_id: 0,
+            label: "S:CONTAINER_SHIP_RUNTIME_STATE".to_string(), note: json, timestamp_unix: now_unix,
+        });
     }
 }
 
@@ -255,7 +209,6 @@ pub(crate) fn can_character_access_ship_bay_with_password_snap(
     let req_pw = cfg
         .password
         .as_deref()
-        .or_else(|| st.ship_passwords.get(&host_ship_id).map(|s| s.as_str()))
         .filter(|s| !s.is_empty());
     if let Some(req) = req_pw {
         let already_unlocked = st.unlocked_containers.contains(&(char_id, host_ship_id))
@@ -1399,10 +1352,7 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                     message: format!("Encoded item type {type_id} not found"),
                 }));
             };
-            let custom_name = ctx
-                .db
-                .with_snapshot(|snap| snap.item_custom_names.get(&raw_id).cloned())
-                .unwrap_or_default();
+            let custom_name = ctx.db.with_snapshot(|snap| snap.item_custom_names.get(&raw_id).cloned()).unwrap_or_default();
             let mut merged_attrs = type_info.default_attributes.clone();
             let mut dyn_entries = Vec::new();
             let mut muta_id_rep = PyRep::None;
@@ -1411,27 +1361,19 @@ pub(crate) async fn handle_containers_ships_and_fitting(
             if let Some(ref item) = item_opt {
                 owner_rep = PyRep::Integer(item.owner_id);
                 is_bpc = item.is_blueprint_copy;
-                if let Some(m) = item.source_mutaplasmid_id {
-                    muta_id_rep = PyRep::Integer(m as i64);
-                }
+                if let Some(m) = item.source_mutaplasmid_id { muta_id_rep = PyRep::Integer(m as i64); }
                 for (&aid, &val) in &item.dynamic_attributes {
                     merged_attrs.insert(aid, val);
                     dyn_entries.push((PyRep::Integer(aid as i64), PyRep::Real(val)));
                 }
             }
             let attr_entries: Vec<(PyRep, PyRep)> = merged_attrs
-                .into_iter()
-                .map(|(k, v)| (PyRep::Integer(k as i64), PyRep::Real(v)))
-                .collect();
+                .into_iter().map(|(k, v)| (PyRep::Integer(k as i64), PyRep::Real(v))).collect();
             Some(Ok(PyRep::keyval([
-                ("itemID", PyRep::Integer(raw_id)),
-                ("typeID", PyRep::Integer(type_id as i64)),
-                ("typeName", PyRep::String(type_info.name.clone())),
-                ("customName", PyRep::String(custom_name)),
-                ("ownerID", owner_rep),
-                ("isBlueprintCopy", PyRep::Bool(is_bpc)),
-                ("sourceMutaplasmidID", muta_id_rep),
-                ("dynamicAttributes", PyRep::Dict(dyn_entries)),
+                ("itemID", PyRep::Integer(raw_id)), ("typeID", PyRep::Integer(type_id as i64)),
+                ("typeName", PyRep::String(type_info.name.clone())), ("customName", PyRep::String(custom_name)),
+                ("ownerID", owner_rep), ("isBlueprintCopy", PyRep::Bool(is_bpc)),
+                ("sourceMutaplasmidID", muta_id_rep), ("dynamicAttributes", PyRep::Dict(dyn_entries)),
                 ("attributes", PyRep::Dict(attr_entries)),
             ])))
         }

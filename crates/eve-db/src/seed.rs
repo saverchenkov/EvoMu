@@ -424,6 +424,14 @@ impl WorldRepository {
                     skill_points: 135_765.0,
                 },
             ),
+            (
+                3436,
+                TrainedSkillRecord {
+                    type_id: 3436, // Drones (R-DRONE-NOSKILL-5)
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            ),
         ]);
         let mut sorted_starter_skills: Vec<_> = starter_skill_map.values().cloned().collect();
         sorted_starter_skills.sort_by_key(|s| s.type_id);

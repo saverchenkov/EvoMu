@@ -321,30 +321,15 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 } else {
                     Some(ship.location_id) == session.solar_system_id.map(|s| s as i64)
                 };
-                if !reachable
-                    || !ship.singleton
-                    || ship.flag == InventoryFlag::Locked
-                    || snap.is_item_locked_in_contract_or_job(target_ship_id)
-                {
-                    return Err(BridgeRpcError {
-                        code: "ShipNotBoardable".into(),
-                        message: format!(
-                            "Ship {target_ship_id} must be assembled, unlocked, and at your current location"
-                        ),
-                    });
+                if !reachable || !ship.singleton || ship.flag == InventoryFlag::Locked || snap.is_item_locked_in_contract_or_job(target_ship_id) {
+                    return Err(BridgeRpcError { code: "ShipNotBoardable".into(), message: format!("Ship {target_ship_id} must be assembled, unlocked, and at your current location") });
                 }
-                let is_ship = ctx
-                    .sde
-                    .types
-                    .get(&ship.type_id)
-                    .map(|t| t.category_id == 6)
-                    .unwrap_or(false);
+                let is_ship = ctx.sde.types.get(&ship.type_id).map(|t| t.category_id == 6).unwrap_or(false);
                 if !is_ship {
-                    return Err(BridgeRpcError {
-                        code: "NotAShip".into(),
-                        message: format!("Item {target_ship_id} is not a ship"),
-                    });
+                    return Err(BridgeRpcError { code: "NotAShip".into(), message: format!("Item {target_ship_id} is not a ship") });
                 }
+                // parity: feat:ships.board-ship-skill-and-clone-check
+                ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, ship.type_id)?;
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.active_ship_id = target_ship_id;
                 }
@@ -357,12 +342,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         ctx.invalidate_ship_fitting(prev);
                         if prev != sid && session.station_id.is_none() && session.structure_id.is_none() {
                             let was_capsule = ctx.db.with_mut_snapshot(|snap| {
-                                if snap.items.get(&prev).is_some_and(|it| it.type_id == 670) {
-                                    snap.items.remove(&prev);
-                                    true
-                                } else {
-                                    false
-                                }
+                                snap.items.get(&prev).is_some_and(|it| it.type_id == 670) && snap.items.remove(&prev).is_some()
                             });
                             if was_capsule {
                                 if let Some(sys_id) = session.solar_system_id {

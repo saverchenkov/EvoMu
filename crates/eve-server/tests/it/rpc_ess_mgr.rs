@@ -319,9 +319,13 @@ async fn test_ess_mgr_telemetry_links_and_thefts() {
         .await
         .expect("AttemptLinkToReserveBank complete"),
     );
-    assert_eq!(
-        res_complete.get("stolenISK"),
-        Some(&PyRep::Real(35_000_000.0))
+    let stolen_reserve = match res_complete.get("stolenISK") {
+        Some(PyRep::Real(v)) => *v,
+        other => panic!("expected Real stolenISK, got {:?}", other),
+    };
+    assert!(
+        (stolen_reserve - 2_333_333.33).abs() < 0.01,
+        "stolen_reserve: {stolen_reserve}"
     );
     assert_eq!(res_complete.get("linkStartedOnly"), Some(&PyRep::Bool(false)));
 
@@ -359,7 +363,14 @@ async fn test_ess_mgr_telemetry_links_and_thefts() {
     assert_eq!(res_rows.len(), 1, "Should have 1 recorded reserve bank theft");
     let res_entry = kv_map(&res_rows[0]);
     assert_eq!(res_entry.get("characterID"), Some(&PyRep::Integer(CHAR_ID)));
-    assert_eq!(res_entry.get("stolenISK"), Some(&PyRep::Real(35_000_000.0)));
+    let entry_stolen = match res_entry.get("stolenISK") {
+        Some(PyRep::Real(v)) => *v,
+        other => panic!("expected Real stolenISK in entry, got {:?}", other),
+    };
+    assert!(
+        (entry_stolen - 2_333_333.33).abs() < 0.01,
+        "entry_stolen: {entry_stolen}"
+    );
 
     // 5. Complete Main Bank robbery to test GetMainBankTheftsForClientSolarSystem
     let main_start = kv_map(

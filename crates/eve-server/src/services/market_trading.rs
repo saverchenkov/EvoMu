@@ -792,7 +792,7 @@ pub fn handle(
                     let v_lvl = sk
                         .and_then(|m| m.get(&3447))
                         .map(|s| s.level)
-                        .unwrap_or_else(|| if sk.is_some_and(|m| !m.is_empty()) { 5 } else { 0 });
+                        .unwrap_or(0);
                     let trade_lvl = sk.and_then(|m| m.get(&3443)).map(|s| s.level).unwrap_or(0) as usize;
                     let retail_lvl = sk.and_then(|m| m.get(&3444)).map(|s| s.level).unwrap_or(0) as usize;
                     let wholesale_lvl = sk.and_then(|m| m.get(&16596)).map(|s| s.level).unwrap_or(0) as usize;

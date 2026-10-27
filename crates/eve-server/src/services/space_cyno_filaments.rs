@@ -114,14 +114,6 @@ async fn handle_wormhole_jump(
     crate::services::combat_crimewatch::check_crimewatch_action_restriction(
         ctx, char_id, ship_id, old_sys, "wormhole_jump", now_unix,
     )?;
-    crate::services::tactical_modules::prepare_ship_for_wormhole_jump(
-        ctx,
-        &old_handle,
-        char_id,
-        ship_id,
-        &mut current_ball,
-    )
-    .await?;
 
     let ship_type_id = ctx
         .db
@@ -142,6 +134,15 @@ async fn handle_wormhole_jump(
             ),
         });
     }
+
+    crate::services::tactical_modules::prepare_ship_for_wormhole_jump(
+        ctx,
+        &old_handle,
+        char_id,
+        ship_id,
+        &mut current_ball,
+    )
+    .await?;
 
     let wh_arg_i64 = args.first().and_then(|a| a.as_i64());
     let wh_arg_str = args.first().and_then(|a| a.as_str());

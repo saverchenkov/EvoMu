@@ -29,6 +29,9 @@ pub struct BoundObjectEntry {
 }
 
 static NEXT_CTX_INSTANCE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+pub(crate) fn next_ctx_instance_id() -> u64 {
+    NEXT_CTX_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
 
 pub struct ServerContext {
     pub instance_id: u64,
@@ -44,12 +47,8 @@ pub struct ServerContext {
     pub object_cache: RwLock<HashMap<String, crate::router::cache_notifications::CachedObjectRecord>>,
     pub object_cache_timestamps: RwLock<HashMap<String, i64>>,
     pub notification_records: RwLock<Vec<crate::router::cache_notifications::NotificationRecord>>,
-    pub pending_notifications:
-        Arc<RwLock<HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>>>,
-    pub notify_tx: tokio::sync::broadcast::Sender<(
-        i64,
-        crate::router::cache_notifications::PendingMachoNotification,
-    )>,
+    pub pending_notifications: Arc<RwLock<HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>>>,
+    pub notify_tx: tokio::sync::broadcast::Sender<(i64, crate::router::cache_notifications::PendingMachoNotification)>,
     pub map_landmarks: RwLock<Vec<(i64, String, f64, f64, f64)>>,
     pub session_closers: RwLock<HashMap<u64, tokio::sync::mpsc::UnboundedSender<(String, String)>>>,
     pub ship_fittings: Arc<RwLock<HashMap<i64, ShipFittingEngine>>>,
@@ -63,7 +62,7 @@ pub struct ServerContext {
     pub active_moon_probes: RwLock<Vec<ActiveMoonSurveyProbe>>,
     pub scanned_signatures: RwLock<HashSet<(i64, u32, i64)>>,
     pub character_scan_progress: RwLock<HashMap<(i64, u32, String), f64>>,
-    pub invention_roll_override: RwLock<Option<f64>>,
+    pub invention_roll_override: Arc<RwLock<Option<f64>>>,
     pub mechanic_rng: Arc<crate::rng::MechanicRng>, // seeded test RNG: shared with `systems`; OS CSPRNG unless seeded
     pub module_reactivation_cooldowns: RwLock<HashMap<(i64, i64), f64>>,
     /// Repeating mining-module cycles keyed by module item ID (`MN-04`).
@@ -152,6 +151,8 @@ impl ServerContext {
         let quasar_domains: HashSet<String> = quasar_map.into_keys().collect();
         let (notify_tx, _) = tokio::sync::broadcast::channel(256);
         let pending_notifications = Arc::new(RwLock::new(HashMap::new()));
+        let ship_fittings = Arc::new(RwLock::new(HashMap::new()));
+        let invention_roll_override = Arc::new(RwLock::new(None));
         let mechanic_rng = Arc::new(crate::rng::MechanicRng::os());
         let tactical_state = Arc::new(RwLock::new(
             crate::services::tactical_modules::TacticalModulesState::default(),
@@ -222,6 +223,25 @@ impl ServerContext {
                 }
             })
         }));
+        let (step_sys_w, step_db_w, step_sde_w, step_rng_w, step_fit_w, step_pend_w, step_ntx, step_ce_w, step_gw_w, step_inv_w) = (
+            Arc::downgrade(&systems), Arc::downgrade(&db), Arc::downgrade(&sde), Arc::downgrade(&mechanic_rng),
+            Arc::downgrade(&ship_fittings), Arc::downgrade(&pending_notifications), notify_tx.clone(),
+            Arc::downgrade(&combat_ephemeral), Arc::downgrade(&quasar_gateway), Arc::downgrade(&invention_roll_override),
+        );
+        systems.set_system_step_hook(Arc::new(move |sys_id, dt| {
+            let (sw, dw, sdw, rw, fit_w, pend_w, ntx, cew, gww, inw) = (
+                step_sys_w.clone(), step_db_w.clone(), step_sde_w.clone(), step_rng_w.clone(),
+                step_fit_w.clone(), step_pend_w.clone(), step_ntx.clone(), step_ce_w.clone(), step_gw_w.clone(), step_inv_w.clone(),
+            );
+            Box::pin(async move {
+                if let (Some(sys), Some(db), Some(sde), Some(rng), Some(fit), Some(pend), Some(ce), Some(gw), Some(inv_roll)) = (
+                    sw.upgrade(), dw.upgrade(), sdw.upgrade(), rw.upgrade(), fit_w.upgrade(), pend_w.upgrade(), cew.upgrade(), gww.upgrade(), inw.upgrade(),
+                ) {
+                    let ctx = ServerContext::from_step_components(sys, db, sde, rng, fit, pend, ntx, ce, gw, inv_roll);
+                    crate::services::combat_weapons_spool::step_system_entropic_spools(&ctx, sys_id, dt).await;
+                }
+            })
+        }));
         let persisted_notifications = db.with_snapshot(|snap| {
             let mut list: Vec<crate::router::cache_notifications::NotificationRecord> = snap
                 .owner_notes
@@ -269,7 +289,7 @@ impl ServerContext {
             notify_tx,
             map_landmarks: RwLock::new(Vec::new()),
             session_closers: RwLock::new(HashMap::new()),
-            ship_fittings: Arc::new(RwLock::new(HashMap::new())),
+            ship_fittings,
             projected_ewar: RwLock::new(HashMap::new()),
             weapon_cycle_state: RwLock::new(HashMap::new()),
             fighter_cooldown_state: RwLock::new(HashMap::new()),
@@ -280,7 +300,7 @@ impl ServerContext {
             active_moon_probes: RwLock::new(Vec::new()),
             scanned_signatures: RwLock::new(HashSet::new()),
             character_scan_progress: RwLock::new(HashMap::new()),
-            invention_roll_override: RwLock::new(None),
+            invention_roll_override,
             mechanic_rng,
             module_reactivation_cooldowns: RwLock::new(HashMap::new()),
             mining_cycles: RwLock::new(HashMap::new()),
@@ -1230,6 +1250,7 @@ impl ServerContext {
         Ok(fit)
     }
 
+    // parity: feat:ships.board-ship-skill-and-clone-check
     pub fn check_type_skill_prerequisites_in_snapshot(
         &self,
         snap: &eve_db::WorldStateSnapshot,
@@ -1240,7 +1261,22 @@ impl ServerContext {
             return Ok(());
         };
         let char_skills = snap.skills.get(&char_id);
-        for (req_skill_attr, req_lvl_attr) in [(182_u16, 277_u16), (183, 278), (184, 279)] {
+        let char_rec = snap.characters.get(&char_id);
+        let is_omega = char_rec.is_some_and(|c| {
+            let exp_opt = crate::services::account_services::subscription_expiry_for_user(snap, c.user_id);
+            c.clone_grade >= 2 && exp_opt.map(|u| u > self.now_unix()).unwrap_or(true)
+        });
+        let is_alpha_clone = !is_omega;
+        let race_id = char_rec.map(|c| c.race_id).unwrap_or(1);
+        let req_pairs = [
+            (182_u16, 277_u16),
+            (183, 278),
+            (184, 279),
+            (1285, 1286),
+            (1289, 1287),
+            (1290, 1288),
+        ];
+        for (req_skill_attr, req_lvl_attr) in req_pairs {
             if let Some(&skill_f) = t.default_attributes.get(&req_skill_attr) {
                 let skill_id = skill_f.round() as u32;
                 if skill_id > 0 {
@@ -1251,27 +1287,35 @@ impl ServerContext {
                         .unwrap_or(1.0)
                         .round()
                         .clamp(1.0, 5.0) as u8;
-                    let mut trained = char_skills
+                    let mut raw_trained = char_skills
                         .and_then(|m| m.get(&skill_id))
                         .map(|r| r.level)
                         .unwrap_or(0);
-                    if trained < req_lvl && (12180..=12199).contains(&skill_id) && skill_id != 12189 {
+                    if raw_trained < req_lvl && (12180..=12199).contains(&skill_id) && skill_id != 12189 {
                         for alt_skill in [60377_u32, 60378, 60379, 60380, 60381] {
                             let alt_lvl = char_skills
                                 .and_then(|m| m.get(&alt_skill))
                                 .map(|r| r.level)
                                 .unwrap_or(0);
-                            trained = trained.max(alt_lvl);
+                            raw_trained = raw_trained.max(alt_lvl);
                         }
                     }
-                    if trained < req_lvl {
-                        return Err(BridgeRpcError {
-                            code: "SkillPrerequisitesNotMet".into(),
-                            message: format!(
-                                "{} (type {type_id}) requires skill {skill_id} at level {req_lvl} (character has level {trained})",
-                                t.name
-                            ),
-                        });
+                    if raw_trained < req_lvl {
+                        let is_ship = t.category_id == 6;
+                        let code = if is_ship { "ShipHasSkillPrerequisites" } else { "SkillPrerequisitesNotMet" };
+                        return Err(BridgeRpcError::user_error(code));
+                    }
+                    if is_alpha_clone {
+                        let alpha_cap =
+                            crate::services::character_skills::alpha_skill_cap_for_character(
+                                &self.sde, race_id, skill_id,
+                            );
+                        let effective_trained = raw_trained.min(alpha_cap);
+                        if req_lvl > alpha_cap || effective_trained < req_lvl {
+                            let is_ship = t.category_id == 6;
+                            let code = if is_ship { "TrialAccountRestriction" } else { "SkillPrerequisitesNotMet" };
+                            return Err(BridgeRpcError::user_error(code));
+                        }
                     }
                 }
             }

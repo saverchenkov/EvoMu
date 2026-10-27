@@ -519,7 +519,7 @@ async fn siege_triage_and_disruptive_lance_v24_mechanics() {
     assert!((attr_from_item_info(&drone_info, 64) - 0.0).abs() < 1e-4, "Triage must set -100% drone damageMultiplier (0.0)");
 
     let launch_err = rpc(&ctx, &mut fax_sess, "ship", "LaunchDrones", vec![PyRep::List(vec![PyRep::Integer(71015)])]).await;
-    assert_eq!(launch_err.unwrap_err().code, "InsufficientDroneBandwidth");
+    assert_eq!(launch_err.unwrap_err().code, "MaxBandwidthExceeded");
 
     rpc(&ctx, &mut fax_sess, "dogmaIM", "AddTarget", vec![PyRep::Integer(81010)]).await.unwrap();
     for _ in 0..25 {
@@ -933,9 +933,9 @@ async fn target_spectrum_breaker_cehe_rsb_rtc_ancillary_remote_and_auto_targeter
 
     rpc(&ctx, &mut rev_sess, "dogmaIM", "Activate", vec![PyRep::Integer(71061)]).await.expect("activate CEHE I");
     let rev_cs = sys.get_combat_state(81051).await.unwrap().unwrap();
-    assert!((rev_cs.structure_resonance[0] - 0.01).abs() < 1e-4, "CEHE I must grant 99% hull damage resistance (0.01 resonance)");
+    assert!((rev_cs.structure_resonance[0] - 0.05).abs() < 1e-4, "CEHE I must grant 95% hull damage resistance (0.05 resonance)");
     let rev_info = rpc(&ctx, &mut rev_sess, "dogmaIM", "GetAllInfo", vec![PyRep::Bool(true), PyRep::Bool(true)]).await.unwrap();
-    assert!((attr_from_all_info(&rev_info, "shipInfo", 109) - 0.01).abs() < 1e-4);
+    assert!((attr_from_all_info(&rev_info, "shipInfo", 109) - 0.05).abs() < 1e-4);
 
     // Tick past 20s cycle -> CEHE I burns out (damage = 40.0, offline) and cannot be reactivated
     for _ in 0..22 {

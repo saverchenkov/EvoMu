@@ -108,12 +108,19 @@ async fn test_fighters_left_in_space_abandon_persist_and_scoop() {
     assert_eq!(sess.solar_system_id, Some(dest_sys));
     assert!(ctx.active_fighters.read().unwrap()[&f_jump_ball].is_abandoned);
     assert_eq!(ctx.db.get_item(fighter_jump_id).unwrap().location_id, sys_id as i64);
+    eve_server::services::space_destiny::break_location_change_invulnerability(&ctx, char_id);
+    let sys_dest = ctx.systems.get_or_spawn(dest_sys);
+    if let Ok(Some(mut cs)) = sys_dest.get_combat_state(carrier_id).await {
+        cs.is_cloaked = false;
+        let _ = sys_dest.set_combat_state(carrier_id, cs).await;
+    }
 
     ctx.dispatch_rpc(&mut sess, "fighterMgr", None, "LoadFightersToTube", &[PyRep::Integer(0), PyRep::Integer(fighter_logoff_id)], &kw, None).await.unwrap();
     let PyRep::List(logoff_balls) = ctx.dispatch_rpc(&mut sess, "fighterMgr", None, "LaunchFightersFromTubes", &[PyRep::List(vec![PyRep::Integer(0)])], &kw, None).await.unwrap() else { panic!() };
     let f_logoff_ball = logoff_balls[0].as_i64().unwrap();
     eve_server::sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, char_id).await;
     assert!(ctx.active_fighters.read().unwrap()[&f_logoff_ball].is_abandoned);
+    let _ = sys_dest.set_movement_mode(carrier_id, eve_destiny::MovementMode::Stop).await;
 
     ctx.dispatch_rpc(&mut sess, "fighterMgr", None, "LoadFightersToTube", &[PyRep::Integer(0), PyRep::Integer(fighter_death_id)], &kw, None).await.unwrap();
     let PyRep::List(death_balls) = ctx.dispatch_rpc(&mut sess, "fighterMgr", None, "LaunchFightersFromTubes", &[PyRep::List(vec![PyRep::Integer(0)])], &kw, None).await.unwrap() else { panic!() };

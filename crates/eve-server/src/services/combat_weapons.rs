@@ -189,6 +189,51 @@ pub async fn handle_weapons(
                             message: format!("Target character {vc} is invulnerable due to recent location change"),
                         }));
                     }
+                    // parity: feat:crimewatch.safety-setting-action-block, feat:crimewatch.limited-engagement-duel
+                    if vc != char_id {
+                        let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.0);
+                        let v_suspect_or_crim = {
+                            let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+                            let st = cw.get_or_create(vc);
+                            st.is_suspect(now_unix) || st.is_criminal(now_unix)
+                        };
+                        let is_legal = ctx.db.with_snapshot(|snap| {
+                            is_legal_war_or_suspect_target(snap, char_id, vc, now_unix)
+                        }) || v_suspect_or_crim
+                            || with_combat_runtime(ctx, |rt| rt.has_limited_engagement_with(vc, char_id, now_unix));
+                        if !is_legal {
+                            let safety = with_combat_runtime(ctx, |rt| {
+                                rt.safety_levels.get(&char_id).copied().unwrap_or(SafetyLevel::Red)
+                            });
+                            let would_be_criminal = sys_sec >= 0.45;
+                            let would_be_suspect = sys_sec > 0.0 && sys_sec < 0.45;
+                            if safety == SafetyLevel::Green && (would_be_criminal || would_be_suspect) {
+                                return Some(Err(BridgeRpcError {
+                                    code: "SafetyLevelRestricted".into(),
+                                    message: "UserError: CantDoInCurrentSafetyLevel - Ship safety is set to Green; illegal suspect/criminal aggression is prevented".into(),
+                                }));
+                            }
+                            if safety == SafetyLevel::Yellow && would_be_criminal {
+                                return Some(Err(BridgeRpcError {
+                                    code: "SafetyLevelRestricted".into(),
+                                    message: "UserError: CantDoInCurrentSafetyLevel - Ship safety is set to Yellow; criminal aggression is prevented".into(),
+                                }));
+                            }
+                        }
+                        if v_suspect_or_crim || with_combat_runtime(ctx, |rt| rt.has_limited_engagement_with(char_id, vc, now_unix)) {
+                            with_mut_combat_runtime(ctx, |rt| {
+                                rt.add_limited_engagement(char_id, vc, now_unix);
+                                rt.add_limited_engagement(vc, char_id, now_unix);
+                            });
+                        }
+                        if !is_legal {
+                            let _ = ctx
+                                .crimewatch
+                                .write()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .handle_combat_aggression(char_id, vc, ship_id, sys_id, sys_sec, false, now_unix);
+                        }
+                    }
                 }
                 record_killmail_assist_action(
                     ctx,
@@ -354,6 +399,7 @@ pub async fn handle_weapons(
             };
             let charge_type = &ctx.sde.types[&charge_type_id];
             let is_fof_missile = matches!(charge_type.group_id, 394..=396);
+            let is_entropic = mod_type.group_id == 1986;
 
             // Resolve target ball ID (FoF auto-targeting missiles can fire without a lock even while jammed!)
             let resolved_target_id = if let Some(tid) = target_id_opt {
@@ -461,18 +507,19 @@ pub async fn handle_weapons(
                         let is_pod_target = target_ball.type_id == 670;
                         let would_be_criminal = sys_sec >= 0.45 || (sys_sec > 0.0 && is_pod_target);
                         let would_be_suspect = sys_sec > 0.0 && sys_sec < 0.45 && !is_pod_target;
+                        // parity: feat:crimewatch.safety-setting-action-block
                         if safety == SafetyLevel::Green
                             && (would_be_criminal || would_be_suspect)
                         {
                             return Some(Err(BridgeRpcError {
                                 code: "SafetyLevelRestricted".into(),
-                                message: "Ship safety is set to Green; illegal suspect/criminal aggression is prevented".into(),
+                                message: "UserError: CantDoInCurrentSafetyLevel - Ship safety is set to Green; illegal suspect/criminal aggression is prevented".into(),
                             }));
                         }
                         if safety == SafetyLevel::Yellow && would_be_criminal {
                             return Some(Err(BridgeRpcError {
                                 code: "SafetyLevelRestricted".into(),
-                                message: "Ship safety is set to Yellow; criminal aggression is prevented".into(),
+                                message: "UserError: CantDoInCurrentSafetyLevel - Ship safety is set to Yellow; criminal aggression is prevented".into(),
                             }));
                         }
                     }
@@ -485,7 +532,6 @@ pub async fn handle_weapons(
                 506..=511 | 524 | 1674 | 4500 | 4805 | 4807
             );
             let is_breacher_pod = matches!(mod_type.group_id, 4500 | 4805 | 4807);
-            let is_entropic = mod_type.group_id == 1986;
             let is_vorton = mod_type.group_id == 4060;
 
             // Turret range validation BEFORE capacitor and ammo deduction (P1-ENTROPIC-PARTIAL-MUTATION-AND-AMMO-DEPLETION):
@@ -789,7 +835,7 @@ pub async fn handle_weapons(
             let (spool_cycles, spool_multiplier) = if is_entropic {
                 let duration_s = mod_type.default_attributes.get(&51).map(|d| d / 1000.0).unwrap_or(3.5);
                 match combat_weapons_spool::handle_entropic_activation(ctx, char_id, ship_id, sys_id, module_id, target_ball_id, mod_type, Some(charge_item_id), base_dmg, base_cap_need, duration_s) {
-                    Ok(res) => res,
+                    Ok(r) => r,
                     Err(e) => return Some(Err(e)),
                 }
             } else {
@@ -1000,19 +1046,20 @@ pub async fn handle_weapons(
                     victim_char_id,
                     now_unix,
                 );
-                if !is_legal {
-                    with_mut_combat_runtime(ctx, |rt| {
+                // parity: feat:crimewatch.limited-engagement-duel
+                let victim_is_suspect_or_criminal = {
+                    let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+                    let st = cw.get_or_create(victim_char_id);
+                    st.is_suspect(now_unix) || st.is_criminal(now_unix)
+                };
+                with_mut_combat_runtime(ctx, |rt| {
+                    if victim_is_suspect_or_criminal
+                        || rt.has_limited_engagement_with(char_id, victim_char_id, now_unix)
+                    {
                         rt.add_limited_engagement(char_id, victim_char_id, now_unix);
                         rt.add_limited_engagement(victim_char_id, char_id, now_unix);
-                    });
-                } else {
-                    with_mut_combat_runtime(ctx, |rt| {
-                        if rt.has_limited_engagement_with(char_id, victim_char_id, now_unix) {
-                            rt.add_limited_engagement(char_id, victim_char_id, now_unix);
-                            rt.add_limited_engagement(victim_char_id, char_id, now_unix);
-                        }
-                    });
-                }
+                    }
+                });
                 if !is_legal && sys_sec > 0.0 {
                     let old_sec = ctx.db.with_snapshot(|snap| {
                         snap.characters

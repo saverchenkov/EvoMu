@@ -2,6 +2,7 @@
 //!
 // parity: feat:drones.fighter-load-tubes, feat:drones.fighter-launch-recall, feat:drones.fighter-movement
 // parity: feat:drones.fighter-abilities, feat:drones.fighter-abandon, feat:drones.fighter-squadron-losses
+// parity: feat:drones.carrier-launch-tubes-and-flight-control
 
 #![forbid(unsafe_code)]
 
@@ -436,6 +437,7 @@ pub async fn handle_fighters(
             Some(Ok(PyRep::Bool(removed.is_some())))
         }
 
+        // parity: feat:drones.carrier-launch-tubes-and-flight-control
         ("fighterMgr", "LaunchFightersFromTubes") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -468,6 +470,26 @@ pub async fn handle_fighters(
                     message: "Active ship is not spawned in space".into(),
                 }));
             };
+            if matches!(ship_ball.mode, eve_destiny::MovementMode::Warp { .. }) {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotLaunchFightersInWarp".into(),
+                    message: "UserError: Cannot launch fighters while ship is in warp".into(),
+                }));
+            }
+            if let Ok(Some(ship_cs)) = sys_handle.get_combat_state(ship_id).await {
+                if ship_cs.is_cloaked {
+                    return Some(Err(BridgeRpcError {
+                        code: "CannotLaunchFightersCloaked".into(),
+                        message: "UserError: Cannot launch fighters while cloaked".into(),
+                    }));
+                }
+                if ship_cs.is_tethered {
+                    return Some(Err(BridgeRpcError {
+                        code: "CannotLaunchFightersTethered".into(),
+                        message: "UserError: Cannot launch fighters while tethered to a structure".into(),
+                    }));
+                }
+            }
 
             let raw_req: Option<Vec<i64>> = match args.first() {
                 Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) if !items.is_empty() => {
@@ -793,6 +815,7 @@ pub async fn handle_fighters(
                     }
                 });
 
+                // parity: feat:drones.carrier-launch-tubes-and-flight-control
                 ctx.fighter_tube_loads
                     .write()
                     .unwrap()
@@ -800,6 +823,8 @@ pub async fn handle_fighters(
                 with_mut_combat_runtime(ctx, |rt| {
                     rt.fighter_tube_rearm_until.insert((ship_id, f.tube_index), ctx.now_unix() + 15);
                 });
+                let tube_flag = (159 + f.tube_index) as i64;
+                session.push_notification("OnFighterTubeTaskStatus", vec![PyRep::Integer(tube_flag), PyRep::String("REFUELING".into())]);
                 let _ = sys_handle.remove_ball(f.ball_id).await;
                 recalled.push(PyRep::Integer(f.ball_id));
             }

@@ -922,6 +922,16 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     assert_eq!(sess.solar_system_id, Some(30000142));
 
     // Board Archon Carrier (100_000_024, type_id = 24483), undock, and verify S-2 & S-3 return UnimplementedRPC
+    let char_id = sess.character_id.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        let sk = snap.skills.entry(char_id).or_default();
+        sk.insert(20533, eve_db::TrainedSkillRecord { type_id: 20533, level: 5, skill_points: 256_000.0 });
+        sk.insert(3327, eve_db::TrainedSkillRecord { type_id: 3327, level: 5, skill_points: 256_000.0 });
+        sk.insert(24314, eve_db::TrainedSkillRecord { type_id: 24314, level: 5, skill_points: 256_000.0 });
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2;
+        }
+    });
     ctx.advance_secs(12);
     ctx.dispatch_rpc(
         &mut sess,

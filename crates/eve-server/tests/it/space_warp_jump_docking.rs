@@ -66,6 +66,15 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
     let _ = ctx.drain_notifications_for_char(char_id);
 
     // 1. Board a DIFFERENT ship in station hangar (feat:ships.board-ship)
+    ctx.db.with_mut_snapshot(|snap| {
+        let sk = snap.skills.entry(char_id).or_default();
+        sk.insert(3334, eve_db::TrainedSkillRecord { type_id: 3334, level: 5, skill_points: 256_000.0 });
+        sk.insert(3330, eve_db::TrainedSkillRecord { type_id: 3330, level: 5, skill_points: 256_000.0 });
+        sk.insert(3327, eve_db::TrainedSkillRecord { type_id: 3327, level: 5, skill_points: 256_000.0 });
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2;
+        }
+    });
     ctx.advance_secs(12);
     let board_res = ctx
         .dispatch_rpc(

@@ -555,7 +555,7 @@ pub async fn handle_fit_ships(
                     134 | 151 => ship_type.and_then(|t| t.default_attributes.get(&1556).copied().or_else(|| t.default_attributes.get(&1770).copied())).unwrap_or(0.0),
                     136 => ship_type.and_then(|t| t.default_attributes.get(&1558).copied()).unwrap_or(0.0),
                     135 => ship_type.and_then(|t| t.default_attributes.get(&1557).copied().or_else(|| t.default_attributes.get(&1556).copied())).unwrap_or(0.0),
-                    179 => ship_type.and_then(|t| t.default_attributes.get(&5325).copied()).unwrap_or(0.0),
+                    179 => ship_type.and_then(|t| t.default_attributes.get(&3020).copied().or_else(|| t.default_attributes.get(&5325).copied())).unwrap_or(0.0),
                     181 => ship_type.and_then(|t| t.default_attributes.get(&3136).copied().or_else(|| t.default_attributes.get(&1556).copied())).unwrap_or(0.0),
                     150 | 185 => ship_type.and_then(|t| t.default_attributes.get(&5646).copied()).unwrap_or(0.0),
                     182 => ship_type.and_then(|t| t.default_attributes.get(&5646).copied().or_else(|| t.default_attributes.get(&3227).copied())).unwrap_or(0.0),
@@ -844,7 +844,15 @@ pub(crate) fn is_item_allowed_in_ship_hold(
         143 => item_type.category_id == 8,
         148 => item_type.group_id == 1027,
         149 => matches!(item_type.category_id, 42 | 43),
-        179 => item_type.group_id == 1246,
+        // parity: feat:ships.frigate-escape-bay
+        179 => {
+            item_type.group_id == 1246
+                || (ship_type.default_attributes.get(&3020).copied().unwrap_or(0.0) > 0.0
+                    && matches!(
+                        item_type.group_id,
+                        25 | 324 | 830 | 831 | 834 | 893 | 1283 | 1527 | 2001
+                    ))
+        }
         181 => item_type.group_id == 465,
         150 | 185 => {
             matches!(item_type.category_id, 23 | 39 | 40 | 41 | 42 | 43 | 46 | 65 | 66 | 2143)
@@ -879,7 +887,12 @@ pub(crate) fn get_ship_hold_capacity(
         135 => ship_type.default_attributes.get(&1557).copied()
             .or_else(|| ship_type.default_attributes.get(&1556).copied())
             .unwrap_or(0.0),
-        179 => ship_type.default_attributes.get(&5325).copied().unwrap_or(0.0),
+        179 => ship_type
+            .default_attributes
+            .get(&3020)
+            .copied()
+            .or_else(|| ship_type.default_attributes.get(&5325).copied())
+            .unwrap_or(0.0),
         181 => ship_type.default_attributes.get(&3136).copied()
             .or_else(|| ship_type.default_attributes.get(&1556).copied())
             .unwrap_or(0.0),

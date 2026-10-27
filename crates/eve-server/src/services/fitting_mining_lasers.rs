@@ -304,6 +304,19 @@ pub(crate) async fn handle_mining_and_deactivate(
                     });
                 }
                 let active = snap.module_active_states.contains(&module_id);
+                // parity: feat:modules.emergency-hull-energizer
+                let is_ehe = matches!(m_item.type_id, 40714 | 40717)
+                    || ctx
+                        .sde
+                        .types
+                        .get(&m_item.type_id)
+                        .is_some_and(|t| t.effect_ids.contains(&6484));
+                if is_ehe {
+                    return Err(BridgeRpcError {
+                        code: "ModuleBurnedOut".into(),
+                        message: "UserError: Capital Emergency Hull Energizer cannot be repaired with Nanite Repair Paste".into(),
+                    });
+                }
                 let dmg = m_item
                     .dynamic_attributes
                     .get(&attr_ids::DAMAGE)

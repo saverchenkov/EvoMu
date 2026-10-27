@@ -981,6 +981,7 @@ pub async fn handle(
                         eve_db::InventoryFlag::Hangar
                             | eve_db::InventoryFlag::Cargo
                             | eve_db::InventoryFlag::SubSystemSlot0
+                            | eve_db::InventoryFlag::Locked
                             | eve_db::InventoryFlag::CorpSAG1
                             | eve_db::InventoryFlag::CorpSAG2
                             | eve_db::InventoryFlag::CorpSAG3

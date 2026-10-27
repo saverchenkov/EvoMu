@@ -359,6 +359,7 @@ pub(crate) fn step_cycles_and_capacitor(
                     .copied()
                     .unwrap_or(0);
                 let impedance = eve_dogma::stacking_penalty_factor(rank);
+                // parity: feat:modules.mutadaptive-remote-armor-repairer
                 let spool_mult = if cycle.mutadaptive_spool_step > 0.0 {
                     let mult = 1.0
                         + ((cycle.current_spool_cycles as f64) * cycle.mutadaptive_spool_step)
@@ -433,6 +434,7 @@ pub(crate) fn step_cycles_and_capacitor(
             }
 
             // 3. Thermodynamics & rack heat accumulation + slot-adjacency heat damage (`feat:dogma.heat-rack-thermodynamics`)
+            // parity: feat:modules.emergency-hull-energizer
             let mut burned_out = false;
             if matches!(cycle.module_type_id, 40714 | 40717) {
                 burned_out = true;
@@ -1127,6 +1129,13 @@ impl SystemHandle {
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                     let _ = handle.spawn(fut);
                 }
+            }
+        }
+        let step_hook_guard = self.system_step_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(hook) = step_hook_guard {
+            let fut = hook(self.solar_system_id, dt);
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let _ = handle.spawn(fut);
             }
         }
         if let Some(db) = db_opt {

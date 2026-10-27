@@ -35,8 +35,8 @@ const BOOSTER_ID: i64 = 90_000_002;
 
 /// Barge pilot skills: Mining V, Astrogeology V, Mining Barge V, Mining Upgrades IV, prerequisites,
 /// Simple Ore Processing III (crystals) and Target Management V.
-const BARGE_SKILLS: [(u32, u8); 9] =
-    [(3_386, 5), (3_410, 5), (17_940, 5), (22_578, 4), (32_918, 5), (3_380, 5), (3_327, 5), (60_377, 3), (3_429, 5)];
+const BARGE_SKILLS: [(u32, u8); 10] =
+    [(3_386, 5), (3_410, 5), (17_940, 5), (22_578, 4), (32_918, 5), (3_380, 5), (3_327, 5), (60_377, 3), (3_429, 5), (3_436, 5)];
 
 fn insert_item(p: &Pilot, item_id: i64, type_id: u32, location: i64, flag: InventoryFlag, qty: i32) {
     p.ctx.db.with_mut_snapshot(|snap| {

@@ -133,7 +133,15 @@ pub async fn step_combat_system(
     solar_system_id: u32,
     dt: f64,
 ) -> Vec<InFlightMissileState> {
-    super::combat_weapons_spool::step_system_entropic_spools(ctx, solar_system_id, dt).await;
+    crate::services::combat_weapons_spool::step_system_entropic_spools(ctx, solar_system_id, dt).await;
+    step_missiles_and_breachers(ctx, solar_system_id, dt).await
+}
+
+pub async fn step_missiles_and_breachers(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    dt: f64,
+) -> Vec<InFlightMissileState> {
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
     let missile_ids: Vec<i64> = with_combat_runtime(ctx, |rt| {
         rt.in_flight_missiles
@@ -489,23 +497,21 @@ pub async fn activate_aoe_or_defender_module(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
             // 2. Smartbomb (`group_id == 72`, `feat:modules.smartbomb`)
+            // parity: feat:crimewatch.safety-setting-action-block, feat:crimewatch.limited-engagement-duel
             if mod_type.group_id == 72 {
                 let safety = with_combat_runtime(ctx, |rt| {
-                    rt.safety_levels
-                        .get(&char_id)
-                        .copied()
-                        .unwrap_or(SafetyLevel::Red)
+                    rt.safety_levels.get(&char_id).copied().unwrap_or(SafetyLevel::Red)
                 });
-                if sys_sec >= 0.45 && safety != SafetyLevel::Red {
+                if safety == SafetyLevel::Green && sys_sec > 0.0 {
                     return Some(Err(BridgeRpcError {
                         code: "SafetyLevelRestricted".into(),
-                        message: "Smartbombs cannot be activated in high-security space unless safety is set to Red".into(),
+                        message: "UserError: CantDoInCurrentSafetyLevel - Safety Green blocks activating Smartbombs in empire space".into(),
                     }));
                 }
-                if sys_sec > 0.0 && sys_sec < 0.45 && safety == SafetyLevel::Green {
+                if safety == SafetyLevel::Yellow && sys_sec >= 0.45 {
                     return Some(Err(BridgeRpcError {
                         code: "SafetyLevelRestricted".into(),
-                        message: "Smartbombs cannot be activated in low-security space while safety is set to Green".into(),
+                        message: "UserError: CantDoInCurrentSafetyLevel - Safety Yellow blocks activating Smartbombs in high-security space".into(),
                     }));
                 }
                 let cap_need = mod_type
@@ -602,15 +608,22 @@ pub async fn activate_aoe_or_defender_module(
                                 if applied > 0.0 {
                                     crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, now_unix);
                                 }
-                                let is_legal = ctx.db.with_snapshot(|snap| {
-                                    is_legal_war_or_suspect_target(snap, char_id, vcid, now_unix)
-                                }) || {
+                                let v_suspect_or_crim = {
                                     let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
                                     let st = cw.get_or_create(vcid);
                                     st.is_suspect(now_unix) || st.is_criminal(now_unix)
-                                } || with_combat_runtime(ctx, |rt| {
+                                };
+                                let is_legal = ctx.db.with_snapshot(|snap| {
+                                    is_legal_war_or_suspect_target(snap, char_id, vcid, now_unix)
+                                }) || v_suspect_or_crim || with_combat_runtime(ctx, |rt| {
                                     rt.has_limited_engagement_with(vcid, char_id, now_unix)
                                 });
+                                if v_suspect_or_crim || with_combat_runtime(ctx, |rt| rt.has_limited_engagement_with(char_id, vcid, now_unix)) {
+                                    with_mut_combat_runtime(ctx, |rt| {
+                                        rt.add_limited_engagement(char_id, vcid, now_unix);
+                                        rt.add_limited_engagement(vcid, char_id, now_unix);
+                                    });
+                                }
                                 if !is_legal {
                                     illegal_capsuleer_hits.push((vcid, b.type_id == 670));
                                 }
@@ -1190,7 +1203,7 @@ pub async fn activate_missile_or_breacher_launcher(
                 }
 
                 // Simulate full missile flight immediately when deferImpact is false
-                let _ = step_combat_system(ctx, sys_id, flight_time_s + 0.01).await;
+                let _ = step_missiles_and_breachers(ctx, sys_id, flight_time_s + 0.01).await;
                 let resolved_ms = with_combat_runtime(ctx, |rt| {
                     rt.in_flight_missiles.get(&missile_ball_id).cloned()
                 })
@@ -1198,7 +1211,7 @@ pub async fn activate_missile_or_breacher_launcher(
 
                 let mut dot_tick_applied = 0.0;
                 if is_breacher_pod && resolved_ms.impacted {
-                    let _ = step_combat_system(ctx, sys_id, 1.0).await;
+                    let _ = step_missiles_and_breachers(ctx, sys_id, 1.0).await;
                     dot_tick_applied = with_combat_runtime(ctx, |rt| {
                         rt.active_breacher_dots
                             .get(&target_ball_id)

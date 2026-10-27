@@ -528,9 +528,16 @@ pub(crate) async fn handle_dogma_ops(
                         let active = snap.module_active_states.contains(&module_id);
                         let m_opt = snap.items.get(&module_id);
                         let is_valid = m_opt.map_or(false, |it| {
+                            let is_ehe = matches!(it.type_id, 40714 | 40717)
+                                || ctx
+                                    .sde
+                                    .types
+                                    .get(&it.type_id)
+                                    .is_some_and(|t| t.effect_ids.contains(&6484));
                             it.owner_id == char_id
                                 && it.location_id == ship_id
                                 && (11..=34).contains(&(it.flag as i64))
+                                && !is_ehe
                         });
                         let dmg = m_opt
                             .and_then(|i| i.dynamic_attributes.get(&attr_ids::DAMAGE).copied())

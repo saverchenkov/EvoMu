@@ -638,6 +638,7 @@ pub(crate) async fn handle_module_cycles(
                 }
 
 
+                // parity: feat:modules.stasis-grappler-mechanics, feat:modules.emergency-hull-energizer, feat:modules.mutadaptive-remote-armor-repairer
                 let EwarCapitalPrep {
                     warp_scramble_points,
                     disables_target_mwd_mjd,
@@ -709,7 +710,21 @@ pub(crate) async fn handle_module_cycles(
             let shield_boost_amount = if matches!(mod_type.group_id, 41 | 1697) { 0.0 } else { raw_shield * overload_mult };
             let mut armor_repair_amount = if matches!(mod_type.group_id, 325 | 2018 | 1698) { 0.0 } else { raw_armor * overload_mult };
             let hull_repair_amount = if mod_type.group_id == 585 { 0.0 } else { raw_hull * overload_mult };
-            let mut remote_armor_amount = remote_armor_amount;
+            let mut remote_armor_amount = if mod_type.group_id == 2018 && remote_armor_amount <= 0.0 {
+                mod_type.default_attributes.get(&84).copied().unwrap_or(0.0)
+            } else {
+                remote_armor_amount
+            };
+            let mutadaptive_spool_step = if mod_type.group_id == 2018 && mutadaptive_spool_step <= 0.0 {
+                mod_type.default_attributes.get(&2796).copied().unwrap_or(0.0)
+            } else {
+                mutadaptive_spool_step
+            };
+            let mutadaptive_spool_max = if mod_type.group_id == 2018 && mutadaptive_spool_max <= 0.0 {
+                mod_type.default_attributes.get(&2797).copied().unwrap_or(0.0)
+            } else {
+                mutadaptive_spool_max
+            };
 
             // Ancillary Shield Booster (`group_id == 1156`) & Ancillary Remote Shield Booster (`group_id == 1697`)
             let is_asb = matches!(mod_type.group_id, 1156 | 1697);
@@ -953,6 +968,15 @@ pub(crate) async fn handle_module_cycles(
             let cap_drain_target = mod_state.get_attribute(97, &ctx.sde);
             let cap_transfer_target = mod_state.get_attribute(90, &ctx.sde);
             let is_cehe = matches!(m.type_id, 40714 | 40717) || mod_type.effect_ids.contains(&6484);
+            let ehe_hull_resists = if is_cehe {
+                let em = mod_type.default_attributes.get(&974).copied().unwrap_or(0.05);
+                let exp = mod_type.default_attributes.get(&975).copied().unwrap_or(0.05);
+                let kin = mod_type.default_attributes.get(&976).copied().unwrap_or(0.05);
+                let therm = mod_type.default_attributes.get(&977).copied().unwrap_or(0.05);
+                Some([em, exp, kin, therm])
+            } else {
+                None
+            };
             let repeat = if is_mjd || grants_interdiction_nullification || is_adc || is_cehe {
                 0
             } else {
@@ -963,6 +987,27 @@ pub(crate) async fn handle_module_cycles(
             } else {
                 None
             };
+
+            // Burst Jammer / ECM Burst (`group_id == 80 || group_id == 353`, e.g. `580` Burst Jammer I, `2117` Burst Jammer II)
+            // & Smartbomb (`group_id == 72`) Crimewatch safety check (`feat:crimewatch.safety-setting-action-block`)
+            // parity: feat:crimewatch.safety-setting-action-block, feat:crimewatch.limited-engagement-duel
+            if matches!(mod_type.group_id, 72 | 80 | 353) {
+                let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0);
+                let safety = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                    rt.safety_levels
+                        .get(&char_id)
+                        .copied()
+                        .unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red)
+                });
+                let is_green = safety == crate::services::combat_crimewatch::SafetyLevel::Green;
+                let is_yellow = safety == crate::services::combat_crimewatch::SafetyLevel::Yellow;
+                if (sys_sec >= 0.45 && (is_green || is_yellow)) || (sys_sec > 0.0 && is_green) {
+                    return Some(Err(BridgeRpcError {
+                        code: "SafetyLevelRestricted".into(),
+                        message: "UserError: CantDoInCurrentSafetyLevel - Cannot activate AoE offensive module in empire space with current ship safety setting".into(),
+                    }));
+                }
+            }
 
             let cycle = crate::system_actor::ActiveModuleCycle {
                 ship_id,
@@ -1032,6 +1077,7 @@ pub(crate) async fn handle_module_cycles(
                 rah_shift_amount,
                 is_adc,
                 adc_saved_resists: None,
+                ehe_hull_resists,
                 is_overloaded,
                 rack_idx,
                 heat_damage_per_cycle,

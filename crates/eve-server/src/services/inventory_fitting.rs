@@ -53,6 +53,10 @@ pub(crate) use fitting_scanners_superweapons::*;
 pub mod fitting_cyno_portal;
 pub(crate) use fitting_cyno_portal::*;
 
+#[path = "fitting_ship_forcefield.rs"]
+pub mod fitting_ship_forcefield;
+pub(crate) use fitting_ship_forcefield::*;
+
 #[path = "fitting_ship_bays.rs"]
 pub mod fitting_ship_bays;
 pub(crate) use fitting_ship_bays::*;
@@ -222,6 +226,25 @@ pub async fn handle(
                     }
                 }
                 if let Some(src_item) = &source_item_opt {
+                    // parity: feat:modules.emergency-hull-energizer
+                    let is_ehe = matches!(src_item.type_id, 40714 | 40717)
+                        || ctx
+                            .sde
+                            .types
+                            .get(&src_item.type_id)
+                            .is_some_and(|t| t.effect_ids.contains(&6484));
+                    let ehe_damaged = src_item
+                        .dynamic_attributes
+                        .get(&eve_sde::attr_ids::DAMAGE)
+                        .copied()
+                        .unwrap_or(0.0)
+                        > 0.0;
+                    if is_ehe && ehe_damaged && (session.station_id.is_none() && session.structure_id.is_none() || is_fitting_slot) {
+                        return Some(Err(BridgeRpcError {
+                            code: "CannotRefitDamagedModule".into(),
+                            message: "UserError: Damaged or burned-out Capital Emergency Hull Energizer cannot be refitted".into(),
+                        }));
+                    }
                     if matches!(src_item.flag as u16, 125..=129) {
                         if let Ok(mut check_fit) = ctx.get_or_rebuild_ship_fitting(char_id, src_item.location_id) {
                             if let Err(msg) = check_fit.unfit_module(item_id, &ctx.sde) {
@@ -386,6 +409,58 @@ pub async fn handle(
                             code: "InvalidFittingTarget".into(),
                             message: format!("Target {new_loc} is not an owned ship"),
                         });
+                    }
+                    // parity: feat:modules.emergency-hull-energizer, feat:modules.stasis-grappler-mechanics
+                    let is_ehe = matches!(item.type_id, 40714 | 40717)
+                        || ctx
+                            .sde
+                            .types
+                            .get(&item.type_id)
+                            .is_some_and(|t| t.effect_ids.contains(&6484));
+                    if is_ehe
+                        && item
+                            .dynamic_attributes
+                            .get(&eve_sde::attr_ids::DAMAGE)
+                            .copied()
+                            .unwrap_or(0.0)
+                            > 0.0
+                    {
+                        return Err(BridgeRpcError {
+                            code: "CannotRefitDamagedModule".into(),
+                            message: "UserError: Damaged or burned-out Capital Emergency Hull Energizer cannot be fitted".into(),
+                        });
+                    }
+                    if let (Some(mod_t), Some(ship_t)) = (
+                        ctx.sde.types.get(&item.type_id),
+                        ctx.sde.types.get(&ship_item.type_id),
+                    ) {
+                        if mod_t.group_id == 1672 {
+                            let hull_ok = matches!(
+                                ship_t.group_id,
+                                27 | 30 | 485 | 513 | 547 | 659 | 883 | 898 | 900 | 902 | 941 | 1538 | 4594
+                            );
+                            if !hull_ok {
+                                return Err(BridgeRpcError {
+                                    code: "CanNotFitModuleToShip".into(),
+                                    message: format!(
+                                        "UserError: Heavy Stasis Grappler cannot be fitted to {} (group {})",
+                                        ship_t.name, ship_t.group_id
+                                    ),
+                                });
+                            }
+                            let already_grappler = snap.items.values().any(|i| {
+                                i.location_id == new_loc
+                                    && i.item_id != item_id
+                                    && matches!(i.flag as u16, 11..=34)
+                                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 1672)
+                            });
+                            if already_grappler {
+                                return Err(BridgeRpcError {
+                                    code: "MaxGroupFitted".into(),
+                                    message: "UserError: Maximum of 1 Heavy Stasis Grappler can be fitted per ship".into(),
+                                });
+                            }
+                        }
                     }
                     let (char_dock, char_sys, active_ship_id) = snap
                         .characters
@@ -728,11 +803,11 @@ pub async fn handle(
                             }));
                         }
                         true
-                    } else if fitting_containers_ships::is_container_group(p_grp, parent.type_id) || p_grp == 186 {
+                    } else if fitting_containers_ships::is_container_group(p_grp, parent.type_id) || matches!(p_grp, 186 | 1250) {
                         let is_public_or_own = parent.owner_id == char_id
                             || parent.owner_id == 0
                             || parent.type_id == 23
-                            || p_grp == 186
+                            || matches!(p_grp, 186 | 1250)
                             || (corp_id > 0 && parent.owner_id == corp_id);
                         if is_public_or_own {
                             is_loc_colocated(parent.item_id)
@@ -868,11 +943,46 @@ pub async fn handle(
                     if !crate::services::fitting_saved_apply::is_item_allowed_in_ship_hold(flag_u16, item_type, ship_type) {
                         return Err(BridgeRpcError::user_error("InvalidItemTypeForHold"));
                     }
+                    // parity: feat:ships.frigate-escape-bay
+                    if flag_u16 == 179
+                        && ship_type.default_attributes.get(&3020).copied().unwrap_or(0.0) > 0.0
+                        && item_type.category_id == 6
+                    {
+                        if !moving_item.singleton || moving_item.quantity != 1 {
+                            return Err(BridgeRpcError {
+                                code: "ShipMustBeAssembled".into(),
+                                message: "UserError: Only an assembled frigate can be placed in the Frigate Escape Bay".into(),
+                            });
+                        }
+                        let has_non_charge_cargo = snap.items.values().any(|c| {
+                            c.location_id == item_id
+                                && !matches!(c.flag as u16, 11..=34 | 92..=94 | 125..=132)
+                                && ctx.sde.types.get(&c.type_id).is_none_or(|t| t.category_id != 8)
+                        });
+                        if has_non_charge_cargo {
+                            return Err(BridgeRpcError {
+                                code: "ShipHasItemsInCargo".into(),
+                                message: "UserError: Frigate in Frigate Escape Bay cannot contain non-charge cargo items".into(),
+                            });
+                        }
+                        let existing_frigate = snap.items.values().any(|i| {
+                            i.location_id == new_loc
+                                && (i.flag as u16) == 179
+                                && i.item_id != item_id
+                                && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 6)
+                        });
+                        if existing_frigate {
+                            return Err(BridgeRpcError {
+                                code: "CapacityExceeded".into(),
+                                message: "UserError: Frigate Escape Bay can hold at most 1 assembled frigate".into(),
+                            });
+                        }
+                    }
                     let hold_capacity = crate::services::fitting_saved_apply::get_ship_hold_capacity(flag_u16, ship_type, eval_cargo_cap);
                     if flag_u16 != 5 && hold_capacity <= 0.0 {
                         return Err(BridgeRpcError { code: "CapacityExceeded".into(), message: format!("Ship {} does not have a specialized hold for flag {flag_u16} (capacity 0 m³)", ship_type.name) });
                     }
-                    if hold_capacity > 0.0 {
+                    if flag_u16 != 179 && hold_capacity > 0.0 {
                         let used_vol: f64 = snap.items.values()
                             .filter(|i| i.location_id == new_loc && (i.flag as u16) == flag_u16 && i.item_id != item_id)
                             .map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity as f64)).sum();

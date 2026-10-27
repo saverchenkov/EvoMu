@@ -406,17 +406,22 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
     );
 
     // 6. Locator Agents (`DoAction` action 15 = LocateCharacter)
-    let locator_agent_id = ctx
+    let locator_agent = ctx
         .sde
         .agents
         .values()
         .find(|a| a.is_locator && a.solar_system_id.is_some())
-        .map(|a| a.agent_id)
+        .cloned()
         .expect("Locator agent in SDE");
+    let locator_agent_id = locator_agent.agent_id;
+    let agent_sys = locator_agent.solar_system_id.unwrap();
     colocate_with_agent(&ctx, &mut sess, char_id, locator_agent_id);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.standings.insert(locator_agent_id, 8.0);
+        }
+        if let Some(target) = snap.characters.get_mut(&90_000_002) {
+            target.solar_system_id = agent_sys;
         }
     });
     let locate_res = rpc_call(

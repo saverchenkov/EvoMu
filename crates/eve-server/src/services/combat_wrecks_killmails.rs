@@ -18,12 +18,7 @@ pub fn compute_ship_insurance_quote_levels(
 ) -> (f64, Vec<(f64, &'static str, f64, f64)>) {
     let ref_val = compute_ship_insurance_reference_value(&ctx.sde, ship_type_id);
     let fracs = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
-    let raw = compute_insurance_levels(ref_val);
-    let levels = raw
-        .into_iter()
-        .enumerate()
-        .map(|(idx, (name, cost, payout))| (fracs[idx], name, cost, payout))
-        .collect();
+    let levels = compute_insurance_levels(ref_val).into_iter().enumerate().map(|(idx, (name, cost, payout))| (fracs[idx], name, cost, payout)).collect();
     (ref_val, levels)
 }
 
@@ -380,14 +375,18 @@ pub fn record_killmail_assist_action(
                 .map(|c| (c.corporation_id, c.alliance_id, c.active_ship_id))
                 .unwrap_or((1_000_125, None, attacker_char_id))
         });
-    crate::services::combat_crimewatch::combat_npc_ai::record_npc_threat_event(
-        ctx,
-        victim_id,
-        attacker_ship_id,
-        damage_done,
-        is_ewar,
-        false,
-    );
+    let is_drone_assist = ship_type_id == weapon_type_id
+        && ctx.sde.types.get(&weapon_type_id).is_some_and(|t| t.category_id == 18);
+    if !is_drone_assist {
+        crate::services::combat_crimewatch::combat_npc_ai::record_npc_threat_event(
+            ctx,
+            victim_id,
+            attacker_ship_id,
+            damage_done,
+            is_ewar,
+            false,
+        );
+    }
     with_mut_combat_runtime(ctx, |rt| {
         let entries = rt.aggression_assist_log.entry(victim_id).or_default();
         if let Some(existing) = entries
@@ -837,12 +836,18 @@ pub async fn handle_wrecks_killmails(
             };
             let module_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let ship_id = session.ship_id.unwrap_or(0);
-            // Reset Entropic Disintegrator spool on deactivation (`feat:modules.turret-precursor`)
-            with_mut_combat_runtime(ctx, |rt| {
-                rt.entropic_spools.remove(&(ship_id, module_id));
-            });
+            with_mut_combat_runtime(ctx, |rt| { rt.entropic_spools.remove(&(ship_id, module_id)); });
+            if let Some(sys_id) = session.solar_system_id {
+                let _ = ctx.systems.get_or_spawn(sys_id).remove_module_cycle(ship_id, module_id).await;
+            }
             ctx.db.with_mut_snapshot(|snap| {
                 snap.module_active_states.remove(&module_id);
+                if let Some(m_item) = snap.items.get_mut(&module_id) {
+                    if let Some(t) = ctx.sde.types.get(&m_item.type_id).filter(|t| t.group_id == 2018) {
+                        let base_rep = t.default_attributes.get(&84).copied().unwrap_or(0.0);
+                        if base_rep > 0.0 { m_item.dynamic_attributes.insert(84, base_rep); } else { m_item.dynamic_attributes.remove(&84); }
+                    }
+                }
             });
             if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
                 let _ = fit.deactivate_module(module_id, &ctx.sde);
@@ -1020,10 +1025,11 @@ pub async fn handle_wrecks_killmails(
                         .copied()
                         .unwrap_or(SafetyLevel::Red)
                 });
+                // parity: feat:crimewatch.suspect-timer-looting-ess, feat:crimewatch.safety-setting-action-block
                 if safety == SafetyLevel::Green {
                     return Some(Err(BridgeRpcError {
                         code: "SafetyLevelRestricted".into(),
-                        message: "Safety Green blocks looting a foreign wreck that triggers a Suspect flag".into(),
+                        message: "UserError: CantDoInCurrentSafetyLevel - Safety Green blocks looting a foreign wreck that triggers a Suspect flag".into(),
                     }));
                 }
                 {

@@ -118,6 +118,11 @@ async fn test_mn03_mining_ledger_recording_and_char_mining_ledger_service() {
 
     // Advance virtual clock by 1 day (Day 2) and mine Scordite ore (1228), Clear Icicle ice (16262), and Fullerite-C50 gas (30370)
     ctx.advance_time_seconds(86_400);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.type_id = 654; // Kryos (Specialized Ice Hold 30,000 m3)
+        }
+    });
     let ice_ast_id = 750_000_229i64;
     let gas_ast_id = 750_000_230i64;
     for (aid, tid, units, uvol) in [

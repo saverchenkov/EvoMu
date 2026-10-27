@@ -572,6 +572,16 @@ async fn test_c1_triglavian_entropic_spool_and_edencom_vorton_arc_and_sig_radius
     let kw = HashMap::new();
     ctx.set_invention_roll_override(Some(0.30));
 
+    for &tid in &target_ids {
+        let _ = sys_handle.add_target_lock(ship_id, TargetLock {
+            target_id: tid,
+            lock_time_ms: 0.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: Some(100_000.0),
+        }).await;
+    }
+
     let hp0_init = sys_handle.get_combat_state(target_ids[0]).await.unwrap().unwrap().shield_hp;
 
     // Cycle 0: spoolMultiplier == 1.0

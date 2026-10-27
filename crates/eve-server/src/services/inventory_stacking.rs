@@ -854,6 +854,7 @@ pub(crate) fn evaluate_space_wreck_or_jetcan_loot(
     char_id: i64,
     src_item: &eve_db::InventoryItemRecord,
 ) -> Result<(bool, bool), BridgeRpcError> {
+    // parity: feat:crimewatch.suspect-timer-looting-ess, feat:crimewatch.safety-setting-action-block
     let now_unix = ctx.now_unix_secs();
     let info = ctx.db.with_snapshot(|snap| {
         let ch_sys = snap
@@ -862,12 +863,12 @@ pub(crate) fn evaluate_space_wreck_or_jetcan_loot(
             .map(|c| c.solar_system_id as i64)
             .unwrap_or(0);
         let cont = snap.items.get(&src_item.location_id)?;
-        let is_wreck = ctx
+        let is_wreck_or_mtu = ctx
             .sde
             .types
             .get(&cont.type_id)
-            .is_some_and(|t| t.group_id == 186);
-        if !(cont.type_id == 23 || is_wreck) || cont.location_id != ch_sys || ch_sys <= 0 {
+            .is_some_and(|t| matches!(t.group_id, 186 | 1250));
+        if !(cont.type_id == 23 || is_wreck_or_mtu) || cont.location_id != ch_sys || ch_sys <= 0 {
             return None;
         }
         let owner_id = if cont.owner_id != 0 {
@@ -923,7 +924,7 @@ pub(crate) fn evaluate_space_wreck_or_jetcan_loot(
     if safety == crate::services::combat_crimewatch::SafetyLevel::Green {
         return Err(BridgeRpcError {
             code: "SafetyLevelRestricted".into(),
-            message: "Safety Green blocks taking items from a foreign wreck or container that triggers a Suspect flag".into(),
+            message: "UserError: CantDoInCurrentSafetyLevel - Safety Green blocks taking items from a foreign wreck or container that triggers a Suspect flag".into(),
         });
     }
     Ok((true, true))

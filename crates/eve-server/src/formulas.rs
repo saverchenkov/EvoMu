@@ -184,12 +184,14 @@ pub fn compute_jump_fuel_isotopes(
 }
 
 /// #146-#148: Jump Fatigue & Jump Activation Cooldown (`cooldown = 1 + dist_ly * (1 - 0.09 * JDC_lvl)` minutes, capped at 5h fatigue):
+// parity: feat:ships.jump-drive-fatigue-accumulation
 pub fn compute_jump_fatigue_and_cooldown_minutes(
     current_fatigue_min: f64,
     distance_ly: f64,
     fatigue_reduction_bonus: f64,
 ) -> (f64, f64) {
-    let effective_ly = distance_ly * (1.0 - fatigue_reduction_bonus.clamp(0.0, 0.95));
+    let ship_fatigue_multiplier = (1.0 - fatigue_reduction_bonus.clamp(0.0, 0.95)).max(0.05);
+    let effective_ly = distance_ly * ship_fatigue_multiplier;
     let cooldown_min = (1.0 + effective_ly).max(current_fatigue_min / 10.0);
     let new_fatigue_min = (current_fatigue_min.max(10.0) * (1.0 + effective_ly)).min(300.0);
     (cooldown_min, new_fatigue_min)

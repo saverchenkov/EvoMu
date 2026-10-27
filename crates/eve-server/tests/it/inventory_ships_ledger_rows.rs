@@ -647,6 +647,7 @@ async fn test_cargo_capacity_move_items_and_packaged_volumes() {
     let mut s2 = pilot(&ctx, C2, 6112).await;
 
     // Board a Venture (32880: 50 m3 cargo, 5,000 m3 specialized Ore Hold flag 134).
+    grant_skills(&ctx, C1, 32880);
     seed(&ctx, 720_001, 32880, C1, JITA44, InventoryFlag::Hangar, 1, true);
     ctx.advance_secs(12);
     call(&ctx, &mut s1, "ship", "Board", vec![PyRep::Integer(720_001)]).await.unwrap();

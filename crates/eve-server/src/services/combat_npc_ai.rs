@@ -555,10 +555,19 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
 
         // Add any hostile ships or active player drones within 75 km that pass standings aggression check
         for (&cand_id, cand_ball) in &ball_map {
+            let is_player_drone = with_combat_runtime(ctx, |rt| {
+                rt.active_drones_in_space.contains_key(&cand_id)
+            }) || ctx.db.with_snapshot(|snap| {
+                snap.items.get(&cand_id).is_some_and(|item| {
+                    ctx.sde.types.get(&item.type_id).is_some_and(|t| {
+                        t.category_id == 18 || matches!(t.group_id, 100 | 549 | 1023)
+                    })
+                })
+            });
             if cand_id == nid
                 || cand_id >= 700_000_000
                 || cand_ball.type_id == 26468
-                || cand_ball.max_velocity <= 0.0
+                || (cand_ball.max_velocity <= 0.0 && !is_player_drone)
                 || !valid_target(cand_id)
             {
                 continue;
@@ -571,15 +580,6 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             if dist > 75_000.0 {
                 continue;
             }
-            let is_player_drone = with_combat_runtime(ctx, |rt| {
-                rt.active_drones_in_space.contains_key(&cand_id)
-            }) || ctx.db.with_snapshot(|snap| {
-                snap.items.get(&cand_id).is_some_and(|item| {
-                    ctx.sde.types.get(&item.type_id).is_some_and(|t| {
-                        t.category_id == 18 || matches!(t.group_id, 100 | 549 | 1023)
-                    })
-                })
-            });
             // Standings and security status check (`feat:npc.npc-standings-aggression`, `feat:npc.navy-npc`, `F-01`):
             // Resolve owner character for ships and player drones
             let owner_char_opt = if is_player_drone {
@@ -649,56 +649,55 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 });
 
                 let should_skip = if is_pirate {
-                    // Pirate belt rats aggress all players on grid regardless of +8.0 or positive standing
                     false
                 } else if is_navy {
-                    // Empire navy NPCs do not add 0.0-standing pilots to their threat list,
-                    // but DO aggress pilots with <= -5.0 standing to the empire faction
                     standing > -5.0 && !is_criminal
                 } else if is_police {
-                    // Faction police only aggress outlaws (sec <= threshold or <= -5.0) or standing <= -5.0
                     !is_criminal && standing > -5.0
                 } else if is_edencom {
                     standing >= 0.0 && !is_criminal
                 } else {
                     standing >= 5.0 && !is_criminal
                 };
-
-                if should_skip
-                    && !owner_already_threat
-                    && !npc.aggression_threat.contains_key(&cand_id)
-                    && !npc.threat_table.contains_key(&cand_id)
-                {
+                if should_skip && !owner_already_threat && !npc.aggression_threat.contains_key(&cand_id) && !npc.threat_table.contains_key(&cand_id) {
                     continue;
                 }
-            } else if !npc.aggression_threat.contains_key(&cand_id)
-                && !npc.threat_table.contains_key(&cand_id)
-            {
+            } else if !npc.aggression_threat.contains_key(&cand_id) && !npc.threat_table.contains_key(&cand_id) {
                 continue;
             }
             let (is_capital, sig_radius, has_ewar, has_logi) = ctx.db.with_snapshot(|snap| {
                 let st = snap.items.get(&cand_id).and_then(|i| ctx.sde.types.get(&i.type_id));
                 let cap = st.is_some_and(|t| matches!(t.group_id, 485 | 547 | 1538 | 30 | 659));
                 let sig = st.and_then(|t| t.default_attributes.get(&552).copied()).unwrap_or(40.0);
-                let mut ewar = false;
-                let mut logi = false;
+                let (mut ewar, mut logi) = (false, false);
                 for &aid in &snap.module_active_states {
-                    if let Some(it) = snap.items.get(&aid).filter(|i| i.location_id == cand_id) {
-                        if let Some(mt) = ctx.sde.types.get(&it.type_id) {
-                            if matches!(mt.group_id, 52 | 65 | 201 | 208 | 291 | 357) { ewar = true; }
-                            if matches!(mt.group_id, 41 | 325 | 585) { logi = true; }
-                        }
+                    if let Some(mt) = snap.items.get(&aid).filter(|i| i.location_id == cand_id).and_then(|it| ctx.sde.types.get(&it.type_id)) {
+                        if matches!(mt.group_id, 52 | 65 | 201 | 208 | 291 | 357) { ewar = true; }
+                        if matches!(mt.group_id, 41 | 325 | 585) { logi = true; }
                     }
                 }
                 (cap, sig, ewar, logi)
             });
-            // DERIVED: threat weighting combines hull class/drone base, signature radius (attr 552), EWAR (1.5x), and logistics (1.3x).
+            // DERIVED: threat weighting combines hull class/drone base, signature radius (attr 552), proximity, DPS, EWAR (1.5x), and logistics (1.3x).
+            // parity: feat:drones.drone-npc-aggro-switching
             let sig_weight = (sig_radius / 40.0).clamp(0.5, 5.0) * 10.0;
             let role_mult = if has_ewar { 1.5 } else if has_logi { 1.3 } else { 1.0 };
+            let (drone_sig, drone_dps) = if is_player_drone {
+                let d_state = with_combat_runtime(ctx, |rt| rt.active_drones_in_space.get(&cand_id).cloned());
+                let d_tid = d_state.as_ref().map(|d| d.type_id).unwrap_or(cand_ball.type_id);
+                let d_sig = ctx.sde.types.get(&d_tid).and_then(|t| t.default_attributes.get(&552).copied()).unwrap_or(25.0);
+                let d_dps = d_state.as_ref().map(|d| d.damage_vector.total()).unwrap_or(15.0);
+                (d_sig, d_dps)
+            } else {
+                (0.0, 0.0)
+            };
             let base_threat = if is_capital {
                 if npc.archetype == "Sleeper" { 1_000.0 } else { (200.0 + sig_weight) * role_mult }
             } else if is_player_drone {
-                120.0 * role_mult
+                let prox_bonus = (10_000.0 / dist.max(500.0)).clamp(0.0, 20.0);
+                let sig_bonus = (drone_sig / 25.0).clamp(0.5, 4.0) * 5.0;
+                let dps_bonus = (drone_dps / 10.0).clamp(0.0, 25.0);
+                (120.0 + prox_bonus + sig_bonus + dps_bonus) * role_mult
             } else {
                 (100.0 + sig_weight) * role_mult
             };

@@ -115,6 +115,17 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     // E2E-03: Ship Fitting, Module Overload, Insurance, & Abyssal Mutaplasmid Rolling
     ctx.dispatch_rpc(
         &mut session,
+        "dynamicItemService",
+        None,
+        "CreateDynamicItem",
+        &[PyRep::Integer(47746), PyRep::Integer(100_000_003)],
+        &empty,
+        None,
+    )
+    .await
+    .unwrap();
+    ctx.dispatch_rpc(
+        &mut session,
         "invbroker",
         None,
         "Add",
@@ -134,17 +145,6 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
         None,
         "Overload",
         &[PyRep::Integer(100_000_003)],
-        &empty,
-        None,
-    )
-    .await
-    .unwrap();
-    ctx.dispatch_rpc(
-        &mut session,
-        "dynamicItemService",
-        None,
-        "CreateDynamicItem",
-        &[PyRep::Integer(47746), PyRep::Integer(100_000_003)],
         &empty,
         None,
     )
@@ -403,7 +403,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     .unwrap();
 
     // Jump wormhole from VFK-IV (30002904) -> Tama (30002813), then stargate route back to Jita (30000142)
-    ctx.advance_secs(12);
+    ctx.advance_secs(300);
     let jb_tama = ctx
         .dispatch_rpc(
             &mut session,

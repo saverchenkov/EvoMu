@@ -193,6 +193,14 @@ async fn test_ship_bays_scoop_store_board_space_and_password() {
     assert_eq!(sd_kv.get("flagID").and_then(|v| v.as_i64()), Some(90));
 
     // Undock Orca into space
+    ctx.db.with_mut_snapshot(|snap| {
+        let sk = snap.skills.entry(char_id).or_default();
+        sk.insert(29637, eve_db::TrainedSkillRecord { type_id: 29637, level: 5, skill_points: 256_000.0 });
+        sk.insert(3327, eve_db::TrainedSkillRecord { type_id: 3327, level: 5, skill_points: 256_000.0 });
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2;
+        }
+    });
     ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "ship", None, "Board", &[PyRep::Integer(orca_id)], &kw, None).await.unwrap();
     ctx.advance_secs(12);

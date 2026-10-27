@@ -476,6 +476,46 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
             if let Err(e) = scanner_range_check(ctx, sys, ship_id, target_id, mod_state, 126).await {
                 return Some(Err(e));
             }
+            // parity: feat:ships.blockade-runner-cargo-scan-immunity
+            let is_cargo_scan_immune = {
+                let target_tid = ctx
+                    .db
+                    .with_snapshot(|snap| snap.items.get(&target_id).map(|i| i.type_id))
+                    .or_else(|| {
+                        sys.get_ball_position_sync(target_id).and_then(|_| None)
+                    });
+                let ball_tid = if let Some(tid) = target_tid {
+                    Some(tid)
+                } else {
+                    sys.get_ball_snapshot(target_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|(_, b)| b.type_id)
+                };
+                ball_tid
+                    .and_then(|tid| ctx.sde.types.get(&tid))
+                    .is_some_and(|t| {
+                        t.group_id == 1202
+                            || t.default_attributes.get(&1886).copied().unwrap_or(0.0) >= 1.0
+                    })
+            };
+            if is_cargo_scan_immune {
+                ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnCargoScanComplete",
+                    "charid",
+                    vec![PyRep::Integer(target_id), PyRep::List(Vec::new())],
+                );
+                return Some(Ok(PyRep::keyval([
+                    ("moduleID", PyRep::Integer(module_id)),
+                    ("targetID", PyRep::Integer(target_id)),
+                    ("cargoScanImmune", PyRep::Bool(true)),
+                    ("message", PyRep::String("ShipImmuneToCargoScan".into())),
+                    ("totalScannedQuantity", PyRep::Integer(0)),
+                    ("scannedItems", PyRep::List(Vec::new())),
+                ])));
+            }
             let (scanned_items, total_qty) = ctx.db.with_snapshot(|snap| {
                 let mut list = Vec::new();
                 let mut sum_qty = 0_i64;

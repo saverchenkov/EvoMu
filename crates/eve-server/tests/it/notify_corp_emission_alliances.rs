@@ -348,13 +348,9 @@ async fn test_corp_registry_governance_structures_contacts_and_reinforce() {
     let PyRep::Rowset { rows: t_rows, .. } = titles else { panic!("expected Rowset") };
     assert!(!t_rows.is_empty());
 
-    // 3. Potential CEOs & ResignFromCEO
+    // 3. Potential CEOs
     let pot = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "GetNumberOfPotentialCEOs", &[], &kw, None).await.expect("GetNumberOfPotentialCEOs");
     assert_eq!(pot.as_i64(), Some(0));
-
-    let resign = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "ResignFromCEO", &[PyRep::Integer(P1)], &kw, None).await.expect("ResignFromCEO");
-    let PyRep::KeyVal(res_kv) = resign else { panic!("expected KeyVal") };
-    assert_eq!(res_kv.get("corporationID"), Some(&PyRep::Integer(corp_id)));
 
     // 4. Bulletins (UpdateBulletinOrder, DeleteBulletin)
     let _b1 = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "AddBulletin", &[PyRep::String("Welcome".into()), PyRep::String("Fly safe".into())], &kw, None).await.expect("AddBulletin");
@@ -425,4 +421,9 @@ async fn test_corp_registry_governance_structures_contacts_and_reinforce() {
     let itv = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "itervalues", &[], &kw, None).await.expect("itervalues");
     let PyRep::List(it_list) = itv else { panic!("expected List") };
     assert!(it_list.is_empty());
+
+    // 9. ResignFromCEO
+    let resign = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "ResignFromCEO", &[PyRep::Integer(P1)], &kw, None).await.expect("ResignFromCEO");
+    let PyRep::KeyVal(res_kv) = resign else { panic!("expected KeyVal") };
+    assert_eq!(res_kv.get("corporationID"), Some(&PyRep::Integer(corp_id)));
 }

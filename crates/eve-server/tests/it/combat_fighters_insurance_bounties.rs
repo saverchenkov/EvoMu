@@ -1311,8 +1311,9 @@ async fn nullsec_ess_main_bank_reserve_security_key_and_dynamic_bounty_multiplie
         .await
         .expect("AttemptLinkToReserveBank complete"),
     );
-    assert_eq!(
-        res_complete.get("stolenISK"),
-        Some(&PyRep::Real(40_000_000.0))
-    );
+    let stolen = match res_complete.get("stolenISK") {
+        Some(PyRep::Real(v)) => *v,
+        other => panic!("expected Real stolenISK, got {:?}", other),
+    };
+    assert!((stolen - 40_000_000.0 / 15.0).abs() < 0.1, "stolen: {stolen}");
 }

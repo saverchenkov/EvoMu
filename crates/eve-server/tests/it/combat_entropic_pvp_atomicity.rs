@@ -53,6 +53,13 @@ fn ball(id: i64, type_id: u32, pos: DVec3, radius: f64) -> Ball {
 
 async fn setup_pilot(ctx: &ServerContext, client_id: u64, char_id: i64, ship_id: i64, ship_type_id: u32, sys_id: u32, pos: DVec3) -> SessionState {
     ctx.db.with_mut_snapshot(|snap| {
+        if !snap.characters.contains_key(&char_id) {
+            if let Some(mut tmpl) = snap.characters.values().next().cloned() {
+                tmpl.character_id = char_id;
+                tmpl.corporation_id = 1_000_002;
+                snap.characters.insert(char_id, tmpl);
+            }
+        }
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = sys_id;
             ch.station_id = None;
@@ -98,6 +105,13 @@ async fn test_entropic_activation_and_cycle_do_not_partially_mutate_and_deplete_
         cs.max_shield_hp = 80_000.0;
         cs.shield_hp = 80_000.0;
         let _ = sys_handle.spawn_ball_with_combat(ball(tid, 24690, DVec3::new(x, 0.0, 0.0), 400.0), cs).await;
+        let _ = sys_handle.add_target_lock(ship_id, eve_destiny::TargetLock {
+            target_id: tid,
+            lock_time_ms: 0.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: Some(100_000.0),
+        }).await;
     }
     // Light Entropic Disintegrator I (47272) + Meson Exotic Plasma S (47925)
     let (ent_id, ammo_id) = (201_101, 201_102);
@@ -267,4 +281,96 @@ async fn test_proving_grounds_result_not_recorded_for_kills_outside_arena() {
         (m.active, m.winner_char_id)
     });
     assert_eq!((active, winner), (true, None), "Kill outside arena_solar_system_id must not conclude the match");
+}
+
+#[tokio::test]
+async fn test_entropic_spool_cycle_kill_executes_canonical_death_pipeline() {
+    // parity: feat:modules.turret-precursor
+    eve_testkit::attest(&["feat:modules.turret-precursor"]);
+
+    let ctx = ServerContext::new();
+    let (p1, p2) = (90_000_101, 90_000_102);
+    let (ship1, ship2) = (100_000_301, 100_000_302);
+    let sys = 30_000_142;
+    let mut s1 = setup_pilot(&ctx, 7331, p1, ship1, 47269, sys, DVec3::ZERO).await; // Damavik
+    let _s2 = setup_pilot(&ctx, 7332, p2, ship2, 587, sys, DVec3::new(2_000.0, 0.0, 0.0)).await; // Rifter
+    let sys_h = ctx.systems.get_or_spawn(sys);
+
+    let (ent_id, ammo_id) = (201_301, 201_302);
+    fit(&ctx, p1, ship1, (ent_id, 47272), (ammo_id, 47925, 50));
+    let cargo_item_id = 201_303;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            cargo_item_id,
+            item(cargo_item_id, 34, p2, ship2, InventoryFlag::Cargo, 100, false),
+        );
+    });
+
+    let _ = sys_h.add_target_lock(ship1, eve_destiny::TargetLock {
+        target_id: ship2,
+        lock_time_ms: 0.0,
+        remaining_lock_ms: 0.0,
+        locked: true,
+        max_range_m: Some(50_000.0),
+    }).await;
+
+    let mut cs2 = sys_h.get_combat_state(ship2).await.unwrap().unwrap();
+    (cs2.shield_hp, cs2.armor_hp, cs2.structure_hp) = (0.0, 0.0, 500.0);
+    let _ = sys_h.set_combat_state(ship2, cs2).await;
+    ctx.set_invention_roll_override(Some(0.50));
+
+    let act_res = dispatch_combat_rpc(
+        &ctx,
+        &mut s1,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(ent_id), PyRep::Integer(ship2)],
+        &HashMap::new(),
+    ).await.expect("Initial activation");
+    assert_eq!(act_res.dict_get("destroyed").and_then(PyRep::as_bool), Some(false));
+    assert!(sys_h.get_combat_state(ship2).await.unwrap().is_some());
+
+    let mut cs2_low = sys_h.get_combat_state(ship2).await.unwrap().unwrap();
+    cs2_low.structure_hp = 1.0;
+    let _ = sys_h.set_combat_state(ship2, cs2_low).await;
+
+    ctx.advance_time_seconds(4);
+    sys_h.step_manual(4.0).await.unwrap();
+
+    // 1. Victim ship ball destroyed
+    assert!(sys_h.get_combat_state(ship2).await.unwrap().is_none(), "Victim ship must be destroyed on spool cycle");
+
+    // 2. Capsule ejected and ship item removed
+    let active_ship = ctx.db.with_snapshot(|s| s.characters.get(&p2).unwrap().active_ship_id);
+    assert_ne!(active_ship, ship2, "Victim active ship must be swapped to capsule");
+    let ship_exists = ctx.db.with_snapshot(|s| s.items.contains_key(&ship2));
+    assert!(!ship_exists, "Destroyed ship must be removed from DB items");
+
+    // 3. Killmail recorded
+    let km = ctx.db.with_snapshot(|s| {
+        s.killmails.values().find(|k| k.victim_character_id == p2).cloned()
+    }).expect("Killmail must be recorded");
+    assert_eq!(km.ship_type_id, 587);
+    assert_eq!(km.attacker_character_id, p1);
+
+    // 4. Wreck container exists in solar system
+    let wreck = ctx.db.with_snapshot(|s| {
+        s.items.values().find(|i| i.location_id == sys as i64 && i.owner_id == p2).cloned()
+    }).expect("Wreck must be spawned");
+    assert!(wreck.singleton);
+
+    // 5. Entropic spool cleared and module deactivated
+    let mult = eve_server::services::combat_weapons::get_entropic_spool_multiplier(&ctx, ship1, ent_id);
+    assert_eq!(mult, 1.0, "Spool must reset to 1.0 upon target destruction");
+    let is_active = ctx.db.with_snapshot(|s| s.module_active_states.contains(&ent_id));
+    assert!(!is_active, "Module must be deactivated upon target destruction");
+
+    // 6. CrimeWatch PvP timer renewed
+    let (cw_p1, cw_p2) = ctx.crimewatch.read().unwrap().states.iter().fold((0, 0), |(t1, t2), (&cid, st)| {
+        if cid == p1 { (st.pvp_timer_until_unix, t2) }
+        else if cid == p2 { (t1, st.pvp_timer_until_unix) }
+        else { (t1, t2) }
+    });
+    assert!(cw_p1 > 0, "Attacker must have PvP timer");
+    assert!(cw_p2 > 0, "Victim must have PvP timer");
 }

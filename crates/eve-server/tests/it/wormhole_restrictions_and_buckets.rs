@@ -156,6 +156,7 @@ async fn test_wormhole_restrictions_and_buckets() {
     assert_eq!(jump_from_wh_err.code, "JumpDriveForbiddenInWormholeSpace");
 
     // Move session to K-Space (Jita 30000142) in a Dreadnought (Revelation 19720)
+    ctx.advance_secs(600);
     let jita_sys_id = 30_000_142u32;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {

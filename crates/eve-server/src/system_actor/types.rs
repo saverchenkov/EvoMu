@@ -85,6 +85,7 @@ pub struct ActiveModuleCycle {
     pub rah_shift_amount: f64,
     pub is_adc: bool,
     pub adc_saved_resists: Option<([f64; 4], [f64; 4], [f64; 4])>,
+    pub ehe_hull_resists: Option<[f64; 4]>,
     pub target_velocity_multiplier: Option<f64>,
     pub target_original_max_velocity: Option<f64>,
     pub immobilize_self: bool,
@@ -426,3 +427,5 @@ pub type CharacterId = i64;
 pub type NpcDeathFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 pub type NpcDeathHook = Arc<dyn Fn(SolarSystemId, BallId, Option<CharacterId>) -> NpcDeathFuture + Send + Sync>;
 pub type ModuleDeactivationHook = Arc<dyn Fn(CharacterId, &ActiveModuleCycle) + Send + Sync>;
+pub type SystemStepFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+pub type SystemStepHook = Arc<dyn Fn(SolarSystemId, f64) -> SystemStepFuture + Send + Sync>;

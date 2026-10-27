@@ -30,6 +30,7 @@ pub struct SystemHandle {
     pub(crate) last_auto_stepped_unix: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) npc_death_hook: Arc<RwLock<Option<super::NpcDeathHook>>>,
     pub(crate) module_deactivation_hook: Arc<RwLock<Option<super::ModuleDeactivationHook>>>,
+    pub(crate) system_step_hook: Arc<RwLock<Option<super::SystemStepHook>>>,
 }
 
 impl SystemHandle {
@@ -652,6 +653,10 @@ impl SystemHandle {
             if let Some(fut) = super::on_ball_destroyed_by_damage(self.solar_system_id, target_ball_id, owner_char_id, hook.as_ref()) {
                 fut.await;
             }
+        }
+        let step_hook = self.system_step_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(hook) = step_hook {
+            hook(self.solar_system_id, dt).await;
         }
         Ok(broadcast)
     }
