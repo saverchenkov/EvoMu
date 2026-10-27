@@ -46,17 +46,17 @@
       "flagged_by_audit": "20261026-153450"
     },
     {
-      "evidence": "crates/eve-server/src/services/character_certificates.rs:120-168 — derive_certificate_levels computes certificate levels by matching cert.group_id with a wildcard (_ => ...) and looping over a fixed set of 5 hardcoded skill IDs ([3300, 3392, 3426, 3449, 3402]), taking their maximum level up to 5 and assigning it to every certificate in the SDE bundle (or assigning max_skill_lvl.min(5) to dummy certificate IDs 1..=20 if SDE load fails). It completely ignores each certificate's actual skill prerequisites defined in certificates.fsdbinary. Furthermore, the service is built around Crucible-era certificateMgr (character_certificates.rs:179-182), which is bypassed via `rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json`. The tagged test crates/eve-server/tests/it/skills_parity_complete.rs:378-450 never asserts certificate derivation from trained skills per the acceptance text (\"certificateMgr reports certificate levels derived from trained skills\"); it only asserts certificates 101 and 202 that were manually pushed using mock setter RPCs (GrantCertificate, BatchCertificateGrant, BatchCertificateUpdate).",
+      "evidence": "crates/eve-server/src/services/character_certificates.rs:120-168 \u2014 derive_certificate_levels computes certificate levels by matching cert.group_id with a wildcard (_ => ...) and looping over a fixed set of 5 hardcoded skill IDs ([3300, 3392, 3426, 3449, 3402]), taking their maximum level up to 5 and assigning it to every certificate in the SDE bundle (or assigning max_skill_lvl.min(5) to dummy certificate IDs 1..=20 if SDE load fails). It completely ignores each certificate's actual skill prerequisites defined in certificates.fsdbinary. Furthermore, the service is built around Crucible-era certificateMgr (character_certificates.rs:179-182), which is bypassed via `rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json`. The tagged test crates/eve-server/tests/it/skills_parity_complete.rs:378-450 never asserts certificate derivation from trained skills per the acceptance text (\"certificateMgr reports certificate levels derived from trained skills\"); it only asserts certificates 101 and 202 that were manually pushed using mock setter RPCs (GrantCertificate, BatchCertificateGrant, BatchCertificateUpdate).",
       "id": "feat:skills.certificates",
       "flagged_by_audit": "20261026-104051"
     },
     {
-      "evidence": "crates/eve-server/src/services/character_skill_plans.rs:886-919, 930-1170 — implements 7 invented RPC methods on skillMgr2 (SaveSkillPlan, CreateSkillPlan, GetPersonalSkillPlans, GetCorpSkillPlans, GetCertifiedSkillPlans, GetSharedSkillPlan, TrackSkillPlan, GetTrackedSkillPlan), all suppressed with `// rpc-lint: allow parity audit feat:skills.skill-plans`. None of these RPC methods exist on skillMgr2 in the V24 client bytecode; skill plans in live V24 are managed through the public gateway via Quasar (quasar:skill). Furthermore, default_certified_plans() in character_skill_plans.rs:886-919 hardcodes 3 synthetic fixture plans (cert-plan-enforcer-core, cert-plan-industrialist, cert-plan-explorer) with hand-written skill vectors instead of reading client static data (res:/staticdata/skillplans.fsdbinary), and TrackSkillPlan broadcasts OnSelectedSkillPlanChanged, which is already triaged in docs/parity/triage.json:2002 as client-local UI scatter.",
+      "evidence": "crates/eve-server/src/services/character_skill_plans.rs:886-919, 930-1170 \u2014 implements 7 invented RPC methods on skillMgr2 (SaveSkillPlan, CreateSkillPlan, GetPersonalSkillPlans, GetCorpSkillPlans, GetCertifiedSkillPlans, GetSharedSkillPlan, TrackSkillPlan, GetTrackedSkillPlan), all suppressed with `// rpc-lint: allow parity audit feat:skills.skill-plans`. None of these RPC methods exist on skillMgr2 in the V24 client bytecode; skill plans in live V24 are managed through the public gateway via Quasar (quasar:skill). Furthermore, default_certified_plans() in character_skill_plans.rs:886-919 hardcodes 3 synthetic fixture plans (cert-plan-enforcer-core, cert-plan-industrialist, cert-plan-explorer) with hand-written skill vectors instead of reading client static data (res:/staticdata/skillplans.fsdbinary), and TrackSkillPlan broadcasts OnSelectedSkillPlanChanged, which is already triaged in docs/parity/triage.json:2002 as client-local UI scatter.",
       "id": "feat:skills.skill-plans",
       "flagged_by_audit": "20261026-104051"
     },
     {
-      "evidence": "crates/eve-server/src/services/character_skill_ops.rs:745-805, 843-850 — invents skillMgr2.RefundObsoleteSkill (suppressed with `// rpc-lint: allow parity audit feat:skills.skill-remove-obsolete`), an RPC method not present in the V24 client. The tagged test crates/eve-server/tests/it/skills_parity_complete.rs:340-360 only exercises this invented RPC fixture to refund skill 3400 rather than exercising any live-server obsolete skill refund mechanism.",
+      "evidence": "crates/eve-server/src/services/character_skill_ops.rs:745-805, 843-850 \u2014 invents skillMgr2.RefundObsoleteSkill (suppressed with `// rpc-lint: allow parity audit feat:skills.skill-remove-obsolete`), an RPC method not present in the V24 client. The tagged test crates/eve-server/tests/it/skills_parity_complete.rs:340-360 only exercises this invented RPC fixture to refund skill 3400 rather than exercising any live-server obsolete skill refund mechanism.",
       "id": "feat:skills.skill-remove-obsolete",
       "flagged_by_audit": "20261026-104051"
     },
@@ -91,7 +91,7 @@
       "flagged_by_audit": "20261026-151210"
     },
     {
-      "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:222-330 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:236-300 — default_store_catalog() is a hardcoded 4-category, 4-product (101..=104), 4-offer (1001..=1004) fixture table explicitly commented as DERIVED.",
+      "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:222-330 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:236-300 \u2014 default_store_catalog() is a hardcoded 4-category, 4-product (101..=104), 4-offer (1001..=1004) fixture table explicitly commented as DERIVED.",
       "id": "feat:wallet.nes-store",
       "flagged_by_audit": "20261025-200428"
     },
@@ -136,7 +136,7 @@
       "id": "quasar:eveProto/generated/eve_public/ai/assistant/chat/api/requests_pb2.pyj"
     },
     {
-      "evidence": "Closed only by commit 8edbc933, which adds a tag to existing code (diff.patch: 6 added lines, no logic change). GetAsOwnerResponse is built from synthetic data. The code labels it 'DERIVED (synthetic — the client mercenary den evolution / infomorph / activity-template FSD tables are not part of the EvoMu SDE import)' at crates/eve-server/src/services/quasar_sov_mercden.rs:29-46. The synthetic values are den cap 5, 1 level/hour, 20-level stages, 2000-infomorph cap and 3*stage infomorphs/hour. encode_evolution_definition (:118-137) invents the stage bounds and the 500*stage anarchy thresholds. GetMaximumForCharacter returns min(skill level, invented MERCENARY_DEN_ABSOLUTE_MAX=5) (:388-397). The comment says the data exists in the client but wasn't imported. Under AGENTS.md, rows backed by synthesized data stay open. The test (crates/eve-server/tests/it/quasar_sov_pirate_remediation.rs:371-454) puts the den straight into sov_runtime (:383-388), with no deploy or anchoring path. It then asserts the synthetic numbers: max (3,5) at :392, level 21 / stage 2 after 6h at :402. So it checks the invented curve, not live den data.",
+      "evidence": "Closed only by commit 8edbc933, which adds a tag to existing code (diff.patch: 6 added lines, no logic change). GetAsOwnerResponse is built from synthetic data. The code labels it 'DERIVED (synthetic \u2014 the client mercenary den evolution / infomorph / activity-template FSD tables are not part of the EvoMu SDE import)' at crates/eve-server/src/services/quasar_sov_mercden.rs:29-46. The synthetic values are den cap 5, 1 level/hour, 20-level stages, 2000-infomorph cap and 3*stage infomorphs/hour. encode_evolution_definition (:118-137) invents the stage bounds and the 500*stage anarchy thresholds. GetMaximumForCharacter returns min(skill level, invented MERCENARY_DEN_ABSOLUTE_MAX=5) (:388-397). The comment says the data exists in the client but wasn't imported. Under AGENTS.md, rows backed by synthesized data stay open. The test (crates/eve-server/tests/it/quasar_sov_pirate_remediation.rs:371-454) puts the den straight into sov_runtime (:383-388), with no deploy or anchoring path. It then asserts the synthetic numbers: max (3,5) at :392, level 21 / stage 2 after 6h at :402. So it checks the invented curve, not live den data.",
       "id": "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj",
       "flagged_by_audit": "20261026-161125"
     },
@@ -146,22 +146,22 @@
       "id": "quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj"
     },
     {
-      "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:222-254 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:246-256 — store.category.api handlers serve the 4-entry hardcoded category fixture in default_store_catalog().",
+      "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:222-254 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:246-256 \u2014 store.category.api handlers serve the 4-entry hardcoded category fixture in default_store_catalog().",
       "id": "quasar:eveProto/generated/eve_public/store/category/api_pb2.pyj",
       "flagged_by_audit": "20261025-200428"
     },
     {
-      "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:290-328 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:283-300 — store.offer.api handlers serve the 4-entry hardcoded offer fixture (1001..=1004) in default_store_catalog().",
+      "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:290-328 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:283-300 \u2014 store.offer.api handlers serve the 4-entry hardcoded offer fixture (1001..=1004) in default_store_catalog().",
       "id": "quasar:eveProto/generated/eve_public/store/offer/api_pb2.pyj",
       "flagged_by_audit": "20261025-200428"
     },
     {
-      "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:255-289 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:258-281 — store.product.api handlers serve the 4-entry hardcoded product fixture (101..=104) in default_store_catalog().",
+      "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:255-289 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:258-281 \u2014 store.product.api handlers serve the 4-entry hardcoded product fixture (101..=104) in default_store_catalog().",
       "id": "quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj",
       "flagged_by_audit": "20261025-200428"
     },
     {
-      "evidence": "crates/eve-server/src/services/quasar_payment_store.rs:509-540, crates/eve-server/src/services/quasar_payment_store_types.rs:146-247, crates/eve-server/tests/it/quasar_store_vault_suite.rs:148-159, crates/eve-server/tests/it/quasar_extended_endpoints.rs:365-372 — GetOffersForTargetAudienceRequest serves the same 4-entry hardcoded fixture (seed_store_catalog) that caused store/category/api_pb2.pyj, store/offer/api_pb2.pyj, and store/product/api_pb2.pyj to be flagged fake, and ignores the request's target-audience filter completely; tagged tests only assert status_code == 200 and !offers.is_empty() against an empty request payload.",
+      "evidence": "crates/eve-server/src/services/quasar_payment_store.rs:509-540, crates/eve-server/src/services/quasar_payment_store_types.rs:146-247, crates/eve-server/tests/it/quasar_store_vault_suite.rs:148-159, crates/eve-server/tests/it/quasar_extended_endpoints.rs:365-372 \u2014 GetOffersForTargetAudienceRequest serves the same 4-entry hardcoded fixture (seed_store_catalog) that caused store/category/api_pb2.pyj, store/offer/api_pb2.pyj, and store/product/api_pb2.pyj to be flagged fake, and ignores the request's target-audience filter completely; tagged tests only assert status_code == 200 and !offers.is_empty() against an empty request payload.",
       "id": "quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj",
       "flagged_by_audit": "20261026-073033"
     },
@@ -247,7 +247,7 @@
       "flagged_by_audit": "20261025-191723"
     },
     {
-      "evidence": "crates/eve-server/src/services/misc_client_services.rs:1453-1474, crates/eve-server/tests/it/rpc_missing_batch3_part2.rs:197-205 — raffleMgr.character_Seeding is collapsed into the same match arm as QA_SeedRaffles (\"QA_SeedRaffles\" | \"character_Seeding\"), ignoring arguments and seeding 3 hardcoded type_ids (34, 35, 36) with fixed ticket count 8 and price 100_000 * 100 instead of character-specific seeding; the test only asserts that the returned integer is >= 3.",
+      "evidence": "crates/eve-server/src/services/misc_client_services.rs:1453-1474, crates/eve-server/tests/it/rpc_missing_batch3_part2.rs:197-205 \u2014 raffleMgr.character_Seeding is collapsed into the same match arm as QA_SeedRaffles (\"QA_SeedRaffles\" | \"character_Seeding\"), ignoring arguments and seeding 3 hardcoded type_ids (34, 35, 36) with fixed ticket count 8 and price 100_000 * 100 instead of character-specific seeding; the test only asserts that the returned integer is >= 3.",
       "id": "rpc:raffleMgr.character_Seeding",
       "flagged_by_audit": "20261026-073033"
     },
@@ -307,6 +307,26 @@
       "evidence": "History entries are matched against the hand-written SEASONAL_LOGIN_SCHEDULES (campaigns_and_milestones.rs:653), and the campaign id falls back to that schedule's hardcoded 2323 (:657-659). Claims made outside the invented 2023-2028 window are dropped silently (:653-656). The test (rpc_campaigns_and_telemetry.rs:305-330) runs inside the synthetic window.",
       "id": "rpc:seasonalLoginCampaignManager.get_claim_history",
       "flagged_by_audit": "20261026-162943"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/agents_missions_helpers.rs:248-314 computes mission ISK rewards using the DERIVED heuristic base_isk = base_lp * 1000 and bonus_reward = isk_reward / 2 because per-mission ISK reward tables are server-authored and not in V24 client FSD.",
+      "id": "plan:E-5",
+      "flagged_by_audit": "20261026-171500"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/agents_missions_helpers.rs:248-314 computes mission ISK rewards using the DERIVED heuristic base_isk = base_lp * 1000 and bonus_reward = isk_reward / 2 because per-mission ISK reward tables are server-authored and not in V24 client FSD.",
+      "id": "feat:pve.mission-lp-isk-reward-formula",
+      "flagged_by_audit": "20261026-171500"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/agents_standings_arcs.rs:318-378 static_npc_faction_standings() is a static table of inter-faction standings because crpNPCCorporations/chrFactions inter-faction standings are not included in the runtime SDE bundle.",
+      "id": "rpc:standingMgr.GetNPCNPCStandings",
+      "flagged_by_audit": "20261026-171500"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/agents_standings_arcs.rs:318-378 static_npc_faction_standings() is a static table of inter-faction standings because crpNPCCorporations/chrFactions inter-faction standings are not included in the runtime SDE bundle.",
+      "id": "feat:standings.npc-npc-standings",
+      "flagged_by_audit": "20261026-171500"
     }
   ],
   "rejected_triage": [
@@ -335,7 +355,7 @@
       "why_missing": "feat:pve.insurgency only covers corruption/suppression read-out and feat:fw.fw-pirate is a single line; the phase machine, with its V24.01 timings (48h forecast, 7-day max), has no testable row."
     },
     {
-      "acceptance": "The pirate FOB spawns in the insurgency hub system and is dockable only by the pirate militia. It becomes attackable only once the Empire side reaches its suppression goal, and uses a single 3h (±1h jitter) armor reinforcement timer. Destroying it raises Suppression by one level (max 5) in every affected system and ends the insurgency as an Empire win.",
+      "acceptance": "The pirate FOB spawns in the insurgency hub system and is dockable only by the pirate militia. It becomes attackable only once the Empire side reaches its suppression goal, and uses a single 3h (\u00b11h jitter) armor reinforcement timer. Destroying it raises Suppression by one level (max 5) in every affected system and ends the insurgency as an Empire win.",
       "added_by_audit": "20261017-214922",
       "attest_ok": false,
       "category": "feat",
@@ -367,7 +387,7 @@
       "why_missing": "Victory resolution and the persistent ambition counter are absent from every fw/pve row."
     },
     {
-      "acceptance": "When a system reaches Corruption level 3, an adjacent system with security 0.0–0.8 joins the insurgency and starts spawning sites. If no adjacent system is valid, a random valid system adjacent to the insurgency is chosen.",
+      "acceptance": "When a system reaches Corruption level 3, an adjacent system with security 0.0\u20130.8 joins the insurgency and starts spawning sites. If no adjacent system is valid, a random valid system adjacent to the insurgency is chosen.",
       "added_by_audit": "20261017-214922",
       "attest_ok": false,
       "category": "feat",
@@ -383,7 +403,7 @@
       "why_missing": "No row defines insurgency area growth; it was changed to level 3 in V24.01."
     },
     {
-      "acceptance": "Each Corruption and Suppression stage (1–5) applies that stage's published system effects: security posture changes via securityMgr.get_modified_systems, plus the stage-gated site spawns and NPC behaviour. Effects are removed when the stage drops.",
+      "acceptance": "Each Corruption and Suppression stage (1\u20135) applies that stage's published system effects: security posture changes via securityMgr.get_modified_systems, plus the stage-gated site spawns and NPC behaviour. Effects are removed when the stage drops.",
       "added_by_audit": "20261017-214922",
       "attest_ok": false,
       "category": "feat",
@@ -396,7 +416,7 @@
         "client:security/client/securitySvc.pyj"
       ],
       "title": "Per-stage corruption/suppression system effects",
-      "why_missing": "feat:pve.insurgency only requires that levels are returned and change; feat:crimewatch.security-bands only reads modified systems. The stage→effect table is untested."
+      "why_missing": "feat:pve.insurgency only requires that levels are returned and change; feat:crimewatch.security-bands only reads modified systems. The stage\u2192effect table is untested."
     },
     {
       "acceptance": "At insurgency end, contributors on the winning side are paid ISK+LP scaled by personal corruption/suppression contribution: maximum at 45% personal contribution, capped at 1,500,000 LP, with a 1.0x multiplier for winners and 0.4x for losers. Ties pay no bonus.",
@@ -444,7 +464,7 @@
       "why_missing": "Not covered by any pve/fw row."
     },
     {
-      "acceptance": "dungeonInstanceCacheMgr.GetPirateInsurgencyIceHeistInstances lists heists. Spawn rules: only at corruption 3–4, with a 4h respawn that persists across downtime.\n\nIn the site:\n- tanker NPCs spawn at the refinery and are web-immune;\n- each side escorts them to its own scoring zone;\n- the first side to 10 tankers wins 150,000 LP;\n- pirates near the Upwell Thunderchild guards are destroyed.",
+      "acceptance": "dungeonInstanceCacheMgr.GetPirateInsurgencyIceHeistInstances lists heists. Spawn rules: only at corruption 3\u20134, with a 4h respawn that persists across downtime.\n\nIn the site:\n- tanker NPCs spawn at the refinery and are web-immune;\n- each side escorts them to its own scoring zone;\n- the first side to 10 tankers wins 150,000 LP;\n- pirates near the Upwell Thunderchild guards are destroyed.",
       "added_by_audit": "20261017-214922",
       "attest_ok": false,
       "category": "feat",
@@ -742,7 +762,7 @@
       "why_missing": "No navigation row covers collision physics, although bumping is a core tactic (gate/structure bumping, anti-warp bumping)."
     },
     {
-      "acceptance": "Warping to a celestial lands at its warp-in point; warping to a station or stargate lands at its docking or jump perimeter. Warps to targets closer than 150 km are refused with the live error. The requested 0–100 km offset is applied relative to the landing point.",
+      "acceptance": "Warping to a celestial lands at its warp-in point; warping to a station or stargate lands at its docking or jump perimeter. Warps to targets closer than 150 km are refused with the live error. The requested 0\u2013100 km offset is applied relative to the landing point.",
       "added_by_audit": "20261017-214922",
       "attest_ok": false,
       "category": "feat",
@@ -1391,7 +1411,7 @@
       "why_missing": "No row defines which object classes each probe type can resolve or the exclusions."
     },
     {
-      "acceptance": "Core probes scan from 0.25 to 32 AU and combat probes from 0.5 to 64 AU, in power-of-two steps. Max deviation = base deviation × (range / base range) × (1 − 0.05×Astrometrics) × (1 − 0.05×Astrometric Pinpointing). Probes past their max flight time (RSS 16m40s, others 1h6m40s) return to cargo if there is room, otherwise they are lost.",
+      "acceptance": "Core probes scan from 0.25 to 32 AU and combat probes from 0.5 to 64 AU, in power-of-two steps. Max deviation = base deviation \u00d7 (range / base range) \u00d7 (1 \u2212 0.05\u00d7Astrometrics) \u00d7 (1 \u2212 0.05\u00d7Astrometric Pinpointing). Probes past their max flight time (RSS 16m40s, others 1h6m40s) return to cargo if there is room, otherwise they are lost.",
       "added_by_audit": "20261018-073440",
       "attest_ok": false,
       "category": "feat",
@@ -1406,7 +1426,7 @@
       "why_missing": "The scan-math, recall and skills rows don't fix the range limits, the deviation formula or the flight-time return/loss rule."
     },
     {
-      "acceptance": "Signature difficulty levels are data-driven. Level I–III signatures resolve with the minimum strength of 42; Level IV needs a combined probe strength of at least 72, and Level V at least 104. Weaker probes can't reach 100% at any geometry.",
+      "acceptance": "Signature difficulty levels are data-driven. Level I\u2013III signatures resolve with the minimum strength of 42; Level IV needs a combined probe strength of at least 72, and Level V at least 104. Weaker probes can't reach 100% at any geometry.",
       "added_by_audit": "20261018-073440",
       "attest_ok": false,
       "category": "feat",
@@ -1421,7 +1441,7 @@
       "why_missing": "No row ties signature difficulty to a probe-strength floor."
     },
     {
-      "acceptance": "Starting a warp consumes capacitor = warpCapacitorNeed × ship mass × distance, reduced by Warp Drive Operation and SDE modifiers. With insufficient capacitor the warp is handled per V24 rules (shortened or refused), and capacitor updates reach the client.",
+      "acceptance": "Starting a warp consumes capacitor = warpCapacitorNeed \u00d7 ship mass \u00d7 distance, reduced by Warp Drive Operation and SDE modifiers. With insufficient capacitor the warp is handled per V24 rules (shortened or refused), and capacitor updates reach the client.",
       "added_by_audit": "20261018-073440",
       "attest_ok": false,
       "category": "feat",
@@ -1453,7 +1473,7 @@
       "why_missing": "feat:navigation.jump-range-restrictions only forbids capitals entering high-sec; the general gate ban is untested."
     },
     {
-      "acceptance": "Each storm is centred on a null-sec system. Its core is the centre plus systems 1 jump away, with full effects; its periphery is systems 2–3 jumps away, with weaker effects. Extra storm PvE sites spawn only in the core. The centre moves one jump every 24–48h in a semi-random direction, avoiding retracing. Overlapping storms apply both effect sets.",
+      "acceptance": "Each storm is centred on a null-sec system. Its core is the centre plus systems 1 jump away, with full effects; its periphery is systems 2\u20133 jumps away, with weaker effects. Extra storm PvE sites spawn only in the core. The centre moves one jump every 24\u201348h in a semi-random direction, avoiding retracing. Overlapping storms apply both effect sets.",
       "added_by_audit": "20261018-073440",
       "attest_ok": false,
       "category": "feat",
@@ -1613,7 +1633,7 @@
       "why_missing": "'progress matchers' in feat:corporation.corp-goals hides every method type behind one row."
     },
     {
-      "acceptance": "A hacking board has a System Core, Defensive Subsystems (Firewall, Anti-Virus, Restoration Node, Virus Suppressor), Utility Subsystems (Kernel Rot, Polymorphic Shield, Secondary Vector, Self Repair) and Data Caches. Each has coherence and strength, set by difficulty and by the virus's analyzer/skill stats. Empty nodes show the distance (1–5) to the nearest core/utility/cache, and combat resolves per the V24 rules.",
+      "acceptance": "A hacking board has a System Core, Defensive Subsystems (Firewall, Anti-Virus, Restoration Node, Virus Suppressor), Utility Subsystems (Kernel Rot, Polymorphic Shield, Secondary Vector, Self Repair) and Data Caches. Each has coherence and strength, set by difficulty and by the virus's analyzer/skill stats. Empty nodes show the distance (1\u20135) to the nearest core/utility/cache, and combat resolves per the V24 rules.",
       "added_by_audit": "20261018-073440",
       "attest_ok": false,
       "category": "feat",
@@ -1661,7 +1681,7 @@
       "why_missing": "The abyssal rows cover rooms, weather, tiers and gate activation, but not the origin trace or the return-to-origin rule."
     },
     {
-      "acceptance": "A conduit jump moves the conduit ship plus eligible fleet members within 10 km to the target cyno, for a flat isotope cost by conduit class (not mass-based).\n- Black Ops: up to 30 ships, covert-ops-cloak-capable hulls only.\n- Rorqual: up to 30 dedicated mining ships, and only while its Industrial Core is inactive.\n- T1 carriers and supercarriers: 5–30 ships by Capital Jump Portal Generation level; command carriers double that.\n- Eligible ships: shuttles, capsules, corvettes, frigates, destroyers, cruisers, battlecruisers and battleships.\n- Titans cannot conduit jump.\n- Members who opted out of conduit jumps are skipped.",
+      "acceptance": "A conduit jump moves the conduit ship plus eligible fleet members within 10 km to the target cyno, for a flat isotope cost by conduit class (not mass-based).\n- Black Ops: up to 30 ships, covert-ops-cloak-capable hulls only.\n- Rorqual: up to 30 dedicated mining ships, and only while its Industrial Core is inactive.\n- T1 carriers and supercarriers: 5\u201330 ships by Capital Jump Portal Generation level; command carriers double that.\n- Eligible ships: shuttles, capsules, corvettes, frigates, destroyers, cruisers, battlecruisers and battleships.\n- Titans cannot conduit jump.\n- Members who opted out of conduit jumps are skipped.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -1676,7 +1696,7 @@
       "why_missing": "No ledger row covers conduit jumps. Only the auditor's fleet opt-in row mentions conduit at all, and jump-portal covers bridging only."
     },
     {
-      "acceptance": "Range and fuel:\n- Max range per hull class follows the V24 table (e.g. dreadnought/carrier/FAX 3.5 ly, supercarrier/titan 3.0, JF/Rorqual 5.0, Black Ops 4.0); Jump Drive Calibration adds +20%/level.\n- Isotope type follows the hull faction (Helium/Nitrogen/Oxygen/Hydrogen).\n- Isotopes used = D × fuel/ly × (1 − 0.1×JFC) × (1 − 0.1×JF skill, JF only) × the stacking-penalised economizer terms.\n\nActivation:\n- Consumes 95% capacitor, minus 5% per Jump Drive Operation level.\n- Refused inside a warp disruption bubble or when warp core strength is below 0.\n- Alignment is not required.",
+      "acceptance": "Range and fuel:\n- Max range per hull class follows the V24 table (e.g. dreadnought/carrier/FAX 3.5 ly, supercarrier/titan 3.0, JF/Rorqual 5.0, Black Ops 4.0); Jump Drive Calibration adds +20%/level.\n- Isotope type follows the hull faction (Helium/Nitrogen/Oxygen/Hydrogen).\n- Isotopes used = D \u00d7 fuel/ly \u00d7 (1 \u2212 0.1\u00d7JFC) \u00d7 (1 \u2212 0.1\u00d7JF skill, JF only) \u00d7 the stacking-penalised economizer terms.\n\nActivation:\n- Consumes 95% capacitor, minus 5% per Jump Drive Operation level.\n- Refused inside a warp disruption bubble or when warp core strength is below 0.\n- Alignment is not required.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -1691,7 +1711,7 @@
       "why_missing": "feat:navigation.jump-drive only says 'jump to a cyno within range consuming isotopes'. The range table, skill modifiers, fuel formula, capacitor cost and disruption gates are not testable from it."
     },
     {
-      "acceptance": "After a jump of L effective light-years:\n- Fatigue = max(10×(1+L) min, existing fatigue×(1+L)), capped at 5 h.\n- Jump activation cooldown = max((1+L) min, pre-jump fatigue/10), capped at 30 min.\n- Fatigue decays in real time, offline included.\n\nEffective distance reductions:\n- Black Ops and the covert ships they bridge: −75%.\n- Capsules, shuttles, haulers, blockade runners, DSTs, freighters, JFs, capital industrials and industrial command ships: −90%.\n\njumpTimers.GetTimers reports both timers.",
+      "acceptance": "After a jump of L effective light-years:\n- Fatigue = max(10\u00d7(1+L) min, existing fatigue\u00d7(1+L)), capped at 5 h.\n- Jump activation cooldown = max((1+L) min, pre-jump fatigue/10), capped at 30 min.\n- Fatigue decays in real time, offline included.\n\nEffective distance reductions:\n- Black Ops and the covert ships they bridge: \u221275%.\n- Capsules, shuttles, haulers, blockade runners, DSTs, freighters, JFs, capital industrials and industrial command ships: \u221290%.\n\njumpTimers.GetTimers reports both timers.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -1707,7 +1727,7 @@
       "why_missing": "feat:navigation.jump-fatigue only says the timers 'grow per jump distance'. The minimum and multiplier formula, the caps and the per-class distance reductions are untested."
     },
     {
-      "acceptance": "Who and where:\n- Normal cynos fit only on Force Recons and Black Ops.\n- Refused in high-sec, within 200 km of a Mobile Cynosural Inhibitor, and in systems jammed by a Tenebrex or an incursion.\n- Can be lit in wormhole space, but no jump drive can lock to it.\n\nActivation:\n- Requires fleet membership and speed below 500 m/s.\n- The cyno is visible system-wide and on the map, and only fleet members can jump to it.\n\nCycle and fuel:\n- Base cycle 10 min, halved on Recon/Black Ops (except Marshal).\n- 500 Liquid Ozone per cycle, −10% per Cynosural Field Theory level; Force Recons get −80% fuel.\n\nWhile lit:\n- The ship's nominal speed is 0.\n- It cannot dock or eject, but can self-destruct.",
+      "acceptance": "Who and where:\n- Normal cynos fit only on Force Recons and Black Ops.\n- Refused in high-sec, within 200 km of a Mobile Cynosural Inhibitor, and in systems jammed by a Tenebrex or an incursion.\n- Can be lit in wormhole space, but no jump drive can lock to it.\n\nActivation:\n- Requires fleet membership and speed below 500 m/s.\n- The cyno is visible system-wide and on the map, and only fleet members can jump to it.\n\nCycle and fuel:\n- Base cycle 10 min, halved on Recon/Black Ops (except Marshal).\n- 500 Liquid Ozone per cycle, \u221210% per Cynosural Field Theory level; Force Recons get \u221280% fuel.\n\nWhile lit:\n- The ship's nominal speed is 0.\n- It cannot dock or eject, but can self-destruct.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -1752,7 +1772,7 @@
       "why_missing": "feat:modules.cyno-industrial says 'JF and Rorqual only'. It omits Black Ops, the fitting restriction and the fuel cost."
     },
     {
-      "acceptance": "Titan bridges:\n- go only to normal cynos or beacons and accept any subcapital;\n- stay open 60 s, immobilise the titan, and cost 500 Strontium (modified by skill).\n\nBlack Ops bridges accept only covert-cloak-capable hulls; Rorqual bridges accept only mining ships. Both stay open 20 s and cost nothing to open.\n\nFor every bridge:\n- Each jumper must be in fleet and within 2,500 m.\n- Each jumper costs fuel = mass × portal mass factor × base cost × skill modifier × ly, taken from the bridger's fuel bay, then cargo.\n- Ships in a bubble or warp-disrupted below 0 WCS cannot take the bridge; the host itself may be bubbled.",
+      "acceptance": "Titan bridges:\n- go only to normal cynos or beacons and accept any subcapital;\n- stay open 60 s, immobilise the titan, and cost 500 Strontium (modified by skill).\n\nBlack Ops bridges accept only covert-cloak-capable hulls; Rorqual bridges accept only mining ships. Both stay open 20 s and cost nothing to open.\n\nFor every bridge:\n- Each jumper must be in fleet and within 2,500 m.\n- Each jumper costs fuel = mass \u00d7 portal mass factor \u00d7 base cost \u00d7 skill modifier \u00d7 ly, taken from the bridger's fuel bay, then cargo.\n- Ships in a bubble or warp-disrupted below 0 WCS cannot take the bridge; the host itself may be bubbled.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -1998,7 +2018,7 @@
       "why_missing": "suspect-flag and criminal-flag are generic one-liners. The low-sec ship-vs-pod classification and the high-sec entry consequence are untested."
     },
     {
-      "acceptance": "Faction police engage capsuleers in ships when their security status is at or below a threshold that depends on system security:\n\n| System security | Threshold |\n|---|---|\n| 1.0 | −2.0 |\n| 0.9 | −2.5 |\n| 0.8 | −3.0 |\n| 0.7 | −3.5 |\n| 0.6 | −4.0 |\n| 0.5 | −4.5 |\n\nBelow the threshold, in that system:\n- the character's cloak is disabled;\n- docking or tethering in a ship is refused, while docking in a capsule is allowed;\n- capsules are not attacked.",
+      "acceptance": "Faction police engage capsuleers in ships when their security status is at or below a threshold that depends on system security:\n\n| System security | Threshold |\n|---|---|\n| 1.0 | \u22122.0 |\n| 0.9 | \u22122.5 |\n| 0.8 | \u22123.0 |\n| 0.7 | \u22123.5 |\n| 0.6 | \u22124.0 |\n| 0.5 | \u22124.5 |\n\nBelow the threshold, in that system:\n- the character's cloak is disabled;\n- docking or tethering in a ship is refused, while docking in a capsule is allowed;\n- capsules are not attacked.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -2010,10 +2030,10 @@
         "wiki:Security_status"
       ],
       "title": "Faction police thresholds per system security",
-      "why_missing": "feat:crimewatch.faction-police says 'at −5', which contradicts the live per-security thresholds. The cloak, dock and pod rules are missing."
+      "why_missing": "feat:crimewatch.faction-police says 'at \u22125', which contradicts the live per-security thresholds. The cloak, dock and pod rules are missing."
     },
     {
-      "acceptance": "At security status −4.95 or below, a character is an outlaw:\n- anyone may attack them anywhere without CONCORD response or penalty;\n- remote assistance to them is a suspect offence, even for corp members;\n- assisting outlaws in low-sec is not an offence.",
+      "acceptance": "At security status \u22124.95 or below, a character is an outlaw:\n- anyone may attack them anywhere without CONCORD response or penalty;\n- remote assistance to them is a suspect offence, even for corp members;\n- assisting outlaws in low-sec is not an offence.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -2029,7 +2049,7 @@
       "why_missing": "No crimewatch row defines the outlaw state or its assistance rule."
     },
     {
-      "acceptance": "Security status gains from NPC kills (belt, mission and incursion rats) stop at +5.0. Clone soldier tags cannot raise security status above 0.0. Security status is clamped to −10..+10.",
+      "acceptance": "Security status gains from NPC kills (belt, mission and incursion rats) stop at +5.0. Clone soldier tags cannot raise security status above 0.0. Security status is clamped to \u221210..+10.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -2060,7 +2080,7 @@
       "why_missing": "feat:npc.sentry-guns covers criminals and low standings only. The sec-loss trigger, grid reset and invulnerability are untested."
     },
     {
-      "acceptance": "Each clone soldier tag turned in at a low-sec CONCORD exchange adds +0.5 security status, but only within its band:\n\n| Tag | Band |\n|---|---|\n| Trainer | −10 to −8 |\n| Recruiter | −8 to −5 |\n| Transporter | −5 to −2 |\n| Negotiator | −2 to 0 |\n\nA tag used outside its band is refused.",
+      "acceptance": "Each clone soldier tag turned in at a low-sec CONCORD exchange adds +0.5 security status, but only within its band:\n\n| Tag | Band |\n|---|---|\n| Trainer | \u221210 to \u22128 |\n| Recruiter | \u22128 to \u22125 |\n| Transporter | \u22125 to \u22122 |\n| Negotiator | \u22122 to 0 |\n\nA tag used outside its band is refused.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -2090,7 +2110,7 @@
       "why_missing": "No NPC row covers clone soldiers, the only source of security tags."
     },
     {
-      "acceptance": "Medium Upwell structures with an online service module enter armor reinforcement when shields are depleted. They exit at the owner's hour plus a period that depends on space, ±1.5 h jitter:\n\n| Space | Exit after |\n|---|---|\n| Wormhole | 2.5 d |\n| Null/low-sec | 3.5 d |\n| High-sec | 4.5 d |\n| War HQ | 24 h |\n\nLarge/XL structures exit after 24 h ±3 h.\n\nThese skip armor reinforcement and go straight to vulnerable armor:\n- FLEX structures;\n- abandoned structures;\n- low-power Large/XL structures.",
+      "acceptance": "Medium Upwell structures with an online service module enter armor reinforcement when shields are depleted. They exit at the owner's hour plus a period that depends on space, \u00b11.5 h jitter:\n\n| Space | Exit after |\n|---|---|\n| Wormhole | 2.5 d |\n| Null/low-sec | 3.5 d |\n| High-sec | 4.5 d |\n| War HQ | 24 h |\n\nLarge/XL structures exit after 24 h \u00b13 h.\n\nThese skip armor reinforcement and go straight to vulnerable armor:\n- FLEX structures;\n- abandoned structures;\n- low-power Large/XL structures.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -2105,7 +2125,7 @@
       "why_missing": "feat:structures.reinforce-cycle bundles everything into 'timing per structure type and sec'. The per-space table and the skip conditions are untested."
     },
     {
-      "acceptance": "When armor is depleted, Large/XL structures enter hull reinforcement and exit after the owner's hour plus a period that depends on space, ±3 h:\n\n| Space | Exit after |\n|---|---|\n| Wormhole | 1.5 d |\n| Null/low-sec | 2.5 d |\n| High-sec | 4.5 d |\n| War HQ | 24 h |\n\nOther structure classes:\n- FLEX structures exit at the next chosen hour after 30 min ±30 min.\n- Medium and abandoned structures have no hull timer, so their hull is immediately vulnerable.",
+      "acceptance": "When armor is depleted, Large/XL structures enter hull reinforcement and exit after the owner's hour plus a period that depends on space, \u00b13 h:\n\n| Space | Exit after |\n|---|---|\n| Wormhole | 1.5 d |\n| Null/low-sec | 2.5 d |\n| High-sec | 4.5 d |\n| War HQ | 24 h |\n\nOther structure classes:\n- FLEX structures exit at the next chosen hour after 30 min \u00b130 min.\n- Medium and abandoned structures have no hull timer, so their hull is immediately vulnerable.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -2334,7 +2354,7 @@
       "why_missing": "No abyssal row specifies these restrictions or the downtime handling."
     },
     {
-      "acceptance": "Arrival and gate:\n- Ships arrive 35–70 km from the pocket gate.\n- The gate unlocks only when every NPC in the pocket is dead.\n\nNPCs:\n- Abyssal NPCs leave no wrecks, pay no bounty and cost no faction standing.\n\nLoot:\n- The Triglavian Bioadaptive Cache (300 HP) drops the pocket loot.\n- Extraction nodes and subnodes (T1+) roll their limited loot pool, and may be empty.",
+      "acceptance": "Arrival and gate:\n- Ships arrive 35\u201370 km from the pocket gate.\n- The gate unlocks only when every NPC in the pocket is dead.\n\nNPCs:\n- Abyssal NPCs leave no wrecks, pay no bounty and cost no faction standing.\n\nLoot:\n- The Triglavian Bioadaptive Cache (300 HP) drops the pocket loot.\n- Extraction nodes and subnodes (T1+) roll their limited loot pool, and may be empty.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -4900,7 +4920,7 @@
       "why_missing": "feat:mining.mining-fleet-boosts is one line ('increase yield/reduce cycle/increase range'). The implementation applies a flat 0.85 duration and 0.70 waste multiplier for any group-1771 charge (crates/eve-server/src/services/inventory_fitting.rs:3093-3153). The auditor rows command-burst-strength-formula, command-burst-range and command-burst-duration-reload are generic."
     },
     {
-      "acceptance": "moonExtractions.StartNewExtraction accepts a player-chosen duration from 6 to 56 days, and the chunk arrives at start + duration. Chunk volume = 30,000 m³ per hour of extraction, split by the moon's survey composition fractions. CancelExtraction before arrival stops the extraction and produces no chunk.",
+      "acceptance": "moonExtractions.StartNewExtraction accepts a player-chosen duration from 6 to 56 days, and the chunk arrives at start + duration. Chunk volume = 30,000 m\u00b3 per hour of extraction, split by the moon's survey composition fractions. CancelExtraction before arrival stops the extraction and produces no chunk.",
       "added_by_audit": "20261019-222106",
       "attest_ok": false,
       "category": "feat",
@@ -5064,7 +5084,7 @@
       "why_missing": "No row models the individual opt-out flag from fleet warp, which is critical for scouts, cyno ships, and logistics anchors."
     },
     {
-      "acceptance": "Unprovoked aggression against non-suspect capsuleers in high-sec triggers CONCORD intervention with system security response delays: 0.5 = 19s (±1s), 0.6 = 14s, 0.7 = 11s, 0.8 = 8s, 0.9 = 6s, 1.0 = 6s; CONCORD ships spawn on grid, apply 100% web, warp scramble, capacitor drain, and ECM jam, and destroy the criminal ship; CONCORD hulls are completely invulnerable to damage.",
+      "acceptance": "Unprovoked aggression against non-suspect capsuleers in high-sec triggers CONCORD intervention with system security response delays: 0.5 = 19s (\u00b11s), 0.6 = 14s, 0.7 = 11s, 0.8 = 8s, 0.9 = 6s, 1.0 = 6s; CONCORD ships spawn on grid, apply 100% web, warp scramble, capacitor drain, and ECM jam, and destroy the criminal ship; CONCORD hulls are completely invulnerable to damage.",
       "added_by_audit": "20261020-230707",
       "attest_ok": false,
       "category": "feat",

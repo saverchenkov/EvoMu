@@ -95,8 +95,8 @@ fn extract_attr_from_info(info_rep: &PyRep, attr_id: i64) -> f64 {
 
 #[tokio::test]
 async fn test_phase_4_dg4_and_exit_gate_full_cycle_journey() {
-    // parity: plan:DG-4, feat:dogma.module-cycle, notify:OnGodmaShipEffect, notify:OnModuleActivated, notify:OnModulesDeactivating, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.LinkAllWeapons, rpc:dogmaIM.LoadAmmo
-    eve_testkit::attest(&["feat:dogma.module-cycle", "notify:OnGodmaShipEffect", "notify:OnModuleActivated", "notify:OnModulesDeactivating"]);
+    // parity: plan:DG-4, feat:dogma.module-cycle, notify:OnGodmaShipEffect, notify:OnModulesDeactivating, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.LinkAllWeapons, rpc:dogmaIM.LoadAmmo
+    eve_testkit::attest(&["feat:dogma.module-cycle", "notify:OnGodmaShipEffect", "notify:OnModulesDeactivating"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();

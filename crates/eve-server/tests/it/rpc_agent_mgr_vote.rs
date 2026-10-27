@@ -254,7 +254,7 @@ async fn test_agent_mgr_career_and_epic_arcs() {
     )
     .await
     .expect("agentMgr.GetMessagesForEpicArcMissions");
-    assert!(matches!(epic_msgs_res, PyRep::List(_)));
+    assert!(matches!(epic_msgs_res, PyRep::Dict(_)));
 }
 
 #[tokio::test]
