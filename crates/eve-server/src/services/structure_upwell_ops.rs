@@ -550,19 +550,33 @@ fn handle_structure_deliver(ctx: &ServerContext, session: &mut SessionState, arg
     let structure_id = arg_i64(args, 0).ok_or_else(|| err("MissingStructureId", "structureDeliveries.Deliver requires structureID"))?;
     let item_id = arg_i64(args, 1).ok_or_else(|| err("MissingItemId", "structureDeliveries.Deliver requires itemID"))?;
     let recipient_id = arg_i64(args, 2).ok_or_else(|| err("MissingRecipientId", "structureDeliveries.Deliver requires recipient characterID"))?;
+    if session.structure_id != Some(structure_id) {
+        return Err(err("NotDockedInStructure", format!("Must be docked in structure {structure_id} to deliver items")));
+    }
+    if session.ship_id == Some(item_id) {
+        return Err(err("CannotDeliverActiveShip", "Cannot deliver your active boarded ship"));
+    }
     ctx.db.try_with_mut_snapshot(|snap| {
         if !snap.characters.contains_key(&recipient_id) {
             return Err(err("RecipientNotFound", format!("Recipient character {recipient_id} not found")));
         }
-        let Some(it) = snap.items.get_mut(&item_id) else {
+        let Some(it) = snap.items.get(&item_id) else {
             return Err(err("ItemNotFound", format!("Item {item_id} not found")));
         };
-        if it.owner_id != char_id || it.location_id != structure_id {
+        if it.owner_id != char_id || it.location_id != structure_id || it.flag != InventoryFlag::Hangar {
             return Err(err("ItemNotInStructureHangar", format!("Item {item_id} must be owned by {char_id} inside structure {structure_id}")));
         }
-        it.owner_id = recipient_id;
-        it.flag = InventoryFlag::Deliveries;
-        it.version += 1;
+        if snap.is_item_locked_in_contract_or_job(item_id) {
+            return Err(err("ItemLocked", format!("Item {item_id} is locked in a contract or job")));
+        }
+        if snap.items.values().any(|child| child.location_id == item_id) {
+            return Err(err("CannotDeliverNonEmptyContainer", format!("Item {item_id} contains nested items and must be repackaged or emptied before delivery")));
+        }
+        if let Some(it) = snap.items.get_mut(&item_id) {
+            it.owner_id = recipient_id;
+            it.flag = InventoryFlag::Deliveries;
+            it.version += 1;
+        }
         Ok(PyRep::None)
     })
 }
@@ -590,8 +604,25 @@ async fn handle_cargo_dropoff(ctx: &ServerContext, session: &mut SessionState, a
     }
     ctx.db.try_with_mut_snapshot(|snap| {
         for &iid in &item_ids {
-            if !snap.items.get(&iid).map(|it| it.owner_id == char_id && it.location_id == ship_id).unwrap_or(false) {
+            let valid_cargo = snap.items.get(&iid).is_some_and(|it| {
+                it.owner_id == char_id
+                    && it.location_id == ship_id
+                    && matches!(
+                        it.flag,
+                        InventoryFlag::Cargo
+                            | InventoryFlag::SpecializedOreHold
+                            | InventoryFlag::SpecializedGasHold
+                            | InventoryFlag::SpecializedIceHold
+                            | InventoryFlag::SpecializedMineralHold
+                            | InventoryFlag::SpecializedAmmoHold
+                            | InventoryFlag::SpecializedFuelBay
+                    )
+            });
+            if !valid_cargo {
                 return Err(err("ItemNotInShipCargo", format!("Item {iid} is not in active ship {ship_id} cargo")));
+            }
+            if snap.is_item_locked_in_contract_or_job(iid) {
+                return Err(err("ItemLocked", format!("Item {iid} is locked in a contract or job")));
             }
         }
         for &iid in &item_ids {

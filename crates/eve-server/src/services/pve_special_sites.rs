@@ -826,6 +826,12 @@ pub async fn complete_special_dungeon_instance(
     fleet_count: usize,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(rpc_err(
+            "ShipDocked",
+            "Cannot complete in-space special dungeon instance while docked",
+        ));
+    }
     ensure_special_sites_spawned(ctx).await;
 
     let caller_sys = session.solar_system_id.ok_or_else(|| rpc_err("NotInSpace", "Caller must be in space"))?;
@@ -950,7 +956,12 @@ pub async fn complete_special_dungeon_instance(
             if let Some(fid) = fleet_id {
                 snap.characters
                     .values()
-                    .filter(|c| c.fleet_id == Some(fid) && c.solar_system_id == caller_sys)
+                    .filter(|c| {
+                        c.fleet_id == Some(fid)
+                            && c.solar_system_id == caller_sys
+                            && c.station_id.is_none()
+                            && c.structure_id.is_none()
+                    })
                     .count()
                     .max(1)
             } else {
@@ -1343,7 +1354,12 @@ pub async fn on_special_site_npc_destroyed_core(
                 let mut members: Vec<CharacterId> = snap
                     .characters
                     .values()
-                    .filter(|c| c.fleet_id == Some(fid) && c.solar_system_id == solar_system_id)
+                    .filter(|c| {
+                        c.fleet_id == Some(fid)
+                            && c.solar_system_id == solar_system_id
+                            && c.station_id.is_none()
+                            && c.structure_id.is_none()
+                    })
                     .map(|c| c.character_id)
                     .collect();
                 if !members.contains(&cid) {
@@ -1398,12 +1414,14 @@ pub async fn on_special_site_npc_destroyed_core(
     }
 
     // 1. Check Triglavian sites
+    let mut trig_escorts_to_remove = Vec::new();
     let trig_res = with_pve_special_reg_db(db, now_sec, |reg| {
         let mut found = None;
         if let Some(list) = reg.triglavian_sites.get_mut(&solar_system_id) {
             for site in list.iter_mut() {
                 if site.boss_npc_ball_id == npc_ball_id && !site.completed {
                     site.completed = true;
+                    trig_escorts_to_remove = site.escort_ball_ids.clone();
                     let (g_fac, l_fac) = if site.faction_owner_id == 500_027 {
                         (500_026_i64, 500_027_i64)
                     } else {
@@ -1422,6 +1440,12 @@ pub async fn on_special_site_npc_destroyed_core(
     });
 
     if let Some((_inst_id, base_isk, db_drop, g_fac, l_fac, loot_id)) = trig_res {
+        if !trig_escorts_to_remove.is_empty() {
+            let sys_handle = _systems.get_or_spawn(solar_system_id);
+            for ebid in trig_escorts_to_remove {
+                sys_handle.try_remove_ball(ebid);
+            }
+        }
         if let Some(cid) = killer_char_id {
             let spawned_cid = db.with_mut_snapshot(|snap| {
                 let j_id = (snap.wallet_journal.len() as i64) + 965_000;

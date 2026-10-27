@@ -44,11 +44,11 @@ pub(crate) async fn handle_ships_and_services(
                     return Err(rpc_err("ShipNotFound", format!("Ship {ship_id} not found")));
                 };
                 let dock_id_opt = session.station_id.or(session.structure_id).or_else(|| {
-                    (ship.location_id >= 60_000_000 && ship.location_id < 1_000_000_000_000).then_some(ship.location_id)
+                    (ship.location_id >= 60_000_000).then_some(ship.location_id)
                 });
                 if let Some(dock_id) = dock_id_opt {
-                    if dock_id < 1_000_000_000_000
-                        && !crate::services::station_structure::npc_station_offers_service(&ctx.sde, dock_id, 21)
+                    if dock_id >= 1_000_000_000_000
+                        || !crate::services::station_structure::npc_station_offers_service(&ctx.sde, dock_id, 21)
                     {
                         return Err(BridgeRpcError {
                             code: "StationServiceUnavailable".into(),
