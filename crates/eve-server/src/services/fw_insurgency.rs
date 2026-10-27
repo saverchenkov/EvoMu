@@ -592,7 +592,7 @@ pub async fn handle_hub_and_scan(
         ("scanSvc", "GetSystemScanMgr")
         | ("scanSvc", "GetScanResults")
         | ("scanMgr", "GetScanResults") => {
-            let _ = match ServerContext::require_character(session) {
+            let (_user_id, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -612,7 +612,7 @@ pub async fn handle_hub_and_scan(
                             .find(|s| {
                                 !s.collapsed
                                     && s.sig_group == "Gas"
-                                    && s.signal_strength >= 1.0
+                                    && ctx.effective_signature_signal_strength(char_id, sys_id, s) >= 1.0
                                     && now >= s.created_unix.saturating_add(900)
                             })
                             .map(|s| DVec3::from_array(s.position))
@@ -726,8 +726,9 @@ pub async fn handle_hub_and_scan(
                                     && !matches!(s.sig_group.as_str(), "OreAnomaly" | "SovOre")
                             })
                             .map(|s| {
-                                let revealed = s.signal_strength >= 1.0;
-                                let pos_known = s.signal_strength >= 0.25;
+                                let eff_strength = ctx.effective_signature_signal_strength(char_id, sys_id, s);
+                                let revealed = eff_strength >= 1.0;
+                                let pos_known = eff_strength >= 0.25;
                                 let sig_pos = DVec3::from_array(s.position);
 
                                 if s.sig_group == "Gas" {
@@ -793,7 +794,7 @@ pub async fn handle_hub_and_scan(
                                             PyRep::String("Unidentified Cosmic Signature".into())
                                         },
                                     ),
-                                    ("signalStrength", PyRep::Real(s.signal_strength)),
+                                    ("signalStrength", PyRep::Real(eff_strength)),
                                     ("warpable", PyRep::Bool(revealed)),
                                     (
                                         "x",

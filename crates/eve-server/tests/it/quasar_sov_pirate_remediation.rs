@@ -290,7 +290,7 @@ async fn test_authentic_freelance_pirate_stargate_remediated() {
         .expect("corruption IncreasedNotice from complex pulse");
     assert_eq!(field(&c_inc.value, 1).and_then(|i| varint(&i, 1)), Some(TURNUR as u64));
     assert_eq!(field(&c_inc.value, 2).map(|f| (varint(&f, 1), varint(&f, 2))), Some((Some(200), Some(1000))));
-    assert_eq!(field(&c_inc.value, 3).map(|f| (varint(&f, 1), varint(&f, 2))), Some((Some(250), Some(1000))));
+    assert_eq!(field(&c_inc.value, 3).map(|f| (varint(&f, 1), varint(&f, 2))), Some((Some(201), Some(1000))));
     assert_eq!((varint(&c_inc.value, 4), varint(&c_inc.value, 5)), (Some(1), Some(0)));
 
     // Enlist in Caldari State (500_001), reset complex tick guard, and step capture tick -> emits suppression IncreasedNotice.
@@ -304,7 +304,7 @@ async fn test_authentic_freelance_pirate_stargate_remediated() {
         .expect("suppression IncreasedNotice from complex pulse");
     assert_eq!(field(&s_inc.value, 1).and_then(|i| varint(&i, 1)), Some(TURNUR as u64));
     assert_eq!(field(&s_inc.value, 2).map(|f| (varint(&f, 1), varint(&f, 2))), Some((Some(150), Some(1000))));
-    assert_eq!(field(&s_inc.value, 3).map(|f| (varint(&f, 1), varint(&f, 2))), Some((Some(200), Some(1000))));
+    assert_eq!(field(&s_inc.value, 3).map(|f| (varint(&f, 1), varint(&f, 2))), Some((Some(151), Some(1000))));
     assert_eq!((varint(&s_inc.value, 4), varint(&s_inc.value, 5)), (Some(1), Some(0)));
 
     // Ending the insurgency campaign emits ResetNotice (0/1000) for both corruption and suppression.

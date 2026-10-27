@@ -1258,7 +1258,7 @@ pub(super) async fn handle_bookmarks(
             let now_unix = ctx.now_unix();
             let sig_res = ctx.db.with_snapshot(|s| {
                 s.cosmic_signatures.get(&sys_id).and_then(|sigs| {
-                    sigs.iter().find(|s| s.signature_id == sig_id && (s.lifetime_seconds == 0 || now_unix < s.created_unix.saturating_add(s.lifetime_seconds))).map(|s| (s.position, s.signal_strength, s.wormhole_type_id.map(|w| w as i64).unwrap_or(9988)))
+                    sigs.iter().find(|s| s.signature_id == sig_id && (s.lifetime_seconds == 0 || now_unix < s.created_unix.saturating_add(s.lifetime_seconds))).map(|s| (s.position, ctx.effective_signature_signal_strength(char_id, sys_id, s), s.wormhole_type_id.map(|w| w as i64).unwrap_or(9988)))
                 })
             });
             let Some((pos, signal_strength, sig_type_id)) = sig_res else {

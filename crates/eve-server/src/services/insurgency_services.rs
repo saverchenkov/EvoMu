@@ -36,7 +36,7 @@ pub const WINDDOWN_DURATION_SECS: u64 = 48 * 3600;    // 48h
 
 /// DERIVED (synthetic): Insurgency complex capture rate balance constants.
 pub const MIN_FW_CAPTURE_DURATION_SECONDS: u64 = 600;
-pub const MIN_INSURGENCY_CAPTURE_POINTS_DELTA: i64 = 50;
+pub const MIN_INSURGENCY_CAPTURE_POINTS_DELTA: i64 = 1;
 pub const MAX_INSURGENCY_TICK_DELTA_SECS: u64 = 30;
 pub const INSURGENCY_CAPTURE_POINTS_TOTAL: u64 = 1000;
 
@@ -975,22 +975,24 @@ pub async fn step_system_insurgency_tick(ctx: &ServerContext, sys_id: u32) {
     if !has_campaign {
         return;
     }
-    let ships: Vec<(i64, i64)> = ctx.db.with_snapshot(|snap| {
+    let candidates: Vec<(i64, u64, i64, i64)> = ctx.db.with_snapshot(|snap| {
         snap.characters
             .values()
             .filter(|c| c.solar_system_id == sys_id && c.station_id.is_none() && c.structure_id.is_none())
             .filter_map(|c| {
                 let fid = c.war_faction_id.unwrap_or(0);
                 if fid != 0 {
-                    Some((c.active_ship_id, fid))
+                    Some((c.character_id, c.user_id, c.active_ship_id, fid))
                 } else {
                     None
                 }
             })
             .collect()
     });
-    for (ship_id, fid) in ships {
-        let _ = step_system_insurgency_capture_tick(ctx, sys_id, ship_id, fid).await;
+    for (char_id, user_id, ship_id, fid) in candidates {
+        if ctx.is_character_online(char_id, user_id) {
+            let _ = step_system_insurgency_capture_tick(ctx, sys_id, ship_id, fid).await;
+        }
     }
 }
 
