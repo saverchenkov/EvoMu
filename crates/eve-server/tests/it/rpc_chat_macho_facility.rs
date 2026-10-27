@@ -348,6 +348,22 @@ async fn test_facility_manager_and_macho_stats() {
                 last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
+        snap.items.insert(
+            1_000_000_000_102,
+            eve_db::InventoryItemRecord {
+                item_id: 1_000_000_000_102,
+                type_id: 35878,
+                owner_id: CORP_1,
+                location_id: struct_id,
+                flag: eve_db::InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::from([(2, 1.0)]),
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(1_000_000_000_102, true);
     });
 
     // 4. facilityManager.GetFacilities: lists industry facilities in the system / universe

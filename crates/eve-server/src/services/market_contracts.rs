@@ -38,40 +38,20 @@ use super::market_trading::{
 
 fn market_order_descriptor() -> DBRowDescriptor {
     DBRowDescriptor::new([
-        ("price", DbColumnType::R8),
-        ("volRemaining", DbColumnType::R8),
-        ("typeID", DbColumnType::I4),
-        ("orderID", DbColumnType::I8),
-        ("volEntered", DbColumnType::I4),
-        ("minVolume", DbColumnType::I4),
-        ("bid", DbColumnType::Bool),
-        ("stationID", DbColumnType::I8),
-        ("regionID", DbColumnType::I4),
-        ("range", DbColumnType::I2),
-        ("issueDate", DbColumnType::FileTime),
-        ("duration", DbColumnType::I2),
+        ("price", DbColumnType::R8), ("volRemaining", DbColumnType::R8), ("typeID", DbColumnType::I4),
+        ("orderID", DbColumnType::I8), ("volEntered", DbColumnType::I4), ("minVolume", DbColumnType::I4),
+        ("bid", DbColumnType::Bool), ("stationID", DbColumnType::I8), ("regionID", DbColumnType::I4),
+        ("range", DbColumnType::I2), ("issueDate", DbColumnType::FileTime), ("duration", DbColumnType::I2),
     ])
 }
 
-fn order_to_packed_cells(
-    snap: &eve_db::WorldStateSnapshot,
-    o: &MarketOrderRecord,
-    default_unix: u64,
-) -> Vec<PyRep> {
+fn order_to_packed_cells(snap: &eve_db::WorldStateSnapshot, o: &MarketOrderRecord, default_unix: u64) -> Vec<PyRep> {
     let meta = load_market_order_meta(snap, o, default_unix);
     vec![
-        PyRep::Real(o.price.to_wire_f64()),
-        PyRep::Real(o.vol_remaining as f64),
-        PyRep::Integer(o.type_id as i64),
-        PyRep::Integer(o.order_id),
-        PyRep::Integer(o.vol_entered as i64),
-        PyRep::Integer(o.min_volume as i64),
-        PyRep::Bool(o.is_bid),
-        PyRep::Integer(o.station_id),
-        PyRep::Integer(o.region_id as i64),
-        PyRep::Integer(meta.range),
-        PyRep::Integer(unix_to_filetime(meta.issue_unix)),
-        PyRep::Integer(meta.duration),
+        PyRep::Real(o.price.to_wire_f64()), PyRep::Real(o.vol_remaining as f64), PyRep::Integer(o.type_id as i64),
+        PyRep::Integer(o.order_id), PyRep::Integer(o.vol_entered as i64), PyRep::Integer(o.min_volume as i64),
+        PyRep::Bool(o.is_bid), PyRep::Integer(o.station_id), PyRep::Integer(o.region_id as i64),
+        PyRep::Integer(meta.range), PyRep::Integer(unix_to_filetime(meta.issue_unix)), PyRep::Integer(meta.duration),
     ]
 }
 
@@ -130,9 +110,18 @@ pub fn compute_relist_fee_cents(
 pub(crate) fn sweep_expired_orders(
     snap: &mut eve_db::WorldStateSnapshot,
     now_unix: u64,
-) -> Vec<(i64, i64, bool, TypeId)> {
-    let candidate_ids: Vec<i64> = snap.market_orders.values().filter(|o| !o.is_npc && o.vol_remaining > 0)
-        .map(|o| o.order_id).collect();
+) -> Vec<(i64, i64, bool, TypeId, i64)> {
+    sweep_expired_orders_filtered(snap, now_unix, None)
+}
+
+pub(crate) fn sweep_expired_orders_filtered(
+    snap: &mut eve_db::WorldStateSnapshot,
+    now_unix: u64,
+    owner_filter: Option<(i64, Option<i64>)>,
+) -> Vec<(i64, i64, bool, TypeId, i64)> {
+    let candidate_ids: Vec<i64> = snap.market_orders.values().filter(|o| {
+        !o.is_npc && o.vol_remaining > 0 && owner_filter.is_none_or(|(cid, corp_opt)| o.owner_id == cid || corp_opt == Some(o.owner_id))
+    }).map(|o| o.order_id).collect();
     let mut expired = Vec::new();
     for oid in candidate_ids {
         let Some(order) = snap.market_orders.get(&oid).cloned() else { continue; };
@@ -212,35 +201,27 @@ pub(crate) fn sweep_expired_orders(
         meta.final_vol_remaining = Some(order.vol_remaining);
         meta.closed_unix = Some(now_unix);
         save_market_order_meta(snap, oid, meta);
-        expired.push((oid, order.owner_id, order.is_bid, order.type_id));
+        expired.push((oid, order.owner_id, order.is_bid, order.type_id, order.station_id));
     }
     expired
 }
 
-pub(crate) fn emit_expired_order_notifications(ctx: &ServerContext, expired: &[(i64, i64, bool, TypeId)]) {
-    for (oid, owner_id, is_bid, type_id) in expired {
-        notify_char(
-            ctx,
-            *owner_id,
-            "OnOwnOrdersChanged",
-            vec![
-                PyRep::Integer(*oid),
-                PyRep::String("Expiry".into()),
-                PyRep::Bool(false),
-            ],
-        );
+pub(crate) fn sweep_and_notify_expired_for_char(ctx: &ServerContext, char_id: i64) {
+    let now = ctx.now_unix();
+    let swept = ctx.db.with_mut_snapshot(|s| {
+        let corp_id = s.characters.get(&char_id).map(|c| c.corporation_id);
+        sweep_expired_orders_filtered(s, now, Some((char_id, corp_id)))
+    });
+    if !swept.is_empty() {
+        emit_expired_order_notifications(ctx, &swept);
+    }
+}
+
+pub(crate) fn emit_expired_order_notifications(ctx: &ServerContext, expired: &[(i64, i64, bool, TypeId, i64)]) {
+    for (oid, owner_id, is_bid, type_id, station_id) in expired {
+        notify_char(ctx, *owner_id, "OnOwnOrdersChanged", vec![PyRep::Integer(*oid), PyRep::String("Expiry".into()), PyRep::Bool(false)]);
         if !*is_bid {
-            notify_char(
-                ctx,
-                *owner_id,
-                "OnMarketItemReceived",
-                vec![
-                    PyRep::Integer(*oid),
-                    PyRep::Integer(*type_id as i64),
-                    PyRep::Integer(4),
-                    PyRep::Integer(60_003_760),
-                ],
-            );
+            notify_char(ctx, *owner_id, "OnMarketItemReceived", vec![PyRep::Integer(*oid), PyRep::Integer(*type_id as i64), PyRep::Integer(4), PyRep::Integer(*station_id)]);
         }
     }
 }
@@ -267,74 +248,29 @@ pub fn handle(
                 let region_id = session.region_id.unwrap_or(THE_FORGE_REGION_ID);
                 let ( npc_count, swept_list ) = ctx.db.with_mut_snapshot(|snap| {
                     // 1. Replenish depleted NPC seeded orders (`feat:market.npc-seeded-orders`)
-                    let npc_ids: Vec<i64> = snap.market_orders.values().filter(|o| o.is_npc).map(|o| o.order_id)
-                        .collect();
+                    let npc_meta = MarketOrderMeta { range: 32767, duration: 365, issue_unix: now_unix, order_state: None, account_key: None, final_vol_remaining: None, closed_unix: None };
+                    let npc_ids: Vec<i64> = snap.market_orders.values().filter(|o| o.is_npc).map(|o| o.order_id).collect();
                     for oid in npc_ids {
                         if let Some(o_mut) = snap.market_orders.get_mut(&oid) {
                             if o_mut.vol_remaining < o_mut.vol_entered {
                                 o_mut.vol_remaining = o_mut.vol_entered.max(10_000);
                             }
                         }
-                        save_market_order_meta(
-                            snap,
-                            oid,
-                            MarketOrderMeta {
-                                range: 32767,
-                                duration: 365,
-                                issue_unix: now_unix,
-                                order_state: None,
-                                account_key: None,
-                                final_vol_remaining: None,
-                                closed_unix: None,
-                            },
-                        );
+                        save_market_order_meta(snap, oid, npc_meta);
                     }
                     // 2. Seed permanent NPC buy orders for Sleeper blue loot (`feat:market.npc-buy-orders-sleeper-loot`)
                     for &(loot_tid, price_isk) in SLEEPER_BLUE_LOOT_ORDERS {
-                        for &(st_id, reg_id) in &[
-                            (JITA_STATION_ID, THE_FORGE_REGION_ID),
-                            (station_id, region_id),
-                        ] {
-                            let exists = snap.market_orders.values().any(|o| {
-                                o.is_npc
-                                    && o.is_bid
-                                    && o.type_id == loot_tid
-                                    && o.station_id == st_id
-                                    && o.vol_remaining > 0
-                            });
+                        for &(st_id, reg_id) in &[(JITA_STATION_ID, THE_FORGE_REGION_ID), (station_id, region_id)] {
+                            let exists = snap.market_orders.values().any(|o| o.is_npc && o.is_bid && o.type_id == loot_tid && o.station_id == st_id && o.vol_remaining > 0);
                             if !exists {
                                 snap.next_entity_id += 1;
                                 let new_oid = snap.next_entity_id;
-                                snap.market_orders.insert(
-                                    new_oid,
-                                    MarketOrderRecord {
-                                        order_id: new_oid,
-                                        owner_id: 1_000_125, // CONCORD / Sisters of EVE NPC buyer
-                                        station_id: st_id,
-                                        region_id: reg_id,
-                                        type_id: loot_tid,
-                                        is_bid: true,
-                                        price: IskCents::from_isk(price_isk),
-                                        vol_entered: 1_000_000,
-                                        vol_remaining: 1_000_000,
-                                        min_volume: 1,
-                                        is_npc: true,
-                                        escrow: IskCents(0),
-                                    },
-                                );
-                                save_market_order_meta(
-                                    snap,
-                                    new_oid,
-                                    MarketOrderMeta {
-                                        range: 32767,
-                                        duration: 365,
-                                        issue_unix: now_unix,
-                                        order_state: None,
-                                        account_key: None,
-                                        final_vol_remaining: None,
-                                        closed_unix: None,
-                                    },
-                                );
+                                snap.market_orders.insert(new_oid, MarketOrderRecord {
+                                    order_id: new_oid, owner_id: 1_000_125, station_id: st_id, region_id: reg_id,
+                                    type_id: loot_tid, is_bid: true, price: IskCents::from_isk(price_isk),
+                                    vol_entered: 1_000_000, vol_remaining: 1_000_000, min_volume: 1, is_npc: true, escrow: IskCents(0),
+                                });
+                                save_market_order_meta(snap, new_oid, npc_meta);
                             }
                         }
                     }

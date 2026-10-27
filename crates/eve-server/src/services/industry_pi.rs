@@ -717,3 +717,271 @@ pub fn pi_schematic_recipe(schem_id: u32, default_p0: TypeId) -> (u64, Vec<(Type
         _ => (3600, vec![(3645, 40)], 2329, 5),
     }
 }
+
+pub(crate) fn restore_blueprint_flag(bp_owner_id: i64, meta: &IndustryJobCostMeta) -> eve_db::InventoryFlag {
+    use eve_db::InventoryFlag;
+    match meta.blueprint_original_flag {
+        Some(f)
+            if matches!(
+                f,
+                InventoryFlag::CorpSAG1
+                    | InventoryFlag::CorpSAG2
+                    | InventoryFlag::CorpSAG3
+                    | InventoryFlag::CorpSAG4
+                    | InventoryFlag::CorpSAG5
+                    | InventoryFlag::CorpSAG6
+                    | InventoryFlag::CorpSAG7
+            ) =>
+        {
+            f
+        }
+        _ if meta.use_corp && bp_owner_id == meta.owner_id => InventoryFlag::CorpSAG1,
+        Some(f) if f != InventoryFlag::Locked && f != InventoryFlag::None => f,
+        _ => InventoryFlag::Hangar,
+    }
+}
+
+pub(crate) fn emit_industry_job(
+    ctx: &ServerContext,
+    char_id: i64,
+    owner_id: i64,
+    job_id: i64,
+    bp_iid: i64,
+    status: i64,
+    runs: i64,
+) {
+    use crate::router::NotificationTarget;
+    let eff_owner = if owner_id > 0 { owner_id } else { char_id };
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnIndustryJob",
+        "character",
+        vec![
+            PyRep::Integer(job_id),
+            PyRep::Integer(eff_owner),
+            PyRep::Integer(bp_iid),
+            PyRep::Integer(char_id),
+            PyRep::Integer(status),
+            PyRep::Integer(runs),
+        ],
+    );
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnBlueprintsUpdated",
+        "ownerID",
+        vec![PyRep::Integer(eff_owner)],
+    );
+}
+
+pub(crate) fn handle_industry_job_queries(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    match (service, method) {
+        ("industryManager", "GetJobCounts") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let now_unix = ctx.now_unix();
+            let counts = ctx.db.with_mut_snapshot(|snap| {
+                sync_industry_job_pause_states(snap, now_unix);
+                let char_skills = snap.skills.get(&char_id);
+                let skill_lvl = |sid: TypeId| -> u8 {
+                    char_skills.and_then(|m| m.get(&sid)).map(|s| s.level).unwrap_or(0)
+                };
+                let mfg_max = 1 + (skill_lvl(3387) as i64) + (skill_lvl(24625) as i64);
+                let sci_max = 1 + (skill_lvl(3406) as i64) + (skill_lvl(24624) as i64);
+                let react_max = 1 + (skill_lvl(45748) as i64) + (skill_lvl(45749) as i64);
+                let mfg_used = snap
+                    .industry_jobs
+                    .values()
+                    .filter(|j| j.installer_id == char_id && matches!(j.status.as_str(), "Active" | "Paused") && j.activity_id == 1)
+                    .count() as i64;
+                let sci_used = snap
+                    .industry_jobs
+                    .values()
+                    .filter(|j| {
+                        j.installer_id == char_id
+                            && matches!(j.status.as_str(), "Active" | "Paused")
+                            && matches!(j.activity_id, 3 | 4 | 5 | 8)
+                    })
+                    .count() as i64;
+                let react_used = snap
+                    .industry_jobs
+                    .values()
+                    .filter(|j| j.installer_id == char_id && matches!(j.status.as_str(), "Active" | "Paused") && j.activity_id == 9)
+                    .count() as i64;
+                PyRep::keyval([
+                    ("manufacturingUsed", PyRep::Integer(mfg_used)),
+                    ("manufacturingMax", PyRep::Integer(mfg_max)),
+                    ("researchUsed", PyRep::Integer(sci_used)),
+                    ("researchMax", PyRep::Integer(sci_max)),
+                    ("reactionsUsed", PyRep::Integer(react_used)),
+                    ("reactionsMax", PyRep::Integer(react_max)),
+                ])
+            });
+            Some(Ok(counts))
+        }
+
+        ("industryManager", "GetJob") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let job_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let now_unix = ctx.now_unix();
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                sync_industry_job_pause_states(snap, now_unix);
+                let Some(j) = snap.industry_jobs.get(&job_id) else {
+                    return Err(BridgeRpcError {
+                        code: "JobNotFound".into(),
+                        message: format!("Industry job {job_id} not found"),
+                    });
+                };
+                let meta = load_job_cost_meta(snap, j.job_id).unwrap_or_default();
+                let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                if j.installer_id != char_id && !(meta.use_corp && meta.owner_id == char_corp) {
+                    return Err(BridgeRpcError {
+                        code: "JobOwnershipViolation".into(),
+                        message: format!("Industry job {job_id} does not belong to character {char_id}"),
+                    });
+                }
+                Ok(format_industry_job_pyrep(j, &meta))
+            });
+            Some(res)
+        }
+
+        ("industryManager", "GetJobsByOwner") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let req_owner_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or_else(|| kwargs.get("ownerID").and_then(|v| v.as_i64()))
+                .unwrap_or(char_id);
+            let caller_corp_id = session
+                .corporation_id
+                .or_else(|| {
+                    ctx.db
+                        .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
+                })
+                .unwrap_or(0);
+            if req_owner_id != char_id && req_owner_id != caller_corp_id && !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "OwnerAccessDenied".into(),
+                    message: format!(
+                        "Character {char_id} is not authorized to query industry jobs for owner {req_owner_id}"
+                    ),
+                }));
+            }
+            let now_unix = ctx.now_unix();
+            let jobs = ctx.db.with_mut_snapshot(|snap| {
+                sync_industry_job_pause_states(snap, now_unix);
+                snap.industry_jobs
+                    .values()
+                    .filter(|j| {
+                        let meta = load_job_cost_meta(snap, j.job_id).unwrap_or_default();
+                        if req_owner_id == char_id {
+                            j.installer_id == char_id
+                        } else {
+                            meta.owner_id == req_owner_id || j.installer_id == req_owner_id
+                        }
+                    })
+                    .map(|j| {
+                        let meta = load_job_cost_meta(snap, j.job_id).unwrap_or_default();
+                        format_industry_job_pyrep(j, &meta)
+                    })
+                    .collect::<Vec<_>>()
+            });
+            Some(Ok(PyRep::List(jobs)))
+        }
+
+        ("industryMonitor", "ConnectJob") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let job_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(j) = snap.industry_jobs.get(&job_id).cloned() else {
+                    return Err(BridgeRpcError { code: "JobNotFound".into(), message: format!("Industry job {job_id} not found") });
+                };
+                let meta = load_job_cost_meta(snap, job_id).unwrap_or_default();
+                let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                if j.installer_id != char_id {
+                    let corp = snap.corporations.get(&char_corp);
+                    let caller_roles = corp.and_then(|c| c.member_roles.get(&char_id).copied()).unwrap_or(session.corp_role);
+                    let has_role = corp.is_some_and(|c| c.ceo_id == char_id)
+                        || (caller_roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_FACTORY_MANAGER) != 0);
+                    let is_corp_job = meta.use_corp && meta.owner_id == char_corp && char_corp >= 2_000_000;
+                    if !is_corp_job || !has_role {
+                        return Err(BridgeRpcError { code: "CrpAccessDenied".into(), message: format!("Industry job {job_id} does not belong to character {char_id} or caller lacks Director/Factory Manager role") });
+                    }
+                }
+                let nid = -8_950_000_000_000_i64 - char_id;
+                let mut set: std::collections::BTreeSet<i64> = snap.owner_notes.get(&nid).and_then(|n| serde_json::from_str(&n.note).ok()).unwrap_or_default();
+                set.insert(job_id);
+                snap.owner_notes.insert(nid, eve_db::OwnerNoteRecord {
+                    note_id: nid, character_id: char_id, item_id: job_id, label: "industry_monitor".into(),
+                    note: serde_json::to_string(&set).unwrap_or_default(), timestamp_unix: 0,
+                });
+                Ok(PyRep::keyval([
+                    ("jobID", PyRep::Integer(j.job_id)),
+                    ("installerID", PyRep::Integer(j.installer_id)),
+                    ("status", PyRep::String(j.status)),
+                    ("connected", PyRep::Bool(true)),
+                    ("subscriberCharID", PyRep::Integer(char_id)),
+                ]))
+            });
+            Some(res)
+        }
+
+        ("industryMonitor", "DisconnectJob") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let job_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(j) = snap.industry_jobs.get(&job_id) else {
+                    return Err(BridgeRpcError { code: "JobNotFound".into(), message: format!("Industry job {job_id} not found") });
+                };
+                let meta = load_job_cost_meta(snap, job_id).unwrap_or_default();
+                let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                if j.installer_id != char_id {
+                    let corp = snap.corporations.get(&char_corp);
+                    let caller_roles = corp.and_then(|c| c.member_roles.get(&char_id).copied()).unwrap_or(session.corp_role);
+                    let has_role = corp.is_some_and(|c| c.ceo_id == char_id)
+                        || (caller_roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_FACTORY_MANAGER) != 0);
+                    let is_corp_job = meta.use_corp && meta.owner_id == char_corp && char_corp >= 2_000_000;
+                    if !is_corp_job || !has_role {
+                        return Err(BridgeRpcError { code: "CrpAccessDenied".into(), message: format!("Industry job {job_id} does not belong to character {char_id} or caller lacks Director/Factory Manager role") });
+                    }
+                }
+                let nid = -8_950_000_000_000_i64 - char_id;
+                let mut set: std::collections::BTreeSet<i64> = snap.owner_notes.get(&nid).and_then(|n| serde_json::from_str(&n.note).ok()).unwrap_or_default();
+                let was_subscribed = set.remove(&job_id);
+                snap.owner_notes.insert(nid, eve_db::OwnerNoteRecord {
+                    note_id: nid, character_id: char_id, item_id: job_id, label: "industry_monitor".into(),
+                    note: serde_json::to_string(&set).unwrap_or_default(), timestamp_unix: 0,
+                });
+                Ok(PyRep::keyval([
+                    ("jobID", PyRep::Integer(j.job_id)),
+                    ("connected", PyRep::Bool(false)),
+                    ("unsubscribed", PyRep::Bool(was_subscribed)),
+                    ("subscriberCharID", PyRep::Integer(char_id)),
+                ]))
+            });
+            Some(res)
+        }
+
+        _ => None,
+    }
+}

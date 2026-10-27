@@ -26,80 +26,42 @@ const CARGO_DROPOFF_EXTRA_RANGE_M: f64 = 2_500.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetSafetyWrapRecord {
-    pub wrap_id: i64,
-    pub owner_id: i64,
-    pub is_corp: bool,
-    pub source_structure_id: i64,
-    pub source_structure_name: String,
-    pub solar_system_id: u32,
-    pub created_unix: u64,
-    pub deliverable_after_unix: u64,
-    pub delivered_to_id: Option<i64>,
-    pub item_ids: Vec<i64>,
-    /// DERIVED: sum of SDE `basePrice * quantity`; the live server uses market estimates.
-    pub estimated_value_isk: f64,
-    #[serde(default)]
-    pub nearest_npc_station_id: Option<i64>,
+    pub wrap_id: i64, pub owner_id: i64, pub is_corp: bool, pub source_structure_id: i64, pub source_structure_name: String,
+    pub solar_system_id: u32, pub created_unix: u64, pub deliverable_after_unix: u64, pub delivered_to_id: Option<i64>,
+    pub item_ids: Vec<i64>, pub estimated_value_isk: f64, #[serde(default)] pub nearest_npc_station_id: Option<i64>,
 }
 
 /// Per-structure lifecycle bookkeeping used by `structure_lifecycle`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StructureLifecycleState {
-    pub repair_until_unix: Option<u64>,
-    pub fight_started_unix: Option<u64>,
-    pub reinforce_jitter_secs: i64,
-    pub last_fuel_tick_unix: Option<u64>,
-    pub low_power_since_unix: Option<u64>,
-    pub online_modules: Vec<i64>,
+    pub repair_until_unix: Option<u64>, pub fight_started_unix: Option<u64>, pub reinforce_jitter_secs: i64,
+    pub last_fuel_tick_unix: Option<u64>, pub low_power_since_unix: Option<u64>, pub online_modules: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AccessGroupRecord {
-    pub group_id: i64,
-    pub creator_id: i64,
-    pub owner_corp_id: i64,
-    pub name: String,
-    pub description: String,
-    pub members: HashMap<i64, i64>,
+    pub group_id: i64, pub creator_id: i64, pub owner_corp_id: i64, pub name: String, pub description: String, pub members: HashMap<i64, i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StructureAccessProfile {
-    pub profile_id: i64,
-    pub owner_corp_id: i64,
-    pub name: String,
-    pub description: String,
-    pub access_group_ids: HashSet<i64>,
-    pub blocked_characters: HashSet<i64>,
-    pub allowed_characters: HashSet<i64>,
-    pub blocked_corporations: HashSet<i64>,
-    pub allowed_corporations: HashSet<i64>,
-    pub blocked_alliances: HashSet<i64>,
-    pub allowed_alliances: HashSet<i64>,
-    pub corp_only: bool,
-    /// Service tax rates stored as fixed-point basis points (100 bps = 1.0% = 0.01).
-    pub service_settings: HashMap<i64, i64>,
-    pub general_settings: HashMap<i64, bool>,
+    pub profile_id: i64, pub owner_corp_id: i64, pub name: String, pub description: String, pub access_group_ids: HashSet<i64>,
+    pub blocked_characters: HashSet<i64>, pub allowed_characters: HashSet<i64>, pub blocked_corporations: HashSet<i64>,
+    pub allowed_corporations: HashSet<i64>, pub blocked_alliances: HashSet<i64>, pub allowed_alliances: HashSet<i64>,
+    pub corp_only: bool, pub service_settings: HashMap<i64, i64>, pub general_settings: HashMap<i64, bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StructureExtendedState {
-    pub unanchoring_until_unix: HashMap<i64, u64>,
-    pub descriptions: HashMap<i64, String>,
-    pub active_pilot_by_structure: HashMap<i64, i64>,
-    pub pending_reinforce_schedule: HashMap<i64, (u8, u8, u64)>,
-    pub asset_safety_wraps: HashMap<i64, AssetSafetyWrapRecord>,
-    pub lifecycle: HashMap<i64, StructureLifecycleState>,
-    pub war_hq_structures: std::collections::HashSet<i64>,
-    pub jump_bridge_links: HashMap<i64, i64>,
-    pub access_profiles: HashMap<i64, StructureAccessProfile>,
-    pub profiles_by_id: HashMap<i64, StructureAccessProfile>,
-    pub structure_profile_id: HashMap<i64, i64>,
-    pub owner_groups: HashMap<i64, AccessGroupRecord>,
+    pub unanchoring_until_unix: HashMap<i64, u64>, pub descriptions: HashMap<i64, String>, pub active_pilot_by_structure: HashMap<i64, i64>,
+    pub pending_reinforce_schedule: HashMap<i64, (u8, u8, u64)>, pub asset_safety_wraps: HashMap<i64, AssetSafetyWrapRecord>,
+    pub lifecycle: HashMap<i64, StructureLifecycleState>, pub war_hq_structures: std::collections::HashSet<i64>,
+    pub jump_bridge_links: HashMap<i64, i64>, pub access_profiles: HashMap<i64, StructureAccessProfile>,
+    pub profiles_by_id: HashMap<i64, StructureAccessProfile>, pub structure_profile_id: HashMap<i64, i64>, pub owner_groups: HashMap<i64, AccessGroupRecord>,
 }
 
 pub fn load_ext_state(snap: &WorldStateSnapshot) -> StructureExtendedState {
@@ -683,12 +645,10 @@ pub fn service_id_for_module_type(type_id: u32) -> Option<i64> {
 pub fn structure_allows_market_orders(ctx: &ServerContext, snap: &WorldStateSnapshot, structure_id: i64) -> bool {
     use super::structure_lifecycle as life;
     let Some(st) = snap.structures.get(&structure_id) else { return false; };
-    if !life::is_operational(&st.state) { return false; }
+    if !life::is_operational(&st.state) || !st.quantum_core_installed || st.fuel_blocks == 0 { return false; }
     let Some(profile) = life::structure_profile(ctx, st.type_id) else { return false; };
-    if matches!(profile.hull_class, life::HullClass::Medium | life::HullClass::Flex) { return false; }
-    if life::online_service_type_ids(ctx, snap, structure_id).contains(&35892) { return true; }
-    let has_any_service_item = snap.items.values().any(|i| i.location_id == structure_id && (164..=171).contains(&(i.flag as u16)));
-    !(has_any_service_item || load_ext_state(snap).lifecycle.contains_key(&structure_id))
+    !matches!(profile.hull_class, life::HullClass::Medium | life::HullClass::Flex)
+        && snap.items.values().any(|i| i.location_id == structure_id && i.type_id == 35_892 && (164..=171).contains(&(i.flag as u16)) && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true) && i.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0)
 }
 
 pub fn evaluate_character_structure_access(_ctx: &ServerContext, snap: &WorldStateSnapshot, structure_id: i64, char_id: i64) -> bool {
@@ -701,23 +661,17 @@ pub fn evaluate_character_structure_access_in_snap(snap: &WorldStateSnapshot, st
     let owner_corp = snap.structures.get(&structure_id).map(|s| s.owner_corp_id).unwrap_or(0);
     let ext = load_ext_state(snap);
     if let Some(prof) = ext.access_profiles.get(&structure_id) {
-        if prof.blocked_characters.contains(&char_id) || prof.blocked_corporations.contains(&char_corp) || (char_ally > 0 && prof.blocked_alliances.contains(&char_ally)) {
-            return false;
-        }
+        if prof.blocked_characters.contains(&char_id) || prof.blocked_corporations.contains(&char_corp) || (char_ally > 0 && prof.blocked_alliances.contains(&char_ally)) { return false; }
         for &gid in &prof.access_group_ids {
             if let Some(grp) = ext.owner_groups.get(&gid) {
-                if grp.members.get(&char_id) == Some(&-1) || grp.members.get(&char_corp) == Some(&-1) || (char_ally > 0 && grp.members.get(&char_ally) == Some(&-1)) {
-                    return false;
-                }
+                if grp.members.get(&char_id) == Some(&-1) || grp.members.get(&char_corp) == Some(&-1) || (char_ally > 0 && grp.members.get(&char_ally) == Some(&-1)) { return false; }
             }
         }
         if prof.corp_only && owner_corp != 0 && char_corp != owner_corp { return false; }
         let has_group_allows = prof.access_group_ids.iter().any(|gid| ext.owner_groups.get(gid).is_some_and(|g| g.members.values().any(|&r| r >= 0)));
         let in_group = prof.access_group_ids.iter().any(|gid| ext.owner_groups.get(gid).is_some_and(|g| g.members.get(&char_id).is_some_and(|&r| r >= 0) || g.members.get(&char_corp).is_some_and(|&r| r >= 0) || (char_ally > 0 && g.members.get(&char_ally).is_some_and(|&r| r >= 0))));
         let has_allow = !prof.allowed_characters.is_empty() || !prof.allowed_corporations.is_empty() || !prof.allowed_alliances.is_empty() || has_group_allows;
-        if has_allow && char_corp != owner_corp && !prof.allowed_characters.contains(&char_id) && !prof.allowed_corporations.contains(&char_corp) && (char_ally <= 0 || !prof.allowed_alliances.contains(&char_ally)) && !in_group {
-            return false;
-        }
+        if has_allow && char_corp != owner_corp && !prof.allowed_characters.contains(&char_id) && !prof.allowed_corporations.contains(&char_corp) && (char_ally <= 0 || !prof.allowed_alliances.contains(&char_ally)) && !in_group { return false; }
         return true;
     }
     !(owner_corp >= 98_000_000 && owner_corp != char_corp)
@@ -726,22 +680,15 @@ pub fn evaluate_character_structure_access_in_snap(snap: &WorldStateSnapshot, st
 pub(crate) fn require_corp_profile_manager(snap: &WorldStateSnapshot, session: &SessionState, char_id: i64, corp_id: i64) -> Result<(), BridgeRpcError> {
     if session.has_gm_role() { return Ok(()); }
     let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
-    if corp_id != 0 && char_corp != corp_id {
-        return Err(err("StructureOwnershipViolation", "Caller does not belong to the owning corporation"));
-    }
+    if corp_id != 0 && char_corp != corp_id { return Err(err("StructureOwnershipViolation", "Caller does not belong to the owning corporation")); }
     let req = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
-    let has_role = (session.corp_role & req) != 0
-        || snap.corporations.get(&corp_id).is_some_and(|c| c.ceo_id == char_id || c.member_roles.get(&char_id).is_some_and(|&r| (r & req) != 0));
-    if !has_role {
-        return Err(err("InsufficientCorpRoles", "Structure profile and ACL configuration requires Director or Station Manager role"));
-    }
+    let has_role = (session.corp_role & req) != 0 || snap.corporations.get(&corp_id).is_some_and(|c| c.ceo_id == char_id || c.member_roles.get(&char_id).is_some_and(|&r| (r & req) != 0));
+    if !has_role { return Err(err("InsufficientCorpRoles", "Structure profile and ACL configuration requires Director or Station Manager role")); }
     Ok(())
 }
 
 pub(crate) fn require_structure_corp_manager(snap: &WorldStateSnapshot, session: &SessionState, char_id: i64, structure_id: i64) -> Result<UpwellStructureRecord, BridgeRpcError> {
-    if session.has_gm_role() {
-        return snap.structures.get(&structure_id).cloned().ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")));
-    }
+    if session.has_gm_role() { return snap.structures.get(&structure_id).cloned().ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found"))); }
     let st = require_structure_corp_member(snap, char_id, structure_id)?;
     require_corp_profile_manager(snap, session, char_id, st.owner_corp_id)?;
     Ok(st)
@@ -749,22 +696,14 @@ pub(crate) fn require_structure_corp_manager(snap: &WorldStateSnapshot, session:
 
 pub(crate) fn validate_and_classify_entity(snap: &WorldStateSnapshot, entity_id: i64) -> Result<(bool, bool, bool), BridgeRpcError> {
     let (is_ally, is_corp, is_char) = (snap.alliances.contains_key(&entity_id), snap.corporations.contains_key(&entity_id), snap.characters.contains_key(&entity_id));
-    if !is_ally && !is_corp && !is_char {
-        return Err(err("InvalidAccessEntity", format!("Entity {entity_id} is not a known character, corporation, or alliance")));
-    }
+    if !is_ally && !is_corp && !is_char { return Err(err("InvalidAccessEntity", format!("Entity {entity_id} is not a known character, corporation, or alliance"))); }
     Ok((is_ally, is_corp, is_char))
 }
 
 pub(crate) fn apply_entity_to_profile(prof: &mut StructureAccessProfile, eid: i64, is_ally: bool, is_corp: bool, is_blocked: bool, is_add: bool) {
-    let target_set = if is_ally {
-        if is_blocked { &mut prof.blocked_alliances } else { &mut prof.allowed_alliances }
-    } else if is_corp {
-        if is_blocked { &mut prof.blocked_corporations } else { &mut prof.allowed_corporations }
-    } else if is_blocked {
-        &mut prof.blocked_characters
-    } else {
-        &mut prof.allowed_characters
-    };
+    let target_set = if is_ally { if is_blocked { &mut prof.blocked_alliances } else { &mut prof.allowed_alliances } }
+        else if is_corp { if is_blocked { &mut prof.blocked_corporations } else { &mut prof.allowed_corporations } }
+        else if is_blocked { &mut prof.blocked_characters } else { &mut prof.allowed_characters };
     if is_add { target_set.insert(eid); } else { target_set.remove(&eid); }
 }
 
@@ -1252,26 +1191,11 @@ fn handle_get_structures(ctx: &ServerContext, session: &mut SessionState, corp_o
     let (_, char_id) = ServerContext::require_character(session)?;
     let now = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
-        let caller_corp = snap
-            .characters
-            .get(&char_id)
-            .map(|c| c.corporation_id)
-            .or(session.corporation_id)
-            .unwrap_or(0);
+        let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
         let ext = load_ext_state(snap);
-        let mut list: Vec<&UpwellStructureRecord> = snap
-            .structures
-            .values()
-            .filter(|s| {
-                s.state != life::STATE_DESTROYED
-                    && if corp_only {
-                        s.owner_corp_id == caller_corp
-                    } else {
-                        s.owner_corp_id == caller_corp
-                            || evaluate_character_structure_access_in_snap(snap, s.structure_id, char_id)
-                    }
-            })
-            .collect();
+        let mut list: Vec<&UpwellStructureRecord> = snap.structures.values().filter(|s| {
+            s.state != life::STATE_DESTROYED && (s.owner_corp_id == caller_corp || (!corp_only && evaluate_character_structure_access_in_snap(snap, s.structure_id, char_id)))
+        }).collect();
         list.sort_by_key(|s| s.structure_id);
         Ok(PyRep::Dict(list.into_iter().map(|st| (PyRep::Integer(st.structure_id), build_structure_dir_entry(ctx, snap, &ext, st, now))).collect()))
     })

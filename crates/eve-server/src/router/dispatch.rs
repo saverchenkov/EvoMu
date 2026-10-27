@@ -590,6 +590,8 @@ impl ServerContext {
                     if let Some(sys) = session.solar_system_id {
                         services::map_service::record_solar_system_visit(self, cid, sys);
                     }
+                    services::market_contracts::sweep_and_notify_expired_for_char(self, cid);
+                    services::industry_pi::sync_character_pi_colonies_on_login(self, cid);
                 }
             }
             if effective_service == "skillMgr2"

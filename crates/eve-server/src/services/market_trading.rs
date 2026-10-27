@@ -45,23 +45,12 @@ fn market_order_meta_note_id(order_id: i64) -> i64 {
     -(4_000_000_000_000_i64.saturating_add(order_id.abs()))
 }
 
-pub(crate) fn save_market_order_meta(
-    snap: &mut eve_db::WorldStateSnapshot,
-    order_id: i64,
-    meta: MarketOrderMeta,
-) {
+pub(crate) fn save_market_order_meta(snap: &mut eve_db::WorldStateSnapshot, order_id: i64, meta: MarketOrderMeta) {
     let nid = market_order_meta_note_id(order_id);
     if let Ok(js) = serde_json::to_string(&meta) {
         snap.owner_notes.insert(
             nid,
-            eve_db::OwnerNoteRecord {
-                note_id: nid,
-                character_id: -4,
-                item_id: order_id,
-                label: format!("mkt_order:{order_id}"),
-                note: js,
-                timestamp_unix: meta.issue_unix,
-            },
+            eve_db::OwnerNoteRecord { note_id: nid, character_id: -4, item_id: order_id, label: format!("mkt_order:{order_id}"), note: js, timestamp_unix: meta.issue_unix },
         );
     }
     let esi_range = match meta.range {
@@ -77,38 +66,16 @@ pub(crate) fn save_market_order_meta(
     };
     let is_corp = meta.account_key.is_some();
     let wallet_div = meta.account_key.map(|k| ((k.saturating_sub(999)).clamp(1, 7)) as i64);
-    let issued_by = snap
-        .market_order_meta
-        .get(&order_id)
-        .and_then(|m| m.issued_by)
-        .or_else(|| {
-            snap.market_orders.get(&order_id).and_then(|o| {
-                if is_corp {
-                    snap.corporations.get(&o.owner_id).map(|c| c.ceo_id)
-                } else {
-                    Some(o.owner_id)
-                }
-            })
-        });
+    let issued_by = snap.market_order_meta.get(&order_id).and_then(|m| m.issued_by).or_else(|| {
+        snap.market_orders.get(&order_id).and_then(|o| if is_corp { snap.corporations.get(&o.owner_id).map(|c| c.ceo_id) } else { Some(o.owner_id) })
+    });
     snap.market_order_meta.insert(
         order_id,
-        eve_db::MarketOrderMeta {
-            issued_unix: meta.issue_unix,
-            duration_days: meta.duration,
-            range: esi_range,
-            issued_by,
-            wallet_division: wallet_div,
-            is_corporation: is_corp,
-            state: esi_state,
-        },
+        eve_db::MarketOrderMeta { issued_unix: meta.issue_unix, duration_days: meta.duration, range: esi_range, issued_by, wallet_division: wallet_div, is_corporation: is_corp, state: esi_state },
     );
 }
 
-pub(crate) fn load_market_order_meta(
-    snap: &eve_db::WorldStateSnapshot,
-    o: &MarketOrderRecord,
-    default_unix: u64,
-) -> MarketOrderMeta {
+pub(crate) fn load_market_order_meta(snap: &eve_db::WorldStateSnapshot, o: &MarketOrderRecord, default_unix: u64) -> MarketOrderMeta {
     let nid = market_order_meta_note_id(o.order_id);
     if let Some(note) = snap.owner_notes.get(&nid) {
         if let Ok(meta) = serde_json::from_str::<MarketOrderMeta>(&note.note) {
@@ -127,25 +94,9 @@ pub(crate) fn load_market_order_meta(
             "region" => 32767,
             s => s.parse().unwrap_or(if o.is_bid { -1 } else { 32767 }),
         };
-        return MarketOrderMeta {
-            range,
-            duration: m.duration_days,
-            issue_unix: m.issued_unix,
-            order_state,
-            account_key: m.wallet_division.map(|k| (k as u16) + 999),
-            final_vol_remaining: None,
-            closed_unix: None,
-        };
+        return MarketOrderMeta { range, duration: m.duration_days, issue_unix: m.issued_unix, order_state, account_key: m.wallet_division.map(|k| (k as u16) + 999), final_vol_remaining: None, closed_unix: None };
     }
-    MarketOrderMeta {
-        range: if o.is_bid { -1 } else { 32767 },
-        duration: if o.is_npc { 365 } else { 90 },
-        issue_unix: default_unix,
-        order_state: None,
-        account_key: None,
-        final_vol_remaining: None,
-        closed_unix: None,
-    }
+    MarketOrderMeta { range: if o.is_bid { -1 } else { 32767 }, duration: if o.is_npc { 365 } else { 90 }, issue_unix: default_unix, order_state: None, account_key: None, final_vol_remaining: None, closed_unix: None }
 }
 
 pub(crate) fn unix_to_filetime(unix_secs: u64) -> i64 {
@@ -154,18 +105,9 @@ pub(crate) fn unix_to_filetime(unix_secs: u64) -> i64 {
 
 fn market_order_descriptor() -> DBRowDescriptor {
     DBRowDescriptor::new([
-        ("price", DbColumnType::R8),
-        ("volRemaining", DbColumnType::R8),
-        ("typeID", DbColumnType::I4),
-        ("orderID", DbColumnType::I8),
-        ("volEntered", DbColumnType::I4),
-        ("minVolume", DbColumnType::I4),
-        ("bid", DbColumnType::Bool),
-        ("stationID", DbColumnType::I8),
-        ("regionID", DbColumnType::I4),
-        ("range", DbColumnType::I2),
-        ("issueDate", DbColumnType::FileTime),
-        ("duration", DbColumnType::I2),
+        ("price", DbColumnType::R8), ("volRemaining", DbColumnType::R8), ("typeID", DbColumnType::I4), ("orderID", DbColumnType::I8),
+        ("volEntered", DbColumnType::I4), ("minVolume", DbColumnType::I4), ("bid", DbColumnType::Bool), ("stationID", DbColumnType::I8),
+        ("regionID", DbColumnType::I4), ("range", DbColumnType::I2), ("issueDate", DbColumnType::FileTime), ("duration", DbColumnType::I2),
     ])
 }
 
@@ -258,32 +200,24 @@ pub(crate) fn can_bid_match_seller_station(
     (jumps as i64) <= meta.range
 }
 
-pub(crate) fn is_structure_market_online(
-    snap: &eve_db::WorldStateSnapshot,
-    structure_id: i64,
-) -> bool {
-    let Some(st) = snap.structures.get(&structure_id) else {
-        return true;
-    };
-    if st.state == "Destroyed" {
+pub(crate) fn is_structure_market_online(snap: &eve_db::WorldStateSnapshot, structure_id: i64) -> bool {
+    let Some(st) = snap.structures.get(&structure_id) else { return true };
+    if st.state == "Destroyed" || !st.quantum_core_installed || st.fuel_blocks == 0 {
         return false;
     }
-    let mut has_market_hub = false;
-    for item in snap.items.values() {
-        if item.location_id == structure_id && item.type_id == 35_892 {
-            has_market_hub = true;
-            if snap.module_online_states.get(&item.item_id).copied().unwrap_or(true) {
-                return true;
-            }
-        }
+    if !matches!(st.type_id, 35826 | 35827 | 35833 | 35834 | 40340 | 47512..=47516) {
+        return false;
     }
-    !has_market_hub
+    snap.items.values().any(|item| {
+        item.location_id == structure_id
+            && item.type_id == 35_892
+            && (164..=171).contains(&(item.flag as u16))
+            && snap.module_online_states.get(&item.item_id).copied().unwrap_or(true)
+            && item.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
+    })
 }
 
-pub(crate) fn resolve_structure_broker_rate(
-    snap: &eve_db::WorldStateSnapshot,
-    structure_id: i64,
-) -> f64 {
+pub(crate) fn resolve_structure_broker_rate(snap: &eve_db::WorldStateSnapshot, structure_id: i64) -> f64 {
     let nid = -(1_000_000_000_000_i64.saturating_add(structure_id.abs()));
     if let Some(note) = snap.owner_notes.get(&nid) {
         if let Ok(map) = serde_json::from_str::<HashMap<u8, f64>>(&note.note) {
@@ -294,13 +228,17 @@ pub(crate) fn resolve_structure_broker_rate(
             }
             if let Some(&rate) = map.get(&1) {
                 if rate.is_finite() && rate >= 0.0 {
-                    if rate < 0.01 {
-                        return 0.005 + rate;
-                    }
-                    return rate.clamp(0.01, 1.0);
+                    return if rate < 0.01 { 0.005 + rate } else { rate.clamp(0.01, 1.0) };
                 }
             }
         }
+    }
+    if let Some(&bps) = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap)
+        .access_profiles
+        .get(&structure_id)
+        .and_then(|p| p.service_settings.get(&1).or_else(|| p.service_settings.get(&35_892)))
+    {
+        return 0.005 + (bps.max(0) as f64 / 10_000.0).clamp(0.0, 1.0);
     }
     0.015
 }
@@ -329,6 +267,18 @@ pub(crate) fn structure_owner_broker_share(
                 }
             }
         }
+    }
+    if let Some(&bps) = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap)
+        .access_profiles
+        .get(&structure_id)
+        .and_then(|p| p.service_settings.get(&1).or_else(|| p.service_settings.get(&35_892)))
+    {
+        if bps <= 0 {
+            return IskCents(0);
+        }
+        let owner_rate = (bps as f64 / 10_000.0).clamp(0.0, 1.0);
+        let total_rate = 0.005 + owner_rate;
+        return IskCents(((broker_fee.0 as f64) * (owner_rate / total_rate)).round() as i64);
     }
     IskCents(broker_fee.0 / 2)
 }
@@ -794,18 +744,27 @@ pub fn handle(
                     None
                 }
             });
-            let (structure_info, market_hub_online) = ctx.db.with_snapshot(|snap| {
+            let (structure_info, market_hub_online, market_acl_ok) = ctx.db.with_snapshot(|snap| {
                 let info = snap
                     .structures
                     .get(&station_id)
                     .filter(|st| st.state != "Destroyed")
                     .map(|st| (st.owner_corp_id, resolve_structure_broker_rate(snap, station_id)));
-                (info, is_structure_market_online(snap, station_id))
+                let online = is_structure_market_online(snap, station_id)
+                    && crate::services::station_structure::structure_upwell_ops::structure_allows_market_orders(ctx, snap, station_id);
+                let acl = crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access(ctx, snap, station_id, char_id);
+                (info, online, acl)
             });
             if structure_info.is_some() && !market_hub_online {
                 return Some(Err(BridgeRpcError {
                     code: "MarketHubOffline".into(),
                     message: format!("Standup Market Hub I service module at structure {station_id} is offline"),
+                }));
+            }
+            if structure_info.is_some() && !market_acl_ok {
+                return Some(Err(BridgeRpcError {
+                    code: "StructureServiceAccessDenied".into(),
+                    message: format!("Character {char_id} is excluded by structure {station_id} access list"),
                 }));
             }
             let (owner_corp_id, owner_faction_id, structure_broker_opt) =
@@ -1306,31 +1265,16 @@ pub fn handle(
                 snap.market_orders.insert(
                     new_oid,
                     MarketOrderRecord {
-                        order_id: new_oid,
-                        owner_id: order_owner_id,
-                        station_id,
-                        region_id,
-                        type_id,
-                        is_bid,
-                        price: order_price,
-                        vol_entered: quantity_i32,
-                        vol_remaining: remaining_qty,
-                        min_volume: eff_min_vol,
-                        is_npc: false,
-                        escrow,
+                        order_id: new_oid, owner_id: order_owner_id, station_id, region_id, type_id, is_bid,
+                        price: order_price, vol_entered: quantity_i32, vol_remaining: remaining_qty, min_volume: eff_min_vol, is_npc: false, escrow,
                     },
                 );
                 save_market_order_meta(
                     snap,
                     new_oid,
                     MarketOrderMeta {
-                        range: order_range,
-                        duration: duration_days,
-                        issue_unix: now_unix,
-                        order_state: None,
-                        account_key: if use_corp { Some(account_key) } else { None },
-                        final_vol_remaining: None,
-                        closed_unix: None,
+                        range: order_range, duration: duration_days, issue_unix: now_unix, order_state: None,
+                        account_key: if use_corp { Some(account_key) } else { None }, final_vol_remaining: None, closed_unix: None,
                     },
                 );
                 if let Some(m) = snap.market_order_meta.get_mut(&new_oid) {
@@ -1353,54 +1297,18 @@ pub fn handle(
             match res {
                 Ok((order_id, filled_immediately, actual_sales_tax_charged, escrow_cents, matched_sellers, delivered_items)) => {
                     for (matched_oid, seller_id) in matched_sellers {
-                        ctx.notify(
-                            NotificationTarget::Character(seller_id),
-                            "OnOwnOrdersChanged",
-                            "charid",
-                            vec![
-                                PyRep::Integer(matched_oid),
-                                PyRep::String("Change".into()),
-                                PyRep::Bool(false),
-                            ],
-                        );
+                        ctx.notify(NotificationTarget::Character(seller_id), "OnOwnOrdersChanged", "charid", vec![PyRep::Integer(matched_oid), PyRep::String("Change".into()), PyRep::Bool(false)]);
                     }
                     for (iid, tid, flag_id, loc_id) in delivered_items {
-                        ctx.notify(
-                            NotificationTarget::Character(char_id),
-                            "OnMarketItemReceived",
-                            "charid",
-                            vec![
-                                PyRep::Integer(iid),
-                                PyRep::Integer(tid as i64),
-                                PyRep::Integer(flag_id),
-                                PyRep::Integer(loc_id),
-                            ],
-                        );
+                        ctx.notify(NotificationTarget::Character(char_id), "OnMarketItemReceived", "charid", vec![PyRep::Integer(iid), PyRep::Integer(tid as i64), PyRep::Integer(flag_id), PyRep::Integer(loc_id)]);
                     }
-                    ctx.notify(
-                        NotificationTarget::Character(char_id),
-                        "OnOwnOrdersChanged",
-                        "charid",
-                        vec![
-                            PyRep::Integer(order_id),
-                            PyRep::String(if filled_immediately { "Change" } else { "Add" }.into()),
-                            PyRep::Bool(false),
-                        ],
-                    );
+                    ctx.notify(NotificationTarget::Character(char_id), "OnOwnOrdersChanged", "charid", vec![PyRep::Integer(order_id), PyRep::String(if filled_immediately { "Change" } else { "Add" }.into()), PyRep::Bool(false)]);
                     Some(Ok(PyRep::keyval([
-                        ("orderID", PyRep::Integer(order_id)),
-                        ("filledImmediately", PyRep::Bool(filled_immediately)),
-                        ("brokerFeeISK", PyRep::Real(broker_fee.to_wire_f64())),
-                        (
-                            "salesTaxISK",
-                            PyRep::Real(actual_sales_tax_charged.to_wire_f64()),
-                        ),
-                        ("escrowISK", PyRep::Real(escrow_cents.to_wire_f64())),
-                        ("range", PyRep::Integer(order_range)),
-                        ("orderRange", PyRep::Integer(order_range)),
-                        ("duration", PyRep::Integer(duration_days)),
-                        ("minVolume", PyRep::Integer(min_volume_i32 as i64)),
-                        ("issueDate", PyRep::Integer(unix_to_filetime(now_unix))),
+                        ("orderID", PyRep::Integer(order_id)), ("filledImmediately", PyRep::Bool(filled_immediately)),
+                        ("brokerFeeISK", PyRep::Real(broker_fee.to_wire_f64())), ("salesTaxISK", PyRep::Real(actual_sales_tax_charged.to_wire_f64())),
+                        ("escrowISK", PyRep::Real(escrow_cents.to_wire_f64())), ("range", PyRep::Integer(order_range)),
+                        ("orderRange", PyRep::Integer(order_range)), ("duration", PyRep::Integer(duration_days)),
+                        ("minVolume", PyRep::Integer(min_volume_i32 as i64)), ("issueDate", PyRep::Integer(unix_to_filetime(now_unix))),
                     ])))
                 }
                 Err(e) => Some(Err(e)),

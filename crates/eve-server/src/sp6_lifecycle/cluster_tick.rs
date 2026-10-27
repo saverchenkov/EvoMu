@@ -12,6 +12,8 @@ use super::{
     AbyssalPersistedSession, DisconnectedShipEntry, SafeLogoffEntry, SelfDestructPersistedEntry,
     JETCAN_DECAY_LIFETIME_SECS, WRECK_DECAY_LIFETIME_SECS,
 };
+
+pub const PLANETARY_LAUNCH_DECAY_SECS: u64 = 5 * 86_400; // 5d (432,000s)
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
 use crate::system_actor::PendingAnchoringDisruptor;
@@ -184,8 +186,15 @@ pub fn populate_persisted_space_objects(
                 continue;
             }
 
-            // Check decay lifetimes before spawning (`feat:lifecycle.wreck-restart`, `feat:lifecycle.mobile_warp_disruptor-lifecycle`)
-            if is_wreck || is_corpse {
+            // Check decay lifetimes before spawning (`feat:lifecycle.wreck-restart`, `feat:lifecycle.mobile_warp_disruptor-lifecycle`, `feat:lifecycle.pi-launch-canister`)
+            if obj_meta.and_then(|m| m.planet_id).is_some() {
+                if let Some(created) = obj_meta.and_then(|m| m.created_unix) {
+                    if now_unix >= created.saturating_add(PLANETARY_LAUNCH_DECAY_SECS) {
+                        expired_item_ids.push(item.item_id);
+                        continue;
+                    }
+                }
+            } else if is_wreck || is_corpse {
                 if let Some(created) = obj_meta.and_then(|m| m.created_unix) {
                     if now_unix >= created.saturating_add(WRECK_DECAY_LIFETIME_SECS) {
                         expired_item_ids.push(item.item_id);
@@ -943,7 +952,13 @@ pub fn on_advance_secs(ctx: &ServerContext, _prev_unix: u64, secs: u64) {
             let is_mwd_bubble = group_id == 361;
             let obj_meta = st.space_object_meta.get(&item.item_id);
 
-            if is_wreck || is_corpse {
+            if obj_meta.and_then(|m| m.planet_id).is_some() {
+                if let Some(created) = obj_meta.and_then(|m| m.created_unix) {
+                    if now_unix >= created.saturating_add(PLANETARY_LAUNCH_DECAY_SECS) {
+                        expired_ids.push((item.item_id, sys_id, false));
+                    }
+                }
+            } else if is_wreck || is_corpse {
                 if let Some(created) = obj_meta.and_then(|m| m.created_unix) {
                     if now_unix >= created.saturating_add(WRECK_DECAY_LIFETIME_SECS) {
                         expired_ids.push((item.item_id, sys_id, false));

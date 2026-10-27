@@ -59,10 +59,17 @@ pub fn handle_pi_colonies(
                     0
                 };
                 let (sim_extracted, sim_processed) = if elapsed > 0 {
-                    let r = advance_colony_simulation(ctx, &mut col, &mut net, elapsed, now_unix);
+                    let (e, p) = advance_colony_simulation(ctx, &mut col, &mut net, elapsed, now_unix);
+                    let tot_e = e.saturating_add(std::mem::take(&mut net.pending_login_extracted));
+                    let tot_p = p.saturating_add(std::mem::take(&mut net.pending_login_processed));
                     snap.planetary_colonies.insert((char_id, planet_id), col.clone());
                     save_pi_network(snap, char_id, planet_id, &net);
-                    r
+                    (tot_e, tot_p)
+                } else if net.pending_login_extracted > 0 || net.pending_login_processed > 0 {
+                    let tot_e = std::mem::take(&mut net.pending_login_extracted);
+                    let tot_p = std::mem::take(&mut net.pending_login_processed);
+                    save_pi_network(snap, char_id, planet_id, &net);
+                    (tot_e, tot_p)
                 } else {
                     (0, 0)
                 };
@@ -1091,6 +1098,23 @@ pub fn handle_pi_colonies(
                                 pin.extractor_cycle_seconds = cyc_secs;
                                 pin.extractor_head_count = head_cnt_raw as u8;
                                 pin.program_install_unix = now_unix;
+                                const MAX_EXTRACTOR_PROGRAM_SECS: u64 = 14 * 86_400;
+                                let requested_dur = els
+                                    .get(6)
+                                    .and_then(|v| v.as_i64())
+                                    .or_else(|| els.get(5).and_then(|v| v.as_i64()))
+                                    .filter(|&v| v > 0)
+                                    .map(|v| {
+                                        let u = v as u64;
+                                        if u > now_unix {
+                                            u.saturating_sub(now_unix)
+                                        } else {
+                                            u
+                                        }
+                                    })
+                                    .unwrap_or(86_400);
+                                let prog_dur = requested_dur.clamp(cyc_secs, MAX_EXTRACTOR_PROGRAM_SECS);
+                                pin.expiry_time_unix = Some(now_unix.saturating_add(prog_dur));
                                 if let Some(col_mut) = snap.planetary_colonies.get_mut(&(char_id, planet_id)) {
                                     if col_mut.last_extracted_unix == 0 {
                                         col_mut.last_extracted_unix = now_unix;

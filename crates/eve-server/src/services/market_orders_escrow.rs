@@ -95,62 +95,39 @@ pub fn handle_orders_escrow(
             };
 
             let station_info = ctx.sde.solar_systems.values().find_map(|sys| {
-                if sys.region_id == region_id {
-                    sys.stations
-                        .iter()
-                        .find(|st| st.station_id == docked_station_id)
-                } else {
-                    None
-                }
+                (sys.region_id == region_id).then(|| sys.stations.iter().find(|st| st.station_id == docked_station_id)).flatten()
             });
-            let (owner_corp_id, owner_faction_id, is_structure) = if let Some(station_def) =
-                station_info
-            {
-                (
-                    station_def.owner_corporation_id,
-                    station_def.owner_faction_id,
-                    false,
-                )
-            } else if let Some((str_owner_corp, str_region, hub_online)) =
-                ctx.db.with_snapshot(|snap| {
-                    snap.structures.get(&docked_station_id).and_then(|st| {
-                        ctx.sde
-                            .solar_systems
-                            .get(&st.solar_system_id)
-                            .map(|sys| (st.owner_corp_id, sys.region_id, is_structure_market_online(snap, docked_station_id)))
+            let (owner_corp_id, owner_faction_id, is_structure) = if let Some(station_def) = station_info {
+                (station_def.owner_corporation_id, station_def.owner_faction_id, false)
+            } else if let Some((str_owner_corp, str_region, hub_online, acl_ok)) = ctx.db.with_snapshot(|snap| {
+                snap.structures.get(&docked_station_id).and_then(|st| {
+                    ctx.sde.solar_systems.get(&st.solar_system_id).map(|sys| {
+                        let online = is_structure_market_online(snap, docked_station_id)
+                            && crate::services::station_structure::structure_upwell_ops::structure_allows_market_orders(ctx, snap, docked_station_id);
+                        let acl = crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access(ctx, snap, docked_station_id, char_id);
+                        (st.owner_corp_id, sys.region_id, online, acl)
                     })
                 })
-            {
+            }) {
                 if str_region != region_id {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidMarketStation".into(),
-                        message: format!(
-                            "Structure {docked_station_id} is not in region {region_id}"
-                        ),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "InvalidMarketStation".into(), message: format!("Structure {docked_station_id} is not in region {region_id}") }));
                 }
                 if !hub_online {
-                    return Some(Err(BridgeRpcError {
-                        code: "MarketHubOffline".into(),
-                        message: format!("Standup Market Hub I service module at structure {docked_station_id} is offline"),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "MarketHubOffline".into(), message: format!("Standup Market Hub I service module at structure {docked_station_id} is offline") }));
+                }
+                if !acl_ok {
+                    return Some(Err(BridgeRpcError { code: "StructureServiceAccessDenied".into(), message: format!("Character {char_id} is excluded by structure {docked_station_id} access list") }));
                 }
                 (str_owner_corp, None, true)
             } else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidMarketStation".into(),
-                    message: format!("Station {docked_station_id} is not in region {region_id}"),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidMarketStation".into(), message: format!("Station {docked_station_id} is not in region {region_id}") }));
             };
 
-            let mut parsed_items: Vec<(i64, TypeId, i64, IskCents, i32, i64)> =
-                Vec::with_capacity(entries.len());
+            let mut parsed_items: Vec<(i64, TypeId, i64, IskCents, i32, i64)> = Vec::with_capacity(entries.len());
             for entry in entries {
                 let (st_id, raw_tid, item_id, price_isk, qty, item_dur) = match entry {
                     PyRep::KeyVal(kv) => (
-                        kv.get("stationID")
-                            .and_then(|v| v.as_i64())
-                            .unwrap_or(docked_station_id),
+                        kv.get("stationID").and_then(|v| v.as_i64()).unwrap_or(docked_station_id),
                         kv.get("typeID").and_then(|v| v.as_i64()).unwrap_or(0),
                         kv.get("itemID").and_then(|v| v.as_i64()).unwrap_or(0),
                         kv.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0),
@@ -158,15 +135,9 @@ pub fn handle_orders_escrow(
                         kv.get("duration").and_then(|v| v.as_i64()).unwrap_or(duration_days),
                     ),
                     PyRep::Dict(kv) => {
-                        let find_key = |k: &str| {
-                            kv.iter()
-                                .find(|(ek, _)| ek.as_str() == Some(k))
-                                .map(|(_, ev)| ev)
-                        };
+                        let find_key = |k: &str| kv.iter().find(|(ek, _)| ek.as_str() == Some(k)).map(|(_, ev)| ev);
                         (
-                            find_key("stationID")
-                                .and_then(|e| e.as_i64())
-                                .unwrap_or(docked_station_id),
+                            find_key("stationID").and_then(|e| e.as_i64()).unwrap_or(docked_station_id),
                             find_key("typeID").and_then(|e| e.as_i64()).unwrap_or(0),
                             find_key("itemID").and_then(|e| e.as_i64()).unwrap_or(0),
                             find_key("price").and_then(|e| e.as_f64()).unwrap_or(0.0),
@@ -174,56 +145,25 @@ pub fn handle_orders_escrow(
                             find_key("duration").and_then(|e| e.as_i64()).unwrap_or(duration_days),
                         )
                     }
-                    _ => {
-                        return Some(Err(BridgeRpcError {
-                            code: "InvalidMultiSellOrder".into(),
-                            message: "Each PlaceMultiSellOrder entry must be a KeyVal/dict with stationID, typeID, itemID, price, quantity".into(),
-                        }));
-                    }
+                    _ => return Some(Err(BridgeRpcError {
+                        code: "InvalidMultiSellOrder".into(),
+                        message: "Each PlaceMultiSellOrder entry must be a KeyVal/dict with stationID, typeID, itemID, price, quantity".into(),
+                    })),
                 };
                 if st_id != docked_station_id {
-                    return Some(Err(BridgeRpcError {
-                        code: "StationMismatch".into(),
-                        message: format!(
-                            "Cannot place sell order at station {st_id} while docked at {docked_station_id}"
-                        ),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "StationMismatch".into(), message: format!("Cannot place sell order at station {st_id} while docked at {docked_station_id}") }));
                 }
-                if raw_tid <= 0
-                    || !price_isk.is_finite()
-                    || price_isk <= 0.0
-                    || qty <= 0
-                    || qty > (i32::MAX as i64)
-                    || ![0, 1, 3, 7, 14, 30, 90].contains(&item_dur)
-                {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidMultiSellOrder".into(),
-                        message: "PlaceMultiSellOrder entry requires valid positive typeID, price, quantity, and duration".into(),
-                    }));
+                if raw_tid <= 0 || !price_isk.is_finite() || price_isk <= 0.0 || qty <= 0 || qty > (i32::MAX as i64) || ![0, 1, 3, 7, 14, 30, 90].contains(&item_dur) {
+                    return Some(Err(BridgeRpcError { code: "InvalidMultiSellOrder".into(), message: "PlaceMultiSellOrder entry requires valid positive typeID, price, quantity, and duration".into() }));
                 }
                 if !super::super::market_contracts::is_valid_4_sig_fig_price(price_isk) {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidPriceTickSize".into(),
-                        message: format!(
-                            "Sell order price {price_isk} violates EVE 4-significant-figure tick size rule"
-                        ),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "InvalidPriceTickSize".into(), message: format!("Sell order price {price_isk} violates EVE 4-significant-figure tick size rule") }));
                 }
                 let tid = raw_tid as TypeId;
                 if ctx.sde.types.get(&tid).and_then(|t| t.market_group_id).is_none() {
-                    return Some(Err(BridgeRpcError {
-                        code: "ItemNotMarketEligible".into(),
-                        message: format!("Type {tid} has no marketGroupID and cannot be sold on the market"),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "ItemNotMarketEligible".into(), message: format!("Type {tid} has no marketGroupID and cannot be sold on the market") }));
                 }
-                parsed_items.push((
-                    st_id,
-                    tid,
-                    item_id,
-                    IskCents::from_f64_isk(price_isk),
-                    qty as i32,
-                    item_dur,
-                ));
+                parsed_items.push((st_id, tid, item_id, IskCents::from_f64_isk(price_isk), qty as i32, item_dur));
             }
 
             let now_unix = ctx.now_unix();

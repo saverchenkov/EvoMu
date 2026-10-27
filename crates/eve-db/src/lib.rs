@@ -109,6 +109,8 @@ pub struct PersistedSpaceObjectMeta {
     pub bubble_radius_m: Option<f64>,
     #[serde(default)]
     pub drone_ball_id: Option<i64>,
+    #[serde(default)]
+    pub planet_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

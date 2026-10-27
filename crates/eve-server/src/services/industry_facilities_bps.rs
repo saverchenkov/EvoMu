@@ -52,7 +52,7 @@ pub struct IndustryJobCostMeta {
     pub consumed_materials: Vec<(TypeId, i32)>,
 }
 
-/// Checks whether an Upwell structure's industry/reaction service is online and fueled (`feat:industry.job-pause-on-service-offline`).
+/// Checks whether an Upwell structure's industry/reaction service is online and fueled (`feat:industry.job-pause-on-service-offline`, `feat:structures.service-industry`).
 pub fn is_structure_industry_service_online(
     snap: &eve_db::WorldStateSnapshot,
     facility_id: i64,
@@ -62,33 +62,29 @@ pub fn is_structure_industry_service_online(
     if st.state == "Destroyed" || !st.quantum_core_installed || st.fuel_blocks == 0 {
         return false;
     }
-    let service_modules: Vec<&eve_db::InventoryItemRecord> = snap
-        .items
-        .values()
-        .filter(|it| {
-            it.location_id == facility_id
-                && (164..=171).contains(&(it.flag as u16))
-                && match activity_id {
-                    1 => matches!(it.type_id, 35878 | 35881 | 35877),
-                    9 => matches!(it.type_id, 35882 | 35883 | 35884),
-                    _ => matches!(it.type_id, 35879 | 35880),
-                }
-        })
-        .collect();
-    service_modules.is_empty()
-        || service_modules
-            .iter()
-            .any(|m| m.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0)
+    snap.items.values().any(|it| {
+        it.location_id == facility_id
+            && (164..=171).contains(&(it.flag as u16))
+            && match activity_id {
+                1 => matches!(it.type_id, 35878 | 35881 | 35877),
+                3..=5 => matches!(it.type_id, 35891 | 45550 | 35879 | 35880),
+                8 => matches!(it.type_id, 35886 | 35879 | 35880),
+                9 | 11 => matches!(it.type_id, 45537..=45539 | 35882..=35884 | 35894..=35896),
+                _ => matches!(it.type_id, 35879 | 35880 | 35891 | 35886),
+            }
+            && snap.module_online_states.get(&it.item_id).copied().unwrap_or(true)
+            && it.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
+    })
 }
 
-/// Synchronizes active/paused industry jobs when a host structure loses or regains fuel/service (`feat:industry.job-pause-on-service-offline`).
+/// Synchronizes active/paused industry jobs when a host structure loses or regains fuel/service (`feat:industry.job-pause-on-service-offline`, `feat:lifecycle.industry-pause-and-many`).
 pub fn sync_industry_job_pause_states(snap: &mut eve_db::WorldStateSnapshot, now_unix: u64) {
     let job_ids: Vec<i64> = snap.industry_jobs.keys().copied().collect();
     for jid in job_ids {
-        let Some((facility_id, activity_id, status)) = snap
+        let Some((facility_id, activity_id, status, start_unix, duration_seconds)) = snap
             .industry_jobs
             .get(&jid)
-            .map(|j| (j.facility_id, j.activity_id, j.status.clone()))
+            .map(|j| (j.facility_id, j.activity_id, j.status.clone(), j.start_unix, j.duration_seconds))
         else {
             continue;
         };
@@ -97,17 +93,26 @@ pub fn sync_industry_job_pause_states(snap: &mut eve_db::WorldStateSnapshot, now
         }
         let online = is_structure_industry_service_online(snap, facility_id, activity_id);
         if !online && status == "Active" {
+            let ready_at = start_unix.saturating_add(duration_seconds);
+            let offline_opt = resolve_facility_offline_moment_opt(snap, facility_id);
+            if let Some(offline_moment) = offline_opt {
+                if ready_at <= offline_moment {
+                    continue;
+                }
+            }
+            let pause_ts = offline_opt.unwrap_or(now_unix).max(start_unix);
             if let Some(j_mut) = snap.industry_jobs.get_mut(&jid) {
                 j_mut.status = "Paused".into();
             }
             let mut meta = load_job_cost_meta(snap, jid).unwrap_or_default();
             if meta.paused_at_unix.is_none() {
-                meta.paused_at_unix = Some(now_unix);
+                meta.paused_at_unix = Some(pause_ts);
                 save_job_cost_meta(snap, jid, &meta);
             }
         } else if online && status == "Paused" {
             let mut meta = load_job_cost_meta(snap, jid).unwrap_or_default();
-            let paused_secs = now_unix.saturating_sub(meta.paused_at_unix.unwrap_or(now_unix));
+            let pause_start = meta.paused_at_unix.unwrap_or(now_unix);
+            let paused_secs = now_unix.saturating_sub(pause_start);
             if let Some(j_mut) = snap.industry_jobs.get_mut(&jid) {
                 j_mut.duration_seconds = j_mut.duration_seconds.saturating_add(paused_secs);
                 j_mut.status = "Active".into();
@@ -116,6 +121,13 @@ pub fn sync_industry_job_pause_states(snap: &mut eve_db::WorldStateSnapshot, now
             save_job_cost_meta(snap, jid, &meta);
         }
     }
+}
+
+pub fn resolve_facility_offline_moment_opt(snap: &eve_db::WorldStateSnapshot, facility_id: i64) -> Option<u64> {
+    crate::services::station_structure::structure_upwell_ops::load_ext_state(snap)
+        .lifecycle
+        .get(&facility_id)
+        .and_then(|l| l.low_power_since_unix)
 }
 
 /// Checks whether the Havoc Fulcrum pirate ship bonus applies (`feat:industry.fulcrum-pirate-ship-bonus`).

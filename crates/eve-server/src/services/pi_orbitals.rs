@@ -191,21 +191,25 @@ pub fn handle_pi_orbitals(
                         requested_resource_or_pin,
                     )?;
                 let mut net = load_pi_network(snap, char_id, planet_id, _cc_level);
-                let extractor_pins = net
-                    .pins
-                    .iter()
-                    .filter(|p| {
-                        p.type_id == 2848
-                            || p.type_id == 3060
-                            || ctx
-                                .sde
-                                .types
-                                .get(&p.type_id)
-                                .map(|t| t.group_id == 1026 || t.group_id == 1063)
-                                .unwrap_or(false)
-                    })
-                    .count()
-                    .max(1) as u32;
+                let is_ext_pin = |p: &PiPinState| {
+                    p.type_id == 2848
+                        || p.type_id == 3060
+                        || ctx
+                            .sde
+                            .types
+                            .get(&p.type_id)
+                            .map(|t| t.group_id == 1026 || t.group_id == 1063)
+                            .unwrap_or(false)
+                };
+                let total_ext = net.pins.iter().filter(|p| is_ext_pin(p)).count();
+                let extractor_pins = if total_ext > 0 {
+                    net.pins
+                        .iter()
+                        .filter(|p| is_ext_pin(p) && !p.expiry_time_unix.is_some_and(|exp| now_unix >= exp))
+                        .count() as u32
+                } else {
+                    1
+                };
                 let raw_produced_qty = p0_qty_per_pin.saturating_mul(u64::from(extractor_pins));
                 let ext_idx = net
                     .pins
@@ -495,6 +499,15 @@ pub fn handle_pi_orbitals(
             }
 
             let current_sys_id = session.solar_system_id;
+            let now_unix = ctx.now_unix();
+            let container_type_id: TypeId = ctx
+                .sde
+                .types
+                .values()
+                .find(|t| t.name.eq_ignore_ascii_case("Planetary Launch Container"))
+                .or_else(|| ctx.sde.types.values().find(|t| t.name.contains("Planetary Launch")))
+                .map(|t| t.type_id)
+                .unwrap_or(27_912);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)).cloned() else {
                     return Err(BridgeRpcError {
@@ -590,7 +603,7 @@ pub fn handle_pi_orbitals(
                     *net.pins[target_idx].contents.entry(type_id).or_insert(0) += qty;
                     save_pi_network(snap, char_id, planet_id, &net);
 
-                    return Ok((qty, import_tax_isk, import_tax_isk, orbital_tid));
+                    return Ok((qty, import_tax_isk, import_tax_isk, orbital_tid, 0_i64, col.solar_system_id, [0.0; 3]));
                 }
 
                 let cc_lvl = col.command_center_level;
@@ -668,6 +681,8 @@ pub fn handle_pi_orbitals(
                         }
                     }
                 }
+                let mut created_launch_id = 0_i64;
+                let mut launch_pos = [0.0_f64; 3];
                 if matches!(
                     destination,
                     "Hangar" | "CustomsOffice" | "Skyhook" | "CommandCenterLaunch" | "CommandCenter"
@@ -680,30 +695,123 @@ pub fn handle_pi_orbitals(
                         }
                     }
                     save_pi_network(snap, char_id, planet_id, &net);
-                    let delivery_loc = col.planet_id;
-                    snap.next_entity_id += 1;
-                    let nid = snap.next_entity_id;
-                    snap.items.insert(
-                        nid,
-                        InventoryItemRecord {
-                            item_id: nid,
-                            type_id,
-                            owner_id: char_id,
-                            location_id: delivery_loc,
-                            flag: InventoryFlag::Hangar,
-                            quantity: qty as i32,
-                            singleton: false,
-                            version: 1,
-                            ..Default::default()
-                        },
-                    );
+                    if destination == "Hangar" {
+                        snap.next_entity_id += 1;
+                        let nid = snap.next_entity_id;
+                        created_launch_id = nid;
+                        snap.items.insert(
+                            nid,
+                            InventoryItemRecord {
+                                item_id: nid,
+                                type_id,
+                                owner_id: char_id,
+                                location_id: col.planet_id,
+                                flag: InventoryFlag::Hangar,
+                                quantity: i32::try_from(qty).unwrap_or(i32::MAX),
+                                singleton: false,
+                                version: 1,
+                                ..Default::default()
+                            },
+                        );
+                    } else {
+                        launch_pos = ctx
+                            .sde
+                            .celestials_in_system(col.solar_system_id)
+                            .into_iter()
+                            .find(|c| c.celestial_id == col.planet_id)
+                            .map(|c| {
+                                let offset = c.radius.max(1_000_000.0) + 150_000.0;
+                                [
+                                    c.position.x + offset,
+                                    c.position.y + 25_000.0,
+                                    c.position.z - 15_000.0,
+                                ]
+                            })
+                            .unwrap_or([1.5e10, 2.5e8, -1.5e8]);
+                        snap.next_entity_id += 1;
+                        let canister_id = snap.next_entity_id;
+                        created_launch_id = canister_id;
+                        snap.items.insert(
+                            canister_id,
+                            InventoryItemRecord {
+                                item_id: canister_id,
+                                type_id: container_type_id,
+                                owner_id: char_id,
+                                location_id: col.solar_system_id as i64,
+                                flag: InventoryFlag::None,
+                                quantity: 1,
+                                singleton: true,
+                                version: 1,
+                                ..Default::default()
+                            },
+                        );
+                        snap.next_entity_id += 1;
+                        let commodity_item_id = snap.next_entity_id;
+                        snap.items.insert(
+                            commodity_item_id,
+                            InventoryItemRecord {
+                                item_id: commodity_item_id,
+                                type_id,
+                                owner_id: char_id,
+                                location_id: canister_id,
+                                flag: InventoryFlag::Hangar,
+                                quantity: i32::try_from(qty).unwrap_or(i32::MAX),
+                                singleton: false,
+                                version: 1,
+                                ..Default::default()
+                            },
+                        );
+                        snap.item_positions.insert(canister_id, launch_pos);
+                        let meta = snap
+                            .sp6_lifecycle
+                            .space_object_meta
+                            .entry(canister_id)
+                            .or_default();
+                        meta.created_unix = Some(now_unix);
+                        meta.planet_id = Some(col.planet_id);
+                    }
                 }
-                Ok((qty, export_tax_isk, 0.0, orbital_tid))
+                Ok((qty, export_tax_isk, 0.0, orbital_tid, created_launch_id, col.solar_system_id, launch_pos))
             });
 
             match res {
-                Ok((routed, export_tax_isk, import_tax_isk, orbital_tid)) => {
+                Ok((routed, export_tax_isk, import_tax_isk, orbital_tid, created_launch_id, col_sys_id, launch_pos)) => {
+                    if created_launch_id > 0 && destination != "Hangar" {
+                        let sys_handle = ctx.systems.get_or_spawn(col_sys_id);
+                        let (group_id, category_id, radius, mass) = ctx
+                            .sde
+                            .types
+                            .get(&container_type_id)
+                            .map(|t| (t.group_id, t.category_id, t.radius.max(20.0), t.mass.max(1_000.0)))
+                            .unwrap_or((12, 2, 25.0, 1_000.0));
+                        sys_handle.try_spawn_ball_with_meta(
+                            eve_destiny::Ball {
+                                id: created_launch_id,
+                                type_id: container_type_id,
+                                position: glam::DVec3::from_array(launch_pos),
+                                velocity: glam::DVec3::ZERO,
+                                max_velocity: 0.0,
+                                inertia: 1.0,
+                                mass,
+                                radius,
+                                speed_fraction: 0.0,
+                                mode: eve_destiny::MovementMode::Stop,
+                            },
+                            eve_destiny::CombatState::default(),
+                            eve_destiny::SlimItemMeta {
+                                group_id,
+                                category_id,
+                                owner_id: char_id,
+                                char_id: None,
+                                corp_id: -1,
+                                alliance_id: -1,
+                                security_status: 0.0,
+                                is_cloaked: false,
+                            },
+                        );
+                    }
                     Some(Ok(PyRep::keyval([
+                        ("launchID", PyRep::Integer(created_launch_id)),
                         ("planetID", PyRep::Integer(planet_id)),
                         ("orbitalTypeID", PyRep::Integer(orbital_tid as i64)),
                         ("commodityTypeID", PyRep::Integer(type_id as i64)),
@@ -728,35 +836,65 @@ pub fn handle_pi_orbitals(
                     .and_then(|a| a.as_i64())
                     .filter(|&id| (40_000_000..50_000_000).contains(&id))
             });
+            let session_sys_id = session.solar_system_id.map(i64::from).unwrap_or(0);
             let launches = ctx.db.with_snapshot(|snap| {
                 snap.items
                     .values()
-                    .filter(|it| {
-                        it.owner_id == char_id
-                            && (40_000_000..50_000_000).contains(&it.location_id)
-                            && filter_planet.is_none_or(|p| it.location_id == p)
-                    })
-                    .map(|it| {
-                        let sys_id = ctx
-                            .sde
-                            .solar_systems
+                    .filter_map(|it| {
+                        if it.owner_id != char_id {
+                            return None;
+                        }
+                        let meta = snap.sp6_lifecycle.space_object_meta.get(&it.item_id);
+                        let launch_planet = meta
+                            .and_then(|m| m.planet_id)
+                            .or_else(|| (40_000_000..50_000_000).contains(&it.location_id).then_some(it.location_id))?;
+                        if filter_planet.is_some_and(|p| launch_planet != p) {
+                            return None;
+                        }
+                        let sys_id = if (30_000_000..=34_000_000).contains(&it.location_id) {
+                            it.location_id
+                        } else {
+                            snap.planetary_colonies
+                                .get(&(char_id, launch_planet))
+                                .map(|c| c.solar_system_id as i64)
+                                .or_else(|| {
+                                    ctx.sde
+                                        .solar_systems
+                                        .values()
+                                        .find(|s| s.planet_ids.contains(&launch_planet))
+                                        .map(|s| s.solar_system_id as i64)
+                                })
+                                .unwrap_or(session_sys_id)
+                        };
+                        let launch_ts = meta
+                            .and_then(|m| m.created_unix)
+                            .map(|t| t as i64)
+                            .unwrap_or(now_unix as i64);
+                        let (comm_tid, comm_qty) = snap
+                            .items
                             .values()
-                            .find(|s| s.planet_ids.contains(&it.location_id))
-                            .map(|s| s.solar_system_id as i64)
-                            .unwrap_or(30000142);
-                        PyRep::keyval([
+                            .find(|c| c.location_id == it.item_id)
+                            .map(|c| (c.type_id, c.quantity))
+                            .unwrap_or((it.type_id, it.quantity));
+                        let pos = snap
+                            .item_positions
+                            .get(&it.item_id)
+                            .copied()
+                            .unwrap_or([0.0, 0.0, 0.0]);
+                        Some(PyRep::keyval([
                             ("launchID", PyRep::Integer(it.item_id)),
                             ("itemID", PyRep::Integer(it.item_id)),
-                            ("planetID", PyRep::Integer(it.location_id)),
+                            ("containerTypeID", PyRep::Integer(it.type_id as i64)),
+                            ("planetID", PyRep::Integer(launch_planet)),
                             ("solarSystemID", PyRep::Integer(sys_id)),
-                            ("typeID", PyRep::Integer(it.type_id as i64)),
-                            ("quantity", PyRep::Integer(it.quantity as i64)),
+                            ("typeID", PyRep::Integer(comm_tid as i64)),
+                            ("quantity", PyRep::Integer(comm_qty as i64)),
                             ("status", PyRep::Integer(1)),
-                            ("launchTime", PyRep::Integer(now_unix as i64)),
-                            ("x", PyRep::Real(0.0)),
-                            ("y", PyRep::Real(0.0)),
-                            ("z", PyRep::Real(0.0)),
-                        ])
+                            ("launchTime", PyRep::Integer(launch_ts)),
+                            ("x", PyRep::Real(pos[0])),
+                            ("y", PyRep::Real(pos[1])),
+                            ("z", PyRep::Real(pos[2])),
+                        ]))
                     })
                     .collect::<Vec<_>>()
             });
@@ -787,24 +925,44 @@ pub fn handle_pi_orbitals(
                         message: format!("Launch item {launch_id} does not belong to character {char_id}"),
                     });
                 }
-                if !(40_000_000..50_000_000).contains(&it.location_id) {
+                let launch_planet_opt = snap
+                    .sp6_lifecycle
+                    .space_object_meta
+                    .get(&launch_id)
+                    .and_then(|m| m.planet_id)
+                    .or_else(|| (40_000_000..50_000_000).contains(&it.location_id).then_some(it.location_id));
+                let Some(launch_planet) = launch_planet_opt else {
                     return Err(BridgeRpcError {
                         code: "InvalidLaunchID".into(),
                         message: format!("Item {launch_id} is not a planetary launch container (location_id: {})", it.location_id),
                     });
-                }
+                };
                 if let Some(bp) = bound_planet {
-                    if it.location_id != bp {
+                    if launch_planet != bp {
                         return Err(BridgeRpcError {
                             code: "LaunchNotFound".into(),
-                            message: format!("Launch item {launch_id} is on planet {}, not bound planet {bp}", it.location_id),
+                            message: format!("Launch item {launch_id} is on planet {launch_planet}, not bound planet {bp}"),
                         });
                     }
                 }
+                let sys_id_opt = (30_000_000..=34_000_000)
+                    .contains(&it.location_id)
+                    .then_some(it.location_id as u32);
                 snap.items.remove(&launch_id);
-                Ok(PyRep::Bool(true))
+                snap.item_positions.remove(&launch_id);
+                snap.sp6_lifecycle.space_object_meta.remove(&launch_id);
+                snap.items.retain(|_, child| child.location_id != launch_id);
+                Ok(sys_id_opt)
             });
-            Some(res)
+            match res {
+                Ok(sys_id_opt) => {
+                    if let Some(sys_id) = sys_id_opt {
+                        ctx.systems.get_or_spawn(sys_id).try_remove_ball(launch_id);
+                    }
+                    Some(Ok(PyRep::Bool(true)))
+                }
+                Err(e) => Some(Err(e)),
+            }
         }
 
         ("planetMgr", "CancelInstallProgram") => {

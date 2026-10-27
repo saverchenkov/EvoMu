@@ -294,21 +294,22 @@ pub(super) fn handle_mail_and_calendar(
             }
 
             let now_unix = ctx.now_unix();
-            let primary_recipient = recipient_ids[0];
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let char_mail_count = snap
-                    .mails
-                    .iter()
-                    .filter(|m| {
-                        (m.recipient_id == primary_recipient || m.sender_id == char_id)
-                            && !snap.deleted_mails.contains(&(primary_recipient, m.message_id))
-                    })
-                    .count();
-                if char_mail_count >= 1_000 || snap.mails.len() >= 3_000 {
-                    return Err(BridgeRpcError {
-                        code: "MailQuotaExceeded".into(),
-                        message: "Mailbox limit reached".into(),
-                    });
+                for &rec_id in &recipient_ids {
+                    let char_mail_count = snap
+                        .mails
+                        .iter()
+                        .filter(|m| {
+                            m.recipient_id == rec_id
+                                && !snap.deleted_mails.contains(&(rec_id, m.message_id))
+                        })
+                        .count();
+                    if char_mail_count >= 1_000 {
+                        return Err(BridgeRpcError {
+                            code: "MailQuotaExceeded".into(),
+                            message: "Mailbox limit reached".into(),
+                        });
+                    }
                 }
                     let sender_ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
                         code: "CharacterNotFound".into(),

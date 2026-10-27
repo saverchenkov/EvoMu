@@ -71,6 +71,10 @@ pub struct PiColonyNetworkState {
     pub pg_max: f64,
     #[serde(default)]
     pub last_simulated_unix: u64,
+    #[serde(default)]
+    pub pending_login_extracted: u64,
+    #[serde(default)]
+    pub pending_login_processed: u64,
 }
 
 pub fn cc_level_info(level: u8) -> (f64, f64, f64) {
@@ -501,28 +505,31 @@ pub fn queue_pi_notification(
         marshaled_packet,
         created_filetime: now_ft,
     };
+    let notif_id = -(7_900_000_000_000 + (type_id as i64) * 100_000_000 + ((pin_id.abs() ^ (now_unix as i64)) & 0x03FF_FFFF));
+    let data_str = format!("{event}:{planet_id}:{pin_id}");
+    if let Ok(mut recs) = ctx.notification_records.write() {
+        if recs.iter().any(|r| r.receiver_id == recipient_char_id && r.notification_id == notif_id && !r.deleted) {
+            return;
+        }
+        recs.push(crate::router::cache_notifications::NotificationRecord {
+            notification_id: notif_id,
+            type_id,
+            group_id: 1,
+            sender_id: recipient_char_id,
+            receiver_id: recipient_char_id,
+            processed: false,
+            created: now_unix as i64,
+            data: data_str,
+            deleted: false,
+            interacted: false,
+        });
+    }
     if let Ok(mut queues) = ctx.pending_notifications.write() {
         let q = queues.entry(recipient_char_id).or_default();
         if q.len() >= crate::router::cache_notifications::MAX_PENDING_NOTIFICATIONS_PER_CHAR {
             q.remove(0);
         }
         q.push(notif);
-    }
-
-    let rec = crate::router::cache_notifications::NotificationRecord {
-        notification_id: -(7_900_000_000_000 + (type_id as i64) * 1_000_000 + pin_id.abs()),
-        type_id,
-        group_id: 1,
-        sender_id: recipient_char_id,
-        receiver_id: recipient_char_id,
-        processed: false,
-        created: now_unix as i64,
-        data: format!("{event}:{planet_id}:{pin_id}"),
-        deleted: false,
-        interacted: false,
-    };
-    if let Ok(mut recs) = ctx.notification_records.write() {
-        recs.push(rec);
     }
 }
 
@@ -544,13 +551,31 @@ pub fn advance_colony_simulation(
     let mut processed_total = 0_u64;
 
     let mut extracted_batches: Vec<(i64, TypeId, u64, f64)> = Vec::new();
+    let sim_start = now_unix.saturating_sub(elapsed_sec);
     for pin in &net.pins {
         let is_ext = pin.type_id == 2848
             || pin.type_id == 3060
             || ctx.sde.types.get(&pin.type_id).map(|t| t.group_id == 1026 || t.group_id == 1063).unwrap_or(false);
         if is_ext && pin.extractor_cycle_seconds > 0 && pin.extractor_head_count > 0 {
             let cyc_secs = pin.extractor_cycle_seconds.max(60);
-            let cycles = (elapsed_sec / cyc_secs).min(200);
+            let install_ts = if pin.program_install_unix > 0 {
+                pin.program_install_unix.min(sim_start)
+            } else {
+                sim_start
+            };
+            let expiry = pin
+                .expiry_time_unix
+                .unwrap_or_else(|| install_ts.saturating_add(86_400));
+            if expiry == 0 || sim_start >= expiry {
+                continue;
+            }
+            let effective_end = now_unix.min(expiry);
+            let prev_completed = sim_start.saturating_sub(install_ts) / cyc_secs;
+            let total_completed = effective_end.saturating_sub(install_ts) / cyc_secs;
+            let cycles = total_completed.saturating_sub(prev_completed).min(200);
+            if cycles == 0 {
+                continue;
+            }
             let p0_tid = pin.extractor_resource_type_id.unwrap_or(default_p0);
             let heads = u64::from(pin.extractor_head_count.clamp(1, 10));
             let overlap = extractor_overlap_factor(&pin.extractor_heads, pin.extractor_head_radius.max(0.02));
@@ -567,7 +592,7 @@ pub fn advance_colony_simulation(
                 .unwrap_or(pin.pin_id);
             let p0_vol_per_unit = ctx.sde.types.get(&p0_tid).map(|t| t.volume.max(0.01)).unwrap_or(0.38);
             for c in 0..cycles {
-                let decay = (-0.015 * (c as f64)).exp();
+                let decay = (-0.015 * ((prev_completed + c) as f64)).exp();
                 let batch = ((1_000.0 * (heads as f64) * overlap * decay).round() as u64).max(10);
                 extracted_batches.push((target_pin_id, p0_tid, batch, p0_vol_per_unit));
             }
@@ -709,19 +734,14 @@ pub fn advance_colony_simulation(
         let is_ext = pin.type_id == 2848
             || pin.type_id == 3060
             || ctx.sde.types.get(&pin.type_id).map(|t| t.group_id == 1026 || t.group_id == 1063).unwrap_or(false);
-        if is_ext && (pin.program_install_unix > 0 || pin.expiry_time_unix.is_some()) {
-            let is_expired = if let Some(exp) = pin.expiry_time_unix {
-                exp > 0 && now_unix >= exp
-            } else if pin.program_install_unix > 0 {
-                now_unix >= pin.program_install_unix.saturating_add(86_400)
-            } else {
-                false
-            };
-            if is_expired {
-                finished_extractors.push(pin.pin_id);
-                pin.program_install_unix = 0;
-                pin.expiry_time_unix = None;
-            }
+        let effective_exp = pin.expiry_time_unix.or_else(|| {
+            (pin.program_install_unix > 0 && pin.extractor_cycle_seconds > 0)
+                .then(|| pin.program_install_unix.saturating_add(86_400))
+        });
+        if is_ext && effective_exp.is_some_and(|exp| exp > 0 && now_unix >= exp) {
+            finished_extractors.push(pin.pin_id);
+            pin.program_install_unix = 0;
+            pin.expiry_time_unix = Some(0);
         }
     }
 
@@ -751,6 +771,38 @@ pub fn advance_colony_simulation(
     net.last_simulated_unix = now_unix;
     col.last_extracted_unix = now_unix;
     (extracted_total, processed_total)
+}
+
+pub fn sync_character_pi_colonies_on_login(ctx: &ServerContext, char_id: i64) {
+    let now_unix = ctx.now_unix();
+    let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+        let keys: Vec<(i64, i64)> = snap
+            .planetary_colonies
+            .keys()
+            .filter(|&&(cid, _)| cid == char_id)
+            .copied()
+            .collect();
+        for (cid, pid) in keys {
+            let Some(mut col) = snap.planetary_colonies.get(&(cid, pid)).cloned() else {
+                continue;
+            };
+            let mut net = load_pi_network(snap, cid, pid, col.command_center_level);
+            let baseline = if col.last_extracted_unix > 0 {
+                col.last_extracted_unix
+            } else {
+                net.last_simulated_unix
+            };
+            if baseline > 0 && now_unix > baseline {
+                let elapsed = now_unix.saturating_sub(baseline);
+                let (ext, proc_qty) = advance_colony_simulation(ctx, &mut col, &mut net, elapsed, now_unix);
+                net.pending_login_extracted = net.pending_login_extracted.saturating_add(ext);
+                net.pending_login_processed = net.pending_login_processed.saturating_add(proc_qty);
+                snap.planetary_colonies.insert((cid, pid), col);
+                save_pi_network(snap, cid, pid, &net);
+            }
+        }
+        Ok(())
+    });
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1002,6 +1054,12 @@ pub fn consume_pi_import_commodities(
                         | eve_db::InventoryFlag::SpecializedPlanetaryCommoditiesHold
                 );
             let in_customs_or_hangar = (it.location_id == planet_id
+                || snap
+                    .sp6_lifecycle
+                    .space_object_meta
+                    .get(&it.location_id)
+                    .and_then(|m| m.planet_id)
+                    == Some(planet_id)
                 || station_id_opt.is_some_and(|sid| it.location_id == sid)
                 || structure_id_opt.is_some_and(|sid| it.location_id == sid))
                 && it.flag == eve_db::InventoryFlag::Hangar;
