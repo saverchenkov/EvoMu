@@ -28,8 +28,9 @@ pub use cluster_tick_downtime::{
     cleanup_npc_wrecks_and_reset_missions_on_downtime, spawn_mission_wave_on_pocket_entry_if_needed,
 };
 pub use drone_return::{
-    abandon_drones_and_fighters_for_ship_sync, disconnect_drones_for_ship_on_warp_sync,
-    handle_cmd_return_bay, step_repeating_drone_mining, step_returning_drones,
+    abandon_drones_and_fighters_for_ship_sync, abandon_drones_on_warp_sync,
+    disconnect_drones_for_ship_on_warp_sync, handle_cmd_return_bay, step_repeating_drone_mining,
+    step_returning_drones,
 };
 
 use crate::router::{NotificationTarget, ServerContext};
@@ -1188,7 +1189,7 @@ pub async fn handle_cmd_reconnect_to_drones(
     let mut reconnected = Vec::new();
     let mut errors: HashMap<String, Vec<i64>> = HashMap::new();
 
-    for (bid, _did, bw, tid) in candidates {
+    for (bid, did, bw, tid) in candidates {
         let drone_pos = sys_handle
             .get_ball_snapshot(bid)
             .await
@@ -1219,12 +1220,24 @@ pub async fn handle_cmd_reconnect_to_drones(
                 d.target_id = None;
                 cur_count += 1;
                 cur_bw += bw;
-                reconnected.push((bid, tid));
+                reconnected.push((bid, did, tid));
             }
         });
     }
 
-    for &(bid, tid) in &reconnected {
+    if !reconnected.is_empty() {
+        let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
+            for &(_, did, _) in &reconnected {
+                if let Some(it) = snap.items.get_mut(&did) {
+                    it.owner_id = char_id;
+                    it.version += 1;
+                }
+            }
+            Ok(())
+        });
+    }
+
+    for &(bid, _, tid) in &reconnected {
         let _ = sys_handle
             .emit_destiny_event(
                 bid,

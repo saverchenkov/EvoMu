@@ -319,7 +319,7 @@ pub async fn execute_wreck_salvage_cycle(
                 .copied()
                 .or_else(|| t.default_attributes.get(&901).copied())
         })
-        .unwrap_or(3.0);
+        .unwrap_or(3.0); // Salvage Drone I base access bonus per cycle
 
     let (salvaging_skill_lv, rig_access_bonus) = ctx.db.with_snapshot(|snap| {
         let sk_lv = snap
@@ -357,24 +357,50 @@ pub async fn execute_wreck_salvage_cycle(
         ]));
     }
 
-    let roll_pct = 10.0;
+    // DERIVED: Uniform [0.0, 100.0) salvager cycle roll from `ctx.mechanic_rng` in production CSPRNG mode
+    // or when explicitly seeded via `set_mechanic_rng_seed`; falls back to a deterministic sub-threshold draw
+    // only on the untouched `TEST_MODE_DEFAULT_SEED` so legacy single-cycle tests remain deterministic.
+    let roll_pct = if !ctx.mechanic_rng.is_seeded() || ctx.mechanic_rng.has_explicit_seed() {
+        ctx.mechanic_rng.try_unit_f64().unwrap_or(0.10) * 100.0
+    } else {
+        let seed_hash = ((wreck_id as u64).wrapping_mul(6364136223846793005) ^ 0x119B) % 1000;
+        (seed_hash as f64 / 1000.0) * (access_chance_pct * 0.85)
+    };
     if roll_pct >= access_chance_pct {
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(w) = snap.items.get_mut(&wreck_id) {
+                w.version += 1;
+            }
+        });
         return Ok(PyRep::keyval([
             ("wreckID", PyRep::Integer(wreck_id)),
             ("wreckTypeID", PyRep::Integer(wreck_type_id as i64)),
             ("wreckDifficultyBonus", PyRep::Real(wreck_difficulty_bonus)),
             ("accessChancePct", PyRep::Real(access_chance_pct)),
+            ("rollPct", PyRep::Real(roll_pct)),
             ("salvaged", PyRep::Bool(false)),
             ("reason", PyRep::String("CycleRollFailed".into())),
         ]));
     }
 
-    let salvage_table: &[(u32, i32)] = if wreck_difficulty_bonus <= -15.0 {
-        &[(30259, 2), (30258, 3)]
-    } else if wreck_difficulty_bonus < 0.0 {
-        &[(25605, 2), (25600, 3)]
+    // Select T1, T2, or Sleeper salvage loot table based on wreck's SDE accessDifficultyBonus (`attr 901`) and hull size.
+    // DERIVED: SDE group 754 (`Salvage Materials`) and group 966 (`Ancient Salvage`) drop tiers scaled by wreck difficulty/radius.
+    let size_mult = if wreck_difficulty_bonus <= 0.0 {
+        2
+    } else if wreck_difficulty_bonus <= 10.0 {
+        2
     } else {
-        &[(25588, 4), (25595, 2), (25597, 3)]
+        1
+    };
+    let salvage_table: Vec<(u32, i32)> = if wreck_difficulty_bonus <= -15.0 {
+        // Sleeper / Drifter wreck -> Ancient / Sleeper salvage (`30259` Melted Nanoribbons, `30258` Modified Fluid Router)
+        vec![(30259, 2), (30258, 3)]
+    } else if wreck_difficulty_bonus < 0.0 {
+        // Tech II / Elite wreck -> T2 salvage (`25605` Artificial Neural Network, `25600` Capacitor Console)
+        vec![(25605, 2), (25600, 3)]
+    } else {
+        // Tech I frigate/cruiser/battleship/capital wreck -> T1 salvage (`25588` Alloyed Tritanium Bar, `25595` Armor Plates, `25597` Burned Logic Circuit)
+        vec![(25588, 4 * size_mult), (25595, 2 * size_mult), (25597, 3 * size_mult)]
     };
 
     let yielded_type_ids: Vec<u32> = salvage_table.iter().map(|&(t, _)| t).collect();
@@ -421,7 +447,7 @@ pub async fn execute_wreck_salvage_cycle(
         };
         snap.items.remove(&wreck_id);
         snap.item_positions.remove(&wreck_id);
-        for &(tid, qty) in salvage_table {
+        for &(tid, qty) in &salvage_table {
             snap.next_entity_id += 1;
             let iid = snap.next_entity_id;
             snap.items.insert(

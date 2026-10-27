@@ -541,15 +541,8 @@ impl SystemRegistry {
                             }
                             SystemCommand::SetMovementMode { ball_id, mode, reply } => {
                                 if ballpark.balls.contains_key(&ball_id) {
-                                    let is_stop = matches!(mode, eve_destiny::MovementMode::Stop);
                                     match ballpark.set_mode(ball_id, mode) {
                                         Ok(()) => {
-                                            if is_stop {
-                                                if let Some(b) = ballpark.balls.get_mut(&ball_id) {
-                                                    b.speed_fraction = 0.0;
-                                                    b.velocity = DVec3::ZERO;
-                                                }
-                                            }
                                             let _ = reply.send(Ok(ballpark.current_tick));
                                         }
                                         Err(e) => {

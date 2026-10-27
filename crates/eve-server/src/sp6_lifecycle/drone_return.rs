@@ -300,70 +300,98 @@ pub fn disconnect_drones_for_ship_on_warp_sync(
     }
 }
 
-/// Abandons all active in-space drones and fighters controlled by `char_id` or `ship_id` (`feat:lifecycle.drones-leave-grid-abandon`, `feat:lifecycle.fighters-left-in-space`).
-pub fn abandon_drones_and_fighters_for_ship_sync(
+/// Abandons active in-space drones (in `sys_id` only) when the controlling ship warps (`feat:lifecycle.drones-leave-grid-abandon`).
+/// Keeps carrier fighter squadrons under control and preserves DB item `owner_id` so `CmdReconnectToDrones` works seamlessly.
+pub fn abandon_drones_on_warp_sync(
     ctx: &ServerContext,
     char_id: i64,
     ship_id: i64,
     sys_id: u32,
 ) {
     let mut abandoned_balls = Vec::new();
-    let mut abandoned_drone_items = Vec::new();
     with_mut_combat_runtime(ctx, |rt| {
         for d in rt.active_drones_in_space.values_mut() {
-            if (d.owner_char_id == char_id || d.parent_ship_id == ship_id) && !d.is_abandoned {
+            if d.solar_system_id == sys_id
+                && (d.owner_char_id == char_id || d.parent_ship_id == ship_id)
+                && !d.is_abandoned
+            {
                 d.is_abandoned = true;
                 d.owner_char_id = 0;
                 d.parent_ship_id = 0;
                 d.target_id = None;
                 d.activity_state = 0;
                 abandoned_balls.push(d.ball_id);
-                abandoned_drone_items.push(d.drone_item_id);
                 rt.active_drone_miners.remove(&d.ball_id);
             }
         }
     });
-    for &bid in &abandoned_balls {
-        ctx.notify(
-            NotificationTarget::Character(char_id),
-            "OnDroneControlLost",
-            "charid",
-            vec![PyRep::Integer(bid)],
-        );
+    if !abandoned_balls.is_empty() {
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        for &bid in &abandoned_balls {
+            sys_handle.try_stop_ball(bid);
+            ctx.notify(
+                NotificationTarget::Character(char_id),
+                "OnDroneControlLost",
+                "charid",
+                vec![PyRep::Integer(bid)],
+            );
+        }
     }
-    let mut abandoned_fighter_items = Vec::new();
-    let mut abandoned_fighter_balls = Vec::new();
+}
+
+/// Abandons all active in-space drones and fighters in `sys_id` controlled by `char_id` or `ship_id`
+/// on dock, stargate/wormhole/cyno jump, logoff, or death (`feat:lifecycle.drones-leave-grid-abandon`, `feat:lifecycle.fighters-left-in-space`).
+pub fn abandon_drones_and_fighters_for_ship_sync(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+) {
+    abandon_drones_on_warp_sync(ctx, char_id, ship_id, sys_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let mut abandoned_fighters = Vec::new();
     if let Ok(mut fighters) = ctx.active_fighters.write() {
         for f in fighters.values_mut() {
-            if (f.owner_char_id == char_id || f.parent_ship_id == ship_id) && !f.is_abandoned {
+            let in_sys = sys_handle.get_ball_position_sync(f.ball_id).is_some()
+                || ctx.db.with_snapshot(|snap| {
+                    snap.items
+                        .get(&f.item_id)
+                        .is_some_and(|it| it.location_id == sys_id as i64 || it.location_id == ship_id)
+                });
+            if in_sys && (f.owner_char_id == char_id || f.parent_ship_id == ship_id) && !f.is_abandoned {
                 f.is_abandoned = true;
                 f.parent_ship_id = 0;
                 f.target_id = None;
-                abandoned_fighter_items.push(f.item_id);
-                abandoned_fighter_balls.push(f.ball_id);
+                abandoned_fighters.push((f.item_id, f.ball_id, f.tube_index));
             }
         }
     }
-    if !abandoned_balls.is_empty() || !abandoned_fighter_balls.is_empty() {
-        let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        for &bid in abandoned_balls.iter().chain(abandoned_fighter_balls.iter()) {
+    if !abandoned_fighters.is_empty() {
+        if let Ok(mut loads) = ctx.fighter_tube_loads.write() {
+            for &(_, _, tidx) in &abandoned_fighters {
+                loads.remove(&(ship_id, tidx));
+            }
+        }
+        let mut pos_updates = Vec::new();
+        for &(iid, bid, _) in &abandoned_fighters {
             sys_handle.try_stop_ball(bid);
-        }
-    }
-    if !abandoned_drone_items.is_empty() || !abandoned_fighter_items.is_empty() {
-        let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
-            for iid in abandoned_drone_items {
-                if let Some(it) = snap.items.get_mut(&iid) {
-                    it.owner_id = 0;
-                    it.version += 1;
-                }
+            if let Some(pos) = sys_handle.get_ball_position_sync(bid) {
+                pos_updates.push((iid, bid, [pos.x, pos.y, pos.z]));
             }
-            for iid in abandoned_fighter_items {
+        }
+        let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
+            for &(iid, bid, _) in &abandoned_fighters {
                 if let Some(it) = snap.items.get_mut(&iid) {
                     it.location_id = sys_id as i64;
                     it.flag = eve_db::InventoryFlag::None;
                     it.version += 1;
                 }
+                super::record_drone_ball_meta_in_snap(snap, iid, bid);
+            }
+            for (iid, bid, pos_arr) in pos_updates {
+                snap.item_positions.insert(iid, pos_arr);
+                snap.item_positions.insert(bid, pos_arr);
             }
             Ok(())
         });

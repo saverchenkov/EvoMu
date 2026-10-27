@@ -256,13 +256,12 @@ pub fn check_crimewatch_action_restriction(
 
     if has_weapon_timer {
         // Cosmic wormhole jumping IS allowed under a weapons/PvP timer (unless criminal in high-sec above)
-        if action == "wormhole_jump" {
+        if matches!(action, "wormhole_jump" | "wh_jump") {
             return Ok(());
         }
         if matches!(
             action,
             "stargate_jump"
-                | "wh_jump"
                 | "jump_drive"
                 | "jump_bridge"
                 | "jump_portal"

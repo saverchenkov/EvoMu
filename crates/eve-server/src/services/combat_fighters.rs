@@ -1084,24 +1084,20 @@ async fn handle_scoop_abandoned_fighter(
         squad
     };
 
+    let in_caller_sys = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .get(&squad.item_id)
+            .is_some_and(|it| it.location_id == sys_id as i64)
+    });
+    if !in_caller_sys {
+        return Some(Err(BridgeRpcError {
+            code: "FighterNotInSystem".into(),
+            message: format!("Fighter squadron {} is not in solar system {sys_id}", squad.ball_id),
+        }));
+    }
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let f_pos = sys_handle.get_ball_position_sync(squad.ball_id).or_else(|| {
-        ctx.db.with_snapshot(|snap| {
-            snap.item_positions
-                .get(&squad.ball_id)
-                .or_else(|| snap.item_positions.get(&squad.item_id))
-                .copied()
-                .map(DVec3::from_array)
-        })
-    });
-    let s_pos = sys_handle.get_ball_position_sync(ship_id).or_else(|| {
-        ctx.db.with_snapshot(|snap| {
-            snap.item_positions
-                .get(&ship_id)
-                .copied()
-                .map(DVec3::from_array)
-        })
-    });
+    let f_pos = sys_handle.get_ball_position_sync(squad.ball_id);
+    let s_pos = sys_handle.get_ball_position_sync(ship_id);
     let Some(f_pos) = f_pos else {
         return Some(Err(BridgeRpcError {
             code: "FighterNotInSystem".into(),

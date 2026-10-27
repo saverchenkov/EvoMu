@@ -66,12 +66,6 @@ impl SystemHandle {
                 b.velocity = DVec3::ZERO;
             }
         }
-        let (tx, _) = oneshot::channel();
-        let _ = self.cmd_tx.try_send(SystemCommand::SetMovementMode {
-            ball_id,
-            mode: MovementMode::Stop,
-            reply: tx,
-        });
     }
 
     pub async fn spawn_ball(&self, ball: Ball) -> Result<u64, String> {

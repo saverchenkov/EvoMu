@@ -444,14 +444,22 @@ pub fn seed_persisted_abandoned_drones(ctx: &ServerContext) {
             if t.category_id != 18 {
                 continue;
             }
-            let bw_used = item
-                .dynamic_attributes
-                .get(&1272)
-                .or_else(|| t.default_attributes.get(&1272))
-                .copied()
-                .unwrap_or(5.0);
-            let max_vel = t.default_attributes.get(&37).copied().unwrap_or(1_500.0);
-            let opt_range = t.default_attributes.get(&54).copied().unwrap_or(5_000.0);
+            let attr = |aid: u16| -> Option<f64> {
+                item.dynamic_attributes
+                    .get(&aid)
+                    .or_else(|| t.default_attributes.get(&aid))
+                    .copied()
+            };
+            let bw_used = attr(1272).unwrap_or(5.0);
+            let max_vel = attr(37).unwrap_or(1_500.0);
+            let opt_range = attr(54).unwrap_or(5_000.0);
+            let dmg_mult = attr(64).unwrap_or(1.0);
+            let dmg_vec = eve_destiny::DamageVector {
+                em: attr(114).unwrap_or(0.0) * dmg_mult,
+                explosive: attr(116).unwrap_or(0.0) * dmg_mult,
+                kinetic: attr(117).unwrap_or(0.0) * dmg_mult,
+                thermal: attr(118).unwrap_or(0.0) * dmg_mult,
+            };
             drones.push(crate::services::combat_crimewatch::DroneSpaceState {
                 ball_id,
                 drone_item_id: item.item_id,
@@ -470,7 +478,7 @@ pub fn seed_persisted_abandoned_drones(ctx: &ServerContext) {
                 bandwidth_used: bw_used,
                 max_velocity: max_vel,
                 optimal_range: opt_range,
-                damage_vector: eve_destiny::DamageVector::default(),
+                damage_vector: dmg_vec,
                 shield_repair_amount: 0.0,
                 armor_repair_amount: 0.0,
                 hull_repair_amount: 0.0,
@@ -849,6 +857,12 @@ pub fn on_advance_secs(ctx: &ServerContext, _prev_unix: u64, secs: u64) {
     // 3. Finalize completed 30s Safe Logoffs (`plan:SP-6`, `feat:character.safe-logoff`)
     // parity: feat:character.safe-logoff
     for entry in completed_safe_logoffs {
+        super::abandon_drones_and_fighters_for_ship_sync(
+            ctx,
+            entry.char_id,
+            entry.ship_id,
+            entry.solar_system_id,
+        );
         let handle = ctx.systems.get_or_spawn(entry.solar_system_id);
         if let Some(pos) = handle.get_ball_position_sync(entry.ship_id) {
             let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {

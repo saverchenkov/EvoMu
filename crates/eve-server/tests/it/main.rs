@@ -290,3 +290,4 @@ mod fw_parity_complete;
 mod pve_parity_complete;
 mod plan_char_dogma_social_esi;
 mod plan_c7_crimewatch_closure;
+mod plan_c7_crimewatch_closure_part2;

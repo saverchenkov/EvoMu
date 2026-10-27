@@ -429,7 +429,7 @@ async fn handle_cmd_warp_to_stuff(
         Ok(tick) => {
             // [plan:DG-4] Entering warp halts active non-warp module cycles (weapons, scrams, webs, mining lasers, etc.)
             let _ = handle.stop_non_warp_module_cycles(ship_id).await;
-            crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, sys_id);
+            crate::sp6_lifecycle::abandon_drones_on_warp_sync(ctx, char_id, ship_id, sys_id);
             let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_if_needed(
                 ctx, char_id, sys_id, dest_pos,
             );

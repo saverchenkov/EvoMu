@@ -19,6 +19,14 @@
 use super::*;
 use eve_destiny::{Ball, MovementMode};
 
+impl DroneSpaceState {
+    pub fn effective_tracking_speed(&self, ctx: &ServerContext) -> f64 {
+        ctx.db.get_item(self.drone_item_id).and_then(|r| r.dynamic_attributes.get(&160).copied())
+            .or_else(|| ctx.sde.types.get(&self.type_id).and_then(|t| t.default_attributes.get(&160).copied()))
+            .unwrap_or(1.0)
+    }
+}
+
 /// Evaluates effective drone control range in meters for `char_id` flying `ship_id` (`feat:drones.drone-control-range`).
 /// Base control range is 20,000 m + 5,000 m/level of Drone Avionics (`3437`) + 3,000 m/level of Advanced Drone Avionics (`23618`).
 pub fn compute_drone_control_range(ctx: &ServerContext, char_id: i64, ship_id: i64) -> f64 {
@@ -464,15 +472,19 @@ pub async fn handle_npcs_drones(
                 }
                 let sde_t = ctx.sde.types.get(&rec.type_id);
                 let attr = |aid: u16| -> Option<f64> {
-                    rec.dynamic_attributes
-                        .get(&aid)
-                        .copied()
-                        .or_else(|| {
-                            ship_fit_opt
-                                .as_ref()
-                                .map(|f| f.get_drone_effective_attribute(rec.item_id, aid, &ctx.sde))
-                        })
-                        .or_else(|| sde_t.and_then(|t| t.default_attributes.get(&aid).copied()))
+                    let sde_base = sde_t.and_then(|t| t.default_attributes.get(&aid).copied());
+                    let fit_eff = ship_fit_opt
+                        .as_ref()
+                        .map(|f| f.get_drone_effective_attribute(rec.item_id, aid, &ctx.sde));
+                    if let Some(&mut_val) = rec.dynamic_attributes.get(&aid) {
+                        if let (Some(fe), Some(sb)) = (fit_eff, sde_base.filter(|b| b.abs() > 1e-9)) {
+                            Some(mut_val * (fe / sb))
+                        } else {
+                            Some(mut_val)
+                        }
+                    } else {
+                        fit_eff.or(sde_base)
+                    }
                 };
                 let raw_vel = attr(37).unwrap_or(1_500.0);
                 let is_sentry = raw_vel < 1.0
@@ -1043,7 +1055,7 @@ pub async fn handle_npcs_drones(
                 }));
             }
             let drone_st_opt = with_combat_runtime(ctx, |rt| rt.active_drones_in_space.get(&drone_ball_id).cloned());
-            let drone_item_id = if let Some(drone_st) = drone_st_opt {
+            let drone_item_id = if let Some(ref drone_st) = drone_st_opt {
                 if !drone_st.is_abandoned && drone_st.owner_char_id != char_id {
                     return Some(Err(BridgeRpcError { code: "DroneOwnedByOther".into(), message: "Cannot scoop an active drone controlled by another pilot".into() }));
                 }
@@ -1086,11 +1098,12 @@ pub async fn handle_npcs_drones(
                         message: format!("Item {drone_item_id} (type {}) is not a drone", it.type_id),
                     });
                 }
-                let is_abandoned_meta = snap
-                    .sp6_lifecycle
-                    .space_object_meta
-                    .get(&it.item_id)
-                    .is_some_and(|m| m.drone_ball_id.is_some());
+                let is_abandoned_meta = drone_st_opt.as_ref().is_some_and(|d| d.is_abandoned)
+                    || snap
+                        .sp6_lifecycle
+                        .space_object_meta
+                        .get(&it.item_id)
+                        .is_some_and(|m| m.drone_ball_id.is_some());
                 if it.owner_id != char_id && it.owner_id != 0 && !is_abandoned_meta {
                     return Err(BridgeRpcError {
                         code: "DroneOwnedByOther".into(),

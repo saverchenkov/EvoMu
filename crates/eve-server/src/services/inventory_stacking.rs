@@ -805,7 +805,12 @@ pub(crate) fn evaluate_space_wreck_or_jetcan_loot(
         let same_fleet = snap
             .fleets
             .values()
-            .any(|f| f.members.contains(&char_id) && f.members.contains(&owner_id));
+            .any(|f| f.members.contains(&char_id) && f.members.contains(&owner_id))
+            || snap
+                .characters
+                .get(&char_id)
+                .and_then(|c| c.fleet_id)
+                .is_some_and(|fid| snap.characters.get(&owner_id).and_then(|c| c.fleet_id) == Some(fid));
         Some((
             cont.item_id,
             owner_id,

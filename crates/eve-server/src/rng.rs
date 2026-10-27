@@ -42,6 +42,8 @@ pub fn u64_to_unit_f64(raw: u64) -> f64 {
 pub struct MechanicRng {
     /// `None` = OS CSPRNG; `Some(state)` = SplitMix64 state.
     seeded_state: Mutex<Option<u64>>,
+    /// `true` when explicitly seeded with a non-default seed (`seed != TEST_MODE_DEFAULT_SEED`).
+    explicit_seed: std::sync::atomic::AtomicBool,
 }
 
 impl MechanicRng {
@@ -54,12 +56,22 @@ impl MechanicRng {
     pub fn seeded(seed: u64) -> Self {
         Self {
             seeded_state: Mutex::new(Some(seed)),
+            explicit_seed: std::sync::atomic::AtomicBool::new(seed != TEST_MODE_DEFAULT_SEED),
         }
     }
 
     /// Switches to a SplitMix64 stream at `seed` (`Some`) or back to the OS CSPRNG (`None`).
     pub fn set_seed(&self, seed: Option<u64>) {
+        self.explicit_seed.store(
+            seed.is_some_and(|s| s != TEST_MODE_DEFAULT_SEED),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         *self.seeded_state.lock().unwrap_or_else(|e| e.into_inner()) = seed;
+    }
+
+    /// Returns `true` when explicitly seeded with a custom test seed (`!= TEST_MODE_DEFAULT_SEED`).
+    pub fn has_explicit_seed(&self) -> bool {
+        self.explicit_seed.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Returns `true` when draws are deterministic (seeded mode).

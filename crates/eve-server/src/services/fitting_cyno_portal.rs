@@ -515,6 +515,7 @@ async fn relocate_ship(
     });
     let from = ctx.systems.get_or_spawn(from_sys);
     let old = from.remove_ball(ship_id).await;
+    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, from_sys);
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let type_id = old.as_ref().map(|b| b.type_id).unwrap_or_else(|| {
         ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0)
@@ -988,7 +989,7 @@ async fn group_jump_to_fleet_beacon(
 async fn jump_through_fleet(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<JumpOutcome, BridgeRpcError> {
     let other_char = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
     let other_ship = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-    let (_, char_id) = ServerContext::require_character(session)?;
+    let (char_id, ship_id, sys_id, ball) = caller_in_space(ctx, session).await?;
     require_same_fleet(ctx, char_id, other_char)?;
     let key = (ctx_key(ctx), other_char);
     let bridge = cyno_state().read().unwrap_or_else(|e| e.into_inner()).bridges.get(&key).cloned();
@@ -996,7 +997,6 @@ async fn jump_through_fleet(ctx: &ServerContext, session: &mut SessionState, arg
     let bridge = bridge
         .filter(|b| b.bridger_ship_id == other_ship && b.expires_at_unix > now)
         .ok_or_else(|| err("NoActiveBridge", format!("Ship {other_ship} has no open jump portal")))?;
-    let (char_id, ship_id, sys_id, ball) = caller_in_space(ctx, session).await?;
     if bridge.origin_system_id != sys_id {
         return Err(err("NoActiveBridge", "Jump portal is in a different solar system"));
     }

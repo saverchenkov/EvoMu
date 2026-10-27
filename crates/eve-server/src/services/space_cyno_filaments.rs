@@ -111,6 +111,10 @@ async fn handle_wormhole_jump(
             message: "Active ship ball is not in space".into(),
         });
     };
+    let now_unix = ctx.now_unix();
+    crate::services::combat_crimewatch::check_crimewatch_action_restriction(
+        ctx, char_id, ship_id, old_sys, "wormhole_jump", now_unix,
+    )?;
     crate::services::tactical_modules::prepare_ship_for_wormhole_jump(
         ctx,
         &old_handle,
@@ -142,11 +146,7 @@ async fn handle_wormhole_jump(
 
     let wh_arg_i64 = args.first().and_then(|a| a.as_i64());
     let wh_arg_str = args.first().and_then(|a| a.as_str());
-    let now_unix = ctx.now_unix();
     if wh_arg_i64 != Some(750_000_001) {
-        crate::services::combat_crimewatch::check_crimewatch_action_restriction(
-            ctx, char_id, ship_id, old_sys, "wormhole_jump", now_unix,
-        )?;
         if let Some(res) = execute_cosmic_wormhole_jump(
             ctx, session, char_id, old_sys, ship_id, current_ball.clone(), wh_arg_i64, wh_arg_str,
         )
@@ -863,6 +863,7 @@ async fn handle_cmd_jump_to_structure_beacon(
         }
     });
 
+    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys_id);
     let _ = cur_sys_handle.remove_ball(ship_id).await;
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let target_pos = DVec3::from_array(target_struct.position) + DVec3::new(5_000.0, 0.0, 0.0);
@@ -1284,6 +1285,7 @@ async fn handle_cmd_beacon_jump_fleet(
         }
     });
 
+    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys_id);
     let _ = cur_sys_handle.remove_ball(ship_id).await;
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let target_pos = beacon.position + DVec3::new(2_500.0, 0.0, 0.0);
