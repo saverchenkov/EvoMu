@@ -558,14 +558,21 @@ pub fn handle_special_dialogue_action(
                 let rp_per_day =
                     (10.0 + 12.0 * (skill_lvl as f64) + 2.5 * eff_st.max(0.0)) * (agent_info.level as f64);
                 let mut entries = load_rnd_research_entries(snap, char_id);
-                entries.retain(|e| e.agent_id != agent_id);
-                entries.push(RndResearchEntry {
-                    agent_id,
-                    research_type_id: req_field_skill,
-                    points_per_day: rp_per_day,
-                    initial_points: rp_per_day, // Grant 1 day initial RP on start
-                    started_unix: now_unix,
-                });
+                if let Some(existing) = entries.iter_mut().find(|e| e.agent_id == agent_id) {
+                    let elapsed_days = (now_unix.saturating_sub(existing.started_unix) as f64) / 86_400.0;
+                    existing.initial_points += existing.points_per_day * elapsed_days;
+                    existing.points_per_day = rp_per_day;
+                    existing.research_type_id = req_field_skill;
+                    existing.started_unix = now_unix;
+                } else {
+                    entries.push(RndResearchEntry {
+                        agent_id,
+                        research_type_id: req_field_skill,
+                        points_per_day: rp_per_day,
+                        initial_points: rp_per_day, // Grant 1 day initial RP on first start
+                        started_unix: now_unix,
+                    });
+                }
                 save_rnd_research_entries(snap, char_id, &entries);
                 Ok(rp_per_day)
             });
@@ -603,11 +610,16 @@ pub fn handle_special_dialogue_action(
 
         // 14 = agentDialogueButtonBuyDatacores (feat:pve.research-agents)
         14 => {
-            let qty = args
-                .get(2)
-                .and_then(|a| a.as_i64())
-                .unwrap_or(1)
-                .max(1) as i32;
+            let qty_opt = match args.get(2).and_then(|a| a.as_i64()) {
+                Some(raw) => i32::try_from(raw).ok().filter(|&q| (1..=100_000).contains(&q)),
+                None => Some(1),
+            };
+            let Some(qty) = qty_opt else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidDatacoreQuantity".into(),
+                    message: "Datacore quantity must be between 1 and 100,000".into(),
+                }));
+            };
             let now_unix = ctx.now_unix();
             let station_id = session.station_id.unwrap_or(60_003_760);
             let res = ctx.db.try_with_mut_snapshot(|snap| {

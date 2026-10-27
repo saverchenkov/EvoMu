@@ -1296,17 +1296,19 @@ pub async fn handle(
                     return Err(BridgeRpcError { code: "AccessDenied".into(), message: "Cannot close or delete a project belonging to another corporation".into() });
                 }
                 if let Some(corp) = snap.corporations.get(&corp_id) {
-                    let caller_roles = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-                    if corp.ceo_id != char_id && !corp_roles::has_role(caller_roles, corp_roles::ROLE_ACCOUNTANT) {
-                        return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Closing or deleting corporation projects requires Accountant or Director role".into() });
+                    let caller_roles = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
+                    if corp.ceo_id != char_id
+                        && !corp_roles::has_role(caller_roles, corp_roles::ROLE_ACCOUNTANT)
+                        && !corp_roles::has_role(caller_roles, corp_roles::ROLE_PROJECT_MANAGER)
+                    {
+                        return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Closing or deleting corporation projects requires Project Manager, Accountant, or Director role".into() });
                     }
                 }
                 if let Some(proj) = snap.corp_projects.remove(&pid) {
                     if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-                        if let Some(div0) = corp.wallet_divisions.first_mut() {
-                            div0.balance = div0.balance.checked_add(proj.escrow_remaining).unwrap_or(div0.balance);
-                        }
+                        corp.ensure_wallet_divisions();
                         corp.master_wallet = corp.master_wallet.checked_add(proj.escrow_remaining).unwrap_or(corp.master_wallet);
+                        corp.wallet_divisions[0].balance = corp.master_wallet;
                     } else if let Some(ch) = snap.characters.get_mut(&char_id) {
                         ch.balance = ch.balance.checked_add(proj.escrow_remaining).unwrap_or(ch.balance);
                     }
@@ -1348,14 +1350,30 @@ fn handle_create_project(
             code: "ProjectEscrowOverflow".into(),
             message: "Corporation project total escrow overflows 64-bit ISK cents".into(),
         })?;
-        let Some(ch) = snap.characters.get_mut(&char_id) else {
+        let Some(ch) = snap.characters.get(&char_id).cloned() else {
             return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found") });
         };
         let corp_id = session.corporation_id.unwrap_or(ch.corporation_id);
-        ch.balance = ch.balance.checked_sub(escrow).ok_or_else(|| BridgeRpcError {
-            code: "InsufficientFunds".into(),
-            message: "Not enough ISK to fund corporation project escrow".into(),
-        })?;
+        if let Some(corp) = snap.corporations.get(&corp_id) {
+            if !corp.member_roles.is_empty() {
+                let caller_roles = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
+                if corp.ceo_id != char_id
+                    && !corp_roles::has_role(caller_roles, corp_roles::ROLE_ACCOUNTANT)
+                    && !corp_roles::has_role(caller_roles, corp_roles::ROLE_PROJECT_MANAGER)
+                {
+                    return Err(BridgeRpcError {
+                        code: "CorpRoleDenied".into(),
+                        message: "Creating corporation projects requires Project Manager, Accountant, or Director role".into(),
+                    });
+                }
+            }
+        }
+        if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
+            ch_mut.balance = ch_mut.balance.checked_sub(escrow).ok_or_else(|| BridgeRpcError {
+                code: "InsufficientFunds".into(),
+                message: "Not enough ISK to fund corporation project escrow".into(),
+            })?;
+        }
         snap.next_entity_id += 1;
         let id = snap.next_entity_id;
         snap.corp_projects.insert(id, CorpProjectRecord {
@@ -1436,8 +1454,49 @@ fn handle_contribute_project(
             let Some(iid) = contrib_item_id else {
                 return Err(BridgeRpcError { code: "InsufficientContributionItems".into(), message: format!("Character {char_id} does not have {accepted} units of ore/mineral to contribute") });
             };
+            let mut delivered_type_and_loc: Option<(u32, i64)> = None;
             if let Some(item) = snap.items.get_mut(&iid) {
-                if (item.quantity as u64) > accepted { item.quantity -= accepted as i32; item.version += 1; } else { snap.items.remove(&iid); }
+                let d_loc = current_dock.unwrap_or(item.location_id);
+                let d_tid = item.type_id;
+                if (item.quantity as u64) > accepted {
+                    item.quantity -= accepted as i32;
+                    item.version += 1;
+                    delivered_type_and_loc = Some((d_tid, d_loc));
+                } else {
+                    item.owner_id = proj.corporation_id;
+                    item.location_id = d_loc;
+                    item.flag = InventoryFlag::Deliveries;
+                    item.version += 1;
+                }
+            }
+            if let Some((d_tid, d_loc)) = delivered_type_and_loc {
+                if let Some(existing) = snap.items.values_mut().find(|i| {
+                    i.owner_id == proj.corporation_id
+                        && i.location_id == d_loc
+                        && i.type_id == d_tid
+                        && i.flag == InventoryFlag::Deliveries
+                        && !i.singleton
+                }) {
+                    existing.quantity = existing.quantity.saturating_add(accepted as i32);
+                    existing.version += 1;
+                } else {
+                    snap.next_entity_id += 1;
+                    let new_id = snap.next_entity_id;
+                    snap.items.insert(
+                        new_id,
+                        eve_db::InventoryItemRecord {
+                            item_id: new_id,
+                            type_id: d_tid,
+                            owner_id: proj.corporation_id,
+                            location_id: d_loc,
+                            flag: InventoryFlag::Deliveries,
+                            quantity: accepted as i32,
+                            singleton: false,
+                            version: 1,
+                            ..Default::default()
+                        },
+                    );
+                }
             }
         }
         let reward = proj.isk_per_unit.checked_mul_qty(accepted as i64).unwrap_or(IskCents(0));

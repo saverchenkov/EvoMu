@@ -830,6 +830,35 @@ pub fn handle(
                             ),
                         });
                     };
+                    for (skill_attr, level_attr) in eve_dogma::REQUIRED_SKILL_ATTR_IDS
+                        .into_iter()
+                        .zip(eve_dogma::REQUIRED_SKILL_LEVEL_ATTR_IDS)
+                    {
+                        if let Some(&req_skill_f) = skill_type.default_attributes.get(&skill_attr) {
+                            let req_skill_id = req_skill_f as TypeId;
+                            if req_skill_id > 0 {
+                                let req_lvl = skill_type
+                                    .default_attributes
+                                    .get(&level_attr)
+                                    .copied()
+                                    .unwrap_or(1.0)
+                                    .max(1.0) as u8;
+                                let trained_lvl = skills_map
+                                    .get(&req_skill_id)
+                                    .map(|s| s.level)
+                                    .unwrap_or(0);
+                                if trained_lvl < req_lvl {
+                                    return Err(BridgeRpcError {
+                                        code: "SkillPrerequisiteNotMet".into(),
+                                        message: format!(
+                                            "Skill {} (type {skill_type_id}) requires prerequisite skill {req_skill_id} at level {req_lvl}",
+                                            skill_type.name
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                    }
                     let max_lvl = if ch_snap.clone_grade <= 1 {
                         alpha_skill_cap_for_character(&ctx.sde, ch_snap.race_id, skill_type_id)
                     } else {
@@ -846,9 +875,22 @@ pub fn handle(
                             ),
                         });
                     }
+                    let alpha_total_room = if ch_snap.clone_grade <= 1 {
+                        let r = (5_000_000.0 - ch_snap.skill_points).max(0.0);
+                        if r <= 0.0 {
+                            return Err(BridgeRpcError {
+                                code: "AlphaCloneSpCapExceeded".into(),
+                                message: "Alpha clones cannot apply free skill points beyond 5,000,000 total SP".into(),
+                            });
+                        }
+                        r
+                    } else {
+                        f64::INFINITY
+                    };
                     let applied = points_to_apply
                         .min(ch_snap.free_skill_points)
-                        .min(room_in_skill);
+                        .min(room_in_skill)
+                        .min(alpha_total_room);
                     let new_skill_sp = existing_skill.skill_points + applied;
                     let mut achieved_lvl = existing_skill.level;
                     for lvl in (existing_skill.level + 1)..=max_lvl {
@@ -934,11 +976,13 @@ pub fn handle(
             }
             let now_ft = ctx.now_blueos_filetime_ticks();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let available_free_sp = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| c.free_skill_points)
-                    .unwrap_or(0.0);
+                let Some(ch_snap) = snap.characters.get(&char_id).cloned() else {
+                    return Err(BridgeRpcError {
+                        code: "CharacterNotFound".into(),
+                        message: format!("Character {char_id} not found"),
+                    });
+                };
+                let available_free_sp = ch_snap.free_skill_points;
                 if available_free_sp <= 0.0 {
                     return Err(BridgeRpcError {
                         code: "InsufficientFreeSP".into(),
@@ -949,6 +993,16 @@ pub fn handle(
                 let mut remaining_budget = requested_sp_opt
                     .map(|req| available_free_sp.min(req))
                     .unwrap_or(available_free_sp);
+                if ch_snap.clone_grade <= 1 {
+                    let alpha_room = (5_000_000.0 - ch_snap.skill_points).max(0.0);
+                    if alpha_room <= 0.0 {
+                        return Err(BridgeRpcError {
+                            code: "AlphaCloneSpCapExceeded".into(),
+                            message: "Alpha clones cannot apply free skill points beyond 5,000,000 total SP".into(),
+                        });
+                    }
+                    remaining_budget = remaining_budget.min(alpha_room);
+                }
                 let queue = snap.skill_queues.entry(char_id).or_default().clone();
                 let mut remaining_queue = Vec::new();
                 let mut history_to_append = Vec::new();
@@ -956,6 +1010,12 @@ pub fn handle(
                 let mut total_applied = 0.0;
 
                 for mut q in queue {
+                    if ch_snap.clone_grade <= 1
+                        && q.target_level > alpha_skill_cap_for_character(&ctx.sde, ch_snap.race_id, q.type_id)
+                    {
+                        remaining_queue.push(q);
+                        continue;
+                    }
                     let needed = (q.end_sp - q.start_sp).max(0.0);
                     if remaining_budget >= needed && needed > 0.0 {
                         remaining_budget -= needed;

@@ -579,7 +579,6 @@ pub(super) fn handle_corp_gov(
                     let mids: Vec<i64> = corp.members.iter().copied().collect();
                     (cur_bal, mids)
                 };
-
                 let recipients: Vec<(i64, i64)> = if to_shareholders {
                     let state = snap.corp_governance.entry(corp_id).or_default();
                     let shares_snapshot = state.shares.clone();
@@ -787,6 +786,14 @@ pub(super) fn handle_corp_gov(
                 }
                 if now_unix > vc.end_ts { return Err(BridgeRpcError { code: "VoteCaseClosed".into(), message: "Voting period has closed for this case".into() }); }
                 let vc_corp = vc.corporation_id;
+                let has_any_corp_shares = snap
+                    .corp_shareholders
+                    .get(&vc_corp)
+                    .is_some_and(|shs| shs.iter().any(|s| s.share_count > 0))
+                    || snap
+                        .corp_governance
+                        .get(&vc_corp)
+                        .is_some_and(|g| g.shares.values().any(|&s| s > 0));
                 let sh_weight = snap
                     .corp_shareholders
                     .get(&vc_corp)
@@ -796,17 +803,17 @@ pub(super) fn handle_corp_gov(
                             .get(&vc_corp)
                             .and_then(|g| g.shares.get(&char_id).copied())
                     });
-                let is_ceo_or_member = snap
+                let is_ceo = snap
                     .corporations
                     .get(&vc_corp)
-                    .is_some_and(|c| c.ceo_id == char_id || c.members.contains(&char_id));
+                    .is_some_and(|c| c.ceo_id == char_id);
                 let w = match sh_weight {
                     Some(s) if s > 0 => s,
-                    _ if is_ceo_or_member => 1,
+                    None if !has_any_corp_shares && is_ceo => 1,
                     _ => {
                         return Err(BridgeRpcError {
                             code: "CorpAccessDenied".into(),
-                            message: "Only corporation shareholders or members may vote".into(),
+                            message: "Only corporation shareholders with > 0 shares may vote".into(),
                         });
                     }
                 };
@@ -854,6 +861,12 @@ pub(super) fn handle_corp_gov(
                 };
                 if !passed { return Err(BridgeRpcError { code: "VoteDidNotPass".into(), message: "Sanctioned action did not pass shareholder vote".into() }); }
                 let vc = snap.corp_vote_cases.get_mut(&case_id).unwrap();
+                if vc.vote_type == 5 && win_param <= 0 {
+                    return Err(BridgeRpcError {
+                        code: "InvalidShareCount".into(),
+                        message: "Sanctioned share creation requires a positive share count".into(),
+                    });
+                }
                 vc.executed = true;
                 vc.parameter = win_param;
                 if vc.vote_type == 5 {
