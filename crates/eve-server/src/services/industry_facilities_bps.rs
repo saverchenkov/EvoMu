@@ -690,14 +690,46 @@ pub fn handle_industry_facilities_bps(
                     message: "GetBlueprintData requires a blueprint typeID or itemID".into(),
                 }));
             };
-            let (bp_type_id, bp_item_opt) = ctx.db.with_snapshot(|snap| {
+            let (bp_type_id, bp_item_opt) = match ctx.db.with_snapshot(|snap| -> Result<(TypeId, Option<eve_db::InventoryItemRecord>), BridgeRpcError> {
                 if let Some(it) = snap.items.get(&raw_id) {
                     if ctx.sde.blueprints.contains_key(&it.type_id) {
-                        return (it.type_id, Some(it.clone()));
+                        let caller_corp_id = session.corporation_id.or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id)).unwrap_or(0);
+                        let is_owned = it.owner_id == char_id
+                            || (caller_corp_id > 0 && it.owner_id == caller_corp_id);
+                        let caller_alliance_id = if caller_corp_id > 0 {
+                            snap.corporations.get(&caller_corp_id).and_then(|c| c.alliance_id).unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        let in_visible_contract = snap.contracts.values().any(|c| {
+                            c.status != "Deleted"
+                                && c.item_ids.contains(&raw_id)
+                                && (c.availability.eq_ignore_ascii_case("Public")
+                                    || c.issuer_id == char_id
+                                    || c.assignee_id == char_id
+                                    || c.acceptor_id == Some(char_id)
+                                    || (caller_corp_id > 0
+                                        && ((c.for_corp && c.issuer_corp_id == caller_corp_id)
+                                            || (c.availability.eq_ignore_ascii_case("Corporation")
+                                                && c.issuer_corp_id == caller_corp_id)
+                                            || c.assignee_id == caller_corp_id
+                                            || c.acceptor_id == Some(caller_corp_id)))
+                                    || (caller_alliance_id > 0 && c.assignee_id == caller_alliance_id))
+                        });
+                        if !is_owned && !in_visible_contract {
+                            return Err(BridgeRpcError {
+                                code: "CrpAccessDenied".into(),
+                                message: format!("Access denied to blueprint item {raw_id}"),
+                            });
+                        }
+                        return Ok((it.type_id, Some(it.clone())));
                     }
                 }
-                (raw_id as TypeId, None)
-            });
+                Ok((raw_id as TypeId, None))
+            }) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let Some(bp) = ctx.sde.blueprints.get(&bp_type_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "UnknownBlueprint".into(),

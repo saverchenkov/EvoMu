@@ -975,7 +975,7 @@ impl WorldStateSnapshot {
         let in_job = self
             .industry_jobs
             .values()
-            .any(|j| j.status == "Active" && j.blueprint_item_id == item_id);
+            .any(|j| matches!(j.status.as_str(), "Active" | "Paused") && j.blueprint_item_id == item_id);
         in_contract || in_job
     }
 

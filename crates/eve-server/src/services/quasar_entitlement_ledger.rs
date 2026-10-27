@@ -602,7 +602,7 @@ fn redeem_record(db: &WorldRepository, ledger: &mut EntitlementLedger, now_unix:
         cap_claimed = Some((rem, new_rem));
     }
     let holder = rec.holder as i64;
-    db.with_mut_snapshot(|s| {
+    db.try_with_mut_snapshot(|s| {
         let ch = s.characters.get(&holder).ok_or_else(|| (STATUS_NOT_FOUND, "Character not found".to_string()))?;
         let location = ch.station_id.unwrap_or(ch.home_station_id);
         for (type_id, qty) in &asset.stacks {

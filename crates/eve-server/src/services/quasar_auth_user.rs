@@ -830,6 +830,13 @@ fn register_federated_and_transfer_handlers(
                         )
                     })?;
                 let dest_uid = extract_dyn_u64(dyn_msg, &any.value, 2).unwrap_or(caller_uid);
+                if dest_uid == 0 {
+                    return Err((
+                        crate::quasar_gateway::STATUS_BAD_REQUEST,
+                        "Valid destination user ID required for character transfer".to_string(),
+                    ));
+                }
+                let dest_consent_token = extract_dyn_string(dyn_msg, &any.value, 3);
                 let now_unix = ctx.now_unix();
                 let cooldown_key = format!("char_transfer_last_unix:{char_id}");
 
@@ -845,6 +852,27 @@ fn register_federated_and_transfer_handlers(
                             crate::quasar_gateway::STATUS_FORBIDDEN,
                             format!("Character {char_id} is not owned by user {caller_uid}"),
                         ));
+                    }
+                    if dest_uid != caller_uid && !is_admin {
+                        if let Some(dest_acc) = snap.accounts.values().find(|a| a.user_id == dest_uid) {
+                            if dest_acc.banned_until_unix.is_some_and(|u| u > now_unix) {
+                                return Err((
+                                    crate::quasar_gateway::STATUS_FORBIDDEN,
+                                    format!("Destination account {dest_uid} is banned"),
+                                ));
+                            }
+                        }
+                        if let Some(expected_tok) = snap
+                            .service_state_blobs
+                            .get(&format!("char_transfer_consent_token:{dest_uid}"))
+                        {
+                            if dest_consent_token.as_deref() != Some(expected_tok.as_str()) {
+                                return Err((
+                                    crate::quasar_gateway::STATUS_FORBIDDEN,
+                                    "Destination account transfer consent token mismatch".into(),
+                                ));
+                            }
+                        }
                     }
                     // Must be in an NPC corporation (1_000_000..2_000_000) and not a player corp CEO
                     let is_npc_corp = (1_000_000..2_000_000).contains(&ch.corporation_id);
@@ -862,8 +890,16 @@ fn register_federated_and_transfer_handlers(
                             "Character requires at least 1,000 ISK wallet balance to transfer".into(),
                         ));
                     }
-                    // Must have no active market orders, contracts, or industry jobs
-                    if snap.market_orders.values().any(|o| o.owner_id == char_id && o.vol_remaining > 0) {
+                    // Must have no active market orders (personal or corporate issued by char_id), contracts, or industry jobs
+                    if snap.market_orders.values().any(|o| {
+                        o.vol_remaining > 0
+                            && (o.owner_id == char_id
+                                || snap
+                                    .market_order_meta
+                                    .get(&o.order_id)
+                                    .and_then(|m| m.issued_by)
+                                    == Some(char_id))
+                    }) {
                         return Err((
                             crate::quasar_gateway::STATUS_PRECONDITION_FAILED,
                             "Character has active market orders".into(),
@@ -881,7 +917,10 @@ fn register_federated_and_transfer_handlers(
                         ));
                     }
                     if snap.industry_jobs.values().any(|j| {
-                        j.installer_id == char_id && j.status.eq_ignore_ascii_case("active")
+                        j.installer_id == char_id
+                            && (j.status.eq_ignore_ascii_case("active")
+                                || j.status.eq_ignore_ascii_case("paused")
+                                || j.status.eq_ignore_ascii_case("ready"))
                     }) {
                         return Err((
                             crate::quasar_gateway::STATUS_PRECONDITION_FAILED,

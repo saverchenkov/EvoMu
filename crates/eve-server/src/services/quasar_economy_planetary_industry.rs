@@ -353,7 +353,11 @@ pub fn register_economy_planetary_industry_handlers(
                         || c.acceptor_id == Some(effective_cid)
                         || c.assignee_id == effective_cid
                         || (caller_corp != 0
-                            && (c.issuer_corp_id == caller_corp || c.assignee_id == caller_corp))
+                            && ((c.for_corp && c.issuer_corp_id == caller_corp)
+                                || (c.availability.eq_ignore_ascii_case("Corporation")
+                                    && c.issuer_corp_id == caller_corp)
+                                || c.assignee_id == caller_corp
+                                || c.acceptor_id == Some(caller_corp)))
                         || (caller_alliance != 0 && c.assignee_id == caller_alliance);
                     if !authorized {
                         return Err((

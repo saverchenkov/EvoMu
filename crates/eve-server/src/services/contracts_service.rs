@@ -906,6 +906,11 @@ pub fn handle(
                 let mut new_status = "Outstanding";
                 if is_buyout {
                     snap.credit_contract_issuer(&c, effective_bid);
+                    if let Some(dep_str) = snap.service_state_blobs.remove(&format!("contract_deposit:{cid}")) {
+                        if let Ok(dep_raw) = dep_str.parse::<i64>() {
+                            snap.credit_contract_issuer(&c, IskCents(dep_raw));
+                        }
+                    }
                     if c.for_corp {
                         let bal_after = snap
                             .corporations
@@ -1192,6 +1197,11 @@ pub fn handle(
                         ));
                     }
                     snap.credit_contract_issuer(&c, c.reward);
+                    if let Some(dep_str) = snap.service_state_blobs.remove(&format!("contract_deposit:{cid}")) {
+                        if let Ok(dep_raw) = dep_str.parse::<i64>() {
+                            snap.credit_contract_issuer(&c, IskCents(dep_raw));
+                        }
+                    }
                     for iid in &c.item_ids {
                         if let Some(item) = snap.items.get_mut(iid) {
                             item.owner_id = issuer_entity_id;
@@ -1364,8 +1374,20 @@ pub fn handle(
 
         "GetMyCurrentContractList" | "GetContractList" | "GetContractListForOwner" => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let owner_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
             let caller_corp = session.corporation_id.unwrap_or(0);
+            let is_corp_query = args
+                .first()
+                .and_then(|a| a.as_bool())
+                .or_else(|| kwargs.get("forCorp").and_then(|v| v.as_bool()))
+                .unwrap_or(false);
+            let owner_id = if is_corp_query && caller_corp != 0 {
+                caller_corp
+            } else {
+                args.first()
+                    .and_then(|a| a.as_i64())
+                    .filter(|&v| v > 1)
+                    .unwrap_or(char_id)
+            };
             if owner_id != char_id && owner_id != caller_corp {
                 return Some(Err(rpc_err("ContractAccessDenied", format!("Cannot query contract list for foreign owner {owner_id}"))));
             }
@@ -1373,9 +1395,20 @@ pub fn handle(
             let rows = ctx.db.try_with_mut_snapshot(|snap| {
                 let cids: Vec<i64> = snap.contracts.keys().copied().collect();
                 for cid in cids { let _ = snap.resolve_expired_contract(cid, now_unix); }
+                let owner_is_corp = (owner_id == caller_corp && caller_corp != 0) || snap.corporations.contains_key(&owner_id);
                 let mut list: Vec<ContractRecord> = snap.contracts.values().filter(|c| {
                     matches!(c.status.as_str(), "Outstanding" | "InProgress")
-                        && (c.issuer_id == owner_id || c.issuer_corp_id == owner_id || c.acceptor_id == Some(owner_id) || c.assignee_id == owner_id || c.current_bidder_id == Some(owner_id))
+                        && if owner_is_corp {
+                            (c.for_corp && (c.issuer_corp_id == owner_id || c.issuer_id == owner_id))
+                                || c.acceptor_id == Some(owner_id)
+                                || c.assignee_id == owner_id
+                                || c.current_bidder_id == Some(owner_id)
+                        } else {
+                            (!c.for_corp && c.issuer_id == owner_id)
+                                || c.acceptor_id == Some(owner_id)
+                                || c.assignee_id == owner_id
+                                || c.current_bidder_id == Some(owner_id)
+                        }
                 }).cloned().collect();
                 list.sort_by_key(|c| c.contract_id);
                 Ok::<_, std::convert::Infallible>(list.iter().map(|c| contract_to_pyrep(c, snap)).collect::<Vec<_>>())
