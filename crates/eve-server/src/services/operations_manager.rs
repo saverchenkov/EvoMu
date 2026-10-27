@@ -46,6 +46,8 @@ pub struct CharacterOperationsRecord {
     #[serde(default)]
     pub completed_surveys: HashSet<i64>,
     #[serde(default)]
+    pub claimed_surveys: HashSet<i64>,
+    #[serde(default)]
     pub claimed_vgs_rewards: Vec<u32>,
     #[serde(default)]
     pub operation_events: Vec<(String, i64)>,
@@ -95,6 +97,108 @@ pub fn register_survey(ctx: &ServerContext, survey: SurveyDefinition) {
         }
         save_store(snap, &store, now);
     });
+}
+
+/// Marks an active or valid survey as completed for a character, enabling rewards claiming
+/// and notifying the client via `OnSurveyRewardsAvailable`.
+pub fn mark_survey_completed(
+    ctx: &ServerContext,
+    char_id: i64,
+    survey_id: i64,
+) -> Result<(), BridgeRpcError> {
+    let now = ctx.now_unix();
+    ctx.db.try_with_mut_snapshot(|snap| {
+        if !snap.characters.contains_key(&char_id) {
+            return Err(rpc_err("CharacterNotFound", "Character not found"));
+        }
+        let mut store = load_store(snap);
+        let catalog = combined_survey_catalog(&ctx.sde, &store.custom_surveys);
+        let Some(survey) = catalog.iter().find(|s| s.survey_id == survey_id) else {
+            return Err(rpc_err("InvalidSurveyID", format!("Invalid surveyID {survey_id}")));
+        };
+        if let Some(exp) = survey.expires_at_unix {
+            if now > exp {
+                return Err(rpc_err("SurveyExpired", format!("Survey {survey_id} has expired")));
+            }
+        }
+        if let Some(start) = survey.start_unix {
+            if now < start {
+                return Err(rpc_err("SurveyNotActive", format!("Survey {survey_id} has not started yet")));
+            }
+        }
+        let rec = store.by_character.entry(char_id).or_default();
+        if rec.claimed_surveys.contains(&survey_id) {
+            return Err(rpc_err("SurveyAlreadyClaimed", format!("Survey {survey_id} has already been claimed")));
+        }
+        rec.completed_surveys.insert(survey_id);
+        save_store(snap, &store, now);
+        Ok(())
+    })?;
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnSurveyRewardsAvailable",
+        "charid",
+        vec![PyRep::Integer(survey_id)],
+    );
+    Ok(())
+}
+
+/// Handles GM/QA `/survey` slash commands (`schedule` / `activate` and `complete`).
+pub fn handle_survey_slash(
+    ctx: &ServerContext,
+    caller_char_id: i64,
+    cmd: &str,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let rest = cmd.strip_prefix("/survey")?.trim();
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    match parts.first().copied() {
+        Some("schedule" | "activate") => match build_scheduled_survey_from_slash(&ctx.sde, ctx.now_unix(), &parts[1..]) {
+            Ok(def) => {
+                let sid = def.survey_id;
+                let exp = def.expires_at_unix.unwrap_or(0) as i64;
+                register_survey(ctx, def);
+                Some(Ok(PyRep::keyval([
+                    ("command", PyRep::String(cmd.to_string())),
+                    ("surveyID", PyRep::Integer(sid)),
+                    ("scheduled", PyRep::Bool(true)),
+                    ("expiresAtUnix", PyRep::Integer(exp)),
+                ])))
+            }
+            Err(msg) => Some(Err(rpc_err("InvalidSlashArgument", msg))),
+        },
+        Some("complete") => {
+            let target_cid = parts
+                .get(2)
+                .and_then(|s| s.parse::<i64>().ok())
+                .filter(|&id| id > 0)
+                .unwrap_or(caller_char_id);
+            let sid = match parts.get(1).and_then(|s| s.parse::<i64>().ok()).filter(|&id| id > 0) {
+                Some(id) => id,
+                None => match ctx.db.with_snapshot(|snap| {
+                    load_store(snap)
+                        .by_character
+                        .get(&target_cid)
+                        .and_then(|r| r.active_survey_id)
+                }) {
+                    Some(id) => id,
+                    None => return Some(Err(BridgeRpcError::user_error("NoActiveSurvey"))),
+                },
+            };
+            match mark_survey_completed(ctx, target_cid, sid) {
+                Ok(()) => Some(Ok(PyRep::keyval([
+                    ("command", PyRep::String(cmd.to_string())),
+                    ("surveyID", PyRep::Integer(sid)),
+                    ("characterID", PyRep::Integer(target_cid)),
+                    ("completed", PyRep::Bool(true)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+        _ => Some(Err(rpc_err(
+            "InvalidSlashArgument",
+            "Usage: /survey schedule <survey_id> [duration_secs] [type_id:qty,...] [vgs_id,...] | /survey complete [survey_id] [char_id]",
+        ))),
+    }
 }
 
 /// Resolves the character's active operation/tutorial dungeon tuple `(dungeon_id, room_id, instance_id, dungeon_name)`
@@ -1048,6 +1152,7 @@ pub fn handle(
         // ====================================================================
         // survey — In-game Player Satisfaction Surveys & Rewards
         // ====================================================================
+        // parity: rpc:survey.GetActiveSurveyID
         ("survey", "GetActiveSurveyID") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -1062,6 +1167,7 @@ pub fn handle(
             Some(Ok(survey_id.map(PyRep::Integer).unwrap_or(PyRep::None)))
         }
 
+        // parity: rpc:survey.PerformSurveyChecks
         ("survey", "PerformSurveyChecks") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -1094,6 +1200,7 @@ pub fn handle(
             Some(Ok(PyRep::List(surveys)))
         }
 
+        // parity: rpc:survey.ClaimSurveyRewards
         ("survey", "ClaimSurveyRewards") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -1102,16 +1209,15 @@ pub fn handle(
             let explicit_survey_id = args.first().and_then(|a| a.as_i64());
             let now = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let (char_create_unix, home_station_id) = snap
+                let home_station_id = snap
                     .characters
                     .get(&char_id)
                     .map(|c| {
-                        let stn = if c.home_station_id > 0 {
+                        if c.home_station_id > 0 {
                             c.home_station_id
                         } else {
                             c.station_id.unwrap_or(60_003_760)
-                        };
-                        (c.create_date_unix, stn)
+                        }
                     })
                     .ok_or_else(|| rpc_err("CharacterNotFound", "Character not found"))?;
                 let mut store = load_store(snap);
@@ -1120,6 +1226,13 @@ pub fn handle(
                     let rec = store.by_character.entry(char_id).or_default();
                     let survey_id = if let Some(id) = explicit_survey_id {
                         id
+                    } else if let Some(unclaimed_id) = rec
+                        .completed_surveys
+                        .iter()
+                        .find(|id| !rec.claimed_surveys.contains(id))
+                        .copied()
+                    {
+                        unclaimed_id
                     } else if let Some(active_id) = rec.active_survey_id {
                         active_id
                     } else {
@@ -1147,17 +1260,22 @@ pub fn handle(
                             ));
                         }
                     }
-                    let eligible = eligible_surveys(rec, char_create_unix, &catalog, now);
-                    let is_claimable = rec.active_survey_id == Some(survey_id)
-                        || eligible.contains(&survey_id);
-                    if !is_claimable || rec.completed_surveys.contains(&survey_id) {
+                    if rec.claimed_surveys.contains(&survey_id) {
                         return Err(rpc_err(
-                            "SurveyNotActive",
-                            format!("Survey {survey_id} is not active or has already been claimed"),
+                            "SurveyAlreadyClaimed",
+                            format!("Survey {survey_id} has already been claimed"),
                         ));
                     }
-                    rec.completed_surveys.insert(survey_id);
-                    rec.active_survey_id = None;
+                    if !rec.completed_surveys.contains(&survey_id) {
+                        return Err(rpc_err(
+                            "SurveyNotCompleted",
+                            format!("Survey {survey_id} has not been completed yet"),
+                        ));
+                    }
+                    rec.claimed_surveys.insert(survey_id);
+                    if rec.active_survey_id == Some(survey_id) {
+                        rec.active_survey_id = None;
+                    }
                     for &vgs_id in &survey.vgs_rewards {
                         if !rec.claimed_vgs_rewards.contains(&vgs_id) {
                             rec.claimed_vgs_rewards.push(vgs_id);
@@ -1194,15 +1312,7 @@ pub fn handle(
                 Ok(survey_id)
             });
             match res {
-                Ok(survey_id) => {
-                    ctx.notify(
-                        NotificationTarget::Character(char_id),
-                        "OnSurveyRewardsAvailable",
-                        "charid",
-                        vec![PyRep::Integer(survey_id)],
-                    );
-                    Some(Ok(PyRep::Bool(true)))
-                }
+                Ok(_survey_id) => Some(Ok(PyRep::Bool(true))),
                 Err(e) => Some(Err(e)),
             }
         }

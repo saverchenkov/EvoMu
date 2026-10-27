@@ -223,7 +223,7 @@ pub fn eligible_surveys(
     let mut out = Vec::new();
     for survey in catalog {
         let sid = survey.survey_id;
-        if rec.completed_surveys.contains(&sid) {
+        if rec.completed_surveys.contains(&sid) || rec.claimed_surveys.contains(&sid) {
             continue;
         }
         if let Some(start) = survey.start_unix {
@@ -245,4 +245,95 @@ pub fn eligible_surveys(
         out.push(sid);
     }
     out
+}
+
+/// Builds a [`SurveyDefinition`] for `/survey schedule <survey_id> [duration_secs] [type_id:qty,...] [vgs_id,...]`,
+/// inheriting metadata from SDE `surveys.fsdbinary` when `survey_id` matches an SDE entry.
+pub fn build_scheduled_survey_from_slash(
+    sde: &eve_sde::SdeRegistry,
+    now_unix: u64,
+    parts: &[&str],
+) -> Result<SurveyDefinition, String> {
+    let survey_id = parts
+        .first()
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|&id| id > 0)
+        .ok_or_else(|| "Usage: /survey schedule <survey_id> [duration_secs] [type_id:qty,...] [vgs_id,...]".to_string())?;
+    let duration_secs = match parts.get(1) {
+        Some(s) => s
+            .parse::<u64>()
+            .ok()
+            .filter(|&d| d > 0)
+            .ok_or_else(|| "duration_secs must be a positive integer".to_string())?,
+        None => 86_400,
+    };
+    let sde_base = get_survey_catalog(sde)
+        .iter()
+        .find(|s| s.survey_id == survey_id)
+        .cloned();
+    let mut item_rewards = sde_base
+        .as_ref()
+        .map(|s| s.item_rewards.clone())
+        .unwrap_or_default();
+    if let Some(items_arg) = parts.get(2).copied().filter(|s| !s.is_empty() && *s != "-") {
+        let mut parsed_items = Vec::new();
+        for pair in items_arg.split(',') {
+            let (tid_str, qty_str) = pair
+                .split_once(':')
+                .ok_or_else(|| format!("Invalid item reward '{pair}', expected type_id:qty"))?;
+            let tid = tid_str
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|id| sde.types.contains_key(id))
+                .ok_or_else(|| format!("Unknown or invalid reward type_id '{tid_str}'"))?;
+            let qty = qty_str
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|&q| q > 0)
+                .ok_or_else(|| format!("Invalid reward quantity '{qty_str}'"))?;
+            parsed_items.push((tid, qty));
+        }
+        item_rewards = parsed_items;
+    }
+    let mut vgs_rewards = sde_base
+        .as_ref()
+        .map(|s| s.vgs_rewards.clone())
+        .unwrap_or_default();
+    if let Some(vgs_arg) = parts.get(3).copied().filter(|s| !s.is_empty() && *s != "-") {
+        let mut parsed_vgs = Vec::new();
+        for tok in vgs_arg.split(',') {
+            let vid = tok
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|&v| v > 0)
+                .ok_or_else(|| format!("Invalid VGS reward ID '{tok}'"))?;
+            parsed_vgs.push(vid);
+        }
+        vgs_rewards = parsed_vgs;
+    }
+    Ok(SurveyDefinition {
+        survey_id,
+        name: sde_base
+            .as_ref()
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| format!("Capsuleer Survey {survey_id}")),
+        description: sde_base
+            .as_ref()
+            .map(|s| s.description.clone())
+            .unwrap_or_else(|| "Active player satisfaction survey".to_string()),
+        start_date: sde_base.as_ref().and_then(|s| s.start_date.clone()),
+        end_date: sde_base.as_ref().and_then(|s| s.end_date.clone()),
+        start_unix: Some(now_unix.saturating_sub(3_600)),
+        expires_at_unix: Some(now_unix.saturating_add(duration_secs)),
+        grace_period_days: sde_base.as_ref().map(|s| s.grace_period_days).unwrap_or(7),
+        min_account_age_hours: sde_base
+            .as_ref()
+            .map(|s| s.min_account_age_hours)
+            .unwrap_or(24),
+        item_rewards,
+        vgs_rewards,
+    })
 }

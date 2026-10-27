@@ -172,7 +172,7 @@ async fn test_operations_tasks_operations_and_telemetry() {
     // parity: rpc:operationsManager.get_mission_avoidance_systems, rpc:operationsManager.get_operations_completed_at_least_once
     // parity: rpc:operationsManager.process_client_event, rpc:operationsManager.skip_task
     // parity: rpc:operationsManager.start_site, rpc:operationsManager.unblock_task
-    // DATA GAP: requires live survey catalog import
+    // parity: rpc:survey.ClaimSurveyRewards, rpc:survey.GetActiveSurveyID, rpc:survey.PerformSurveyChecks
     eve_testkit::attest(&[
         "rpc:operationsManager.activate_operation_in_solar_system",
         "rpc:operationsManager.block_task",
@@ -182,6 +182,9 @@ async fn test_operations_tasks_operations_and_telemetry() {
         "rpc:operationsManager.skip_task",
         "rpc:operationsManager.start_site",
         "rpc:operationsManager.unblock_task",
+        "rpc:survey.ClaimSurveyRewards",
+        "rpc:survey.GetActiveSurveyID",
+        "rpc:survey.PerformSurveyChecks",
     ]);
     let ctx = ServerContext::new();
     let mut p1 = select(&ctx, 70_002, "demo", "demo-secret", P1).await;
@@ -321,7 +324,7 @@ async fn test_operations_tasks_operations_and_telemetry() {
     assert!(prog_entries.contains(&(PyRep::Integer(blocked_tid), PyRep::Integer(0))));
     assert!(prog_entries.contains(&(PyRep::Integer(op_id), PyRep::Integer(100))));
 
-    // 7. Survey catalog & rewards: backed by SDE surveys.fsdbinary + operator-registered surveys (no synthetic defaults)
+    // 7. Survey catalog & rewards: backed by SDE surveys.fsdbinary + GM/QA /survey schedule & completion
     let sde_surveys = ctx.sde.surveys().expect("sde surveys");
     assert!(sde_surveys.contains_key("28"), "SDE surveys.fsdbinary contains survey 28");
     assert_eq!(sde_surveys["28"]["name"], "12traits 2021");
@@ -333,24 +336,21 @@ async fn test_operations_tasks_operations_and_telemetry() {
     let expired_err = rpc(&ctx, &mut p1, "survey", "ClaimSurveyRewards", &[PyRep::Integer(28)]).await.expect_err("claiming expired SDE survey 28 must fail");
     assert_eq!(expired_err.code, "SurveyExpired");
 
-    // Schedule an active operator survey with item_rewards and vgs_rewards
-    let now_unix = ctx.now_unix();
-    eve_server::services::operations_manager::register_survey(
+    // Schedule an active survey with item_rewards and vgs_rewards via reachable GM/QA /survey slash command
+    let saved_role = p1.role;
+    p1.role |= eve_machonet::service_roles::ROLE_GMH | eve_machonet::service_roles::ROLE_QA;
+    let sched_rep = rpc(
         &ctx,
-        eve_server::services::operations_manager::SurveyDefinition {
-            survey_id: 2801,
-            name: "Capsuleer Operations Survey".into(),
-            description: "Active survey with item and VGS rewards".into(),
-            start_date: None,
-            end_date: None,
-            start_unix: Some(now_unix - 3_600),
-            expires_at_unix: Some(now_unix + 86_400),
-            grace_period_days: 7,
-            min_account_age_hours: 24,
-            item_rewards: vec![(34, 1_000), (35, 500)],
-            vgs_rewards: vec![5003],
-        },
-    );
+        &mut p1,
+        "publicQaToolsServer",
+        "SlashCmd",
+        &[PyRep::String("/survey schedule 2801 86400 34:1000,35:500 5003".into())],
+    )
+    .await
+    .expect("schedule survey 2801 via /survey");
+    assert_eq!(sched_rep.dict_get("surveyID"), Some(&PyRep::Integer(2801)));
+    assert_eq!(sched_rep.dict_get("scheduled"), Some(&PyRep::Bool(true)));
+    p1.role = saved_role;
 
     let checks = rpc(&ctx, &mut p1, "survey", "PerformSurveyChecks", &[]).await.expect("PerformSurveyChecks active");
     assert_eq!(checks, PyRep::List(vec![PyRep::Integer(2801)]));
@@ -361,12 +361,42 @@ async fn test_operations_tasks_operations_and_telemetry() {
         (ch.free_skill_points, ch.balance, ch.home_station_id, s.items.len())
     });
 
-    // ClaimSurveyRewards with 0 positional arguments delivers item_rewards into home station hangar
-    rpc(&ctx, &mut p1, "survey", "ClaimSurveyRewards", &[]).await.expect("Claim survey 2801 (0 args)");
+    // Claiming rewards before the survey is completed must be rejected with SurveyNotCompleted
+    let uncompleted_err = rpc(&ctx, &mut p1, "survey", "ClaimSurveyRewards", &[])
+        .await
+        .expect_err("claiming uncompleted survey must fail");
+    assert_eq!(uncompleted_err.code, "SurveyNotCompleted");
+    assert!(
+        ctx.drain_notifications_for_char(P1).iter().all(|n| n.event != "OnSurveyRewardsAvailable"),
+        "OnSurveyRewardsAvailable must not fire before survey completion"
+    );
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.len()), init_items, "uncompleted claim must not mint items");
+
+    // Completing the survey via server/QA trigger marks completion and emits OnSurveyRewardsAvailable
+    p1.role |= eve_machonet::service_roles::ROLE_GMH | eve_machonet::service_roles::ROLE_QA;
+    let comp_rep = rpc(
+        &ctx,
+        &mut p1,
+        "publicQaToolsServer",
+        "SlashCmd",
+        &[PyRep::String("/survey complete 2801".into())],
+    )
+    .await
+    .expect("complete survey 2801 via /survey");
+    assert_eq!(comp_rep.dict_get("completed"), Some(&PyRep::Bool(true)));
+    p1.role = saved_role;
+
     let s1_notifs = ctx.drain_notifications_for_char(P1);
-    let s1_ev = s1_notifs.iter().find(|n| n.event == "OnSurveyRewardsAvailable").expect("OnSurveyRewardsAvailable");
+    let s1_ev = s1_notifs.iter().find(|n| n.event == "OnSurveyRewardsAvailable").expect("OnSurveyRewardsAvailable on completion");
     assert_eq!(s1_ev.args, vec![PyRep::Integer(2801)], "OnSurveyRewardsAvailable must have 1 argument [survey_id]");
-    assert!(rpc(&ctx, &mut p1, "survey", "ClaimSurveyRewards", &[PyRep::Integer(2801)]).await.is_err(), "duplicate claim must fail");
+
+    // ClaimSurveyRewards with 0 positional arguments delivers item_rewards into home station hangar
+    let claimed = rpc(&ctx, &mut p1, "survey", "ClaimSurveyRewards", &[]).await.expect("Claim survey 2801 (0 args)");
+    assert_eq!(claimed, PyRep::Bool(true));
+    let dup_err = rpc(&ctx, &mut p1, "survey", "ClaimSurveyRewards", &[PyRep::Integer(2801)])
+        .await
+        .expect_err("duplicate claim must fail");
+    assert_eq!(dup_err.code, "SurveyAlreadyClaimed");
     assert_eq!(rpc(&ctx, &mut p1, "survey", "GetActiveSurveyID", &[]).await.expect("GetActiveSurveyID after"), PyRep::None);
 
     ctx.db.with_snapshot(|s| {

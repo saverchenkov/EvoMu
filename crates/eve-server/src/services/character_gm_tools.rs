@@ -1217,6 +1217,9 @@ pub async fn handle_gm_slash_ext(
         };
         return Some(Ok(PyRep::Real(crate::services::wallet_serverops::set_system_tidi_factor(ctx, sys_id, f))));
     }
+    if cmd == "/survey" || cmd.starts_with("/survey ") {
+        return crate::services::operations_manager::handle_survey_slash(ctx, cid, cmd);
+    }
 
     None
 }
@@ -1259,6 +1262,8 @@ pub async fn handle_gm_qa_rpcs(
                 || cmd.starts_with("/translocate ")
                 || cmd == "/online"
                 || cmd.starts_with("/online ")
+                || cmd == "/survey"
+                || cmd.starts_with("/survey ")
             {
                 if let Some(ext_res) = handle_gm_slash_ext(ctx, session, cid, cmd).await {
                     return Some(ext_res);
