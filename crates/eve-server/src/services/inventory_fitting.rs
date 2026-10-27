@@ -682,7 +682,11 @@ pub async fn handle(
                     if let Some(parent) = snap.items.get(&moving.location_id) {
                         let p_cat = ctx.sde.types.get(&parent.type_id).map(|t| t.category_id).unwrap_or(0);
                         let p_grp = ctx.sde.types.get(&parent.type_id).map(|t| t.group_id).unwrap_or(0);
-                        let is_foreign_unit = (p_cat == 22 || matches!(p_grp, 12 | 340 | 448 | 649)) && parent.type_id != 23 && parent.owner_id != char_id && parent.owner_id != 0;
+                        let is_foreign_unit = (p_cat == 22 || matches!(p_grp, 12 | 340 | 448 | 649))
+                            && parent.type_id != 23
+                            && parent.owner_id != char_id
+                            && parent.owner_id != 0
+                            && !(corp_id > 0 && parent.owner_id == corp_id);
                         let is_foreign_ship = p_cat == 6 && parent.owner_id != char_id;
                         if is_foreign_unit {
                             is_storage_auth_and_near(parent.item_id)
@@ -1006,6 +1010,8 @@ pub async fn handle(
                         fitting_containers_ships::write_container_ship_state(ctx, |st| {
                             st.alsc_logs.entry(cid).or_default().push(entry);
                         });
+                    } else if orig_source_loc_id != new_loc && orig_source_loc_id > 0 {
+                        fitting_containers_ships::record_container_take_log(ctx, char_id, item_id, moved_tid, moved_qty, orig_source_loc_id);
                     }
                     if looted_foreign_jetcan {
                         super::inventory_stacking::apply_space_loot_suspect_flag(ctx, session, char_id);
@@ -1095,6 +1101,16 @@ pub async fn handle(
                         updated.quantity,
                         updated.location_id,
                     );
+                    if pending_alsc_take.is_none() && orig_source_loc_id != new_loc && orig_source_loc_id > 0 {
+                        fitting_containers_ships::record_container_take_log(
+                            ctx,
+                            char_id,
+                            updated.item_id,
+                            updated.type_id,
+                            updated.quantity,
+                            orig_source_loc_id,
+                        );
+                    }
                     write_container_ship_state(ctx, |st| {
                         if let Some((cid, entry)) = pending_alsc_take {
                             st.alsc_logs.entry(cid).or_default().push(entry);

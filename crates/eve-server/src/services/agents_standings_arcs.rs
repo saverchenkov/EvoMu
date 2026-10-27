@@ -569,7 +569,7 @@ pub fn handle_special_dialogue_action(
                         agent_id,
                         research_type_id: req_field_skill,
                         points_per_day: rp_per_day,
-                        initial_points: rp_per_day, // Grant 1 day initial RP on first start
+                        initial_points: 0.0,
                         started_unix: now_unix,
                     });
                 }
@@ -693,6 +693,20 @@ pub fn handle_special_dialogue_action(
             if !agent_info.is_locator {
                 return Some(Err(BridgeRpcError { code: "AgentHasNoLocatorService".into(), message: format!("Agent {agent_id} does not offer Locator services") }));
             }
+            let caller_sys = session.solar_system_id.unwrap_or(30_000_142);
+            if agent_info.solar_system_id != Some(caller_sys)
+                || (session.station_id.is_some()
+                    && agent_info.station_id.is_some()
+                    && agent_info.station_id != session.station_id)
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "AgentNotCoLocated".into(),
+                    message: format!(
+                        "Must be co-located with Locator Agent {agent_id} in system {:?} / station {:?}",
+                        agent_info.solar_system_id, agent_info.station_id
+                    ),
+                }));
+            }
             let target_char_id = args
                 .get(2)
                 .or_else(|| args.get(1))
@@ -709,6 +723,15 @@ pub fn handle_special_dialogue_action(
             };
             let cd_nid = locator_cooldown_note_id(char_id, agent_id);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let eff_st = compute_effective_agent_standing(ctx, snap, char_id, agent_id, agent_info.corporation_id, None);
+                if agent_info.level > 1 {
+                    let req_st = ((agent_info.level as f64) - 1.0) * 2.0 - 1.0;
+                    if eff_st < req_st {
+                        return Err(BridgeRpcError { code: "InsufficientAgentStanding".into(), message: format!("Locator agent {agent_id} (level {}) requires effective standing >= {req_st:.1} (have {eff_st:.2})", agent_info.level) });
+                    }
+                } else if eff_st <= -2.0 {
+                    return Err(BridgeRpcError { code: "InsufficientAgentStanding".into(), message: format!("Locator agent {agent_id} (level 1) requires effective standing > -2.0 (have {eff_st:.2})") });
+                }
                 if let Some(cd_note) = snap.owner_notes.get(&cd_nid) {
                     if now_unix < cd_note.timestamp_unix {
                         return Err(BridgeRpcError { code: "LocatorAgentOnCooldown".into(), message: format!("Locator agent {agent_id} is on cooldown until {}", cd_note.timestamp_unix) });
@@ -717,6 +740,36 @@ pub fn handle_special_dialogue_action(
                 let Some(target_ch) = snap.characters.get(&target_char_id).cloned() else {
                     return Err(BridgeRpcError { code: "TargetCharacterNotFound".into(), message: format!("Target character {target_char_id} not found") });
                 };
+                if target_ch.solar_system_id >= 31_000_000 {
+                    return Err(BridgeRpcError {
+                        code: "LocatorTargetInUnknownSpace".into(),
+                        message: format!("Locator agents cannot locate targets in wormhole or abyssal space (system {})", target_ch.solar_system_id),
+                    });
+                }
+                let sys_info = ctx.sde.solar_systems.get(&target_ch.solar_system_id);
+                let const_id = sys_info.map(|s| s.constellation_id).unwrap_or(20_000_020);
+                let reg_id = sys_info.map(|s| s.region_id).unwrap_or(10_000_002);
+                if reg_id >= 11_000_000 {
+                    return Err(BridgeRpcError {
+                        code: "LocatorTargetInUnknownSpace".into(),
+                        message: format!("Locator agents cannot locate targets in unknown space region {reg_id}"),
+                    });
+                }
+                let agent_sys_info = agent_info.solar_system_id.and_then(|sid| ctx.sde.solar_systems.get(&sid));
+                let agent_const_id = agent_sys_info.map(|s| s.constellation_id).unwrap_or(20_000_020);
+                let agent_reg_id = agent_sys_info.map(|s| s.region_id).unwrap_or(10_000_002);
+                if agent_info.level == 1 && const_id != agent_const_id {
+                    return Err(BridgeRpcError {
+                        code: "LocatorTargetOutOfRange".into(),
+                        message: format!("Level 1 locator agent {agent_id} can only locate targets in constellation {agent_const_id}"),
+                    });
+                }
+                if agent_info.level == 2 && reg_id != agent_reg_id {
+                    return Err(BridgeRpcError {
+                        code: "LocatorTargetOutOfRange".into(),
+                        message: format!("Level 2 locator agent {agent_id} can only locate targets in region {agent_reg_id}"),
+                    });
+                }
                 let fee_cents = IskCents::from_isk(isk_fee);
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     if ch.balance < fee_cents {
@@ -743,9 +796,6 @@ pub fn handle_special_dialogue_action(
                         timestamp_unix: now_unix + cooldown_sec,
                     },
                 );
-                let sys_info = ctx.sde.solar_systems.get(&target_ch.solar_system_id);
-                let const_id = sys_info.map(|s| s.constellation_id).unwrap_or(20_000_020);
-                let reg_id = sys_info.map(|s| s.region_id).unwrap_or(10_000_002);
                 Ok((
                     target_ch.solar_system_id,
                     const_id,

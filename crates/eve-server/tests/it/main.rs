@@ -44,6 +44,7 @@ mod combat_npc_crimewatch;
 mod combat_pve;
 mod combat_sleepers_pochven_zarzakh;
 mod combat_weapons_wrecks;
+mod corp_skills_inventory_r4_regressions;
 mod cosmetics_ui_complete;
 mod destiny_binary_stream;
 mod destiny_events_emission;

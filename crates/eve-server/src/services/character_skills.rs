@@ -388,6 +388,7 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            catch_up_skill_queue(ctx, char_id);
             let is_add_to_end = false;
 
             let mut skills_to_queue: Vec<(TypeId, u8)> = Vec::new();
@@ -679,6 +680,7 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            catch_up_skill_queue(ctx, char_id);
             let now_ft = ctx.now_blueos_filetime_ticks();
 
             // V24 2-argument form: ApplyFreeSkillPoints(skill_type_id, points_to_apply)
@@ -1043,8 +1045,22 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            catch_up_skill_queue(ctx, char_id);
+            let now_unix = ctx.now_unix();
             ctx.db.with_mut_snapshot(|snap| {
                 snap.paused_skill_queues.insert(char_id);
+                if let Some(q) = snap.skill_queues.get_mut(&char_id) {
+                    if let Some(head) = q.first_mut() {
+                        let cur_sp = snap
+                            .skills
+                            .get(&char_id)
+                            .and_then(|m| m.get(&head.type_id))
+                            .map(|s| s.skill_points)
+                            .unwrap_or(head.start_sp);
+                        head.start_sp = cur_sp;
+                        head.started_at_unix = Some(now_unix);
+                    }
+                }
             });
             let _ = ctx.notify_skill_queue_paused_server(char_id);
             Some(Ok(PyRep::Bool(true)))

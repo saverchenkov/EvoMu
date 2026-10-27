@@ -724,15 +724,24 @@ pub(super) fn handle_corp_gov(
                 if corp.ceo_id != char_id {
                     return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only the current CEO can resign".into() });
                 }
-                let next_ceo = new_ceo_opt.filter(|id| corp.members.contains(id)).unwrap_or(0);
+                let next_ceo = new_ceo_opt.filter(|&id| id > 0 && id != char_id && corp.members.contains(&id)).unwrap_or(0);
+                if next_ceo == 0 && corp.members.len() > 1 {
+                    return Err(BridgeRpcError {
+                        code: "InvalidNewCEO".into(),
+                        message: "Cannot resign as CEO without designating a valid member successor while corporation has other members".into(),
+                    });
+                }
                 corp.ceo_id = next_ceo;
+                corp.member_roles.insert(char_id, 0);
                 if next_ceo > 0 {
                     corp.member_roles.insert(next_ceo, u64::MAX);
                 }
+                snap.corp_role_assignments.remove(&(corp_id, char_id));
                 Ok(next_ceo)
             });
             match res {
                 Ok(next_ceo) => {
+                    session.corp_role = 0;
                     let change = PyRep::Dict(vec![(
                         PyRep::String(("ceoID").into()),
                         PyRep::Tuple(vec![PyRep::Integer(char_id), PyRep::Integer(next_ceo)]),

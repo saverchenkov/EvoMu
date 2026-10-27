@@ -252,14 +252,15 @@ pub(crate) fn can_character_access_ship_bay_with_password_snap(
     if !base_allowed {
         return false;
     }
-    if let (Some(sup), Some(req)) = (
-        _supplied_password,
-        cfg.password
-            .as_deref()
-            .or_else(|| st.ship_passwords.get(&host_ship_id).map(|s| s.as_str()))
-            .filter(|s| !s.is_empty()),
-    ) {
-        if sup != req {
+    let req_pw = cfg
+        .password
+        .as_deref()
+        .or_else(|| st.ship_passwords.get(&host_ship_id).map(|s| s.as_str()))
+        .filter(|s| !s.is_empty());
+    if let Some(req) = req_pw {
+        let already_unlocked = st.unlocked_containers.contains(&(char_id, host_ship_id))
+            || st.unlocked_containers.contains(&(host_ship_id, char_id));
+        if !already_unlocked && _supplied_password != Some(req) {
             return false;
         }
     }
@@ -373,6 +374,61 @@ pub(crate) fn record_container_add_log(
     });
 }
 
+pub(crate) fn record_container_take_log(
+    ctx: &ServerContext,
+    char_id: i64,
+    item_id: i64,
+    moved_tid: u32,
+    moved_qty: i32,
+    container_id: i64,
+) {
+    let now_unix = ctx.now_unix_secs();
+    let is_alsc = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .get(&container_id)
+            .map(|i| {
+                let grp = ctx.sde.types.get(&i.type_id).map(|t| t.group_id).unwrap_or(0);
+                matches!(grp, 340 | 448)
+            })
+            .unwrap_or(false)
+    });
+    if !is_alsc {
+        return;
+    }
+    write_container_ship_state(ctx, |st| {
+        st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry {
+            timestamp_unix: now_unix,
+            actor_id: char_id,
+            action: "ALSCActionTake".into(),
+            item_id,
+            item_type_id: moved_tid,
+            quantity: moved_qty,
+        });
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some((corp_id, c_tid, c_loc, loc_flag)) =
+            resolve_corp_container_log_target(snap, container_id)
+        {
+            snap.corp_container_logs.entry(corp_id).or_default().push(
+                eve_db::CorpContainerLogEntry {
+                    logged_at_unix: now_unix,
+                    container_id,
+                    container_type_id: c_tid,
+                    character_id: char_id,
+                    location_id: c_loc,
+                    location_flag: loc_flag,
+                    action: "take".into(),
+                    password_type: None,
+                    type_id: Some(moved_tid as i32),
+                    quantity: Some(moved_qty),
+                    old_config_bitmask: None,
+                    new_config_bitmask: None,
+                },
+            );
+        }
+    });
+}
+
 /// Validates container rules, ALSC locks/passwords, SMA (`flag 90`), and Fleet Hangar (`flag 155`) on item move.
 pub(crate) fn validate_container_and_bay_move(
     ctx: &ServerContext,
@@ -394,6 +450,71 @@ pub(crate) fn validate_container_and_bay_move(
             code: "ALSCItemLocked".into(),
             message: format!("Item {item_id} is locked in an Audit Log Secure Container"),
         });
+    }
+
+    // Validate source container password and corporate container take role when moving out of a container
+    let src_cont_info = ctx.db.with_snapshot(|snap| {
+        let moving_item = snap.items.get(&item_id)?;
+        let src_loc = moving_item.location_id;
+        if src_loc == new_loc {
+            return None;
+        }
+        let src_cont = snap.items.get(&src_loc)?;
+        let src_grp = ctx.sde.types.get(&src_cont.type_id).map(|t| t.group_id).unwrap_or(0);
+        if !is_container_group(src_grp, src_cont.type_id) {
+            return None;
+        }
+        let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+        let cont_corp = if snap.corporations.contains_key(&src_cont.owner_id) {
+            src_cont.owner_id
+        } else if (116..=122).contains(&(src_cont.flag as i64)) && char_corp > 0 && moving_item.owner_id == char_corp {
+            char_corp
+        } else {
+            0
+        };
+        Some((src_loc, src_cont.flag as i64, src_cont.location_id, cont_corp, char_corp))
+    });
+    if let Some((src_loc, src_cont_flag, src_cont_station, cont_corp, char_corp)) = src_cont_info {
+        let mut st = read_container_ship_state(ctx);
+        if let Some(req_pw) = st.container_passwords.get(&src_loc).cloned() {
+            if !req_pw.is_empty()
+                && !st.unlocked_containers.contains(&(src_loc, char_id))
+                && !st.unlocked_containers.contains(&(char_id, src_loc))
+            {
+                let provided = kwargs.get("password").and_then(|v| v.as_str()).unwrap_or("");
+                if provided != req_pw {
+                    return Err(BridgeRpcError {
+                        code: "ALSCPasswordNeededToOpen".into(),
+                        message: format!("Password required to take items from secure container {src_loc}"),
+                    });
+                }
+                st.unlocked_containers.insert((src_loc, char_id));
+                save_container_ship_state(ctx, &st);
+            }
+        }
+        if cont_corp > 0 && cont_corp == char_corp {
+            let (is_ceo, roles) = crate::services::inventory_bound::get_effective_corp_roles_at_location(
+                ctx,
+                cont_corp,
+                char_id,
+                Some(src_cont_station),
+            );
+            let div_idx = if (116..=122).contains(&src_cont_flag) {
+                (src_cont_flag - 116) as u32
+            } else {
+                0
+            };
+            let req_container_take_role = 1u64 << (43 + div_idx);
+            if !is_ceo && !eve_db::corp_roles::has_role(roles, req_container_take_role) {
+                return Err(BridgeRpcError {
+                    code: "CorpRoleDenied".into(),
+                    message: format!(
+                        "Corporation container take role denied for division {}",
+                        div_idx + 1
+                    ),
+                });
+            }
+        }
     }
 
     let snap_check = ctx.db.with_snapshot(|snap| {
