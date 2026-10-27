@@ -79,6 +79,16 @@ async fn serve_harness_bridge_client(
                         _ => None,
                     }).unwrap_or(12);
                     ctx.advance_secs(secs);
+                    if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
+                        let sys_h = ctx.systems.get_or_spawn(sys_id);
+                        if let Ok(Some((_, ball))) = sys_h.get_ball_snapshot(ship_id).await {
+                            if matches!(ball.mode, eve_destiny::MovementMode::Warp { .. }) {
+                                for _ in 0..secs.min(60) {
+                                    let _ = sys_h.tick().await;
+                                }
+                            }
+                        }
+                    }
                     Ok(PyRep::Bool(true))
                 } else if (service == "timeControl" || service == "harness") && (method == "FastForwardSessionTimer" || method == "ClearSessionTimer") {
                     if let Some(cid) = session.character_id {

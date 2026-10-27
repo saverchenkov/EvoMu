@@ -279,6 +279,7 @@ async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
     let ship_id_2 = 100_000_002;
     let start_sys = 30_000_142; // Jita
     let mut sess = setup_pilot(&ctx, 8002, "demo", "demo-secret", char_id).await;
+    let mut sess2 = setup_pilot(&ctx, 8003, "other", "other-secret", char_id_2).await;
 
     // Seed pilots in space in Jita with fleet and filaments in cargo
     ctx.db.with_mut_snapshot(|snap| {
@@ -306,8 +307,8 @@ async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
                 ..Default::default()
             },
         );
-        // Filaments: Abyssal 47763, Needlejack 53977
-        for (iid, tid) in [(1_300_000_001, 47763), (1_300_000_002, 53977)] {
+        // Filaments: Abyssal 47763, Needlejack 53977, Ice Storm 85282
+        for (iid, tid) in [(1_300_000_001, 47763), (1_300_000_002, 53977), (1_300_000_003, 85282)] {
             snap.items.insert(
                 iid,
                 InventoryItemRecord {
@@ -323,41 +324,17 @@ async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
     sess.structure_id = None;
     sess.ship_id = Some(ship_id);
 
+    sess2.solar_system_id = Some(start_sys);
+    sess2.station_id = None;
+    sess2.structure_id = None;
+    sess2.ship_id = Some(ship_id_2);
+    let _ = ctx.bind_object(&mut sess2, "beyonce", start_sys as i64);
+
     let handle_start = ctx.systems.get_or_spawn(start_sys);
-    let _ = handle_start
-        .spawn_ball_with_combat(
-            Ball {
-                id: ship_id,
-                type_id: 601,
-                position: DVec3::new(50_000.0, 0.0, 0.0),
-                velocity: DVec3::ZERO,
-                max_velocity: 1000.0,
-                inertia: 1.0,
-                mass: 100_000.0,
-                radius: 50.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            ctx.build_ship_combat_state(char_id, ship_id, 601),
-        )
-        .await;
-    let _ = handle_start
-        .spawn_ball_with_combat(
-            Ball {
-                id: ship_id_2,
-                type_id: 587,
-                position: DVec3::new(51_000.0, 0.0, 0.0),
-                velocity: DVec3::ZERO,
-                max_velocity: 1000.0,
-                inertia: 1.0,
-                mass: 100_000.0,
-                radius: 50.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            ctx.build_ship_combat_state(char_id_2, ship_id_2, 587),
-        )
-        .await;
+    for (pid, sid, tid, pos) in [(char_id, ship_id, 601, DVec3::new(50_000.0, 0.0, 0.0)), (char_id_2, ship_id_2, 587, DVec3::new(51_000.0, 0.0, 0.0))] {
+        let b = Ball { id: sid, type_id: tid, position: pos, velocity: DVec3::ZERO, max_velocity: 1000.0, inertia: 1.0, mass: 100_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop };
+        let _ = handle_start.spawn_ball_with_combat(b, ctx.build_ship_combat_state(pid, sid, tid)).await;
+    }
 
     // 1. Abyssal filament deployment returns UnimplementedRPC
     let abyssal_err = rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceDeployment", &[])
@@ -392,6 +369,12 @@ async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
         .expect_err("requires valid filament item_id in cargo");
     assert_eq!(invalid_arg_err.code, "FilamentNotInCargo");
 
+    // Unsupported group 4041 filament (Ice Storm without attr 3025) returns UnimplementedRPC
+    let ice_err = rpc(&ctx, &mut sess, "randomJumpMgr", "ActivateRandomJumpFilament", &[PyRep::Integer(1_300_000_003)])
+        .await
+        .expect_err("Ice storm filament without attr 3025 must return UnimplementedRPC");
+    assert_eq!(ice_err.code, "UnimplementedRPC");
+
     let random_res = rpc(&ctx, &mut sess, "randomJumpMgr", "ActivateRandomJumpFilament", &[PyRep::Integer(1_300_000_002)])
         .await
         .expect("ActivateRandomJumpFilament");
@@ -400,38 +383,44 @@ async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
         .and_then(|v| v.as_i64())
         .expect("solarSystemID") as u32;
 
-    // Verify destination system is a null-sec system in SDE
+    // Verify destination system is a null-sec system in SDE (excluding Pochven/Jove/Zarzakh)
     let sys_record = ctx.sde.solar_systems.get(&dest_sys).expect("solar system in SDE");
     assert!(sys_record.security_status < 0.0, "Needlejack must jump to null-sec (sec: {})", sys_record.security_status);
+    assert!(!matches!(sys_record.region_id, 10000070 | 10000004 | 10000017 | 10000019 | 10001000), "Destination must not be Pochven/Jove/Zarzakh");
     assert_eq!(sess.solar_system_id, Some(dest_sys));
 
     // Verify both fleetmates jumped to destination null-sec system
     let (c1_sys, c2_sys, s2_loc) = ctx.db.with_snapshot(|snap| {
-        (
-            snap.characters[&char_id].solar_system_id,
-            snap.characters[&char_id_2].solar_system_id,
-            snap.items[&ship_id_2].location_id,
-        )
+        (snap.characters[&char_id].solar_system_id, snap.characters[&char_id_2].solar_system_id, snap.items[&ship_id_2].location_id)
     });
     assert_eq!(c1_sys, dest_sys, "Caller character moved to destination");
     assert_eq!(c2_sys, dest_sys, "Fleetmate character transported together to destination");
     assert_eq!(s2_loc, dest_sys as i64, "Fleetmate ship moved to destination");
 
-    // Verify Destiny balls moved from start to destination system
+    // Verify Destiny balls moved from start to destination system and landed near planet
     let handle_dest = ctx.systems.get_or_spawn(dest_sys);
-    assert!(handle_dest.get_ball_snapshot(ship_id).await.unwrap().is_some(), "Caller ball in dest");
+    let dest_b1 = handle_dest.get_ball_snapshot(ship_id).await.unwrap().expect("Caller ball in dest").1;
     assert!(handle_dest.get_ball_snapshot(ship_id_2).await.unwrap().is_some(), "Fleetmate ball in dest");
     assert!(handle_start.get_ball_snapshot(ship_id).await.unwrap().is_none(), "Caller ball removed from start");
     assert!(handle_start.get_ball_snapshot(ship_id_2).await.unwrap().is_none(), "Fleetmate ball removed from start");
+    assert_ne!(dest_b1.position, DVec3::new(100_000_000.0, 0.0, 0.0), "Landed near planet, not fixed coordinates");
+
+    // Verify fleetmate received OnSessionChanged notification, beyonce bound object updated, and session synchronized
+    let notifs2 = ctx.drain_notifications_for_char(char_id_2);
+    assert!(notifs2.iter().any(|n| n.event == "OnSessionChanged"), "Fleetmate must receive OnSessionChanged notification");
+    let bounds = ctx.bound_objects.read().unwrap();
+    let beyonce_bound = bounds.values().find(|b| b.character_id == char_id_2 && b.service == "beyonce");
+    assert_eq!(beyonce_bound.map(|b| b.object_id), Some(dest_sys as i64), "Fleetmate beyonce bound object updated to destination system");
+    drop(bounds);
+
+    ctx.sync_session(&mut sess2);
+    assert_eq!(sess2.solar_system_id, Some(dest_sys), "Fleetmate session synchronized to destination system");
 
     // Verify 15-minute PvP log-off timer (900s) applied to all transported pilots
     let now = ctx.now_unix();
     let (t1, t2) = {
         let cw = ctx.crimewatch.read().unwrap();
-        (
-            cw.states.get(&char_id).map(|c| c.pvp_timer_until_unix).unwrap_or(0),
-            cw.states.get(&char_id_2).map(|c| c.pvp_timer_until_unix).unwrap_or(0),
-        )
+        (cw.states.get(&char_id).map(|c| c.pvp_timer_until_unix).unwrap_or(0), cw.states.get(&char_id_2).map(|c| c.pvp_timer_until_unix).unwrap_or(0))
     };
     assert!(t1 >= now + 890, "Caller has 15-minute PvP timer");
     assert!(t2 >= now + 890, "Fleetmate has 15-minute PvP timer");

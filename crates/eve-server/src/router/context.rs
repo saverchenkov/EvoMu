@@ -575,8 +575,12 @@ impl ServerContext {
     /// Synchronizes a live `SessionState` with current DB character spatial and vessel state.
     pub fn sync_session(&self, session: &mut eve_machonet::SessionState) {
         if let Some(cid) = session.character_id {
-            if let Some((act_ship, st_id, str_id, sys_id)) = self.db.with_snapshot(|snap| snap.characters.get(&cid).map(|c| (c.active_ship_id, c.station_id, c.structure_id, c.solar_system_id))) {
+            if let Some((act_ship, st_id, str_id, sys_id, const_id, reg_id)) = self.db.with_snapshot(|snap| {
+                snap.characters.get(&cid).map(|c| (c.active_ship_id, c.station_id, c.structure_id, c.solar_system_id, c.constellation_id, c.region_id))
+            }) {
                 session.solar_system_id = Some(sys_id);
+                if const_id != 0 { session.constellation_id = Some(const_id); }
+                if reg_id != 0 { session.region_id = Some(reg_id); }
                 session.station_id = st_id;
                 session.structure_id = str_id;
                 if act_ship != 0 { session.ship_id = Some(act_ship); }

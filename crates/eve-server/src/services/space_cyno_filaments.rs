@@ -480,6 +480,27 @@ async fn handle_random_jump_filament(
         return Err(BridgeRpcError { code: "ShipCapitalRestricted".into(), message: "Random jump filaments cannot be activated on capital ships".into() });
     }
 
+    let fleet_members: Vec<i64> = ctx.db.with_snapshot(|snap| {
+        snap.fleets.values().find(|f| f.members.contains(&char_id)).map(|f| f.members.clone())
+    }).ok_or_else(|| BridgeRpcError {
+        code: "NotInFleet".into(),
+        message: "Random jump filaments require being in a fleet".into(),
+    })?;
+
+    let caller_pos = current_ball.position;
+    let too_close = |pos: DVec3| caller_pos.distance(pos) < 1_000_000.0;
+    let station_close = ctx.sde.stations.values().any(|s| s.solar_system_id == old_sys && too_close(s.position));
+    let gate_close = ctx.sde.stargates().values().any(|g| g.from_solar_system_id == old_sys && too_close(g.position));
+    let struct_close = ctx.db.with_snapshot(|snap| {
+        snap.structures.values().any(|s| s.solar_system_id == old_sys && s.state != "Destroyed" && too_close(DVec3::from_array(s.position)))
+    });
+    if station_close || gate_close || struct_close {
+        return Err(BridgeRpcError {
+            code: "TooCloseToStructureOrStation".into(),
+            message: "Must be at least 1,000 km away from stations, stargates, and structures to activate filament".into(),
+        });
+    }
+
     const GROUP_JUMP_FILAMENTS: u32 = 4041;
     let fil_item_id = if let Some(id) = args.first().and_then(|a| a.as_i64()) {
         id
@@ -495,51 +516,49 @@ async fn handle_random_jump_filament(
         })?
     };
 
-    let max_capacity = ctx.db.with_snapshot(|snap| {
+    let (max_capacity, is_signal) = ctx.db.with_snapshot(|snap| {
         let fil = snap.items.get(&fil_item_id).filter(|i| {
             i.owner_id == char_id && i.location_id == ship_id && i.flag == eve_db::InventoryFlag::Cargo && i.quantity >= 1
-        });
-        let Some(fil) = fil else {
-            return Err(BridgeRpcError { code: "FilamentNotInCargo".into(), message: format!("Filament {fil_item_id} not found in active ship Cargo") });
-        };
+        }).ok_or_else(|| BridgeRpcError {
+            code: "FilamentNotInCargo".into(),
+            message: format!("Filament {fil_item_id} not found in active ship Cargo"),
+        })?;
         let sde_type = ctx.sde.types.get(&fil.type_id).filter(|t| t.group_id == GROUP_JUMP_FILAMENTS).ok_or_else(|| {
             BridgeRpcError { code: "InvalidItemType".into(), message: "Item is not a jump filament".into() }
         })?;
-        let cap = if sde_type.name.contains("-25") || sde_type.name.contains(" 25") {
-            25
-        } else if sde_type.name.contains("-15") || sde_type.name.contains(" 15") {
-            15
-        } else {
-            5
-        };
-        Ok(cap)
+        let attr_3025 = sde_type.default_attributes.get(&3025).copied().ok_or_else(|| BridgeRpcError {
+            code: "UnimplementedRPC".into(),
+            message: format!("Filament type {} does not support needlejack random jump", fil.type_id),
+        })?;
+        let cap = sde_type.default_attributes.get(&2832).copied().unwrap_or(5.0) as usize;
+        Ok((cap, attr_3025 >= 0.5))
     })?;
 
-    let nullsec_systems: Vec<u32> = ctx
-        .sde
-        .solar_systems
-        .iter()
-        .filter(|(&sid, s)| sid != old_sys && s.security_status < 0.0 && sid < 31_000_000)
-        .map(|(&sid, _)| sid)
-        .collect();
+    let nullsec_systems: Vec<u32> = ctx.sde.solar_systems.iter().filter(|(&sid, s)| {
+        sid != old_sys && s.security_status < 0.0 && sid < 31_000_000
+            && !matches!(s.region_id, 10000070 | 10000004 | 10000017 | 10000019 | 10001000)
+    }).map(|(&sid, _)| sid).collect();
     if nullsec_systems.is_empty() {
         return Err(BridgeRpcError { code: "NoNullsecSystemInSde".into(), message: "No destination nullsec solar system found in SDE".into() });
     }
-    let idx = ((char_id as usize) ^ (old_sys as usize) ^ (now_unix as usize)) % nullsec_systems.len();
+    let idx = ((char_id as usize) ^ (old_sys as usize) ^ (now_unix as usize) ^ if is_signal { 0x5160 } else { 0 }) % nullsec_systems.len();
     let dest_sys_id = nullsec_systems[idx];
     let dest_sys = ctx.sde.solar_systems.get(&dest_sys_id).ok_or_else(|| {
         BridgeRpcError { code: "NoNullsecSystemInSde".into(), message: "Destination nullsec solar system not found in SDE".into() }
     })?;
 
-    let caller_pos = current_ball.position;
+    let landing_base = if !dest_sys.planet_ids.is_empty() {
+        let p_idx = ((now_unix as usize) ^ (char_id as usize)) % dest_sys.planet_ids.len();
+        let pid = dest_sys.planet_ids[p_idx];
+        ctx.sde.celestials_in_system(dest_sys_id).into_iter().find(|c| c.celestial_id == pid)
+            .map(|c| c.position + DVec3::new(c.radius.max(50_000.0) + 1_000_000.0, 0.0, 0.0))
+    } else {
+        None
+    }.unwrap_or(DVec3::new(100_000_000.0, 0.0, 0.0));
+
     let mut jumpers = vec![(char_id, ship_id, current_ball)];
-    let fleet_members: Vec<i64> = ctx.db.with_snapshot(|snap| {
-        snap.fleets.values().find(|f| f.members.contains(&char_id)).map(|f| f.members.clone()).unwrap_or_default()
-    });
     for mate_id in fleet_members {
-        if mate_id == char_id || jumpers.len() >= max_capacity {
-            continue;
-        }
+        if mate_id == char_id || jumpers.len() >= max_capacity { continue; }
         let mate_ship_info = ctx.db.with_snapshot(|snap| {
             snap.characters.get(&mate_id).filter(|ch| ch.solar_system_id == old_sys && ch.station_id.is_none() && ch.structure_id.is_none())
                 .map(|ch| (ch.active_ship_id, snap.items.get(&ch.active_ship_id).map(|i| i.type_id).unwrap_or(0)))
@@ -557,12 +576,7 @@ async fn handle_random_jump_filament(
 
     ctx.db.try_with_mut_snapshot(|snap| {
         if let Some(item) = snap.items.get_mut(&fil_item_id) {
-            if item.quantity > 1 {
-                item.quantity -= 1;
-                item.version += 1;
-            } else {
-                snap.items.remove(&fil_item_id);
-            }
+            if item.quantity > 1 { item.quantity -= 1; item.version += 1; } else { snap.items.remove(&fil_item_id); }
         }
         for &(p_char, p_ship, _) in &jumpers {
             if let Some(ch) = snap.characters.get_mut(&p_char) {
@@ -579,14 +593,16 @@ async fn handle_random_jump_filament(
         Ok::<(), BridgeRpcError>(())
     })?;
 
+    let (old_const, old_reg) = ctx.sde.solar_systems.get(&old_sys).map(|s| (s.constellation_id, s.region_id)).unwrap_or((0, 0));
     let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
     let pvp_until = now_unix.saturating_add(crate::sp6_lifecycle::PVP_TIMER_SECS);
     for (j_idx, (p_char, p_ship, mut b)) in jumpers.into_iter().enumerate() {
         let _ = old_handle.remove_ball(p_ship).await;
         crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, p_char, p_ship);
         ctx.sync_character_local_chat(p_char, Some(old_sys), dest_sys_id);
+        crate::services::map_service::record_solar_system_visit(ctx, p_char, dest_sys_id);
 
-        b.position = DVec3::new(100_000_000.0 + (j_idx as f64) * 200.0, 0.0, 0.0);
+        b.position = landing_base + DVec3::new((j_idx as f64) * 200.0, 0.0, 0.0);
         b.velocity = DVec3::ZERO;
         b.speed_fraction = 0.0;
         b.mode = MovementMode::Stop;
@@ -602,6 +618,30 @@ async fn handle_random_jump_filament(
             st.pvp_timers_until.insert(p_char, pvp_until);
         });
         crate::services::combat_crimewatch::emit_crimewatch_timer_notifications(ctx, p_char, now_unix);
+
+        if p_char != char_id {
+            if let Ok(mut bounds) = ctx.bound_objects.write() {
+                for bound in bounds.values_mut().filter(|b| b.character_id == p_char && b.service == "beyonce") {
+                    bound.object_id = dest_sys_id as i64;
+                }
+            }
+            let sess_rep = PyRep::keyval([
+                ("charid", PyRep::Integer(p_char)),
+                ("stationid", PyRep::None),
+                ("structureid", PyRep::None),
+                ("solarsystemid2", PyRep::Integer(dest_sys_id as i64)),
+                ("solarsystemid", PyRep::Integer(dest_sys_id as i64)),
+                ("constellationid", PyRep::Integer(dest_sys.constellation_id as i64)),
+                ("regionid", PyRep::Integer(dest_sys.region_id as i64)),
+            ]);
+            let change_dict = PyRep::Dict(vec![
+                (PyRep::String("solarsystemid".into()), PyRep::Tuple(vec![PyRep::Integer(old_sys as i64), PyRep::Integer(dest_sys_id as i64)])),
+                (PyRep::String("solarsystemid2".into()), PyRep::Tuple(vec![PyRep::Integer(old_sys as i64), PyRep::Integer(dest_sys_id as i64)])),
+                (PyRep::String("constellationid".into()), PyRep::Tuple(vec![PyRep::Integer(old_const as i64), PyRep::Integer(dest_sys.constellation_id as i64)])),
+                (PyRep::String("regionid".into()), PyRep::Tuple(vec![PyRep::Integer(old_reg as i64), PyRep::Integer(dest_sys.region_id as i64)])),
+            ]);
+            ctx.notify(crate::router::NotificationTarget::Character(p_char), "OnSessionChanged", "charid", vec![PyRep::Bool(false), sess_rep, change_dict]);
+        }
     }
 
     session.solar_system_id = Some(dest_sys_id);
@@ -629,33 +669,16 @@ fn validate_structure_cyno_beacon(
         message: format!("Beacon structure {target_struct_id} not found"),
     })?;
     if st.type_id != 35840 {
-        return Err(BridgeRpcError {
-            code: "InvalidStructureBeacon".into(),
-            message: format!("Structure {target_struct_id} (type {}) is not a Pharolux Cyno Beacon", st.type_id),
-        });
+        return Err(BridgeRpcError { code: "InvalidStructureBeacon".into(), message: format!("Structure {target_struct_id} (type {}) is not a Pharolux Cyno Beacon", st.type_id) });
     }
     if st.state == "Destroyed" {
-        return Err(BridgeRpcError {
-            code: "BeaconDestroyed".into(),
-            message: format!("Beacon structure {target_struct_id} is destroyed"),
-        });
+        return Err(BridgeRpcError { code: "BeaconDestroyed".into(), message: format!("Beacon structure {target_struct_id} is destroyed") });
     }
     if st.fuel_blocks <= 0 {
-        return Err(BridgeRpcError {
-            code: "BeaconOutOfFuel".into(),
-            message: format!("Beacon structure {target_struct_id} has no fuel blocks"),
-        });
+        return Err(BridgeRpcError { code: "BeaconOutOfFuel".into(), message: format!("Beacon structure {target_struct_id} has no fuel blocks") });
     }
-    if !st.quantum_core_installed
-        || matches!(
-            st.state.as_str(),
-            "Unanchored" | "Anchored" | "AnchorVulnerable" | "Anchoring" | "NoCore" | "Onlining"
-        )
-    {
-        return Err(BridgeRpcError {
-            code: "StructureBeaconOffline".into(),
-            message: format!("Beacon structure {target_struct_id} is offline (state '{}')", st.state),
-        });
+    if !st.quantum_core_installed || matches!(st.state.as_str(), "Unanchored" | "Anchored" | "AnchorVulnerable" | "Anchoring" | "NoCore" | "Onlining") {
+        return Err(BridgeRpcError { code: "StructureBeaconOffline".into(), message: format!("Beacon structure {target_struct_id} is offline (state '{}')", st.state) });
     }
     if !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
         snap,
@@ -774,66 +797,36 @@ async fn handle_cmd_jump_to_structure_beacon(
     if (31_000_000..32_000_000).contains(&cur_sys_id)
         || (31_000_000..32_000_000).contains(&target_sys_id)
     {
-        return Err(BridgeRpcError {
-            code: "JumpDriveForbiddenInWormholeSpace".into(),
-            message: "Jump drive and cynosural beacon operations are prohibited in wormhole space"
-                .into(),
-        });
+        return Err(BridgeRpcError { code: "JumpDriveForbiddenInWormholeSpace".into(), message: "Jump drive and cynosural beacon operations are prohibited in wormhole space".into() });
     }
     // Jump-drive range, isotope fuel, high-sec restriction and fatigue are SDE-driven
     // (`feat:navigation.jump-drive`, `feat:navigation.jump-fatigue`, `feat:navigation.jump-range-restrictions`).
     use super::space_nav_travel as nav;
-    let db_type_id = ctx
-        .db
-        .get_item(ship_id)
-        .map(|i| i.type_id)
-        .unwrap_or(current_ball.type_id);
+    let db_type_id = ctx.db.get_item(ship_id).map(|i| i.type_id).unwrap_or(current_ball.type_id);
     let plan = match nav::plan_jump_drive(ctx, char_id, db_type_id, cur_sys_id, target_sys_id) {
         Ok(p) => p,
         Err(_) if current_ball.type_id != 0 && current_ball.type_id != db_type_id => {
-            match nav::plan_jump_drive(ctx, char_id, current_ball.type_id, cur_sys_id, target_sys_id)
-            {
+            match nav::plan_jump_drive(ctx, char_id, current_ball.type_id, cur_sys_id, target_sys_id) {
                 Ok(p) => p,
                 Err(_) => {
                     let distance_ly = nav::distance_ly(ctx, cur_sys_id, target_sys_id);
                     if distance_ly > 7.0 {
-                        return Err(BridgeRpcError {
-                            code: "JumpDistanceOutOfRange".into(),
-                            message: format!("Distance {distance_ly:.2} LY exceeds jump range 7.00 LY"),
-                        });
+                        return Err(BridgeRpcError { code: "JumpDistanceOutOfRange".into(), message: format!("Distance {distance_ly:.2} LY exceeds jump range 7.00 LY") });
                     }
-                    nav::JumpDrivePlan {
-                        distance_ly,
-                        fuel_type_id: 16274,
-                        fuel_units: (distance_ly * 150.0).round().max(50.0) as i32,
-                        fatigue_multiplier: 1.0,
-                    }
+                    nav::JumpDrivePlan { distance_ly, fuel_type_id: 16274, fuel_units: (distance_ly * 150.0).round().max(50.0) as i32, fatigue_multiplier: 1.0 }
                 }
             }
         }
         Err(e) => return Err(e),
     };
-    let target_sec = ctx
-        .sde
-        .solar_systems
-        .get(&target_sys_id)
-        .map(|s| s.security_status)
-        .unwrap_or(0.0);
+    let target_sec = ctx.sde.solar_systems.get(&target_sys_id).map(|s| s.security_status).unwrap_or(0.0);
     if target_sec >= 0.45 {
-        return Err(BridgeRpcError {
-            code: "CannotJumpToHighSecBeacon".into(),
-            message: format!(
-                "Pharolux Cyno Beacon cannot operate in high-security system {target_sys_id} (security {target_sec:.2} >= 0.45)"
-            ),
-        });
+        return Err(BridgeRpcError { code: "CannotJumpToHighSecBeacon".into(), message: format!("Pharolux Cyno Beacon cannot operate in high-security system {target_sys_id} (security {target_sec:.2} >= 0.45)") });
     }
 
     let now_unix = ctx.now_unix();
     if let Some(_active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
-        return Err(BridgeRpcError {
-            code: "SessionChangeTimerActive".into(),
-            message: "Session change timer is active".into(),
-        });
+        return Err(BridgeRpcError { code: "SessionChangeTimerActive".into(), message: "Session change timer is active".into() });
     }
 
     nav::check_jump_activation(ctx, char_id)?;
@@ -917,84 +910,41 @@ fn validate_beacon_and_distance(
     args: &[PyRep],
 ) -> Result<(eve_db::types::UpwellStructureRecord, i64, f64), BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError {
-        code: "NoActiveShip".into(),
-        message: "Session has no active ship".into(),
-    })?;
+    let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into() })?;
     if session.station_id.is_some() || session.structure_id.is_some() {
-        return Err(BridgeRpcError {
-            code: "ShipDocked".into(),
-            message: "Cannot bridge or jump to cyno beacon while docked".into(),
-        });
+        return Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot bridge or jump to cyno beacon while docked".into() });
     }
-    let cur_sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError {
-        code: "NoSolarSystem".into(),
-        message: "Session has no active solarSystemID".into(),
-    })?;
+    let cur_sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solarSystemID".into() })?;
     let cur_sys_handle = ctx.systems.get_or_spawn(cur_sys_id);
     if cur_sys_handle.is_ball_scrambled_sync(ship_id) {
-        return Err(BridgeRpcError {
-            code: "WarpScrambled".into(),
-            message: "Cannot bridge or jump while warp scrambled".into(),
-        });
+        return Err(BridgeRpcError { code: "WarpScrambled".into(), message: "Cannot bridge or jump while warp scrambled".into() });
     }
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
     let now_check = ctx.now_unix();
-    if ctx
-        .crimewatch
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .states
-        .get(&char_id)
-        .is_some_and(|st| st.is_weapon_timer_active(now_check))
-    {
-        return Err(BridgeRpcError {
-            code: "WeaponsTimerActive".into(),
-            message: "Cannot bridge or jump while a Weapons Timer is active".into(),
-        });
+    if ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner()).states.get(&char_id).is_some_and(|st| st.is_weapon_timer_active(now_check)) {
+        return Err(BridgeRpcError { code: "WeaponsTimerActive".into(), message: "Cannot bridge or jump while a Weapons Timer is active".into() });
     }
     let (target_sys_hint, target_struct_id) = if args.len() >= 2 {
-        (
-            args.first().and_then(|a| a.as_i64()).map(|s| s as u32),
-            args.get(1).and_then(|a| a.as_i64()).unwrap_or(0),
-        )
+        (args.first().and_then(|a| a.as_i64()).map(|s| s as u32), args.get(1).and_then(|a| a.as_i64()).unwrap_or(0))
     } else {
         (None, args.first().and_then(|a| a.as_i64()).unwrap_or(0))
     };
-    let target_struct = ctx
-        .db
-        .with_snapshot(|snap| validate_structure_cyno_beacon(snap, char_id, target_struct_id, target_sys_hint))?;
-    if (31_000_000..32_000_000).contains(&cur_sys_id)
-        || (31_000_000..32_000_000).contains(&target_struct.solar_system_id)
-    {
-        return Err(BridgeRpcError {
-            code: "JumpDriveForbiddenInWormholeSpace".into(),
-            message: "Jump drive and cynosural beacon operations are prohibited in wormhole space"
-                .into(),
-        });
+    let target_struct = ctx.db.with_snapshot(|snap| validate_structure_cyno_beacon(snap, char_id, target_struct_id, target_sys_hint))?;
+    if (31_000_000..32_000_000).contains(&cur_sys_id) || (31_000_000..32_000_000).contains(&target_struct.solar_system_id) {
+        return Err(BridgeRpcError { code: "JumpDriveForbiddenInWormholeSpace".into(), message: "Jump drive and cynosural beacon operations are prohibited in wormhole space".into() });
     }
     let target_sec = ctx.sde.solar_systems.get(&target_struct.solar_system_id).map(|s| s.security_status).unwrap_or(0.0);
     if target_sec >= 0.45 {
-        return Err(BridgeRpcError {
-            code: "CannotJumpToHighSecBeacon".into(),
-            message: format!("Pharolux Cyno Beacon cannot operate in high-security system {}", target_struct.solar_system_id),
-        });
+        return Err(BridgeRpcError { code: "CannotJumpToHighSecBeacon".into(), message: format!("Pharolux Cyno Beacon cannot operate in high-security system {}", target_struct.solar_system_id) });
     }
     let dist_ly = super::space_nav_travel::distance_ly(ctx, cur_sys_id, target_struct.solar_system_id);
     if dist_ly > 6.0 {
-        return Err(BridgeRpcError {
-            code: "JumpDistanceOutOfRange".into(),
-            message: format!("Distance {dist_ly:.2} LY exceeds maximum range 6.0 LY"),
-        });
+        return Err(BridgeRpcError { code: "JumpDistanceOutOfRange".into(), message: format!("Distance {dist_ly:.2} LY exceeds maximum range 6.0 LY") });
     }
     Ok((target_struct, target_struct_id, dist_ly))
 }
 
-fn handle_cmd_bridge_to_structure_beacon(
-    ctx: &ServerContext,
-    session: &SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
+fn handle_cmd_bridge_to_structure_beacon(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (target_struct, target_struct_id, dist_ly) = validate_beacon_and_distance(ctx, session, args)?;
     Ok(PyRep::keyval([
         ("bridgeActive", PyRep::Bool(true)),
@@ -1005,11 +955,7 @@ fn handle_cmd_bridge_to_structure_beacon(
     ]))
 }
 
-fn handle_cmd_group_jump_to_structure_beacon(
-    ctx: &ServerContext,
-    session: &SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
+fn handle_cmd_group_jump_to_structure_beacon(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (target_struct, target_struct_id, dist_ly) = validate_beacon_and_distance(ctx, session, args)?;
     Ok(PyRep::keyval([
         ("groupJumpActive", PyRep::Bool(true)),

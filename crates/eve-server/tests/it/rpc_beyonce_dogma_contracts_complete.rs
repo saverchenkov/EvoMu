@@ -668,7 +668,8 @@ async fn test_rpc_survey_interference_drones_qa_and_filaments() {
     let scooped = rpc(&ctx, &mut s1, "ship", "ScoopDrone", &[PyRep::Integer(drone_ball_id)]).await;
     assert_eq!(scooped.dict_get("scoopedDroneItemID"), Some(&PyRep::Integer(886_002)));
 
-    let fil_tid = *ctx.sde.types.values().find(|t| t.group_id == 4041).map(|t| &t.type_id).unwrap();
+    ctx.db.with_mut_snapshot(|s| { s.fleets.insert(886099, eve_db::FleetRecord { fleet_id: 886099, boss_id: C1, members: vec![C1], ..Default::default() }); });
+    let fil_tid = *ctx.sde.types.values().find(|t| t.group_id == 4041 && t.default_attributes.contains_key(&3025)).map(|t| &t.type_id).unwrap();
     seed_item(&ctx, 886_003, fil_tid, C1, 886_001, InventoryFlag::Cargo, 1);
     let jump = rpc(&ctx, &mut s1, "randomJumpMgr", "ActivateRandomJumpFilament", &[PyRep::Integer(886_003)]).await;
     assert_ne!(s1.solar_system_id, Some(JITA));
