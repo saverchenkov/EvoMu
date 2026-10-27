@@ -126,6 +126,7 @@ pub(crate) fn handle_add_module_cycle(
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
     base_scramble_strengths: &HashMap<BallId, i32>,
     base_core_strengths: &HashMap<BallId, i32>,
+    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     mut cycle: ActiveModuleCycle,
 ) -> Result<(), String> {
@@ -142,6 +143,18 @@ pub(crate) fn handle_add_module_cycle(
         if disabled {
             return Err("WarpScrambled: Propulsion module disabled by warp scrambler or warp disruption bubble".to_string());
         }
+    }
+    // Remove any existing cycle for this (ship_id, module_id) before re-adding
+    // Covers: mutadaptive spool preservation, emergency hull energizer, stasis grappler
+    if let Some(pos) = active_module_cycles
+        .iter()
+        .position(|c| c.ship_id == cycle.ship_id && c.module_id == cycle.module_id)
+    {
+        let prev = active_module_cycles.remove(pos);
+        if prev.mutadaptive_spool_step > 0.0 && prev.target_id == cycle.target_id {
+            cycle.current_spool_cycles = prev.current_spool_cycles;
+        }
+        cleanup_removed_module_cycle(ballpark, &prev, db_opt);
     }
     if let Some(eff_cap_max) = cycle.effective_max_capacitor {
         if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
@@ -163,57 +176,51 @@ pub(crate) fn handle_add_module_cycle(
                 .min(cs.max_capacitor);
         }
     }
+    if cycle.shield_boost_amount > 0.0 {
+        if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
+            cs.shield_hp = (cs.shield_hp + cycle.shield_boost_amount)
+                .min(cs.max_shield_hp);
+        }
+    }
     if let Some(target_id) = cycle.target_id {
-        let self_cap_before = ballpark
-            .combat_states
-            .get(&cycle.ship_id)
-            .map(|cs| cs.capacitor)
-            .unwrap_or(0.0);
-        let mut nos_transferred = 0.0;
+        let is_sleeper_target = ballpark
+            .balls
+            .get(&target_id)
+            .is_some_and(|b| matches!(b.type_id, 30185..=30500));
         if let Some(t_cs) = ballpark.combat_states.get_mut(&target_id) {
-            if cycle.cap_drain_target > 0.0 {
-                t_cs.capacitor =
-                    (t_cs.capacitor - cycle.cap_drain_target).max(0.0);
+            let mut att = 1.0;
+            if cycle.remote_falloff > 0.0 || cycle.remote_optimal > 0.0 {
+                if let (Some(sb), Some(tb)) = (ballpark.balls.get(&cycle.ship_id), ballpark.balls.get(&target_id)) {
+                    let dist = (sb.position - tb.position).length();
+                    att = eve_dogma::compute_falloff_with_cutoff(dist, cycle.remote_optimal, cycle.remote_falloff);
+                }
             }
-            if cycle.cap_transfer_target > 0.0
-                && t_cs.capacitor > self_cap_before
-            {
-                let transferred =
-                    cycle.cap_transfer_target.min(t_cs.capacitor);
-                t_cs.capacitor = (t_cs.capacitor - transferred).max(0.0);
-                nos_transferred = transferred;
+            if cycle.cap_drain_target > 0.0 && !is_sleeper_target {
+                t_cs.capacitor =
+                    (t_cs.capacitor - cycle.cap_drain_target * att).max(0.0);
             }
             if !t_cs.disallow_assistance {
                 if cycle.remote_shield_amount > 0.0 {
-                    t_cs.shield_hp = (t_cs.shield_hp
-                        + cycle.remote_shield_amount)
-                        .min(t_cs.max_shield_hp);
+                    let impedance = if is_capital_remote_repair_module(cycle.module_type_id, sde_opt) {
+                        let cap_rank = active_module_cycles
+                            .iter()
+                            .filter(|c| {
+                                c.target_id == Some(target_id)
+                                    && c.remote_shield_amount > 0.0
+                                    && is_capital_remote_repair_module(c.module_type_id, sde_opt)
+                            })
+                            .count();
+                        1.0 / (1.0 + 0.25 * (cap_rank as f64))
+                    } else {
+                        1.0
+                    };
+                    t_cs.shield_hp = (t_cs.shield_hp + cycle.remote_shield_amount * att * impedance).min(t_cs.max_shield_hp);
                 }
                 if cycle.remote_cap_amount > 0.0 {
-                    t_cs.capacitor = (t_cs.capacitor
-                        + cycle.remote_cap_amount)
-                        .min(t_cs.max_capacitor);
+                    t_cs.capacitor = (t_cs.capacitor + cycle.remote_cap_amount * att).min(t_cs.max_capacitor);
                 }
             }
         }
-        if nos_transferred > 0.0 {
-            if let Some(s_cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
-                s_cs.capacitor = (s_cs.capacitor + nos_transferred)
-                    .min(s_cs.max_capacitor);
-            }
-        }
-    }
-    // Remove any existing cycle for this (ship_id, module_id) before re-adding
-    // parity: feat:modules.mutadaptive-remote-armor-repairer, feat:modules.emergency-hull-energizer, feat:modules.stasis-grappler-mechanics
-    if let Some(pos) = active_module_cycles
-        .iter()
-        .position(|c| c.ship_id == cycle.ship_id && c.module_id == cycle.module_id)
-    {
-        let prev = active_module_cycles.remove(pos);
-        if prev.mutadaptive_spool_step > 0.0 && prev.target_id == cycle.target_id {
-            cycle.current_spool_cycles = prev.current_spool_cycles;
-        }
-        cleanup_removed_module_cycle(ballpark, &prev, db_opt);
     }
     if cycle.immobilize_self {
         if let Some(ball) = ballpark.balls.get_mut(&cycle.ship_id) {

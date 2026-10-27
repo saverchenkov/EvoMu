@@ -620,12 +620,12 @@ pub async fn step_passive_shield_recharge(
     } else {
         before
     };
-    let after = eve_dogma::simulate_capacitor(
+    let rate = eve_dogma::compute_passive_recharge_rate(
         seed_hp,
         cs.max_shield_hp,
         recharge_time_s.max(1.0),
-        dt,
     );
+    let after = (seed_hp + rate * dt).min(cs.max_shield_hp);
     let delta = (after - before).max(0.0);
     cs.shield_hp = after;
     let shield_ratio = (cs.shield_hp / cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0);
@@ -655,16 +655,8 @@ pub async fn step_passive_shield_recharge(
 
 /// Instantaneous passive shield recharge rate in HP/s at `current_shield` out of `max_shield`
 /// with time constant `recharge_time_s` (`feat:dogma.shield-recharge`).
-pub fn passive_shield_recharge_rate_hps(
-    current_shield: f64,
-    max_shield: f64,
-    recharge_time_s: f64,
-) -> f64 {
-    if max_shield <= 0.0 || recharge_time_s <= 0.0 {
-        return 0.0;
-    }
-    let ratio = (current_shield / max_shield).clamp(0.0, 1.0);
-    (10.0 * max_shield / recharge_time_s) * (ratio.sqrt() - ratio)
+pub fn passive_shield_recharge_rate_hps(current_shield: f64, max_shield: f64, recharge_time_s: f64) -> f64 {
+    eve_dogma::compute_passive_recharge_rate(current_shield, max_shield, recharge_time_s)
 }
 
 /// Emits `OnDamageMessage`, `OnDamageMessages`, and `OnDamageStateChange` notifications to both attacker and victim (`feat:combat.damage-log`).
@@ -978,22 +970,17 @@ pub(crate) fn handle_get_bounties_and_kill_rights(
             })
             .map(|kr| {
                 let exp = rt.kill_right_expires_unix.get(&kr.kill_right_id).copied().unwrap_or(0);
-                let restr = rt.kill_right_restricted_to.get(&kr.kill_right_id).copied();
-                let restr_rep = match restr {
+                let restr_rep = match rt.kill_right_restricted_to.get(&kr.kill_right_id).copied() {
                     Some(id) if id > 0 => PyRep::Integer(id),
                     _ => PyRep::None,
                 };
                 PyRep::keyval([
-                    ("killRightID", PyRep::Integer(kr.kill_right_id)),
-                    ("fromID", PyRep::Integer(kr.owner_id)),
-                    ("toID", PyRep::Integer(kr.target_id)),
-                    ("price", PyRep::Real(kr.activation_fee.to_wire_f64())),
-                    ("activeSuspect", PyRep::Bool(kr.is_active_suspect)),
-                    ("expiryTime", PyRep::Integer(exp as i64)),
+                    ("killRightID", PyRep::Integer(kr.kill_right_id)), ("fromID", PyRep::Integer(kr.owner_id)),
+                    ("toID", PyRep::Integer(kr.target_id)), ("price", PyRep::Real(kr.activation_fee.to_wire_f64())),
+                    ("activeSuspect", PyRep::Bool(kr.is_active_suspect)), ("expiryTime", PyRep::Integer(exp as i64)),
                     ("restrictedTo", restr_rep),
                 ])
-            })
-            .collect::<Vec<_>>()
+            }).collect::<Vec<_>>()
     });
     Ok(PyRep::Tuple(vec![PyRep::List(bounties), PyRep::List(kill_rights)]))
 }
@@ -1010,27 +997,16 @@ pub async fn dispatch_combat_rpc(
 ) -> Result<PyRep, BridgeRpcError> {
     let initial_len = session
         .character_id
-        .and_then(|cid| {
-            ctx.pending_notifications
-                .read()
-                .ok()
-                .and_then(|q| q.get(&cid).map(|v| v.len()))
-        })
+        .and_then(|cid| ctx.pending_notifications.read().ok().and_then(|q| q.get(&cid).map(|v| v.len())))
         .unwrap_or(0);
 
     if let Some(res) = handle(ctx, session, service, method, args, kwargs).await {
         if let Some(cid) = session.character_id {
-            if let Some(notifs) = ctx
-                .pending_notifications
-                .read()
-                .ok()
-                .and_then(|q| q.get(&cid).cloned())
-            {
+            if let Some(notifs) = ctx.pending_notifications.read().ok().and_then(|q| q.get(&cid).cloned()) {
                 for notif in notifs.into_iter().skip(initial_len) {
                     session.push_notification(notif.event, notif.args);
                 }
             }
-
         }
         return res;
     }

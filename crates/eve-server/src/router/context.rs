@@ -64,7 +64,7 @@ pub struct ServerContext {
     pub character_scan_progress: RwLock<HashMap<(i64, u32, String), f64>>,
     pub invention_roll_override: Arc<RwLock<Option<f64>>>,
     pub mechanic_rng: Arc<crate::rng::MechanicRng>, // seeded test RNG: shared with `systems`; OS CSPRNG unless seeded
-    pub module_reactivation_cooldowns: RwLock<HashMap<(i64, i64), f64>>,
+    pub module_reactivation_cooldowns: Arc<RwLock<HashMap<(i64, i64, u32), ModuleCooldownEntry>>>,
     /// Repeating mining-module cycles keyed by module item ID (`MN-04`).
     pub mining_cycles: RwLock<HashMap<i64, crate::services::mining_cycle::ActiveMiningCycle>>,
     pub crimewatch: crate::combat::crimewatch::CrimeWatchLock,
@@ -87,6 +87,14 @@ pub struct ServerContext {
     pub alert_telemetry: std::sync::Mutex<crate::services::client_login::AlertTelemetryState>,
     pub npc_spawns: RwLock<HashMap<u32, crate::combat::npc_ai::NpcSpawnManager>>,
     pub combat_rng_seq: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ModuleCooldownEntry {
+    pub recorded_unix_f64: f64,
+    pub delay_s: f64,
+    pub solar_system_id: Option<u32>,
+    pub recorded_sys_sim_s: f64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -228,17 +236,20 @@ impl ServerContext {
             Arc::downgrade(&ship_fittings), Arc::downgrade(&pending_notifications), notify_tx.clone(),
             Arc::downgrade(&combat_ephemeral), Arc::downgrade(&quasar_gateway), Arc::downgrade(&invention_roll_override),
         );
+        let module_reactivation_cooldowns = Arc::new(RwLock::new(HashMap::new()));
+        let step_cd_w = Arc::downgrade(&module_reactivation_cooldowns);
         systems.set_system_step_hook(Arc::new(move |sys_id, dt| {
-            let (sw, dw, sdw, rw, fit_w, pend_w, ntx, cew, gww, inw) = (
+            let (sw, dw, sdw, rw, fit_w, pend_w, ntx, cew, gww, inw, cdw) = (
                 step_sys_w.clone(), step_db_w.clone(), step_sde_w.clone(), step_rng_w.clone(),
-                step_fit_w.clone(), step_pend_w.clone(), step_ntx.clone(), step_ce_w.clone(), step_gw_w.clone(), step_inv_w.clone(),
+                step_fit_w.clone(), step_pend_w.clone(), step_ntx.clone(), step_ce_w.clone(), step_gw_w.clone(), step_inv_w.clone(), step_cd_w.clone(),
             );
             Box::pin(async move {
-                if let (Some(sys), Some(db), Some(sde), Some(rng), Some(fit), Some(pend), Some(ce), Some(gw), Some(inv_roll)) = (
-                    sw.upgrade(), dw.upgrade(), sdw.upgrade(), rw.upgrade(), fit_w.upgrade(), pend_w.upgrade(), cew.upgrade(), gww.upgrade(), inw.upgrade(),
+                if let (Some(sys), Some(db), Some(sde), Some(rng), Some(fit), Some(pend), Some(ce), Some(gw), Some(inv_roll), Some(cd_map)) = (
+                    sw.upgrade(), dw.upgrade(), sdw.upgrade(), rw.upgrade(), fit_w.upgrade(), pend_w.upgrade(), cew.upgrade(), gww.upgrade(), inw.upgrade(), cdw.upgrade(),
                 ) {
-                    let ctx = ServerContext::from_step_components(sys, db, sde, rng, fit, pend, ntx, ce, gw, inv_roll);
+                    let ctx = ServerContext::from_step_components(sys, db, sde, rng, fit, pend, ntx, ce, gw, inv_roll, cd_map);
                     crate::services::combat_weapons_spool::step_system_entropic_spools(&ctx, sys_id, dt).await;
+                    crate::services::inventory_fitting::execute_pending_cycle_actions(&ctx, sys_id).await;
                 }
             })
         }));
@@ -302,7 +313,7 @@ impl ServerContext {
             character_scan_progress: RwLock::new(HashMap::new()),
             invention_roll_override,
             mechanic_rng,
-            module_reactivation_cooldowns: RwLock::new(HashMap::new()),
+            module_reactivation_cooldowns,
             mining_cycles: RwLock::new(HashMap::new()),
             crimewatch,
             combat_ephemeral,
@@ -541,15 +552,53 @@ impl ServerContext {
         })
     }
 
+    fn resolve_ship_cooldown_clock(&self, ship_id: i64, module_id: i64) -> (u32, Option<u32>, f64) {
+        let (type_id, db_sys_opt) = self.db.with_snapshot(|s| {
+            let tid = s.items.get(&module_id).map(|i| i.type_id).unwrap_or(0);
+            let char_sys = s
+                .characters
+                .values()
+                .find(|c| c.active_ship_id == ship_id)
+                .map(|c| c.solar_system_id);
+            let item_sys = s.items.get(&ship_id).and_then(|it| {
+                (30_000_000..=33_000_000)
+                    .contains(&it.location_id)
+                    .then_some(it.location_id as u32)
+            });
+            (tid, char_sys.or(item_sys))
+        });
+        let sys_opt = self.systems.find_ball_system_sync(ship_id).or(db_sys_opt);
+        let cur_sys_sim_s = sys_opt
+            .map(|sid| self.systems.get_system_sim_elapsed(sid))
+            .unwrap_or(0.0);
+        (type_id, sys_opt, cur_sys_sim_s)
+    }
+
+    fn remaining_cooldown_secs(
+        entry: &ModuleCooldownEntry,
+        now_unix_f64: f64,
+        sys_opt: Option<u32>,
+        cur_sys_sim_s: f64,
+    ) -> f64 {
+        let wall_elapsed = (now_unix_f64 - entry.recorded_unix_f64).max(0.0);
+        let sim_elapsed = if entry.solar_system_id.is_some() && entry.solar_system_id == sys_opt {
+            (cur_sys_sim_s - entry.recorded_sys_sim_s).max(0.0)
+        } else {
+            0.0
+        };
+        entry.delay_s - wall_elapsed.max(sim_elapsed)
+    }
+
     /// Checks if a module on a ship is currently under reactivation delay (`feat:dogma.reactivation-delay`, `DG-4`).
     pub fn is_module_in_reactivation_delay(&self, ship_id: i64, module_id: i64) -> bool {
         let now = self.now_unix_secs() as f64;
+        let (type_id, sys_opt, cur_sys_sim_s) = self.resolve_ship_cooldown_clock(ship_id, module_id);
         let guard = self
             .module_reactivation_cooldowns
             .read()
             .unwrap_or_else(|e| e.into_inner());
-        if let Some(&expiry) = guard.get(&(ship_id, module_id)) {
-            now < expiry
+        if let Some(entry) = guard.get(&(ship_id, module_id, type_id)) {
+            Self::remaining_cooldown_secs(entry, now, sys_opt, cur_sys_sim_s) > 1e-6
         } else {
             false
         }
@@ -560,12 +609,25 @@ impl ServerContext {
         if delay_s <= 0.0 {
             return;
         }
-        let expiry = (self.now_unix_secs() as f64) + delay_s;
+        let now = self.now_unix_secs() as f64;
+        let (type_id, sys_opt, cur_sys_sim_s) = self.resolve_ship_cooldown_clock(ship_id, module_id);
         let mut guard = self
             .module_reactivation_cooldowns
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        guard.insert((ship_id, module_id), expiry);
+        let effective_delay = guard
+            .get(&(ship_id, module_id, type_id))
+            .map(|e| Self::remaining_cooldown_secs(e, now, sys_opt, cur_sys_sim_s).max(delay_s))
+            .unwrap_or(delay_s);
+        guard.insert(
+            (ship_id, module_id, type_id),
+            ModuleCooldownEntry {
+                recorded_unix_f64: now,
+                delay_s: effective_delay,
+                solar_system_id: sys_opt,
+                recorded_sys_sim_s: cur_sys_sim_s,
+            },
+        );
     }
 
     /// Returns the active [`eve_db::ServerClock`] implementation (`T-7`).
@@ -1027,7 +1089,7 @@ impl ServerContext {
         }
     }
 
-    pub fn remove_projected_ewar_by_module(&self, source_module_id: i64) {
+    pub fn remove_projected_ewar_by_module(&self, source_module_id: i64) -> Vec<i64> {
         let mut affected_ships = Vec::new();
         {
             let mut guard = self.projected_ewar.write().unwrap_or_else(|e| e.into_inner());
@@ -1044,12 +1106,13 @@ impl ServerContext {
                 .ship_fittings
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
-            for ship_id in affected_ships {
+            for &ship_id in &affected_ships {
                 if let Some(fit) = fit_guard.get_mut(&ship_id) {
                     fit.remove_projected_ewar(source_module_id, &self.sde);
                 }
             }
         }
+        affected_ships
     }
 
     pub fn get_or_rebuild_ship_fitting(
@@ -1249,82 +1312,6 @@ impl ServerContext {
         self.store_ship_fitting(ship_id, fit.clone());
         Ok(fit)
     }
-
-    // parity: feat:ships.board-ship-skill-and-clone-check
-    pub fn check_type_skill_prerequisites_in_snapshot(
-        &self,
-        snap: &eve_db::WorldStateSnapshot,
-        char_id: i64,
-        type_id: u32,
-    ) -> Result<(), BridgeRpcError> {
-        let Some(t) = self.sde.types.get(&type_id) else {
-            return Ok(());
-        };
-        let char_skills = snap.skills.get(&char_id);
-        let char_rec = snap.characters.get(&char_id);
-        let is_omega = char_rec.is_some_and(|c| {
-            let exp_opt = crate::services::account_services::subscription_expiry_for_user(snap, c.user_id);
-            c.clone_grade >= 2 && exp_opt.map(|u| u > self.now_unix()).unwrap_or(true)
-        });
-        let is_alpha_clone = !is_omega;
-        let race_id = char_rec.map(|c| c.race_id).unwrap_or(1);
-        let req_pairs = [
-            (182_u16, 277_u16),
-            (183, 278),
-            (184, 279),
-            (1285, 1286),
-            (1289, 1287),
-            (1290, 1288),
-        ];
-        for (req_skill_attr, req_lvl_attr) in req_pairs {
-            if let Some(&skill_f) = t.default_attributes.get(&req_skill_attr) {
-                let skill_id = skill_f.round() as u32;
-                if skill_id > 0 {
-                    let req_lvl = t
-                        .default_attributes
-                        .get(&req_lvl_attr)
-                        .copied()
-                        .unwrap_or(1.0)
-                        .round()
-                        .clamp(1.0, 5.0) as u8;
-                    let mut raw_trained = char_skills
-                        .and_then(|m| m.get(&skill_id))
-                        .map(|r| r.level)
-                        .unwrap_or(0);
-                    if raw_trained < req_lvl && (12180..=12199).contains(&skill_id) && skill_id != 12189 {
-                        for alt_skill in [60377_u32, 60378, 60379, 60380, 60381] {
-                            let alt_lvl = char_skills
-                                .and_then(|m| m.get(&alt_skill))
-                                .map(|r| r.level)
-                                .unwrap_or(0);
-                            raw_trained = raw_trained.max(alt_lvl);
-                        }
-                    }
-                    if raw_trained < req_lvl {
-                        let is_ship = t.category_id == 6;
-                        let code = if is_ship { "ShipHasSkillPrerequisites" } else { "SkillPrerequisitesNotMet" };
-                        return Err(BridgeRpcError::user_error(code));
-                    }
-                    if is_alpha_clone {
-                        let alpha_cap =
-                            crate::services::character_skills::alpha_skill_cap_for_character(
-                                &self.sde, race_id, skill_id,
-                            );
-                        let effective_trained = raw_trained.min(alpha_cap);
-                        if req_lvl > alpha_cap || effective_trained < req_lvl {
-                            let is_ship = t.category_id == 6;
-                            let code = if is_ship { "TrialAccountRestriction" } else { "SkillPrerequisitesNotMet" };
-                            return Err(BridgeRpcError::user_error(code));
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-
-
 
     pub fn has_fleet_extras_for(&self, fleet_id: i64) -> bool {
         let ex = self.fleet_extras.lock().unwrap();

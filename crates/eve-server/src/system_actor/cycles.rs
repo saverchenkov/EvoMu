@@ -66,6 +66,20 @@ pub fn on_ball_destroyed_by_damage(
     hook.map(|h| h(solar_system_id, ball_id, attacker_id))
 }
 
+pub(crate) fn is_capital_remote_repair_module(
+    module_type_id: u32,
+    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
+) -> bool {
+    sde_opt
+        .as_ref()
+        .and_then(|sde| sde.types.get(&module_type_id))
+        .is_some_and(|t| {
+            let req1 = t.default_attributes.get(&182).copied().unwrap_or(0.0) as u32;
+            let pwr = t.default_attributes.get(&30).copied().unwrap_or(0.0);
+            matches!(req1, 24568 | 24571 | 27936) || pwr >= 10_000.0
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn step_cycles_and_capacitor(
     ballpark: &mut Ballpark,
@@ -79,13 +93,11 @@ pub(crate) fn step_cycles_and_capacitor(
     sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     tactical_state: &std::sync::RwLock<crate::services::tactical_modules::TacticalModulesState>,
+    pending_cycle_actions: &mut Vec<PendingCycleAction>,
     dt: f64,
     deactivation_hook: Option<&ModuleDeactivationHook>,
 ) -> Vec<(BallId, Option<CharacterId>)> {
     let mut destroyed_balls = Vec::new();
-    for cs in ballpark.combat_states.values_mut() {
-        cs.capacitor = eve_dogma::simulate_capacitor(cs.capacitor, cs.max_capacitor, 250.0, dt);
-    }
     crate::services::tactical_modules::step_wubble_probes_and_debuffs(
         ballpark,
         sde_opt,
@@ -174,13 +186,15 @@ pub(crate) fn step_cycles_and_capacitor(
         }
     }
 
-    // Count active remote repairers per target for Remote Assistance Impedance (`feat:modules.remote-assistance-impedance`)
-    let mut remote_rep_ranks: HashMap<(BallId, i64), usize> = HashMap::new();
+    // Count active Capital remote repairers per target for Capital Remote Assistance Impedance
+    let mut cap_remote_rep_ranks: HashMap<(BallId, i64), usize> = HashMap::new();
     {
         let mut by_target: HashMap<BallId, Vec<i64>> = HashMap::new();
         for c in active_module_cycles.iter() {
             if let Some(tid) = c.target_id {
-                if c.remote_shield_amount > 0.0 || c.remote_armor_amount > 0.0 || c.remote_hull_amount > 0.0 {
+                if (c.remote_shield_amount > 0.0 || c.remote_armor_amount > 0.0 || c.remote_hull_amount > 0.0)
+                    && is_capital_remote_repair_module(c.module_type_id, sde_opt)
+                {
                     by_target.entry(tid).or_default().push(c.module_id);
                 }
             }
@@ -188,7 +202,7 @@ pub(crate) fn step_cycles_and_capacitor(
         for (tid, mut mods) in by_target {
             mods.sort_unstable();
             for (rank, mid) in mods.into_iter().enumerate() {
-                remote_rep_ranks.insert((tid, mid), rank);
+                cap_remote_rep_ranks.insert((tid, mid), rank);
             }
         }
     }
@@ -204,6 +218,11 @@ pub(crate) fn step_cycles_and_capacitor(
     let mut finished_indices = Vec::new();
     let mut burned_ship_modules: Vec<(BallId, i64)> = Vec::new();
     for (idx, cycle) in active_module_cycles.iter_mut().enumerate() {
+        // If the source ship was destroyed / removed from space mid-cycle, cancel module cycle (`feat:combat.active-armor-repair-cycle-end`).
+        if !ballpark.balls.contains_key(&cycle.ship_id) {
+            finished_indices.push(idx);
+            continue;
+        }
         // [plan:DG-4] Targeted module cycles automatically deactivate if target leaves ballpark or exceeds maximum effective range.
         if let Some(target_id) = cycle.target_id {
             let source_ball = ballpark.balls.get(&cycle.ship_id);
@@ -225,11 +244,27 @@ pub(crate) fn step_cycles_and_capacitor(
         }
         cycle.elapsed_s += dt;
         if cycle.elapsed_s + 1e-6 >= cycle.duration_s {
-            // 1. Local shield boost, armor repair, and hull repair healing (`DG-4`)
-            if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
-                if cycle.shield_boost_amount > 0.0 {
-                    cs.shield_hp = (cs.shield_hp + cycle.shield_boost_amount).min(cs.max_shield_hp);
+            let mod_grp = sde_opt
+                .as_ref()
+                .and_then(|sde| sde.types.get(&cycle.module_type_id))
+                .map(|t| t.group_id)
+                .unwrap_or(0);
+            if mod_grp == 1122 {
+                if let (Some(cid), Some(wid)) = (cycle.owner_char_id, cycle.target_id) {
+                    pending_cycle_actions.push(PendingCycleAction::SalvageEnd {
+                        char_id: cid,
+                        ship_id: cycle.ship_id,
+                        module_id: cycle.module_id,
+                        module_type_id: cycle.module_type_id,
+                        wreck_id: wid,
+                        repeat: cycle.repeat,
+                        effect_name: cycle.effect_name.clone(),
+                    });
                 }
+            }
+            // 1. Local armor repair and hull repair healing at cycle completion (`t = duration_s`, `feat:combat.active-armor-repair-cycle-end`)
+            //    (Shield boosters apply at cycle start `t = 0`, `feat:combat.active-shield-boost-cycle-start`)
+            if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
                 if cycle.armor_repair_amount > 0.0 {
                     cs.armor_hp = (cs.armor_hp + cycle.armor_repair_amount).min(cs.max_armor_hp);
                 }
@@ -354,12 +389,16 @@ pub(crate) fn step_cycles_and_capacitor(
                     .combat_states
                     .get(&cycle.ship_id)
                     .map(|s| (s.capacitor, s.max_capacitor));
-                let rank = remote_rep_ranks
-                    .get(&(target_id, cycle.module_id))
-                    .copied()
-                    .unwrap_or(0);
-                let impedance = eve_dogma::stacking_penalty_factor(rank);
-                // parity: feat:modules.mutadaptive-remote-armor-repairer
+                let impedance = if is_capital_remote_repair_module(cycle.module_type_id, sde_opt) {
+                    let cap_rank = cap_remote_rep_ranks
+                        .get(&(target_id, cycle.module_id))
+                        .copied()
+                        .unwrap_or(0);
+                    1.0 / (1.0 + 0.25 * (cap_rank as f64))
+                } else {
+                    1.0
+                };
+                // Covers: mutadaptive remote armor repairer spool progression
                 let spool_mult = if cycle.mutadaptive_spool_step > 0.0 {
                     let mult = 1.0
                         + ((cycle.current_spool_cycles as f64) * cycle.mutadaptive_spool_step)
@@ -384,18 +423,29 @@ pub(crate) fn step_cycles_and_capacitor(
                     .is_some_and(|b| matches!(b.type_id, 30185..=30500));
                 let mut nos_transferred = 0.0;
                 if let Some(cs) = ballpark.combat_states.get_mut(&target_id) {
-                    if cycle.cap_drain_target > 0.0 && !is_sleeper_target {
-                        cs.capacitor = (cs.capacitor - cycle.cap_drain_target).max(0.0);
-                    }
-                    // Nosferatu transfer rule (`feat:modules.nosferatu-transfer-rule`, `feat:npc.sleeper-capacitor-immunity-and-leash`):
-                    // Only drains from target and adds to self when target capacitor > self capacitor;
+                    // Nosferatu transfer rule (`feat:combat.nosferatu-drain-cap`, `feat:modules.nosferatu-transfer-rule`, `feat:npc.sleeper-capacitor-immunity-and-leash`):
+                    // Transfers at cycle end (`t = duration_s`) when target capacitor > self capacitor, or when Blood Raider hull bonus overrides the cap comparison;
                     // Sleepers have effectively infinite capacitor and are never drained by player neutralizers/nosferatus.
                     if cycle.cap_transfer_target > 0.0 {
+                        let mut att = 1.0;
+                        if cycle.remote_falloff > 0.0 || cycle.remote_optimal > 0.0 {
+                            if let (Some(sb), Some(tb)) = (ballpark.balls.get(&cycle.ship_id), ballpark.balls.get(&target_id)) {
+                                let dist = (sb.position - tb.position).length();
+                                att = eve_dogma::compute_falloff_with_cutoff(dist, cycle.remote_optimal, cycle.remote_falloff);
+                            }
+                        }
+                        let effective_transfer = cycle.cap_transfer_target * att;
                         if let Some((src_cap, src_max_cap)) = src_cap_info {
-                            if is_sleeper_target || cs.capacitor > src_cap {
-                                let transferred = cycle
-                                    .cap_transfer_target
-                                    .min(if is_sleeper_target { cycle.cap_transfer_target } else { cs.capacitor })
+                            if is_sleeper_target
+                                || cycle.nosferatu_blood_raider_override
+                                || cs.capacitor > src_cap
+                            {
+                                let transferred = effective_transfer
+                                    .min(if is_sleeper_target {
+                                        effective_transfer
+                                    } else {
+                                        cs.capacitor
+                                    })
                                     .min((src_max_cap - src_cap).max(0.0));
                                 if !is_sleeper_target {
                                     cs.capacitor = (cs.capacitor - transferred).max(0.0);
@@ -404,24 +454,23 @@ pub(crate) fn step_cycles_and_capacitor(
                             }
                         }
                     }
-                    // Remote shield / armor / hull / cap assistance (blocked if target has `disallow_assistance`)
+                    // Remote armor / hull assistance at cycle end (shield/cap applied at cycle start; blocked if target has `disallow_assistance`)
                     if !cs.disallow_assistance {
-                        if cycle.remote_shield_amount > 0.0 {
-                            cs.shield_hp = (cs.shield_hp + cycle.remote_shield_amount * impedance)
-                                .min(cs.max_shield_hp);
+                        let mut att = 1.0;
+                        if cycle.remote_falloff > 0.0 || cycle.remote_optimal > 0.0 {
+                            if let (Some(sb), Some(tb)) = (ballpark.balls.get(&cycle.ship_id), ballpark.balls.get(&target_id)) {
+                                let dist = (sb.position - tb.position).length();
+                                att = eve_dogma::compute_falloff_with_cutoff(dist, cycle.remote_optimal, cycle.remote_falloff);
+                            }
                         }
                         if cycle.remote_armor_amount > 0.0 {
                             cs.armor_hp = (cs.armor_hp
-                                + cycle.remote_armor_amount * spool_mult * impedance)
+                                + cycle.remote_armor_amount * att * spool_mult * impedance)
                                 .min(cs.max_armor_hp);
                         }
                         if cycle.remote_hull_amount > 0.0 {
-                            cs.structure_hp = (cs.structure_hp + cycle.remote_hull_amount * impedance)
+                            cs.structure_hp = (cs.structure_hp + cycle.remote_hull_amount * att * impedance)
                                 .min(cs.max_structure_hp);
-                        }
-                        if cycle.remote_cap_amount > 0.0 {
-                            cs.capacitor =
-                                (cs.capacitor + cycle.remote_cap_amount).min(cs.max_capacitor);
                         }
                     }
                 }
@@ -896,6 +945,66 @@ pub(crate) fn step_cycles_and_capacitor(
                 }
                 if stop_cycle {
                     finished_indices.push(idx);
+                } else {
+                    if matches!(mod_grp, 72 | 80 | 353 | 650) {
+                        if let Some(cid) = cycle.owner_char_id {
+                            pending_cycle_actions.push(PendingCycleAction::RepeatCycleStart {
+                                char_id: cid,
+                                ship_id: cycle.ship_id,
+                                module_id: cycle.module_id,
+                                module_type_id: cycle.module_type_id,
+                                target_id: cycle.target_id,
+                                duration_s: cycle.duration_s,
+                                is_overloaded: cycle.is_overloaded,
+                                effect_name: cycle.effect_name.clone(),
+                            });
+                        }
+                    }
+                    // Apply start-of-next-cycle (`t = 0`) effects: active shield boost, energy neutralizer drain, remote shield/cap
+                    if cycle.shield_boost_amount > 0.0 {
+                        if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
+                            cs.shield_hp =
+                                (cs.shield_hp + cycle.shield_boost_amount).min(cs.max_shield_hp);
+                        }
+                    }
+                    if let Some(target_id) = cycle.target_id {
+                        let is_sleeper_target = ballpark
+                            .balls
+                            .get(&target_id)
+                            .is_some_and(|b| matches!(b.type_id, 30185..=30500));
+                        let impedance = if is_capital_remote_repair_module(cycle.module_type_id, sde_opt) {
+                            let cap_rank = cap_remote_rep_ranks
+                                .get(&(target_id, cycle.module_id))
+                                .copied()
+                                .unwrap_or(0);
+                            1.0 / (1.0 + 0.25 * (cap_rank as f64))
+                        } else {
+                            1.0
+                        };
+                        if let Some(cs) = ballpark.combat_states.get_mut(&target_id) {
+                            let mut att = 1.0;
+                            if cycle.remote_falloff > 0.0 || cycle.remote_optimal > 0.0 {
+                                if let (Some(sb), Some(tb)) = (ballpark.balls.get(&cycle.ship_id), ballpark.balls.get(&target_id)) {
+                                    let dist = (sb.position - tb.position).length();
+                                    att = eve_dogma::compute_falloff_with_cutoff(dist, cycle.remote_optimal, cycle.remote_falloff);
+                                }
+                            }
+                            if cycle.cap_drain_target > 0.0 && !is_sleeper_target {
+                                cs.capacitor = (cs.capacitor - cycle.cap_drain_target * att).max(0.0);
+                            }
+                            if !cs.disallow_assistance {
+                                if cycle.remote_shield_amount > 0.0 {
+                                    cs.shield_hp = (cs.shield_hp
+                                        + cycle.remote_shield_amount * att * impedance)
+                                        .min(cs.max_shield_hp);
+                                }
+                                if cycle.remote_cap_amount > 0.0 {
+                                    cs.capacitor = (cs.capacitor + cycle.remote_cap_amount * att)
+                                        .min(cs.max_capacitor);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1112,8 +1221,12 @@ impl SystemHandle {
         let SystemActorState {
             active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
-            asteroids, asteroid_templates, sde_opt, db_opt, tactical_state,
+            asteroids, asteroid_templates, sde_opt, db_opt, mechanic_rng_opt: _,
+            sim_elapsed_secs, pending_cycle_actions, tactical_state,
         } = &mut *st;
+        if dt > 0.0 && dt.is_finite() {
+            *sim_elapsed_secs += dt;
+        }
         respawn_due_asteroids(&mut bp, asteroids, asteroid_templates, sde_opt, db_opt);
         sync_player_slim_items(&mut bp, db_opt);
         let events = bp.step(dt);
@@ -1122,7 +1235,7 @@ impl SystemHandle {
         let destroyed = step_cycles_and_capacitor(
             &mut bp, active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
-            sde_opt, db_opt, tactical_state, dt, deact_hook_guard.as_ref(),
+            sde_opt, db_opt, tactical_state, pending_cycle_actions, dt, deact_hook_guard.as_ref(),
         );
         for (target_ball_id, owner_char_id) in destroyed {
             if let Some(fut) = on_ball_destroyed_by_damage(self.solar_system_id, target_ball_id, owner_char_id, hook_guard.as_ref()) {

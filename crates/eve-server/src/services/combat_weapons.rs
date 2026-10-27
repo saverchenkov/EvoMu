@@ -96,17 +96,19 @@ pub async fn handle_weapons(
                         })
                         .map(|i| i.type_id)
                 });
-                eve_dogma::FittedModule {
+                let fm = eve_dogma::FittedModule {
                     item_id: item_rec.item_id,
                     type_id: item_rec.type_id,
                     flag_id: item_rec.flag as u16,
                     state: eve_dogma::ModuleState::Online,
                     charge_type_id: charge_tid,
-                    charge_quantity: 0,
+                    charge_quantity: 1,
                     damage_hp: 0.0,
                     max_hp: 40.0,
                     dynamic_attribute_overrides: std::collections::HashMap::new(),
-                }
+                };
+                fit.modules.insert(module_id, fm.clone());
+                fm
             } else {
                 return Some(Err(BridgeRpcError {
                     code: "ModuleNotFound".into(),
@@ -277,17 +279,21 @@ pub async fn handle_weapons(
                     );
                     if let Some(vcid) = victim_char_opt {
                         let _ = evaluate_effective_signature_radius(ctx, vcid, tid, sys_id).await;
+                    } else if let Ok(Some(mut t_cs)) = sys_handle.get_combat_state(tid).await {
+                        let unpainted_base = t_cs.base_signature_radius.unwrap_or(t_cs.signature_radius);
+                        t_cs.signature_radius =
+                            ctx.effective_target_signature_radius(tid, unpainted_base);
+                        let _ = sys_handle.set_combat_state(tid, t_cs).await;
                     }
                 }
                 // Energy Neutralizer (71) & Energy Nosferatu (68) (`feat:npc.sleeper-capacitor-immunity-and-leash`)
+                let mut actual_drained = 0.0;
                 if matches!(mod_type.group_id, 68 | 71) {
+                    let target_snap = sys_handle.get_ball_snapshot(tid).await.ok().flatten();
                     let is_sleeper = with_combat_runtime(ctx, |rt| {
                         rt.npc_entities.get(&tid).is_some_and(|n| n.archetype == "Sleeper")
-                    }) || sys_handle
-                        .get_ball_snapshot(tid)
-                        .await
-                        .ok()
-                        .flatten()
+                    }) || target_snap
+                        .as_ref()
                         .is_some_and(|(_, b)| matches!(b.type_id, 30185..=30500));
                     let drain_amt = mod_type
                         .default_attributes
@@ -296,18 +302,44 @@ pub async fn handle_weapons(
                         .copied()
                         .unwrap_or(120.0)
                         .max(60.0);
+                    let ewar_dist = target_snap
+                        .as_ref()
+                        .map(|(_, tb)| {
+                            (attacker_ball.position.distance(tb.position) - attacker_ball.radius - tb.radius)
+                                .max(0.0)
+                        })
+                        .unwrap_or(0.0);
                     if let Ok(Some(mut t_cs)) = sys_handle.get_combat_state(tid).await {
-                        if !is_sleeper {
-                            t_cs.capacitor = (t_cs.capacitor - drain_amt).max(0.0);
-                            let _ = sys_handle.set_combat_state(tid, t_cs.clone()).await;
-                        }
                         if mod_type.group_id == 68 {
+                            let is_blood_raider = fit.ship.get_attribute(1945, &ctx.sde) > 0.0
+                                || eve_dogma::is_blood_raider_nosferatu_hull(fit.ship.type_id, &ctx.sde);
                             if let Ok(Some(mut s_cs)) = sys_handle.get_combat_state(ship_id).await {
-                                if is_sleeper || t_cs.capacitor > s_cs.capacitor {
+                                if is_sleeper {
                                     s_cs.capacitor = (s_cs.capacitor + drain_amt).min(s_cs.max_capacitor);
                                     let _ = sys_handle.set_combat_state(ship_id, s_cs).await;
+                                } else {
+                                    let res = eve_dogma::eval_energy_nosferatu_with_hull(
+                                        &mod_state,
+                                        ewar_dist,
+                                        s_cs.capacitor,
+                                        s_cs.max_capacitor,
+                                        t_cs.capacitor,
+                                        is_blood_raider,
+                                        &ctx.sde,
+                                    );
+                                    actual_drained = res.actual_transferred;
+                                    if res.actual_transferred > 0.0 {
+                                        t_cs.capacitor = res.target_new_cap;
+                                        let _ = sys_handle.set_combat_state(tid, t_cs).await;
+                                        s_cs.capacitor = res.source_new_cap;
+                                        let _ = sys_handle.set_combat_state(ship_id, s_cs).await;
+                                    }
                                 }
                             }
+                        } else if !is_sleeper {
+                            actual_drained = drain_amt.min(t_cs.capacitor);
+                            t_cs.capacitor = (t_cs.capacitor - actual_drained).max(0.0);
+                            let _ = sys_handle.set_combat_state(tid, t_cs).await;
                         }
                     }
                 }
@@ -327,6 +359,7 @@ pub async fn handle_weapons(
                     ("targetID", PyRep::Integer(tid)),
                     ("ewarAssistRecorded", PyRep::Bool(true)),
                     ("damageDealt", PyRep::Real(0.0)),
+                    ("capacitorDrained", PyRep::Real(actual_drained)),
                 ])));
             }
 
@@ -397,6 +430,14 @@ pub async fn handle_weapons(
                     message: format!("Weapon module {module_id} has no compatible charge loaded"),
                 }));
             };
+            if let Some(fm) = fit.modules.get_mut(&module_id) {
+                if fm.charge_type_id != Some(charge_type_id) {
+                    fm.charge_type_id = Some(charge_type_id);
+                    fm.charge_quantity = fm.charge_quantity.max(1);
+                }
+            }
+            let mod_state =
+                fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde);
             let charge_type = &ctx.sde.types[&charge_type_id];
             let is_fof_missile = matches!(charge_type.group_id, 394..=396);
             let is_entropic = mod_type.group_id == 1986;
@@ -555,11 +596,16 @@ pub async fn handle_weapons(
                     mod_type.default_attributes.get(&54).copied().unwrap_or(5_000.0)
                 }
             };
-            let optimal_range = if mod_state
-                .modifiers
-                .iter()
-                .any(|m| m.target_attribute_id == 54 && m.source_item_id == charge_item_id)
-            {
+            let has_charge_mod = |attr: u16| {
+                mod_state.modifiers.iter().any(|m| {
+                    m.target_attribute_id == attr
+                        && (m.source_item_id == charge_item_id
+                            || (m.source_item_id == 0
+                                && m.effect_id
+                                    .is_some_and(|eid| charge_type.effect_ids.contains(&eid))))
+                })
+            };
+            let optimal_range = if has_charge_mod(54) {
                 base_opt
             } else {
                 base_opt * range_mult
@@ -623,11 +669,7 @@ pub async fn handle_weapons(
                     }
                 };
                 let cap_bonus_pct = charge_type.default_attributes.get(&317).copied().unwrap_or(0.0);
-                if mod_state
-                    .modifiers
-                    .iter()
-                    .any(|m| m.target_attribute_id == 6 && m.source_item_id == charge_item_id)
-                {
+                if has_charge_mod(6) {
                     raw_cap.max(0.0)
                 } else {
                     (raw_cap * (1.0 + cap_bonus_pct / 100.0)).max(0.0)
@@ -753,17 +795,14 @@ pub async fn handle_weapons(
                     * dmg_mult,
             };
 
-            let target_sig = if let Some((vcid, _)) = player_target_info {
+            let raw_sig = if let Some((vcid, _)) = player_target_info {
                 evaluate_effective_signature_radius(ctx, vcid, target_ball_id, sys_id).await
             } else if let Ok(Some(t_cs)) = sys_handle.get_combat_state(target_ball_id).await {
-                if t_cs.signature_radius > 0.0 {
-                    t_cs.signature_radius
-                } else {
-                    target_ball.radius.max(35.0)
-                }
+                t_cs.base_signature_radius.unwrap_or(if t_cs.signature_radius > 0.0 { t_cs.signature_radius } else { target_ball.radius.max(35.0) })
             } else {
                 target_ball.radius.max(35.0)
             };
+            let target_sig = ctx.effective_target_signature_radius(target_ball_id, raw_sig);
 
             // Handle Missile Launcher / Breacher Pod in-flight physics (`feat:modules.missile-launchers`, `feat:combat.missile-flight-physics-destruction`)
             if is_missile_launcher {
@@ -777,6 +816,7 @@ pub async fn handle_weapons(
                         now_unix,
                         module_id,
                         &m,
+                        &fit,
                         charge_type_id,
                         charge_type,
                         &attacker_ball,
@@ -803,11 +843,7 @@ pub async fn handle_weapons(
                     mod_type.default_attributes.get(&160).copied().unwrap_or(100.0)
                 }
             };
-            let tracking_speed = if mod_state
-                .modifiers
-                .iter()
-                .any(|m| m.target_attribute_id == 160 && m.source_item_id == charge_item_id)
-            {
+            let tracking_speed = if has_charge_mod(160) {
                 base_tracking
             } else {
                 base_tracking * tracking_mult

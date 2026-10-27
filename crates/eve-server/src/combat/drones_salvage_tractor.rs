@@ -244,17 +244,16 @@ pub async fn attempt_salvage_wreck(
     }
 }
 
-/// Core wreck salvaging cycle shared by Salvager modules (`25861`/`30836`) and Salvage Drones (`32787`)
-/// (`feat:modules.salvager`, `feat:combat.wreck-size-salvage-difficulty`, `feat:drones.salvage-drones`, `feat:lifecycle.wreck-salvage_with_loot`).
-pub async fn execute_wreck_salvage_cycle(
+/// Validates that `wreck_id` is a salvageable wreck in `sys_id`, within jetcan loot capacity, and within salvager/drone range.
+pub async fn validate_wreck_salvage_target(
     ctx: &ServerContext,
     sys_id: u32,
     char_id: i64,
     ship_id: i64,
     wreck_id: i64,
     salvager_type_id_opt: Option<u32>,
-) -> Result<eve_proto::PyRep, eve_proto::BridgeRpcError> {
-    use eve_proto::{BridgeRpcError, PyRep};
+) -> Result<(u32, Option<Ball>), eve_proto::BridgeRpcError> {
+    use eve_proto::BridgeRpcError;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let wreck_ball_opt = sys_handle.get_ball_snapshot(wreck_id).await.ok().flatten().map(|(_, b)| b);
     let (wreck_type_id, loot_volume) = ctx.db.with_snapshot(|snap| {
@@ -358,6 +357,30 @@ pub async fn execute_wreck_salvage_cycle(
             }
         }
     }
+    Ok((wreck_type_id, wreck_ball_opt))
+}
+
+/// Core wreck salvaging cycle shared by Salvager modules (`25861`/`30836`) and Salvage Drones (`32787`)
+/// (`feat:modules.salvager`, `feat:combat.wreck-size-salvage-difficulty`, `feat:drones.salvage-drones`, `feat:lifecycle.wreck-salvage_with_loot`).
+pub async fn execute_wreck_salvage_cycle(
+    ctx: &ServerContext,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+    wreck_id: i64,
+    salvager_type_id_opt: Option<u32>,
+) -> Result<eve_proto::PyRep, eve_proto::BridgeRpcError> {
+    use eve_proto::{BridgeRpcError, PyRep};
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let (wreck_type_id, wreck_ball_opt) = validate_wreck_salvage_target(
+        ctx,
+        sys_id,
+        char_id,
+        ship_id,
+        wreck_id,
+        salvager_type_id_opt,
+    )
+    .await?;
 
     let wreck_difficulty_bonus = ctx
         .sde

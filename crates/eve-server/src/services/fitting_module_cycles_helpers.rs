@@ -474,3 +474,580 @@ pub(crate) fn build_all_info(
         ("shipState", ship_state),
     ])
 }
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_ecm_or_burst_jammer_activation(
+    ctx: &ServerContext,
+    sys: &SystemHandle,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+    mod_type: &InvType,
+    mod_state: &DogmaItemState,
+    target_id_opt: Option<i64>,
+    duration_s: f64,
+) -> Result<(), BridgeRpcError> {
+    // SDE sensor pairing: `idx 0..4` matches jammer attrs `[238 Grav, 239 Ladar, 240 Mag, 241 Radar]`
+    // against target sensor attrs `[211 Grav, 209 Ladar, 210 Mag, 208 Radar]`.
+    const SENSOR_ATTRS: [u16; 4] = [211, 209, 210, 208];
+
+    if mod_type.group_id == 201 {
+        let Some(target_id) = target_id_opt else {
+            let _ = sys.remove_module_cycle(ship_id, module_id).await;
+            return Err(BridgeRpcError {
+                code: "TargetRequired".into(),
+                message: "ECM module requires a locked target".into(),
+            });
+        };
+        let mut distance_m = 0.0;
+        if let (Ok(Some((_, ship_ball))), Ok(Some((_, target_ball)))) = (
+            sys.get_ball_snapshot(ship_id).await,
+            sys.get_ball_snapshot(target_id).await,
+        ) {
+            distance_m = (ship_ball.position - target_ball.position).length();
+        }
+        let target_type_id_opt = ctx
+            .db
+            .with_snapshot(|snap| snap.items.get(&target_id).map(|i| (i.owner_id, i.type_id)));
+        let mut best_sensor_idx = 0usize;
+        let mut target_sensor_strength = 0.0;
+        if let Some((t_owner, t_tid)) = target_type_id_opt {
+            if let Ok(t_fit) = ctx.get_or_rebuild_ship_fitting(t_owner, target_id) {
+                for (idx, &s_attr) in SENSOR_ATTRS.iter().enumerate() {
+                    let val = t_fit.ship.get_attribute(s_attr, &ctx.sde);
+                    if val > target_sensor_strength {
+                        target_sensor_strength = val;
+                        best_sensor_idx = idx;
+                    }
+                }
+            } else if let Some(t_type) = ctx.sde.types.get(&t_tid) {
+                for (idx, &s_attr) in SENSOR_ATTRS.iter().enumerate() {
+                    let val = t_type.default_attributes.get(&s_attr).copied().unwrap_or(0.0);
+                    if val > target_sensor_strength {
+                        target_sensor_strength = val;
+                        best_sensor_idx = idx;
+                    }
+                }
+            }
+        } else if let Ok(Some((_, target_ball))) = sys.get_ball_snapshot(target_id).await {
+            if let Some(t_type) = ctx.sde.types.get(&target_ball.type_id) {
+                for (idx, &s_attr) in SENSOR_ATTRS.iter().enumerate() {
+                    let val = t_type.default_attributes.get(&s_attr).copied().unwrap_or(0.0);
+                    if val > target_sensor_strength {
+                        target_sensor_strength = val;
+                        best_sensor_idx = idx;
+                    }
+                }
+            }
+        }
+        if target_sensor_strength <= 0.0 {
+            target_sensor_strength = 12.0;
+        }
+        let jam_attr_id = 238u16 + (best_sensor_idx as u16);
+        let jam_strength = mod_state.get_attribute(jam_attr_id, &ctx.sde);
+        let optimal_range = mod_state.get_attribute(attr_ids::MAX_RANGE, &ctx.sde);
+        let falloff_range = mod_state.get_attribute(attr_ids::FALLOFF, &ctx.sde);
+        let jam_chance = eve_dogma::compute_ecm_jam_chance(
+            jam_strength,
+            target_sensor_strength,
+            distance_m,
+            optimal_range,
+            falloff_range,
+        );
+        let roll = super::csprng_unit_f64(ctx);
+        let jam_duration_s = if duration_s > 0.0 { duration_s } else { 20.0 };
+        if roll < jam_chance && jam_chance > 0.0 {
+            let _ = sys.apply_ecm_jam(target_id, jam_duration_s).await;
+        }
+    }
+
+    if mod_type.group_id == 80 || mod_type.group_id == 353 {
+        let burst_range = eve_dogma::compute_burst_jammer_radius_m(mod_type, mod_state, &ctx.sde);
+        let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+            rt.modified_system_securities.get(&sys_id).copied()
+        })
+        .unwrap_or_else(|| {
+            ctx.sde
+                .solar_systems
+                .get(&sys_id)
+                .map(|s| s.security_status)
+                .unwrap_or(1.0)
+        });
+        let ship_pos = sys
+            .get_ball_snapshot(ship_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, b)| b.position)
+            .unwrap_or(DVec3::ZERO);
+        let all_balls = sys.list_balls().await.unwrap_or_default();
+        let mut unprovoked_neutral_victims: Vec<i64> = Vec::new();
+        let mut legal_pvp_victims: Vec<i64> = Vec::new();
+        let mut ship_candidates: Vec<(i64, usize, f64)> = Vec::new();
+        let now_unix = ctx.now_unix_secs();
+        for b in &all_balls {
+            if b.id == ship_id || (b.position - ship_pos).length() > burst_range + 1e-3 {
+                continue;
+            }
+            // Burst Jammer affects ONLY uncloaked, non-EWAR-immune Ships (`category_id == 6`) —
+            // never wrecks, jetcans, drones, fighters, deployables, or structures (`R-BURST-ECM-01`).
+            let is_ship_ball = ctx
+                .sde
+                .types
+                .get(&b.type_id)
+                .is_some_and(|t| t.category_id == 6);
+            if !is_ship_ball {
+                continue;
+            }
+            let cs_opt = sys.get_combat_state(b.id).await.ok().flatten();
+            if cs_opt.as_ref().is_some_and(|cs| cs.is_cloaked) {
+                continue;
+            }
+            let victim_char_opt = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .values()
+                    .find(|c| c.active_ship_id == b.id && c.solar_system_id == sys_id)
+                    .map(|c| c.character_id)
+                    .or_else(|| {
+                        snap.items
+                            .get(&b.id)
+                            .map(|i| i.owner_id)
+                            .filter(|oid| snap.characters.contains_key(oid))
+                    })
+            });
+            if let Some(v_char) = victim_char_opt {
+                if crate::services::space_destiny::is_location_change_invulnerable(ctx, v_char, now_unix) {
+                    continue;
+                }
+                if v_char != char_id {
+                    let legal = {
+                        let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());
+                        cw.states.get(&v_char).is_some_and(|vs| {
+                            vs.is_criminal(now_unix) || vs.is_suspect(now_unix)
+                        })
+                    } || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                        rt.has_limited_engagement_with(char_id, v_char, now_unix)
+                            || rt.has_limited_engagement_with(v_char, char_id, now_unix)
+                    }) || ctx.db.with_snapshot(|snap| {
+                        crate::services::combat_crimewatch::is_legal_war_or_suspect_target(
+                            snap, char_id, v_char, now_unix,
+                        )
+                    });
+                    if !legal {
+                        if !unprovoked_neutral_victims.contains(&v_char) {
+                            unprovoked_neutral_victims.push(v_char);
+                        }
+                    } else if !legal_pvp_victims.contains(&v_char) {
+                        legal_pvp_victims.push(v_char);
+                    }
+                }
+            }
+            let mut best_sensor_idx = 0usize;
+            let mut target_sensor_strength = 0.0;
+            let owner_for_fit = victim_char_opt.or_else(|| {
+                ctx.db
+                    .with_snapshot(|snap| snap.items.get(&b.id).map(|i| i.owner_id))
+            });
+            if let Some(t_owner) = owner_for_fit {
+                if let Ok(t_fit) = ctx.get_or_rebuild_ship_fitting(t_owner, b.id) {
+                    for (idx, &s_attr) in SENSOR_ATTRS.iter().enumerate() {
+                        let val = t_fit.ship.get_attribute(s_attr, &ctx.sde);
+                        if val > target_sensor_strength {
+                            target_sensor_strength = val;
+                            best_sensor_idx = idx;
+                        }
+                    }
+                }
+            }
+            if target_sensor_strength <= 0.0 {
+                if let Some(t_type) = ctx.sde.types.get(&b.type_id) {
+                    for (idx, &s_attr) in SENSOR_ATTRS.iter().enumerate() {
+                        let val = t_type.default_attributes.get(&s_attr).copied().unwrap_or(0.0);
+                        if val > target_sensor_strength {
+                            target_sensor_strength = val;
+                            best_sensor_idx = idx;
+                        }
+                    }
+                }
+            }
+            if target_sensor_strength <= 0.0 {
+                target_sensor_strength = 12.0;
+            }
+            ship_candidates.push((b.id, best_sensor_idx, target_sensor_strength));
+        }
+
+        if !unprovoked_neutral_victims.is_empty() && sys_sec > 0.0 {
+            let safety = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                rt.safety_levels.get(&char_id).copied()
+            })
+            .unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red);
+            if (sys_sec >= 0.45 && safety != crate::services::combat_crimewatch::SafetyLevel::Red)
+                || (sys_sec < 0.45 && safety == crate::services::combat_crimewatch::SafetyLevel::Green)
+            {
+                let _ = sys.remove_module_cycle(ship_id, module_id).await;
+                return Err(BridgeRpcError {
+                    code: "SafetyBlocked".into(),
+                    message: "Safety setting prevents activating Burst Jammer near neutral capsuleers in empire space".into(),
+                });
+            }
+        }
+        let jam_strengths = [
+            mod_state.get_attribute(238, &ctx.sde),
+            mod_state.get_attribute(239, &ctx.sde),
+            mod_state.get_attribute(240, &ctx.sde),
+            mod_state.get_attribute(241, &ctx.sde),
+        ];
+        let mut ship_eval_overrides = HashMap::with_capacity(ship_candidates.len());
+        for (bid, s_idx, s_str) in ship_candidates {
+            let ship_roll = super::csprng_unit_f64(ctx);
+            ship_eval_overrides.insert(bid, (s_idx, s_str, ship_roll));
+        }
+        let jam_duration_s = if duration_s > 0.0 { duration_s } else { 20.0 };
+        let jammed_ids = sys
+            .apply_ecm_burst_ships(
+                ship_id,
+                burst_range,
+                jam_strengths,
+                jam_duration_s,
+                0.5,
+                Some(ship_eval_overrides),
+            )
+            .await
+            .unwrap_or_default();
+        for &jid in &jammed_ids {
+            let jammed_owner_opt = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .values()
+                    .find(|c| c.active_ship_id == jid)
+                    .map(|c| c.character_id)
+                    .or_else(|| {
+                        snap.items
+                            .get(&jid)
+                            .map(|i| i.owner_id)
+                            .filter(|oid| snap.characters.contains_key(oid))
+                    })
+            });
+            if let Some(j_char) = jammed_owner_opt {
+                ctx.notify(
+                    crate::router::NotificationTarget::Character(j_char),
+                    "OnTargetClear",
+                    "charid",
+                    vec![],
+                );
+            }
+        }
+        for &v_char in &legal_pvp_victims {
+            crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
+                ctx, char_id, v_char, now_unix,
+            );
+            let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+            let _ = cw.handle_combat_aggression(
+                char_id, v_char, ship_id, sys_id, sys_sec, true, now_unix,
+            );
+            cw.get_or_create(v_char).pvp_timer_until_unix = now_unix.saturating_add(900);
+        }
+        for &v_char in &unprovoked_neutral_victims {
+            crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
+                ctx, char_id, v_char, now_unix,
+            );
+            crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                rt.add_limited_engagement(char_id, v_char, now_unix);
+                rt.add_limited_engagement(v_char, char_id, now_unix);
+            });
+            let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+            cw.get_or_create(v_char).pvp_timer_until_unix = now_unix.saturating_add(900);
+            let _ = cw.handle_combat_aggression(
+                char_id,
+                v_char,
+                ship_id,
+                sys_id,
+                sys_sec,
+                sys_sec <= 0.0,
+                now_unix,
+            );
+        }
+        if !unprovoked_neutral_victims.is_empty() && sys_sec > 0.0 {
+            crate::services::combat_crimewatch::emit_crimewatch_timer_notifications(
+                ctx, char_id, now_unix,
+            );
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_pre_notify_instant_module_effects(
+    ctx: &ServerContext,
+    sys: &SystemHandle,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+    m: &eve_dogma::FittedModule,
+    mod_type: &InvType,
+    mod_state: &DogmaItemState,
+    is_overloaded: bool,
+    target_id_opt: Option<i64>,
+    duration_s: f64,
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<Option<PyRep>, BridgeRpcError> {
+    if matches!(mod_type.group_id, 201 | 80 | 353) {
+        handle_ecm_or_burst_jammer_activation(
+            ctx,
+            sys,
+            sys_id,
+            char_id,
+            ship_id,
+            module_id,
+            mod_type,
+            mod_state,
+            target_id_opt,
+            duration_s,
+        )
+        .await?;
+        return Ok(None);
+    }
+    if matches!(mod_type.group_id, 72 | 650) {
+        if let Ok(Some((_, attacker_ball))) = sys.get_ball_snapshot(ship_id).await {
+            let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                rt.modified_system_securities.get(&sys_id).copied()
+            })
+            .unwrap_or_else(|| {
+                ctx.sde
+                    .solar_systems
+                    .get(&sys_id)
+                    .map(|s| s.security_status)
+                    .unwrap_or(0.0)
+            });
+            let now_unix = ctx.now_unix_secs();
+            let mut m_eff = m.clone();
+            if is_overloaded {
+                m_eff.state = eve_dogma::ModuleState::Overloaded;
+            }
+            let action_res = if mod_type.group_id == 650 {
+                crate::services::combat_crimewatch::activate_salvager_or_tractor_module(
+                    ctx,
+                    char_id,
+                    ship_id,
+                    sys_id,
+                    module_id,
+                    &m_eff,
+                    mod_type,
+                    &attacker_ball,
+                    target_id_opt,
+                    kwargs,
+                )
+                .await
+            } else {
+                crate::services::combat_crimewatch::activate_aoe_or_defender_module_with_cap(
+                    ctx,
+                    char_id,
+                    ship_id,
+                    sys_id,
+                    sys_sec,
+                    now_unix,
+                    module_id,
+                    &m_eff,
+                    mod_type,
+                    &attacker_ball,
+                    target_id_opt,
+                    kwargs,
+                    false,
+                )
+                .await
+            };
+            if let Some(res) = action_res {
+                return res.map(Some);
+            }
+        }
+    }
+    Ok(None)
+}
+
+async fn deactivate_repeating_cycle_after_action(
+    ctx: &ServerContext,
+    sys: &SystemHandle,
+    owner_char_id: Option<i64>,
+    ship_id: i64,
+    module_id: i64,
+    effect_name: &str,
+) {
+    let _ = sys.remove_module_cycle(ship_id, module_id).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.remove(&module_id);
+        snap.module_active_charges.remove(&module_id);
+    });
+    if let Some(cid) = owner_char_id {
+        if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(cid, ship_id) {
+            let _ = fit.deactivate_module(module_id, &ctx.sde);
+            ctx.store_ship_fitting(ship_id, fit);
+        }
+        ctx.notify(
+            crate::router::NotificationTarget::Character(cid),
+            "OnGodmaShipEffect",
+            "charid",
+            vec![
+                PyRep::Integer(module_id),
+                PyRep::String(effect_name.to_string()),
+                PyRep::Bool(false),
+            ],
+        );
+    }
+}
+
+/// Executes cycle-end wreck salvaging (`group 1122`) and auto-repeating (`repeat != 0`) AoE / tractor
+/// cycle-start pulses queued by `step_ballpark_and_cycles` (`R-AOE-SALVAGE-CYCLE-01`).
+pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u32) {
+    let actions = ctx.systems.take_pending_cycle_actions(sys_id);
+    if actions.is_empty() {
+        return;
+    }
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let empty_kw = HashMap::new();
+    for action in actions {
+        match action {
+            crate::system_actor::PendingCycleAction::SalvageEnd {
+                char_id,
+                ship_id,
+                module_id,
+                module_type_id,
+                wreck_id,
+                repeat,
+                effect_name,
+            } => {
+                let res = crate::combat::drones_salvage_tractor::execute_wreck_salvage_cycle(
+                    ctx,
+                    sys_id,
+                    char_id,
+                    ship_id,
+                    wreck_id,
+                    Some(module_type_id),
+                )
+                .await;
+                if repeat == 0 {
+                    if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+                        let _ = fit.deactivate_module(module_id, &ctx.sde);
+                        ctx.store_ship_fitting(ship_id, fit);
+                    }
+                } else {
+                    let keep_repeating = matches!(
+                        &res,
+                        Ok(rep)
+                            if rep.dict_get("salvaged").and_then(|v| v.as_bool()) == Some(false)
+                                && rep.dict_get("reason").and_then(|v| v.as_str())
+                                    == Some("CycleRollFailed")
+                    );
+                    if keep_repeating {
+                        let dur_s = ctx
+                            .sde
+                            .types
+                            .get(&module_type_id)
+                            .and_then(|t| t.default_attributes.get(&73).copied())
+                            .unwrap_or(10_000.0)
+                            / 1000.0;
+                        ctx.record_module_reactivation_delay(ship_id, module_id, dur_s);
+                    } else {
+                        let cap_refund = ctx
+                            .sde
+                            .types
+                            .get(&module_type_id)
+                            .and_then(|t| t.default_attributes.get(&6).copied())
+                            .unwrap_or(0.0);
+                        deactivate_repeating_cycle_after_action(
+                            ctx,
+                            &sys,
+                            Some(char_id),
+                            ship_id,
+                            module_id,
+                            &effect_name,
+                        )
+                        .await;
+                        if cap_refund > 0.0 {
+                            if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
+                                let _ = sys
+                                    .set_capacitor(
+                                        ship_id,
+                                        (cs.capacitor + cap_refund).min(cs.max_capacitor),
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            }
+            crate::system_actor::PendingCycleAction::RepeatCycleStart {
+                char_id,
+                ship_id,
+                module_id,
+                module_type_id,
+                target_id,
+                duration_s,
+                is_overloaded,
+                effect_name,
+            } => {
+                ctx.record_module_reactivation_delay(ship_id, module_id, duration_s);
+                let Some(mod_type) = ctx.sde.types.get(&module_type_id).cloned() else {
+                    continue;
+                };
+                let fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
+                let mod_state = fit_opt
+                    .as_ref()
+                    .map(|f| {
+                        f.build_effective_module_state(
+                            module_id,
+                            module_type_id,
+                            is_overloaded,
+                            &ctx.sde,
+                        )
+                    })
+                    .unwrap_or_else(|| DogmaItemState::from_sde(char_id, module_type_id, &ctx.sde));
+                let m_eff = fit_opt
+                    .as_ref()
+                    .and_then(|f| f.modules.get(&module_id).cloned())
+                    .unwrap_or(eve_dogma::FittedModule {
+                        item_id: module_id,
+                        type_id: module_type_id,
+                        flag_id: 27,
+                        state: if is_overloaded {
+                            eve_dogma::ModuleState::Overloaded
+                        } else {
+                            eve_dogma::ModuleState::Active
+                        },
+                        charge_type_id: None,
+                        charge_quantity: 0,
+                        damage_hp: 0.0,
+                        max_hp: 40.0,
+                        dynamic_attribute_overrides: HashMap::new(),
+                    });
+                let pulse_res = run_pre_notify_instant_module_effects(
+                    ctx,
+                    &sys,
+                    sys_id,
+                    char_id,
+                    ship_id,
+                    module_id,
+                    &m_eff,
+                    &mod_type,
+                    &mod_state,
+                    is_overloaded,
+                    target_id,
+                    duration_s,
+                    &empty_kw,
+                )
+                .await;
+                if pulse_res.is_err() {
+                    deactivate_repeating_cycle_after_action(
+                        ctx,
+                        &sys,
+                        Some(char_id),
+                        ship_id,
+                        module_id,
+                        &effect_name,
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+}

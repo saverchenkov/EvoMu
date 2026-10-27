@@ -39,11 +39,37 @@ pub(crate) async fn handle_mining_and_deactivate(
                     message: "No active ship in session".into(),
                 }));
             };
+            let mut removed_cycle_delay = None;
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
-                let _ = sys.remove_module_cycle(ship_id, module_id).await;
+                removed_cycle_delay = sys.remove_module_cycle(ship_id, module_id).await.ok().flatten();
             }
-            ctx.remove_projected_ewar_by_module(module_id);
+            let affected_ewar_ships = ctx.remove_projected_ewar_by_module(module_id);
+            if let Some(sys_id) = session.solar_system_id {
+                let sys = ctx.systems.get_or_spawn(sys_id);
+                for tid in affected_ewar_ships {
+                    if let Ok(Some(mut t_cs)) = sys.get_combat_state(tid).await {
+                        let base_sig = match t_cs.base_signature_radius {
+                            Some(b) => b,
+                            None => sys.get_ball_snapshot(tid)
+                                .await
+                                .ok()
+                                .flatten()
+                                .and_then(|(_, b)| {
+                                    ctx.sde
+                                        .types
+                                        .get(&b.type_id)
+                                        .and_then(|t| t.default_attributes.get(&552).copied())
+                                        .or(Some(b.radius.max(35.0)))
+                                })
+                                .unwrap_or(t_cs.signature_radius),
+                        };
+                        t_cs.signature_radius =
+                            ctx.effective_target_signature_radius(tid, base_sig);
+                        let _ = sys.set_combat_state(tid, t_cs).await;
+                    }
+                }
+            }
             crate::services::tactical_modules::remove_projected_remote_assistance(ctx, module_id);
             crate::services::combat_weapons_spool::clear_entropic_spool(ctx, ship_id, module_id);
 
@@ -84,8 +110,18 @@ pub(crate) async fn handle_mining_and_deactivate(
             if let Some(m_entry) = fit.modules.get(&module_id) {
                 let mod_state = fit.build_effective_module_state(module_id, m_entry.type_id, false, &ctx.sde);
                 let react_delay_ms = mod_state.get_attribute(669, &ctx.sde);
-                if react_delay_ms > 0.0 {
-                    ctx.record_module_reactivation_delay(ship_id, module_id, react_delay_ms / 1000.0);
+                let is_cycle_gated = ctx.sde.types.get(&m_entry.type_id).is_some_and(|t| {
+                    matches!(t.group_id, 40 | 1156 | 41 | 1697 | 67 | 71 | 76 | 72 | 1122 | 650 | 80 | 353)
+                });
+                let delay_s = if is_cycle_gated {
+                    removed_cycle_delay.unwrap_or(0.0).max(react_delay_ms / 1000.0)
+                } else if react_delay_ms > 0.0 {
+                    react_delay_ms / 1000.0
+                } else {
+                    0.0
+                };
+                if delay_s > 0.0 {
+                    ctx.record_module_reactivation_delay(ship_id, module_id, delay_s);
                 }
             }
             let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);

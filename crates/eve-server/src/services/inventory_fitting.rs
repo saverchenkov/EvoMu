@@ -21,6 +21,10 @@ pub(crate) use fitting_dogma_im::*;
 pub mod fitting_ewar_capital;
 pub(crate) use fitting_ewar_capital::*;
 
+#[path = "fitting_mgr_service.rs"]
+pub mod fitting_mgr_service;
+pub(crate) use fitting_mgr_service::*;
+
 #[path = "fitting_mining_lasers.rs"]
 pub mod fitting_mining_lasers;
 pub(crate) use fitting_mining_lasers::*;

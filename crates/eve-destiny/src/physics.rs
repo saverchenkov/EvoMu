@@ -463,12 +463,9 @@ impl Ballpark {
                     if has_target_locks || is_scrambled || cs.is_mwd_mjd_disabled || cs.disallow_assistance {
                         cs.is_tethered = false;
                     } else {
-                        cs.shield_hp =
-                            (cs.shield_hp + cs.max_shield_hp * 0.10 * dt).min(cs.max_shield_hp);
-                        cs.armor_hp =
-                            (cs.armor_hp + cs.max_armor_hp * 0.10 * dt).min(cs.max_armor_hp);
-                        cs.structure_hp = (cs.structure_hp + cs.max_structure_hp * 0.10 * dt)
-                            .min(cs.max_structure_hp);
+                        cs.shield_hp = (cs.shield_hp + cs.max_shield_hp * 0.10 * dt).min(cs.max_shield_hp);
+                        cs.armor_hp = (cs.armor_hp + cs.max_armor_hp * 0.10 * dt).min(cs.max_armor_hp);
+                        cs.structure_hp = (cs.structure_hp + cs.max_structure_hp * 0.10 * dt).min(cs.max_structure_hp);
                     }
                 }
                 if is_cmd_destroyer {
@@ -571,11 +568,8 @@ impl Ballpark {
                     }
                 }
 
-                // Passive Shield and Capacitor recharge simulation (C-2)
-                if cs.shield_hp > 0.0
-                    && cs.shield_hp < cs.max_shield_hp
-                    && cs.shield_recharge_time_ms > 0.0
-                {
+                // Passive Shield and Capacitor recharge simulation (C-2, feat:combat.passive-shield-recharge-peak)
+                if cs.shield_hp < cs.max_shield_hp && cs.shield_recharge_time_ms > 0.0 {
                     cs.shield_hp = combat::compute_passive_recharge(
                         cs.shield_hp,
                         cs.max_shield_hp,
@@ -909,7 +903,7 @@ pub mod combat {
     /// $$t_{\text{lock}} = \frac{40000}{R_{\text{scan}} \cdot \text{arsinh}^2(\sigma_{\text{target}})}$$
     pub fn compute_lock_time_seconds(scan_resolution: f64, target_sig_radius: f64) -> f64 {
         let denom = scan_resolution.max(1.0) * target_sig_radius.max(1.0).asinh().powi(2);
-        (40_000.0 / denom).max(0.1)
+        (40_000.0 / denom).max(0.25)
     }
 
     /// Computes angular velocity $\omega = \frac{\|\vec{d} \times \Delta \vec{v}\|}{\|\vec{d}\|^2}$ in rad/s (`#46`).

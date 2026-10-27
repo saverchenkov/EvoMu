@@ -420,6 +420,34 @@ pub fn compute_falloff_attenuation(distance: f64, optimal: f64, falloff: f64) ->
     }
 }
 
+/// Computes EVE Online range falloff attenuation with the `optimal + 3 * falloff` 0% cutoff
+/// (`feat:combat.remote-repair-falloff`, `feat:combat.energy-neutralizer-cycle`).
+#[inline]
+pub fn compute_falloff_with_cutoff(distance: f64, optimal: f64, falloff: f64) -> f64 {
+    if distance <= optimal || falloff <= 0.0 {
+        1.0
+    } else if distance > optimal + 3.0 * falloff {
+        0.0
+    } else {
+        let excess = distance - optimal;
+        0.5_f64.powf((excess / falloff).powi(2))
+    }
+}
+
+/// Computes the instantaneous passive shield/capacitor recharge rate in HP/s (or GJ/s)
+/// (`feat:combat.passive-shield-recharge-peak`):
+///
+/// $$\frac{dC}{dt} = \frac{10 \, C_{\max}}{\tau_{\text{recharge}}} \left(\sqrt{\frac{C}{C_{\max}}} - \frac{C}{C_{\max}}\right)$$
+/// peaking at $2.5 \, C_{\max} / \tau_{\text{recharge}}$ at $25\%$ capacity.
+#[inline]
+pub fn compute_passive_recharge_rate(current: f64, max_capacity: f64, recharge_time_s: f64) -> f64 {
+    if max_capacity <= 0.0 || recharge_time_s <= 0.0 || current <= 0.0 || current >= max_capacity {
+        return 0.0;
+    }
+    let ratio = (current / max_capacity).clamp(0.0, 1.0);
+    (10.0 * max_capacity / recharge_time_s) * (ratio.sqrt() - ratio)
+}
+
 /// Computes EVE Online's stacking penalty factor for the `n`-th (0-indexed) module modifier (`DG-1`):
 ///
 /// $$S(n) = e^{-(n-1)^2 / 7.1289}$$

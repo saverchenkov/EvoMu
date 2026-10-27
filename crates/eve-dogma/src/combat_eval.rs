@@ -159,40 +159,102 @@ pub struct EnergyNosferatuResult {
     pub target_new_cap: f64,
 }
 
-/// Evaluates energy nosferatu capacitor vampire transfer with range falloff and cap % rule (`DG-1`).
+/// Evaluates energy nosferatu capacitor vampire transfer with range falloff and absolute GJ rule (`feat:combat.nosferatu-drain-cap`).
 pub fn eval_energy_nosferatu(
     module: &DogmaItemState,
     distance: f64,
     source_current_cap: f64,
     source_max_cap: f64,
     target_current_cap: f64,
-    target_max_cap: f64,
+    _target_max_cap: f64,
+    sde: &SdeRegistry,
+) -> EnergyNosferatuResult {
+    eval_energy_nosferatu_with_hull(
+        module,
+        distance,
+        source_current_cap,
+        source_max_cap,
+        target_current_cap,
+        false,
+        sde,
+    )
+}
+
+/// Computes the effective omnidirectional AoE radius in meters for a Burst Jammer (`group_id == 80`)
+/// or QA ECM Burst (`group_id == 353`) module (`feat:combat.ecm-burst-radius`).
+///
+/// In V24.01 SDE, `Burst Jammer I` (`580`) and `Burst Jammer II` (`2117`) store full-diameter span
+/// in base dogma attribute `142` (`ecmBurstRange` = `10,000.0` / `12,000.0` m) with no `maxRange` (`54`),
+/// yielding exact `5,000.0` m (`5 km` T1) and `6,000.0` m (`6 km` T2) radii without single-target ECM
+/// optimal-range skill/hull inflation.
+pub fn compute_burst_jammer_radius_m(
+    mod_type: &eve_sde::InvType,
+    mod_state: &DogmaItemState,
+    sde: &SdeRegistry,
+) -> f64 {
+    let max_r = mod_state.get_attribute(attr_ids::MAX_RANGE, sde);
+    if max_r > 0.0 {
+        return max_r;
+    }
+    let base_burst_span = mod_state
+        .base_attributes
+        .get(&142)
+        .copied()
+        .or_else(|| mod_type.default_attributes.get(&142).copied())
+        .unwrap_or(0.0);
+    if mod_type.group_id == 80 {
+        if base_burst_span > 0.0 {
+            0.5 * base_burst_span
+        } else {
+            5_000.0
+        }
+    } else if base_burst_span > 0.0 {
+        base_burst_span
+    } else {
+        5_000.0
+    }
+}
+
+/// Returns `true` if `ship_type_id` has a Blood Raider hull bonus overriding the Energy Nosferatu
+/// `target_cap > self_cap` limitation (`feat:combat.nosferatu-drain-cap`).
+///
+/// Derived dynamically from SDE hull data: checks dogma attribute 1945 (`nosOverride` > 0.0)
+/// or dogma effect 5854 (`shipBonusNosferatuOverride`).
+pub fn is_blood_raider_nosferatu_hull(ship_type_id: TypeId, sde: &SdeRegistry) -> bool {
+    if let Some(ship_type) = sde.types.get(&ship_type_id) {
+        if ship_type.default_attributes.get(&1945).copied().unwrap_or(0.0) > 0.0 {
+            return true;
+        }
+        if ship_type.effect_ids.contains(&5854) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Evaluates Energy Nosferatu capacitor vampire transfer with range falloff, absolute GJ comparison
+/// (`target_current_cap > source_current_cap`), and Blood Raider hull override (`feat:combat.nosferatu-drain-cap`).
+pub fn eval_energy_nosferatu_with_hull(
+    module: &DogmaItemState,
+    distance: f64,
+    source_current_cap: f64,
+    source_max_cap: f64,
+    target_current_cap: f64,
+    blood_raider_override: bool,
     sde: &SdeRegistry,
 ) -> EnergyNosferatuResult {
     let nominal_transfer = module.get_attribute(90, sde);
     let optimal = module.get_attribute(attr_ids::MAX_RANGE, sde);
     let falloff = get_module_falloff(module, sde);
-
-    let falloff_factor = compute_falloff_attenuation(distance, optimal, falloff);
-    let source_pct = if source_max_cap > 0.0 {
-        source_current_cap / source_max_cap
-    } else {
-        1.0
-    };
-    let target_pct = if target_max_cap > 0.0 {
-        target_current_cap / target_max_cap
-    } else {
-        0.0
-    };
-
-    let actual_transferred = if source_pct < target_pct {
+    let falloff_factor = compute_falloff_with_cutoff(distance, optimal, falloff);
+    let can_drain = blood_raider_override || target_current_cap > source_current_cap;
+    let actual_transferred = if can_drain {
         (nominal_transfer * falloff_factor)
             .min(target_current_cap.max(0.0))
             .min((source_max_cap - source_current_cap).max(0.0))
     } else {
         0.0
     };
-
     EnergyNosferatuResult {
         nominal_transfer,
         falloff_factor,
@@ -200,6 +262,23 @@ pub fn eval_energy_nosferatu(
         source_new_cap: (source_current_cap + actual_transferred).min(source_max_cap),
         target_new_cap: (target_current_cap - actual_transferred).max(0.0),
     }
+}
+
+/// Evaluates effective signature radius from base signature and a slice of falloff-attenuated
+/// percentage bonuses (e.g. `30.0` for `+30%`) using EVE's stacking penalty curve (`feat:combat.target-painter-bloom`).
+pub fn eval_target_painters_sig_radius(base_sig: f64, effective_pct_bonuses: &[f64]) -> f64 {
+    let mut deltas: Vec<f64> = effective_pct_bonuses
+        .iter()
+        .copied()
+        .filter(|&b| b > 0.0)
+        .map(|b| b / 100.0)
+        .collect();
+    deltas.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let mut sig = base_sig;
+    for (i, d) in deltas.into_iter().enumerate() {
+        sig *= 1.0 + d * stacking_penalty_factor(i);
+    }
+    sig
 }
 
 /// Computes ECM jam probability against a target sensor strength with range falloff (`DG-1`):
@@ -669,7 +748,7 @@ pub fn evaluate_capacitor_stability(
 /// Computes target lock duration from scan resolution and target signature radius (`DG-5`).
 pub fn compute_target_lock_time(scan_resolution: f64, target_signature_radius: f64) -> f64 {
     let denom = scan_resolution.max(1.0) * target_signature_radius.max(1.0).asinh().powi(2);
-    (40_000.0 / denom).max(0.1)
+    (40_000.0 / denom).max(0.25)
 }
 
 /// Computes effective max locked targets with hull and character skills (`DG-5`).
@@ -714,7 +793,7 @@ impl ShipFittingEngine {
     ) -> f64 {
         let optimal = source_module.get_attribute(attr_ids::MAX_RANGE, sde);
         let falloff = get_module_falloff(source_module, sde);
-        let att = compute_falloff_attenuation(distance, optimal, falloff);
+        let att = compute_falloff_with_cutoff(distance, optimal, falloff);
         let impedance = self.ship.get_attribute(2116, sde).clamp(0.0, 1.0);
         for aid in [attr_ids::SHIELD_BONUS, 84_u16, 83_u16] {
             let v = source_module.get_attribute(aid, sde);

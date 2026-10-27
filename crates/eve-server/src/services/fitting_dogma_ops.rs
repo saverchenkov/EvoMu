@@ -162,7 +162,17 @@ pub(crate) async fn handle_dogma_ops(
                 .as_ref()
                 .map(|f| f.ship.get_attribute(attr_ids::SCAN_RESOLUTION, &ctx.sde).max(1.0))
                 .unwrap_or(250.0);
-            let target_sig = target_ball.radius.max(35.0);
+            let raw_sig = sys
+                .get_combat_state(target_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|cs| cs.base_signature_radius.unwrap_or(cs.signature_radius))
+                .filter(|&s| s > 0.0)
+                .unwrap_or(0.0)
+                .max(target_ball.radius)
+                .max(35.0);
+            let target_sig = ctx.effective_target_signature_radius(target_id, raw_sig);
             let lock_sec = eve_destiny::combat::compute_lock_time_seconds(scan_res, target_sig);
             let lock_time_ms = lock_sec * 1000.0;
 

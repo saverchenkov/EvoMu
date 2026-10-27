@@ -776,6 +776,7 @@ impl ServerContext {
     }
 
     /// Constructs a lightweight `ServerContext` handle referencing shared core components for system step execution.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_step_components(
         systems: std::sync::Arc<crate::system_actor::SystemRegistry>,
         db: std::sync::Arc<eve_db::WorldRepository>,
@@ -787,6 +788,7 @@ impl ServerContext {
         combat_ephemeral: std::sync::Arc<std::sync::RwLock<crate::services::combat_crimewatch::CombatRuntimeState>>,
         quasar_gateway: std::sync::Arc<crate::quasar_gateway::PublicGatewayRouter>,
         invention_roll_override: std::sync::Arc<std::sync::RwLock<Option<f64>>>,
+        module_reactivation_cooldowns: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<(i64, i64, u32), super::context::ModuleCooldownEntry>>>,
     ) -> Self {
         let crimewatch = crate::combat::crimewatch::CrimeWatchLock::new(std::sync::Arc::clone(&db));
         let clock = std::sync::RwLock::new(db.clock());
@@ -825,7 +827,7 @@ impl ServerContext {
             character_scan_progress: std::sync::RwLock::new(std::collections::HashMap::new()),
             invention_roll_override,
             mechanic_rng,
-            module_reactivation_cooldowns: std::sync::RwLock::new(std::collections::HashMap::new()),
+            module_reactivation_cooldowns,
             mining_cycles: std::sync::RwLock::new(std::collections::HashMap::new()),
             crimewatch,
             combat_ephemeral,
@@ -845,6 +847,119 @@ impl ServerContext {
             npc_spawns: std::sync::RwLock::new(std::collections::HashMap::new()),
             combat_rng_seq: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Computes a target entity's effective signature radius including active Target Painters
+    /// (`group 379`, stacking-penalized) and ship fitting modifiers (`feat:combat.target-painter-bloom`).
+    pub fn effective_target_signature_radius(&self, target_ball_id: i64, fallback_base_sig: f64) -> f64 {
+        let (owner_char_opt, item_base_sig_opt, tp_resist_opt) = self.db.with_snapshot(|snap| {
+            let char_id = snap.characters.values().find(|c| c.active_ship_id == target_ball_id).map(|c| c.character_id)
+                .or_else(|| snap.items.get(&target_ball_id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)));
+            let item_t = snap.items.get(&target_ball_id).and_then(|i| self.sde.types.get(&i.type_id));
+            let base_sig = item_t
+                .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::SIGNATURE_RADIUS).copied()).filter(|&v| v > 0.0);
+            let tp_resist = item_t
+                .and_then(|t| t.default_attributes.get(&2114).copied());
+            (char_id, base_sig, tp_resist)
+        });
+        if let Some(cid) = owner_char_opt {
+            if let Ok(fit) = self.get_or_rebuild_ship_fitting(cid, target_ball_id) {
+                let sig = fit.ship.get_attribute(eve_sde::attr_ids::SIGNATURE_RADIUS, &self.sde);
+                if sig > 0.0 {
+                    return sig;
+                }
+            }
+        }
+        let base_sig = item_base_sig_opt.unwrap_or_else(|| fallback_base_sig.max(1.0));
+        let tp_resist = tp_resist_opt.unwrap_or(1.0).clamp(0.0, 1.0);
+        let bonuses: Vec<f64> = self.projected_ewar.read().unwrap_or_else(|e| e.into_inner())
+            .get(&target_ball_id)
+            .map(|list| {
+                list.iter()
+                    .filter(|proj| self.sde.types.get(&proj.source_module_type_id).is_some_and(|t| t.group_id == 379) || proj.effective_module.base_attributes.contains_key(&554))
+                    .map(|proj| {
+                        let opt = proj.effective_module.get_attribute(eve_sde::attr_ids::MAX_RANGE, &self.sde);
+                        let fall = eve_dogma::get_module_falloff(&proj.effective_module, &self.sde);
+                        let att = eve_dogma::compute_falloff_attenuation(proj.distance, opt, fall);
+                        proj.effective_module.get_attribute(554, &self.sde) * att * tp_resist
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        eve_dogma::eval_target_painters_sig_radius(base_sig, &bonuses)
+    }
+
+    // Covers: ship boarding skill and clone checks (`feat:ships.board-ship-skill-and-clone-check`)
+    pub fn check_type_skill_prerequisites_in_snapshot(
+        &self,
+        snap: &eve_db::WorldStateSnapshot,
+        char_id: i64,
+        type_id: u32,
+    ) -> Result<(), BridgeRpcError> {
+        let Some(t) = self.sde.types.get(&type_id) else {
+            return Ok(());
+        };
+        let char_skills = snap.skills.get(&char_id);
+        let char_rec = snap.characters.get(&char_id);
+        let is_omega = char_rec.is_some_and(|c| {
+            let exp_opt = crate::services::account_services::subscription_expiry_for_user(snap, c.user_id);
+            c.clone_grade >= 2 && exp_opt.map(|u| u > self.now_unix()).unwrap_or(true)
+        });
+        let is_alpha_clone = !is_omega;
+        let race_id = char_rec.map(|c| c.race_id).unwrap_or(1);
+        let req_pairs = [
+            (182_u16, 277_u16),
+            (183, 278),
+            (184, 279),
+            (1285, 1286),
+            (1289, 1287),
+            (1290, 1288),
+        ];
+        for (req_skill_attr, req_lvl_attr) in req_pairs {
+            if let Some(&skill_f) = t.default_attributes.get(&req_skill_attr) {
+                let skill_id = skill_f.round() as u32;
+                if skill_id > 0 {
+                    let req_lvl = t
+                        .default_attributes
+                        .get(&req_lvl_attr)
+                        .copied()
+                        .unwrap_or(1.0)
+                        .round()
+                        .clamp(1.0, 5.0) as u8;
+                    let mut raw_trained = char_skills
+                        .and_then(|m| m.get(&skill_id))
+                        .map(|r| r.level)
+                        .unwrap_or(0);
+                    if raw_trained < req_lvl && (12180..=12199).contains(&skill_id) && skill_id != 12189 {
+                        for alt_skill in [60377_u32, 60378, 60379, 60380, 60381] {
+                            let alt_lvl = char_skills
+                                .and_then(|m| m.get(&alt_skill))
+                                .map(|r| r.level)
+                                .unwrap_or(0);
+                            raw_trained = raw_trained.max(alt_lvl);
+                        }
+                    }
+                    if raw_trained < req_lvl {
+                        let is_ship = t.category_id == 6;
+                        let code = if is_ship { "ShipHasSkillPrerequisites" } else { "SkillPrerequisitesNotMet" };
+                        return Err(BridgeRpcError::user_error(code));
+                    }
+                    if is_alpha_clone {
+                        let alpha_cap =
+                            crate::services::character_skills::alpha_skill_cap_for_character(
+                                &self.sde, race_id, skill_id,
+                            );
+                        let effective_trained = raw_trained.min(alpha_cap);
+                        if req_lvl > alpha_cap || effective_trained < req_lvl {
+                            let is_ship = t.category_id == 6;
+                            let code = if is_ship { "TrialAccountRestriction" } else { "SkillPrerequisitesNotMet" };
+                            return Err(BridgeRpcError::user_error(code));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 

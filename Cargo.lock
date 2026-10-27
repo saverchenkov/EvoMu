@@ -261,6 +261,7 @@ dependencies = [
 name = "eve-destiny"
 version = "0.1.0"
 dependencies = [
+ "eve-dogma",
  "eve-proto",
  "eve-sde",
  "eve-testkit",

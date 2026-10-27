@@ -200,6 +200,8 @@ pub struct CombatState {
     pub capacitor: f64,
     pub max_capacitor: f64,
     pub signature_radius: f64,
+    #[serde(default)]
+    pub base_signature_radius: Option<f64>,
     pub is_cloaked: bool,
     pub is_tethered: bool,
     pub warp_scramble_strength: i32,
@@ -288,6 +290,7 @@ impl Default for CombatState {
             capacitor: 250.0,
             max_capacitor: 250.0,
             signature_radius: 35.0,
+            base_signature_radius: None,
             is_cloaked: false,
             is_tethered: false,
             warp_scramble_strength: 0,
@@ -975,16 +978,7 @@ pub struct Ballpark {
 impl Ballpark {
     /// Spawns a `DSTBALL_MUSHROOM` (`MovementMode::Mushroom`) expanding shockwave ball (`_destiny.so` `Ballpark::AddMushroom` `0x36fd0`).
     /// Starts at `radius = 0.0` with `velocity = DVec3::ZERO` and expands by $R(t) = R_{\max} (t / T)^{0.25}$ until expiring at $t \ge T$.
-    pub fn add_mushroom_ball(
-        &mut self,
-        id: BallId,
-        type_id: u32,
-        position: DVec3,
-        max_radius: f64,
-        duration_s: f64,
-        mass: f64,
-        owner_id: i64,
-    ) -> bool {
+    pub fn add_mushroom_ball(&mut self, id: BallId, type_id: u32, position: DVec3, max_radius: f64, duration_s: f64, mass: f64, owner_id: i64) -> bool {
         if duration_s <= 0.0 || !duration_s.is_finite() || self.balls.contains_key(&id) {
             return false;
         }

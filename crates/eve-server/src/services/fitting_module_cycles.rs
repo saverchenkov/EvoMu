@@ -105,7 +105,7 @@ pub(crate) async fn handle_module_cycles(
                         && ctx.sde.types.get(&wm.type_id).is_some_and(|t| {
                             matches!(
                                 t.group_id,
-                                53 | 55 | 74 | 506..=511 | 1986 | 4060 | 4500 | 4805 | 4807
+                                53 | 55 | 74 | 506..=511 | 524 | 1986 | 4060 | 4500 | 4805 | 4807
                             )
                         })
                 });
@@ -137,7 +137,9 @@ pub(crate) async fn handle_module_cycles(
             let Some(mod_type) = ctx.sde.types.get(&m.type_id) else {
                 return Some(Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module type {} not found in SDE", m.type_id) }));
             };
-            if target_id_opt.is_some_and(|tid| ctx.db.with_snapshot(|s| s.items.get(&tid).and_then(|i| ctx.sde.types.get(&i.type_id)).is_some_and(|t| matches!(t.group_id, 340 | 448)))) {
+            if !matches!(mod_type.group_id, 1122 | 650)
+                && target_id_opt.is_some_and(|tid| ctx.db.with_snapshot(|s| s.items.get(&tid).and_then(|i| ctx.sde.types.get(&i.type_id)).is_some_and(|t| matches!(t.group_id, 340 | 448))))
+            {
                 return crate::services::combat_crimewatch::combat_weapons::handle_weapons(ctx, session, service, method, args, kwargs).await;
             }
 
@@ -543,7 +545,8 @@ pub(crate) async fn handle_module_cycles(
                 let already_active = matches!(
                     m.state,
                     eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
-                ) || ctx.db.with_snapshot(|s| s.module_active_states.contains(&module_id));
+                ) || ctx.db.with_snapshot(|s| s.module_active_states.contains(&module_id))
+                    || sys.has_module_cycle(ship_id, module_id).await;
                 if method == "Overload"
                     && (already_active
                         || (target_id_opt.is_none()
@@ -574,7 +577,31 @@ pub(crate) async fn handle_module_cycles(
                 if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
                     return Some(Err(BridgeRpcError { code: "ModuleReactivationDelay".into(), message: format!("Module {module_id} cannot reactivate before delay expires") }));
                 }
+                if method == "Activate"
+                    && already_active
+                    && matches!(
+                        mod_type.group_id,
+                        40 | 1156 | 41 | 1697 | 67 | 71 | 76 | 72 | 1122 | 650 | 80 | 353
+                    )
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "ModuleAlreadyActive".into(),
+                        message: format!("Module {module_id} is already active in a cycle"),
+                    }));
+                }
+                if matches!(mod_type.group_id, 1122 | 650) && target_id_opt.is_none() {
+                    return Some(Err(BridgeRpcError {
+                        code: "TargetRequired".into(),
+                        message: "Salvager / Tractor Beam requires a locked target".into(),
+                    }));
+                }
                 if let Some(target_id) = target_id_opt {
+                    if target_id == ship_id && matches!(mod_type.group_id, 41 | 325 | 2018 | 585 | 67 | 1697 | 1698 | 52 | 65 | 68 | 71 | 201 | 208 | 291 | 379 | 1672) {
+                        return Some(Err(BridgeRpcError {
+                            code: "CannotActivateOnSelf".into(),
+                            message: "Cannot activate remote assistance or offensive module on self".into(),
+                        }));
+                    }
                     if mod_type.group_id == 82 {
                         // Passive Targeter (`group_id == 82`, `feat:modules.passive-targeter`):
                         // locks target silently without sending `"OnTarget"` `"targetedBy"` to target pilot!
@@ -660,6 +687,8 @@ pub(crate) async fn handle_module_cycles(
                     remote_armor_amount,
                     remote_hull_amount,
                     remote_cap_amount,
+                    remote_optimal,
+                    remote_falloff,
                     mutadaptive_spool_step,
                     mutadaptive_spool_max,
                 } = match prepare_ewar_and_capital_module(
@@ -965,8 +994,41 @@ pub(crate) async fn handle_module_cycles(
                 });
             }
 
-            let cap_drain_target = mod_state.get_attribute(97, &ctx.sde);
-            let cap_transfer_target = mod_state.get_attribute(90, &ctx.sde);
+            let raw_cap_drain = mod_state.get_attribute(97, &ctx.sde);
+            let raw_cap_transfer = mod_state.get_attribute(90, &ctx.sde);
+            let (cap_drain_target, cap_transfer_target, neut_optimal, neut_falloff) =
+                if (raw_cap_drain > 0.0 || raw_cap_transfer > 0.0) && target_id_opt.is_some() {
+                    let tid = target_id_opt.unwrap();
+                    let opt_range = mod_state.get_attribute(attr_ids::MAX_RANGE, &ctx.sde);
+                    let falloff = eve_dogma::get_module_falloff(&mod_state, &ctx.sde);
+                    let ewar_resist = ctx
+                        .db
+                        .with_snapshot(|snap| {
+                            snap.characters
+                                .values()
+                                .find(|c| c.active_ship_id == tid)
+                                .map(|c| c.character_id)
+                                .or_else(|| {
+                                    snap.items
+                                        .get(&tid)
+                                        .map(|i| i.owner_id)
+                                        .filter(|oid| snap.characters.contains_key(oid))
+                                })
+                        })
+                        .and_then(|cid| ctx.get_or_rebuild_ship_fitting(cid, tid).ok())
+                        .map(|t_fit| t_fit.ship.get_attribute(2045, &ctx.sde).clamp(0.0, 1.0))
+                        .unwrap_or(1.0);
+                    (
+                        raw_cap_drain * ewar_resist,
+                        raw_cap_transfer * ewar_resist,
+                        opt_range,
+                        falloff,
+                    )
+                } else {
+                    (raw_cap_drain, raw_cap_transfer, 0.0, 0.0)
+                };
+            let nosferatu_blood_raider_override = fit.ship.get_attribute(1945, &ctx.sde) > 0.0
+                || eve_dogma::is_blood_raider_nosferatu_hull(fit.ship.type_id, &ctx.sde);
             let is_cehe = matches!(m.type_id, 40714 | 40717) || mod_type.effect_ids.contains(&6484);
             let ehe_hull_resists = if is_cehe {
                 let em = mod_type.default_attributes.get(&974).copied().unwrap_or(0.05);
@@ -977,7 +1039,11 @@ pub(crate) async fn handle_module_cycles(
             } else {
                 None
             };
-            let repeat = if is_mjd || grants_interdiction_nullification || is_adc || is_cehe {
+            let repeat = if is_mjd
+                || grants_interdiction_nullification
+                || is_adc
+                || is_cehe
+            {
                 0
             } else {
                 repeat
@@ -992,7 +1058,16 @@ pub(crate) async fn handle_module_cycles(
             // & Smartbomb (`group_id == 72`) Crimewatch safety check (`feat:crimewatch.safety-setting-action-block`)
             // parity: feat:crimewatch.safety-setting-action-block, feat:crimewatch.limited-engagement-duel
             if matches!(mod_type.group_id, 72 | 80 | 353) {
-                let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0);
+                let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                    rt.modified_system_securities.get(&sys_id).copied()
+                })
+                .unwrap_or_else(|| {
+                    ctx.sde
+                        .solar_systems
+                        .get(&sys_id)
+                        .map(|s| s.security_status)
+                        .unwrap_or(1.0)
+                });
                 let safety = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
                     rt.safety_levels
                         .get(&char_id)
@@ -1006,6 +1081,20 @@ pub(crate) async fn handle_module_cycles(
                         code: "SafetyLevelRestricted".into(),
                         message: "UserError: CantDoInCurrentSafetyLevel - Cannot activate AoE offensive module in empire space with current ship safety setting".into(),
                     }));
+                }
+            }
+            if mod_type.group_id == 1122 {
+                if let Err(e) = crate::combat::drones_salvage_tractor::validate_wreck_salvage_target(
+                    ctx,
+                    sys_id,
+                    char_id,
+                    ship_id,
+                    target_id_opt.unwrap_or(0),
+                    Some(mod_type.type_id),
+                )
+                .await
+                {
+                    return Some(Err(e));
                 }
             }
 
@@ -1057,6 +1146,7 @@ pub(crate) async fn handle_module_cycles(
                 },
                 cap_drain_target,
                 cap_transfer_target,
+                nosferatu_blood_raider_override,
                 shield_boost_amount,
                 armor_repair_amount,
                 hull_repair_amount,
@@ -1064,6 +1154,8 @@ pub(crate) async fn handle_module_cycles(
                 remote_armor_amount,
                 remote_hull_amount,
                 remote_cap_amount,
+                remote_optimal: if remote_optimal > 0.0 { remote_optimal } else { neut_optimal },
+                remote_falloff: if remote_falloff > 0.0 { remote_falloff } else { neut_falloff },
                 mutadaptive_spool_step,
                 mutadaptive_spool_max,
                 current_spool_cycles: 0,
@@ -1109,9 +1201,9 @@ pub(crate) async fn handle_module_cycles(
                 crystal_volatility_damage,
                 max_effective_range_m: if target_id_opt.is_some() {
                     let opt_range = mod_state.get_attribute(attr_ids::MAX_RANGE, &ctx.sde);
-                    let falloff = mod_state.get_attribute(attr_ids::FALLOFF, &ctx.sde);
+                    let falloff = eve_dogma::get_module_falloff(&mod_state, &ctx.sde);
                     let eff = if opt_range > 0.0 {
-                        opt_range + falloff.max(0.0)
+                        opt_range + 3.0 * falloff.max(0.0)
                     } else {
                         fit.ship.get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde)
                     };
@@ -1133,95 +1225,36 @@ pub(crate) async fn handle_module_cycles(
                 }));
             }
 
-            // Targeted ECM (`group_id == 201`, e.g. `1957` Multispectral ECM I, `2567` Multispectral ECM II)
-            if mod_type.group_id == 201 {
-                let Some(target_id) = target_id_opt else {
+            let instant_rep_opt = match run_pre_notify_instant_module_effects(
+                ctx,
+                &sys,
+                sys_id,
+                char_id,
+                ship_id,
+                module_id,
+                &m,
+                mod_type,
+                &mod_state,
+                is_overloaded,
+                target_id_opt,
+                duration_s,
+                kwargs,
+            )
+            .await
+            {
+                Ok(rep_opt) => rep_opt,
+                Err(e) => {
                     let _ = sys.remove_module_cycle(ship_id, module_id).await;
-                    return Some(Err(BridgeRpcError { code: "TargetRequired".into(), message: "ECM module requires a locked target".into() }));
-                };
-                let mut distance_m = 0.0;
-                if let (Ok(Some((_, ship_ball))), Ok(Some((_, target_ball)))) = (
-                    sys.get_ball_snapshot(ship_id).await,
-                    sys.get_ball_snapshot(target_id).await,
-                ) {
-                    distance_m = (ship_ball.position - target_ball.position).length();
-                }
-                let target_type_id_opt = ctx
-                    .db
-                    .with_snapshot(|snap| snap.items.get(&target_id).map(|i| (i.owner_id, i.type_id)));
-                let mut best_sensor_idx = 0usize;
-                let mut target_sensor_strength = 0.0;
-                if let Some((t_owner, t_tid)) = target_type_id_opt {
-                    if let Ok(t_fit) = ctx.get_or_rebuild_ship_fitting(t_owner, target_id) {
-                        for (idx, &s_attr) in [208u16, 209, 210, 211].iter().enumerate() {
-                            let val = t_fit.ship.get_attribute(s_attr, &ctx.sde);
-                            if val > target_sensor_strength {
-                                target_sensor_strength = val;
-                                best_sensor_idx = idx;
-                            }
-                        }
-                    } else if let Some(t_type) = ctx.sde.types.get(&t_tid) {
-                        for (idx, &s_attr) in [208u16, 209, 210, 211].iter().enumerate() {
-                            let val = t_type.default_attributes.get(&s_attr).copied().unwrap_or(0.0);
-                            if val > target_sensor_strength {
-                                target_sensor_strength = val;
-                                best_sensor_idx = idx;
-                            }
+                    if cap_need > 0.0 {
+                        if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
+                            let _ = sys
+                                .set_capacitor(ship_id, (cs.capacitor + cap_need).min(cs.max_capacitor))
+                                .await;
                         }
                     }
-                } else if let Ok(Some((_, target_ball))) = sys.get_ball_snapshot(target_id).await {
-                    if let Some(t_type) = ctx.sde.types.get(&target_ball.type_id) {
-                        for (idx, &s_attr) in [208u16, 209, 210, 211].iter().enumerate() {
-                            let val = t_type.default_attributes.get(&s_attr).copied().unwrap_or(0.0);
-                            if val > target_sensor_strength {
-                                target_sensor_strength = val;
-                                best_sensor_idx = idx;
-                            }
-                        }
-                    }
+                    return Some(Err(e));
                 }
-                if target_sensor_strength <= 0.0 {
-                    target_sensor_strength = 12.0;
-                }
-                let jam_attr_id = 238u16 + (best_sensor_idx as u16);
-                let jam_strength = mod_state.get_attribute(jam_attr_id, &ctx.sde);
-                let optimal_range = mod_state.get_attribute(attr_ids::MAX_RANGE, &ctx.sde);
-                let falloff_range = mod_state.get_attribute(attr_ids::FALLOFF, &ctx.sde);
-                let jam_chance = eve_dogma::compute_ecm_jam_chance(
-                    jam_strength,
-                    target_sensor_strength,
-                    distance_m,
-                    optimal_range,
-                    falloff_range,
-                );
-                let roll = csprng_unit_f64(ctx);
-                let jam_duration_s = if duration_s > 0.0 { duration_s } else { 20.0 };
-                if roll < jam_chance && jam_chance > 0.0 {
-                    let _ = sys.apply_ecm_jam(target_id, jam_duration_s).await;
-                }
-            }
-
-            // Burst Jammer / ECM Burst (`group_id == 80 || group_id == 353`, e.g. `580` Burst Jammer I, `2117` Burst Jammer II)
-            if mod_type.group_id == 80 || mod_type.group_id == 353 {
-                let mut burst_range = mod_state.get_attribute(142, &ctx.sde);
-                if burst_range <= 0.0 {
-                    burst_range = mod_state.get_attribute(attr_ids::MAX_RANGE, &ctx.sde);
-                }
-                if burst_range <= 0.0 {
-                    burst_range = 10_000.0;
-                }
-                let jam_strengths = [
-                    mod_state.get_attribute(238, &ctx.sde),
-                    mod_state.get_attribute(239, &ctx.sde),
-                    mod_state.get_attribute(240, &ctx.sde),
-                    mod_state.get_attribute(241, &ctx.sde),
-                ];
-                let roll = csprng_unit_f64(ctx);
-                let jam_duration_s = if duration_s > 0.0 { duration_s } else { 20.0 };
-                let _ = sys
-                    .apply_ecm_burst(ship_id, burst_range, jam_strengths, jam_duration_s, roll)
-                    .await;
-            }
+            };
             ctx.db.with_mut_snapshot(|snap| {
                 if snap.items.contains_key(&module_id) {
                     snap.module_active_states.insert(module_id);
@@ -1231,11 +1264,20 @@ pub(crate) async fn handle_module_cycles(
                 }
             });
             let _ = fit.activate_module(module_id, is_overloaded, &ctx.sde);
-            if repeat == 0 && reactivation_delay_s > 0.0 {
+            let is_cycle_gated = matches!(
+                mod_type.group_id,
+                40 | 1156 | 41 | 1697 | 67 | 71 | 76 | 72 | 1122 | 650 | 80 | 353
+            );
+            if is_cycle_gated || (repeat == 0 && reactivation_delay_s > 0.0) {
+                let total_delay = if mod_type.group_id == 40 {
+                    duration_s.max(reactivation_delay_s)
+                } else {
+                    duration_s + reactivation_delay_s
+                };
                 ctx.record_module_reactivation_delay(
                     ship_id,
                     module_id,
-                    duration_s + reactivation_delay_s,
+                    total_delay,
                 );
             }
             if is_overloaded {
@@ -1256,6 +1298,10 @@ pub(crate) async fn handle_module_cycles(
 
             // V24 client derives `OnModuleActivated` from `OnGodmaShipEffect` (active=1).
             let _ = ctx.notify_module_effect_started(char_id, ship_id, module_id, m.type_id, Some(effect_name.as_str()), target_id_opt);
+
+            if let Some(rep) = instant_rep_opt {
+                return Some(Ok(rep));
+            }
 
             if let Some(res) = build_specialized_module_result(
                 method,

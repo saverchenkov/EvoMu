@@ -214,15 +214,12 @@ pub async fn step_missiles_and_breachers(
             mstate.remaining_flight_s = (mstate.remaining_flight_s - (dist / closing_speed)).max(0.0);
             let _ = sys_handle.remove_ball(mid).await;
 
-            let target_sig = if let Ok(Some(t_cs)) = sys_handle.get_combat_state(mstate.target_ball_id).await {
-                if t_cs.signature_radius > 0.0 {
-                    t_cs.signature_radius
-                } else {
-                    t_ball.radius.max(35.0)
-                }
+            let raw_sig = if let Ok(Some(t_cs)) = sys_handle.get_combat_state(mstate.target_ball_id).await {
+                t_cs.base_signature_radius.unwrap_or(if t_cs.signature_radius > 0.0 { t_cs.signature_radius } else { t_ball.radius.max(35.0) })
             } else {
                 t_ball.radius.max(35.0)
             };
+            let target_sig = ctx.effective_target_signature_radius(mstate.target_ball_id, raw_sig);
             let target_speed = if t_ball.velocity.length() > 0.0 {
                 t_ball.velocity.length()
             } else {
@@ -530,10 +527,44 @@ pub async fn activate_aoe_or_defender_module(
     mod_type: &eve_sde::InvType,
     attacker_ball: &eve_destiny::Ball,
     target_id_opt: Option<i64>,
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    activate_aoe_or_defender_module_with_cap(
+        ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        sys_sec,
+        now_unix,
+        module_id,
+        m,
+        mod_type,
+        attacker_ball,
+        target_id_opt,
+        kwargs,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn activate_aoe_or_defender_module_with_cap(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    sys_sec: f64,
+    now_unix: u64,
+    module_id: i64,
+    m: &eve_dogma::FittedModule,
+    mod_type: &eve_sde::InvType,
+    attacker_ball: &eve_destiny::Ball,
+    target_id_opt: Option<i64>,
     _kwargs: &HashMap<String, PyRep>,
+    deduct_capacitor: bool,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            // 2. Smartbomb (`group_id == 72`, `feat:modules.smartbomb`)
+            // 2. Smartbomb (`group_id == 72`, `feat:modules.smartbomb`, `feat:combat.smartbomb-aoe-damage`)
             // parity: feat:crimewatch.safety-setting-action-block, feat:crimewatch.limited-engagement-duel
             if mod_type.group_id == 72 {
                 let safety = with_combat_runtime(ctx, |rt| {
@@ -551,38 +582,42 @@ pub async fn activate_aoe_or_defender_module(
                         message: "UserError: CantDoInCurrentSafetyLevel - Safety Yellow blocks activating Smartbombs in high-security space".into(),
                     }));
                 }
-                let cap_need = mod_type
-                    .default_attributes
-                    .get(&6)
-                    .copied()
-                    .unwrap_or(30.0);
-                if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
-                    if cs.capacitor < cap_need {
-                        return Some(Err(BridgeRpcError {
-                            code: "NotEnoughCapacitor".into(),
-                            message: format!(
-                                "Smartbomb requires {cap_need:.1} GJ capacitor (have {:.1} GJ)",
-                                cs.capacitor
-                            ),
-                        }));
-                    }
-                    cs.capacitor -= cap_need;
-                    let _ = sys_handle.set_combat_state(ship_id, cs).await;
-                }
-                let emp_range = mod_type
-                    .default_attributes
-                    .get(&99)
-                    .copied()
-                    .unwrap_or(3_000.0);
-                let sb_dmg = DamageVector {
+                let is_overloaded = m.state == eve_dogma::ModuleState::Overloaded;
+                let fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
+                let mod_state_opt = fit_opt.as_ref().map(|f| f.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde));
+                let emp_range = mod_state_opt.as_ref().map(|st| st.get_attribute(99, &ctx.sde)).filter(|&r| r > 0.0)
+                    .unwrap_or_else(|| mod_type.default_attributes.get(&99).copied().unwrap_or(3_000.0));
+                let sb_dmg = mod_state_opt.as_ref().map(|st| DamageVector {
+                    em: st.get_attribute(114, &ctx.sde), explosive: st.get_attribute(116, &ctx.sde),
+                    kinetic: st.get_attribute(117, &ctx.sde), thermal: st.get_attribute(118, &ctx.sde),
+                }).filter(|d| d.total() > 0.0).unwrap_or_else(|| DamageVector {
                     em: mod_type.default_attributes.get(&114).copied().unwrap_or(0.0),
                     explosive: mod_type.default_attributes.get(&116).copied().unwrap_or(0.0),
                     kinetic: mod_type.default_attributes.get(&117).copied().unwrap_or(0.0),
                     thermal: mod_type.default_attributes.get(&118).copied().unwrap_or(0.0),
-                };
+                });
+                if deduct_capacitor {
+                    let cap_need = mod_state_opt
+                        .as_ref()
+                        .map(|st| st.get_attribute(6, &ctx.sde))
+                        .filter(|&c| c > 0.0)
+                        .unwrap_or_else(|| mod_type.default_attributes.get(&6).copied().unwrap_or(30.0));
+                    if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
+                        if cs.capacitor < cap_need {
+                            return Some(Err(BridgeRpcError {
+                                code: "NotEnoughCapacitor".into(),
+                                message: format!("Smartbomb requires {cap_need:.1} GJ capacitor (have {:.1} GJ)", cs.capacitor),
+                            }));
+                        }
+                        cs.capacitor -= cap_need;
+                        let _ = sys_handle.set_combat_state(ship_id, cs).await;
+                    }
+                }
 
-                // Destroy/damage any in-flight missiles within smartbomb range (`feat:combat.missile-flight-physics-destruction`)
+                // Destroy/damage any in-flight missiles, scanner probes, and drones within smartbomb range (`feat:combat.smartbomb-aoe-damage`)
                 let mut destroyed_missile_ids = Vec::new();
+                let mut destroyed_probe_ids = Vec::new();
+                let mut destroyed_drone_ids = Vec::new();
                 let in_flight_ids: Vec<i64> = with_combat_runtime(ctx, |rt| {
                     rt.in_flight_missiles
                         .values()
@@ -612,31 +647,27 @@ pub async fn activate_aoe_or_defender_module(
                         }
                     }
                 }
-
-                // Apply AoE damage to all dynamic ship/NPC/drone balls within emp_range (including fleetmates!)
+                // Apply AoE damage to all uncloaked dynamic ship/NPC/drone/probe balls within emp_range (including fleetmates!)
                 let all_balls = sys_handle.list_balls().await.unwrap_or_default();
                 let mut hit_ball_ids = Vec::new();
                 let mut illegal_capsuleer_hits: Vec<(i64, bool)> = Vec::new();
                 for b in all_balls {
-                    if b.id == ship_id
-                        || !is_combatant_ship_or_entity_ball(ctx, b.id, b.type_id)
-                        || destroyed_missile_ids.contains(&b.id)
-                    {
+                    let is_probe_b = ctx.sde.types.get(&b.type_id).is_some_and(|t| matches!(t.group_id, 479 | 492 | 548));
+                    let is_drone_b = ctx.sde.types.get(&b.type_id).and_then(|t| ctx.sde.groups.get(&t.group_id)).is_some_and(|g| g.category_id == 18);
+                    let is_targetable = is_combatant_ship_or_entity_ball(ctx, b.id, b.type_id) || is_drone_b || is_probe_b;
+                    if b.id == ship_id || !is_targetable || destroyed_missile_ids.contains(&b.id) {
                         continue;
                     }
                     if attacker_ball.position.distance(b.position) <= emp_range {
+                        if sys_handle.get_combat_state(b.id).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) {
+                            continue;
+                        }
                         let victim_char_opt = ctx.db.with_snapshot(|snap| {
-                            snap.characters
-                                .values()
-                                .find(|c| c.active_ship_id == b.id)
-                                .map(|c| c.character_id)
-                                .or_else(|| {
-                                    snap.items
-                                        .get(&b.id)
-                                        .map(|i| i.owner_id)
-                                        .filter(|oid| snap.characters.contains_key(oid))
-                                })
-                        });
+                            snap.characters.values().find(|c| c.active_ship_id == b.id).map(|c| c.character_id)
+                                .or_else(|| snap.items.get(&b.id).map(|i| i.owner_id).filter(|&oid| snap.characters.contains_key(&oid)))
+                        })
+                        .or_else(|| with_combat_runtime(ctx, |rt| rt.active_drones_in_space.get(&b.id).map(|d| d.owner_char_id)))
+                        .or_else(|| ctx.active_scanner_probes.read().ok().and_then(|ap| ap.get(&b.id).map(|p| p.owner_char_id)));
                         if let Some(vcid) = victim_char_opt {
                             if crate::services::space_destiny::is_location_change_invulnerable(ctx, vcid, now_unix) {
                                 continue;
@@ -644,27 +675,18 @@ pub async fn activate_aoe_or_defender_module(
                         }
                         if let Ok(Some((applied, destroyed, _))) = sys_handle.apply_damage_with_attacker(b.id, sb_dmg, Some(char_id)).await {
                             hit_ball_ids.push(b.id);
-                            record_killmail_assist_action(
-                                ctx,
-                                b.id,
-                                char_id,
-                                attacker_ball.type_id,
-                                m.type_id,
-                                applied,
-                                false,
-                                now_unix,
-                            );
+                            record_killmail_assist_action(ctx, b.id, char_id, attacker_ball.type_id, m.type_id, applied, false, now_unix);
+                            if destroyed {
+                                if is_probe_b && !destroyed_probe_ids.contains(&b.id) {
+                                    destroyed_probe_ids.push(b.id);
+                                }
+                                if is_drone_b {
+                                    with_mut_combat_runtime(ctx, |rt| { rt.active_drones_in_space.remove(&b.id); });
+                                    destroyed_drone_ids.push(b.id);
+                                }
+                            }
                             if let Some(vcid) = victim_char_opt.filter(|&v| v != char_id) {
-                                record_killmail_assist_action(
-                                    ctx,
-                                    vcid,
-                                    char_id,
-                                    attacker_ball.type_id,
-                                    m.type_id,
-                                    applied,
-                                    false,
-                                    now_unix,
-                                );
+                                record_killmail_assist_action(ctx, vcid, char_id, attacker_ball.type_id, m.type_id, applied, false, now_unix);
                                 if applied > 0.0 {
                                     crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, now_unix);
                                     let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
@@ -693,14 +715,7 @@ pub async fn activate_aoe_or_defender_module(
                             }
                             if let Ok(Some(t_cs)) = sys_handle.get_combat_state(b.id).await {
                                 emit_combat_log_and_damage_state(
-                                    ctx,
-                                    char_id,
-                                    victim_char_opt,
-                                    ship_id,
-                                    b.id,
-                                    m.type_id,
-                                    applied,
-                                    false,
+                                    ctx, char_id, victim_char_opt, ship_id, b.id, m.type_id, applied, false,
                                     (t_cs.shield_hp / t_cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0),
                                     (t_cs.armor_hp / t_cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0),
                                     (t_cs.structure_hp / t_cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0),
@@ -710,16 +725,7 @@ pub async fn activate_aoe_or_defender_module(
                                 super::combat_npc_ai::record_npc_threat_event(ctx, b.id, ship_id, applied, false, false);
                             }
                             if destroyed {
-                                handle_destroyed_ball_from_missile_or_aoe(
-                                    ctx,
-                                    sys_id,
-                                    char_id,
-                                    b.id,
-                                    b.type_id,
-                                    b.position,
-                                    now_unix,
-                                )
-                                .await;
+                                handle_destroyed_ball_from_missile_or_aoe(ctx, sys_id, char_id, b.id, b.type_id, b.position, now_unix).await;
                             }
                         }
                     }
@@ -756,6 +762,7 @@ pub async fn activate_aoe_or_defender_module(
                                 st.suspect_flag_until_unix = 0;
                             }
                         }
+                        emit_crimewatch_timer_notifications(ctx, char_id, now_unix);
                         let old_sec = ctx.db.with_snapshot(|s| {
                             s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0)
                         });
@@ -779,6 +786,14 @@ pub async fn activate_aoe_or_defender_module(
                     (
                         "destroyedMissileIDs",
                         PyRep::List(destroyed_missile_ids.into_iter().map(PyRep::Integer).collect()),
+                    ),
+                    (
+                        "destroyedProbeIDs",
+                        PyRep::List(destroyed_probe_ids.into_iter().map(PyRep::Integer).collect()),
+                    ),
+                    (
+                        "destroyedDroneIDs",
+                        PyRep::List(destroyed_drone_ids.into_iter().map(PyRep::Integer).collect()),
                     ),
                     ("concordTriggered", PyRep::Bool(concord_triggered)),
                 ])));
@@ -1148,6 +1163,7 @@ pub async fn activate_missile_or_breacher_launcher(
     now_unix: u64,
     module_id: i64,
     m: &eve_dogma::FittedModule,
+    fit: &eve_dogma::ShipFittingEngine,
     charge_type_id: u32,
     charge_type: &eve_sde::InvType,
     attacker_ball: &eve_destiny::Ball,
@@ -1158,54 +1174,31 @@ pub async fn activate_missile_or_breacher_launcher(
     has_explicit_target: bool,
 ) -> Result<PyRep, BridgeRpcError> {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-                let missile_vel = charge_type
-                    .default_attributes
-                    .get(&37)
-                    .copied()
-                    .unwrap_or(3_750.0);
-                let flight_time_s = charge_type
-                    .default_attributes
-                    .get(&281)
-                    .copied()
-                    .unwrap_or(5_000.0)
-                    / 1_000.0;
-                let missile_hp = charge_type
-                    .default_attributes
-                    .get(&9)
-                    .copied()
-                    .unwrap_or(60.0);
-                let exp_vel = charge_type
-                    .default_attributes
-                    .get(&653)
-                    .copied()
-                    .unwrap_or(170.0);
-                let exp_rad = charge_type
-                    .default_attributes
-                    .get(&654)
-                    .copied()
-                    .unwrap_or(40.0);
-                let drf = charge_type
-                    .default_attributes
-                    .get(&1353)
-                    .copied()
-                    .unwrap_or(0.604);
-                let dot_dur_s = charge_type
-                    .default_attributes
-                    .get(&5735)
-                    .copied()
-                    .unwrap_or(40_000.0)
-                    / 1_000.0;
-                let dot_flat = charge_type
-                    .default_attributes
-                    .get(&5736)
-                    .copied()
-                    .unwrap_or(200.0);
-                let dot_pct = charge_type
-                    .default_attributes
-                    .get(&5737)
-                    .copied()
-                    .unwrap_or(0.6)
-                    / 100.0;
+                let missile_vel = {
+                    let v = fit.get_charge_effective_attribute(module_id, 37, &ctx.sde);
+                    if v > 0.0 { v } else { charge_type.default_attributes.get(&37).copied().unwrap_or(3_750.0) }
+                };
+                let flight_time_s = {
+                    let v = fit.get_charge_effective_attribute(module_id, 281, &ctx.sde);
+                    let ms = if v > 0.0 { v } else { charge_type.default_attributes.get(&281).copied().unwrap_or(5_000.0) };
+                    ms / 1_000.0
+                };
+                let missile_hp = charge_type.default_attributes.get(&9).copied().unwrap_or(60.0);
+                let exp_vel = {
+                    let v = fit.get_charge_effective_attribute(module_id, 653, &ctx.sde);
+                    if v > 0.0 { v } else { charge_type.default_attributes.get(&653).copied().unwrap_or(170.0) }
+                };
+                let exp_rad = {
+                    let v = fit.get_charge_effective_attribute(module_id, 654, &ctx.sde);
+                    if v > 0.0 { v } else { charge_type.default_attributes.get(&654).copied().unwrap_or(40.0) }
+                };
+                let drf = {
+                    let v = fit.get_charge_effective_attribute(module_id, 1353, &ctx.sde);
+                    if v > 0.0 { v } else { charge_type.default_attributes.get(&1353).copied().unwrap_or(0.604) }
+                };
+                let dot_dur_s = charge_type.default_attributes.get(&5735).copied().unwrap_or(40_000.0) / 1_000.0;
+                let dot_flat = charge_type.default_attributes.get(&5736).copied().unwrap_or(200.0);
+                let dot_pct = charge_type.default_attributes.get(&5737).copied().unwrap_or(0.6) / 100.0;
 
                 let missile_ball_id = ctx.db.with_mut_snapshot(|snap| {
                     snap.next_entity_id += 1;

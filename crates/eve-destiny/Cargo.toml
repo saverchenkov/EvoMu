@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+eve-dogma = { path = "../eve-dogma" }
 eve-proto = { path = "../eve-proto" }
 eve-sde = { path = "../eve-sde" }
 glam.workspace = true

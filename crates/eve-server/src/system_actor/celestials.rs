@@ -345,11 +345,22 @@ impl SystemHandle {
     }
 
     pub fn try_step_manual(&self, dt: f64) {
+        if dt > 0.0 && dt.is_finite() {
+            self.actor_state.write().unwrap_or_else(|e| e.into_inner()).sim_elapsed_secs += dt;
+        }
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
         let events = bp.step(dt);
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
         let broadcast = build_tick_broadcast(self.solar_system_id, &mut bp, events);
         let _ = self.event_tx.send(broadcast);
+    }
+
+    pub fn sim_elapsed_secs(&self) -> f64 {
+        self.actor_state.read().unwrap_or_else(|e| e.into_inner()).sim_elapsed_secs
+    }
+
+    pub fn take_pending_cycle_actions(&self) -> Vec<super::PendingCycleAction> {
+        std::mem::take(&mut self.actor_state.write().unwrap_or_else(|e| e.into_inner()).pending_cycle_actions)
     }
 
     pub async fn set_movement_mode(
@@ -730,13 +741,30 @@ impl SystemHandle {
         rx.await.map_err(|_| "Solar system reply dropped".to_string())?
     }
 
-    pub async fn remove_module_cycle(&self, ship_id: BallId, module_id: i64) -> Result<(), String> {
+    pub async fn remove_module_cycle(&self, ship_id: BallId, module_id: i64) -> Result<Option<f64>, String> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SystemCommand::RemoveModuleCycle { ship_id, module_id, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await.map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
+    pub async fn has_module_cycle(&self, ship_id: BallId, module_id: i64) -> bool {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(SystemCommand::HasModuleCycle {
+                ship_id,
+                module_id,
+                reply: tx,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
     }
 
     /// Parity: [plan:DG-4] Entering warp halts active non-warp module cycles.
@@ -840,6 +868,19 @@ impl SystemHandle {
         duration_s: f64,
         roll: f64,
     ) -> Result<Vec<BallId>, String> {
+        self.apply_ecm_burst_ships(source_id, burst_radius_m, jam_strengths, duration_s, roll, None)
+            .await
+    }
+
+    pub async fn apply_ecm_burst_ships(
+        &self,
+        source_id: BallId,
+        burst_radius_m: f64,
+        jam_strengths: [f64; 4],
+        duration_s: f64,
+        roll: f64,
+        ship_eval_overrides: Option<HashMap<BallId, (usize, f64, f64)>>,
+    ) -> Result<Vec<BallId>, String> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SystemCommand::ApplyEcmBurst {
@@ -848,6 +889,7 @@ impl SystemHandle {
                 jam_strengths,
                 duration_s,
                 roll,
+                ship_eval_overrides,
                 reply: tx,
             })
             .await

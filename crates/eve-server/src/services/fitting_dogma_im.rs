@@ -523,7 +523,18 @@ pub(crate) async fn handle_dogma_im(
             ctx.invalidate_ship_fitting(ship_id);
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
-                let _ = sys.remove_module_cycle(ship_id, module_id).await;
+                let is_cycle_gated = ctx
+                    .db
+                    .with_snapshot(|s| s.items.get(&module_id).map(|i| i.type_id))
+                    .and_then(|tid| ctx.sde.types.get(&tid))
+                    .is_some_and(|t| {
+                        matches!(t.group_id, 40 | 1156 | 41 | 1697 | 67 | 71 | 76 | 72 | 1122 | 650 | 80 | 353)
+                    });
+                if let Ok(Some(rem_delay)) = sys.remove_module_cycle(ship_id, module_id).await {
+                    if is_cycle_gated && rem_delay > 0.0 {
+                        ctx.record_module_reactivation_delay(ship_id, module_id, rem_delay);
+                    }
+                }
                 for &mid in &offline_mod_ids {
                     if mid != module_id {
                         let _ = sys.remove_module_cycle(ship_id, mid).await;
@@ -622,7 +633,17 @@ pub(crate) async fn handle_dogma_im(
             }
 
             let scan_res = fit.ship.get_attribute(attr_ids::SCAN_RESOLUTION, &ctx.sde).max(1.0);
-            let target_sig = target_ball.radius.max(35.0);
+            let raw_sig = sys
+                .get_combat_state(target_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|cs| cs.base_signature_radius.unwrap_or(cs.signature_radius))
+                .filter(|&s| s > 0.0)
+                .unwrap_or(0.0)
+                .max(target_ball.radius)
+                .max(35.0);
+            let target_sig = ctx.effective_target_signature_radius(target_id, raw_sig);
             let lock_sec = eve_destiny::combat::compute_lock_time_seconds(scan_res, target_sig);
             let lock_time_ms = lock_sec * 1000.0;
 

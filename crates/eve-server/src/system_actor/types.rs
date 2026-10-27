@@ -65,6 +65,7 @@ pub struct ActiveModuleCycle {
     pub damage_vector: DamageVector,
     pub cap_drain_target: f64,
     pub cap_transfer_target: f64,
+    pub nosferatu_blood_raider_override: bool,
     pub shield_boost_amount: f64,
     pub armor_repair_amount: f64,
     pub hull_repair_amount: f64,
@@ -72,6 +73,8 @@ pub struct ActiveModuleCycle {
     pub remote_armor_amount: f64,
     pub remote_hull_amount: f64,
     pub remote_cap_amount: f64,
+    pub remote_optimal: f64,
+    pub remote_falloff: f64,
     pub mutadaptive_spool_step: f64,
     pub mutadaptive_spool_max: f64,
     pub current_spool_cycles: u32,
@@ -138,6 +141,29 @@ pub struct PendingAnchoringDisruptor {
     pub remaining_s: f64,
 }
 
+#[derive(Debug, Clone)]
+pub enum PendingCycleAction {
+    SalvageEnd {
+        char_id: CharacterId,
+        ship_id: BallId,
+        module_id: i64,
+        module_type_id: u32,
+        wreck_id: BallId,
+        repeat: i32,
+        effect_name: String,
+    },
+    RepeatCycleStart {
+        char_id: CharacterId,
+        ship_id: BallId,
+        module_id: i64,
+        module_type_id: u32,
+        target_id: Option<BallId>,
+        duration_s: f64,
+        is_overloaded: bool,
+        effect_name: String,
+    },
+}
+
 #[derive(Default)]
 pub(crate) struct SystemActorState {
     pub active_module_cycles: Vec<ActiveModuleCycle>,
@@ -151,6 +177,9 @@ pub(crate) struct SystemActorState {
     pub asteroid_templates: HashMap<BallId, (AsteroidState, Ball)>,
     pub sde_opt: Option<Arc<SdeRegistry>>,
     pub db_opt: Option<Arc<eve_db::WorldRepository>>,
+    pub mechanic_rng_opt: Option<Arc<crate::rng::MechanicRng>>,
+    pub sim_elapsed_secs: f64,
+    pub pending_cycle_actions: Vec<PendingCycleAction>,
     pub tactical_state: Arc<std::sync::RwLock<crate::services::tactical_modules::TacticalModulesState>>,
 }
 
@@ -341,7 +370,12 @@ pub enum SystemCommand {
     RemoveModuleCycle {
         ship_id: BallId,
         module_id: i64,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<Option<f64>, String>>,
+    },
+    HasModuleCycle {
+        ship_id: BallId,
+        module_id: i64,
+        reply: oneshot::Sender<bool>,
     },
     SetInterdictionNullified {
         ball_id: BallId,
@@ -387,6 +421,7 @@ pub enum SystemCommand {
         jam_strengths: [f64; 4],
         duration_s: f64,
         roll: f64,
+        ship_eval_overrides: Option<HashMap<BallId, (usize, f64, f64)>>,
         reply: oneshot::Sender<Vec<BallId>>,
     },
     ScheduleMobileWarpDisruptor {
