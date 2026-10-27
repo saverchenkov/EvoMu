@@ -170,36 +170,41 @@ pub(crate) fn sweep_expired_orders(
                     );
                 }
             }
-        } else { let is_corp_owner = snap.corporations.contains_key(&order.owner_id);
-            let target_flag = if is_corp_owner { InventoryFlag::Deliveries } else { InventoryFlag::Hangar };
-            let existing = snap.items.values().find(|i| {
-                    i.owner_id == order.owner_id
-                        && i.location_id == order.station_id
-                        && i.flag == target_flag
-                        && i.type_id == order.type_id
-                        && !i.singleton
-                }).map(|i| i.item_id);
-            if let Some(eid) = existing {
-                if let Some(it) = snap.items.get_mut(&eid) {
-                    it.quantity = it.quantity.saturating_add(order.vol_remaining);
-                    it.version += 1;
+        } else {
+            let is_corp_owner = snap.corporations.contains_key(&order.owner_id);
+            if !is_corp_owner && order.type_id == PLEX_TYPE_ID {
+                let _ = snap.adjust_plex_vault(order.owner_id, order.vol_remaining as i64);
+            } else {
+                let target_flag = if is_corp_owner { InventoryFlag::Deliveries } else { InventoryFlag::Hangar };
+                let existing = snap.items.values().find(|i| {
+                        i.owner_id == order.owner_id
+                            && i.location_id == order.station_id
+                            && i.flag == target_flag
+                            && i.type_id == order.type_id
+                            && !i.singleton
+                    }).map(|i| i.item_id);
+                if let Some(eid) = existing {
+                    if let Some(it) = snap.items.get_mut(&eid) {
+                        it.quantity = it.quantity.saturating_add(order.vol_remaining);
+                        it.version += 1;
+                    }
+                } else { snap.next_entity_id += 1;
+                    let nid = snap.next_entity_id;
+                    snap.items.insert(
+                        nid,
+                        InventoryItemRecord {
+                            item_id: nid,
+                            type_id: order.type_id,
+                            owner_id: order.owner_id,
+                            location_id: order.station_id,
+                            flag: target_flag,
+                            quantity: order.vol_remaining,
+                            singleton: false,
+                            version: 1,
+                            ..Default::default()
+                        },
+                    );
                 }
-            } else { snap.next_entity_id += 1;
-                let nid = snap.next_entity_id;
-                snap.items.insert(
-                    nid,
-                    InventoryItemRecord {
-                        item_id: nid,
-                        type_id: order.type_id,
-                        owner_id: order.owner_id,
-                        location_id: order.station_id,
-                        flag: target_flag,
-                        quantity: order.vol_remaining,
-                        singleton: false,
-                        version: 1,
-                        ..Default::default()
-                    },
-                );
             }
         }
         if let Some(o_mut) = snap.market_orders.get_mut(&oid) { o_mut.vol_remaining = 0; o_mut.escrow = IskCents(0); }

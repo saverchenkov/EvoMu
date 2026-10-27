@@ -1358,3 +1358,220 @@ async fn test_contracts_visibility_search_fees_limits_reject_blueprints_and_gm_e
     let _ = rpc(&ctx, &mut s1, "contractProxy", "GetMyBids", &[]).await.unwrap();
     let _ = ctx.dispatch_rpc(&mut s1, "contractProxy", None, "GetMyCurrentContractList", &[], &kw, None).await.unwrap();
 }
+
+#[tokio::test]
+async fn test_r3_track3_industry_contracts_market_and_pi_regressions() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let mut s1 = setup_pilot(&ctx, 1301, "demo", "demo-secret", 90_000_001).await;
+    let mut s2 = setup_pilot(&ctx, 1302, "other", "other-secret", 90_000_002).await;
+
+    // 1. Issue #126 & #127: Corporate contract item return + deposit refund on DeleteContract
+    let corp_id = 98_500_001_i64;
+    let corp_item_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.insert(
+            corp_id,
+            eve_db::CorporationRecord {
+                corporation_id: corp_id,
+                name: "Contract Test Corp".into(),
+                ticker: "CTC".into(),
+                ceo_id: 90_000_001,
+                master_wallet: IskCents::from_isk(50_000_000),
+                members: [90_000_001].into_iter().collect(),
+                member_roles: [(90_000_001, eve_db::corp_roles::ROLE_CONTRACT_MANAGER | eve_db::corp_roles::ROLE_DIRECTOR)]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+        );
+        if let Some(c) = snap.corporations.get_mut(&corp_id) {
+            c.ensure_wallet_divisions();
+        }
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.corporation_id = corp_id;
+            ch.station_id = Some(JITA_STATION_ID);
+        }
+        snap.next_entity_id += 1;
+        let iid = snap.next_entity_id;
+        snap.items.insert(
+            iid,
+            InventoryItemRecord {
+                item_id: iid,
+                type_id: TRITANIUM_TYPE_ID,
+                owner_id: corp_id,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::CorpSAG1,
+                quantity: 1_000,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        iid
+    });
+    s1.corporation_id = Some(corp_id);
+    s1.corp_role = eve_db::corp_roles::ROLE_CONTRACT_MANAGER | eve_db::corp_roles::ROLE_DIRECTOR;
+
+    let corp_bal_before = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet);
+    let c_corp = rpc(
+        &ctx,
+        &mut s1,
+        "contractProxy",
+        "CreateContract",
+        &[
+            PyRep::Integer(1), // ItemExchange
+            PyRep::Integer(0), // Public -> charges brokerFee + deposit
+            PyRep::Integer(0),
+            PyRep::Integer(20160),
+            PyRep::Integer(0),
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Real(1_000_000.0),
+            PyRep::Real(0.0),
+            PyRep::Real(0.0),
+            PyRep::String("Corp Item Exchange".into()),
+            PyRep::String("".into()),
+            PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(corp_item_id), PyRep::Integer(1_000)])]),
+            PyRep::Integer(4),
+            PyRep::List(vec![]),
+            PyRep::Bool(true), // for_corp = true
+        ],
+    )
+    .await
+    .expect("CreateContract for_corp with corp-owned item");
+    let PyRep::KeyVal(cc_kv) = c_corp else { panic!("Expected KeyVal"); };
+    let corp_cid = cc_kv.get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let dep_isk = cc_kv.get("depositISK").and_then(|v| v.as_f64()).unwrap();
+    assert!(dep_isk >= 100_000.0);
+
+    let corp_bal_after_create = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet);
+    assert!(corp_bal_after_create.0 < corp_bal_before.0);
+
+    // DeleteContract refunds deposit to corp wallet and restores item ownership to corp_id
+    rpc(&ctx, &mut s1, "contractProxy", "DeleteContract", &[PyRep::Integer(corp_cid)])
+        .await
+        .expect("DeleteContract corp contract");
+    let corp_bal_after_delete = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet);
+    assert_eq!(
+        corp_bal_after_delete.0 - corp_bal_after_create.0,
+        IskCents::from_f64_isk(dep_isk).0,
+        "DeleteContract must refund depositISK to issuer"
+    );
+    assert_eq!(ctx.db.get_item(corp_item_id).unwrap().owner_id, corp_id);
+
+    // 2. Issue #125: Industry multi-stack consumption + CancelJob material refund
+    let bp_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(90_000_001).or_default().insert(
+            3380,
+            TrainedSkillRecord { type_id: 3380, level: 5, skill_points: 256_000.0 },
+        );
+        // Remove any existing Tritanium owned by 90_000_001 at Jita so we test two split stacks
+        snap.items.retain(|_, i| !(i.owner_id == 90_000_001 && i.location_id == JITA_STATION_ID));
+        snap.next_entity_id += 1;
+        let bpid = snap.next_entity_id;
+        snap.items.insert(
+            bpid,
+            InventoryItemRecord {
+                item_id: bpid,
+                type_id: RIFTER_BP_TYPE_ID,
+                owner_id: 90_000_001,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        // Seed required materials for Rifter BP across two separate stacks for Tritanium (34)
+        let bp_sde = ctx.sde.blueprints.get(&RIFTER_BP_TYPE_ID).cloned().unwrap();
+        for mat in &bp_sde.materials {
+            let total_q = (mat.quantity as i32) * 2;
+            let q1 = total_q / 2;
+            let q2 = total_q - q1;
+            for q in [q1, q2] {
+                snap.next_entity_id += 1;
+                let mid = snap.next_entity_id;
+                snap.items.insert(
+                    mid,
+                    InventoryItemRecord {
+                        item_id: mid,
+                        type_id: mat.type_id,
+                        owner_id: 90_000_001,
+                        location_id: JITA_STATION_ID,
+                        flag: InventoryFlag::Hangar,
+                        quantity: q,
+                        singleton: false,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        bpid
+    });
+    let trit_before_job: i32 = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .filter(|i| i.owner_id == 90_000_001 && i.location_id == JITA_STATION_ID && i.type_id == TRITANIUM_TYPE_ID)
+            .map(|i| i.quantity)
+            .sum()
+    });
+    let job_rep = rpc(
+        &ctx,
+        &mut s1,
+        "industryManager",
+        "InstallJob",
+        &[
+            PyRep::Integer(bp_id),
+            PyRep::Integer(RIFTER_BP_TYPE_ID as i64),
+            PyRep::Integer(1), // Manufacturing
+            PyRep::Integer(1), // 1 run
+        ],
+    )
+    .await
+    .expect("InstallJob across split material stacks");
+    let PyRep::KeyVal(job_kv) = job_rep else { panic!("Expected KeyVal"); };
+    let job_id = job_kv.get("jobID").and_then(|v| v.as_i64()).unwrap();
+    let trit_during_job: i32 = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .filter(|i| i.owner_id == 90_000_001 && i.location_id == JITA_STATION_ID && i.type_id == TRITANIUM_TYPE_ID)
+            .map(|i| i.quantity)
+            .sum()
+    });
+    assert!(trit_during_job < trit_before_job);
+
+    rpc(&ctx, &mut s1, "industryManager", "CancelJob", &[PyRep::Integer(job_id)])
+        .await
+        .expect("CancelJob refunds materials");
+    let trit_after_cancel: i32 = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .filter(|i| i.owner_id == 90_000_001 && i.location_id == JITA_STATION_ID && i.type_id == TRITANIUM_TYPE_ID)
+            .map(|i| i.quantity)
+            .sum()
+    });
+    assert_eq!(trit_after_cancel, trit_before_job, "CancelJob must refund consumed manufacturing materials");
+    assert_eq!(ctx.db.get_item(bp_id).unwrap().flag, InventoryFlag::Hangar);
+
+    // 3. Issue #128: BuyMultipleItems Visibility skill range gate
+    let vis_err = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "marketProxy",
+            None,
+            "BuyMultipleItems",
+            &[PyRep::List(vec![PyRep::keyval([
+                ("typeID", PyRep::Integer(TRITANIUM_TYPE_ID as i64)),
+                ("quantity", PyRep::Integer(10)),
+                ("orderRange", PyRep::Integer(32767)),
+            ])])],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("BuyMultipleItems with region range and Visibility=0 must fail");
+    assert_eq!(vis_err.code, "InsufficientVisibilitySkill");
+}

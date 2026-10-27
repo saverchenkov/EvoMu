@@ -475,6 +475,14 @@ pub fn handle_industry_jobs(
                     });
                 }
 
+                let is_usable_industry_flag = |flag: InventoryFlag| -> bool {
+                    flag != InventoryFlag::Locked
+                        && !matches!(
+                            flag as u16,
+                            11..=34 | 36 | 92..=94 | 125..=132 | 158 | 164..=171
+                        )
+                };
+
                 let matching_bps: Vec<InventoryItemRecord> = snap
                     .items
                     .values()
@@ -484,7 +492,7 @@ pub fn handle_industry_jobs(
                             && i.type_id == bp_type_id
                             && explicit_bp_item_id.map(|eid| i.item_id == eid).unwrap_or(true)
                             && i.quantity >= 1
-                            && i.flag != InventoryFlag::Locked
+                            && is_usable_industry_flag(i.flag)
                             && !snap.is_item_locked_in_contract_or_job(i.item_id)
                     })
                     .cloned()
@@ -641,37 +649,106 @@ pub fn handle_industry_jobs(
                     dec_prob_mult,
                 );
 
-                let consume_material = |snap: &mut eve_db::WorldStateSnapshot,
-                                        mat_tid: TypeId,
-                                        req_qty: i32,
-                                        err_code: &str|
+                let mut cost_meta = compute_industry_job_costs_for_char(
+                    ctx,
+                    snap,
+                    Some(char_id),
+                    bp_type_id,
+                    activity_id,
+                    runs,
+                    station_id,
+                    is_alpha_clone,
+                )?;
+                cost_meta.decryptor_type_id = decryptor_type_id;
+                cost_meta.product_type_id = product_type_id;
+                cost_meta.invented_runs = invented_runs;
+                cost_meta.invented_me = invented_me;
+                cost_meta.invented_te = invented_te;
+                cost_meta.inv_prob = inv_prob;
+                cost_meta.use_corp = use_corp;
+                cost_meta.owner_id = job_owner_id;
+
+                let use_full_eiv_debit = is_v24_call || has_custom_facility_taxes(snap, station_id);
+                let (charged_facility_tax_isk, total_debit_isk) = if use_full_eiv_debit {
+                    (cost_meta.facility_tax_isk, cost_meta.total_cost_isk)
+                } else {
+                    let legacy_tax = 1_000.0 * (runs as f64);
+                    (legacy_tax, legacy_tax)
+                };
+
+                let total_debit_cents = IskCents::from_f64_isk(total_debit_isk);
+                if use_corp && snap.corporations.contains_key(&job_owner_id) {
+                    let corp_bal = snap
+                        .corporations
+                        .get(&job_owner_id)
+                        .map(|c| c.master_wallet)
+                        .unwrap_or(IskCents(0));
+                    if corp_bal < total_debit_cents {
+                        return Err(BridgeRpcError {
+                            code: "InsufficientFunds".into(),
+                            message: format!("Insufficient corporation funds ({total_debit_isk:.2} ISK)"),
+                        });
+                    }
+                } else if let Some(ch) = snap.characters.get(&char_id) {
+                    if ch.balance < total_debit_cents {
+                        return Err(BridgeRpcError {
+                            code: "InsufficientFunds".into(),
+                            message: format!("Insufficient funds ({total_debit_isk:.2} ISK required)"),
+                        });
+                    }
+                }
+
+                let mut consumed_materials: Vec<(TypeId, i32)> = Vec::new();
+                let mut consume_material = |snap: &mut eve_db::WorldStateSnapshot,
+                                            mat_tid: TypeId,
+                                            req_qty: i32,
+                                            err_code: &str|
                  -> Result<(), BridgeRpcError> {
-                    let mat_item_id = snap
+                    if req_qty <= 0 {
+                        return Ok(());
+                    }
+                    let mut matching_stacks: Vec<(i64, i32)> = snap
                         .items
                         .values()
-                        .find(|i| {
+                        .filter(|i| {
                             (i.owner_id == char_id || (use_corp && i.owner_id == job_owner_id))
                                 && i.location_id == station_id
                                 && i.type_id == mat_tid
-                                && i.quantity >= req_qty
+                                && i.quantity > 0
                                 && !i.singleton
-                                && i.flag != InventoryFlag::Locked
+                                && is_usable_industry_flag(i.flag)
                                 && !snap.is_item_locked_in_contract_or_job(i.item_id)
                         })
-                        .map(|i| i.item_id);
-                    let Some(mid) = mat_item_id else {
+                        .map(|i| (i.item_id, i.quantity))
+                        .collect();
+                    matching_stacks.sort_by_key(|(id, _)| *id);
+                    let total_avail: i64 = matching_stacks.iter().map(|(_, q)| i64::from(*q)).sum();
+                    if total_avail < i64::from(req_qty) {
                         return Err(BridgeRpcError {
                             code: err_code.into(),
                             message: format!("Missing {req_qty}x material type {mat_tid} at {station_id}"),
                         });
-                    };
-                    if let Some(m_item) = snap.items.get_mut(&mid) {
-                        if m_item.quantity > req_qty {
-                            m_item.quantity -= req_qty;
-                            m_item.version += 1;
-                        } else {
-                            snap.items.remove(&mid);
+                    }
+                    let mut rem = req_qty;
+                    for (mid, _) in matching_stacks {
+                        if rem <= 0 {
+                            break;
                         }
+                        if let Some(m_item) = snap.items.get_mut(&mid) {
+                            let take = m_item.quantity.min(rem);
+                            if m_item.quantity > take {
+                                m_item.quantity -= take;
+                                m_item.version += 1;
+                            } else {
+                                snap.items.remove(&mid);
+                            }
+                            rem -= take;
+                        }
+                    }
+                    if let Some(entry) = consumed_materials.iter_mut().find(|(t, _)| *t == mat_tid) {
+                        entry.1 = entry.1.saturating_add(req_qty);
+                    } else {
+                        consumed_materials.push((mat_tid, req_qty));
                     }
                     Ok(())
                 };
@@ -720,14 +797,20 @@ pub fn handle_industry_jobs(
                         .unwrap_or_default();
                     let has_sde_mats = !sde_inv_mats.is_empty()
                         && sde_inv_mats.iter().all(|(tid, q)| {
-                            snap.items.values().any(|i| {
-                                (i.owner_id == char_id || (use_corp && i.owner_id == job_owner_id))
-                                    && i.location_id == station_id
-                                    && i.type_id == *tid
-                                    && i.quantity >= *q
-                                    && !i.singleton
-                                    && i.flag != InventoryFlag::Locked
-                            })
+                            let avail: i64 = snap
+                                .items
+                                .values()
+                                .filter(|i| {
+                                    (i.owner_id == char_id || (use_corp && i.owner_id == job_owner_id))
+                                        && i.location_id == station_id
+                                        && i.type_id == *tid
+                                        && !i.singleton
+                                        && is_usable_industry_flag(i.flag)
+                                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                                })
+                                .map(|i| i64::from(i.quantity))
+                                .sum();
+                            avail >= i64::from(*q)
                         });
                     if has_sde_mats {
                         for (dc_type, q) in sde_inv_mats {
@@ -766,47 +849,9 @@ pub fn handle_industry_jobs(
                         consume_material(snap, mtid, req_qty, "InsufficientReactionMaterials")?;
                     }
                 }
+                cost_meta.consumed_materials = consumed_materials;
 
-                let mut cost_meta = compute_industry_job_costs_for_char(
-                    ctx,
-                    snap,
-                    Some(char_id),
-                    bp_type_id,
-                    activity_id,
-                    runs,
-                    station_id,
-                    is_alpha_clone,
-                )?;
-                cost_meta.decryptor_type_id = decryptor_type_id;
-                cost_meta.product_type_id = product_type_id;
-                cost_meta.invented_runs = invented_runs;
-                cost_meta.invented_me = invented_me;
-                cost_meta.invented_te = invented_te;
-                cost_meta.inv_prob = inv_prob;
-                cost_meta.use_corp = use_corp;
-                cost_meta.owner_id = job_owner_id;
-
-                let use_full_eiv_debit = is_v24_call || has_custom_facility_taxes(snap, station_id);
-                let (charged_facility_tax_isk, total_debit_isk) = if use_full_eiv_debit {
-                    (cost_meta.facility_tax_isk, cost_meta.total_cost_isk)
-                } else {
-                    let legacy_tax = 1_000.0 * (runs as f64);
-                    (legacy_tax, legacy_tax)
-                };
-
-                let total_debit_cents = IskCents::from_f64_isk(total_debit_isk);
                 if use_corp && snap.corporations.contains_key(&job_owner_id) {
-                    let corp_bal = snap
-                        .corporations
-                        .get(&job_owner_id)
-                        .map(|c| c.master_wallet)
-                        .unwrap_or(IskCents(0));
-                    if corp_bal < total_debit_cents {
-                        return Err(BridgeRpcError {
-                            code: "InsufficientFunds".into(),
-                            message: format!("Insufficient corporation funds ({total_debit_isk:.2} ISK)"),
-                        });
-                    }
                     if let Some(corp_mut) = snap.corporations.get_mut(&job_owner_id) {
                         corp_mut.ensure_wallet_divisions();
                         corp_mut.master_wallet = corp_mut
@@ -814,13 +859,6 @@ pub fn handle_industry_jobs(
                             .checked_sub(total_debit_cents)
                             .unwrap_or(IskCents(0));
                         corp_mut.wallet_divisions[0].balance = corp_mut.master_wallet;
-                    }
-                } else if let Some(ch) = snap.characters.get(&char_id) {
-                    if ch.balance < total_debit_cents {
-                        return Err(BridgeRpcError {
-                            code: "InsufficientFunds".into(),
-                            message: format!("Insufficient funds ({total_debit_isk:.2} ISK required)"),
-                        });
                     }
                 }
 
@@ -880,6 +918,30 @@ pub fn handle_industry_jobs(
                         ch.balance = ch.balance.checked_sub(total_debit_cents).unwrap_or(IskCents(0));
                         let bal_after = ch.balance;
                         snap.append_journal(char_id, "IndustryFacilityTax", total_debit_cents, bal_after, format!("Facility tax for industry job {jid}"));
+                    }
+                }
+
+                let fac_tax_cents = IskCents::from_f64_isk(charged_facility_tax_isk);
+                if fac_tax_cents.0 > 0 {
+                    if let Some(struct_owner_corp) = snap.structures.get(&station_id).map(|s| s.owner_corp_id) {
+                        if !use_corp || struct_owner_corp != job_owner_id {
+                            if let Some(scorp) = snap.corporations.get_mut(&struct_owner_corp) {
+                                scorp.ensure_wallet_divisions();
+                                scorp.master_wallet = scorp
+                                    .master_wallet
+                                    .checked_add(fac_tax_cents)
+                                    .unwrap_or(scorp.master_wallet);
+                                scorp.wallet_divisions[0].balance = scorp.master_wallet;
+                                let sbal = scorp.master_wallet;
+                                snap.append_journal(
+                                    struct_owner_corp,
+                                    "IndustryFacilityTax",
+                                    fac_tax_cents,
+                                    sbal,
+                                    format!("Structure industry facility tax for job {jid}"),
+                                );
+                            }
+                        }
                     }
                 }
 
@@ -1072,6 +1134,52 @@ pub fn handle_industry_jobs(
                 if let Some(bp_mut) = snap.items.get_mut(&job.blueprint_item_id) {
                     bp_mut.flag = restore_blueprint_flag(bp_mut.owner_id, &meta);
                     bp_mut.version += 1;
+                }
+                let refund_owner_id = if meta.use_corp && meta.owner_id > 0 {
+                    meta.owner_id
+                } else {
+                    job.installer_id
+                };
+                let refund_flag = if meta.use_corp && refund_owner_id != job.installer_id {
+                    InventoryFlag::CorpSAG1
+                } else {
+                    InventoryFlag::Hangar
+                };
+                for (mat_tid, mat_qty) in &meta.consumed_materials {
+                    if *mat_qty <= 0 {
+                        continue;
+                    }
+                    if let Some(existing) = snap.items.values_mut().find(|i| {
+                        i.owner_id == refund_owner_id
+                            && i.location_id == job.facility_id
+                            && i.type_id == *mat_tid
+                            && i.flag == refund_flag
+                            && !i.singleton
+                    }) {
+                        existing.quantity = existing.quantity.saturating_add(*mat_qty);
+                        existing.version += 1;
+                    } else {
+                        snap.next_entity_id += 1;
+                        let new_id = snap.next_entity_id;
+                        snap.items.insert(
+                            new_id,
+                            InventoryItemRecord {
+                                item_id: new_id,
+                                type_id: *mat_tid,
+                                owner_id: refund_owner_id,
+                                location_id: job.facility_id,
+                                flag: refund_flag,
+                                quantity: *mat_qty,
+                                singleton: false,
+                                version: 1,
+                                dynamic_attributes: HashMap::new(),
+                                source_mutaplasmid_id: None,
+                                insured_payout_isk: 0.0,
+                                is_blueprint_copy: false,
+                                blueprint_runs_remaining: None,
+                            },
+                        );
+                    }
                 }
                 Ok(job)
             });
