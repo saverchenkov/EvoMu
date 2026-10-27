@@ -353,21 +353,51 @@ async fn test_station_services_and_corp_station_mgr_parity() {
     .expect_err("GetStation with non-existent station must fail");
     assert_eq!(err_st.code, "StationNotFound");
 
-    // 8. R-NSS-01 / R-NSS-02: verify station services depend on station/operation at two real SDE stations
-    // Station A: Jita IV-4 (STATION_JITA, operation 14: offers repair [13], reprocess [5], insurance [21], cloning [10], etc.)
+    // 8. R-NSS-01 / R-NSS-02: verify station services depend on station/operation at real SDE stations
+    // Station A: Jita IV-4 (STATION_JITA, operation 14: offers repair [13], reprocess [5], insurance [21], fitting [17], cloning [10], etc.)
     // Station B: Caldari Provisions Plantation (60000859, operation 1: no repair [13], no insurance [21], no cloning [10])
-    // Station C: Turnur I Damaged Bureau (60004723, operation 120: only docking [22] and market [7], no reprocess [5], no LP store [25])
+    // Station C: Turnur I Damaged Bureau (60004723, operation 120: only docking [22] and market [7], no reprocess [5], no LP store [25], no fitting [17])
 
-    // At STATION_JITA (offers repair, insurance, reprocessing):
+    // At STATION_JITA (offers repair, insurance, reprocessing, fitting):
     s1.station_id = Some(STATION_JITA);
-    let quotes_jita = rpc(&ctx, &mut s1, "repairSvc", "GetRepairQuotes", &[]).await;
-    assert!(quotes_jita.is_ok(), "GetRepairQuotes must succeed at Jita which offers repair");
+    let quotes_jita = rpc(&ctx, &mut s1, "repairSvc", "GetRepairQuotes", &[])
+        .await
+        .expect("GetRepairQuotes must succeed at Jita which offers repair");
+    let PyRep::Dict(q_map) = quotes_jita else {
+        panic!("GetRepairQuotes must return a Dict, got {quotes_jita:?}");
+    };
+    assert!(!q_map.is_empty(), "Repair quotes map should contain entries for ship");
 
-    let ins_jita = rpc(&ctx, &mut s1, "insuranceSvc", "GetInsurancePrices", &[]).await;
-    assert!(ins_jita.is_ok(), "GetInsurancePrices must succeed at Jita which offers insurance");
+    let ins_jita = rpc(&ctx, &mut s1, "insuranceSvc", "GetInsurancePrices", &[])
+        .await
+        .expect("GetInsurancePrices must succeed at Jita which offers insurance");
+    let PyRep::List(ins_list) = ins_jita else {
+        panic!("GetInsurancePrices must return a List, got {ins_jita:?}");
+    };
+    assert!(!ins_list.is_empty(), "Insurance prices list must not be empty");
+    let PyRep::KeyVal(first_ins) = &ins_list[0] else {
+        panic!("Expected KeyVal in insurance list");
+    };
+    assert!(first_ins.get("referenceValue").is_some(), "Expected referenceValue in insurance quote");
 
-    let reproc_jita = rpc(&ctx, &mut s1, "reprocessingSvc", "GetQuotes", &[]).await;
-    assert!(reproc_jita.is_ok(), "GetQuotes must succeed at Jita which offers reprocessing");
+    let reproc_jita = rpc(&ctx, &mut s1, "reprocessingSvc", "GetQuotes", &[])
+        .await
+        .expect("GetQuotes must succeed at Jita which offers reprocessing");
+    let PyRep::KeyVal(reproc_kv) = reproc_jita else {
+        panic!("Expected KeyVal from GetQuotes, got {reproc_jita:?}");
+    };
+    assert!(reproc_kv.get("stationBaseYield").is_some(), "Expected stationBaseYield in reprocessing quotes");
+
+    // Positive fitting test at Jita: fit module 100_000_003 into ship 100_000_001 slot 19 (MedSlot0)
+    let fit_jita = rpc(
+        &ctx,
+        &mut s1,
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(100_000_003), PyRep::Integer(100_000_001), PyRep::Integer(19)],
+    )
+    .await;
+    assert!(fit_jita.is_ok(), "Fitting module into ship slot must succeed at Jita which offers fitting");
 
     // Reset standing so standing check is clean:
     ctx.db.with_mut_snapshot(|snap| {
@@ -376,9 +406,11 @@ async fn test_station_services_and_corp_station_mgr_parity() {
         }
     });
 
-    // Standing check at Jita for repair (13) and insurance (21) succeeds:
+    // Standing check at Jita for repair (13) and fitting (17) succeeds:
     let chk_jita_repair = rpc(&ctx, &mut s1, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(13), PyRep::Integer(STATION_JITA)]).await;
     assert!(chk_jita_repair.is_ok(), "DoStandingCheckForStationService for repair must succeed at Jita");
+    let chk_jita_fit = rpc(&ctx, &mut s1, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(17), PyRep::Integer(STATION_JITA)]).await;
+    assert!(chk_jita_fit.is_ok(), "DoStandingCheckForStationService for fitting must succeed at Jita");
 
     // Move to Station B (60000859: Plantation, does NOT offer repair, insurance, or clone bay):
     ctx.db.with_mut_snapshot(|snap| {
@@ -407,7 +439,7 @@ async fn test_station_services_and_corp_station_mgr_parity() {
         .expect_err("DoStandingCheckForStationService for repair must fail at Plantation");
     assert_eq!(chk_b_repair.code, "StationServiceUnavailable");
 
-    // Move to Station C (60004723: Damaged Bureau, does NOT offer reprocessing or LP store):
+    // Move to Station C (60004723: Damaged Bureau, does NOT offer reprocessing, LP store, or fitting):
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c1) = snap.characters.get_mut(&PILOT1) {
             c1.station_id = Some(60004723);
@@ -423,6 +455,36 @@ async fn test_station_services_and_corp_station_mgr_parity() {
         .await
         .expect_err("GetAvailableOffersFromCorp must fail at station lacking LP store");
     assert_eq!(err_lp_c.code, "StationServiceUnavailable");
+
+    // Negative fitting test at Station C: invbroker.Add module into ship slot must fail
+    let err_fit_c = rpc(
+        &ctx,
+        &mut s1,
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(100_000_004), PyRep::Integer(100_000_001), PyRep::Integer(11)],
+    )
+    .await
+    .expect_err("Fitting module at Station C lacking fitting service must fail");
+    assert_eq!(err_fit_c.code, "StationServiceUnavailable");
+
+    // Negative unfitting test at Station C: invbroker.Add fitted module out of ship slot must fail
+    let err_unfit_c = rpc(
+        &ctx,
+        &mut s1,
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(100_000_003), PyRep::Integer(60004723), PyRep::Integer(4)],
+    )
+    .await
+    .expect_err("Unfitting module at Station C lacking fitting service must fail");
+    assert_eq!(err_unfit_c.code, "StationServiceUnavailable");
+
+    // Negative standing check for fitting (17) at Station C:
+    let chk_c_fit = rpc(&ctx, &mut s1, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(17), PyRep::Integer(60004723)])
+        .await
+        .expect_err("DoStandingCheckForStationService for fitting must fail at Station C");
+    assert_eq!(chk_c_fit.code, "StationServiceUnavailable");
 
     // Reset s1 station_id back to STATION_JITA
     ctx.db.with_mut_snapshot(|snap| {

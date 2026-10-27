@@ -215,7 +215,7 @@ fn self_inv_item(
 ) -> Result<PyRep, BridgeRpcError> {
     let header = DBRowDescriptor::inv_item_header();
     if let Some(item) = ctx.db.get_item(object_id).filter(|i| i.owner_id == char_id) {
-        return Ok(header.build_dbrow(crate::services::inventory_fitting::item_to_packed_cells(ctx, &item)));
+        return Ok(header.build_dbrow(item_to_packed_cells(ctx, &item)));
     }
     if session.station_id == Some(object_id) {
         if let Some(st) = ctx.sde.stations.get(&object_id) {
@@ -389,4 +389,94 @@ pub fn handle_i2_get_item(
         ]));
     }
     Ok(PyRep::None)
+}
+
+pub(crate) fn item_to_packed_cells(ctx: &ServerContext, i: &eve_db::InventoryItemRecord) -> Vec<PyRep> {
+    let (group_id, category_id) = ctx
+        .sde
+        .types
+        .get(&i.type_id)
+        .map(|t| (t.group_id as i64, t.category_id as i64))
+        .unwrap_or((0, 0));
+    let qty = if i.is_blueprint_copy {
+        -2
+    } else if i.singleton {
+        -1
+    } else {
+        i.quantity as i64
+    };
+    let custom_name = ctx
+        .db
+        .with_snapshot(|snap| snap.item_custom_names.get(&i.item_id).cloned())
+        .unwrap_or_default();
+    vec![
+        PyRep::Integer(i.item_id),
+        PyRep::Integer(i.type_id as i64),
+        PyRep::Integer(i.owner_id),
+        PyRep::Integer(i.location_id),
+        PyRep::Integer(i.flag as i64),
+        PyRep::Integer(qty),
+        PyRep::Integer(group_id),
+        PyRep::Integer(category_id),
+        PyRep::String(custom_name),
+    ]
+}
+
+pub(crate) fn get_effective_corp_roles(
+    ctx: &ServerContext,
+    corp_id: i64,
+    char_id: i64,
+) -> (bool, u64) {
+    get_effective_corp_roles_at_location(ctx, corp_id, char_id, None)
+}
+
+pub(crate) fn get_effective_corp_roles_at_location(
+    ctx: &ServerContext,
+    corp_id: i64,
+    char_id: i64,
+    location_id: Option<i64>,
+) -> (bool, u64) {
+    crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
+    ctx.db.with_snapshot(|snap| {
+        let (is_ceo, hq_station_id, mut role_mask) = snap
+            .corporations
+            .get(&corp_id)
+            .map(|c| (c.ceo_id == char_id, c.hq_station_id.unwrap_or(60_003_760), c.member_roles.get(&char_id).copied().unwrap_or(0)))
+            .unwrap_or((false, 60_003_760, 0));
+        let raw_loc = location_id
+            .or_else(|| {
+                snap.characters
+                    .get(&char_id)
+                    .and_then(|ch| ch.station_id.or(ch.structure_id))
+            })
+            .unwrap_or(0);
+        let loc_station_id = snap
+            .items
+            .get(&raw_loc)
+            .and_then(|it| {
+                (it.location_id >= 60_000_000 || snap.structures.contains_key(&it.location_id))
+                    .then_some(it.location_id)
+            })
+            .unwrap_or(raw_loc);
+        let base_id = snap
+            .corp_governance
+            .get(&corp_id)
+            .and_then(|g| g.member_bases.get(&char_id).copied())
+            .unwrap_or(0);
+        if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
+            role_mask |= ra.roles;
+            if loc_station_id > 0 {
+                if loc_station_id == hq_station_id {
+                    role_mask |= ra.roles_at_hq;
+                }
+                if base_id > 0 && loc_station_id == base_id {
+                    role_mask |= ra.roles_at_base;
+                }
+                if loc_station_id != hq_station_id && (base_id <= 0 || loc_station_id != base_id) {
+                    role_mask |= ra.roles_at_other;
+                }
+            }
+        }
+        (is_ceo, role_mask)
+    })
 }

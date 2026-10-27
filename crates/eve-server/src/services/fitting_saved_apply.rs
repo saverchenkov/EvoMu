@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use crate::router::ServerContext;
-use eve_db::{InventoryFlag, TypeId};
+use eve_db::{InventoryFlag, SavedFittingRecord, TypeId};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 
@@ -817,5 +817,70 @@ pub(crate) fn get_ship_hold_capacity(
         149 => ship_type.default_attributes.get(&1653).copied().unwrap_or(0.0),
         _ => 0.0,
     }
+}
+
+/// Encodes a ship fitting into an EVE DNA fitting string (`INV-3`):
+/// `<ship_type_id>:<type_id_1>;<qty_1>:<type_id_2>;<qty_2>:...::`
+pub fn fitting_to_dna(ship_type_id: TypeId, items: &[(TypeId, i32)]) -> String {
+    let mut counts: HashMap<TypeId, i32> = HashMap::new();
+    let mut order: Vec<TypeId> = Vec::new();
+    for &(type_id, qty) in items {
+        if qty <= 0 {
+            continue;
+        }
+        if !counts.contains_key(&type_id) {
+            order.push(type_id);
+        }
+        *counts.entry(type_id).or_insert(0) += qty;
+    }
+    let mut out = format!("{ship_type_id}:");
+    for type_id in order {
+        let qty = counts[&type_id];
+        out.push_str(&format!("{type_id};{qty}:"));
+    }
+    out.push(':');
+    out
+}
+
+/// Encodes a `SavedFittingRecord` into an EVE DNA fitting string (`INV-3`).
+pub fn saved_fitting_to_dna(fitting: &SavedFittingRecord) -> String {
+    let items: Vec<(TypeId, i32)> = fitting.items.iter().map(|&(t, _, q)| (t, q)).collect();
+    fitting_to_dna(fitting.ship_type_id, &items)
+}
+
+/// Decodes an EVE DNA fitting string into `(ship_type_id, Vec<(TypeId, i32)>)` (`INV-3`).
+/// Supports standard format `<ship_type_id>:<type_id_1>;<qty_1>:<type_id_2>;<qty_2>:...::`
+pub fn dna_to_fitting(dna: &str) -> Result<(TypeId, Vec<(TypeId, i32)>), String> {
+    let trimmed = dna.trim();
+    if trimmed.is_empty() {
+        return Err("Empty DNA string".into());
+    }
+    let mut parts = trimmed.split(':');
+    let ship_str = parts.next().ok_or("Missing ship type ID")?;
+    let ship_type_id = ship_str
+        .parse::<TypeId>()
+        .map_err(|e| format!("Invalid ship type ID '{ship_str}': {e}"))?;
+
+    let mut items = Vec::new();
+    for part in parts {
+        let token = part.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let (type_str, qty_str) = match token.split_once(';') {
+            Some((t, q)) => (t.trim(), q.trim()),
+            None => (token, "1"),
+        };
+        let type_id = type_str
+            .parse::<TypeId>()
+            .map_err(|e| format!("Invalid item type ID '{type_str}': {e}"))?;
+        let qty = qty_str
+            .parse::<i32>()
+            .map_err(|e| format!("Invalid quantity '{qty_str}': {e}"))?;
+        if qty > 0 {
+            items.push((type_id, qty));
+        }
+    }
+    Ok((ship_type_id, items))
 }
 

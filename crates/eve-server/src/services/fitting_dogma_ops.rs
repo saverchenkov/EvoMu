@@ -427,19 +427,31 @@ pub(crate) async fn handle_dogma_ops(
                 }));
             };
 
-            if session.station_id.is_none() && session.structure_id.is_none() {
-                if let Some(sys_id) = session.solar_system_id {
-                    let sys = ctx.systems.get_or_spawn(sys_id);
-                    if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-                        if cs.max_capacitor > 0.0 && cs.capacitor < 0.75 * cs.max_capacitor {
-                            return Some(Err(BridgeRpcError {
-                                code: "NotEnoughCapacitorToOnline".into(),
-                                message: format!(
-                                    "Capacitor level ({:.1} GJ / {:.1} GJ) is below 75% requirement to online modules in space",
-                                    cs.capacitor, cs.max_capacitor
-                                ),
-                            }));
-                        }
+            let dock_id = session.station_id.or(session.structure_id).or_else(|| {
+                ctx.db.with_snapshot(|snap| {
+                    snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id))
+                })
+            });
+            if let Some(did) = dock_id {
+                if did < 1_000_000_000_000
+                    && !crate::services::station_structure::npc_station_offers_service(&ctx.sde, did, 17)
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "StationServiceUnavailable".into(),
+                        message: format!("Station {did} does not offer fitting facilities"),
+                    }));
+                }
+            } else if let Some(sys_id) = session.solar_system_id {
+                let sys = ctx.systems.get_or_spawn(sys_id);
+                if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
+                    if cs.max_capacitor > 0.0 && cs.capacitor < 0.75 * cs.max_capacitor {
+                        return Some(Err(BridgeRpcError {
+                            code: "NotEnoughCapacitorToOnline".into(),
+                            message: format!(
+                                "Capacitor level ({:.1} GJ / {:.1} GJ) is below 75% requirement to online modules in space",
+                                cs.capacitor, cs.max_capacitor
+                            ),
+                        }));
                     }
                 }
             }

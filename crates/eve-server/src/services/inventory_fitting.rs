@@ -57,99 +57,26 @@ pub(crate) use fitting_cyno_portal::*;
 pub mod fitting_ship_bays;
 pub(crate) use fitting_ship_bays::*;
 
-pub(crate) fn item_to_packed_cells(ctx: &ServerContext, i: &eve_db::InventoryItemRecord) -> Vec<PyRep> {
-    let (group_id, category_id) = ctx
-        .sde
-        .types
-        .get(&i.type_id)
-        .map(|t| (t.group_id as i64, t.category_id as i64))
-        .unwrap_or((0, 0));
-    let qty = if i.is_blueprint_copy {
-        -2
-    } else if i.singleton {
-        -1
-    } else {
-        i.quantity as i64
-    };
-    let custom_name = ctx
-        .db
-        .with_snapshot(|snap| snap.item_custom_names.get(&i.item_id).cloned())
-        .unwrap_or_default();
-    vec![
-        PyRep::Integer(i.item_id),
-        PyRep::Integer(i.type_id as i64),
-        PyRep::Integer(i.owner_id),
-        PyRep::Integer(i.location_id),
-        PyRep::Integer(i.flag as i64),
-        PyRep::Integer(qty),
-        PyRep::Integer(group_id),
-        PyRep::Integer(category_id),
-        PyRep::String(custom_name),
-    ]
-}
+pub(crate) use super::inventory_bound::{get_effective_corp_roles, get_effective_corp_roles_at_location, item_to_packed_cells};
 
 /// Mechanic roll in `[0, 1)` from the context RNG (seeded test RNG); `0.5` if the OS CSPRNG is unreadable.
 pub(crate) fn csprng_unit_f64(ctx: &ServerContext) -> f64 {
     ctx.mechanic_rng.try_unit_f64().unwrap_or(0.5)
 }
 
-pub(crate) fn get_effective_corp_roles(
-    ctx: &ServerContext,
-    corp_id: i64,
-    char_id: i64,
-) -> (bool, u64) {
-    get_effective_corp_roles_at_location(ctx, corp_id, char_id, None)
-}
-
-pub(crate) fn get_effective_corp_roles_at_location(
-    ctx: &ServerContext,
-    corp_id: i64,
-    char_id: i64,
-    location_id: Option<i64>,
-) -> (bool, u64) {
-    crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
-    ctx.db.with_snapshot(|snap| {
-        let (is_ceo, hq_station_id, mut role_mask) = snap
-            .corporations
-            .get(&corp_id)
-            .map(|c| (c.ceo_id == char_id, c.hq_station_id.unwrap_or(60_003_760), c.member_roles.get(&char_id).copied().unwrap_or(0)))
-            .unwrap_or((false, 60_003_760, 0));
-        let raw_loc = location_id
-            .or_else(|| {
-                snap.characters
-                    .get(&char_id)
-                    .and_then(|ch| ch.station_id.or(ch.structure_id))
-            })
-            .unwrap_or(0);
-        let loc_station_id = snap
-            .items
-            .get(&raw_loc)
-            .and_then(|it| {
-                (it.location_id >= 60_000_000 || snap.structures.contains_key(&it.location_id))
-                    .then_some(it.location_id)
-            })
-            .unwrap_or(raw_loc);
-        let base_id = snap
-            .corp_governance
-            .get(&corp_id)
-            .and_then(|g| g.member_bases.get(&char_id).copied())
-            .unwrap_or(0);
-        if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
-            role_mask |= ra.roles;
-            if loc_station_id > 0 {
-                if loc_station_id == hq_station_id {
-                    role_mask |= ra.roles_at_hq;
-                }
-                if base_id > 0 && loc_station_id == base_id {
-                    role_mask |= ra.roles_at_base;
-                }
-                if loc_station_id != hq_station_id && (base_id <= 0 || loc_station_id != base_id) {
-                    role_mask |= ra.roles_at_other;
-                }
-            }
+fn check_fitting_dock(ctx: &ServerContext, session: &SessionState, char_id: i64) -> Result<(), BridgeRpcError> {
+    let dock_id = session.station_id.or(session.structure_id).or_else(|| {
+        ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id)))
+    });
+    if let Some(did) = dock_id {
+        if did < 1_000_000_000_000 && !crate::services::station_structure::npc_station_offers_service(&ctx.sde, did, 17) {
+            return Err(BridgeRpcError {
+                code: "StationServiceUnavailable".into(),
+                message: format!("Station {did} does not offer fitting facilities"),
+            });
         }
-        (is_ceo, role_mask)
-    })
+    }
+    Ok(())
 }
 
 pub async fn handle(
@@ -438,6 +365,9 @@ pub async fn handle(
             });
 
             if src_is_fitted_module && !is_fitting_slot {
+                if let Err(e) = check_fitting_dock(ctx, session, char_id) {
+                    return Some(Err(e));
+                }
                 if session.station_id.is_none() && session.structure_id.is_none() {
                     let now_unix = ctx.now_unix_secs();
                     let has_weapons_timer = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner()).states.get(&char_id).is_some_and(|cw| cw.is_weapon_timer_active(now_unix));
@@ -522,6 +452,9 @@ pub async fn handle(
                         ]))),
                         Err(e) => Some(Err(e)),
                     };
+                }
+                if let Err(e) = check_fitting_dock(ctx, session, char_id) {
+                    return Some(Err(e));
                 }
                 if session.station_id.is_none() && session.structure_id.is_none() {
                     let now_unix = ctx.now_unix_secs();
@@ -1388,105 +1321,20 @@ pub async fn handle(
         }
 
         _ => {
-            if let Some(res) = super::inventory_stacking::handle_stack_ops(ctx, session, bound_entry, service, method, args, kwargs) {
-                return Some(res);
-            }
-            if let Some(res) = handle_dogma_im(ctx, session, bound_entry, service, method, args, kwargs).await {
-                return Some(res);
-            }
-            if let Some(res) = handle_dogma_ops(ctx, session, bound_entry, service, method, args, kwargs).await {
-                return Some(res);
-            }
-            if let Some(res) = handle_module_cycles(ctx, session, bound_entry, service, method, args, kwargs).await {
-                return Some(res);
-            }
-            if let Some(res) = handle_mining_and_deactivate(ctx, session, bound_entry, service, method, args, kwargs).await {
-                return Some(res);
-            }
-            if let Some(res) = handle_fitting_mgr(ctx, session, bound_entry, service, method, args, kwargs).await {
-                return Some(res);
-            }
-            if let Some(res) = handle_ships_and_services(ctx, session, bound_entry, service, method, args, kwargs).await {
-                return Some(res);
-            }
-            if let Some(res) = handle_containers_ships_and_fitting(ctx, session, bound_entry, service, method, args, kwargs).await {
-                return Some(res);
-            }
-            if let Some(res) = handle_ships_mastery_and_fitting_ext(ctx, session, bound_entry, service, method, args, kwargs).await {
-                return Some(res);
-            }
-            if let Some(res) = handle_superweapons_dbuffs_and_clones(ctx, session, bound_entry, service, method, args, kwargs).await {
-                return Some(res);
-            }
-            if let Some(res) = handle_cyno_portal(ctx, session, service, method, args).await {
-                return Some(res);
-            }
+            if let Some(res) = super::inventory_stacking::handle_stack_ops(ctx, session, bound_entry, service, method, args, kwargs) { return Some(res); }
+            if let Some(res) = handle_dogma_im(ctx, session, bound_entry, service, method, args, kwargs).await { return Some(res); }
+            if let Some(res) = handle_dogma_ops(ctx, session, bound_entry, service, method, args, kwargs).await { return Some(res); }
+            if let Some(res) = handle_module_cycles(ctx, session, bound_entry, service, method, args, kwargs).await { return Some(res); }
+            if let Some(res) = handle_mining_and_deactivate(ctx, session, bound_entry, service, method, args, kwargs).await { return Some(res); }
+            if let Some(res) = handle_fitting_mgr(ctx, session, bound_entry, service, method, args, kwargs).await { return Some(res); }
+            if let Some(res) = handle_ships_and_services(ctx, session, bound_entry, service, method, args, kwargs).await { return Some(res); }
+            if let Some(res) = handle_containers_ships_and_fitting(ctx, session, bound_entry, service, method, args, kwargs).await { return Some(res); }
+            if let Some(res) = handle_ships_mastery_and_fitting_ext(ctx, session, bound_entry, service, method, args, kwargs).await { return Some(res); }
+            if let Some(res) = handle_superweapons_dbuffs_and_clones(ctx, session, bound_entry, service, method, args, kwargs).await { return Some(res); }
+            if let Some(res) = handle_cyno_portal(ctx, session, service, method, args).await { return Some(res); }
             None
         }
     }
 }
 
-/// Encodes a ship fitting into an EVE DNA fitting string (`INV-3`):
-/// `<ship_type_id>:<type_id_1>;<qty_1>:<type_id_2>;<qty_2>:...::`
-pub fn fitting_to_dna(ship_type_id: TypeId, items: &[(TypeId, i32)]) -> String {
-    let mut counts: HashMap<TypeId, i32> = HashMap::new();
-    let mut order: Vec<TypeId> = Vec::new();
-    for &(type_id, qty) in items {
-        if qty <= 0 {
-            continue;
-        }
-        if !counts.contains_key(&type_id) {
-            order.push(type_id);
-        }
-        *counts.entry(type_id).or_insert(0) += qty;
-    }
-    let mut out = format!("{ship_type_id}:");
-    for type_id in order {
-        let qty = counts[&type_id];
-        out.push_str(&format!("{type_id};{qty}:"));
-    }
-    out.push(':');
-    out
-}
-
-/// Encodes a `SavedFittingRecord` into an EVE DNA fitting string (`INV-3`).
-pub fn saved_fitting_to_dna(fitting: &SavedFittingRecord) -> String {
-    let items: Vec<(TypeId, i32)> = fitting.items.iter().map(|&(t, _, q)| (t, q)).collect();
-    fitting_to_dna(fitting.ship_type_id, &items)
-}
-
-/// Decodes an EVE DNA fitting string into `(ship_type_id, Vec<(TypeId, i32)>)` (`INV-3`).
-/// Supports standard format `<ship_type_id>:<type_id_1>;<qty_1>:<type_id_2>;<qty_2>:...::`
-pub fn dna_to_fitting(dna: &str) -> Result<(TypeId, Vec<(TypeId, i32)>), String> {
-    let trimmed = dna.trim();
-    if trimmed.is_empty() {
-        return Err("Empty DNA string".into());
-    }
-    let mut parts = trimmed.split(':');
-    let ship_str = parts.next().ok_or("Missing ship type ID")?;
-    let ship_type_id = ship_str
-        .parse::<TypeId>()
-        .map_err(|e| format!("Invalid ship type ID '{ship_str}': {e}"))?;
-
-    let mut items = Vec::new();
-    for part in parts {
-        let token = part.trim();
-        if token.is_empty() {
-            continue;
-        }
-        let (type_str, qty_str) = match token.split_once(';') {
-            Some((t, q)) => (t.trim(), q.trim()),
-            None => (token, "1"),
-        };
-        let type_id = type_str
-            .parse::<TypeId>()
-            .map_err(|e| format!("Invalid item type ID '{type_str}': {e}"))?;
-        let qty = qty_str
-            .parse::<i32>()
-            .map_err(|e| format!("Invalid quantity '{qty_str}': {e}"))?;
-        if qty > 0 {
-            items.push((type_id, qty));
-        }
-    }
-    Ok((ship_type_id, items))
-}
+pub use super::fitting_saved_apply::{dna_to_fitting, fitting_to_dna, saved_fitting_to_dna};
