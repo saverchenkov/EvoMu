@@ -306,3 +306,4 @@ mod plan_social_closure;
 mod plan_economy_closure;
 mod plan_economy_closure_part2;
 mod skills_attributes_char_social_closure;
+mod structures_mining_r4_regressions;

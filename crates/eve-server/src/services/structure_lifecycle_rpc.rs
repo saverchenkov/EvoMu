@@ -529,7 +529,7 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
             if matches!(src.flag as u16, 92..=94) {
                 snap.items.remove(&item_id);
                 snap.module_online_states.remove(&item_id);
-                return Ok((structure_id, src.type_id, true, false, false));
+                return Ok((structure_id, item_id, src.type_id, true, false, false));
             }
             let was_service = (164..=171).contains(&(src.flag as u16));
             if let Some(it) = snap.items.get_mut(&item_id) {
@@ -542,7 +542,7 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
                 life::sync_structure(ctx, snap, &mut ext, structure_id, now);
                 save_ext_state(snap, &ext);
             }
-            return Ok((structure_id, src.type_id, false, false, was_service));
+            return Ok((structure_id, item_id, src.type_id, false, false, was_service));
         }
         // Fitting into structure slot
         if src.owner_id != char_id && src.owner_id != st.owner_corp_id {
@@ -566,13 +566,38 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
         } else {
             online && !matches!(flag_u16, 92..=94)
         };
-        if let Some(it) = snap.items.get_mut(&item_id) {
-            it.location_id = structure_id;
-            it.flag = flag;
-            it.singleton = true;
-            it.version += 1;
-        }
-        snap.module_online_states.insert(item_id, will_online);
+        let fitted_id = if src.quantity > 1 {
+            if let Some(it) = snap.items.get_mut(&item_id) {
+                it.quantity -= 1;
+                it.version += 1;
+            }
+            snap.next_entity_id += 1;
+            let new_id = snap.next_entity_id;
+            snap.items.insert(
+                new_id,
+                eve_db::InventoryItemRecord {
+                    item_id: new_id,
+                    type_id: src.type_id,
+                    owner_id: src.owner_id,
+                    location_id: structure_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            new_id
+        } else {
+            if let Some(it) = snap.items.get_mut(&item_id) {
+                it.location_id = structure_id;
+                it.flag = flag;
+                it.singleton = true;
+                it.version += 1;
+            }
+            item_id
+        };
+        snap.module_online_states.insert(fitted_id, will_online);
         if is_service {
             let max_before = life::effective_max_shield(ctx, snap, &profile, structure_id, life::PowerState::LowPower);
             life::sync_structure(ctx, snap, &mut ext, structure_id, now);
@@ -585,9 +610,9 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
             }
             save_ext_state(snap, &ext);
         }
-        Ok((structure_id, src.type_id, false, will_online, is_service))
+        Ok((structure_id, fitted_id, src.type_id, false, will_online, is_service))
     })?;
-    let (structure_id, type_id, destroyed, is_online, service_changed) = res;
+    let (structure_id, fitted_id, type_id, destroyed, is_online, service_changed) = res;
     if service_changed {
         ctx.notify(
             crate::router::NotificationTarget::Station(structure_id),
@@ -597,10 +622,10 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
         );
     }
     if destroyed {
-        return Ok(PyRep::keyval([("itemID", PyRep::Integer(item_id)), ("destroyed", PyRep::Bool(true))]));
+        return Ok(PyRep::keyval([("itemID", PyRep::Integer(fitted_id)), ("destroyed", PyRep::Bool(true))]));
     }
     Ok(PyRep::keyval([
-        ("itemID", PyRep::Integer(item_id)),
+        ("itemID", PyRep::Integer(fitted_id)),
         ("typeID", PyRep::Integer(i64::from(type_id))),
         ("locationID", PyRep::Integer(new_loc)),
         ("flagID", PyRep::Integer(flag as i64)),

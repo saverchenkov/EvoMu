@@ -292,7 +292,25 @@ pub fn handle_eject_from_structure(
         }
         ext.active_pilot_by_structure.remove(&structure_id);
         save_ext_state(snap, &ext);
-        Ok(snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0))
+        let fallback_ship = snap
+            .items
+            .values()
+            .find(|i| {
+                i.owner_id == char_id
+                    && i.location_id == structure_id
+                    && i.item_id != structure_id
+                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 6)
+            })
+            .map(|i| i.item_id)
+            .unwrap_or(0);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            if ch.active_ship_id == structure_id || ch.active_ship_id <= 0 {
+                ch.active_ship_id = fallback_ship;
+            }
+            Ok(ch.active_ship_id)
+        } else {
+            Ok(0)
+        }
     })?;
 
     if orig_ship_id > 0 {
@@ -307,6 +325,8 @@ pub fn handle_eject_from_structure(
             "charid",
             vec![PyRep::keyval([("shipID", PyRep::Integer(orig_ship_id))])],
         );
+    } else if session.ship_id == Some(structure_id) {
+        session.ship_id = None;
     }
     Ok(PyRep::keyval([
         ("structureID", PyRep::Integer(structure_id)),
@@ -344,7 +364,7 @@ pub fn handle_release_control(
         .or(session.structure_id)
         .ok_or_else(|| err("MissingStructureId", "ReleaseControl requires structureID"))?;
     let target_id = arg_i64(args, 1).unwrap_or(0);
-    ctx.db.try_with_mut_snapshot(|snap| {
+    let orig_ship_id = ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_ext_state(snap);
         if ext.active_pilot_by_structure.get(&structure_id) != Some(&char_id) {
             return Err(err(
@@ -354,8 +374,41 @@ pub fn handle_release_control(
         }
         ext.active_pilot_by_structure.remove(&structure_id);
         save_ext_state(snap, &ext);
-        Ok(())
+        let fallback_ship = snap
+            .items
+            .values()
+            .find(|i| {
+                i.owner_id == char_id
+                    && i.location_id == structure_id
+                    && i.item_id != structure_id
+                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 6)
+            })
+            .map(|i| i.item_id)
+            .unwrap_or(0);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            if ch.active_ship_id == structure_id || ch.active_ship_id <= 0 {
+                ch.active_ship_id = fallback_ship;
+            }
+            Ok(ch.active_ship_id)
+        } else {
+            Ok(0)
+        }
     })?;
+    if orig_ship_id > 0 {
+        session.ship_id = Some(orig_ship_id);
+        session.push_notification(
+            "OnSessionChanged",
+            vec![PyRep::keyval([("shipID", PyRep::Integer(orig_ship_id))])],
+        );
+        ctx.notify(
+            crate::router::NotificationTarget::Character(char_id),
+            "OnSessionChanged",
+            "charid",
+            vec![PyRep::keyval([("shipID", PyRep::Integer(orig_ship_id))])],
+        );
+    } else if session.ship_id == Some(structure_id) {
+        session.ship_id = None;
+    }
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
         "OnStructureTargetRemoved",

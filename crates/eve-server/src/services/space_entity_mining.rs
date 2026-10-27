@@ -286,6 +286,7 @@ pub(crate) async fn handle_mine(
 
     let mut per_drone_yield_m3: std::collections::HashMap<i64, f64> = std::collections::HashMap::new();
     let mut per_drone_dur_secs: std::collections::HashMap<i64, u64> = std::collections::HashMap::new();
+    let mut per_drone_waste_prob: std::collections::HashMap<i64, f64> = std::collections::HashMap::new();
     let (base_yield_m3, waste_prob) = if is_drone {
         let ast_group_id = ctx
             .sde
@@ -420,9 +421,11 @@ pub(crate) async fn handle_mine(
             let d_yield = drone_t
                 .and_then(|t| t.default_attributes.get(&77).copied())
                 .unwrap_or(25.0);
-            let d_waste = drone_t
+            let raw_waste = drone_t
                 .and_then(|t| t.default_attributes.get(&3154).copied())
                 .unwrap_or(0.0);
+            let d_waste = if raw_waste > 1.0 { raw_waste / 100.0 } else { raw_waste };
+            per_drone_waste_prob.insert(d_item.item_id, d_waste);
             max_waste_prob = max_waste_prob.max(d_waste);
             let is_ice_drone = drone_t
                 .and_then(|t| t.default_attributes.get(&182).copied())
@@ -479,7 +482,8 @@ pub(crate) async fn handle_mine(
         (total_drone_yield, max_waste_prob)
     } else if let (Some(fit), Some(mod_id)) = (&fit, primary_id) {
         let y = fit.get_module_effective_attribute(mod_id, 77, &ctx.sde);
-        let w = fit.get_module_effective_attribute(mod_id, 3154, &ctx.sde);
+        let raw_w = fit.get_module_effective_attribute(mod_id, 3154, &ctx.sde);
+        let w = if raw_w > 1.0 { raw_w / 100.0 } else { raw_w };
         (y, w)
     } else if let Some(fit) = &fit {
         let m = fit.modules.values().find(|m| {
@@ -487,7 +491,8 @@ pub(crate) async fn handle_mine(
         });
         if let Some(m) = m {
             let y = fit.get_module_effective_attribute(m.item_id, 77, &ctx.sde);
-            let w = fit.get_module_effective_attribute(m.item_id, 3154, &ctx.sde);
+            let raw_w = fit.get_module_effective_attribute(m.item_id, 3154, &ctx.sde);
+            let w = if raw_w > 1.0 { raw_w / 100.0 } else { raw_w };
             (y, w)
         } else {
             (40.0, 0.0)
@@ -567,7 +572,7 @@ pub(crate) async fn handle_mine(
                         yield_units: d_units,
                         duration_secs: dur,
                         next_cycle_unix: now_unix.saturating_add(dur),
-                        waste_prob,
+                        waste_prob: per_drone_waste_prob.get(&d_item.item_id).copied().unwrap_or(0.0),
                         ore_type_id: ast_state.type_id,
                         destination_flag: target_flag,
                     },
@@ -591,7 +596,7 @@ pub(crate) async fn handle_mine(
             .sum();
         (cap, used)
     });
-    let max_fit_units = if matches!(target_flag as u16, 134 | 135 | 181) && hold_cap > 0.0 {
+    let max_fit_units = if matches!(target_flag as u16, 5 | 134 | 135 | 181) && hold_cap > 0.0 {
         ((hold_cap - used_vol).max(0.0) / unit_vol).floor() as u64
     } else {
         u64::MAX
@@ -981,6 +986,16 @@ pub async fn handle(
                             ),
                         });
                     }
+                    if !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
+                        snap, station_id, char_id,
+                    ) {
+                        return Err(BridgeRpcError {
+                            code: "AccessDenied".into(),
+                            message: format!(
+                                "Character {char_id} is denied access to structure {station_id} by its access profile"
+                            ),
+                        });
+                    }
                 } else if !crate::services::station_structure::npc_station_offers_service(&ctx.sde, station_id, 5) {
                     return Err(BridgeRpcError {
                         code: "StationServiceUnavailable".into(),
@@ -988,6 +1003,11 @@ pub async fn handle(
                     });
                 }
 
+                let caller_corp = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .unwrap_or(0);
                 let mut batch_results = Vec::with_capacity(item_ids.len());
                 for item_id in item_ids {
                     let Some(item) = snap.items.get(&item_id).cloned() else {
@@ -996,12 +1016,27 @@ pub async fn handle(
                             message: format!("Item {item_id} does not exist"),
                         });
                     };
-                    if item.owner_id != char_id || item.location_id != station_id || item.quantity <= 0
+                    let valid_owner_and_flag = (item.owner_id == char_id
+                        && item.flag == InventoryFlag::Hangar)
+                        || (caller_corp > 0
+                            && item.owner_id == caller_corp
+                            && matches!(
+                                item.flag,
+                                InventoryFlag::Hangar
+                                    | InventoryFlag::CorpSAG1
+                                    | InventoryFlag::CorpSAG2
+                                    | InventoryFlag::CorpSAG3
+                                    | InventoryFlag::CorpSAG4
+                                    | InventoryFlag::CorpSAG5
+                                    | InventoryFlag::CorpSAG6
+                                    | InventoryFlag::CorpSAG7
+                            ));
+                    if !valid_owner_and_flag || item.location_id != station_id || item.quantity <= 0
                     {
                         return Err(BridgeRpcError {
                             code: "OwnershipOrLocationViolation".into(),
                             message: format!(
-                                "Item {item_id} must be owned by character {char_id} at station {station_id}"
+                                "Item {item_id} must be owned by character {char_id} in the hangar at station {station_id}"
                             ),
                         });
                     }
@@ -1275,9 +1310,17 @@ pub async fn handle(
                 ])));
             }
             let quotes = ctx.db.with_snapshot(|snap| {
+                let caller_corp = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .unwrap_or(0);
                 let mut quotes = Vec::new();
                 for item_id in item_ids {
                     let Some(item) = snap.items.get(&item_id) else { continue };
+                    if item.owner_id != char_id && !(caller_corp > 0 && item.owner_id == caller_corp) {
+                        continue;
+                    }
                     let Some(inv_type) = ctx.sde.types.get(&item.type_id) else { continue };
                     let Some(materials) = resolve_reprocessable_materials(
                         &ctx.sde,

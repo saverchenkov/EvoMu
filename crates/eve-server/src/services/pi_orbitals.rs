@@ -595,7 +595,11 @@ pub fn handle_pi_orbitals(
                         if let Some(cfg) = load_orbital_settings(snap, planet_id) {
                             let player_share = IskCents::from_f64_isk(0.5 * unit_base * (qty as f64) * player_poco_rate);
                             if let Some(corp) = snap.corporations.get_mut(&cfg.owner_corp_id) {
+                                corp.ensure_wallet_divisions();
                                 corp.master_wallet = corp.master_wallet.checked_add(player_share).unwrap_or(corp.master_wallet);
+                                if let Some(d0) = corp.wallet_divisions.first_mut() {
+                                    d0.balance = corp.master_wallet;
+                                }
                             }
                         }
                     }
@@ -676,7 +680,11 @@ pub fn handle_pi_orbitals(
                         if let Some(cfg) = load_orbital_settings(snap, planet_id) {
                             let player_share = IskCents::from_f64_isk(tax_mult * unit_base * (qty as f64) * player_poco_rate);
                             if let Some(corp) = snap.corporations.get_mut(&cfg.owner_corp_id) {
+                                corp.ensure_wallet_divisions();
                                 corp.master_wallet = corp.master_wallet.checked_add(player_share).unwrap_or(corp.master_wallet);
+                                if let Some(d0) = corp.wallet_divisions.first_mut() {
+                                    d0.balance = corp.master_wallet;
+                                }
                             }
                         }
                     }

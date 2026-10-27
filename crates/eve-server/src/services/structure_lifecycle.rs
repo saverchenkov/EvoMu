@@ -480,12 +480,27 @@ fn dispose_contents(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &mu
     owners.sort_unstable();
     for owner in owners {
         let item_ids = by_owner.remove(&owner).unwrap_or_default();
+        let mut all_ids_for_val = item_ids.clone();
+        let mut frontier = item_ids.clone();
+        while !frontier.is_empty() {
+            let children: Vec<i64> = snap
+                .items
+                .values()
+                .filter(|i| frontier.contains(&i.location_id) && !all_ids_for_val.contains(&i.item_id))
+                .map(|i| i.item_id)
+                .collect();
+            all_ids_for_val.extend(children.iter().copied());
+            frontier = children;
+        }
+        let value: f64 = all_ids_for_val
+            .iter()
+            .filter_map(|id| snap.items.get(id))
+            .map(|it| ctx.sde.types.get(&it.type_id).map(|t| t.base_price).unwrap_or(0.0) * f64::from(it.quantity.max(1)))
+            .sum();
         snap.next_entity_id += 1;
         let wrap_id = snap.next_entity_id;
-        let mut value = 0.0;
         for &iid in &item_ids {
             if let Some(it) = snap.items.get_mut(&iid) {
-                value += ctx.sde.types.get(&it.type_id).map(|t| t.base_price).unwrap_or(0.0) * f64::from(it.quantity.max(1));
                 it.location_id = wrap_id;
                 it.flag = InventoryFlag::Locked;
             }

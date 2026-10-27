@@ -293,15 +293,31 @@ fn handle_move_assets_to_safety(ctx: &ServerContext, session: &mut SessionState,
             i.owner_id == owner_id && i.location_id == structure_id && i.item_id != active_ship
                 && !matches!(i.flag as u16, 11..=34 | 87 | 92..=94 | 125..=132 | 163 | 164..=171)
                 && i.flag != InventoryFlag::SpecializedFuelBay && i.flag != InventoryFlag::Locked
+                && !snap.is_item_locked_in_contract_or_job(i.item_id)
         }).map(|i| i.item_id).collect();
         item_ids.sort_unstable();
         if item_ids.is_empty() { return Err(err("NoAssetsToMoveToSafety", format!("Owner {owner_id} has no eligible items in structure {structure_id}"))); }
+        let mut all_ids_for_val = item_ids.clone();
+        let mut frontier = item_ids.clone();
+        while !frontier.is_empty() {
+            let children: Vec<i64> = snap
+                .items
+                .values()
+                .filter(|i| frontier.contains(&i.location_id) && !all_ids_for_val.contains(&i.item_id))
+                .map(|i| i.item_id)
+                .collect();
+            all_ids_for_val.extend(children.iter().copied());
+            frontier = children;
+        }
+        let est_val: f64 = all_ids_for_val
+            .iter()
+            .filter_map(|id| snap.items.get(id))
+            .map(|it| ctx.sde.types.get(&it.type_id).map(|t| t.base_price).unwrap_or(0.0) * f64::from(it.quantity.max(1)))
+            .sum();
         snap.next_entity_id += 1;
         let wrap_id = snap.next_entity_id;
-        let mut est_val = 0.0;
         for &iid in &item_ids {
             if let Some(it) = snap.items.get_mut(&iid) {
-                est_val += ctx.sde.types.get(&it.type_id).map(|t| t.base_price).unwrap_or(0.0) * f64::from(it.quantity.max(1));
                 it.location_id = wrap_id;
                 it.flag = InventoryFlag::Locked;
             }

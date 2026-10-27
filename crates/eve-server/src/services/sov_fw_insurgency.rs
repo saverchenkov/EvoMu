@@ -541,7 +541,36 @@ pub async fn handle(
                 }));
             }
             let now_u = ctx.now_unix();
-            let _ = ctx.db.try_with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let store = crate::services::fw_enlistment::load_store(snap);
+                if let Some(&until) = store.cooldown_until.get(&char_id) {
+                    if now_u < until {
+                        return Err(BridgeRpcError {
+                            code: "FwEnlistmentCooldown".into(),
+                            message: "Direct enlistment cooldown is still active".into(),
+                        });
+                    }
+                }
+                let Some(ch) = snap.characters.get(&char_id) else {
+                    return Err(BridgeRpcError {
+                        code: "CharacterNotFound".into(),
+                        message: "Character not found".into(),
+                    });
+                };
+                if ch.standings.get(&faction_id).copied().unwrap_or(0.0) < 0.0 {
+                    return Err(BridgeRpcError {
+                        code: "FwStandingTooLow".into(),
+                        message: "Standing with militia faction is below 0.0".into(),
+                    });
+                }
+                if let Some(allowed) = store.corp_allowed.get(&ch.corporation_id) {
+                    if !allowed.contains(&faction_id) {
+                        return Err(BridgeRpcError {
+                            code: "FwFactionNotAllowedByCorp".into(),
+                            message: "Corporation does not allow direct enlistment into this faction".into(),
+                        });
+                    }
+                }
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.war_faction_id = Some(faction_id);
                     ch.version += 1;
@@ -559,8 +588,11 @@ pub async fn handle(
                 });
                 rec.faction_id = Some(faction_id);
                 rec.enlisted_on_unix = Some(now_u);
-                Ok::<_, std::convert::Infallible>(())
+                Ok(())
             });
+            if let Err(e) = res {
+                return Some(Err(e));
+            }
             session.war_faction_id = Some(faction_id);
             Some(Ok(PyRep::keyval([
                 ("factionID", PyRep::Integer(faction_id)),
@@ -658,6 +690,8 @@ pub async fn handle(
                     return Ok(Err((dist, beacon_coords)));
                 }
 
+                let status = crate::services::fw_services::compute_system_frontline_status(ctx, snap, sys_id);
+                let has_occ = snap.fw_system_occupations.contains_key(&sys_id);
                 if let Some(st) = snap.system_states.get_mut(&sys_id) {
                     let Some(_beacon_coords) = st.fw_complex_position else {
                         return Err(BridgeRpcError {
@@ -679,6 +713,7 @@ pub async fn handle(
                                     .into(),
                         });
                     };
+                    let prev_contested_pct = st.fw_contested_pct;
                     let duration = st.fw_capture_duration_seconds.max(600);
                     let tick_delta = if st.last_fw_capture_tick == 0 {
                         1
@@ -705,9 +740,15 @@ pub async fn handle(
                             .min(100.0);
                     st.insurgency_corruption_stage =
                         ((st.fw_contested_pct / 20.0).ceil() as u8).clamp(1, 5);
-                    let status_mult = if st.fw_contested_pct > 75.0 {
+                    let status_mult = if has_occ {
+                        match status {
+                            crate::services::fw_services::STATUS_FRONTLINE => 1.5,
+                            crate::services::fw_services::STATUS_COMMAND => 1.0,
+                            _ => 0.75,
+                        }
+                    } else if prev_contested_pct > 75.0 {
                         1.5 // Frontline
-                    } else if st.fw_contested_pct > 25.0 {
+                    } else if prev_contested_pct > 25.0 {
                         1.0 // Command Operations
                     } else {
                         0.75 // Rearguard

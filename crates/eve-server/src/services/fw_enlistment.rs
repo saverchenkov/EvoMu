@@ -44,7 +44,7 @@ pub(crate) fn unix_to_filetime(unix_secs: u64) -> i64 {
     (unix_secs as i64 + 11_644_473_600).saturating_mul(10_000_000)
 }
 
-fn load_store(snap: &eve_db::WorldStateSnapshot) -> FwEnlistmentStore {
+pub(crate) fn load_store(snap: &eve_db::WorldStateSnapshot) -> FwEnlistmentStore {
     snap.item_custom_names
         .get(&FW_ENLISTMENT_STORE_KEY)
         .and_then(|s| serde_json::from_str(s).ok())
