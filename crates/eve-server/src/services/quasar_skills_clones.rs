@@ -666,13 +666,99 @@ pub fn register_skill_handlers(
     );
 
     // 16. eve.character.implant.GetActiveImplantsByCharacterRequest -> GetActiveImplantsByCharacterResponse
+    let db_imp = Arc::clone(&db);
+    let sde_imp = Arc::clone(&router.sde);
     router.register_handler(
         "eve.character.implant.GetActiveImplantsByCharacterRequest",
-        Arc::new(move |_ctx, _any, _dyn| {
+        Arc::new(move |ctx, any, dyn_msg| {
+            let req_char_id = dyn_msg
+                .get(1)
+                .and_then(|v| match v {
+                    DynamicValue::Message(m) => m.get(1).and_then(|sv| match sv {
+                        DynamicValue::Uint32(u) => Some(*u),
+                        DynamicValue::Uint64(u) => Some(*u as u32),
+                        DynamicValue::Int32(i) => Some(*i as u32),
+                        DynamicValue::Int64(i) => Some(*i as u32),
+                        DynamicValue::Bytes(b) if b.len() == 16 && b[0..12] == [0u8; 12] => {
+                            Some(u32::from_be_bytes([b[12], b[13], b[14], b[15]]))
+                        }
+                        _ => None,
+                    }),
+                    DynamicValue::Uint32(u) => Some(*u),
+                    DynamicValue::Uint64(u) => Some(*u as u32),
+                    DynamicValue::Int32(i) => Some(*i as u32),
+                    DynamicValue::Int64(i) => Some(*i as u32),
+                    _ => None,
+                })
+                .or_else(|| {
+                    eve_proto::quasar::WireMessage::decode(&any.value)
+                        .ok()
+                        .and_then(|wm| {
+                            wm.fields
+                                .iter()
+                                .find(|f| f.field_number == 1)
+                                .and_then(|f| {
+                                    if let Some(b) = f.value.as_bytes() {
+                                        eve_proto::quasar::WireMessage::decode(b)
+                                            .ok()
+                                            .and_then(|swm| {
+                                                swm.fields
+                                                    .iter()
+                                                    .find(|sf| sf.field_number == 1)
+                                                    .and_then(|sf| {
+                                                        sf.value.as_varint().map(|v| v as u32).or_else(|| {
+                                                            sf.value.as_bytes().and_then(|ub| {
+                                                                (ub.len() == 16 && ub[0..12] == [0u8; 12]).then(|| {
+                                                                    u32::from_be_bytes([ub[12], ub[13], ub[14], ub[15]])
+                                                                })
+                                                            })
+                                                        })
+                                                    })
+                                            })
+                                    } else {
+                                        f.value.as_varint().map(|v| v as u32)
+                                    }
+                                })
+                        })
+                })
+                .or_else(|| ctx.effective_character_id());
+            let Some(char_id) = req_char_id else {
+                return Err((STATUS_FORBIDDEN, "Active character required".into()));
+            };
+            if let Some(caller_id) = ctx.effective_character_id() {
+                if caller_id != char_id && crate::quasar_gateway::require_admin_role(ctx).is_err() {
+                    return Err((
+                        STATUS_FORBIDDEN,
+                        "Cannot query another character's active implants".into(),
+                    ));
+                }
+            }
+            let implants = db_imp.with_snapshot(|snap| {
+                let mut list = snap
+                    .active_implants
+                    .get(&(char_id as i64))
+                    .cloned()
+                    .unwrap_or_default();
+                for item in snap.items.values() {
+                    if item.owner_id == char_id as i64
+                        && item.location_id == char_id as i64
+                        && item.flag == eve_db::InventoryFlag::Implant
+                        && !list.contains(&item.type_id)
+                    {
+                        list.push(item.type_id);
+                    }
+                }
+                list
+            });
             let mut out = Vec::new();
-            // Return active cybernetic attribute implants (e.g. Ocular Filter, Memory Augmentation)
-            let sample_implants = [(1, 9941), (2, 9942), (3, 9943)]; // (slot, type_id)
-            for (slot, tid) in sample_implants {
+            for (idx, tid) in implants.into_iter().enumerate() {
+                let slot = sde_imp
+                    .types
+                    .get(&tid)
+                    .and_then(|t| t.default_attributes.get(&331u16).copied())
+                    .map(|v| v.round() as u32)
+                    .filter(|&s| (1..=10).contains(&s))
+                    .unwrap_or((idx + 1) as u32);
                 let mut imp = Vec::new();
                 let mut type_bytes = Vec::new();
                 encode_varint_field(1, tid as u64, &mut type_bytes); // type sequential
@@ -690,12 +776,19 @@ pub fn register_skill_handlers(
     );
 
     // 17. eve.implanttype.GetAllRequest -> GetAllResponse
+    let sde_imp_types = Arc::clone(&router.sde);
     router.register_handler(
         "eve.implanttype.GetAllRequest",
         Arc::new(move |_ctx, _any, _dyn| {
             let mut out = Vec::new();
-            let sample_types = [9941u32, 9942u32, 9943u32];
-            for tid in sample_types {
+            let mut tids: Vec<u32> = sde_imp_types
+                .types
+                .values()
+                .filter(|t| t.category_id == 20 && t.published)
+                .map(|t| t.type_id)
+                .collect();
+            tids.sort_unstable();
+            for tid in tids {
                 let mut imp_type = Vec::new();
                 encode_varint_field(1, tid as u64, &mut imp_type);
                 encode_bytes_field(1, &imp_type, &mut out);

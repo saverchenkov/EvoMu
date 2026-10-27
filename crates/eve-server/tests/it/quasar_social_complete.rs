@@ -377,6 +377,28 @@ async fn test_quasar_alliance_complete() {
     let now = ctx.now_unix();
     let sess = make_auth_session(102, 1, 90000001, 98000001);
 
+    // Unknown alliance returns STATUS_NOT_FOUND before seeding
+    let miss_req = make_public_req("eve.alliance.GetRequest", encode_seq_id(1, 99000001), now);
+    assert_eq!(
+        ctx.quasar_gateway
+            .handle_public_request(&sess, &miss_req, None, false, now)
+            .status_code,
+        eve_server::quasar_gateway::STATUS_NOT_FOUND
+    );
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.alliances.insert(
+            99_000_001,
+            eve_db::AllianceRecord {
+                alliance_id: 99_000_001,
+                name: "EvoMu Parity Coalition".into(),
+                short_name: "EVOMU".into(),
+                executor_corp_id: 98_000_001,
+                member_corp_ids: [98_000_001, 98_000_002].into_iter().collect(),
+            },
+        );
+    });
+
     let mut search_bytes = Vec::new();
     encode_string_field(1, "EvoMu", &mut search_bytes);
     for (url, payload, want) in [
@@ -507,4 +529,20 @@ async fn test_quasar_corporation_governance_complete() {
         assert_eq!(rsp.status_code, STATUS_OK, "failed: {url}");
         assert!(rsp.payload.unwrap().type_url.contains(want));
     }
+
+    // Cross-corporation query by non-admin pilot in another corp must return STATUS_FORBIDDEN
+    let mut foreign_sess = make_auth_session(105, 2, 90000002, 98000002);
+    foreign_sess.role = 0;
+    foreign_sess.corp_role = 0;
+    let cross_corp_req = make_public_req(
+        "eve.corporation.members.GetRequest",
+        encode_seq_id(1, 98000001),
+        now,
+    );
+    assert_eq!(
+        ctx.quasar_gateway
+            .handle_public_request(&foreign_sess, &cross_corp_req, None, false, now)
+            .status_code,
+        eve_server::quasar_gateway::STATUS_FORBIDDEN
+    );
 }

@@ -16,7 +16,7 @@ use eve_server::quasar_gateway::{
 };
 use eve_server::router::ServerContext;
 use eve_server::services::quasar_cosmetics_market::{
-    skin_tier_for_hex, BUYER_FEES_VERSION, PARAGON_CORP_ID,
+    BUYER_FEES_VERSION, PARAGON_CORP_ID,
 };
 use std::collections::HashMap;
 
@@ -111,6 +111,24 @@ async fn paragon_hub_cosmetic_market_fees_and_component_listings() {
     let mut skin_id = Vec::new();
     encode_string_field(1, "cafebabe1234", &mut skin_id);
     encode_bytes_field(2, &skin_id, &mut req_buyer_fee);
+    // Unknown SKIN design returns STATUS_NOT_FOUND before being registered in SkinrCosmeticsState
+    let rsp_missing_fee = quasar_rpc(&ctx, &mut buyer, "eve_public.cosmetic.market.api.GetBuyerFeeRequest", req_buyer_fee.clone()).await;
+    assert_eq!(rsp_missing_fee.status_code, STATUS_NOT_FOUND);
+    let mut gm = build_sess(71_099, buyer_cid, CORP_A);
+    let mut grant_req = Vec::new();
+    encode_bytes_field(1, &skin_id, &mut grant_req);
+    encode_varint_field(2, 1, &mut grant_req);
+    assert_eq!(
+        quasar_rpc(
+            &ctx,
+            &mut gm,
+            "eve_public.cosmetic.ship.skin.thirdparty.license.api.admin.GrantRequest",
+            grant_req,
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
     let rsp_buyer_fee = quasar_rpc(&ctx, &mut buyer, "eve_public.cosmetic.market.api.GetBuyerFeeRequest", req_buyer_fee).await;
     assert_eq!(rsp_buyer_fee.status_code, STATUS_OK);
     let lp_msg = sub(&sub(&decode(&rsp_buyer_fee), 1), 1);
@@ -129,10 +147,11 @@ async fn paragon_hub_cosmetic_market_fees_and_component_listings() {
     skinr.data.write().unwrap().skins.insert("custom_hex_4".into(), eve_server::services::quasar_cosmetics_skinr::SkinDesignRecord {
         skin_hex: "custom_hex_4".into(), name: "Custom".into(), line_name: "L".into(), creator_id: 1, ship_type_id: 587, pattern_blend_mode: 0, slots: Vec::new(), tier_level: 4, first_sequenced_unix: None,
     });
-    assert_eq!(mkt.skin_tier_for_hex("custom_hex_4"), 4);
-    assert_eq!(mkt.skin_tier_for_hex("nonexistent"), skin_tier_for_hex("nonexistent"));
+    assert_eq!(mkt.skin_tier_for_hex("custom_hex_4"), Some(4));
+    assert_eq!(mkt.skin_tier_for_hex("nonexistent"), None);
 
-    // 4. Component listings GetAllRequest + InitiatePurchaseListingRequest.
+    // 4. Component listings GetAllRequest + InitiatePurchaseListingRequest (seeded via test helper).
+    crate::common::seed_test_cosmetics_component_listings(&ctx);
     let rsp_comp_all = quasar_rpc(&ctx, &mut buyer, "eve_public.cosmetic.market.component.listing.api.GetAllRequest", Vec::new()).await;
     assert_eq!(rsp_comp_all.status_code, STATUS_OK);
     let wm_comp = decode(&rsp_comp_all);

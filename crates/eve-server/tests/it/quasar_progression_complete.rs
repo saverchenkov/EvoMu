@@ -662,7 +662,13 @@ async fn quasar_skills_plans_extractors_and_implants() {
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.skilltype.GetRequest", make_id_request(3300)).await.status_code, STATUS_OK);
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.skill.injector.InjectSkillPointsRequest", make_id_request(1)).await.status_code, STATUS_NOT_IMPLEMENTED);
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.skill.extractor.ExtractSkillsRequest", make_id_request(3300)).await.status_code, STATUS_NOT_IMPLEMENTED);
-    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.character.implant.GetActiveImplantsByCharacterRequest", make_id_request(90_000_001)).await.status_code, STATUS_OK);
+    ctx.db.with_mut_snapshot(|s| {
+        s.active_implants.insert(90_000_001, vec![9941, 9942]);
+    });
+    let imp_rsp = quasar_rpc(&ctx, &mut sess, "eve.character.implant.GetActiveImplantsByCharacterRequest", make_id_request(90_000_001)).await;
+    assert_eq!(imp_rsp.status_code, STATUS_OK);
+    let imp_wm = WireMessage::decode(&imp_rsp.payload.unwrap().value).expect("decode implants");
+    assert_eq!(imp_wm.fields.iter().filter(|f| f.field_number == 1).count(), 2, "Should return the 2 active implants from WorldRepository");
     let implant_type_rsp = quasar_rpc(&ctx, &mut sess, "eve.implanttype.GetAllRequest", Vec::new()).await;
     assert!(implant_type_rsp.status_code == STATUS_OK && implant_type_rsp.payload.as_ref().unwrap().normalized_type_name() == "eve.implanttype.GetAllResponse");
 }

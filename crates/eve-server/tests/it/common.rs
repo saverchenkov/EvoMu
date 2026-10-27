@@ -201,6 +201,26 @@ pub fn seed_test_lp_store_offers(ctx: &ServerContext) {
 }
 
 #[allow(dead_code)]
+pub fn seed_test_cosmetics_component_listings(ctx: &ServerContext) {
+    use eve_server::services::quasar_cosmetics_market::{
+        seed_component_listings_if_empty, CosmeticsMarketData,
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut data: CosmeticsMarketData = snap
+            .quasar_state_blobs
+            .get("quasar_cosmetics_market")
+            .and_then(|j| serde_json::from_str(j).ok())
+            .unwrap_or_default();
+        if seed_component_listings_if_empty(&mut data, &ctx.sde) {
+            if let Ok(json) = serde_json::to_string(&data) {
+                snap.quasar_state_blobs
+                    .insert("quasar_cosmetics_market".into(), json);
+            }
+        }
+    });
+}
+
+#[allow(dead_code)]
 pub async fn login_pilot(
     ctx: &ServerContext,
     sess: &mut SessionState,
