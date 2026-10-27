@@ -789,11 +789,11 @@ pub(super) fn handle_corp_gov(
                 let has_any_corp_shares = snap
                     .corp_shareholders
                     .get(&vc_corp)
-                    .is_some_and(|shs| shs.iter().any(|s| s.share_count > 0))
+                    .is_some_and(|shs| shs.iter().any(|s| s.shareholder_id != vc_corp && s.share_count > 0))
                     || snap
                         .corp_governance
                         .get(&vc_corp)
-                        .is_some_and(|g| g.shares.values().any(|&s| s > 0));
+                        .is_some_and(|g| g.shares.iter().any(|(&oid, &s)| oid != vc_corp && s > 0));
                 let sh_weight = snap
                     .corp_shareholders
                     .get(&vc_corp)

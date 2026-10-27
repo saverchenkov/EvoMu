@@ -101,6 +101,7 @@ async fn test_review_r6_np0_np1_regressions() {
             },
         );
     });
+    let bal_before_pi = ctx.db.get_character(90_000_001).unwrap().balance.0;
     ctx.dispatch_rpc(
         &mut s1,
         "planetMgr",
@@ -108,13 +109,22 @@ async fn test_review_r6_np0_np1_regressions() {
         "UserUpdateNetwork",
         &[
             PyRep::Integer(40_009_082),
-            PyRep::List(vec![PyRep::Tuple(vec![
-                PyRep::Integer(1),
-                PyRep::Integer(1),
-                PyRep::Integer(2534),
-                PyRep::Real(0.1),
-                PyRep::Real(0.2),
-            ])]),
+            PyRep::List(vec![
+                PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Integer(1),
+                    PyRep::Integer(2534),
+                    PyRep::Real(0.1),
+                    PyRep::Real(0.2),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Integer(2),
+                    PyRep::Integer(2848),
+                    PyRep::Real(0.15),
+                    PyRep::Real(0.25),
+                ]),
+            ]),
         ],
         &kw,
         None,
@@ -127,7 +137,6 @@ async fn test_review_r6_np0_np1_regressions() {
             ch.station_id = prev_st;
         }
     });
-    let bal_before_flush = ctx.db.get_character(90_000_001).unwrap().balance.0;
     ctx.dispatch_rpc(
         &mut s1,
         "planetMgr",
@@ -140,7 +149,7 @@ async fn test_review_r6_np0_np1_regressions() {
     .await
     .unwrap();
     let bal_after_flush = ctx.db.get_character(90_000_001).unwrap().balance.0;
-    assert!(bal_after_flush < bal_before_flush);
+    assert!(bal_after_flush < bal_before_pi);
 
     // N-P0-2: Two-party Courier contract and self-accept rejection
     let mut s2 = SessionState::new(11);

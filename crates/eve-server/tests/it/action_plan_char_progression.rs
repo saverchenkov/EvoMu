@@ -191,15 +191,10 @@ async fn test_action_plan_ch1_to_ch5_character_skills_and_gm() {
             book_item_id,
             make_test_item(book_item_id, 3410, char_id, 60_003_760, InventoryFlag::Hangar, 1, false),
         );
-        // Ensure character has Mining III prerequisite for Astrogeology
-        snap.skills.entry(char_id).or_default().insert(
-            3386,
-            TrainedSkillRecord {
-                type_id: 3386,
-                level: 3,
-                skill_points: sp_for_skill_level(1.0, 3),
-            },
-        );
+        // Ensure character has Mining IV and Science IV prerequisites for Astrogeology
+        let skills = snap.skills.entry(char_id).or_default();
+        skills.insert(3386, TrainedSkillRecord { type_id: 3386, level: 4, skill_points: sp_for_skill_level(1.0, 4) });
+        skills.insert(3402, TrainedSkillRecord { type_id: 3402, level: 4, skill_points: sp_for_skill_level(1.0, 4) });
     });
 
     let inject_rep = ctx

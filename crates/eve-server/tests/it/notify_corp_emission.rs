@@ -552,9 +552,9 @@ async fn test_corporation_governance_shares_titles_votes_and_medals_notification
     );
     assert!(ctx.drain_notifications_for_char(p3).is_empty());
 
-    // InsertVote -> OnVoteCast(corpID, voteCaseID) to P1 & P2.
+    // InsertVote -> OnVoteCast(corpID, voteCaseID) to P1 & P2 (cast by shareholder P2 who holds 400 shares).
     ctx.dispatch_rpc(
-        &mut s1,
+        &mut s2,
         "voteManager",
         None,
         "InsertVote",

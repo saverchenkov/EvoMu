@@ -404,6 +404,11 @@ async fn test_structure_jumpbridge_safety_and_deliveries() {
     sess1.role = eve_machonet::service_roles::ROLE_PLAYER;
 
     // 6. structureDeliveries: Deliver
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_1) {
+            ch.structure_id = Some(gate_b_id);
+        }
+    });
     let hangar_item = grant_item(&ctx, PILOT_1, gate_b_id, 35, InventoryFlag::Hangar, 20); // 20 Pyerite
     let deliver_rep = rpc(
         &ctx,
@@ -424,6 +429,13 @@ async fn test_structure_jumpbridge_safety_and_deliveries() {
 
     // 7. structureCargoDelivery: DropOffItems
     // Pilot undocked near gate_b in sys_b
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_1) {
+            ch.solar_system_id = sys_b;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
     sess1.solar_system_id = Some(sys_b);
     sess1.station_id = None;
     sess1.structure_id = None;

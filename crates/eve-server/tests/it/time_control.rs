@@ -340,7 +340,7 @@ async fn test_t7_injectable_server_clock_time_acceleration_and_pause_on_tick() {
     assert_eq!(cycle_time, 300); // SDE pinCycleTime (attribute 1643) = 300s
     assert_eq!(produced_type_id, 2_268); // Aqueous Liquids (harvesterType 709 on Barren extractor 2409)
     assert_eq!(first_qty, 1_000); // SDE pinExtractionQuantity (attribute 1642) = 1000 units
-    assert!((poco_tax - 750.0).abs() < 1e-6); // SDE exportTaxMultiplier (attribute 1641) = 5.0 ISK * 1000 units * 0.15 = 750.0 ISK
+    assert!(poco_tax.abs() < 1e-6); // Surface P0 extraction into extractor pin charges 0.0 orbital POCO export tax
     assert_eq!(
         fkv1.get("totalStoredQuantity"),
         Some(&PyRep::Integer(first_qty))

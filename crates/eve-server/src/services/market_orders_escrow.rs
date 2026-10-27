@@ -1151,59 +1151,21 @@ pub fn handle_orders_escrow(
             let now_unix = ctx.now_unix();
             let region_id = session.region_id.unwrap_or(10_000_002);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                if station_id >= 1_000_000_000_000
-                    && !is_structure_market_online(snap, station_id)
-                {
-                    return Err(BridgeRpcError {
-                        code: "MarketServiceOffline".into(),
-                        message: format!(
-                            "Structure {station_id} does not have an online Standup Market Hub I service"
-                        ),
-                    });
+                if station_id >= 1_000_000_000_000 && !is_structure_market_online(snap, station_id) {
+                    return Err(BridgeRpcError { code: "MarketServiceOffline".into(), message: format!("Structure {station_id} does not have an online Standup Market Hub I service") });
                 }
-                let vis_lvl = snap
-                    .skills
-                    .get(&char_id)
-                    .and_then(|m| m.get(&3447))
-                    .map(|s| s.level)
-                    .unwrap_or(0);
-                let max_vis_jumps =
-                    crate::services::market_contracts::max_remote_jumps_for_skill_level(vis_lvl);
+                let vis_lvl = snap.skills.get(&char_id).and_then(|m| m.get(&3447)).map(|s| s.level).unwrap_or(0);
+                let max_vis_jumps = crate::services::market_contracts::max_remote_jumps_for_skill_level(vis_lvl);
                 for (_, _, _, ent_st, ord_rng) in &parsed_requests {
-                    if *ent_st >= 1_000_000_000_000
-                        && !is_structure_market_online(snap, *ent_st)
-                    {
-                        return Err(BridgeRpcError {
-                            code: "MarketServiceOffline".into(),
-                            message: format!(
-                                "Structure {ent_st} does not have an online Standup Market Hub I service"
-                            ),
-                        });
+                    if *ent_st >= 1_000_000_000_000 && !is_structure_market_online(snap, *ent_st) {
+                        return Err(BridgeRpcError { code: "MarketServiceOffline".into(), message: format!("Structure {ent_st} does not have an online Standup Market Hub I service") });
                     }
-                    if *ord_rng > max_vis_jumps {
-                        return Err(BridgeRpcError {
-                            code: "InsufficientVisibilitySkill".into(),
-                            message: format!(
-                                "Order range {ord_rng} exceeds Visibility skill limit {max_vis_jumps}"
-                            ),
-                        });
+                    if *ord_rng > max_vis_jumps.max(0) {
+                        return Err(BridgeRpcError { code: "InsufficientVisibilitySkill".into(), message: format!("Order range {ord_rng} exceeds Visibility skill limit {max_vis_jumps}") });
                     }
                 }
-                let mut avail_isk = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| c.balance)
-                    .ok_or_else(|| BridgeRpcError {
-                        code: "CharacterNotFound".into(),
-                        message: format!("Character {char_id} not found"),
-                    })?;
-
-                let mut virtual_rem: HashMap<i64, i32> = snap
-                    .market_orders
-                    .values()
-                    .filter(|o| !o.is_bid && o.region_id == region_id && o.vol_remaining > 0)
-                    .map(|o| (o.order_id, o.vol_remaining))
-                    .collect();
+                let mut avail_isk = snap.characters.get(&char_id).map(|c| c.balance).ok_or_else(|| BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found") })?;
+                let mut virtual_rem: HashMap<i64, i32> = snap.market_orders.values().filter(|o| !o.is_bid && o.region_id == region_id && o.vol_remaining > 0).map(|o| (o.order_id, o.vol_remaining)).collect();
 
                 let mut planned_fills: Vec<(i64, TypeId, i32, IskCents, i64, bool, IskCents, i64, u32)> = Vec::new();
                 let mut item_statuses: Vec<PyRep> = Vec::with_capacity(parsed_requests.len());
