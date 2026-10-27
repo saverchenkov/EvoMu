@@ -787,16 +787,19 @@ pub fn register_progression_extra_handlers(
             let hex = uuid_to_hex(&target_uuid);
             let goal_corp = mgr.goal_corp_id(&target_uuid);
             let is_corp_director = goal_corp.is_some_and(|gc| {
-                mgr.db.as_ref().is_some_and(|db| {
-                    db.with_snapshot(|s| {
-                        let caller_corp = s.characters.get(&(caller_id as i64)).map(|c| c.corporation_id as u32);
-                        caller_corp == Some(gc)
-                            && s.corporations.get(&(gc as i64)).is_some_and(|corp| {
-                                corp.ceo_id == caller_id as i64
-                                    || corp.member_roles.get(&(caller_id as i64)).copied().unwrap_or(0) != 0
-                            })
+                gc != 0
+                    && mgr.db.as_ref().is_some_and(|db| {
+                        db.with_snapshot(|s| {
+                            let caller_corp = s.characters.get(&(caller_id as i64)).map(|c| c.corporation_id as u32);
+                            caller_corp == Some(gc)
+                                && s.corporations.get(&(gc as i64)).is_some_and(|corp| {
+                                    corp.ceo_id == caller_id as i64
+                                        || (corp.member_roles.get(&(caller_id as i64)).copied().unwrap_or(0)
+                                            & eve_db::corp_roles::ROLE_DIRECTOR)
+                                            != 0
+                                })
+                        })
                     })
-                })
             });
             let (creator_id, was_open) = {
                 let mut goals = mgr.generic_goals.write().unwrap_or_else(|e| e.into_inner());
@@ -893,16 +896,19 @@ pub fn register_progression_extra_handlers(
             // Resolve the audience before the corporation ledger entry is removed.
             let goal_corp = mgr.goal_corp_id(&target_uuid);
             let is_corp_director = goal_corp.is_some_and(|gc| {
-                mgr.db.as_ref().is_some_and(|db| {
-                    db.with_snapshot(|s| {
-                        let caller_corp = s.characters.get(&(caller_id as i64)).map(|c| c.corporation_id as u32);
-                        caller_corp == Some(gc)
-                            && s.corporations.get(&(gc as i64)).is_some_and(|corp| {
-                                corp.ceo_id == caller_id as i64
-                                    || corp.member_roles.get(&(caller_id as i64)).copied().unwrap_or(0) != 0
-                            })
+                gc != 0
+                    && mgr.db.as_ref().is_some_and(|db| {
+                        db.with_snapshot(|s| {
+                            let caller_corp = s.characters.get(&(caller_id as i64)).map(|c| c.corporation_id as u32);
+                            caller_corp == Some(gc)
+                                && s.corporations.get(&(gc as i64)).is_some_and(|corp| {
+                                    corp.ceo_id == caller_id as i64
+                                        || (corp.member_roles.get(&(caller_id as i64)).copied().unwrap_or(0)
+                                            & eve_db::corp_roles::ROLE_DIRECTOR)
+                                            != 0
+                                })
+                        })
                     })
-                })
             });
             let creator_id = {
                 let mut goals = mgr.generic_goals.write().unwrap_or_else(|e| e.into_inner());

@@ -1244,13 +1244,29 @@ pub fn handle(
                     return Err(rpc_err("ContractOwnershipViolation", "Not issuer or winning bidder"));
                 }
                 if c.expiration_unix == 0 || now_unix < c.expiration_unix { return Err(rpc_err("AuctionNotExpired", "Auction has not yet expired")); }
-                let winner = c.current_bidder_id.unwrap_or(c.issuer_id);
+                let has_winner = c.current_bidder_id.is_some() && c.current_bid.0 > 0;
+                let issuer_entity_id = if c.for_corp && c.issuer_corp_id != 0 {
+                    c.issuer_corp_id
+                } else {
+                    c.issuer_id
+                };
+                let winner = c.current_bidder_id.filter(|_| has_winner).unwrap_or(issuer_entity_id);
+                let target_flag = if !has_winner && c.for_corp && c.issuer_corp_id != 0 {
+                    InventoryFlag::CorpSAG1
+                } else {
+                    InventoryFlag::Hangar
+                };
                 for iid in &c.item_ids {
                     if let Some(it) = snap.items.get_mut(iid) {
-                        it.owner_id = winner; it.location_id = c.start_station_id; it.flag = InventoryFlag::Hangar; it.version += 1;
+                        it.owner_id = winner; it.location_id = c.start_station_id; it.flag = target_flag; it.version += 1;
                     }
                 }
-                if c.current_bid.0 > 0 && winner != c.issuer_id {
+                if let Some(dep_str) = snap.service_state_blobs.remove(&format!("contract_deposit:{cid}")) {
+                    if let Ok(dep_raw) = dep_str.parse::<i64>() {
+                        snap.credit_contract_issuer(&c, IskCents(dep_raw));
+                    }
+                }
+                if has_winner && winner != c.issuer_id {
                     snap.credit_contract_issuer(&c, c.current_bid);
                     if c.for_corp {
                         let bal = snap.corporations.get(&c.issuer_corp_id).map(|corp| corp.master_wallet).unwrap_or(IskCents(0));

@@ -344,7 +344,53 @@ pub fn register_plex_vault_extra_handlers(router: &PublicGatewayRouter, db: Arc<
                         .find(|o| o.id == offer_id)
                         .cloned()
                         .ok_or_else(|| format!("{STATUS_NOT_FOUND}:Offer {offer_id} not found"))?;
-                    let total_cost = offer.price_plex.max(1).saturating_mul(qty as i64);
+                    if offer.price_plex < 0 {
+                        return Err(format!("{STATUS_BAD_REQUEST}:Offer {offer_id} has invalid negative PLEX price"));
+                    }
+                    let total_cost = offer.price_plex.saturating_mul(qty as i64);
+
+                    // Validate recipient character and station BEFORE deducting PLEX
+                    let recipient_cid = active_cid.or_else(|| {
+                        let mut chars: Vec<_> = snap
+                            .characters
+                            .values()
+                            .filter(|c| c.user_id == uid)
+                            .map(|c| c.character_id)
+                            .collect();
+                        chars.sort_unstable();
+                        chars.first().copied()
+                    });
+                    let delivery_target = if !offer.product_ids.is_empty() {
+                        let Some(cid) = recipient_cid else {
+                            return Err(format!("{STATUS_BAD_REQUEST}:No valid recipient character for store delivery"));
+                        };
+                        let Some(ch) = snap.characters.get(&cid).cloned() else {
+                            return Err(format!("{STATUS_NOT_FOUND}:Recipient character {cid} not found"));
+                        };
+                        let target_station = ch.station_id.or(ch.structure_id).unwrap_or(ch.home_station_id);
+                        if target_station <= 0 {
+                            return Err(format!("{STATUS_BAD_REQUEST}:Target character {cid} has no valid delivery station"));
+                        }
+                        let mut items_to_deliver = Vec::new();
+                        for pid in &offer.product_ids {
+                            if let Some(prod) = catalog.products.iter().find(|p| p.id == *pid) {
+                                if prod.type_id > 0 && prod.quantity > 0 {
+                                    let deliver_qty = i32::try_from(prod.quantity.saturating_mul(qty))
+                                        .map_err(|_| format!("{STATUS_BAD_REQUEST}:Delivery quantity overflow"))?;
+                                    items_to_deliver.push((prod.type_id, deliver_qty));
+                                }
+                            }
+                        }
+                        Some((cid, target_station, items_to_deliver))
+                    } else if let Some(cid) = active_cid {
+                        if !snap.characters.contains_key(&cid) {
+                            return Err(format!("{STATUS_NOT_FOUND}:Recipient character {cid} not found"));
+                        }
+                        None
+                    } else {
+                        None
+                    };
+
                     let cur = snap.account_plex_vault.entry(uid).or_insert(0);
                     if *cur < total_cost {
                         return Err(format!("{STATUS_BAD_REQUEST}:Insufficient PLEX balance"));
@@ -356,45 +402,24 @@ pub fn register_plex_vault_extra_handlers(router: &PublicGatewayRouter, db: Arc<
                     let desc = format!("NES Purchase: {}", offer.name);
                     record_plex_transaction(snap, tx_id, uid, -total_cost, bal, &desc, now_unix);
 
-                    let recipient_cid = active_cid.or_else(|| {
-                        let mut chars: Vec<_> = snap
-                            .characters
-                            .values()
-                            .filter(|c| c.user_id == uid)
-                            .map(|c| c.character_id)
-                            .collect();
-                        chars.sort_unstable();
-                        chars.first().copied()
-                    });
-                    if let Some(cid) = recipient_cid {
-                        if let Some(ch) = snap.characters.get(&cid).cloned() {
-                            let target_station = ch.station_id.or(ch.structure_id).unwrap_or(ch.home_station_id);
-                            if target_station > 0 {
-                                for pid in &offer.product_ids {
-                                    if let Some(prod) = catalog.products.iter().find(|p| p.id == *pid) {
-                                        if prod.type_id > 0 && prod.quantity > 0 {
-                                            let deliver_qty = i32::try_from(prod.quantity.saturating_mul(qty))
-                                                .map_err(|_| format!("{STATUS_BAD_REQUEST}:Delivery quantity overflow"))?;
-                                            snap.next_entity_id += 1;
-                                            let item_id = snap.next_entity_id;
-                                            snap.items.insert(
-                                                item_id,
-                                                eve_db::InventoryItemRecord {
-                                                    item_id,
-                                                    type_id: prod.type_id,
-                                                    owner_id: cid,
-                                                    location_id: target_station,
-                                                    flag: eve_db::InventoryFlag::Hangar,
-                                                    quantity: deliver_qty,
-                                                    singleton: false,
-                                                    version: 1,
-                                                    ..Default::default()
-                                                },
-                                            );
-                                        }
-                                    }
-                                }
-                            }
+                    if let Some((cid, target_station, items_to_deliver)) = delivery_target {
+                        for (type_id, deliver_qty) in items_to_deliver {
+                            snap.next_entity_id += 1;
+                            let item_id = snap.next_entity_id;
+                            snap.items.insert(
+                                item_id,
+                                eve_db::InventoryItemRecord {
+                                    item_id,
+                                    type_id,
+                                    owner_id: cid,
+                                    location_id: target_station,
+                                    flag: eve_db::InventoryFlag::Hangar,
+                                    quantity: deliver_qty,
+                                    singleton: false,
+                                    version: 1,
+                                    ..Default::default()
+                                },
+                            );
                         }
                     }
                     let omega_notice = if offer.category_id == 1 {

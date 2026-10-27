@@ -67,6 +67,7 @@ mod economy_market_part2;
 mod economy_market_part3;
 mod economy_market_industry;
 mod economy_market_industry_part2;
+mod economy_quasar_esi_r4_regressions;
 mod esi;
 mod esi_corp_alliance;
 mod esi_fittings_war_killmails;

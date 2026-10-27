@@ -998,10 +998,10 @@ pub fn dispatch_economy_route(
                     .contracts
                     .values()
                     .filter(|c| {
-                        c.issuer_corp_id == corp_id
+                        (c.for_corp
+                            && (c.issuer_corp_id == corp_id || corp.members.contains(&c.issuer_id)))
                             || c.assignee_id == corp_id
                             || c.acceptor_id == Some(corp_id)
-                            || (c.for_corp && corp.members.contains(&c.issuer_id))
                     })
                     .collect();
                 contracts.sort_by_key(|c| c.contract_id);
@@ -1063,10 +1063,10 @@ pub fn dispatch_economy_route(
                     );
                 };
                 let Some(c) = snap.contracts.get(&contract_id).filter(|c| {
-                    c.issuer_corp_id == corp_id
+                    (c.for_corp
+                        && (c.issuer_corp_id == corp_id || corp.members.contains(&c.issuer_id)))
                         || c.assignee_id == corp_id
                         || c.acceptor_id == Some(corp_id)
-                        || (c.for_corp && corp.members.contains(&c.issuer_id))
                 }) else {
                     return RouteExecutionResult::error(
                         404,
@@ -1094,10 +1094,10 @@ pub fn dispatch_economy_route(
                     );
                 };
                 let Some(c) = snap.contracts.get(&contract_id).filter(|c| {
-                    c.issuer_corp_id == corp_id
+                    (c.for_corp
+                        && (c.issuer_corp_id == corp_id || corp.members.contains(&c.issuer_id)))
                         || c.assignee_id == corp_id
                         || c.acceptor_id == Some(corp_id)
-                        || (c.for_corp && corp.members.contains(&c.issuer_id))
                 }) else {
                     return RouteExecutionResult::error(
                         404,

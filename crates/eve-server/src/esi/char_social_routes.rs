@@ -678,13 +678,20 @@ pub fn dispatch_char_social_route(
                     .calendar_responses
                     .read()
                     .unwrap_or_else(|e| e.into_inner());
+                let corp_alliance_id = snap
+                    .corporations
+                    .get(&ch.corporation_id)
+                    .and_then(|c| c.alliance_id);
                 let mut visible: Vec<_> = events_guard
                     .values()
                     .filter(|ev| {
                         let invited = ev.owner_id == char_id
                             || ev.attendees.contains(&char_id)
                             || (ev.owner_type == "corporation"
-                                && ev.owner_id == ch.corporation_id);
+                                && ev.owner_id == ch.corporation_id)
+                            || (ev.owner_type == "alliance"
+                                && corp_alliance_id == Some(ev.owner_id))
+                            || ev.owner_type == "eve_server";
                         invited && from_event.is_none_or(|f| ev.event_id >= f)
                     })
                     .collect();
@@ -737,16 +744,22 @@ pub fn dispatch_char_social_route(
                         format!("Calendar event {event_id} not found"),
                     );
                 };
-                if ev.owner_id != char_id && !ev.attendees.is_empty() && !ev.attendees.contains(&char_id) {
-                    return RouteExecutionResult::error(
-                        403,
-                        format!("Character {char_id} is not invited to calendar event {event_id}"),
-                    );
-                }
+                let corp_alliance_id = snap
+                    .corporations
+                    .get(&ch.corporation_id)
+                    .and_then(|c| c.alliance_id);
                 let invited = ev.owner_id == char_id
                     || ev.attendees.contains(&char_id)
-                    || (ev.owner_type == "corporation" && ev.owner_id == ch.corporation_id);
+                    || (ev.owner_type == "corporation" && ev.owner_id == ch.corporation_id)
+                    || (ev.owner_type == "alliance" && corp_alliance_id == Some(ev.owner_id))
+                    || ev.owner_type == "eve_server";
                 if !invited {
+                    if !ev.attendees.is_empty() {
+                        return RouteExecutionResult::error(
+                            403,
+                            format!("Character {char_id} is not invited to calendar event {event_id}"),
+                        );
+                    }
                     return RouteExecutionResult::error(
                         404,
                         format!("Calendar event {event_id} not found for character {char_id}"),
@@ -813,13 +826,58 @@ pub fn dispatch_char_social_route(
                     ));
                 }
             };
-            let exists = ctx
-                .db
-                .with_snapshot(|snap| snap.characters.contains_key(&char_id));
-            if !exists {
+            let Some((corp_id, corp_alliance_id)) = ctx.db.with_snapshot(|snap| {
+                let ch = snap.characters.get(&char_id)?;
+                let ally_id = snap
+                    .corporations
+                    .get(&ch.corporation_id)
+                    .and_then(|c| c.alliance_id);
+                Some((ch.corporation_id, ally_id))
+            }) else {
                 return Some(RouteExecutionResult::error(
                     404,
                     format!("Character {char_id} not found"),
+                ));
+            };
+            let (event_exists, is_invited) = {
+                let esi_guard = ctx
+                    .esi_state
+                    .calendar_events
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                if let Some(ev) = esi_guard.get(&event_id) {
+                    let inv = ev.owner_id == char_id
+                        || ev.attendees.contains(&char_id)
+                        || (ev.owner_type == "corporation" && ev.owner_id == corp_id)
+                        || (ev.owner_type == "alliance" && corp_alliance_id == Some(ev.owner_id))
+                        || ev.owner_type == "eve_server";
+                    (true, inv)
+                } else {
+                    drop(esi_guard);
+                    let s = ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(ev) = s.calendar_events.get(&event_id).filter(|e| !e.is_deleted) {
+                        let inv = ev.owner_id == char_id
+                            || ev.creator_id == char_id
+                            || ev.responses.contains_key(&char_id)
+                            || (ev._scope == "Corporation" && ev.owner_id == corp_id)
+                            || (ev._scope == "Alliance" && corp_alliance_id == Some(ev.owner_id))
+                            || ev._scope == "CCP";
+                        (true, inv)
+                    } else {
+                        (false, false)
+                    }
+                }
+            };
+            if !event_exists {
+                return Some(RouteExecutionResult::error(
+                    404,
+                    format!("Calendar event {event_id} not found"),
+                ));
+            }
+            if !is_invited {
+                return Some(RouteExecutionResult::error(
+                    403,
+                    format!("Character {char_id} is not invited to calendar event {event_id}"),
                 ));
             }
             let social_ev = crate::services::fleet_social::update_calendar_response_from_esi(
@@ -831,30 +889,30 @@ pub fn dispatch_char_social_route(
             let ev_meta = if let Some(meta) = social_ev {
                 meta
             } else {
-                let esi_ev = ctx
+                let mut esi_guard = ctx
                     .esi_state
                     .calendar_events
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&event_id)
-                    .map(|ev| {
-                        // Convert Unix epoch seconds to BlueOS FILETIME ticks (100 ns since 1601-01-01).
-                        let filetime = (ev.event_date_unix as i64 + 11_644_473_600) * 10_000_000;
-                        (
-                            ev.owner_id,
-                            filetime,
-                            ev.duration_minutes,
-                            ev.title.clone(),
-                            ev.importance,
-                        )
-                    });
-                let Some(meta) = esi_ev else {
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                let Some(ev) = esi_guard.get_mut(&event_id) else {
                     return Some(RouteExecutionResult::error(
                         404,
                         format!("Calendar event {event_id} not found"),
                     ));
                 };
-                meta
+                if !ev.attendees.contains(&char_id) {
+                    ev.attendees.push(char_id);
+                    ev.attendees.sort_unstable();
+                }
+                // Convert Unix epoch seconds to BlueOS FILETIME ticks (100 ns since 1601-01-01).
+                let filetime = (ev.event_date_unix as i64 + 11_644_473_600) * 10_000_000;
+                (
+                    ev.owner_id,
+                    filetime,
+                    ev.duration_minutes,
+                    ev.title.clone(),
+                    ev.importance,
+                )
             };
             ctx.esi_state
                 .calendar_responses
@@ -886,12 +944,12 @@ pub fn dispatch_char_social_route(
                 Err(e) => return Some(e),
             };
             Some(ctx.db.with_snapshot(|snap| {
-                if !snap.characters.contains_key(&char_id) {
+                let Some(ch) = snap.characters.get(&char_id) else {
                     return RouteExecutionResult::error(
                         404,
                         format!("Character {char_id} not found"),
                     );
-                }
+                };
                 let events_guard = ctx
                     .esi_state
                     .calendar_events
@@ -903,7 +961,16 @@ pub fn dispatch_char_social_route(
                         format!("Calendar event {event_id} not found"),
                     );
                 };
-                if ev.owner_id != char_id && !ev.attendees.is_empty() && !ev.attendees.contains(&char_id) {
+                let corp_alliance_id = snap
+                    .corporations
+                    .get(&ch.corporation_id)
+                    .and_then(|c| c.alliance_id);
+                let invited = ev.owner_id == char_id
+                    || ev.attendees.contains(&char_id)
+                    || (ev.owner_type == "corporation" && ev.owner_id == ch.corporation_id)
+                    || (ev.owner_type == "alliance" && corp_alliance_id == Some(ev.owner_id))
+                    || ev.owner_type == "eve_server";
+                if !invited {
                     return RouteExecutionResult::error(
                         403,
                         format!("Character {char_id} is not invited to calendar event {event_id}"),

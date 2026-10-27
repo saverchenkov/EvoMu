@@ -137,6 +137,35 @@ impl WorldStateWalDelta {
             && old.corp_vote_cases == new.corp_vote_cases
             && old.corp_vote_ballots == new.corp_vote_ballots
             && old.corp_governance == new.corp_governance
+            && old.service_state_blobs == new.service_state_blobs
+            && old.quasar_state_blobs == new.quasar_state_blobs
+            && old.sov_prospecting_levels == new.sov_prospecting_levels
+            && old.system_jump_events == new.system_jump_events
+            && old.system_kill_events == new.system_kill_events
+            && old.sov_campaign_scores == new.sov_campaign_scores
+            && old.fw_character_stats == new.fw_character_stats
+            && old.fw_corp_enlisted_on == new.fw_corp_enlisted_on
+            && old.fw_system_occupations == new.fw_system_occupations
+            && old.fw_wars == new.fw_wars
+            && old.war_lifecycle_meta == new.war_lifecycle_meta
+            && old.killmail_details == new.killmail_details
+            && old.station_office_rental_costs == new.station_office_rental_costs
+            && old.alliance_lifecycle_meta == new.alliance_lifecycle_meta
+            && old.corp_hangar_divisions == new.corp_hangar_divisions
+            && old.structure_esi_timer_meta == new.structure_esi_timer_meta
+            && old.corp_alliance_history == new.corp_alliance_history
+            && old.corp_medals == new.corp_medals
+            && old.corp_issued_medals == new.corp_issued_medals
+            && old.corp_member_limits == new.corp_member_limits
+            && old.corp_titles == new.corp_titles
+            && old.corp_member_titles == new.corp_member_titles
+            && old.corp_role_assignments == new.corp_role_assignments
+            && old.corp_role_history == new.corp_role_history
+            && old.corp_shareholders == new.corp_shareholders
+            && old.corp_project_contributors == new.corp_project_contributors
+            && old.char_medals == new.char_medals
+            && old.char_scoped_roles == new.char_scoped_roles
+            && old.loyalty_store_offers == new.loyalty_store_offers
             && old.employment_history == new.employment_history
             && old.alliance_war_state == new.alliance_war_state
             && old.war_state == new.war_state
@@ -813,5 +842,30 @@ impl WorldRepository {
         self.with_mut_snapshot(|snap| {
             snap.asteroids.entry(record.asteroid_id).or_insert(record);
         });
+    }
+}
+
+#[cfg(test)]
+mod r4_persistence_tests {
+    use super::*;
+
+    #[test]
+    fn test_r4_198_wal_delta_cold_equal_detects_blobs_and_corp_maps() {
+        let old = WorldStateSnapshot::default();
+
+        let mut new_svc = old.clone();
+        new_svc.service_state_blobs.insert("contract_deposit:1".into(), "10000".into());
+        let delta_svc = WorldStateWalDelta::from_diff(&old, &new_svc);
+        assert!(delta_svc.full_snapshot.is_some(), "service_state_blobs change must trigger full_snapshot");
+
+        let mut new_quasar = old.clone();
+        new_quasar.quasar_state_blobs.insert("entitlement_ledger".into(), "{}".into());
+        let delta_quasar = WorldStateWalDelta::from_diff(&old, &new_quasar);
+        assert!(delta_quasar.full_snapshot.is_some(), "quasar_state_blobs change must trigger full_snapshot");
+
+        let mut new_limits = old.clone();
+        new_limits.corp_member_limits.insert(98_000_001, 50);
+        let delta_limits = WorldStateWalDelta::from_diff(&old, &new_limits);
+        assert!(delta_limits.full_snapshot.is_some(), "corp_member_limits change must trigger full_snapshot");
     }
 }

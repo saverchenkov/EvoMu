@@ -910,7 +910,7 @@ fn register_payment_token_and_purchase_handlers(
             }).ok_or_else(|| (STATUS_NOT_FOUND, format!("Store offer {offer_id} not found")))?;
 
             // DERIVED: 1 PLEX = 5 USD cents ($0.05/PLEX retail benchmark)
-            let amount_in_cents = (offer.price_plex.max(1) as u64) * 5;
+            let amount_in_cents = (offer.price_plex.max(0) as u64) * 5;
             let currency = "USD";
 
             let mut cost_bytes = Vec::new();
@@ -982,6 +982,31 @@ fn register_payment_token_and_purchase_handlers(
             }).or_else(|| raw_fields.get(&2).map(|v| *v as u32));
             let tok_id = token_id_opt.ok_or_else(|| (STATUS_BAD_REQUEST, "Missing token ID".to_string()))?;
 
+            let qty = dyn_msg
+                .get(1)
+                .and_then(|v| match v {
+                    DynamicValue::Message(order) => order.get(2).and_then(|qv| match qv {
+                        DynamicValue::Uint32(u) => Some(*u),
+                        DynamicValue::Uint64(u) => Some(*u as u32),
+                        DynamicValue::Int32(i) => Some(*i as u32),
+                        DynamicValue::Int64(i) => Some(*i as u32),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+                .or_else(|| {
+                    dyn_msg.get(3).and_then(|qv| match qv {
+                        DynamicValue::Uint32(u) => Some(*u),
+                        DynamicValue::Uint64(u) => Some(*u as u32),
+                        DynamicValue::Int32(i) => Some(*i as u32),
+                        DynamicValue::Int64(i) => Some(*i as u32),
+                        _ => None,
+                    })
+                })
+                .or_else(|| raw_fields.get(&3).map(|v| *v as u32))
+                .unwrap_or(1)
+                .clamp(1, 10_000);
+
             let now_unix = ctx.now_unix();
             let active_char_id = ctx.effective_character_id().map(|c| c as i64);
 
@@ -993,6 +1018,9 @@ fn register_payment_token_and_purchase_handlers(
                         .into_iter()
                         .find(|o| o.id as u64 == offer_id)
                         .ok_or_else(|| format!("{STATUS_NOT_FOUND}:Store offer {offer_id} not found"))?;
+                    if offer.price_plex < 0 {
+                        return Err(format!("{STATUS_BAD_REQUEST}:Store offer {offer_id} has invalid negative PLEX price"));
+                    }
 
                     let mut tokens: Vec<PaymentTokenRecord> = snap
                         .service_state_blobs
@@ -1021,11 +1049,6 @@ fn register_payment_token_and_purchase_handlers(
                         ));
                     }
 
-                    tok.consumed = true;
-                    if let Ok(serialized) = serde_json::to_string(&tokens) {
-                        snap.service_state_blobs.insert("payment_tokens".to_string(), serialized);
-                    }
-
                     let mut user_chars: Vec<_> = snap
                         .characters
                         .values()
@@ -1035,16 +1058,20 @@ fn register_payment_token_and_purchase_handlers(
                     user_chars.sort_by_key(|c| c.character_id);
 
                     let chosen_char = if let Some(acid) = active_char_id {
-                        user_chars
-                            .iter()
-                            .find(|c| c.character_id == acid)
-                            .cloned()
-                            .or_else(|| user_chars.first().cloned())
+                        if let Some(ch) = snap.characters.get(&acid) {
+                            if ch.user_id == uid {
+                                Some(ch.clone())
+                            } else {
+                                return Err(format!("{STATUS_FORBIDDEN}:Target character {acid} does not belong to user"));
+                            }
+                        } else {
+                            return Err(format!("{STATUS_NOT_FOUND}:Target character {acid} not found"));
+                        }
                     } else {
                         user_chars.first().cloned()
                     };
 
-                    if offer_id != 1001 {
+                    let delivery_target = if offer_id != 1001 && !offer.product_ids.is_empty() {
                         let ch = chosen_char.as_ref().ok_or_else(|| {
                             format!("{STATUS_BAD_REQUEST}:No valid recipient character for purchase")
                         })?;
@@ -1055,39 +1082,54 @@ fn register_payment_token_and_purchase_handlers(
                             .ok_or_else(|| {
                                 format!("{STATUS_BAD_REQUEST}:Target character has no valid station")
                             })?;
-
-                        let cid = ch.character_id;
+                        let mut items_to_deliver = Vec::new();
                         for pid in &offer.product_ids {
                             if let Some(prod) = catalog.products.iter().find(|p| p.id == *pid) {
                                 if prod.type_id > 0 && prod.quantity > 0 {
-                                    if let Some(existing) = snap.items.values_mut().find(|it| {
-                                        it.owner_id == cid
-                                            && it.location_id == target_station
-                                            && it.flag == eve_db::InventoryFlag::Hangar
-                                            && it.type_id == prod.type_id
-                                            && !it.singleton
-                                    }) {
-                                        existing.quantity = existing.quantity.saturating_add(prod.quantity as i32);
-                                        existing.version += 1;
-                                    } else {
-                                        snap.next_entity_id += 1;
-                                        let item_id = snap.next_entity_id;
-                                        snap.items.insert(
-                                            item_id,
-                                            eve_db::InventoryItemRecord {
-                                                item_id,
-                                                type_id: prod.type_id,
-                                                owner_id: cid,
-                                                location_id: target_station,
-                                                flag: eve_db::InventoryFlag::Hangar,
-                                                quantity: prod.quantity as i32,
-                                                singleton: false,
-                                                version: 1,
-                                                ..Default::default()
-                                            },
-                                        );
-                                    }
+                                    let deliver_qty = i32::try_from(prod.quantity.saturating_mul(qty))
+                                        .map_err(|_| format!("{STATUS_BAD_REQUEST}:Delivery quantity overflow"))?;
+                                    items_to_deliver.push((prod.type_id, deliver_qty));
                                 }
+                            }
+                        }
+                        Some((ch.character_id, target_station, items_to_deliver))
+                    } else {
+                        None
+                    };
+
+                    tok.consumed = true;
+                    if let Ok(serialized) = serde_json::to_string(&tokens) {
+                        snap.service_state_blobs.insert("payment_tokens".to_string(), serialized);
+                    }
+
+                    if let Some((cid, target_station, items_to_deliver)) = delivery_target {
+                        for (type_id, deliver_qty) in items_to_deliver {
+                            if let Some(existing) = snap.items.values_mut().find(|it| {
+                                it.owner_id == cid
+                                    && it.location_id == target_station
+                                    && it.flag == eve_db::InventoryFlag::Hangar
+                                    && it.type_id == type_id
+                                    && !it.singleton
+                            }) {
+                                existing.quantity = existing.quantity.saturating_add(deliver_qty);
+                                existing.version += 1;
+                            } else {
+                                snap.next_entity_id += 1;
+                                let item_id = snap.next_entity_id;
+                                snap.items.insert(
+                                    item_id,
+                                    eve_db::InventoryItemRecord {
+                                        item_id,
+                                        type_id,
+                                        owner_id: cid,
+                                        location_id: target_station,
+                                        flag: eve_db::InventoryFlag::Hangar,
+                                        quantity: deliver_qty,
+                                        singleton: false,
+                                        version: 1,
+                                        ..Default::default()
+                                    },
+                                );
                             }
                         }
                     }
@@ -1098,14 +1140,16 @@ fn register_payment_token_and_purchase_handlers(
                         let (_, notice) = crate::services::quasar_auth_user::activate_user_omega_license_in_snapshot(
                             snap,
                             uid,
-                            30 * 86_400,
+                            30 * 86_400 * u64::from(qty),
                             now_unix,
                         );
                         omega_notice = Some(notice);
                     }
 
                     // DERIVED: 1 PLEX = 5 USD cents ($0.05/PLEX retail benchmark)
-                    let amount_in_cents = (offer.price_plex.max(1) as u32) * 5;
+                    let amount_in_cents = (offer.price_plex.max(0) as u32)
+                        .saturating_mul(5)
+                        .saturating_mul(qty);
                     snap.next_entity_id += 1;
                     let rid = snap.next_entity_id as u64;
                     let mut receipts: Vec<PaymentReceiptRecord> = snap

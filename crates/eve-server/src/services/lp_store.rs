@@ -521,6 +521,10 @@ fn take_offer(
                     message: "Not enough ISK for corporation LP store purchase".into(),
                 });
             }
+            if offer.ak_cost > 0 {
+                let ak_cost = offer.ak_cost.saturating_mul(qty);
+                crate::services::project_discovery::spend_analysis_kredits_in_snap(snap, char_id, ak_cost)?;
+            }
             let rem = current_lp - total_lp_cost;
             corp_balances.insert(offer.corp_id, rem);
             save_corp_lp_balances(snap, player_corp_id, &corp_balances);
