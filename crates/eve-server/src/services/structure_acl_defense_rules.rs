@@ -229,6 +229,17 @@ pub fn handle_board_structure(
     ctx.db.try_with_mut_snapshot(|snap| {
         let st = ops::require_structure_corp_member(snap, char_id, structure_id)?;
         ops::require_structure_control_role(snap, char_id, &st)?;
+        if session.structure_id != Some(structure_id)
+            && session.solar_system_id != Some(st.solar_system_id)
+        {
+            return Err(err(
+                "NotDockedInStructure",
+                format!(
+                    "Must be docked in structure {structure_id} (or in system {}) to board it",
+                    st.solar_system_id
+                ),
+            ));
+        }
         let mut ext = load_ext_state(snap);
         if let Some(&pilot) = ext.active_pilot_by_structure.get(&structure_id) {
             if pilot != char_id {

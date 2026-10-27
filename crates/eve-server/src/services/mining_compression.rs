@@ -202,6 +202,16 @@ pub fn structure_has_online_reprocessing_service(
     structure_id: i64,
     st_type_id: TypeId,
 ) -> bool {
+    if snap.structures.get(&structure_id).is_some_and(|st| {
+        !st.quantum_core_installed
+            || st.fuel_blocks == 0
+            || matches!(
+                st.state.as_str(),
+                "Destroyed" | "Anchoring" | "AnchorVulnerable" | "NoCore"
+            )
+    }) {
+        return false;
+    }
     let is_reproc_mod = |it: &InventoryItemRecord| -> bool {
         matches!(it.type_id, 35899 | 35892 | 35894)
             || sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1322)
@@ -351,12 +361,35 @@ pub async fn handle_in_space_compression_mgr(
     });
 
     let handle = ctx.systems.get_or_spawn(sys_id);
+    if let Some(sid) = ship_id {
+        if handle
+            .get_combat_state(sid)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|cs| cs.is_cloaked)
+        {
+            return Err(BridgeRpcError {
+                code: "CannotCompressWhileCloaked".into(),
+                message: "Cannot compress ore while ship is cloaked".into(),
+            });
+        }
+    }
     let my_pos = match ship_id {
         Some(sid) => handle.get_ball_snapshot(sid).await.ok().flatten().map(|(_, b)| b.position),
         None => None,
     };
     let mut in_range_compressor = false;
     for (c_ship_id, max_range) in candidate_compressors {
+        if handle
+            .get_combat_state(c_ship_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|cs| cs.is_cloaked)
+        {
+            continue;
+        }
         if Some(c_ship_id) == ship_id {
             in_range_compressor = true;
             break;

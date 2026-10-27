@@ -238,7 +238,8 @@ pub async fn handle_hub_and_scan(
                     }
                     let owned_or_installed = it.owner_id == char_id
                         || it.owner_id == caller_corp_id
-                        || it.location_id == hub_id;
+                        || (it.location_id == hub_id
+                            && it.flag == eve_db::InventoryFlag::SubSystemSlot0);
                     let in_hub = it.location_id == hub_id;
                     let in_ship = active_ship_id == Some(it.location_id);
                     if !owned_or_installed || (!in_hub && !in_ship) {

@@ -334,3 +334,135 @@ async fn test_structure_unanchor_rename_control_and_schedule_regressions() {
         .expect("schedule");
     assert_eq!(kv_i64(&sched, "applyAfterUnix"), ctx.now_unix() as i64 + 86_400);
 }
+
+#[tokio::test]
+async fn test_r3_track2_structures_compression_special_sites_regressions() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let char_id = 90_000_001;
+    let other_id = 90_000_002;
+    let mut sess = login_with_corp(&ctx, 3099, char_id).await;
+    let _other = login(&ctx, 3100, "other", "other-secret", other_id).await;
+    let struct_id = undock_and_anchor(&ctx, &mut sess, char_id, "Track2 Astrahus").await;
+    let ship_id = sess.ship_id.expect("ship");
+    let sys_id = sess.solar_system_id.expect("sys");
+
+    // #118: Unfueled Athanor (35835) has no online reprocessing service, and cloaked ship cannot CompressItemInSpace
+    let athanor_id = 1_040_000_999_118_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = snap.structures.get(&struct_id).expect("struct").clone();
+        st.structure_id = athanor_id;
+        st.type_id = 35835;
+        st.fuel_blocks = 0;
+        snap.structures.insert(athanor_id, st);
+    });
+    let has_reproc = ctx.db.with_snapshot(|snap| {
+        eve_server::services::mining_advanced::structure_has_online_reprocessing_service(
+            &ctx.sde, snap, athanor_id, 35835,
+        )
+    });
+    assert!(!has_reproc, "#118: Unfueled refinery must not report online reprocessing service");
+
+    // #119: Docked session cannot complete special dungeon instance
+    let mut docked_sess = sess.clone();
+    docked_sess.station_id = Some(60_003_760);
+    let err_119 = eve_server::services::pve_special_sites::complete_special_dungeon_instance(
+        &ctx, &mut docked_sess, 710_001, 1,
+    )
+    .await
+    .expect_err("#119: Docked session must not complete special dungeon");
+    assert_eq!(err_119.code, "ShipDocked");
+
+    // #121: structureDeliveries.Deliver while undocked fails; when docked, rejects active ship and non-empty container
+    let hangar_item = grant_item(&ctx, char_id, struct_id, 34, InventoryFlag::Hangar, 10);
+    let err_121_undocked = rpc(
+        &ctx,
+        &mut sess,
+        "structureDeliveries",
+        "Deliver",
+        &[PyRep::Integer(struct_id), PyRep::Integer(hangar_item), PyRep::Integer(other_id)],
+    )
+    .await
+    .expect_err("#121: Undocked caller cannot Deliver");
+    assert_eq!(err_121_undocked.code, "NotDockedInStructure");
+
+    // #122: structureCargoDelivery.DropOffItems rejects fitted rig on active ship
+    let fitted_rig = grant_item(&ctx, char_id, ship_id, 31_716, InventoryFlag::RigSlot0, 1);
+    let err_122 = rpc(
+        &ctx,
+        &mut sess,
+        "structureCargoDelivery",
+        "DropOffItems",
+        &[PyRep::Integer(struct_id), PyRep::List(vec![PyRep::Integer(fitted_rig)])],
+    )
+    .await
+    .expect_err("#122: Fitted rig must not be dropped off via DropOffItems");
+    assert_eq!(err_122.code, "ItemNotInShipCargo");
+
+    // #123: BoardStructure rejects caller in a different solar system
+    let mut remote_sess = sess.clone();
+    remote_sess.structure_id = None;
+    remote_sess.solar_system_id = Some(30_002_187);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = 30_002_187;
+            ch.structure_id = None;
+        }
+    });
+    let err_123 = rpc(
+        &ctx,
+        &mut remote_sess,
+        "structureControl",
+        "BoardStructure",
+        &[PyRep::Integer(struct_id)],
+    )
+    .await
+    .expect_err("#123: Cross-system BoardStructure must be rejected");
+    assert_eq!(err_123.code, "NotDockedInStructure");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+        }
+    });
+
+    // Dock in struct_id to test #121 active ship / container delivery & #124 Upwell insurance rejection
+    rpc(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(struct_id)])
+        .await
+        .expect("Dock");
+    let err_121_ship = rpc(
+        &ctx,
+        &mut sess,
+        "structureDeliveries",
+        "Deliver",
+        &[PyRep::Integer(struct_id), PyRep::Integer(ship_id), PyRep::Integer(other_id)],
+    )
+    .await
+    .expect_err("#121: Cannot deliver active boarded ship");
+    assert_eq!(err_121_ship.code, "CannotDeliverActiveShip");
+
+    let box_id = grant_item(&ctx, char_id, struct_id, 3293, InventoryFlag::Hangar, 1);
+    let _nested = grant_item(&ctx, char_id, box_id, 34, InventoryFlag::Cargo, 5);
+    let err_121_box = rpc(
+        &ctx,
+        &mut sess,
+        "structureDeliveries",
+        "Deliver",
+        &[PyRep::Integer(struct_id), PyRep::Integer(box_id), PyRep::Integer(other_id)],
+    )
+    .await
+    .expect_err("#121: Non-empty container must not be delivered without contents");
+    assert_eq!(err_121_box.code, "CannotDeliverNonEmptyContainer");
+
+    // #124: InsureShip rejects ships docked in Upwell structures
+    let err_124 = rpc(
+        &ctx,
+        &mut sess,
+        "insuranceSvc",
+        "InsureShip",
+        &[PyRep::Integer(ship_id), PyRep::Real(1.0)],
+    )
+    .await
+    .expect_err("#124: Upwell structures do not offer NPC ship insurance");
+    assert_eq!(err_124.code, "StationServiceUnavailable");
+    let _ = sys_id;
+}

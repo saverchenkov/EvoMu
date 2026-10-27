@@ -84,6 +84,7 @@ pub fn sync_ship_insurance_contracts(ctx: &ServerContext, owner_id: i64) {
                 && payout_isk > 0.0
                 && (item_owner == owner_id || owner_id == 0)
                 && !rt.insurance_contracts.contains_key(&sid)
+                && !voided_ship_ids.contains(&sid)
             {
                 let ref_val = compute_ship_insurance_reference_value(&ctx.sde, type_id);
                 let frac = (payout_isk / ref_val.max(1.0)).clamp(0.4, 1.0);
