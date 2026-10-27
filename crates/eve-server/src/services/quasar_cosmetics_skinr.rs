@@ -356,23 +356,7 @@ impl Default for SkinrCosmeticsData {
             next_job_seq: 1,
             title_def_version: [24, 1, 0],
             tenant_title_versions: BTreeMap::new(),
-            title_definitions: vec![
-                TitleDefinitionRecord {
-                    title_id: 101,
-                    name: "Grand Admiral".into(),
-                    internal_name: "title_grand_admiral".into(),
-                },
-                TitleDefinitionRecord {
-                    title_id: 102,
-                    name: "Fleet Commander".into(),
-                    internal_name: "title_fleet_commander".into(),
-                },
-                TitleDefinitionRecord {
-                    title_id: 103,
-                    name: "Sovereign Vanguard".into(),
-                    internal_name: "title_sovereign_vanguard".into(),
-                },
-            ],
+            title_definitions: Vec::new(),
         }
     }
 }

@@ -327,6 +327,81 @@
       "evidence": "crates/eve-server/src/services/agents_standings_arcs.rs:318-378 static_npc_faction_standings() is a static table of inter-faction standings because crpNPCCorporations/chrFactions inter-faction standings are not included in the runtime SDE bundle.",
       "id": "feat:standings.npc-npc-standings",
       "flagged_by_audit": "20261026-171500"
+    },
+    {
+      "evidence": "Depends on load_lp_offers which is empty in production unless seeded by tests/it/common.rs::seed_test_lp_store_offers.",
+      "id": "rpc:LPStoreMgr.TakeOfferForCharacter",
+      "flagged_by_audit": "20261026-170000"
+    },
+    {
+      "evidence": "Depends on load_lp_offers which is empty in production unless seeded by tests/it/common.rs::seed_test_lp_store_offers.",
+      "id": "rpc:LPStoreMgr.TakeOfferForCorporation",
+      "flagged_by_audit": "20261026-170000"
+    },
+    {
+      "evidence": "LP Store purchase flow fails with OfferNotFound in production because no LP store catalog is loaded outside test helpers.",
+      "id": "feat:lp.lp-store-buy",
+      "flagged_by_audit": "20261026-170000"
+    },
+    {
+      "evidence": "Depends on read_store_catalog (empty outside test seeding) and derived 1 PLEX = 5 USD cents formula in quasar_payment_store.rs.",
+      "id": "quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj",
+      "flagged_by_audit": "20261026-170000"
+    },
+    {
+      "evidence": "Paragon Hub component listings are un-seeded in production unless populated via test helpers or external catalog data.",
+      "id": "quasar:eveProto/generated/eve_public/cosmetic/market/component/listing/api/requests_pb2.pyj",
+      "flagged_by_audit": "20261026-170000"
+    },
+    {
+      "evidence": "Paragon Hub component listings are un-seeded in production unless populated via test helpers or external catalog data.",
+      "id": "quasar:eveProto/generated/eve_public/cosmetic/market/component/listing/api/api_pb2.pyj",
+      "flagged_by_audit": "20261026-170000"
+    },
+    {
+      "evidence": "Paragon Hub SKIN market listings use derived broker fee, EverMark buyer fee (tier * 1,000 / tier * 2,500), and tax rate (10% / 20%) schedules in quasar_cosmetics_market.rs.",
+      "id": "quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/requests_pb2.pyj",
+      "flagged_by_audit": "20261026-170000"
+    },
+    {
+      "evidence": "Paragon Hub SKIN market listings use derived broker fee, EverMark buyer fee (tier * 1,000 / tier * 2,500), and tax rate (10% / 20%) schedules in quasar_cosmetics_market.rs.",
+      "id": "quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/api_pb2.pyj",
+      "flagged_by_audit": "20261026-170000"
+    },
+    {
+      "evidence": "Paragon Hub SKIN market order/fee schedules use derived broker fee and EverMark buyer fee formulas in quasar_cosmetics_market.rs.",
+      "id": "quasar:eveProto/generated/eve_public/cosmetic/market/skin/Order_pb2.pyj",
+      "flagged_by_audit": "20261026-170000"
+    },
+    {
+      "evidence": "SKINR sequencing job tier pricing (tier * 1,500 + min_pts * 2 PLEX cents), tier durations (tier * 3,600 + min_pts * 10 seconds), and early-completion brackets ([500, 2,500, 10,000] PLEX cents) in quasar_cosmetics_skinr_seq.rs are derived formulas.",
+      "id": "quasar:eveProto/generated/eve_public/cosmetic/skin/thirdparty/sequencing/job/api/requests_pb2.pyj",
+      "flagged_by_audit": "20261026-170000"
+    },
+    {
+      "evidence": "SKINR sequencing job tier pricing (tier * 1,500 + min_pts * 2 PLEX cents), tier durations (tier * 3,600 + min_pts * 10 seconds), and early-completion brackets ([500, 2,500, 10,000] PLEX cents) in quasar_cosmetics_skinr_seq.rs are derived formulas.",
+      "id": "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/job/api/requests_pb2.pyj",
+      "flagged_by_audit": "20261026-170000"
+    },
+    {
+      "evidence": "Quasar cosmetics market and SKINR sequencing rely on derived fee, tier pricing, and duration formulas in quasar_cosmetics_market.rs and quasar_cosmetics_skinr_seq.rs.",
+      "id": "feat:quasar.cosmetic",
+      "flagged_by_audit": "20261026-170000"
+    },
+    {
+      "evidence": "Paragon Hub cosmetic marketplace and SKINR sequencing rely on derived broker fee, EverMark buyer fee, tax rate, and sequencing pricing/duration formulas.",
+      "id": "feat:economy.paragon-hub",
+      "flagged_by_audit": "20261026-170000"
+    },
+    {
+      "evidence": "Paragon Hub custom SKIN listing, purchase, and tax schedules rely on derived broker fee, EverMark buyer fee, and tax rate formulas in quasar_cosmetics_market.rs.",
+      "id": "feat:cosmetics.skinr-paragon-hub-listing",
+      "flagged_by_audit": "20261026-170000"
+    },
+    {
+      "evidence": "SKINR sequencing studio job pricing and durations rely on derived PLEX/duration formulas in quasar_cosmetics_skinr_seq.rs.",
+      "id": "feat:cosmetics.skinr-sequencing-studio",
+      "flagged_by_audit": "20261026-170000"
     }
   ],
   "rejected_triage": [

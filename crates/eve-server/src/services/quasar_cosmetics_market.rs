@@ -115,25 +115,20 @@ pub struct CosmeticsMarketState {
 impl CosmeticsMarketState {
     pub fn load(
         db: Arc<WorldRepository>,
-        sde: Arc<SdeRegistry>,
+        _sde: Arc<SdeRegistry>,
         skinr: Arc<SkinrCosmeticsState>,
     ) -> Arc<Self> {
-        let mut data: CosmeticsMarketData = db.with_snapshot(|s| {
+        let data: CosmeticsMarketData = db.with_snapshot(|s| {
             s.quasar_state_blobs
                 .get(BLOB_KEY)
                 .and_then(|j| serde_json::from_str(j).ok())
                 .unwrap_or_default()
         });
-        let seeded = seed_component_listings_if_empty(&mut data, &sde);
-        let state = Arc::new(Self {
+        Arc::new(Self {
             db,
             data: RwLock::new(data),
             skinr,
-        });
-        if seeded {
-            state.save();
-        }
-        state
+        })
     }
 
     fn save(&self) {
@@ -145,18 +140,56 @@ impl CosmeticsMarketState {
         }
     }
 
-    pub fn skin_tier_for_hex(&self, skin_hex: &str) -> u32 {
+    fn sync_from_blob(&self) {
+        let needs_sync = self
+            .data
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .component_listings
+            .is_empty();
+        if !needs_sync {
+            return;
+        }
+        let persisted: Option<CosmeticsMarketData> = self.db.with_snapshot(|s| {
+            s.quasar_state_blobs
+                .get(BLOB_KEY)
+                .and_then(|j| serde_json::from_str(j).ok())
+        });
+        if let Some(p) = persisted {
+            if !p.component_listings.is_empty() {
+                let mut data = self.data.write().unwrap_or_else(|e| e.into_inner());
+                for (k, v) in p.component_listings {
+                    data.component_listings.entry(k).or_insert(v);
+                }
+                if data.next_seq < p.next_seq {
+                    data.next_seq = p.next_seq;
+                }
+            }
+        }
+    }
+
+    pub fn skin_tier_for_hex(&self, skin_hex: &str) -> Option<u32> {
         let data = self.skinr.data.read().unwrap_or_else(|e| e.into_inner());
         if let Some(skin) = data.skins.get(skin_hex) {
             if skin.tier_level > 0 {
-                return skin.tier_level;
+                return Some(skin.tier_level);
             }
         }
-        skin_tier_for_hex(skin_hex)
+        drop(data);
+        self.db.with_snapshot(|s| {
+            s.quasar_state_blobs
+                .get(super::quasar_cosmetics_skinr::SKINR_BLOB_KEY)
+                .and_then(|j| {
+                    serde_json::from_str::<super::quasar_cosmetics_skinr::SkinrCosmeticsData>(j)
+                        .ok()
+                })
+                .and_then(|d| d.skins.get(skin_hex).map(|sk| sk.tier_level))
+                .filter(|&t| t > 0)
+        })
     }
 }
 
-fn seed_component_listings_if_empty(data: &mut CosmeticsMarketData, sde: &SdeRegistry) -> bool {
+pub fn seed_component_listings_if_empty(data: &mut CosmeticsMarketData, sde: &SdeRegistry) -> bool {
     if !data.component_listings.is_empty() {
         return false;
     }
@@ -490,11 +523,17 @@ fn market_get_buyer_fee(
     let skin_hex = sub(msg, 2)
         .and_then(|m| m.get(1))
         .and_then(as_str)
-        .unwrap_or("default_skin");
+        .unwrap_or("");
     if skin_hex.is_empty() {
         return Err((STATUS_BAD_REQUEST, "Empty skin identifier".to_string()));
     }
-    let tier = u64::from(st.skin_tier_for_hex(skin_hex));
+    let Some(tier_u32) = st.skin_tier_for_hex(skin_hex) else {
+        return Err((
+            STATUS_NOT_FOUND,
+            format!("SKIN design '{skin_hex}' not found"),
+        ));
+    };
+    let tier = u64::from(tier_u32);
     let lp_amount = if target.is_branded() {
         tier * 2_500
     } else {
@@ -535,6 +574,7 @@ fn component_get_all(
     _msg: &DynamicQuasarMessage,
 ) -> HandlerResult {
     let _cid = require_char(ctx)?;
+    st.sync_from_blob();
     let now = ctx.now_unix();
     let listings: Vec<ComponentListingRecord> = st
         .data
@@ -561,6 +601,7 @@ fn component_initiate_purchase(
     msg: &DynamicQuasarMessage,
 ) -> HandlerResult {
     let cid = require_char(ctx)?;
+    st.sync_from_blob();
     let uuid = uuid_of(msg, 1)
         .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing component listing UUID".to_string()))?;
     let quantity_u64 = msg.get(2).and_then(as_u64).unwrap_or(0);
@@ -1029,7 +1070,13 @@ fn skin_initiate_purchase(
     };
 
     let tax_pct: u64 = if listing.branded { 10 } else { 20 };
-    let tier = u64::from(st.skin_tier_for_hex(&listing.skin_hex));
+    let Some(tier_u32) = st.skin_tier_for_hex(&listing.skin_hex) else {
+        return Err((
+            STATUS_NOT_FOUND,
+            format!("SKIN design '{}' not found", listing.skin_hex),
+        ));
+    };
+    let tier = u64::from(tier_u32);
     let fee_per_unit = if listing.branded { tier * 2_500 } else { tier * 1_000 };
     let buyer_lp_fee = fee_per_unit
         .checked_mul(quantity_u64)
