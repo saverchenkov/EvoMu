@@ -24,46 +24,26 @@ fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError { code: code.into(), message: message.into(), }
 }
 
-fn parse_requested_items(
-    raw: Option<&PyRep>,
-    kwargs: &HashMap<String, PyRep>,
-) -> Result<Vec<(TypeId, i32)>, BridgeRpcError> {
+fn parse_requested_items(raw: Option<&PyRep>, kwargs: &HashMap<String, PyRep>) -> Result<Vec<(TypeId, i32)>, BridgeRpcError> {
     let source = raw.or_else(|| kwargs.get("requestedItems")).or_else(|| kwargs.get("requestItemTypeList"));
     let Some(rep) = source else { return Ok(Vec::new()); };
     let list = match rep {
         PyRep::None => return Ok(Vec::new()),
         PyRep::List(v) | PyRep::Tuple(v) => v,
-        _ => {
-            return Err(rpc_err(
-                "InvalidContractParameters",
-                "requestedItems must be a list or tuple of (typeID, quantity) pairs",
-            ))
-        }
+        _ => return Err(rpc_err("InvalidContractParameters", "requestedItems must be a list or tuple of (typeID, quantity) pairs")),
     };
     let mut out = Vec::with_capacity(list.len());
     for entry in list {
         let (tid_opt, qty_opt) = match entry {
-            PyRep::Tuple(pair) | PyRep::List(pair) => (
-                pair.first().and_then(|v| v.as_i64()),
-                pair.get(1).and_then(|v| v.as_i64()),
-            ),
-            PyRep::KeyVal(kv) => (
-                kv.get("typeID").and_then(|v| v.as_i64()),
-                kv.get("quantity").and_then(|v| v.as_i64()),
-            ),
+            PyRep::Tuple(pair) | PyRep::List(pair) => (pair.first().and_then(|v| v.as_i64()), pair.get(1).and_then(|v| v.as_i64())),
+            PyRep::KeyVal(kv) => (kv.get("typeID").and_then(|v| v.as_i64()), kv.get("quantity").and_then(|v| v.as_i64())),
             _ => (None, None),
         };
         let (Some(tid), Some(qty)) = (tid_opt, qty_opt) else {
-            return Err(rpc_err(
-                "InvalidContractParameters",
-                "Each requested item entry must provide (typeID, quantity)",
-            ));
+            return Err(rpc_err("InvalidContractParameters", "Each requested item entry must provide (typeID, quantity)"));
         };
         if tid <= 0 || qty <= 0 || qty > i32::MAX as i64 {
-            return Err(rpc_err(
-                "InvalidContractParameters",
-                format!("Invalid requested item (typeID={tid}, quantity={qty})"),
-            ));
+            return Err(rpc_err("InvalidContractParameters", format!("Invalid requested item (typeID={tid}, quantity={qty})")));
         }
         out.push((tid as TypeId, qty as i32));
     }
@@ -74,90 +54,49 @@ fn parse_item_ids(raw: Option<&PyRep>) -> Vec<i64> {
     match raw {
         Some(PyRep::Integer(id)) if *id > 0 => vec![*id],
         Some(PyRep::List(items) | PyRep::Tuple(items)) => items.iter().filter_map(|v| match v {
-                PyRep::Integer(id) if *id > 0 => Some(*id),
-                PyRep::Tuple(pair) | PyRep::List(pair) => {
-                    pair.first().and_then(|x| x.as_i64()).filter(|id| *id > 0)
-                }
-                _ => None,
-            }).collect(),
+            PyRep::Integer(id) if *id > 0 => Some(*id),
+            PyRep::Tuple(pair) | PyRep::List(pair) => pair.first().and_then(|x| x.as_i64()).filter(|id| *id > 0),
+            _ => None,
+        }).collect(),
         _ => Vec::new(),
     }
 }
 
 fn contract_to_pyrep(c: &ContractRecord, snap: &eve_db::WorldStateSnapshot) -> PyRep {
     let items_rep = PyRep::List(c.item_ids.iter().map(|&id| PyRep::Integer(id)).collect());
-    let detailed_items_rep = PyRep::List(
-        c.item_ids.iter().filter_map(|&id| {
-                let it = snap.items.get(&id)?;
-                let me = it.dynamic_attributes.get(&1112).copied().unwrap_or(0.0) as i64;
-                let te = it.dynamic_attributes.get(&1113).copied().unwrap_or(0.0) as i64;
-                let dmg = it.dynamic_attributes.get(&3).copied().unwrap_or(0.0);
-                let runs_rep = it.blueprint_runs_remaining.map(|r| PyRep::Integer(r as i64))
-                    .unwrap_or(PyRep::Integer(-1));
-                let mut dyn_entries: Vec<(PyRep, PyRep)> = it.dynamic_attributes.iter()
-                    .map(|(&attr_id, &val)| (PyRep::Integer(attr_id as i64), PyRep::Real(val))).collect();
-                dyn_entries.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
-                Some(PyRep::keyval([
-                    ("itemID", PyRep::Integer(it.item_id)),
-                    ("typeID", PyRep::Integer(it.type_id as i64)),
-                    ("quantity", PyRep::Integer(it.quantity as i64)),
-                    ("singleton", PyRep::Bool(it.singleton)),
-                    ("copy", PyRep::Bool(it.is_blueprint_copy)),
-                    ("isBlueprintCopy", PyRep::Bool(it.is_blueprint_copy)),
-                    ("materialEfficiency", PyRep::Integer(me)),
-                    ("timeEfficiency", PyRep::Integer(te)),
-                    ("runs", runs_rep.clone()),
-                    ("runsRemaining", runs_rep),
-                    ("damage", PyRep::Real(dmg)),
-                    (
-                        "sourceMutaplasmidID",
-                        it.source_mutaplasmid_id.map(|m| PyRep::Integer(m as i64)).unwrap_or(PyRep::None),
-                    ),
-                    ("dynamicAttributes", PyRep::Dict(dyn_entries)),
-                ]))
-            }).collect(),
-    );
-    let req_rep = PyRep::List(
-        c.requested_items.iter().map(|&(tid, qty)| {
-                PyRep::keyval([("typeID", PyRep::Integer(tid as i64)), ("quantity", PyRep::Integer(qty as i64)),])
-            }).collect(),
-    );
-    let bids_rep = PyRep::List(
-        c.bid_history.iter().map(|&(bidder_id, amount, ts)| {
-                PyRep::keyval([
-                    ("bidderID", PyRep::Integer(bidder_id)),
-                    ("amountISK", PyRep::Real(amount.to_wire_f64())),
-                    ("timestampUnix", PyRep::Integer(ts as i64)),
-                ])
-            }).collect(),
-    );
+    let detailed_items_rep = PyRep::List(c.item_ids.iter().filter_map(|&id| {
+        let it = snap.items.get(&id)?;
+        let me = it.dynamic_attributes.get(&1112).copied().unwrap_or(0.0) as i64;
+        let te = it.dynamic_attributes.get(&1113).copied().unwrap_or(0.0) as i64;
+        let dmg = it.dynamic_attributes.get(&3).copied().unwrap_or(0.0);
+        let runs_rep = it.blueprint_runs_remaining.map(|r| PyRep::Integer(r as i64)).unwrap_or(PyRep::Integer(-1));
+        let mut dyn_entries: Vec<(PyRep, PyRep)> = it.dynamic_attributes.iter().map(|(&attr_id, &val)| (PyRep::Integer(attr_id as i64), PyRep::Real(val))).collect();
+        dyn_entries.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
+        Some(PyRep::keyval([
+            ("itemID", PyRep::Integer(it.item_id)), ("typeID", PyRep::Integer(it.type_id as i64)),
+            ("quantity", PyRep::Integer(it.quantity as i64)), ("singleton", PyRep::Bool(it.singleton)),
+            ("copy", PyRep::Bool(it.is_blueprint_copy)), ("isBlueprintCopy", PyRep::Bool(it.is_blueprint_copy)),
+            ("materialEfficiency", PyRep::Integer(me)), ("timeEfficiency", PyRep::Integer(te)),
+            ("runs", runs_rep.clone()), ("runsRemaining", runs_rep), ("damage", PyRep::Real(dmg)),
+            ("sourceMutaplasmidID", it.source_mutaplasmid_id.map(|m| PyRep::Integer(m as i64)).unwrap_or(PyRep::None)),
+            ("dynamicAttributes", PyRep::Dict(dyn_entries)),
+        ]))
+    }).collect());
+    let req_rep = PyRep::List(c.requested_items.iter().map(|&(tid, qty)| PyRep::keyval([("typeID", PyRep::Integer(tid as i64)), ("quantity", PyRep::Integer(qty as i64))])).collect());
+    let bids_rep = PyRep::List(c.bid_history.iter().map(|&(bidder_id, amount, ts)| PyRep::keyval([("bidderID", PyRep::Integer(bidder_id)), ("amountISK", PyRep::Real(amount.to_wire_f64())), ("timestampUnix", PyRep::Integer(ts as i64))])).collect());
     let availability = if c.availability.is_empty() { "Public".to_string() } else { c.availability.clone() };
     let base_fields = [
-        ("contractID", PyRep::Integer(c.contract_id)),
-        ("issuerID", PyRep::Integer(c.issuer_id)),
-        ("issuerCorpID", PyRep::Integer(c.issuer_corp_id)),
-        ("acceptorID", c.acceptor_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-        ("assigneeID", PyRep::Integer(c.assignee_id)),
-        ("availability", PyRep::String(availability)),
-        ("type", PyRep::String(c.contract_type.clone())),
-        ("status", PyRep::String(c.status.clone())),
-        ("startStationID", PyRep::Integer(c.start_station_id)),
-        ("endStationID", PyRep::Integer(c.end_station_id)),
-        ("price", PyRep::Real(c.price.to_wire_f64())),
-        ("reward", PyRep::Real(c.reward.to_wire_f64())),
-        ("collateral", PyRep::Real(c.collateral.to_wire_f64())),
-        ("buyout", PyRep::Real(c.buyout.to_wire_f64())),
-        ("currentBid", PyRep::Real(c.current_bid.to_wire_f64())),
-        ("currentBidderID", c.current_bidder_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-        ("itemIDs", items_rep),
-        ("items", detailed_items_rep),
-        ("requestedItems", req_rep),
-        ("bids", bids_rep),
-        ("expirationUnix", PyRep::Integer(c.expiration_unix as i64)),
-        ("dateIssuedUnix", PyRep::Integer(c.date_issued_unix as i64)),
-        ("numDays", PyRep::Integer(c.num_days.max(1) as i64)),
-        ("title", PyRep::String(c.title.clone())),
-        ("forCorp", PyRep::Bool(c.for_corp)),
+        ("contractID", PyRep::Integer(c.contract_id)), ("issuerID", PyRep::Integer(c.issuer_id)),
+        ("issuerCorpID", PyRep::Integer(c.issuer_corp_id)), ("acceptorID", c.acceptor_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+        ("assigneeID", PyRep::Integer(c.assignee_id)), ("availability", PyRep::String(availability)),
+        ("type", PyRep::String(c.contract_type.clone())), ("status", PyRep::String(c.status.clone())),
+        ("startStationID", PyRep::Integer(c.start_station_id)), ("endStationID", PyRep::Integer(c.end_station_id)),
+        ("price", PyRep::Real(c.price.to_wire_f64())), ("reward", PyRep::Real(c.reward.to_wire_f64())),
+        ("collateral", PyRep::Real(c.collateral.to_wire_f64())), ("buyout", PyRep::Real(c.buyout.to_wire_f64())),
+        ("currentBid", PyRep::Real(c.current_bid.to_wire_f64())), ("currentBidderID", c.current_bidder_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+        ("itemIDs", items_rep), ("items", detailed_items_rep), ("requestedItems", req_rep), ("bids", bids_rep),
+        ("expirationUnix", PyRep::Integer(c.expiration_unix as i64)), ("dateIssuedUnix", PyRep::Integer(c.date_issued_unix as i64)),
+        ("numDays", PyRep::Integer(c.num_days.max(1) as i64)), ("title", PyRep::String(c.title.clone())), ("forCorp", PyRep::Bool(c.for_corp)),
     ];
     let contract_kv = PyRep::keyval(base_fields.clone());
     let mut outer: Vec<(&str, PyRep)> = base_fields.into();
@@ -482,51 +421,25 @@ pub fn handle(
                 }
 
                 let exp_unix = now_unix.saturating_add(duration_secs);
-                snap.contracts.insert(
-                    id,
-                    ContractRecord {
-                        contract_id: id,
-                        issuer_id: char_id,
-                        issuer_corp_id,
-                        acceptor_id: None,
-                        assignee_id,
-                        availability,
-                        contract_type: contract_type.to_string(),
-                        status: "Outstanding".into(),
-                        start_station_id,
-                        end_station_id,
-                        price,
-                        reward,
-                        collateral,
-                        buyout,
-                        current_bid: IskCents(0),
-                        current_bidder_id: None,
-                        bid_history: Vec::new(),
-                        item_ids: escrowed_items,
-                        requested_items,
-                        expiration_unix: exp_unix,
-                        date_issued_unix: now_unix,
-                        title,
-                        for_corp,
-                        num_days,
-                    },
-                );
+                snap.contracts.insert(id, ContractRecord {
+                    contract_id: id, issuer_id: char_id, issuer_corp_id, acceptor_id: None, assignee_id,
+                    availability, contract_type: contract_type.to_string(), status: "Outstanding".into(),
+                    start_station_id, end_station_id, price, reward, collateral, buyout,
+                    current_bid: IskCents(0), current_bidder_id: None, bid_history: Vec::new(),
+                    item_ids: escrowed_items, requested_items, expiration_unix: exp_unix,
+                    date_issued_unix: now_unix, title, for_corp, num_days,
+                });
                 Ok((id, exp_unix, broker_fee_isk, deposit_isk, max_slots))
             });
 
             match res {
                 Ok((cid, exp_unix, broker_fee_isk, deposit_isk, max_slots)) => {
                     notify_contract(ctx, char_id, "OnContractCreated", cid);
-                    if assignee_id > 0 {
-                        notify_contract(ctx, assignee_id, "OnContractAssigned", cid);
-                    }
+                    if assignee_id > 0 { notify_contract(ctx, assignee_id, "OnContractAssigned", cid); }
                     Some(Ok(PyRep::keyval([
-                        ("contractID", PyRep::Integer(cid)),
-                        ("status", PyRep::String("Outstanding".into())),
-                        ("expirationUnix", PyRep::Integer(exp_unix as i64)),
-                        ("numDays", PyRep::Integer(num_days as i64)),
-                        ("brokerFeeISK", PyRep::Real(broker_fee_isk)),
-                        ("depositISK", PyRep::Real(deposit_isk)),
+                        ("contractID", PyRep::Integer(cid)), ("status", PyRep::String("Outstanding".into())),
+                        ("expirationUnix", PyRep::Integer(exp_unix as i64)), ("numDays", PyRep::Integer(num_days as i64)),
+                        ("brokerFeeISK", PyRep::Real(broker_fee_isk)), ("depositISK", PyRep::Real(deposit_isk)),
                         ("maxContractsLimit", PyRep::Integer(max_slots as i64)),
                     ])))
                 }
@@ -535,14 +448,10 @@ pub fn handle(
         }
 
         "AcceptContract" => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let cid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let accept_for_corp = args
-                .get(1)
-                .map(|a| a.as_bool().unwrap_or(false) || a.as_i64().unwrap_or(0) != 0)
+            let accept_for_corp = args.get(1).map(|a| a.as_bool().unwrap_or(false) || a.as_i64().unwrap_or(0) != 0)
+                .or_else(|| kwargs.get("forCorp").and_then(|v| v.as_bool()))
                 .unwrap_or(false);
             let caller_station = session.station_id.or(session.structure_id);
             let caller_ship = session.ship_id;
@@ -551,13 +460,10 @@ pub fn handle(
             let now_unix = ctx.now_unix();
 
             let expired_resolved = ctx.db.try_with_mut_snapshot(|snap| {
-                    Ok::<_, std::convert::Infallible>(snap.resolve_expired_contract(cid, now_unix))
-                }).unwrap();
+                Ok::<_, std::convert::Infallible>(snap.resolve_expired_contract(cid, now_unix))
+            }).unwrap();
             if expired_resolved.is_some() {
-                return Some(Err(rpc_err(
-                    "ContractExpired",
-                    format!("Contract {cid} has expired; escrowed items and reward returned to issuer"),
-                )));
+                return Some(Err(rpc_err("ContractExpired", format!("Contract {cid} has expired; escrowed items and reward returned to issuer"))));
             }
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -565,96 +471,90 @@ pub fn handle(
                     return Err(rpc_err("ContractNotFound", format!("Contract {cid} does not exist")));
                 };
                 if c.status != "Outstanding" {
-                    return Err(rpc_err(
-                        "InvalidContractState",
-                        format!("Contract {cid} is in state '{}', not Outstanding", c.status),
-                    ));
+                    return Err(rpc_err("InvalidContractState", format!("Contract {cid} is in state '{}', not Outstanding", c.status)));
                 }
                 if !matches!(c.contract_type.as_str(), "Courier" | "ItemExchange") {
-                    return Err(rpc_err(
-                        "InvalidContractType",
-                        format!("Contract type '{}' cannot be directly accepted via AcceptContract", c.contract_type),
-                    ));
+                    return Err(rpc_err("InvalidContractType", format!("Contract type '{}' cannot be directly accepted via AcceptContract", c.contract_type)));
                 }
-                let effective_caller_corp = if caller_corp != 0 {
-                    caller_corp
-                } else {
-                    snap.characters.get(&char_id).map(|ch| ch.corporation_id).unwrap_or(0)
-                };
+                let effective_caller_corp = if caller_corp != 0 { caller_corp } else { snap.characters.get(&char_id).map(|ch| ch.corporation_id).unwrap_or(0) };
+                let is_corp_accept = accept_for_corp
+                    || (c.assignee_id != 0
+                        && c.assignee_id == effective_caller_corp
+                        && c.assignee_id != char_id
+                        && !c.availability.eq_ignore_ascii_case("Corporation"));
                 let is_self_corp_contract = c.for_corp
                     && c.issuer_corp_id != 0
                     && c.issuer_corp_id == effective_caller_corp
-                    && (accept_for_corp
-                        || (c.assignee_id != char_id
-                            && c.assignee_id != effective_caller_corp
-                            && !c.availability.eq_ignore_ascii_case("Corporation")));
+                    && (is_corp_accept || (c.assignee_id != char_id && c.assignee_id != effective_caller_corp && !c.availability.eq_ignore_ascii_case("Corporation")));
                 if c.issuer_id == char_id || is_self_corp_contract {
                     return Err(rpc_err("CannotAcceptOwnContract", "Issuer cannot accept their own contract"));
                 }
                 if !check_contract_visibility(&c, char_id, effective_caller_corp, caller_alliance) {
-                    return Err(rpc_err(
-                        "ContractAccessDenied",
-                        format!("Character {char_id} is not authorized to accept private contract {cid}"),
-                    ));
+                    return Err(rpc_err("ContractAccessDenied", format!("Character {char_id} is not authorized to accept private contract {cid}")));
+                }
+                if is_corp_accept {
+                    let has_corp_role = effective_caller_corp != 0
+                        && ((session.corp_role & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_CONTRACT_MANAGER)) != 0
+                            || snap.corporations.get(&effective_caller_corp).is_some_and(|corp| {
+                                corp.ceo_id == char_id
+                                    || corp.member_roles.get(&char_id).is_some_and(|&r| {
+                                        (r & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_CONTRACT_MANAGER)) != 0
+                                    })
+                            }));
+                    if !has_corp_role {
+                        return Err(rpc_err("CrpAccessDenied", "Accepting a contract on behalf of a corporation requires ROLE_CONTRACT_MANAGER or ROLE_DIRECTOR"));
+                    }
                 }
                 if caller_station != Some(c.start_station_id) {
-                    return Err(rpc_err(
-                        "MustBeDockedAtStartStation",
-                        format!("Accepting contract {cid} requires being docked at {}", c.start_station_id),
-                    ));
+                    return Err(rpc_err("MustBeDockedAtStartStation", format!("Accepting contract {cid} requires being docked at {}", c.start_station_id)));
                 }
                 for iid in &c.item_ids {
-                    let valid_escrow = snap.items.get(iid)
-                        .map(|item| item.location_id == cid && item.flag == InventoryFlag::Locked).unwrap_or(false);
+                    let valid_escrow = snap.items.get(iid).map(|item| item.location_id == cid && item.flag == InventoryFlag::Locked).unwrap_or(false);
                     if !valid_escrow {
-                        return Err(rpc_err(
-                            "ContractEscrowItemMissing",
-                            format!("Escrowed item {iid} is missing or no longer locked in contract {cid}"),
-                        ));
+                        return Err(rpc_err("ContractEscrowItemMissing", format!("Escrowed item {iid} is missing or no longer locked in contract {cid}")));
                     }
                 }
                 if c.contract_type == "Courier" && caller_ship.is_none() {
-                    return Err(rpc_err(
-                        "NoActiveShip",
-                        "Accepting a Courier contract requires an active ship to load the courier package",
-                    ));
+                    return Err(rpc_err("NoActiveShip", "Accepting a Courier contract requires an active ship to load the courier package"));
                 }
 
                 let mut requested_transfers: Vec<(i64, i32)> = Vec::new();
                 if c.contract_type == "ItemExchange" && !c.requested_items.is_empty() {
                     let mut aggregated_reqs: Vec<(u32, i32)> = Vec::new();
                     for &(req_tid, req_qty) in &c.requested_items {
-                        if req_qty <= 0 {
-                            continue;
-                        }
+                        if req_qty <= 0 { continue; }
                         if let Some(entry) = aggregated_reqs.iter_mut().find(|(t, _)| *t == req_tid) {
-                            entry.1 = entry.1.checked_add(req_qty).ok_or_else(|| {
-                                rpc_err("ContractOverflow", "Requested item quantity overflow")
-                            })?;
+                            entry.1 = entry.1.checked_add(req_qty).ok_or_else(|| rpc_err("ContractOverflow", "Requested item quantity overflow"))?;
                         } else {
                             aggregated_reqs.push((req_tid, req_qty));
                         }
                     }
-                    let active_ship = caller_ship.or_else(|| {
-                        snap.characters.get(&char_id).map(|ch| ch.active_ship_id).filter(|&id| id > 0)
-                    });
+                    let active_ship = caller_ship.or_else(|| snap.characters.get(&char_id).map(|ch| ch.active_ship_id).filter(|&id| id > 0));
                     for (req_tid, req_qty) in aggregated_reqs {
                         let mut needed = req_qty;
                         let mut candidate_ids: Vec<(i64, i32)> = snap.items.values().filter(|it| {
-                                it.owner_id == char_id
-                                    && it.location_id == c.start_station_id
-                                    && it.flag == InventoryFlag::Hangar
-                                    && it.type_id == req_tid
-                                    && it.quantity > 0
-                                    && Some(it.item_id) != active_ship
-                                    && !snap.is_item_locked_in_contract_or_job(it.item_id)
-                                    && !snap.items.values().any(|child| {
-                                        child.item_id != it.item_id
-                                            && child.location_id == it.item_id
-                                            && child.quantity > 0
-                                    })
-                                    && !snap.item_custom_names.get(&it.item_id).is_some_and(|name| name.starts_with("courier_cargo:"))
-                            }).map(|it| (it.item_id, it.quantity)).collect();
+                            let owner_flag_ok = if is_corp_accept {
+                                it.owner_id == effective_caller_corp && matches!(
+                                    it.flag,
+                                    InventoryFlag::Hangar | InventoryFlag::CorpDeliveries | InventoryFlag::CorpSAG1
+                                        | InventoryFlag::CorpSAG2 | InventoryFlag::CorpSAG3 | InventoryFlag::CorpSAG4
+                                        | InventoryFlag::CorpSAG5 | InventoryFlag::CorpSAG6 | InventoryFlag::CorpSAG7
+                                )
+                            } else {
+                                it.owner_id == char_id && it.flag == InventoryFlag::Hangar
+                            };
+                            owner_flag_ok
+                                && it.location_id == c.start_station_id
+                                && it.type_id == req_tid
+                                && it.quantity > 0
+                                && !it.is_blueprint_copy
+                                && it.dynamic_attributes.get(&3).copied().unwrap_or(0.0) <= 0.0
+                                && it.source_mutaplasmid_id.is_none()
+                                && Some(it.item_id) != active_ship
+                                && !snap.is_item_locked_in_contract_or_job(it.item_id)
+                                && !snap.items.values().any(|child| child.item_id != it.item_id && child.location_id == it.item_id && child.quantity > 0)
+                                && !snap.item_custom_names.get(&it.item_id).is_some_and(|name| name.starts_with("courier_cargo:"))
+                        }).map(|it| (it.item_id, it.quantity)).collect();
                         candidate_ids.sort_by_key(|(id, _)| *id);
                         for (cand_id, cand_qty) in candidate_ids {
                             if needed <= 0 { break; }
@@ -663,36 +563,42 @@ pub fn handle(
                             needed -= take;
                         }
                         if needed > 0 {
-                            return Err(rpc_err(
-                                "MissingRequestedContractItems",
-                                format!(
-                                    "Acceptor lacks {needed} units of requested type {req_tid} in station hangar {}",
-                                    c.start_station_id
-                                ),
-                            ));
+                            return Err(rpc_err("MissingRequestedContractItems", format!("Acceptor lacks {needed} units of requested type {req_tid} in station hangar {}", c.start_station_id)));
                         }
                     }
                 }
 
-                let required_isk = c.collateral.checked_add(c.price)
-                    .ok_or_else(|| rpc_err("ContractOverflow", "Collateral + price overflow"))?;
-                let Some(ch) = snap.characters.get_mut(&char_id) else {
-                    return Err(rpc_err("CharacterNotFound", format!("Character {char_id} not found")));
-                };
-                let new_bal = ch.balance.checked_sub(required_isk)
-                    .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough ISK to cover contract collateral and price"))?;
-                ch.balance = new_bal;
-                if c.contract_type == "ItemExchange" && c.reward.0 > 0 {
-                    ch.balance = ch.balance.checked_add(c.reward).unwrap_or(ch.balance);
+                let required_isk = c.collateral.checked_add(c.price).ok_or_else(|| rpc_err("ContractOverflow", "Collateral + price overflow"))?;
+                if is_corp_accept {
+                    let Some(corp) = snap.corporations.get_mut(&effective_caller_corp) else {
+                        return Err(rpc_err("CorpNotFound", format!("Corporation {effective_caller_corp} not found")));
+                    };
+                    let cur = corp.division_balance(1);
+                    let mut new_bal = cur.checked_sub(required_isk).ok_or_else(|| rpc_err("InsufficientFunds", "Not enough corporation ISK to cover contract collateral and price"))?;
+                    if c.contract_type == "ItemExchange" && c.reward.0 > 0 {
+                        new_bal = new_bal.checked_add(c.reward).unwrap_or(new_bal);
+                    }
+                    corp.set_division_balance(1, new_bal);
+                } else {
+                    let Some(ch) = snap.characters.get_mut(&char_id) else {
+                        return Err(rpc_err("CharacterNotFound", format!("Character {char_id} not found")));
+                    };
+                    let new_bal = ch.balance.checked_sub(required_isk).ok_or_else(|| rpc_err("InsufficientFunds", "Not enough ISK to cover contract collateral and price"))?;
+                    ch.balance = new_bal;
+                    if c.contract_type == "ItemExchange" && c.reward.0 > 0 {
+                        ch.balance = ch.balance.checked_add(c.reward).unwrap_or(ch.balance);
+                    }
                 }
 
                 snap.credit_contract_issuer(&c, c.price);
 
                 if c.contract_type == "ItemExchange" {
-                    let issuer_entity_id = if c.for_corp && c.issuer_corp_id != 0 {
-                        c.issuer_corp_id
+                    snap.service_state_blobs.remove(&format!("contract_deposit:{cid}"));
+                    let issuer_entity_id = if c.for_corp && c.issuer_corp_id != 0 { c.issuer_corp_id } else { c.issuer_id };
+                    let (acceptor_entity_id, acceptor_flag) = if is_corp_accept {
+                        (effective_caller_corp, InventoryFlag::CorpDeliveries)
                     } else {
-                        c.issuer_id
+                        (char_id, InventoryFlag::Hangar)
                     };
                     for (cand_id, take_qty) in requested_transfers {
                         let cur_qty = snap.items.get(&cand_id).map(|i| i.quantity).unwrap_or(0);
@@ -703,63 +609,45 @@ pub fn handle(
                                 it.flag = InventoryFlag::Hangar;
                                 it.version += 1;
                             }
-                        } else if let Some(it) = snap.items.get_mut(&cand_id) { let tid = it.type_id;
+                        } else if let Some(it) = snap.items.get_mut(&cand_id) {
+                            let tid = it.type_id;
                             it.quantity -= take_qty;
                             it.version += 1;
                             snap.next_entity_id += 1;
                             let split_id = snap.next_entity_id;
-                            snap.items.insert(
-                                split_id,
-                                InventoryItemRecord {
-                                    item_id: split_id,
-                                    type_id: tid,
-                                    owner_id: issuer_entity_id,
-                                    location_id: c.start_station_id,
-                                    flag: InventoryFlag::Hangar,
-                                    quantity: take_qty,
-                                    singleton: false,
-                                    version: 1,
-                                    ..Default::default()
-                                },
-                            );
+                            snap.items.insert(split_id, InventoryItemRecord {
+                                item_id: split_id, type_id: tid, owner_id: issuer_entity_id, location_id: c.start_station_id,
+                                flag: InventoryFlag::Hangar, quantity: take_qty, singleton: false, version: 1, ..Default::default()
+                            });
                         }
                     }
 
                     for iid in &c.item_ids {
                         if let Some(item) = snap.items.get_mut(iid) {
-                            item.owner_id = char_id;
+                            item.owner_id = acceptor_entity_id;
                             item.location_id = c.start_station_id;
-                            item.flag = InventoryFlag::Hangar;
+                            item.flag = acceptor_flag;
                             item.version += 1;
                         }
                     }
                     if let Some(c_mut) = snap.contracts.get_mut(&cid) {
-                        c_mut.acceptor_id = Some(char_id);
+                        c_mut.acceptor_id = Some(acceptor_entity_id);
                         c_mut.status = "Completed".into();
                     }
                     return Ok(("Completed", c.expiration_unix, None, c.issuer_id));
                 }
 
+                if let Some(dep_str) = snap.service_state_blobs.remove(&format!("contract_deposit:{cid}")) {
+                    if let Ok(dep_raw) = dep_str.parse::<i64>() {
+                        snap.credit_contract_issuer(&c, IskCents(dep_raw));
+                    }
+                }
                 snap.next_entity_id += 1;
                 let wrap_id = snap.next_entity_id;
-                snap.items.insert(
-                    wrap_id,
-                    InventoryItemRecord {
-                        item_id: wrap_id,
-                        type_id: 3468, // SDE Plastic Wrap (group 649)
-                        owner_id: char_id,
-                        location_id: c.start_station_id,
-                        flag: InventoryFlag::Hangar,
-                        quantity: 1,
-                        singleton: true,
-                        version: 1,
-                        dynamic_attributes: HashMap::new(),
-                        source_mutaplasmid_id: None,
-                        insured_payout_isk: 0.0,
-                        is_blueprint_copy: false,
-                        blueprint_runs_remaining: None,
-                    },
-                );
+                snap.items.insert(wrap_id, InventoryItemRecord {
+                    item_id: wrap_id, type_id: 3468, owner_id: char_id, location_id: c.start_station_id,
+                    flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default()
+                });
                 for iid in &c.item_ids {
                     if let Some(item) = snap.items.get_mut(iid) {
                         item.location_id = wrap_id;
@@ -770,7 +658,7 @@ pub fn handle(
                 let courier_days = (c.num_days.max(1) as u64).min(28);
                 let delivery_deadline = now_unix.saturating_add(courier_days.saturating_mul(86_400));
                 if let Some(c_mut) = snap.contracts.get_mut(&cid) {
-                    c_mut.acceptor_id = Some(char_id);
+                    c_mut.acceptor_id = Some(if is_corp_accept { effective_caller_corp } else { char_id });
                     c_mut.status = "InProgress".into();
                     c_mut.expiration_unix = delivery_deadline;
                 }
@@ -880,13 +768,7 @@ pub fn handle(
                         if let Some(prev_ch) = snap.characters.get_mut(&prev_bidder) {
                             prev_ch.balance = prev_ch.balance.checked_add(c.current_bid).unwrap_or(prev_ch.balance);
                             let bal_after = prev_ch.balance;
-                            snap.append_journal(
-                                prev_bidder,
-                                "ContractAuctionBidRefund",
-                                c.current_bid,
-                                bal_after,
-                                format!("Outbid refund on auction contract {cid}"),
-                            );
+                            snap.append_journal(prev_bidder, "ContractAuctionBidRefund", c.current_bid, bal_after, format!("Outbid refund on auction contract {cid}"));
                         }
                     }
                 }
@@ -894,13 +776,7 @@ pub fn handle(
                 if let Some(bidder_ch) = snap.characters.get_mut(&char_id) {
                     bidder_ch.balance = bidder_ch.balance.checked_sub(effective_bid).unwrap_or(IskCents(0));
                     let bal_after = bidder_ch.balance;
-                    snap.append_journal(
-                        char_id,
-                        "ContractAuctionBid",
-                        effective_bid,
-                        bal_after,
-                        format!("Bid placed on auction contract {cid}"),
-                    );
+                    snap.append_journal(char_id, "ContractAuctionBid", effective_bid, bal_after, format!("Bid placed on auction contract {cid}"));
                 }
 
                 let mut new_status = "Outstanding";
@@ -912,18 +788,8 @@ pub fn handle(
                         }
                     }
                     if c.for_corp {
-                        let bal_after = snap
-                            .corporations
-                            .get(&c.issuer_corp_id)
-                            .map(|corp| corp.master_wallet)
-                            .unwrap_or(IskCents(0));
-                        snap.append_journal(
-                            c.issuer_corp_id,
-                            "ContractAuctionSold",
-                            effective_bid,
-                            bal_after,
-                            format!("Auction contract {cid} bought out by {char_id}"),
-                        );
+                        let bal_after = snap.corporations.get(&c.issuer_corp_id).map(|corp| corp.master_wallet).unwrap_or(IskCents(0));
+                        snap.append_journal(c.issuer_corp_id, "ContractAuctionSold", effective_bid, bal_after, format!("Auction contract {cid} bought out by {char_id}"));
                     } else if let Some(issuer_ch) = snap.characters.get(&c.issuer_id) {
                         let bal_after = issuer_ch.balance;
                         snap.append_journal(c.issuer_id, "ContractAuctionSold", effective_bid, bal_after, format!("Auction contract {cid} bought out by {char_id}"));
@@ -951,20 +817,16 @@ pub fn handle(
             match res {
                 Ok((new_status, effective_bid, is_buyout, prev_bidder_opt, issuer_id)) => {
                     if let Some(prev_bidder) = prev_bidder_opt {
-                        if prev_bidder != char_id {
-                            notify_contract(ctx, prev_bidder, "OnContractOutbid", cid);
-                        }
+                        if prev_bidder != char_id { notify_contract(ctx, prev_bidder, "OnContractOutbid", cid); }
                     }
                     if is_buyout {
                         notify_contract(ctx, issuer_id, "OnContractBuyout", cid);
                         notify_contract(ctx, issuer_id, "OnContractCompleted", cid);
                     }
                     Some(Ok(PyRep::keyval([
-                        ("contractID", PyRep::Integer(cid)),
-                        ("status", PyRep::String(new_status.into())),
+                        ("contractID", PyRep::Integer(cid)), ("status", PyRep::String(new_status.into())),
                         ("currentBidISK", PyRep::Real(effective_bid.to_wire_f64())),
-                        ("highestBidderID", PyRep::Integer(char_id)),
-                        ("boughtOut", PyRep::Bool(is_buyout)),
+                        ("highestBidderID", PyRep::Integer(char_id)), ("boughtOut", PyRep::Bool(is_buyout)),
                     ])))
                 }
                 Err(e) => Some(Err(e)),
@@ -1243,10 +1105,8 @@ pub fn handle(
                     }
                     if c.status == "Outstanding" {
                         snap.credit_contract_issuer(&c, c.reward);
-                        if let Some(dep_str) = snap.service_state_blobs.remove(&format!("contract_deposit:{cid}")) {
-                            if let Ok(dep_raw) = dep_str.parse::<i64>() {
-                                snap.credit_contract_issuer(&c, IskCents(dep_raw));
-                            }
+                        if let Some(dep_raw) = snap.service_state_blobs.remove(&format!("contract_deposit:{cid}")).and_then(|s| s.parse::<i64>().ok()) {
+                            snap.credit_contract_issuer(&c, IskCents(dep_raw));
                         }
                         for iid in &c.item_ids {
                             if let Some(item) = snap.items.get_mut(iid) {
@@ -1257,26 +1117,20 @@ pub fn handle(
                             }
                         }
                     }
-                    for item in snap.items.values_mut() {
-                        if item.location_id == cid {
-                            item.owner_id = issuer_entity_id;
-                            item.location_id = c.start_station_id;
-                            item.flag = InventoryFlag::Hangar;
-                            item.version += 1;
-                        }
+                    for item in snap.items.values_mut().filter(|item| item.location_id == cid) {
+                        item.owner_id = issuer_entity_id;
+                        item.location_id = c.start_station_id;
+                        item.flag = InventoryFlag::Hangar;
+                        item.version += 1;
                     }
                     if let Some(c_mut) = snap.contracts.get_mut(&cid) { c_mut.status = "Deleted".into(); }
                     return Ok(("Deleted", c.issuer_id));
                 }
-                if method == "FailContract"
-                    && c.status == "InProgress"
-                    && c.contract_type == "Courier"
-                    && c.acceptor_id == Some(char_id)
-                { snap.fail_courier_contract(cid, now_unix); return Ok(("Failed", c.issuer_id)); }
-                Err(rpc_err(
-                    "InvalidContractState",
-                    format!("Contract {cid} in state '{}' cannot be resolved via {method}", c.status),
-                ))
+                if method == "FailContract" && c.status == "InProgress" && c.contract_type == "Courier" && c.acceptor_id == Some(char_id) {
+                    snap.fail_courier_contract(cid, now_unix);
+                    return Ok(("Failed", c.issuer_id));
+                }
+                Err(rpc_err("InvalidContractState", format!("Contract {cid} in state '{}' cannot be resolved via {method}", c.status)))
             });
             match res {
                 Ok((new_status, issuer_id)) => {
@@ -1285,20 +1139,14 @@ pub fn handle(
                         "Deleted" => {}
                         _ => notify_contract(ctx, issuer_id, "OnContractFailed", cid),
                     }
-                    Some(Ok(PyRep::keyval([
-                        ("contractID", PyRep::Integer(cid)),
-                        ("status", PyRep::String(new_status.into())),
-                    ])))
+                    Some(Ok(PyRep::keyval([("contractID", PyRep::Integer(cid)), ("status", PyRep::String(new_status.into()))])))
                 }
                 Err(e) => Some(Err(e)),
             }
         }
 
         "GetContractInfo" | "GetContract" => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let cid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let caller_corp = session.corporation_id.unwrap_or(0);
             let caller_alliance = session.alliance_id;
@@ -1308,33 +1156,21 @@ pub fn handle(
                 let Some(c) = snap.contracts.get(&cid) else {
                     return Err(rpc_err("ContractNotFound", format!("Contract {cid} does not exist")));
                 };
-                if !check_contract_visibility(c, char_id, caller_corp, caller_alliance)
-                    && c.acceptor_id != Some(char_id)
-                {
-                    return Err(rpc_err(
-                        "ContractAccessDenied",
-                        format!("Character {char_id} cannot view private contract {cid}"),
-                    ));
+                if !check_contract_visibility(c, char_id, caller_corp, caller_alliance) && c.acceptor_id != Some(char_id) {
+                    return Err(rpc_err("ContractAccessDenied", format!("Character {char_id} cannot view private contract {cid}")));
                 }
                 Ok(contract_to_pyrep(c, snap))
             });
-            if res.is_ok() {
-                notify_contract(ctx, char_id, "OnShowContract", cid);
-            }
+            if res.is_ok() { notify_contract(ctx, char_id, "OnShowContract", cid); }
             Some(res)
         }
 
         "SearchContracts" | "GetPublicContractList" => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let filter_type = args.first().and_then(|a| a.as_str())
-                .or_else(|| kwargs.get("contractType").and_then(|v| v.as_str()));
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let filter_type = args.first().and_then(|a| a.as_str()).or_else(|| kwargs.get("contractType").and_then(|v| v.as_str()));
             let filter_station = kwargs.get("stationID").and_then(|v| v.as_i64());
             let filter_region = kwargs.get("regionID").and_then(|v| v.as_i64()).map(|r| r as u32);
-            let filter_item_type = kwargs.get("itemTypeID").or_else(|| kwargs.get("typeID")).and_then(|v| v.as_i64())
-                .map(|t| t as TypeId);
+            let filter_item_type = kwargs.get("itemTypeID").or_else(|| kwargs.get("typeID")).and_then(|v| v.as_i64()).map(|t| t as TypeId);
             let min_price = kwargs.get("minPrice").and_then(|v| v.as_f64()).map(IskCents::from_f64_isk);
             let max_price = kwargs.get("maxPrice").and_then(|v| v.as_f64()).map(IskCents::from_f64_isk);
             let caller_corp = session.corporation_id.unwrap_or(0);
@@ -1351,9 +1187,8 @@ pub fn handle(
                                         .map(|sys| sys.region_id == reg).unwrap_or(true)
                                 }).unwrap_or(true);
                             let item_type_ok = filter_item_type.map(|tid| {
-                                    c.item_ids.iter().any(|iid| {
-                                        snap.items.get(iid).map(|it| it.type_id == tid).unwrap_or(false)
-                                    }) || c.requested_items.iter().any(|&(rtid, _)| rtid == tid)
+                                    c.item_ids.iter().any(|iid| snap.items.get(iid).map(|it| it.type_id == tid).unwrap_or(false))
+                                        || c.requested_items.iter().any(|&(rtid, _)| rtid == tid)
                                 }).unwrap_or(true);
                             c.status == "Outstanding"
                                 && check_contract_visibility(c, char_id, caller_corp, caller_alliance)
@@ -1365,9 +1200,7 @@ pub fn handle(
                                 && item_type_ok
                         }).cloned().collect();
                     list.sort_by_key(|c| c.contract_id);
-                    Ok::<_, std::convert::Infallible>(
-                        list.iter().map(|c| contract_to_pyrep(c, snap)).collect::<Vec<_>>(),
-                    )
+                    Ok::<_, std::convert::Infallible>(list.iter().map(|c| contract_to_pyrep(c, snap)).collect::<Vec<_>>())
                 }).unwrap();
             Some(Ok(PyRep::List(rows)))
         }
@@ -1375,18 +1208,11 @@ pub fn handle(
         "GetMyCurrentContractList" | "GetContractList" | "GetContractListForOwner" => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let caller_corp = session.corporation_id.unwrap_or(0);
-            let is_corp_query = args
-                .first()
-                .and_then(|a| a.as_bool())
-                .or_else(|| kwargs.get("forCorp").and_then(|v| v.as_bool()))
-                .unwrap_or(false);
+            let is_corp_query = args.first().and_then(|a| a.as_bool()).or_else(|| kwargs.get("forCorp").and_then(|v| v.as_bool())).unwrap_or(false);
             let owner_id = if is_corp_query && caller_corp != 0 {
                 caller_corp
             } else {
-                args.first()
-                    .and_then(|a| a.as_i64())
-                    .filter(|&v| v > 1)
-                    .unwrap_or(char_id)
+                args.first().and_then(|a| a.as_i64()).filter(|&v| v > 1).unwrap_or(char_id)
             };
             if owner_id != char_id && owner_id != caller_corp {
                 return Some(Err(rpc_err("ContractAccessDenied", format!("Cannot query contract list for foreign owner {owner_id}"))));

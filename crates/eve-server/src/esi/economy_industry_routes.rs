@@ -311,10 +311,14 @@ pub fn dispatch_economy_industry_route(
                     .industry_jobs
                     .values()
                     .filter(|j| {
-                        (j.installer_id == corp_id
-                            || corp.members.contains(&j.installer_id)
-                            || j.installer_id == corp.ceo_id)
-                            && (include_completed || j.status.eq_ignore_ascii_case("active"))
+                        let is_corp_job = if j.installer_id == corp_id {
+                            true
+                        } else if let Some(m) = crate::services::industry_pi::load_job_cost_meta(snap, j.job_id) {
+                            m.use_corp && m.owner_id == corp_id
+                        } else {
+                            corp.members.contains(&j.installer_id) || j.installer_id == corp.ceo_id
+                        };
+                        is_corp_job && (include_completed || j.status.eq_ignore_ascii_case("active"))
                     })
                     .collect();
                 jobs.sort_by_key(|j| j.job_id);

@@ -208,18 +208,39 @@ pub(crate) fn fp_contract(c: &ContractRecord) -> u64 {
     let mut h = FnvHasher::new();
     h.write_i64(c.contract_id);
     h.write_i64(c.issuer_id);
+    h.write_i64(c.issuer_corp_id);
+    h.write_i64(c.assignee_id);
     h.write_i64(c.acceptor_id.unwrap_or(-1));
+    h.write_bool(c.for_corp);
+    h.write_str(&c.availability);
     h.write_str(&c.contract_type);
     h.write_str(&c.status);
+    h.write_str(&c.title);
     h.write_i64(c.start_station_id);
     h.write_i64(c.end_station_id);
     h.write_i64(c.price.0);
     h.write_i64(c.reward.0);
     h.write_i64(c.collateral.0);
+    h.write_i64(c.buyout.0);
+    h.write_i64(c.current_bid.0);
+    h.write_i64(c.current_bidder_id.unwrap_or(-1));
+    h.write_u64(c.date_issued_unix);
     h.write_u64(c.expiration_unix);
     h.write_u32(c.num_days);
+    h.write_u64(c.item_ids.len() as u64);
     for &id in &c.item_ids {
         h.write_i64(id);
+    }
+    h.write_u64(c.requested_items.len() as u64);
+    for &(tid, qty) in &c.requested_items {
+        h.write_u32(tid);
+        h.write_i32(qty);
+    }
+    h.write_u64(c.bid_history.len() as u64);
+    for &(bidder_id, amount, ts) in &c.bid_history {
+        h.write_i64(bidder_id);
+        h.write_i64(amount.0);
+        h.write_u64(ts);
     }
     h.finish()
 }

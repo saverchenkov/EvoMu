@@ -501,15 +501,22 @@ fn direct_delivery(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &Dynam
         if quantity == 0 {
             return Err((STATUS_BAD_REQUEST, "Delivered quantity must be positive".to_string()));
         }
-        if !ledger.assets.contains_key(&hex(&key.asset)) {
-            return Err((STATUS_NOT_FOUND, "Asset not found".to_string()));
-        }
         if !db.with_snapshot(|s| s.characters.contains_key(&(key.holder as i64))) {
             return Err((STATUS_NOT_FOUND, format!("Character {} not found", key.holder)));
         }
         let k = key.key();
         if !ledger.entitlements.contains_key(&k) && ledger.entitlements.len() >= MAX_LEDGER_ENTRIES {
             return Err((STATUS_BAD_REQUEST, "Entitlement ledger capacity reached".to_string()));
+        }
+        let asset = ledger
+            .assets
+            .get_mut(&hex(&key.asset))
+            .ok_or_else(|| (STATUS_NOT_FOUND, "Asset not found".to_string()))?;
+        if let Some((_orig, rem)) = &mut asset.capacity {
+            if *rem < quantity {
+                return Err((STATUS_BAD_REQUEST, "Asset finite capacity exhausted".to_string()));
+            }
+            *rem -= quantity;
         }
         let rec = ledger.entitlements.entry(k).or_insert_with(|| EntitlementRecord {
             holder: key.holder,
@@ -682,6 +689,12 @@ fn delete_or_expire(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &Dyna
     }
     let mut ledger = load(db);
     let (key, rec) = owned_entitlement(&ledger, ctx, msg, true)?;
+    if !require_admin && require_admin_role(ctx).is_err() && rec.redeemed > 0 {
+        return Err((
+            STATUS_FORBIDDEN,
+            "Cannot delete an already-redeemed entitlement without admin role".to_string(),
+        ));
+    }
     ledger.entitlements.remove(&key);
     save(db, &ledger);
     let (mut a_id, mut del_n) = (Vec::new(), Vec::new());
