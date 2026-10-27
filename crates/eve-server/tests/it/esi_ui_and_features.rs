@@ -836,3 +836,220 @@ async fn test_esi_bookmarks_location_skills_opportunities_and_plan_esi_7() {
     assert_eq!(char_opps_arr.len(), 1);
     assert_eq!(char_opps_arr[0]["task_id"], json!(first_tid));
 }
+
+#[tokio::test]
+async fn test_r3_track6_esi_quasar_destiny_and_dogma_regressions() {
+    let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
+    let router = EsiRouter::new(Arc::clone(&ctx));
+
+    let char_id = 90_000_001i64;
+    let corp_id = 98_600_001i64;
+    let alliance_id = 99_600_001i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c1) = snap.characters.get_mut(&char_id) {
+            c1.corporation_id = 1_000_009;
+            c1.alliance_id = None; // Unallied character first for #146!
+        }
+        snap.corporations.insert(
+            corp_id,
+            eve_db::CorporationRecord {
+                corporation_id: corp_id,
+                name: "Track 6 Corp".into(),
+                ticker: "TRK6".into(),
+                ceo_id: char_id,
+                alliance_id: Some(alliance_id),
+                tax_rate: 0.05,
+                master_wallet: eve_db::IskCents(0),
+                members: [char_id].into_iter().collect(),
+                member_roles: HashMap::new(),
+                applications: HashMap::new(),
+                wallet_divisions: Vec::new(),
+                description: String::new(),
+                url: String::new(),
+                hq_station_id: Some(60_003_760),
+            },
+        );
+        snap.alliances.insert(
+            alliance_id,
+            eve_db::AllianceRecord {
+                alliance_id,
+                name: "Track 6 Alliance".into(),
+                short_name: "T6AL".into(),
+                executor_corp_id: corp_id,
+                member_corp_ids: [corp_id].into_iter().collect(),
+            },
+        );
+        snap.bookmarks.insert(
+            6101,
+            BookmarkRecord {
+                bookmark_id: 6101,
+                owner_id: char_id,
+                label: "Private Personal Safe".into(),
+                solar_system_id: 30_000_142,
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+                item_id: None,
+                memo: "Private".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.bookmarks.insert(
+            6102,
+            BookmarkRecord {
+                bookmark_id: 6102,
+                owner_id: corp_id,
+                label: "Shared Corp Perch".into(),
+                solar_system_id: 30_000_142,
+                x: 4.0,
+                y: 5.0,
+                z: 6.0,
+                item_id: None,
+                memo: "Corp".into(),
+                folder_id: None,
+                is_shared: true,
+            },
+        );
+    });
+
+    // 1. Issue #146: Unallied character (`alliance_id == None`) gets 403 on `/v2/alliances/{alliance_id}/contacts/`
+    let token = issue_token_with_scopes(
+        &ctx,
+        char_id,
+        &[
+            "esi-alliances.read_contacts.v1",
+            "esi-bookmarks.read_corporation_bookmarks.v1",
+        ],
+    );
+    call(
+        &router,
+        EsiHttpRequest::new("GET", format!("/v2/alliances/{alliance_id}/contacts/"))
+            .with_bearer_token(&token),
+        403,
+    );
+
+    // 2. Issue #147: `/v1/corporations/{corp_id}/bookmarks/` excludes private character bookmarks (`is_shared == false`)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c1) = snap.characters.get_mut(&char_id) {
+            c1.corporation_id = corp_id;
+            c1.alliance_id = Some(alliance_id);
+        }
+    });
+    let corp_bms = call(
+        &router,
+        EsiHttpRequest::new("GET", format!("/v1/corporations/{corp_id}/bookmarks/"))
+            .with_bearer_token(&token),
+        200,
+    );
+    let bms_arr = corp_bms.as_array().unwrap();
+    assert!(
+        !bms_arr.iter().any(|b| b["bookmark_id"] == json!(6101)),
+        "Personal non-shared bookmark 6101 must not leak in corporation bookmarks"
+    );
+    assert!(bms_arr.iter().any(|b| b["bookmark_id"] == json!(6102)));
+
+    // 3. Issue #149: operationsManager rejects bogus category ID > 1000 and bogus task ID
+    let mut sess = eve_machonet::SessionState::new(76_001);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    assert!(
+        ctx.dispatch_rpc(
+            &mut sess,
+            "operationsManager",
+            None,
+            "complete_category_for_character",
+            &[eve_proto::PyRep::Integer(99_999)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        ctx.dispatch_rpc(
+            &mut sess,
+            "operationsManager",
+            None,
+            "skip_task",
+            &[eve_proto::PyRep::Integer(99_999)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .is_err()
+    );
+
+    // 4. Issue #150 & #151: Breacher Pod DoT applies resistance-ignoring true damage & set_ball_position emits grid transition events
+    let mut bp = eve_destiny::Ballpark::new(30_000_142);
+    bp.add_ball(eve_destiny::Ball {
+        id: 501,
+        type_id: 587,
+        position: eve_destiny::DVec3::ZERO,
+        velocity: eve_destiny::DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 3.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    });
+    bp.add_ball(eve_destiny::Ball {
+        id: 502,
+        type_id: 587,
+        position: eve_destiny::DVec3::new(100.0, 0.0, 0.0),
+        velocity: eve_destiny::DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 3.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    });
+    {
+        let cs = bp.combat_states.entry(501).or_default();
+        cs.shield_hp = 100.0;
+        cs.max_shield_hp = 100.0;
+        cs.armor_hp = 100.0;
+        cs.max_armor_hp = 100.0;
+        cs.structure_hp = 100.0;
+        cs.max_structure_hp = 100.0;
+        cs.shield_resonance = [0.1, 0.1, 0.1, 0.1]; // 90% resist that Breacher DoT must ignore
+    }
+    let _ = bp.drain_observer_events(501);
+    let _ = bp.drain_observer_events(502);
+    bp.apply_breacher_dot(501, 50.0, 1.0, 2);
+    bp.step(1.0);
+    assert!(
+        (bp.combat_states[&501].shield_hp - 50.0).abs() < 5.0,
+        "Breacher DoT must deal full 50 true damage ignoring 90% shield resist"
+    );
+
+    let _ = bp.drain_observer_events(501);
+    let _ = bp.drain_observer_events(502);
+    assert!(bp.set_ball_position(501, eve_destiny::DVec3::new(100_000_000.0, 0.0, 0.0)));
+    let ev_502 = bp.drain_observer_events(502);
+    assert!(
+        ev_502
+            .iter()
+            .any(|e| matches!(e, eve_destiny::DestinyEvent::RemoveBalls { ball_ids } if ball_ids.contains(&501))),
+        "set_ball_position across grid boundary must emit RemoveBalls to old grid observers"
+    );
+
+    // 5. Issue #152: Burned-out module cannot be brought online without repair
+    let mut fit = eve_dogma::ShipFittingEngine::from_sde(1, 587, &ctx.sde);
+    for (&sid, _) in &ctx.sde.types {
+        fit.character_skills.insert(sid, 5);
+    }
+    fit.fit_module_with_state(1001, 440, 19, false, &ctx.sde)
+        .expect("fit 1MN Afterburner I offline");
+    if let Some(m) = fit.modules.get_mut(&1001) {
+        m.damage_hp = m.max_hp;
+    }
+    assert!(
+        fit.set_module_online(1001, &ctx.sde).is_err(),
+        "Burned-out module must be rejected by set_module_online"
+    );
+}

@@ -901,6 +901,16 @@ impl Ballpark {
                 .and_then(|gid| self.grids.get(&gid))
                 .is_some_and(|g| g.contains(new_position));
             if !stay_in_old {
+                let old_members: Vec<BallId> = old_gid
+                    .and_then(|gid| self.grids.get(&gid))
+                    .map(|g| {
+                        g.members
+                            .iter()
+                            .copied()
+                            .filter(|&id| id != ball_id && !self.is_static_ball(id))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 if let Some(gid) = old_gid {
                     if let Some(g) = self.grids.get_mut(&gid) {
                         g.members.remove(&ball_id);
@@ -908,10 +918,78 @@ impl Ballpark {
                     self.contract_or_delete_grid(gid);
                 }
                 let new_gid = self.find_or_create_grid_for_position(new_position);
+                let new_members: Vec<BallId> = self
+                    .grids
+                    .get(&new_gid)
+                    .map(|g| {
+                        g.members
+                            .iter()
+                            .copied()
+                            .filter(|&id| id != ball_id && !self.is_static_ball(id))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 if let Some(g) = self.grids.get_mut(&new_gid) {
                     g.members.insert(ball_id);
                 }
                 self.ball_grid_ids.insert(ball_id, new_gid);
+
+                if old_gid != Some(new_gid) {
+                    let is_cloaked = self
+                        .combat_states
+                        .get(&ball_id)
+                        .is_some_and(|c| c.is_cloaked);
+                    if !old_members.is_empty() {
+                        for &other_id in &old_members {
+                            self.observer_events
+                                .entry(other_id)
+                                .or_default()
+                                .push(DestinyEvent::RemoveBalls {
+                                    ball_ids: vec![ball_id],
+                                });
+                        }
+                        self.observer_events
+                            .entry(ball_id)
+                            .or_default()
+                            .push(DestinyEvent::RemoveBalls {
+                                ball_ids: old_members,
+                            });
+                    }
+                    if !new_members.is_empty() {
+                        if !is_cloaked {
+                            if let Some(moved_ball) = self.balls.get(&ball_id).cloned() {
+                                for &other_id in &new_members {
+                                    self.observer_events
+                                        .entry(other_id)
+                                        .or_default()
+                                        .push(DestinyEvent::AddBalls2 {
+                                            balls: vec![moved_ball.clone()],
+                                        });
+                                }
+                            }
+                        }
+                        let mut entered_for_mover = Vec::new();
+                        for &other_id in &new_members {
+                            let other_cloaked = self
+                                .combat_states
+                                .get(&other_id)
+                                .is_some_and(|c| c.is_cloaked);
+                            if !other_cloaked {
+                                if let Some(b) = self.balls.get(&other_id).cloned() {
+                                    entered_for_mover.push(b);
+                                }
+                            }
+                        }
+                        if !entered_for_mover.is_empty() {
+                            self.observer_events
+                                .entry(ball_id)
+                                .or_default()
+                                .push(DestinyEvent::AddBalls {
+                                    balls: entered_for_mover,
+                                });
+                        }
+                    }
+                }
             }
         }
         true

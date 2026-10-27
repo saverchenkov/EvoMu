@@ -457,6 +457,43 @@ impl CombatState {
         let destroyed = self.structure_hp <= 1e-6;
         (total_applied, destroyed)
     }
+
+    /// Applies resistance-ignoring true damage (e.g. Breacher Pod DoT) across Shield -> Armor -> Structure.
+    /// Returns `(total_applied_damage, destroyed)`.
+    pub fn apply_true_damage(&mut self, amount: f64) -> (f64, bool) {
+        self.sync_action_breaks();
+        if self.is_tethered
+            || self.gate_cloak_remaining_ticks > 0
+            || self.undock_invulnerable_remaining_ticks > 0
+            || self.warp_exit_invulnerable_remaining_ticks > 0
+        {
+            return (0.0, false);
+        }
+        let mut rem = amount.max(0.0);
+        if rem <= 0.0 {
+            return (0.0, self.structure_hp <= 1e-6);
+        }
+        let mut total_applied = 0.0;
+        if self.shield_hp > 0.0 && rem > 0.0 {
+            let take = rem.min(self.shield_hp);
+            self.shield_hp -= take;
+            total_applied += take;
+            rem -= take;
+        }
+        if self.armor_hp > 0.0 && rem > 0.0 {
+            let take = rem.min(self.armor_hp);
+            self.armor_hp -= take;
+            total_applied += take;
+            rem -= take;
+        }
+        if self.structure_hp > 0.0 && rem > 0.0 {
+            let take = rem.min(self.structure_hp);
+            self.structure_hp -= take;
+            total_applied += take;
+        }
+        let destroyed = self.structure_hp <= 1e-6;
+        (total_applied, destroyed)
+    }
 }
 
 /// Physical & kinematic state of a single entity ("Ball") inside a solar system's `Ballpark`.

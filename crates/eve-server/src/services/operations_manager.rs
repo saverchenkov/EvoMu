@@ -393,7 +393,7 @@ pub fn handle(
             let Some(cat_id) = args
                 .first()
                 .and_then(|a| a.as_i64())
-                .filter(|id| (1..=100_000).contains(id))
+                .filter(|id| (1..=1_000).contains(id))
             else {
                 return Some(Err(BridgeRpcError::user_error("CustomInfo")));
             };
@@ -401,7 +401,9 @@ pub fn handle(
             ctx.db.with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let rec = store.by_character.entry(char_id).or_default();
-                rec.completed_categories.insert(cat_id);
+                if rec.completed_categories.len() < 128 {
+                    rec.completed_categories.insert(cat_id);
+                }
                 if rec.active_category_id == Some(cat_id) {
                     rec.active_category_id = None;
                 }
@@ -625,11 +627,12 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let op_defs = get_operation_defs(&ctx.sde);
             let Some(task_id) = args
                 .get(2)
                 .and_then(|a| a.as_i64())
                 .or_else(|| args.first().and_then(|a| a.as_i64()))
-                .filter(|id| (1..=100_000).contains(id))
+                .filter(|id| (1..=100_000).contains(id) && op_defs.task_to_op.contains_key(id))
             else {
                 return Some(Err(BridgeRpcError::user_error("CustomInfo")));
             };
@@ -643,12 +646,13 @@ pub fn handle(
             } else {
                 None
             };
-            let op_defs = get_operation_defs(&ctx.sde);
             let now = ctx.now_unix();
             let (cat_id, op_id) = ctx.db.with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let rec = store.by_character.entry(char_id).or_default();
-                rec.skipped_tasks.insert(task_id);
+                if rec.skipped_tasks.len() < 512 {
+                    rec.skipped_tasks.insert(task_id);
+                }
                 let cat_id = call_cat_id.or(rec.active_category_id).unwrap_or(1);
                 let op_id = call_op_id
                     .or(rec.active_operation_id)
@@ -961,6 +965,7 @@ pub fn handle(
                 return Some(Ok(PyRep::Bool(true)));
             }
 
+            let op_defs = get_operation_defs(&ctx.sde);
             let explicit_task_id = extra_data
                 .and_then(|ed| match ed {
                     PyRep::Dict(dict) => dict.iter().find_map(|(k, v)| {
@@ -976,8 +981,7 @@ pub fn handle(
                 .or(amount)
                 .or_else(|| args.first().and_then(|a| a.as_i64()))
                 .or_else(|| args.get(1).and_then(|a| a.as_i64()))
-                .filter(|id| (1..=100_000).contains(id));
-            let op_defs = get_operation_defs(&ctx.sde);
+                .filter(|id| (1..=100_000).contains(id) && op_defs.task_to_op.contains_key(id));
             let completed_task = ctx.db.with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let rec = store.by_character.entry(char_id).or_default();

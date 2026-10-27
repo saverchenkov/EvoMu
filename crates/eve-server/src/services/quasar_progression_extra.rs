@@ -606,7 +606,7 @@ pub fn register_progression_extra_handlers(
                 })
                 .unwrap_or(100);
 
-            let initial_prog = dyn_msg
+            let raw_initial_prog = dyn_msg
                 .get(5)
                 .and_then(|v| match v {
                     DynamicValue::Uint64(u) => Some(*u),
@@ -615,6 +615,13 @@ pub fn register_progression_extra_handlers(
                 })
                 .unwrap_or(0)
                 .min(target);
+            if raw_initial_prog > 0 && crate::quasar_gateway::require_admin_role(ctx).is_err() {
+                return Err((
+                    STATUS_FORBIDDEN,
+                    "Non-admin callers cannot seed initial goal progress on CreateRequest".into(),
+                ));
+            }
+            let initial_prog = raw_initial_prog;
 
             let mut escrow_isk = 0i64;
             if let Some(pools) = dyn_msg.get(8) {
@@ -729,10 +736,24 @@ pub fn register_progression_extra_handlers(
     let mgr = Arc::clone(&manager);
     router.register_handler(
         "eve_public.goal.api.GetAllRequest",
-        Arc::new(move |_ctx, _any, _dyn| {
+        Arc::new(move |ctx, _any, _dyn| {
+            let caller_cid = ctx.effective_character_id();
+            let is_admin = crate::quasar_gateway::require_admin_role(ctx).is_ok();
+            let caller_corp = caller_cid.and_then(|cid| {
+                mgr.db.as_ref().and_then(|db| {
+                    db.with_snapshot(|s| s.characters.get(&(cid as i64)).map(|c| c.corporation_id as u32))
+                })
+            });
             let goals = mgr.generic_goals.read().unwrap_or_else(|e| e.into_inner());
             let mut out = Vec::new();
             for g in goals.values() {
+                if !is_admin {
+                    if let (Some(gc), Some(cc)) = (mgr.goal_corp_id(&g.uuid), caller_corp) {
+                        if gc != 0 && gc != cc && caller_cid != Some(g.creator_id) {
+                            continue;
+                        }
+                    }
+                }
                 let mut goal_bytes = Vec::new();
                 let mut id_bytes = Vec::new();
                 encode_bytes_field(1, &g.uuid, &mut id_bytes);
@@ -991,10 +1012,18 @@ pub fn register_progression_extra_handlers(
     router.register_handler(
         "eve.seasonalevent.challenge.GetChallengesForCharacterRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let char_id = extract_track_id(dyn_msg)
-                .or_else(|| ctx.effective_character_id())
-                .map(|id| id as i64)
-                .unwrap_or(0);
+            let req_cid = extract_track_id(dyn_msg).map(|id| id as i64);
+            let effective_cid = ctx.effective_character_id().map(|id| id as i64).unwrap_or(0);
+            let is_admin = crate::quasar_gateway::require_admin_role(ctx).is_ok();
+            if let Some(rc) = req_cid {
+                if effective_cid != 0 && rc != effective_cid && !is_admin {
+                    return Err((
+                        STATUS_FORBIDDEN,
+                        "Cannot query seasonal challenges of another character".into(),
+                    ));
+                }
+            }
+            let char_id = req_cid.unwrap_or(effective_cid);
             if char_id <= 0 {
                 return Err((STATUS_BAD_REQUEST, "Missing character ID".into()));
             }

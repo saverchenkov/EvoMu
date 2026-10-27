@@ -650,7 +650,7 @@ impl EsiRouter {
                         let char_al = snap.characters.get(&claims.character_id).and_then(|c| c.alliance_id);
                         let char_corp = snap.characters.get(&claims.character_id).map(|c| c.corporation_id).unwrap_or(0);
                         let in_alliance = char_al == Some(path_alliance_id) || al.member_corp_ids.contains(&char_corp);
-                        !in_alliance && char_al.is_some()
+                        !in_alliance && (!al.member_corp_ids.is_empty() || char_al.is_some())
                     });
                     if forbidden {
                         return self.build_error_response(

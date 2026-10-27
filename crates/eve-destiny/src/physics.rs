@@ -1,7 +1,7 @@
 //! 1 Hz `Ballpark::step` physics loop, sub-warp & warp kinematics, collision bounce, and `combat` equations.
 
 use crate::{
-    Ball, BallId, Ballpark, DamageVector, DestinyEvent, MovementMode, WarpPhase, AU_METERS,
+    Ball, BallId, Ballpark, DestinyEvent, MovementMode, WarpPhase, AU_METERS,
     BUBBLE_TRANSITION_THRESHOLD_METERS, DECLOAK_DISTANCE_METERS,
 };
 use glam::DVec3;
@@ -536,15 +536,35 @@ impl Ballpark {
                 if let Some((flat_dps, pct_dps, rem_ticks)) = cs.active_breacher_dot {
                     let max_total = cs.max_shield_hp + cs.max_armor_hp + cs.max_structure_hp;
                     let tick_dmg = flat_dps.min(pct_dps * max_total) * dt;
-                    let _ = cs.apply_damage(DamageVector {
-                        em: 0.0,
-                        thermal: tick_dmg * 0.5,
-                        kinetic: tick_dmg * 0.5,
-                        explosive: 0.0,
-                    });
+                    let (applied, destroyed) = cs.apply_true_damage(tick_dmg);
+                    let shield_ratio = if cs.max_shield_hp > 0.0 {
+                        (cs.shield_hp / cs.max_shield_hp).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let armor_ratio = if cs.max_armor_hp > 0.0 {
+                        (cs.armor_hp / cs.max_armor_hp).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let structure_ratio = if cs.max_structure_hp > 0.0 {
+                        (cs.structure_hp / cs.max_structure_hp).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
                     let next_rem = rem_ticks.saturating_sub(1);
-                    dot_updates.push((id_a, flat_dps, pct_dps, next_rem));
-                    if rem_ticks <= 1 {
+                    dot_updates.push((
+                        id_a,
+                        flat_dps,
+                        pct_dps,
+                        next_rem,
+                        applied > 0.0,
+                        shield_ratio,
+                        armor_ratio,
+                        structure_ratio,
+                        destroyed,
+                    ));
+                    if rem_ticks <= 1 || destroyed {
                         cs.active_breacher_dot = None;
                     } else {
                         cs.active_breacher_dot = Some((flat_dps, pct_dps, next_rem));
@@ -574,7 +594,18 @@ impl Ballpark {
                 cs.last_step_capacitor = Some(cs.capacitor);
             }
         }
-        for (dot_id, flat_dps, pct_dps, remaining_ticks) in dot_updates {
+        for (
+            dot_id,
+            flat_dps,
+            pct_dps,
+            remaining_ticks,
+            did_apply,
+            shield_ratio,
+            armor_ratio,
+            structure_ratio,
+            destroyed,
+        ) in dot_updates
+        {
             self.emit_event(
                 Some(dot_id),
                 DestinyEvent::OnDotVictimUpdated {
@@ -584,6 +615,27 @@ impl Ballpark {
                     remaining_ticks,
                 },
             );
+            if did_apply {
+                self.emit_event(
+                    Some(dot_id),
+                    DestinyEvent::OnDamageStateChange {
+                        ball_id: dot_id,
+                        shield_ratio,
+                        armor_ratio,
+                        structure_ratio,
+                    },
+                );
+            }
+            if destroyed {
+                self.emit_event(
+                    Some(dot_id),
+                    DestinyEvent::TerminalExplosion {
+                        ball_id: dot_id,
+                        destruction_effect_id: None,
+                    },
+                );
+                let _ = self.remove_ball(dot_id);
+            }
         }
         for mjfg_id in mjfg_completed_ids {
             let _ = self.micro_jump_field(mjfg_id, 100_000.0, 6_000.0, 25);

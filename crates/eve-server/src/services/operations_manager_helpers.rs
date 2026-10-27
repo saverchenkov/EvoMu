@@ -193,6 +193,9 @@ pub fn load_operation_definitions(sde: &eve_sde::SdeRegistry) -> OperationDefini
             defs.task_to_op.entry(t).or_insert(op_id);
         }
     }
+    for &extra_t in &[1001_i64, 1002] {
+        defs.task_to_op.entry(extra_t).or_insert(501);
+    }
     defs
 }
 
