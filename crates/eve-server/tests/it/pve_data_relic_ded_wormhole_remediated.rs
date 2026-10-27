@@ -129,23 +129,22 @@ async fn hack_until_won(ctx: &ServerContext, sess: &mut SessionState, can_id: i6
     // Non-adjacent unrevealed SystemCore cannot be clicked on turn 1
     let direct_err = ctx.dispatch_rpc(sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can_id), PyRep::Integer(core_idx as i64)], &kw, None).await.expect_err("unrevealed non-adjacent core");
     assert_eq!(direct_err.code, "TileNotAccessible");
-    // Undefeated Firewall at tile 3 blocks revealing tile 4 until tile 3 is destroyed
-    for adj_idx in [1_i64, 2, 3] {
-        ctx.dispatch_rpc(sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can_id), PyRep::Integer(adj_idx)], &kw, None).await.expect("step 1..=3");
-    }
-    let blocked_err = ctx.dispatch_rpc(sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can_id), PyRep::Integer(4)], &kw, None).await.expect_err("blocked by Firewall on tile 3");
-    assert_eq!(blocked_err.code, "TileNotAccessible");
 
     let mut path: Vec<u32> = (1..=(core_idx / 6)).map(|r| r * 6).collect();
     path.extend(((core_idx / 6) * 6 + 1)..=core_idx);
-    for idx in path {
-        for _ in 0..5 {
+    for (step_i, &idx) in path.iter().enumerate() {
+        for attempt in 0..5 {
             let r = ctx.dispatch_rpc(sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can_id), PyRep::Integer(idx as i64)], &kw, None).await.expect("ClickedOnTile");
             if r.dict_get("status").and_then(|v| v.as_str()) == Some("Won") {
                 return r;
             }
-            if r.dict_get("nodeCoherence").and_then(|v| v.as_i64()).unwrap_or(0) <= 0 {
+            let node_coh = r.dict_get("nodeCoherence").and_then(|v| v.as_i64()).unwrap_or(0);
+            if node_coh <= 0 {
                 break;
+            }
+            if attempt == 0 && step_i + 1 < path.len() {
+                let blocked_err = ctx.dispatch_rpc(sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can_id), PyRep::Integer(path[step_i + 1] as i64)], &kw, None).await.expect_err("blocked by undefeated defensive node");
+                assert_eq!(blocked_err.code, "TileNotAccessible");
             }
         }
     }

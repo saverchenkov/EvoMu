@@ -160,6 +160,16 @@ pub struct DialogEntry {
     pub dialog_type: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SecondarySunInfo {
+    pub item_id: u32,
+    pub type_id: TypeId,
+    pub effect_beacon_type_id: TypeId,
+    pub position: [f64; 3],
+}
+
+static SECONDARY_SUNS_CACHE: OnceLock<HashMap<SolarSystemId, SecondarySunInfo>> = OnceLock::new();
+
 fn u32_le(buf: &[u8], pos: usize) -> u32 {
     u32::from_le_bytes(buf[pos..pos + 4].try_into().expect("u32 slice"))
 }
@@ -985,5 +995,53 @@ impl SdeRegistry {
             out.insert(fa.ability_id, fa);
         }
         Ok((byte_size, out))
+    }
+
+    /// Loads `secondarySun` records (`1,038` W-space system phenomena celestials and their
+    /// `effectBeaconTypeID`) from `res:/staticdata/solarsystemcontent.static`.
+    pub fn load_secondary_suns(&self) -> Result<HashMap<SolarSystemId, SecondarySunInfo>, SdeError> {
+        let raw = self.read_fsd_static_bytes("res:/staticdata/solarsystemcontent.static")?;
+        let sch_len = u32_le(&raw, 0) as usize;
+        let entries = fsd_dict_entries(&raw, 4 + sch_len, 12);
+        let mut out = HashMap::new();
+        for (sys_id, pos) in entries {
+            let fixed_end = pos + 98;
+            if fixed_end + 8 > raw.len() {
+                continue;
+            }
+            let mask = u64_le(&raw, fixed_end);
+            if (mask & 4) == 0 {
+                continue;
+            }
+            let n_present = 2 + (mask & 0x1ffff).count_ones() as usize;
+            let sec_idx = 1 + (mask & 0x03).count_ones() as usize;
+            let offsets_start = fixed_end + 8;
+            let data_start = offsets_start + 4 * n_present;
+            let spos = data_start + u32_le(&raw, offsets_start + 4 * sec_idx) as usize;
+            if spos + 36 > raw.len() {
+                continue;
+            }
+            out.insert(
+                sys_id,
+                SecondarySunInfo {
+                    item_id: u32_le(&raw, spos),
+                    type_id: u32_le(&raw, spos + 4),
+                    effect_beacon_type_id: u32_le(&raw, spos + 8),
+                    position: [
+                        f64_le(&raw, spos + 12),
+                        f64_le(&raw, spos + 20),
+                        f64_le(&raw, spos + 28),
+                    ],
+                },
+            );
+        }
+        Ok(out)
+    }
+
+    /// Returns the cached `SecondarySunInfo` (`type_id` and `effect_beacon_type_id`) for a W-space
+    /// solar system from `res:/staticdata/solarsystemcontent.static`, if the system has a secondary sun.
+    pub fn secondary_sun_for_system(&self, solar_system_id: SolarSystemId) -> Option<SecondarySunInfo> {
+        let map = SECONDARY_SUNS_CACHE.get_or_init(|| self.load_secondary_suns().unwrap_or_default());
+        map.get(&solar_system_id).copied()
     }
 }

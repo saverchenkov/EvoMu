@@ -616,6 +616,13 @@ pub(super) async fn handle_scanning_and_wormholes(
                 };
                 let is_collapsed = wh.collapsed || lifetime_pct <= 0.0 || wh.remaining_mass_kg <= 0.0;
                 let dest_sys = wh.destination_system_id.unwrap_or(31_000_005) as i64;
+                let entrance_wh_id =
+                    crate::services::space_destiny::wormhole_item_id_for_signature(sys_id, &wh.signature_id);
+                let exit_wh_id =
+                    crate::services::space_destiny::wormhole_exit_item_id_for_signature(
+                        dest_sys as u32,
+                        &wh.signature_id,
+                    );
                 let rem_pol = ctx.db.with_snapshot(|snap| {
                     snap.wh_polarizations
                         .get(&(char_id, dest_sys))
@@ -625,6 +632,16 @@ pub(super) async fn handle_scanning_and_wormholes(
                 });
                 return Some(Ok(PyRep::keyval([
                     ("signatureID", PyRep::String(wh.signature_id)),
+                    ("entranceWormholeID", PyRep::Integer(entrance_wh_id)),
+                    ("exitWormholeID", PyRep::Integer(exit_wh_id)),
+                    (
+                        "wormholeTypeID",
+                        wh.wormhole_type_id
+                            .map(|t| PyRep::Integer(t as i64))
+                            .unwrap_or(PyRep::None),
+                    ),
+                    ("totalLifespanSeconds", PyRep::Integer(wh.lifetime_seconds as i64)),
+                    ("elapsedSeconds", PyRep::Integer(elapsed as i64)),
                     ("lifetimeStage", PyRep::String(lifetime_stage.into())),
                     ("massStage", PyRep::String(mass_stage.into())),
                     ("remainingMassKg", PyRep::Real(wh.remaining_mass_kg)),
@@ -634,6 +651,11 @@ pub(super) async fn handle_scanning_and_wormholes(
                     ("maxShipSize", PyRep::String(buckets.max_ship_size.into())),
                     ("lifetimeBucket", PyRep::String(buckets.lifetime_bucket.into())),
                     ("massStabilityBucket", PyRep::String(buckets.mass_stability_bucket.into())),
+                    ("lifetimeDescription", PyRep::String(buckets.lifetime_description.into())),
+                    (
+                        "massStabilityDescription",
+                        PyRep::String(buckets.mass_stability_description.into()),
+                    ),
                     ("collapsed", PyRep::Bool(is_collapsed)),
                     ("isPolarized", PyRep::Bool(rem_pol > 0)),
                     ("remainingSeconds", PyRep::Integer(rem_pol as i64)),

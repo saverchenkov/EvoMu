@@ -282,58 +282,37 @@ pub fn apply_active_dbuffs_and_system_effects_to_ship_attrs(
                         })
                         .map(|i| i.type_id)
                 })
+            })
+            .or_else(|| {
+                eve_dogma::resolve_system_wormhole_phenomenon(&ctx.sde, sys_id, None)
+                    .map(|(_, _, _, eff_tid)| eff_tid)
             });
         if let Some(eff_tid) = eff_tid_opt {
-            let name = ctx
-                .sde
-                .types
-                .get(&eff_tid)
-                .map(|t| t.name.to_lowercase())
-                .unwrap_or_default();
-            if name.contains("pulsar") || eff_tid == 30844 {
-                // Pulsar: +30% Shield HP (263), +30% Signature Radius (552), -15% Armor Resists, -15% Cap Recharge (55)
-                if let Some(v) = attrs.get_mut(&263) {
-                    *v *= 1.30;
+            let (target_cat_id, is_npc_or_sleeper, ship_type_id_opt) = ctx.db.with_snapshot(|snap| {
+                if let Some(item) = snap.items.get(&ship_id) {
+                    let cat = ctx.sde.types.get(&item.type_id).map(|t| t.category_id).unwrap_or(6);
+                    let is_npc = cat == 11 || (item.owner_id > 0 && item.owner_id < 10_000);
+                    (cat, is_npc, Some(item.type_id))
+                } else {
+                    (6, false, None)
                 }
-                if let Some(v) = attrs.get_mut(&552) {
-                    *v *= 1.30;
+            });
+            if target_cat_id == 6 && !is_npc_or_sleeper {
+                if let Some(ship_tid) = ship_type_id_opt {
+                    if let Some(ship_type) = ctx.sde.types.get(&ship_tid) {
+                        for (&aid, &val) in &ship_type.default_attributes {
+                            attrs.entry(aid).or_insert(val);
+                        }
+                    }
                 }
-                if let Some(v) = attrs.get_mut(&55) {
-                    *v *= 0.85;
-                }
-            } else if name.contains("wolf") || eff_tid == 30849 {
-                // Wolf-Rayet: +30% Armor HP (265), -15% Signature Radius (552)
-                if let Some(v) = attrs.get_mut(&265) {
-                    *v *= 1.30;
-                }
-                if let Some(v) = attrs.get_mut(&552) {
-                    *v *= 0.85;
-                }
-            } else if name.contains("black hole") || eff_tid == 30845 {
-                // Black Hole: +30% Max Velocity (37), +15% Inertia (70)
-                if let Some(v) = attrs.get_mut(&37) {
-                    *v *= 1.30;
-                }
-                if let Some(v) = attrs.get_mut(&70) {
-                    *v *= 1.15;
-                }
-            } else if name.contains("cataclysmic") || eff_tid == 30846 {
-                // Cataclysmic Variable: +30% Capacitor Capacity (482)
-                if let Some(v) = attrs.get_mut(&482) {
-                    *v *= 1.30;
-                }
-            } else if name.contains("magnetar") || eff_tid == 30847 {
-                // Magnetar: +30% Damage Multiplier (64), -15% Max Target Range (76)
-                let cur_dmg = attrs.get(&64).copied().unwrap_or(1.0);
-                attrs.insert(64, cur_dmg * 1.30);
-                if let Some(v) = attrs.get_mut(&76) {
-                    *v *= 0.85;
-                }
-            } else if name.contains("red giant") || eff_tid == 30848 {
-                // Red Giant: +15% Overload Heat Damage (1211), +30% Smartbomb Range
-                let cur_hd = attrs.get(&1211).copied().unwrap_or(3.4);
-                attrs.insert(1211, cur_hd * 1.15);
             }
+            eve_dogma::apply_wormhole_phenomenon_to_attributes(
+                &ctx.sde,
+                eff_tid,
+                target_cat_id,
+                is_npc_or_sleeper,
+                attrs,
+            );
         }
     }
     crate::services::tactical_modules::apply_tactical_module_ship_attributes(ctx, ship_id, attrs);
@@ -875,13 +854,20 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                         message: "RefreshSystemWideEnvironment requires GM/Admin authority".into(),
                     }));
                 }
+                let phenom_str_opt = args.get(1).and_then(|a| a.as_str()).or_else(|| args.first().and_then(|a| a.as_str()));
                 let req_tid_opt = if args.len() >= 2 {
                     args.get(1).and_then(|a| a.as_i64())
                 } else {
                     args.first().and_then(|a| a.as_i64()).filter(|&t| t < 30_000_000)
-                };
-                if let Some(req_tid) = req_tid_opt.filter(|&t| t > 0) {
-                    scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner()).system_wide_effects.insert(sys_id, req_tid as u32);
+                }
+                .filter(|&t| t > 0)
+                .map(|t| t as u32)
+                .or_else(|| {
+                    eve_dogma::resolve_system_wormhole_phenomenon(&ctx.sde, sys_id, phenom_str_opt)
+                        .map(|(_, _, _, tid)| tid)
+                });
+                if let Some(req_tid) = req_tid_opt {
+                    scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner()).system_wide_effects.insert(sys_id, req_tid);
                     if ship_id > 0 {
                         ctx.invalidate_ship_fitting(ship_id);
                     }
@@ -889,36 +875,87 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                         crate::router::NotificationTarget::Character(char_id),
                         "OnSystemWideEffectAdd",
                         "charid",
-                        vec![PyRep::Integer(sys_id as i64), PyRep::Integer(req_tid)],
+                        vec![PyRep::Integer(sys_id as i64), PyRep::Integer(req_tid as i64)],
                     );
                 }
             }
 
+            let resolved_wh = eve_dogma::resolve_system_wormhole_phenomenon(&ctx.sde, sys_id, None);
             let active_tid_opt = scanners_superweapons_state()
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .system_wide_effects
                 .get(&sys_id)
-                .copied();
+                .copied()
+                .or_else(|| resolved_wh.map(|(_, _, _, tid)| tid));
             let eff_name = active_tid_opt
                 .and_then(|tid| ctx.sde.types.get(&tid))
                 .map(|t| t.name.clone())
                 .unwrap_or_default();
+            let eff_attrs_py: Vec<(PyRep, PyRep)> = active_tid_opt
+                .and_then(|tid| ctx.sde.types.get(&tid))
+                .map(|t| {
+                    t.default_attributes
+                        .iter()
+                        .map(|(&aid, &val)| (PyRep::Integer(aid as i64), PyRep::Real(val)))
+                        .collect()
+                })
+                .unwrap_or_default();
 
             let mut ship_attrs = HashMap::new();
-            if ship_id > 0 {
-                if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+            let target_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .filter(|&id| {
+                    id > 0
+                        && id < 30_000_000
+                        && (id == ship_id
+                            || ctx
+                                .db
+                                .with_snapshot(|snap| snap.items.get(&id).is_some_and(|it| it.owner_id == char_id)))
+                })
+                .unwrap_or(ship_id);
+            if target_id > 0 {
+                if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(char_id, target_id) {
                     let eval_ctx = fit.evaluated_context(&ctx.sde);
-                    for &aid in &[37u16, 55, 64, 70, 76, 263, 265, 482, 552, 1211] {
+                    for &aid in &[20u16, 37, 55, 64, 68, 70, 76, 84, 90, 97, 99, 114, 116, 117, 118, 160, 263, 265, 267, 268, 269, 270, 271, 272, 273, 274, 482, 507, 552, 554, 653, 654, 1210, 1211, 2125, 2129] {
                         ship_attrs.insert(aid, eval_ctx.ship.get_attribute(aid, &ctx.sde));
                     }
                 }
-                apply_active_dbuffs_and_system_effects_to_ship_attrs(ctx, ship_id, &mut ship_attrs);
+                apply_active_dbuffs_and_system_effects_to_ship_attrs(ctx, target_id, &mut ship_attrs);
             }
+            let ship_attrs_py: Vec<(PyRep, PyRep)> = ship_attrs
+                .iter()
+                .map(|(&aid, &val)| (PyRep::Integer(aid as i64), PyRep::Real(val)))
+                .collect();
+            let applies_to_capsuleer_ships_only = active_tid_opt
+                .and_then(|tid| ctx.sde.types.get(&tid))
+                .is_some_and(|t| {
+                    !t.effect_ids.is_empty()
+                        && t.effect_ids
+                            .iter()
+                            .filter_map(|eid| ctx.sde.effects.get(eid))
+                            .flat_map(|e| e.modifiers.iter())
+                            .all(|m| matches!(m.domain.as_str(), "shipID" | "charID"))
+                });
 
             Some(Ok(PyRep::keyval([
                 ("solarSystemID", PyRep::Integer(sys_id as i64)),
                 ("active", PyRep::Bool(active_tid_opt.is_some())),
+                ("hudVisible", PyRep::Bool(active_tid_opt.is_some())),
+                ("appliesToCapsuleerShipsOnly", PyRep::Bool(applies_to_capsuleer_ships_only)),
+                (
+                    "wormholeClass",
+                    resolved_wh.map(|(raw_c, _, _, _)| PyRep::Integer(raw_c as i64)).unwrap_or(PyRep::Integer(0)),
+                ),
+                (
+                    "effectiveClassStrength",
+                    resolved_wh.map(|(_, eff_c, _, _)| PyRep::Integer(eff_c as i64)).unwrap_or(PyRep::Integer(0)),
+                ),
+                (
+                    "phenomenonName",
+                    resolved_wh.map(|(_, _, p, _)| PyRep::String(p.into())).unwrap_or(PyRep::String("None".into())),
+                ),
                 (
                     "effectTypeID",
                     active_tid_opt
@@ -926,6 +963,8 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                         .unwrap_or(PyRep::None),
                 ),
                 ("effectName", PyRep::String(eff_name)),
+                ("effectAttributes", PyRep::Dict(eff_attrs_py)),
+                ("shipAttributes", PyRep::Dict(ship_attrs_py)),
                 (
                     "effectiveShieldCapacity",
                     PyRep::Real(ship_attrs.get(&263).copied().unwrap_or(0.0)),

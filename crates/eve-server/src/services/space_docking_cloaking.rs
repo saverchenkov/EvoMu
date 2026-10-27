@@ -1,47 +1,305 @@
-//! Wormhole profiles, cosmic signatures/anomalies, cosmic wormhole jumps, and `scanMgr` probe scanning handlers.
+//! Wormhole profiles, cosmic signatures/anomalies, cosmic wormhole jumps, and `scanMgr` probe scanning re-exports.
 
 #![forbid(unsafe_code)]
 
-use crate::router::{BoundObjectEntry, ServerContext};
+use crate::router::ServerContext;
 use crate::services::space_destiny::{
     record_session_change_timer, wormhole_item_id_for_signature, AU_IN_METERS,
 };
-use eve_db::types::{CosmicAnomalyRecord, CosmicSignatureRecord, InventoryFlag};
+use eve_db::types::{CosmicAnomalyRecord, CosmicSignatureRecord};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::SolarSystemId;
 use glam::DVec3;
-use std::collections::HashMap;
+
+#[path = "space_probe_scanning.rs"]
+pub mod space_probe_scanning;
+pub use space_probe_scanning::*;
 
 const BEYONCE_SVC: &str = "beyonce";
 
-pub fn system_wormhole_profile(sys_id: SolarSystemId) -> (u8, bool, bool, &'static str) {
-    let is_wh = (31_000_000..=31_002_605).contains(&sys_id);
-    let is_thera = sys_id == 31_000_005;
-    let is_shattered = is_thera || (is_wh && (sys_id % 10 == 0));
-    let wh_class = if is_thera {
-        12
-    } else if is_shattered {
-        13
-    } else if is_wh {
-        (((sys_id - 31_000_000) % 6) + 1) as u8
+pub fn wormhole_exit_item_id_for_signature(dest_sys: SolarSystemId, sig_id: &str) -> i64 {
+    wormhole_item_id_for_signature(dest_sys, &format!("K162-{sig_id}"))
+}
+
+pub fn pick_system_celestial_position(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    seed: u32,
+) -> ([f64; 3], Option<i64>) {
+    let celestials = ctx.sde.celestials_in_system(sys_id);
+    if !celestials.is_empty() {
+        let idx = (seed as usize).wrapping_mul(7) % celestials.len();
+        let c = &celestials[idx];
+        let pos = [
+            c.position.x + 15_000.0,
+            c.position.y - 10_000.0,
+            c.position.z + 5_000.0,
+        ];
+        return (pos, Some(c.celestial_id));
+    }
+    let angle = ((seed % 360) as f64).to_radians();
+    let r = 8.0 * AU_IN_METERS;
+    ([r * angle.cos(), 1.5 * AU_IN_METERS, r * angle.sin()], None)
+}
+
+pub fn compute_effective_ship_jump_mass(
+    ctx: &ServerContext,
+    ship_id: i64,
+    ball_mass: f64,
+) -> (f64, f64) {
+    let (base_hull_mass, fitted_plate_mass, prop_mass_add) = ctx.db.with_snapshot(|snap| {
+        let hull_tid = snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(0);
+        let hull_m = ctx
+            .sde
+            .types
+            .get(&hull_tid)
+            .map(|t| t.mass)
+            .unwrap_or(ball_mass);
+        let mut plate_m = 0.0;
+        let mut prop_m = 0.0;
+        for item in snap.items.values() {
+            if item.location_id != ship_id || item.quantity <= 0 {
+                continue;
+            }
+            let Some(mt) = ctx.sde.types.get(&item.type_id) else {
+                continue;
+            };
+            let mass_add = item
+                .dynamic_attributes
+                .get(&796)
+                .copied()
+                .or_else(|| mt.default_attributes.get(&796).copied())
+                .unwrap_or(0.0);
+            if mass_add <= 0.0 {
+                continue;
+            }
+            if mt.group_id == 46 {
+                if snap.module_active_states.contains(&item.item_id) {
+                    prop_m += mass_add;
+                }
+            } else if snap.module_online_states.get(&item.item_id).copied().unwrap_or(true)
+                && matches!(item.flag as u16, 11..=34)
+            {
+                plate_m += mass_add;
+            }
+        }
+        (hull_m, plate_m, prop_m)
+    });
+    let base_total = if ball_mass > 0.0 {
+        ball_mass.max(base_hull_mass + fitted_plate_mass)
     } else {
-        0
+        base_hull_mass + fitted_plate_mass
     };
-    let env_effect = if !is_wh || is_thera {
-        "None"
+    let effective_mass = if prop_mass_add > 0.0 && ball_mass <= base_hull_mass + fitted_plate_mass + 1.0 {
+        base_total + prop_mass_add
     } else {
-        match sys_id % 6 {
-            0 => "Pulsar",
-            1 => "Wolf-Rayet",
-            2 => "Magnetar",
-            3 => "Red Giant",
-            4 => "Cataclysmic Variable",
-            _ => "Black Hole",
+        base_total
+    };
+    (effective_mass, prop_mass_add)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WormholeBuckets {
+    pub destination_class: &'static str,
+    pub max_ship_size: &'static str,
+    pub lifetime_bucket: &'static str,
+    pub mass_stability_bucket: &'static str,
+    pub lifetime_description: &'static str,
+    pub mass_stability_description: &'static str,
+}
+
+// parity: feat:wormholes.mass-reduction-and-destabilization
+pub fn derive_wormhole_buckets(
+    wh: &CosmicSignatureRecord,
+    now_unix: u64,
+    sde: &eve_sde::SdeRegistry,
+) -> WormholeBuckets {
+    derive_wormhole_buckets_raw(
+        wh.destination_system_id.unwrap_or(0),
+        wh.max_jump_mass_kg,
+        wh.remaining_mass_kg,
+        wh.max_mass_kg,
+        wh.created_unix,
+        wh.lifetime_seconds,
+        wh.collapsed,
+        now_unix,
+        sde,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn derive_wormhole_buckets_raw(
+    dest_sys: u32,
+    max_jump_mass_kg: f64,
+    remaining_mass_kg: f64,
+    max_mass_kg: f64,
+    created_unix: u64,
+    lifetime_seconds: u64,
+    collapsed: bool,
+    now_unix: u64,
+    sde: &eve_sde::SdeRegistry,
+) -> WormholeBuckets {
+    let wh_class_id = sde.solar_systems.get(&dest_sys).and_then(|s| {
+        s.wormhole_class_id.or_else(|| {
+            sde.constellations
+                .get(&s.constellation_id)
+                .and_then(|c| c.wormhole_class_id)
+                .or_else(|| sde.regions.get(&s.region_id).and_then(|r| r.wormhole_class_id))
+        })
+    });
+
+    // DERIVED: Destination classification resolved from SDE solar system, constellation, or region wormholeClassID
+    let dest_class = match wh_class_id {
+        Some(12) => "Thera",
+        Some(14..=18) => "Drifter",
+        Some(25) => "Triglavian",
+        Some(1..=3 | 13) => "C1-3",
+        Some(4..=5) => "C4-5",
+        Some(6) => "C6",
+        Some(7) => "High-Sec",
+        Some(8) => "Low-Sec",
+        Some(9..=11) => "Null-Sec",
+        _ => {
+            let sec = sde
+                .solar_systems
+                .get(&dest_sys)
+                .map(|s| s.security_status)
+                .unwrap_or(0.0);
+            if sec >= 0.45 {
+                "High-Sec"
+            } else if sec > 0.0 {
+                "Low-Sec"
+            } else {
+                "Null-Sec"
+            }
         }
     };
-    (wh_class, is_thera, is_shattered, env_effect)
+
+    // DERIVED: Ship size category bucket thresholds derived from mass
+    let max_ship_size = if max_jump_mass_kg > 0.0 && max_jump_mass_kg <= 20_000_000.0 {
+        "Small"
+    } else if max_jump_mass_kg > 0.0 && max_jump_mass_kg <= 62_000_000.0 {
+        "Medium"
+    } else if max_jump_mass_kg > 0.0 && max_jump_mass_kg <= 375_000_000.0 {
+        "Large"
+    } else if max_jump_mass_kg > 375_000_000.0 {
+        "Extra Large"
+    } else {
+        "Large"
+    };
+
+    // DERIVED: Lifetime stage bucket intervals derived from elapsed time
+    let elapsed = now_unix.saturating_sub(created_unix);
+    let remaining_seconds = lifetime_seconds.saturating_sub(elapsed);
+    let lifetime_bucket = if collapsed
+        || lifetime_seconds == 0
+        || elapsed >= lifetime_seconds
+        || remaining_seconds == 0
+    {
+        "expired"
+    } else if remaining_seconds < 3_600 {
+        "<1h"
+    } else if remaining_seconds < 4 * 3_600 {
+        "<4h"
+    } else {
+        "<1 day"
+    };
+
+    // Show-info lifetime strings for the 3 remaining-lifetime bands (>24h, 4h-24h, <4h).
+    let lifetime_description = if remaining_seconds > 24 * 3_600 && !collapsed {
+        "This wormhole is not yet beginning to decay"
+    } else if remaining_seconds >= 4 * 3_600 && !collapsed {
+        "This wormhole is beginning to decay, and probably won't last another day"
+    } else {
+        "This wormhole is reaching the end of its natural lifetime"
+    };
+
+    // DERIVED: Mass stability bucket threshold derived from mass ratio
+    let mass_ratio = if max_mass_kg > 0.0 {
+        remaining_mass_kg / max_mass_kg
+    } else {
+        0.0
+    };
+    let (mass_stability_bucket, mass_stability_description) =
+        if remaining_mass_kg <= 0.0 || mass_ratio < 0.10 {
+            (
+                "<10%",
+                "This wormhole has had its stability critically disrupted",
+            )
+        } else if mass_ratio < 0.50 {
+            (
+                "<50%",
+                "This wormhole has had its stability reduced by ships passing through it",
+            )
+        } else {
+            (
+                ">50%",
+                "This wormhole has not yet had its stability significantly disrupted",
+            )
+        };
+
+    WormholeBuckets {
+        destination_class: dest_class,
+        max_ship_size,
+        lifetime_bucket,
+        mass_stability_bucket,
+        lifetime_description,
+        mass_stability_description,
+    }
+}
+
+static WORMHOLE_PROFILES_CACHE: std::sync::OnceLock<
+    std::collections::HashMap<SolarSystemId, (u8, bool, bool, &'static str)>,
+> = std::sync::OnceLock::new();
+
+fn build_wormhole_profiles_map(
+    sde: &eve_sde::SdeRegistry,
+) -> std::collections::HashMap<SolarSystemId, (u8, bool, bool, &'static str)> {
+    let mut map = std::collections::HashMap::new();
+    for (&sys_id, sys) in &sde.solar_systems {
+        let sde_class = sys
+            .wormhole_class_id
+            .or_else(|| {
+                sde.constellations
+                    .get(&sys.constellation_id)
+                    .and_then(|c| c.wormhole_class_id)
+                    .or_else(|| sde.regions.get(&sys.region_id).and_then(|r| r.wormhole_class_id))
+            })
+            .unwrap_or(0);
+        let wh_class = match sde_class {
+            c @ (1..=6 | 12..=18) => c as u8,
+            _ => 0,
+        };
+        if wh_class == 0 {
+            continue;
+        }
+        let is_thera = sys_id == 31_000_005 || wh_class == 12;
+        let is_shattered =
+            is_thera || (13..=18).contains(&wh_class) || sys.name.starts_with("J0");
+        let env_effect = eve_dogma::resolve_system_wormhole_phenomenon(sde, sys_id, None)
+            .map(|(_, _, name, _)| name)
+            .unwrap_or("None");
+        map.insert(sys_id, (wh_class, is_thera, is_shattered, env_effect));
+    }
+    map
+}
+
+pub fn system_wormhole_profile_sde(
+    sde: &eve_sde::SdeRegistry,
+    sys_id: SolarSystemId,
+) -> (u8, bool, bool, &'static str) {
+    let map = WORMHOLE_PROFILES_CACHE.get_or_init(|| build_wormhole_profiles_map(sde));
+    map.get(&sys_id).copied().unwrap_or((0, false, false, "None"))
+}
+
+pub fn system_wormhole_profile(sys_id: SolarSystemId) -> (u8, bool, bool, &'static str) {
+    let map = WORMHOLE_PROFILES_CACHE.get_or_init(|| {
+        let sde = eve_sde::SdeRegistry::with_canonical_seed();
+        build_wormhole_profiles_map(&sde)
+    });
+    map.get(&sys_id).copied().unwrap_or((0, false, false, "None"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -109,6 +367,46 @@ fn make_site_sig(
     }
 }
 
+fn lookup_wormhole_type_for_target_class(sde: &eve_sde::SdeRegistry, target_class: i32) -> u32 {
+    sde.wormhole_types
+        .values()
+        .filter(|w| w.target_system_class == target_class)
+        .min_by_key(|w| w.type_id)
+        .map(|w| w.type_id)
+        .unwrap_or(30579)
+}
+
+fn pick_destination_system_for_target_class(
+    sde: &eve_sde::SdeRegistry,
+    source_sys_id: SolarSystemId,
+    target_class: i32,
+    seq: u32,
+) -> SolarSystemId {
+    let mut candidates: Vec<SolarSystemId> = sde
+        .solar_systems
+        .values()
+        .filter(|s| {
+            s.solar_system_id != source_sys_id
+                && match target_class {
+                    7 => s.wormhole_class_id.is_none() && s.security_status >= 0.45,
+                    8 => s.wormhole_class_id.is_none() && s.security_status > 0.0 && s.security_status < 0.45,
+                    9 => s.wormhole_class_id.is_none() && s.security_status <= 0.0 && s.solar_system_id < 31_000_000,
+                    c => s.wormhole_class_id == Some(c),
+                }
+        })
+        .map(|s| s.solar_system_id)
+        .collect();
+    candidates.sort_unstable();
+    if candidates.is_empty() {
+        30_000_142
+    } else {
+        let idx = ((source_sys_id as usize).wrapping_add(seq as usize)) % candidates.len();
+        candidates[idx]
+    }
+}
+
+// DERIVED: Per-system static wormhole tables are not in the client FSD SDE (`evomu_sde.sqlite`);
+// only the 132 wormhole types (`sde_wormhole_types`) and system `wormhole_class_id` are present.
 pub(crate) fn static_wormhole_template(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
@@ -116,9 +414,12 @@ pub(crate) fn static_wormhole_template(
     seq: u32,
 ) -> Vec<CosmicSignatureRecord> {
     if sys_id == 31_000_005 {
-        let hs_wh = ctx.sde.wormhole_types.get(&30647);
-        let ls_wh = ctx.sde.wormhole_types.get(&30648);
-        let ns_wh = ctx.sde.wormhole_types.get(&30649);
+        let hs_tid = lookup_wormhole_type_for_target_class(&ctx.sde, 7);
+        let ls_tid = lookup_wormhole_type_for_target_class(&ctx.sde, 8);
+        let ns_tid = lookup_wormhole_type_for_target_class(&ctx.sde, 9);
+        let hs_wh = ctx.sde.wormhole_types.get(&hs_tid);
+        let ls_wh = ctx.sde.wormhole_types.get(&ls_tid);
+        let ns_wh = ctx.sde.wormhole_types.get(&ns_tid);
         vec![
             make_wh_sig(
                 format!("THS-{}", 100 + ((sys_id + seq) % 900)),
@@ -127,8 +428,8 @@ pub(crate) fn static_wormhole_template(
                     .map(|w| w.name.clone())
                     .unwrap_or_else(|| "Wormhole B449".into()),
                 [10.0, 2.0, -3.0],
-                30647,
-                30_000_142,
+                hs_tid,
+                pick_destination_system_for_target_class(&ctx.sde, sys_id, 7, seq),
                 now_unix,
                 hs_wh
                     .map(|w| (w.max_stable_time_min * 60.0) as u64)
@@ -141,8 +442,8 @@ pub(crate) fn static_wormhole_template(
                 sys_id,
                 ls_wh.map(|w| w.name.clone()).unwrap_or_else(|| "Wormhole N944".into()),
                 [-9.0, 4.0, 6.0],
-                30648,
-                30_002_813,
+                ls_tid,
+                pick_destination_system_for_target_class(&ctx.sde, sys_id, 8, seq),
                 now_unix,
                 ls_wh.map(|w| (w.max_stable_time_min * 60.0) as u64).unwrap_or(86_400),
                 ls_wh.map(|w| w.max_stable_mass).unwrap_or(3_000_000_000.0),
@@ -153,8 +454,8 @@ pub(crate) fn static_wormhole_template(
                 sys_id,
                 ns_wh.map(|w| w.name.clone()).unwrap_or_else(|| "Wormhole S199".into()),
                 [6.0, -8.0, 5.0],
-                30649,
-                30_002_904,
+                ns_tid,
+                pick_destination_system_for_target_class(&ctx.sde, sys_id, 9, seq),
                 now_unix,
                 ns_wh.map(|w| (w.max_stable_time_min * 60.0) as u64).unwrap_or(57_600),
                 ns_wh.map(|w| w.max_stable_mass).unwrap_or(3_000_000_000.0),
@@ -163,40 +464,58 @@ pub(crate) fn static_wormhole_template(
         ]
     } else if (31_000_000..=31_002_605).contains(&sys_id) {
         // DERIVED: static (`WST-...`) and wandering (`WND-...`) wormhole connection templates per W-space class
-        let (wh_class, _, is_shattered, _) = system_wormhole_profile(sys_id);
-        let (wh_type_id, dest_sys, wnd_type_id, wnd_dest_sys): (u32, u32, u32, u32) = match wh_class {
-            1 => (30579, 30_000_142, 30584, 30_002_813),
-            2 => (30583, 31_000_001, 30579, 30_000_142),
-            3 => (30584, 30_002_813, 30642, 31_000_003),
-            4 => (30642, 31_000_003, 30643, 31_000_004),
-            5 => (30643, 31_000_004, 30645, 31_000_006),
-            6 => (30645, 31_000_006, 30643, 31_000_004),
-            _ => (30660, 30_000_142, 30584, 30_002_813),
+        let (wh_class, _, is_shattered, _) = system_wormhole_profile_sde(&ctx.sde, sys_id);
+        let (static_target_class, wnd_target_class) = match wh_class {
+            1 => (1, 3),
+            2 => (2, 1),
+            3 => (3, 4),
+            4 => (4, 5),
+            5 => (5, 6),
+            6 => (6, 5),
+            13 => (3, 2),
+            c @ 14..=18 => (c as i32, 9),
+            _ => (1, 3),
         };
+        let wh_type_id = lookup_wormhole_type_for_target_class(&ctx.sde, static_target_class);
+        let wnd_type_id = lookup_wormhole_type_for_target_class(&ctx.sde, wnd_target_class);
+        let dest_sys = pick_destination_system_for_target_class(&ctx.sde, sys_id, static_target_class, seq);
+        let wnd_dest_sys = pick_destination_system_for_target_class(&ctx.sde, sys_id, wnd_target_class, seq + 1);
         let wh_info = ctx.sde.wormhole_types.get(&wh_type_id);
         let max_mass = wh_info.map(|w| w.max_stable_mass).unwrap_or(2_000_000_000.0);
-        let max_jump = if is_shattered { 62_000_000.0 } else { wh_info.map(|w| w.max_jump_mass).unwrap_or(375_000_000.0) };
-        let life_s = wh_info.map(|w| (w.max_stable_time_min * 60.0) as u64).unwrap_or(86_400);
+        let max_jump = if is_shattered {
+            62_000_000.0
+        } else {
+            wh_info.map(|w| w.max_jump_mass).unwrap_or(375_000_000.0)
+        };
+        let life_s = wh_info
+            .map(|w| (w.max_stable_time_min * 60.0) as u64)
+            .unwrap_or(86_400);
         let mut out = Vec::new();
         if seq == 0 {
             let wnd_info = ctx.sde.wormhole_types.get(&wnd_type_id);
             out.push(make_wh_sig(
                 format!("WND-{}", 200 + ((sys_id + 13) % 700)),
                 sys_id,
-                wnd_info.map(|w| w.name.clone()).unwrap_or_else(|| "Wandering Wormhole".into()),
+                wnd_info
+                    .map(|w| w.name.clone())
+                    .unwrap_or_else(|| "Wandering Wormhole".into()),
                 [-8.0, 5.0, 3.0],
                 wnd_type_id,
                 wnd_dest_sys,
                 now_unix,
-                wnd_info.map(|w| (w.max_stable_time_min * 60.0) as u64).unwrap_or(57_600),
+                wnd_info
+                    .map(|w| (w.max_stable_time_min * 60.0) as u64)
+                    .unwrap_or(57_600),
                 wnd_info.map(|w| w.max_stable_mass).unwrap_or(1_000_000_000.0),
                 max_jump,
             ));
         }
-        out.push(make_wh_sig(
+        let mut wst = make_wh_sig(
             format!("WST-{}", 100 + ((sys_id + seq * 17) % 900)),
             sys_id,
-            wh_info.map(|w| w.name.clone()).unwrap_or_else(|| "Unstable Wormhole".into()),
+            wh_info
+                .map(|w| w.name.clone())
+                .unwrap_or_else(|| "Unstable Wormhole".into()),
             [12.0, 2.5, -4.0],
             wh_type_id,
             dest_sys,
@@ -204,11 +523,16 @@ pub(crate) fn static_wormhole_template(
             life_s,
             max_mass,
             max_jump,
-        ));
+        );
+        if seq > 0 {
+            let (cel_pos, _) = pick_system_celestial_position(ctx, sys_id, seq);
+            wst.position = cel_pos;
+        }
+        out.push(wst);
         out
     } else {
         let sig_prefix = if seq == 0 { "JMM" } else { "STA" };
-        vec![make_wh_sig(
+        let mut wh = make_wh_sig(
             format!("{sig_prefix}-{}", 100 + ((sys_id + seq * 37) % 900)),
             sys_id,
             "Unstable Wormhole (K162)".into(),
@@ -219,8 +543,51 @@ pub(crate) fn static_wormhole_template(
             86_400,
             2_000_000_000.0,
             375_000_000.0,
-        )]
+        );
+        if seq > 0 {
+            let (cel_pos, _) = pick_system_celestial_position(ctx, sys_id, seq);
+            wh.position = cel_pos;
+        }
+        vec![wh]
     }
+}
+
+pub fn build_static_replacement_wormhole(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    collapsed_wh: &CosmicSignatureRecord,
+    now_unix: u64,
+    seq: u32,
+) -> Option<CosmicSignatureRecord> {
+    if collapsed_wh.signature_id.starts_with("WND-") {
+        return None;
+    }
+    let mut eff_seq = seq.max(1);
+    let mut rep = static_wormhole_template(ctx, sys_id, now_unix, eff_seq).into_iter().next()?;
+    if rep.signature_id == collapsed_wh.signature_id {
+        eff_seq += 1;
+        rep = static_wormhole_template(ctx, sys_id, now_unix, eff_seq).into_iter().next()?;
+    }
+    let (cel_pos, _) = pick_system_celestial_position(ctx, sys_id, eff_seq);
+    rep.position = cel_pos;
+    if let Some(wtid) = collapsed_wh.wormhole_type_id {
+        rep.wormhole_type_id = Some(wtid);
+        if let Some(wh_info) = ctx.sde.wormhole_types.get(&wtid) {
+            rep.type_name = wh_info.name.clone();
+            rep.lifetime_seconds = (wh_info.max_stable_time_min * 60.0) as u64;
+            rep.max_mass_kg = wh_info.max_stable_mass;
+            rep.remaining_mass_kg = wh_info.max_stable_mass;
+            if wh_info.max_jump_mass > 0.0 {
+                rep.max_jump_mass_kg = wh_info.max_jump_mass;
+            }
+        } else {
+            rep.type_name = collapsed_wh.type_name.clone();
+        }
+    }
+    if let Some(dest) = collapsed_wh.destination_system_id {
+        rep.destination_system_id = Some(dest);
+    }
+    Some(rep)
 }
 
 pub async fn ensure_system_signatures_and_anomalies(
@@ -228,6 +595,7 @@ pub async fn ensure_system_signatures_and_anomalies(
     sys_id: SolarSystemId,
 ) -> (Vec<CosmicSignatureRecord>, Vec<CosmicAnomalyRecord>) {
     let now_unix = ctx.now_unix();
+    let mut expired_balls_to_despawn: Vec<(SolarSystemId, i64)> = Vec::new();
     let (sigs, anomalies) = ctx
         .db
         .try_with_mut_snapshot(|snap| {
@@ -277,6 +645,35 @@ pub async fn ensure_system_signatures_and_anomalies(
                 ]);
                 v
             });
+
+            let mut spawned_replacements = Vec::new();
+            let base_len = list.len() as u32;
+            for (idx, sig) in list.iter_mut().enumerate() {
+                if sig.sig_group == "Wormhole"
+                    && !sig.collapsed
+                    && sig.lifetime_seconds > 0
+                    && now_unix >= sig.created_unix.saturating_add(sig.lifetime_seconds)
+                {
+                    sig.collapsed = true;
+                    let ent_id = wormhole_item_id_for_signature(sys_id, &sig.signature_id);
+                    expired_balls_to_despawn.push((sys_id, ent_id));
+                    if let Some(dest_sys) = sig.destination_system_id {
+                        let exit_id = wormhole_exit_item_id_for_signature(dest_sys, &sig.signature_id);
+                        expired_balls_to_despawn.push((dest_sys, exit_id));
+                    }
+                    if let Some(rep) = build_static_replacement_wormhole(
+                        ctx,
+                        sys_id,
+                        sig,
+                        now_unix,
+                        base_len + (idx as u32) + 1,
+                    ) {
+                        spawned_replacements.push(rep);
+                    }
+                }
+            }
+            list.extend(spawned_replacements);
+
             let sigs_clone = list.clone();
             let anoms = snap
                 .cosmic_anomalies
@@ -305,6 +702,11 @@ pub async fn ensure_system_signatures_and_anomalies(
         })
         .unwrap();
 
+    for (b_sys, b_id) in expired_balls_to_despawn {
+        let h = ctx.systems.get_or_spawn(b_sys);
+        let _ = h.remove_ball(b_id).await;
+    }
+
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     for sig in &sigs {
         if sig.sig_group == "Wormhole" && !sig.collapsed {
@@ -331,10 +733,117 @@ pub async fn ensure_system_signatures_and_anomalies(
                     })
                     .await;
             }
+            if let Some(dest_sys) = sig.destination_system_id {
+                let exit_id = wormhole_exit_item_id_for_signature(dest_sys, &sig.signature_id);
+                let dest_handle = ctx.systems.get_or_spawn(dest_sys);
+                if dest_handle
+                    .get_ball_snapshot(exit_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_none()
+                {
+                    let (exit_pos, _) = pick_system_celestial_position(ctx, dest_sys, (wh_item_id as u32).wrapping_add(1));
+                    let _ = dest_handle
+                        .spawn_ball(Ball {
+                            id: exit_id,
+                            type_id: 26272, // Wormhole K162 exit
+                            position: DVec3::from_array(exit_pos),
+                            velocity: DVec3::ZERO,
+                            max_velocity: 0.0,
+                            inertia: 1.0,
+                            mass: sig.remaining_mass_kg.max(1.0),
+                            radius: 1500.0,
+                            speed_fraction: 0.0,
+                            mode: MovementMode::Rigid,
+                        })
+                        .await;
+                }
+            }
         }
     }
 
     (sigs, anomalies)
+}
+
+/// Background cluster wormhole expiry sweep:
+/// despawns both entrance and exit balls of expired wormholes and spawns static replacement wormholes.
+pub async fn expire_and_respawn_wormholes_in_cluster(ctx: &ServerContext, now_unix: u64) {
+    let mut expired_balls_to_despawn: Vec<(SolarSystemId, i64)> = Vec::new();
+    let mut new_wormholes_to_spawn: Vec<(SolarSystemId, CosmicSignatureRecord)> = Vec::new();
+    ctx.db.with_mut_snapshot(|snap| {
+        for (&sys_id, list) in snap.cosmic_signatures.iter_mut() {
+            let mut spawned_replacements = Vec::new();
+            let base_len = list.len() as u32;
+            for (idx, sig) in list.iter_mut().enumerate() {
+                if sig.sig_group == "Wormhole"
+                    && !sig.collapsed
+                    && sig.lifetime_seconds > 0
+                    && now_unix >= sig.created_unix.saturating_add(sig.lifetime_seconds)
+                {
+                    sig.collapsed = true;
+                    let ent_id = wormhole_item_id_for_signature(sys_id, &sig.signature_id);
+                    expired_balls_to_despawn.push((sys_id, ent_id));
+                    if let Some(dest_sys) = sig.destination_system_id {
+                        let exit_id = wormhole_exit_item_id_for_signature(dest_sys, &sig.signature_id);
+                        expired_balls_to_despawn.push((dest_sys, exit_id));
+                    }
+                    if let Some(rep) = build_static_replacement_wormhole(
+                        ctx,
+                        sys_id,
+                        sig,
+                        now_unix,
+                        base_len + (idx as u32) + 1,
+                    ) {
+                        new_wormholes_to_spawn.push((sys_id, rep.clone()));
+                        spawned_replacements.push(rep);
+                    }
+                }
+            }
+            list.extend(spawned_replacements);
+        }
+    });
+    for (b_sys, b_id) in expired_balls_to_despawn {
+        let h = ctx.systems.get_or_spawn(b_sys);
+        let _ = h.remove_ball(b_id).await;
+    }
+    for (sys_id, rep) in new_wormholes_to_spawn {
+        let new_wh_id = wormhole_item_id_for_signature(sys_id, &rep.signature_id);
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        let _ = sys_handle
+            .spawn_ball(Ball {
+                id: new_wh_id,
+                type_id: rep.wormhole_type_id.unwrap_or(26272),
+                position: DVec3::from_array(rep.position),
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: rep.remaining_mass_kg.max(1.0),
+                radius: 1500.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Rigid,
+            })
+            .await;
+        if let Some(d_sys) = rep.destination_system_id {
+            let new_exit_id = wormhole_exit_item_id_for_signature(d_sys, &rep.signature_id);
+            let (exit_pos, _) = pick_system_celestial_position(ctx, d_sys, (new_wh_id as u32).wrapping_add(1));
+            let dh = ctx.systems.get_or_spawn(d_sys);
+            let _ = dh
+                .spawn_ball(Ball {
+                    id: new_exit_id,
+                    type_id: 26272,
+                    position: DVec3::from_array(exit_pos),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 1.0,
+                    mass: rep.remaining_mass_kg.max(1.0),
+                    radius: 1500.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Rigid,
+                })
+                .await;
+        }
+    }
 }
 
 pub fn compute_wormhole_stages(
@@ -379,6 +888,7 @@ pub fn compute_wormhole_stages(
     )
 }
 
+// parity: feat:wormholes.mass-reduction-and-destabilization
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_cosmic_wormhole_jump(
     ctx: &ServerContext,
@@ -391,26 +901,49 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
     wh_arg_str: Option<&str>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let now_unix = ctx.now_unix();
-    if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
+    if let Some(active_timer) =
+        crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None)
+    {
         return Some(Err(BridgeRpcError {
             code: "SessionChangeInProgress".into(),
-            message: format!("Cannot jump wormhole while 10s session-change timer ({}) is active", active_timer.reason),
+            message: format!(
+                "Cannot jump wormhole while 10s session-change timer ({}) is active",
+                active_timer.reason
+            ),
         }));
     }
-    let _ = ensure_system_signatures_and_anomalies(ctx, old_sys).await;
+
+    let has_explicit_expired = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_signatures.get(&old_sys).is_some_and(|sigs| {
+            sigs.iter().any(|s| {
+                s.sig_group == "Wormhole"
+                    && (wh_arg_str == Some(s.signature_id.as_str())
+                        || wh_arg_i64
+                            == Some(wormhole_item_id_for_signature(old_sys, &s.signature_id)))
+            })
+        })
+    });
+    if !has_explicit_expired {
+        let _ = ensure_system_signatures_and_anomalies(ctx, old_sys).await;
+    }
     let has_matching_sig = ctx.db.with_snapshot(|snap| {
         snap.cosmic_signatures.get(&old_sys).is_some_and(|sigs| {
-            sigs.iter().any(|s| s.sig_group == "Wormhole" && (wh_arg_str == Some(s.signature_id.as_str()) || wh_arg_i64 == Some(wormhole_item_id_for_signature(old_sys, &s.signature_id))))
+            sigs.iter().any(|s| {
+                s.sig_group == "Wormhole"
+                    && (wh_arg_str == Some(s.signature_id.as_str())
+                        || wh_arg_i64
+                            == Some(wormhole_item_id_for_signature(old_sys, &s.signature_id)))
+            })
         })
     });
     if !has_matching_sig && wh_arg_str.is_none() {
         return None;
     }
 
-    let ship_mass = current_ball.mass;
+    let (ship_mass, prop_mass_add) = compute_effective_ship_jump_mass(ctx, ship_id, current_ball.mass);
     let old_handle = ctx.systems.get_or_spawn(old_sys);
 
-    let mut collapsed_ball_to_remove: Option<i64> = None;
+    let mut collapsed_balls_to_remove: Vec<(SolarSystemId, i64)> = Vec::new();
     let mut replacement_to_spawn: Option<CosmicSignatureRecord> = None;
 
     let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -436,6 +969,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
         let wh_id = wormhole_item_id_for_signature(old_sys, &sigs[wh_idx].signature_id);
         let sig_id_str = sigs[wh_idx].signature_id.clone();
         let dest_sys = sigs[wh_idx].destination_system_id.unwrap_or(31_000_005);
+        let exit_wh_id = wormhole_exit_item_id_for_signature(dest_sys, &sig_id_str);
 
         let pol_expiry = snap
             .wh_polarizations
@@ -465,10 +999,10 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             });
         }
 
-        let mut spawn_replacement = |sigs_vec: &mut Vec<CosmicSignatureRecord>| {
-            let replacements = static_wormhole_template(ctx, old_sys, now_unix, next_seq);
-            if let Some(mut rep) = replacements.into_iter().next() {
-                rep.destination_system_id = Some(dest_sys);
+        let mut spawn_replacement = |sigs_vec: &mut Vec<CosmicSignatureRecord>, idx: usize| {
+            if let Some(rep) =
+                build_static_replacement_wormhole(ctx, old_sys, &sigs_vec[idx], now_unix, next_seq)
+            {
                 replacement_to_spawn = Some(rep.clone());
                 sigs_vec.push(rep);
             }
@@ -476,9 +1010,13 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
 
         let elapsed = now_unix.saturating_sub(sigs[wh_idx].created_unix);
         if elapsed >= sigs[wh_idx].lifetime_seconds || sigs[wh_idx].collapsed {
+            let was_already_collapsed = sigs[wh_idx].collapsed;
             sigs[wh_idx].collapsed = true;
-            collapsed_ball_to_remove = Some(wh_id);
-            spawn_replacement(sigs);
+            collapsed_balls_to_remove.push((old_sys, wh_id));
+            collapsed_balls_to_remove.push((dest_sys, exit_wh_id));
+            if !was_already_collapsed {
+                spawn_replacement(sigs, wh_idx);
+            }
             let code = if elapsed >= sigs[wh_idx].lifetime_seconds {
                 "WormholeCollapsed"
             } else {
@@ -507,8 +1045,9 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
 
         if sigs[wh_idx].remaining_mass_kg <= 0.0 {
             sigs[wh_idx].collapsed = true;
-            collapsed_ball_to_remove = Some(wh_id);
-            spawn_replacement(sigs);
+            collapsed_balls_to_remove.push((old_sys, wh_id));
+            collapsed_balls_to_remove.push((dest_sys, exit_wh_id));
+            spawn_replacement(sigs, wh_idx);
             return Err(BridgeRpcError {
                 code: "WormholeMassCollapsed".into(),
                 message: "Wormhole lacks remaining mass capacity and has collapsed".into(),
@@ -518,12 +1057,14 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
         sigs[wh_idx].remaining_mass_kg -= ship_mass;
         if sigs[wh_idx].remaining_mass_kg <= 0.0 {
             sigs[wh_idx].collapsed = true;
-            collapsed_ball_to_remove = Some(wh_id);
-            spawn_replacement(sigs);
+            collapsed_balls_to_remove.push((old_sys, wh_id));
+            collapsed_balls_to_remove.push((dest_sys, exit_wh_id));
+            spawn_replacement(sigs, wh_idx);
         }
 
         let (mass_stage, wh_size, life_stage, wh_age, is_collapsed) =
             compute_wormhole_stages(&sigs[wh_idx], now_unix);
+        let buckets = derive_wormhole_buckets(&sigs[wh_idx], now_unix, &ctx.sde);
         let rem_mass = sigs[wh_idx].remaining_mass_kg;
 
         snap.wh_polarizations
@@ -532,6 +1073,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
         Ok((
             dest_sys,
             wh_id,
+            exit_wh_id,
             sig_id_str,
             rem_mass,
             max_jump,
@@ -540,18 +1082,22 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             life_stage,
             wh_age,
             is_collapsed,
+            buckets,
         ))
     });
 
-    if let Some(rem_id) = collapsed_ball_to_remove {
-        let _ = old_handle.remove_ball(rem_id).await;
+    for (b_sys, rem_id) in &collapsed_balls_to_remove {
+        let h = ctx.systems.get_or_spawn(*b_sys);
+        let _ = h.remove_ball(*rem_id).await;
     }
     let mut rep_sig_id: Option<String> = None;
     let mut rep_wh_id: Option<i64> = None;
+    let mut rep_wh_type_id: Option<u32> = None;
     if let Some(rep) = replacement_to_spawn {
         let new_wh_id = wormhole_item_id_for_signature(old_sys, &rep.signature_id);
         rep_sig_id = Some(rep.signature_id.clone());
         rep_wh_id = Some(new_wh_id);
+        rep_wh_type_id = rep.wormhole_type_id;
         let _ = old_handle
             .spawn_ball(Ball {
                 id: new_wh_id,
@@ -566,12 +1112,32 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
                 mode: MovementMode::Rigid,
             })
             .await;
+        if let Some(d_sys) = rep.destination_system_id {
+            let new_exit_id = wormhole_exit_item_id_for_signature(d_sys, &rep.signature_id);
+            let (exit_pos, _) = pick_system_celestial_position(ctx, d_sys, (new_wh_id as u32).wrapping_add(1));
+            let dh = ctx.systems.get_or_spawn(d_sys);
+            let _ = dh
+                .spawn_ball(Ball {
+                    id: new_exit_id,
+                    type_id: 26272,
+                    position: DVec3::from_array(exit_pos),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 1.0,
+                    mass: rep.remaining_mass_kg.max(1.0),
+                    radius: 1500.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Rigid,
+                })
+                .await;
+        }
     }
 
     match res {
         Ok((
             dest_sys_id,
             wh_item_id,
+            exit_wh_id,
             sig_id_str,
             remaining_mass,
             max_jump_mass,
@@ -580,6 +1146,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             life_stage,
             wh_age,
             is_collapsed,
+            buckets,
         )) => {
             crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
                 ctx, char_id, ship_id, old_sys,
@@ -671,12 +1238,25 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
                 ("destinationSystemID", PyRep::Integer(dest_sys_id as i64)),
                 ("beyonceBoundID", PyRep::Integer(new_beyonce_id as i64)),
                 ("wormholeID", PyRep::Integer(wh_item_id)),
+                ("exitWormholeID", PyRep::Integer(exit_wh_id)),
                 ("signatureID", PyRep::String(sig_id_str)),
+                ("shipJumpMassKg", PyRep::Real(ship_mass)),
+                ("propulsionMassAdditionKg", PyRep::Real(prop_mass_add)),
                 ("remainingMassKg", PyRep::Real(remaining_mass)),
                 ("maxJumpMassKg", PyRep::Real(max_jump_mass)),
                 ("massStage", PyRep::String(mass_stage.into())),
+                ("massStabilityBucket", PyRep::String(buckets.mass_stability_bucket.into())),
+                (
+                    "massStabilityDescription",
+                    PyRep::String(buckets.mass_stability_description.into()),
+                ),
                 ("wormholeSize", PyRep::Real(wh_size)),
                 ("lifetimeStage", PyRep::String(life_stage.into())),
+                ("lifetimeBucket", PyRep::String(buckets.lifetime_bucket.into())),
+                (
+                    "lifetimeDescription",
+                    PyRep::String(buckets.lifetime_description.into()),
+                ),
                 ("wormholeAge", PyRep::Integer(wh_age)),
                 ("collapsed", PyRep::Bool(is_collapsed)),
                 (
@@ -687,6 +1267,12 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
                     "replacementWormholeID",
                     rep_wh_id.map(PyRep::Integer).unwrap_or(PyRep::None),
                 ),
+                (
+                    "replacementWormholeTypeID",
+                    rep_wh_type_id
+                        .map(|t| PyRep::Integer(t as i64))
+                        .unwrap_or(PyRep::None),
+                ),
                 ("wormholeClass", PyRep::Integer(dest_wh_class as i64)),
                 ("isThera", PyRep::Bool(dest_is_thera)),
                 ("isShattered", PyRep::Bool(dest_is_shattered)),
@@ -696,743 +1282,4 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
         }
         Err(e) => Some(Err(e)),
     }
-}
-
-pub(crate) async fn handle_scan_and_wormhole_extras(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    bound_entry: Option<&BoundObjectEntry>,
-    service: &str,
-    method: &str,
-    args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    // parity: feat:scanning.probe-launch, feat:scanning.probe-recall, feat:scanning.probe-scan-math
-    // parity: rpc:scanMgr.GetSystemScanMgr
-    match (service, method) {
-        ("scanMgr", "GetSystemScanMgr") => handle_get_system_scan_mgr(ctx, session, service, args).await,
-        ("scanMgr", "GetAnomalies") => handle_get_anomalies(ctx, session, bound_entry).await,
-        ("scanMgr", "RequestScans") => handle_request_scans(ctx, session, bound_entry, args, _kwargs).await,
-        ("scanMgr", "RecoverProbes") => handle_recover_probes(ctx, session, bound_entry, args).await,
-        ("scanMgr", "ReconnectToLostProbes") => handle_reconnect_probes(ctx, session, bound_entry).await,
-        ("scanMgr", "DestroyProbe") => handle_destroy_probe(ctx, session, bound_entry, args).await,
-        _ => None,
-    }
-}
-
-fn format_anomalies(anomalies: Vec<CosmicAnomalyRecord>, now_unix: u64) -> Vec<PyRep> {
-    anomalies
-        .into_iter()
-        .filter(|a| !a.cleared && (a.lifetime_seconds == 0 || now_unix < a.created_unix.saturating_add(a.lifetime_seconds)))
-        .map(|a| {
-            PyRep::keyval([
-                ("anomalyID", PyRep::String(a.anomaly_id)),
-                ("name", PyRep::String(a.name)),
-                ("anomalyType", PyRep::String(a.anomaly_type)),
-                ("signalStrength", PyRep::Real(1.0)),
-                ("resolved", PyRep::Bool(true)),
-                ("x", PyRep::Real(a.position[0])),
-                ("y", PyRep::Real(a.position[1])),
-                ("z", PyRep::Real(a.position[2])),
-            ])
-        })
-        .collect()
-}
-
-async fn handle_get_system_scan_mgr(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    service: &str,
-    args: &[PyRep],
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, char_id) = match ServerContext::require_character(session) {
-        Ok(v) => v,
-        Err(e) => return Some(Err(e)),
-    };
-    let caller_sys = session
-        .solar_system_id
-        .or_else(|| {
-            ctx.db
-                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
-        })
-        .unwrap_or(30_000_142);
-    if let Some(arg_sys) = args.first().and_then(|a| a.as_i64()).map(|v| v as u32) {
-        if arg_sys != caller_sys && !session.has_gm_role() {
-            return Some(Err(BridgeRpcError {
-                code: "AccessDenied".into(),
-                message: "Cannot query scan manager for a remote solar system".into(),
-            }));
-        }
-    }
-    let sys_id = caller_sys;
-    let now_unix = ctx.now_unix();
-    let (sigs, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
-    let bound_id = match ctx.bind_object(session, service, sys_id as i64) {
-        Ok(b) => b,
-        Err(e) => return Some(Err(e)),
-    };
-    let (wh_class, is_thera, is_shattered, env_effect) = system_wormhole_profile(sys_id);
-
-    let sig_items: Vec<PyRep> = sigs
-        .into_iter()
-        .filter(|s| !s.collapsed && (s.lifetime_seconds == 0 || now_unix < s.created_unix.saturating_add(s.lifetime_seconds)))
-        .map(|s| {
-            let eff_strength = ctx.effective_signature_signal_strength(char_id, sys_id, &s);
-            let resolved = eff_strength >= 1.0;
-            let wh_item_id = wormhole_item_id_for_signature(sys_id, &s.signature_id);
-            let (mass_stage, wh_size, life_stage, wh_age, is_collapsed) =
-                compute_wormhole_stages(&s, now_unix);
-            PyRep::keyval([
-                ("signatureID", PyRep::String(s.signature_id)),
-                ("itemID", PyRep::Integer(wh_item_id)),
-                ("targetID", PyRep::Integer(wh_item_id)),
-                (
-                    "group",
-                    PyRep::String(if eff_strength >= 0.25 {
-                        s.sig_group
-                    } else {
-                        "Unknown".into()
-                    }),
-                ),
-                (
-                    "type",
-                    PyRep::String(if resolved {
-                        s.type_name
-                    } else {
-                        "Unidentified Signature".into()
-                    }),
-                ),
-                ("signalStrength", PyRep::Real(eff_strength)),
-                (
-                    "typeID",
-                    s.wormhole_type_id
-                        .map(|t| PyRep::Integer(t as i64))
-                        .unwrap_or(PyRep::None),
-                ),
-                (
-                    "destinationSystemID",
-                    if resolved {
-                        s.destination_system_id
-                            .map(|d| PyRep::Integer(d as i64))
-                            .unwrap_or(PyRep::None)
-                    } else {
-                        PyRep::None
-                    },
-                ),
-                ("massStage", PyRep::String(mass_stage.into())),
-                ("wormholeSize", PyRep::Real(wh_size)),
-                ("lifetimeStage", PyRep::String(life_stage.into())),
-                ("wormholeAge", PyRep::Integer(wh_age)),
-                ("remainingMassKg", PyRep::Real(s.remaining_mass_kg)),
-                ("maxJumpMassKg", PyRep::Real(s.max_jump_mass_kg)),
-                ("collapsed", PyRep::Bool(is_collapsed)),
-                ("x", if resolved { PyRep::Real(s.position[0]) } else { PyRep::None }),
-                ("y", if resolved { PyRep::Real(s.position[1]) } else { PyRep::None }),
-                ("z", if resolved { PyRep::Real(s.position[2]) } else { PyRep::None }),
-            ])
-        })
-        .collect();
-
-    let anom_items = format_anomalies(anomalies, now_unix);
-
-    Some(Ok(PyRep::keyval([
-        ("boundID", PyRep::Integer(bound_id as i64)),
-        ("solarSystemID", PyRep::Integer(sys_id as i64)),
-        ("wormholeClass", PyRep::Integer(wh_class as i64)),
-        ("isThera", PyRep::Bool(is_thera)),
-        ("isShattered", PyRep::Bool(is_shattered)),
-        ("delayedLocal", PyRep::Bool(wh_class > 0)),
-        (
-            "allowsCapitalShips",
-            PyRep::Bool(wh_class == 0 || (wh_class >= 5 && !is_shattered)),
-        ),
-        ("environmentalEffect", PyRep::String(env_effect.into())),
-        ("signatures", PyRep::List(sig_items)),
-        ("anomalies", PyRep::List(anom_items)),
-    ])))
-}
-
-async fn handle_get_anomalies(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    bound_entry: Option<&BoundObjectEntry>,
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, char_id) = match ServerContext::require_character(session) {
-        Ok(v) => v,
-        Err(e) => return Some(Err(e)),
-    };
-    let caller_sys = session
-        .solar_system_id
-        .or_else(|| {
-            ctx.db
-                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
-        })
-        .unwrap_or(30_000_142);
-    if let Some(b) = bound_entry {
-        if (b.object_id as u32) != caller_sys && !session.has_gm_role() {
-            return Some(Err(BridgeRpcError {
-                code: "AccessDenied".into(),
-                message: "Cannot query anomalies for a remote solar system".into(),
-            }));
-        }
-    }
-    let sys_id = caller_sys;
-    let now_unix = ctx.now_unix();
-    let (_, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
-    Some(Ok(PyRep::List(format_anomalies(anomalies, now_unix))))
-}
-
-async fn handle_request_scans(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    bound_entry: Option<&BoundObjectEntry>,
-    args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, char_id) = match ServerContext::require_character(session) {
-        Ok(v) => v,
-        Err(e) => return Some(Err(e)),
-    };
-    let has_active_probes = ctx.active_scanner_probes.read().ok().is_some_and(|map| {
-        map.values()
-            .any(|p| p.owner_char_id == char_id && p.state != 0)
-    });
-    if !has_active_probes
-        && bound_entry.is_none()
-        && (args.is_empty() || matches!(args.first(), Some(PyRep::Real(_))))
-        && _kwargs.is_empty()
-    {
-        return None;
-    }
-
-    let caller_sys = session
-        .solar_system_id
-        .or_else(|| {
-            ctx.db
-                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
-        })
-        .unwrap_or(30_000_142);
-    if let Some(b) = bound_entry {
-        if (b.object_id as u32) != caller_sys && !session.has_gm_role() {
-            return Some(Err(BridgeRpcError {
-                code: "AccessDenied".into(),
-                message: "Cannot request probe scans for a remote solar system".into(),
-            }));
-        }
-    }
-    let sys_id = caller_sys;
-    let _ = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
-    let now_unix = ctx.now_unix();
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-
-    let override_range_step = args
-        .get(1)
-        .and_then(|a| a.as_i64())
-        .map(|v| (v as i32).clamp(1, 8));
-
-    let mut moved_balls: Vec<(i64, DVec3)> = Vec::new();
-    if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
-        for p in probe_map.values_mut() {
-            if p.owner_char_id == char_id
-                && now_unix
-                    >= p.launched_at_unix
-                        .saturating_add(p.max_flight_time_s.max(0.0) as u64)
-            {
-                p.state = 0;
-            }
-        }
-
-        if let Some(PyRep::Dict(entries)) = args.first() {
-            for (k, v) in entries {
-                let Some(pid) = k.as_i64() else { continue };
-                let Some(probe) = probe_map.get_mut(&pid) else {
-                    continue;
-                };
-                if probe.owner_char_id != char_id || probe.state == 0 {
-                    continue;
-                }
-                let find_in_v = |key: &str| -> Option<&PyRep> {
-                    match v {
-                        PyRep::KeyVal(kv) => {
-                            kv.iter().find(|(ek, _)| *ek == key).map(|(_, ev)| ev)
-                        }
-                        PyRep::Dict(kv) => kv
-                            .iter()
-                            .find(|(ek, _)| ek.as_str() == Some(key))
-                            .map(|(_, ev)| ev),
-                        _ => None,
-                    }
-                };
-                if let Some(PyRep::Tuple(c) | PyRep::List(c)) =
-                    find_in_v("pos").or_else(|| find_in_v("destination"))
-                {
-                    if c.len() >= 3 {
-                        probe.position = [
-                            c[0].as_f64().unwrap_or(probe.position[0]),
-                            c[1].as_f64().unwrap_or(probe.position[1]),
-                            c[2].as_f64().unwrap_or(probe.position[2]),
-                        ];
-                        probe.destination = probe.position;
-                        moved_balls.push((pid, DVec3::from_array(probe.position)));
-                    }
-                } else if let (Some(x), Some(y), Some(z)) = (
-                    find_in_v("x").and_then(|a| a.as_f64()),
-                    find_in_v("y").and_then(|a| a.as_f64()),
-                    find_in_v("z").and_then(|a| a.as_f64()),
-                ) {
-                    probe.position = [x, y, z];
-                    probe.destination = probe.position;
-                    moved_balls.push((pid, DVec3::from_array(probe.position)));
-                }
-                if let Some(step) = find_in_v("rangeStep").and_then(|a| a.as_i64()) {
-                    probe.range_step = (step as i32).clamp(1, 8);
-                    probe.scan_range_m =
-                        0.25 * AU_IN_METERS * 2.0_f64.powi(probe.range_step - 1);
-                } else if let Some(rad_m) = find_in_v("scanRange").and_then(|a| a.as_f64()) {
-                    probe.scan_range_m = rad_m.max(0.25 * AU_IN_METERS);
-                    let au = probe.scan_range_m / (0.25 * AU_IN_METERS);
-                    probe.range_step = (au.log2().round() as i32 + 1).clamp(1, 8);
-                }
-            }
-        } else if let Some(PyRep::List(list)) = args.first() {
-            let mut owner_probe_ids: Vec<i64> = probe_map
-                .values()
-                .filter(|p| {
-                    p.owner_char_id == char_id
-                        && p.solar_system_id == sys_id
-                        && p.state != 0
-                })
-                .map(|p| p.probe_id)
-                .collect();
-            owner_probe_ids.sort_unstable();
-            for (idx, item) in list.iter().enumerate() {
-                let Some(&pid) = owner_probe_ids.get(idx) else {
-                    break;
-                };
-                let Some(probe) = probe_map.get_mut(&pid) else {
-                    continue;
-                };
-                if let PyRep::List(coords) | PyRep::Tuple(coords) = item {
-                    if coords.len() >= 3 {
-                        probe.position = [
-                            coords[0].as_f64().unwrap_or(0.0),
-                            coords[1].as_f64().unwrap_or(0.0),
-                            coords[2].as_f64().unwrap_or(0.0),
-                        ];
-                        probe.destination = probe.position;
-                        moved_balls.push((pid, DVec3::from_array(probe.position)));
-                    }
-                    if let Some(step) = coords
-                        .get(3)
-                        .and_then(|a| a.as_i64())
-                        .map(|s| (s as i32).clamp(1, 8))
-                        .or(override_range_step)
-                    {
-                        probe.range_step = step;
-                        probe.scan_range_m = 0.25 * AU_IN_METERS * 2.0_f64.powi(step - 1);
-                    }
-                }
-            }
-        } else if let Some(step) = override_range_step {
-            for p in probe_map.values_mut() {
-                if p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state != 0 {
-                    p.range_step = step;
-                    p.scan_range_m = 0.25 * AU_IN_METERS * 2.0_f64.powi(step - 1);
-                }
-            }
-        }
-    }
-
-    for (pid, new_pos) in moved_balls {
-        if let Ok(Some((_, mut b))) = sys_handle.get_ball_snapshot(pid).await {
-            b.position = new_pos;
-            let _ = sys_handle.spawn_ball(b).await;
-        }
-    }
-
-    let active_probes: Vec<crate::router::ActiveScannerProbe> = ctx
-        .active_scanner_probes
-        .read()
-        .ok()
-        .map(|map| {
-            map.values()
-                .filter(|p| {
-                    p.owner_char_id == char_id
-                        && p.solar_system_id == sys_id
-                        && p.state != 0
-                })
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default();
-
-    if active_probes.is_empty() {
-        return Some(Err(BridgeRpcError {
-            code: "NoActiveProbes".into(),
-            message: "No active scanner probes in space".into(),
-        }));
-    }
-
-    let (astro_lvl, rangefinding_lvl) = ctx.db.with_snapshot(|snap| {
-        let sk = snap.skills.get(&char_id);
-        let a = sk.and_then(|m| m.get(&3412)).map(|s| s.level).unwrap_or(3);
-        let r = sk.and_then(|m| m.get(&25810)).map(|s| s.level).unwrap_or(0);
-        (a, r)
-    });
-    let skill_mult = (1.0 + 0.05 * astro_lvl as f64) * (1.0 + 0.05 * rangefinding_lvl as f64);
-
-    let scan_results = ctx.db.with_snapshot(|snap| {
-        let mut out = Vec::new();
-        if let Some(sigs) = snap.cosmic_signatures.get(&sys_id) {
-            for sig in sigs {
-                if sig.collapsed {
-                    continue;
-                }
-                let sig_pos = DVec3::from_array(sig.position);
-                let mut covering_probes = 0usize;
-                let mut total_effective_strength = 0.0;
-
-                for probe in &active_probes {
-                    let p_pos = DVec3::from_array(probe.position);
-                    let dist = p_pos.distance(sig_pos);
-                    let radius = probe.scan_range_m.max(0.25 * AU_IN_METERS);
-                    if dist <= radius {
-                        covering_probes += 1;
-                        let step_factor = 0.5_f64.powi(probe.range_step - 1);
-                        let dist_factor = (-(dist / radius).powi(2)).exp();
-                        let probe_s = probe.base_sensor_strength
-                            * skill_mult
-                            * step_factor
-                            * dist_factor;
-                        total_effective_strength += probe_s;
-                    }
-                }
-
-                let trilateration_cap = match covering_probes {
-                    0 => 0.0,
-                    1 => 0.24,
-                    2 => 0.49,
-                    3 => 0.74,
-                    _ => 1.0,
-                };
-                let raw_strength = (total_effective_strength / 25.0).min(trilateration_cap);
-                let mut scanned_sig = sig.clone();
-                scanned_sig.signal_strength = raw_strength.clamp(0.0, trilateration_cap);
-                let resolved = scanned_sig.signal_strength >= 1.0;
-                let wh_item_id = wormhole_item_id_for_signature(sys_id, &scanned_sig.signature_id);
-                out.push((scanned_sig, wh_item_id, covering_probes, resolved));
-            }
-        }
-        out
-    });
-
-    let mut rows = Vec::new();
-    for (sig, wh_item_id, covering_probes, resolved) in scan_results {
-        ctx.record_character_scan_progress(char_id, sys_id, &sig.signature_id, sig.signal_strength);
-        if resolved {
-            ctx.mark_signature_scanned(char_id, sys_id, wh_item_id);
-        }
-        let (mass_stage, wh_size, life_stage, wh_age, is_collapsed) =
-            compute_wormhole_stages(&sig, now_unix);
-        rows.push(PyRep::keyval([
-            ("id", PyRep::String(sig.signature_id.clone())),
-            ("signatureID", PyRep::String(sig.signature_id)),
-            ("itemID", PyRep::Integer(wh_item_id)),
-            ("targetID", PyRep::Integer(wh_item_id)),
-            (
-                "group",
-                PyRep::String(if sig.signal_strength >= 0.25 {
-                    sig.sig_group
-                } else {
-                    "Unknown".into()
-                }),
-            ),
-            (
-                "type",
-                PyRep::String(if resolved {
-                    sig.type_name
-                } else {
-                    "Unidentified Signature".into()
-                }),
-            ),
-            ("signalStrength", PyRep::Real(sig.signal_strength)),
-            ("certainty", PyRep::Real(sig.signal_strength)),
-            ("deviation", PyRep::Real(if resolved { 0.0 } else { (1.0 - sig.signal_strength) * 0.25 * AU_IN_METERS })),
-            ("coveringProbes", PyRep::Integer(covering_probes as i64)),
-            ("resolved", PyRep::Bool(resolved)),
-            ("massStage", PyRep::String(mass_stage.into())),
-            ("wormholeSize", PyRep::Real(wh_size)),
-            ("lifetimeStage", PyRep::String(life_stage.into())),
-            ("wormholeAge", PyRep::Integer(wh_age)),
-            ("x", if resolved { PyRep::Real(sig.position[0]) } else { PyRep::None }),
-            ("y", if resolved { PyRep::Real(sig.position[1]) } else { PyRep::None }),
-            ("z", if resolved { PyRep::Real(sig.position[2]) } else { PyRep::None }),
-            ("collapsed", PyRep::Bool(is_collapsed)),
-        ]));
-    }
-
-    let _ = ctx.notify(
-        crate::router::NotificationTarget::Character(char_id),
-        "OnSystemScanStarted",
-        "charid",
-        vec![
-            PyRep::Integer(now_unix as i64),
-            PyRep::Integer(4000),
-            PyRep::Integer(active_probes.len() as i64),
-        ],
-    );
-    let _ = ctx.notify(
-        crate::router::NotificationTarget::Character(char_id),
-        "OnSystemScanStopped",
-        "charid",
-        vec![
-            PyRep::Integer(active_probes.len() as i64),
-            PyRep::List(rows.clone()),
-            PyRep::List(Vec::new()),
-        ],
-    );
-
-    Some(Ok(PyRep::List(rows)))
-}
-
-async fn handle_recover_probes(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    bound_entry: Option<&BoundObjectEntry>,
-    args: &[PyRep],
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, char_id) = match ServerContext::require_character(session) {
-        Ok(v) => v,
-        Err(e) => return Some(Err(e)),
-    };
-    let sys_id = bound_entry
-        .map(|b| b.object_id as u32)
-        .or(session.solar_system_id)
-        .unwrap_or(30_000_142);
-
-    let mut target_probe_ids: Vec<i64> = Vec::new();
-    if let Some(PyRep::List(list) | PyRep::Tuple(list)) = args.first() {
-        for item in list {
-            if let Some(pid) = item.as_i64() {
-                target_probe_ids.push(pid);
-            }
-        }
-    } else if let Some(pid) = args.first().and_then(|a| a.as_i64()) {
-        target_probe_ids.push(pid);
-    }
-
-    let now_unix = ctx.now_unix();
-    let recovered_probes: Vec<crate::router::ActiveScannerProbe> =
-        if let Ok(mut map) = ctx.active_scanner_probes.write() {
-            for p in map.values_mut() {
-                if p.owner_char_id == char_id
-                    && now_unix >= p.launched_at_unix.saturating_add(p.max_flight_time_s.max(0.0) as u64)
-                {
-                    p.state = 0;
-                }
-            }
-            let ids: Vec<i64> = map
-                .values()
-                .filter(|p| {
-                    p.owner_char_id == char_id
-                        && p.state != 0
-                        && (target_probe_ids.is_empty() || target_probe_ids.contains(&p.probe_id))
-                })
-                .map(|p| p.probe_id)
-                .collect();
-            ids.into_iter().filter_map(|id| map.remove(&id)).collect()
-        } else {
-            Vec::new()
-        };
-
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    for p in &recovered_probes {
-        let _ = sys_handle.remove_ball(p.probe_id).await;
-    }
-
-    let count = recovered_probes.len() as i32;
-    let probe_type_id = recovered_probes
-        .first()
-        .map(|p| p.probe_type_id)
-        .unwrap_or(30013);
-    let launcher_id_opt = recovered_probes.first().map(|p| p.launcher_module_id);
-    let ship_id_opt = session
-        .ship_id
-        .or_else(|| recovered_probes.first().map(|p| p.ship_id));
-
-    let (to_launcher, to_cargo) = if count > 0 {
-        ctx.db.with_mut_snapshot(|snap| {
-            let mut remaining = count;
-            let mut in_launcher = 0i32;
-            let mut in_cargo = 0i32;
-            let add_stack = |items: &mut HashMap<i64, eve_db::InventoryItemRecord>,
-                             next_id: &mut i64,
-                             ship_id: i64,
-                             flag: InventoryFlag,
-                             qty: i32,
-                             exclude_id: i64| {
-                if let Some(st) = items.values_mut().find(|i| {
-                    i.owner_id == char_id
-                        && i.location_id == ship_id
-                        && i.flag == flag
-                        && i.item_id != exclude_id
-                        && i.type_id == probe_type_id
-                }) {
-                    st.quantity += qty;
-                    st.version += 1;
-                } else {
-                    *next_id += 1;
-                    let new_id = *next_id;
-                    items.insert(
-                        new_id,
-                        eve_db::InventoryItemRecord {
-                            item_id: new_id,
-                            type_id: probe_type_id,
-                            owner_id: char_id,
-                            location_id: ship_id,
-                            flag,
-                            quantity: qty,
-                            singleton: false,
-                            version: 1,
-                            ..Default::default()
-                        },
-                    );
-                }
-            };
-            if let (Some(ship_id), Some(launcher_id)) = (ship_id_opt, launcher_id_opt) {
-                if let Some(li) = snap.items.get(&launcher_id).cloned().filter(|i| i.location_id == ship_id) {
-                    let cur_clip = snap
-                        .items
-                        .values()
-                        .find(|i| {
-                            i.owner_id == char_id
-                                && i.location_id == ship_id
-                                && i.flag == li.flag
-                                && i.item_id != launcher_id
-                                && i.type_id == probe_type_id
-                        })
-                        .map(|i| i.quantity)
-                        .unwrap_or(0);
-                    let add = (8 - cur_clip).max(0).min(remaining);
-                    if add > 0 {
-                        add_stack(&mut snap.items, &mut snap.next_entity_id, ship_id, li.flag, add, launcher_id);
-                        remaining -= add;
-                        in_launcher += add;
-                    }
-                }
-            }
-            if remaining > 0 {
-                if let Some(ship_id) = ship_id_opt {
-                    add_stack(&mut snap.items, &mut snap.next_entity_id, ship_id, InventoryFlag::Cargo, remaining, 0);
-                    in_cargo += remaining;
-                }
-            }
-            (in_launcher, in_cargo)
-        })
-    } else {
-        (0, 0)
-    };
-
-    let rec_ids: Vec<PyRep> = recovered_probes
-        .iter()
-        .map(|p| PyRep::Integer(p.probe_id))
-        .collect();
-    if count > 0 {
-        let _ = ctx.notify(
-            crate::router::NotificationTarget::Character(char_id),
-            "OnProbesIdle",
-            "charid",
-            vec![PyRep::List(rec_ids.clone())],
-        );
-    }
-    Some(Ok(PyRep::keyval([
-        ("recoveredProbeIDs", PyRep::List(rec_ids)),
-        ("recoveredCount", PyRep::Integer(count as i64)),
-        ("returnedToLauncher", PyRep::Integer(to_launcher as i64)),
-        ("returnedToCargo", PyRep::Integer(to_cargo as i64)),
-    ])))
-}
-
-async fn handle_reconnect_probes(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    bound_entry: Option<&BoundObjectEntry>,
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, char_id) = match ServerContext::require_character(session) {
-        Ok(v) => v,
-        Err(e) => return Some(Err(e)),
-    };
-    let sys_id = bound_entry
-        .map(|b| b.object_id as u32)
-        .or(session.solar_system_id)
-        .unwrap_or(30_000_142);
-    let now_unix = ctx.now_unix();
-    let ship_id = session.ship_id.unwrap_or(0);
-
-    let mut reconnected = Vec::new();
-    if let Ok(mut map) = ctx.active_scanner_probes.write() {
-        for p in map.values_mut() {
-            if p.owner_char_id == char_id && p.solar_system_id == sys_id {
-                if now_unix
-                    >= p.launched_at_unix
-                        .saturating_add(p.max_flight_time_s.max(0.0) as u64)
-                {
-                    p.state = 0;
-                } else {
-                    p.state = 1;
-                    if ship_id != 0 {
-                        p.ship_id = ship_id;
-                    }
-                    reconnected.push(PyRep::Integer(p.probe_id));
-                }
-            }
-        }
-    }
-    let count = reconnected.len() as i64;
-    Some(Ok(PyRep::keyval([
-        ("reconnectedProbeIDs", PyRep::List(reconnected)),
-        ("reconnectedCount", PyRep::Integer(count)),
-    ])))
-}
-
-async fn handle_destroy_probe(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    bound_entry: Option<&BoundObjectEntry>,
-    args: &[PyRep],
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, char_id) = match ServerContext::require_character(session) {
-        Ok(v) => v,
-        Err(e) => return Some(Err(e)),
-    };
-    let sys_id = bound_entry.map(|b| b.object_id as u32).or(session.solar_system_id).unwrap_or(30_000_142);
-    let target_pid = args.first().and_then(|a| a.as_i64());
-
-    let destroyed_ids: Vec<i64> = if let Ok(mut map) = ctx.active_scanner_probes.write() {
-        let ids: Vec<i64> = map
-            .values()
-            .filter(|p| p.owner_char_id == char_id && (target_pid.is_none() || target_pid == Some(p.probe_id)))
-            .map(|p| p.probe_id)
-            .collect();
-        for id in &ids {
-            map.remove(id);
-        }
-        ids
-    } else {
-        Vec::new()
-    };
-
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    for pid in &destroyed_ids {
-        let _ = sys_handle.remove_ball(*pid).await;
-    }
-    for &pid in &destroyed_ids {
-        let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnRemoveProbe", "charid", vec![PyRep::Integer(pid)]);
-    }
-
-    Some(Ok(PyRep::keyval([
-        ("destroyedProbeID", destroyed_ids.first().copied().map(PyRep::Integer).unwrap_or(PyRep::None)),
-        ("destroyedCount", PyRep::Integer(destroyed_ids.len() as i64)),
-        ("destroyed", PyRep::Bool(!destroyed_ids.is_empty())),
-    ])))
 }

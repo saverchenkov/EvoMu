@@ -98,6 +98,12 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
     );
 
     // 3. Thera & Shattered W-space rules (`feat:navigation.wormhole-thera`)
+    let _ = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(31_000_005)], &kw, None).await.expect("seed Thera sigs");
+    ctx.db.with_mut_snapshot(|snap| {
+        for s in snap.cosmic_signatures.get_mut(&31_000_005).into_iter().flatten() {
+            s.signal_strength = 1.0;
+        }
+    });
     let thera_scan = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(31_000_005)], &kw, None).await.expect("GetSystemScanMgr in Thera");
     let PyRep::KeyVal(ts_kv) = &thera_scan else { panic!() };
     assert_eq!(ts_kv["isThera"], PyRep::Bool(true));
@@ -109,10 +115,10 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
     assert_eq!(thera_anchor_err.code, "AnchoringDisallowedInTheraOrShattered");
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&90_000_001).unwrap().solar_system_id = 31_000_010;
+        snap.characters.get_mut(&90_000_001).unwrap().solar_system_id = 31_002_585;
     });
-    sess.solar_system_id = Some(31_000_010);
-    let shat_scan = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(31_000_010)], &kw, None).await.unwrap();
+    sess.solar_system_id = Some(31_002_585);
+    let shat_scan = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(31_002_585)], &kw, None).await.unwrap();
     assert_eq!(shat_scan.dict_get("isShattered"), Some(&PyRep::Bool(true)));
     let shat_anchor_err = ctx.dispatch_rpc(&mut sess, "structureDeployment", None, "Anchor", &[PyRep::Integer(35832), PyRep::String("Shattered Astrahus".into())], &kw, None).await.unwrap_err();
     assert_eq!(shat_anchor_err.code, "AnchoringDisallowedInTheraOrShattered");
@@ -139,7 +145,7 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
     ctx.db.with_mut_snapshot(|snap| {
         let wh = snap.cosmic_signatures.get_mut(&30_000_142).unwrap().iter_mut().find(|s| s.signature_id == wh_sig_id).unwrap();
         wh.remaining_mass_kg = 800_000_000.0;
-        wh.destination_system_id = Some(31_000_003);
+        wh.destination_system_id = Some(31_000_028);
     });
     let destab_jump = ctx.dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(wh_item_id)], &kw, None).await.expect("Jump through destabilized wormhole into Wolf-Rayet W-space");
     let PyRep::KeyVal(dkv) = &destab_jump else { panic!() };
@@ -148,7 +154,7 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
     assert_eq!(dkv["environmentalEffect"], PyRep::String("Wolf-Rayet".into()));
 
     let base_rifter_cs = ctx.build_ship_combat_state(90_000_001, 600_000_001, 587);
-    let wr_handle = ctx.systems.get_or_spawn(31_000_003);
+    let wr_handle = ctx.systems.get_or_spawn(31_000_028);
     let wr_cs = wr_handle.get_combat_state(600_000_001).await.unwrap().unwrap();
     assert!((wr_cs.max_armor_hp - base_rifter_cs.max_armor_hp * 1.30).abs() < 1.0);
     assert!((wr_cs.signature_radius - base_rifter_cs.signature_radius * 0.85).abs() < 1.0);
@@ -160,7 +166,7 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
         if let Some(sigs) = snap.cosmic_signatures.get_mut(&30_000_142) {
             if let Some(wh) = sigs.iter_mut().find(|s| s.signature_id == wh_sig_id) {
                 wh.remaining_mass_kg = 800_000.0;
-                wh.destination_system_id = Some(31_000_004);
+                wh.destination_system_id = Some(31_001_886);
             }
         }
     });
@@ -177,7 +183,18 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
     assert_ne!(replacement_sig_id, wh_sig_id);
     assert!(jita_sys.get_ball_snapshot(wh_item_id).await.unwrap().is_none(), "Collapsed wormhole ball must be removed from Ballpark");
 
-    let c5_scan = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(31_000_004)], &kw, None).await.unwrap();
+    let _ = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(31_001_886)], &kw, None).await.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        for s in snap.cosmic_signatures.get_mut(&31_001_886).into_iter().flatten() {
+            s.signal_strength = 1.0;
+        }
+        for s in snap.cosmic_signatures.get_mut(&30_000_142).into_iter().flatten() {
+            if s.signature_id == replacement_sig_id {
+                s.signal_strength = 1.0;
+            }
+        }
+    });
+    let c5_scan = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(31_001_886)], &kw, None).await.unwrap();
     let Some(PyRep::List(c5_sigs)) = c5_scan.dict_get("signatures") else { panic!() };
     assert!(c5_sigs.iter().any(|s| s.dict_get("signatureID").and_then(|v| v.as_str()).is_some_and(|id| id.starts_with("WST-")) && s.dict_get("typeID") == Some(&PyRep::Integer(30643))));
     assert!(c5_sigs.iter().any(|s| s.dict_get("signatureID").and_then(|v| v.as_str()).is_some_and(|id| id.starts_with("WND-")) && s.dict_get("typeID") == Some(&PyRep::Integer(30645))));

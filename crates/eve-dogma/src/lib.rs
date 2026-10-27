@@ -876,3 +876,213 @@ pub use combat_eval::*;
 pub use context::*;
 pub use evaluation::*;
 pub use fitting::*;
+
+/// Maps an effective wormhole class strength (`1..=6`) and phenomenon name to its SDE Secondary Sun
+/// (`group_id == 920`) dogma effect type ID (`30844..=30884`).
+// parity: feat:dogma.wormhole-phenomena-effects, feat:wormholes.system-phenomena-bonuses
+pub fn wormhole_phenomenon_type_for_class_and_name(
+    effective_class: u8,
+    phenomenon: &str,
+) -> Option<u32> {
+    let cls = effective_class.clamp(1, 6);
+    let low = phenomenon.trim().to_ascii_lowercase();
+    if low.contains("pulsar") {
+        Some(match cls {
+            1 => 30844,
+            2 => 30865,
+            3 => 30866,
+            4 => 30867,
+            5 => 30868,
+            _ => 30869,
+        })
+    } else if low.contains("black hole") || low.contains("blackhole") {
+        Some(match cls {
+            1 => 30845,
+            2 => 30850,
+            3 => 30851,
+            4 => 30852,
+            5 => 30853,
+            _ => 30854,
+        })
+    } else if low.contains("cataclysmic") {
+        Some(match cls {
+            1 => 30846,
+            2 => 30880,
+            3 => 30881,
+            4 => 30884,
+            5 => 30883,
+            _ => 30882,
+        })
+    } else if low.contains("magnetar") {
+        Some(match cls {
+            1 => 30847,
+            2 => 30860,
+            3 => 30861,
+            4 => 30862,
+            5 => 30863,
+            _ => 30864,
+        })
+    } else if low.contains("red giant") || low.contains("redgiant") {
+        Some(match cls {
+            1 => 30848,
+            2 => 30870,
+            3 => 30871,
+            4 => 30872,
+            5 => 30873,
+            _ => 30874,
+        })
+    } else if low.contains("wolf") {
+        Some(match cls {
+            1 => 30849,
+            2 => 30875,
+            3 => 30876,
+            4 => 30877,
+            5 => 30878,
+            _ => 30879,
+        })
+    } else {
+        None
+    }
+}
+
+/// Resolves `(raw_wormhole_class, effective_strength_class, phenomenon_name, sde_effect_type_id)` for a
+/// wormhole solar system from SDE `wormhole_class_id` and `res:/staticdata/solarsystemcontent.static`
+/// `secondarySun` records (`group_id == 920`). C13 systems (`wormhole_class_id == 13`) have C6 Wolf-Rayet
+/// (`30879`) secondary suns; Drifter wormhole systems (`wormhole_class_id` in `14..=18`) have C2 secondary suns.
+// parity: feat:dogma.wormhole-phenomena-effects, feat:wormholes.system-phenomena-bonuses
+pub fn resolve_system_wormhole_phenomenon(
+    sde: &eve_sde::SdeRegistry,
+    solar_system_id: u32,
+    phenomenon_override: Option<&str>,
+) -> Option<(u8, u8, &'static str, u32)> {
+    let sde_class = sde.solar_systems.get(&solar_system_id).and_then(|s| {
+        s.wormhole_class_id.or_else(|| {
+            sde.constellations
+                .get(&s.constellation_id)
+                .and_then(|c| c.wormhole_class_id)
+                .or_else(|| sde.regions.get(&s.region_id).and_then(|r| r.wormhole_class_id))
+        })
+    })?;
+    let raw_class = match sde_class {
+        c @ (1..=6 | 12..=18) => c as u8,
+        _ => return None,
+    };
+    if raw_class == 12 {
+        return None;
+    }
+    let default_effective_class = if raw_class == 13 {
+        6
+    } else if (14..=18).contains(&raw_class) {
+        2
+    } else {
+        raw_class.clamp(1, 6)
+    };
+    let canonicalize_phenom = |s: &str| -> Option<&'static str> {
+        let low = s.to_ascii_lowercase();
+        if low.contains("pulsar") {
+            Some("Pulsar")
+        } else if low.contains("black") {
+            Some("Black Hole")
+        } else if low.contains("cataclysmic") {
+            Some("Cataclysmic Variable")
+        } else if low.contains("magnetar") {
+            Some("Magnetar")
+        } else if low.contains("red") {
+            Some("Red Giant")
+        } else if low.contains("wolf") {
+            Some("Wolf-Rayet")
+        } else {
+            None
+        }
+    };
+    if let Some(override_str) = phenomenon_override {
+        let canonical = if raw_class == 13 {
+            "Wolf-Rayet"
+        } else {
+            canonicalize_phenom(override_str)?
+        };
+        let eff_tid = wormhole_phenomenon_type_for_class_and_name(default_effective_class, canonical)?;
+        return Some((raw_class, default_effective_class, canonical, eff_tid));
+    }
+    let sec = sde.secondary_sun_for_system(solar_system_id)?;
+    let eff_tid = sec.effect_beacon_type_id;
+    let beacon_name = sde
+        .types
+        .get(&eff_tid)
+        .map(|t| t.name.as_str())
+        .unwrap_or_default();
+    let sun_name = sde
+        .types
+        .get(&sec.type_id)
+        .map(|t| t.name.as_str())
+        .unwrap_or(beacon_name);
+    let canonical = canonicalize_phenom(sun_name).or_else(|| canonicalize_phenom(beacon_name))?;
+    let effective_class = (1u8..=6)
+        .find(|c| beacon_name.contains(&format!("Class {c} ")))
+        .unwrap_or(default_effective_class);
+    Some((raw_class, effective_class, canonical, eff_tid))
+}
+
+/// Applies SDE system-wide wormhole phenomenon modifiers (`effect_type_id` in `30844..=30884`, `group_id == 920`)
+/// to `attrs` by evaluating the beacon's SDE dogma effect `modifiers` (`EffectModifierSpec`).
+/// Returns `true` if applied. Applies to capsuleer ships only (`target_category_id == 6 && !is_npc_or_sleeper`),
+/// never to Sleepers (`category_id == 11`) or structures (`category_id == 65` / `23`).
+// parity: feat:dogma.wormhole-phenomena-effects, feat:wormholes.system-phenomena-bonuses
+pub fn apply_wormhole_phenomenon_to_attributes(
+    sde: &eve_sde::SdeRegistry,
+    effect_type_id: u32,
+    target_category_id: u32,
+    is_npc_or_sleeper: bool,
+    attrs: &mut std::collections::HashMap<u16, f64>,
+) -> bool {
+    if target_category_id != 6 || is_npc_or_sleeper {
+        return false;
+    }
+    let Some(eff_type) = sde.types.get(&effect_type_id) else {
+        return false;
+    };
+    if eff_type.group_id != 920 {
+        return false;
+    }
+    let d = &eff_type.default_attributes;
+    let apply_op = |attrs: &mut std::collections::HashMap<u16, f64>, target_aid: u16, op: i32, mod_val: f64| -> bool {
+        let Some(&base) = attrs.get(&target_aid) else {
+            return false;
+        };
+        let next = match op {
+            4 => base * mod_val,
+            6 => base * (1.0 + mod_val / 100.0),
+            2 => base + mod_val,
+            _ => return false,
+        };
+        attrs.insert(target_aid, next);
+        true
+    };
+    let mut modified_attrs = std::collections::HashSet::new();
+    for pass in 0..2 {
+        for &eid in &eff_type.effect_ids {
+            let Some(eff) = sde.effects.get(&eid) else {
+                continue;
+            };
+            for m in &eff.modifiers {
+                if !matches!(m.domain.as_str(), "shipID" | "charID") {
+                    continue;
+                }
+                let is_direct_ship_mod = matches!(m.func.as_str(), "ItemModifier" | "LocationModifier");
+                if (pass == 0) != is_direct_ship_mod {
+                    continue;
+                }
+                let Some(&mod_val) = d.get(&m.modifying_attribute_id) else {
+                    continue;
+                };
+                if !modified_attrs.contains(&m.modified_attribute_id)
+                    && apply_op(attrs, m.modified_attribute_id, m.operator, mod_val)
+                {
+                    modified_attrs.insert(m.modified_attribute_id);
+                }
+            }
+        }
+    }
+    !modified_attrs.is_empty()
+}
+

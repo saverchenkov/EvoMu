@@ -307,14 +307,12 @@ async fn test_pve_ghost_site_timer_and_detonation_mechanics() {
         )
         .await
         .expect("StartNewGameInstance can1");
-    for adj_idx in [1_i64, 2] {
-        ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can1_id), PyRep::Integer(adj_idx)], &kw, None).await.expect("reveal path to tile 3");
-    }
     with_pve_exploration_reg(&ctx, |reg| {
         if let Some(g) = reg.hacking_games.get_mut(&(char_id, can1_id)) {
             g.virus_coherence = 1;
-            if let Some(t) = g.tiles.get_mut(3) {
+            if let Some(t) = g.tiles.get_mut(1) {
                 t.kind = HackingNodeKind::Firewall;
+                t.coherence = 40;
                 t.strength = 100;
             }
         }
@@ -325,7 +323,7 @@ async fn test_pve_ghost_site_timer_and_detonation_mechanics() {
             "hackingMgr",
             None,
             "ClickedOnTile",
-            &[PyRep::Integer(can1_id), PyRep::Integer(3)],
+            &[PyRep::Integer(can1_id), PyRep::Integer(1)],
             &kw,
             None,
         )

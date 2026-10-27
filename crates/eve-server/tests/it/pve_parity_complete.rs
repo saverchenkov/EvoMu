@@ -202,71 +202,41 @@ async fn test_pve_hacking_minigame_complete() {
     let virus_coh = start_rep.dict_get("virusCoherence").and_then(|v| v.as_i64()).unwrap_or(0);
     assert!(virus_coh > 0, "Initial virus coherence must be > 0");
 
-    // 2. Discover utility drop from tile 1 (DataCache with PolymorphicShield)
-    let click1 = ctx
-        .dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can_id), PyRep::Integer(1)], &kw, None)
-        .await
-        .expect("ClickedOnTile 1");
-    assert_eq!(click1.dict_get("status"), Some(&PyRep::String("InProgress".into())));
-
-    // Verify utility slot 0 now has the utility drop
-    let has_util = with_pve_exploration_reg(&ctx, |reg| {
-        let game = &reg.hacking_games[&(PILOT_HACKER, can_id)];
-        game.utilities[0].is_some()
+    // 2. Discover utility drop (DataCache with PolymorphicShield) along connected path from tile 0
+    let shield_idx = with_pve_exploration_reg(&ctx, |reg| {
+        reg.hacking_games[&(PILOT_HACKER, can_id)].tiles.iter().find(|t| format!("{:?}", t.utility_drop).contains("PolymorphicShield")).unwrap().tile_index
     });
-    assert!(has_util, "Tile 1 should yield utility element in slot 0");
+    let mut shield_path: Vec<u32> = (1..=(shield_idx / 6)).map(|r| r * 6).collect();
+    shield_path.extend(((shield_idx / 6) * 6 + 1)..=shield_idx);
+    for idx in shield_path {
+        for _ in 0..5 {
+            let r = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can_id), PyRep::Integer(idx as i64)], &kw, None).await.expect("ClickedOnTile");
+            if r.dict_get("nodeCoherence").and_then(|v| v.as_i64()).unwrap_or(0) <= 0 { break; }
+        }
+    }
+    let shield_slot = with_pve_exploration_reg(&ctx, |reg| {
+        reg.hacking_games[&(PILOT_HACKER, can_id)].utilities.iter().position(|u| format!("{:?}", u).contains("PolymorphicShield"))
+    }).expect("Discovered PolymorphicShield utility in slot");
 
-    // 3. UsedUtilityElement activates the element from slot 0
-    let util_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "hackingMgr",
-            None,
-            "UsedUtilityElement",
-            &[PyRep::Integer(can_id), PyRep::Integer(0), PyRep::Integer(0)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("UsedUtilityElement");
+    // 3. UsedUtilityElement activates the PolymorphicShield element
+    let util_rep = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "UsedUtilityElement", &[PyRep::Integer(can_id), PyRep::Integer(shield_slot as i64), PyRep::Integer(0)], &kw, None).await.expect("UsedUtilityElement");
     assert_eq!(util_rep.dict_get("containerID"), Some(&PyRep::Integer(can_id)));
     let shield_charges = util_rep.dict_get("polymorphicShieldCharges").and_then(|v| v.as_i64()).unwrap_or(0);
     assert!(shield_charges >= 2, "PolymorphicShield utility granted shield charges");
 
     // 4. Click tiles to navigate towards System Core and win game
     let core_idx = with_pve_exploration_reg(&ctx, |reg| {
-        reg.hacking_games[&(PILOT_HACKER, can_id)]
-            .tiles
-            .iter()
-            .find(|t| format!("{:?}", t.kind) == "SystemCore")
-            .unwrap()
-            .tile_index
+        reg.hacking_games[&(PILOT_HACKER, can_id)].tiles.iter().find(|t| format!("{:?}", t.kind) == "SystemCore").unwrap().tile_index
     });
-
     let mut path: Vec<u32> = (1..=(core_idx / 6)).map(|r| r * 6).collect();
     path.extend(((core_idx / 6) * 6 + 1)..=core_idx);
-
     let mut win_rep = PyRep::None;
     for idx in path {
         for _ in 0..6 {
-            let r = ctx
-                .dispatch_rpc(
-                    &mut sess,
-                    "hackingMgr",
-                    None,
-                    "ClickedOnTile",
-                    &[PyRep::Integer(can_id), PyRep::Integer(idx as i64)],
-                    &kw,
-                    None,
-                )
-                .await
-                .expect("ClickedOnTile traversal");
-            let won = r.dict_get("status").and_then(|v| v.as_str()) == Some("Won");
-            let destroyed = r.dict_get("nodeCoherence").and_then(|v| v.as_i64()).unwrap_or(0) <= 0;
+            let r = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can_id), PyRep::Integer(idx as i64)], &kw, None).await.expect("ClickedOnTile traversal");
+            let done = r.dict_get("status").and_then(|v| v.as_str()) == Some("Won") || r.dict_get("nodeCoherence").and_then(|v| v.as_i64()).unwrap_or(0) <= 0;
             win_rep = r;
-            if won || destroyed {
-                break;
-            }
+            if done { break; }
         }
     }
 

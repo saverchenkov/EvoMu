@@ -372,9 +372,6 @@ async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
     let sys_142 = ctx.systems.get_or_spawn(30_000_142);
     let _ = sys_142.set_ball_position(710_001_004, DVec3::from_array(gho_pos) + DVec3::new(500.0, 0.0, 0.0)).await;
     ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(ghost_cans[1])], &kw, None).await.expect("Ghost hack starts timer");
-    for adj_idx in [1_i64, 2] {
-        ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(ghost_cans[1]), PyRep::Integer(adj_idx)], &kw, None).await.expect("reveal path to Firewall");
-    }
     with_pve_exploration_reg(&ctx, |reg| {
         if let Some(g) = reg.hacking_games.get_mut(&(90_000_001, ghost_cans[1])) {
             g.virus_coherence = 5;
@@ -383,7 +380,14 @@ async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
             s.ghost_detonated = false;
         }
     });
-    let fail_det = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(ghost_cans[1]), PyRep::Integer(3)], &kw, None).await.expect("Failed ghost hack detonates");
+    let mut fail_det = PyRep::None;
+    for adj_idx in 1..24_i64 {
+        let rep = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(ghost_cans[1]), PyRep::Integer(adj_idx)], &kw, None).await.expect("Ghost hack click");
+        fail_det = rep;
+        if fail_det.dict_get("status").and_then(|v| v.as_str()) == Some("Failed") {
+            break;
+        }
+    }
     assert_eq!(fail_det.dict_get("status").and_then(|v| v.as_str()), Some("Failed"));
     assert_eq!(fail_det.dict_get("ghostDetonated").and_then(|v| v.as_bool()), Some(true));
     assert!(fail_det.dict_get("ghostExplosiveDamage").and_then(|v| v.as_f64()).unwrap_or(0.0) >= 4_000.0);

@@ -223,17 +223,17 @@ pub(crate) async fn handle_module_cycles(
             // Scan Probe Launcher (`group_id == 481`, e.g., `Core Probe Launcher I` `17938`)
             if mod_type.group_id == 481 {
                 return Some(
-                    handle_scan_probe_launcher_activation(
+                    crate::services::space_destiny::activate_scan_probe_launcher(
                         ctx,
                         session,
                         &sys,
-                        sys_id,
                         char_id,
                         ship_id,
+                        sys_id,
                         module_id,
                         m.type_id,
                         m.flag_id,
-                        &effect_name,
+                        effect_name.as_str(),
                         target_id_opt,
                         kwargs,
                     )

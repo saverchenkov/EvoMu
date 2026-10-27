@@ -3,7 +3,6 @@
 #![forbid(unsafe_code)]
 
 use crate::router::{BoundObjectEntry, ServerContext};
-use eve_db::CosmicSignatureRecord;
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -190,7 +189,9 @@ async fn handle_wormhole_jump(
         });
     }
 
-    let ship_mass = current_ball.mass;
+    let (ship_mass, _) =
+        super::space_docking_cloaking::compute_effective_ship_jump_mass(ctx, ship_id, current_ball.mass);
+    let now_unix = ctx.now_unix();
     if let Some(_active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
         return Err(BridgeRpcError {
             code: "SessionChangeTimerActive".into(),
@@ -303,134 +304,9 @@ async fn handle_wormhole_jump(
     ]))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WormholeBuckets {
-    pub destination_class: &'static str,
-    pub max_ship_size: &'static str,
-    pub lifetime_bucket: &'static str,
-    pub mass_stability_bucket: &'static str,
-}
-
-pub fn derive_wormhole_buckets(
-    wh: &CosmicSignatureRecord,
-    now_unix: u64,
-    sde: &eve_sde::SdeRegistry,
-) -> WormholeBuckets {
-    derive_wormhole_buckets_raw(
-        wh.destination_system_id.unwrap_or(0),
-        wh.max_jump_mass_kg,
-        wh.remaining_mass_kg,
-        wh.max_mass_kg,
-        wh.created_unix,
-        wh.lifetime_seconds,
-        wh.collapsed,
-        now_unix,
-        sde,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn derive_wormhole_buckets_raw(
-    dest_sys: u32,
-    max_jump_mass_kg: f64,
-    remaining_mass_kg: f64,
-    max_mass_kg: f64,
-    created_unix: u64,
-    lifetime_seconds: u64,
-    collapsed: bool,
-    now_unix: u64,
-    sde: &eve_sde::SdeRegistry,
-) -> WormholeBuckets {
-    // DERIVED: Destination classification resolved from SDE solar system, constellation, or region wormholeClassID
-    let wh_class_id = sde
-        .solar_systems
-        .get(&dest_sys)
-        .and_then(|s| {
-            s.wormhole_class_id.or_else(|| {
-                sde.constellations
-                    .get(&s.constellation_id)
-                    .and_then(|c| c.wormhole_class_id)
-                    .or_else(|| sde.regions.get(&s.region_id).and_then(|r| r.wormhole_class_id))
-            })
-        });
-
-    let dest_class = match wh_class_id {
-        Some(12) => "Thera",
-        Some(14..=18) => "Drifter",
-        Some(25) => "Triglavian",
-        Some(1..=3 | 13) => "C1-3",
-        Some(4..=5) => "C4-5",
-        Some(6) => "C6",
-        Some(7) => "High-Sec",
-        Some(8) => "Low-Sec",
-        Some(9..=11) => "Null-Sec",
-        _ => {
-            let sec = sde
-                .solar_systems
-                .get(&dest_sys)
-                .map(|s| s.security_status)
-                .unwrap_or(0.0);
-            if sec >= 0.45 {
-                "High-Sec"
-            } else if sec > 0.0 {
-                "Low-Sec"
-            } else {
-                "Null-Sec"
-            }
-        }
-    };
-
-    // DERIVED: Ship size category bucket thresholds derived from mass
-    let max_ship_size = if max_jump_mass_kg > 0.0 && max_jump_mass_kg <= 20_000_000.0 {
-        "Small"
-    } else if max_jump_mass_kg > 0.0 && max_jump_mass_kg <= 62_000_000.0 {
-        "Medium"
-    } else if max_jump_mass_kg > 0.0 && max_jump_mass_kg <= 375_000_000.0 {
-        "Large"
-    } else if max_jump_mass_kg > 375_000_000.0 {
-        "Extra Large"
-    } else {
-        "Large"
-    };
-
-    // DERIVED: Lifetime stage bucket intervals derived from elapsed time
-    let elapsed = now_unix.saturating_sub(created_unix);
-    let remaining_seconds = lifetime_seconds.saturating_sub(elapsed);
-    let lifetime_bucket = if collapsed
-        || lifetime_seconds == 0
-        || elapsed >= lifetime_seconds
-        || remaining_seconds == 0
-    {
-        "expired"
-    } else if remaining_seconds < 3_600 {
-        "<1h"
-    } else if remaining_seconds < 4 * 3_600 {
-        "<4h"
-    } else {
-        "<1 day"
-    };
-
-    // DERIVED: Mass stability bucket threshold derived from mass ratio
-    let mass_ratio = if max_mass_kg > 0.0 {
-        remaining_mass_kg / max_mass_kg
-    } else {
-        0.0
-    };
-    let mass_stability_bucket = if remaining_mass_kg <= 0.0 || mass_ratio < 0.10 {
-        "<10%"
-    } else if mass_ratio < 0.50 {
-        "<50%"
-    } else {
-        ">50%"
-    };
-
-    WormholeBuckets {
-        destination_class: dest_class,
-        max_ship_size,
-        lifetime_bucket,
-        mass_stability_bucket,
-    }
-}
+pub use super::space_docking_cloaking::{
+    derive_wormhole_buckets, derive_wormhole_buckets_raw, WormholeBuckets,
+};
 
 async fn handle_random_jump_filament(
     ctx: &ServerContext,
