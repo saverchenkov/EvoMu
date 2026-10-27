@@ -237,10 +237,7 @@ pub struct DroneBehaviorSettings {
 
 impl Default for DroneBehaviorSettings {
     fn default() -> Self {
-        Self {
-            aggressive: true,
-            focus_fire: true,
-        }
+        Self { aggressive: true, focus_fire: true }
     }
 }
 
@@ -354,6 +351,7 @@ pub struct CombatRuntimeState {
     pub npc_timers: HashMap<i64, u64>,
     pub crimewatch_timer_states: HashMap<i64, (i64, i64, i64, i64)>,
     pub active_drones_in_space: HashMap<i64, DroneSpaceState>,
+    pub drone_next_ready_unix: HashMap<i64, u64>,
     pub drone_settings: HashMap<i64, DroneBehaviorSettings>,
     pub npc_entities: HashMap<i64, ExtendedNpcEntity>,
     pub pending_bounty_ticks: HashMap<(u32, i64), f64>,

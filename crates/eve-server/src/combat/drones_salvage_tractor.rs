@@ -357,15 +357,8 @@ pub async fn execute_wreck_salvage_cycle(
         ]));
     }
 
-    // DERIVED: Uniform [0.0, 100.0) salvager cycle roll from `ctx.mechanic_rng` in production CSPRNG mode
-    // or when explicitly seeded via `set_mechanic_rng_seed`; falls back to a deterministic sub-threshold draw
-    // only on the untouched `TEST_MODE_DEFAULT_SEED` so legacy single-cycle tests remain deterministic.
-    let roll_pct = if !ctx.mechanic_rng.is_seeded() || ctx.mechanic_rng.has_explicit_seed() {
-        ctx.mechanic_rng.try_unit_f64().unwrap_or(0.10) * 100.0
-    } else {
-        let seed_hash = ((wreck_id as u64).wrapping_mul(6364136223846793005) ^ 0x119B) % 1000;
-        (seed_hash as f64 / 1000.0) * (access_chance_pct * 0.85)
-    };
+    // DERIVED: Uniform [0.0, 100.0) salvager cycle roll drawn directly from `ctx.mechanic_rng`.
+    let roll_pct = ctx.mechanic_rng.try_unit_f64().unwrap_or(0.10) * 100.0;
     if roll_pct >= access_chance_pct {
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(w) = snap.items.get_mut(&wreck_id) {

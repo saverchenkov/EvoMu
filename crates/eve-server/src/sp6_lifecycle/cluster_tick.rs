@@ -1092,6 +1092,7 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     let _ = crate::services::mining_cycle::process_mining_cycles(ctx).await;
     let _ = crate::sp6_lifecycle::step_repeating_drone_mining(ctx, now_unix).await;
     let _ = crate::sp6_lifecycle::step_returning_drones(ctx).await;
+    crate::services::combat_crimewatch::combat_npcs_drones::step_engaged_drones(ctx, now_unix).await;
     let _ = ctx
         .living_world
         .step_all_hauler_convoys(&ctx.systems, &ctx.db, &ctx.sde)

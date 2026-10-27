@@ -211,7 +211,7 @@ async fn test_plan_c7_drones_stargate_jump_reconnect_dock_logoff_death() {
         }
     });
 
-    // 1. Launch 2 medium drones (`Hammerhead II`, 20 Mbit/s) in Jita, then jump stargate to `dest_sys`.
+    // 1. Launch 2 medium drones (`Hammerhead II`, 10 Mbit/s each = 20 Mbit/s total) in Jita, then jump stargate to `dest_sys`.
     let launch_jita = dispatch_combat_rpc(
         &ctx, &mut sess, "ship", "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(drone_ids[0]), PyRep::Integer(drone_ids[1])])], &kw,
     ).await.expect("Launch 2 Hammerhead II in Jita");
@@ -232,6 +232,17 @@ async fn test_plan_c7_drones_stargate_jump_reconnect_dock_logoff_death() {
         &ctx, &mut sess, "entity", "CmdReturnHome", &[PyRep::List(jita_balls.iter().map(|&b| PyRep::Integer(b)).collect())], &kw,
     ).await.expect("CmdReturnHome from another system");
     assert_eq!(cross_sys_home, PyRep::Integer(0));
+    let cross_sys_bay = dispatch_combat_rpc(
+        &ctx, &mut sess, "entity", "CmdReturnBay", &[PyRep::List(jita_balls.iter().map(|&b| PyRep::Integer(b)).collect())], &kw,
+    ).await.expect("CmdReturnBay from another system");
+    assert_eq!(cross_sys_bay, PyRep::Dict(vec![]));
+    for &did in &drone_ids[0..2] {
+        assert_eq!(
+            ctx.db.get_item(did).unwrap().location_id,
+            jita_sys as i64,
+            "CmdReturnBay from another system must leave drone item in space in origin system"
+        );
+    }
 
     // 2. Launch 5 medium drones (50 Mbit/s total) in `dest_sys`, proving the 2 left-behind drones in Jita no longer consume bandwidth or active count.
     let launch_dest = dispatch_combat_rpc(
@@ -302,19 +313,25 @@ async fn test_plan_c7_gecko_augmented_mutated_subverted_drones() {
     let (char_id, ship_id) = (96_100_010i64, 86_100_100i64);
     let mut sess = setup_pilot_in_space(&ctx, 61010, char_id, 1_000_125, ship_id, 628, sys_id, DVec3::ZERO).await;
 
-    let (sub1, sub2, sub3, gecko_id, aug_id, base_hob_id, mut_hob_id, target_id) = (
-        86_100_101i64, 86_100_102i64, 86_100_103i64, 86_100_104i64, 86_100_105i64, 86_100_106i64, 86_100_107i64, 86_100_108i64,
+    let (sub1, sub2, sub3, gecko_id, aug_id, base_hob_id, mut_hob_id, track_hob_id, target_id) = (
+        86_100_101i64, 86_100_102i64, 86_100_103i64, 86_100_104i64, 86_100_105i64, 86_100_106i64, 86_100_107i64, 86_100_108i64, 86_100_109i64,
     );
     let base_hob_mult = ctx.sde.types[&2456].default_attributes.get(&64).copied().unwrap_or(1.0);
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(char_id).or_default().insert(3436, TrainedSkillRecord { type_id: 3436, level: 5, skill_points: 256_000.0 });
-        for (iid, tid) in [(sub1, 48744u32), (sub2, 48744), (sub3, 48744), (gecko_id, 33681), (aug_id, 28266), (base_hob_id, 2456)] {
+        for (iid, tid) in [(sub1, 48744u32), (sub2, 48744), (sub3, 48744), (gecko_id, 33681), (aug_id, 28288), (base_hob_id, 2456)] {
             snap.items.insert(iid, item_rec(iid, tid, char_id, ship_id, InventoryFlag::DroneBay, 1, true));
         }
         let mut rec = item_rec(mut_hob_id, 2456, char_id, ship_id, InventoryFlag::DroneBay, 1, true);
-        rec.dynamic_attributes = HashMap::from([(64, base_hob_mult * 2.25), (37, 4500.0), (160, 3.5), (263, 1200.0), (265, 950.0), (9, 800.0)]);
+        rec.dynamic_attributes = HashMap::from([(64, base_hob_mult * 2.25), (37, 4500.0), (160, 4.5), (263, 1200.0), (265, 950.0), (9, 800.0)]);
         rec.source_mutaplasmid_id = Some(49766);
         snap.items.insert(mut_hob_id, rec);
+
+        // Mutated Hobgoblin II with identical damageMultiplier (`base_hob_mult`) but boosted trackingSpeed (`160 -> 4.5`)
+        let mut track_rec = item_rec(track_hob_id, 2456, char_id, ship_id, InventoryFlag::DroneBay, 1, true);
+        track_rec.dynamic_attributes = HashMap::from([(64, base_hob_mult), (160, 4.5)]);
+        track_rec.source_mutaplasmid_id = Some(49766);
+        snap.items.insert(track_hob_id, track_rec);
     });
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let mut target_cs = ctx.build_type_combat_state(645);
@@ -333,7 +350,7 @@ async fn test_plan_c7_gecko_augmented_mutated_subverted_drones() {
     let sub_type = ctx.sde.types.get(&48744).unwrap();
     assert_eq!((sub_type.default_attributes.get(&1272).copied(), sub_type.volume), (Some(20.0), 20.0));
 
-    // 1. Launching 3 'Subverted' JVN-UC49 (60 Mbit/s) on a 50 Mbit/s ship fails; 2 succeed (40 Mbit/s).
+    // 1. Launching 3 'Subverted' JVN-UC49 (60 Mbit/s) on a 50 Mbit/s ship fails; 2 succeed (40 Mbit/s) and deal omni split damage per cycle.
     let bw_err = dispatch_combat_rpc(
         &ctx, &mut sess, "ship", "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(sub1), PyRep::Integer(sub2), PyRep::Integer(sub3)])], &kw,
     ).await.expect_err("3 x 20 Mbit/s Subverted drones must exceed 50 Mbit/s bandwidth");
@@ -344,6 +361,8 @@ async fn test_plan_c7_gecko_augmented_mutated_subverted_drones() {
     ).await.expect("2 x 20 Mbit/s Subverted drones must launch");
     let sub_balls: Vec<i64> = match launch_two { PyRep::List(v) => v.iter().filter_map(PyRep::as_i64).collect(), _ => panic!() };
     assert_eq!(sub_balls.len(), 2);
+    let sub_eng = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdEngage", &[PyRep::Integer(target_id)], &kw).await.unwrap();
+    assert!(dict_get(&sub_eng, "totalDamageDealt").and_then(PyRep::as_f64).unwrap() > 0.0);
     for bid in sub_balls {
         dispatch_combat_rpc(&ctx, &mut sess, "ship", "ScoopToDroneBay", &[PyRep::Integer(bid)], &kw).await.unwrap();
     }
@@ -354,9 +373,21 @@ async fn test_plan_c7_gecko_augmented_mutated_subverted_drones() {
     let gecko_rt = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&gecko_ball_id].clone());
     assert_eq!(gecko_rt.bandwidth_used, 50.0);
     assert!(gecko_rt.damage_vector.em > 0.0 && gecko_rt.damage_vector.thermal > 0.0 && gecko_rt.damage_vector.kinetic > 0.0 && gecko_rt.damage_vector.explosive > 0.0);
+    let gecko_eng1 = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdEngage", &[PyRep::Integer(target_id)], &kw).await.unwrap();
+    let gecko_volley = dict_get(&gecko_eng1, "totalDamageDealt").and_then(PyRep::as_f64).unwrap();
+    assert!(gecko_volley > 0.0);
+    // Spamming CmdEngage at the same clock timestamp is rate-limited by SDE cycle duration (`attr 51`) -> 0 extra damage
+    let gecko_eng_spam = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdEngage", &[PyRep::Integer(target_id)], &kw).await.unwrap();
+    assert_eq!(dict_get(&gecko_eng_spam, "totalDamageDealt").and_then(PyRep::as_f64), Some(0.0));
+    // Advancing clock by 4s (`attr 51 == 4000 ms`) and ticking fires the next cycle volley
+    let hp_before_tick = sys_handle.get_combat_state(target_id).await.unwrap().unwrap().shield_hp;
+    ctx.advance_secs(4);
+    eve_server::services::combat_crimewatch::combat_npcs_drones::step_engaged_drones(&ctx, ctx.now_unix()).await;
+    let hp_after_tick = sys_handle.get_combat_state(target_id).await.unwrap().unwrap().shield_hp;
+    assert!((hp_before_tick - hp_after_tick - gecko_volley).abs() < 1e-2, "Tick after 4s cycle must apply next Gecko volley");
     dispatch_combat_rpc(&ctx, &mut sess, "ship", "ScoopToDroneBay", &[PyRep::Integer(gecko_ball_id)], &kw).await.unwrap();
 
-    // 2. Compare combat attack cycle (`entity.CmdEngage`) of unmutated vs Abyssal mutated `Hobgoblin II` (2456).
+    // 2. Compare combat attack cycle (`entity.CmdEngage`) of unmutated vs Abyssal mutated `Hobgoblin II` (2456) and `Augmented Hammerhead` (28266).
     let base_launch = dispatch_combat_rpc(&ctx, &mut sess, "ship", "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(base_hob_id)])], &kw).await.expect("Launch unmutated Hobgoblin II");
     let base_ball_id = match base_launch { PyRep::List(v) => v[0].as_i64().unwrap(), _ => panic!() };
     let base_eng = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdEngage", &[PyRep::List(vec![PyRep::Integer(base_ball_id)]), PyRep::Integer(target_id)], &kw).await.expect("Unmutated Hobgoblin II engages target");
@@ -366,12 +397,16 @@ async fn test_plan_c7_gecko_augmented_mutated_subverted_drones() {
 
     let launch_mut = dispatch_combat_rpc(&ctx, &mut sess, "ship", "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(aug_id), PyRep::Integer(mut_hob_id)])], &kw).await.expect("Launch Augmented Hammerhead + Mutated Hobgoblin II");
     let (aug_ball_id, mut_ball_id) = match launch_mut { PyRep::List(v) => (v[0].as_i64().unwrap(), v[1].as_i64().unwrap()), _ => panic!() };
-    let mut_rt = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&mut_ball_id].clone());
-    assert_eq!((mut_rt.max_velocity, mut_rt.effective_tracking_speed(&ctx)), (4500.0, 3.5));
+    let (aug_rt, mut_rt) = with_combat_runtime(&ctx, |rt| (rt.active_drones_in_space[&aug_ball_id].clone(), rt.active_drones_in_space[&mut_ball_id].clone()));
+    assert!(aug_rt.damage_vector.thermal > 0.0 && aug_rt.damage_vector.kinetic > 0.0, "Augmented Hammerhead must have split thermal+kinetic damage");
+    assert_eq!((mut_rt.max_velocity, mut_rt.effective_tracking_speed(&ctx)), (4500.0, 4.5));
     let (_, mut_ball) = sys_handle.get_ball_snapshot(mut_ball_id).await.unwrap().unwrap();
     assert_eq!(mut_ball.max_velocity, 4500.0);
     let mut_cs = sys_handle.get_combat_state(mut_ball_id).await.unwrap().unwrap();
     assert_eq!((mut_cs.max_shield_hp, mut_cs.max_armor_hp, mut_cs.max_structure_hp), (1200.0, 950.0, 800.0));
+
+    let aug_eng = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdEngage", &[PyRep::List(vec![PyRep::Integer(aug_ball_id)]), PyRep::Integer(target_id)], &kw).await.unwrap();
+    assert!(dict_get(&aug_eng, "totalDamageDealt").and_then(PyRep::as_f64).unwrap() > 0.0, "Augmented Hammerhead must deal split combat damage");
 
     let mut_eng = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdEngage", &[PyRep::List(vec![PyRep::Integer(mut_ball_id)]), PyRep::Integer(target_id)], &kw).await.expect("Mutated Hobgoblin II engages target");
     let mut_dmg = dict_get(&mut_eng, "totalDamageDealt").and_then(PyRep::as_f64).unwrap();
@@ -385,6 +420,27 @@ async fn test_plan_c7_gecko_augmented_mutated_subverted_drones() {
 
     let (_, aug_destroyed) = apply_damage_to_drone_in_space(&ctx, sys_id, aug_ball_id, DamageVector::new(10_000.0, 10_000.0, 10_000.0, 10_000.0)).await;
     assert!(aug_destroyed && ctx.db.get_item(aug_id).is_none());
+
+    // 3. Prove mutated `trackingSpeed` (`attr 160`) directly affects combat damage against a fast-moving small-signature target (`RV-C7-07`).
+    let mut fast_cs = ctx.build_type_combat_state(587);
+    fast_cs.shield_hp = 50_000.0;
+    fast_cs.max_shield_hp = 50_000.0;
+    fast_cs.signature_radius = 35.0;
+    let _ = sys_handle.spawn_ball_with_combat(
+        Ball {
+            id: target_id, type_id: 587, position: DVec3::new(500.0, 0.0, 0.0), velocity: DVec3::new(0.0, 1_500.0, 0.0),
+            max_velocity: 1_500.0, inertia: 1.0, mass: 1_000_000.0, radius: 35.0, speed_fraction: 1.0, mode: MovementMode::Stop,
+        },
+        fast_cs,
+    ).await;
+    let launch_pair = dispatch_combat_rpc(&ctx, &mut sess, "ship", "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(base_hob_id), PyRep::Integer(track_hob_id)])], &kw).await.unwrap();
+    let (b_ball, t_ball) = match launch_pair { PyRep::List(v) => (v[0].as_i64().unwrap(), v[1].as_i64().unwrap()), _ => panic!() };
+    let b_eng = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdEngage", &[PyRep::List(vec![PyRep::Integer(b_ball)]), PyRep::Integer(target_id)], &kw).await.unwrap();
+    let t_eng = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdEngage", &[PyRep::List(vec![PyRep::Integer(t_ball)]), PyRep::Integer(target_id)], &kw).await.unwrap();
+    let b_moving_dmg = dict_get(&b_eng, "totalDamageDealt").and_then(PyRep::as_f64).unwrap();
+    let t_moving_dmg = dict_get(&t_eng, "totalDamageDealt").and_then(PyRep::as_f64).unwrap();
+    assert!(b_moving_dmg < base_dmg * 0.75, "Fast transversal target must reduce unmutated drone damage via tracking formula");
+    assert!(t_moving_dmg > b_moving_dmg * 1.25, "Mutated trackingSpeed (4.5 vs SDE base) with identical damageMultiplier must deal >25% higher combat damage on fast target (got {t_moving_dmg} vs {b_moving_dmg})");
 }
 
 // parity: plan:C-7

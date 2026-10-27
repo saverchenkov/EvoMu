@@ -823,10 +823,11 @@ pub(crate) fn evaluate_space_wreck_or_jetcan_loot(
     };
     let owner_is_criminal = ctx
         .crimewatch
-        .write()
+        .read()
         .unwrap_or_else(|e| e.into_inner())
-        .get_or_create(owner_id)
-        .is_criminal(now_unix);
+        .states
+        .get(&owner_id)
+        .is_some_and(|st| st.is_criminal(now_unix));
     let rt_abandoned = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
         rt.container_lifetimes
             .get(&cont_id)

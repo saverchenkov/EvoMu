@@ -350,16 +350,35 @@ pub fn abandon_drones_and_fighters_for_ship_sync(
     abandon_drones_on_warp_sync(ctx, char_id, ship_id, sys_id);
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let candidate_fighter_items: Vec<(i64, bool)> = if let Ok(fighters) = ctx.active_fighters.read() {
+        fighters
+            .values()
+            .filter(|f| (f.owner_char_id == char_id || f.parent_ship_id == ship_id) && !f.is_abandoned)
+            .map(|f| (f.item_id, sys_handle.get_ball_position_sync(f.ball_id).is_some()))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if candidate_fighter_items.is_empty() {
+        return;
+    }
+    let in_sys_item_ids: std::collections::HashSet<i64> = ctx.db.with_snapshot(|snap| {
+        candidate_fighter_items
+            .iter()
+            .filter(|&&(iid, ball_in_sys)| {
+                ball_in_sys
+                    || snap.items.get(&iid).is_some_and(|it| it.location_id == sys_id as i64 || it.location_id == ship_id)
+            })
+            .map(|&(iid, _)| iid)
+            .collect()
+    });
     let mut abandoned_fighters = Vec::new();
     if let Ok(mut fighters) = ctx.active_fighters.write() {
         for f in fighters.values_mut() {
-            let in_sys = sys_handle.get_ball_position_sync(f.ball_id).is_some()
-                || ctx.db.with_snapshot(|snap| {
-                    snap.items
-                        .get(&f.item_id)
-                        .is_some_and(|it| it.location_id == sys_id as i64 || it.location_id == ship_id)
-                });
-            if in_sys && (f.owner_char_id == char_id || f.parent_ship_id == ship_id) && !f.is_abandoned {
+            if in_sys_item_ids.contains(&f.item_id)
+                && (f.owner_char_id == char_id || f.parent_ship_id == ship_id)
+                && !f.is_abandoned
+            {
                 f.is_abandoned = true;
                 f.parent_ship_id = 0;
                 f.target_id = None;

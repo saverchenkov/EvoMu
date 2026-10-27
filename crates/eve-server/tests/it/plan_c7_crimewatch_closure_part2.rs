@@ -24,9 +24,9 @@ async fn test_fighters_left_in_space_abandon_persist_and_scoop() {
     let (scooper_id, scooper_carrier_id) = (96_100_031i64, 86_100_301i64);
     let mut scooper_sess = setup_pilot_in_space(&ctx, 61031, scooper_id, 1_000_125, scooper_carrier_id, 23757, sys_id, station_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
 
-    let (fighter_id, fighter_logoff_id, fighter_death_id) = (86_100_310i64, 86_100_311i64, 86_100_312i64);
+    let (fighter_id, fighter_logoff_id, fighter_death_id, fighter_jump_id) = (86_100_310i64, 86_100_311i64, 86_100_312i64, 86_100_313i64);
     ctx.db.with_mut_snapshot(|snap| {
-        for fid in [fighter_id, fighter_logoff_id, fighter_death_id] {
+        for fid in [fighter_id, fighter_logoff_id, fighter_death_id, fighter_jump_id] {
             snap.items.insert(fid, item_rec(fid, 23055, char_id, carrier_id, InventoryFlag::FighterBay, 9, false));
         }
     });
@@ -83,9 +83,32 @@ async fn test_fighters_left_in_space_abandon_persist_and_scoop() {
     let PyRep::List(relaunched) = relaunch_rep else { panic!("Expected List") };
     assert_eq!(relaunched.len(), 1);
 
-    // 4. Verify fighter abandonment on carrier logoff (`handle_character_disconnect_in_space`) and carrier death (`execute_death_pipeline`).
+    // 4. Verify fighter abandonment on carrier jump (`CmdJumpToFleetDeployableBeacon`), logoff (`handle_character_disconnect_in_space`), and carrier death (`execute_death_pipeline`).
     ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None).await.expect("Carrier undocks");
+    ctx.dispatch_rpc(&mut sess, "fighterMgr", None, "LoadFightersToTube", &[PyRep::Integer(0), PyRep::Integer(fighter_jump_id)], &kw, None).await.unwrap();
+    let PyRep::List(jump_balls) = ctx.dispatch_rpc(&mut sess, "fighterMgr", None, "LaunchFightersFromTubes", &[PyRep::List(vec![PyRep::Integer(0)])], &kw, None).await.unwrap() else { panic!() };
+    let f_jump_ball = jump_balls[0].as_i64().unwrap();
+    let jita_ly = ctx.sde.solar_systems[&sys_id].galactic_pos_ly;
+    let dest_sys = *ctx.sde.solar_systems.iter()
+        .find(|(&sid, s)| {
+            sid != sys_id && s.security_status < 0.45 && sid < 31_000_000
+                && ((s.galactic_pos_ly[0] - jita_ly[0]).powi(2) + (s.galactic_pos_ly[1] - jita_ly[1]).powi(2) + (s.galactic_pos_ly[2] - jita_ly[2]).powi(2)).sqrt() < 3.4
+        })
+        .unwrap().0;
+    let beacon_id = 86_100_320i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(beacon_id, item_rec(beacon_id, 56099, char_id, dest_sys as i64, InventoryFlag::None, 1, true));
+        snap.items.insert(86_100_321, item_rec(86_100_321, 16274, char_id, carrier_id, InventoryFlag::Cargo, 50_000, false));
+    });
+    ctx.advance_secs(12);
+    let beyonce_jita = ctx.bind_object(&sess, "beyonce", sys_id as i64).unwrap();
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_jita), "CmdJumpToFleetDeployableBeacon", &[PyRep::Integer(char_id), PyRep::Integer(dest_sys as i64), PyRep::Integer(beacon_id)], &kw, None)
+        .await.expect("Carrier jumps to deployable cyno beacon");
+    assert_eq!(sess.solar_system_id, Some(dest_sys));
+    assert!(ctx.active_fighters.read().unwrap()[&f_jump_ball].is_abandoned);
+    assert_eq!(ctx.db.get_item(fighter_jump_id).unwrap().location_id, sys_id as i64);
+
     ctx.dispatch_rpc(&mut sess, "fighterMgr", None, "LoadFightersToTube", &[PyRep::Integer(0), PyRep::Integer(fighter_logoff_id)], &kw, None).await.unwrap();
     let PyRep::List(logoff_balls) = ctx.dispatch_rpc(&mut sess, "fighterMgr", None, "LaunchFightersFromTubes", &[PyRep::List(vec![PyRep::Integer(0)])], &kw, None).await.unwrap() else { panic!() };
     let f_logoff_ball = logoff_balls[0].as_i64().unwrap();
@@ -95,8 +118,10 @@ async fn test_fighters_left_in_space_abandon_persist_and_scoop() {
     ctx.dispatch_rpc(&mut sess, "fighterMgr", None, "LoadFightersToTube", &[PyRep::Integer(0), PyRep::Integer(fighter_death_id)], &kw, None).await.unwrap();
     let PyRep::List(death_balls) = ctx.dispatch_rpc(&mut sess, "fighterMgr", None, "LaunchFightersFromTubes", &[PyRep::List(vec![PyRep::Integer(0)])], &kw, None).await.unwrap() else { panic!() };
     let f_death_ball = death_balls[0].as_i64().unwrap();
-    eve_server::combat::death_pipeline::execute_death_pipeline_sync(&ctx, sys_id, char_id, carrier_id, 0, DVec3::ZERO, 1).expect("execute_death_pipeline_sync on carrier");
+    eve_server::combat::death_pipeline::execute_death_pipeline_sync(&ctx, dest_sys, char_id, carrier_id, 0, DVec3::ZERO, 1).expect("execute_death_pipeline_sync on carrier");
     assert!(ctx.active_fighters.read().unwrap()[&f_death_ball].is_abandoned);
+    let f_death_item = ctx.db.get_item(fighter_death_id).expect("Abandoned fighter in space must not be destroyed by loot fairy on carrier death");
+    assert_eq!((f_death_item.location_id, f_death_item.flag), (dest_sys as i64, InventoryFlag::None));
 }
 
 // parity: feat:war.war-targets
@@ -277,6 +302,18 @@ async fn test_crimewatch_highsec_criminal_movement_and_wormhole_exemption() {
     let gate_wpn_err = ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_bound), "CmdStargateJump", &[PyRep::Integer(jita_gate.stargate_id)], &kw, None)
         .await.expect_err("Weapons timer blocks stargate jump");
     assert_eq!(gate_wpn_err.code, "WeaponsTimerActive");
+    let jump_wpn_err = ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_bound), "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(char_id), PyRep::Integer(30_000_144), PyRep::Integer(1)], &kw, None)
+        .await.expect_err("Active weapons timer blocks jump drive");
+    assert_eq!(jump_wpn_err.code, "WeaponsTimerActive");
+    let bridge_wpn_err = ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_bound), "CmdBridgeToFleetModuleBeacon", &[PyRep::Integer(char_id), PyRep::Integer(30_000_144), PyRep::Integer(1)], &kw, None)
+        .await.expect_err("Active weapons timer blocks jump bridge");
+    assert_eq!(bridge_wpn_err.code, "WeaponsTimerActive");
+    let portal_wpn_err = ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_bound), "CmdJumpThroughFleet", &[PyRep::Integer(char_id), PyRep::Integer(ship_id)], &kw, None)
+        .await.expect_err("Active weapons timer blocks jump portal");
+    assert_eq!(portal_wpn_err.code, "WeaponsTimerActive");
+    let struct_wpn_err = ctx.dispatch_rpc(&mut sess, "structureCynoBeaconMgr", None, "CmdJumpToStructureBeacon", &[PyRep::Integer(30_000_144), PyRep::Integer(struct_id)], &kw, None)
+        .await.expect_err("Active weapons timer blocks structure cyno jump");
+    assert_eq!(struct_wpn_err.code, "WeaponsTimerActive");
 
     ctx.dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(wh_item_id)], &kw, None)
         .await.expect("WormholeJump succeeds with active weapons and PvP timers");
@@ -390,7 +427,17 @@ async fn test_wreck_take_item_add_multiadd_lootall_crimewatch() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&thief_id).unwrap().fleet_id = None;
         snap.characters.get_mut(&victim_id).unwrap().fleet_id = None;
+        snap.items.insert(86_100_516, item_rec(86_100_516, 34, victim_id, wreck_id, InventoryFlag::Cargo, 10, false));
+        snap.items.get_mut(&wreck_id).unwrap().owner_id = 0;
     });
+    let explicit_aband = ctx.dispatch_rpc(
+        &mut thief_sess, "invbroker", Some(ship_inv_bound), "Add",
+        &[PyRep::Integer(86_100_516), PyRep::Integer(wreck_id), PyRep::Integer(InventoryFlag::Cargo as i64)], &kw, None,
+    ).await.expect("Explicitly abandoned wreck (owner_id == 0) take is legal under Safety Green");
+    assert_eq!(dict_get(&explicit_aband, "suspectFlagged"), Some(&PyRep::Bool(false)));
+    assert_eq!(ctx.crimewatch.read().unwrap().states.get(&thief_id).unwrap().suspect_flag_until_unix, 0);
+
+    ctx.db.with_mut_snapshot(|snap| { snap.items.get_mut(&wreck_id).unwrap().owner_id = victim_id; });
     ctx.crimewatch.write().unwrap().get_or_create(victim_id).criminal_flag_until_unix = ctx.now_unix_secs() + 900;
     ctx.dispatch_rpc(&mut thief_sess, "invbroker", Some(ship_inv_bound), "LootAll", &[PyRep::Integer(wreck_id)], &kw, None)
         .await.expect("Abandoned wreck LootAll is legal under Safety Green");
