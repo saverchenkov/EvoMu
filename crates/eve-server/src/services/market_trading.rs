@@ -947,13 +947,34 @@ pub fn handle(
                 }
 
                 // Collect matching opposite orders sorted by best price-time priority
+                let bid_sys_opt = resolve_station_solar_system(ctx, snap, station_id);
                 let mut candidate_ids: Vec<(i64, i64)> = snap
                     .market_orders
                     .values()
                     .filter(|o| {
+                        let reach_ok = if type_id == PLEX_TYPE_ID {
+                            true
+                        } else if o.station_id == station_id {
+                            true
+                        } else if is_bid && o.region_id == region_id && order_range >= 0 {
+                            if order_range >= 32767 {
+                                true
+                            } else {
+                                let sell_sys_opt = resolve_station_solar_system(ctx, snap, o.station_id);
+                                match (bid_sys_opt, sell_sys_opt) {
+                                    (Some(bs), Some(ss)) if bs == ss => true,
+                                    (Some(bs), Some(ss)) if order_range > 0 => {
+                                        solar_system_jump_distance(ctx, bs, ss)
+                                            .is_some_and(|d| (d as i64) <= order_range)
+                                    }
+                                    _ => false,
+                                }
+                            }
+                        } else {
+                            false
+                        };
                         o.type_id == type_id
-                            // PLEX trades on a single global market (`feat:market.plex-market`).
-                            && (type_id == PLEX_TYPE_ID || o.station_id == station_id)
+                            && reach_ok
                             && o.is_bid != is_bid
                             && o.vol_remaining > 0
                             && ((is_bid && o.price.0 <= order_price.0)
@@ -1132,11 +1153,13 @@ pub fn handle(
                             tax_collector_id: tax_collector,
                             region_id: Some(resting.region_id),
                         });
-                        // PLEX trades settle into the account-wide PLEX Vault instead of the hangar.
-                        if type_id == PLEX_TYPE_ID {
-                            let _ = snap.adjust_plex_vault(char_id, fill_qty as i64);
-                        }
-                        if type_id != PLEX_TYPE_ID {
+                        // PLEX trades settle into the account-wide PLEX Vault for characters, or Deliveries for corporations.
+                        let settled_to_vault = if type_id == PLEX_TYPE_ID && !use_corp {
+                            snap.adjust_plex_vault(order_owner_id, fill_qty as i64).is_some()
+                        } else {
+                            false
+                        };
+                        if !settled_to_vault {
                             snap.next_entity_id += 1;
                             let new_item_id = snap.next_entity_id;
                             let deliv_flag = if use_corp {
@@ -1144,13 +1167,18 @@ pub fn handle(
                             } else {
                                 InventoryFlag::Hangar
                             };
+                            let deliv_station = if type_id == PLEX_TYPE_ID {
+                                station_id
+                            } else {
+                                resting.station_id
+                            };
                             snap.items.insert(
                                 new_item_id,
                                 InventoryItemRecord {
                                     item_id: new_item_id,
                                     type_id,
                                     owner_id: order_owner_id,
-                                    location_id: station_id,
+                                    location_id: deliv_station,
                                     flag: deliv_flag,
                                     quantity: fill_qty,
                                     singleton: false,
@@ -1158,7 +1186,7 @@ pub fn handle(
                                     ..Default::default()
                                 },
                             );
-                            delivered_items.push((new_item_id, type_id, deliv_flag as i64, station_id));
+                            delivered_items.push((new_item_id, type_id, deliv_flag as i64, deliv_station));
                         }
                     }
 

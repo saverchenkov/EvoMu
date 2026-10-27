@@ -651,6 +651,13 @@ pub(crate) async fn handle_multi_add(
             });
         }
     }
+    let caller_corp_id = session
+        .corporation_id
+        .or_else(|| {
+            ctx.db
+                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
+        })
+        .unwrap_or(0);
     let moved = ctx.db.try_with_mut_snapshot(|snap| {
         let mut moved = Vec::with_capacity(item_ids.len());
         for &item_id in &item_ids {
@@ -658,8 +665,17 @@ pub(crate) async fn handle_multi_add(
                 code: "ItemNotFound".into(),
                 message: format!("Item {item_id} not found"),
             })?;
+            let old_flag_u16 = it.flag as u16;
             it.location_id = new_loc;
             it.flag = flag;
+            if (116..=122).contains(&flag_u16) && caller_corp_id > 0 {
+                it.owner_id = caller_corp_id;
+            } else if (116..=122).contains(&old_flag_u16)
+                || matches!(flag, InventoryFlag::Hangar | InventoryFlag::Cargo)
+                || is_ship_hold
+            {
+                it.owner_id = char_id;
+            }
             it.version += 1;
             snap.module_online_states.remove(&item_id);
             snap.module_active_states.remove(&item_id);

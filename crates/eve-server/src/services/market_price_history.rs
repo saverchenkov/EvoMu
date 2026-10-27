@@ -39,11 +39,30 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
     let mut delivered_to_corp_deliveries = 0_i32;
 
     if order.is_bid {
-        // Buy order modified upward: crosses resting ask orders at same station
+        // Buy order modified upward: crosses resting ask orders within buy order range
+        let mut order_with_meta = order.clone();
+        let prev_meta = snap.market_order_meta.get(&order_id).cloned();
+        save_market_order_meta(snap, order_id, *meta);
         let mut ask_ids: Vec<(i64, IskCents)> = snap.market_orders.values().filter(|o| {
-            !o.is_bid && o.station_id == order.station_id && o.type_id == order.type_id
-                && o.vol_remaining > 0 && o.price.0 <= new_price.0 && o.owner_id != order.owner_id
+            !o.is_bid
+                && o.type_id == order.type_id
+                && o.vol_remaining > 0
+                && o.price.0 <= new_price.0
+                && o.owner_id != order.owner_id
+                && (order.type_id == PLEX_TYPE_ID
+                    || (o.region_id == order.region_id
+                        && super::market_trading::can_bid_match_seller_station(
+                            ctx,
+                            snap,
+                            &order_with_meta,
+                            o.station_id,
+                            now_unix,
+                        )))
         }).map(|o| (o.order_id, o.price)).collect();
+        if let Some(pm) = prev_meta {
+            snap.market_order_meta.insert(order_id, pm);
+        }
+        let _ = &mut order_with_meta;
         ask_ids.sort_by(|a, b| a.1.0.cmp(&b.1.0).then_with(|| a.0.cmp(&b.0)));
 
         let buyer_owner_id = order.owner_id;
@@ -171,17 +190,21 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
                 }
             }
 
-            if order.type_id == PLEX_TYPE_ID {
-                let _ = snap.adjust_plex_vault(buyer_owner_id, fill_qty as i64);
+            let settled_to_vault = if order.type_id == PLEX_TYPE_ID && !is_corp_order {
+                snap.adjust_plex_vault(buyer_owner_id, fill_qty as i64).is_some()
             } else {
+                false
+            };
+            if !settled_to_vault {
                 snap.next_entity_id += 1;
                 let delivery_item_id = snap.next_entity_id;
                 let flag = if is_corp_order { InventoryFlag::Deliveries } else { InventoryFlag::Hangar };
+                let deliv_loc = if order.type_id == PLEX_TYPE_ID { order.station_id } else { ask.station_id };
                 snap.items.insert(
                     delivery_item_id,
                     InventoryItemRecord {
                         item_id: delivery_item_id, type_id: order.type_id, owner_id: buyer_owner_id,
-                        location_id: order.station_id, flag, quantity: fill_qty, singleton: false,
+                        location_id: deliv_loc, flag, quantity: fill_qty, singleton: false,
                         version: 1, ..Default::default()
                     },
                 );
@@ -314,12 +337,15 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
                 }
             }
 
-            if order.type_id == PLEX_TYPE_ID {
-                let _ = snap.adjust_plex_vault(bid.owner_id, fill_qty as i64);
+            let buyer_is_corp = snap.corporations.contains_key(&bid.owner_id);
+            let settled_to_vault = if order.type_id == PLEX_TYPE_ID && !buyer_is_corp {
+                snap.adjust_plex_vault(bid.owner_id, fill_qty as i64).is_some()
             } else {
+                false
+            };
+            if !settled_to_vault {
                 snap.next_entity_id += 1;
                 let delivery_item_id = snap.next_entity_id;
-                let buyer_is_corp = snap.corporations.contains_key(&bid.owner_id);
                 let flag = if buyer_is_corp { InventoryFlag::Deliveries } else { InventoryFlag::Hangar };
                 snap.items.insert(
                     delivery_item_id,

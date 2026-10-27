@@ -964,15 +964,38 @@ pub async fn handle_wrecks_killmails(
                     message: format!("Container {wreck_id} is not in solar system {sys_id}"),
                 }));
             }
-            let is_ship_or_station = ctx
-                .sde
-                .types
-                .get(&wreck_item.type_id)
-                .is_some_and(|t| matches!(t.category_id, 3 | 6 | 65));
+            let (is_ship_or_station, is_foreign_depot, is_locked_container) = ctx.db.with_snapshot(|snap| {
+                let Some(t) = ctx.sde.types.get(&wreck_item.type_id) else {
+                    return (false, false, false);
+                };
+                let ship_or_st = matches!(t.category_id, 3 | 6 | 65);
+                let foreign_depot = t.group_id == 1246 && wreck_item.owner_id != char_id;
+                let locked_cont = if matches!(t.group_id, 340 | 448) && wreck_item.owner_id != char_id {
+                    let st = crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state_snap(snap);
+                    st.container_passwords.get(&wreck_id).is_some_and(|pw| !pw.is_empty())
+                        && !st.unlocked_containers.contains(&(wreck_id, char_id))
+                        && !st.unlocked_containers.contains(&(char_id, wreck_id))
+                } else {
+                    false
+                };
+                (ship_or_st, foreign_depot, locked_cont)
+            });
             if is_ship_or_station {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidContainerType".into(),
                     message: format!("Item {wreck_id} (type {}) is not a lootable wreck or cargo container", wreck_item.type_id),
+                }));
+            }
+            if is_foreign_depot {
+                return Some(Err(BridgeRpcError {
+                    code: "AccessDenied".into(),
+                    message: format!("Cannot loot foreign Mobile Depot {wreck_id}"),
+                }));
+            }
+            if is_locked_container {
+                return Some(Err(BridgeRpcError {
+                    code: "ContainerLocked".into(),
+                    message: format!("Secure container {wreck_id} requires a password before looting"),
                 }));
             }
             let sys_handle = ctx.systems.get_or_spawn(sys_id);

@@ -244,11 +244,26 @@ pub(crate) fn can_character_access_ship_bay_with_password_snap(
         .values()
         .any(|fl| fl.members.contains(&char_id) && fl.members.contains(&host_owner_id));
     let same_corp = c1.is_some() && c1 == c2;
-    if is_sma {
+    let base_allowed = if is_sma {
         (in_same_fleet && cfg.allow_fleet_smb) || (same_corp && cfg.allow_corp_smb)
     } else {
         (in_same_fleet && cfg.allow_fleet_hangar) || (same_corp && cfg.allow_corp_hangar)
+    };
+    if !base_allowed {
+        return false;
     }
+    if let (Some(sup), Some(req)) = (
+        _supplied_password,
+        cfg.password
+            .as_deref()
+            .or_else(|| st.ship_passwords.get(&host_ship_id).map(|s| s.as_str()))
+            .filter(|s| !s.is_empty()),
+    ) {
+        if sup != req {
+            return false;
+        }
+    }
+    true
 }
 
 #[allow(dead_code)]

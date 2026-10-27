@@ -1095,6 +1095,21 @@ pub fn handle_industry_jobs(
                 .and_then(|a| a.as_i64())
                 .or_else(|| kwargs.get("ownerID").and_then(|v| v.as_i64()))
                 .unwrap_or(char_id);
+            let caller_corp_id = session
+                .corporation_id
+                .or_else(|| {
+                    ctx.db
+                        .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
+                })
+                .unwrap_or(0);
+            if req_owner_id != char_id && req_owner_id != caller_corp_id && !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "OwnerAccessDenied".into(),
+                    message: format!(
+                        "Character {char_id} is not authorized to query industry jobs for owner {req_owner_id}"
+                    ),
+                }));
+            }
             let now_unix = ctx.now_unix();
             let jobs = ctx.db.with_mut_snapshot(|snap| {
                 sync_industry_job_pause_states(snap, now_unix);

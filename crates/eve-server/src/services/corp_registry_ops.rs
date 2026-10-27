@@ -402,11 +402,6 @@ pub async fn handle_corp_hangar_invbroker(
                     message: format!("Corporation role denied for division {} take", div_idx + 1),
                 }));
             }
-            ctx.db.with_mut_snapshot(|snap| {
-                if let Some(it) = snap.items.get_mut(&item_id) {
-                    it.owner_id = char_id;
-                }
-            });
         }
     }
     None
