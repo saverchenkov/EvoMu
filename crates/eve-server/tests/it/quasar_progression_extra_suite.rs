@@ -185,9 +185,14 @@ async fn quasar_achievements_categories_scores_and_claims() {
 
 #[tokio::test]
 async fn quasar_community_progression_tales_and_goals() {
-    // parity: quasar:eveProto/generated/eve_public/communitytrack/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/communitytrack/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/goal/api/requests_pb2.pyj
+    // parity: feat:quasar.tale, feat:quasar.communitytrack, quasar:eveProto/generated/eve_public/communitytrack/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/communitytrack/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/goal/api/requests_pb2.pyj
+    eve_testkit::attest(&[
+        "feat:quasar.tale",
+        "feat:quasar.communitytrack",
+        "quasar:eveProto/generated/eve_public/communitytrack/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/communitytrack/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/goal/api/requests_pb2.pyj",
+    ]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut sess = crate::quasar_progression_complete::build_sess(10_005, 90_000_001, 98_000_001);
@@ -238,6 +243,12 @@ async fn quasar_community_progression_tales_and_goals() {
     )
     .await;
     assert_eq!(start_rsp.status_code, STATUS_OK);
+    let tale_start_notifs = drain_notices(&mut stream_rx);
+    assert_eq!(tale_start_notifs.len(), 1, "StartedNotice should be emitted");
+    assert_eq!(
+        tale_start_notifs[0].payload.as_ref().unwrap().normalized_type_name(),
+        "eve_public.tale.api.StartedNotice"
+    );
 
     let count_rsp = quasar_rpc(
         &ctx,
@@ -251,6 +262,11 @@ async fn quasar_community_progression_tales_and_goals() {
         count_rsp.payload.as_ref().unwrap().normalized_type_name(),
         "eve.tale.api.GetActiveTalesCountResponse"
     );
+    let count_wm = WireMessage::decode(&count_rsp.payload.unwrap().value).expect("decode count response");
+    assert_eq!(
+        count_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()),
+        Some(1)
+    );
 
     let stop_rsp = quasar_rpc(
         &ctx,
@@ -260,6 +276,24 @@ async fn quasar_community_progression_tales_and_goals() {
     )
     .await;
     assert_eq!(stop_rsp.status_code, STATUS_OK);
+    let tale_stop_notifs = drain_notices(&mut stream_rx);
+    assert_eq!(tale_stop_notifs.len(), 1, "StoppedNotice should be emitted");
+    assert_eq!(
+        tale_stop_notifs[0].payload.as_ref().unwrap().normalized_type_name(),
+        "eve_public.tale.api.StoppedNotice"
+    );
+    let count_after_stop = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve.tale.api.GetActiveTalesCountRequest",
+        Vec::new(),
+    )
+    .await;
+    let count_after_wm = WireMessage::decode(&count_after_stop.payload.unwrap().value).expect("decode count response");
+    assert_eq!(
+        count_after_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()).unwrap_or(0),
+        0
+    );
 
     // Negative tests for unauthorized callers (P1-1)
     let mut unauth_sess = crate::quasar_progression_complete::build_sess(10_099, 90_000_002, 98_000_001);

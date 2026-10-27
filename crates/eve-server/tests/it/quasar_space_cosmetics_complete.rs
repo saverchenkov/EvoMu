@@ -33,8 +33,24 @@ fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
     panic!("Expected KeyVal containing response_proto, got {rep:?}");
 }
 
-fn encode_id_req(_id: u64) -> Vec<u8> {
-    Vec::new()
+fn encode_id_req(id: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut id_buf = Vec::new();
+    encode_varint_field(1, id, &mut id_buf);
+    encode_bytes_field(1, &id_buf, &mut out);
+    out
+}
+
+fn encode_typed_id_req(ctx: &ServerContext, type_name: &str, id: u64) -> Vec<u8> {
+    eve_server::services::quasar_space_services::encode_domain_message(
+        &ctx.quasar_gateway.descriptors,
+        type_name,
+        |reg, req| {
+            eve_server::services::quasar_space_services::set_domain_field(reg, req, 1, id, "");
+        },
+    )
+    .expect("encode typed id req")
+    .value
 }
 
 pub(crate) fn call_req(
@@ -193,7 +209,7 @@ async fn q7_space_celestials_navigation_and_dbs() {
         &ctx,
         &session,
         "eve.npc.ship.api.GetOwnerRequest",
-        encode_id_req(90_000_101),
+        encode_typed_id_req(&ctx, "eve.npc.ship.api.GetOwnerRequest", 90_000_101),
         false,
     );
     assert_eq!(npc_rsp.status_code, STATUS_OK);
@@ -217,6 +233,8 @@ async fn q7_space_celestials_navigation_and_dbs() {
 
 #[tokio::test]
 async fn q7_bubble_presence_and_pirate_insurgency() {
+    // parity: feat:quasar.pirate
+    eve_testkit::attest(&["feat:quasar.pirate"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut session = SessionState::new(20_002);
@@ -226,27 +244,98 @@ async fn q7_bubble_presence_and_pirate_insurgency() {
     session.character_id = Some(90_000_001);
     session.solar_system_id = Some(30_000_142);
 
+    ctx.db.with_mut_snapshot(|s| {
+        s.insurgency_runtime.campaigns.insert(
+            1,
+            eve_db::PersistedInsurgencyCampaign {
+                campaign_id: 1,
+                pirate_faction_id: eve_server::services::insurgency_services::FACTION_GURISTAS,
+                target_faction_id: 500_001,
+                fob_solar_system_id: 30_000_142,
+                systems: vec![30_000_142, 30_000_144, 30_000_119],
+                created_at_unix: ctx.now_unix(),
+                forecasting_end_unix: ctx.now_unix(),
+                active_end_unix: ctx.now_unix() + 86_400,
+                winddown_end_unix: ctx.now_unix() + 172_800,
+                corruption_points: [(30_000_142, 450)].into_iter().collect(),
+                suppression_points: [(30_000_142, 250)].into_iter().collect(),
+            },
+        );
+    });
+
     // 1. Bubble presence queries
     let bubble_rsp = call_req(
         &ctx,
         &session,
         "eve.bubble.presence.api.GetInBubbleRequest",
-        encode_id_req(30_000_142),
+        encode_typed_id_req(&ctx, "eve.bubble.presence.api.GetInBubbleRequest", 30_000_142),
         true,
     );
     assert_eq!(bubble_rsp.status_code, STATUS_OK);
 
-    // 2. Pirate Insurgency API
+    // 2. Pirate Insurgency API requires a valid persisted campaign ID (returns 400 when missing, 404 when unknown)
+    let ins_bad = call_req(&ctx, &session, "eve.pirate.insurgency.api.GetRequest", Vec::new(), true);
+    assert_eq!(ins_bad.status_code, STATUS_BAD_REQUEST);
+    let ins_404 = call_req(
+        &ctx,
+        &session,
+        "eve.pirate.insurgency.api.GetRequest",
+        encode_typed_id_req(&ctx, "eve.pirate.insurgency.api.GetRequest", 30_000_142),
+        true,
+    );
+    assert_eq!(ins_404.status_code, eve_server::quasar_gateway::STATUS_NOT_FOUND);
+    let sys_404 = call_req(
+        &ctx,
+        &session,
+        "eve.pirate.insurgency.api.GetSystemsRequest",
+        encode_typed_id_req(&ctx, "eve.pirate.insurgency.api.GetSystemsRequest", 999),
+        true,
+    );
+    assert_eq!(sys_404.status_code, eve_server::quasar_gateway::STATUS_NOT_FOUND);
     let ins_rsp = call_req(
         &ctx,
         &session,
         "eve.pirate.insurgency.api.GetRequest",
-        encode_id_req(30_000_142),
+        encode_typed_id_req(&ctx, "eve.pirate.insurgency.api.GetRequest", 1),
         true,
     );
     assert_eq!(ins_rsp.status_code, STATUS_OK);
+    let ins_wm = eve_proto::quasar::WireMessage::decode(&ins_rsp.payload.as_ref().unwrap().value)
+        .expect("decode insurgency GetResponse");
+    let origin_wm = eve_proto::quasar::WireMessage::decode(
+        ins_wm.fields.iter().find(|f| f.field_number == 3).unwrap().value.as_bytes().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(origin_wm.fields[0].value.as_varint(), Some(30_000_142));
+    assert_eq!(
+        ins_wm.fields.iter().filter(|f| f.field_number == 4).count(),
+        3,
+        "insurgency GetResponse must encode all 3 campaign systems"
+    );
+    assert_eq!(
+        ins_wm.fields.iter().find(|f| f.field_number == 5).and_then(|f| f.value.as_varint()),
+        Some(2),
+        "insurgency GetResponse must report ACTIVE (2) state"
+    );
+    let sys_rsp = call_req(
+        &ctx,
+        &session,
+        "eve.pirate.insurgency.api.GetSystemsRequest",
+        encode_typed_id_req(&ctx, "eve.pirate.insurgency.api.GetSystemsRequest", 1),
+        true,
+    );
+    assert_eq!(sys_rsp.status_code, STATUS_OK);
+    let sys_wm = eve_proto::quasar::WireMessage::decode(&sys_rsp.payload.as_ref().unwrap().value).unwrap();
+    assert_eq!(sys_wm.fields.iter().filter(|f| f.field_number == 1).count(), 3);
+    let cur_rsp = call_req(&ctx, &session, "eve.pirate.insurgency.api.GetCurrentRequest", Vec::new(), true);
+    assert_eq!(cur_rsp.status_code, STATUS_OK);
+    let cur_wm = eve_proto::quasar::WireMessage::decode(&cur_rsp.payload.as_ref().unwrap().value).unwrap();
+    let cur_id = eve_proto::quasar::WireMessage::decode(cur_wm.fields[0].value.as_bytes().unwrap()).unwrap();
+    assert_eq!(cur_id.fields[0].value.as_varint(), Some(1));
 
-    // 3. Corruption & Suppression System Info + Stages
+    // 3. Corruption & Suppression System Info + Stages + Notices
+    let _rx = ctx.quasar_gateway.subscribe_session(&session, Vec::new(), ctx.now_unix());
+
     let corr_rsp = call_req(
         &ctx,
         &session,
@@ -255,6 +344,12 @@ async fn q7_bubble_presence_and_pirate_insurgency() {
         true,
     );
     assert_eq!(corr_rsp.status_code, STATUS_OK);
+    let corr_wm = eve_proto::quasar::WireMessage::decode(&corr_rsp.payload.as_ref().unwrap().value)
+        .expect("decode corruption GetSystemInfoResponse");
+    assert_eq!(
+        corr_wm.fields.iter().find(|f| f.field_number == 4).and_then(|f| f.value.as_varint()),
+        Some(3)
+    );
 
     let corr_stg_rsp = call_req(
         &ctx,
@@ -273,51 +368,12 @@ async fn q7_bubble_presence_and_pirate_insurgency() {
         true,
     );
     assert_eq!(supp_rsp.status_code, STATUS_OK);
-
-    let supp_stg_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.pirate.suppression.api.GetStageThresholdsRequest",
-        Vec::new(),
-        true,
+    let supp_wm = eve_proto::quasar::WireMessage::decode(&supp_rsp.payload.as_ref().unwrap().value)
+        .expect("decode suppression GetSystemInfoResponse");
+    assert_eq!(
+        supp_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()),
+        Some(2)
     );
-    assert_eq!(supp_stg_rsp.status_code, STATUS_OK);
-
-    let _rx = ctx.quasar_gateway.subscribe_session(
-        &session,
-        vec![
-            "eve_public.pirate.corruption.api.Notice".into(),
-            "eve_public.pirate.suppression.api.Notice".into(),
-        ],
-        ctx.now_unix(),
-    );
-
-    let corr_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.pirate.corruption.api.GetSystemInfoRequest",
-        encode_id_req(30_000_142),
-        true,
-    );
-    assert_eq!(corr_rsp.status_code, STATUS_OK);
-
-    let corr_stg_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.pirate.corruption.api.GetStageThresholdsRequest",
-        Vec::new(),
-        true,
-    );
-    assert_eq!(corr_stg_rsp.status_code, STATUS_OK);
-
-    let supp_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.pirate.suppression.api.GetSystemInfoRequest",
-        encode_id_req(30_000_142),
-        true,
-    );
-    assert_eq!(supp_rsp.status_code, STATUS_OK);
 
     let supp_stg_rsp = call_req(
         &ctx,
@@ -330,6 +386,18 @@ async fn q7_bubble_presence_and_pirate_insurgency() {
 
     let polled = ctx.quasar_gateway.poll_notices(session.session_id);
     assert_eq!(polled.len(), 0, "Read-only GetSystemInfoRequest must not emit notices");
+
+    eve_server::services::insurgency_services::add_system_corruption(&ctx, 1, 30_000_142, -50);
+    eve_server::services::insurgency_services::add_system_suppression(&ctx, 1, 30_000_142, -50);
+    let notifs = ctx.quasar_gateway.poll_notices(session.session_id);
+    assert!(
+        notifs.iter().any(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("pirate.corruption.api.SetNotice"))),
+        "Expected corruption SetNotice"
+    );
+    assert!(
+        notifs.iter().any(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("pirate.suppression.api.SetNotice"))),
+        "Expected suppression SetNotice"
+    );
     assert_eq!(
         corr_rsp.payload.as_ref().unwrap().normalized_type_name(),
         "eve_public.pirate.corruption.api.GetSystemInfoResponse"
@@ -392,7 +460,7 @@ async fn q8_sovereignty_hub_skyhooks_and_workforce() {
         "eve_public.sovereignty.hub.upgrade.api.GetHubUpgradesRequest",
         "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest",
     ] {
-        let rsp = call_req(&ctx, &session, req_name, encode_id_req(1_000_000_010), true);
+        let rsp = call_req(&ctx, &session, req_name, Vec::new(), true);
         assert_eq!(rsp.status_code, STATUS_BAD_REQUEST, "{req_name} must reject a missing identifier");
     }
 
@@ -408,9 +476,9 @@ async fn q8_sovereignty_hub_skyhooks_and_workforce() {
 
 #[tokio::test]
 async fn q8_faction_warfare_and_operations() {
-    // parity: quasar:eveProto/generated/eve/factionwarfare/warzone/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/operation/recommendation/recommendation_pb2.pyj
+    // parity: feat:quasar.operation, quasar:eveProto/generated/eve/factionwarfare/warzone/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/operation/recommendation/recommendation_pb2.pyj
     eve_testkit::attest(&[
+        "feat:quasar.operation",
         "quasar:eveProto/generated/eve/factionwarfare/warzone/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/operation/recommendation/recommendation_pb2.pyj",
     ]);

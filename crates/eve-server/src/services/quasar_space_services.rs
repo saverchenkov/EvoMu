@@ -232,10 +232,16 @@ pub fn get_int_field(msg: &DynamicQuasarMessage, field_num: u32) -> Option<i64> 
 
 /// Helper to read an integer ID directly or from a nested Identifier message.
 pub fn get_identifier_or_int(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> Option<i64> {
-    match dyn_msg.get(field_num) {
-        Some(DynamicValue::Message(sub)) => get_int_field(sub, 1),
-        _ => get_int_field(dyn_msg, field_num),
+    if let Some(DynamicValue::Message(sub)) = dyn_msg.get(field_num) {
+        if let Some(v) = get_int_field(sub, 1) {
+            return Some(v);
+        }
+        if let Some(DynamicValue::Message(inner)) = sub.get(1) {
+            return get_int_field(inner, 1);
+        }
+        return None;
     }
+    get_int_field(dyn_msg, field_num)
 }
 
 /// Helper to read a string field from a dynamic message.
@@ -532,66 +538,140 @@ pub fn register_handlers(
 
     // 7. eve.pirate.insurgency.api.GetRequest, GetCurrentRequest, GetSystemsRequest, GetForWarzoneRequest
     {
-        let d = Arc::clone(&desc);
+        let db_i = Arc::clone(&db);
         router.register_handler(
             "eve.pirate.insurgency.api.GetRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
-                let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u32;
-                if sys_id == 0 {
-                    return Err((STATUS_BAD_REQUEST, "System ID must be positive".into()));
+            Arc::new(move |ctx, _any, dyn_msg| {
+                let req_id = get_identifier_or_int(dyn_msg, 1)
+                    .filter(|&v| v > 0)
+                    .ok_or_else(|| (STATUS_BAD_REQUEST, "Campaign ID must be positive".to_string()))?;
+                let now = ctx.received.as_ref().map(|t| t.seconds.max(0) as u64).unwrap_or(0);
+                let camp = db_i
+                    .with_snapshot(|snap| snap.insurgency_runtime.campaigns.get(&req_id).cloned())
+                    .ok_or_else(|| (STATUS_NOT_FOUND, format!("Insurgency campaign {req_id} not found")))?;
+                let warzone_id: u64 = if matches!(camp.target_faction_id, 500_002 | 500_003) { 2 } else { 1 };
+                let pirate_won = camp.corruption_points.values().any(|&p| crate::services::insurgency_services::insurgency_stage(p) >= 5);
+                let anti_pirate_won = camp.suppression_points.values().any(|&p| crate::services::insurgency_services::insurgency_stage(p) >= 5);
+                let state_enum: u64 = if pirate_won {
+                    3 // PIRATE_VICTORY
+                } else if anti_pirate_won {
+                    4 // ANTI_PIRATE_VICTORY
+                } else if now > 0 && now < camp.forecasting_end_unix {
+                    1 // FORECAST
+                } else if now > 0 && camp.winddown_end_unix > 0 && now >= camp.winddown_end_unix {
+                    6 // CLEANUP
+                } else if now > 0 && camp.active_end_unix > 0 && now >= camp.active_end_unix {
+                    5 // NO_WINNER
+                } else {
+                    2 // ACTIVE
+                };
+                let mut out = Vec::new();
+                encode_id_field(1, warzone_id, &mut out);
+                let mut part_buf = Vec::new();
+                encode_id_field(1, camp.target_faction_id as u64, &mut part_buf);
+                encode_id_field(2, camp.pirate_faction_id as u64, &mut part_buf);
+                encode_bytes_field(2, &part_buf, &mut out);
+                encode_id_field(3, camp.fob_solar_system_id as u64, &mut out);
+                for &sys_id in &camp.systems {
+                    encode_id_field(4, sys_id as u64, &mut out);
                 }
-                encode_domain_message(&d, "eve.pirate.insurgency.api.GetResponse", |reg, resp| {
-                    set_domain_attributes(reg, resp, sys_id as u64, 3, "InsurgencyStage3");
+                encode_varint_field(5, state_enum, &mut out);
+                if camp.active_end_unix > 0 {
+                    let mut ts_buf = Vec::new();
+                    encode_varint_field(1, camp.active_end_unix, &mut ts_buf);
+                    encode_bytes_field(7, &ts_buf, &mut out);
+                } else {
+                    encode_varint_field(6, 1, &mut out);
+                }
+                Ok(GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.pirate.insurgency.api.GetResponse"),
+                    value: out,
                 })
             }),
         );
     }
     {
-        let d = Arc::clone(&desc);
+        let db_i = Arc::clone(&db);
         router.register_handler(
             "eve.pirate.insurgency.api.GetCurrentRequest",
-            Arc::new(move |_ctx, _any, _dyn_msg| {
-                encode_domain_message(
-                    &d,
-                    "eve.pirate.insurgency.api.GetCurrentResponse",
-                    |reg, resp| {
-                        set_domain_attributes(reg, resp, 30_000_142, 500_010, "Guristas Insurgency");
-                    },
-                )
+            Arc::new(move |ctx, _any, _dyn_msg| {
+                let caller_sys = caller_solar_system(ctx, &db_i).ok();
+                let camp_ids = db_i.with_snapshot(|snap| {
+                    let mut list: Vec<(bool, i64)> = snap
+                        .insurgency_runtime
+                        .campaigns
+                        .values()
+                        .map(|c| {
+                            let matches_sys = caller_sys.is_some_and(|s| c.fob_solar_system_id == s || c.systems.contains(&s));
+                            (!matches_sys, c.campaign_id)
+                        })
+                        .collect();
+                    list.sort_unstable();
+                    list.into_iter().map(|(_, id)| id.max(0) as u64).collect::<Vec<_>>()
+                });
+                let mut out = Vec::new();
+                for cid in camp_ids {
+                    encode_id_field(1, cid, &mut out);
+                }
+                Ok(GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.pirate.insurgency.api.GetCurrentResponse"),
+                    value: out,
+                })
             }),
         );
     }
     {
-        let d = Arc::clone(&desc);
+        let db_i = Arc::clone(&db);
         router.register_handler(
             "eve.pirate.insurgency.api.GetSystemsRequest",
-            Arc::new(move |_ctx, _any, _dyn_msg| {
-                encode_domain_message(
-                    &d,
-                    "eve.pirate.insurgency.api.GetSystemsResponse",
-                    |reg, resp| {
-                        set_domain_attributes(reg, resp, 30_000_142, 30_000_144, "InsurgencySystems");
-                    },
-                )
+            Arc::new(move |_ctx, _any, dyn_msg| {
+                let req_cid = get_identifier_or_int(dyn_msg, 1)
+                    .filter(|&v| v > 0)
+                    .ok_or_else(|| (STATUS_BAD_REQUEST, "Campaign ID must be positive".to_string()))?;
+                let systems = db_i
+                    .with_snapshot(|snap| snap.insurgency_runtime.campaigns.get(&req_cid).map(|c| c.systems.clone()))
+                    .ok_or_else(|| (STATUS_NOT_FOUND, format!("Insurgency campaign {req_cid} not found")))?;
+                let mut out = Vec::new();
+                for sys_id in systems {
+                    encode_id_field(1, sys_id as u64, &mut out);
+                }
+                Ok(GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.pirate.insurgency.api.GetSystemsResponse"),
+                    value: out,
+                })
             }),
         );
     }
     {
-        let d = Arc::clone(&desc);
+        let db_i = Arc::clone(&db);
         router.register_handler(
             "eve.pirate.insurgency.api.GetForWarzoneRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let warzone_id = get_int_field(dyn_msg, 1).unwrap_or(1) as u32;
-                if warzone_id == 0 {
-                    return Err((STATUS_BAD_REQUEST, "Warzone ID must be positive".into()));
+                let warzone_id = get_identifier_or_int(dyn_msg, 1)
+                    .and_then(|v| u32::try_from(v).ok())
+                    .filter(|&v| v > 0)
+                    .ok_or_else(|| (STATUS_BAD_REQUEST, "Warzone ID must be positive".to_string()))?;
+                let matched_cid = db_i.with_snapshot(|snap| {
+                    let mut camps: Vec<_> = snap.insurgency_runtime.campaigns.values().collect();
+                    camps.sort_by_key(|c| c.campaign_id);
+                    camps
+                        .into_iter()
+                        .find(|c| {
+                            let wz = if matches!(c.target_faction_id, 500_002 | 500_003) { 2 } else { 1 };
+                            wz == warzone_id
+                        })
+                        .map(|c| c.campaign_id.max(0) as u64)
+                });
+                let mut out = Vec::new();
+                if let Some(cid) = matched_cid {
+                    encode_id_field(2, cid, &mut out);
+                } else {
+                    encode_varint_field(1, 1, &mut out);
                 }
-                encode_domain_message(
-                    &d,
-                    "eve.pirate.insurgency.api.GetForWarzoneResponse",
-                    |reg, resp| {
-                        set_domain_attributes(reg, resp, warzone_id as u64, 500_010, "WarzoneInsurgency");
-                    },
-                )
+                Ok(GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.pirate.insurgency.api.GetForWarzoneResponse"),
+                    value: out,
+                })
             }),
         );
     }

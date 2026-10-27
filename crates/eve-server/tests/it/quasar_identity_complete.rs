@@ -286,8 +286,9 @@ async fn test_q3_user_license_and_subscription() {
 
 #[tokio::test]
 async fn test_q3_entitlements_omega_and_membership() {
-    // parity: quasar:eveProto/generated/eve_public/entitlement/character/character_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/alliancelogo_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/corplogo_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/alliancelogo_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/corplogo_pb2.pyj
+    // parity: feat:quasar.entitlement, quasar:eveProto/generated/eve_public/entitlement/character/character_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/alliancelogo_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/corplogo_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/alliancelogo_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/corplogo_pb2.pyj
     eve_testkit::attest(&[
+        "feat:quasar.entitlement",
         "quasar:eveProto/generated/eve_public/entitlement/character/character_pb2.pyj",
         "quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/alliancelogo_pb2.pyj",
         "quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/corplogo_pb2.pyj",
@@ -327,51 +328,113 @@ async fn test_q3_entitlements_omega_and_membership() {
         .expect("GrantRequest unauth");
     assert_eq!(extract_response_proto(&rep_unauth).status_code, STATUS_FORBIDDEN);
 
-    // With GM role, GrantRequest succeeds
-    session.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
-
-    let rep = ctx
-        .dispatch_rpc(
-            &mut session,
-            "publicGatewaySvc",
-            None,
-            "SendRequest",
-            &[PyRep::Bytes(req.encode_proto())],
-            &empty_kw,
-            None,
-        )
-        .await
-        .expect("GrantRequest");
-    assert_eq!(extract_response_proto(&rep).status_code, STATUS_OK);
-    session.role = 0;
-
-    // 2. Get list of user & character entitlements
-    let req = build_public_request(
+    // Before granting Omega, membership must report inactive Alpha tier
+    let mem_req = build_public_request(
         ctx.now_unix(),
-        "eve_public.entitlement.user.api.GetRequest",
+        "eve.membership.GetCharacterAllRequest",
         Vec::new(),
     );
-    let rep = ctx
+    let pre_mem_rep = ctx
         .dispatch_rpc(
             &mut session,
             "publicGatewaySvc",
             None,
             "SendRequest",
-            &[PyRep::Bytes(req.encode_proto())],
+            &[PyRep::Bytes(mem_req.encode_proto())],
             &empty_kw,
             None,
         )
         .await
-        .expect("GetRequest");
-    let rsp = extract_response_proto(&rep);
-    assert_eq!(rsp.status_code, STATUS_OK);
-    assert_eq!(rsp.correlation_uuid, b"corr-q3-test-uuid");
-    let ent_payload = rsp.payload.unwrap();
+        .expect("pre-grant membership.GetCharacterAllRequest");
+    let pre_mem_wm = eve_proto::quasar::WireMessage::decode(
+        &extract_response_proto(&pre_mem_rep).payload.unwrap().value,
+    )
+    .unwrap();
+    let pre_mem_attr = eve_proto::quasar::WireMessage::decode(
+        pre_mem_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap(),
+    )
+    .unwrap();
     assert_eq!(
-        ent_payload.normalized_type_name(),
-        "eve_public.entitlement.user.api.GetResponse"
+        pre_mem_attr.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()).unwrap_or(0),
+        0,
+        "Membership before Omega grant must have active == 0"
     );
-    assert!(!ent_payload.value.is_empty());
+    assert_eq!(
+        pre_mem_attr.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_bytes()),
+        Some(b"alpha".as_slice())
+    );
+
+    // With GM role (user 1), GrantRequest without user ID grants to caller (user 1), while GrantRequest with sint32 user 101 grants to user 101 only
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(base) = s.characters.get(&90_000_001).cloned() {
+            let mut c101 = base;
+            c101.character_id = 90_000_101;
+            c101.user_id = 101;
+            c101.clone_grade = 1;
+            s.characters.insert(90_000_101, c101);
+        }
+    });
+    let mut sess_101 = SessionState::new(2_006);
+    sess_101.user_id = Some(101);
+    sess_101.character_id = Some(90_000_101);
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess_101, "loginRewardFacilities", None, "get_my_clone_grade", &[], &empty_kw, None).await.expect("clone grade pre"),
+        PyRep::Integer(1)
+    );
+
+    session.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
+    let rep = ctx.dispatch_rpc(&mut session, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None).await.expect("GrantRequest");
+    assert_eq!(extract_response_proto(&rep).status_code, STATUS_OK);
+
+    let (mut uid_101, mut omega_ent_bytes, mut omega_req_bytes) = (Vec::new(), Vec::new(), Vec::new());
+    encode_varint_field(1, eve_proto::quasar::encode_zigzag32(101) as u64, &mut uid_101);
+    encode_bytes_field(2, &uid_101, &mut omega_ent_bytes);
+    encode_string_field(3, "omega", &mut omega_ent_bytes);
+    encode_bytes_field(1, &omega_ent_bytes, &mut omega_req_bytes);
+    let omega_grant_req = build_public_request(ctx.now_unix(), "eve.entitlement.user.api.GrantRequest", omega_req_bytes);
+    for _ in 0..2 {
+        let rep_omega = ctx.dispatch_rpc(&mut session, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(omega_grant_req.encode_proto())], &empty_kw, None).await.expect("GrantRequest omega");
+        assert_eq!(extract_response_proto(&rep_omega).status_code, STATUS_OK);
+    }
+    session.role = 0;
+
+    // 2. Verify caller user 1 has 'alliance_tournament_xx' but NOT 'omega' (and remains Alpha), while target user 101 has deduplicated 'omega' and is Omega
+    let get_ent_req = build_public_request(ctx.now_unix(), "eve_public.entitlement.user.api.GetRequest", Vec::new());
+    let decode_ent_names = |rep: &PyRep| -> Vec<String> {
+        let rsp = extract_response_proto(rep);
+        assert_eq!(rsp.status_code, STATUS_OK);
+        assert_eq!(rsp.correlation_uuid, b"corr-q3-test-uuid");
+        let p = rsp.payload.unwrap();
+        assert_eq!(p.normalized_type_name(), "eve_public.entitlement.user.api.GetResponse");
+        let wm = eve_proto::quasar::WireMessage::decode(&p.value).expect("decode user GetResponse");
+        wm.fields.iter().filter(|f| f.field_number == 1).filter_map(|f| f.value.as_bytes()).filter_map(|b| eve_proto::quasar::WireMessage::decode(b).ok()).filter_map(|sub| {
+            sub.fields.iter().find(|sf| sf.field_number == 1).and_then(|sf| sf.value.as_bytes()).and_then(|sb| std::str::from_utf8(sb).ok()).map(|s| s.to_string())
+        }).collect()
+    };
+    let u1_rep = ctx.dispatch_rpc(&mut session, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(get_ent_req.encode_proto())], &empty_kw, None).await.expect("GetRequest user 1");
+    let u1_ents = decode_ent_names(&u1_rep);
+    assert!(u1_ents.contains(&"alliance_tournament_xx".to_string()));
+    assert!(!u1_ents.contains(&"omega".to_string()), "Caller user 1 must NOT receive target user 101's omega grant");
+
+    let u1_mem_rep = ctx.dispatch_rpc(&mut session, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(mem_req.encode_proto())], &empty_kw, None).await.expect("membership user 1");
+    let u1_mem_wm = eve_proto::quasar::WireMessage::decode(&extract_response_proto(&u1_mem_rep).payload.unwrap().value).unwrap();
+    let u1_mem_attr = eve_proto::quasar::WireMessage::decode(u1_mem_wm.fields[0].value.as_bytes().unwrap()).unwrap();
+    assert_eq!(u1_mem_attr.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()).unwrap_or(0), 0);
+    assert_eq!(u1_mem_attr.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_bytes()), Some(b"alpha".as_slice()));
+
+    let u101_rep = ctx.dispatch_rpc(&mut sess_101, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(get_ent_req.encode_proto())], &empty_kw, None).await.expect("GetRequest user 101");
+    let u101_ents = decode_ent_names(&u101_rep);
+    assert_eq!(u101_ents.iter().filter(|s| s.as_str() == "omega").count(), 1, "Target user 101 must receive deduplicated omega entitlement");
+
+    let mem_rep = ctx.dispatch_rpc(&mut sess_101, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(mem_req.encode_proto())], &empty_kw, None).await.expect("membership user 101");
+    let mem_wm = eve_proto::quasar::WireMessage::decode(&extract_response_proto(&mem_rep).payload.unwrap().value).unwrap();
+    let mem_attr = eve_proto::quasar::WireMessage::decode(mem_wm.fields[0].value.as_bytes().unwrap()).unwrap();
+    assert_eq!(mem_attr.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()), Some(1));
+    assert_eq!(mem_attr.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_bytes()), Some(b"omega".as_slice()));
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess_101, "loginRewardFacilities", None, "get_my_clone_grade", &[], &empty_kw, None).await.expect("clone grade post"),
+        PyRep::Integer(2)
+    );
 
     let char_ent_req = build_public_request(
         ctx.now_unix(),

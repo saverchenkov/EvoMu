@@ -11,10 +11,12 @@ use std::sync::Arc;
 
 fn extract_nested_seq_id(val: &DynamicValue) -> Option<u64> {
     match val {
-        DynamicValue::Uint64(v) => Some(*v),
-        DynamicValue::Int64(v) if *v >= 0 => Some(*v as u64),
-        DynamicValue::Uint32(v) => Some(*v as u64),
-        DynamicValue::Int32(v) if *v >= 0 => Some(*v as u64),
+        DynamicValue::Uint64(v) if *v > 0 => Some(*v),
+        DynamicValue::Int64(v) if *v > 0 => Some(*v as u64),
+        DynamicValue::Sint64(v) if *v > 0 => Some(*v as u64),
+        DynamicValue::Uint32(v) if *v > 0 => Some(*v as u64),
+        DynamicValue::Int32(v) if *v > 0 => Some(*v as u64),
+        DynamicValue::Sint32(v) if *v > 0 => Some(*v as u64),
         DynamicValue::Message(m) => m.get(1).and_then(extract_nested_seq_id),
         _ => None,
     }
@@ -222,32 +224,52 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
         "eve.entitlement.user.api.GrantRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             require_admin_role(ctx)?;
-            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
-            let ent_name = if let Some(DynamicValue::Message(ent_msg)) = dyn_msg.get(1) {
-                if let Some(DynamicValue::String(s)) = ent_msg.get(3) {
+            let caller_uid = ctx.effective_user_id().unwrap_or(1) as u64;
+            let (uid, ent_name) = if let Some(DynamicValue::Message(ent_msg)) = dyn_msg.get(1) {
+                let target_uid = ent_msg
+                    .get(2)
+                    .and_then(extract_nested_seq_id)
+                    .filter(|&id| id > 0)
+                    .unwrap_or(caller_uid);
+                let name = if let Some(DynamicValue::String(s)) = ent_msg.get(3) {
                     s.clone()
                 } else if let Some(DynamicValue::String(s)) = ent_msg.get(1) {
                     s.clone()
                 } else {
                     "special_access".to_string()
-                }
+                };
+                (target_uid, name)
             } else if let Some(DynamicValue::Message(ent_msg)) = dyn_msg.get(2) {
-                if let Some(DynamicValue::String(s)) = ent_msg.get(1) {
+                let target_uid = dyn_msg
+                    .get(1)
+                    .and_then(extract_nested_seq_id)
+                    .filter(|&id| id > 0)
+                    .unwrap_or(caller_uid);
+                let name = if let Some(DynamicValue::String(s)) = ent_msg.get(1) {
                     s.clone()
                 } else {
                     "special_access".to_string()
-                }
+                };
+                (target_uid, name)
             } else {
-                "special_access".to_string()
+                (caller_uid, "special_access".to_string())
             };
 
             with_identity_store(&db_ent_grant, |guard| {
-                guard
-                    .user_entitlements
-                    .entry(uid)
-                    .or_default()
-                    .push(ent_name.clone());
+                let list = guard.user_entitlements.entry(uid).or_default();
+                if !list.contains(&ent_name) {
+                    list.push(ent_name.clone());
+                }
             });
+            if ent_name.eq_ignore_ascii_case("omega") {
+                db_ent_grant.with_mut_snapshot(|snap| {
+                    for ch in snap.characters.values_mut() {
+                        if ch.user_id == uid {
+                            ch.clone_grade = 2;
+                        }
+                    }
+                });
+            }
 
             let mut id_bytes = Vec::new();
             encode_string_field(1, &ent_name, &mut id_bytes);
@@ -274,12 +296,19 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     );
 
     // 5. eve.membership.GetCharacterAllRequest -> eve.membership.GetCharacterAllResponse
+    let db_mem = Arc::clone(&db);
     router.register_handler(
         "eve.membership.GetCharacterAllRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
+            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+            let has_omega = read_identity_store(&db_mem, |st| {
+                st.user_entitlements
+                    .get(&uid)
+                    .is_some_and(|ents| ents.iter().any(|e| e.eq_ignore_ascii_case("omega")))
+            });
             let mut mem_attr = Vec::new();
-            encode_varint_field(1, 1, &mut mem_attr); // active = true
-            encode_string_field(2, "omega", &mut mem_attr); // tier = omega
+            encode_varint_field(1, u64::from(has_omega), &mut mem_attr); // active = 1 if omega else 0
+            encode_string_field(2, if has_omega { "omega" } else { "alpha" }, &mut mem_attr);
             let now = ctx.received.as_ref().map(|t| t.seconds as u64).unwrap_or(0);
             encode_varint_field(3, now.saturating_sub(86400 * 30), &mut mem_attr); // join date
 
