@@ -126,10 +126,13 @@ fn make_ta_offer_request(offer_id: u32) -> Vec<u8> {
 
 #[tokio::test]
 async fn test_unified_plex_vault_and_transactions() {
-    // parity: feat:wallet.plex-vault
-    // parity: quasar:eveProto/generated/eve_public/plex/vault/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/plex/vault/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/plex/vault/transaction/api/requests_pb2.pyj
+    // parity: feat:wallet.plex-vault, quasar:eveProto/generated/eve_public/plex/vault/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/plex/vault/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/plex/vault/transaction/api/requests_pb2.pyj
+    eve_testkit::attest(&[
+        "feat:wallet.plex-vault",
+        "quasar:eveProto/generated/eve_public/plex/vault/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/plex/vault/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/plex/vault/transaction/api/requests_pb2.pyj",
+    ]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let (uid, cid) = (1u64, 90_000_001);
@@ -143,63 +146,60 @@ async fn test_unified_plex_vault_and_transactions() {
     assert_eq!(init_bal, 500, "Initial PLEX balance for demo user 1 should be 500");
 
     // 2. GM Deposit 500 PLEX
-    let mut curr_msg = Vec::new();
+    let (mut curr_msg, mut dep_payload) = (Vec::new(), Vec::new());
     encode_varint_field(1, eve_proto::quasar::encode_zigzag64(500 * 100), &mut curr_msg);
-    let mut dep_payload = Vec::new();
     encode_bytes_field(3, &curr_msg, &mut dep_payload);
     let dep_rsp = quasar_rpc(&ctx, &mut sess, "eve.plex.vault.assetholding.operation.api.DepositRequest", dep_payload).await;
     assert_eq!(dep_rsp.status_code, STATUS_OK, "DepositRequest failed: {}", dep_rsp.status_message);
 
     // Verify unified state across snapshot and MachoNet helper
     let (snap_bal, char_bal) = ctx.db.with_snapshot(|snap| (snap.account_plex_vault.get(&uid).copied().unwrap_or(0), snap.plex_vault_balance(cid as i64)));
-    assert_eq!(snap_bal, 1000, "Snapshot account_plex_vault should have 1000 PLEX");
-    assert_eq!(char_bal, 1000, "snap.plex_vault_balance should match 1000 PLEX");
-
-    // Drain notices and assert BalanceChangedNotice
+    assert_eq!((snap_bal, char_bal), (1000, 1000));
     flush_pending_notices(&ctx);
     let notices = drain_notices(&mut notice_rx);
     assert!(notices.iter().any(|n| n.payload.as_ref().map(|p| p.type_url.contains("BalanceChangedNotice")).unwrap_or(false)));
 
-    // 3. BalanceRequest -> reflects 1000 PLEX
+    // 3. BalanceRequest -> reflects 1000 PLEX; GM Withdraw 200 PLEX -> 800 PLEX
     let rsp2 = quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.BalanceRequest", vec![]).await;
-    assert_eq!(rsp2.status_code, STATUS_OK);
     assert_eq!(rsp2.payload.unwrap().normalized_type_name(), "eve_public.plex.vault.api.BalanceResponse");
-
-    // 4. GM Withdraw 200 PLEX
-    let mut with_curr = Vec::new();
+    let (mut with_curr, mut with_payload) = (Vec::new(), Vec::new());
     encode_varint_field(1, eve_proto::quasar::encode_zigzag64(200 * 100), &mut with_curr);
-    let mut with_payload = Vec::new();
     encode_bytes_field(3, &with_curr, &mut with_payload);
-    let with_rsp = quasar_rpc(&ctx, &mut sess, "eve.plex.vault.assetholding.operation.api.WithdrawRequest", with_payload).await;
-    assert_eq!(with_rsp.status_code, STATUS_OK, "WithdrawRequest failed: {}", with_rsp.status_message);
-    let rem_bal = ctx.db.with_snapshot(|snap| snap.plex_vault_balance(cid as i64));
-    assert_eq!(rem_bal, 800, "Balance after withdrawal should be 800 PLEX");
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.plex.vault.assetholding.operation.api.WithdrawRequest", with_payload).await.status_code, STATUS_OK);
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.plex_vault_balance(cid as i64)), 800);
 
-    // 5. GetAllLoggedForUserRequest -> returns transactions
+    // 4. NES Purchase via eve_public.plex.vault.api.PurchaseRequest: seed catalog, buy offer 2001 (450 PLEX -> 350 PLEX)
+    common::seed_test_nes_store_catalog(&ctx);
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.PurchaseRequest", make_str_id_request("9999")).await.status_code, STATUS_NOT_FOUND);
+    let mut over_purch = make_str_id_request("1001");
+    encode_varint_field(2, 10, &mut over_purch); // 10 * 500 = 5000 PLEX > 800
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.PurchaseRequest", over_purch).await.status_code, STATUS_BAD_REQUEST);
+    let (mut bad_gift, mut gm, mut cm) = (make_str_id_request("2001"), Vec::new(), Vec::new());
+    encode_varint_field(1, 999_999_999, &mut cm);
+    encode_bytes_field(3, &cm, &mut gm);
+    encode_bytes_field(3, &gm, &mut bad_gift);
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.PurchaseRequest", bad_gift).await.status_code, STATUS_NOT_FOUND);
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.plex_vault_balance(cid as i64)), 800, "Missing gift recipient must not debit PLEX");
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.PurchaseRequest", make_str_id_request("2001")).await.status_code, STATUS_OK);
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.plex_vault_balance(cid as i64)), 350, "PurchaseRequest deducts 450 PLEX");
+
+    // 5. GetAllLoggedForUserRequest & GetLogRequest & operation.api.GetRequest & RecordInvoiceRequest
     let tx_all_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.transaction.api.GetAllLoggedForUserRequest", vec![]).await;
     assert_eq!(tx_all_rsp.status_code, STATUS_OK);
-    let tx_payload = tx_all_rsp.payload.expect("tx payload present");
-    assert_eq!(tx_payload.normalized_type_name(), "eve_public.plex.vault.transaction.api.GetAllLoggedForUserResponse");
-
-    // 6. GetLogRequest -> fetch first transaction
     let first_tx_id = ctx.db.with_snapshot(|snap| {
-        eve_server::services::quasar_payment_store::get_plex_transactions(snap)
-            .into_iter()
-            .find(|t| t.user_id == uid)
-            .map(|t| t.id)
-            .expect("tx exists")
+        eve_server::services::quasar_payment_store::get_plex_transactions(snap).into_iter().find(|t| t.user_id == uid).map(|t| t.id).expect("tx exists")
     });
     let log_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.transaction.api.GetLogRequest", make_varint_id_request(first_tx_id)).await;
-    assert_eq!(log_rsp.status_code, STATUS_OK, "GetLogRequest failed for tx {first_tx_id}");
-
-    // Non-existent transaction returns 404
-    let miss_log_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.transaction.api.GetLogRequest", make_varint_id_request(999_999_999)).await;
-    assert_eq!(miss_log_rsp.status_code, STATUS_NOT_FOUND);
-
-    // User 2 querying user 1's tx returns 404 (R-PS-04)
+    assert_eq!(log_rsp.status_code, STATUS_OK);
+    assert!(!log_rsp.payload.unwrap().value.is_empty());
+    let op_rsp = quasar_rpc(&ctx, &mut sess, "eve.plex.vault.assetholding.operation.api.GetRequest", make_str_id_request(&first_tx_id.to_string())).await;
+    assert_eq!(op_rsp.status_code, STATUS_OK);
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.plex.vault.transaction.invoice.api.admin.RecordInvoiceRequest", make_str_id_request("inv-001")).await.status_code, STATUS_OK);
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.transaction.api.GetLogRequest", make_varint_id_request(999_999_999)).await.status_code, STATUS_NOT_FOUND);
     let mut sess_user2 = build_sess(3509, 2, 90_000_002);
-    let u2_log_rsp = quasar_rpc(&ctx, &mut sess_user2, "eve_public.plex.vault.transaction.api.GetLogRequest", make_varint_id_request(first_tx_id)).await;
-    assert_eq!(u2_log_rsp.status_code, STATUS_NOT_FOUND, "User 2 cannot query user 1's tx");
+    sess_user2.role = 0;
+    assert_eq!(quasar_rpc(&ctx, &mut sess_user2, "eve_public.plex.vault.transaction.api.GetLogRequest", make_varint_id_request(first_tx_id)).await.status_code, STATUS_NOT_FOUND);
+    assert_eq!(quasar_rpc(&ctx, &mut sess_user2, "eve.plex.vault.assetholding.operation.api.GetRequest", make_str_id_request(&first_tx_id.to_string())).await.status_code, STATUS_FORBIDDEN);
 
     // Test MachoNet RPCs DepositPlexToVault and WithdrawPlexFromVault emitting BalanceChangedNotice (R-PS-01)
     let initial_vault = ctx.db.with_snapshot(|s| s.plex_vault_balance(cid as i64));

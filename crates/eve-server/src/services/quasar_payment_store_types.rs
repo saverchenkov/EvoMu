@@ -1,12 +1,16 @@
 //! Shared types and default data for Quasar Payment, PLEX Vault, and NES Store.
 
-use crate::quasar_gateway::NoticeScope;
+use crate::quasar_gateway::{
+    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
+    STATUS_NOT_FOUND,
+};
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
+    encode_bytes_field, encode_string_field, encode_varint_field, DynamicValue, GoogleAny,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 pub fn emit_balance_changed_notice(
     router_notices: &RwLock<Vec<(NoticeScope, GoogleAny)>>,
@@ -172,6 +176,9 @@ pub fn record_plex_transaction(
     now_unix: u64,
 ) {
     let mut logs = get_plex_transactions(snap);
+    if logs.len() >= 1000 {
+        logs.remove(0);
+    }
     logs.push(PlexTransactionRecord {
         id: tx_id,
         user_id,
@@ -264,4 +271,249 @@ pub struct PaymentReceiptRecord {
     pub amount_in_cents: u32,
     pub currency: String,
     pub timestamp_unix: u64,
+}
+
+pub fn register_plex_vault_extra_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
+    // 1. eve_public.plex.vault.api.PurchaseRequest -> PurchaseResponse
+    let db_purch = Arc::clone(&db);
+    let pending_purch = Arc::clone(&router.pending_notices);
+    router.register_handler(
+        "eve_public.plex.vault.api.PurchaseRequest",
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let uid = ctx
+                .effective_user_id()
+                .ok_or_else(|| (STATUS_FORBIDDEN, "User authentication required".to_string()))?
+                as u64;
+            let offer_id = dyn_msg
+                .get(1)
+                .and_then(|v| match v {
+                    DynamicValue::String(s) => s.parse::<u32>().ok(),
+                    DynamicValue::Uint32(u) => Some(*u),
+                    DynamicValue::Int32(i) if *i > 0 => Some(*i as u32),
+                    DynamicValue::Uint64(u) => Some(*u as u32),
+                    DynamicValue::Int64(i) if *i > 0 => Some(*i as u32),
+                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
+                        DynamicValue::String(s) => s.parse::<u32>().ok(),
+                        DynamicValue::Uint32(u) => Some(*u),
+                        DynamicValue::Int32(i) if *i > 0 => Some(*i as u32),
+                        DynamicValue::Uint64(u) => Some(*u as u32),
+                        DynamicValue::Int64(i) if *i > 0 => Some(*i as u32),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+                .filter(|&id| id > 0)
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing or invalid store offer ID".to_string()))?;
+
+            let qty = match dyn_msg.get(2) {
+                None => 1u32,
+                Some(DynamicValue::Uint32(q)) if *q > 0 => *q,
+                Some(DynamicValue::Uint64(q)) if *q > 0 => *q as u32,
+                Some(DynamicValue::Int32(q)) if *q > 0 => *q as u32,
+                Some(DynamicValue::Int64(q)) if *q > 0 => *q as u32,
+                _ => return Err((STATUS_BAD_REQUEST, "Purchase quantity must be positive".to_string())),
+            };
+
+            let gift_char_id = match dyn_msg.get(3) {
+                Some(DynamicValue::Message(gm)) => match gm.get(3) {
+                    Some(DynamicValue::Message(cm)) => match cm.get(1) {
+                        Some(DynamicValue::Uint64(c)) if *c > 0 => Some(*c as i64),
+                        Some(DynamicValue::Int64(c)) if *c > 0 => Some(*c),
+                        Some(DynamicValue::Uint32(c)) if *c > 0 => Some(*c as i64),
+                        Some(DynamicValue::Int32(c)) if *c > 0 => Some(*c as i64),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                _ => None,
+            };
+            let active_cid = gift_char_id.or_else(|| ctx.effective_character_id().map(|c| c as i64));
+            let now_unix = ctx.now_unix();
+
+            let (tx_id, total_plex, new_bal, desc, maybe_omega) = db_purch
+                .try_with_mut_snapshot(|snap| {
+                    if let Some(gift_cid) = gift_char_id {
+                        if !snap.characters.contains_key(&gift_cid) {
+                            return Err(format!("{STATUS_NOT_FOUND}:Gift recipient character {gift_cid} not found"));
+                        }
+                    }
+                    let catalog = read_store_catalog(snap);
+                    let offer = catalog
+                        .offers
+                        .iter()
+                        .find(|o| o.id == offer_id)
+                        .cloned()
+                        .ok_or_else(|| format!("{STATUS_NOT_FOUND}:Offer {offer_id} not found"))?;
+                    let total_cost = offer.price_plex.max(1).saturating_mul(qty as i64);
+                    let cur = snap.account_plex_vault.entry(uid).or_insert(0);
+                    if *cur < total_cost {
+                        return Err(format!("{STATUS_BAD_REQUEST}:Insufficient PLEX balance"));
+                    }
+                    *cur -= total_cost;
+                    let bal = *cur;
+                    snap.next_entity_id += 1;
+                    let tx_id = snap.next_entity_id as u64;
+                    let desc = format!("NES Purchase: {}", offer.name);
+                    record_plex_transaction(snap, tx_id, uid, -total_cost, bal, &desc, now_unix);
+
+                    let recipient_cid = active_cid.or_else(|| {
+                        let mut chars: Vec<_> = snap
+                            .characters
+                            .values()
+                            .filter(|c| c.user_id == uid)
+                            .map(|c| c.character_id)
+                            .collect();
+                        chars.sort_unstable();
+                        chars.first().copied()
+                    });
+                    if let Some(cid) = recipient_cid {
+                        if let Some(ch) = snap.characters.get(&cid).cloned() {
+                            let target_station = ch.station_id.or(ch.structure_id).unwrap_or(ch.home_station_id);
+                            if target_station > 0 {
+                                for pid in &offer.product_ids {
+                                    if let Some(prod) = catalog.products.iter().find(|p| p.id == *pid) {
+                                        if prod.type_id > 0 && prod.quantity > 0 {
+                                            let deliver_qty = i32::try_from(prod.quantity.saturating_mul(qty))
+                                                .map_err(|_| format!("{STATUS_BAD_REQUEST}:Delivery quantity overflow"))?;
+                                            snap.next_entity_id += 1;
+                                            let item_id = snap.next_entity_id;
+                                            snap.items.insert(
+                                                item_id,
+                                                eve_db::InventoryItemRecord {
+                                                    item_id,
+                                                    type_id: prod.type_id,
+                                                    owner_id: cid,
+                                                    location_id: target_station,
+                                                    flag: eve_db::InventoryFlag::Hangar,
+                                                    quantity: deliver_qty,
+                                                    singleton: false,
+                                                    version: 1,
+                                                    ..Default::default()
+                                                },
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let omega_notice = if offer.category_id == 1 {
+                        let (_, n) = crate::services::quasar_auth_user::activate_user_omega_license_in_snapshot(
+                            snap,
+                            uid,
+                            30 * 86_400 * u64::from(qty),
+                            now_unix,
+                        );
+                        Some(n)
+                    } else {
+                        None
+                    };
+                    Ok((tx_id, total_cost, bal, desc, omega_notice))
+                })
+                .map_err(|e| {
+                    if let Some((c, m)) = e.split_once(':') {
+                        if let Ok(code) = c.parse::<u32>() {
+                            return (code, m.to_string());
+                        }
+                    }
+                    (STATUS_BAD_REQUEST, e)
+                })?;
+
+            emit_balance_changed_notice(&pending_purch, uid, tx_id, -total_plex, new_bal, &desc, now_unix);
+            if let Some(n) = maybe_omega {
+                pending_purch.write().unwrap_or_else(|e| e.into_inner()).push((NoticeScope::User(uid as i32), n));
+            }
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.plex.vault.api.PurchaseResponse"),
+                value: Vec::new(),
+            })
+        }),
+    );
+
+    // 2. eve.plex.vault.assetholding.operation.api.GetRequest -> GetResponse
+    let db_op = Arc::clone(&db);
+    router.register_handler(
+        "eve.plex.vault.assetholding.operation.api.GetRequest",
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let caller_uid = ctx.effective_user_id().map(|u| u as u64);
+            let is_admin = require_admin_role(ctx).is_ok();
+            if caller_uid.is_none() && !is_admin {
+                return Err((STATUS_FORBIDDEN, "User authentication required".to_string()));
+            }
+            let op_id = match dyn_msg.get(1) {
+                Some(DynamicValue::Message(m)) => match m.get(1) {
+                    Some(DynamicValue::Bytes(b)) if !b.is_empty() => {
+                        std::str::from_utf8(b)
+                            .ok()
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .or_else(|| (b.len() >= 8).then(|| u64::from_be_bytes(b[b.len() - 8..].try_into().unwrap())))
+                    }
+                    Some(DynamicValue::Uint64(v)) => Some(*v),
+                    Some(DynamicValue::Int64(v)) if *v > 0 => Some(*v as u64),
+                    _ => None,
+                },
+                Some(DynamicValue::Uint64(v)) => Some(*v),
+                _ => None,
+            }
+            .filter(|&id| id > 0)
+            .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing operation Identifier".to_string()))?;
+
+            let tx = db_op
+                .with_snapshot(|snap| get_plex_transactions(snap).into_iter().find(|t| t.id == op_id))
+                .ok_or_else(|| (STATUS_NOT_FOUND, format!("PLEX operation {op_id} not found")))?;
+            if !is_admin && caller_uid != Some(tx.user_id) {
+                return Err((STATUS_FORBIDDEN, "Cannot query another user's PLEX operation".to_string()));
+            }
+
+            let (mut u_b, mut c_b, mut attr_b, mut out) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            encode_varint_field(1, tx.user_id, &mut u_b);
+            encode_bytes_field(1, &u_b, &mut attr_b);
+            encode_varint_field(1, (tx.amount.abs() * 100) as u64, &mut c_b);
+            encode_bytes_field(2, &c_b, &mut attr_b);
+            encode_bytes_field(1, &attr_b, &mut out);
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.plex.vault.assetholding.operation.api.GetResponse"),
+                value: out,
+            })
+        }),
+    );
+
+    // 3. eve.plex.vault.transaction.invoice.api.admin.RecordInvoiceRequest -> RecordInvoiceResponse
+    let db_inv = Arc::clone(&db);
+    router.register_handler(
+        "eve.plex.vault.transaction.invoice.api.admin.RecordInvoiceRequest",
+        Arc::new(move |ctx, _any, dyn_msg| {
+            require_admin_role(ctx)?;
+            let inv_uuid = match dyn_msg.get(1) {
+                Some(DynamicValue::Message(m)) => match m.get(1) {
+                    Some(DynamicValue::Bytes(b)) if !b.is_empty() => Some(b.clone()),
+                    Some(DynamicValue::String(s)) if !s.is_empty() => Some(s.as_bytes().to_vec()),
+                    _ => None,
+                },
+                _ => None,
+            }
+            .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing invoice Identifier.uuid".to_string()))?;
+            let hex: String = inv_uuid.iter().map(|b| format!("{b:02x}")).collect();
+            db_inv.with_mut_snapshot(|snap| {
+                let mut list: Vec<String> = snap
+                    .service_state_blobs
+                    .get("plex_invoices")
+                    .and_then(|j| serde_json::from_str(j).ok())
+                    .unwrap_or_default();
+                if !list.contains(&hex) {
+                    if list.len() >= 1000 {
+                        list.remove(0);
+                    }
+                    list.push(hex);
+                }
+                if let Ok(s) = serde_json::to_string(&list) {
+                    snap.service_state_blobs.insert("plex_invoices".into(), s);
+                }
+            });
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.plex.vault.transaction.invoice.api.admin.RecordInvoiceResponse"),
+                value: Vec::new(),
+            })
+        }),
+    );
 }

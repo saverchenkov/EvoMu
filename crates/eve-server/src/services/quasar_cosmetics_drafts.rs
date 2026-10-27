@@ -906,10 +906,16 @@ pub fn register_draft_and_title_handlers(
                 let Some(char_id) = ctx.effective_character_id() else {
                     return Err((STATUS_FORBIDDEN, "Active character required".into()));
                 };
-                let titles: Vec<u64> = {
+                let mut titles: Vec<u64> = {
                     let data = st.data.read().unwrap_or_else(|e| e.into_inner());
                     data.owned_titles.get(&char_id).map(|s| s.iter().copied().collect()).unwrap_or_default()
                 };
+                for tid in super::quasar_entitlement_ledger::redeemed_titles_for_char(&st.db, char_id) {
+                    if !titles.contains(&tid) {
+                        titles.push(tid);
+                    }
+                }
+                titles.sort_unstable();
 
                 let mut out = Vec::new();
                 for tid in titles {
@@ -1027,9 +1033,13 @@ pub fn register_draft_and_title_handlers(
                     );
                 } else {
                     let title_id = opt_id.unwrap();
+                    let redeemed = super::quasar_entitlement_ledger::redeemed_titles_for_char(&st.db, char_id);
                     {
                         let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
                         let owned = data.owned_titles.entry(char_id).or_default();
+                        for tid in redeemed {
+                            owned.insert(tid);
+                        }
                         if !owned.contains(&title_id) {
                             return Err((STATUS_BAD_REQUEST, format!("Character {char_id} does not own title {title_id}")));
                         }

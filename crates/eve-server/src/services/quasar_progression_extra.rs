@@ -1,11 +1,12 @@
-//! `quasar_progression_extra` — V24.01 Quasar Community Tracks, Tales, Goals, Campaigns, Titles & Seasonal Events
-//! (`feat:quasar.communitytrack`, `feat:quasar.tale`, `feat:quasar.goal`, `feat:quasar.campaign`,
-//!  `feat:quasar.seasonalevent`, `Q-4`).
+//! `quasar_progression_extra` — V24.01 Quasar Community Tracks, Tales, Goals, Opportunities, Campaigns, Titles & Seasonal Events
+//! (`feat:quasar.communitytrack`, `feat:quasar.tale`, `feat:quasar.goal`, `feat:quasar.opportunity`,
+//!  `feat:quasar.campaign`, `feat:quasar.seasonalevent`, `Q-4`).
 //!
 //! Implements live backend semantics for:
 //! - Community Progression Tracks (`eve_public.communitytrack.api`, `eve.communitytrack.api`).
 //! - Narrative Tales (`eve.tale.api`, `eve_public.tale.api`).
-//! - Generic Organization and Personal Goals (`eve_public.goal.api`, `eve.goal.api`).
+//! - Generic Organization and Personal Goals (`eve_public.goal.api`, `eve_public.goal.contribution.api`, `eve.goal.api`).
+//! - Job Board Opportunities (`eve_public.opportunity.api`).
 //! - Character Cosmetic Titles (`eve_public.cosmetic.character.title.api`).
 //! - Seasonal Challenges and Live Campaigns (`eve_public.campaign.api`, `eve.seasonalevent.challenge`).
 
@@ -1001,6 +1002,137 @@ pub fn register_progression_extra_handlers(
         }),
     );
 
+    // 3b. eve_public.goal.contribution.api.{GetContributorSummariesForGoalRequest,GetMyContributorSummaryForGoalRequest,GetMyContributorSummariesRequest}
+    let encode_goal_contrib_summary = |cid: u32, progress: u64, uuid: &[u8; 16]| -> Vec<u8> {
+        let (mut ch_b, mut goal_b, mut s_b) = (Vec::new(), Vec::new(), Vec::new());
+        encode_varint_field(1, cid as u64, &mut ch_b);
+        encode_bytes_field(1, &ch_b, &mut s_b);
+        encode_varint_field(2, progress, &mut s_b);
+        encode_bytes_field(1, uuid, &mut goal_b);
+        encode_bytes_field(3, &goal_b, &mut s_b);
+        s_b
+    };
+    let resolve_goal_contribs = |mgr: &ProgressionExtraManager, g: &GenericGoalRecord| -> Vec<(u32, u64)> {
+        if &g.uuid[0..8] == notices::CORP_GOAL_UUID_PREFIX {
+            if let Some(ref cs) = mgr.corp_state {
+                let gid = u64::from_be_bytes(g.uuid[8..16].try_into().unwrap_or([0; 8]));
+                if let Some(cg) = cs.goals.read().unwrap_or_else(|e| e.into_inner()).get(&gid) {
+                    let mut list: Vec<(u32, u64)> = cg
+                        .contributors
+                        .iter()
+                        .map(|(&c, &(p, _))| (c, p.max(0) as u64))
+                        .collect();
+                    list.sort_by_key(|&(c, _)| c);
+                    if !list.is_empty() {
+                        return list;
+                    }
+                }
+            }
+        }
+        if g.current_progress > 0 {
+            vec![(g.creator_id, g.current_progress)]
+        } else {
+            Vec::new()
+        }
+    };
+
+    let mgr = Arc::clone(&manager);
+    router.register_handler(
+        "eve_public.goal.contribution.api.GetContributorSummariesForGoalRequest",
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let Some(cid) = ctx.effective_character_id() else {
+                return Err((STATUS_FORBIDDEN, "Active character required".into()));
+            };
+            let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
+                return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
+            };
+            let g = mgr
+                .generic_goals
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&uuid_to_hex(&target_uuid))
+                .cloned()
+                .ok_or_else(|| (STATUS_NOT_FOUND, "Goal not found".into()))?;
+            if let Some(gc) = mgr.goal_corp_id(&target_uuid) {
+                let caller_corp = mgr.db.as_ref().and_then(|db| {
+                    db.with_snapshot(|s| s.characters.get(&(cid as i64)).map(|c| c.corporation_id as u32))
+                });
+                if gc != 0 && caller_corp != Some(gc) && g.creator_id != cid && require_admin_role(ctx).is_err() {
+                    return Err((STATUS_FORBIDDEN, "Cross-corporation goal summary access denied".into()));
+                }
+            }
+            let mut out = Vec::new();
+            for (c_id, prog) in resolve_goal_contribs(&mgr, &g) {
+                let s_b = encode_goal_contrib_summary(c_id, prog, &g.uuid);
+                encode_bytes_field(1, &s_b, &mut out);
+            }
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.contribution.api.GetContributorSummariesForGoalResponse"),
+                value: out,
+            })
+        }),
+    );
+
+    let mgr = Arc::clone(&manager);
+    router.register_handler(
+        "eve_public.goal.contribution.api.GetMyContributorSummaryForGoalRequest",
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let Some(cid) = ctx.effective_character_id() else {
+                return Err((STATUS_FORBIDDEN, "Active character required".into()));
+            };
+            let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
+                return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
+            };
+            let g = mgr
+                .generic_goals
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&uuid_to_hex(&target_uuid))
+                .cloned()
+                .ok_or_else(|| (STATUS_NOT_FOUND, "Goal not found".into()))?;
+            let prog = resolve_goal_contribs(&mgr, &g)
+                .into_iter()
+                .find(|&(c, _)| c == cid)
+                .map(|(_, p)| p)
+                .unwrap_or(0);
+            let s_b = encode_goal_contrib_summary(cid, prog, &g.uuid);
+            let mut out = Vec::new();
+            encode_bytes_field(1, &s_b, &mut out);
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.contribution.api.GetMyContributorSummaryForGoalResponse"),
+                value: out,
+            })
+        }),
+    );
+
+    let mgr = Arc::clone(&manager);
+    router.register_handler(
+        "eve_public.goal.contribution.api.GetMyContributorSummariesRequest",
+        Arc::new(move |ctx, _any, _dyn_msg| {
+            let Some(cid) = ctx.effective_character_id() else {
+                return Err((STATUS_FORBIDDEN, "Active character required".into()));
+            };
+            let goals: Vec<GenericGoalRecord> = mgr
+                .generic_goals
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .values()
+                .cloned()
+                .collect();
+            let mut out = Vec::new();
+            for g in goals {
+                if let Some((_, prog)) = resolve_goal_contribs(&mgr, &g).into_iter().find(|&(c, p)| c == cid && p > 0) {
+                    let s_b = encode_goal_contrib_summary(cid, prog, &g.uuid);
+                    encode_bytes_field(1, &s_b, &mut out);
+                }
+            }
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.contribution.api.GetMyContributorSummariesResponse"),
+                value: out,
+            })
+        }),
+    );
+
     // ------------------------------------------------------------------------
     // 4. Character Titles Definition Handler: delegated to `quasar_cosmetics_skinr`
     // ------------------------------------------------------------------------
@@ -1056,4 +1188,125 @@ pub fn register_progression_extra_handlers(
     // ------------------------------------------------------------------------
     super::quasar_campaign_definitions::register_campaign_definition_handlers(router, Arc::clone(&manager));
     super::quasar_campaign_handlers::register_campaign_handlers(router, Arc::clone(&manager));
+}
+
+fn format_opportunity_id_value(v: &DynamicValue) -> String {
+    match v {
+        DynamicValue::String(s) => s.clone(),
+        DynamicValue::Bytes(b) => b.iter().map(|x| format!("{x:02x}")).collect(),
+        DynamicValue::Uint64(u) => u.to_string(),
+        DynamicValue::Int64(i) => i.to_string(),
+        DynamicValue::Uint32(u) => u.to_string(),
+        DynamicValue::Int32(i) => i.to_string(),
+        DynamicValue::Bool(b) => b.to_string(),
+        DynamicValue::Enum(e) => e.to_string(),
+        DynamicValue::Message(m) => m
+            .fields
+            .iter()
+            .map(|(k, fv)| format!("{k}={}", format_opportunity_id_value(fv)))
+            .collect::<Vec<_>>()
+            .join(","),
+        DynamicValue::Repeated(items) => items
+            .iter()
+            .map(format_opportunity_id_value)
+            .collect::<Vec<_>>()
+            .join(","),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Consumes client-published `eve_public.opportunity.api.{Viewed,Tracked,Untracked,Completed,Discovered}`
+/// events from `publicGatewaySvc.PublishEvent` / `PublishEventPayload`, updates live achievement/goal
+/// progression state, and queues progression notices to the character's subscribed session.
+pub fn handle_opportunity_event(
+    manager: &crate::services::quasar_progression::ProgressionManagers,
+    descriptors: &eve_proto::quasar::QuasarDescriptorRegistry,
+    session: &eve_machonet::SessionState,
+    any: &GoogleAny,
+    now_unix: u64,
+) {
+    let event_name = eve_proto::quasar::QuasarDescriptorRegistry::normalize_type_name(&any.type_url);
+    if !matches!(
+        event_name,
+        "eve_public.opportunity.api.Viewed"
+            | "eve_public.opportunity.api.Tracked"
+            | "eve_public.opportunity.api.Untracked"
+            | "eve_public.opportunity.api.Completed"
+            | "eve_public.opportunity.api.Discovered"
+    ) {
+        return;
+    }
+    let Some(cid) = session.character_id.filter(|&c| c > 0).map(|c| c as u32) else { return };
+    let Ok(dyn_msg) = descriptors.decode_dynamic(&any.type_url, &any.value) else { return };
+    let mut delta = 1u64;
+    let opp_key = if event_name.ends_with(".Discovered") {
+        let Some(DynamicValue::Message(disc_opp)) = dyn_msg.get(1) else { return };
+        if let Some(amt) = disc_opp.get(2).and_then(|v| match v {
+            DynamicValue::Uint64(u) if *u > 0 => Some(*u),
+            DynamicValue::Int64(i) if *i > 0 => Some(*i as u64),
+            _ => None,
+        }) {
+            delta = amt;
+        }
+        let tag = match disc_opp.get(1) {
+            Some(DynamicValue::Message(m)) => match m.get(1) {
+                Some(DynamicValue::String(s)) if !s.trim().is_empty() => s.clone(),
+                Some(DynamicValue::Uint64(v)) if *v > 0 => v.to_string(),
+                Some(DynamicValue::Int64(v)) if *v > 0 => v.to_string(),
+                _ => String::new(),
+            },
+            Some(DynamicValue::String(s)) => s.clone(),
+            _ => String::new(),
+        };
+        if tag.is_empty() { return; }
+        format!("discovered:{tag}")
+    } else {
+        if let Some(DynamicValue::Message(ch_msg)) = dyn_msg.get(1) {
+            let req_cid = match ch_msg.get(1) {
+                Some(DynamicValue::Uint64(v)) => Some(*v as u32),
+                Some(DynamicValue::Int64(v)) if *v > 0 => Some(*v as u32),
+                Some(DynamicValue::Uint32(v)) => Some(*v),
+                Some(DynamicValue::Int32(v)) if *v > 0 => Some(*v as u32),
+                _ => None,
+            };
+            if req_cid.filter(|&c| c > 0).is_some_and(|rc| rc != cid) { return; }
+        }
+        let Some(DynamicValue::Message(opp_msg)) = dyn_msg.get(2) else { return };
+        let Some(variant_num) = (1u32..=8).find(|&f| opp_msg.get(f).is_some()) else { return };
+        let Some(variant_val) = opp_msg.get(variant_num) else { return };
+        let id_str = format_opportunity_id_value(variant_val);
+        if id_str.is_empty() { return; }
+        format!("v{variant_num}:{id_str}")
+    };
+    if let Some((ach, done, ms)) = manager.achievements.add_progress(cid, 102, delta, now_unix) {
+        manager.achievements.save_to_db();
+        let cat_score = manager.achievements.category_score(cid, ach.def.category_id);
+        crate::services::quasar_achievements::emit_achievement_notices(cid, ach.def.id, ach.def.category_id, ach.progress, cat_score, done, &ms, now_unix);
+    }
+    if let Some(ref db) = manager.extra.db {
+        db.with_mut_snapshot(|snap| {
+            let mut state: serde_json::Value = snap.quasar_state_blobs.get("quasar_opportunities").and_then(|j| serde_json::from_str(j).ok()).unwrap_or_else(|| serde_json::json!({}));
+            if !state.is_object() { state = serde_json::json!({}); }
+            if let Some(obj) = state.as_object_mut() {
+                let ch_entry = obj.entry(cid.to_string()).or_insert_with(|| serde_json::json!({"tracked": [], "history": []}));
+                if event_name.ends_with(".Tracked") {
+                    if let Some(arr) = ch_entry.get_mut("tracked").and_then(|v| v.as_array_mut()) {
+                        if !arr.iter().any(|x| x.as_str() == Some(&opp_key)) {
+                            if arr.len() >= 256 { arr.remove(0); }
+                            arr.push(serde_json::Value::String(opp_key.clone()));
+                        }
+                    }
+                } else if event_name.ends_with(".Untracked") {
+                    if let Some(arr) = ch_entry.get_mut("tracked").and_then(|v| v.as_array_mut()) {
+                        arr.retain(|x| x.as_str() != Some(&opp_key));
+                    }
+                }
+                if let Some(hist) = ch_entry.get_mut("history").and_then(|v| v.as_array_mut()) {
+                    if hist.len() >= 256 { hist.remove(0); }
+                    hist.push(serde_json::json!({"event": event_name, "key": opp_key}));
+                }
+            }
+            snap.quasar_state_blobs.insert("quasar_opportunities".into(), state.to_string());
+        });
+    }
 }

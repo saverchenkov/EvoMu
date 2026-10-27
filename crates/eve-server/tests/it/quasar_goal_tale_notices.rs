@@ -75,7 +75,12 @@ async fn kill_rat(ctx: &ServerContext, killer: i64) {
 
 #[tokio::test]
 async fn goal_notices_follow_project_lifecycle_and_contributions() {
-    // parity: quasar:eveProto/generated/eve_public/goal/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/goal/contribution/api/notices_pb2.pyj
+    // parity: feat:quasar.goal, quasar:eveProto/generated/eve_public/goal/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/goal/contribution/api/notices_pb2.pyj
+    eve_testkit::attest(&[
+        "feat:quasar.goal",
+        "quasar:eveProto/generated/eve_public/goal/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/goal/contribution/api/notices_pb2.pyj",
+    ]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.db.with_mut_snapshot(|s| {
@@ -89,6 +94,7 @@ async fn goal_notices_follow_project_lifecycle_and_contributions() {
     let mut creator = build_sess(51_001, 90_000_001, CORP);
     let mut mate = build_sess(51_002, 90_000_002, CORP);
     let mut outsider = build_sess(51_003, 90_000_003, OTHER_CORP);
+    outsider.role = 0;
     let mut rx_creator = subscribe(&ctx, &mut creator).await;
     let mut rx_mate = subscribe(&ctx, &mut mate).await;
     let mut rx_out = subscribe(&ctx, &mut outsider).await;
@@ -146,6 +152,17 @@ async fn goal_notices_follow_project_lifecycle_and_contributions() {
     assert!(drain(&mut rx_creator, "eve_public.goal").is_empty(), "a completed goal takes no further contributions");
     assert_eq!(drain(&mut rx_mate, "eve_public.goal").len(), 3, "the contributing corp mate sees the same 3 notices");
     assert!(drain(&mut rx_out, "eve_public.goal").is_empty());
+
+    // Contributor summary queries on eve_public.goal.contribution.api reflect the 2 contributed kills.
+    let g_sum = quasar_rpc(&ctx, &mut creator, "eve_public.goal.contribution.api.GetContributorSummariesForGoalRequest", goal_req(&uuid, |_| {})).await;
+    assert_eq!(g_sum.status_code, STATUS_OK);
+    let g_sum_wm = WireMessage::decode(&g_sum.payload.unwrap().value).unwrap();
+    assert_eq!(varint(&sub(&g_sum_wm, 1), 2), Some(2), "corp mate added 2 progress");
+    assert_eq!(quasar_rpc(&ctx, &mut outsider, "eve_public.goal.contribution.api.GetContributorSummariesForGoalRequest", goal_req(&uuid, |_| {})).await.status_code, 403);
+    let my_sum = quasar_rpc(&ctx, &mut mate, "eve_public.goal.contribution.api.GetMyContributorSummaryForGoalRequest", goal_req(&uuid, |_| {})).await;
+    assert_eq!(varint(&sub(&WireMessage::decode(&my_sum.payload.unwrap().value).unwrap(), 1), 2), Some(2));
+    let my_all = quasar_rpc(&ctx, &mut mate, "eve_public.goal.contribution.api.GetMyContributorSummariesRequest", Vec::new()).await;
+    assert_eq!(varint(&sub(&WireMessage::decode(&my_all.payload.unwrap().value).unwrap(), 1), 2), Some(2));
 
     // Admin rename / re-describe -> NameChangedNotice / DescriptionChangedNotice.
     let rename = goal_req(&uuid, |b| encode_string_field(2, "Belt Clearance II", b));

@@ -1049,10 +1049,7 @@ impl PublicGatewayRouter {
     /// capped at `MAX_PUBLISHED_EVENTS` entries (`R-Q2-P1-4`).
     pub fn publish_event(&self, session: &SessionState, mut event: EvePublicEvent, now_unix: u64) {
         if event.occurred.is_none() {
-            event.occurred = Some(GoogleTimestamp {
-                seconds: now_unix as i64,
-                nanos: 0,
-            });
+            event.occurred = Some(GoogleTimestamp { seconds: now_unix as i64, nanos: 0 });
         }
         event.authoritative_context = Some(AuthoritativeContext::for_session_at(
             session.user_id.map(|u| u as i32),
@@ -1063,10 +1060,19 @@ impl PublicGatewayRouter {
             self.gateway_instance_uuid.clone(),
             now_unix,
         ));
-        let mut events = self
-            .published_events
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        if let Some(ref payload) = event.payload {
+            crate::services::quasar_progression_extra::handle_opportunity_event(
+                &self.progression,
+                &self.descriptors,
+                session,
+                payload,
+                now_unix,
+            );
+            for (scope, notice_payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
+                let _ = self.publish_notice(scope, notice_payload, ts);
+            }
+        }
+        let mut events = self.published_events.write().unwrap_or_else(|e| e.into_inner());
         if events.len() >= MAX_PUBLISHED_EVENTS {
             events.pop_front();
         }
@@ -1074,43 +1080,23 @@ impl PublicGatewayRouter {
     }
 
     pub fn set_server_hijack_mode(&self, enabled: bool, error: Option<u32>, latency: Option<f64>) {
-        *self
-            .server_hijack_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = QuasarHijackState {
-            enabled,
-            error_code: error,
-            latency_sec: latency,
-        };
+        *self.server_hijack_state.write().unwrap_or_else(|e| e.into_inner()) =
+            QuasarHijackState { enabled, error_code: error, latency_sec: latency };
     }
 
     pub fn is_server_hijack_mode_enabled(&self) -> bool {
-        self.server_hijack_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .enabled
+        self.server_hijack_state.read().unwrap_or_else(|e| e.into_inner()).enabled
     }
 }
 
 pub fn response_to_pyrep(rsp: &EvePublicResponse) -> PyRep {
     let raw = rsp.encode_proto();
-    let payload_type_url = rsp
-        .payload
-        .as_ref()
-        .map(|p| p.type_url.clone())
-        .unwrap_or_default();
-    let payload_bytes = rsp
-        .payload
-        .as_ref()
-        .map(|p| p.value.clone())
-        .unwrap_or_default();
+    let payload_type_url = rsp.payload.as_ref().map(|p| p.type_url.clone()).unwrap_or_default();
+    let payload_bytes = rsp.payload.as_ref().map(|p| p.value.clone()).unwrap_or_default();
     PyRep::keyval([
         ("status_code", PyRep::Integer(rsp.status_code as i64)),
         ("status_message", PyRep::String(rsp.status_message.clone())),
-        (
-            "correlation_uuid",
-            PyRep::Bytes(rsp.correlation_uuid.clone()),
-        ),
+        ("correlation_uuid", PyRep::Bytes(rsp.correlation_uuid.clone())),
         ("type_url", PyRep::String(payload_type_url)),
         ("payload", PyRep::Bytes(payload_bytes)),
         ("response_proto", PyRep::Bytes(raw)),
@@ -1119,21 +1105,9 @@ pub fn response_to_pyrep(rsp: &EvePublicResponse) -> PyRep {
 
 pub fn notice_to_pyrep(notice: &EvePublicNotice) -> PyRep {
     let raw = notice.encode_proto();
-    let payload_type_url = notice
-        .payload
-        .as_ref()
-        .map(|p| p.type_url.clone())
-        .unwrap_or_default();
-    let payload_bytes = notice
-        .payload
-        .as_ref()
-        .map(|p| p.value.clone())
-        .unwrap_or_default();
-    let target_group = notice
-        .target_group
-        .as_ref()
-        .map(|tg| tg.target_group_name().to_string())
-        .unwrap_or_default();
+    let payload_type_url = notice.payload.as_ref().map(|p| p.type_url.clone()).unwrap_or_default();
+    let payload_bytes = notice.payload.as_ref().map(|p| p.value.clone()).unwrap_or_default();
+    let target_group = notice.target_group.as_ref().map(|tg| tg.target_group_name().to_string()).unwrap_or_default();
     PyRep::keyval([
         ("uuid", PyRep::Bytes(notice.uuid.clone())),
         ("tenant", PyRep::String(notice.tenant.clone())),
@@ -1178,15 +1152,11 @@ fn parse_hijack_args(
             }
         },
         Some(PyRep::Integer(code)) => match *code {
-            400 | 401 | 403 | 404 | 405 | 409 | 412 | 415 | 500 | 501 | 503 | 504 => {
-                Some(*code as u32)
-            }
+            400 | 401 | 403 | 404 | 405 | 409 | 412 | 415 | 500 | 501 | 503 | 504 => Some(*code as u32),
             other => {
                 return Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
-                    message: format!(
-                        "Unsupported Quasar hijack HTTP status code {other} (must be V24 ERROR_OPTIONS)"
-                    ),
+                    message: format!("Unsupported Quasar hijack HTTP status code {other} (must be V24 ERROR_OPTIONS)"),
                 });
             }
         },
@@ -1233,13 +1203,7 @@ fn parse_hijack_args(
 impl PublicGatewayRouter {
     /// Handles `serviceGatewayMgr` QA hijack mode RPCs (`qa_enable_hijack_mode`, `qa_disable_hijack_mode`,
     /// `qa_is_hijack_mode_enabled`) as consumed by `ServerRequestHijackWindow` in
-    /// `eve/devtools/script/quasarHijackWnd.pyj`:
-    /// - `ServerRequestHijackWindow.LoadData`:
-    ///   `self.is_enabled = sm.RemoteSvc('serviceGatewayMgr').qa_is_hijack_mode_enabled()` -> `PyRep::Bool`
-    /// - `ServerRequestHijackWindow.EnableHijack`:
-    ///   `sm.RemoteSvc('serviceGatewayMgr').qa_enable_hijack_mode(self.error, self.latency)` -> `PyRep::None`
-    /// - `ServerRequestHijackWindow.DisableHijack`:
-    ///   `sm.RemoteSvc('serviceGatewayMgr').qa_disable_hijack_mode()` -> `PyRep::None`
+    /// `eve/devtools/script/quasarHijackWnd.pyj`.
     pub fn dispatch_service_gateway_mgr_rpc(
         &self,
         method: &str,
@@ -1259,15 +1223,13 @@ impl PublicGatewayRouter {
                 self.set_server_hijack_mode(false, None, None);
                 Some(Ok(PyRep::None))
             }
-            "qa_is_hijack_mode_enabled" => {
-                Some(Ok(PyRep::Bool(self.is_server_hijack_mode_enabled())))
-            }
+            "qa_is_hijack_mode_enabled" => Some(Ok(PyRep::Bool(self.is_server_hijack_mode_enabled()))),
             _ => None,
         }
     }
 
     /// Handles client-facing `publicGatewaySvc` RPCs (`SendRequest`, `CallQuasar`, `Send`,
-    /// `Subscribe`, `SubscribeToNotice`, `ConsumeNotices`, `PollNotices`, `PublishEvent`).
+    /// `Subscribe`, `SubscribeToNotice`, `ConsumeNotices`, `PollNotices`, `PublishEvent`, `PublishEventPayload`).
     /// Server-only operations (`PublishNotice`, `HandleInternalRequest`, `ConsumeEvents`) are not
     /// exposed here (`R-Q2-P0-1`, `R-Q2-P1-3`).
     pub fn dispatch_public_gateway_rpc(
@@ -1283,8 +1245,7 @@ impl PublicGatewayRouter {
                 if session.user_id.is_none() {
                     return Some(Err(BridgeRpcError {
                         code: "AuthenticationRequired".into(),
-                        message: "publicGatewaySvc subscription requires an authenticated session"
-                            .into(),
+                        message: "publicGatewaySvc subscription requires an authenticated session".into(),
                     }));
                 }
                 let mut notice_types = Vec::new();
@@ -1302,10 +1263,7 @@ impl PublicGatewayRouter {
                     }
                 }
                 let rx = self.subscribe_session(session, notice_types, now_unix);
-                self.stream_receivers
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(session.session_id, rx);
+                self.stream_receivers.write().unwrap_or_else(|e| e.into_inner()).insert(session.session_id, rx);
                 let app_uuid = Self::default_app_instance_uuid(session.session_id);
                 Some(Ok(PyRep::keyval([
                     ("application_instance_uuid", PyRep::Bytes(app_uuid)),
@@ -1314,11 +1272,9 @@ impl PublicGatewayRouter {
             }
             "PollNotices" => {
                 let notices = self.poll_notices(session.session_id);
-                Some(Ok(PyRep::List(
-                    notices.iter().map(notice_to_pyrep).collect(),
-                )))
+                Some(Ok(PyRep::List(notices.iter().map(notice_to_pyrep).collect())))
             }
-            "PublishEvent" => {
+            "PublishEvent" | "PublishEventPayload" => {
                 if let Some(PyRep::Bytes(raw_event)) | Some(PyRep::Buffer(raw_event)) = args.first()
                 {
                     if session.user_id.is_none() {
@@ -1327,13 +1283,19 @@ impl PublicGatewayRouter {
                             message: "publicGatewaySvc.PublishEvent requires authentication".into(),
                         }));
                     }
-                    let event = match EvePublicEvent::decode_proto(raw_event) {
-                        Ok(ev) => ev,
-                        Err(e) => {
-                            return Some(Err(BridgeRpcError {
-                                code: "InvalidProtobuf".into(),
-                                message: e.to_string(),
-                            }))
+                    let event = if method == "PublishEventPayload" {
+                        if let Some(any) = GoogleAny::decode_proto(raw_event).ok().filter(|a| a.type_url.starts_with(TYPE_GOOGLEAPIS_PREFIX)) {
+                            EvePublicEvent { payload: Some(any), ..Default::default() }
+                        } else {
+                            match EvePublicEvent::decode_proto(raw_event) {
+                                Ok(ev) => ev,
+                                Err(e) => return Some(Err(BridgeRpcError { code: "InvalidProtobuf".into(), message: e.to_string() })),
+                            }
+                        }
+                    } else {
+                        match EvePublicEvent::decode_proto(raw_event) {
+                            Ok(ev) => ev,
+                            Err(e) => return Some(Err(BridgeRpcError { code: "InvalidProtobuf".into(), message: e.to_string() })),
                         }
                     };
                     self.publish_event(session, event, now_unix);
@@ -1342,37 +1304,24 @@ impl PublicGatewayRouter {
                 None
             }
             "SendRequest" | "CallQuasar" | "Send" => {
-                let explicit_idem = kwargs
-                    .get("idempotency_key")
-                    .and_then(|v| match v {
-                        PyRep::Bytes(b) | PyRep::Buffer(b) => Some(b.clone()),
-                        PyRep::String(s) => Some(s.as_bytes().to_vec()),
-                        _ => None,
-                    });
+                let explicit_idem = kwargs.get("idempotency_key").and_then(|v| match v {
+                    PyRep::Bytes(b) | PyRep::Buffer(b) => Some(b.clone()),
+                    PyRep::String(s) => Some(s.as_bytes().to_vec()),
+                    _ => None,
+                });
 
                 // Binary `EvePublicRequest` wire envelope
                 if let Some(PyRep::Bytes(raw_req)) | Some(PyRep::Buffer(raw_req)) =
                     args.first().or_else(|| kwargs.get("request"))
                 {
                     let rsp = match EvePublicRequest::decode_proto(raw_req) {
-                        Ok(req) => self.handle_public_request(
-                            session,
-                            &req,
-                            explicit_idem,
-                            false,
-                            now_unix,
-                        ),
+                        Ok(req) => self.handle_public_request(session, &req, explicit_idem, false, now_unix),
                         Err(e) => EvePublicResponse {
-                            dispatched: Some(GoogleTimestamp {
-                                seconds: now_unix as i64,
-                                nanos: 0,
-                            }),
+                            dispatched: Some(GoogleTimestamp { seconds: now_unix as i64, nanos: 0 }),
                             status_code: STATUS_BAD_REQUEST,
                             status_message: format!("Malformed eve_public.Request wire frame: {e}"),
                             internal_origin: "evomu.quasar.public_gateway".into(),
-                            application_instance_uuid: Self::default_app_instance_uuid(
-                                session.session_id,
-                            ),
+                            application_instance_uuid: Self::default_app_instance_uuid(session.session_id),
                             gateway_instance_uuid: self.gateway_instance_uuid.clone(),
                             ..Default::default()
                         },

@@ -2,7 +2,8 @@ use eve_machonet::SessionState;
 use crate::quasar_progression_complete::quasar_rpc;
 use crate::quasar_space_cosmetics_complete::call_req;
 use eve_proto::quasar::{
-    encode_bytes_field, EvePublicNotice, WireField, WireMessage,
+    encode_bytes_field, EvePublicNotice, GoogleAny, QuasarMessage, WireField, WireMessage,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
 use eve_server::quasar_gateway::STATUS_OK;
@@ -185,10 +186,12 @@ async fn quasar_achievements_categories_scores_and_claims() {
 
 #[tokio::test]
 async fn quasar_community_progression_tales_and_goals() {
-    // parity: feat:quasar.tale, feat:quasar.communitytrack, quasar:eveProto/generated/eve_public/communitytrack/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/communitytrack/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/goal/api/requests_pb2.pyj
+    // parity: feat:quasar.tale, feat:quasar.communitytrack, feat:quasar.goal, feat:quasar.opportunity, quasar:eveProto/generated/eve_public/communitytrack/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/communitytrack/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/goal/api/requests_pb2.pyj
     eve_testkit::attest(&[
         "feat:quasar.tale",
         "feat:quasar.communitytrack",
+        "feat:quasar.goal",
+        "feat:quasar.opportunity",
         "quasar:eveProto/generated/eve_public/communitytrack/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/communitytrack/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/goal/api/requests_pb2.pyj",
@@ -328,6 +331,52 @@ async fn quasar_community_progression_tales_and_goals() {
 
     let chall_rsp = quasar_rpc(&ctx, &mut sess, "eve.seasonalevent.challenge.GetChallengesForCharacterRequest", make_sequential_id_request(90_000_001)).await;
     assert_eq!(chall_rsp.status_code, STATUS_OK);
+
+    // Job Board Opportunities: Viewed, Tracked, Untracked, Completed, Discovered via publicGatewaySvc.PublishEventPayload
+    let make_opp_ev = |cid: u32, story_name: &str| {
+        let (mut ch, mut story, mut opp, mut ev) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        eve_proto::quasar::encode_varint_field(1, cid as u64, &mut ch);
+        eve_proto::quasar::encode_string_field(1, story_name, &mut story);
+        encode_bytes_field(5, &story, &mut opp);
+        encode_bytes_field(1, &ch, &mut ev);
+        encode_bytes_field(2, &opp, &mut ev);
+        ev
+    };
+    async fn pub_opp(ctx: &ServerContext, s: &mut SessionState, type_name: &str, value: Vec<u8>) {
+        let any = GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"), value };
+        ctx.dispatch_rpc(s, "publicGatewaySvc", None, "PublishEventPayload", &[PyRep::Bytes(any.encode_proto())], &HashMap::new(), None).await.expect("PublishEventPayload");
+    }
+    // Foreign character session attempting to track for 90_000_001 is ignored
+    pub_opp(&ctx, &mut unauth_sess, "eve_public.opportunity.api.Tracked", make_opp_ev(90_000_001, "air_npe_storylin1")).await;
+    assert!(!ctx.db.with_snapshot(|s| s.quasar_state_blobs.contains_key("quasar_opportunities")));
+    // Two distinct opportunity IDs of identical byte length ("air_npe_storylin1" and "air_npe_storylin2", 17 bytes) both persist distinctly
+    let opp1 = make_opp_ev(90_000_001, "air_npe_storylin1");
+    let opp2 = make_opp_ev(90_000_001, "air_npe_storylin2");
+    assert_eq!(opp1.len(), opp2.len(), "Both opportunity event payloads have identical byte length");
+    for ev_name in ["eve_public.opportunity.api.Viewed", "eve_public.opportunity.api.Tracked", "eve_public.opportunity.api.Completed"] {
+        pub_opp(&ctx, &mut sess, ev_name, opp1.clone()).await;
+    }
+    pub_opp(&ctx, &mut sess, "eve_public.opportunity.api.Tracked", opp2).await;
+    let opp_state: serde_json::Value = ctx.db.with_snapshot(|s| serde_json::from_str(&s.quasar_state_blobs["quasar_opportunities"]).unwrap());
+    let tracked = opp_state["90000001"]["tracked"].as_array().unwrap();
+    assert_eq!(tracked.len(), 2, "Both same-length opportunity IDs must be tracked distinctly");
+    assert!(tracked.iter().any(|x| x.as_str() == Some("v5:1=air_npe_storylin1")));
+    assert!(tracked.iter().any(|x| x.as_str() == Some("v5:1=air_npe_storylin2")));
+    pub_opp(&ctx, &mut sess, "eve_public.opportunity.api.Untracked", opp1).await;
+    let opp_state2: serde_json::Value = ctx.db.with_snapshot(|s| serde_json::from_str(&s.quasar_state_blobs["quasar_opportunities"]).unwrap());
+    let tracked2 = opp_state2["90000001"]["tracked"].as_array().unwrap();
+    assert_eq!(tracked2.len(), 1, "Untracked removes only opp1 while keeping opp2");
+    assert_eq!(tracked2[0].as_str(), Some("v5:1=air_npe_storylin2"));
+    let (mut ctag, mut disc_opp, mut disc_ev) = (Vec::new(), Vec::new(), Vec::new());
+    eve_proto::quasar::encode_string_field(1, "feature_combat_anomalies", &mut ctag);
+    encode_bytes_field(1, &ctag, &mut disc_opp);
+    eve_proto::quasar::encode_varint_field(2, 3, &mut disc_opp);
+    encode_bytes_field(1, &disc_opp, &mut disc_ev);
+    pub_opp(&ctx, &mut sess, "eve_public.opportunity.api.Discovered", disc_ev).await;
+    let opp_state3: serde_json::Value = ctx.db.with_snapshot(|s| serde_json::from_str(&s.quasar_state_blobs["quasar_opportunities"]).unwrap());
+    assert!(opp_state3["90000001"]["history"].as_array().unwrap().iter().any(|h| h["key"].as_str() == Some("discovered:feature_combat_anomalies")));
+    assert!(ctx.quasar_gateway.poll_notices(sess.session_id).iter().any(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("achievement.api.ProgressedNotice"))));
+    assert!(ctx.quasar_gateway.progression.achievements.get_or_init_achievements(90_000_001).iter().any(|a| a.def.id == 102 && a.progress >= 3));
 }
 
 #[tokio::test]

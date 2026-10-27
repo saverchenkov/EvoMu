@@ -416,8 +416,9 @@ async fn test_quasar_alliance_complete() {
 
 #[tokio::test]
 async fn test_quasar_corporation_skill_plans_complete() {
-    // parity: quasar:eveProto/generated/eve_public/corporation/skill/plan/milestone_pb2.pyj, quasar:eveProto/generated/eve_public/corporation/skill/plan/plan_pb2.pyj
+    // parity: feat:quasar.corporation, quasar:eveProto/generated/eve_public/corporation/skill/plan/milestone_pb2.pyj, quasar:eveProto/generated/eve_public/corporation/skill/plan/plan_pb2.pyj
     eve_testkit::attest(&[
+        "feat:quasar.corporation",
         "quasar:eveProto/generated/eve_public/corporation/skill/plan/milestone_pb2.pyj",
         "quasar:eveProto/generated/eve_public/corporation/skill/plan/plan_pb2.pyj",
     ]);
@@ -511,38 +512,155 @@ async fn test_quasar_corporation_skill_plans_complete() {
 
 #[tokio::test]
 async fn test_quasar_corporation_governance_complete() {
+    // parity: feat:quasar.corporation
+    eve_testkit::attest(&["feat:quasar.corporation"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let now = ctx.now_unix();
     let sess = make_auth_session(104, 1, 90000001, 98000001);
 
-    for (url, payload, want) in [
-        ("eve.corporation.members.GetRequest", Vec::new(), "GetResponse"),
-        ("eve.corporation.members.GetLimitRequest", Vec::new(), "GetLimitResponse"),
-        ("eve.corporation.members.roles.GetRequest", Vec::new(), "roles"),
-        ("eve.corporation.npc.GetAllRequest", Vec::new(), "GetAllResponse"),
-        ("eve.corporation.structure.GetAllWithDetailsRequest", Vec::new(), "structure"),
-        ("eve.corporation.medals.GetRequest", encode_seq_id(1, 98000001), "medals"),
-    ] {
+    // Seed authoritative corporation state across all 7 sub-domains:
+    // accounting, divisions, home station, industry, members, alliance membership, and ALSC logs.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.corporation_id = 98_000_001;
+        }
+        if let Some(corp) = snap.corporations.get_mut(&98_000_001) {
+            corp.members.insert(90_000_001);
+            corp.alliance_id = Some(99_000_001);
+            corp.hq_station_id = Some(60_003_760);
+            corp.wallet_divisions = eve_db::CorporationRecord::default_wallet_divisions(eve_db::IskCents(250_000_00));
+            corp.wallet_divisions[0].name = "Ops Treasury".into();
+            corp.member_roles.insert(90_000_001, 0x01);
+        }
+        snap.corp_hangar_divisions.entry(98_000_001).or_default().insert(1, "Capital Bay".into());
+        snap.corp_member_limits.insert(98_000_001, 640);
+        snap.corp_alliance_history.insert(98_000_001, vec![eve_db::snapshot_ext::CorpAllianceHistoryEntry {
+            record_id: 701, alliance_id: Some(99_000_001), start_date_unix: now - 3600, is_deleted: Some(false),
+        }]);
+        snap.corp_container_logs.insert(98_000_001, vec![eve_db::snapshot_ext::CorpContainerLogEntry {
+            logged_at_unix: now - 60, container_id: 700_001, container_type_id: 17_366, character_id: 90_000_001,
+            location_id: 60_003_760, location_flag: "CorpSAG1".into(), action: "Add".into(), password_type: None,
+            type_id: Some(34), quantity: Some(500), old_config_bitmask: None, new_config_bitmask: None,
+        }]);
+        snap.industry_jobs.insert(880_001, eve_db::IndustryJobRecord {
+            job_id: 880_001, installer_id: 90_000_001, facility_id: 60_003_760, blueprint_item_id: 880_002,
+            blueprint_type_id: 688, activity_id: 1, runs: 4, product_type_id: 587, status: "Active".into(),
+            duration_seconds: 1800, start_unix: now,
+        });
+        snap.industry_jobs.insert(880_003, eve_db::IndustryJobRecord {
+            job_id: 880_003, installer_id: 90_000_001, facility_id: 60_003_760, blueprint_item_id: 880_002,
+            blueprint_type_id: 688, activity_id: 3, runs: 2, product_type_id: 688, status: "Active".into(),
+            duration_seconds: 900, start_unix: now,
+        });
+        snap.items.insert(880_002, eve_db::InventoryItemRecord {
+            item_id: 880_002, type_id: 688, owner_id: 98_000_001, location_id: 60_003_760,
+            flag: eve_db::InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1,
+            dynamic_attributes: std::collections::HashMap::from([(1112, 8.0), (1113, 16.0)]), ..Default::default()
+        });
+        snap.items.insert(770_001, eve_db::InventoryItemRecord {
+            item_id: 770_001, type_id: 2233, owner_id: 98_000_001, location_id: 30_000_142,
+            flag: eve_db::InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default()
+        });
+        snap.corp_titles.insert(98_000_001, vec![eve_db::snapshot_ext::CorpTitleEntry { title_id: 1, name: "Fleet Admiral".into(), roles: vec!["Director".into()], ..Default::default() }]);
+        snap.corp_member_titles.insert((98_000_001, 90_000_001), vec![1]);
+        snap.corp_role_history.insert(98_000_001, vec![eve_db::snapshot_ext::CorpRoleHistoryEntry { character_id: 90_000_001, changed_at_unix: now - 30, issuer_id: 90_000_001, role_type: "roles".into(), old_roles: Vec::new(), new_roles: vec!["Director".into()] }]);
+        snap.corp_vote_cases.insert(501, eve_db::snapshot_ext::CorpVoteCaseRecord { case_id: 501, corporation_id: 98_000_001, vote_type: 1, text: "CEO Vote".into(), description: "Election".into(), parameter: 0, start_ts: now - 100, end_ts: now + 3600, executed: false, options: Vec::new() });
+        snap.starbase_settings.insert(1_035_000_001, eve_db::snapshot_ext::StarbaseDetailSettings::default());
+        snap.corp_wallet_transactions.insert((98_000_001, 1), vec![eve_db::snapshot_ext::WalletTransactionRecord { transaction_id: 990_001, date_unix: now - 10, location_id: 60_003_760, type_id: 34, unit_price: 5.5, quantity: 100, client_id: 90_000_001, is_buy: true, is_personal: false, journal_ref_id: 1 }]);
+        snap.corp_contacts.insert(98_000_001, vec![eve_db::snapshot_ext::SocialContactRecord { contact_id: 500_001, contact_type: "faction".into(), standing: 4.5, is_watched: false, is_blocked: false, label_ids: Vec::new() }]);
+        snap.corp_customs_offices.insert(98_000_001, vec![eve_db::snapshot_ext::CustomsOfficeRecord { office_id: 770_001, system_id: 30_000_142, reinforce_exit_start: 18, reinforce_exit_end: 20, allow_alliance_access: true, allow_access_with_standings: false, standing_level: None, corporation_tax_rate: Some(0.05), alliance_tax_rate: Some(0.08), excellent_standing_tax_rate: None, good_standing_tax_rate: None, neutral_standing_tax_rate: None, bad_standing_tax_rate: None, terrible_standing_tax_rate: None }]);
+        snap.structures.insert(1_035_000_001, eve_db::UpwellStructureRecord { structure_id: 1_035_000_001, type_id: 35_835, owner_corp_id: 98_000_001, solar_system_id: 30_000_142, name: "Corp Athanor".into(), position: [0.0, 0.0, 0.0], state: "Online".into(), quantum_core_installed: true, fuel_blocks: 100, shield_hp: 1000.0, armor_hp: 1000.0, hull_hp: 1000.0, reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None });
+        snap.observer_mining_ledger.insert(1_035_000_001, Vec::new());
+    });
+
+    let call = |url: &str, payload: Vec<u8>| -> eve_proto::quasar::WireMessage {
         let req = make_public_req(url, payload, now);
         let rsp = ctx.quasar_gateway.handle_public_request(&sess, &req, None, false, now);
-        assert_eq!(rsp.status_code, STATUS_OK, "failed: {url}");
-        assert!(rsp.payload.unwrap().type_url.contains(want));
-    }
+        assert_eq!(rsp.status_code, STATUS_OK, "failed: {url}: {}", rsp.status_message);
+        eve_proto::quasar::WireMessage::decode(&rsp.payload.as_ref().expect("payload").value).expect("decode wm")
+    };
+    let field_varint = |wm: &eve_proto::quasar::WireMessage, num: u32| -> u64 {
+        wm.fields.iter().find(|f| f.field_number == num).and_then(|f| f.value.as_varint()).expect("varint")
+    };
+
+    // 1. Accounting & Divisions & Home station
+    let acct = call("eve.corporation.accounting.wallet.GetAllDivisionBalanceRequest", encode_seq_id(2, 98_000_001));
+    let div1 = eve_proto::quasar::WireMessage::decode(field_ld(&acct, 1)).unwrap();
+    assert_eq!(field_varint(&div1, 1), 1000);
+    let bal1 = eve_proto::quasar::WireMessage::decode(field_ld(&div1, 2)).unwrap();
+    assert_eq!(field_varint(&bal1, 1), 500_000);
+    let divs = call("eve.corporation.divisions.GetRequest", encode_seq_id(1, 98_000_001));
+    let h1 = eve_proto::quasar::WireMessage::decode(field_ld(&divs, 1)).unwrap();
+    assert_eq!(std::str::from_utf8(field_ld(&h1, 3)).unwrap(), "Capital Bay");
+    let w1 = eve_proto::quasar::WireMessage::decode(field_ld(&divs, 2)).unwrap();
+    assert_eq!(std::str::from_utf8(field_ld(&w1, 3)).unwrap(), "Ops Treasury");
+    let hs = call("eve.corporation.homestation.GetRequest", encode_seq_id(1, 98_000_001));
+    assert_eq!(field_varint(&eve_proto::quasar::WireMessage::decode(field_ld(&hs, 1)).unwrap(), 1), 60_003_760);
+
+    // 4. Industry: active jobs (manufacturing at field 4 + TE research at field 6), blueprints, facilities, and observers
+    let jobs = call("eve.corporation.industry.job.GetActiveRequest", encode_seq_id(1, 98_000_001));
+    let job_entries: Vec<_> = jobs.fields.iter().filter(|f| f.field_number == 1).map(|f| eve_proto::quasar::WireMessage::decode(f.value.as_bytes().unwrap()).unwrap()).collect();
+    assert_eq!(job_entries.len(), 2);
+    assert_eq!(field_varint(&eve_proto::quasar::WireMessage::decode(field_ld(&job_entries[0], 1)).unwrap(), 1), 880_001);
+    assert_eq!(field_varint(&eve_proto::quasar::WireMessage::decode(field_ld(&job_entries[0], 4)).unwrap(), 8), 4);
+    assert_eq!(field_varint(&eve_proto::quasar::WireMessage::decode(field_ld(&job_entries[1], 1)).unwrap(), 1), 880_003);
+    assert_eq!(field_varint(&eve_proto::quasar::WireMessage::decode(field_ld(&job_entries[1], 6)).unwrap(), 8), 2, "TE research encoded at field 6");
+    let bps = call("eve.corporation.industry.blueprints.GetRequest", encode_seq_id(1, 98_000_001));
+    let bp_e = eve_proto::quasar::WireMessage::decode(field_ld(&bps, 1)).unwrap();
+    assert_eq!(field_varint(&eve_proto::quasar::WireMessage::decode(field_ld(&bp_e, 1)).unwrap(), 1), 880_002);
+    let bp_attr = eve_proto::quasar::WireMessage::decode(field_ld(&bp_e, 2)).unwrap();
+    assert_eq!((field_varint(&bp_attr, 2), field_varint(&bp_attr, 3)), (8, 16), "blueprint dynamic ME=8, TE=16");
+    let facs = call("eve.corporation.industry.facilties.GetRequest", encode_seq_id(1, 98_000_001));
+    let fac_e = eve_proto::quasar::WireMessage::decode(field_ld(&facs, 1)).unwrap();
+    assert_eq!(field_varint(&eve_proto::quasar::WireMessage::decode(field_ld(&fac_e, 1)).unwrap(), 1), 1_035_000_001);
+    let obs = call("eve.corporation.industry.observer.GetAllDetailsRequest", encode_seq_id(1, 98_000_001));
+    let obs_e = eve_proto::quasar::WireMessage::decode(field_ld(&obs, 1)).unwrap();
+    assert_eq!(field_varint(&eve_proto::quasar::WireMessage::decode(field_ld(&obs_e, 1)).unwrap(), 1), 1_035_000_001);
+
+    // 5. Members, titles, role auditlog, logo, vote, starbase, market entries, NPC standings, and PI offices
+    let mems = call("eve.corporation.members.GetRequest", Vec::new());
+    assert_eq!(field_varint(&eve_proto::quasar::WireMessage::decode(field_ld(&mems, 1)).unwrap(), 1), 90_000_001);
+    assert_eq!(field_varint(&call("eve.corporation.members.GetLimitRequest", Vec::new()), 1), 640);
+    let roles = call("eve.corporation.members.roles.GetRequest", Vec::new());
+    assert_eq!(field_varint(&eve_proto::quasar::WireMessage::decode(field_ld(&roles, 1)).unwrap(), 2), 0x01);
+    assert!(!call("eve.corporation.members.titles.GetRequest", Vec::new()).fields.is_empty());
+    assert!(!call("eve.corporation.title.GetAllRequest", Vec::new()).fields.is_empty());
+    assert!(!call("eve.corporation.members.roles.auditlog.GetRequest", Vec::new()).fields.is_empty());
+    assert!(!call("eve.corporation.logo.api.GetRequest", encode_seq_id(1, 98_000_001)).fields.is_empty());
+    assert!(!call("eve.corporation.vote.GetRequest", encode_seq_id(1, 501)).fields.is_empty());
+    assert!(!call("eve.corporation.starbase.GetAllRequest", Vec::new()).fields.is_empty());
+    assert!(!call("eve.corporation.starbase.GetSettingsAndFuelsRequest", encode_seq_id(3, 1_035_000_001)).fields.is_empty());
+    assert!(!call("eve.corporation.market.entry.GetEntriesRequest", Vec::new()).fields.is_empty());
+    assert!(!call("eve.corporation.standing.npc.GetAllRequest", Vec::new()).fields.is_empty());
+    assert!(!call("eve.corporation.planetinteraction.office.GetRequest", Vec::new()).fields.is_empty());
+
+    // 6. Alliance membership & ALSC container audit logs
+    let cur_al = call("eve.corporation.alliance.api.GetCurrentMembershipRequest", encode_seq_id(1, 98_000_001));
+    assert_eq!(field_varint(&eve_proto::quasar::WireMessage::decode(field_ld(&cur_al, 1)).unwrap(), 1), 99_000_001);
+    let al_hist = call("eve.corporation.alliancemembershiprecord.GetAllRequest", encode_seq_id(1, 98_000_001));
+    let rec_e = eve_proto::quasar::WireMessage::decode(field_ld(&al_hist, 1)).unwrap();
+    assert_eq!(field_varint(&eve_proto::quasar::WireMessage::decode(field_ld(&rec_e, 1)).unwrap(), 1), 701);
+    let alsc = call("eve.corporation.alsclogs.GetRequest", encode_seq_id(1, 98_000_001));
+    let log_e = eve_proto::quasar::WireMessage::decode(field_ld(&alsc, 1)).unwrap();
+    assert_eq!(field_varint(&eve_proto::quasar::WireMessage::decode(field_ld(&log_e, 2)).unwrap(), 1), 700_001);
+    assert_eq!(field_varint(&log_e, 5), 116, "CorpSAG1 flag == 116");
 
     // Cross-corporation query by non-admin pilot in another corp must return STATUS_FORBIDDEN
     let mut foreign_sess = make_auth_session(105, 2, 90000002, 98000002);
     foreign_sess.role = 0;
     foreign_sess.corp_role = 0;
-    let cross_corp_req = make_public_req(
+    for url in [
         "eve.corporation.members.GetRequest",
-        encode_seq_id(1, 98000001),
-        now,
-    );
-    assert_eq!(
-        ctx.quasar_gateway
-            .handle_public_request(&foreign_sess, &cross_corp_req, None, false, now)
-            .status_code,
-        eve_server::quasar_gateway::STATUS_FORBIDDEN
-    );
+        "eve.corporation.accounting.wallet.GetAllDivisionBalanceRequest",
+        "eve.corporation.alsclogs.GetRequest",
+        "eve.corporation.alliance.api.GetCurrentMembershipRequest",
+    ] {
+        let cross_corp_req = make_public_req(url, encode_seq_id(1, 98000001), now);
+        assert_eq!(
+            ctx.quasar_gateway.handle_public_request(&foreign_sess, &cross_corp_req, None, false, now).status_code,
+            eve_server::quasar_gateway::STATUS_FORBIDDEN,
+            "cross-corp {url} must be forbidden"
+        );
+    }
 }

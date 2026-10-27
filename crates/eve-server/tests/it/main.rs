@@ -122,6 +122,7 @@ mod pve_mining_sites;
 mod pve_missions_dungeons_extended;
 mod quasar_career_achievements_remediated;
 mod quasar_economy_complete;
+mod quasar_economy_complete_part2;
 mod quasar_feature_packages_complete;
 mod quasar_gateway;
 mod quasar_grpc_complete;

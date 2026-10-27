@@ -360,3 +360,108 @@ async fn test_equinox_hub_workforce_transfer_network_state_backed() {
     let b_after = resources(&ok_payload(rpc(&ctx, &mut s, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, HUB_B as u64)).await));
     assert_eq!(b_after.2, b_before.2 + 1_000, "imported workforce raises Perimeter availability");
 }
+
+#[tokio::test]
+async fn test_quasar_space_locations_measurements_npcstation_and_tags() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let mut user = sess(61_020, PILOT, CORP, JITA, 0);
+    let mut gm = sess(61_021, PILOT, CORP, JITA, 0);
+    gm.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
+    let mut rx = subscribe(&ctx, &mut user).await;
+
+    // 1. Space locations: ResolveLocationsRequest, GetAllSolarSystemsRequest, GetLocationsWithinSecurityRequest.
+    let mut loc_req_item = Vec::new();
+    encode_bytes_field(2, &idm(JITA as u64), &mut loc_req_item);
+    let mut resolve_req = Vec::new();
+    encode_bytes_field(1, &loc_req_item, &mut resolve_req);
+    let resolved = ok_payload(rpc(&ctx, &mut user, "eve.space.location.api.ResolveLocationsRequest", resolve_req).await);
+    let jita_loc = field(&field(&resolved, 1).expect("locations"), 1).expect("first location");
+    assert_eq!(field(&jita_loc, 1).and_then(|r| varint(&r, 1)), Some(10_000_002), "The Forge region");
+    assert_eq!(field(&jita_loc, 2).and_then(|c| field(&c, 1)).and_then(|c| varint(&c, 1)), Some(20_000_020), "Kimotoro constellation");
+    assert_eq!(field(&jita_loc, 2).and_then(|c| field(&c, 2)).and_then(|s| varint(&s, 1)), Some(JITA as u64));
+
+    let all_sys = ok_payload(rpc(&ctx, &mut user, "eve.space.location.api.GetAllSolarSystemsRequest", Vec::new()).await);
+    assert!(!fields(&all_sys, 1).is_empty(), "SDE solar systems returned");
+
+    let mut min_lim = Vec::new();
+    min_lim.push((1 << 3) | 5);
+    min_lim.extend_from_slice(&0.85f32.to_le_bytes());
+    encode_varint_field(2, 1, &mut min_lim);
+    let mut sec_req = Vec::new();
+    encode_bytes_field(1, &min_lim, &mut sec_req);
+    let sec_locs = ok_payload(rpc(&ctx, &mut user, "eve.space.api.GetLocationsWithinSecurityRequest", sec_req).await);
+    assert!(fields(&sec_locs, 1).iter().any(|l| l == &jita_loc), "Jita included in high-sec locations");
+
+    // 2. NPC station query: Jita 4-4 (60003760) location and Caldari Navy (1000035) owner.
+    let st_rsp = ok_payload(rpc(&ctx, &mut user, "eve.space.npcstation.api.GetRequest", id_req(1, JITA_STATION as u64)).await);
+    assert_eq!(field(&st_rsp, 1).as_deref(), Some(jita_loc.as_slice()));
+    assert_eq!(field(&st_rsp, 2).and_then(|o| varint(&o, 1)), Some(1_000_035));
+    assert_eq!(rpc(&ctx, &mut user, "eve.space.npcstation.api.GetRequest", id_req(1, 999_999_999)).await.status_code, 404);
+
+    // 3. Space measurements: RecordRequest (admin-gated, rejects NaN) -> Recorded notice -> QueryRequest.
+    let (mut m_id, mut m_attr, mut m_req) = (Vec::new(), Vec::new(), Vec::new());
+    eve_proto::quasar::encode_string_field(1, "jump_traffic", &mut m_id);
+    encode_bytes_field(1, &jita_loc, &mut m_attr);
+    m_attr.push((2 << 3) | 1);
+    m_attr.extend_from_slice(&42.5f64.to_le_bytes());
+    encode_bytes_field(1, &m_id, &mut m_req);
+    encode_bytes_field(2, &m_attr, &mut m_req);
+    assert_eq!(rpc(&ctx, &mut user, "eve.space.measurement.api.RecordRequest", m_req.clone()).await.status_code, STATUS_FORBIDDEN);
+    let (mut nan_attr, mut nan_req) = (Vec::new(), Vec::new());
+    encode_bytes_field(1, &jita_loc, &mut nan_attr);
+    nan_attr.push((2 << 3) | 1);
+    nan_attr.extend_from_slice(&f64::NAN.to_le_bytes());
+    encode_bytes_field(1, &m_id, &mut nan_req);
+    encode_bytes_field(2, &nan_attr, &mut nan_req);
+    assert_eq!(rpc(&ctx, &mut gm, "eve.space.measurement.api.RecordRequest", nan_req).await.status_code, STATUS_BAD_REQUEST);
+    ok_payload(rpc(&ctx, &mut gm, "eve.space.measurement.api.RecordRequest", m_req).await);
+    let m_notices = drain(&mut rx);
+    assert!(m_notices.iter().any(|(t, _)| t == "eve.space.measurement.api.Recorded"));
+    let mut q_req = Vec::new();
+    encode_bytes_field(1, &m_id, &mut q_req);
+    let q_rsp = ok_payload(rpc(&ctx, &mut user, "eve.space.measurement.api.QueryRequest", q_req).await);
+    let first_m = field(&q_rsp, 1).expect("measurement result");
+    assert_eq!(field(&first_m, 1).as_deref(), Some(jita_loc.as_slice()));
+    let val_bits = WireMessage::decode(&first_m).unwrap().fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_fixed64()).expect("double bits");
+    assert!((f64::from_bits(val_bits) - 42.5).abs() < 1e-6);
+
+    // 4. Space tags: ApplyRequest (admin-gated) -> Applied notice -> GetTagsRequest / GetLocationsRequest / QueryRequest -> RemoveRequest.
+    let (mut tag_id, mut tag_spec, mut apply_req) = (Vec::new(), Vec::new(), Vec::new());
+    eve_proto::quasar::encode_string_field(1, "trade_hub", &mut tag_id);
+    encode_bytes_field(1, &tag_id, &mut tag_spec);
+    encode_varint_field(2, 1, &mut tag_spec);
+    encode_bytes_field(2, &jita_loc, &mut apply_req);
+    encode_bytes_field(3, &tag_spec, &mut apply_req);
+    assert_eq!(rpc(&ctx, &mut user, "eve.space.tag.admin.api.ApplyRequest", apply_req.clone()).await.status_code, STATUS_FORBIDDEN);
+    ok_payload(rpc(&ctx, &mut gm, "eve.space.tag.admin.api.ApplyRequest", apply_req).await);
+    let tag_notices = drain(&mut rx);
+    assert!(tag_notices.iter().any(|(t, _)| t == "eve.space.tag.api.Applied"));
+
+    let mut gt_loc = Vec::new();
+    encode_bytes_field(3, &idm(JITA as u64), &mut gt_loc);
+    let mut gt_req = Vec::new();
+    encode_bytes_field(1, &gt_loc, &mut gt_req);
+    let gt_rsp = ok_payload(rpc(&ctx, &mut user, "eve.space.location.api.GetTagsRequest", gt_req).await);
+    let tagged_loc = field(&field(&gt_rsp, 1).expect("locations"), 1).expect("tagged_location");
+    assert_eq!(field(&tagged_loc, 2).and_then(|t| field(&t, 1)), Some(b"trade_hub".to_vec()));
+
+    let mut gl_req = Vec::new();
+    encode_bytes_field(1, &tag_id, &mut gl_req);
+    let gl_rsp = ok_payload(rpc(&ctx, &mut user, "eve.space.tag.api.GetLocationsRequest", gl_req).await);
+    assert_eq!(field(&field(&gl_rsp, 1).expect("result"), 2).as_deref(), Some(jita_loc.as_slice()));
+
+    let (mut term, mut tq_req) = (Vec::new(), Vec::new());
+    encode_bytes_field(2, &tag_id, &mut term);
+    encode_bytes_field(1, &term, &mut tq_req);
+    let tq_rsp = ok_payload(rpc(&ctx, &mut user, "eve.space.tag.api.QueryRequest", tq_req.clone()).await);
+    assert_eq!(field(&tq_rsp, 1).as_deref(), Some(jita_loc.as_slice()));
+
+    let mut rm_req = Vec::new();
+    encode_bytes_field(2, &jita_loc, &mut rm_req);
+    encode_bytes_field(3, &tag_id, &mut rm_req);
+    ok_payload(rpc(&ctx, &mut gm, "eve.space.tag.admin.api.RemoveRequest", rm_req).await);
+    assert!(drain(&mut rx).iter().any(|(t, _)| t == "eve.space.tag.api.Removed"));
+    let tq_after = ok_payload(rpc(&ctx, &mut user, "eve.space.tag.api.QueryRequest", tq_req).await);
+    assert!(fields(&tq_after, 1).is_empty(), "tag removed from Jita");
+}

@@ -72,7 +72,11 @@ fn wrap(field: u32, inner: &[u8]) -> Vec<u8> {
 
 #[tokio::test]
 async fn entitlement_notices_follow_delivery_and_redemption() {
-    // parity: quasar:eveProto/generated/eve_public/assetholding/entitlement/api/notices_pb2.pyj
+    // parity: feat:quasar.assetholding, quasar:eveProto/generated/eve_public/assetholding/entitlement/api/notices_pb2.pyj
+    eve_testkit::attest(&[
+        "feat:quasar.assetholding",
+        "quasar:eveProto/generated/eve_public/assetholding/entitlement/api/notices_pb2.pyj",
+    ]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     place_char(&ctx, 90_000_002, CORP, None);
@@ -114,6 +118,9 @@ async fn entitlement_notices_follow_delivery_and_redemption() {
     let rsp = quasar_rpc(&ctx, &mut holder, "eve_public.assetholding.entitlement.api.GetRequest", wrap(1, &id)).await;
     assert_eq!(get(&decode(&rsp)), (Some(2), Some(0)), "total 2, nothing redeemed");
     assert_eq!(quasar_rpc(&ctx, &mut other, "eve_public.assetholding.entitlement.api.RedeemRequest", wrap(1, &id)).await.status_code, 403);
+    assert_eq!(quasar_rpc(&ctx, &mut holder, "eve_public.assetholding.asset.api.GetRequest", wrap(1, &wrap(1, &asset))).await.status_code, STATUS_OK);
+    let unred = decode(&quasar_rpc(&ctx, &mut holder, "eve.assetholding.entitlement.api.GetUnredeemedByHolderAndGroupNameRequest", Vec::new()).await);
+    assert_eq!(unred.fields.iter().filter(|f| f.field_number == 1).count(), 1);
 
     // Redeem -> 200 Tritanium materialize in the holder's station hangar + RedeemedNotice.
     let (location, before) = ctx.db.with_snapshot(|s| {
@@ -135,6 +142,84 @@ async fn entitlement_notices_follow_delivery_and_redemption() {
     assert_eq!(quasar_rpc(&ctx, &mut holder, "eve_public.assetholding.entitlement.api.RedeemRequest", wrap(1, &id)).await.status_code, 400);
     let rsp = quasar_rpc(&ctx, &mut holder, "eve_public.assetholding.entitlement.api.GetRequest", wrap(1, &id)).await;
     assert_eq!(get(&decode(&rsp)), (Some(2), Some(2)));
+
+    // Foreign holder query on GetUnredeemedByHolderAndGroupNameRequest must be rejected with 403.
+    let mut fh_inner = Vec::new();
+    seq(1, 90_000_002, &mut fh_inner);
+    let foreign_holder_req = wrap(1, &fh_inner);
+    assert_eq!(
+        quasar_rpc(&ctx, &mut other, "eve.assetholding.entitlement.api.GetUnredeemedByHolderAndGroupNameRequest", foreign_holder_req).await.status_code,
+        403
+    );
+
+    // 2. Cosmetic character title holding: SpawnRequest(field 13 = character_title, finite = 2) -> DirectDelivery -> Redeem.
+    let mut title_uuid = [0u8; 16];
+    title_uuid[8..16].copy_from_slice(&777u64.to_be_bytes());
+    let mut title_sp = wrap(1, &wrap(1, &title_uuid));
+    encode_varint_field(3, 2, &mut title_sp); // finite = 2
+    let mut spawn_title = Vec::new();
+    encode_string_field(2, "Cosmetic Title 777", &mut spawn_title);
+    encode_bytes_field(13, &title_sp, &mut spawn_title);
+    let t_rsp = quasar_rpc(&ctx, &mut gm, "eve.assetholding.asset.api.SpawnRequest", spawn_title).await;
+    assert_eq!(t_rsp.status_code, STATUS_OK);
+    let t_asset = bytes(&sub(&decode(&t_rsp), 1), 1);
+    let t_get = decode(&quasar_rpc(&ctx, &mut holder, "eve.assetholding.asset.api.GetRequest", wrap(1, &wrap(1, &t_asset))).await);
+    assert_eq!(bytes(&sub(&sub(&sub(&sub(&t_get, 1), 4), 12), 1), 1), title_uuid.to_vec());
+    assert_eq!(varint(&sub(&sub(&sub(&t_get, 1), 5), 1), 2), Some(2));
+
+    let t_group = *b"TITLETITLETITLE1";
+    let t_id = ident(90_000_002, &t_asset, &t_group);
+    let mut t_entry = wrap(2, &t_id);
+    encode_varint_field(10, 1, &mut t_entry);
+    assert_eq!(quasar_rpc(&ctx, &mut gm, "eve.assetholding.entitlement.api.DirectDeliveryRequest", wrap(2, &t_entry)).await.status_code, STATUS_OK);
+    let _ = drain(&mut rx, "eve_public.assetholding");
+    assert_eq!(quasar_rpc(&ctx, &mut holder, "eve_public.assetholding.entitlement.api.RedeemRequest", wrap(1, &t_id)).await.status_code, STATUS_OK);
+    let t_notices = drain(&mut rx, "eve_public.");
+    let cap_n = t_notices.iter().find(|(n, _)| n == "eve_public.assetholding.asset.api.FiniteCapacityClaimedNotice").expect("FiniteCapacityClaimedNotice");
+    assert_eq!(bytes(&sub(&cap_n.1, 1), 1), t_asset);
+    assert_eq!((varint(&cap_n.1, 2), varint(&cap_n.1, 3)), (Some(2), Some(1)));
+    let title_n = t_notices.iter().find(|(n, _)| n == "eve_public.cosmetic.character.title.api.GrantedNotice").expect("title GrantedNotice");
+    assert_eq!(bytes(&sub(&title_n.1, 1), 1), title_uuid.to_vec());
+    let owned_titles = decode(&quasar_rpc(&ctx, &mut holder, "eve_public.cosmetic.character.title.api.GetOwnedRequest", Vec::new()).await);
+    assert_eq!(bytes(&sub(&owned_titles, 1), 1), title_uuid.to_vec());
+
+    // 3. Ship SKIN license holding: HoldRequest requires admin (403 for non-admin), then DirectDelivery -> Redeem.
+    let mut skin_id_msg = Vec::new();
+    encode_string_field(1, "skin_hex_assethold_01", &mut skin_id_msg);
+    let mut skin_hp = wrap(1, &wrap(1, &skin_id_msg));
+    encode_varint_field(2, 3, &mut skin_hp);
+    assert_eq!(quasar_rpc(&ctx, &mut holder, "eve.assetholding.asset.api.HoldRequest", wrap(11, &skin_hp)).await.status_code, 403);
+    let h_rsp = quasar_rpc(&ctx, &mut gm, "eve.assetholding.asset.api.HoldRequest", wrap(11, &skin_hp)).await;
+    assert_eq!(h_rsp.status_code, STATUS_OK, "{}", h_rsp.status_message);
+    let s_asset = bytes(&sub(&decode(&h_rsp), 1), 1);
+    let s_get = decode(&quasar_rpc(&ctx, &mut holder, "eve.assetholding.asset.api.GetRequest", wrap(1, &wrap(1, &s_asset))).await);
+    assert_eq!(
+        String::from_utf8(bytes(&sub(&sub(&sub(&sub(&s_get, 1), 4), 10), 1), 1)).unwrap(),
+        "skin_hex_assethold_01"
+    );
+    let s_group = *b"SKINSKINSKINSKIN";
+    let s_id = ident(90_000_002, &s_asset, &s_group);
+    let mut s_entry = wrap(2, &s_id);
+    encode_varint_field(10, 2, &mut s_entry);
+    assert_eq!(quasar_rpc(&ctx, &mut gm, "eve.assetholding.entitlement.api.DirectDeliveryRequest", wrap(2, &s_entry)).await.status_code, STATUS_OK);
+    let _ = drain(&mut rx, "eve_public.assetholding");
+    let int_ent_get = decode(&quasar_rpc(&ctx, &mut holder, "eve.assetholding.entitlement.api.GetRequest", wrap(1, &s_id)).await);
+    assert_eq!(varint(&sub(&sub(&int_ent_get, 1), 1), 1), Some(2));
+    assert_eq!(quasar_rpc(&ctx, &mut gm, "eve.assetholding.entitlement.api.admin.RedeliverStaleEntitlementsRequest", Vec::new()).await.status_code, STATUS_OK);
+    assert!(!drain(&mut rx, "eve_public.assetholding").is_empty());
+    assert_eq!(quasar_rpc(&ctx, &mut gm, "eve_public.assetholding.entitlement.api.admin.AutoRedeemRequest", wrap(1, &s_id)).await.status_code, STATUS_OK);
+    let s_notices = drain(&mut rx, "eve_public.");
+    let s_cap = s_notices.iter().find(|(n, _)| n == "eve_public.assetholding.asset.api.FiniteCapacityClaimedNotice").expect("skin FiniteCapacityClaimedNotice");
+    assert_eq!((varint(&s_cap.1, 2), varint(&s_cap.1, 3)), (Some(3), Some(1)));
+    let lic_added = s_notices.iter().find(|(n, _)| n == "eve_public.cosmetic.ship.skin.thirdparty.license.api.AddedNotice").expect("skin AddedNotice");
+    assert_eq!(varint(&sub(&lic_added.1, 2), 2), Some(2), "2 unactivated licenses granted");
+    let mut lic_get_req = Vec::new();
+    seq(1, 90_000_002, &mut lic_get_req);
+    encode_bytes_field(2, &skin_id_msg, &mut lic_get_req);
+    let lic_get = decode(&quasar_rpc(&ctx, &mut holder, "eve_public.cosmetic.ship.skin.thirdparty.license.api.GetRequest", wrap(1, &lic_get_req)).await);
+    assert_eq!(varint(&sub(&lic_get, 1), 2), Some(2), "GetRequest returns 2 unactivated licenses");
+    assert_eq!(quasar_rpc(&ctx, &mut gm, "eve_public.assetholding.entitlement.api.admin.ExpireRequest", wrap(1, &s_id)).await.status_code, STATUS_OK);
+    assert_eq!(quasar_rpc(&ctx, &mut holder, "eve.assetholding.entitlement.api.GetRequest", wrap(1, &s_id)).await.status_code, 404);
 }
 
 #[tokio::test]

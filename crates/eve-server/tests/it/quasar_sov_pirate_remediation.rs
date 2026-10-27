@@ -253,6 +253,13 @@ async fn test_authentic_freelance_pirate_stargate_remediated() {
     let sth_bytes = supp_th.payload.expect("supp th payload").value;
     assert_eq!(fields(&sth_bytes, 1).len(), 5);
 
+    // GetForWarzoneRequest maps target_faction_id 500_001 -> warzone 1 (campaign 1), warzone 2 -> no_campaign (field 1 == 1), warzone 0 -> 400.
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.pirate.insurgency.api.GetForWarzoneRequest", Vec::new(), b"pi-wz0").await.status_code, STATUS_BAD_REQUEST);
+    let wz1 = quasar_rpc(&ctx, &mut sess, "eve.pirate.insurgency.api.GetForWarzoneRequest", encode_id_req(1), b"pi-wz1").await.payload.expect("wz1").value;
+    assert_eq!(field(&wz1, 2).and_then(|i| varint(&i, 1)), Some(1), "warzone 1 returns campaign 1");
+    let wz2 = quasar_rpc(&ctx, &mut sess, "eve.pirate.insurgency.api.GetForWarzoneRequest", encode_id_req(2), b"pi-wz2").await.payload.expect("wz2").value;
+    assert_eq!(varint(&wz2, 1), Some(1), "warzone 2 reports no_campaign");
+
     // 3. Point decreases emit SetNotice (not IncreasedNotice).
     eve_server::services::insurgency_services::add_system_corruption(&ctx, 1, zarzakh_sys, -50);
     eve_server::services::insurgency_services::add_system_suppression(&ctx, 1, zarzakh_sys, -50);

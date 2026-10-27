@@ -295,11 +295,20 @@ fn handle_skin_license_get_owned(
 ) -> HandlerResult {
     let cid = require_char(ctx)?;
     let data = state.data.read().unwrap_or_else(|e| e.into_inner());
-    let mut out = Vec::new();
-    for lic in data.skin_licenses.values() {
-        if lic.character_id == cid {
-            encode_bytes_field(1, &encode_skin_license_id(cid, &lic.skin_hex), &mut out);
+    let mut owned_hexes: Vec<String> = data
+        .skin_licenses
+        .values()
+        .filter(|lic| lic.character_id == cid)
+        .map(|lic| lic.skin_hex.clone())
+        .collect();
+    for (sh, _) in super::quasar_entitlement_ledger::redeemed_skin_licenses_for_char(&state.db, cid) {
+        if !owned_hexes.contains(&sh) {
+            owned_hexes.push(sh);
         }
+    }
+    let mut out = Vec::new();
+    for sh in &owned_hexes {
+        encode_bytes_field(1, &encode_skin_license_id(cid, sh), &mut out);
     }
     if req_type.starts_with("eve.") {
         if out.is_empty() {
@@ -333,11 +342,28 @@ fn handle_skin_license_get(
     }
     let key = SkinrCosmeticsState::skin_lic_key(target_cid, &skin_hex);
     let data = state.data.read().unwrap_or_else(|e| e.into_inner());
-    let Some(lic) = data.skin_licenses.get(&key) else {
-        return Err((STATUS_NOT_FOUND, "3rd-party SKIN license not found".into()));
+    let redeemed_qty = super::quasar_entitlement_ledger::redeemed_skin_licenses_for_char(&state.db, target_cid)
+        .into_iter()
+        .find(|(sh, _)| sh == &skin_hex)
+        .map(|(_, q)| q)
+        .unwrap_or(0);
+    let lic_cow = match data.skin_licenses.get(&key).cloned() {
+        Some(mut l) => {
+            l.unactivated = l.unactivated.saturating_add(redeemed_qty);
+            l
+        }
+        None if redeemed_qty > 0 => ThirdPartySkinLicense {
+            character_id: target_cid,
+            skin_hex: skin_hex.clone(),
+            activated: false,
+            unactivated: redeemed_qty,
+            escrowed: 0,
+            first_acquired_unix: ctx.now_unix(),
+        },
+        None => return Err((STATUS_NOT_FOUND, "3rd-party SKIN license not found".into())),
     };
     let mut out = Vec::new();
-    encode_bytes_field(1, &encode_skin_license_attrs(lic), &mut out);
+    encode_bytes_field(1, &encode_skin_license_attrs(&lic_cow), &mut out);
     let rsp_type = if req_type.starts_with("eve.") {
         "eve.cosmetic.ship.skin.thirdparty.license.api.GetResponse"
     } else {

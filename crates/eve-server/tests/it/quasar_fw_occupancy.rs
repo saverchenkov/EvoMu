@@ -87,7 +87,12 @@ fn encode_id_field(field_num: u32, id: u64, out: &mut Vec<u8>) {
 
 #[tokio::test]
 async fn test_fw_occupancy_warzone_scope_and_dynamic_threshold() {
-    // parity: quasar:eveProto/generated/eve_public/faction/activity/activity_pb2.pyj, quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj
+    // parity: feat:quasar.faction, quasar:eveProto/generated/eve_public/faction/activity/activity_pb2.pyj, quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj
+    eve_testkit::attest(&[
+        "feat:quasar.faction",
+        "quasar:eveProto/generated/eve_public/faction/activity/activity_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj",
+    ]);
     let reg = QuasarDescriptorRegistry::open_default().expect("registry");
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -127,110 +132,54 @@ async fn test_fw_occupancy_warzone_scope_and_dynamic_threshold() {
 
     let mut user_sess = build_sess(60_001, 101, 90_000_001, false);
     let mut admin_sess = build_sess(60_002, 102, 90_000_002, true);
+    let _rx = ctx.quasar_gateway.subscribe_session(&user_sess, Vec::new(), ctx.now_unix());
 
     // 2. Query valid FW system -> Returns occupier faction and victory points
     let mut get_fw_req = Vec::new();
     encode_id_field(1, FW_SYSTEM_ID as u64, &mut get_fw_req);
-    let rsp = quasar_rpc(
-        &ctx,
-        &mut user_sess,
-        "eve_public.faction.activity.GetSolarSystemScoresRequest",
-        get_fw_req,
-        b"corr-fw-scores-valid",
-    )
-    .await;
+    let rsp = quasar_rpc(&ctx, &mut user_sess, "eve_public.faction.activity.GetSolarSystemScoresRequest", get_fw_req, b"corr-fw-scores-valid").await;
     assert_eq!(rsp.status_code, STATUS_OK, "Valid FW system query must succeed");
     let dyn_scores = reg
-        .decode_dynamic(
-            "eve_public.faction.activity.GetSolarSystemScoresResponse",
-            &rsp.payload.unwrap().value,
-        )
+        .decode_dynamic("eve_public.faction.activity.GetSolarSystemScoresResponse", &rsp.payload.unwrap().value)
         .expect("decode GetSolarSystemScoresResponse");
-    let Some(DynamicValue::Repeated(score_entries)) = dyn_scores.get(2) else {
-        panic!("expected repeated score entries at field 2");
-    };
+    let Some(DynamicValue::Repeated(score_entries)) = dyn_scores.get(2) else { panic!("expected repeated score entries at field 2") };
     assert_eq!(score_entries.len(), 1);
-    let DynamicValue::Message(first_score) = &score_entries[0] else {
-        panic!("expected message in score entry");
-    };
-    // Field 1 is occupier faction (Minmatar 500002)
-    let Some(DynamicValue::Message(fac_msg)) = first_score.get(1) else {
-        panic!("expected faction id message");
-    };
+    let DynamicValue::Message(first_score) = &score_entries[0] else { panic!("expected message in score entry") };
+    let Some(DynamicValue::Message(fac_msg)) = first_score.get(1) else { panic!("expected faction id message") };
     assert_eq!(fac_msg.get(1), Some(&DynamicValue::Uint64(FACTION_MINMATAR)));
-    // Field 2 is victory points (1000)
     assert_eq!(first_score.get(2), Some(&DynamicValue::Uint32(1_000)));
 
     // 3. Query non-FW system -> Rejected with 400 Bad Request (no station-owner fallback for non-FW)
     let mut get_non_fw_req = Vec::new();
     encode_id_field(1, NON_FW_SYSTEM_ID as u64, &mut get_non_fw_req);
-    let rsp_non_fw = quasar_rpc(
-        &ctx,
-        &mut user_sess,
-        "eve_public.faction.activity.GetSolarSystemScoresRequest",
-        get_non_fw_req,
-        b"corr-fw-scores-non-fw",
-    )
-    .await;
-    assert_eq!(
-        rsp_non_fw.status_code, STATUS_BAD_REQUEST,
-        "Non-warzone system must be rejected with 400 Bad Request"
-    );
+    let rsp_non_fw = quasar_rpc(&ctx, &mut user_sess, "eve_public.faction.activity.GetSolarSystemScoresRequest", get_non_fw_req, b"corr-fw-scores-non-fw").await;
+    assert_eq!(rsp_non_fw.status_code, STATUS_BAD_REQUEST, "Non-warzone system must be rejected with 400 Bad Request");
 
     // 4. Non-admin attempting to mutate score is rejected with 403 Forbidden
     let mut inc_req = Vec::new();
     encode_id_field(1, FW_SYSTEM_ID as u64, &mut inc_req);
     encode_id_field(2, FACTION_MINMATAR, &mut inc_req);
     encode_varint_field(3, 1_500, &mut inc_req);
-    let rsp_unauth = quasar_rpc(
-        &ctx,
-        &mut user_sess,
-        "eve_public.faction.activity.admin.IncrementContributionScoreRequest",
-        inc_req.clone(),
-        b"corr-fw-inc-unauth",
-    )
-    .await;
-    assert_eq!(
-        rsp_unauth.status_code, STATUS_FORBIDDEN,
-        "Non-admin score mutation must be forbidden"
-    );
+    let rsp_unauth = quasar_rpc(&ctx, &mut user_sess, "eve_public.faction.activity.admin.IncrementContributionScoreRequest", inc_req.clone(), b"corr-fw-inc-unauth").await;
+    assert_eq!(rsp_unauth.status_code, STATUS_FORBIDDEN, "Non-admin score mutation must be forbidden");
 
     // 5. Admin mutating non-FW system is rejected and does NOT write an occupation
     let mut inc_non_fw_req = Vec::new();
     encode_id_field(1, NON_FW_SYSTEM_ID as u64, &mut inc_non_fw_req);
     encode_id_field(2, FACTION_CALDARI, &mut inc_non_fw_req);
     encode_varint_field(3, 500, &mut inc_non_fw_req);
-    let rsp_inc_non_fw = quasar_rpc(
-        &ctx,
-        &mut admin_sess,
-        "eve_public.faction.activity.admin.IncrementContributionScoreRequest",
-        inc_non_fw_req,
-        b"corr-fw-inc-non-fw",
-    )
-    .await;
-    assert_eq!(
-        rsp_inc_non_fw.status_code, STATUS_BAD_REQUEST,
-        "Admin increment on non-warzone system must be rejected"
-    );
-    // Verify no occupation was spuriously inserted for non-FW system
+    let rsp_inc_non_fw = quasar_rpc(&ctx, &mut admin_sess, "eve_public.faction.activity.admin.IncrementContributionScoreRequest", inc_non_fw_req, b"corr-fw-inc-non-fw").await;
+    assert_eq!(rsp_inc_non_fw.status_code, STATUS_BAD_REQUEST, "Admin increment on non-warzone system must be rejected");
     ctx.db.with_snapshot(|snap| {
-        assert!(
-            !snap.fw_system_occupations.contains_key(&NON_FW_SYSTEM_ID),
-            "Non-FW system must NOT have an occupation record inserted"
-        );
+        assert!(!snap.fw_system_occupations.contains_key(&NON_FW_SYSTEM_ID), "Non-FW system must NOT have an occupation record inserted");
     });
 
-    // 6. Admin increment on valid FW system respects dynamic threshold
-    // Increment by 1,500 VP -> total 2,500 VP out of 5,000 threshold = 50.0% contested
-    let rsp_inc = quasar_rpc(
-        &ctx,
-        &mut admin_sess,
-        "eve_public.faction.activity.admin.IncrementContributionScoreRequest",
-        inc_req,
-        b"corr-fw-inc-admin",
-    )
-    .await;
+    // 6. Admin increment on valid FW system respects dynamic threshold and emits ScoreContributionNotice + SolarSystemScoresNotice
+    let rsp_inc = quasar_rpc(&ctx, &mut admin_sess, "eve_public.faction.activity.admin.IncrementContributionScoreRequest", inc_req, b"corr-fw-inc-admin").await;
     assert_eq!(rsp_inc.status_code, STATUS_OK, "Admin increment must succeed");
+    let inc_notifs = ctx.quasar_gateway.poll_notices(user_sess.session_id);
+    assert!(inc_notifs.iter().any(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("faction.activity.ScoreContributionNotice"))));
+    assert!(inc_notifs.iter().any(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("faction.activity.SolarSystemScoresNotice"))));
 
     // Verify snapshot: dynamic threshold was used (50.0%), NOT hardcoded 3,000 (which would give 83.33%)
     ctx.db.with_snapshot(|snap| {
@@ -273,6 +222,42 @@ async fn test_fw_occupancy_warzone_scope_and_dynamic_threshold() {
             st.fw_contested_pct
         );
     });
+
+    // 7b. Exercise eve.faction.api.GetRequest, SearchRequest, and eve.faction.activity.*
+    let mut fac_get_req = Vec::new();
+    encode_id_field(1, FACTION_MINMATAR, &mut fac_get_req);
+    let fac_rsp = quasar_rpc(&ctx, &mut user_sess, "eve.faction.api.GetRequest", fac_get_req, b"corr-fac-get").await;
+    assert_eq!(fac_rsp.status_code, STATUS_OK);
+    let fac_dyn = reg.decode_dynamic("eve.faction.api.GetResponse", &fac_rsp.payload.unwrap().value).expect("decode fac");
+    let Some(DynamicValue::Message(fac_attr)) = fac_dyn.get(1) else { panic!("expected faction attributes") };
+    assert!(matches!(fac_attr.get(1), Some(DynamicValue::String(s)) if s.to_lowercase().contains("minmatar")));
+
+    let mut fac_missing_req = Vec::new();
+    encode_id_field(1, 999_999, &mut fac_missing_req);
+    let fac_missing_rsp = quasar_rpc(&ctx, &mut user_sess, "eve.faction.api.GetRequest", fac_missing_req, b"corr-fac-404").await;
+    assert_eq!(fac_missing_rsp.status_code, 404, "Unknown faction must return 404 Not Found");
+
+    let mut kw_msg = Vec::new();
+    eve_proto::quasar::encode_string_field(1, "Minmatar", &mut kw_msg);
+    let mut search_req = Vec::new();
+    eve_proto::quasar::encode_bytes_field(1, &kw_msg, &mut search_req);
+    let search_rsp = quasar_rpc(&ctx, &mut user_sess, "eve.faction.SearchRequest", search_req, b"corr-fac-search").await;
+    assert_eq!(search_rsp.status_code, STATUS_OK);
+    let search_dyn = reg.decode_dynamic("eve.faction.SearchResponse", &search_rsp.payload.unwrap().value).expect("decode search");
+    assert!(search_dyn.get(1).is_some(), "SearchResponse must contain matching faction IDs");
+
+    let mut int_scores_req = Vec::new();
+    encode_id_field(1, FW_SYSTEM_ID as u64, &mut int_scores_req);
+    let int_scores_rsp = quasar_rpc(&ctx, &mut user_sess, "eve.faction.activity.GetSolarSystemScoresRequest", int_scores_req, b"corr-fac-int-scores").await;
+    assert_eq!(int_scores_rsp.status_code, STATUS_OK);
+    let int_scores_dyn = reg.decode_dynamic("eve.faction.activity.GetSolarSystemScoresResponse", &int_scores_rsp.payload.unwrap().value).expect("decode int scores");
+    let Some(DynamicValue::Repeated(scores)) = int_scores_dyn.get(2) else { panic!("expected scores") };
+    let Some(DynamicValue::Message(sc0)) = scores.first() else { panic!("expected score entry") };
+    assert_eq!(sc0.get(2), Some(&DynamicValue::Uint32(4_000)));
+    let all_scores_rsp = quasar_rpc(&ctx, &mut user_sess, "eve.faction.activity.api.GetAllSolarSystemScoresRequest", Vec::new(), b"corr-fac-all-scores").await;
+    assert_eq!(all_scores_rsp.status_code, STATUS_OK);
+    let all_scores_dyn = reg.decode_dynamic("eve.faction.activity.api.GetAllSolarSystemScoresResponse", &all_scores_rsp.payload.unwrap().value).expect("decode all scores");
+    assert!(all_scores_dyn.get(1).is_some());
 
     // 8. fwVictoryPointMgr.GetLocalVictoryPointState reads dynamic threshold (5,000, not hardcoded 3,000)
     let empty_kw = HashMap::new();

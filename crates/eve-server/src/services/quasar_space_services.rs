@@ -537,6 +537,11 @@ pub fn register_handlers(
     }
 
     // 7. eve.pirate.insurgency.api.GetRequest, GetCurrentRequest, GetSystemsRequest, GetForWarzoneRequest
+    // DERIVED: Insurgency warzone IDs (1 = Caldari/Gallente for target_faction_id 500_001 | 500_004,
+    // 2 = Minmatar/Amarr for target_faction_id 500_002 | 500_003) and stage-5 victory states
+    // (3 = PIRATE_VICTORY, 4 = ANTI_PIRATE_VICTORY when any campaign system reaches stage 5 via
+    // `insurgency_stage(pts) >= 5`) are derived from persisted `InsurgencyRuntimeState` because CCP's
+    // live insurgency campaign FSM is server-authoritative.
     {
         let db_i = Arc::clone(&db);
         router.register_handler(
@@ -1057,4 +1062,6 @@ pub fn register_handlers(
             }),
         );
     }
+
+    super::quasar_space_domain::register_handlers(router, db, sde);
 }

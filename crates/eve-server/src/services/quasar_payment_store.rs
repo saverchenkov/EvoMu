@@ -1285,4 +1285,6 @@ fn register_payment_token_and_purchase_handlers(
             })
         }),
     );
+
+    register_plex_vault_extra_handlers(router, Arc::clone(&db));
 }

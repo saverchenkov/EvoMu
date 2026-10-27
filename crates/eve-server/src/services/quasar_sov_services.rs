@@ -17,7 +17,7 @@
 use super::quasar_sov_hub::{caller, owned_structure, require_roles, required_id, transact};
 use super::quasar_space_services::{
     encode_domain_message, get_identifier_or_int, get_int_field, get_string_field,
-    set_domain_attributes, set_domain_field,
+    set_domain_attributes,
 };
 use super::sov_services::TYPE_ORBITAL_SKYHOOK;
 use crate::quasar_gateway::{
@@ -135,70 +135,117 @@ pub fn register_handlers(
         );
     }
 
-    // 6. eve.faction.api handlers
+    // 6. eve.faction.api & eve.faction.activity handlers
     {
-        let d = Arc::clone(&desc);
+        let sde_fac = Arc::clone(&sde);
         router.register_handler(
             "eve.faction.api.GetRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let faction_id = get_int_field(dyn_msg, 1).unwrap_or(500_001) as u64;
-                encode_domain_message(&d, "eve.faction.api.GetResponse", |reg, resp| {
-                    set_domain_field(reg, resp, 1, faction_id, "");
+                let Some(faction_id) = get_identifier_or_int(dyn_msg, 1).and_then(|v| u32::try_from(v).ok()).filter(|&v| v > 0) else {
+                    return Err((STATUS_BAD_REQUEST, "Faction identifier is required".to_string()));
+                };
+                let Some(fac) = sde_fac.factions.get(&faction_id) else {
+                    return Err((STATUS_NOT_FOUND, format!("Faction {faction_id} not found")));
+                };
+                // Standard EVE empire race bit/sequential mapping for playable factions
+                let race_id = match faction_id {
+                    500_001 => Some(1u64), // Caldari
+                    500_002 => Some(2u64), // Minmatar
+                    500_003 => Some(4u64), // Amarr
+                    500_004 => Some(8u64), // Gallente
+                    500_005 => Some(16u64), // Jove
+                    _ => None,
+                };
+                let mut attr = Vec::new();
+                eve_proto::quasar::encode_string_field(1, &fac.name, &mut attr);
+                eve_proto::quasar::encode_string_field(2, &format!("res:/ui/texture/corps/{}_128.png", fac.corporation_id.unwrap_or(faction_id as i64)), &mut attr);
+                if let Some(rid) = race_id {
+                    encode_id_field(3, rid, &mut attr);
+                    encode_id_field(4, rid, &mut attr);
+                }
+                let mut out = Vec::new();
+                encode_bytes_field(1, &attr, &mut out);
+                Ok(GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.faction.api.GetResponse"),
+                    value: out,
                 })
             }),
         );
     }
     {
-        let d = Arc::clone(&desc);
         let sde_fac = Arc::clone(&sde);
         router.register_handler(
             "eve.faction.SearchRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let query = get_string_field(dyn_msg, 1).unwrap_or_default();
-                if query.is_empty() {
+                let mut keywords = Vec::new();
+                if let Some(s) = get_string_field(dyn_msg, 1) {
+                    if !s.trim().is_empty() {
+                        keywords.push(s.trim().to_lowercase());
+                    }
+                } else if let Some(eve_proto::quasar::DynamicValue::Message(q_msg)) = dyn_msg.get(1) {
+                    match q_msg.get(1) {
+                        Some(eve_proto::quasar::DynamicValue::String(s)) if !s.trim().is_empty() => {
+                            keywords.push(s.trim().to_lowercase());
+                        }
+                        Some(eve_proto::quasar::DynamicValue::Repeated(vals)) => {
+                            for v in vals {
+                                if let eve_proto::quasar::DynamicValue::String(s) = v {
+                                    if !s.trim().is_empty() {
+                                        keywords.push(s.trim().to_lowercase());
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if keywords.is_empty() {
                     return Err((STATUS_BAD_REQUEST, "Search query cannot be empty".into()));
                 }
-                let q_lower = query.to_lowercase();
-                let fac_id = sde_fac
+                let mut matched_ids: Vec<u32> = sde_fac
                     .factions
                     .values()
-                    .find(|f| f.name.to_lowercase().contains(&q_lower))
+                    .filter(|f| {
+                        let name_lower = f.name.to_lowercase();
+                        keywords.iter().all(|kw| name_lower.contains(kw))
+                    })
                     .map(|f| f.faction_id)
-                    .unwrap_or(500_001);
-                encode_domain_message(&d, "eve.faction.SearchResponse", |reg, resp| {
-                    set_domain_attributes(reg, resp, fac_id as u64, 30_000_142, &query);
+                    .collect();
+                matched_ids.sort_unstable();
+                let mut out = Vec::new();
+                for fid in matched_ids {
+                    encode_id_field(1, fid as u64, &mut out);
+                }
+                Ok(GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.faction.SearchResponse"),
+                    value: out,
                 })
             }),
         );
     }
     {
-        let d = Arc::clone(&desc);
-        router.register_handler(
-            "eve.faction.activity.GetSolarSystemScoresRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
-                let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u64;
-                encode_domain_message(
-                    &d,
-                    "eve.faction.activity.GetSolarSystemScoresResponse",
-                    |reg, resp| {
-                        set_domain_field(reg, resp, 1, sys_id, "");
-                    },
-                )
-            }),
-        );
-        // parity: quasar:eveProto/generated/eve_public/faction/activity/activity_pb2.pyj
-        // parity: quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj
-        {
+        for (req_name, rsp_name, include_sys_field) in [
+            (
+                "eve.faction.activity.GetSolarSystemScoresRequest",
+                "eve.faction.activity.GetSolarSystemScoresResponse",
+                false,
+            ),
+            (
+                "eve_public.faction.activity.GetSolarSystemScoresRequest",
+                "eve_public.faction.activity.GetSolarSystemScoresResponse",
+                true,
+            ),
+        ] {
             let db_fw = Arc::clone(&db);
             router.register_handler(
-                "eve_public.faction.activity.GetSolarSystemScoresRequest",
+                req_name,
                 Arc::new(move |ctx, _any, dyn_msg| {
-                    let opt_sys = get_identifier_or_int(dyn_msg, 1).map(|v| v as u32).or_else(|| {
+                    let opt_sys = get_identifier_or_int(dyn_msg, 1).and_then(|v| u32::try_from(v).ok()).or_else(|| {
                         ctx.effective_character_id().and_then(|cid| {
                             db_fw.with_snapshot(|s| s.characters.get(&(cid as i64)).map(|c| c.solar_system_id))
                         })
                     });
-                    let Some(sys_id) = opt_sys else {
+                    let Some(sys_id) = opt_sys.filter(|&id| id > 0) else {
                         return Err((
                             STATUS_BAD_REQUEST,
                             "SolarSystemId is required in GetSolarSystemScoresRequest".to_string(),
@@ -228,14 +275,68 @@ pub fn register_handlers(
                         )
                     })?;
                     let mut out = Vec::new();
-                    encode_id_field(1, sys_id as u64, &mut out);
+                    if include_sys_field {
+                        encode_id_field(1, sys_id as u64, &mut out);
+                    }
                     let mut score_entry = Vec::new();
                     encode_id_field(1, occ_fac, &mut score_entry);
                     encode_varint_field(2, vp, &mut score_entry);
                     encode_varint_field(3, adv_floor, &mut score_entry);
                     encode_bytes_field(2, &score_entry, &mut out);
                     Ok(GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.faction.activity.GetSolarSystemScoresResponse"),
+                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_name}"),
+                        value: out,
+                    })
+                }),
+            );
+        }
+        {
+            let db_all = Arc::clone(&db);
+            router.register_handler(
+                "eve.faction.activity.api.GetAllSolarSystemScoresRequest",
+                Arc::new(move |_ctx, _any, _dyn_msg| {
+                    let (rows, ceiling) = db_all.with_snapshot(|snap| {
+                        let mut sys_ids: Vec<u32> = snap.fw_system_occupations.keys().copied().collect();
+                        sys_ids.sort_unstable();
+                        let mut max_ceil = 3_000u64;
+                        let mut entries = Vec::with_capacity(sys_ids.len());
+                        for sys_id in sys_ids {
+                            if let Some(occ) = snap.fw_system_occupations.get(&sys_id) {
+                                max_ceil = max_ceil.max(occ.victory_points_threshold.max(0) as u64);
+                                let vp = snap
+                                    .fw_runtime
+                                    .system_victory_points
+                                    .get(&sys_id)
+                                    .copied()
+                                    .unwrap_or(occ.victory_points)
+                                    .max(0) as u64;
+                                let floor = snap
+                                    .fw_runtime
+                                    .system_advantage
+                                    .get(&sys_id)
+                                    .map(|(occ_adv, _)| ((*occ_adv).max(0.0) * 100.0) as u64)
+                                    .unwrap_or(0);
+                                entries.push((sys_id, occ.occupier_faction_id as u64, vp, floor));
+                            }
+                        }
+                        (entries, max_ceil)
+                    });
+                    let mut out = Vec::new();
+                    for (sys_id, fac_id, vp, floor) in rows {
+                        let mut score_entry = Vec::new();
+                        encode_id_field(1, fac_id, &mut score_entry);
+                        encode_varint_field(2, vp, &mut score_entry);
+                        encode_varint_field(3, floor, &mut score_entry);
+                        let mut sys_scores = Vec::new();
+                        encode_id_field(1, sys_id as u64, &mut sys_scores);
+                        encode_bytes_field(2, &score_entry, &mut sys_scores);
+                        encode_bytes_field(1, &sys_scores, &mut out);
+                    }
+                    encode_varint_field(2, ceiling, &mut out);
+                    Ok(GoogleAny {
+                        type_url: format!(
+                            "{TYPE_GOOGLEAPIS_PREFIX}eve.faction.activity.api.GetAllSolarSystemScoresResponse"
+                        ),
                         value: out,
                     })
                 }),
@@ -250,6 +351,16 @@ pub fn register_handlers(
             (
                 "eve_public.faction.activity.admin.SetContributionScoreRequest",
                 "eve_public.faction.activity.admin.SetContributionScoreResponse",
+                false,
+            ),
+            (
+                "eve.faction.activity.admin.IncrementContributionScoreRequest",
+                "eve.faction.activity.admin.IncrementContributionScoreResponse",
+                true,
+            ),
+            (
+                "eve.faction.activity.admin.SetContributionScoreRequest",
+                "eve.faction.activity.admin.SetContributionScoreResponse",
                 false,
             ),
         ] {
