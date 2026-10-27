@@ -433,13 +433,35 @@ pub async fn handle(
                     .get(&char_id)
                     .map(|c| c.corporation_id)
                     .unwrap_or(0);
-                if st.owner_corp_id != caller_corp {
+                if st.owner_corp_id != caller_corp
+                    || !mining_compression::caller_has_structure_extraction_role(
+                        snap,
+                        char_id,
+                        caller_corp,
+                        session.corp_role,
+                    )
+                {
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: format!(
                             "Character {char_id} (corp {caller_corp}) lacks permissions on structure {structure_id} (corp {})",
                             st.owner_corp_id
                         ),
+                    });
+                }
+                if !matches!(st.type_id, 35835 | 35836) {
+                    return Err(BridgeRpcError {
+                        code: "InvalidStructureType".into(),
+                        message: format!(
+                            "Moon extraction requires an Athanor (35835) or Tatara (35836) refinery, got structure type {}",
+                            st.type_id
+                        ),
+                    });
+                }
+                if st.fuel_blocks == 0 || !st.quantum_core_installed {
+                    return Err(BridgeRpcError {
+                        code: "StructureServiceOffline".into(),
+                        message: "Refinery must have a Quantum Core installed and fuel blocks to operate moon drill".into(),
                     });
                 }
 
@@ -638,7 +660,14 @@ pub async fn handle(
                     .get(&char_id)
                     .map(|c| c.corporation_id)
                     .unwrap_or(0);
-                if st.owner_corp_id != caller_corp {
+                if st.owner_corp_id != caller_corp
+                    || !mining_compression::caller_has_structure_extraction_role(
+                        snap,
+                        char_id,
+                        caller_corp,
+                        session.corp_role,
+                    )
+                {
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: "Character lacks permission to cancel extraction".into(),
@@ -711,7 +740,14 @@ pub async fn handle(
                 let owner_corp_id = st.owner_corp_id;
 
                 let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                if owner_corp_id != caller_corp {
+                if owner_corp_id != caller_corp
+                    || !mining_compression::caller_has_structure_extraction_role(
+                        snap,
+                        char_id,
+                        caller_corp,
+                        session.corp_role,
+                    )
+                {
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: "Character lacks corporation permission to fracture chunk".into(),
@@ -805,9 +841,16 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let corp_id = args.first().and_then(|a| a.as_i64()).unwrap_or_else(|| {
-                ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0))
+            let caller_corp = ctx.db.with_snapshot(|snap| {
+                snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0)
             });
+            let corp_id = args.first().and_then(|a| a.as_i64()).unwrap_or(caller_corp);
+            if corp_id != caller_corp && !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "AccessDenied".into(),
+                    message: format!("Cannot query moon extractions for foreign corporation {corp_id}"),
+                }));
+            }
             let struct_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
                 snap.moon_extractions
                     .keys()

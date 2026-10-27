@@ -884,3 +884,180 @@ async fn test_mn03_mining_ledger_recording_and_char_mining_ledger_service() {
         "Mining ledger entries older than 30 days must age out of characterMiningLedger.GetCharacterLogs"
     );
 }
+
+#[tokio::test]
+async fn test_r3_track1_mining_pve_fw_regressions() {
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(964);
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("demo".into()),
+            PyRep::String("demo-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login");
+    let char_id = 90_000_001_i64;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    let undock = ctx
+        .dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock");
+    let PyRep::KeyVal(undock_kv) = &undock else { panic!("Expected KeyVal") };
+    let beyonce_id = undock_kv["beyonceBoundID"].as_i64().unwrap() as u64;
+    let ship_id = undock_kv["shipID"].as_i64().unwrap();
+
+    // #111: Cross-system DB asteroid must not be cloned into caller's system
+    let foreign_ast_id = 755_000_999_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.asteroids.insert(
+            foreign_ast_id,
+            eve_db::AsteroidRecord {
+                asteroid_id: foreign_ast_id,
+                belt_id: 40_000_999,
+                solar_system_id: 30_002_187, // Amarr
+                type_id: 1230,
+                quantity: 5_000,
+                initial_quantity: 5_000,
+                position: (0.0, 0.0, 0.0),
+                radius: 50.0,
+            },
+        );
+    });
+    let cross_sys_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdMineRepeatedly",
+            &[PyRep::Integer(foreign_ast_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Cross-system asteroid must be rejected");
+    assert_eq!(cross_sys_err.code, "TargetNotInSystem");
+
+    // #112: warpVectorMgr.UseVector rejects self-targeting and caps displacement
+    let self_vec_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "warpVectorMgr",
+            None,
+            "UseVector",
+            &[PyRep::Integer(ship_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Self-targeting UseVector must fail");
+    assert_eq!(self_vec_err.code, "InvalidArgument");
+
+    // #113: Data/Relic/Ghost sites cannot be completed via EnterCombatAnomaly while containers are unhacked
+    eve_server::services::pve_exploration::ensure_system_pve_sites_seeded(&ctx, 30_000_142).await;
+    let unhacked_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "scanSvc",
+            None,
+            "EnterCombatAnomaly",
+            &[PyRep::String("DAT-30000142".into()), PyRep::Bool(true)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Data site with unhacked cans must reject wave completion");
+    assert_eq!(unhacked_err.code, "SiteContainersUnhacked");
+
+    // #115: Capsules cannot join Proving Grounds queue
+    let fil_id = 755_001_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.type_id = 670; // Capsule
+        }
+        snap.items.insert(
+            fil_id,
+            eve_db::InventoryItemRecord {
+                item_id: fil_id,
+                type_id: 56_303,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: eve_db::InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    let pod_pvp_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "pvpFilamentMgr",
+            None,
+            "JoinPVPQueue",
+            &[PyRep::Integer(fil_id), PyRep::Integer(56_303)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Capsule must be rejected from JoinPVPQueue");
+    assert_eq!(pod_pvp_err.code, "InvalidShipForFilament");
+
+    // #116: GetExtractionsForCorp rejects foreign corporation IDs
+    let foreign_corp_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "moonExtractions",
+            None,
+            "GetExtractionsForCorp",
+            &[PyRep::Integer(98_999_999)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Foreign corp moon extraction query must be denied");
+    assert_eq!(foreign_corp_err.code, "AccessDenied");
+
+    // #117: award_fw_kill_lp does not double-credit LP or credit unenlisted pilots as Caldari
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.war_faction_id = None;
+            ch.loyalty_points.clear();
+        }
+    });
+    let _ = eve_server::services::fw_services::award_fw_kill_lp(&ctx, char_id, 30_002_537, 100_000_000.0);
+    let unenlisted_lp_empty = ctx
+        .db
+        .with_snapshot(|s| s.characters[&char_id].loyalty_points.is_empty());
+    assert!(unenlisted_lp_empty, "Unenlisted character must not receive Caldari LP");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.war_faction_id = Some(500_002); // Minmatar Republic
+        }
+    });
+    let awarded = eve_server::services::fw_services::award_fw_kill_lp(&ctx, char_id, 30_002_537, 100_000_000.0);
+    let total_lp: i64 = ctx
+        .db
+        .with_snapshot(|s| s.characters[&char_id].loyalty_points.values().copied().sum());
+    assert_eq!(total_lp, awarded, "Enlisted pilot must receive single militia corp LP without double-crediting");
+}

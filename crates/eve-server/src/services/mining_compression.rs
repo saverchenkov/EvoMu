@@ -1030,6 +1030,30 @@ pub(crate) struct MetenoxDrillInspection {
     pub(crate) hourly_materials: Vec<(TypeId, u64)>,
 }
 
+pub(crate) fn caller_has_structure_extraction_role(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    corp_id: i64,
+    session_corp_role: u64,
+) -> bool {
+    use eve_db::corp_roles::{ROLE_DIRECTOR, ROLE_STARBASE_CONFIG, ROLE_STATION_MANAGER};
+    const MOON_ROLES: u64 = ROLE_DIRECTOR | ROLE_STATION_MANAGER | ROLE_STARBASE_CONFIG;
+    if (session_corp_role & MOON_ROLES) != 0 {
+        return true;
+    }
+    let Some(corp) = snap.corporations.get(&corp_id) else {
+        return true;
+    };
+    if corp.ceo_id == 0 || corp.ceo_id == char_id {
+        return true;
+    }
+    if corp.member_roles.is_empty() {
+        return true;
+    }
+    let member_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+    (member_role & MOON_ROLES) != 0
+}
+
 pub(crate) fn inspect_metenox_drill(
     sde: &eve_sde::SdeRegistry,
     snap: &eve_db::WorldStateSnapshot,
@@ -1058,7 +1082,9 @@ pub(crate) fn inspect_metenox_drill(
         .map(|c| c.corporation_id)
         .unwrap_or(0);
     let st_owner_corp = st.owner_corp_id;
-    if st_owner_corp != caller_corp {
+    if st_owner_corp != caller_corp
+        || !caller_has_structure_extraction_role(snap, char_id, caller_corp, 0)
+    {
         return Err(BridgeRpcError {
             code: "AccessDenied".into(),
             message: "Character lacks corporation permissions for auto moon mining".into(),

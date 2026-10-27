@@ -730,8 +730,13 @@ pub async fn handle(
                     );
                     if lp_awarded > 0 {
                         if let Some(ch) = snap.characters.get_mut(&char_id) {
-                            *ch.loyalty_points.entry(fid).or_insert(0) += lp_awarded;
-                            let militia_corp = ctx.sde.factions.get(&(fid as u32)).and_then(|f| f.militia_corporation_id).map(|c| c as i64).unwrap_or(fid);
+                            let militia_corp = ctx
+                                .sde
+                                .factions
+                                .get(&(fid as u32))
+                                .and_then(|f| f.militia_corporation_id)
+                                .map(|c| c as i64)
+                                .unwrap_or(fid);
                             *ch.loyalty_points.entry(militia_corp).or_insert(0) += lp_awarded;
                         }
                         if let Some(occ) = snap.fw_system_occupations.get_mut(&sys_id) {

@@ -641,8 +641,22 @@ pub async fn handle_use_warp_vector(
             code: "InvalidArgument".into(),
             message: "warpVectorMgr.UseVector requires a positive vector itemID".into(),
         })?;
+    if target_id == ship_id {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "Cannot activate a warp vector targeting your own active ship".into(),
+        });
+    }
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    if sys_handle.is_ball_scrambled_sync(ship_id) || sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
+    let is_scrambled = sys_handle.is_ball_scrambled_sync(ship_id)
+        || sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false)
+        || sys_handle
+            .get_combat_state(ship_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|cs| cs.warp_scramble_strength > 0);
+    if is_scrambled {
         return Err(BridgeRpcError {
             code: "WarpScrambled".into(),
             message: "WarpScrambled: Warp drive disabled by warp disruption/scrambler effect".into(),
@@ -670,6 +684,17 @@ pub async fn handle_use_warp_vector(
             code: "VectorItemNotFound".into(),
             message: format!("Warp vector entity {target_id} is not in space in solar system {sys_id}"),
         })?;
+    if ctx
+        .sde
+        .types
+        .get(&target_ball.type_id)
+        .is_some_and(|t| t.category_id == 6)
+    {
+        return Err(BridgeRpcError {
+            code: "InvalidVectorTarget".into(),
+            message: format!("Entity {target_id} is a ship, not a valid warp vector celestial"),
+        });
+    }
     let dist = (target_ball.position - ship_ball.position).length();
     const MAX_VECTOR_PROXIMITY_M: f64 = 100_000.0;
     if dist > MAX_VECTOR_PROXIMITY_M {
@@ -695,18 +720,21 @@ pub async fn handle_use_warp_vector(
         }
         _ => None,
     };
+    const MAX_VECTOR_DISPLACEMENT_M: f64 = 100_000.0;
     let dest_pos = if let Some(v) = explicit_vec.filter(|v| v.length() > 1e-6) {
-        if v.length() >= 1_000.0 {
+        if v.length() > MAX_VECTOR_DISPLACEMENT_M {
+            ship_ball.position + v.normalize() * MAX_VECTOR_DISPLACEMENT_M
+        } else if v.length() >= 1_000.0 {
             ship_ball.position + v
         } else {
-            ship_ball.position + v.normalize() * 100_000.0
+            ship_ball.position + v.normalize() * MAX_VECTOR_DISPLACEMENT_M
         }
     } else {
         let delta = target_ball.position - ship_ball.position;
         if delta.length() > 1.0 {
-            target_ball.position + delta.normalize() * 100_000.0
+            target_ball.position + delta.normalize() * MAX_VECTOR_DISPLACEMENT_M
         } else {
-            target_ball.position + glam::DVec3::new(100_000.0, 0.0, 0.0)
+            target_ball.position + glam::DVec3::new(MAX_VECTOR_DISPLACEMENT_M, 0.0, 0.0)
         }
     };
     let _ = sys_handle.set_ball_position(ship_id, dest_pos).await;

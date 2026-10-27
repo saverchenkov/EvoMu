@@ -440,24 +440,25 @@ pub fn award_fw_kill_lp(
 
     let now_u = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
-        let mut fid = FACTION_CALDARI;
+        let mut fid_opt = None;
         if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
-            fid = ch.war_faction_id.unwrap_or(FACTION_CALDARI);
-            let militia_corp = ctx
-                .sde
-                .factions
-                .get(&(fid as u32))
-                .and_then(|f| f.militia_corporation_id)
-                .map(|c| c as i64)
-                .unwrap_or(fid);
-            *ch.loyalty_points.entry(militia_corp).or_insert(0) += final_lp;
-            *ch.loyalty_points.entry(fid).or_insert(0) += final_lp;
+            fid_opt = ch.war_faction_id;
+            if let Some(fid) = fid_opt {
+                let militia_corp = ctx
+                    .sde
+                    .factions
+                    .get(&(fid as u32))
+                    .and_then(|f| f.militia_corporation_id)
+                    .map(|c| c as i64)
+                    .unwrap_or(fid);
+                *ch.loyalty_points.entry(militia_corp).or_insert(0) += final_lp;
+            }
         }
         let rec = snap.fw_character_stats.entry(killer_char_id).or_insert_with(|| {
             eve_db::snapshot_ext::FwCharacterStatsRecord {
                 character_id: killer_char_id,
-                faction_id: Some(fid),
-                enlisted_on_unix: Some(now_u),
+                faction_id: fid_opt,
+                enlisted_on_unix: fid_opt.map(|_| now_u),
                 current_rank: 1,
                 highest_rank: 1,
                 kills: Default::default(),
