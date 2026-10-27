@@ -210,6 +210,39 @@ async fn handle_wormhole_jump(
                 message: format!("Solar system {old_sys} has no active wormhole destination"),
             });
         };
+        let pol_expiry = snap
+            .wh_polarizations
+            .get(&(char_id, dest_sys as i64))
+            .copied()
+            .unwrap_or(0);
+        if pol_expiry > now_unix {
+            return Err(BridgeRpcError {
+                code: "WormholePolarized".into(),
+                message: format!(
+                    "Character is polarized for system {} for another {} seconds",
+                    dest_sys,
+                    pol_expiry.saturating_sub(now_unix)
+                ),
+            });
+        }
+        let max_jump = snap
+            .cosmic_signatures
+            .get(&old_sys)
+            .and_then(|sigs| {
+                sigs.iter()
+                    .find(|s| s.sig_group == "Wormhole" && s.destination_system_id == Some(dest_sys))
+                    .map(|s| s.max_jump_mass_kg)
+            })
+            .unwrap_or(0.0);
+        if max_jump > 0.0 && ship_mass > max_jump {
+            return Err(BridgeRpcError {
+                code: "ShipTooHeavyForWormhole".into(),
+                message: format!(
+                    "Ship mass {:.1} kg exceeds wormhole jump limit {:.1} kg",
+                    ship_mass, max_jump
+                ),
+            });
+        }
         for sys in [old_sys, dest_sys] {
             if let Some(st) = snap.system_states.get_mut(&sys) {
                 if st.wormhole_remaining_mass_kg < ship_mass {
@@ -221,6 +254,10 @@ async fn handle_wormhole_jump(
                 st.wormhole_remaining_mass_kg -= ship_mass;
             }
         }
+        snap.wh_polarizations
+            .insert((char_id, dest_sys as i64), now_unix + 300);
+        snap.wh_polarizations
+            .insert((char_id, old_sys as i64), now_unix + 300);
         let sig_pos = snap
             .system_states
             .get(&dest_sys)
@@ -864,6 +901,12 @@ async fn handle_cone_scan(
     if let Err(e) = ServerContext::require_character(session) {
         return Some(Err(e));
     }
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Some(Err(BridgeRpcError {
+            code: "CannotDirectionalScanWhileDocked".into(),
+            message: "Directional scanner cannot be used while docked".into(),
+        }));
+    }
     let Some(sys_id) = bound_entry
         .map(|b| b.object_id as u32)
         .or(session.solar_system_id)
@@ -938,6 +981,7 @@ async fn handle_cone_scan(
 
     let cos_half_angle = (scan_angle.to_radians() * 0.5).cos();
     let balls = sys_handle.list_balls().await.unwrap_or_default();
+    let all_ball_ids: std::collections::HashSet<i64> = balls.iter().map(|b| b.id).collect();
     let mut matches: Vec<PyRep> = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
 
@@ -988,19 +1032,52 @@ async fn handle_cone_scan(
         .into_iter()
         .filter(|c| c.current_system_id == sys_id && !c.destroyed)
     {
-        if !seen_ids.contains(&c.convoy_id) {
+        if !seen_ids.contains(&c.convoy_id)
+            && !all_ball_ids.contains(&c.convoy_id)
+            && !ctx.living_world.is_convoy_docked(c.convoy_id)
+        {
+            let station_pos = ctx
+                .sde
+                .solar_systems
+                .get(&sys_id)
+                .and_then(|sys| {
+                    sys.stations
+                        .iter()
+                        .find(|st| st.station_id == c.destination_station_id)
+                        .or_else(|| sys.stations.first())
+                        .map(|st| st.position)
+                })
+                .unwrap_or(DVec3::ZERO);
+            let convoy_pos = station_pos + DVec3::new(3_000.0, 0.0, 0.0);
+            let dist = convoy_pos.distance(caller_pos);
+            if dist > scan_range {
+                continue;
+            }
+            if scan_angle < 360.0 {
+                let to_target = (convoy_pos - caller_pos).normalize_or_zero();
+                if to_target.dot(caller_dir) < cos_half_angle {
+                    continue;
+                }
+            }
             let group_id = ctx
                 .sde
                 .types
                 .get(&c.ship_type_id)
                 .map(|t| t.group_id)
                 .unwrap_or(0);
+            if group_id == 906 {
+                continue;
+            }
             matches.push(PyRep::keyval([
                 ("id", PyRep::Integer(c.convoy_id)),
                 ("itemID", PyRep::Integer(c.convoy_id)),
                 ("ballID", PyRep::Integer(c.convoy_id)),
                 ("typeID", PyRep::Integer(c.ship_type_id as i64)),
                 ("groupID", PyRep::Integer(group_id as i64)),
+                ("distance", PyRep::Real(dist)),
+                ("x", PyRep::Real(convoy_pos.x)),
+                ("y", PyRep::Real(convoy_pos.y)),
+                ("z", PyRep::Real(convoy_pos.z)),
             ]));
         }
     }

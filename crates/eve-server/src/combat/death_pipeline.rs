@@ -703,7 +703,8 @@ pub async fn execute_death_pipeline(
 }
 
 /// Triggers self-destruct for a ship or capsule in space, executing the canonical death pipeline
-/// with the character as their own attacker (`feat:ships.self-destruct`).
+/// with the character as their own attacker (or the most recent PvP attacker within the 15-minute
+/// assist window) (`feat:ships.self-destruct`).
 pub async fn execute_self_destruct(
     ctx: &ServerContext,
     sys_id: u32,
@@ -712,7 +713,25 @@ pub async fn execute_self_destruct(
     pos: DVec3,
     rng_seed: u64,
 ) -> Result<DeathPipelineResult, String> {
-    execute_death_pipeline(ctx, sys_id, char_id, ship_id, char_id, pos, rng_seed).await
+    let now_unix = ctx.now_unix();
+    let final_blow_char_id = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        let mut latest: Option<(u64, i64)> = None;
+        for key in [ship_id, char_id] {
+            if let Some(list) = rt.aggression_assist_log.get(&key) {
+                for e in list {
+                    if now_unix.saturating_sub(e.last_action_unix)
+                        <= crate::services::combat_crimewatch::KILLMAIL_ASSIST_WINDOW_SECS
+                        && e.attacker_char_id != char_id
+                        && latest.is_none_or(|(ts, _)| e.last_action_unix >= ts)
+                    {
+                        latest = Some((e.last_action_unix, e.attacker_char_id));
+                    }
+                }
+            }
+        }
+        latest.map(|(_, cid)| cid).unwrap_or(char_id)
+    });
+    execute_death_pipeline(ctx, sys_id, char_id, ship_id, final_blow_char_id, pos, rng_seed).await
 }
 
 /// Tracks 2-minute self-destruct countdown timers and cancellations (`feat:ships.self-destruct`).

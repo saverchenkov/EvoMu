@@ -921,6 +921,13 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
                         || wh_arg_i64
                             == Some(wormhole_item_id_for_signature(old_sys, &s.signature_id)))
             })
+        }) || snap.cosmic_signatures.iter().any(|(_, sigs)| {
+            sigs.iter().any(|s| {
+                s.sig_group == "Wormhole"
+                    && s.destination_system_id == Some(old_sys)
+                    && wh_arg_i64
+                        == Some(wormhole_exit_item_id_for_signature(old_sys, &s.signature_id))
+            })
         })
     });
     if !has_explicit_expired {
@@ -934,6 +941,13 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
                         || wh_arg_i64
                             == Some(wormhole_item_id_for_signature(old_sys, &s.signature_id)))
             })
+        }) || snap.cosmic_signatures.iter().any(|(_, sigs)| {
+            sigs.iter().any(|s| {
+                s.sig_group == "Wormhole"
+                    && s.destination_system_id == Some(old_sys)
+                    && wh_arg_i64
+                        == Some(wormhole_exit_item_id_for_signature(old_sys, &s.signature_id))
+            })
         })
     });
     if !has_matching_sig && wh_arg_str.is_none() {
@@ -942,12 +956,46 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
 
     let (ship_mass, prop_mass_add) = compute_effective_ship_jump_mass(ctx, ship_id, current_ball.mass);
     let old_handle = ctx.systems.get_or_spawn(old_sys);
+    let exit_ball_pos_opt = if let Some(arg_id) = wh_arg_i64 {
+        old_handle
+            .get_ball_snapshot(arg_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, b)| b.position)
+    } else {
+        None
+    };
 
     let mut collapsed_balls_to_remove: Vec<(SolarSystemId, i64)> = Vec::new();
     let mut replacement_to_spawn: Option<CosmicSignatureRecord> = None;
 
     let res = ctx.db.try_with_mut_snapshot(|snap| {
-        let Some(sigs) = snap.cosmic_signatures.get_mut(&old_sys) else {
+        let mut reverse_parent_sys_opt: Option<SolarSystemId> = None;
+        let has_local = snap.cosmic_signatures.get(&old_sys).is_some_and(|sigs| {
+            sigs.iter().any(|s| {
+                s.sig_group == "Wormhole"
+                    && (wh_arg_str == Some(s.signature_id.as_str())
+                        || wh_arg_i64
+                            == Some(wormhole_item_id_for_signature(old_sys, &s.signature_id)))
+            })
+        });
+        if !has_local {
+            for (&psys, sigs) in &snap.cosmic_signatures {
+                if sigs.iter().any(|s| {
+                    s.sig_group == "Wormhole"
+                        && s.destination_system_id == Some(old_sys)
+                        && wh_arg_i64
+                            == Some(wormhole_exit_item_id_for_signature(old_sys, &s.signature_id))
+                }) {
+                    reverse_parent_sys_opt = Some(psys);
+                    break;
+                }
+            }
+        }
+        let sig_host_sys = reverse_parent_sys_opt.unwrap_or(old_sys);
+        let is_reverse_exit_jump = reverse_parent_sys_opt.is_some();
+        let Some(sigs) = snap.cosmic_signatures.get_mut(&sig_host_sys) else {
             return Err(BridgeRpcError {
                 code: "WormholeNotFound".into(),
                 message: "No signatures in system".into(),
@@ -956,9 +1004,15 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
         let next_seq = sigs.len() as u32 + 1;
         let Some(wh_idx) = sigs.iter().position(|s| {
             s.sig_group == "Wormhole"
-                && (wh_arg_str == Some(s.signature_id.as_str())
-                    || wh_arg_i64
-                        == Some(wormhole_item_id_for_signature(old_sys, &s.signature_id)))
+                && if is_reverse_exit_jump {
+                    s.destination_system_id == Some(old_sys)
+                        && wh_arg_i64
+                            == Some(wormhole_exit_item_id_for_signature(old_sys, &s.signature_id))
+                } else {
+                    wh_arg_str == Some(s.signature_id.as_str())
+                        || wh_arg_i64
+                            == Some(wormhole_item_id_for_signature(old_sys, &s.signature_id))
+                }
         }) else {
             return Err(BridgeRpcError {
                 code: "WormholeNotFound".into(),
@@ -966,16 +1020,29 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             });
         };
 
-        let wh_id = wormhole_item_id_for_signature(old_sys, &sigs[wh_idx].signature_id);
         let sig_id_str = sigs[wh_idx].signature_id.clone();
-        let dest_sys = sigs[wh_idx].destination_system_id.unwrap_or(31_000_005);
-        let exit_wh_id = wormhole_exit_item_id_for_signature(dest_sys, &sig_id_str);
+        let (wh_id, dest_sys, exit_wh_id) = if is_reverse_exit_jump {
+            let local_exit_id = wormhole_exit_item_id_for_signature(old_sys, &sig_id_str);
+            let parent_entrance_id = wormhole_item_id_for_signature(sig_host_sys, &sig_id_str);
+            (local_exit_id, sig_host_sys, parent_entrance_id)
+        } else {
+            let entrance_id = wormhole_item_id_for_signature(old_sys, &sig_id_str);
+            let d_sys = sigs[wh_idx].destination_system_id.unwrap_or(31_000_005);
+            let exit_id = wormhole_exit_item_id_for_signature(d_sys, &sig_id_str);
+            (entrance_id, d_sys, exit_id)
+        };
 
         let pol_expiry = snap
             .wh_polarizations
             .get(&(char_id, dest_sys as i64))
             .copied()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(
+                snap.wh_polarizations
+                    .get(&(char_id, wh_id))
+                    .copied()
+                    .unwrap_or(0),
+            );
         if pol_expiry > now_unix {
             return Err(BridgeRpcError {
                 code: "WormholePolarized".into(),
@@ -987,7 +1054,11 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             });
         }
 
-        let wh_pos = DVec3::from_array(sigs[wh_idx].position);
+        let wh_pos = if is_reverse_exit_jump {
+            exit_ball_pos_opt.unwrap_or_else(|| DVec3::from_array(sigs[wh_idx].position))
+        } else {
+            DVec3::from_array(sigs[wh_idx].position)
+        };
         let dist = current_ball.position.distance(wh_pos);
         if dist > 2_500.0 {
             return Err(BridgeRpcError {
@@ -1001,7 +1072,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
 
         let mut spawn_replacement = |sigs_vec: &mut Vec<CosmicSignatureRecord>, idx: usize| {
             if let Some(rep) =
-                build_static_replacement_wormhole(ctx, old_sys, &sigs_vec[idx], now_unix, next_seq)
+                build_static_replacement_wormhole(ctx, sig_host_sys, &sigs_vec[idx], now_unix, next_seq)
             {
                 replacement_to_spawn = Some(rep.clone());
                 sigs_vec.push(rep);
@@ -1069,6 +1140,12 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
 
         snap.wh_polarizations
             .insert((char_id, dest_sys as i64), now_unix + 300);
+        snap.wh_polarizations
+            .insert((char_id, old_sys as i64), now_unix + 300);
+        snap.wh_polarizations
+            .insert((char_id, wh_id), now_unix + 300);
+        snap.wh_polarizations
+            .insert((char_id, exit_wh_id), now_unix + 300);
 
         Ok((
             dest_sys,

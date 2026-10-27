@@ -1084,19 +1084,32 @@ async fn handle_recover_probes(
     }
 
     let count = recovered_probes.len() as i32;
-    let probe_type_id = recovered_probes.first().map(|p| p.probe_type_id).unwrap_or(30013);
-    let launcher_id_opt = recovered_probes.first().map(|p| p.launcher_module_id);
     let ship_id_opt = session.ship_id.or_else(|| recovered_probes.first().map(|p| p.ship_id));
+    let ship_cargo_cap = ship_id_opt
+        .and_then(|sid| {
+            ctx.get_or_rebuild_ship_fitting(char_id, sid)
+                .ok()
+                .map(|fs| fs.ship.get_attribute(eve_sde::attr_ids::CAPACITY, &ctx.sde))
+                .filter(|&c| c > 0.0)
+                .or_else(|| {
+                    ctx.db.with_snapshot(|s| {
+                        s.items
+                            .get(&sid)
+                            .and_then(|it| ctx.sde.types.get(&it.type_id).map(|t| t.capacity))
+                    })
+                })
+        })
+        .unwrap_or(400.0);
 
     let (to_launcher, to_cargo) = if count > 0 {
         ctx.db.with_mut_snapshot(|snap| {
-            let mut remaining = count;
             let mut in_launcher = 0i32;
             let mut in_cargo = 0i32;
             let add_stack = |items: &mut HashMap<i64, eve_db::InventoryItemRecord>,
                              next_id: &mut i64,
                              ship_id: i64,
                              flag: InventoryFlag,
+                             p_type_id: u32,
                              qty: i32,
                              exclude_id: i64| {
                 if let Some(st) = items.values_mut().find(|i| {
@@ -1104,7 +1117,7 @@ async fn handle_recover_probes(
                         && i.location_id == ship_id
                         && i.flag == flag
                         && i.item_id != exclude_id
-                        && i.type_id == probe_type_id
+                        && i.type_id == p_type_id
                 }) {
                     st.quantity += qty;
                     st.version += 1;
@@ -1115,7 +1128,7 @@ async fn handle_recover_probes(
                         new_id,
                         eve_db::InventoryItemRecord {
                             item_id: new_id,
-                            type_id: probe_type_id,
+                            type_id: p_type_id,
                             owner_id: char_id,
                             location_id: ship_id,
                             flag,
@@ -1127,32 +1140,82 @@ async fn handle_recover_probes(
                     );
                 }
             };
-            if let (Some(ship_id), Some(launcher_id)) = (ship_id_opt, launcher_id_opt) {
-                if let Some(li) = snap.items.get(&launcher_id).cloned().filter(|i| i.location_id == ship_id) {
-                    let cur_clip = snap
+            let mut used_cargo_vol: f64 = if let Some(ship_id) = ship_id_opt {
+                snap.items
+                    .values()
+                    .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::Cargo)
+                    .map(|i| {
+                        let uv = ctx.sde.types.get(&i.type_id).map(|t| t.volume).unwrap_or(0.1);
+                        uv * (i.quantity.max(1) as f64)
+                    })
+                    .sum()
+            } else {
+                0.0
+            };
+            for p in &recovered_probes {
+                let p_type_id = p.probe_type_id;
+                let ship_id = ship_id_opt.unwrap_or(p.ship_id);
+                let launcher_id = p.launcher_module_id;
+                let mut placed_in_launcher = false;
+                if let Some(li) = snap
+                    .items
+                    .get(&launcher_id)
+                    .cloned()
+                    .filter(|i| i.location_id == ship_id)
+                {
+                    let cur_clip: i32 = snap
                         .items
                         .values()
-                        .find(|i| {
+                        .filter(|i| {
                             i.owner_id == char_id
                                 && i.location_id == ship_id
                                 && i.flag == li.flag
                                 && i.item_id != launcher_id
-                                && i.type_id == probe_type_id
                         })
                         .map(|i| i.quantity)
-                        .unwrap_or(0);
-                    let add = (8 - cur_clip).max(0).min(remaining);
-                    if add > 0 {
-                        add_stack(&mut snap.items, &mut snap.next_entity_id, ship_id, li.flag, add, launcher_id);
-                        remaining -= add;
-                        in_launcher += add;
+                        .sum();
+                    let matching_clip = snap.items.values().any(|i| {
+                        i.owner_id == char_id
+                            && i.location_id == ship_id
+                            && i.flag == li.flag
+                            && i.item_id != launcher_id
+                            && i.type_id == p_type_id
+                    });
+                    if cur_clip == 0 || (cur_clip < 8 && matching_clip) {
+                        add_stack(
+                            &mut snap.items,
+                            &mut snap.next_entity_id,
+                            ship_id,
+                            li.flag,
+                            p_type_id,
+                            1,
+                            launcher_id,
+                        );
+                        in_launcher += 1;
+                        placed_in_launcher = true;
                     }
                 }
-            }
-            if remaining > 0 {
-                if let Some(ship_id) = ship_id_opt {
-                    add_stack(&mut snap.items, &mut snap.next_entity_id, ship_id, InventoryFlag::Cargo, remaining, 0);
-                    in_cargo += remaining;
+                if !placed_in_launcher {
+                    let probe_vol = ctx
+                        .sde
+                        .types
+                        .get(&p_type_id)
+                        .map(|t| t.volume)
+                        .filter(|&v| v > 0.0)
+                        .unwrap_or(0.1);
+                    if ship_cargo_cap <= 0.0 || used_cargo_vol + probe_vol <= ship_cargo_cap + 1e-6 {
+                        add_stack(
+                            &mut snap.items,
+                            &mut snap.next_entity_id,
+                            ship_id,
+                            InventoryFlag::Cargo,
+                            p_type_id,
+                            1,
+                            0,
+                        );
+                        used_cargo_vol += probe_vol;
+                        in_cargo += 1;
+                    }
                 }
             }
             (in_launcher, in_cargo)
