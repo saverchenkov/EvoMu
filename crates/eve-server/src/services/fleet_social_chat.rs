@@ -683,15 +683,27 @@ fn handle_chat_rpc(
 
             if chan_id.starts_with("solarsystemid2:") {
                 let sys_id: u32 = chan_id.split(':').nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                if session.solar_system_id != Some(sys_id) && !session.has_gm_role() {
+                    return Some(Err(BridgeRpcError { code: "ChannelAccessDenied".into(), message: "Sender is not in the target solar system".into() }));
+                }
                 ctx.notify(NotificationTarget::SolarSystem(sys_id), "OnClientEvent_ChatMessageSent", "channelid", notif_args);
             } else if chan_id.starts_with("corpid:") {
                 let corp_id: i64 = chan_id.split(':').nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                if session.corporation_id != Some(corp_id) && !session.has_gm_role() {
+                    return Some(Err(BridgeRpcError { code: "ChannelAccessDenied".into(), message: "Sender is not in the target corporation".into() }));
+                }
                 ctx.notify(NotificationTarget::Corporation(corp_id), "OnClientEvent_ChatMessageSent", "channelid", notif_args);
             } else if chan_id.starts_with("allianceid:") {
                 let alliance_id: i64 = chan_id.split(':').nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                if session.alliance_id != Some(alliance_id) && !session.has_gm_role() {
+                    return Some(Err(BridgeRpcError { code: "ChannelAccessDenied".into(), message: "Sender is not in the target alliance".into() }));
+                }
                 ctx.notify(NotificationTarget::Alliance(alliance_id), "OnClientEvent_ChatMessageSent", "channelid", notif_args);
             } else if chan_id.starts_with("fleetid:") {
                 let fleet_id: i64 = chan_id.split(':').nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                if session.fleet_id != Some(fleet_id) && !session.has_gm_role() {
+                    return Some(Err(BridgeRpcError { code: "ChannelAccessDenied".into(), message: "Sender is not in the target fleet".into() }));
+                }
                 ctx.notify(NotificationTarget::Fleet(fleet_id), "OnClientEvent_ChatMessageSent", "channelid", notif_args);
             } else {
                 let members: Vec<i64> = ctx.db.with_snapshot(|snap| {

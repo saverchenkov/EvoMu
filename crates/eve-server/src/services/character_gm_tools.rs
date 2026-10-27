@@ -354,8 +354,15 @@ pub fn handle_char_unbound(
             let was_online = session.character_id == Some(c.character_id)
                 || crate::services::character_contacts::is_character_online(ctx, c.character_id);
             ctx.release_session_bindings(session.session_id);
-            if ctx.db.get_online_session(user_id).is_some_and(|os| os.session_id == session.session_id) {
-                let _ = ctx.db.acquire_online_lock(user_id, session.session_id, Some(c.character_id), false, ctx.now_unix());
+            if let Some(os) = ctx.db.get_online_session(user_id) {
+                if os.session_id == session.session_id {
+                    let _ = ctx.db.acquire_online_lock(user_id, session.session_id, Some(c.character_id), false, ctx.now_unix());
+                } else if os.character_id == Some(c.character_id) {
+                    return Some(Err(BridgeRpcError {
+                        code: "CharacterAlreadyOnline".into(),
+                        message: format!("Character {} is already online on another active session", c.character_id),
+                    }));
+                }
             }
             let eff_sys = crate::services::pve_special_sites::reconcile_abyssal_login(
                 ctx, c.character_id, c.solar_system_id, c.active_ship_id,

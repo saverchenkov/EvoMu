@@ -596,19 +596,37 @@ impl EsiRouter {
                         true,
                     );
                 };
-                let (char_corp, is_corp_ceo) = self.ctx.db.with_snapshot(|snap| {
+                let (char_corp, has_corp_role) = self.ctx.db.with_snapshot(|snap| {
                     let c_corp = snap
                         .characters
                         .get(&claims.character_id)
                         .map(|c| c.corporation_id);
-                    let is_ceo = snap
+                    let has_role = snap
                         .corporations
                         .get(&path_corp_id)
-                        .map(|corp| corp.ceo_id == claims.character_id)
-                        .unwrap_or(false);
-                    (c_corp, is_ceo)
+                        .map(|corp| {
+                            corp.ceo_id == claims.character_id
+                                || corp
+                                    .member_roles
+                                    .get(&claims.character_id)
+                                    .copied()
+                                    .unwrap_or(0)
+                                    != 0
+                        })
+                        .unwrap_or(false)
+                        || snap
+                            .corp_role_assignments
+                            .get(&(path_corp_id, claims.character_id))
+                            .map(|r| {
+                                r.roles != 0
+                                    || r.roles_at_hq != 0
+                                    || r.roles_at_base != 0
+                                    || r.roles_at_other != 0
+                            })
+                            .unwrap_or(false);
+                    (c_corp, has_role)
                 });
-                if char_corp != Some(path_corp_id) || !is_corp_ceo {
+                if char_corp != Some(path_corp_id) || !has_corp_role {
                     return self.build_error_response(
                         &client_key,
                         now,
@@ -621,6 +639,33 @@ impl EsiRouter {
                         ),
                         true,
                     );
+                }
+            }
+            if let Some(raw_alid) = matched.path_params.get("alliance_id") {
+                if let Ok(path_alliance_id) = raw_alid.parse::<i64>() {
+                    let forbidden = self.ctx.db.with_snapshot(|snap| {
+                        let Some(al) = snap.alliances.get(&path_alliance_id) else {
+                            return false;
+                        };
+                        let char_al = snap.characters.get(&claims.character_id).and_then(|c| c.alliance_id);
+                        let char_corp = snap.characters.get(&claims.character_id).map(|c| c.corporation_id).unwrap_or(0);
+                        let in_alliance = char_al == Some(path_alliance_id) || al.member_corp_ids.contains(&char_corp);
+                        !in_alliance && char_al.is_some()
+                    });
+                    if forbidden {
+                        return self.build_error_response(
+                            &client_key,
+                            now,
+                            req_id,
+                            compat_date,
+                            403,
+                            format!(
+                                "Token character {} is not a member of alliance {}",
+                                claims.character_id, path_alliance_id
+                            ),
+                            true,
+                        );
+                    }
                 }
             }
             Some(claims)
