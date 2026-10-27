@@ -1051,12 +1051,17 @@ pub fn dispatch_char_social_route(
                     .bookmarks
                     .values()
                     .filter(|b| {
-                        (b.owner_id == corp_id
-                            || snap
-                                .characters
-                                .get(&b.owner_id)
-                                .map(|c| c.corporation_id == corp_id)
-                                .unwrap_or(false))
+                        let is_corp_folder = b
+                            .folder_id
+                            .and_then(|fid| snap.bookmark_folders.get(&fid))
+                            .is_some_and(|f| f.is_shared || f.corporation_id == Some(corp_id));
+                        let belongs_to_corp = b.owner_id == corp_id
+                            || ((b.is_shared || is_corp_folder)
+                                && snap
+                                    .characters
+                                    .get(&b.owner_id)
+                                    .is_some_and(|c| c.corporation_id == corp_id));
+                        belongs_to_corp
                             && !snap
                                 .bookmark_expiries
                                 .get(&b.bookmark_id)

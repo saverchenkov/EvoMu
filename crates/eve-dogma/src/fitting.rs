@@ -327,11 +327,14 @@ impl ShipFittingEngine {
             }
         }
 
-        // Validate required character skills (requiredSkill1..3 and requiredSkill1..3Level)
+        // Validate required character skills (requiredSkill1..6 and requiredSkill1..6Level)
         for (skill_attr, level_attr) in [
             (attr_ids::REQUIRED_SKILL_1, attr_ids::REQUIRED_SKILL_1_LEVEL),
             (attr_ids::REQUIRED_SKILL_2, attr_ids::REQUIRED_SKILL_2_LEVEL),
             (attr_ids::REQUIRED_SKILL_3, attr_ids::REQUIRED_SKILL_3_LEVEL),
+            (1285, 1286),
+            (1289, 1287),
+            (1290, 1288),
         ] {
             if let Some(&req_skill_f) = mod_type.default_attributes.get(&skill_attr) {
                 let req_skill_id = req_skill_f as TypeId;
@@ -402,7 +405,18 @@ impl ShipFittingEngine {
         }
 
         // Prevent duplicate modifiers if already fitted
+        if online {
+            if let Some(existing) = self.modules.get(&module_item_id) {
+                if existing.max_hp > 0.0 && existing.damage_hp >= existing.max_hp - 1e-6 {
+                    return Err(format!(
+                        "ModuleBurnedOut: module {module_item_id} is burned out (100% heat damage) and must be repaired before onlining"
+                    ));
+                }
+            }
+        }
         let prev_entry = self.modules.remove(&module_item_id);
+        let prev_damage_hp = prev_entry.as_ref().map(|p| p.damage_hp).unwrap_or(0.0);
+        let prev_max_hp = prev_entry.as_ref().map(|p| p.max_hp).unwrap_or(40.0);
         let prev_load_cpu = {
             self.recalculate_stats(sde);
             self.ship.get_attribute(attr_ids::CPU_LOAD, sde)
@@ -422,8 +436,8 @@ impl ShipFittingEngine {
                 } else {
                     ModuleState::Offline
                 },
-                damage_hp: 0.0,
-                max_hp: 40.0,
+                damage_hp: prev_damage_hp,
+                max_hp: prev_max_hp,
                 charge_type_id: None,
                 charge_quantity: 0,
                 dynamic_attribute_overrides: dynamic_attributes.clone(),
@@ -597,6 +611,11 @@ impl ShipFittingEngine {
                 .modules
                 .get(&module_item_id)
                 .ok_or_else(|| format!("Module {module_item_id} is not fitted"))?;
+            if m.max_hp > 0.0 && m.damage_hp >= m.max_hp - 1e-6 {
+                return Err(format!(
+                    "ModuleBurnedOut: module {module_item_id} is burned out (100% heat damage) and must be repaired before onlining"
+                ));
+            }
             (m.type_id, m.flag_id)
         };
         let mod_type = sde

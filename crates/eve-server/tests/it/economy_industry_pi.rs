@@ -1215,9 +1215,9 @@ async fn test_pi_colony_command_center_pins_and_links() {
     .expect("planetMgr.Flush");
     let PyRep::KeyVal(fl_kv) = flush_res else { panic!("Expected KeyVal"); };
     let extracted_type_id = fl_kv.get("producedTypeID").and_then(|v| v.as_i64()).unwrap();
-    let produced_qty = fl_kv.get("producedQuantity").and_then(|v| v.as_i64()).unwrap() as f64;
+    let _produced_qty = fl_kv.get("producedQuantity").and_then(|v| v.as_i64()).unwrap() as f64;
     let flush_tax_isk = fl_kv.get("pocoExportTaxISK").and_then(|v| v.as_f64()).unwrap();
-    assert!((flush_tax_isk - (5.0 * produced_qty * 0.15)).abs() < 1e-4);
+    assert!(flush_tax_isk.abs() < 1e-4, "Surface-only P0 extraction into colony pin must not charge orbital POCO export tax");
 
     let res_after = rpc(
         &ctx,
