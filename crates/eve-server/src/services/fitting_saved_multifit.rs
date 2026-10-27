@@ -43,14 +43,18 @@ pub(crate) async fn handle_ships_and_services(
                 let Some(ship) = snap.items.get(&ship_id).cloned() else {
                     return Err(rpc_err("ShipNotFound", format!("Ship {ship_id} not found")));
                 };
-                let dock_id = session.station_id.or(session.structure_id).unwrap_or(ship.location_id);
-                if dock_id < 1_000_000_000_000
-                    && !crate::services::station_structure::npc_station_offers_service(&ctx.sde, dock_id, 21)
-                {
-                    return Err(BridgeRpcError {
-                        code: "StationServiceUnavailable".into(),
-                        message: format!("Station {dock_id} does not offer insurance"),
-                    });
+                let dock_id_opt = session.station_id.or(session.structure_id).or_else(|| {
+                    (ship.location_id >= 60_000_000 && ship.location_id < 1_000_000_000_000).then_some(ship.location_id)
+                });
+                if let Some(dock_id) = dock_id_opt {
+                    if dock_id < 1_000_000_000_000
+                        && !crate::services::station_structure::npc_station_offers_service(&ctx.sde, dock_id, 21)
+                    {
+                        return Err(BridgeRpcError {
+                            code: "StationServiceUnavailable".into(),
+                            message: format!("Station {dock_id} does not offer insurance"),
+                        });
+                    }
                 }
                 if ctx.sde.get_type_category(ship.type_id) != Some(6) {
                     return Err(BridgeRpcError::user_error("InsureShipFailed"));

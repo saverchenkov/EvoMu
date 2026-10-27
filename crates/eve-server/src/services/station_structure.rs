@@ -164,7 +164,7 @@ pub async fn handle(
             if let Some((sys_id, st)) = found {
                 let op = ctx.sde.station_operations.get(&st.operation_id);
                 let service_mask = op
-                    .map(|o| o.services.iter().fold(0i64, |acc, &sid| if sid < 64 { acc | (1i64 << sid) } else { acc }))
+                    .map(|o| o.services.iter().fold(0i64, |acc, &sid| if sid > 0 && sid <= 64 { acc | (1i64 << (sid - 1)) } else { acc }))
                     .unwrap_or(0);
                 let services = op
                     .map(|o| o.services.iter().map(|&sid| PyRep::Integer(i64::from(sid))).collect())
@@ -262,7 +262,7 @@ pub async fn handle(
             };
             let raw_service_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0) as u32;
             let station_id = args.get(1).and_then(|a| a.as_i64()).or(session.station_id).unwrap_or(60_003_760);
-            let service_id = if raw_service_id > 32 && raw_service_id.is_power_of_two() {
+            let service_id = if raw_service_id.is_power_of_two() && raw_service_id > 0 {
                 raw_service_id.trailing_zeros() + 1
             } else {
                 raw_service_id
@@ -1311,14 +1311,14 @@ pub fn npc_station_offers_service(sde: &eve_sde::SdeRegistry, station_id: i64, s
     let Ok(raw_u32) = u32::try_from(service_id) else {
         return false;
     };
-    let normalized = if raw_u32 > 32 && raw_u32.is_power_of_two() {
+    let decoded = if raw_u32.is_power_of_two() && raw_u32 > 0 {
         raw_u32.trailing_zeros() + 1
     } else {
         raw_u32
     };
     sde.station_operations
         .get(&station.operation_id)
-        .map(|op| op.services.contains(&normalized) || op.services.contains(&raw_u32))
+        .map(|op| op.services.contains(&decoded) || op.services.contains(&raw_u32))
         .unwrap_or(false)
 }
 

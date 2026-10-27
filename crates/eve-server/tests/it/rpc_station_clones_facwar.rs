@@ -406,11 +406,20 @@ async fn test_station_services_and_corp_station_mgr_parity() {
         }
     });
 
-    // Standing check at Jita for repair (13) and fitting (17) succeeds:
+    // Standing check at Jita for repair (13), fitting (17), and bitmask 16 (reprocessing, service ID 5):
     let chk_jita_repair = rpc(&ctx, &mut s1, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(13), PyRep::Integer(STATION_JITA)]).await;
     assert!(chk_jita_repair.is_ok(), "DoStandingCheckForStationService for repair must succeed at Jita");
     let chk_jita_fit = rpc(&ctx, &mut s1, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(17), PyRep::Integer(STATION_JITA)]).await;
     assert!(chk_jita_fit.is_ok(), "DoStandingCheckForStationService for fitting must succeed at Jita");
+    let chk_jita_reproc_bm = rpc(&ctx, &mut s1, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(16), PyRep::Integer(STATION_JITA)]).await;
+    assert!(chk_jita_reproc_bm.is_ok(), "DoStandingCheckForStationService with bitmask 16 (reprocessing) must succeed at Jita");
+
+    // GetStation serviceMask round-trip: service 5 (bit 4: 16) and service 17 (bit 16: 65536) must be present in mask:
+    let st_rep = rpc(&ctx, &mut s1, "stationSvc", "GetStation", &[PyRep::Integer(STATION_JITA)]).await.expect("GetStation at Jita");
+    let PyRep::KeyVal(st_kv) = st_rep else { panic!("Expected KeyVal from GetStation"); };
+    let mask_jita = st_kv.get("serviceMask").and_then(|v| v.as_i64()).expect("serviceMask");
+    assert!((mask_jita & (1i64 << (5 - 1))) != 0, "serviceMask must include bitmask 16 for reprocessing (service 5)");
+    assert!((mask_jita & (1i64 << (17 - 1))) != 0, "serviceMask must include bit for fitting (service 17)");
 
     // Move to Station B (60000859: Plantation, does NOT offer repair, insurance, or clone bay):
     ctx.db.with_mut_snapshot(|snap| {
@@ -432,7 +441,7 @@ async fn test_station_services_and_corp_station_mgr_parity() {
     let err_clone_b = rpc(&ctx, &mut s1, "jumpCloneSvc", "InstallCloneInStation", &[])
         .await
         .expect_err("InstallCloneInStation must fail at station lacking clone bay service");
-    assert_eq!(err_clone_b.code, "StationServiceUnavailable");
+    assert_eq!(err_clone_b.code, "StationHasNoCloneBay");
 
     let chk_b_repair = rpc(&ctx, &mut s1, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(13), PyRep::Integer(60000859)])
         .await
@@ -485,6 +494,18 @@ async fn test_station_services_and_corp_station_mgr_parity() {
         .await
         .expect_err("DoStandingCheckForStationService for fitting must fail at Station C");
     assert_eq!(chk_c_fit.code, "StationServiceUnavailable");
+
+    // Negative standing check for bitmask 16 (reprocessing) at Station C:
+    let chk_c_reproc_bm = rpc(&ctx, &mut s1, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(16), PyRep::Integer(60004723)])
+        .await
+        .expect_err("DoStandingCheck with bitmask 16 must fail at Damaged Bureau");
+    assert_eq!(chk_c_reproc_bm.code, "StationServiceUnavailable");
+
+    let st_c_rep = rpc(&ctx, &mut s1, "stationSvc", "GetStation", &[PyRep::Integer(60004723)]).await.expect("GetStation at Station C");
+    let PyRep::KeyVal(st_c_kv) = st_c_rep else { panic!("Expected KeyVal from GetStation C"); };
+    let mask_c = st_c_kv.get("serviceMask").and_then(|v| v.as_i64()).expect("serviceMask");
+    assert_eq!(mask_c & (1i64 << (5 - 1)), 0, "serviceMask at Damaged Bureau must NOT include bit for reprocessing");
+    assert_eq!(mask_c & (1i64 << (17 - 1)), 0, "serviceMask at Damaged Bureau must NOT include bit for fitting");
 
     // Reset s1 station_id back to STATION_JITA
     ctx.db.with_mut_snapshot(|snap| {

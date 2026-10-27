@@ -289,7 +289,7 @@ pub fn handle_clones_and_sheet(
                     && !crate::services::station_structure::npc_station_offers_service(&ctx.sde, station_id, 24)
                 {
                     return Some(Err(BridgeRpcError {
-                        code: "StationServiceUnavailable".into(),
+                        code: "StationHasNoCloneBay".into(),
                         message: format!(
                             "Station {} ({station_id}) does not have a medical/clone bay service",
                             station.name
