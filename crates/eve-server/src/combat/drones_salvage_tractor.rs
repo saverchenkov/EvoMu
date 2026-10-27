@@ -512,6 +512,37 @@ pub async fn execute_wreck_salvage_cycle(
     ]))
 }
 
+/// Auto-repeating Salvager module (`effectSalvaging`) / Salvage Drone (`CmdSalvage`) cycle loop:
+/// stops immediately on `Err` (`SalvageTooMuchLootBody`, range, target) or `InsufficientAccessChance`,
+/// and repeats 10s salvage cycles while `reason == "CycleRollFailed"` until the wreck is salvaged.
+pub async fn execute_wreck_salvage_auto_repeat(
+    ctx: &ServerContext,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+    wreck_id: i64,
+    salvager_type_id_opt: Option<u32>,
+) -> Result<eve_proto::PyRep, eve_proto::BridgeRpcError> {
+    let mut last_rep =
+        execute_wreck_salvage_cycle(ctx, sys_id, char_id, ship_id, wreck_id, salvager_type_id_opt)
+            .await?;
+    for _ in 1..32 {
+        if !format!("{last_rep:?}").contains("CycleRollFailed") {
+            break;
+        }
+        last_rep = execute_wreck_salvage_cycle(
+            ctx,
+            sys_id,
+            char_id,
+            ship_id,
+            wreck_id,
+            salvager_type_id_opt,
+        )
+        .await?;
+    }
+    Ok(last_rep)
+}
+
 /// Simulates a tractor beam pull on a wreck towards the player ship:
 /// - Maximum tractor range: 20,000 m.
 /// - Tractor pull speed: 500 m/s.

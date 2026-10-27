@@ -316,7 +316,7 @@ pub async fn activate_salvager_or_tractor_module(
             ),
         }));
     }
-    let res = execute_wreck_salvage_cycle(
+    let res = crate::combat::drones_salvage_tractor::execute_wreck_salvage_auto_repeat(
         ctx,
         sys_id,
         char_id,
@@ -1324,7 +1324,7 @@ pub async fn handle_npcs_drones(
             let Some(wreck_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError { code: "TargetRequired".into(), message: "CmdSalvage requires a target wreckID".into() }));
             };
-            Some(execute_wreck_salvage_cycle(ctx, sys_id, char_id, ship_id, wreck_id, None).await)
+            Some(crate::combat::drones_salvage_tractor::execute_wreck_salvage_auto_repeat(ctx, sys_id, char_id, ship_id, wreck_id, None).await)
         }
 
         _ => None,

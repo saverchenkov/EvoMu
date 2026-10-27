@@ -989,14 +989,20 @@ async fn group_jump_to_fleet_beacon(
 async fn jump_through_fleet(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<JumpOutcome, BridgeRpcError> {
     let other_char = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
     let other_ship = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-    let (char_id, ship_id, sys_id, ball) = caller_in_space(ctx, session).await?;
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let now = ctx.now_unix_secs();
+    if let (Some(ship_id), Some(sys_id)) = (session.ship_id, session.solar_system_id) {
+        crate::services::combat_crimewatch::check_crimewatch_action_restriction(
+            ctx, char_id, ship_id, sys_id, "jump_drive", now,
+        )?;
+    }
     require_same_fleet(ctx, char_id, other_char)?;
     let key = (ctx_key(ctx), other_char);
     let bridge = cyno_state().read().unwrap_or_else(|e| e.into_inner()).bridges.get(&key).cloned();
-    let now = ctx.now_unix_secs();
     let bridge = bridge
         .filter(|b| b.bridger_ship_id == other_ship && b.expires_at_unix > now)
         .ok_or_else(|| err("NoActiveBridge", format!("Ship {other_ship} has no open jump portal")))?;
+    let (char_id, ship_id, sys_id, ball) = caller_in_space(ctx, session).await?;
     if bridge.origin_system_id != sys_id {
         return Err(err("NoActiveBridge", "Jump portal is in a different solar system"));
     }

@@ -21,7 +21,7 @@ const SPLITMIX64_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// Seed used by the test/demo constructor `ServerContext::new()` (only compiled with `cfg(test)` or
 /// the `demo-seed` feature). Production constructors never seed.
-pub const TEST_MODE_DEFAULT_SEED: u64 = 0x00C5_5EED_0000_11C9;
+pub const TEST_MODE_DEFAULT_SEED: u64 = 0x00C5_5EED_0000_0001;
 
 /// One SplitMix64 step: advances `state` and returns the mixed 64-bit output.
 pub fn splitmix64_next(state: &mut u64) -> u64 {

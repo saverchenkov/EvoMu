@@ -188,12 +188,10 @@ async fn test_war_targets_mutual_allies_and_retraction_crimewatch() {
     assert!(!ctx.db.with_snapshot(|s| is_legal_war_or_suspect_target(s, aggr_char, def_char, now)));
 }
 
-// parity: feat:lifecycle.crimewatch-highsec-criminal-movement
 // parity: feat:navigation.wormhole-aggression-exemption
 #[tokio::test]
 async fn test_crimewatch_highsec_criminal_movement_and_wormhole_exemption() {
     eve_testkit::attest(&[
-        "feat:lifecycle.crimewatch-highsec-criminal-movement",
         "feat:navigation.wormhole-aggression-exemption",
     ]);
     let ctx = ServerContext::new();
@@ -302,6 +300,9 @@ async fn test_crimewatch_highsec_criminal_movement_and_wormhole_exemption() {
     let gate_wpn_err = ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_bound), "CmdStargateJump", &[PyRep::Integer(jita_gate.stargate_id)], &kw, None)
         .await.expect_err("Weapons timer blocks stargate jump");
     assert_eq!(gate_wpn_err.code, "WeaponsTimerActive");
+    let dock_wpn_err = ctx.dispatch_rpc(&mut sess, "structureDocking", None, "Dock", &[PyRep::Integer(struct_id)], &kw, None)
+        .await.expect_err("Active weapons timer blocks docking at structure");
+    assert_eq!(dock_wpn_err.code, "WeaponsTimerActive");
     let jump_wpn_err = ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_bound), "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(char_id), PyRep::Integer(30_000_144), PyRep::Integer(1)], &kw, None)
         .await.expect_err("Active weapons timer blocks jump drive");
     assert_eq!(jump_wpn_err.code, "WeaponsTimerActive");
