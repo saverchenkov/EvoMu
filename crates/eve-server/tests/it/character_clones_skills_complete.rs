@@ -276,6 +276,7 @@ async fn test_jump_clone_state_clones_implants_and_timers() {
         .sde
         .solar_systems
         .values()
+        .filter(|sys| sys.region_id != 10_000_070 && sys.solar_system_id < 31_000_000)
         .flat_map(|sys| sys.stations.iter())
         .find(|st| st.has_clone_bay && st.station_id != 60_003_760)
         .map(|st| st.station_id)

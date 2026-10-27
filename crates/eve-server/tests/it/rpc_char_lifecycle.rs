@@ -265,7 +265,7 @@ async fn test_char_mgr_character_profile_info_and_lifecycle() {
         .dispatch_rpc(&mut sess, "charUnboundMgr", None, "GetCohortsForUser", &[], &kw, None)
         .await
         .expect("GetCohortsForUser");
-    assert_eq!(user_cohorts, PyRep::List(Vec::new()));
+    assert!(matches!(user_cohorts, PyRep::List(ref l) if !l.is_empty()));
 
     // 10. SetSessionCheck & clear_memoized
     let sc = ctx

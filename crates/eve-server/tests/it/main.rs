@@ -301,3 +301,4 @@ mod scanning_exploration_wormholes_closure;
 mod plan_social_closure;
 mod plan_economy_closure;
 mod plan_economy_closure_part2;
+mod skills_attributes_char_social_closure;

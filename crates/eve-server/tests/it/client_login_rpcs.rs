@@ -260,7 +260,7 @@ async fn character_selection_screen_and_entry_rpcs_work_end_to_end() {
         .dispatch_rpc(&mut sess, "charUnboundMgr", None, "GetCohortsForUser", &[], &kw, None)
         .await
         .unwrap();
-    assert_eq!(cohorts, PyRep::List(Vec::new()));
+    assert!(matches!(cohorts, PyRep::List(ref l) if !l.is_empty()));
 
     let tokens = ctx
         .dispatch_rpc(&mut sess, "userSvc", None, "GetRedeemTokens", &[], &kw, None)

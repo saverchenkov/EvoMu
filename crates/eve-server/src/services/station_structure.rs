@@ -968,6 +968,14 @@ pub async fn handle(
                     ),
                 }));
             }
+            if matches!(item_type.group_id, 12 | 340 | 448 | 649) && item_type.type_id != 23 && sys_sec >= 0.75 {
+                return Some(Err(BridgeRpcError {
+                    code: "CantAnchorInHighSec08".into(),
+                    message: format!(
+                        "Secure container cannot be anchored in high-sec system {sys_id} with security >= 0.8 (security {sys_sec:.2})"
+                    ),
+                }));
+            }
 
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let Some((_, ship_ball)) = (match sys_handle.get_ball_snapshot(ship_id).await {

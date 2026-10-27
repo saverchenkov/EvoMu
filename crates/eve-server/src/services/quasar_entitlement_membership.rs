@@ -322,4 +322,153 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             })
         }),
     );
+
+    // 6. eve.character.skill.PurchaseSkillsRequest -> eve.character.skill.PurchaseSkillsResponse (`feat:skills.direct-purchase-inject`)
+    let db_skill_buy = Arc::clone(&db);
+    let sde_skill_buy = Arc::clone(&router.sde);
+    router.register_handler(
+        "eve.character.skill.PurchaseSkillsRequest",
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let char_id = ctx
+                .effective_character_id()
+                .ok_or_else(|| {
+                    (
+                        crate::quasar_gateway::STATUS_UNAUTHORIZED,
+                        "Character authentication required".to_string(),
+                    )
+                })? as i64;
+            let mut skill_ids = Vec::new();
+            for field_num in [1u32, 2u32] {
+                if let Some(val) = dyn_msg.get(field_num) {
+                    match val {
+                        DynamicValue::Repeated(list) => {
+                            for item in list {
+                                if let Some(id) = extract_nested_seq_id(item) {
+                                    if id > 0 && !skill_ids.contains(&(id as u32)) {
+                                        skill_ids.push(id as u32);
+                                    }
+                                }
+                            }
+                        }
+                        single => {
+                            if let Some(id) = extract_nested_seq_id(single) {
+                                if id > 0 && !skill_ids.contains(&(id as u32)) {
+                                    skill_ids.push(id as u32);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if skill_ids.is_empty() {
+                return Err((
+                    crate::quasar_gateway::STATUS_BAD_REQUEST,
+                    "PurchaseSkillsRequest requires at least one skill type ID".into(),
+                ));
+            }
+            let now_unix = ctx.now_unix();
+            let now_ft = (now_unix as i64 + 11_644_473_600) * 10_000_000;
+            let res: Result<(Vec<u32>, i64), (u32, String)> =
+                db_skill_buy.try_with_mut_snapshot(|snap| {
+                    let mut total_cost: i64 = 0;
+                    let mut costs = Vec::new();
+                    for &sk_id in &skill_ids {
+                        let Some(st) = sde_skill_buy.types.get(&sk_id) else {
+                            return Err((
+                                crate::quasar_gateway::STATUS_NOT_FOUND,
+                                format!("Skill type {sk_id} not found"),
+                            ));
+                        };
+                        if st.category_id != 16 || !st.published {
+                            return Err((
+                                crate::quasar_gateway::STATUS_BAD_REQUEST,
+                                format!("Type {sk_id} is not a published skill"),
+                            ));
+                        }
+                        if snap
+                            .skills
+                            .get(&char_id)
+                            .is_some_and(|m| m.contains_key(&sk_id))
+                        {
+                            return Err((
+                                crate::quasar_gateway::STATUS_CONFLICT,
+                                format!("Skill {sk_id} is already injected"),
+                            ));
+                        }
+                        let npc_price_cents = snap
+                            .market_orders
+                            .values()
+                            .filter(|o| !o.is_bid && o.is_npc && o.vol_remaining > 0 && o.type_id == sk_id)
+                            .map(|o| o.price.0)
+                            .min()
+                            .ok_or_else(|| {
+                                (
+                                    crate::quasar_gateway::STATUS_PRECONDITION_FAILED,
+                                    format!("Skill {sk_id} is not available from NPC market orders"),
+                                )
+                            })?;
+                        let markup_cents = ((npc_price_cents as f64) * 1.30).round() as i64;
+                        total_cost = total_cost.saturating_add(markup_cents);
+                        costs.push((sk_id, markup_cents));
+                    }
+                    let ch = snap.characters.get_mut(&char_id).ok_or_else(|| {
+                        (
+                            crate::quasar_gateway::STATUS_NOT_FOUND,
+                            format!("Character {char_id} not found"),
+                        )
+                    })?;
+                    if ch.balance.0 < total_cost {
+                        return Err((
+                            crate::quasar_gateway::STATUS_PRECONDITION_FAILED,
+                            "Insufficient ISK for direct skill purchase".into(),
+                        ));
+                    }
+                    ch.balance = eve_db::IskCents(ch.balance.0 - total_cost);
+                    let new_bal = ch.balance.0;
+                    let skills_map = snap.skills.entry(char_id).or_default();
+                    let hist = snap.skill_history.entry(char_id).or_default();
+                    for (sk_id, cost_c) in costs {
+                        skills_map.insert(
+                            sk_id,
+                            eve_db::TrainedSkillRecord {
+                                type_id: sk_id,
+                                level: 0,
+                                skill_points: 0.0,
+                            },
+                        );
+                        hist.push(eve_db::SkillHistoryEntry {
+                            log_date_ft: now_ft,
+                            event_type_id: 36,
+                            skill_type_id: sk_id,
+                            skill_level: 0,
+                            absolute_points: 0.0,
+                        });
+                        snap.next_entity_id += 1;
+                        let jid = snap.next_entity_id;
+                        snap.wallet_journal.push(eve_db::WalletJournalEntry {
+                            entry_id: jid,
+                            character_id: char_id,
+                            entry_type: "skill_purchase".into(),
+                            amount: eve_db::IskCents(-cost_c),
+                            balance_after: eve_db::IskCents(new_bal),
+                            reason: format!("Direct skill purchase and injection (type {sk_id})"),
+                        });
+                        snap.wallet_journal_timestamps.insert(jid, now_unix);
+                    }
+                    Ok((skill_ids, total_cost))
+                });
+            let (bought, total_cost) = res?;
+            let mut out = Vec::new();
+            for sk in bought {
+                encode_varint_field(1, sk as u64, &mut out);
+            }
+            encode_varint_field(2, total_cost as u64, &mut out);
+            Ok(GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve.character.skill.PurchaseSkillsResponse"
+                ),
+                value: out,
+            })
+        }),
+    );
 }

@@ -137,6 +137,9 @@ pub(crate) async fn handle_module_cycles(
             let Some(mod_type) = ctx.sde.types.get(&m.type_id) else {
                 return Some(Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module type {} not found in SDE", m.type_id) }));
             };
+            if target_id_opt.is_some_and(|tid| ctx.db.with_snapshot(|s| s.items.get(&tid).and_then(|i| ctx.sde.types.get(&i.type_id)).is_some_and(|t| matches!(t.group_id, 340 | 448)))) {
+                return crate::services::combat_crimewatch::combat_weapons::handle_weapons(ctx, session, service, method, args, kwargs).await;
+            }
 
             // Mining lasers, strip miners, ice and gas harvesters run on the repeating MN-04 cycle engine.
             if crate::services::mining_cycle::mining_kind_of(&ctx.sde, mod_type).is_some() {

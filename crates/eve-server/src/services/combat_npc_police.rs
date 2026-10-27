@@ -113,7 +113,47 @@ pub async fn check_and_spawn_faction_police(
                 .find(|c| c.active_ship_id == bid)
                 .map(|c| (c.character_id, c.security_status))
         });
-        let Some((_char_id, sec_status)) = owner_char_opt else { continue; };
+        let Some((char_id, sec_status)) = owner_char_opt else { continue; };
+
+        // High-sec customs contraband booster cargo scan (`feat:attributes.booster-highsec-contraband`):
+        // Scans unconsumed items in `InventoryFlag::Cargo` on the ship. Consumed (active) boosters
+        // live on the character sheet rather than ship cargo and are never flagged.
+        let confiscated = scan_and_confiscate_highsec_contraband_cargo(ctx, char_id, bid, sys_faction, sys_sec);
+        for (removed_item, old_loc, old_flag, fine_isk) in confiscated {
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnItemChange",
+                "charid",
+                vec![
+                    eve_proto::PyRep::keyval([
+                        ("itemID", eve_proto::PyRep::Integer(removed_item.item_id)),
+                        ("typeID", eve_proto::PyRep::Integer(removed_item.type_id as i64)),
+                        ("ownerID", eve_proto::PyRep::Integer(removed_item.owner_id)),
+                        ("locationID", eve_proto::PyRep::Integer(removed_item.location_id)),
+                        ("flagID", eve_proto::PyRep::Integer(removed_item.flag as i64)),
+                        ("quantity", eve_proto::PyRep::Integer(removed_item.quantity as i64)),
+                    ]),
+                    eve_proto::PyRep::Dict(vec![
+                        (eve_proto::PyRep::Integer(3), eve_proto::PyRep::Integer(old_loc)),
+                        (eve_proto::PyRep::Integer(4), eve_proto::PyRep::Integer(old_flag as i64)),
+                    ]),
+                ],
+            );
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnRemoteMessage",
+                "charid",
+                vec![
+                    eve_proto::PyRep::String("ParamCustomsNotification".into()),
+                    eve_proto::PyRep::Dict(vec![
+                        (eve_proto::PyRep::String("typeID".into()), eve_proto::PyRep::Integer(removed_item.type_id as i64)),
+                        (eve_proto::PyRep::String("quantity".into()), eve_proto::PyRep::Integer(removed_item.quantity as i64)),
+                        (eve_proto::PyRep::String("fineISK".into()), eve_proto::PyRep::Real(fine_isk)),
+                        (eve_proto::PyRep::String("factionID".into()), eve_proto::PyRep::Integer(sys_faction as i64)),
+                    ]),
+                ],
+            );
+        }
 
         // Only engage outlaws below threshold or <= -5.0
         if sec_status > threshold && sec_status > -5.0 {
@@ -187,4 +227,88 @@ pub async fn check_and_spawn_faction_police(
     }
 
     spawned_police
+}
+
+fn scan_and_confiscate_highsec_contraband_cargo(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    sys_faction: u32,
+    sys_sec: f64,
+) -> Vec<(eve_db::InventoryItemRecord, i64, eve_db::InventoryFlag, f64)> {
+    if sys_sec < 0.45 {
+        return Vec::new();
+    }
+    let now_unix = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        let contraband_ids: Vec<(i64, f64)> = snap
+            .items
+            .values()
+            .filter_map(|it| {
+                if it.location_id != ship_id || it.flag != eve_db::InventoryFlag::Cargo || it.quantity <= 0 {
+                    return None;
+                }
+                let t = ctx.sde.types.get(&it.type_id)?;
+                // Contraband combat boosters (group 303 with side-effect chance attribute 1089 > 0.0)
+                let is_contraband_booster = t.group_id == 303
+                    && t.default_attributes.get(&1089).copied().unwrap_or(0.0) > 0.0;
+                if !is_contraband_booster {
+                    return None;
+                }
+                let fine_isk = (t.base_price.max(10_000.0)) * (it.quantity as f64);
+                Some((it.item_id, fine_isk))
+            })
+            .collect();
+
+        if contraband_ids.is_empty() {
+            return Vec::new();
+        }
+
+        let mut removed = Vec::new();
+        let mut total_fine_cents: i64 = 0;
+        for (iid, fine_isk) in contraband_ids {
+            if let Some(mut it) = snap.items.remove(&iid) {
+                let old_loc = it.location_id;
+                let old_flag = it.flag;
+                it.location_id = 6; // confiscated / junkyard
+                it.flag = eve_db::InventoryFlag::None;
+                total_fine_cents = total_fine_cents.saturating_add((fine_isk * 100.0).round() as i64);
+                removed.push((it, old_loc, old_flag, fine_isk));
+            }
+        }
+
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            let deduct = total_fine_cents.min(ch.balance.0.max(0));
+            if deduct > 0 {
+                ch.balance = eve_db::IskCents(ch.balance.0 - deduct);
+                let new_bal = ch.balance;
+                snap.next_entity_id += 1;
+                let jid = snap.next_entity_id;
+                snap.wallet_journal.push(eve_db::WalletJournalEntry {
+                    entry_id: jid,
+                    character_id: char_id,
+                    entry_type: "contraband_fine".into(),
+                    amount: eve_db::IskCents(-deduct),
+                    balance_after: new_bal,
+                    reason: format!("High-sec customs contraband booster confiscation fine (faction {sys_faction})"),
+                });
+                snap.wallet_journal_timestamps.insert(jid, now_unix);
+            }
+        }
+
+        snap.next_entity_id += 1;
+        let st_event_id = snap.next_entity_id;
+        snap.standing_transactions
+            .entry(char_id)
+            .or_default()
+            .push(eve_db::StandingTransactionRecord {
+                event_id: st_event_id,
+                from_id: sys_faction as i64,
+                to_id: char_id,
+                modification: -0.1,
+                event_type_id: 85, // contraband confiscation standing penalty
+            });
+
+        removed
+    })
 }

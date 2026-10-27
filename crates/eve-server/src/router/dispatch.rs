@@ -640,6 +640,16 @@ impl ServerContext {
         if let Some(res) = Box::pin(services::inventory_fitting::handle(
             self, session, bound_entry.as_ref(), effective_service, method, args, kwargs,
         )).await {
+            if res.is_ok() {
+                services::character_skill_ops::post_inventory_fitting_hook(
+                    self,
+                    session,
+                    bound_entry.as_ref(),
+                    method,
+                    args,
+                )
+                .await;
+            }
             return res;
         }
         if let Some(res) = Box::pin(services::station_structure::handle(

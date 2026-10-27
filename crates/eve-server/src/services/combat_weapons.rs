@@ -408,6 +408,12 @@ pub async fn handle_weapons(
                     snap.characters
                         .get(&it.owner_id)
                         .map(|c| (c.character_id, resolved_target_id))
+                        .or_else(|| {
+                            snap.corporations
+                                .get(&it.owner_id)
+                                .and_then(|corp| snap.characters.get(&corp.ceo_id))
+                                .map(|c| (c.character_id, resolved_target_id))
+                        })
                 } else {
                     None
                 }
@@ -942,22 +948,46 @@ pub async fn handle_weapons(
                     rt.has_limited_engagement_with(victim_char_id, char_id, now_unix)
                 });
                 let is_pod_target = target_ball.type_id == 670;
+                let (is_anchored_container, is_secure_container, is_unanchored_jetcan) =
+                    ctx.db.with_snapshot(|snap| {
+                        let anchored = snap
+                            .sp6_lifecycle
+                            .space_object_meta
+                            .get(&resolved_target_id)
+                            .is_some_and(|m| m.anchor_start_unix.is_some());
+                        let secure = ctx
+                            .sde
+                            .types
+                            .get(&target_ball.type_id)
+                            .is_some_and(|t| matches!(t.group_id, 340 | 448));
+                        let jetcan = target_ball.type_id == 23 && !anchored;
+                        (anchored, secure, jetcan)
+                    });
                 {
                     let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+                    let effective_sec = if is_unanchored_jetcan {
+                        sys_sec.min(0.40)
+                    } else {
+                        sys_sec
+                    };
                     let _ = cw.handle_combat_aggression(
                         char_id,
                         victim_char_id,
                         ship_id,
                         sys_id,
-                        sys_sec,
+                        effective_sec,
                         is_legal,
                         now_unix,
                     );
                     cw.get_or_create(char_id).pvp_timer_until_unix = now_unix.saturating_add(900);
                     cw.get_or_create(victim_char_id).pvp_timer_until_unix =
                         now_unix.saturating_add(900);
-                    if !is_legal && sys_sec > 0.0 && sys_sec < 0.45 && is_pod_target {
-                        // In low-sec (< 0.45), attacking a capsule triggers a Criminal flag rather than Suspect
+                    if !is_legal
+                        && ((sys_sec > 0.0 && sys_sec < 0.45 && is_pod_target)
+                            || is_anchored_container
+                            || (is_secure_container && sys_sec >= 0.45))
+                    {
+                        // Attacking a capsule in low-sec, an anchored container, or a secure container in high-sec triggers a Criminal flag
                         let st = cw.get_or_create(char_id);
                         st.criminal_flag_until_unix = now_unix.saturating_add(900);
                         st.suspect_flag_until_unix = 0;

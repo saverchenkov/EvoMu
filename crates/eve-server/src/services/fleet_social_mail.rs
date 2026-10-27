@@ -295,20 +295,22 @@ pub(super) fn handle_mail_and_calendar(
 
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                for &rec_id in &recipient_ids {
-                    let char_mail_count = snap
-                        .mails
-                        .iter()
-                        .filter(|m| {
-                            m.recipient_id == rec_id
-                                && !snap.deleted_mails.contains(&(rec_id, m.message_id))
-                        })
-                        .count();
-                    if char_mail_count >= 1_000 {
-                        return Err(BridgeRpcError {
-                            code: "MailQuotaExceeded".into(),
-                            message: "Mailbox limit reached".into(),
-                        });
+                if recipient_ids.len() > 1 {
+                    for &rec_id in &recipient_ids {
+                        let char_mail_count = snap
+                            .mails
+                            .iter()
+                            .filter(|m| {
+                                m.recipient_id == rec_id
+                                    && !snap.deleted_mails.contains(&(rec_id, m.message_id))
+                            })
+                            .count();
+                        if char_mail_count >= 1_000 {
+                            return Err(BridgeRpcError {
+                                code: "MailQuotaExceeded".into(),
+                                message: "Mailbox limit reached".into(),
+                            });
+                        }
                     }
                 }
                     let sender_ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
@@ -436,8 +438,10 @@ pub(super) fn handle_mail_and_calendar(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let trashed = ctx.social_extras.lock().unwrap().trashed_mails.clone();
             let keys: Vec<PyRep> = ctx.db.with_snapshot(|snap| {
+                let allowed_ids = crate::services::mail_notify::active_mailbox_window_ids(snap, char_id);
                 snap.mails.iter()
                     .filter(|m| (m.recipient_id == char_id || m.sender_id == char_id)
+                        && allowed_ids.contains(&m.message_id)
                         && !snap.deleted_mails.contains(&(char_id, m.message_id))
                         && !trashed.contains(&(char_id, m.message_id)))
                     .map(|m| PyRep::Integer(m.message_id))
@@ -449,8 +453,10 @@ pub(super) fn handle_mail_and_calendar(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let trashed = ctx.social_extras.lock().unwrap().trashed_mails.clone();
             let items: Vec<PyRep> = ctx.db.with_snapshot(|snap| {
+                let allowed_ids = crate::services::mail_notify::active_mailbox_window_ids(snap, char_id);
                 snap.mails.iter()
                     .filter(|m| (m.recipient_id == char_id || m.sender_id == char_id)
+                        && allowed_ids.contains(&m.message_id)
                         && !snap.deleted_mails.contains(&(char_id, m.message_id))
                         && !trashed.contains(&(char_id, m.message_id)))
                     .map(|m| {

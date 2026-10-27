@@ -144,42 +144,15 @@ async fn test_d6_single_source_of_truth_cross_surface_and_restart() {
         crate::common::pin_clock(&ctx);
 
         let mut sess = SessionState::new(7102);
-        let _ = rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)])
-            .await
-            .expect("SelectCharacterID");
-
-        let _ = rpc(
-            &ctx,
-            &mut sess,
-            "addressbook",
-            "AddContact",
-            &[PyRep::Integer(90_000_002), PyRep::Real(10.0), PyRep::Bool(true)],
-        )
-        .await
-        .expect("AddContact");
-        let _ = rpc(
-            &ctx,
-            &mut sess,
-            "invbroker",
-            "SetLabel",
-            &[PyRep::Integer(100_000_001), PyRep::String("SSOT Flagship".into())],
-        )
-        .await
-        .expect("SetLabel");
-        let _ = rpc(&ctx, &mut sess, "charMgr", "LogSettings", &[PyRep::Real(3_750.0)])
-            .await
-            .expect("charMgr.LogSettings");
+        let _ = rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)]).await.expect("SelectCharacterID");
+        let _ = rpc(&ctx, &mut sess, "addressbook", "AddContact", &[PyRep::Integer(90_000_002), PyRep::Real(10.0), PyRep::Bool(true)]).await.expect("AddContact");
+        let _ = rpc(&ctx, &mut sess, "invbroker", "SetLabel", &[PyRep::Integer(100_000_001), PyRep::String("SSOT Flagship".into())]).await.expect("SetLabel");
+        let _ = rpc(&ctx, &mut sess, "charMgr", "LogSettings", &[PyRep::Real(3_750.0)]).await.expect("charMgr.LogSettings");
         ctx.db.with_mut_snapshot(|snap| {
-            snap.alliances.insert(
-                99_000_777,
-                AllianceRecord {
-                    alliance_id: 99_000_777,
-                    name: "Single Source Alliance".into(),
-                    short_name: "SSOTA".into(),
-                    executor_corp_id: 98_000_001,
-                    member_corp_ids: [98_000_001].into_iter().collect(),
-                },
-            );
+            snap.alliances.insert(99_000_777, AllianceRecord {
+                alliance_id: 99_000_777, name: "Single Source Alliance".into(), short_name: "SSOTA".into(),
+                executor_corp_id: 98_000_001, member_corp_ids: [98_000_001].into_iter().collect(),
+            });
         });
 
         let esi = EsiRouter::new(Arc::clone(&ctx));
@@ -191,24 +164,11 @@ async fn test_d6_single_source_of_truth_cross_surface_and_restart() {
     let repo2 = Arc::new(WorldRepository::open_sqlite(&db_path).expect("reopen sqlite"));
     let ctx2 = Arc::new(ServerContext::with_repository(repo2));
     let mut sess2 = SessionState::new(7103);
-    let _ = rpc(&ctx2, &mut sess2, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)])
-        .await
-        .expect("SelectCharacterID after restart");
+    let _ = rpc(&ctx2, &mut sess2, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)]).await.expect("SelectCharacterID after restart");
 
-    let names_rep = rpc(
-        &ctx2,
-        &mut sess2,
-        "dogmaIM",
-        "ItemGetInfo",
-        &[PyRep::Integer(100_000_001)],
-    )
-    .await
-    .expect("ItemGetInfo after restart");
+    let names_rep = rpc(&ctx2, &mut sess2, "dogmaIM", "ItemGetInfo", &[PyRep::Integer(100_000_001)]).await.expect("ItemGetInfo after restart");
     assert!(format!("{names_rep:?}").contains("SSOT Flagship"));
-
-    let contacts_rep = rpc(&ctx2, &mut sess2, "addressbook", "GetContactList", &[])
-        .await
-        .expect("addressbook after restart");
+    let contacts_rep = rpc(&ctx2, &mut sess2, "addressbook", "GetContactList", &[]).await.expect("addressbook after restart");
     assert!(format!("{contacts_rep:?}").contains("90000002"));
 
     let has_alliance = ctx2.db.with_snapshot(|snap| snap.alliances.contains_key(&99_000_777));
@@ -504,6 +464,23 @@ async fn test_s7_secure_container_anchor_no_bubble_and_30d_despawn() {
         .expect_err("Cargo container cannot anchor");
     assert_eq!(err.code, "ItemNotAnchorable");
 
+    let hs08_err = rpc(&ctx, &mut sess, "posMgr", "AnchorStructure", &[PyRep::Integer(cont_id)])
+        .await
+        .expect_err("Secure container cannot anchor in >= 0.8 system (Jita)");
+    assert_eq!(hs08_err.code, "CantAnchorInHighSec08");
+
+    // Move ship to a <= 0.7 high-sec system (security < 0.75) to anchor secure container
+    let maurasi_sys_id: u32 = ctx.sde.solar_systems.values().find(|s| s.security_status >= 0.50 && s.security_status < 0.74).map(|s| s.solar_system_id).unwrap_or(30_000_139);
+    sess.solar_system_id = Some(maurasi_sys_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) { ch.solar_system_id = maurasi_sys_id; }
+        if let Some(sh) = snap.items.get_mut(&ship_id) { sh.location_id = maurasi_sys_id as i64; }
+    });
+    let _ = ctx.systems.get_or_spawn(maurasi_sys_id).spawn_ball_with_combat(
+        Ball { id: ship_id, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 350.0, inertia: 2.5, mass: 1_200_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop },
+        ctx.build_type_combat_state(587),
+    ).await;
+
     let anchor_rep = rpc(&ctx, &mut sess, "posMgr", "AnchorStructure", &[PyRep::Integer(cont_id)]).await.expect("posMgr.AnchorStructure for secure container");
     assert_eq!(anchor_rep.dict_get("bubbleRadius"), Some(&PyRep::Real(0.0)));
     assert_eq!(anchor_rep.dict_get("state"), Some(&PyRep::String("Anchoring".into())));
@@ -518,7 +495,7 @@ async fn test_s7_secure_container_anchor_no_bubble_and_30d_despawn() {
     });
     assert!(is_anchored, "Container must be marked anchored after anchoring delay elapses");
 
-    let despawned = step_wreck_and_jetcan_decay(&ctx, JITA_SYSTEM_ID, now_u + 30 * 86_400 + 1).await;
+    let despawned = step_wreck_and_jetcan_decay(&ctx, maurasi_sys_id, now_u + 30 * 86_400 + 1).await;
     assert!(despawned.contains(&cont_id));
     assert!(ctx.db.get_item(cont_id).is_none());
 }

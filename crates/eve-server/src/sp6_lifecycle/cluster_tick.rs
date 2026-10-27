@@ -990,10 +990,10 @@ pub fn on_advance_secs(ctx: &ServerContext, _prev_unix: u64, secs: u64) {
                         }
                     }
                 }
-            } else if ctx.sde.types.get(&item.type_id).is_some_and(|t| t.effect_ids.contains(&649) && t.capacity > 0.0) {
-                if let Some(start_u) =
-                    obj_meta.and_then(|m| m.anchor_start_unix.or(m.created_unix))
-                {
+            } else if matches!(group_id, 12 | 340 | 448)
+                || ctx.sde.types.get(&item.type_id).is_some_and(|t| t.effect_ids.contains(&649) && t.capacity > 0.0)
+            {
+                if let Some(start_u) = obj_meta.and_then(|m| m.anchor_start_unix) {
                     if now_unix >= start_u.saturating_add(super::SECURE_CONTAINER_DECAY_SECS) {
                         expired_ids.push((item.item_id, sys_id, false));
                     } else {
@@ -1002,6 +1002,10 @@ pub fn on_advance_secs(ctx: &ServerContext, _prev_unix: u64, secs: u64) {
                         if !already_done && now_unix >= start_u.saturating_add(delay_s.ceil() as u64) {
                             newly_anchored_ids.push(item.item_id);
                         }
+                    }
+                } else if let Some(created_u) = obj_meta.and_then(|m| m.created_unix) {
+                    if now_unix >= created_u.saturating_add(WRECK_DECAY_LIFETIME_SECS) {
+                        expired_ids.push((item.item_id, sys_id, false));
                     }
                 }
             }

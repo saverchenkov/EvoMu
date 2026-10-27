@@ -10,6 +10,38 @@ pub(crate) use super::fleet_social_persistence::{
     CalendarEventState, SocialExtrasState,
 };
 
+fn prune_delayed_local_speakers_on_leave(
+    ctx: &ServerContext,
+    snap: &mut eve_db::WorldStateSnapshot,
+    chan_id: &str,
+    leaving_char_id: i64,
+    remaining_members: &HashSet<i64>,
+) {
+    let mut s = ctx.social_extras.lock().unwrap();
+    let Some(speakers) = s.delayed_local_speakers.get_mut(chan_id) else {
+        return;
+    };
+    speakers.retain(|&spk| {
+        let wit_key = format!("wh_local_witnesses:{chan_id}:{spk}");
+        let mut wit: HashSet<i64> = snap
+            .service_state_blobs
+            .get(&wit_key)
+            .and_then(|j| serde_json::from_str(j).ok())
+            .unwrap_or_default();
+        wit.remove(&leaving_char_id);
+        let keep = remaining_members.contains(&spk)
+            || wit.iter().any(|m| remaining_members.contains(m));
+        if keep {
+            if let Ok(j) = serde_json::to_string(&wit) {
+                snap.service_state_blobs.insert(wit_key, j);
+            }
+        } else {
+            snap.service_state_blobs.remove(&wit_key);
+        }
+        keep
+    });
+}
+
 pub(super) fn handle_chat_and_social(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -119,8 +151,7 @@ fn handle_chat_rpc(
                 }
                 chan.members.insert(target_char);
                 let visible_count = if chan.is_delayed_local {
-                    let speakers = ctx.social_extras.lock().unwrap().delayed_local_speakers.get(chan_id).cloned().unwrap_or_default();
-                    chan.members.iter().filter(|m| speakers.contains(m)).count()
+                    ctx.social_extras.lock().unwrap().delayed_local_speakers.get(chan_id).map(|s| s.len()).unwrap_or(0)
                 } else {
                     chan.members.len()
                 };
@@ -175,14 +206,18 @@ fn handle_chat_rpc(
                 if let Some(fid) = fleet_id {
                     target_chans.push(format!("fleetid:{fid}"));
                 }
+                let mut left_delayed = Vec::new();
                 for c in snap.chat_channels.values_mut() {
                     let is_sys_scoped = c.channel_id.starts_with("solarsystemid2:")
                         || c.channel_id.starts_with("corpid:")
                         || c.channel_id.starts_with("allianceid:")
                         || c.channel_id.starts_with("fleetid:");
-                    if is_sys_scoped && !target_chans.contains(&c.channel_id) {
-                        c.members.remove(&char_id);
+                    if is_sys_scoped && !target_chans.contains(&c.channel_id) && c.members.remove(&char_id) && c.is_delayed_local {
+                        left_delayed.push((c.channel_id.clone(), c.members.clone()));
                     }
+                }
+                for (lcid, rem_m) in left_delayed {
+                    prune_delayed_local_speakers_on_leave(ctx, snap, &lcid, char_id, &rem_m);
                 }
                 for cid in &target_chans {
                     let delayed = is_delayed_local_channel(cid);
@@ -589,89 +624,74 @@ fn handle_chat_rpc(
             let Some(chan_id) = args.first().and_then(|a| a.as_str()) else {
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "LeaveChannel requires channelID string".into() }));
             };
-            let _ = ctx.db.try_with_mut_snapshot(|snap| {
-                if let Some(chan) = snap.chat_channels.get_mut(chan_id) { chan.members.remove(&char_id); }
-                Ok::<(), std::convert::Infallible>(())
+            ctx.db.with_mut_snapshot(|snap| {
+                let rem_members = if let Some(chan) = snap.chat_channels.get_mut(chan_id) {
+                    chan.members.remove(&char_id);
+                    chan.members.clone()
+                } else {
+                    HashSet::new()
+                };
+                if is_delayed_local_channel(chan_id) {
+                    prune_delayed_local_speakers_on_leave(ctx, snap, chan_id, char_id, &rem_members);
+                }
             });
-            ctx.social_extras.lock().unwrap().delayed_local_speakers.entry(chan_id.to_string()).or_default().remove(&char_id);
-            ctx.notify(NotificationTarget::All, "OnChannelLeft", "channelid", vec![PyRep::String(chan_id.to_string()), PyRep::Integer(char_id)]);
+            if !is_delayed_local_channel(chan_id) {
+                ctx.notify(NotificationTarget::All, "OnChannelLeft", "channelid", vec![PyRep::String(chan_id.to_string()), PyRep::Integer(char_id)]);
+            }
             Some(Ok(PyRep::keyval([("channelID", PyRep::String(chan_id.to_string())), ("left", PyRep::Bool(true))])))
         }
 
         (_, "SendMessage") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(chan_id) = args.first().and_then(|a| a.as_str()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "SendMessage requires channelID string".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "SendMessage requires channelID string".into() }));
             };
             let text = args.get(1).and_then(|a| a.as_str()).unwrap_or("o7");
             if text.is_empty() || text.chars().count() > 2_000 {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidChatMessageLength".into(),
-                    message: "Chat message must be 1..=2000 characters".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidChatMessageLength".into(), message: "Chat message must be 1..=2000 characters".into() }));
             }
             if !crate::services::lookup_svc::is_word_allowed(text) {
-                return Some(Err(BridgeRpcError {
-                    code: "UserError".into(),
-                    message: "ChatContentInvalidBannedWords".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "UserError".into(), message: "ChatContentInvalidBannedWords".into() }));
             }
             let now_unix = ctx.now_unix();
-            let db_mute = ctx.db.with_snapshot(|snap| {
-                snap.chat_channel_acl
-                    .get(chan_id)
-                    .and_then(|a| a.muted_until.get(&char_id).cloned())
-            });
+            let db_mute = ctx.db.with_snapshot(|snap| snap.chat_channel_acl.get(chan_id).and_then(|a| a.muted_until.get(&char_id).cloned()));
             if let Some((until, reason)) = db_mute {
                 if now_unix < until {
-                    return Some(Err(BridgeRpcError {
-                        code: "MutedInChannel".into(),
-                        message: format!("You are muted in {chan_id}: {reason}"),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "MutedInChannel".into(), message: format!("You are muted in {chan_id}: {reason}") }));
                 }
             }
             {
                 let mut s = ctx.social_extras.lock().unwrap();
-                if let Some(&(until, ref reason)) =
-                    s.muted_in_channel.get(&(chan_id.to_string(), char_id))
-                {
+                if let Some(&(until, ref reason)) = s.muted_in_channel.get(&(chan_id.to_string(), char_id)) {
                     if now_unix < until {
-                        return Some(Err(BridgeRpcError {
-                            code: "MutedInChannel".into(),
-                            message: format!("You are muted in {chan_id}: {reason}"),
-                        }));
+                        return Some(Err(BridgeRpcError { code: "MutedInChannel".into(), message: format!("You are muted in {chan_id}: {reason}") }));
                     }
                 }
                 let entry = s.chat_rate_window.entry(char_id).or_insert((now_unix, 0));
                 if entry.0 == now_unix {
                     entry.1 += 1;
                     if entry.1 > 20 {
-                        return Some(Err(BridgeRpcError {
-                            code: "ChatRateLimitExceeded".into(),
-                            message: "Chat message rate limit exceeded".into(),
-                        }));
+                        return Some(Err(BridgeRpcError { code: "ChatRateLimitExceeded".into(), message: "Chat message rate limit exceeded".into() }));
                     }
                 } else {
                     *entry = (now_unix, 1);
                 }
                 if is_delayed_local_channel(chan_id) {
-                    s.delayed_local_speakers
-                        .entry(chan_id.to_string())
-                        .or_default()
-                        .insert(char_id);
+                    s.delayed_local_speakers.entry(chan_id.to_string()).or_default().insert(char_id);
+                    ctx.db.with_mut_snapshot(|snap| {
+                        let cur_members = snap.chat_channels.get(chan_id).map(|c| c.members.clone()).unwrap_or_default();
+                        let wit_key = format!("wh_local_witnesses:{chan_id}:{char_id}");
+                        let mut wit: HashSet<i64> = snap.service_state_blobs.get(&wit_key).and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default();
+                        wit.extend(cur_members.into_iter().filter(|&m| m != char_id));
+                        if let Ok(j) = serde_json::to_string(&wit) {
+                            snap.service_state_blobs.insert(wit_key, j);
+                        }
+                    });
                 }
             }
 
             let now_ft = ctx.now_blueos_filetime_ticks();
-            let sender_name = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .get(&char_id)
-                    .map(|c| c.name.clone())
-                    .unwrap_or_else(|| "Pilot".into())
-            });
+            let sender_name = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.name.clone()).unwrap_or_else(|| "Pilot".into()));
 
             let notif_args = vec![
                 PyRep::String(chan_id.to_string()),
@@ -867,18 +887,13 @@ fn handle_chat_rpc(
                 }));
             };
             let visible_members: Vec<i64> = if chan.is_delayed_local {
-                let speakers = ctx.social_extras
+                ctx.social_extras
                     .lock()
                     .unwrap()
                     .delayed_local_speakers
                     .get(chan_id)
-                    .cloned()
-                    .unwrap_or_default();
-                chan.members
-                    .iter()
-                    .copied()
-                    .filter(|m| speakers.contains(m))
-                    .collect()
+                    .map(|s| s.iter().copied().collect())
+                    .unwrap_or_default()
             } else {
                 chan.members.iter().copied().collect()
             };

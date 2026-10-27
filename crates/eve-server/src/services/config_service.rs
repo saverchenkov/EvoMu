@@ -625,7 +625,9 @@ pub fn handle(
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .iter()
+                .rev()
                 .filter(|n| n.receiver_id == char_id && !n.deleted)
+                .take(500)
                 .map(|n| {
                     vec![
                         PyRep::Integer(n.notification_id),
@@ -658,9 +660,10 @@ pub fn handle(
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .iter()
-                .filter(|n| {
-                    n.receiver_id == char_id && !n.deleted && n.group_id as i64 == group_id
-                })
+                .rev()
+                .filter(|n| n.receiver_id == char_id && !n.deleted)
+                .take(500)
+                .filter(|n| n.group_id as i64 == group_id)
                 .map(|n| {
                     vec![
                         PyRep::Integer(n.notification_id),
@@ -687,7 +690,10 @@ pub fn handle(
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .iter()
-                .filter(|n| n.receiver_id == char_id && !n.deleted && !n.processed)
+                .rev()
+                .filter(|n| n.receiver_id == char_id && !n.deleted)
+                .take(500)
+                .filter(|n| !n.processed)
                 .map(|n| {
                     vec![
                         PyRep::Integer(n.notification_id),

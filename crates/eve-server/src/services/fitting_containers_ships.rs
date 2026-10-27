@@ -596,46 +596,36 @@ pub(crate) fn validate_container_and_bay_move(
     Ok(())
 }
 
-fn validate_single_item_can_be_opened(
+async fn validate_single_item_can_be_opened(
     ctx: &ServerContext,
     char_id: i64,
     item_id: i64,
 ) -> Result<(), BridgeRpcError> {
     if item_id <= 0 {
-        return Err(BridgeRpcError {
-            code: "InvalidArgument".into(),
-            message: "Valid itemID required".into(),
-        });
+        return Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Valid itemID required".into() });
     }
-    let (item_type_id, _owner_id, _location_id, singleton) = ctx.db.with_snapshot(|snap| {
+    let (item_type_id, _owner_id, location_id, singleton) = ctx.db.with_snapshot(|snap| {
         let it = snap.items.get(&item_id).ok_or_else(|| BridgeRpcError {
             code: "ItemNotFound".into(),
             message: format!("Container item {item_id} not found"),
         })?;
         Ok::<_, BridgeRpcError>((it.type_id, it.owner_id, it.location_id, it.singleton))
     })?;
-
     if !singleton {
         return Err(BridgeRpcError {
             code: "CantOpenPackagedItem".into(),
             message: format!("Item {item_id} is packaged and cannot be opened. Assemble it first."),
         });
     }
-
     let grp = ctx.sde.types.get(&item_type_id).map(|t| t.group_id).unwrap_or(0);
     let cat = ctx.sde.types.get(&item_type_id).map(|t| t.category_id).unwrap_or(0);
-    let is_openable = is_container_group(grp, item_type_id)
-        || grp == 186
-        || cat == 6
-        || cat == 2
-        || item_type_id == 23;
-    if !is_openable {
+    if !(is_container_group(grp, item_type_id) || grp == 186 || cat == 6 || cat == 2 || item_type_id == 23) {
         return Err(BridgeRpcError {
             code: "NotAContainer".into(),
             message: format!("Item {item_id} (type {item_type_id}) is not a container"),
         });
     }
-
+    crate::services::character_skill_ops::verify_in_space_container_proximity(ctx, char_id, location_id, item_id).await?;
     let st = read_container_ship_state(ctx);
     if st.container_passwords.get(&item_id).is_some_and(|p| !p.is_empty())
         && !st.unlocked_containers.contains(&(item_id, char_id))
@@ -645,7 +635,6 @@ fn validate_single_item_can_be_opened(
             message: format!("Container {item_id} is password-locked. Enter password to unlock."),
         });
     }
-
     Ok(())
 }
 
@@ -660,40 +649,26 @@ pub(crate) async fn handle_containers_ships_and_fitting(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("invbroker", "ValidateItemCanBeOpened") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let item_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or_else(|| kwargs.get("itemID").and_then(|v| v.as_i64()))
-                .or_else(|| bound_entry.map(|b| b.object_id))
-                .unwrap_or(0);
-            match validate_single_item_can_be_opened(ctx, char_id, item_id) {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let item_id = args.first().and_then(|a| a.as_i64()).or_else(|| kwargs.get("itemID").and_then(|v| v.as_i64())).or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0);
+            match validate_single_item_can_be_opened(ctx, char_id, item_id).await {
                 Ok(()) => Some(Ok(PyRep::Bool(true))),
                 Err(e) => Some(Err(e)),
             }
         }
 
         ("invbroker", "ValidateItemListCanBeOpened") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let item_ids: Vec<i64> = match args.first().or_else(|| kwargs.get("itemIDs")) {
                 Some(PyRep::List(l) | PyRep::Tuple(l)) => l.iter().filter_map(|x| x.as_i64()).collect(),
                 Some(PyRep::Integer(id)) => vec![*id],
                 _ => Vec::new(),
             };
             if item_ids.is_empty() {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "ValidateItemListCanBeOpened requires a list of itemIDs".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "ValidateItemListCanBeOpened requires a list of itemIDs".into() }));
             }
             for &id in &item_ids {
-                if let Err(e) = validate_single_item_can_be_opened(ctx, char_id, id) {
+                if let Err(e) = validate_single_item_can_be_opened(ctx, char_id, id).await {
                     return Some(Err(e));
                 }
             }
@@ -959,93 +934,47 @@ pub(crate) async fn handle_containers_ships_and_fitting(
         | ("invbroker", "ALSCLock")
         | ("invbroker", "ALSCUnlockItems")
         | ("invbroker", "ALSCUnlock") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let is_lock = method.contains("ALSCLock");
-            let container_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or_else(|| bound_entry.map(|b| b.object_id))
-                .unwrap_or(0);
+            let container_id = args.first().and_then(|a| a.as_i64()).or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0);
             if container_id <= 0 {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidContainer".into(),
-                    message: "Valid containerID required for ALSC lock/unlock".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidContainer".into(), message: "Valid containerID required for ALSC lock/unlock".into() }));
             }
             let item_ids: Vec<i64> = match args.get(1).or_else(|| args.first()) {
-                Some(PyRep::List(v) | PyRep::Tuple(v)) => {
-                    v.iter().filter_map(|x| x.as_i64()).collect()
-                }
+                Some(PyRep::List(v) | PyRep::Tuple(v)) => v.iter().filter_map(|x| x.as_i64()).collect(),
                 Some(PyRep::Integer(id)) if *id != container_id => vec![*id],
-                _ => kwargs
-                    .get("itemIDs")
-                    .and_then(|v| match v {
-                        PyRep::List(l) | PyRep::Tuple(l) => {
-                            Some(l.iter().filter_map(|x| x.as_i64()).collect())
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or_default(),
+                _ => kwargs.get("itemIDs").and_then(|v| match v { PyRep::List(l) | PyRep::Tuple(l) => Some(l.iter().filter_map(|x| x.as_i64()).collect()), _ => None }).unwrap_or_default(),
             };
             let auth_check = ctx.db.with_snapshot(|snap| {
-                let cont = snap.items.get(&container_id).ok_or_else(|| BridgeRpcError {
-                    code: "ContainerNotFound".into(),
-                    message: format!("Container {container_id} not found"),
-                })?;
+                let cont = snap.items.get(&container_id).ok_or_else(|| BridgeRpcError { code: "ContainerNotFound".into(), message: format!("Container {container_id} not found") })?;
                 let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 let ch_loc = snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id).or(Some(c.solar_system_id as i64))).unwrap_or(0);
                 let ch_ship = snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0);
                 let is_ceo = snap.corporations.get(&corp_id).map(|c| c.ceo_id == char_id).unwrap_or(false);
                 let is_owner_or_corp = cont.owner_id == char_id || (corp_id > 0 && cont.owner_id == corp_id && (session.corp_role != 0 || is_ceo));
                 if !is_owner_or_corp && cont.location_id != ch_loc && cont.location_id != ch_ship {
-                    return Err(BridgeRpcError {
-                        code: "ALSCAccessDenied".into(),
-                        message: format!("Not authorized to lock/unlock items in container {container_id}"),
-                    });
+                    return Err(BridgeRpcError { code: "ALSCAccessDenied".into(), message: format!("Not authorized to lock/unlock items in container {container_id}") });
                 }
                 for &iid in &item_ids {
-                    let it = snap.items.get(&iid).ok_or_else(|| BridgeRpcError {
-                        code: "ItemNotFound".into(),
-                        message: format!("Item {iid} not found"),
-                    })?;
+                    let it = snap.items.get(&iid).ok_or_else(|| BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {iid} not found") })?;
                     if it.location_id != container_id {
-                        return Err(BridgeRpcError {
-                            code: "ItemNotInContainer".into(),
-                            message: format!("Item {iid} is not located inside container {container_id}"),
-                        });
+                        return Err(BridgeRpcError { code: "ItemNotInContainer".into(), message: format!("Item {iid} is not located inside container {container_id}") });
                     }
                 }
                 Ok(is_owner_or_corp)
             });
-            let is_owner_or_corp = match auth_check {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let is_owner_or_corp = match auth_check { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let now_unix = ctx.now_unix_secs();
             let mut st = read_container_ship_state(ctx);
             let req_pw = st.container_passwords.get(&container_id).cloned().unwrap_or_default();
             if !is_owner_or_corp && req_pw.is_empty() {
-                return Some(Err(BridgeRpcError {
-                    code: "ALSCAccessDenied".into(),
-                    message: format!("Not authorized to lock/unlock items in container {container_id}"),
-                }));
+                return Some(Err(BridgeRpcError { code: "ALSCAccessDenied".into(), message: format!("Not authorized to lock/unlock items in container {container_id}") }));
             }
             if !req_pw.is_empty() {
-                let provided = kwargs
-                    .get("password")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| args.get(2).and_then(|a| a.as_str()))
-                    .unwrap_or("");
+                let provided = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.get(2).and_then(|a| a.as_str())).unwrap_or("");
                 if provided != req_pw && !st.unlocked_containers.contains(&(container_id, char_id)) {
                     return Some(Err(BridgeRpcError {
-                        code: if is_lock {
-                            "ALSCPasswordNeededToLock".into()
-                        } else {
-                            "ALSCPasswordNeededToUnlock".into()
-                        },
+                        code: if is_lock { "ALSCPasswordNeededToLock".into() } else { "ALSCPasswordNeededToUnlock".into() },
                         message: "Container password required".into(),
                     }));
                 }

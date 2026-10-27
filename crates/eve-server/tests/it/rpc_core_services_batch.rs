@@ -374,7 +374,7 @@ async fn test_rpc_char_unbound_mgr_batch() {
         .await
         .expect("GetCohortsForUser");
     let cohorts = as_list(&res);
-    assert!(cohorts.is_empty());
+    assert!(!cohorts.is_empty());
 
     // 5. GetQAStarterSystemIDs
     let res = ctx

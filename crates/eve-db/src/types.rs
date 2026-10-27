@@ -77,6 +77,12 @@ impl FromWalError for String {
     }
 }
 
+impl FromWalError for (u32, String) {
+    fn from_wal_error(err: String) -> Self {
+        (500, err)
+    }
+}
+
 impl FromWalError for () {
     fn from_wal_error(err: String) -> Self {
         panic!("Durable WAL persistence failure: {err}");

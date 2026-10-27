@@ -400,12 +400,37 @@ pub async fn handle(
             crate::services::char_selection::get_character_selection_data(ctx, session),
         ),
         ("charUnboundMgr", "GetCohortsForUser") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            // const-ok: gatekeeper.user checks `cohortID in <result>`; EvoMu enrols no account in
-            // any feature cohort, so the user's cohort list is empty.
-            Some(Ok(PyRep::List(Vec::new())))
+            let uid = match ServerContext::require_auth(session) {
+                Ok(u) => u,
+                Err(e) => return Some(Err(e)),
+            };
+            let now_unix = ctx.now_unix();
+            let cohorts = ctx.db.with_snapshot(|snap| {
+                let blob_key = format!("user_cohorts:{uid}");
+                if let Some(json_str) = snap.service_state_blobs.get(&blob_key) {
+                    if let Ok(list) = serde_json::from_str::<Vec<String>>(json_str) {
+                        return list.into_iter().map(PyRep::String).collect();
+                    }
+                }
+                let user_chars: Vec<&eve_db::CharacterRecord> = snap
+                    .characters
+                    .values()
+                    .filter(|c| c.user_id == uid)
+                    .collect();
+                let mut out = Vec::new();
+                if let Some(oldest) = user_chars.iter().min_by_key(|c| c.create_date_unix) {
+                    let year = 1970 + (oldest.create_date_unix / 31_536_000);
+                    out.push(PyRep::String(format!("cohort_created_{year}")));
+                    let age_secs = now_unix.saturating_sub(oldest.create_date_unix);
+                    if age_secs < 30 * 86_400 {
+                        out.push(PyRep::String("cohort_new_player".into()));
+                    } else {
+                        out.push(PyRep::String("cohort_veteran".into()));
+                    }
+                }
+                out
+            });
+            Some(Ok(PyRep::List(cohorts)))
         }
         ("userSvc", "GetRedeemTokens") => {
             if let Err(e) = ServerContext::require_auth(session) {

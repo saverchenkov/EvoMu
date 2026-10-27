@@ -254,6 +254,36 @@ pub(crate) fn resolve_mail_targets(
     }
 }
 
+/// Returns the active 3,000-mail window (`feat:social.mail-mailbox-limits`) for `char_id`.
+/// Trash counts toward the 3,000 limit until permanently emptied (`snap.deleted_mails`).
+/// Beyond 3,000 non-deleted mails (including mailing-list and Trash mails), older mails
+/// are no longer listed until some mails are permanently deleted.
+pub(crate) fn active_mailbox_window_ids(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+) -> HashSet<i64> {
+    let mut entries: Vec<(u64, i64)> = Vec::new();
+    let mut seen = HashSet::new();
+    for m in &snap.mails {
+        if snap.deleted_mails.contains(&(char_id, m.message_id)) {
+            continue;
+        }
+        let is_list_member = snap.mailing_lists.values().any(|ml| {
+            (ml.mail_ids.contains(&m.message_id) || ml.list_id == m.recipient_id)
+                && ml.members.contains_key(&char_id)
+        });
+        let has_label = snap.mail_assigned_labels.contains_key(&(char_id, m.message_id));
+        if (m.recipient_id == char_id || m.sender_id == char_id || is_list_member || has_label)
+            && seen.insert(m.message_id)
+        {
+            let ts = snap.mail_timestamps.get(&m.message_id).copied().unwrap_or(0);
+            entries.push((ts, m.message_id));
+        }
+    }
+    entries.sort_unstable_by(|a, b| b.cmp(a));
+    entries.into_iter().take(3_000).map(|(_, id)| id).collect()
+}
+
 pub(crate) fn handle_mail_headers(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -291,9 +321,13 @@ pub(crate) fn handle_mail_headers(
         let mut statuses = Vec::new();
         let mut seen = HashSet::new();
         let meta_map = ctx.social_extras.lock().unwrap().mail_headers_meta.clone();
+        let allowed_window = active_mailbox_window_ids(snap, char_id);
 
         for m in snap.mails.iter() {
             if !seen.insert(m.message_id) {
+                continue;
+            }
+            if !allowed_window.contains(&m.message_id) {
                 continue;
             }
             if let Some(ref fetch_set) = to_fetch {

@@ -558,8 +558,13 @@ impl ServerContext {
 
     /// Injects a custom [`eve_db::ServerClock`] into both `ServerContext` and `WorldRepository` (`T-7`).
     pub fn set_clock(&self, clock: Arc<dyn eve_db::ServerClock>) {
+        let now_u = clock.now_unix_secs();
         self.db.set_clock(clock.clone());
         *self.clock.write().unwrap_or_else(|e| e.into_inner()) = clock;
+        self.db.with_mut_snapshot(|snap| {
+            snap.service_state_blobs
+                .insert("__server_now_unix".into(), now_u.to_string());
+        });
     }
 
     /// Returns the current server Unix timestamp in seconds (`T-7`).
@@ -594,6 +599,11 @@ impl ServerContext {
     pub fn advance_secs(&self, secs: u64) {
         let prev_unix = self.now_unix_secs();
         self.clock().advance_secs(secs);
+        let cur_unix = self.now_unix_secs();
+        self.db.with_mut_snapshot(|snap| {
+            snap.service_state_blobs
+                .insert("__server_now_unix".into(), cur_unix.to_string());
+        });
         if secs > 0 {
             crate::sp6_lifecycle::on_advance_secs(self, prev_unix, secs);
             crate::services::implant_plugging::purge_expired_boosters_all(
@@ -810,6 +820,8 @@ impl ServerContext {
                 let is_alpha = omega_lapsed_at.is_none() && ch.clone_grade <= 1;
                 let current_char_sp = ch.skill_points + ch.free_skill_points;
                 if is_alpha && current_char_sp >= 5_000_000.0 {
+                    snap.paused_skill_queues.insert(char_id);
+                    paused_chars.push(char_id);
                     continue;
                 }
                 let eff_attrs = crate::services::character_skills::effective_character_attributes(&sde, snap, char_id);

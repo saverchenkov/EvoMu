@@ -18,6 +18,8 @@ const JITA_STATION_ID: i64 = 60_003_760;
 
 #[tokio::test]
 async fn test_plan_ch2_skill_queue_and_brain_injection() {
+    // parity: plan:CH-2
+    eve_testkit::attest(&["plan:CH-2"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
@@ -104,6 +106,15 @@ async fn test_plan_ch2_skill_queue_and_brain_injection() {
         .await
         .expect_err("SaveSkillQueue without Mining IV must fail with SkillPrerequisiteNotMet");
     assert_eq!(q_no_prereq.code, "SkillPrerequisiteNotMet");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().free_skill_points = 5_000.0;
+    });
+    let apply_no_prereq = ctx
+        .dispatch_rpc(&mut sess, "skillMgr2", None, "ApplyFreeSkillPoints", &[PyRep::Integer(3410), PyRep::Integer(450)], &kw, None)
+        .await
+        .expect_err("ApplyFreeSkillPoints without prerequisites must fail with SkillPrerequisiteNotMet");
+    assert_eq!(apply_no_prereq.code, "SkillPrerequisiteNotMet");
 
     ctx.db.with_mut_snapshot(|snap| {
         let sk = snap.skills.entry(char_id).or_default();

@@ -927,6 +927,12 @@ fn handle_char_mgr(
                 if let Some(ch) = snap.characters.get(&char_id) {
                     let year = 1970 + (ch.create_date_unix / 31_536_000);
                     derived.push(PyRep::String(format!("cohort_created_{year}")));
+                    let age_secs = ctx.now_unix().saturating_sub(ch.create_date_unix);
+                    if age_secs < 30 * 86_400 {
+                        derived.push(PyRep::String("cohort_new_player".into()));
+                    } else {
+                        derived.push(PyRep::String("cohort_veteran".into()));
+                    }
                     if ch.corporation_id > 0 {
                         derived.push(PyRep::String(format!("cohort_corp_{}", ch.corporation_id)));
                     }

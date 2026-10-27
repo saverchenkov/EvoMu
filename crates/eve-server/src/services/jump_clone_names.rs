@@ -823,6 +823,20 @@ pub fn effective_character_attributes(
     snap: &eve_db::WorldStateSnapshot,
     char_id: i64,
 ) -> (f64, f64, f64, f64, f64) {
+    let now_unix = snap
+        .service_state_blobs
+        .get("__server_now_unix")
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    effective_character_attributes_at(sde, snap, char_id, now_unix)
+}
+
+pub fn effective_character_attributes_at(
+    sde: &eve_sde::SdeRegistry,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    now_unix: f64,
+) -> (f64, f64, f64, f64, f64) {
     let (mut cha, mut int, mut mem, mut per, mut wil) = snap
         .characters
         .get(&char_id)
@@ -874,12 +888,11 @@ pub fn effective_character_attributes(
             per += get_bonus(178);
             wil += get_bonus(179);
         } else if item.flag == InventoryFlag::Booster {
-            if item
-                .dynamic_attributes
-                .get(&crate::services::implant_plugging::DYN_ATTR_BOOSTER_EXPIRY_UNIX)
-                .is_some_and(|&exp| {
-                    exp > 0.0 && (eve_db::clock::host_wall_unix_secs_and_nanos().0 as f64) >= exp
-                })
+            if now_unix > 0.0
+                && item
+                    .dynamic_attributes
+                    .get(&crate::services::implant_plugging::DYN_ATTR_BOOSTER_EXPIRY_UNIX)
+                    .is_some_and(|&exp| exp > 0.0 && now_unix >= exp)
             {
                 continue;
             }
