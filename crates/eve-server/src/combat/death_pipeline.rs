@@ -33,6 +33,40 @@ pub fn execute_death_pipeline_sync(
     victim_pos: DVec3,
     rng_seed: u64,
 ) -> Result<DeathPipelineResult, String> {
+    let (victim_ship_type_id, base_price, insured_payout) = ctx.db.with_snapshot(|snap| {
+        let ship = snap
+            .items
+            .get(&victim_ship_id)
+            .ok_or_else(|| format!("Ship {victim_ship_id} not found in world repository"))?;
+        let cat_id = ctx
+            .sde
+            .types
+            .get(&ship.type_id)
+            .map(|t| t.category_id)
+            .unwrap_or(6);
+        if cat_id != 6 {
+            return Err(format!(
+                "Item {victim_ship_id} (type {}, category {cat_id}) is not a ship",
+                ship.type_id
+            ));
+        }
+        if let Some(ch) = snap.characters.get(&victim_char_id) {
+            if ch.active_ship_id > 0 && ch.active_ship_id != victim_ship_id {
+                return Err(format!(
+                    "Ship {victim_ship_id} is not character {victim_char_id}'s active ship ({})",
+                    ch.active_ship_id
+                ));
+            }
+        }
+        let base = ctx
+            .sde
+            .types
+            .get(&ship.type_id)
+            .map(|t| t.base_price)
+            .unwrap_or(230_000.0);
+        Ok::<_, String>((ship.type_id, base, ship.insured_payout_isk))
+    })?;
+
     let fitted_mods: Vec<(i64, u32, u16)> = ctx
         .ship_fittings
         .write()
@@ -52,20 +86,6 @@ pub fn execute_death_pipeline_sync(
         sys_id,
     );
 
-    let (victim_ship_type_id, base_price, insured_payout) = ctx.db.with_snapshot(|snap| {
-        let ship = snap
-            .items
-            .get(&victim_ship_id)
-            .ok_or_else(|| format!("Ship {victim_ship_id} not found in world repository"))?;
-        let base = ctx
-            .sde
-            .types
-            .get(&ship.type_id)
-            .map(|t| t.base_price)
-            .unwrap_or(230_000.0);
-        Ok::<_, String>((ship.type_id, base, ship.insured_payout_isk))
-    })?;
-
     let is_pod = victim_ship_type_id == 670
         || victim_ship_type_id == 33328
         || ctx
@@ -75,7 +95,7 @@ pub fn execute_death_pipeline_sync(
             .map(|t| t.group_id == 29)
             .unwrap_or(false);
     let wreck_type_id = if is_pod {
-        26557
+        25
     } else {
         ctx.sde
             .wrecks
@@ -132,7 +152,7 @@ pub fn execute_death_pipeline_sync(
                 type_id: wreck_type_id,
                 owner_id: victim_char_id,
                 location_id: sys_id as i64,
-                flag: InventoryFlag::Cargo,
+                flag: if is_pod { InventoryFlag::None } else { InventoryFlag::Cargo },
                 quantity: 1,
                 singleton: true,
                 version: 1,
@@ -145,6 +165,49 @@ pub fn execute_death_pipeline_sync(
         );
         snap.item_positions
             .insert(wreck_id, [victim_pos.x, victim_pos.y, victim_pos.z]);
+
+        let courier_cids: Vec<i64> = snap
+            .contracts
+            .values()
+            .filter(|c| {
+                c.contract_type == "Courier"
+                    && c.status == "InProgress"
+                    && c.item_ids.iter().any(|iid| {
+                        let Some(it) = snap.items.get(iid) else { return false; };
+                        it.location_id == victim_ship_id
+                            || snap
+                                .items
+                                .get(&it.location_id)
+                                .is_some_and(|p| p.location_id == victim_ship_id)
+                    })
+            })
+            .map(|c| c.contract_id)
+            .collect();
+        for cid in courier_cids {
+            snap.fail_courier_contract(cid, now_unix);
+        }
+        let wrap_ids: Vec<i64> = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == victim_ship_id && i.type_id == 3468)
+            .map(|i| i.item_id)
+            .collect();
+        for wid in wrap_ids {
+            let nested_ids: Vec<i64> = snap
+                .items
+                .values()
+                .filter(|i| i.location_id == wid)
+                .map(|i| i.item_id)
+                .collect();
+            for nid in nested_ids {
+                if let Some(nit) = snap.items.get_mut(&nid) {
+                    nit.location_id = victim_ship_id;
+                    nit.owner_id = victim_char_id;
+                    nit.flag = InventoryFlag::Cargo;
+                }
+            }
+            snap.items.remove(&wid);
+        }
 
         for &(mid, mtype, mflag) in &fitted_mods {
             snap.items.entry(mid).or_insert_with(|| InventoryItemRecord {
@@ -224,6 +287,24 @@ pub fn execute_death_pipeline_sync(
                 });
             } else {
                 snap.items.remove(&iid);
+                let orphan_ids: Vec<i64> = snap
+                    .items
+                    .values()
+                    .filter(|c| c.location_id == iid)
+                    .map(|c| c.item_id)
+                    .collect();
+                for oid in orphan_ids {
+                    if let Some(orph) = snap.items.remove(&oid) {
+                        destroyed.push(oid);
+                        destroyed_km.push(eve_db::KillmailItemEntry {
+                            type_id: orph.type_id,
+                            flag: orph.flag as u16,
+                            qty_dropped: 0,
+                            qty_destroyed: orph.quantity,
+                            singleton: orph.singleton,
+                        });
+                    }
+                }
                 destroyed.push(iid);
                 destroyed_km.push(eve_db::KillmailItemEntry {
                     type_id: item_snap.type_id,
@@ -235,24 +316,38 @@ pub fn execute_death_pipeline_sync(
             }
         }
         if is_pod {
-            if let Some(imps) = snap.active_implants.get(&victim_char_id) {
-                for &imp_tid in imps {
-                    let imp_isk = ctx
-                        .sde
-                        .types
-                        .get(&imp_tid)
-                        .map(|t| t.base_price)
-                        .filter(|&p| p > 0.0)
-                        .unwrap_or(1_000.0);
-                    items_isk += imp_isk;
-                    destroyed_km.push(eve_db::KillmailItemEntry {
-                        type_id: imp_tid,
-                        flag: InventoryFlag::Implant as u16,
-                        qty_dropped: 0,
-                        qty_destroyed: 1,
-                        singleton: true,
-                    });
+            let mut imp_tids: Vec<u32> = snap
+                .active_implants
+                .remove(&victim_char_id)
+                .unwrap_or_default();
+            let char_imp_items: Vec<(i64, u32)> = snap
+                .items
+                .values()
+                .filter(|i| i.location_id == victim_char_id && i.flag == InventoryFlag::Implant)
+                .map(|i| (i.item_id, i.type_id))
+                .collect();
+            for (iid, tid) in char_imp_items {
+                snap.items.remove(&iid);
+                if !imp_tids.contains(&tid) {
+                    imp_tids.push(tid);
                 }
+            }
+            for imp_tid in imp_tids {
+                let imp_isk = ctx
+                    .sde
+                    .types
+                    .get(&imp_tid)
+                    .map(|t| t.base_price)
+                    .filter(|&p| p > 0.0)
+                    .unwrap_or(1_000.0);
+                items_isk += imp_isk;
+                destroyed_km.push(eve_db::KillmailItemEntry {
+                    type_id: imp_tid,
+                    flag: InventoryFlag::Implant as u16,
+                    qty_dropped: 0,
+                    qty_destroyed: 1,
+                    singleton: true,
+                });
             }
         }
 
@@ -488,8 +583,8 @@ pub fn execute_death_pipeline_sync(
             velocity: DVec3::ZERO,
             max_velocity: 0.0,
             inertia: 1.0,
-            mass: 10_000.0,
-            radius: 50.0,
+            mass: if is_pod { 80.0 } else { 10_000.0 },
+            radius: if is_pod { 5.0 } else { 50.0 },
             speed_fraction: 0.0,
             mode: MovementMode::Stop,
         },
@@ -503,7 +598,7 @@ pub fn execute_death_pipeline_sync(
             ..eve_destiny::CombatState::default()
         },
         SlimItemMeta {
-            group_id: 186,
+            group_id: if is_pod { 14 } else { 186 },
             category_id: 2,
             owner_id: victim_char_id,
             char_id: None,

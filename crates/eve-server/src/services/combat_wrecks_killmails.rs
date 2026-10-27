@@ -450,6 +450,70 @@ pub fn register_container_lifetime(
     });
 }
 
+/// Immediately removes an empty jettisoned cargo container (`type_id == 23`) from inventory,
+/// `container_lifetimes`, and the solar system `Ballpark`, broadcasting `RemoveBall` with the
+/// ballpark's current destiny tick stamp (`feat:lifecycle.jetcan-empty`).
+pub async fn despawn_empty_jetcan_if_needed(
+    ctx: &ServerContext,
+    sys_id: Option<u32>,
+    cont_id: i64,
+) -> bool {
+    if cont_id <= 0 {
+        return false;
+    }
+    let resolved_sys_opt = ctx.db.with_mut_snapshot(|snap| {
+        let is_empty_jetcan = snap
+            .items
+            .get(&cont_id)
+            .is_some_and(|c| c.type_id == 23 && c.flag == InventoryFlag::None)
+            && !snap.items.values().any(|i| i.location_id == cont_id);
+        if !is_empty_jetcan {
+            return None;
+        }
+        let loc_sys = snap
+            .items
+            .remove(&cont_id)
+            .and_then(|c| u32::try_from(c.location_id).ok());
+        snap.item_positions.remove(&cont_id);
+        snap.sp6_lifecycle.space_object_meta.remove(&cont_id);
+        snap.sp6_lifecycle.ship_combat_hp.remove(&cont_id);
+        Some(sys_id.or(loc_sys))
+    });
+    let Some(sys_opt) = resolved_sys_opt else {
+        return false;
+    };
+    with_mut_combat_runtime(ctx, |rt| {
+        rt.container_lifetimes.remove(&cont_id);
+    });
+    if let Some(sid) = sys_opt {
+        let sys_handle = ctx.systems.get_or_spawn(sid);
+        let stamp = sys_handle
+            .get_ball_snapshot(cont_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(t, _)| t as i64)
+            .unwrap_or(1);
+        let _ = sys_handle.remove_ball(cont_id).await;
+        ctx.notify(
+            NotificationTarget::SolarSystem(sid),
+            "DoDestinyUpdate",
+            "clientID",
+            vec![
+                PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::Integer(stamp),
+                    PyRep::Tuple(vec![
+                        PyRep::String("RemoveBall".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(cont_id)]),
+                    ]),
+                ])]),
+                PyRep::Bool(false),
+            ],
+        );
+    }
+    true
+}
+
 /// Despawns wrecks (> 7200s = 2h), jetcans (> 3600s = 1h), and anchored Mobile Warp Disruptors
 /// (> 48h SDE decay lifetime) whose lifetime has expired (`feat:combat.wreck-lifetime`,
 /// `feat:lifecycle.mobile_warp_disruptor-lifecycle`).
@@ -695,54 +759,8 @@ pub async fn handle_wrecks_killmails(
 
             match res {
                 Ok(death) => {
-                    let mut corpse_item_id: i64 = 0;
-                    if is_capsule {
-                        // Spawn a Frozen Corpse / Corpse Male (type_id 25) in space at the pod's coordinates (`feat:combat.capsule-ejection-items`)
-                        corpse_item_id = ctx.db.with_mut_snapshot(|snap| {
-                            snap.next_entity_id += 1;
-                            let cid = snap.next_entity_id;
-                            crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
-                                snap, cid, now_unix, false,
-                            );
-                            snap.items.insert(
-                                cid,
-                                InventoryItemRecord {
-                                    item_id: cid,
-                                    type_id: 25, // Corpse Male
-                                    owner_id: char_id,
-                                    location_id: sys_id as i64,
-                                    flag: InventoryFlag::None,
-                                    quantity: 1,
-                                    singleton: true,
-                                    version: 1,
-                                    dynamic_attributes: HashMap::new(),
-                                    source_mutaplasmid_id: None,
-                                    insured_payout_isk: 0.0,
-                                    is_blueprint_copy: false,
-                                    blueprint_runs_remaining: None,
-                                },
-                            );
-                            snap.item_positions
-                                .insert(cid, [pos.x, pos.y, pos.z]);
-                            cid
-                        });
-                        let _ = sys_handle
-                            .spawn_ball_with_combat(
-                                eve_destiny::Ball {
-                                    id: corpse_item_id,
-                                    type_id: 25,
-                                    position: pos,
-                                    velocity: DVec3::ZERO,
-                                    max_velocity: 0.0,
-                                    inertia: 1.0,
-                                    mass: 80.0,
-                                    radius: 5.0,
-                                    speed_fraction: 0.0,
-                                    mode: eve_destiny::MovementMode::Stop,
-                                },
-                                ctx.build_type_combat_state(25),
-                            )
-                            .await;
+                    let corpse_item_id: i64 = if is_capsule {
+                        death.wreck_item_id
                     } else {
                         register_container_lifetime(
                             ctx,
@@ -753,7 +771,8 @@ pub async fn handle_wrecks_killmails(
                             now_unix,
                             false,
                         );
-                    }
+                        0
+                    };
 
                     // Build DetailedKillmail including any attackers within the 15-minute (900s) assist window
                     let recent_assists: Vec<AssistLogEntry> = with_mut_combat_runtime(ctx, |rt| {
@@ -1031,6 +1050,7 @@ pub async fn handle_wrecks_killmails(
                 .get_or_create(wreck_item.owner_id)
                 .is_criminal(now_unix);
             let is_abandoned = owner_is_criminal
+                || wreck_item.owner_id == 0
                 || with_combat_runtime(ctx, |rt| {
                     rt.container_lifetimes
                         .get(&wreck_id)
@@ -1180,6 +1200,9 @@ pub async fn handle_wrecks_killmails(
                     PyRep::List(looted_ids.iter().copied().map(PyRep::Integer).collect()),
                 ],
             );
+            if remaining_ids.is_empty() && wreck_item.type_id == 23 {
+                let _ = despawn_empty_jetcan_if_needed(ctx, Some(sys_id), wreck_id).await;
+            }
             Some(Ok(PyRep::keyval([
                 ("wreckID", PyRep::Integer(wreck_id)),
                 (

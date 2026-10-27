@@ -760,7 +760,7 @@ async fn handle_dock(
             message: "Character is already docked in a station or structure".into(),
         });
     }
-    let Some(ship_id) = session.ship_id else {
+    let Some(mut ship_id) = session.ship_id else {
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),
             message: "Cannot dock without an active ship in space".into(),
@@ -783,8 +783,9 @@ async fn handle_dock(
         });
     };
 
+    let now_unix = ctx.now_unix();
     let handle = ctx.systems.get_or_spawn(sys_id);
-    let Some((cur_tick, ball)) = (match handle.get_ball_snapshot(ship_id).await {
+    let mut ball_snap = match handle.get_ball_snapshot(ship_id).await {
         Ok(v) => v,
         Err(e) => {
             return Err(BridgeRpcError {
@@ -792,16 +793,23 @@ async fn handle_dock(
                 message: e,
             })
         }
-    }) else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: format!("Ship {ship_id} is not spawned in solar system {sys_id} Ballpark"),
-        });
     };
-
-    let now_unix = ctx.now_unix();
+    if ball_snap.is_none() {
+        if let Some(db_ship_id) = ctx
+            .db
+            .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id))
+            .filter(|&id| id > 0 && id != ship_id)
+        {
+            if let Ok(Some(v)) = handle.get_ball_snapshot(db_ship_id).await {
+                ship_id = db_ship_id;
+                session.ship_id = Some(db_ship_id);
+                ball_snap = Some(v);
+            }
+        }
+    }
+    let cur_tick_opt = ball_snap.as_ref().map(|(cur_tick, _)| (sys_id, *cur_tick));
     if let Some(active_timer) =
-        check_session_change_timer_active(ctx, char_id, now_unix, Some((sys_id, cur_tick)))
+        check_session_change_timer_active(ctx, char_id, now_unix, cur_tick_opt)
     {
         return Err(BridgeRpcError {
             code: "SessionChangeInProgress".into(),
@@ -811,6 +819,12 @@ async fn handle_dock(
             ),
         });
     }
+    let Some((cur_tick, ball)) = ball_snap else {
+        return Err(BridgeRpcError {
+            code: "ShipNotInSpace".into(),
+            message: format!("Ship {ship_id} is not spawned in solar system {sys_id} Ballpark"),
+        });
+    };
 
     let sys_sec = ctx
         .sde

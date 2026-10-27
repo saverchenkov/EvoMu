@@ -195,7 +195,40 @@ pub async fn handle_ship_or_npc_destruction(
     let mut generated_corpse_id: i64 = 0;
     let generated_km_hash;
 
-    let victim_char_opt = player_target_info.map(|(vcid, _)| vcid);
+    let is_non_ship_space_obj = ctx.db.with_snapshot(|snap| {
+        snap.items.get(&target_ball_id).is_some_and(|it| {
+            let cat_id = ctx
+                .sde
+                .types
+                .get(&it.type_id)
+                .map(|t| t.category_id)
+                .unwrap_or(6);
+            matches!(cat_id, 2 | 18)
+        })
+    });
+    if is_non_ship_space_obj {
+        crate::services::combat_crimewatch::combat_missiles_aoe::cleanup_destroyed_non_ship_ball(
+            ctx,
+            sys_id,
+            target_ball_id,
+        )
+        .await;
+        return (0, 0, 0, String::new());
+    }
+
+    let victim_char_opt = player_target_info.and_then(|(vcid, _)| {
+        crate::services::combat_crimewatch::combat_missiles_aoe::active_ship_victim_char_id(
+            ctx,
+            target_ball_id,
+        )
+        .or(Some(vcid).filter(|&id| {
+            ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&id)
+                    .is_some_and(|c| c.active_ship_id == target_ball_id)
+            })
+        }))
+    });
     let is_pod_target = target_ball.type_id == 670;
     let victim_id = victim_char_opt.unwrap_or(target_ball_id);
     let wreck_owner_id = if victim_char_opt.is_some() { victim_id } else { attacker_char_id };
@@ -278,6 +311,41 @@ pub async fn handle_ship_or_npc_destruction(
             });
         }
 
+        let courier_cids: Vec<i64> = snap
+            .contracts
+            .values()
+            .filter(|c| {
+                c.contract_type == "Courier"
+                    && c.status == "InProgress"
+                    && c.item_ids.iter().any(|iid| {
+                        let Some(it) = snap.items.get(iid) else { return false; };
+                        it.location_id == target_ball_id
+                            || snap.items.get(&it.location_id).is_some_and(|p| p.location_id == target_ball_id)
+                    })
+            })
+            .map(|c| c.contract_id)
+            .collect();
+        for cid in courier_cids {
+            snap.fail_courier_contract(cid, now_unix);
+        }
+        let wrap_ids: Vec<i64> = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == target_ball_id && i.type_id == 3468)
+            .map(|i| i.item_id)
+            .collect();
+        for wid in wrap_ids {
+            let nested_ids: Vec<i64> = snap.items.values().filter(|i| i.location_id == wid).map(|i| i.item_id).collect();
+            for nid in nested_ids {
+                if let Some(nit) = snap.items.get_mut(&nid) {
+                    nit.location_id = target_ball_id;
+                    nit.owner_id = wreck_owner_id;
+                    nit.flag = eve_db::InventoryFlag::Cargo;
+                }
+            }
+            snap.items.remove(&wid);
+        }
+
         let mut contained: Vec<eve_db::InventoryItemRecord> = snap.items.values().filter(|i| i.location_id == target_ball_id).cloned().collect();
         contained.sort_by_key(|i| i.item_id);
 
@@ -300,12 +368,31 @@ pub async fn handle_ship_or_npc_destruction(
                 dropped_entries.push(eve_db::KillmailItemEntry { type_id: item.type_id, flag: item.flag as u16, qty_dropped: item.quantity, qty_destroyed: 0, singleton: item.singleton });
             } else {
                 snap.items.remove(&item.item_id);
+                let orphan_ids: Vec<i64> = snap.items.values().filter(|c| c.location_id == item.item_id).map(|c| c.item_id).collect();
+                for oid in orphan_ids {
+                    if let Some(orph) = snap.items.remove(&oid) {
+                        destroyed_entries.push(eve_db::KillmailItemEntry { type_id: orph.type_id, flag: orph.flag as u16, qty_dropped: 0, qty_destroyed: orph.quantity, singleton: orph.singleton });
+                    }
+                }
                 destroyed_entries.push(eve_db::KillmailItemEntry { type_id: item.type_id, flag: item.flag as u16, qty_dropped: 0, qty_destroyed: item.quantity, singleton: item.singleton });
             }
         }
 
         if is_pod_target {
-            for &imp_tid in &active_implants {
+            let mut imp_tids = active_implants.clone();
+            let char_imp_items: Vec<(i64, u32)> = snap
+                .items
+                .values()
+                .filter(|i| i.location_id == victim_id && i.flag == eve_db::InventoryFlag::Implant)
+                .map(|i| (i.item_id, i.type_id))
+                .collect();
+            for (iid, tid) in char_imp_items {
+                snap.items.remove(&iid);
+                if !imp_tids.contains(&tid) {
+                    imp_tids.push(tid);
+                }
+            }
+            for imp_tid in imp_tids {
                 items_isk += ctx.sde.types.get(&imp_tid).map(|t| t.base_price).filter(|&p| p > 0.0).unwrap_or(1_000.0);
                 destroyed_entries.push(eve_db::KillmailItemEntry { type_id: imp_tid, flag: eve_db::InventoryFlag::Implant as u16, qty_dropped: 0, qty_destroyed: 1, singleton: true });
             }
@@ -338,15 +425,20 @@ pub async fn handle_ship_or_npc_destruction(
         );
     });
 
+    let _ = sys_handle.remove_ball(target_ball_id).await;
     if !is_pod_target && generated_wreck_id > 0 {
         let _ = sys_handle
-            .spawn_ball_with_combat(
+            .spawn_ball_with_meta(
                 eve_destiny::Ball {
                     id: generated_wreck_id, type_id: wreck_type_id, position: target_ball.position, velocity: DVec3::ZERO,
                     max_velocity: 0.0, inertia: 1.0, mass: 100_000.0, radius: 30.0, speed_fraction: 0.0,
                     mode: eve_destiny::MovementMode::Stop,
                 },
                 ctx.build_type_combat_state(wreck_type_id),
+                eve_destiny::SlimItemMeta {
+                    group_id: 186, category_id: 2, owner_id: wreck_owner_id, char_id: None,
+                    corp_id: -1, alliance_id: -1, security_status: 0.0, is_cloaked: false,
+                },
             )
             .await;
         let is_crim = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).get_or_create(wreck_owner_id).is_criminal(now_unix);
@@ -356,13 +448,17 @@ pub async fn handle_ship_or_npc_destruction(
     if is_pod_target {
         if generated_corpse_id > 0 {
             let _ = sys_handle
-                .spawn_ball_with_combat(
+                .spawn_ball_with_meta(
                     eve_destiny::Ball {
                         id: generated_corpse_id, type_id: 25, position: target_ball.position, velocity: DVec3::ZERO,
                         max_velocity: 0.0, inertia: 1.0, mass: 80.0, radius: 2.0, speed_fraction: 0.0,
                         mode: eve_destiny::MovementMode::Stop,
                     },
                     ctx.build_type_combat_state(25),
+                    eve_destiny::SlimItemMeta {
+                        group_id: 14, category_id: 2, owner_id: victim_id, char_id: None,
+                        corp_id: -1, alliance_id: -1, security_status: 0.0, is_cloaked: false,
+                    },
                 )
                 .await;
         }
@@ -382,6 +478,19 @@ pub async fn handle_ship_or_npc_destruction(
             let _ = ctx
                 .db
                 .respawn_character_at_home_station(vcid, vship_id, &ctx.sde);
+            let new_sys_id = ctx
+                .db
+                .with_snapshot(|s| s.characters.get(&vcid).map(|c| c.solar_system_id))
+                .unwrap_or(sys_id);
+            crate::services::space_destiny::record_session_change_timer(
+                ctx,
+                vcid,
+                now_unix,
+                new_sys_id,
+                0,
+                "podding",
+            );
+            crate::services::map_service::record_solar_system_visit(ctx, vcid, new_sys_id);
         }
     } else if let Some((vcid, vship_id)) = player_target_info {
         crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, vcid, vship_id, sys_id);
@@ -399,6 +508,7 @@ pub async fn handle_ship_or_npc_destruction(
         );
         let cap_id = ctx.db.with_mut_snapshot(|snap| {
             snap.items.remove(&vship_id);
+            snap.item_positions.remove(&vship_id);
             snap.next_entity_id += 1;
             let cid = snap.next_entity_id;
             snap.items.insert(
@@ -419,13 +529,23 @@ pub async fn handle_ship_or_npc_destruction(
                     blueprint_runs_remaining: None,
                 },
             );
+            snap.item_positions.insert(
+                cid,
+                [
+                    target_ball.position.x,
+                    target_ball.position.y,
+                    target_ball.position.z,
+                ],
+            );
             if let Some(vch) = snap.characters.get_mut(&vcid) {
                 vch.active_ship_id = cid;
+                vch.version += 1;
+                vch.system_epoch += 1;
             }
             cid
         });
         let _ = sys_handle
-            .spawn_ball_with_combat(
+            .spawn_ball_with_meta(
                 eve_destiny::Ball {
                     id: cap_id,
                     type_id: 670,
@@ -439,8 +559,26 @@ pub async fn handle_ship_or_npc_destruction(
                     mode: eve_destiny::MovementMode::Stop,
                 },
                 ctx.build_type_combat_state(670),
+                eve_destiny::SlimItemMeta {
+                    group_id: 29,
+                    category_id: 6,
+                    owner_id: vcid,
+                    char_id: Some(vcid),
+                    corp_id: -1,
+                    alliance_id: -1,
+                    security_status: 0.0,
+                    is_cloaked: false,
+                },
             )
             .await;
+        crate::services::space_destiny::record_session_change_timer(
+            ctx,
+            vcid,
+            now_unix,
+            sys_id,
+            0,
+            "ship_loss",
+        );
     } else {
         let bounty = ctx
             .sde

@@ -851,3 +851,67 @@ pub(crate) fn evaluate_space_wreck_or_jetcan_loot(
     }
     Ok((true, true))
 }
+
+pub(super) async fn handle_get_container_contents(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let Some(container_id) = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .or_else(|| bound_entry.map(|b| b.object_id))
+    else {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "GetContainerContents requires containerID".into(),
+        });
+    };
+    let supplied_pw = kwargs
+        .get("password")
+        .and_then(|v| v.as_str())
+        .or_else(|| args.get(1).and_then(|a| a.as_str()));
+    {
+        let mut st = fitting_containers_ships::read_container_ship_state(ctx);
+        if let Some(req_pw) = st.container_passwords.get(&container_id).cloned() {
+            if !req_pw.is_empty() && !st.unlocked_containers.contains(&(container_id, char_id)) {
+                if supplied_pw == Some(req_pw.as_str()) {
+                    st.unlocked_containers.insert((container_id, char_id));
+                } else {
+                    return Err(BridgeRpcError {
+                        code: "ALSCPasswordRequired".into(),
+                        message: format!("Password required to open container {container_id}"),
+                    });
+                }
+            }
+        }
+        let is_alsc = ctx.db.with_snapshot(|snap| {
+            snap.items.get(&container_id).is_some_and(|it| {
+                ctx.sde
+                    .types
+                    .get(&it.type_id)
+                    .is_some_and(|t| t.group_id == 448)
+            })
+        });
+        if is_alsc {
+            let now_unix = ctx.now_unix_secs();
+            st.alsc_logs
+                .entry(container_id)
+                .or_default()
+                .push(fitting_containers_ships::AlscLogEntry {
+                    timestamp_unix: now_unix,
+                    actor_id: char_id,
+                    action: "ALSCActionOpen".into(),
+                    item_id: container_id,
+                    item_type_id: 0,
+                    quantity: 0,
+                });
+        }
+        fitting_containers_ships::save_container_ship_state(ctx, &st);
+    }
+    ctx.get_container_contents(session, bound_entry, char_id, container_id)
+        .await
+}

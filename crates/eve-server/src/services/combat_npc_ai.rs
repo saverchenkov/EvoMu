@@ -188,9 +188,27 @@ pub async fn spawn_specialized_npc_entity(
     let bounty = match archetype {
         "Sleeper" => 0.0, // Sleepers pay 0 direct bounty and drop blue loot (`feat:npc.sleepers`)
         "Officer" => attr(481).unwrap_or(50_000_000.0).max(25_000_000.0),
-        "CloneSoldier" => attr(481).unwrap_or(1_000_000.0).max(500_000.0),
+        "CloneSoldier" => attr(481).unwrap_or(0.0),
         _ => attr(481).unwrap_or(120_000.0),
     };
+    let resolved_faction_id = sde_type.and_then(|t| t.faction_id).unwrap_or_else(|| match archetype {
+        "Navy" | "FactionPolice" | "Police" => if (500_001..=500_030).contains(&spawn_group_id) { spawn_group_id } else { 500_001 },
+        "Sleeper" | "PochvenHypnosianSleeper" => 500_021,
+        "RogueDrone" => 500_008,
+        "EDENCOM" => 500_027,
+        "Drifter" => 500_024,
+        "Triglavian" => 500_026,
+        "CloneSoldier" => if (500_001..=500_030).contains(&spawn_group_id) {
+            spawn_group_id
+        } else {
+            crate::combat::npc_ai::regional_pirate_faction_id(ctx, solar_system_id)
+        },
+        _ => if (500_001..=500_030).contains(&spawn_group_id) {
+            spawn_group_id
+        } else {
+            crate::combat::npc_ai::regional_pirate_faction_id(ctx, solar_system_id)
+        },
+    });
     let dmg_mult = attr(64).unwrap_or(2.0).max(1.0);
     let raw_em = attr(114).unwrap_or(0.0);
     let raw_exp = attr(116).unwrap_or(0.0);
@@ -208,22 +226,35 @@ pub async fn spawn_specialized_npc_entity(
             "Triglavian" => DamageVector::new(0.0, 75.0, 0.0, 75.0),
             "EDENCOM" => DamageVector::new(60.0, 0.0, 60.0, 0.0),
             "Drifter" | "Sleeper" | "IncursionSansha" => DamageVector::new(50.0, 50.0, 50.0, 50.0),
+            "CloneSoldier" | "Pirate" | "BeltRat" | "Officer" => {
+                crate::combat::npc_ai::faction_damage_vector(resolved_faction_id, 100.0)
+            }
             _ => DamageVector::new(25.0, 25.0, 25.0, 25.0),
         }
     };
 
-    // Clone Soldier tier security tag mapping (`feat:npc.clone-soldier-spawns`)
+    // Clone Soldier tier security tag mapping from SDE group 1206 (`Security Tags`, `feat:npc.clone-soldier-spawns`)
     let tag_drop = if archetype == "CloneSoldier" {
         let name = sde_type.map(|t| t.name.as_str()).unwrap_or("");
-        if name.contains("Trainer") {
-            Some(35661)
+        let (tier_str, fallback_tag) = if name.contains("Trainer") {
+            ("Trainer", 33138)
         } else if name.contains("Recruiter") {
-            Some(35662)
+            ("Recruiter", 33139)
         } else if name.contains("Transporter") {
-            Some(35663)
+            ("Transporter", 33140)
         } else {
-            Some(35664)
-        }
+            ("Negotiator", 33141)
+        };
+        ctx.sde
+            .types
+            .values()
+            .find(|t| {
+                t.group_id == 1206
+                    && t.name.contains("Clone Soldier")
+                    && t.name.contains(tier_str)
+            })
+            .map(|t| t.type_id)
+            .or(Some(fallback_tag))
     } else {
         None
     };
@@ -301,15 +332,7 @@ pub async fn spawn_specialized_npc_entity(
     let entity = ExtendedNpcEntity {
         ball_id,
         type_id: npc_type_id,
-        faction_id: sde_type.and_then(|t| t.faction_id).unwrap_or_else(|| match archetype {
-            "Navy" | "FactionPolice" | "Police" => if (500_001..=500_030).contains(&spawn_group_id) { spawn_group_id } else { 500_001 },
-            "Sleeper" | "PochvenHypnosianSleeper" => 500_021,
-            "RogueDrone" => 500_008,
-            "EDENCOM" => 500_027,
-            "Drifter" => 500_024,
-            "Triglavian" => 500_026,
-            _ => if (500_001..=500_030).contains(&spawn_group_id) { spawn_group_id } else { 500_010 },
-        }),
+        faction_id: resolved_faction_id,
         archetype: archetype.to_string(),
         solar_system_id,
         spawn_group_id,
@@ -530,12 +553,30 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         for (&tid, &threat) in &npc.threat_table {
             npc.aggression_threat.entry(tid).or_insert(threat);
         }
-        // Prune any targets in `aggression_threat` that are no longer on grid (> 150 km or removed from Ballpark).
-        npc.aggression_threat.retain(|&tid, _| {
-            ball_map
-                .get(&tid)
-                .is_some_and(|tb| tb.position.distance(npc_ball.position) <= 150_000.0)
-        });
+        // Prune any targets in `aggression_threat` / `threat_table` that are no longer on grid (> 150 km),
+        // warped out (`MovementMode::Warp`), lost lock (`is_cloaked`), or destroyed (`structure_hp <= 0.0`).
+        let valid_target = |tid: i64| -> bool {
+            let Some(tb) = ball_map.get(&tid) else {
+                return false;
+            };
+            if tb.position.distance(npc_ball.position) > 150_000.0
+                || matches!(tb.mode, MovementMode::Warp { .. })
+            {
+                return false;
+            }
+            let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(cs) = bp.combat_states.get(&tid) {
+                if cs.is_cloaked || cs.structure_hp <= 0.0 {
+                    return false;
+                }
+            }
+            true
+        };
+        npc.aggression_threat.retain(|&tid, _| valid_target(tid));
+        npc.threat_table.retain(|&tid, _| valid_target(tid));
+        if npc.target_id.is_some_and(|tid| !valid_target(tid)) {
+            npc.target_id = None;
+        }
 
         // Add any hostile ships or active player drones within 75 km that pass standings aggression check
         for (&cand_id, cand_ball) in &ball_map {
@@ -543,6 +584,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 || cand_id >= 700_000_000
                 || cand_ball.type_id == 26468
                 || cand_ball.max_velocity <= 0.0
+                || !valid_target(cand_id)
             {
                 continue;
             }

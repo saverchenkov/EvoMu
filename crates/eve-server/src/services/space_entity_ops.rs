@@ -61,32 +61,106 @@ pub async fn handle(
         }
         ("beyonce", "CmdAbandonLoot") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let target_ids: Vec<i64> = match args.first() {
+                Some(PyRep::List(list) | PyRep::Tuple(list)) => list.iter().filter_map(|x| x.as_i64()).collect(),
+                Some(v) => v.as_i64().into_iter().collect(),
+                None => Vec::new(),
+            };
+            if target_ids.is_empty() {
+                return Some(Err(BridgeRpcError { code: "ItemNotFound".into(), message: "No wreck/container IDs provided".into() }));
+            }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
             };
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(it) = snap.items.get_mut(&target_id) else {
-                    return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {target_id} not found") });
-                };
-                if it.owner_id != char_id {
-                    return Err(BridgeRpcError { code: "AccessDenied".into(), message: "Only item owner can abandon loot".into() });
+            let res: Result<Vec<(i64, u32, u32, u32, bool, i64)>, BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
+                let mut metas = Vec::new();
+                for &tid in &target_ids {
+                    let Some(it) = snap.items.get(&tid).cloned() else {
+                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {tid} not found") });
+                    };
+                    if it.owner_id != char_id {
+                        return Err(BridgeRpcError { code: "AccessDenied".into(), message: "Only item owner can abandon loot".into() });
+                    }
+                    if it.location_id != sys_id as i64 {
+                        return Err(BridgeRpcError { code: "ItemNotInSpace".into(), message: "Item must be in space to be abandoned".into() });
+                    }
+                    let (grp, cat) = ctx.sde.types.get(&it.type_id).map(|t| (t.group_id, t.category_id)).unwrap_or((0, 0));
+                    if grp != 186 && grp != 12 && grp != 340 && grp != 448 {
+                        return Err(BridgeRpcError { code: "InvalidItemType".into(), message: "Only wrecks and containers in space can be abandoned".into() });
+                    }
+                    let is_empty = !snap.items.values().any(|c| c.location_id == tid);
+                    metas.push((tid, it.type_id, grp, cat, is_empty, it.owner_id));
                 }
-                if it.location_id != sys_id as i64 {
-                    return Err(BridgeRpcError { code: "ItemNotInSpace".into(), message: "Item must be in space to be abandoned".into() });
+                for &(tid, _, _, _, _, _) in &metas {
+                    if let Some(it) = snap.items.get_mut(&tid) {
+                        it.owner_id = 0;
+                        it.version += 1;
+                    }
+                    let child_ids: Vec<i64> = snap.items.values().filter(|c| c.location_id == tid).map(|c| c.item_id).collect();
+                    for cid in child_ids {
+                        if let Some(c) = snap.items.get_mut(&cid) {
+                            c.owner_id = 0;
+                            c.version += 1;
+                        }
+                    }
                 }
-                // Game mechanics: Only in-space wrecks (group 186) and containers (groups 12, 340) can be abandoned.
-                // Setting owner_id to 0 makes the wreck/can free for anyone to loot without crimewatch penalty.
-                let grp = ctx.sde.types.get(&it.type_id).map(|t| t.group_id).unwrap_or(0);
-                if grp != 186 && grp != 12 && grp != 340 {
-                    return Err(BridgeRpcError { code: "InvalidItemType".into(), message: "Only wrecks and containers in space can be abandoned".into() });
-                }
-                it.owner_id = 0;
-                it.version += 1;
-                Ok(())
+                Ok(metas)
             });
             match res {
-                Ok(()) => Some(Ok(PyRep::keyval([("itemID", PyRep::Integer(target_id)), ("abandoned", PyRep::Bool(true))]))),
+                Ok(metas) => {
+                    with_mut_combat_runtime(ctx, |rt| {
+                        for &(tid, _, _, _, _, _) in &metas {
+                            if let Some(c) = rt.container_lifetimes.get_mut(&tid) {
+                                c.is_abandoned = true;
+                                c.owner_id = 0;
+                            }
+                        }
+                    });
+                    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+                    for &(tid, type_id, grp, cat, is_empty, prev_owner_id) in &metas {
+                        let _ = sys_handle
+                            .change_slim_item(
+                                tid,
+                                eve_destiny::SlimItemMeta {
+                                    group_id: grp,
+                                    category_id: cat,
+                                    owner_id: 0,
+                                    char_id: None,
+                                    corp_id: 0,
+                                    alliance_id: 0,
+                                    security_status: 0.0,
+                                    is_cloaked: false,
+                                },
+                            )
+                            .await;
+                        let build_slim_kv = |owner: i64| {
+                            PyRep::keyval([
+                                ("itemID", PyRep::Integer(tid)),
+                                ("typeID", PyRep::Integer(type_id as i64)),
+                                ("groupID", PyRep::Integer(grp as i64)),
+                                ("categoryID", PyRep::Integer(cat as i64)),
+                                ("ownerID", PyRep::Integer(owner)),
+                                ("charID", PyRep::None),
+                                ("corpID", PyRep::None),
+                                ("allianceID", PyRep::None),
+                                ("securityStatus", PyRep::Real(0.0)),
+                                ("isEmpty", PyRep::Integer(if is_empty { 1 } else { 0 })),
+                            ])
+                        };
+                        ctx.notify(
+                            crate::router::NotificationTarget::SolarSystem(sys_id),
+                            "OnSlimItemChange",
+                            "clientID",
+                            vec![build_slim_kv(prev_owner_id), build_slim_kv(0)],
+                        );
+                    }
+                    let first_id = target_ids[0];
+                    Some(Ok(PyRep::keyval([
+                        ("itemID", PyRep::Integer(first_id)),
+                        ("wreckIDs", PyRep::List(target_ids.into_iter().map(PyRep::Integer).collect())),
+                        ("abandoned", PyRep::Bool(true)),
+                    ])))
+                }
                 Err(e) => Some(Err(e)),
             }
         }

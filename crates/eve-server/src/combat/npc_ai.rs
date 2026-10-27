@@ -43,6 +43,89 @@ pub fn faction_damage_vector(faction_id: u32, total_dps: f64) -> DamageVector {
     }
 }
 
+/// Resolves the regional pirate faction ID for a solar system (`feat:npc.belt-rats`, `feat:npc.clone-soldier-spawns`).
+// DERIVED: Region-to-pirate-faction table mapped from EVE regional pirate rat distribution
+// (Guristas, Blood Raiders, Sansha's Nation, Serpentis, Angel Cartel); client FSD static data
+// does not ship server-side regional pirate spawn tables.
+pub fn regional_pirate_faction_id(ctx: &ServerContext, solar_system_id: u32) -> u32 {
+    let Some(sys) = ctx.sde.solar_systems.get(&solar_system_id) else {
+        return 500_010;
+    };
+    match sys.region_id {
+        10_000_001 | 10_000_002 | 10_000_003 | 10_000_010 | 10_000_015 | 10_000_016
+        | 10_000_023 | 10_000_033 | 10_000_051 | 10_000_069 => 500_010, // Guristas
+        10_000_020 | 10_000_036 | 10_000_038 | 10_000_043 | 10_000_052 | 10_000_054
+        | 10_000_065 | 10_000_067 => 500_012, // Blood Raiders
+        10_000_031 | 10_000_037 | 10_000_039 | 10_000_047 | 10_000_050 | 10_000_056
+        | 10_000_063 => 500_019, // Sansha's Nation
+        10_000_027 | 10_000_032 | 10_000_035 | 10_000_041 | 10_000_044 | 10_000_046
+        | 10_000_048 | 10_000_055 | 10_000_057 | 10_000_058 | 10_000_059 | 10_000_060
+        | 10_000_064 | 10_000_068 => 500_020, // Serpentis
+        10_000_005 | 10_000_006 | 10_000_007 | 10_000_008 | 10_000_009 | 10_000_011
+        | 10_000_012 | 10_000_014 | 10_000_025 | 10_000_028 | 10_000_030 | 10_000_042 => 500_011, // Angel Cartel
+        _ => 500_010,
+    }
+}
+
+/// Returns the Clone Soldier tier name for a low-sec system security status (`0.05..0.45`), or `None` outside low-sec (`feat:npc.clone-soldier-spawns`).
+pub fn clone_soldier_tier_for_security(sys_sec: f64) -> Option<&'static str> {
+    if !(0.05..0.45).contains(&sys_sec) {
+        return None;
+    }
+    if sys_sec >= 0.35 {
+        Some("Trainer")
+    } else if sys_sec >= 0.25 {
+        Some("Recruiter")
+    } else if sys_sec >= 0.15 {
+        Some("Transporter")
+    } else {
+        Some("Negotiator")
+    }
+}
+
+/// Returns the Clone Soldier NPC `type_id` for a low-sec system security status (`0.05..0.45`), or `None` outside low-sec (`feat:npc.clone-soldier-spawns`).
+pub fn clone_soldier_type_for_security(sys_sec: f64) -> Option<u32> {
+    match clone_soldier_tier_for_security(sys_sec)? {
+        "Trainer" => Some(33132),     // Clone Soldier Trainer (0.4) -> Tag 33138
+        "Recruiter" => Some(33142),   // Clone Soldier Recruiter (0.3) -> Tag 33139
+        "Transporter" => Some(33163), // Clone Soldier Transporter (0.2) -> Tag 33140
+        _ => Some(33175),             // Clone Soldier Negotiator (0.1) -> Tag 33141
+    }
+}
+
+/// Resolves the regional pirate faction's Clone Soldier NPC `type_id` from `sde.types`
+/// matching the system's low-sec security band (`0.1`..=`0.4`) and pirate faction (`feat:npc.clone-soldier-spawns`).
+pub fn clone_soldier_type_for_security_and_faction(
+    sde: &eve_sde::SdeRegistry,
+    sys_sec: f64,
+    faction_id: u32,
+) -> Option<u32> {
+    let tier = clone_soldier_tier_for_security(sys_sec)?;
+    let target_group_id: u32 = match faction_id {
+        500_011 => 551, // Asteroid Angel Cartel BattleCruiser / Clone Soldiers
+        500_012 => 552, // Asteroid Blood Raiders BattleCruiser / Clone Soldiers
+        500_010 => 556, // Asteroid Guristas BattleCruiser / Clone Soldiers
+        500_019 => 566, // Asteroid Sansha's Nation BattleCruiser / Clone Soldiers
+        500_020 => 574, // Asteroid Serpentis BattleCruiser / Clone Soldiers
+        _ => 556,
+    };
+    let mut matches: Vec<u32> = sde
+        .types
+        .values()
+        .filter(|t| {
+            t.group_id == target_group_id
+                && t.name.contains("Clone Soldier")
+                && t.name.contains(tier)
+        })
+        .map(|t| t.type_id)
+        .collect();
+    matches.sort_unstable();
+    matches
+        .into_iter()
+        .next()
+        .or_else(|| clone_soldier_type_for_security(sys_sec))
+}
+
 /// Computes character security status gain from destroying an NPC pirate (`feat:crimewatch.sec-status-gain`).
 pub fn compute_sec_status_gain(current_sec: f64, bounty: f64) -> f64 {
     if current_sec >= 5.0 || bounty <= 0.0 {
@@ -79,6 +162,8 @@ pub struct NpcSpawnManager {
     pub entities: HashMap<i64, NpcCombatEntity>,
     /// Tracks cleared spawn groups and their respawn cooldown timestamp: `(system_id, spawn_group_id) -> respawn_after_unix`.
     pub respawn_timers: HashMap<(u32, u32), u64>,
+    /// Tracks Clone Soldier respawn cooldown per low-sec solar system: `system_id -> respawn_after_unix`.
+    pub clone_soldier_respawn_timers: HashMap<u32, u64>,
 }
 
 impl NpcSpawnManager {
@@ -181,7 +266,7 @@ impl NpcSpawnManager {
         Ok(spawned_ball_ids)
     }
 
-    /// Spawns belt rats at asteroid belts in a solar system based on system security and region (`feat:npc.belt-rats`).
+    /// Spawns belt rats at asteroid belts in a solar system based on system security and region (`feat:npc.belt-rats`, `feat:npc.clone-soldier-spawns`).
     pub async fn spawn_belt_rats_for_system(
         &mut self,
         ctx: &ServerContext,
@@ -199,23 +284,110 @@ impl NpcSpawnManager {
             belt_positions.push(DVec3::new(100_000.0, 0.0, 50_000.0));
         }
 
+        let sys_sec = ctx
+            .sde
+            .solar_systems
+            .get(&sys_id)
+            .map(|s| s.security_status as f64)
+            .unwrap_or(0.5);
+        let reg_faction = regional_pirate_faction_id(ctx, sys_id);
+        let now_unix = ctx.now_unix();
+
+        let max_ship_class: u32 = if sys_sec >= 0.45 {
+            2 // High-sec: Frigate / Destroyer
+        } else if sys_sec >= 0.05 {
+            4 // Low-sec: up to Cruiser / Battlecruiser
+        } else {
+            6 // Null-sec / W-space: up to Battleship
+        };
         let mut candidate_groups: Vec<u32> = ctx
             .sde
             .npc_spawn_groups
-            .keys()
-            .copied()
+            .iter()
+            .filter(|(_, g)| {
+                (g.faction_id == reg_faction || g.faction_id == 0)
+                    && g.ship_class <= max_ship_class
+            })
+            .map(|(&gid, _)| gid)
             .collect();
+        if candidate_groups.is_empty() {
+            candidate_groups = ctx
+                .sde
+                .npc_spawn_groups
+                .iter()
+                .filter(|(_, g)| g.faction_id == reg_faction || g.faction_id == 0)
+                .map(|(&gid, _)| gid)
+                .collect();
+        }
+        if candidate_groups.is_empty() {
+            candidate_groups = ctx.sde.npc_spawn_groups.keys().copied().collect();
+        }
         candidate_groups.sort_unstable();
 
-        if candidate_groups.is_empty() {
-            return Ok(Vec::new());
+        let mut all_spawned = Vec::new();
+        if !candidate_groups.is_empty() {
+            for (idx, &belt_pos) in belt_positions.iter().enumerate() {
+                let group_id = candidate_groups[idx % candidate_groups.len()];
+                if self
+                    .respawn_timers
+                    .get(&(sys_id, group_id))
+                    .is_some_and(|&until| now_unix < until)
+                {
+                    continue;
+                }
+                if let Ok(spawned) = self.spawn_group(ctx, sys_id, group_id, belt_pos).await {
+                    all_spawned.extend(spawned);
+                }
+            }
+            if sys_sec < 0.45 {
+                let gate_positions: Vec<DVec3> = ctx
+                    .sde
+                    .celestials_in_system(sys_id)
+                    .into_iter()
+                    .filter(|c| c.group_id == 10) // Stargate
+                    .map(|c| c.position)
+                    .collect();
+                if let Some(&gate_pos) = gate_positions.first() {
+                    let gate_group_id = candidate_groups[belt_positions.len() % candidate_groups.len()];
+                    if !self
+                        .respawn_timers
+                        .get(&(sys_id, gate_group_id))
+                        .is_some_and(|&until| now_unix < until)
+                    {
+                        if let Ok(spawned) =
+                            self.spawn_group(ctx, sys_id, gate_group_id, gate_pos).await
+                        {
+                            all_spawned.extend(spawned);
+                        }
+                    }
+                }
+            }
         }
 
-        let mut all_spawned = Vec::new();
-        for (idx, &belt_pos) in belt_positions.iter().enumerate() {
-            let group_id = candidate_groups[idx % candidate_groups.len()];
-            if let Ok(spawned) = self.spawn_group(ctx, sys_id, group_id, belt_pos).await {
-                all_spawned.extend(spawned);
+        // In low-sec (0.1..=0.4), spawn a Clone Soldier at the first asteroid belt if not on respawn cooldown (`feat:npc.clone-soldier-spawns`).
+        if let Some(cs_type_id) =
+            clone_soldier_type_for_security_and_faction(&ctx.sde, sys_sec, reg_faction)
+        {
+            let on_cooldown = self
+                .clone_soldier_respawn_timers
+                .get(&sys_id)
+                .is_some_and(|&until| now_unix < until)
+                || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                    rt.npc_entities.values().any(|n| {
+                        n.solar_system_id == sys_id && n.archetype == "CloneSoldier"
+                    })
+                });
+            if !on_cooldown {
+                let cs_ball_id = crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity(
+                    ctx,
+                    sys_id,
+                    cs_type_id,
+                    "CloneSoldier",
+                    reg_faction,
+                    belt_positions[0],
+                )
+                .await;
+                all_spawned.push(cs_ball_id);
             }
         }
 
@@ -235,21 +407,32 @@ impl NpcSpawnManager {
         _dt: f64,
     ) {
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        let all_balls: Vec<Ball> = sys_handle
-            .ballpark
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .balls
-            .values()
-            .cloned()
-            .collect();
+        let (all_balls, cloaked_or_dead): (Vec<Ball>, std::collections::HashSet<i64>) = {
+            let bp = sys_handle
+                .ballpark
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            let balls = bp.balls.values().cloned().collect();
+            let invalid = bp
+                .combat_states
+                .iter()
+                .filter(|(_, cs)| cs.is_cloaked || cs.structure_hp <= 0.0)
+                .map(|(&id, _)| id)
+                .collect();
+            (balls, invalid)
+        };
         let ball_positions: HashMap<i64, DVec3> =
             all_balls.iter().map(|b| (b.id, b.position)).collect();
 
-        // Find potential player targets (ships that are not NPCs)
+        // Find potential player targets (ships that are not NPCs, not cloaked, not warping, and alive)
         let player_targets: Vec<(i64, DVec3)> = all_balls
             .into_iter()
-            .filter(|b| !self.entities.contains_key(&b.id) && b.max_velocity > 0.0)
+            .filter(|b| {
+                !self.entities.contains_key(&b.id)
+                    && b.max_velocity > 0.0
+                    && !matches!(b.mode, MovementMode::Warp { .. })
+                    && !cloaked_or_dead.contains(&b.id)
+            })
             .map(|b| (b.id, b.position))
             .collect();
 
@@ -271,11 +454,12 @@ impl NpcSpawnManager {
 
             match closest {
                 Some((target_id, _target_pos, dist)) if dist <= 50_000.0 => {
+                    let target_changed = entity.target_id != Some(target_id);
                     entity.target_id = Some(target_id);
 
                     if dist > entity.orbit_range * 1.4 {
                         // 1. Chase target
-                        if entity.state != NpcAiState::Chase {
+                        if entity.state != NpcAiState::Chase || target_changed {
                             entity.state = NpcAiState::Chase;
                             mode_updates.push((
                                 ball_id,
@@ -287,7 +471,9 @@ impl NpcSpawnManager {
                         }
                     } else {
                         // 2. Orbit target
-                        if entity.state != NpcAiState::Orbit && entity.state != NpcAiState::Attack {
+                        if (entity.state != NpcAiState::Orbit && entity.state != NpcAiState::Attack)
+                            || target_changed
+                        {
                             entity.state = NpcAiState::Orbit;
                             mode_updates.push((
                                 ball_id,
@@ -382,10 +568,19 @@ impl NpcSpawnManager {
         let bounty = entity.bounty_isk;
 
         // Record respawn cooldown: 20 minutes (1,200 seconds)
-        self.respawn_timers.insert(
-            (sys_id, entity.spawn_group_id),
-            now_unix.saturating_add(1_200),
-        );
+        if crate::services::combat_crimewatch::combat_npc_ai::derive_npc_archetype(
+            ctx,
+            entity.type_id,
+        ) == "CloneSoldier"
+        {
+            self.clone_soldier_respawn_timers
+                .insert(sys_id, now_unix.saturating_add(1_200));
+        } else {
+            self.respawn_timers.insert(
+                (sys_id, entity.spawn_group_id),
+                now_unix.saturating_add(1_200),
+            );
+        }
 
         let res = ctx.db.try_with_mut_snapshot(|snap| {
             let bounty_cents = IskCents::from_f64_isk(bounty);

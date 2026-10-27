@@ -1139,50 +1139,7 @@ impl WorldStateSnapshot {
                 Some("Expired")
             }
             "InProgress" => {
-                let refund_and_collateral =
-                    c.collateral.checked_add(c.reward).unwrap_or(c.collateral);
-                self.credit_contract_issuer(&c, refund_and_collateral);
-                let mut wraps_to_remove = Vec::new();
-                for iid in &c.item_ids {
-                    let parent_loc = self.items.get(iid).map(|it| it.location_id).unwrap_or(0);
-                    let wrap_parent_loc = self
-                        .items
-                        .get(&parent_loc)
-                        .filter(|p| p.type_id == 3468)
-                        .map(|p| p.location_id);
-                    if let Some(wloc) = wrap_parent_loc {
-                        wraps_to_remove.push(parent_loc);
-                        if let Some(item) = self.items.get_mut(iid) {
-                            item.location_id = wloc;
-                        }
-                    }
-                    let in_ship_container = self
-                        .items
-                        .get(iid)
-                        .map(|item| self.items.contains_key(&item.location_id))
-                        .unwrap_or(false);
-                    if let Some(item) = self.items.get_mut(iid) {
-                        if c.collateral.0 > 0 {
-                            item.owner_id = c.acceptor_id.unwrap_or(issuer_entity_id);
-                            item.flag = if in_ship_container {
-                                InventoryFlag::Cargo
-                            } else {
-                                InventoryFlag::Hangar
-                            };
-                        } else {
-                            item.owner_id = issuer_entity_id;
-                            item.location_id = c.start_station_id;
-                            item.flag = InventoryFlag::Hangar;
-                        }
-                        item.version += 1;
-                    }
-                }
-                for wid in wraps_to_remove {
-                    self.items.remove(&wid);
-                }
-                if let Some(c_mut) = self.contracts.get_mut(&contract_id) {
-                    c_mut.status = "Failed".into();
-                }
+                self.fail_courier_contract(contract_id, now_unix);
                 Some("Failed")
             }
             _ => None,
@@ -1212,8 +1169,7 @@ impl WorldStateSnapshot {
     }
 
     /// Fails an active in-progress courier contract, paying collateral + reward to issuer
-    /// and assigning the wrapped goods (or items) to the acceptor (if collateral was posted)
-    /// or returning to issuer.
+    /// and unwrapping the goods in-place for the acceptor without teleporting them (`feat:lifecycle.courier-package-destroyed`).
     pub fn fail_courier_contract(&mut self, contract_id: i64, _now_unix: u64) -> bool {
         let c = match self.contracts.get(&contract_id).cloned() {
             Some(c) => c,
@@ -1250,18 +1206,12 @@ impl WorldStateSnapshot {
                 .map(|item| self.items.contains_key(&item.location_id))
                 .unwrap_or(false);
             if let Some(item) = self.items.get_mut(iid) {
-                if c.collateral.0 > 0 {
-                    item.owner_id = c.acceptor_id.unwrap_or(issuer_entity_id);
-                    item.flag = if in_ship_container {
-                        InventoryFlag::Cargo
-                    } else {
-                        InventoryFlag::Hangar
-                    };
+                item.owner_id = c.acceptor_id.unwrap_or(issuer_entity_id);
+                item.flag = if in_ship_container {
+                    InventoryFlag::Cargo
                 } else {
-                    item.owner_id = issuer_entity_id;
-                    item.location_id = c.start_station_id;
-                    item.flag = InventoryFlag::Hangar;
-                }
+                    InventoryFlag::Hangar
+                };
                 item.version += 1;
             }
         }

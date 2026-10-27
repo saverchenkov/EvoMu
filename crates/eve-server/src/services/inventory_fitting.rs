@@ -228,35 +228,7 @@ pub async fn handle(
         }
 
         ("invbroker", "GetContainerContents") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(container_id) = args.first().and_then(|a| a.as_i64()).or_else(|| bound_entry.map(|b| b.object_id)) else {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "GetContainerContents requires containerID".into() }));
-            };
-            let supplied_pw = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.get(1).and_then(|a| a.as_str()));
-            {
-                let mut st = read_container_ship_state(ctx);
-                if let Some(req_pw) = st.container_passwords.get(&container_id).cloned() {
-                    if !req_pw.is_empty() && !st.unlocked_containers.contains(&(container_id, char_id)) {
-                        if supplied_pw == Some(req_pw.as_str()) {
-                            st.unlocked_containers.insert((container_id, char_id));
-                        } else {
-                            return Some(Err(BridgeRpcError { code: "ALSCPasswordRequired".into(), message: format!("Password required to open container {container_id}") }));
-                        }
-                    }
-                }
-                let is_alsc = ctx.db.with_snapshot(|snap| snap.items.get(&container_id).is_some_and(|it| ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 448)));
-                if is_alsc {
-                    let now_unix = ctx.now_unix_secs();
-                    st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry {
-                        timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionOpen".into(), item_id: container_id, item_type_id: 0, quantity: 0,
-                    });
-                }
-                save_container_ship_state(ctx, &st);
-            }
-            Some(ctx.get_container_contents(session, bound_entry, char_id, container_id).await)
+            Some(super::inventory_stacking::handle_get_container_contents(ctx, session, bound_entry, args, kwargs).await)
         }
 
         ("invbroker", "Add") => {
@@ -331,6 +303,7 @@ pub async fn handle(
                     }
                 }
             }
+            let orig_source_loc_id = source_item_opt.as_ref().map(|i| i.location_id).unwrap_or(0);
             let (looted_from_space, looted_foreign_jetcan) = if let Some(src_item) = &source_item_opt {
                 match super::inventory_stacking::evaluate_space_wreck_or_jetcan_loot(ctx, char_id, src_item) {
                     Ok(v) => v,
@@ -1140,6 +1113,14 @@ pub async fn handle(
                     }
                 });
                 if let Ok(Some(merged_item)) = merged_opt {
+                    if looted_from_space {
+                        let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::despawn_empty_jetcan_if_needed(
+                            ctx,
+                            session.solar_system_id,
+                            orig_source_loc_id,
+                        )
+                        .await;
+                    }
                     let moved_tid = source_item_opt.as_ref().map(|i| i.type_id).unwrap_or(merged_item.type_id);
                     let moved_qty = source_item_opt.as_ref().map(|i| i.quantity).unwrap_or(1);
                     fitting_containers_ships::record_container_add_log(ctx, char_id, item_id, moved_tid, moved_qty, new_loc);
@@ -1220,6 +1201,14 @@ pub async fn handle(
                 });
             match move_res {
                 Ok(updated) => {
+                    if looted_from_space {
+                        let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::despawn_empty_jetcan_if_needed(
+                            ctx,
+                            session.solar_system_id,
+                            orig_source_loc_id,
+                        )
+                        .await;
+                    }
                     fitting_containers_ships::record_container_add_log(
                         ctx,
                         char_id,

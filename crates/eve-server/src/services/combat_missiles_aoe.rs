@@ -4,6 +4,60 @@
 
 use super::*;
 
+/// Returns `Some(char_id)` only if `ball_id` is an active capsuleer ship (`category_id == 6`
+/// and `ch.active_ship_id == ball_id`). Non-ship balls (drones, wrecks, jetcans, corpses)
+/// return `None` so they never trigger `execute_death_pipeline`.
+pub(crate) fn active_ship_victim_char_id(ctx: &ServerContext, ball_id: i64) -> Option<i64> {
+    ctx.db.with_snapshot(|snap| {
+        let item = snap.items.get(&ball_id)?;
+        let cat_id = ctx
+            .sde
+            .types
+            .get(&item.type_id)
+            .map(|t| t.category_id)
+            .unwrap_or(0);
+        if cat_id != 6 {
+            return None;
+        }
+        snap.characters
+            .values()
+            .find(|c| c.active_ship_id == ball_id)
+            .map(|c| c.character_id)
+    })
+}
+
+/// Cleans up a destroyed non-ship ball in space (drone, wreck, jetcan, container, or corpse)
+/// without invoking the capsuleer ship death pipeline.
+pub(crate) async fn cleanup_destroyed_non_ship_ball(
+    ctx: &ServerContext,
+    sys_id: u32,
+    ball_id: i64,
+) {
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle.remove_ball(ball_id).await;
+    with_mut_combat_runtime(ctx, |rt| {
+        rt.active_drones_in_space.remove(&ball_id);
+        rt.active_drone_miners.remove(&ball_id);
+        rt.container_lifetimes.remove(&ball_id);
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        if snap.items.remove(&ball_id).is_some() {
+            snap.item_positions.remove(&ball_id);
+            snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
+            snap.sp6_lifecycle.ship_combat_hp.remove(&ball_id);
+            let child_ids: Vec<i64> = snap
+                .items
+                .values()
+                .filter(|i| i.location_id == ball_id)
+                .map(|i| i.item_id)
+                .collect();
+            for cid in child_ids {
+                snap.items.remove(&cid);
+            }
+        }
+    });
+}
+
 /// (`feat:combat.missile-flight-physics-destruction`, `feat:modules.breacher-pods`).
 pub async fn step_combat_system(
     ctx: &ServerContext,
@@ -96,14 +150,14 @@ pub async fn step_combat_system(
                 mstate.drf,
             );
             let scaled = mstate.base_damage.scaled(factor);
-            if let Ok(Some((applied, _, _))) = sys_handle.apply_damage_with_attacker(mstate.target_ball_id, scaled, Some(mstate.attacker_char_id)).await {
+            if let Ok(Some((applied, destroyed, _))) = sys_handle.apply_damage_with_attacker(mstate.target_ball_id, scaled, Some(mstate.attacker_char_id)).await {
                 mstate.applied_damage = applied;
+                let victim_char_opt = ctx.db.with_snapshot(|snap| {
+                    snap.characters.values().find(|c| c.active_ship_id == mstate.target_ball_id).map(|c| c.character_id)
+                        .or_else(|| snap.items.get(&mstate.target_ball_id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
+                });
+                let now_unix = ctx.now_unix();
                 if applied > 0.0 {
-                    let victim_char_opt = ctx.db.with_snapshot(|snap| {
-                        snap.characters.values().find(|c| c.active_ship_id == mstate.target_ball_id).map(|c| c.character_id)
-                            .or_else(|| snap.items.get(&mstate.target_ball_id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
-                    });
-                    let now_unix = ctx.now_unix();
                     if let Some(vcid) = victim_char_opt.filter(|&v| v != mstate.attacker_char_id) {
                         crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
                             ctx,
@@ -132,6 +186,22 @@ pub async fn step_combat_system(
                         ar,
                         hr,
                     );
+                }
+                if destroyed {
+                    if let Some(vcid) = active_ship_victim_char_id(ctx, mstate.target_ball_id) {
+                        let _ = crate::combat::death_pipeline::execute_death_pipeline(
+                            ctx,
+                            mstate.solar_system_id,
+                            vcid,
+                            mstate.target_ball_id,
+                            mstate.attacker_char_id,
+                            t_ball.position,
+                            now_unix,
+                        )
+                        .await;
+                    } else {
+                        cleanup_destroyed_non_ship_ball(ctx, mstate.solar_system_id, mstate.target_ball_id).await;
+                    }
                 }
             }
             with_mut_combat_runtime(ctx, |rt| {
@@ -407,7 +477,7 @@ pub async fn activate_aoe_or_defender_module(
                         continue;
                     }
                     if attacker_ball.position.distance(b.position) <= emp_range {
-                        if let Ok(Some((applied, _, _))) = sys_handle.apply_damage_with_attacker(b.id, sb_dmg, Some(char_id)).await {
+                        if let Ok(Some((applied, destroyed, _))) = sys_handle.apply_damage_with_attacker(b.id, sb_dmg, Some(char_id)).await {
                             hit_ball_ids.push(b.id);
                             let victim_char_opt = ctx.db.with_snapshot(|snap| {
                                 snap.characters
@@ -452,6 +522,22 @@ pub async fn activate_aoe_or_defender_module(
                                     (t_cs.armor_hp / t_cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0),
                                     (t_cs.structure_hp / t_cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0),
                                 );
+                            }
+                            if destroyed {
+                                if let Some(vcid) = active_ship_victim_char_id(ctx, b.id) {
+                                    let _ = crate::combat::death_pipeline::execute_death_pipeline(
+                                        ctx,
+                                        sys_id,
+                                        vcid,
+                                        b.id,
+                                        char_id,
+                                        b.position,
+                                        now_unix,
+                                    )
+                                    .await;
+                                } else {
+                                    cleanup_destroyed_non_ship_ball(ctx, sys_id, b.id).await;
+                                }
                             }
                         }
                     }
@@ -612,14 +698,14 @@ pub async fn activate_aoe_or_defender_module(
                         let sig_factor = (target_sig / exp_radius).min(1.0);
                         let scaled_dmg = bomb_dmg.scaled(sig_factor);
                         if scaled_dmg.total() > 0.0 {
-                            if let Ok(Some((app, _, _))) = sys_handle.apply_damage_with_attacker(b.id, scaled_dmg, Some(char_id)).await {
+                            if let Ok(Some((app, destroyed, _))) = sys_handle.apply_damage_with_attacker(b.id, scaled_dmg, Some(char_id)).await {
                                 total_dmg_applied += app;
                                 hit_targets.push(b.id);
+                                let bomb_vic = ctx.db.with_snapshot(|snap| {
+                                    snap.characters.values().find(|c| c.active_ship_id == b.id).map(|c| c.character_id)
+                                        .or_else(|| snap.items.get(&b.id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
+                                });
                                 if app > 0.0 {
-                                    let bomb_vic = ctx.db.with_snapshot(|snap| {
-                                        snap.characters.values().find(|c| c.active_ship_id == b.id).map(|c| c.character_id)
-                                            .or_else(|| snap.items.get(&b.id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
-                                    });
                                     if let Some(vcid) = bomb_vic.filter(|&v| v != char_id) {
                                         crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, ctx.now_unix());
                                     }
@@ -638,6 +724,22 @@ pub async fn activate_aoe_or_defender_module(
                                         (t_cs.armor_hp / t_cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0),
                                         (t_cs.structure_hp / t_cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0),
                                     );
+                                }
+                                if destroyed {
+                                    if let Some(vcid) = active_ship_victim_char_id(ctx, b.id) {
+                                        let _ = crate::combat::death_pipeline::execute_death_pipeline(
+                                            ctx,
+                                            sys_id,
+                                            vcid,
+                                            b.id,
+                                            char_id,
+                                            b.position,
+                                            ctx.now_unix(),
+                                        )
+                                        .await;
+                                    } else {
+                                        cleanup_destroyed_non_ship_ball(ctx, sys_id, b.id).await;
+                                    }
                                 }
                             }
                         }

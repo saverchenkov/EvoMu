@@ -257,6 +257,32 @@ fn record_session_change_timer_with_invuln(
         let has = !entries.is_empty();
         (PyRep::Dict(entries), sess, has)
     });
+    if reason == "podding" {
+        let mut removed_oids = Vec::new();
+        ctx.bound_objects
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|&bid, b| {
+                if b.character_id == char_id && (b.service == "beyonce" || b.service == "scanMgr") {
+                    removed_oids.push(bid);
+                    false
+                } else {
+                    true
+                }
+            });
+        for bid in removed_oids {
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnMachoObjectDisconnect",
+                "clientID",
+                vec![
+                    PyRep::String(format!("N=1:{bid}")),
+                    PyRep::Integer(char_id),
+                    PyRep::Integer(bid as i64),
+                ],
+            );
+        }
+    }
     if reason == "board_or_eject" || !has_entries {
         return;
     }
@@ -300,103 +326,7 @@ pub fn compute_ship_warp_speed_au_s(ctx: &ServerContext, ship_type_id: u32) -> f
     }
 }
 
-pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
-    ctx: &ServerContext,
-    char_id: i64,
-    sys_id: u32,
-    ship_id: i64,
-) {
-    let (has_cloak_mod, active_cloak_type, active_cap_mjfg) = ctx.db.with_snapshot(|snap| {
-        let mut has_cloak = false;
-        let mut active_cloak: Option<u32> = None;
-        let mut cap_mjfg = false;
-        for item in snap.items.values() {
-            if item.owner_id == char_id && item.location_id == ship_id {
-                let is_active = snap.module_active_states.contains(&item.item_id);
-                if matches!(item.type_id, 11370 | 11578) {
-                    has_cloak = true;
-                    if is_active {
-                        active_cloak = Some(item.type_id);
-                    }
-                }
-                if item.type_id == 83485 && is_active {
-                    cap_mjfg = true;
-                }
-            }
-        }
-        (has_cloak, active_cloak, cap_mjfg)
-    });
-
-    space_nav_travel::sync_tether(ctx, char_id, sys_id, ship_id).await;
-    if !has_cloak_mod && !active_cap_mjfg {
-        return;
-    }
-
-    let handle = ctx.systems.get_or_spawn(sys_id);
-    let Some(mut cs) = handle.get_combat_state(ship_id).await.ok().flatten() else {
-        return;
-    };
-    let Some((_, mut ball)) = handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
-        return;
-    };
-
-    let mut cs_changed = false;
-    let mut ball_changed = false;
-    let cloak_before = cs.is_cloaked;
-
-    if let Some(cloak_type_id) = active_cloak_type {
-        let is_covert = cloak_type_id == 11578;
-        let vel_mult = if is_covert { 1.0 } else { 0.25 };
-        let targeting_delay_s = if is_covert { 5.0 } else { 30.0 };
-        if !cs.is_cloaked && cs.decloak_targeting_delay_remaining_s <= 0.0 {
-            let orig_v = cs.cloak_original_max_velocity.unwrap_or(ball.max_velocity);
-            cs.cloak_original_max_velocity = Some(orig_v);
-            ball.max_velocity = orig_v * vel_mult;
-            cs.is_cloaked = true;
-            cs.is_covert_cloak = is_covert;
-            cs.cloak_stabilization_remaining_s = 900.0;
-            cs.cloak_configured_targeting_delay_s = targeting_delay_s;
-            cs_changed = true;
-            ball_changed = true;
-        }
-    } else if has_cloak_mod && cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0 {
-        cs.is_cloaked = false;
-        cs.cloak_stabilization_remaining_s = 0.0;
-        let delay = if cs.cloak_configured_targeting_delay_s > 0.0 {
-            cs.cloak_configured_targeting_delay_s
-        } else if cs.is_covert_cloak {
-            5.0
-        } else {
-            30.0
-        };
-        cs.decloak_targeting_delay_remaining_s = delay;
-        if let Some(orig_v) = cs.cloak_original_max_velocity.take() {
-            ball.max_velocity = orig_v;
-            ball_changed = true;
-        }
-        cs_changed = true;
-    }
-
-    if active_cap_mjfg && !cs.is_capital_mjfg && cs.mjfg_spool_remaining_s <= 0.0 {
-        cs.is_capital_mjfg = true;
-        cs.mjfg_spool_remaining_s = 9.0;
-        let orig_sig = cs.mjfg_original_sig_radius.unwrap_or(cs.signature_radius);
-        cs.mjfg_original_sig_radius = Some(orig_sig);
-        cs.signature_radius = orig_sig * 2.5;
-        cs_changed = true;
-    }
-
-    let cloak_now = cs.is_cloaked;
-    if ball_changed {
-        let _ = handle.spawn_ball(ball).await;
-    }
-    if cs_changed {
-        let _ = handle.set_combat_state(ship_id, cs).await;
-    }
-    if cloak_now != cloak_before {
-        space_nav_travel::emit_cloak_transition(ctx, sys_id, ship_id, cloak_now).await;
-    }
-}
+pub(crate) use space_nav_travel::sync_ship_cloak_and_mjfg_from_fitting;
 
 pub async fn handle(
     ctx: &ServerContext,

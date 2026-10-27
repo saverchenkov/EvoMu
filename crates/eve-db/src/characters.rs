@@ -395,6 +395,10 @@ impl WorldRepository {
                 .unwrap_or(true);
             if is_pod {
                 guard.active_implants.remove(&character_id);
+                guard.items.retain(|_, item| {
+                    !(item.location_id == character_id
+                        && matches!(item.flag, InventoryFlag::Implant | InventoryFlag::Booster))
+                });
             }
 
             guard.items.retain(|id, _| !to_remove.contains(id));
