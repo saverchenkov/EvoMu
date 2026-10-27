@@ -490,6 +490,39 @@ pub async fn handle(
                 }));
             }
 
+            let queued_candidates: Vec<(i64, i64, u32)> = ctx.db.with_snapshot(|snap| {
+                let store = load_pvp_store(snap);
+                store
+                    .queue
+                    .iter()
+                    .filter_map(|(&cid, qe)| {
+                        let ch = snap.characters.get(&cid)?;
+                        if ch.station_id.is_some()
+                            || ch.structure_id.is_some()
+                            || ch.active_ship_id <= 0
+                        {
+                            return None;
+                        }
+                        let opp_sys_id = if qe.solar_system_id > 0 {
+                            qe.solar_system_id
+                        } else {
+                            ch.solar_system_id
+                        };
+                        Some((cid, ch.active_ship_id, opp_sys_id))
+                    })
+                    .collect()
+            });
+            let ready_opponents: HashSet<i64> = queued_candidates
+                .into_iter()
+                .filter(|&(cid, ship_id, sys_id)| {
+                    crate::sp6_lifecycle::require_ship_ready_for_filament_jump(
+                        ctx, cid, ship_id, sys_id,
+                    )
+                    .is_ok()
+                })
+                .map(|(cid, _, _)| cid)
+                .collect();
+
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_pvp_store(snap);
                 if store.queue.contains_key(&char_id) {
@@ -497,6 +530,33 @@ pub async fn handle(
                         code: "AlreadyInPvpQueue".into(),
                         message: "Character is already queued for a PvP filament event".into(),
                     });
+                }
+                if cur_sys_for_check == 32000001
+                    || store.active_matches.values().any(|m| {
+                        m.active
+                            && (m.team_a.contains(&char_id) || m.team_b.contains(&char_id))
+                            && !m.exited_pilots.contains(&char_id)
+                    })
+                {
+                    return Err(BridgeRpcError {
+                        code: "AlreadyInPvpMatch".into(),
+                        message: "Character is already inside an active Proving Grounds arena".into(),
+                    });
+                }
+                let active_ship_id = session.ship_id.ok_or_else(|| BridgeRpcError::user_error("MustBeInSpace"))?;
+                if let Some(ship_it) = snap.items.get(&active_ship_id) {
+                    let ship_grp = ctx.sde.types.get(&ship_it.type_id).map(|t| t.group_id).unwrap_or(0);
+                    if ship_it.type_id == 670
+                        || matches!(
+                            ship_grp,
+                            29 | 30 | 485 | 513 | 547 | 659 | 883 | 902 | 941 | 1538
+                        )
+                    {
+                        return Err(BridgeRpcError {
+                            code: "InvalidShipForFilament".into(),
+                            message: "Capsules and capital/freighter hulls cannot enter Proving Grounds arenas".into(),
+                        });
+                    }
                 }
                 let Some(it) = snap.items.get_mut(&item_id) else {
                     return Err(BridgeRpcError {
@@ -510,7 +570,6 @@ pub async fn handle(
                         message: "Filament item is not owned by pilot".into(),
                     });
                 }
-                let active_ship_id = session.ship_id.ok_or_else(|| BridgeRpcError::user_error("MustBeInSpace"))?;
                 if session.station_id.is_some() || session.structure_id.is_some() {
                     return Err(BridgeRpcError::user_error("MustBeInSpace"));
                 }
@@ -599,18 +658,7 @@ pub async fn handle(
                         {
                             return false;
                         }
-                        let opp_sys_id = if qe.solar_system_id > 0 {
-                            qe.solar_system_id
-                        } else {
-                            opp_ch.solar_system_id
-                        };
-                        crate::sp6_lifecycle::require_ship_ready_for_filament_jump(
-                            ctx,
-                            cid,
-                            opp_ch.active_ship_id,
-                            opp_sys_id,
-                        )
-                        .is_ok()
+                        ready_opponents.contains(&cid)
                     })
                     .map(|(&cid, qe)| (cid, qe.solar_system_id, qe.location_id));
 
@@ -711,7 +759,19 @@ pub async fn handle(
                         ],
                     );
 
-                    // Transition out of origin systems
+                    // Transition out of origin systems and abandon active drones/fighters
+                    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
+                        ctx,
+                        opp_id,
+                        opp_ship_id,
+                        opp_sys,
+                    );
+                    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
+                        ctx,
+                        char_id,
+                        cur_ship_id,
+                        cur_sys,
+                    );
                     ctx.systems.get_or_spawn(opp_sys).try_remove_ball(opp_ship_id);
                     ctx.systems.get_or_spawn(cur_sys).try_remove_ball(cur_ship_id);
 
@@ -956,17 +1016,25 @@ pub async fn handle(
                         && (m.team_a.contains(&char_id) || m.team_b.contains(&char_id))
                         && !m.exited_pilots.contains(&char_id)
                     {
-                        return Some((m.match_id, m.end_gate_id, m.winner_char_id));
+                        return Some((
+                            m.match_id,
+                            m.end_gate_id,
+                            m.winner_char_id,
+                            m.active,
+                            m.started_unix,
+                        ));
                     }
                 }
                 None
             });
 
-            let Some((mid, end_gate_id, winner_char_id)) = match_precheck else {
+            let Some((mid, end_gate_id, winner_char_id, m_active, m_started_unix)) = match_precheck
+            else {
                 return Some(Err(BridgeRpcError::user_error("NoActiveMatch")));
             };
 
-            if winner_char_id.is_none() {
+            let match_timed_out = now_unix >= m_started_unix.saturating_add(900);
+            if winner_char_id.is_none() && m_active && !match_timed_out {
                 return Some(Err(BridgeRpcError::user_error("MatchNotConcluded")));
             }
 
@@ -1032,6 +1100,12 @@ pub async fn handle(
             session.solar_system_id = Some(osys);
             crate::services::map_service::record_solar_system_visit(ctx, char_id, osys);
             let cur_ship = active_ship_id.or(session.ship_id).unwrap_or(char_id);
+            crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
+                ctx,
+                char_id,
+                cur_ship,
+                32000001,
+            );
             ctx.systems.get_or_spawn(32000001).try_remove_ball(cur_ship);
 
             let origin_sys_handle = ctx.systems.get_or_spawn(osys);

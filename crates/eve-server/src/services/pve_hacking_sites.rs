@@ -287,7 +287,9 @@ pub async fn handle_pve_hacking(
                 }));
             };
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
-            let container_id = if let Some(explicit_id) = args
+            let container_id = if args.len() == 1 && matches!(args.first(), Some(PyRep::None)) {
+                0
+            } else if let Some(explicit_id) = args
                 .first()
                 .and_then(|a| a.as_i64())
                 .filter(|&id| args.len() == 1 || id >= 1_000_000)
@@ -424,6 +426,18 @@ pub async fn handle_pve_hacking(
                     }));
                 }
             };
+            if sys_handle
+                .get_combat_state(ship_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|cs| cs.is_cloaked)
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotHackWhileCloaked".into(),
+                    message: "Cannot initiate hacking minigame while cloaked".into(),
+                }));
+            }
 
             let (virus_coh, virus_str, utility_slots, analyzer_max_range) =
                 match resolve_fitted_analyzer_virus_stats(ctx, session, char_id, is_relic) {
@@ -489,6 +503,12 @@ pub async fn handle_pve_hacking(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipDocked".into(),
+                    message: "Cannot continue hacking minigame while docked".into(),
+                }));
+            }
             let (container_id, raw_tile_idx) = if args.len() >= 2 {
                 (
                     args[0].as_i64().unwrap_or(1_870_000_000),
@@ -517,6 +537,13 @@ pub async fn handle_pve_hacking(
                         message: format!("No active hacking game on container {container_id}"),
                     });
                 };
+                if session.solar_system_id.is_some_and(|s| s != game.solar_system_id) {
+                    reg.hacking_games.insert((char_id, container_id), game);
+                    return Err(BridgeRpcError {
+                        code: "NotInSiteSystem".into(),
+                        message: "Cannot continue hacking minigame from another solar system".into(),
+                    });
+                }
                 if game.status != "InProgress" {
                     reg.hacking_games.insert((char_id, container_id), game);
                     return Err(BridgeRpcError {
@@ -538,6 +565,18 @@ pub async fn handle_pve_hacking(
                         reg.hacking_games.insert((char_id, container_id), game);
                         return Err(BridgeRpcError::user_error("TileNotAccessible"));
                     }
+                }
+                if let Some((sv_idx, rem_turns)) = game.secondary_vector_target {
+                    if let Some(sv_tile) = game.tiles.get_mut(sv_idx as usize) {
+                        if sv_tile.revealed && sv_tile.coherence > 0 {
+                            sv_tile.coherence = (sv_tile.coherence - 20).max(0);
+                        }
+                    }
+                    game.secondary_vector_target = if rem_turns > 1 {
+                        Some((sv_idx, rem_turns - 1))
+                    } else {
+                        None
+                    };
                 }
 
                 let mut timer_expired = false;
@@ -911,12 +950,17 @@ pub async fn handle_pve_hacking(
             let tiles = with_pve_exploration_reg(ctx, |reg| {
                 reg.hacking_games.get(&(char_id, container_id)).map(|g| {
                     g.tiles.iter().map(|t| {
+                        let node_type = if t.revealed {
+                            format!("{:?}", t.kind)
+                        } else {
+                            "Unrevealed".into()
+                        };
                         PyRep::keyval([
                             ("tileIndex", PyRep::Integer(t.tile_index as i64)),
                             ("revealed", PyRep::Bool(t.revealed)),
-                            ("nodeType", PyRep::String(format!("{:?}", t.kind))),
-                            ("coherence", PyRep::Integer(t.coherence as i64)),
-                            ("strength", PyRep::Integer(t.strength as i64)),
+                            ("nodeType", PyRep::String(node_type)),
+                            ("coherence", PyRep::Integer(if t.revealed { t.coherence as i64 } else { 0 })),
+                            ("strength", PyRep::Integer(if t.revealed { t.strength as i64 } else { 0 })),
                         ])
                     }).collect::<Vec<_>>()
                 }).unwrap_or_default()
@@ -973,14 +1017,28 @@ pub async fn handle_pve_hacking(
                             (game.virus_coherence + 30).min(game.max_virus_coherence);
                     }
                     HackingUtilityKind::KernelRot => {
-                        if let Some(t) = game.tiles.get_mut(target_tile_idx) {
-                            t.coherence = (t.coherence / 2).max(1);
+                        let Some(t) = game.tiles.get_mut(target_tile_idx) else {
+                            game.utilities[slot_idx] = Some(util);
+                            return Err(BridgeRpcError::user_error("InvalidTileIndex"));
+                        };
+                        if !t.revealed || t.coherence <= 0 {
+                            game.utilities[slot_idx] = Some(util);
+                            return Err(BridgeRpcError::user_error("TargetTileNotRevealed"));
                         }
+                        t.coherence = (t.coherence / 2).max(1);
                     }
                     HackingUtilityKind::PolymorphicShield => {
                         game.polymorphic_shield_charges += 2;
                     }
                     HackingUtilityKind::SecondaryVector => {
+                        let Some(t) = game.tiles.get(target_tile_idx) else {
+                            game.utilities[slot_idx] = Some(util);
+                            return Err(BridgeRpcError::user_error("InvalidTileIndex"));
+                        };
+                        if !t.revealed || t.coherence <= 0 {
+                            game.utilities[slot_idx] = Some(util);
+                            return Err(BridgeRpcError::user_error("TargetTileNotRevealed"));
+                        }
                         game.secondary_vector_target = Some((target_tile_idx as u32, 3));
                     }
                 }

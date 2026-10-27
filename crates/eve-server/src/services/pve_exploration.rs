@@ -686,6 +686,12 @@ pub async fn advance_site_wave_or_complete(
     site_id: &str,
 ) -> Result<PyRep, BridgeRpcError> {
     let char_id = session.character_id.unwrap_or(90_000_001);
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(BridgeRpcError {
+            code: "ShipDocked".into(),
+            message: format!("Cannot advance PvE site {site_id} while docked"),
+        });
+    }
     if session.solar_system_id != Some(solar_system_id) {
         return Err(BridgeRpcError {
             code: "NotInSiteSystem".into(),
@@ -709,6 +715,18 @@ pub async fn advance_site_wave_or_complete(
             return Err(BridgeRpcError {
                 code: "SiteAlreadyCleared".into(),
                 message: format!("PvE site {site_id} is already cleared"),
+            });
+        }
+        if matches!(site.site_category.as_str(), "Data" | "Relic" | "Ghost")
+            && !site.hackable_can_ids.is_empty()
+            && !site
+                .hackable_can_ids
+                .iter()
+                .all(|&cid| reg.hacked_containers.contains(&(solar_system_id, cid)))
+        {
+            return Err(BridgeRpcError {
+                code: "SiteContainersUnhacked".into(),
+                message: format!("Cannot complete exploration site {site_id} while hackable containers remain unhacked"),
             });
         }
         Ok((
@@ -800,7 +818,10 @@ pub async fn advance_site_wave_or_complete(
         let mut loot_specs: Vec<(TypeId, i64, String)> = Vec::new();
 
         // DED Overseer wrecks are only dropped by the real overseer kill in `handle_pve_site_npc_destruction_core`.
-        if let Some(wh_c) = wh_class.filter(|_| ded_rating.is_none()) {
+        if let Some(wh_c) = wh_class.filter(|_| {
+            ded_rating.is_none()
+                && !matches!(site_category.as_str(), "Data" | "Relic" | "Ghost")
+        }) {
             // Site-completion Blue Loot from SDE group 880 "Sleeper Components".
             if let Some((blue_tid, _)) = crate::services::pve_exploration_sites::sleeper_blue_loot_for_class(&ctx.sde, wh_c) {
                 let blue_name = ctx.sde.types.get(&blue_tid).map(|t| t.name.clone()).unwrap_or_default();

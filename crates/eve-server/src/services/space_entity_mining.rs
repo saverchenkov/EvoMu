@@ -95,10 +95,60 @@ pub(crate) async fn handle_mine(
             message: "Active ship is not spawned in Ballpark".into(),
         });
     };
+    if matches!(ship_ball.mode, eve_destiny::MovementMode::Warp { .. }) {
+        return Err(BridgeRpcError {
+            code: "CannotMineInWarp".into(),
+            message: "Cannot activate mining lasers or drones while in warp".into(),
+        });
+    }
+    if handle
+        .get_combat_state(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|cs| cs.is_cloaked)
+    {
+        return Err(BridgeRpcError {
+            code: "CannotMineWhileCloaked".into(),
+            message: "Cannot activate mining lasers or drones while cloaked".into(),
+        });
+    }
+    let ship_hull_type = ctx
+        .db
+        .get_item(ship_id)
+        .map(|i| i.type_id)
+        .unwrap_or(ship_ball.type_id);
+    if ship_hull_type == 670
+        || ctx
+            .sde
+            .types
+            .get(&ship_hull_type)
+            .is_some_and(|t| t.group_id == 29)
+    {
+        return Err(BridgeRpcError {
+            code: "InvalidShipForMining".into(),
+            message: "Capsules cannot mine asteroids".into(),
+        });
+    }
 
     let mut ast_state_opt = handle.get_asteroid_state(asteroid_id).await.ok().flatten();
     if ast_state_opt.is_none() {
         if let Some(db_ast) = ctx.db.get_asteroid(asteroid_id) {
+            if db_ast.solar_system_id != 0 && db_ast.solar_system_id != sys_id {
+                return Err(BridgeRpcError {
+                    code: "TargetNotInSystem".into(),
+                    message: format!(
+                        "Asteroid {asteroid_id} belongs to solar system {}, not {sys_id}",
+                        db_ast.solar_system_id
+                    ),
+                });
+            }
+            if db_ast.quantity <= 0 {
+                return Err(BridgeRpcError {
+                    code: "AsteroidDepleted".into(),
+                    message: format!("Asteroid {asteroid_id} is depleted"),
+                });
+            }
             let unit_vol = ctx
                 .sde
                 .types
