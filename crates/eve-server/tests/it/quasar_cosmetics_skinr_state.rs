@@ -279,6 +279,7 @@ async fn skinr_custom_skins_licenses_and_sequencing_jobs() {
         ch.solar_system_id = 30_000_142;
         ch.active_ship_id = ship_id;
         ch.balance = IskCents::from_isk(1_000_000);
+        ch.plex_balance = 1_000;
         s.characters.insert(cid as i64, ch);
         let sk_map = s.skills.entry(cid as i64).or_default();
         sk_map.insert(81044, TrainedSkillRecord { type_id: 81044, level: 4, skill_points: 45_255.0 });

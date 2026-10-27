@@ -475,16 +475,32 @@ pub fn destroy_implant(
             snap.items.remove(&item_id);
             item.type_id
         } else {
-            let tid = item_id as TypeId;
+            let tid = u32::try_from(item_id).map_err(|_| BridgeRpcError {
+                code: "ImplantNotFound".into(),
+                message: format!("Plugged-in implant {item_id} not found"),
+            })?;
+            let matching_iid = snap
+                .items
+                .values()
+                .find(|it| {
+                    it.owner_id == char_id
+                        && it.location_id == char_id
+                        && it.flag == InventoryFlag::Implant
+                        && it.type_id == tid
+                })
+                .map(|it| it.item_id);
             let has_in_active = snap
                 .active_implants
                 .get(&char_id)
                 .is_some_and(|v| v.contains(&tid));
-            if !has_in_active {
+            if !has_in_active && matching_iid.is_none() {
                 return Err(BridgeRpcError {
                     code: "ImplantNotFound".into(),
                     message: format!("Plugged-in implant {item_id} not found"),
                 });
+            }
+            if let Some(iid) = matching_iid {
+                snap.items.remove(&iid);
             }
             tid
         };

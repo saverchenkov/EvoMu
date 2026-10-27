@@ -690,3 +690,124 @@ async fn break_plastic_wrap_requires_docked_at_wrap_station_and_combat_rng_seede
     assert_ne!(npc_a.rng_state, default_seed);
     assert_ne!(npc_a.rng_state, npc_b.rng_state);
 }
+
+#[tokio::test]
+async fn test_r3_track5_implants_missions_skinr_and_assets_regressions() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let cid1 = 90_000_511i64;
+    let cid2 = 90_000_512i64;
+    seed_char(&ctx, cid1, CORP_A, 10_000_000, 0);
+    seed_char(&ctx, cid2, CORP_B, 10_000_000, 0);
+
+    let mut s1 = player(74_001, cid1 as u32, CORP_A);
+    let mut unauth = SessionState::new(74_003);
+    unauth.user_id = Some(999);
+    let empty_kw = HashMap::new();
+
+    // 1. Issue #139: DestroyImplant by type_id also removes InventoryFlag::Implant item
+    let imp_iid = 995_100_001i64;
+    let imp_tid = 9899u32;
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(
+            imp_iid,
+            InventoryItemRecord {
+                item_id: imp_iid,
+                type_id: imp_tid,
+                owner_id: cid1,
+                location_id: cid1,
+                flag: InventoryFlag::Implant,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        s.active_implants.entry(cid1).or_default().push(imp_tid);
+    });
+    ctx.dispatch_rpc(
+        &mut s1,
+        "dogmaIM",
+        None,
+        "DestroyImplant",
+        &[PyRep::Integer(imp_tid as i64)],
+        &empty_kw,
+        None,
+    )
+    .await
+    .expect("DestroyImplant by type_id");
+    assert!(
+        ctx.db.with_snapshot(|s| !s.items.contains_key(&imp_iid)),
+        "DestroyImplant by type_id must remove the plugged InventoryFlag::Implant item"
+    );
+
+    // 2. Issue #141: TransferLPFromMyWalletToOtherCorp rejects non-existent corp & self-corp transfer
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&cid1).unwrap().loyalty_points.insert(1_000_035, 10_000);
+    });
+    let bad_corp_err = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "LPSvc",
+            None,
+            "TransferLPFromMyWalletToOtherCorp",
+            &[
+                PyRep::Integer(999_999_999),
+                PyRep::Integer(1_000_035),
+                PyRep::Integer(1_000),
+            ],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect_err("LP transfer to non-existent corp must fail");
+    assert_eq!(bad_corp_err.code, "CorporationNotFound");
+
+    // 3. Issue #142: InitiateRequest rejects licenses_qty > 100
+    let mut ovf_init = Vec::new();
+    encode_varint_field(5, 101, &mut ovf_init);
+    let rsp_ovf_init = quasar_rpc(
+        &ctx,
+        &mut s1,
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest",
+        ovf_init,
+    )
+    .await;
+    assert_eq!(rsp_ovf_init.status_code, STATUS_BAD_REQUEST);
+
+    // 4. Issue #144: Unauthenticated Quasar admin & assetholding endpoints return 403
+    for ep in [
+        "eve.planet.skyhook.admin.api.ChangeOwnerRequest",
+        "eve.loyaltypoints.assetholding.operation.api.WithdrawRequest",
+        "eve.loyaltypoints.assetholding.operation.api.DepositRequest",
+        "eve.inventory.assetholding.operation.api.HoldItemsRequest",
+        "eve.inventory.assetholding.operation.api.HoldItemsOfTypeRequest",
+        "eve.inventory.assetholding.operation.api.SpawnItemsOfTypeRequest",
+    ] {
+        let rsp = quasar_rpc(&ctx, &mut unauth, ep, Vec::new()).await;
+        assert_eq!(rsp.status_code, STATUS_FORBIDDEN, "{ep} must reject unauthenticated caller");
+    }
+    // Non-admin player also rejected by skyhook.admin.api.ChangeOwnerRequest
+    assert_eq!(
+        quasar_rpc(&ctx, &mut s1, "eve.planet.skyhook.admin.api.ChangeOwnerRequest", Vec::new())
+            .await
+            .status_code,
+        STATUS_FORBIDDEN
+    );
+
+    // 5. Issue #145: GetAssetsItemsRequest & GetShipAssetsRequest reject cross-character queries
+    let mut target_c2 = Vec::new();
+    seq(1, cid2 as u64, &mut target_c2);
+    assert_eq!(
+        quasar_rpc(&ctx, &mut s1, "eve.asset.GetAssetsItemsRequest", target_c2.clone())
+            .await
+            .status_code,
+        STATUS_FORBIDDEN
+    );
+    assert_eq!(
+        quasar_rpc(&ctx, &mut s1, "eve.asset.GetShipAssetsRequest", target_c2)
+            .await
+            .status_code,
+        STATUS_FORBIDDEN
+    );
+}

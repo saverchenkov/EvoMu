@@ -867,11 +867,14 @@ fn handle_job_initiate(
     }
     let line_name = str_of(dyn_msg, 2).unwrap_or_else(|| "Paragon Custom Line".to_string());
     let licenses_qty = if let Some(v) = dyn_msg.get(5).and_then(as_u64) {
-        if v == 0 {
+        let Some(q) = u32::try_from(v).ok().filter(|&q| (1..=100).contains(&q)) else {
             queue_job_failed_notice(cid, &preview_uuid, 1, now);
-            return Err((STATUS_BAD_REQUEST, "Sequencing job requires licenses > 0".into()));
-        }
-        v as u32
+            return Err((
+                STATUS_BAD_REQUEST,
+                "Sequencing job licenses quantity must be between 1 and 100".into(),
+            ));
+        };
+        q
     } else {
         1
     };
@@ -1130,6 +1133,31 @@ fn handle_job_complete_early(
         }
         if !job.is_active() {
             return Err((STATUS_BAD_REQUEST, "Sequencing job is already finished".into()));
+        }
+        let end_unix = job.initiated_unix.saturating_add(job.planned_duration_secs);
+        let rem_secs = end_unix.saturating_sub(now);
+        let plex_cost: i64 = if rem_secs <= 3_600 {
+            5
+        } else if rem_secs <= 86_400 {
+            25
+        } else {
+            100
+        };
+        let mut insufficient_plex = false;
+        state.db.with_mut_snapshot(|s| {
+            if let Some(ch) = s.characters.get_mut(&(caller as i64)) {
+                if ch.plex_balance < plex_cost {
+                    insufficient_plex = true;
+                } else {
+                    ch.plex_balance -= plex_cost;
+                }
+            }
+        });
+        if insufficient_plex {
+            return Err((
+                STATUS_BAD_REQUEST,
+                format!("Insufficient PLEX balance for early sequencing completion (requires {plex_cost} PLEX)"),
+            ));
         }
         job.completed_unix = Some(now);
         let sh = job.skin_hex.clone();
