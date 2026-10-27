@@ -7,7 +7,7 @@
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::FleetMemberRecord;
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::PyRep;
 
 use super::fleet_social_fleets::{ensure_fleet_channel_member, role_to_i64};
 
@@ -30,8 +30,8 @@ pub(super) const BROADCAST_UP: i64 = 2;
 pub(super) fn member_opt_outs(m: &FleetMemberRecord) -> PyRep {
     PyRep::keyval([
         ("acceptsFleetWarp", PyRep::Bool(m.takes_fleet_warp)),
-        ("acceptsConduitJumps", PyRep::Bool(true)),
-        ("acceptsFleetRegroups", PyRep::Bool(true)),
+        ("acceptsConduitJumps", PyRep::Bool(m.accepts_conduit_jumps)),
+        ("acceptsFleetRegroups", PyRep::Bool(m.accepts_regroup)),
     ])
 }
 
@@ -204,10 +204,11 @@ pub fn remove_character_from_fleet(
             if fleet.members.is_empty() && fleet.member_details.is_empty() {
                 should_disband = true;
             } else if fleet.boss_id == char_id {
+                // parity: feat:fleet.boss-handover
                 let next_boss = fleet
                     .member_details
                     .values()
-                    .min_by_key(|m| (role_to_i64(m.role), m.character_id))
+                    .min_by_key(|m| (role_to_i64(m.role), m.join_time_unix, m.character_id))
                     .map(|m| m.character_id)
                     .or_else(|| fleet.members.first().copied())
                     .unwrap_or(0);
@@ -264,6 +265,12 @@ pub fn remove_character_from_fleet(
         emit_leave(ctx, fleet_id, char_id);
         if let Some((old, new, only)) = &hand_over {
             emit_member_changed(ctx, fleet_id, old, new, *only);
+            ctx.notify(
+                NotificationTarget::Fleet(fleet_id),
+                "OnChangeFleetBoss",
+                "fleetid",
+                vec![PyRep::Integer(char_id), PyRep::Integer(new.character_id)],
+            );
         }
     }
     (disbanded, hand_over.map(|(_, n, _)| n.character_id))
@@ -693,60 +700,8 @@ pub fn ensure_fleet_watchlist_loaded(ctx: &ServerContext) {
     }
 }
 
-async fn resolve_ship_hp_ratios(
-    ctx: &ServerContext,
-    target_char_id: i64,
-) -> (Option<i64>, f64, f64, f64) {
-    let info = ctx.db.with_snapshot(|snap| {
-        let c = snap.characters.get(&target_char_id)?;
-        let ship_id = c.active_ship_id;
-        let item_info = snap.items.get(&ship_id).map(|it| {
-            (
-                it.type_id,
-                it.dynamic_attributes.get(&264).copied(),
-                it.dynamic_attributes.get(&266).copied(),
-                it.dynamic_attributes.get(&3).copied(),
-            )
-        });
-        Some((c.solar_system_id, ship_id, item_info))
-    });
-    let Some((sys_id, ship_id, item_info)) = info else {
-        return (None, 1.0, 1.0, 1.0);
-    };
-    if ship_id > 0 {
-        if let Some((_, sys)) = ctx
-            .systems
-            .active_system_handles()
-            .into_iter()
-            .find(|(id, _)| *id == sys_id)
-        {
-            if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-                let sr = (cs.shield_hp / cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0);
-                let ar = (cs.armor_hp / cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0);
-                let hr = (cs.structure_hp / cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0);
-                return (Some(ship_id), sr, ar, hr);
-            }
-        }
-        if let Some((type_id, s_chg, a_dmg, h_dmg)) = item_info {
-            let mut cs = ctx.build_ship_combat_state(target_char_id, ship_id, type_id);
-            if let Some(sc) = s_chg {
-                cs.shield_hp = sc.clamp(0.0, cs.max_shield_hp);
-            }
-            if let Some(ad) = a_dmg {
-                cs.armor_hp = (cs.max_armor_hp - ad).clamp(0.0, cs.max_armor_hp);
-            }
-            if let Some(hd) = h_dmg {
-                cs.structure_hp = (cs.max_structure_hp - hd).clamp(0.0, cs.max_structure_hp);
-            }
-            crate::sp6_lifecycle::apply_persisted_hp_to_combat_state(ctx, ship_id, &mut cs);
-            let sr = (cs.shield_hp / cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0);
-            let ar = (cs.armor_hp / cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0);
-            let hr = (cs.structure_hp / cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0);
-            return (Some(ship_id), sr, ar, hr);
-        }
-    }
-    (None, 1.0, 1.0, 1.0)
-}
+pub use super::fleet_social_finder_tactical::handle_fleet_watchlist_ops;
+
 
 pub fn get_fleet_join_requests(ctx: &ServerContext, fleet_id: i64) -> std::collections::HashSet<i64> {
     {
@@ -939,189 +894,6 @@ pub fn build_wings_dict(fleet: &eve_db::FleetRecord) -> Vec<(PyRep, PyRep)> {
     wings_dict
 }
 
-pub async fn handle_fleet_watchlist_ops(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    method: &str,
-    args: &[PyRep],
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, char_id) = match ServerContext::require_character(session) {
-        Ok(v) => v,
-        Err(e) => return Some(Err(e)),
-    };
-    let fleet_id = match session.fleet_id {
-        Some(fid) => fid,
-        None => {
-            return Some(Err(BridgeRpcError {
-                code: "NotInFleet".into(),
-                message: "Character is not in a fleet".into(),
-            }))
-        }
-    };
-    ensure_fleet_watchlist_loaded(ctx);
-    if method == "RegisterForDamageUpdates" {
-        let mut target_ids = Vec::new();
-        if let Some(first) = args.first() {
-            match first {
-                PyRep::List(list) | PyRep::Tuple(list) => {
-                    for item in list {
-                        if let Some(tid) = item.as_i64() {
-                            target_ids.push(tid);
-                        }
-                    }
-                }
-                _ => {
-                    if let Some(tid) = first.as_i64() {
-                        target_ids.push(tid);
-                    }
-                }
-            }
-        }
-        let valid = ctx.db.with_snapshot(|snap| {
-            if let Some(f) = snap.fleets.get(&fleet_id) {
-                target_ids.iter().all(|tid| f.members.contains(tid))
-            } else {
-                false
-            }
-        });
-        if !valid {
-            return Some(Err(BridgeRpcError {
-                code: "MemberNotFound".into(),
-                message: "One or more target characters are not in your fleet".into(),
-            }));
-        }
-        {
-            let mut ex = ctx.fleet_extras.lock().unwrap();
-            let set = ex.watchlist.entry(char_id).or_default();
-            set.clear();
-            for &tid in &target_ids {
-                set.insert(tid);
-            }
-        }
-        sync_fleet_watchlist_to_db(ctx);
-        for &tid in &target_ids {
-            let (ship_opt, sr, ar, hr) = resolve_ship_hp_ratios(ctx, tid).await;
-            if let Some(ship_id) = ship_opt {
-                let _ = ctx.notify_damage_state_change(
-                    NotificationTarget::Character(char_id),
-                    ship_id,
-                    sr,
-                    ar,
-                    hr,
-                );
-            }
-            let fleet_state = build_fleet_state_keyval(ctx, Some(fleet_id), tid, sr, ar, hr);
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnFleetStateChange",
-                "charid",
-                vec![fleet_state],
-            );
-        }
-        return Some(Ok(PyRep::keyval([
-            ("characterID", PyRep::Integer(char_id)),
-            ("watched", PyRep::Bool(!target_ids.is_empty())),
-        ])));
-    }
-    let mut target_ids = Vec::new();
-    match args.first() {
-        Some(PyRep::List(list) | PyRep::Tuple(list)) => {
-            for item in list {
-                if let Some(tid) = item.as_i64() {
-                    target_ids.push(tid);
-                }
-            }
-        }
-        Some(first) => {
-            if let Some(tid) = first.as_i64() {
-                target_ids.push(tid);
-            }
-        }
-        None => target_ids.push(char_id),
-    }
-    let mut fav_ids = Vec::new();
-    if let Some(PyRep::List(list) | PyRep::Tuple(list)) = args.get(1) {
-        for item in list {
-            if let Some(fid) = item.as_i64() {
-                fav_ids.push(fid);
-            }
-        }
-    }
-    let in_fleet = !target_ids.is_empty()
-        && ctx.db.with_snapshot(|snap| {
-            snap.fleets
-                .get(&fleet_id)
-                .map(|f| {
-                    target_ids.iter().all(|tid| f.members.contains(tid))
-                        && fav_ids.iter().all(|fid| f.members.contains(fid))
-                })
-                .unwrap_or(false)
-        });
-    if !in_fleet {
-        return Some(Err(BridgeRpcError {
-            code: "MemberNotFound".into(),
-            message: "Target character is not in your fleet".into(),
-        }));
-    }
-    let watched = method != "RemoveFromWatchlist";
-    {
-        let mut ex = ctx.fleet_extras.lock().unwrap();
-        let set = ex.watchlist.entry(char_id).or_default();
-        for &fid in &fav_ids {
-            if watched || !target_ids.contains(&fid) {
-                set.insert(fid);
-            }
-        }
-        for &tid in &target_ids {
-            if watched {
-                set.insert(tid);
-            } else {
-                set.remove(&tid);
-            }
-        }
-    }
-    sync_fleet_watchlist_to_db(ctx);
-    let mut first_ratios = (1.0, 1.0, 1.0);
-    for (idx, &tid) in target_ids.iter().enumerate() {
-        let (ship_opt, s_ratio, a_ratio, h_ratio) = resolve_ship_hp_ratios(ctx, tid).await;
-        if idx == 0 {
-            first_ratios = (s_ratio, a_ratio, h_ratio);
-        }
-        if watched {
-            if let Some(ship_id) = ship_opt {
-                let _ = ctx.notify_damage_state_change(
-                    NotificationTarget::Character(char_id),
-                    ship_id,
-                    s_ratio,
-                    a_ratio,
-                    h_ratio,
-                );
-            }
-            let fleet_state = build_fleet_state_keyval(
-                ctx,
-                Some(fleet_id),
-                tid,
-                s_ratio,
-                a_ratio,
-                h_ratio,
-            );
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnFleetStateChange",
-                "charid",
-                vec![fleet_state],
-            );
-        }
-    }
-    let primary_id = target_ids.first().copied().unwrap_or(char_id);
-    Some(Ok(PyRep::keyval([
-        ("characterID", PyRep::Integer(primary_id)),
-        ("watched", PyRep::Bool(watched)),
-        ("shieldRatio", PyRep::Real(first_ratios.0)),
-        ("armorRatio", PyRep::Real(first_ratios.1)),
-        ("hullRatio", PyRep::Real(first_ratios.2)),
-    ])))
-}
 
 pub(super) fn handle_corp_contacts_and_labels(
     ctx: &ServerContext,

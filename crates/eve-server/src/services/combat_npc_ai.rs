@@ -11,7 +11,6 @@
 #![forbid(unsafe_code)]
 
 use super::*;
-use eve_db::WalletJournalEntry;
 use eve_destiny::{Ball, MovementMode};
 use tracing::info;
 
@@ -1252,90 +1251,20 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
             1,
             &ctx.quasar_gateway,
         );
+        crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
+            ctx,
+            killer_char_id,
+            &["DamageNPCShips", "DestroyNPCShips"],
+            1,
+            npc_type_id.map(|t| t as i64),
+        );
     }
 
     (wreck_id, effective_bounty, dropped_types)
 }
 
-/// Flushes the 20-minute (`1,200s`) batched NPC bounty tick for `(solar_system_id, char_id)`
-/// applying the system's Dynamic Bounty System (`dbs_multiplier`), corporation tax, and K-space null-sec ESS split (`feat:combat.bounty-payout-npc`).
-pub fn flush_npc_bounty_tick(
-    ctx: &ServerContext,
-    solar_system_id: u32,
-    char_id: i64,
-    corp_tax_rate: f64,
-) -> (f64, f64, f64) {
-    let raw_bounty = with_mut_combat_runtime(ctx, |rt| {
-        rt.pending_bounty_ticks
-            .remove(&(solar_system_id, char_id))
-            .unwrap_or(0.0)
-    });
-    if raw_bounty <= 0.0 {
-        return (0.0, 0.0, 0.0);
-    }
-    let sys_sec = ctx
-        .sde
-        .solar_systems
-        .get(&solar_system_id)
-        .map(|s| s.security_status)
-        .unwrap_or(0.5);
-    let is_kspace_nullsec = sys_sec <= 0.0 && solar_system_id < 31_000_000;
-    let dbs_mult = ctx
-        .db
-        .with_snapshot(|s| {
-            s.system_states
-                .get(&solar_system_id)
-                .map(|st| st.dbs_multiplier)
-        })
-        .unwrap_or(1.35);
-
-    let (pilot_isk, main_ess, reserve_ess) = if is_kspace_nullsec {
-        let (p, _tax, m, r) =
-            compute_dbs_and_ess_bounty_split(raw_bounty, dbs_mult, corp_tax_rate);
-        (p, m, r)
-    } else {
-        let modified = raw_bounty * dbs_mult;
-        (modified * (1.0 - corp_tax_rate.clamp(0.0, 1.0)), 0.0, 0.0)
-    };
-
-    ctx.db.with_mut_snapshot(|snap| {
-        let pilot_cents = IskCents::from_f64_isk(pilot_isk);
-        let main_cents = IskCents::from_f64_isk(main_ess);
-        let reserve_cents = IskCents::from_f64_isk(reserve_ess);
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.balance = ch.balance.checked_add(pilot_cents).unwrap_or(ch.balance);
-        }
-        if is_kspace_nullsec {
-            if let Some(st) = snap.system_states.get_mut(&solar_system_id) {
-                st.ess_main_bank = st
-                    .ess_main_bank
-                    .checked_add(main_cents)
-                    .unwrap_or(st.ess_main_bank);
-                st.ess_reserve_bank = st
-                    .ess_reserve_bank
-                    .checked_add(reserve_cents)
-                    .unwrap_or(st.ess_reserve_bank);
-            }
-        }
-        snap.next_entity_id += 1;
-        let jid = snap.next_entity_id;
-        snap.wallet_journal.push(WalletJournalEntry {
-            entry_id: jid,
-            character_id: char_id,
-            entry_type: "bounty_prizes".to_string(),
-            amount: pilot_cents,
-            balance_after: snap
-                .characters
-                .get(&char_id)
-                .map(|c| c.balance)
-                .unwrap_or(pilot_cents),
-            reason: format!("20m Bounty Tick in system {solar_system_id} (DBS {dbs_mult:.2}x)"),
-        });
-    });
-
-    (pilot_isk, main_ess, reserve_ess)
-}
-
 pub use crate::services::combat_crimewatch::combat_npc_encounters::{
-    create_custom_encounter_site, create_encounter_wave_site, step_encounter_wave_on_kill,
+    create_custom_encounter_site, create_encounter_wave_site, flush_npc_bounty_tick,
+    step_encounter_wave_on_kill,
 };
+

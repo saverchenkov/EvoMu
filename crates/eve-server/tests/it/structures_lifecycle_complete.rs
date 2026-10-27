@@ -275,7 +275,12 @@ async fn test_deploy_anchor_timers_restrictions_and_quantum_core() {
 #[tokio::test]
 async fn test_fuel_consumption_low_power_and_abandoned() {
     // parity: feat:structures.fuel-consumption, feat:structures.abandoned
-    eve_testkit::attest(&["feat:structures.fuel-consumption", "feat:structures.abandoned"]);
+    // parity: feat:lifecycle.structure-abandoned_destroyed
+    eve_testkit::attest(&[
+        "feat:structures.fuel-consumption",
+        "feat:structures.abandoned",
+        "feat:lifecycle.structure-abandoned_destroyed",
+    ]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut sess = pilot_in_space(&ctx, 4002).await;
@@ -357,6 +362,8 @@ async fn test_fuel_consumption_low_power_and_abandoned() {
     assert_eq!(power(&ctx, id), life::PowerState::Abandoned);
 
     // Abandoned = single timer: no armor or hull reinforcement, destroyed in one fight.
+    // feat:lifecycle.structure-abandoned_destroyed: hangar contents drop as loot instead of asset safety
+    let abandoned_cargo = grant(&ctx, OWNER, id, 34, InventoryFlag::Hangar, 250);
     prepare_siege(&ctx, id);
     set_hp(&ctx, id, 1.0, 1.0, 1.0);
     let a = attack(&ctx, &mut sess, id).await.expect("shield");
@@ -365,6 +372,9 @@ async fn test_fuel_consumption_low_power_and_abandoned() {
     assert_eq!(kv_str(&b, "state"), life::STATE_HULL_VULNERABLE);
     let c = attack(&ctx, &mut sess, id).await.expect("hull");
     assert_eq!(kv_str(&c, "state"), life::STATE_DESTROYED);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&abandoned_cargo).map(|i| i.location_id), Some(i64::from(JITA)), "abandoned structure drops cargo to space");
+    });
 }
 
 #[tokio::test]
@@ -617,7 +627,8 @@ async fn test_killmail_core_fitting_drop_and_automatic_asset_safety() {
 #[tokio::test]
 async fn test_unanchor_cancel_and_packaging_after_seven_days() {
     // parity: feat:structures.unanchor
-    eve_testkit::attest(&["feat:structures.unanchor"]);
+    // parity: feat:lifecycle.structure-leave_space
+    eve_testkit::attest(&["feat:structures.unanchor", "feat:lifecycle.structure-leave_space"]);
     let ctx = ServerContext::new();
     // Deterministic virtual time: the 7-day timer assertion must not race the host wall clock.
     ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));

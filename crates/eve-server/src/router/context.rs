@@ -580,6 +580,13 @@ impl ServerContext {
     /// Synchronizes a live `SessionState` with current DB character spatial and vessel state.
     pub fn sync_session(&self, session: &mut eve_machonet::SessionState) {
         if let Some(cid) = session.character_id {
+            if let Some((new_corp, new_ally, new_role)) = crate::services::fleet_social::fleet_social_persistence::with_social_state(self, |s| {
+                s.forced_session_corp_sync.remove(&cid)
+            }) {
+                session.corporation_id = Some(new_corp);
+                session.alliance_id = new_ally;
+                session.corp_role = new_role;
+            }
             if let Some((act_ship, st_id, str_id, sys_id, const_id, reg_id)) = self.db.with_snapshot(|snap| {
                 snap.characters.get(&cid).map(|c| (c.active_ship_id, c.station_id, c.structure_id, c.solar_system_id, c.constellation_id, c.region_id))
             }) {
@@ -611,6 +618,11 @@ impl ServerContext {
                 prev_unix,
                 self.now_unix_secs(),
             );
+            let now_after = self.now_unix_secs();
+            let dt_sec = self.systems.downtime_utc_secs_of_day();
+            if secs >= 86_400 || (prev_unix.saturating_sub(dt_sec) / 86_400) < (now_after.saturating_sub(dt_sec) / 86_400) {
+                crate::services::fleet_social::execute_pending_auto_kicks_on_downtime(self);
+            }
             crate::services::implant_plugging::purge_expired_boosters_all(
                 self,
                 self.now_unix_secs(),

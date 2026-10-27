@@ -408,8 +408,8 @@ async fn test_corp_member_tracking_roles_and_expulsion() {
     assert_eq!(can_kick_unauth, PyRep::Bool(false));
     ctx.db.with_mut_snapshot(|s| {
         if let Some(c) = s.corporations.get_mut(&corp_id) { c.member_roles.insert(PILOT_3, 0); }
-        if let Some(ch) = s.characters.get_mut(&PILOT_3) { ch.station_id = Some(60_003_760); ch.structure_id = None; }
-    });
+        s.corp_role_assignments.remove(&(corp_id, PILOT_3));
+        if let Some(ch) = s.characters.get_mut(&PILOT_3) { ch.station_id = Some(60_003_760); ch.structure_id = None; } });
     let can_kick3_ok = rpc(&ctx, &mut sess1, "corpRegistry", "CanBeKickedOut", &[PyRep::Integer(PILOT_3)]).await.expect("CanBeKickedOut valid member");
     assert_eq!(can_kick3_ok, PyRep::Bool(true));
     ctx.db.with_mut_snapshot(|s| { if let Some(ch) = s.characters.get_mut(&PILOT_3) { ch.station_id = None; } });
@@ -443,6 +443,27 @@ async fn test_corp_member_tracking_roles_and_expulsion() {
         "cannot kick non-member"
     );
 
+    assert!(
+        rpc(
+            &ctx,
+            &mut sess1,
+            "corpRegistry",
+            "KickOutMember",
+            &[PyRep::Integer(PILOT_2)],
+        )
+        .await
+        .is_err(),
+        "cannot kick member while they hold active roles"
+    );
+
+    // Clear roles on PILOT_2 and PILOT_3, put PILOT_2 in space so KickOutMember queues auto-kick, then dock & batch-kick [PILOT_2, PILOT_3]
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) { corp.member_roles.insert(PILOT_2, 0); corp.member_roles.insert(PILOT_3, 0); }
+        snap.corp_role_assignments.remove(&(corp_id, PILOT_2));
+        snap.corp_role_assignments.remove(&(corp_id, PILOT_3));
+        if let Some(g) = snap.corp_governance.get_mut(&corp_id) { g.role_drop_timestamps.remove(&PILOT_2); g.role_drop_timestamps.remove(&PILOT_3); }
+        if let Some(ch) = snap.characters.get_mut(&PILOT_2) { ch.station_id = None; }
+    });
     let kick_res = rpc(
         &ctx,
         &mut sess1,
@@ -451,26 +472,19 @@ async fn test_corp_member_tracking_roles_and_expulsion() {
         &[PyRep::Integer(PILOT_2)],
     )
     .await
-    .expect("KickOutMember PILOT_2 with active roles queues auto-kick");
+    .expect("KickOutMember PILOT_2 in space queues auto-kick");
     assert_eq!(field(&kick_res, "characterID"), PyRep::Integer(PILOT_2));
     assert_eq!(field(&kick_res, "queuedAutoKick"), PyRep::Bool(true));
 
-    // Clear roles on PILOT_2 and PILOT_3 and batch-kick [PILOT_2, PILOT_3]
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-            corp.member_roles.insert(PILOT_2, 0);
-            corp.member_roles.insert(PILOT_3, 0);
-        }
+        if let Some(ch) = snap.characters.get_mut(&PILOT_2) { ch.station_id = Some(60_003_760); }
     });
     let kick_mems = rpc(
         &ctx,
         &mut sess1,
         "corpRegistry",
         "KickOutMembers",
-        &[PyRep::List(vec![
-            PyRep::Integer(PILOT_2),
-            PyRep::Integer(PILOT_3),
-        ])],
+        &[PyRep::List(vec![PyRep::Integer(PILOT_2), PyRep::Integer(PILOT_3)])],
     )
     .await
     .expect("KickOutMembers batch");

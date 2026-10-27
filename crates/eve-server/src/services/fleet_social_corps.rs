@@ -121,6 +121,16 @@ pub(super) fn compute_corp_member_limit(
     bonus.max(1)
 }
 
+pub(crate) fn record_corp_join_in_snap_pub(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    old_corp_id: i64,
+    corp_id: i64,
+    now_unix: u64,
+) {
+    record_corp_join_in_snap(snap, char_id, old_corp_id, corp_id, now_unix);
+}
+
 pub(super) fn record_corp_join_in_snap(
     snap: &mut eve_db::WorldStateSnapshot,
     char_id: i64,
@@ -133,9 +143,15 @@ pub(super) fn record_corp_join_in_snap(
             g.pending_role_grants.remove(&char_id);
             g.pending_scoped_role_grants.remove(&char_id);
             g.pending_auto_kicks.remove(&char_id);
+            g.member_titles.remove(&char_id);
+            g.member_divisions.remove(&char_id);
+            g.member_bases.remove(&char_id);
+            g.member_account_keys.remove(&char_id);
+            g.role_drop_timestamps.remove(&char_id);
         }
         snap.corp_role_assignments.remove(&(old_corp_id, char_id));
         snap.char_scoped_roles.remove(&char_id);
+        snap.corp_member_titles.remove(&(old_corp_id, char_id));
     }
     let list = snap.employment_history.entry(char_id).or_default();
     if list.is_empty() {
@@ -437,6 +453,8 @@ pub(super) fn handle_corps(
             let s2 = args.get(1).and_then(|a| a.as_i64()).unwrap_or(20);
             let s3 = args.get(2).and_then(|a| a.as_i64()).unwrap_or(30);
             let c1 = args.get(3).and_then(|a| a.as_i64()).unwrap_or(5);
+            let c2 = args.get(4).and_then(|a| a.as_i64()).unwrap_or(0);
+            let c3 = args.get(5).and_then(|a| a.as_i64()).unwrap_or(0);
             let is_ceo_or_dir = ctx.db.with_snapshot(|snap| {
                 snap.corporations.get(&corp_id).is_some_and(|c| {
                     char_id == c.ceo_id || corp_roles::has_role(c.member_roles.get(&char_id).copied().unwrap_or(0), corp_roles::ROLE_DIRECTOR)
@@ -445,9 +463,12 @@ pub(super) fn handle_corps(
             if !is_ceo_or_dir {
                 return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only CEO or Director can update the corporation logo".into() }));
             }
-            let old_logo = with_corp_gov(ctx, |g| {
+            let (old_logo, old_extra) = with_corp_gov(ctx, |g| {
                 let state = g.entry(corp_id).or_default();
-                std::mem::replace(&mut state.logo, (s1, s2, s3, c1))
+                (
+                    std::mem::replace(&mut state.logo, (s1, s2, s3, c1)),
+                    std::mem::replace(&mut state.logo_extra_colors, (c2, c3)),
+                )
             });
             ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorpLogoReady", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(128)]);
             let change = PyRep::Dict(vec![
@@ -455,11 +476,14 @@ pub(super) fn handle_corps(
                 (PyRep::String(("shape2").into()), PyRep::Tuple(vec![PyRep::Integer(old_logo.1), PyRep::Integer(s2)])),
                 (PyRep::String(("shape3").into()), PyRep::Tuple(vec![PyRep::Integer(old_logo.2), PyRep::Integer(s3)])),
                 (PyRep::String(("color1").into()), PyRep::Tuple(vec![PyRep::Integer(old_logo.3), PyRep::Integer(c1)])),
+                (PyRep::String(("color2").into()), PyRep::Tuple(vec![PyRep::Integer(old_extra.0), PyRep::Integer(c2)])),
+                (PyRep::String(("color3").into()), PyRep::Tuple(vec![PyRep::Integer(old_extra.1), PyRep::Integer(c3)])),
             ]);
             ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), change]);
             Some(Ok(PyRep::keyval([
                 ("corporationID", PyRep::Integer(corp_id)), ("shape1", PyRep::Integer(s1)),
-                ("shape2", PyRep::Integer(s2)), ("shape3", PyRep::Integer(s3)), ("color1", PyRep::Integer(c1)),
+                ("shape2", PyRep::Integer(s2)), ("shape3", PyRep::Integer(s3)),
+                ("color1", PyRep::Integer(c1)), ("color2", PyRep::Integer(c2)), ("color3", PyRep::Integer(c3)),
             ])))
         }
 
@@ -517,7 +541,13 @@ pub(super) fn handle_corps(
                     Err(e) => Some(Err(e)),
                 };
             }
-            let div_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1) as u8;
+            let raw_div_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+            let div_id = match raw_div_id {
+                1..=7 => raw_div_id as u8,
+                115..=121 => (raw_div_id - 114) as u8,
+                1000..=1006 => (raw_div_id - 999) as u8,
+                _ => raw_div_id as u8,
+            };
             let new_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Division");
             let wallet_name = args.get(2).and_then(|a| a.as_str()).unwrap_or(new_name);
 
@@ -657,6 +687,12 @@ pub(super) fn handle_corps(
                     message: "InsertApplication requires target corporationID".into(),
                 }));
             };
+            if ctx.sde.npc_corporations.contains_key(&corp_id) || (1_000_000..2_000_000).contains(&corp_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotApplyToNpcCorporation".into(),
+                    message: "Players cannot submit membership applications to NPC corporations".into(),
+                }));
+            }
             let message = args
                 .get(1)
                 .and_then(|a| a.as_str())
@@ -858,6 +894,16 @@ pub(super) fn handle_corps(
                             message: format!("Cannot join corporation while 10s session-change timer ({}) is active", active_timer.reason),
                         });
                     }
+                    let applicant_in_space = snap
+                        .characters
+                        .get(&applicant_id)
+                        .is_some_and(|ch| ch.station_id.is_none() && ch.structure_id.is_none());
+                    if applicant_in_space {
+                        return Err(BridgeRpcError {
+                            code: "MustBeDockedToJoinCorp".into(),
+                            message: "Character must be docked in a station or structure to accept a corporation transition".into(),
+                        });
+                    }
                 }
 
                 if action.eq_ignore_ascii_case("withdrawn") {
@@ -871,7 +917,7 @@ pub(super) fn handle_corps(
                     if let Some(app) = corp_mut.applications.get_mut(&app_id) {
                         app.status = "Withdrawn".into();
                     }
-                    return Ok((corp_id, applicant_id, old_corp_id, "Withdrawn".to_string(), app_msg, app_ts));
+                    return Ok((corp_id, applicant_id, old_corp_id, "Withdrawn".to_string(), app_msg, app_ts, None));
                 }
 
                 if is_invitation {
@@ -895,13 +941,24 @@ pub(super) fn handle_corps(
                     if let Some(app) = corp_mut.applications.get_mut(&app_id) {
                         app.status = "Rejected".into();
                     }
-                    return Ok((corp_id, applicant_id, old_corp_id, "Rejected".to_string(), app_msg, app_ts));
+                    return Ok((corp_id, applicant_id, old_corp_id, "Rejected".to_string(), app_msg, app_ts, None));
                 }
 
                 if old_corp_id != corp_id {
                     if let Some(old_corp) = snap.corporations.get(&old_corp_id) {
                         if old_corp.ceo_id == applicant_id {
                             return Err(BridgeRpcError::user_error("CeoCannotLeaveCorp"));
+                        }
+                        if let Some(blocker) = super::fleet_social_corp_tail::member_kick_blocker(
+                            snap,
+                            old_corp_id,
+                            applicant_id,
+                            now_unix,
+                        ) {
+                            return Err(BridgeRpcError {
+                                code: "CannotLeaveOldCorpWithRoles".into(),
+                                message: format!("Cannot leave current corporation while {blocker}"),
+                            });
                         }
                     }
                 }
@@ -947,27 +1004,83 @@ pub(super) fn handle_corps(
                     .get(&corp_id)
                     .map(|g| g.welcome_mail.clone())
                     .unwrap_or((false, String::new(), String::new()));
-                if welcome.0 && !welcome.1.is_empty() {
+                let welcome_mail_id = if welcome.0 && !welcome.1.is_empty() {
                     snap.next_entity_id += 1;
                     let mid = snap.next_entity_id;
-                    snap.mails.push(MailRecord { message_id: mid, sender_id: ceo_id, recipient_id: applicant_id, subject: welcome.1, body: welcome.2 });
+                    snap.mails.push(MailRecord { message_id: mid, sender_id: ceo_id, recipient_id: applicant_id, subject: welcome.1.clone(), body: welcome.2 });
                     snap.mail_timestamps.insert(mid, now_unix);
                     snap.mail_assigned_labels.insert((applicant_id, mid), vec![1]);
-                }
+                    Some((mid, ceo_id, welcome.1))
+                } else {
+                    None
+                };
                 record_corp_join_in_snap(snap, applicant_id, old_corp_id, corp_id, now_unix);
 
-                Ok((corp_id, applicant_id, old_corp_id, "Accepted".to_string(), app_msg, app_ts))
+                Ok((corp_id, applicant_id, old_corp_id, "Accepted".to_string(), app_msg, app_ts, welcome_mail_id))
             });
 
             match res {
-                Ok((corp_id, applicant_id, old_corp_id, status_str, app_msg, app_ts)) => {
+                Ok((corp_id, applicant_id, old_corp_id, status_str, app_msg, app_ts, welcome_mail_id)) => {
                     if status_str == "Accepted" {
+                        let (old_ally, new_ally, old_role) = ctx.db.with_snapshot(|s| {
+                            (
+                                s.corporations.get(&old_corp_id).and_then(|c| c.alliance_id),
+                                s.corporations.get(&corp_id).and_then(|c| c.alliance_id),
+                                s.corporations.get(&old_corp_id).and_then(|c| c.member_roles.get(&applicant_id).copied()).unwrap_or(0),
+                            )
+                        });
                         if char_id == applicant_id {
                             session.corporation_id = Some(corp_id);
+                            session.alliance_id = new_ally;
                             session.corp_role = 0;
                         }
+                        super::fleet_social_persistence::with_social_state(ctx, |s| {
+                            s.forced_session_corp_sync.insert(applicant_id, (corp_id, new_ally, 0));
+                        });
                         let m_change = PyRep::Dict(vec![(PyRep::String(("corporationID").into()), PyRep::Tuple(vec![PyRep::Integer(old_corp_id), PyRep::Integer(corp_id)]))]);
-                        ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationMemberChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(applicant_id), m_change]);
+                        let m_args = vec![PyRep::Integer(corp_id), PyRep::Integer(applicant_id), m_change.clone()];
+                        if old_corp_id != corp_id && old_corp_id > 0 {
+                            ctx.notify(
+                                NotificationTarget::Corporation(old_corp_id),
+                                "OnCorporationMemberChanged",
+                                "corpid",
+                                vec![PyRep::Integer(old_corp_id), PyRep::Integer(applicant_id), m_change],
+                            );
+                        }
+                        ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationMemberChanged", "corpid", m_args);
+                        let sess_changes = PyRep::Dict(vec![
+                            (PyRep::String(("corpid").into()), PyRep::Tuple(vec![PyRep::Integer(old_corp_id), PyRep::Integer(corp_id)])),
+                            (PyRep::String(("corprole").into()), PyRep::Tuple(vec![PyRep::Integer(old_role as i64), PyRep::Integer(0)])),
+                            (
+                                PyRep::String(("allianceid").into()),
+                                PyRep::Tuple(vec![
+                                    old_ally.map_or(PyRep::None, PyRep::Integer),
+                                    new_ally.map_or(PyRep::None, PyRep::Integer),
+                                ]),
+                            ),
+                        ]);
+                        ctx.notify(
+                            NotificationTarget::Character(applicant_id),
+                            "OnSessionChanged",
+                            "clientID",
+                            vec![PyRep::Bool(false), PyRep::Integer(applicant_id), sess_changes],
+                        );
+                        if let Some((mid, sender_id, subj)) = welcome_mail_id {
+                            let hdr = PyRep::keyval([
+                                ("messageID", PyRep::Integer(mid)),
+                                ("senderID", PyRep::Integer(sender_id)),
+                                ("toCharacterIDs", PyRep::List(vec![PyRep::Integer(applicant_id)])),
+                                ("toCorpOrAllianceID", PyRep::Integer(corp_id)),
+                                ("subject", PyRep::String(subj)),
+                                ("sentDate", PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now_unix))),
+                            ]);
+                            ctx.notify(
+                                NotificationTarget::Character(applicant_id),
+                                "OnNewMailReceived",
+                                "charid",
+                                vec![hdr],
+                            );
+                        }
                         let _ = crate::services::quasar_social_chat::on_character_local_chat_membership_refreshed(
                             &ctx.quasar_gateway, &ctx.db, applicant_id as u32, now_unix,
                         );
@@ -1018,21 +1131,13 @@ pub(super) fn handle_corps(
             };
             let corp_id = session.corporation_id.unwrap_or(0);
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let accept_now = matches!(args.get(1), Some(PyRep::Bool(true)));
+            let accept_now = matches!(args.get(1), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
             let now_unix = ctx.now_unix();
-            if accept_now && target_id != char_id {
+            if accept_now {
                 return Some(Err(BridgeRpcError {
                     code: "AccessDenied".into(),
-                    message: "Cannot force-accept corporation invitation for another character".into(),
+                    message: "InsertInvitation cannot auto-join a character; the target must accept via UpdateApplicationOffer".into(),
                 }));
-            }
-            if accept_now {
-                if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(ctx, target_id, now_unix, None) {
-                    return Some(Err(BridgeRpcError {
-                        code: "SessionChangeInProgress".into(),
-                        message: format!("Cannot join corporation while 10s session-change timer ({}) is active", active_timer.reason),
-                    }));
-                }
             }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(corp) = snap.corporations.get(&corp_id) else {
@@ -1069,27 +1174,6 @@ pub(super) fn handle_corps(
                         ),
                     });
                 }
-                if accept_now {
-                    let old_corp_id = snap
-                        .characters
-                        .get(&target_id)
-                        .map(|c| c.corporation_id)
-                        .unwrap_or(0);
-                    if old_corp_id != corp_id {
-                        if let Some(old_corp) = snap.corporations.get(&old_corp_id) {
-                            if old_corp.ceo_id == target_id {
-                                return Err(BridgeRpcError::user_error("CeoCannotLeaveCorp"));
-                            }
-                        }
-                        if let Some(old_corp) = snap.corporations.get_mut(&old_corp_id) {
-                            old_corp.members.remove(&target_id);
-                            old_corp.member_roles.remove(&target_id);
-                        }
-                        if let Some(old_ch) = snap.chat_channels.get_mut(&format!("corpid:{old_corp_id}")) {
-                            old_ch.members.remove(&target_id);
-                        }
-                    }
-                }
                 snap.next_entity_id += 1;
                 let app_id = snap.next_entity_id;
                 let corp = snap.corporations.get_mut(&corp_id).unwrap();
@@ -1101,45 +1185,24 @@ pub(super) fn handle_corps(
                         corporation_id: corp_id,
                         message: "Corporation Invitation".into(),
                         created_unix: now_unix,
-                        status: if accept_now { "Accepted".into() } else { "Invited".into() },
+                        status: "Invited".into(),
                     },
                 );
-                if accept_now {
-                    corp.members.insert(target_id);
-                    corp.member_roles.insert(target_id, 0);
-                    let alliance_id = corp.alliance_id;
-                    let old_corp_id = snap.characters.get(&target_id).map(|c| c.corporation_id).unwrap_or(0);
-                    if let Some(ch) = snap.characters.get_mut(&target_id) {
-                        ch.corporation_id = corp_id;
-                        ch.alliance_id = alliance_id;
-                    }
-                    record_corp_join_in_snap(snap, target_id, old_corp_id, corp_id, now_unix);
-                }
                 Ok(app_id)
             });
             match res {
                 Ok(app_id) => {
-                    let inv_status = if accept_now { "Accepted" } else { "Invited" };
                     let app_kv = PyRep::keyval([
                         ("applicationID", PyRep::Integer(app_id)), ("corporationID", PyRep::Integer(corp_id)),
                         ("characterID", PyRep::Integer(target_id)), ("applicationText", PyRep::String(("Corporation Invitation").into())),
-                        ("status", PyRep::String((inv_status).into())), ("applicationDateTime", PyRep::Integer(now_unix as i64)),
+                        ("status", PyRep::String(("Invited").into())), ("applicationDateTime", PyRep::Integer(now_unix as i64)),
                     ]);
                     ctx.notify(NotificationTarget::Character(target_id), "OnCorporationApplicationChanged", "charid", vec![PyRep::Integer(corp_id), PyRep::Integer(target_id), PyRep::Integer(app_id), app_kv]);
-                    if accept_now {
-                        let _ = crate::services::quasar_social_chat::on_character_local_chat_membership_refreshed(
-                            &ctx.quasar_gateway, &ctx.db, target_id as u32, now_unix,
-                        );
-                        let inv_sys = ctx.db.with_snapshot(|s| s.characters.get(&target_id).map(|c| c.solar_system_id)).unwrap_or(0);
-                        crate::services::space_destiny::record_session_change_timer(
-                            ctx, target_id, now_unix, inv_sys, 0, "corp_change",
-                        );
-                    }
                     Some(Ok(PyRep::keyval([
                         ("applicationID", PyRep::Integer(app_id)),
                         ("characterID", PyRep::Integer(target_id)),
                         ("corporationID", PyRep::Integer(corp_id)),
-                        ("joined", PyRep::Bool(accept_now)),
+                        ("joined", PyRep::Bool(false)),
                     ])))
                 }
                 Err(e) => Some(Err(e)),
@@ -1186,13 +1249,17 @@ pub(super) fn handle_corps(
             };
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
             let corp_id = session.corporation_id.unwrap_or(0);
+            let now_unix = ctx.now_unix();
+            promote_due_pending_corp_grants(ctx, corp_id);
             let can_kick = ctx.db.with_snapshot(|snap| {
                 let Some(c) = snap.corporations.get(&corp_id) else { return false; };
                 if !c.members.contains(&target_id) { return false; }
                 let caller_role = c.member_roles.get(&char_id).copied().unwrap_or(0);
                 let auth = char_id == target_id || char_id == c.ceo_id || corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_PERSONNEL_MANAGER);
                 if !auth || target_id == c.ceo_id { return false; }
-                if c.member_roles.get(&target_id).copied().unwrap_or(0) != 0 { return false; }
+                if super::fleet_social_corp_tail::member_kick_blocker(snap, corp_id, target_id, now_unix).is_some() {
+                    return false;
+                }
                 !snap.characters.get(&target_id).is_some_and(|ch| ch.station_id.is_none() && ch.structure_id.is_none())
             });
             Some(Ok(PyRep::Bool(can_kick)))
@@ -1200,24 +1267,6 @@ pub(super) fn handle_corps(
 
         ("corpRegistry", "KickOutMember") | ("corpRegistry", "KickOutMembers") => {
             super::fleet_social_persistence::handle_kick_out_members(ctx, session, args)
-        }
-
-        ("corpRegistry", "GetPendingAutoKicks") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let corp_id = session.corporation_id.unwrap_or(0);
-            let pending: Vec<(i64, u64)> = read_corp_gov(ctx, |g| {
-                g.get(&corp_id)
-                    .map(|g| g.pending_auto_kicks.iter().map(|(&k, &v)| (k, v)).collect())
-                    .unwrap_or_default()
-            });
-            let rows: Vec<Vec<PyRep>> = pending
-                .into_iter()
-                .map(|(cid, ts)| vec![PyRep::Integer(cid), PyRep::Integer(ts as i64)])
-                .collect();
-            Some(Ok(PyRep::rowset(vec!["characterID", "queuedDateTime"], rows)))
         }
 
         ("account", "GetWalletDivisionsInfo") => {
@@ -1284,100 +1333,5 @@ pub(super) fn handle_corps(
     }
 }
 
-pub(super) fn handle_insert_vote_case(
-    ctx: &ServerContext,
-    corp_id: i64,
-    char_id: i64,
-    now_unix: u64,
-    args: &[PyRep],
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    let args = if args.first().and_then(|a| a.as_i64()).is_some() && args.get(1).and_then(|a| a.as_str()).is_some() {
-        &args[1..]
-    } else {
-        args
-    };
-    let text = args.first().and_then(|a| a.as_str()).unwrap_or("CEO Election");
-    let desc = args.get(1).and_then(|a| a.as_str()).unwrap_or("Vote for new CEO");
-    let vote_type = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
-    let opts_arg = args
-        .get(3)
-        .filter(|a| matches!(a, PyRep::List(_) | PyRep::Tuple(_) | PyRep::Rowset { .. }))
-        .or_else(|| {
-            args.get(4)
-                .filter(|a| matches!(a, PyRep::List(_) | PyRep::Tuple(_) | PyRep::Rowset { .. }))
-        });
-    let (case_id, target_id) = match ctx
-        .db
-        .try_with_mut_snapshot(|snap| -> Result<(i64, i64), BridgeRpcError> {
-            let mut options: Vec<(i64, String, i64)> = Vec::new();
-            if let Some(opt_rep) = opts_arg {
-                let items: Vec<PyRep> = match opt_rep {
-                    PyRep::List(v) | PyRep::Tuple(v) => v.clone(),
-                    PyRep::Rowset { rows, .. } => {
-                        rows.iter().map(|r| PyRep::List(r.clone())).collect()
-                    }
-                    _ => Vec::new(),
-                };
-                for (idx, item) in items.iter().enumerate() {
-                    let oid = (idx as i64) + 1;
-                    match item {
-                        PyRep::Integer(cand_id) => {
-                            if vote_type == 0 && !snap.corporations.get(&corp_id).is_some_and(|c| c.members.contains(cand_id)) {
-                                return Err(BridgeRpcError { code: "CandidateNotMember".into(), message: "CEO election candidate must be a member of the corporation".into() });
-                            }
-                            let cname = snap.characters.get(cand_id).map(|c| c.name.clone()).unwrap_or_else(|| format!("Candidate {cand_id}"));
-                            options.push((oid, cname, *cand_id));
-                        }
-                        PyRep::List(els) | PyRep::Tuple(els) => {
-                            let (opt_id, otext, param) = if els.first().and_then(|x| x.as_str()).is_some() {
-                                (oid, els.first().and_then(|x| x.as_str()).unwrap_or("Option").to_string(), els.get(1).and_then(|x| x.as_i64()).unwrap_or(0))
-                            } else {
-                                let id = els.first().and_then(|x| x.as_i64()).unwrap_or(oid);
-                                let txt = els.get(1).and_then(|x| x.as_str()).unwrap_or("Option").to_string();
-                                let p = els.get(2).and_then(|x| x.as_i64()).unwrap_or(id);
-                                (id, txt, p)
-                            };
-                            if vote_type == 0 && param > 0 && !snap.corporations.get(&corp_id).is_some_and(|c| c.members.contains(&param)) {
-                                return Err(BridgeRpcError { code: "CandidateNotMember".into(), message: "CEO election candidate must be a member of the corporation".into() });
-                            }
-                            options.push((opt_id, otext, param));
-                        }
-                        PyRep::String(s) => options.push((oid, s.clone(), oid)),
-                        _ => {}
-                    }
-                }
-            }
-            let target_id = options.first().map(|o| o.2)
-                .or_else(|| if args.len() >= 5 { args.get(4).and_then(|a| a.as_i64()) } else { None })
-                .or_else(|| args.get(3).and_then(|a| a.as_i64()))
-                .unwrap_or(char_id);
-            if vote_type == 5 && (target_id <= 0 || target_id > 10_000_000_000) {
-                return Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Share creation amount must be positive and bounded".into() });
-            }
-            if options.is_empty() {
-                if vote_type == 0 {
-                    if !snap.corporations.get(&corp_id).is_some_and(|c| c.members.contains(&target_id)) {
-                        return Err(BridgeRpcError { code: "CandidateNotMember".into(), message: "CEO election candidate must be a member of the corporation".into() });
-                    }
-                    let cname = snap.characters.get(&target_id).map(|c| c.name.clone()).unwrap_or_else(|| format!("Candidate {target_id}"));
-                    options = vec![(1, format!("Vote for {cname}"), target_id), (2, "Reject".into(), 0)];
-                } else {
-                    options = vec![(1, "Yes / Accept".into(), target_id), (2, "No / Reject".into(), 0)];
-                }
-            }
-            snap.next_entity_id += 1;
-            let cid = snap.next_entity_id;
-            snap.corp_vote_cases.insert(cid, eve_db::CorpVoteCaseRecord {
-                case_id: cid, corporation_id: corp_id, vote_type, text: text.to_string(),
-                description: desc.to_string(), parameter: target_id, start_ts: now_unix,
-                end_ts: now_unix + 86_400, executed: false, options,
-            });
-            Ok((cid, target_id))
-        }) {
-        Ok(v) => v,
-        Err(e) => return Some(Err(e)),
-    };
-    ctx.notify(NotificationTarget::Corporation(corp_id), "OnVoteCaseChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(case_id)]);
-    ctx.notify(NotificationTarget::Corporation(corp_id), "OnSanctionedActionChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(case_id)]);
-    Some(Ok(PyRep::keyval([("voteCaseID", PyRep::Integer(case_id)), ("voteType", PyRep::Integer(vote_type)), ("parameter", PyRep::Integer(target_id))])))
-}
+pub(super) use super::fleet_social_corp_tail::handle_insert_vote_case;
+

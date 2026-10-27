@@ -326,12 +326,13 @@ async fn test_fighters_tubes_and_multi_activation_audit() {
 
 #[tokio::test]
 async fn test_structure_ops_and_asset_safety_audit() {
-    // parity: rpc:structureDeployment.Anchor, rpc:structureControl.TakeControl, rpc:structureAssetSafety.GetStructuresICanDeliverTo, feat:structures.asset-safety-manual
+    // parity: rpc:structureDeployment.Anchor, rpc:structureControl.TakeControl, rpc:structureAssetSafety.GetStructuresICanDeliverTo, feat:structures.asset-safety-manual, feat:lifecycle.asset_safety-auto_delivery
     eve_testkit::attest(&[
         "rpc:structureDeployment.Anchor",
         "rpc:structureControl.TakeControl",
         "rpc:structureAssetSafety.GetStructuresICanDeliverTo",
         "feat:structures.asset-safety-manual",
+        "feat:lifecycle.asset_safety-auto_delivery",
     ]);
 
     let ctx = ServerContext::new();
@@ -558,6 +559,41 @@ async fn test_structure_ops_and_asset_safety_audit() {
                 estimated_value_isk: 10_000_000.0,
                 item_ids: vec![wrapped_item_id],
                 nearest_npc_station_id: Some(60003760),
+                auto_delivered: false,
+                retrieval_fee_paid: false,
+            },
+        );
+        let auto_wrap_id = 940_000_107i64;
+        let auto_item_id = 950_000_107i64;
+        snap.items.insert(
+            auto_item_id,
+            InventoryItemRecord {
+                item_id: auto_item_id,
+                type_id: 34,
+                owner_id: char_id,
+                location_id: 0,
+                flag: InventoryFlag::None,
+                quantity: 50,
+                ..Default::default()
+            },
+        );
+        ext.asset_safety_wraps.insert(
+            auto_wrap_id,
+            eve_server::services::station_structure::structure_upwell_ops::AssetSafetyWrapRecord {
+                wrap_id: auto_wrap_id,
+                owner_id: char_id,
+                is_corp: false,
+                source_structure_id: structure_id,
+                source_structure_name: "Test Structure".into(),
+                solar_system_id: sys_id,
+                created_unix: ctx.now_unix() - (21 * 86_400),
+                deliverable_after_unix: ctx.now_unix() - (15 * 86_400),
+                delivered_to_id: None,
+                estimated_value_isk: 500_000.0,
+                item_ids: vec![auto_item_id],
+                nearest_npc_station_id: Some(60003760),
+                auto_delivered: false,
+                retrieval_fee_paid: false,
             },
         );
         eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
@@ -575,6 +611,13 @@ async fn test_structure_ops_and_asset_safety_audit() {
         )
         .await
         .expect("MoveSafetyWrapToStructure");
+
+    // feat:lifecycle.asset_safety-auto_delivery: wrap older than 20 days is lazily auto-delivered
+    let auto_del = ctx.db.with_snapshot(|snap| {
+        let ext = eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        ext.asset_safety_wraps.get(&940_000_107i64).map(|w| (w.auto_delivered, w.delivered_to_id))
+    });
+    assert_eq!(auto_del, Some((true, Some(60003760))));
 
     let fee_paid = move_res
         .dict_get("feePaidISK")

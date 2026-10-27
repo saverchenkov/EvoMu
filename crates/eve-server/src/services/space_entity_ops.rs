@@ -272,6 +272,7 @@ pub async fn handle(
                 if tag_str.is_empty() {
                     tags.remove(&target_id);
                 } else {
+                    tags.retain(|&tid, existing| tid == target_id || existing != &tag_str);
                     tags.insert(target_id, tag_str);
                 }
             }

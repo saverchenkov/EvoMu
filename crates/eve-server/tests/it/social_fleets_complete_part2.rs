@@ -413,10 +413,10 @@ async fn test_so_bookmarks_expiry_copy_move_corp_bookmarks_and_scanning_features
     let jita_sys = ctx.systems.get_or_spawn(30_000_142);
     let _ = jita_sys.spawn_ball(Ball { id: 800_000_001, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 350.0, inertia: 2.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop }).await;
     sess1.ship_id = Some(800_000_001); sess1.station_id = None; sess1.solar_system_id = Some(30_000_142);
-    sess2.ship_id = Some(800_000_002); sess2.station_id = None; sess2.solar_system_id = Some(30_000_142);
+    sess2.ship_id = Some(800_000_002); sess2.station_id = Some(60_003_760); sess2.solar_system_id = Some(30_000_142);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) { ch.active_ship_id = 800_000_001; ch.station_id = None; ch.solar_system_id = 30_000_142; }
-        if let Some(ch) = snap.characters.get_mut(&90_000_002) { ch.active_ship_id = 800_000_002; ch.station_id = None; ch.solar_system_id = 30_000_142; }
+        if let Some(ch) = snap.characters.get_mut(&90_000_002) { ch.active_ship_id = 800_000_002; ch.station_id = Some(60_003_760); ch.solar_system_id = 30_000_142; }
         snap.skills.entry(90_000_001).or_default().insert(3363, eve_db::TrainedSkillRecord { type_id: 3363, level: 5, skill_points: 256_000.0 });
     });
     ctx.advance_secs(12);
@@ -425,6 +425,8 @@ async fn test_so_bookmarks_expiry_copy_move_corp_bookmarks_and_scanning_features
     let app = ctx.dispatch_rpc(&mut sess2, "corpRegistry", None, "InsertApplication", &[PyRep::Integer(corp_id), PyRep::String("Joining".into())], &kw, None).await.unwrap();
     ctx.dispatch_rpc(&mut sess1, "corpRegistry", None, "UpdateApplicationOffer", &[app.dict_get("applicationID").unwrap().clone(), PyRep::String("Accepted".into())], &kw, None).await.unwrap();
     sess2.corporation_id = Some(corp_id);
+    sess2.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&90_000_002) { ch.station_id = None; } });
 
     let shared_f = ctx.dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "AddFolder", &[PyRep::String("Corp Shared".into()), PyRep::Bool(true)], &kw, None).await.unwrap();
     let shared_folder_id = shared_f.dict_get("folderID").and_then(|v| v.as_i64()).unwrap();
@@ -554,6 +556,8 @@ async fn test_so_social_corp_mail_mailing_lists_cspa_calendar_and_chat_features(
     let app = ctx.dispatch_rpc(&mut sess2, "corpRegistry", None, "InsertApplication", &[PyRep::Integer(corp_id), PyRep::String("Joining".into())], &kw, None).await.unwrap();
     ctx.dispatch_rpc(&mut sess1, "corpRegistry", None, "UpdateApplicationOffer", &[app.dict_get("applicationID").unwrap().clone(), PyRep::String("Accepted".into())], &kw, None).await.unwrap();
     sess2.corporation_id = Some(corp_id);
+    sess2.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&90_000_002) { ch.station_id = None; } });
 
     // 4. Social: Corp/Alliance Mail, Mailing List Admin & Welcome Mail, CSPA, Calendar Personal/Corp/CCP/Auto Events, Chat Mute, Rookie Help & MOTD
     let _ = ctx.drain_notifications_for_char(90_000_002);

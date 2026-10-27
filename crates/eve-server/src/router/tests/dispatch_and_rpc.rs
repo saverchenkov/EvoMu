@@ -501,6 +501,12 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
     .unwrap();
 
     // E2E-18: Corporation Project Escrow & Member Contribution Payout (while docked at 60_003_760 where ore/mineral is in Hangar)
+    let corp_id = session.corporation_id.unwrap();
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(c) = s.corporations.get_mut(&corp_id) {
+            c.wallet_divisions[0].balance = eve_db::IskCents::from_isk(1_000_000);
+        }
+    });
     let proj_res = ctx
         .dispatch_rpc(
             &mut session,

@@ -114,7 +114,16 @@ impl ServerContext {
                             vec![guest_row()],
                         );
                     }
+                    crate::services::fleet_social::execute_pending_auto_kicks_for_docked_char(
+                        self, session, cid,
+                    );
                 }
+            }
+        } else if res.is_ok() && method == "Dock" {
+            if let Some(cid) = session.character_id {
+                crate::services::fleet_social::execute_pending_auto_kicks_for_docked_char(
+                    self, session, cid,
+                );
             }
         }
 

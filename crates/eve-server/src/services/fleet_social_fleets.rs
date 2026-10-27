@@ -25,6 +25,16 @@ pub(crate) struct FleetAdvertState {
     pub(crate) _created_unix: u64,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct FleetSetupRecord {
+    pub(crate) setup_name: String,
+    pub(crate) motd: String,
+    pub(crate) is_free_move: bool,
+    pub(crate) max_size: u16,
+    pub(crate) default_squad_id: Option<i64>,
+    pub(crate) wings: Vec<(String, Vec<String>)>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FleetExtrasState {
     pub(crate) fleet_names: HashMap<i64, String>,
@@ -45,6 +55,11 @@ pub(crate) struct FleetExtrasState {
     pub(crate) voice_enabled: HashMap<i64, bool>,
     pub(crate) loot_logging: HashMap<i64, bool>,
     pub(crate) watchlist_loaded: bool,
+    pub(crate) saved_setups: HashMap<i64, HashMap<String, FleetSetupRecord>>,
+    pub(crate) stored_formations: HashMap<i64, (i64, f64, f64)>,
+    pub(crate) broadcast_filters: HashMap<i64, HashSet<String>>,
+    pub(crate) last_broadcast: HashMap<i64, (u64, String, i64, i64, Option<i64>)>,
+    pub(crate) broadcast_history: HashMap<i64, Vec<(u64, i64, String, i64, Option<i64>, Option<i64>)>>,
 }
 
 /// The fleet holding a pending invite for `char_id`; `hint` (a fleetID argument) wins when it matches.
@@ -224,126 +239,61 @@ pub(super) async fn handle_fleets(
         }
 
         ("fleetMgr", "CreateWing") | ("fleetObjectHandler", "CreateWing") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let fleet_id = match session.fleet_id {
-                Some(fid) => fid,
-                None => {
-                    return Some(Err(BridgeRpcError {
-                        code: "NotInFleet".into(),
-                        message: "Character is not in a fleet".into(),
-                    }))
-                }
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let Some(fleet_id) = session.fleet_id else {
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
             };
             let wing_name = args.first().and_then(|a| a.as_str()).unwrap_or("New Wing");
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError {
-                        code: "FleetNotFound".into(),
-                        message: format!("Fleet {fleet_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
                 };
                 let Some(caller_m) = fleet.member_details.get(&char_id) else {
                     return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
                 };
                 if char_id != fleet.boss_id && role_to_i64(caller_m.role) > 1 {
-                    return Err(BridgeRpcError {
-                        code: "FleetPermissionDenied".into(),
-                        message: "Only Fleet Boss or Fleet Commander can create wings".into(),
-                    });
+                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Boss or Fleet Commander can create wings".into() });
                 }
                 if fleet.wings.len() >= 5 {
-                    return Err(BridgeRpcError {
-                        code: "MaxWingsReached".into(),
-                        message: "Fleet already has the maximum of 5 wings".into(),
-                    });
+                    return Err(BridgeRpcError { code: "MaxWingsReached".into(), message: "Fleet already has the maximum of 5 wings".into() });
                 }
                 let wid = (fleet.wings.iter().max().copied().unwrap_or(0) + 1).max(1);
                 fleet.wings.push(wid);
-                fleet.wing_details.insert(
-                    wid,
-                    FleetWingRecord {
-                        wing_id: wid,
-                        name: wing_name.to_string(),
-                        commander_id: None,
-                        squad_ids: Vec::new(),
-                    },
-                );
+                fleet.wing_details.insert(wid, FleetWingRecord { wing_id: wid, name: wing_name.to_string(), commander_id: None, squad_ids: Vec::new() });
                 Ok(wid)
             });
-
             match res {
                 Ok(wid) => {
-                    ctx.notify(
-                        NotificationTarget::Fleet(fleet_id),
-                        "OnFleetWingAdded",
-                        "fleetid",
-                        // FleetSvc.OnFleetWingAdded(wingID)
-                        vec![PyRep::Integer(wid)],
-                    );
-                    Some(Ok(PyRep::keyval([
-                        ("fleetID", PyRep::Integer(fleet_id)),
-                        ("wingID", PyRep::Integer(wid)),
-                        ("name", PyRep::String(wing_name.to_string())),
-                    ])))
+                    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetWingAdded", "fleetid", vec![PyRep::Integer(wid)]);
+                    Some(Ok(PyRep::keyval([("fleetID", PyRep::Integer(fleet_id)), ("wingID", PyRep::Integer(wid)), ("name", PyRep::String(wing_name.to_string()))])))
                 }
                 Err(e) => Some(Err(e)),
             }
         }
 
         ("fleetObjectHandler", "DeleteWing") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let fleet_id = match session.fleet_id {
-                Some(fid) => fid,
-                None => {
-                    return Some(Err(BridgeRpcError {
-                        code: "NotInFleet".into(),
-                        message: "Character is not in a fleet".into(),
-                    }))
-                }
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let Some(fleet_id) = session.fleet_id else {
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
             };
             let Some(wing_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "DeleteWing requires wingID".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "DeleteWing requires wingID".into() }));
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError {
-                        code: "FleetNotFound".into(),
-                        message: format!("Fleet {fleet_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
                 };
                 let Some(caller_m) = fleet.member_details.get(&char_id) else {
                     return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
                 };
                 if char_id != fleet.boss_id && role_to_i64(caller_m.role) > 1 {
-                    return Err(BridgeRpcError {
-                        code: "FleetPermissionDenied".into(),
-                        message: "Only Fleet Boss or Fleet Commander can delete wings".into(),
-                    });
+                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Boss or Fleet Commander can delete wings".into() });
                 }
-                let has_members = fleet
-                    .member_details
-                    .values()
-                    .any(|m| m.wing_id == Some(wing_id));
-                if has_members {
-                    return Err(BridgeRpcError {
-                        code: "WingNotEmpty".into(),
-                        message: "Cannot delete a wing that still contains members".into(),
-                    });
+                if fleet.member_details.values().any(|m| m.wing_id == Some(wing_id)) {
+                    return Err(BridgeRpcError { code: "WingNotEmpty".into(), message: "Cannot delete a wing that still contains members".into() });
                 }
                 let Some(removed_wing) = fleet.wing_details.remove(&wing_id) else {
-                    return Err(BridgeRpcError {
-                        code: "WingNotFound".into(),
-                        message: format!("Wing {wing_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "WingNotFound".into(), message: format!("Wing {wing_id} not found") });
                 };
                 fleet.wings.retain(|&w| w != wing_id);
                 for sid in removed_wing.squad_ids {
@@ -354,297 +304,151 @@ pub(super) async fn handle_fleets(
             });
             match res {
                 Ok(()) => {
-                    ctx.notify(
-                        NotificationTarget::Fleet(fleet_id),
-                        "OnFleetWingDeleted",
-                        "fleetid",
-                        vec![PyRep::Integer(wing_id)],
-                    );
-                    Some(Ok(PyRep::keyval([
-                        ("wingID", PyRep::Integer(wing_id)),
-                        ("deleted", PyRep::Bool(true)),
-                    ])))
+                    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetWingDeleted", "fleetid", vec![PyRep::Integer(wing_id)]);
+                    Some(Ok(PyRep::keyval([("wingID", PyRep::Integer(wing_id)), ("deleted", PyRep::Bool(true))])))
                 }
                 Err(e) => Some(Err(e)),
             }
         }
 
         ("fleetObjectHandler", "ChangeWingName") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let fleet_id = match session.fleet_id {
-                Some(fid) => fid,
-                None => {
-                    return Some(Err(BridgeRpcError {
-                        code: "NotInFleet".into(),
-                        message: "Character is not in a fleet".into(),
-                    }))
-                }
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let Some(fleet_id) = session.fleet_id else {
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
             };
             let Some(wing_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "ChangeWingName requires wingID".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "ChangeWingName requires wingID".into() }));
             };
             let new_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Renamed Wing");
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError {
-                        code: "FleetNotFound".into(),
-                        message: format!("Fleet {fleet_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
                 };
                 let Some(caller_m) = fleet.member_details.get(&char_id) else {
                     return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
                 };
                 if char_id != fleet.boss_id && role_to_i64(caller_m.role) > 2 {
-                    return Err(BridgeRpcError {
-                        code: "FleetPermissionDenied".into(),
-                        message: "Renaming a wing requires Wing/Fleet Commander or Boss".into(),
-                    });
+                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Renaming a wing requires Wing/Fleet Commander or Boss".into() });
                 }
                 let Some(wing) = fleet.wing_details.get_mut(&wing_id) else {
-                    return Err(BridgeRpcError {
-                        code: "WingNotFound".into(),
-                        message: format!("Wing {wing_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "WingNotFound".into(), message: format!("Wing {wing_id} not found") });
                 };
                 wing.name = new_name.to_string();
                 Ok(())
             });
             match res {
                 Ok(()) => {
-                    ctx.notify(
-                        NotificationTarget::Fleet(fleet_id),
-                        "OnFleetWingNameChanged",
-                        "fleetid",
-                        vec![PyRep::Integer(wing_id), PyRep::String(new_name.to_string())],
-                    );
-                    Some(Ok(PyRep::keyval([
-                        ("wingID", PyRep::Integer(wing_id)),
-                        ("name", PyRep::String(new_name.to_string())),
-                    ])))
+                    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetWingNameChanged", "fleetid", vec![PyRep::Integer(wing_id), PyRep::String(new_name.to_string())]);
+                    Some(Ok(PyRep::keyval([("wingID", PyRep::Integer(wing_id)), ("name", PyRep::String(new_name.to_string()))])))
                 }
                 Err(e) => Some(Err(e)),
             }
         }
 
         ("fleetMgr", "CreateSquad") | ("fleetObjectHandler", "CreateSquad") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let fleet_id = match session.fleet_id {
-                Some(fid) => fid,
-                None => {
-                    return Some(Err(BridgeRpcError {
-                        code: "NotInFleet".into(),
-                        message: "Character is not in a fleet".into(),
-                    }))
-                }
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let Some(fleet_id) = session.fleet_id else {
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
             };
             let wing_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
             let squad_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("New Squad");
-
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError {
-                        code: "FleetNotFound".into(),
-                        message: format!("Fleet {fleet_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
                 };
                 let Some(caller_m) = fleet.member_details.get(&char_id) else {
                     return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
                 };
                 if char_id != fleet.boss_id && role_to_i64(caller_m.role) > 2 {
-                    return Err(BridgeRpcError {
-                        code: "FleetPermissionDenied".into(),
-                        message: "Only Fleet Boss, Fleet Commander, or Wing Commander can create squads".into(),
-                    });
+                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Boss, Fleet Commander, or Wing Commander can create squads".into() });
                 }
                 let Some(wing) = fleet.wing_details.get_mut(&wing_id) else {
-                    return Err(BridgeRpcError {
-                        code: "WingNotFound".into(),
-                        message: format!("Wing {wing_id} not found in fleet {fleet_id}"),
-                    });
+                    return Err(BridgeRpcError { code: "WingNotFound".into(), message: format!("Wing {wing_id} not found in fleet {fleet_id}") });
                 };
                 if wing.squad_ids.len() >= 5 {
-                    return Err(BridgeRpcError {
-                        code: "MaxSquadsReached".into(),
-                        message: "Wing already has the maximum of 5 squads".into(),
-                    });
+                    return Err(BridgeRpcError { code: "MaxSquadsReached".into(), message: "Wing already has the maximum of 5 squads".into() });
                 }
                 let sid = (fleet.squads.iter().max().copied().unwrap_or(0) + 1).max(1);
                 wing.squad_ids.push(sid);
                 fleet.squads.push(sid);
-                fleet.squad_details.insert(
-                    sid,
-                    FleetSquadRecord {
-                        squad_id: sid,
-                        wing_id,
-                        name: squad_name.to_string(),
-                        commander_id: None,
-                    },
-                );
+                fleet.squad_details.insert(sid, FleetSquadRecord { squad_id: sid, wing_id, name: squad_name.to_string(), commander_id: None });
                 Ok(sid)
             });
-
             match res {
                 Ok(sid) => {
-                    ctx.notify(
-                        NotificationTarget::Fleet(fleet_id),
-                        "OnFleetSquadAdded",
-                        "fleetid",
-                        // FleetSvc.OnFleetSquadAdded(wingID, squadID)
-                        vec![PyRep::Integer(wing_id), PyRep::Integer(sid)],
-                    );
-                    Some(Ok(PyRep::keyval([
-                        ("fleetID", PyRep::Integer(fleet_id)),
-                        ("wingID", PyRep::Integer(wing_id)),
-                        ("squadID", PyRep::Integer(sid)),
-                        ("name", PyRep::String(squad_name.to_string())),
-                    ])))
+                    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetSquadAdded", "fleetid", vec![PyRep::Integer(wing_id), PyRep::Integer(sid)]);
+                    Some(Ok(PyRep::keyval([("fleetID", PyRep::Integer(fleet_id)), ("wingID", PyRep::Integer(wing_id)), ("squadID", PyRep::Integer(sid)), ("name", PyRep::String(squad_name.to_string()))])))
                 }
                 Err(e) => Some(Err(e)),
             }
         }
 
         ("fleetObjectHandler", "DeleteSquad") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let fleet_id = match session.fleet_id {
-                Some(fid) => fid,
-                None => {
-                    return Some(Err(BridgeRpcError {
-                        code: "NotInFleet".into(),
-                        message: "Character is not in a fleet".into(),
-                    }))
-                }
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let Some(fleet_id) = session.fleet_id else {
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
             };
             let Some(squad_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "DeleteSquad requires squadID".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "DeleteSquad requires squadID".into() }));
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError {
-                        code: "FleetNotFound".into(),
-                        message: format!("Fleet {fleet_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
                 };
                 let Some(caller_m) = fleet.member_details.get(&char_id) else {
                     return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
                 };
                 if char_id != fleet.boss_id && role_to_i64(caller_m.role) > 2 {
-                    return Err(BridgeRpcError {
-                        code: "FleetPermissionDenied".into(),
-                        message: "Deleting a squad requires Wing/Fleet Commander or Boss".into(),
-                    });
+                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Deleting a squad requires Wing/Fleet Commander or Boss".into() });
                 }
-                if fleet
-                    .member_details
-                    .values()
-                    .any(|m| m.squad_id == Some(squad_id))
-                {
-                    return Err(BridgeRpcError {
-                        code: "SquadNotEmpty".into(),
-                        message: "Cannot delete a squad that still contains members".into(),
-                    });
+                if fleet.member_details.values().any(|m| m.squad_id == Some(squad_id)) {
+                    return Err(BridgeRpcError { code: "SquadNotEmpty".into(), message: "Cannot delete a squad that still contains members".into() });
                 }
                 if fleet.squad_details.remove(&squad_id).is_none() {
-                    return Err(BridgeRpcError {
-                        code: "SquadNotFound".into(),
-                        message: format!("Squad {squad_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "SquadNotFound".into(), message: format!("Squad {squad_id} not found") });
                 }
                 fleet.squads.retain(|&s| s != squad_id);
-                for wing in fleet.wing_details.values_mut() {
-                    wing.squad_ids.retain(|&s| s != squad_id);
-                }
+                for wing in fleet.wing_details.values_mut() { wing.squad_ids.retain(|&s| s != squad_id); }
                 Ok(())
             });
             match res {
                 Ok(()) => {
-                    ctx.notify(
-                        NotificationTarget::Fleet(fleet_id),
-                        "OnFleetSquadDeleted",
-                        "fleetid",
-                        vec![PyRep::Integer(squad_id)],
-                    );
-                    Some(Ok(PyRep::keyval([
-                        ("squadID", PyRep::Integer(squad_id)),
-                        ("deleted", PyRep::Bool(true)),
-                    ])))
+                    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetSquadDeleted", "fleetid", vec![PyRep::Integer(squad_id)]);
+                    Some(Ok(PyRep::keyval([("squadID", PyRep::Integer(squad_id)), ("deleted", PyRep::Bool(true))])))
                 }
                 Err(e) => Some(Err(e)),
             }
         }
 
         ("fleetObjectHandler", "ChangeSquadName") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let fleet_id = match session.fleet_id {
-                Some(fid) => fid,
-                None => {
-                    return Some(Err(BridgeRpcError {
-                        code: "NotInFleet".into(),
-                        message: "Character is not in a fleet".into(),
-                    }))
-                }
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let Some(fleet_id) = session.fleet_id else {
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
             };
             let Some(squad_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "ChangeSquadName requires squadID".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "ChangeSquadName requires squadID".into() }));
             };
             let new_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Renamed Squad");
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError {
-                        code: "FleetNotFound".into(),
-                        message: format!("Fleet {fleet_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
                 };
                 let Some(caller_m) = fleet.member_details.get(&char_id) else {
                     return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
                 };
                 if char_id != fleet.boss_id && role_to_i64(caller_m.role) > 3 {
-                    return Err(BridgeRpcError {
-                        code: "FleetPermissionDenied".into(),
-                        message: "Renaming a squad requires Squad/Wing/Fleet Commander or Boss".into(),
-                    });
+                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Renaming a squad requires Squad/Wing/Fleet Commander or Boss".into() });
                 }
                 let Some(sq) = fleet.squad_details.get_mut(&squad_id) else {
-                    return Err(BridgeRpcError {
-                        code: "SquadNotFound".into(),
-                        message: format!("Squad {squad_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "SquadNotFound".into(), message: format!("Squad {squad_id} not found") });
                 };
                 sq.name = new_name.to_string();
                 Ok(())
             });
             match res {
                 Ok(()) => {
-                    ctx.notify(
-                        NotificationTarget::Fleet(fleet_id),
-                        "OnFleetSquadNameChanged",
-                        "fleetid",
-                        vec![PyRep::Integer(squad_id), PyRep::String(new_name.to_string())],
-                    );
-                    Some(Ok(PyRep::keyval([
-                        ("squadID", PyRep::Integer(squad_id)),
-                        ("name", PyRep::String(new_name.to_string())),
-                    ])))
+                    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetSquadNameChanged", "fleetid", vec![PyRep::Integer(squad_id), PyRep::String(new_name.to_string())]);
+                    Some(Ok(PyRep::keyval([("squadID", PyRep::Integer(squad_id)), ("name", PyRep::String(new_name.to_string()))])))
                 }
                 Err(e) => Some(Err(e)),
             }

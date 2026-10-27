@@ -5,13 +5,15 @@
 
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::{
-    corp_roles, AllianceRecord, CorpProjectRecord, FleetMemberRecord, FleetRecord, FleetRole,
+    corp_roles, AllianceRecord, FleetMemberRecord, FleetRecord, FleetRole,
     FleetSquadRecord, FleetWingRecord, InventoryFlag, IskCents,
     PersistedAllianceMeta as AllianceMeta, PersistedAllianceWarState as AllianceWarState,
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{HashMap, HashSet};
+#[path = "social_corp_projects.rs"]
+pub mod social_corp_projects;
 #[path = "social_wars.rs"]
 mod social_wars;
 
@@ -1247,292 +1249,58 @@ pub async fn handle(
         // =====================================================================
         // Corp Goals & Freelance Projects (`feat:corporation.corp-goals`, `feat:corporation.freelance-jobs`)
         // =====================================================================
-        ("corporationSvc", "CreateGoalSubmit") => handle_create_project(ctx, session, args),
-        ("corporationSvc", m) if m.eq_ignore_ascii_case("createproject") => handle_create_project(ctx, session, args),
-        ("corporationSvc", "GoalProgress") | ("corporationSvc", "CompleteCorpProject") | ("corporationSvc", "CompleteGoal") => {
-            handle_contribute_project(ctx, session, method, args)
-        }
-        ("corporationSvc", m) if m.eq_ignore_ascii_case("contributetoproject") => {
-            handle_contribute_project(ctx, session, method, args)
-        }
-        ("corporationSvc", "GetGoals") | ("corporationSvc", "GetActiveFreelanceProjectId") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let corp_id = session.corporation_id.unwrap_or(0);
-            let rows = ctx.db.with_snapshot(|snap| {
-                snap.corp_projects.values().filter(|p| {
-                    let is_fl = snap.alliance_war_state.project_meta.get(&p.project_id).is_some_and(|m| m.1);
-                    if method == "GetActiveFreelanceProjectId" { is_fl } else { corp_id == 0 || p.corporation_id == corp_id || is_fl }
-                }).map(|p| {
-                    let (matcher, is_fl, claimed) = snap.alliance_war_state.project_meta.get(&p.project_id).cloned().unwrap_or(("DeliverItem".into(), false, false));
-                    vec![
-                        PyRep::Integer(p.project_id),
-                        PyRep::Integer(p.corporation_id),
-                        PyRep::String(p.name.clone()),
-                        PyRep::String(matcher),
-                        PyRep::Bool(is_fl),
-                        PyRep::Integer(p.current_quantity as i64),
-                        PyRep::Integer(p.target_quantity as i64),
-                        PyRep::Real(p.isk_per_unit.to_wire_f64()),
-                        PyRep::Bool(p.current_quantity >= p.target_quantity),
-                        PyRep::Bool(claimed),
-                    ]
-                }).collect()
-            });
-            Some(Ok(PyRep::rowset(
-                vec!["projectID", "corporationID", "name", "matcherType", "isFreelance", "currentQuantity", "targetQuantity", "iskPerUnit", "completed", "claimed"],
-                rows,
-            )))
-        }
-
-        ("corporationSvc", "CloseCorpProject") | ("corporationSvc", "DeleteCorpProject") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let corp_id = session.corporation_id.unwrap_or(0);
-            let pid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(proj_corp_id) = snap.corp_projects.get(&pid).map(|p| p.corporation_id) else {
-                    return Err(BridgeRpcError { code: "ProjectNotFound".into(), message: format!("Corporation project {pid} not found") });
-                };
-                if proj_corp_id != corp_id {
-                    return Err(BridgeRpcError { code: "AccessDenied".into(), message: "Cannot close or delete a project belonging to another corporation".into() });
-                }
-                if let Some(corp) = snap.corporations.get(&corp_id) {
-                    let caller_roles = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
-                    if corp.ceo_id != char_id
-                        && !corp_roles::has_role(caller_roles, corp_roles::ROLE_ACCOUNTANT)
-                        && !corp_roles::has_role(caller_roles, corp_roles::ROLE_PROJECT_MANAGER)
-                    {
-                        return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Closing or deleting corporation projects requires Project Manager, Accountant, or Director role".into() });
-                    }
-                }
-                if let Some(proj) = snap.corp_projects.remove(&pid) {
-                    if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-                        corp.ensure_wallet_divisions();
-                        corp.master_wallet = corp.master_wallet.checked_add(proj.escrow_remaining).unwrap_or(corp.master_wallet);
-                        corp.wallet_divisions[0].balance = corp.master_wallet;
-                    } else if let Some(ch) = snap.characters.get_mut(&char_id) {
-                        ch.balance = ch.balance.checked_add(proj.escrow_remaining).unwrap_or(ch.balance);
-                    }
-                }
-                Ok(())
-            });
-            if let Err(e) = res {
-                return Some(Err(e));
-            }
-            ctx.notify(NotificationTarget::Character(char_id), "OnGoalDeleted", "charid", vec![PyRep::Integer(pid)]);
-            Some(Ok(PyRep::keyval([("projectID", PyRep::Integer(pid)), ("deleted", PyRep::Bool(true))])))
-        }
-
-        _ => social_wars::handle_wars(ctx, session, service, method, args, bound_obj_id),
-    }
-}
-
-fn handle_create_project(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    args: &[PyRep],
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-    let name = args.first().and_then(|a| a.as_str()).unwrap_or("Deliver Tritanium");
-    let target_qty_raw = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1_000);
-    let isk_per_unit = args.get(2).and_then(|a| a.as_f64()).unwrap_or(10.0);
-    let matcher_type = args.get(3).and_then(|a| a.as_str()).unwrap_or("DeliverItem");
-    let is_freelance = matches!(args.get(4), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
-    if target_qty_raw <= 0 || !isk_per_unit.is_finite() || isk_per_unit < 0.0 {
-        return Some(Err(BridgeRpcError {
-            code: "InvalidProjectParameters".into(),
-            message: "Project requires target_quantity > 0 and finite isk_per_unit >= 0".into(),
-        }));
-    }
-    let target_qty = target_qty_raw as u64;
-    let res = ctx.db.try_with_mut_snapshot(|snap| {
-        let per_u = IskCents::from_f64_isk(isk_per_unit);
-        let escrow = per_u.checked_mul_qty(target_qty_raw).ok_or_else(|| BridgeRpcError {
-            code: "ProjectEscrowOverflow".into(),
-            message: "Corporation project total escrow overflows 64-bit ISK cents".into(),
-        })?;
-        let Some(ch) = snap.characters.get(&char_id).cloned() else {
-            return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found") });
-        };
-        let corp_id = session.corporation_id.unwrap_or(ch.corporation_id);
-        if let Some(corp) = snap.corporations.get(&corp_id) {
-            if !corp.member_roles.is_empty() {
-                let caller_roles = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
-                if corp.ceo_id != char_id
-                    && !corp_roles::has_role(caller_roles, corp_roles::ROLE_ACCOUNTANT)
-                    && !corp_roles::has_role(caller_roles, corp_roles::ROLE_PROJECT_MANAGER)
-                {
-                    return Err(BridgeRpcError {
-                        code: "CorpRoleDenied".into(),
-                        message: "Creating corporation projects requires Project Manager, Accountant, or Director role".into(),
-                    });
-                }
-            }
-        }
-        if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
-            ch_mut.balance = ch_mut.balance.checked_sub(escrow).ok_or_else(|| BridgeRpcError {
-                code: "InsufficientFunds".into(),
-                message: "Not enough ISK to fund corporation project escrow".into(),
-            })?;
-        }
-        snap.next_entity_id += 1;
-        let id = snap.next_entity_id;
-        snap.corp_projects.insert(id, CorpProjectRecord {
-            project_id: id,
-            corporation_id: corp_id,
-            name: name.to_string(),
-            target_quantity: target_qty,
-            current_quantity: 0,
-            isk_per_unit: per_u,
-            escrow_remaining: escrow,
-        });
-        Ok(id)
-    });
-    match res {
-        Ok(pid) => {
-            with_alliance_war_state(ctx, |st| {
-                st.project_meta.insert(pid, (matcher_type.to_string(), is_freelance, false));
-            });
-            ctx.notify(NotificationTarget::Character(char_id), "OnGoalProgressChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(0)]);
-            Some(Ok(PyRep::keyval([
-                ("projectID", PyRep::Integer(pid)),
-                ("targetQuantity", PyRep::Integer(target_qty as i64)),
-                ("matcherType", PyRep::String(matcher_type.to_string())),
-                ("isFreelance", PyRep::Bool(is_freelance)),
-            ])))
-        }
-        Err(e) => Some(Err(e)),
-    }
-}
-
-fn handle_contribute_project(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    method: &str,
-    args: &[PyRep],
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-    let pid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-    let qty_raw = args.get(1).and_then(|a| a.as_i64()).unwrap_or(100);
-    if qty_raw <= 0 {
-        return Some(Err(BridgeRpcError { code: "InvalidContributionQuantity".into(), message: "Contribution quantity must be > 0".into() }));
-    }
-    let qty = qty_raw as u64;
-    let (matcher_type, is_freelance, _) = read_alliance_war_state(ctx, |st| {
-        st.project_meta.get(&pid).cloned().unwrap_or(("DeliverItem".into(), false, false))
-    });
-    if matcher_type != "DeliverItem" {
-        // Activity matchers (kills, mining, ...) must be fed by server-side events; a client
-        // cannot self-report progress for them.
-        return Some(Err(BridgeRpcError { code: "ServerTrackedMatcher".into(), message: format!("Project {pid} progress ({matcher_type}) is tracked server-side") }));
-    }
-
-    let res = ctx.db.try_with_mut_snapshot(|snap| {
-        let Some(proj) = snap.corp_projects.get(&pid).cloned() else {
-            return Err(BridgeRpcError { code: "ProjectNotFound".into(), message: format!("Corporation project {pid} does not exist") });
-        };
-        let char_corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
-        if proj.corporation_id != char_corp_id && !is_freelance {
-            return Err(BridgeRpcError {
-                code: "NotInProjectCorporation".into(),
-                message: format!("Character {char_id} (corp {char_corp_id}) is not a member of project corporation {}", proj.corporation_id),
-            });
-        }
-        let needed = proj.target_quantity.saturating_sub(proj.current_quantity);
-        let accepted = qty.min(needed);
-        if accepted == 0 {
-            if method == "CompleteGoal" || method == "CompleteCorpProject" {
-                return Ok((0.0, true, proj.current_quantity));
-            }
-            return Err(BridgeRpcError { code: "ProjectAlreadyCompleted".into(), message: format!("Corporation project {pid} is already completed") });
-        }
-        if matcher_type == "DeliverItem" {
-            let current_dock = session.station_id.or(session.structure_id);
-            let current_ship = session.ship_id;
-            let contrib_item_id = snap.items.values().find(|i| {
-                matches!(i.type_id, 1230 | 62516 | 34) && (i.quantity as u64) >= accepted && snap.is_item_consumable_by(i, char_id, current_dock, current_ship)
-            }).map(|i| i.item_id);
-            let Some(iid) = contrib_item_id else {
-                return Err(BridgeRpcError { code: "InsufficientContributionItems".into(), message: format!("Character {char_id} does not have {accepted} units of ore/mineral to contribute") });
+        ("allianceRegistry", "UpdateLogo") => {
+            let aid = match require_executor(ctx, session) {
+                Ok(a) => a,
+                Err(e) => return Some(Err(e)),
             };
-            let mut delivered_type_and_loc: Option<(u32, i64)> = None;
-            if let Some(item) = snap.items.get_mut(&iid) {
-                let d_loc = current_dock.unwrap_or(item.location_id);
-                let d_tid = item.type_id;
-                if (item.quantity as u64) > accepted {
-                    item.quantity -= accepted as i32;
-                    item.version += 1;
-                    delivered_type_and_loc = Some((d_tid, d_loc));
-                } else {
-                    item.owner_id = proj.corporation_id;
-                    item.location_id = d_loc;
-                    item.flag = InventoryFlag::Deliveries;
-                    item.version += 1;
-                }
-            }
-            if let Some((d_tid, d_loc)) = delivered_type_and_loc {
-                if let Some(existing) = snap.items.values_mut().find(|i| {
-                    i.owner_id == proj.corporation_id
-                        && i.location_id == d_loc
-                        && i.type_id == d_tid
-                        && i.flag == InventoryFlag::Deliveries
-                        && !i.singleton
-                }) {
-                    existing.quantity = existing.quantity.saturating_add(accepted as i32);
-                    existing.version += 1;
-                } else {
-                    snap.next_entity_id += 1;
-                    let new_id = snap.next_entity_id;
-                    snap.items.insert(
-                        new_id,
-                        eve_db::InventoryItemRecord {
-                            item_id: new_id,
-                            type_id: d_tid,
-                            owner_id: proj.corporation_id,
-                            location_id: d_loc,
-                            flag: InventoryFlag::Deliveries,
-                            quantity: accepted as i32,
-                            singleton: false,
-                            version: 1,
-                            ..Default::default()
-                        },
-                    );
-                }
-            }
-        }
-        let reward = proj.isk_per_unit.checked_mul_qty(accepted as i64).unwrap_or(IskCents(0));
-        let (mut done, mut cur_q) = (false, 0);
-        if let Some(proj_mut) = snap.corp_projects.get_mut(&pid) {
-            proj_mut.current_quantity += accepted;
-            cur_q = proj_mut.current_quantity;
-            proj_mut.escrow_remaining = proj_mut.escrow_remaining.checked_sub(reward).unwrap_or(IskCents(0));
-            done = proj_mut.current_quantity >= proj_mut.target_quantity;
-        }
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.balance = ch.balance.checked_add(reward).unwrap_or(ch.balance);
-        }
-        Ok((reward.to_wire_f64(), done, cur_q))
-    });
-    match res {
-        Ok((payout_isk, completed, cur_q)) => {
-            if completed {
-                with_alliance_war_state(ctx, |st| {
-                    if let Some(m) = st.project_meta.get_mut(&pid) {
-                        m.2 = true;
-                    }
-                });
-            }
-            ctx.notify(NotificationTarget::Character(char_id), "OnGoalProgressChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(cur_q as i64)]);
-            if completed {
-                ctx.notify(NotificationTarget::Character(char_id), "OnGoalCompleted", "charid", vec![PyRep::Integer(pid)]);
-            }
+            let s1 = args.first().and_then(|a| a.as_i64()).unwrap_or(10);
+            let s2 = args.get(1).and_then(|a| a.as_i64()).unwrap_or(20);
+            let s3 = args.get(2).and_then(|a| a.as_i64()).unwrap_or(30);
+            let c1 = args.get(3).and_then(|a| a.as_i64()).unwrap_or(5);
+            let c2 = args.get(4).and_then(|a| a.as_i64()).unwrap_or(0);
+            let c3 = args.get(5).and_then(|a| a.as_i64()).unwrap_or(0);
+            let (old_logo, old_extra) = ctx.db.with_mut_snapshot(|snap| {
+                let st = snap.corp_governance.entry(aid).or_default();
+                (
+                    std::mem::replace(&mut st.logo, (s1, s2, s3, c1)),
+                    std::mem::replace(&mut st.logo_extra_colors, (c2, c3)),
+                )
+            });
+            ctx.notify(
+                NotificationTarget::Alliance(aid),
+                "OnAllianceLogoReady",
+                "allianceid",
+                vec![PyRep::Integer(aid), PyRep::Integer(128)],
+            );
+            let change = PyRep::Dict(vec![
+                (PyRep::String(("shape1").into()), PyRep::Tuple(vec![PyRep::Integer(old_logo.0), PyRep::Integer(s1)])),
+                (PyRep::String(("shape2").into()), PyRep::Tuple(vec![PyRep::Integer(old_logo.1), PyRep::Integer(s2)])),
+                (PyRep::String(("shape3").into()), PyRep::Tuple(vec![PyRep::Integer(old_logo.2), PyRep::Integer(s3)])),
+                (PyRep::String(("color1").into()), PyRep::Tuple(vec![PyRep::Integer(old_logo.3), PyRep::Integer(c1)])),
+                (PyRep::String(("color2").into()), PyRep::Tuple(vec![PyRep::Integer(old_extra.0), PyRep::Integer(c2)])),
+                (PyRep::String(("color3").into()), PyRep::Tuple(vec![PyRep::Integer(old_extra.1), PyRep::Integer(c3)])),
+            ]);
+            ctx.notify(
+                NotificationTarget::Alliance(aid),
+                "OnAllianceChanged",
+                "allianceid",
+                vec![PyRep::Integer(aid), change],
+            );
             Some(Ok(PyRep::keyval([
-                ("projectID", PyRep::Integer(pid)),
-                ("currentQuantity", PyRep::Integer(cur_q as i64)),
-                ("payoutISK", PyRep::Real(payout_isk)),
-                ("completed", PyRep::Bool(completed)),
-                ("claimed", PyRep::Bool(completed)),
+                ("allianceID", PyRep::Integer(aid)),
+                ("shape1", PyRep::Integer(s1)),
+                ("shape2", PyRep::Integer(s2)),
+                ("shape3", PyRep::Integer(s3)),
+                ("color1", PyRep::Integer(c1)),
+                ("color2", PyRep::Integer(c2)),
+                ("color3", PyRep::Integer(c3)),
+                ("logoPath", PyRep::String(format!("res:/UI/Texture/AllianceLogos/{aid}_128.png"))),
             ])))
         }
-        Err(e) => Some(Err(e)),
+
+        _ => social_corp_projects::handle_corp_projects_rpc(ctx, session, service, method, args)
+            .or_else(|| social_wars::handle_wars(ctx, session, service, method, args, bound_obj_id)),
     }
 }
+

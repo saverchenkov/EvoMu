@@ -797,6 +797,13 @@ pub async fn handle(
                             .progression
                             .career_goals
                             .on_gameplay_event(char_id as u32, "faction_warfare", 1, &ctx.quasar_gateway);
+                        crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
+                            ctx,
+                            char_id,
+                            &["CaptureFWComplexes", "DefendFWComplexes"],
+                            1,
+                            Some(sys_id as i64),
+                        );
                     }
                     Some(Ok(PyRep::keyval([
                         ("solarSystemID", PyRep::Integer(sys_id as i64)),

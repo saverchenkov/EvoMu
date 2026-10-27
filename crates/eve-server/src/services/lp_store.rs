@@ -133,6 +133,74 @@ pub fn record_lp_reward_log(
     reason: String,
     timestamp_unix: u64,
 ) {
+    if reason.starts_with("Mission ") {
+        let char_corp_id = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.corporation_id)
+            .unwrap_or(0);
+        let (is_player_corp, tax_rate) = match snap.corporations.get(&char_corp_id) {
+            Some(c) => (true, c.tax_rate.clamp(0.0, 1.0)),
+            None => (false, 0.11),
+        };
+        if tax_rate > 0.0 {
+            let recent_rewards: Vec<(String, IskCents, String)> = snap
+                .wallet_journal
+                .iter()
+                .rev()
+                .take(2)
+                .filter(|e| {
+                    e.character_id == char_id
+                        && matches!(
+                            e.entry_type.as_str(),
+                            "agent_mission_reward" | "agent_mission_time_bonus_reward"
+                        )
+                        && e.amount >= IskCents::from_isk(100_000)
+                })
+                .map(|e| (e.entry_type.clone(), e.amount, e.reason.clone()))
+                .collect();
+            for (etype, gross_amt, ereason) in recent_rewards.into_iter().rev() {
+                let tax_cents = IskCents::from_f64_isk(gross_amt.to_wire_f64() * tax_rate);
+                if tax_cents.raw_cents() <= 0 {
+                    continue;
+                }
+                let bal_after = if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    ch.balance = ch.balance.checked_sub(tax_cents).unwrap_or(IskCents::ZERO);
+                    ch.balance
+                } else {
+                    IskCents::ZERO
+                };
+                if is_player_corp {
+                    if let Some(corp) = snap.corporations.get_mut(&char_corp_id) {
+                        corp.ensure_wallet_divisions();
+                        corp.master_wallet = corp
+                            .master_wallet
+                            .checked_add(tax_cents)
+                            .unwrap_or(corp.master_wallet);
+                        if let Some(d0) = corp.wallet_divisions.first_mut() {
+                            d0.balance = d0.balance.checked_add(tax_cents).unwrap_or(d0.balance);
+                        }
+                    }
+                }
+                snap.next_entity_id += 1;
+                let tax_jid = snap.next_entity_id;
+                let tax_type = if etype == "agent_mission_time_bonus_reward" {
+                    "agent_mission_time_bonus_reward_corporation_tax"
+                } else {
+                    "agent_mission_reward_corporation_tax"
+                };
+                snap.wallet_journal.push(eve_db::WalletJournalEntry {
+                    entry_id: tax_jid,
+                    character_id: char_id,
+                    entry_type: tax_type.to_string(),
+                    amount: IskCents::from_raw_cents(-tax_cents.raw_cents()),
+                    balance_after: bal_after,
+                    reason: format!("Corporation tax ({:.0}%) on {ereason}", tax_rate * 100.0),
+                });
+                snap.wallet_journal_timestamps.insert(tax_jid, timestamp_unix);
+            }
+        }
+    }
     snap.next_entity_id += 1;
     let log_id = snap.next_entity_id;
     snap.char_lp_logs
@@ -145,6 +213,16 @@ pub fn record_lp_reward_log(
             reason,
             timestamp_unix,
         });
+    if amount > 0 {
+        let _ = crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity_in_snap(
+            snap,
+            char_id,
+            &["EarnLoyaltyPoints"],
+            amount as u64,
+            Some(corp_id),
+            timestamp_unix,
+        );
+    }
 }
 
 fn offer_to_pyrep(o: &LPOffer) -> PyRep {

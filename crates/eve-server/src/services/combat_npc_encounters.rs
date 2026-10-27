@@ -346,3 +346,124 @@ pub async fn handle_npc_destroyed_in_space(
         rt.destroyed_npc_cache.insert(killed_ball_id, npc);
     }
 }
+
+/// Flushes the 20-minute (`1,200s`) batched NPC bounty tick for `(solar_system_id, char_id)`
+/// applying the system's Dynamic Bounty System (`dbs_multiplier`), corporation tax, and K-space null-sec ESS split (`feat:combat.bounty-payout-npc`).
+pub fn flush_npc_bounty_tick(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    char_id: i64,
+    corp_tax_rate: f64,
+) -> (f64, f64, f64) {
+    use eve_db::{IskCents, WalletJournalEntry};
+    use crate::formulas::compute_dbs_and_ess_bounty_split;
+
+    let raw_bounty = with_mut_combat_runtime(ctx, |rt| {
+        rt.pending_bounty_ticks
+            .remove(&(solar_system_id, char_id))
+            .unwrap_or(0.0)
+    });
+    if raw_bounty <= 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+    let sys_sec = ctx
+        .sde
+        .solar_systems
+        .get(&solar_system_id)
+        .map(|s| s.security_status)
+        .unwrap_or(0.5);
+    let is_kspace_nullsec = sys_sec <= 0.0 && solar_system_id < 31_000_000;
+    let dbs_mult = ctx
+        .db
+        .with_snapshot(|s| {
+            s.system_states
+                .get(&solar_system_id)
+                .map(|st| st.dbs_multiplier)
+        })
+        .unwrap_or(1.35);
+
+    let (char_corp_id, is_player_corp, resolved_tax_rate) = ctx.db.with_snapshot(|s| {
+        let cid = s.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+        match s.corporations.get(&cid) {
+            Some(c) => (cid, true, c.tax_rate.clamp(0.0, 1.0)),
+            None => (cid, false, 0.11),
+        }
+    });
+    let modified_gross = raw_bounty * dbs_mult;
+    let use_threshold = corp_tax_rate <= 0.0 || (corp_tax_rate - 0.11).abs() < 1e-6;
+    let effective_tax_rate = if use_threshold && modified_gross < 100_000.0 {
+        0.0
+    } else if corp_tax_rate > 0.0 {
+        corp_tax_rate.clamp(0.0, 1.0)
+    } else {
+        resolved_tax_rate
+    };
+
+    let (pilot_isk, tax_isk, main_ess, reserve_ess) = if is_kspace_nullsec {
+        compute_dbs_and_ess_bounty_split(raw_bounty, dbs_mult, effective_tax_rate)
+    } else {
+        let tax = modified_gross * effective_tax_rate;
+        (modified_gross - tax, tax, 0.0, 0.0)
+    };
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let pilot_cents = IskCents::from_f64_isk(pilot_isk);
+        let tax_cents = IskCents::from_f64_isk(tax_isk);
+        let main_cents = IskCents::from_f64_isk(main_ess);
+        let reserve_cents = IskCents::from_f64_isk(reserve_ess);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = ch.balance.checked_add(pilot_cents).unwrap_or(ch.balance);
+        }
+        if is_player_corp && tax_cents.raw_cents() > 0 {
+            if let Some(corp) = snap.corporations.get_mut(&char_corp_id) {
+                corp.ensure_wallet_divisions();
+                corp.master_wallet = corp.master_wallet.checked_add(tax_cents).unwrap_or(corp.master_wallet);
+                if let Some(d0) = corp.wallet_divisions.first_mut() {
+                    d0.balance = d0.balance.checked_add(tax_cents).unwrap_or(d0.balance);
+                }
+            }
+        }
+        if is_kspace_nullsec {
+            if let Some(st) = snap.system_states.get_mut(&solar_system_id) {
+                st.ess_main_bank = st
+                    .ess_main_bank
+                    .checked_add(main_cents)
+                    .unwrap_or(st.ess_main_bank);
+                st.ess_reserve_bank = st
+                    .ess_reserve_bank
+                    .checked_add(reserve_cents)
+                    .unwrap_or(st.ess_reserve_bank);
+            }
+        }
+        let bal_after = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.balance)
+            .unwrap_or(pilot_cents);
+        snap.next_entity_id += 1;
+        let jid = snap.next_entity_id;
+        snap.wallet_journal.push(WalletJournalEntry {
+            entry_id: jid,
+            character_id: char_id,
+            entry_type: "bounty_prizes".to_string(),
+            amount: pilot_cents,
+            balance_after: bal_after,
+            reason: format!("20m Bounty Tick in system {solar_system_id} (DBS {dbs_mult:.2}x)"),
+        });
+        if tax_cents.raw_cents() > 0 {
+            snap.next_entity_id += 1;
+            let tjid = snap.next_entity_id;
+            snap.wallet_journal.push(WalletJournalEntry {
+                entry_id: tjid,
+                character_id: char_id,
+                entry_type: "bounty_prize_corporation_tax".to_string(),
+                amount: IskCents::from_raw_cents(-tax_cents.raw_cents()),
+                balance_after: bal_after,
+                reason: format!("Corporation tax ({:.0}%) on bounty tick in {solar_system_id}", effective_tax_rate * 100.0),
+            });
+        }
+    });
+
+    (pilot_isk, main_ess, reserve_ess)
+}
+

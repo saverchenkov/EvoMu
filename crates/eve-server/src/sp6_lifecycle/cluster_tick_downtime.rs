@@ -83,6 +83,8 @@ pub fn cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx: &ServerContext) ->
         handle.try_remove_ball(ball_id);
     }
 
+    crate::services::fleet_social::execute_pending_auto_kicks_on_downtime(ctx);
+
     (wrecks_removed_count, missions_reset_count)
 }
 

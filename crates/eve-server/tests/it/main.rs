@@ -306,3 +306,6 @@ mod plan_social_closure;
 mod plan_economy_closure;
 mod plan_economy_closure_part2;
 mod skills_attributes_char_social_closure;
+mod corp_lifecycle_governance_closure;
+mod corp_projects_welcome_alliance_closure;
+mod fleet_tactical_movement_closure;

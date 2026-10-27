@@ -324,6 +324,7 @@ async fn run_corporation_deliveries_and_governance_suite() -> (bool, bool, i64, 
     ctx.dispatch_rpc(&mut sess1, "corporationSvc", None, "CloseCorpProject", &[PyRep::Integer(goal_id)], &kw, None).await.unwrap();
     assert!(corp_wallet(&ctx, corp_id) > cw_before_close);
 
+    ctx.advance_secs(86_401);
     ctx.dispatch_rpc(&mut sess1, "corpRegistry", None, "KickOutMember", &[PyRep::Integer(90_000_002)], &kw, None).await.unwrap();
     let (_, emp_rows) = rows(&ctx.dispatch_rpc(&mut sess2, "corporationSvc", None, "GetEmployementRecordAndCharacterTransfers", &[PyRep::Integer(90_000_002)], &kw, None).await.unwrap());
     assert!(emp_rows.iter().any(|r| r[0] == PyRep::Integer(corp_id) || r.get(1) == Some(&PyRep::Integer(corp_id))));

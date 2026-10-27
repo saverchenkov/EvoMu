@@ -42,6 +42,13 @@ pub fn dispatch_mining_gameplay_events(ctx: &ServerContext, char_id: i64, units:
                 ctx.now_unix(),
                 &ctx.quasar_gateway,
             );
+        crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
+            ctx,
+            char_id,
+            &["MineMaterials"],
+            units,
+            Some(ore_type_id as i64),
+        );
     }
 }
 

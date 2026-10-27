@@ -325,7 +325,7 @@ pub(super) fn handle_corp_gov(
         snap.corporations.get(&corp_id).map_or((false, false, false), |c| {
             let r = c.member_roles.get(&char_id).copied().unwrap_or(0);
             let dir = c.ceo_id == char_id || corp_roles::has_role(r, corp_roles::ROLE_DIRECTOR);
-            let comms = dir || corp_roles::has_role(r, corp_roles::ROLE_PERSONNEL_MANAGER);
+            let comms = dir || corp_roles::has_role(r, corp_roles::ROLE_PERSONNEL_MANAGER | (1u64 << 55));
             let dip = dir || corp_roles::has_role(r, 1u64 << 42);
             (dir, comms, dip)
         })
@@ -655,7 +655,21 @@ pub(super) fn handle_corp_gov(
             let roles_mask = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0) as u64;
             let grantable_mask = args.get(3).and_then(|a| a.as_i64()).unwrap_or(0) as u64;
             let prev = ctx.db.with_mut_snapshot(|snap| {
-                let prev = snap.corp_governance.entry(corp_id).or_default().titles.insert(title_id, (title_name.to_string(), roles_mask));
+                let state = snap.corp_governance.entry(corp_id).or_default();
+                let prev = state.titles.insert(title_id, (title_name.to_string(), roles_mask));
+                if let Some((_, prev_rmask)) = prev {
+                    if (prev_rmask & !roles_mask) != 0 {
+                        let bit = if (1..=16).contains(&title_id) { 1u64 << ((title_id - 1) as u64) } else { 0 };
+                        let holders: Vec<i64> = state
+                            .member_titles
+                            .iter()
+                            .filter_map(|(&mid, &tmask)| ((tmask & bit) != 0 || tmask == title_id as u64).then_some(mid))
+                            .collect();
+                        for mid in holders {
+                            state.role_drop_timestamps.insert(mid, now_unix);
+                        }
+                    }
+                }
                 let dec = |m: u64| -> Vec<String> {
                     crate::esi::corp_governance_routes::decode_corp_roles(m).into_iter().map(String::from).collect()
                 };
@@ -704,7 +718,23 @@ pub(super) fn handle_corp_gov(
                 if let Some(titles) = snap.corp_titles.get_mut(&corp_id) {
                     titles.retain(|t| t.title_id != title_id);
                 }
-                snap.corp_governance.get_mut(&corp_id).and_then(|s| s.titles.remove(&title_id))
+                let prev = snap.corp_governance.get_mut(&corp_id).and_then(|s| s.titles.remove(&title_id));
+                if let Some((_, prev_rmask)) = prev {
+                    if prev_rmask != 0 {
+                        if let Some(state) = snap.corp_governance.get_mut(&corp_id) {
+                            let bit = if (1..=16).contains(&title_id) { 1u64 << ((title_id - 1) as u64) } else { 0 };
+                            let holders: Vec<i64> = state
+                                .member_titles
+                                .iter()
+                                .filter_map(|(&mid, &tmask)| ((tmask & bit) != 0 || tmask == title_id as u64).then_some(mid))
+                                .collect();
+                            for mid in holders {
+                                state.role_drop_timestamps.insert(mid, now_unix);
+                            }
+                        }
+                    }
+                }
+                prev
             });
             let (old_name, old_roles) = prev.map_or((PyRep::None, PyRep::Integer(0)), |(n, r)| (PyRep::String(n), PyRep::Integer(r as i64)));
             let change = PyRep::Dict(vec![
@@ -726,6 +756,9 @@ pub(super) fn handle_corp_gov(
                 }
                 let next_ceo = new_ceo_opt.filter(|id| corp.members.contains(id)).unwrap_or(0);
                 corp.ceo_id = next_ceo;
+                if next_ceo != char_id {
+                    corp.member_roles.insert(char_id, 0);
+                }
                 if next_ceo > 0 {
                     corp.member_roles.insert(next_ceo, u64::MAX);
                 }
@@ -733,6 +766,9 @@ pub(super) fn handle_corp_gov(
             });
             match res {
                 Ok(next_ceo) => {
+                    if next_ceo != char_id {
+                        session.corp_role = 0;
+                    }
                     let change = PyRep::Dict(vec![(
                         PyRep::String(("ceoID").into()),
                         PyRep::Tuple(vec![PyRep::Integer(char_id), PyRep::Integer(next_ceo)]),
@@ -836,12 +872,17 @@ pub(super) fn handle_corp_gov(
         }
 
         ("voteManager", "ActivateSanctionedAction") => {
-            if !has_director { return deny_role("Activating sanctioned actions requires CEO or Director role"); }
             let case_id = if args.len() >= 2 && args.first().and_then(|a| a.as_i64()) == Some(corp_id) {
                 args.get(1).and_then(|a| a.as_i64()).unwrap_or(1)
             } else {
                 args.first().and_then(|a| a.as_i64()).unwrap_or(1)
             };
+            let is_ceo_election_case = ctx
+                .db
+                .with_snapshot(|s| s.corp_vote_cases.get(&case_id).is_some_and(|vc| vc.vote_type == 0));
+            if !has_director && !is_ceo_election_case {
+                return deny_role("Activating sanctioned actions requires CEO or Director role");
+            }
             let mut old_ceo_id = char_id;
             let mut new_ceo_id = char_id;
             let mut is_ceo_vote = false;
@@ -901,6 +942,11 @@ pub(super) fn handle_corp_gov(
                         return Err(BridgeRpcError { code: "CandidateNotMember".into(), message: "CEO election candidate is not a member of the corporation".into() });
                     }
                     old_ceo_id = corp.ceo_id;
+                    if old_ceo_id > 0 && old_ceo_id != new_ceo_id {
+                        if corp.member_roles.get(&old_ceo_id).copied() == Some(u64::MAX) {
+                            corp.member_roles.insert(old_ceo_id, 0);
+                        }
+                    }
                     corp.ceo_id = new_ceo_id;
                     corp.member_roles.insert(new_ceo_id, u64::MAX);
                 } else if vc.vote_type != 5 && win_param > 0 {
@@ -1286,73 +1332,6 @@ pub(super) fn handle_corp_gov(
             Some(Ok(PyRep::rowset(vec!["labelID", "name", "color"], rows)))
         }
 
-        ("corpRegistry", "SetCorpWelcomeMail") => {
-            if !has_comms { return deny_role("Setting corporation welcome mail requires Communications Officer or Director role"); }
-            let subject = args.first().and_then(|a| a.as_str()).unwrap_or("Welcome to the Corp");
-            let body = args.get(1).and_then(|a| a.as_str()).unwrap_or("Fly safe o7");
-            let enabled = args.get(2).and_then(|a| match a { PyRep::Bool(b) => Some(*b), PyRep::Integer(i) => Some(*i != 0), _ => None }).unwrap_or(true);
-            with_corp_gov(ctx, |g| {
-                g.entry(corp_id).or_default().welcome_mail = (enabled, subject.to_string(), body.to_string());
-            });
-            ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationWelcomeMailChanged", "corpid", vec![PyRep::Integer(char_id), PyRep::Integer(now_unix as i64)]);
-            Some(Ok(PyRep::keyval([("enabled", PyRep::Bool(enabled)), ("subject", PyRep::String(subject.to_string())), ("body", PyRep::String(body.to_string()))])))
-        }
-
-        ("corpRegistry", "GetCorpWelcomeMail") => {
-            let (enabled, subject, body) = read_corp_gov(ctx, |g| {
-                g.get(&corp_id).map(|s| s.welcome_mail.clone()).unwrap_or((false, String::new(), String::new()))
-            });
-            Some(Ok(PyRep::keyval([("enabled", PyRep::Bool(enabled)), ("subject", PyRep::String(subject)), ("body", PyRep::String(body))])))
-        }
-        ("corpRegistry", "RegisterNewCorpMailRestrictionSettings") => {
-            if !has_comms { return deny_role("Updating corporation mail restriction settings requires Communications Officer or Director role"); }
-            let restricted = matches!(args.first(), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
-            let prev = with_corp_gov(ctx, |g| {
-                let s = g.entry(corp_id).or_default();
-                std::mem::replace(&mut s.restrict_corp_mails, restricted)
-            });
-            let change = PyRep::Dict(vec![(PyRep::String(("restrictCorpMails").into()), PyRep::Tuple(vec![PyRep::Bool(prev), PyRep::Bool(restricted)]))]);
-            ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), change]);
-            Some(Ok(PyRep::Bool(restricted)))
-        }
-        ("corpRegistry", "DoesCorpRestrictCorpMails") => {
-            let restricted = read_corp_gov(ctx, |g| g.get(&corp_id).is_some_and(|s| s.restrict_corp_mails));
-            Some(Ok(PyRep::Bool(restricted)))
-        }
-        ("corpRegistry", "RegisterNewAcceptStructureSettings") => {
-            if !has_director { return deny_role("Updating corporation structure transfer settings requires CEO or Director role"); }
-            let accept = matches!(args.first(), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
-            let prev = with_corp_gov(ctx, |g| {
-                let s = g.entry(corp_id).or_default();
-                let old = if s.accept_structures_set { s.accept_structures } else { true };
-                s.accept_structures_set = true;
-                s.accept_structures = accept;
-                old
-            });
-            let change = PyRep::Dict(vec![(PyRep::String(("acceptStructures").into()), PyRep::Tuple(vec![PyRep::Bool(prev), PyRep::Bool(accept)]))]);
-            ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), change]);
-            Some(Ok(PyRep::Bool(accept)))
-        }
-        ("corpRegistry", "DoesMyCorpAcceptStructures") => {
-            let accept = read_corp_gov(ctx, |g| {
-                g.get(&corp_id)
-                    .map(|s| if s.accept_structures_set { s.accept_structures } else { true })
-                    .unwrap_or(true)
-            });
-            Some(Ok(PyRep::Bool(accept)))
-        }
-        ("corpRegistry", "SetStructureReinforceDefault") => {
-            if !has_director { return deny_role("Setting corporation structure reinforcement default requires CEO or Director role"); }
-            let hour = args.first().and_then(|a| a.as_i64()).unwrap_or(18).clamp(0, 23) as u8;
-            with_corp_gov(ctx, |g| {
-                g.entry(corp_id).or_default().reinforce_hour = hour;
-            });
-            Some(Ok(PyRep::Integer(hour as i64)))
-        }
-        ("corpRegistry", "GetStructureReinforceDefault") => {
-            let hour = read_corp_gov(ctx, |g| g.get(&corp_id).map(|s| s.reinforce_hour).unwrap_or(18));
-            Some(Ok(PyRep::Integer(hour as i64)))
-        }
-        _ => super::handle_corp_gov_tail(ctx, session, service, method, args, corp_id, char_id, now_unix),
+        _ => super::fleet_social_corp_tail_dispatch::handle_corp_gov_tail(ctx, session, service, method, args, corp_id, char_id, now_unix),
     }
 }

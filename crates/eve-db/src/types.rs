@@ -100,6 +100,16 @@ impl FromWalError for std::convert::Infallible {
 pub struct IskCents(pub i64);
 
 impl IskCents {
+    pub const ZERO: Self = Self(0);
+
+    pub const fn raw_cents(self) -> i64 {
+        self.0
+    }
+
+    pub const fn from_raw_cents(cents: i64) -> Self {
+        Self(cents)
+    }
+
     pub const fn from_isk(whole_isk: i64) -> Self {
         Self(whole_isk.saturating_mul(100))
     }

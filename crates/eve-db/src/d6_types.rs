@@ -130,6 +130,8 @@ pub struct CorpGovState {
     pub member_divisions: HashMap<i64, (i64, i64)>,
     #[serde(default)]
     pub next_bulletin_id: i64,
+    #[serde(default)]
+    pub role_drop_timestamps: HashMap<i64, u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -157,11 +159,39 @@ pub struct PersistedAllianceMeta {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PersistedProjectDetails {
+    #[serde(default)]
+    pub wallet_division: u8,
+    #[serde(default)]
+    pub max_per_character: Option<u64>,
+    #[serde(default)]
+    pub expires_unix: Option<u64>,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub filter_id: Option<i64>,
+    #[serde(default)]
+    pub char_contributions: HashMap<i64, u64>,
+    #[serde(default)]
+    pub closed: bool,
+    #[serde(default)]
+    pub expired: bool,
+    #[serde(default)]
+    pub min_pilot_age_days: Option<u64>,
+    #[serde(default)]
+    pub allowed_faction_id: Option<i64>,
+    #[serde(default)]
+    pub contributions_by_char: HashMap<i64, u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PersistedAllianceWarState {
     #[serde(default)]
     pub alliances: HashMap<i64, PersistedAllianceMeta>,
     #[serde(default)]
     pub project_meta: HashMap<i64, (String, bool, bool)>,
+    #[serde(default)]
+    pub project_details: HashMap<i64, PersistedProjectDetails>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

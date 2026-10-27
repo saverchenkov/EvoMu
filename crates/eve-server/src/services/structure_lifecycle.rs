@@ -15,7 +15,7 @@ use super::structure_upwell_ops::{load_ext_state, save_ext_state, AssetSafetyWra
 use crate::router::ServerContext;
 use eve_db::{InventoryFlag, InventoryItemRecord, KillmailRecord, UpwellStructureRecord, WorldStateSnapshot};
 use eve_proto::BridgeRpcError;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 // ---- SDE dogma attribute IDs (sde_dogma_attributes) ----
 pub const ATTR_HP: u16 = 9; // hp (hull)
@@ -358,9 +358,14 @@ pub fn hull_reinforcement_secs(class: HullClass, space: SpaceClass, power: Power
 }
 
 /// Reinforcement hour: the applied vulnerability window hour (set at anchoring, changed via
-/// `structureVulnerability.UpdateReinforceTimesFromClient`).
+/// `structureVulnerability.UpdateReinforceTimesFromClient`), falling back to the owning
+/// corporation's default reinforcement hour (`feat:corporation.structure-reinforce-default`).
 fn reinforce_hour(snap: &WorldStateSnapshot, st: &UpwellStructureRecord) -> u64 {
-    snap.structure_vulnerability_windows.get(&st.structure_id).map(|w| w.0).unwrap_or(0)
+    snap.structure_vulnerability_windows
+        .get(&st.structure_id)
+        .map(|w| w.0)
+        .or_else(|| snap.corp_governance.get(&st.owner_corp_id).map(|g| u64::from(g.reinforce_hour)))
+        .unwrap_or(0)
 }
 
 fn new_space_item(snap: &mut WorldStateSnapshot, type_id: u32, owner_id: i64, sys_id: u32, pos: [f64; 3], quantity: i32) -> i64 {
@@ -388,34 +393,49 @@ fn new_space_item(snap: &mut WorldStateSnapshot, type_id: u32, owner_id: i64, sy
     id
 }
 
-/// Nearest NPC station by stargate jumps (breadth-first over SDE jumps), restricted to
-/// systems with security > 0.0 when starting outside high/low sec. DERIVED: the live server's
-/// tie-breaking is unknown; ties are broken by lowest station ID.
+/// Nearest NPC station by Euclidean distance in AU (`galactic_pos_ly`) within the allowed
+/// security band (`high -> high` for `sec >= 0.45`, `low -> low` / `null -> low` for `sec < 0.45`),
+/// tie-broken by lowest station ID (`feat:lifecycle.asset_safety-auto_delivery`).
 pub fn nearest_npc_station(ctx: &ServerContext, origin: u32) -> Option<i64> {
-    let mut adj: HashMap<u32, Vec<u32>> = HashMap::new();
-    for j in ctx.sde.jumps.values() {
-        adj.entry(j.from_solar_system_id).or_default().push(j.to_solar_system_id);
-    }
-    let origin_sec = ctx.sde.solar_systems.get(&origin).map(|s| s.security_status).unwrap_or(-1.0);
-    let allowed = |sys: u32| origin_sec > 0.0 || ctx.sde.solar_systems.get(&sys).map(|s| s.security_status > 0.0).unwrap_or(false);
-    let mut seen = HashSet::from([origin]);
-    let mut frontier = VecDeque::from([origin]);
-    while !frontier.is_empty() {
-        let mut level: Vec<u32> = frontier.drain(..).collect();
-        level.sort_unstable();
-        let best = ctx.sde.stations.values().filter(|s| level.contains(&s.solar_system_id) && allowed(s.solar_system_id)).map(|s| s.station_id).min();
-        if best.is_some() {
-            return best;
+    let origin_sys = ctx.sde.solar_systems.get(&origin);
+    let origin_sec = origin_sys.map(|s| s.security_status).unwrap_or(-1.0);
+    let origin_pos = origin_sys
+        .map(|s| glam::DVec3::from_array(s.galactic_pos_ly))
+        .unwrap_or(glam::DVec3::ZERO);
+    let allowed = |sys: u32| -> bool {
+        let Some(s) = ctx.sde.solar_systems.get(&sys) else {
+            return false;
+        };
+        if origin_sec >= 0.45 {
+            s.security_status >= 0.45
+        } else {
+            s.security_status > 0.0 && s.security_status < 0.45
         }
-        for sys in level {
-            for &n in adj.get(&sys).map(Vec::as_slice).unwrap_or(&[]) {
-                if seen.insert(n) {
-                    frontier.push_back(n);
+    };
+    let mut best: Option<(f64, i64)> = None;
+    for st in ctx.sde.stations.values() {
+        if !allowed(st.solar_system_id) {
+            continue;
+        }
+        let dist_au = if st.solar_system_id == origin {
+            0.0
+        } else if let Some(cand_sys) = ctx.sde.solar_systems.get(&st.solar_system_id) {
+            origin_pos.distance(glam::DVec3::from_array(cand_sys.galactic_pos_ly)) * 63_241.077
+        } else {
+            continue;
+        };
+        match best {
+            None => best = Some((dist_au, st.station_id)),
+            Some((best_d, best_id)) => {
+                if dist_au + 1e-9 < best_d
+                    || ((dist_au - best_d).abs() <= 1e-9 && st.station_id < best_id)
+                {
+                    best = Some((dist_au, st.station_id));
                 }
             }
         }
     }
-    None
+    best.map(|(_, id)| id)
 }
 
 /// What happened to a structure's contents when it left space.
@@ -429,11 +449,13 @@ pub struct DisposalOutcome {
     pub destroyed_item_ids: Vec<i64>,
 }
 
-/// Moves a structure's contents out: rigs are destroyed; in J-space everything else drops as
-/// loot at the structure position; in K-space fitted modules drop/are destroyed (destruction)
-/// or join asset safety (unanchor) and hangar contents go to per-owner asset safety wraps.
+/// Moves a structure's contents out: rigs are destroyed; in J-space or when an Abandoned
+/// structure is destroyed (`feat:lifecycle.structure-abandoned_destroyed`) contents drop as loot
+/// at the structure position; in non-abandoned K-space fitted modules drop/are destroyed
+/// (destruction) or join asset safety (unanchor) and hangar contents go to per-owner wraps.
 fn dispose_contents(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &mut StructureExtendedState, st: &UpwellStructureRecord, destroyed: bool, now: u64, out: &mut DisposalOutcome) {
     let wormhole = space_class(ctx, st.solar_system_id) == SpaceClass::Wormhole;
+    let abandoned = destroyed && power_state(ctx, snap, ext, st, now) == PowerState::Abandoned;
     let mut contents: Vec<(i64, i64, InventoryFlag)> = snap.items.values().filter(|i| i.location_id == st.structure_id).map(|i| (i.item_id, i.owner_id, i.flag)).collect();
     contents.sort_by_key(|c| c.0);
     let mut fitted_index = 0usize;
@@ -455,7 +477,7 @@ fn dispose_contents(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &mu
             snap.items.remove(&iid);
             snap.module_online_states.remove(&iid);
             out.destroyed_item_ids.push(iid);
-        } else if wormhole || (destroyed && fitted) {
+        } else if wormhole || abandoned || (destroyed && fitted) {
             if let Some(it) = snap.items.get_mut(&iid) {
                 it.location_id = i64::from(st.solar_system_id);
                 it.flag = InventoryFlag::None;
@@ -505,9 +527,121 @@ fn dispose_contents(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &mu
                 item_ids,
                 estimated_value_isk: value,
                 nearest_npc_station_id: station,
+                auto_delivered: false,
+                retrieval_fee_paid: false,
             },
         );
         out.asset_safety_wrap_ids.push(wrap_id);
+    }
+}
+
+/// Removes the structure's ball, emits `OnStructureRemoved` / `OnStructureRemovedFromSpace` at
+/// completion, and spawns balls at the structure position for dropped core, fittings, and
+/// packaged structure item (`feat:lifecycle.structure-leave_space`).
+fn emit_structure_left_space_and_spawn_drops(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    st: &UpwellStructureRecord,
+    out: &DisposalOutcome,
+) {
+    let active_handle = ctx
+        .systems
+        .active_system_handles()
+        .into_iter()
+        .find(|(id, _)| *id == st.solar_system_id)
+        .map(|(_, h)| h);
+    if let Some(handle) = active_handle {
+        handle.try_remove_ball(st.structure_id);
+        let pos = glam::DVec3::from_array(st.position);
+        let alliance_id = snap
+            .corporations
+            .get(&st.owner_corp_id)
+            .and_then(|c| c.alliance_id)
+            .unwrap_or(0);
+        for iid in out
+            .dropped_core_item_id
+            .into_iter()
+            .chain(out.packaged_item_id)
+            .chain(out.dropped_item_ids.iter().copied())
+        {
+            if let Some(it) = snap.items.get(&iid) {
+                let rad = ctx.sde.types.get(&it.type_id).map(|t| t.radius.max(10.0)).unwrap_or(25.0);
+                let mass = ctx.sde.types.get(&it.type_id).map(|t| t.mass.max(1.0)).unwrap_or(1_000.0);
+                handle.try_spawn_ball_with_meta(
+                    eve_destiny::Ball {
+                        id: iid,
+                        type_id: it.type_id,
+                        position: pos,
+                        velocity: glam::DVec3::ZERO,
+                        max_velocity: 0.0,
+                        inertia: 1.0,
+                        mass,
+                        radius: rad,
+                        speed_fraction: 0.0,
+                        mode: eve_destiny::MovementMode::Stop,
+                    },
+                    ctx.build_type_combat_state(it.type_id),
+                    eve_destiny::SlimItemMeta {
+                        owner_id: it.owner_id,
+                        char_id: None,
+                        corp_id: st.owner_corp_id,
+                        alliance_id,
+                        group_id: ctx.sde.types.get(&it.type_id).map(|t| t.group_id).unwrap_or(1657),
+                        category_id: 65,
+                        security_status: 0.0,
+                        is_cloaked: false,
+                    },
+                );
+            }
+        }
+    }
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let mut sys_recips: Vec<(i64, Option<u64>)> = snap
+        .characters
+        .values()
+        .filter(|c| c.solar_system_id == st.solar_system_id && snap.sessions.get(&c.user_id).is_some_and(|os| os.character_id == Some(c.character_id)))
+        .map(|c| (c.character_id, Some(c.user_id)))
+        .collect();
+    sys_recips.sort_by_key(|(cid, _)| *cid);
+    sys_recips.dedup_by_key(|(cid, _)| *cid);
+    let mut corp_recips: Vec<(i64, Option<u64>)> = snap
+        .characters
+        .values()
+        .filter(|c| c.corporation_id == st.owner_corp_id && snap.sessions.get(&c.user_id).is_some_and(|os| os.character_id == Some(c.character_id)))
+        .map(|c| (c.character_id, Some(c.user_id)))
+        .collect();
+    corp_recips.sort_by_key(|(cid, _)| *cid);
+    corp_recips.dedup_by_key(|(cid, _)| *cid);
+    let mut queues = ctx.pending_notifications.write().unwrap_or_else(|e| e.into_inner());
+    let sys_args = vec![eve_proto::PyRep::Integer(i64::from(st.solar_system_id)), eve_proto::PyRep::Integer(st.structure_id)];
+    for (cid, uid) in sys_recips {
+        let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(cid, uid, "OnStructureRemoved", "solarsystemid", sys_args.clone());
+        let notif = crate::router::PendingMachoNotification {
+            recipient_char_id: cid,
+            event: "OnStructureRemoved".into(),
+            id_type: "solarsystemid".into(),
+            args: sys_args.clone(),
+            packet,
+            marshaled_packet,
+            created_filetime: now_ft,
+        };
+        queues.entry(cid).or_default().push(notif.clone());
+        let _ = ctx.notify_tx.send((cid, notif));
+    }
+    let corp_args = vec![eve_proto::PyRep::Integer(st.structure_id)];
+    for (cid, uid) in corp_recips {
+        let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(cid, uid, "OnStructureRemovedFromSpace", "corpid", corp_args.clone());
+        let notif = crate::router::PendingMachoNotification {
+            recipient_char_id: cid,
+            event: "OnStructureRemovedFromSpace".into(),
+            id_type: "corpid".into(),
+            args: corp_args.clone(),
+            packet,
+            marshaled_packet,
+            created_filetime: now_ft,
+        };
+        queues.entry(cid).or_default().push(notif.clone());
+        let _ = ctx.notify_tx.send((cid, notif));
     }
 }
 
@@ -541,6 +675,7 @@ pub fn destroy_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext
     ext.unanchoring_until_unix.remove(&structure_id);
     // feat:clones.clone-destroyed-structure: clones in destroyed structure are moved home (implants lost) per V24 rules.
     relocate_structure_clones_to_home(snap, structure_id);
+    emit_structure_left_space_and_spawn_drops(ctx, snap, &st, &out);
     out
 }
 
@@ -580,6 +715,7 @@ pub fn package_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext
     snap.structure_vulnerability_windows.remove(&structure_id);
     // feat:clones.clone-destroyed-structure: clones in unanchored/packaged structure are moved home (implants lost) per V24 rules.
     relocate_structure_clones_to_home(snap, structure_id);
+    emit_structure_left_space_and_spawn_drops(ctx, snap, &st, &out);
     out
 }
 
@@ -777,6 +913,7 @@ pub fn sync_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &
 
 /// Syncs every structure (called before structure RPCs). Returns structures that left space.
 pub fn sync_all_structures(ctx: &ServerContext) -> Vec<(i64, DisposalOutcome)> {
+    super::structure_upwell_ops::sync_auto_delivered_asset_safety_wraps(ctx);
     let now = ctx.now_unix();
     let mut sov_claims: Vec<(u32, i64, i64, i64)> = Vec::new();
     let gone = ctx.db.with_mut_snapshot(|snap| {

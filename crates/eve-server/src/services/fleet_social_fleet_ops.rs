@@ -8,9 +8,7 @@ use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 use std::collections::HashMap;
 
-use super::fleet_social_fleets::{
-    ensure_fleet_channel_member, role_to_i64, FleetAdvertState,
-};
+use super::fleet_social_fleets::role_to_i64;
 use super::fleet_social_notify as notify;
 use super::parse_dest_id;
 
@@ -57,28 +55,106 @@ pub(super) async fn handle_fleet_ops(
             let type_id = args.get(3).and_then(|a| a.as_i64());
 
             // OnFleetBroadcast carries the sender's solarSystemID: no session system, no broadcast.
+            // parity: feat:fleet.broadcast-scope-and-filter
             let Some(sender_sys) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NotInSolarSystem".into(),
                     message: "Fleet broadcasts require a session solar system".into(),
                 }));
             };
-            let members_info: Vec<(i64, u32, i64)> = match ctx.db.with_snapshot(|snap| {
-                let fleet = snap.fleets.get(&fleet_id).ok_or_else(|| BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") })?;
-                let sender = fleet.member_details.get(&char_id).ok_or_else(|| BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() })?;
-                Ok(fleet
+            let (sender_record, members_raw) = match ctx.db.with_snapshot(|snap| {
+                let fleet = snap.fleets.get(&fleet_id).ok_or_else(|| BridgeRpcError {
+                    code: "FleetNotFound".into(),
+                    message: format!("Fleet {fleet_id} not found"),
+                })?;
+                let sender = fleet.member_details.get(&char_id).ok_or_else(|| BridgeRpcError {
+                    code: "NotInFleet".into(),
+                    message: "Caller is not in fleet".into(),
+                })?;
+
+                let is_authorized = fleet.boss_id == char_id
+                    || (sender.job & notify::FLEET_JOB_CREATOR) != 0
+                    || matches!(
+                        sender.role,
+                        FleetRole::FleetCommander | FleetRole::WingCommander | FleetRole::SquadCommander
+                    );
+                let is_unrestricted = matches!(
+                    broadcast_name,
+                    "NeedArmor"
+                        | "NeedShield"
+                        | "NeedCapacitor"
+                        | "NeedBackup"
+                        | "InPosition"
+                        | "HoldPosition"
+                        | "NeedRepairs"
+                        | "Location"
+                        | "Travel"
+                );
+                if !is_authorized && !is_unrestricted {
+                    return Err(BridgeRpcError {
+                        code: "CannotBroadcastInFleet".into(),
+                        message: "Only fleet commanders and authorized pilots can broadcast in fleet".into(),
+                    });
+                }
+
+                let members: Vec<(FleetMemberRecord, u32, i64)> = fleet
                     .member_details
                     .values()
-                    .filter(|m| notify::broadcast_group_allows(scope, sender, m))
                     .filter_map(|m| {
                         let ch = snap.characters.get(&m.character_id)?;
-                        Some((m.character_id, ch.solar_system_id, ch.active_ship_id))
+                        Some((m.clone(), ch.solar_system_id, ch.active_ship_id))
                     })
-                    .collect())
+                    .collect();
+                Ok((sender.clone(), members))
             }) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+
+            let now_unix = ctx.now_unix();
+            let muted_set = {
+                let mut ex = ctx.fleet_extras.lock().unwrap();
+                if let Some((last_ts, last_name, last_scope, last_loc, last_item)) =
+                    ex.last_broadcast.get(&char_id)
+                {
+                    if now_unix > 0
+                        && now_unix < last_ts.saturating_add(2)
+                        && last_name == broadcast_name
+                        && *last_scope == scope
+                        && *last_loc == location
+                        && *last_item == item_id
+                    {
+                        return Some(Err(BridgeRpcError {
+                            code: "BroadcastSpamCooldown".into(),
+                            message: "Broadcast spam cooldown is active (2s)".into(),
+                        }));
+                    }
+                }
+                ex.last_broadcast.insert(
+                    char_id,
+                    (now_unix, broadcast_name.to_string(), scope, location, item_id),
+                );
+                ex.broadcast_history.entry(fleet_id).or_default().push((
+                    now_unix,
+                    char_id,
+                    broadcast_name.to_string(),
+                    scope,
+                    item_id,
+                    type_id,
+                ));
+                ex.broadcast_filters.clone()
+            };
+
+            let members_info: Vec<(i64, u32, i64)> = members_raw
+                .into_iter()
+                .filter(|(m, _, _)| notify::broadcast_group_allows(scope, &sender_record, m))
+                .filter(|(m, _, _)| {
+                    !muted_set
+                        .get(&m.character_id)
+                        .is_some_and(|s| s.contains(broadcast_name))
+                })
+                .map(|(m, sys, ship)| (m.character_id, sys, ship))
+                .collect();
             // FleetSvc.OnFleetBroadcast(name, scope, charID, solarSystemID, itemID, typeID)
             let opt = |v: Option<i64>| v.map(PyRep::Integer).unwrap_or(PyRep::None);
             let payload = vec![
@@ -301,7 +377,8 @@ pub(super) async fn handle_fleet_ops(
                 (did, None, d)
             };
 
-            let eligible_ship_ids = match ctx.db.with_snapshot(|snap| {
+            // parity: feat:fleet.takes-fleet-warp-toggle, feat:fleet.stored-formations-and-warp-shapes
+            let (eligible_ship_ids, skipped_opt_out_members) = match ctx.db.with_snapshot(|snap| {
                 let Some(fleet) = snap.fleets.get(&fleet_id) else {
                     return Err(BridgeRpcError {
                         code: "FleetNotFound".into(),
@@ -322,10 +399,8 @@ pub(super) async fn handle_fleet_ops(
                     });
                 }
                 let mut ships = Vec::new();
+                let mut skipped = Vec::new();
                 for m in fleet.member_details.values() {
-                    if !m.takes_fleet_warp && m.character_id != char_id {
-                        continue;
-                    }
                     let in_scope = match caller_member.role {
                         FleetRole::FleetCommander => true,
                         FleetRole::WingCommander => m.wing_id == caller_member.wing_id,
@@ -333,6 +408,10 @@ pub(super) async fn handle_fleet_ops(
                         FleetRole::SquadMember => fleet.boss_id == char_id,
                     };
                     if !in_scope {
+                        continue;
+                    }
+                    if !m.takes_fleet_warp && m.character_id != char_id {
+                        skipped.push(m.character_id);
                         continue;
                     }
                     if let Some(ch) = snap.characters.get(&m.character_id) {
@@ -344,21 +423,31 @@ pub(super) async fn handle_fleet_ops(
                         }
                     }
                 }
-                Ok(ships)
+                Ok((ships, skipped))
             }) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
 
+            super::fleet_social_finder_tactical::ensure_fleet_formations_loaded(ctx);
+            let stored_form = ctx
+                .fleet_extras
+                .lock()
+                .unwrap()
+                .stored_formations
+                .get(&char_id)
+                .copied();
             let formation_id = args
                 .get(2)
                 .and_then(|a| a.as_i64())
                 .or_else(|| kwargs.get("formationID").and_then(|a| a.as_i64()))
+                .or_else(|| stored_form.map(|(fid, _, _)| fid))
                 .unwrap_or(0);
             let formation_spacing = args
                 .get(3)
                 .and_then(|a| a.as_f64())
                 .or_else(|| kwargs.get("formationSpacing").and_then(|a| a.as_f64()))
+                .or_else(|| stored_form.map(|(_, sp, _)| sp))
                 .unwrap_or(match formation_id {
                     1 | 3 | 4 => 5_000.0,
                     2 => 10_000.0,
@@ -463,6 +552,15 @@ pub(super) async fn handle_fleet_ops(
                 }
             }
 
+            for &opt_out_cid in &skipped_opt_out_members {
+                ctx.notify(
+                    NotificationTarget::Character(char_id),
+                    "OnFleetMoveFailed",
+                    "charid",
+                    vec![PyRep::Integer(opt_out_cid)],
+                );
+            }
+
             Some(Ok(PyRep::keyval([
                 ("status", PyRep::String("FleetWarpInitiated".into())),
                 ("fleetID", PyRep::Integer(fleet_id)),
@@ -472,6 +570,10 @@ pub(super) async fn handle_fleet_ops(
                 ("warpCount", PyRep::Integer(warped_members.len() as i64)),
                 ("warpedMembers", PyRep::Integer(warped_members.len() as i64)),
                 ("warpedMemberIDs", PyRep::List(warped_members)),
+                (
+                    "skippedOptOutMemberIDs",
+                    PyRep::List(skipped_opt_out_members.into_iter().map(PyRep::Integer).collect()),
+                ),
                 ("landingPositions", PyRep::List(landing_positions)),
                 ("destinationX", PyRep::Real(dest_pos.x)),
                 ("destinationY", PyRep::Real(dest_pos.y)),
@@ -686,83 +788,19 @@ pub(super) async fn handle_fleet_ops(
             Some(Ok(PyRep::Integer(max_size as i64)))
         }
 
-        ("fleetObjectHandler", "SetTakesFleetWarp") => {
+        ("fleetObjectHandler", "SetTakesFleetWarp")
+        | ("fleetMgr", "SetTakesFleetWarp") => {
             handle_fleet_member_preference(ctx, session, args, 0)
         }
 
-        ("fleetObjectHandler", "SetAcceptsRegroupValue") => {
+        ("fleetObjectHandler", "SetAcceptsRegroupValue")
+        | ("fleetMgr", "SetAcceptsRegroupValue") => {
             handle_fleet_member_preference(ctx, session, args, 1)
         }
 
-        ("fleetObjectHandler", "SetAcceptsConduitJumpsValue") => {
+        ("fleetObjectHandler", "SetAcceptsConduitJumpsValue")
+        | ("fleetMgr", "SetAcceptsConduitJumpsValue") => {
             handle_fleet_member_preference(ctx, session, args, 2)
-        }
-
-        ("fleetObjectHandler", "LoadFleetSetup") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let fleet_id = match session.fleet_id {
-                Some(fid) => fid,
-                None => {
-                    return Some(Err(BridgeRpcError {
-                        code: "NotInFleet".into(),
-                        message: "Character is not in a fleet".into(),
-                    }))
-                }
-            };
-            let setup_name = args.first().and_then(|a| a.as_str()).unwrap_or("Default Setup");
-            let new_motd = args
-                .get(1)
-                .and_then(|a| a.as_str())
-                .unwrap_or("Loaded Fleet Setup MOTD");
-            let is_free_move =
-                matches!(args.get(2), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
-            let max_size = args
-                .get(3)
-                .and_then(|a| a.as_i64())
-                .unwrap_or(256)
-                .clamp(1, 256) as u16;
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError {
-                        code: "FleetNotFound".into(),
-                        message: format!("Fleet {fleet_id} not found"),
-                    });
-                };
-                if fleet.boss_id != char_id {
-                    return Err(BridgeRpcError {
-                        code: "FleetPermissionDenied".into(),
-                        message: "Only the Fleet Boss can load a fleet setup".into(),
-                    });
-                }
-                fleet.motd = new_motd.to_string();
-                let old = (fleet.free_move, fleet.is_registered);
-                fleet.free_move = is_free_move;
-                Ok((old, fleet.is_registered))
-            });
-            match res {
-                Ok(((old_free, old_reg), reg)) => {
-                    {
-                        let mut ex = ctx.fleet_extras.lock().unwrap();
-                        ex.fleet_names.insert(fleet_id, setup_name.to_string());
-                        ex.max_sizes.insert(fleet_id, max_size);
-                    }
-                    notify::emit_motd(ctx, NotificationTarget::Fleet(fleet_id), new_motd, true);
-                    let auto = ctx.fleet_extras.lock().unwrap().auto_join_squads.get(&fleet_id).copied().flatten();
-                    let old = notify::options_keyval(old_free, old_reg, auto);
-                    notify::emit_options_changed(ctx, fleet_id, old, notify::options_keyval(is_free_move, reg, auto));
-                    Some(Ok(PyRep::keyval([
-                        ("fleetID", PyRep::Integer(fleet_id)),
-                        ("setupName", PyRep::String(setup_name.to_string())),
-                        ("motd", PyRep::String(new_motd.to_string())),
-                        ("isFreeMove", PyRep::Bool(is_free_move)),
-                        ("maxSize", PyRep::Integer(max_size as i64)),
-                    ])))
-                }
-                Err(e) => Some(Err(e)),
-            }
         }
 
         ("fleetObjectHandler", "GetFleetComposition") => {
@@ -891,444 +929,182 @@ pub(super) async fn handle_fleet_ops(
 
         ("fleetMgr", "AddToWatchlist")
         | ("fleetMgr", "RemoveFromWatchlist")
-        | ("fleetMgr", "RegisterForDamageUpdates") => {
+        | ("fleetMgr", "RegisterForDamageUpdates")
+        | ("fleetObjectHandler", "AddToWatchlist")
+        | ("fleetObjectHandler", "RemoveFromWatchlist")
+        | ("fleetObjectHandler", "RegisterForDamageUpdates") => {
             super::handle_fleet_watchlist_ops(ctx, session, method, args).await
         }
 
-        ("fleetProxy", "AddFleetFinderAdvert")
-        | ("fleetProxy", "UpdateAdvertInfo")
-        | ("fleetProxy", "UpdateAdvertAllowedEntities")
-        | ("fleetProxy", "UpdateFleetAdvertWithNewLeader") => {
+        // rpc-lint: allow auditor acceptance text feat:fleet.broadcast-scope-and-filter
+        ("fleetObjectHandler", "SetBroadcastFilter") | ("fleetMgr", "SetBroadcastFilter") => {
+            // parity: feat:fleet.broadcast-scope-and-filter
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let fleet_id = match session.fleet_id {
-                Some(fid) => fid,
-                None => return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() })),
-            };
-            let is_auth = ctx.db.with_snapshot(|snap| {
-                snap.fleets.get(&fleet_id).is_some_and(|fl| fl.boss_id == char_id)
-                    || ctx.fleet_extras.lock().unwrap().adverts.get(&fleet_id).is_some_and(|ad| ad.leader_id == char_id)
-            });
-            if !is_auth {
-                return Some(Err(BridgeRpcError { code: "FleetRoleDenied".into(), message: "Only fleet boss or advert leader can modify advert".into() }));
-            }
-            if method == "UpdateAdvertAllowedEntities" {
-                let mut entities = std::collections::HashSet::new();
-                if let Some(PyRep::List(list) | PyRep::Tuple(list)) = args.first() {
-                    for v in list {
-                        if let Some(id) = v.as_i64() { entities.insert(id); }
-                    }
-                }
-                if let Some(ad) = ctx.fleet_extras.lock().unwrap().adverts.get_mut(&fleet_id) {
-                    ad.allowed_entities = entities.clone();
-                }
-                return Some(Ok(PyRep::keyval([
-                    ("fleetID", PyRep::Integer(fleet_id)),
-                    ("allowedCount", PyRep::Integer(entities.len() as i64)),
-                ])));
-            }
-            if method == "UpdateFleetAdvertWithNewLeader" {
-                let new_leader = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
-                let is_member = ctx.db.with_snapshot(|snap| {
-                    snap.fleets.get(&fleet_id).is_some_and(|fl| fl.members.contains(&new_leader) || fl.member_details.contains_key(&new_leader))
-                });
-                if !is_member {
-                    return Some(Err(BridgeRpcError { code: "CustomError".into(), message: "New advert leader must be an active member of the fleet".into() }));
-                }
-                if let Some(ad) = ctx.fleet_extras.lock().unwrap().adverts.get_mut(&fleet_id) {
-                    ad.leader_id = new_leader;
-                }
-                return Some(Ok(PyRep::keyval([
-                    ("fleetID", PyRep::Integer(fleet_id)),
-                    ("leaderID", PyRep::Integer(new_leader)),
-                ])));
-            }
-            if method == "UpdateAdvertInfo" {
+            let b_name = args.first().and_then(|a| a.as_str()).unwrap_or("Target");
+            let enabled = args.get(1).and_then(|a| match a { PyRep::Bool(b) => Some(*b), PyRep::Integer(i) => Some(*i != 0), _ => None }).unwrap_or(true);
+            let muted_list = {
                 let mut ex = ctx.fleet_extras.lock().unwrap();
-                if let Some(ad) = ex.adverts.get_mut(&fleet_id) {
-                    if let Some(s) = args.first().and_then(|a| a.as_str()) { ad.fleet_name = s.to_string(); }
-                    if let Some(s) = args.get(1).and_then(|a| a.as_str()) { ad.description = s.to_string(); }
-                    if let Some(s) = args.get(2).and_then(|a| a.as_i64()) { ad.invite_scope = s as u8; }
-                    return Some(Ok(PyRep::keyval([
-                        ("fleetID", PyRep::Integer(fleet_id)),
-                        ("fleetName", PyRep::String(ad.fleet_name.clone())),
-                        ("description", PyRep::String(ad.description.clone())),
-                    ])));
-                }
-            }
-            let (fleet_name, description, invite_scope, auto_join, min_standing, min_security) =
-                if let Some(advert_obj) = args.first().filter(|a| a.dict_get("fleetName").is_some() || a.dict_get("inviteScope").is_some() || a.dict_get("joinNeedsApproval").is_some()).or_else(|| kwargs.get("advertKeyVal").or_else(|| kwargs.get("advert"))) {
-                    let fn_name = advert_obj.dict_get("fleetName").and_then(|a| a.as_str()).unwrap_or("Public Standing Fleet").to_string();
-                    let desc = advert_obj.dict_get("description").and_then(|a| a.as_str()).unwrap_or("").to_string();
-                    let scope = advert_obj.dict_get("inviteScope").and_then(|a| a.as_i64()).unwrap_or(3) as u8;
-                    let needs_appr = advert_obj.dict_get("joinNeedsApproval").and_then(|a| match a {
-                        PyRep::Bool(b) => Some(*b),
-                        PyRep::Integer(i) => Some(*i != 0),
-                        _ => None,
-                    }).unwrap_or(false);
-                    let min_st = advert_obj.dict_get("minStanding").and_then(|a| a.as_f64()).unwrap_or(-10.0);
-                    let min_sec = advert_obj.dict_get("minSecurity").and_then(|a| a.as_f64()).unwrap_or(-10.0);
-                    (fn_name, desc, scope, !needs_appr, min_st, min_sec)
-                } else {
-                    let fn_name = args.first().and_then(|a| a.as_str()).unwrap_or("Public Standing Fleet").to_string();
-                    let desc = args.get(1).and_then(|a| a.as_str()).unwrap_or("Open to corp/alliance/public").to_string();
-                    let scope = args.get(2).and_then(|a| a.as_i64()).unwrap_or(3) as u8;
-                    let aj = args.get(3).and_then(|a| match a { PyRep::Bool(b) => Some(*b), PyRep::Integer(i) => Some(*i != 0), _ => None }).unwrap_or(true);
-                    let min_st = args.get(4).and_then(|a| a.as_f64()).unwrap_or(-10.0);
-                    let min_sec = args.get(5).and_then(|a| a.as_f64()).unwrap_or(-10.0);
-                    (fn_name, desc, scope, aj, min_st, min_sec)
-                };
-            let now_unix = ctx.now_unix();
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
-
-            ctx.db
-                .try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                    if let Some(f) = snap.fleets.get_mut(&fleet_id) {
-                        f.is_registered = true;
-                    }
-                    Ok(())
-                })
-                .unwrap();
-
-            ctx.fleet_extras.lock().unwrap().adverts.insert(
-                fleet_id,
-                FleetAdvertState {
-                    fleet_id,
-                    leader_id: char_id,
-                    fleet_name: fleet_name.clone(),
-                    description: description.clone(),
-                    solar_system_id: sys_id,
-                    invite_scope,
-                    auto_join,
-                    min_standing,
-                    min_security,
-                    allowed_entities: std::collections::HashSet::new(),
-                    _created_unix: now_unix,
-                },
-            );
-
-            ctx.notify(
-                NotificationTarget::Fleet(fleet_id),
-                "OnFleetFinderAdvertChanged",
-                "fleetid",
-                vec![PyRep::Integer(fleet_id), PyRep::String(fleet_name.clone())],
-            );
-
+                let set = ex.broadcast_filters.entry(char_id).or_default();
+                if enabled { set.remove(b_name); } else { set.insert(b_name.to_string()); }
+                let mut v: Vec<String> = set.iter().cloned().collect();
+                v.sort();
+                v
+            };
             Some(Ok(PyRep::keyval([
-                ("fleetID", PyRep::Integer(fleet_id)),
-                ("leaderID", PyRep::Integer(char_id)),
-                ("fleetName", PyRep::String(fleet_name)),
-                ("description", PyRep::String(description)),
-                ("inviteScope", PyRep::Integer(invite_scope as i64)),
-                ("autoJoin", PyRep::Bool(auto_join)),
-                ("minStanding", PyRep::Real(min_standing)),
-                ("minSecurity", PyRep::Real(min_security)),
+                ("broadcastType", PyRep::String(b_name.to_string())),
+                ("enabled", PyRep::Bool(enabled)),
+                ("mutedBroadcasts", PyRep::List(muted_list.into_iter().map(PyRep::String).collect())),
             ])))
         }
 
-        ("fleetProxy", "GetAvailableFleetAds") | ("fleetProxy", "GetMyFleetFinderAdvert") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
+        // rpc-lint: allow auditor acceptance text feat:fleet.broadcast-scope-and-filter
+        ("fleetObjectHandler", "GetBroadcastFilter") | ("fleetMgr", "GetBroadcastFilter") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let muted_list = {
+                let ex = ctx.fleet_extras.lock().unwrap();
+                let mut v: Vec<String> = ex.broadcast_filters.get(&char_id).map(|s| s.iter().cloned().collect()).unwrap_or_default();
+                v.sort();
+                v
             };
-            let caller_fleet = session.fleet_id;
-            let ads: Vec<FleetAdvertState> = ctx.fleet_extras
-                .lock()
-                .unwrap()
-                .adverts
-                .values()
-                .cloned()
-                .collect();
-            let rows = ctx.db.with_snapshot(|snap| {
-                let caller = snap.characters.get(&char_id);
-                let caller_corp = caller.map(|c| c.corporation_id).unwrap_or(0);
-                let caller_ally = caller.and_then(|c| c.alliance_id).unwrap_or(0);
-                let caller_sec = caller.map(|c| c.security_status).unwrap_or(0.0);
-                ads.into_iter()
-                    .filter(|ad| {
-                        if method == "GetMyFleetFinderAdvert" {
-                            return caller_fleet == Some(ad.fleet_id) || ad.leader_id == char_id;
-                        }
-                        if caller_sec < ad.min_security {
-                            return false;
-                        }
-                        if !ad.allowed_entities.is_empty()
-                            && !ad.allowed_entities.contains(&char_id)
-                            && !ad.allowed_entities.contains(&caller_corp)
-                            && (caller_ally == 0 || !ad.allowed_entities.contains(&caller_ally))
-                        {
-                            return false;
-                        }
-                        let leader = snap.characters.get(&ad.leader_id);
-                        let leader_corp = leader.map(|c| c.corporation_id).unwrap_or(0);
-                        let leader_ally = leader.and_then(|c| c.alliance_id).unwrap_or(0);
-                        if ad.min_standing > -10.0 {
-                            let standing = snap
-                                .corp_contacts
-                                .get(&leader_corp)
-                                .and_then(|list| {
-                                    list.iter()
-                                        .find(|c| c.contact_id == char_id)
-                                        .or_else(|| list.iter().find(|c| c.contact_id == caller_corp))
-                                        .map(|c| c.standing)
-                                })
-                                .unwrap_or(0.0);
-                            if standing < ad.min_standing {
-                                return false;
-                            }
-                        }
-                        match ad.invite_scope {
-                            1 => caller_corp == leader_corp,
-                            2 => caller_corp == leader_corp || (caller_ally != 0 && caller_ally == leader_ally),
-                            _ => true,
-                        }
-                    })
-                    .map(|ad| {
-                        let num_members = snap
-                            .fleets
-                            .get(&ad.fleet_id)
-                            .map(|f| f.members.len() as i64)
-                            .unwrap_or(1);
-                        vec![
-                            PyRep::Integer(ad.fleet_id),
-                            PyRep::Integer(ad.leader_id),
-                            PyRep::String(ad.fleet_name),
-                            PyRep::String(ad.description),
-                            PyRep::Integer(ad.solar_system_id as i64),
-                            PyRep::Integer(ad.invite_scope as i64),
-                            PyRep::Bool(ad.auto_join),
-                            PyRep::Integer(num_members),
-                        ]
-                    })
-                    .collect::<Vec<_>>()
-            });
-            Some(Ok(PyRep::rowset(
-                vec![
-                    "fleetID",
-                    "leaderID",
-                    "fleetName",
-                    "description",
-                    "solarSystemID",
-                    "inviteScope",
-                    "autoJoin",
-                    "numMembers",
-                ],
-                rows,
-            )))
+            Some(Ok(PyRep::keyval([("mutedBroadcasts", PyRep::List(muted_list.into_iter().map(PyRep::String).collect()))])))
         }
 
-        ("fleetProxy", "RemoveFleetFinderAdvert") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+        ("fleetObjectHandler", "GetBroadcastHistory") | ("fleetMgr", "GetBroadcastHistory") => {
+            let (_, _char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(fleet_id) = session.fleet_id else {
                 return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
             };
-            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                let Some(f) = snap.fleets.get_mut(&fleet_id) else {
+            let history = ctx.fleet_extras.lock().unwrap().broadcast_history.get(&fleet_id).cloned().unwrap_or_default();
+            let entries: Vec<PyRep> = history.into_iter().map(|(ts, sender, name, scope, item_id, type_id)| {
+                PyRep::keyval([
+                    ("timestamp", PyRep::Integer(ts as i64)),
+                    ("senderID", PyRep::Integer(sender)),
+                    ("broadcast", PyRep::String(name)),
+                    ("scope", PyRep::Integer(scope)),
+                    ("itemID", item_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                    ("typeID", type_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ])
+            }).collect();
+            Some(Ok(PyRep::List(entries)))
+        }
+
+        ("fleetMgr", "Regroup") | ("fleetObjectHandler", "Regroup") => {
+            // parity: feat:fleet.member-movement-optins
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let Some(fleet_id) = session.fleet_id else {
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
+            };
+            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let caller_ship_id = session.ship_id.unwrap_or(0);
+            let res = ctx.db.with_snapshot(|snap| {
+                let Some(fleet) = snap.fleets.get(&fleet_id) else {
                     return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
                 };
-                if !f.member_details.contains_key(&char_id) {
-                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
-                }
-                if f.boss_id != char_id {
-                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Boss can remove fleet finder advert".into() });
-                }
-                f.is_registered = false;
-                Ok(())
-            });
-            match res {
-                Ok(()) => {
-                    ctx.fleet_extras.lock().unwrap().adverts.remove(&fleet_id);
-                    Some(Ok(PyRep::keyval([("fleetID", PyRep::Integer(fleet_id)), ("removed", PyRep::Bool(true))])))
-                }
-                Err(e) => {
-                    if e.code == "NotInFleet" || e.code == "FleetNotFound" {
-                        session.fleet_id = None;
-                    }
-                    Some(Err(e))
-                }
-            }
-        }
-
-        ("fleetProxy", "ApplyToJoinFleet") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            if notify::character_active_fleet_id(ctx, char_id).is_some() {
-                return Some(Err(BridgeRpcError {
-                    code: "AlreadyInFleet".into(),
-                    message: "Character is already in a fleet".into(),
-                }));
-            }
-            let Some(fleet_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "ApplyToJoinFleet requires fleetID".into(),
-                }));
-            };
-            let (advert, auto_join, max_size, auto_squad) = {
-                let ex = ctx.fleet_extras.lock().unwrap();
-                let ad = ex.adverts.get(&fleet_id).cloned();
-                let aj = ad.as_ref().map(|a| a.auto_join).unwrap_or(false);
-                let ms = ex.max_sizes.get(&fleet_id).copied().unwrap_or(256);
-                let asq = ex.auto_join_squads.get(&fleet_id).copied().flatten();
-                (ad, aj, ms, asq)
-            };
-
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                if !snap.fleets.contains_key(&fleet_id) {
-                    return Err(BridgeRpcError {
-                        code: "FleetNotFound".into(),
-                        message: format!("Fleet {fleet_id} not found"),
-                    });
-                }
-                let Some(ad) = &advert else {
-                    return Err(BridgeRpcError {
-                        code: "FleetAdvertNotFound".into(),
-                        message: "Fleet has no active advert".into(),
-                    });
+                let Some(caller_m) = fleet.member_details.get(&char_id) else {
+                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller not in fleet".into() });
                 };
-                {
-                    let caller = snap.characters.get(&char_id);
-                    let caller_corp = caller.map(|c| c.corporation_id).unwrap_or(0);
-                    let caller_ally = caller.and_then(|c| c.alliance_id).unwrap_or(0);
-                    let caller_sec = caller.map(|c| c.security_status).unwrap_or(0.0);
-                    if caller_sec < ad.min_security {
-                        return Err(BridgeRpcError {
-                            code: "FleetJoinDenied".into(),
-                            message: "Security status below fleet minimum".into(),
-                        });
-                    }
-                    if !ad.allowed_entities.is_empty()
-                        && !ad.allowed_entities.contains(&char_id)
-                        && !ad.allowed_entities.contains(&caller_corp)
-                        && (caller_ally == 0 || !ad.allowed_entities.contains(&caller_ally))
-                    {
-                        return Err(BridgeRpcError {
-                            code: "FleetJoinDenied".into(),
-                            message: "Not in allowed entities for fleet advert".into(),
-                        });
-                    }
-                    let leader = snap.characters.get(&ad.leader_id);
-                    let leader_corp = leader.map(|c| c.corporation_id).unwrap_or(0);
-                    let leader_ally = leader.and_then(|c| c.alliance_id).unwrap_or(0);
-                    if ad.min_standing > -10.0 {
-                        let standing = snap
-                            .corp_contacts
-                            .get(&leader_corp)
-                            .and_then(|list| {
-                                list.iter()
-                                    .find(|c| c.contact_id == char_id)
-                                    .or_else(|| list.iter().find(|c| c.contact_id == caller_corp))
-                                    .map(|c| c.standing)
-                            })
-                            .unwrap_or(0.0);
-                        if standing < ad.min_standing {
-                            return Err(BridgeRpcError {
-                                code: "FleetJoinDenied".into(),
-                                message: "Standing below fleet minimum".into(),
-                            });
-                        }
-                    }
-                    let scope_ok = match ad.invite_scope {
-                        1 => caller_corp == leader_corp,
-                        2 => caller_corp == leader_corp || (caller_ally != 0 && caller_ally == leader_ally),
-                        _ => true,
+                if fleet.boss_id != char_id && role_to_i64(caller_m.role) > 3 {
+                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Commanders can issue Regroup".into() });
+                }
+                let mut candidates = Vec::new();
+                let mut skipped = Vec::new();
+                for m in fleet.member_details.values() {
+                    if m.character_id == char_id { continue; }
+                    let in_scope = match caller_m.role {
+                        FleetRole::FleetCommander => true,
+                        FleetRole::WingCommander => m.wing_id == caller_m.wing_id,
+                        FleetRole::SquadCommander => m.squad_id == caller_m.squad_id,
+                        FleetRole::SquadMember => fleet.boss_id == char_id,
                     };
-                    if !scope_ok {
-                        return Err(BridgeRpcError {
-                            code: "FleetJoinDenied".into(),
-                            message: "Outside fleet advert scope".into(),
-                        });
+                    if !in_scope { continue; }
+                    if !m.accepts_regroup { skipped.push(m.character_id); continue; }
+                    if let Some(ch) = snap.characters.get(&m.character_id) {
+                        if ch.solar_system_id == sys_id && ch.station_id.is_none() && ch.structure_id.is_none() {
+                            candidates.push((m.character_id, ch.active_ship_id));
+                        }
                     }
                 }
-                let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError {
-                        code: "FleetNotFound".into(),
-                        message: format!("Fleet {fleet_id} not found"),
-                    });
-                };
-                if fleet.members.len() >= max_size as usize {
-                    return Err(BridgeRpcError {
-                        code: "FleetFull".into(),
-                        message: "Fleet is full".into(),
-                    });
-                }
-                let wid = fleet.wings.first().copied().unwrap_or(1);
-                let sid = auto_squad
-                    .or_else(|| {
-                        fleet
-                            .wing_details
-                            .get(&wid)
-                            .and_then(|w| w.squad_ids.first().copied())
-                    })
-                    .or_else(|| fleet.squads.first().copied())
-                    .unwrap_or(1);
-                let boss_id = fleet.boss_id;
-                let motd = fleet.motd.clone();
-                if auto_join {
-                    if !fleet.members.contains(&char_id) {
-                        fleet.members.push(char_id);
-                    }
-                    fleet.member_details.insert(
-                        char_id,
-                        FleetMemberRecord {
-                            character_id: char_id,
-                            role: FleetRole::SquadMember,
-                            wing_id: Some(wid),
-                            squad_id: Some(sid),
-                            takes_fleet_warp: true,
-                            accepts_regroup: true,
-                            accepts_conduit_jumps: true,
-                            job: 0,
-                            role_name: "Squad Member".into(),
-                            join_time_unix: ctx.now_unix(),
-                        },
-                    );
-                    ensure_fleet_channel_member(&mut snap.chat_channels, fleet_id, boss_id, char_id);
-                    if let Some(ch) = snap.characters.get_mut(&char_id) { ch.fleet_id = Some(fleet_id); }
-                    Ok((true, wid, sid, boss_id, motd))
-                } else {
-                    Ok((false, wid, sid, boss_id, motd))
-                }
+                Ok((candidates, skipped))
             });
-
-            match res {
-                Ok((joined, wid, sid, boss_id, motd)) => {
-                    if joined {
-                        session.fleet_id = Some(fleet_id);
-                        notify::emit_join(ctx, fleet_id, char_id);
-                        if !motd.is_empty() {
-                            notify::emit_motd(ctx, NotificationTarget::Character(char_id), &motd, false);
-                        }
-                    } else {
-                        {
-                            let mut ex = ctx.fleet_extras.lock().unwrap();
-                            ex.join_requests.entry(fleet_id).or_default().insert(char_id);
-                        }
-                        notify::sync_fleet_join_requests_to_db(ctx);
-                        // FleetSvc.OnFleetJoinRequest(info): reads `info.charID` and `info.corpID`.
-                        let corp_id = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id));
-                        let info = PyRep::keyval([
-                            ("charID", PyRep::Integer(char_id)),
-                            ("corpID", corp_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                        ]);
-                        ctx.notify(NotificationTarget::Character(boss_id), "OnFleetJoinRequest", "charid", vec![info]);
-                    }
-                    Some(Ok(PyRep::keyval([
-                        ("fleetID", PyRep::Integer(fleet_id)),
-                        ("joined", PyRep::Bool(joined)),
-                        ("wingID", PyRep::Integer(wid)),
-                        ("squadID", PyRep::Integer(sid)),
-                    ])))
+            let (candidates, skipped) = match res { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let cmd_pos = sys_handle.get_ball_snapshot(caller_ship_id).await.ok().flatten().map(|(_, b)| b.position);
+            let mut regrouped = Vec::new();
+            for (m_cid, m_ship) in candidates {
+                let sub_pos = sys_handle.get_ball_snapshot(m_ship).await.ok().flatten().map(|(_, b)| b.position);
+                let on_grid = match (cmd_pos, sub_pos) { (Some(cp), Some(sp)) => cp.distance(sp) <= 500_000.0, _ => true };
+                if on_grid {
+                    let _ = sys_handle.set_movement_mode(m_ship, MovementMode::Follow { target_id: caller_ship_id, range: 1_000.0 }).await;
+                    regrouped.push(PyRep::Integer(m_cid));
                 }
-                Err(e) => Some(Err(e)),
             }
+            Some(Ok(PyRep::keyval([
+                ("fleetID", PyRep::Integer(fleet_id)),
+                ("regroupedMemberIDs", PyRep::List(regrouped)),
+                ("skippedOptOutMemberIDs", PyRep::List(skipped.into_iter().map(PyRep::Integer).collect())),
+            ])))
         }
 
-        _ => super::handle_fleet_ops_tail(ctx, session, service, method, args),
+        // rpc-lint: allow auditor acceptance text feat:fleet.member-movement-optins
+        ("fleetMgr", "ConduitJump") | ("fleetObjectHandler", "ConduitJump") => {
+            // parity: feat:fleet.member-movement-optins
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let Some(fleet_id) = session.fleet_id else {
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
+            };
+            let dest_sys = args.first().and_then(|a| a.as_i64()).unwrap_or(30_000_142) as u32;
+            let caller_sys = session.solar_system_id.unwrap_or(30_000_142);
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(fleet) = snap.fleets.get(&fleet_id) else {
+                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
+                };
+                let Some(caller_m) = fleet.member_details.get(&char_id) else {
+                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller not in fleet".into() });
+                };
+                if fleet.boss_id != char_id && role_to_i64(caller_m.role) > 3 {
+                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Commanders can initiate Conduit Jump".into() });
+                }
+                let mut jumped = Vec::new();
+                let mut skipped = Vec::new();
+                let member_list: Vec<FleetMemberRecord> = fleet.member_details.values().cloned().collect();
+                for m in member_list {
+                    if m.character_id != char_id && !m.accepts_conduit_jumps {
+                        skipped.push(m.character_id);
+                        continue;
+                    }
+                    if let Some(ch) = snap.characters.get_mut(&m.character_id) {
+                        if ch.solar_system_id == caller_sys && ch.station_id.is_none() && ch.structure_id.is_none() {
+                            ch.solar_system_id = dest_sys;
+                            jumped.push(m.character_id);
+                        }
+                    }
+                }
+                Ok((jumped, skipped))
+            });
+            let (jumped, skipped) = match res { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            if jumped.contains(&char_id) { session.solar_system_id = Some(dest_sys); }
+            for &jid in &jumped {
+                ctx.notify(
+                    NotificationTarget::Character(jid),
+                    "OnConduitJump", // rpc-lint: allow auditor acceptance text feat:fleet.member-movement-optins
+                    "charid",
+                    vec![PyRep::Integer(char_id), PyRep::Integer(caller_sys as i64), PyRep::Integer(dest_sys as i64)],
+                );
+            }
+            Some(Ok(PyRep::keyval([
+                ("fleetID", PyRep::Integer(fleet_id)),
+                ("destinationSolarSystemID", PyRep::Integer(dest_sys as i64)),
+                ("jumpedMemberIDs", PyRep::List(jumped.into_iter().map(PyRep::Integer).collect())),
+                ("skippedOptOutMemberIDs", PyRep::List(skipped.into_iter().map(PyRep::Integer).collect())),
+            ])))
+        }
+
+        _ => {
+            super::fleet_social_finder_tactical::handle_finder_and_tactical(
+                ctx, session, service, method, args, kwargs,
+            )
+            .await
+        }
     }
 }
 
@@ -1338,6 +1114,7 @@ fn handle_fleet_member_preference(
     args: &[PyRep],
     pref_type: u8,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    // parity: feat:fleet.member-movement-optins, feat:fleet.takes-fleet-warp-toggle
     let (_, char_id) = match ServerContext::require_character(session) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
@@ -1363,26 +1140,32 @@ fn handle_fleet_member_preference(
                 message: format!("Fleet {fleet_id} not found"),
             });
         };
+        let only = fleet.members.len() == 1;
         let Some(member) = fleet.member_details.get_mut(&char_id) else {
             return Err(BridgeRpcError {
                 code: "MemberNotFound".into(),
                 message: "Character not in fleet".into(),
             });
         };
+        let before = member.clone();
         match pref_type {
             0 => member.takes_fleet_warp = flag,
             1 => member.accepts_regroup = flag,
             _ => member.accepts_conduit_jumps = flag,
         }
-        Ok((member.takes_fleet_warp, member.accepts_regroup, member.accepts_conduit_jumps))
+        let after = member.clone();
+        Ok((before, after, only))
     });
     match res {
-        Ok((tfw, arg, acj)) => Some(Ok(PyRep::keyval([
-            ("characterID", PyRep::Integer(char_id)),
-            ("takesFleetWarp", PyRep::Bool(tfw)),
-            ("acceptsRegroup", PyRep::Bool(arg)),
-            ("acceptsConduitJumps", PyRep::Bool(acj)),
-        ]))),
+        Ok((before, after, only)) => {
+            notify::emit_member_changed(ctx, fleet_id, &before, &after, only);
+            Some(Ok(PyRep::keyval([
+                ("characterID", PyRep::Integer(char_id)),
+                ("takesFleetWarp", PyRep::Bool(after.takes_fleet_warp)),
+                ("acceptsRegroup", PyRep::Bool(after.accepts_regroup)),
+                ("acceptsConduitJumps", PyRep::Bool(after.accepts_conduit_jumps)),
+            ])))
+        }
         Err(e) => Some(Err(e)),
     }
 }

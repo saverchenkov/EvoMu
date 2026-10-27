@@ -348,11 +348,14 @@ async fn test_structure_upwell_asset_safety_and_access_notifications() {
     call(&ctx, &mut s1, "structureAssetSafety", "MoveSafetyWrapToStructure", &[PyRep::Integer(wrap_id), PyRep::Integer(structure_id)]).await;
     assert_eq!(events(&ctx, P1, "OnAssetSafetyDelivered"), vec![vec![PyRep::Integer(P1)]]);
 
-    // 6. Unanchor -> emits OnStructureRemoved, OnStructureRemovedFromSpace, OnHomeStationMovedFromStructure.
+    // 6. Unanchor -> emits OnHomeStationMovedFromStructure immediately, and OnStructureRemoved / OnStructureRemovedFromSpace at completion.
     call(&ctx, &mut s1, "structureDeployment", "Unanchor", &[PyRep::Integer(structure_id)]).await;
+    assert_eq!(events(&ctx, P1, "OnHomeStationMovedFromStructure"), vec![vec![]]);
+    assert!(events(&ctx, P1, "OnStructureRemoved").is_empty());
+    ctx.advance_virtual_clock(7 * 86_400 + 10);
+    call(&ctx, &mut s1, "structureDirectory", "GetStructures", &[]).await;
     assert_eq!(events(&ctx, P1, "OnStructureRemoved"), vec![vec![PyRep::Integer(i64::from(JITA)), PyRep::Integer(structure_id)]]);
     assert_eq!(events(&ctx, P1, "OnStructureRemovedFromSpace"), vec![vec![PyRep::Integer(structure_id)]]);
-    assert_eq!(events(&ctx, P1, "OnHomeStationMovedFromStructure"), vec![vec![]]);
 }
 
 #[tokio::test]
