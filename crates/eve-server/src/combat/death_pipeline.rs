@@ -555,6 +555,10 @@ pub fn execute_death_pipeline_sync(
         death_reason,
     );
 
+    if is_pod {
+        crate::services::map_service::record_solar_system_visit(ctx, victim_char_id, new_sys_id);
+    }
+
     let total_damage = base_price.max(1000.0);
     crate::services::pvp_filament_mgr::record_proving_grounds_combat_result_if_queued(
         ctx,

@@ -649,6 +649,8 @@ async fn test_beyonce_cyno_deployable_and_group_jumps() {
     assert_eq!(sess1.solar_system_id, Some(sys_dest));
     let p2_sys = ctx.db.with_snapshot(|snap| snap.characters.get(&C2).unwrap().solar_system_id);
     assert_eq!(p2_sys, sys_dest, "Passenger must be relocated to sys_dest by conduit jump");
+    let c2_visits = ctx.dispatch_rpc(&mut sess2, "map", None, "GetSolarSystemVisits", &[], &HashMap::new(), None).await.expect("C2 visits");
+    assert!(matches!(c2_visits, PyRep::List(ref l) if l.iter().any(|v| v.dict_get("solarSystemID") == Some(&PyRep::Integer(sys_dest as i64)))), "Passenger visit must be recorded");
     ctx.advance_secs(30);
 
     // 6. Carrier conduit jump to module cyno

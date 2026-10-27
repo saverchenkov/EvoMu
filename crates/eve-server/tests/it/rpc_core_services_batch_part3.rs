@@ -491,10 +491,14 @@ async fn test_rpc_map_svc_part2_batch() {
         .dispatch_rpc(&mut sess, "map", None, "GetSolarSystemVisits", &[], &kw, None)
         .await
         .expect("GetSolarSystemVisits");
-    let visits = as_dict(&res);
+    let PyRep::List(visits) = &res else { panic!("expected List of visits, got {res:?}") };
     assert!(!visits.is_empty());
-    let visit_count = visits[0].1.as_i64().expect("visit count int");
+    let visit_count = visits[0].dict_get("visits").and_then(|v| v.as_i64()).expect("visit count int");
     assert_eq!(visit_count, 1);
+    let last_dt = visits[0].dict_get("lastDateTime").and_then(|v| v.as_i64()).expect("lastDateTime");
+    assert!(last_dt > 0);
+    let sys_id = visits[0].dict_get("solarSystemID").and_then(|v| v.as_i64()).expect("solarSystemID");
+    assert_eq!(sys_id, 30_000_142);
 
     // 7. GetStationCount
     let res = ctx
@@ -564,4 +568,93 @@ async fn test_rpc_map_svc_part2_batch() {
     let PyRep::List(t_list) = res else { panic!("Expected List") };
     assert_eq!(t_list.len(), 28);
     assert!(t_list.contains(&PyRep::Integer(30_003_076)));
+}
+
+#[tokio::test]
+async fn test_map_visited_systems_system_entry_tracking() {
+    // parity: feat:ui.map-visited-systems
+    eve_testkit::attest(&["feat:ui.map-visited-systems"]);
+
+    let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.seed_demo_world_fixtures();
+
+    let mut sess = SessionState::new(102);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let kw = HashMap::new();
+
+    let t0 = ctx.now_blueos_filetime_ticks();
+
+    // 1. Initial logon via SelectCharacterID records initial system visit (Jita 30000142)
+    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(90_000_001)], &kw, None)
+        .await
+        .expect("SelectCharacterID");
+
+    let res = ctx.dispatch_rpc(&mut sess, "map", None, "GetSolarSystemVisits", &[], &kw, None)
+        .await
+        .expect("GetSolarSystemVisits");
+    let PyRep::List(visits) = res else { panic!("expected List") };
+    assert_eq!(visits.len(), 1);
+    let v0 = &visits[0];
+    assert_eq!(v0.dict_get("solarSystemID"), Some(&PyRep::Integer(30_000_142)));
+    assert_eq!(v0.dict_get("visits"), Some(&PyRep::Integer(1)));
+    let dt0 = v0.dict_get("lastDateTime").and_then(|v| v.as_i64()).expect("lastDateTime");
+    assert!(dt0 >= t0);
+
+    // 2. Undock into space and jump stargate 50001248 (Jita -> Perimeter 30000144) via real CmdStargateJump RPC
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None).await.expect("Undock");
+    let ship_id = sess.ship_id.expect("ship_id");
+    let gate_id = 50001248;
+    let gate = &ctx.sde.jumps[&gate_id];
+    let to_sys = gate.to_solar_system_id;
+    let dest_gate_id = gate.destination_stargate_id;
+    let bid_jita = ctx.bind_object(&mut sess, "beyonce", 30_000_142).expect("bind beyonce");
+    let h_jita = ctx.systems.get_or_spawn(30_000_142);
+    let gate_rad = ctx.sde.types.get(&16).map(|t| t.radius).unwrap_or(14_051.0);
+    h_jita.set_ball_position(ship_id, gate.position + DVec3::new(gate_rad + 500.0, 0.0, 0.0)).await;
+    ctx.advance_secs(15);
+
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(bid_jita), "CmdStargateJump", &[PyRep::Integer(gate_id)], &kw, None)
+        .await
+        .expect("CmdStargateJump to Perimeter");
+
+    let res = ctx.dispatch_rpc(&mut sess, "map", None, "GetSolarSystemVisits", &[], &kw, None)
+        .await
+        .expect("GetSolarSystemVisits after gate jump");
+    let PyRep::List(visits) = res else { panic!("expected List") };
+    assert_eq!(visits.len(), 2);
+    let perim = visits.iter().find(|v| v.dict_get("solarSystemID") == Some(&PyRep::Integer(to_sys as i64))).expect("Perimeter visit");
+    assert_eq!(perim.dict_get("visits"), Some(&PyRep::Integer(1)));
+    let dt1 = perim.dict_get("lastDateTime").and_then(|v| v.as_i64()).expect("Perimeter lastDateTime");
+    assert!(dt1 > dt0);
+
+    // 3. Return jump into Jita (30000142) via real CmdStargateJump RPC increments visit count to 2
+    let bid_dest = ctx.bind_object(&mut sess, "beyonce", to_sys as i64).expect("bind dest beyonce");
+    let h_dest = ctx.systems.get_or_spawn(to_sys);
+    let dest_gate = &ctx.sde.jumps[&dest_gate_id];
+    h_dest.set_ball_position(ship_id, dest_gate.position + DVec3::new(gate_rad + 500.0, 0.0, 0.0)).await;
+    ctx.advance_secs(15);
+
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(bid_dest), "CmdStargateJump", &[PyRep::Integer(dest_gate_id)], &kw, None)
+        .await
+        .expect("CmdStargateJump return to Jita");
+
+    let res = ctx.dispatch_rpc(&mut sess, "map", None, "GetSolarSystemVisits", &[], &kw, None)
+        .await
+        .expect("GetSolarSystemVisits after return jump");
+    let PyRep::List(visits) = res else { panic!("expected List") };
+    let jita = visits.iter().find(|v| v.dict_get("solarSystemID") == Some(&PyRep::Integer(30_000_142))).expect("Jita visit");
+    assert_eq!(jita.dict_get("visits"), Some(&PyRep::Integer(2)));
+    let dt2 = jita.dict_get("lastDateTime").and_then(|v| v.as_i64()).expect("Jita lastDateTime updated");
+    assert!(dt2 > dt1);
+
+    // 4. Persistence across service blobs and fresh session reload
+    assert!(ctx.db.with_snapshot(|s| s.service_state_blobs.contains_key("char_system_visits:90000001")));
+    let mut fresh_sess = SessionState::new(103);
+    common::login_pilot(&ctx, &mut fresh_sess, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(&mut fresh_sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(90_000_001)], &kw, None).await.unwrap();
+    let res = ctx.dispatch_rpc(&mut fresh_sess, "map", None, "GetSolarSystemVisits", &[], &kw, None).await.unwrap();
+    let PyRep::List(visits) = res else { panic!("expected List") };
+    assert_eq!(visits.len(), 2);
 }

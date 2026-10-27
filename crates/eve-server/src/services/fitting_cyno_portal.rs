@@ -561,6 +561,7 @@ async fn relocate_caller(
 ) -> Result<(f64, f64, u64), BridgeRpcError> {
     let (cd_min, fat_min) = relocate_ship(ctx, char_id, ship_id, from_sys, to_sys, pos, dist_ly, fatigue_mult).await?;
     session.solar_system_id = Some(to_sys);
+    crate::services::map_service::record_solar_system_visit(ctx, char_id, to_sys);
     let bound = ctx.bind_object(session, "beyonce", to_sys as i64)?;
     Ok((cd_min, fat_min, bound))
 }
@@ -925,6 +926,7 @@ async fn group_jump_to_fleet_beacon(
     for (i, (m_char, m_ship)) in qualified_passengers.iter().enumerate() {
         let offset = DVec3::new(((i + 1) * 100) as f64, 0.0, ((i + 1) * 100) as f64);
         let _ = relocate_ship(ctx, *m_char, *m_ship, sys_id, beacon.solar_system_id, base_dest + offset, dist, 1.0).await;
+        crate::services::map_service::record_solar_system_visit(ctx, *m_char, beacon.solar_system_id);
         ctx.notify(
             crate::router::NotificationTarget::Character(*m_char),
             "OnGroupJumpedPassenger",

@@ -833,6 +833,7 @@ pub async fn handle_wrecks_killmails(
                         session.station_id = ch.station_id;
                         session.structure_id = None;
                         session.solar_system_id = Some(ch.solar_system_id);
+                        crate::services::map_service::record_solar_system_visit(ctx, char_id, ch.solar_system_id);
                     }
                     Some(Ok(PyRep::keyval([
                         ("wreckID", PyRep::Integer(death.wreck_item_id)),

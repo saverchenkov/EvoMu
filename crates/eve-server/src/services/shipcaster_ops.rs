@@ -164,6 +164,7 @@ pub(crate) async fn execute_shipcaster_jump(
     session.region_id = Some(updated_ch.region_id);
     session.station_id = None;
     session.structure_id = None;
+    crate::services::map_service::record_solar_system_visit(ctx, char_id, dest_sys);
 
     let _ = new_handle.push_set_state(ship_id).await;
 
