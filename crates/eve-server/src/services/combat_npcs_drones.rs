@@ -188,10 +188,58 @@ pub async fn execute_wreck_salvage_cycle(
     wreck_id: i64,
     salvager_type_id_opt: Option<u32>,
 ) -> Result<PyRep, BridgeRpcError> {
-    let wreck_type_id = ctx
-        .db
-        .with_snapshot(|snap| snap.items.get(&wreck_id).map(|i| i.type_id))
-        .unwrap_or(26557);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let wreck_ball_opt = sys_handle.get_ball_snapshot(wreck_id).await.ok().flatten().map(|(_, b)| b);
+    let wreck_type_id = ctx.db.with_snapshot(|snap| {
+        let Some(it) = snap.items.get(&wreck_id) else {
+            return Err(BridgeRpcError {
+                code: "TargetNotInSpace".into(),
+                message: format!("Target wreck {wreck_id} does not exist"),
+            });
+        };
+        if it.location_id != sys_id as i64 {
+            return Err(BridgeRpcError {
+                code: "TargetNotInSpace".into(),
+                message: format!("Target {wreck_id} is not in solar system {sys_id}"),
+            });
+        }
+        let is_wreck = it.type_id == 26468
+            || ctx
+                .sde
+                .types
+                .get(&it.type_id)
+                .is_some_and(|t| t.group_id == 186);
+        if !is_wreck {
+            return Err(BridgeRpcError {
+                code: "InvalidSalvageTarget".into(),
+                message: format!("Target {wreck_id} (type {}) is not a salvageable wreck", it.type_id),
+            });
+        }
+        Ok(it.type_id)
+    })?;
+
+    if salvager_type_id_opt.is_none() {
+        let Some(ref wb) = wreck_ball_opt else {
+            return Err(BridgeRpcError {
+                code: "TargetNotInSpace".into(),
+                message: format!("Target wreck {wreck_id} is not in space in solar system {sys_id}"),
+            });
+        };
+        if let Some((_, sb)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() {
+            let max_drone_range =
+                super::compute_drone_control_range(ctx, char_id, ship_id).max(60_000.0);
+            let dist = sb.position.distance(wb.position);
+            if dist > max_drone_range {
+                return Err(BridgeRpcError {
+                    code: "TargetOutOfRange".into(),
+                    message: format!(
+                        "Wreck {wreck_id} is {dist:.1} m away (exceeds salvage drone range {max_drone_range:.1} m)"
+                    ),
+                });
+            }
+        }
+    }
+
     let wreck_difficulty_bonus = ctx
         .sde
         .types
@@ -270,9 +318,49 @@ pub async fn execute_wreck_salvage_cycle(
     };
 
     let yielded_type_ids: Vec<u32> = salvage_table.iter().map(|&(t, _)| t).collect();
-    ctx.db.with_mut_snapshot(|snap| {
-        // Transfer any surviving cargo inside the wreck or remove the wreck entity
+    let wreck_pos = wreck_ball_opt
+        .as_ref()
+        .map(|b| [b.position.x, b.position.y, b.position.z])
+        .or_else(|| ctx.db.with_snapshot(|s| s.item_positions.get(&wreck_id).copied()))
+        .unwrap_or([0.0, 0.0, 0.0]);
+    let spawned_can_id = ctx.db.with_mut_snapshot(|snap| {
+        let wreck_owner = snap.items.get(&wreck_id).map(|i| i.owner_id).unwrap_or(char_id);
+        let child_ids: Vec<i64> = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == wreck_id)
+            .map(|i| i.item_id)
+            .collect();
+        let can_id_opt = if !child_ids.is_empty() {
+            snap.next_entity_id += 1;
+            let can_id = snap.next_entity_id;
+            snap.items.insert(
+                can_id,
+                InventoryItemRecord {
+                    item_id: can_id,
+                    type_id: 23,
+                    owner_id: wreck_owner,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.item_positions.insert(can_id, wreck_pos);
+            for cid in child_ids {
+                if let Some(child) = snap.items.get_mut(&cid) {
+                    child.location_id = can_id;
+                    child.version += 1;
+                }
+            }
+            Some(can_id)
+        } else {
+            None
+        };
         snap.items.remove(&wreck_id);
+        snap.item_positions.remove(&wreck_id);
         for &(tid, qty) in salvage_table {
             snap.next_entity_id += 1;
             let iid = snap.next_entity_id;
@@ -295,11 +383,27 @@ pub async fn execute_wreck_salvage_cycle(
                 },
             );
         }
+        can_id_opt
     });
+    if let Some(can_id) = spawned_can_id {
+        let _ = sys_handle
+            .spawn_ball(Ball {
+                id: can_id,
+                type_id: 23,
+                position: DVec3::from_array(wreck_pos),
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 1_000.0,
+                radius: 20.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await;
+    }
     with_mut_combat_runtime(ctx, |rt| {
         rt.container_lifetimes.remove(&wreck_id);
     });
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let _ = sys_handle.remove_ball(wreck_id).await;
 
     Ok(PyRep::keyval([
@@ -475,6 +579,12 @@ pub async fn handle_npcs_drones(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "CantLaunchDronesWhileDocked".into(),
+                    message: "Cannot launch drones while docked".into(),
+                }));
+            }
             let Some(ship_id) = session.ship_id.or_else(|| {
                 ctx.db
                     .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id))
@@ -490,13 +600,15 @@ pub async fn handle_npcs_drones(
             if let Err(e) = crate::services::tourney_service::check_tourney_drone_restricted(ctx, sys_id, char_id) {
                 return Some(Err(e));
             }
-            let drone_ids: Vec<i64> = match args.first() {
+            let mut drone_ids: Vec<i64> = match args.first() {
                 Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
                     items.iter().filter_map(|it| it.as_i64()).collect()
                 }
                 Some(PyRep::Integer(id)) => vec![*id],
                 _ => Vec::new(),
             };
+            let mut seen_drones = std::collections::HashSet::new();
+            drone_ids.retain(|id| seen_drones.insert(*id));
 
             let mut ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
             let snap_type_id = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).map(|s| s.type_id)).unwrap_or(0);
@@ -533,10 +645,19 @@ pub async fn handle_npcs_drones(
                             message: format!("Drone item {did} not found"),
                         });
                     };
-                    if it.owner_id != char_id || it.location_id != ship_id {
+                    if it.owner_id != char_id
+                        || it.location_id != ship_id
+                        || it.flag != InventoryFlag::DroneBay
+                    {
                         return Err(BridgeRpcError {
                             code: "DroneNotInBay".into(),
                             message: format!("Drone {did} is not in ship {ship_id}'s drone bay"),
+                        });
+                    }
+                    if !ctx.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 18) {
+                        return Err(BridgeRpcError {
+                            code: "NotADrone".into(),
+                            message: format!("Item {did} (type {}) is not a drone", it.type_id),
                         });
                     }
                     recs.push(it);
@@ -612,18 +733,38 @@ pub async fn handle_npcs_drones(
                 };
 
                 let d_pos = ship_pos + DVec3::new(((idx as f64) * 50.0).cos() * 40.0, 0.0, ((idx as f64) * 50.0).sin() * 40.0);
-                let ball_id = ctx.db.with_mut_snapshot(|snap| {
+                let (ball_id, launched_drone_item_id) = ctx.db.with_mut_snapshot(|snap| {
                     snap.next_entity_id += 1;
                     let bid = snap.next_entity_id;
-                    if let Some(it) = snap.items.get_mut(&rec.item_id) {
-                        it.location_id = sys_id as i64;
-                        it.flag = InventoryFlag::None;
-                        it.version += 1;
-                    }
-                    crate::sp6_lifecycle::record_drone_ball_meta_in_snap(snap, rec.item_id, bid);
-                    snap.item_positions.insert(rec.item_id, [d_pos.x, d_pos.y, d_pos.z]);
+                    let actual_item_id = if let Some(it) = snap.items.get_mut(&rec.item_id) {
+                        if it.quantity > 1 {
+                            it.quantity -= 1;
+                            it.version += 1;
+                            let mut split_rec = it.clone();
+                            snap.next_entity_id += 1;
+                            let split_id = snap.next_entity_id;
+                            split_rec.item_id = split_id;
+                            split_rec.location_id = sys_id as i64;
+                            split_rec.flag = InventoryFlag::None;
+                            split_rec.quantity = 1;
+                            split_rec.singleton = true;
+                            split_rec.version = 1;
+                            snap.items.insert(split_id, split_rec);
+                            split_id
+                        } else {
+                            it.location_id = sys_id as i64;
+                            it.flag = InventoryFlag::None;
+                            it.singleton = true;
+                            it.version += 1;
+                            rec.item_id
+                        }
+                    } else {
+                        rec.item_id
+                    };
+                    crate::sp6_lifecycle::record_drone_ball_meta_in_snap(snap, actual_item_id, bid);
+                    snap.item_positions.insert(actual_item_id, [d_pos.x, d_pos.y, d_pos.z]);
                     snap.item_positions.insert(bid, [d_pos.x, d_pos.y, d_pos.z]);
-                    bid
+                    (bid, actual_item_id)
                 });
                 let mut cs = ctx.build_type_combat_state(rec.type_id);
                 if let Some(&mut_hp) = rec.dynamic_attributes.get(&9) {
@@ -664,7 +805,7 @@ pub async fn handle_npcs_drones(
 
                 let st = DroneSpaceState {
                     ball_id,
-                    drone_item_id: rec.item_id,
+                    drone_item_id: launched_drone_item_id,
                     type_id: rec.type_id,
                     group_id: sde_t.map(|t| t.group_id).unwrap_or(100),
                     owner_char_id: char_id,
@@ -697,7 +838,7 @@ pub async fn handle_npcs_drones(
                     rt.active_drones_in_space.insert(ball_id, st);
                 });
                 let notif_args = vec![
-                    PyRep::Integer(rec.item_id),
+                    PyRep::Integer(launched_drone_item_id),
                     PyRep::Integer(char_id),
                     PyRep::Integer(ship_id),
                     PyRep::Integer(0),
@@ -1132,6 +1273,70 @@ pub async fn handle_npcs_drones(
             } else {
                 return Some(Err(BridgeRpcError { code: "DroneNotFound".into(), message: format!("Drone ball {drone_ball_id} is not a scoopable drone") }));
             };
+            if let Err(e) = ctx.db.with_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                let Some(it) = snap.items.get(&drone_item_id) else {
+                    return Err(BridgeRpcError {
+                        code: "DroneNotFound".into(),
+                        message: format!("Drone item {drone_item_id} not found"),
+                    });
+                };
+                let Some(t) = ctx.sde.types.get(&it.type_id) else {
+                    return Err(BridgeRpcError {
+                        code: "NotADrone".into(),
+                        message: format!("Item {drone_item_id} has unknown type {}", it.type_id),
+                    });
+                };
+                if t.category_id != 18 {
+                    return Err(BridgeRpcError {
+                        code: "NotADrone".into(),
+                        message: format!("Item {drone_item_id} (type {}) is not a drone", it.type_id),
+                    });
+                }
+                let is_abandoned_meta = snap
+                    .sp6_lifecycle
+                    .space_object_meta
+                    .get(&it.item_id)
+                    .is_some_and(|m| m.drone_ball_id.is_some());
+                if it.owner_id != char_id && it.owner_id != 0 && !is_abandoned_meta {
+                    return Err(BridgeRpcError {
+                        code: "DroneOwnedByOther".into(),
+                        message: "Cannot scoop a drone owned by another pilot".into(),
+                    });
+                }
+                let ship_drone_cap = snap
+                    .items
+                    .get(&ship_id)
+                    .and_then(|sh| ctx.sde.types.get(&sh.type_id))
+                    .and_then(|st| st.default_attributes.get(&283).copied())
+                    .unwrap_or(0.0);
+                if ship_drone_cap > 0.0 {
+                    let used_vol: f64 = snap
+                        .items
+                        .values()
+                        .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::DroneBay)
+                        .map(|i| {
+                            ctx.sde
+                                .types
+                                .get(&i.type_id)
+                                .map(|dt| dt.volume * (i.quantity.max(1) as f64))
+                                .unwrap_or(0.0)
+                        })
+                        .sum();
+                    let incoming_vol = t.volume * (it.quantity.max(1) as f64);
+                    if used_vol + incoming_vol > ship_drone_cap + 1e-4 {
+                        return Err(BridgeRpcError {
+                            code: "InsufficientDroneBayCapacity".into(),
+                            message: format!(
+                                "Drone bay capacity exceeded ({:.1} + {:.1} > {:.1} m3)",
+                                used_vol, incoming_vol, ship_drone_cap
+                            ),
+                        });
+                    }
+                }
+                Ok(())
+            }) {
+                return Some(Err(e));
+            }
             with_mut_combat_runtime(ctx, |rt| { rt.active_drones_in_space.remove(&drone_ball_id); });
             let _ = sys_handle.remove_ball(drone_ball_id).await;
             ctx.db.with_mut_snapshot(|snap| {

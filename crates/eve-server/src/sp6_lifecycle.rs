@@ -303,6 +303,64 @@ pub fn require_no_pvp_timer_for_filament(
     Ok(())
 }
 
+/// Validates all space/combat/tackle pre-conditions before activating an Abyssal, Void, or Proving Grounds filament (`#76`).
+pub fn require_ship_ready_for_filament_jump(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+) -> Result<(), BridgeRpcError> {
+    let now_unix = ctx.now_unix();
+    require_no_pvp_timer_for_filament(ctx, char_id)?;
+    let (weap_until, _npc_until, _, _) = active_timers_for_char(ctx, char_id, now_unix);
+    if weap_until > now_unix {
+        return Err(BridgeRpcError {
+            code: "WeaponsTimerActive".into(),
+            message: "Cannot activate filament while a Weapons Timer is active".into(),
+        });
+    }
+    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "activate filament")?;
+    if let Some(active_timer) =
+        crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None)
+    {
+        if !matches!(active_timer.reason.as_str(), "login" | "undock") {
+            return Err(BridgeRpcError {
+                code: "SessionChangeInProgress".into(),
+                message: format!(
+                    "Cannot activate filament while 10s session-change timer ({}) is active",
+                    active_timer.reason
+                ),
+            });
+        }
+    }
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    if sys_handle.is_ball_scrambled_sync(ship_id) {
+        return Err(BridgeRpcError {
+            code: "WarpScrambled".into(),
+            message: "Cannot activate filament while warp scrambled or disrupted".into(),
+        });
+    }
+    if let Ok(bp) = sys_handle.ballpark.read() {
+        if let Some(ball) = bp.balls.get(&ship_id) {
+            if matches!(ball.mode, MovementMode::Warp { .. }) {
+                return Err(BridgeRpcError {
+                    code: "ShipInWarp".into(),
+                    message: "Cannot activate filament while ship is mid-warp".into(),
+                });
+            }
+        }
+        if let Some(cs) = bp.combat_states.get(&ship_id) {
+            if cs.warp_scramble_strength > 0 {
+                return Err(BridgeRpcError {
+                    code: "WarpScrambled".into(),
+                    message: "Cannot activate filament while warp scrambled".into(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Records capsuleer-vs-capsuleer aggression, starting/refreshing the 15-minute (`900s`) PvP log-off timer
 /// on both attacker and victim, aborting any active safe-logoff countdown, and renewing the victim's
 /// in-space removal timer to `now + 900s` if the victim is already disconnected (`feat:crimewatch.pvp-logoff-timer-renewal`).
@@ -378,7 +436,19 @@ pub fn safe_logoff_blocking_space_conditions(
     sys_id: u32,
 ) -> Vec<&'static str> {
     let mut conds = Vec::new();
-    let has_active_mods = ctx.systems.has_active_modules_or_cloak_sync(sys_id, ship_id)
+    let has_persisted_active_mods = ctx.db.with_snapshot(|snap| {
+        snap.module_active_states.iter().any(|&mid| {
+            snap.items
+                .get(&mid)
+                .is_some_and(|i| i.location_id == ship_id)
+        })
+    });
+    let has_nav_lock =
+        crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "safe logoff")
+            .is_err();
+    let has_active_mods = has_persisted_active_mods
+        || has_nav_lock
+        || ctx.systems.has_active_modules_or_cloak_sync(sys_id, ship_id)
         || ctx.mining_cycles.read().is_ok_and(|mc| {
             mc.values()
                 .any(|c| c.ship_id == ship_id || c.char_id == char_id)
@@ -395,6 +465,20 @@ pub fn safe_logoff_blocking_space_conditions(
         });
     if has_active_mods {
         conds.push("SAFE_LOGOFF_ACTIVE_MODULES");
+    }
+
+    let in_warp = ctx
+        .systems
+        .get_or_spawn(sys_id)
+        .ballpark
+        .read()
+        .is_ok_and(|bp| {
+            bp.balls
+                .get(&ship_id)
+                .is_some_and(|b| matches!(b.mode, MovementMode::Warp { .. }))
+        });
+    if in_warp {
+        conds.push("SAFE_LOGOFF_IN_WARP");
     }
 
     let has_drones_or_fighters = with_combat_runtime(ctx, |rt| {
@@ -504,6 +588,11 @@ pub async fn handle_safe_logoff(
     }
 
     let complete_at_unix = now_unix.saturating_add(SAFE_LOGOFF_COUNTDOWN_SECS);
+    if ship_id > 0 && session.station_id.is_none() && session.structure_id.is_none() {
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        let _ = sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await;
+        let _ = sys_handle.set_speed_fraction(ship_id, 0.0).await;
+    }
     with_mut_sp6_state(&ctx.db, |st, _snap| {
         st.disconnected_ships.remove(&char_id);
         st.safe_logoffs.insert(

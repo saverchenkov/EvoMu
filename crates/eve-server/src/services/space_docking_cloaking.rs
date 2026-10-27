@@ -581,6 +581,12 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             wh_age,
             is_collapsed,
         )) => {
+            crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
+                ctx, char_id, ship_id, old_sys,
+            );
+            crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(
+                ctx, char_id, ship_id,
+            );
             let _ = old_handle.remove_ball(ship_id).await;
             let updated_ch = match ctx
                 .db

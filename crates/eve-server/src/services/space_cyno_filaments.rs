@@ -237,6 +237,7 @@ async fn handle_wormhole_jump(
         Ok((dest_sys, sig_pos))
     })?;
 
+    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, old_sys);
     let existing_ball = old_handle.remove_ball(ship_id).await;
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let updated_ch = ctx
@@ -256,8 +257,17 @@ async fn handle_wormhole_jump(
     new_ball.velocity = DVec3::ZERO;
     new_ball.speed_fraction = 0.0;
     new_ball.mode = MovementMode::Stop;
-    let combat_state = ctx.build_ship_combat_state(char_id, ship_id, new_ball.type_id);
-    let dest_tick = new_handle.spawn_ball_with_combat(new_ball, combat_state).await.unwrap_or(0);
+    let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, new_ball.type_id);
+    combat_state.is_cloaked = true;
+    combat_state.gate_cloak_remaining_ticks = 60;
+    combat_state.undock_invulnerable_remaining_ticks = 60;
+    combat_state.sync_invuln_with_undock_timer = true;
+    let mut slim_meta = ctx.build_ship_slim_meta(char_id, new_ball.type_id);
+    slim_meta.is_cloaked = true;
+    let dest_tick = new_handle
+        .spawn_ball_with_meta(new_ball, combat_state, slim_meta)
+        .await
+        .unwrap_or(0);
     let now_unix = ctx.now_unix();
     crate::services::space_destiny::record_session_change_timer(
         ctx,
@@ -445,7 +455,7 @@ async fn handle_random_jump_filament(
     let Some(ship_id) = session.ship_id else {
         return Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into() });
     };
-    crate::sp6_lifecycle::require_no_pvp_timer_for_filament(ctx, char_id)?;
+    crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, old_sys)?;
 
     let old_handle = ctx.systems.get_or_spawn(old_sys);
     let Some((cur_tick, mut current_ball)) = (match old_handle.get_ball_snapshot(ship_id).await {
@@ -592,11 +602,11 @@ async fn handle_random_jump_filament(
         }
         Ok::<(), BridgeRpcError>(())
     })?;
-
     let (old_const, old_reg) = ctx.sde.solar_systems.get(&old_sys).map(|s| (s.constellation_id, s.region_id)).unwrap_or((0, 0));
     let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
     let pvp_until = now_unix.saturating_add(crate::sp6_lifecycle::PVP_TIMER_SECS);
     for (j_idx, (p_char, p_ship, mut b)) in jumpers.into_iter().enumerate() {
+        crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, p_char, p_ship, old_sys);
         let _ = old_handle.remove_ball(p_ship).await;
         crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, p_char, p_ship);
         ctx.sync_character_local_chat(p_char, Some(old_sys), dest_sys_id);
@@ -606,9 +616,25 @@ async fn handle_random_jump_filament(
         b.velocity = DVec3::ZERO;
         b.speed_fraction = 0.0;
         b.mode = MovementMode::Stop;
-        let combat_state = ctx.build_ship_combat_state(p_char, p_ship, b.type_id);
-        let dest_tick = new_handle.spawn_ball_with_combat(b, combat_state).await.unwrap_or(0);
-        crate::services::space_destiny::record_session_change_timer(ctx, p_char, now_unix, dest_sys_id, dest_tick, "filamentJump");
+        let mut combat_state = ctx.build_ship_combat_state(p_char, p_ship, b.type_id);
+        combat_state.is_cloaked = true;
+        combat_state.gate_cloak_remaining_ticks = 60;
+        combat_state.undock_invulnerable_remaining_ticks = 60;
+        combat_state.sync_invuln_with_undock_timer = true;
+        let mut slim_meta = ctx.build_ship_slim_meta(p_char, b.type_id);
+        slim_meta.is_cloaked = true;
+        let dest_tick = new_handle
+            .spawn_ball_with_meta(b, combat_state, slim_meta)
+            .await
+            .unwrap_or(0);
+        crate::services::space_destiny::record_session_change_timer(
+            ctx,
+            p_char,
+            now_unix,
+            dest_sys_id,
+            dest_tick,
+            "filamentJump",
+        );
         {
             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
             let pilot_cw = cw.get_or_create(p_char);

@@ -76,6 +76,8 @@ pub struct PvpFilamentStore {
     #[serde(default)]
     pub active_matches: HashMap<i64, PvpArenaMatchInstance>,
     #[serde(default)]
+    pub origin_positions: HashMap<i64, [f64; 3]>,
+    #[serde(default)]
     pub next_match_id: i64,
 }
 
@@ -458,9 +460,26 @@ pub async fn handle(
                     message: "Cannot activate filament while docked in a station or structure".into(),
                 }));
             }
-            if let Err(e) = crate::sp6_lifecycle::require_no_pvp_timer_for_filament(ctx, char_id) {
+            let cur_sys_for_check = session.solar_system_id.unwrap_or(30_000_142);
+            let cur_ship_for_check = session.ship_id.unwrap_or(0);
+            if let Err(e) = crate::sp6_lifecycle::require_ship_ready_for_filament_jump(
+                ctx,
+                char_id,
+                cur_ship_for_check,
+                cur_sys_for_check,
+            ) {
                 return Some(Err(e));
             }
+            let caller_origin_pos = ctx
+                .systems
+                .get_or_spawn(cur_sys_for_check)
+                .get_ball_position_sync(cur_ship_for_check)
+                .map(|p| [p.x, p.y, p.z])
+                .or_else(|| {
+                    ctx.db
+                        .with_snapshot(|s| s.item_positions.get(&cur_ship_for_check).copied())
+                })
+                .unwrap_or([0.0, 0.0, 0.0]);
             let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let type_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
 
@@ -571,10 +590,31 @@ pub async fn handle(
                         if cid == char_id || qe.type_id != it_type_id {
                             return false;
                         }
-                        snap.characters.get(&cid).map(|c| c.station_id.is_none() && c.structure_id.is_none() && c.active_ship_id > 0).unwrap_or(false)
+                        let Some(opp_ch) = snap.characters.get(&cid) else {
+                            return false;
+                        };
+                        if opp_ch.station_id.is_some()
+                            || opp_ch.structure_id.is_some()
+                            || opp_ch.active_ship_id <= 0
+                        {
+                            return false;
+                        }
+                        let opp_sys_id = if qe.solar_system_id > 0 {
+                            qe.solar_system_id
+                        } else {
+                            opp_ch.solar_system_id
+                        };
+                        crate::sp6_lifecycle::require_ship_ready_for_filament_jump(
+                            ctx,
+                            cid,
+                            opp_ch.active_ship_id,
+                            opp_sys_id,
+                        )
+                        .is_ok()
                     })
                     .map(|(&cid, qe)| (cid, qe.solar_system_id, qe.location_id));
 
+                store.origin_positions.insert(char_id, caller_origin_pos);
                 let match_data = if let Some((opp_id, opp_sys, opp_loc)) = matched_opponent {
                     store.queue.remove(&opp_id);
                     store.next_match_id += 1;
@@ -953,6 +993,11 @@ pub async fn handle(
                 let mut store = load_pvp_store(snap);
                 store.queue.remove(&char_id);
                 let mut matched_entry = None;
+                let opos = store
+                    .origin_positions
+                    .get(&char_id)
+                    .copied()
+                    .unwrap_or([0.0, 0.0, 0.0]);
                 for m in store.active_matches.values_mut() {
                     if m.match_id == mid && !m.exited_pilots.contains(&char_id) {
                         let osys = m.origin_systems.get(&char_id).copied().unwrap_or(30000142);
@@ -961,11 +1006,11 @@ pub async fn handle(
                         if all_exited {
                             m.active = false;
                         }
-                        matched_entry = Some((m.match_id, osys));
+                        matched_entry = Some((m.match_id, osys, opos));
                         break;
                     }
                 }
-                let Some((mid, osys)) = matched_entry else {
+                let Some((mid, osys, opos)) = matched_entry else {
                     save_pvp_store(snap, &store);
                     return None;
                 };
@@ -973,11 +1018,14 @@ pub async fn handle(
                 if let Some(c) = snap.characters.get_mut(&char_id) {
                     c.solar_system_id = osys;
                 }
+                if let Some(sid) = active_ship_id {
+                    snap.item_positions.insert(sid, opos);
+                }
                 save_pvp_store(snap, &store);
-                Some((mid, osys, active_ship_id))
+                Some((mid, osys, opos, active_ship_id))
             });
 
-            let Some((_mid, osys, active_ship_id)) = match_info else {
+            let Some((_mid, osys, opos, active_ship_id)) = match_info else {
                 return Some(Err(BridgeRpcError::user_error("NoActiveMatch")));
             };
 
@@ -997,7 +1045,7 @@ pub async fn handle(
             let ball = Ball {
                 id: cur_ship,
                 type_id: ship_type,
-                position: DVec3::ZERO,
+                position: DVec3::from_array(opos),
                 velocity: DVec3::ZERO,
                 max_velocity: max_vel,
                 inertia,
