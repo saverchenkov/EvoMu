@@ -628,32 +628,58 @@ pub(super) fn handle_corp_gov(
                     code: "InsufficientDivisionFunds".into(),
                     message: "Insufficient corporation wallet funds for dividend payout".into(),
                 })?;
-                corp.wallet_divisions[dpos].balance = new_bal;
-                if div_id == 1 {
-                    corp.master_wallet = new_bal;
-                }
                 let member_ids: Vec<i64> = corp.members.iter().copied().collect();
 
                 let recipients: Vec<(i64, i64)> = if to_shareholders {
                     let state = snap.corp_governance.entry(corp_id).or_default();
-                    let shares_snapshot = state.shares.clone();
-                    let total_shares: i64 = shares_snapshot.values().sum::<i64>().max(1);
+                    let shares_snapshot: Vec<(i64, i64)> = state
+                        .shares
+                        .iter()
+                        .filter(|(&oid, &s)| oid != corp_id && s > 0)
+                        .map(|(&oid, &s)| (oid, s))
+                        .collect();
+                    let total_shares: i64 = shares_snapshot.iter().map(|(_, s)| *s).sum();
+                    if total_shares <= 0 {
+                        return Err(BridgeRpcError {
+                            code: "NoIssuedShares".into(),
+                            message: "Corporation has no issued non-treasury shares to receive a dividend".into(),
+                        });
+                    }
                     shares_snapshot
                         .into_iter()
-                        .filter(|(_, s)| *s > 0)
-                        .map(|(oid, s)| (oid, (payout_cents.0 * s) / total_shares))
+                        .map(|(oid, s)| {
+                            let share_cents = ((i128::from(payout_cents.0) * i128::from(s))
+                                / i128::from(total_shares)) as i64;
+                            (oid, share_cents)
+                        })
                         .collect()
                 } else {
-                    let mcount = (member_ids.len() as i64).max(1);
+                    if member_ids.is_empty() {
+                        return Err(BridgeRpcError {
+                            code: "NoCorporationMembers".into(),
+                            message: "Corporation has no members to receive a dividend".into(),
+                        });
+                    }
+                    let mcount = member_ids.len() as i64;
                     member_ids
                         .into_iter()
                         .map(|mid| (mid, payout_cents.0 / mcount))
                         .collect()
                 };
 
+                if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+                    corp.wallet_divisions[dpos].balance = new_bal;
+                    if div_id == 1 {
+                        corp.master_wallet = new_bal;
+                    }
+                }
+
                 for &(rid, cents) in &recipients {
+                    if cents <= 0 {
+                        continue;
+                    }
                     if let Some(ch) = snap.characters.get_mut(&rid) {
-                        ch.balance = IskCents(ch.balance.0 + cents);
+                        ch.balance = ch.balance.checked_add(IskCents(cents)).unwrap_or(ch.balance);
                         let new_ch_bal = ch.balance;
                         snap.next_entity_id += 1;
                         let jid = snap.next_entity_id;
@@ -663,6 +689,24 @@ pub(super) fn handle_corp_gov(
                             entry_type: "CorporationDividendPayment".into(),
                             amount: IskCents(cents),
                             balance_after: new_ch_bal,
+                            reason: format!("Dividend payout from corporation {corp_id}"),
+                        });
+                    } else if let Some(sh_corp) = snap.corporations.get_mut(&rid) {
+                        sh_corp.ensure_wallet_divisions();
+                        sh_corp.master_wallet = sh_corp
+                            .master_wallet
+                            .checked_add(IskCents(cents))
+                            .unwrap_or(sh_corp.master_wallet);
+                        sh_corp.wallet_divisions[0].balance = sh_corp.master_wallet;
+                        let new_corp_bal = sh_corp.master_wallet;
+                        snap.next_entity_id += 1;
+                        let jid = snap.next_entity_id;
+                        snap.wallet_journal.push(WalletJournalEntry {
+                            entry_id: jid,
+                            character_id: rid,
+                            entry_type: "CorporationDividendPayment".into(),
+                            amount: IskCents(cents),
+                            balance_after: new_corp_bal,
                             reason: format!("Dividend payout from corporation {corp_id}"),
                         });
                     }
@@ -818,6 +862,14 @@ pub(super) fn handle_corp_gov(
                 }
                 if now_unix > vc.end_ts { return Err(BridgeRpcError { code: "VoteCaseClosed".into(), message: "Voting period has closed for this case".into() }); }
                 let vc_corp = vc.corporation_id;
+                let has_any_corp_shares = snap
+                    .corp_shareholders
+                    .get(&vc_corp)
+                    .is_some_and(|shs| shs.iter().any(|s| s.share_count > 0))
+                    || snap
+                        .corp_governance
+                        .get(&vc_corp)
+                        .is_some_and(|g| g.shares.values().any(|&s| s > 0));
                 let sh_weight = snap
                     .corp_shareholders
                     .get(&vc_corp)
@@ -827,17 +879,17 @@ pub(super) fn handle_corp_gov(
                             .get(&vc_corp)
                             .and_then(|g| g.shares.get(&char_id).copied())
                     });
-                let is_ceo_or_member = snap
+                let is_ceo = snap
                     .corporations
                     .get(&vc_corp)
-                    .is_some_and(|c| c.ceo_id == char_id || c.members.contains(&char_id));
+                    .is_some_and(|c| c.ceo_id == char_id);
                 let w = match sh_weight {
                     Some(s) if s > 0 => s,
-                    _ if is_ceo_or_member => 1,
+                    None if !has_any_corp_shares && is_ceo => 1,
                     _ => {
                         return Err(BridgeRpcError {
                             code: "CorpAccessDenied".into(),
-                            message: "Only corporation shareholders or members may vote".into(),
+                            message: "Only corporation shareholders with > 0 shares may vote".into(),
                         });
                     }
                 };
@@ -885,22 +937,28 @@ pub(super) fn handle_corp_gov(
                 };
                 if !passed { return Err(BridgeRpcError { code: "VoteDidNotPass".into(), message: "Sanctioned action did not pass shareholder vote".into() }); }
                 let vc = snap.corp_vote_cases.get_mut(&case_id).unwrap();
+                if vc.vote_type == 5 && win_param <= 0 {
+                    return Err(BridgeRpcError {
+                        code: "InvalidShareCount".into(),
+                        message: "Sanctioned share creation requires a positive share count".into(),
+                    });
+                }
                 vc.executed = true;
                 vc.parameter = win_param;
                 if vc.vote_type == 5 {
                     let state = snap.corp_governance.entry(corp_id).or_default();
-                    state.company_shares += vc.parameter;
-                    let entry = state.shares.entry(char_id).or_insert(0);
+                    state.company_shares = state.company_shares.saturating_add(vc.parameter);
+                    let entry = state.shares.entry(corp_id).or_insert(0);
                     let old_s = *entry;
-                    *entry += vc.parameter;
+                    *entry = entry.saturating_add(vc.parameter);
                     share_delta = Some((old_s, *entry));
                     let shareholders = snap.corp_shareholders.entry(corp_id).or_default();
-                    if let Some(sh) = shareholders.iter_mut().find(|s| s.shareholder_id == char_id) {
-                        sh.share_count += vc.parameter;
+                    if let Some(sh) = shareholders.iter_mut().find(|s| s.shareholder_id == corp_id) {
+                        sh.share_count = sh.share_count.saturating_add(vc.parameter);
                     } else {
                         shareholders.push(eve_db::snapshot_ext::CorpShareholderEntry {
-                            shareholder_id: char_id,
-                            shareholder_type: "character".into(),
+                            shareholder_id: corp_id,
+                            shareholder_type: "corporation".into(),
                             share_count: vc.parameter,
                         });
                     }

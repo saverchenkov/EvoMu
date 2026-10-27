@@ -644,3 +644,168 @@ async fn test_vote_manager_cases_and_actions() {
     .expect_err("Activating already activated sanctioned action must fail");
     assert_eq!(double_act_err.code, "VoteAlreadyActivated");
 }
+
+#[tokio::test]
+async fn test_r3_track4_agents_skills_corp_and_clones_regressions() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let mut sess = setup_pilot(&ctx, 1401, "demo", "demo-secret", PILOT1).await;
+
+    // 1. Issue #132: BuyDatacores rejects i64-to-i32 overflow / out-of-range qty
+    let (rnd_agent_id, rnd_station_id) = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| (a.agent_type_id == 4 || a.division_id == 18) && a.station_id.is_some())
+        .map(|a| (a.agent_id, a.station_id.unwrap()))
+        .unwrap_or((KNOWN_AGENT_ID, 60_003_760));
+    sess.station_id = Some(rnd_station_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT1) {
+            ch.station_id = Some(rnd_station_id);
+        }
+    });
+    let dc_err = rpc(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "DoAction",
+        &[
+            PyRep::Integer(14), // BuyDatacores
+            PyRep::Integer(rnd_agent_id),
+            PyRep::Integer(4_294_967_295), // i64 that truncates to -1 as i32
+        ],
+    )
+    .await
+    .expect_err("BuyDatacores with i64 > 100_000 must fail");
+    assert_eq!(dc_err.code, "InvalidDatacoreQuantity");
+
+    // 2. Issue #133: ApplyFreeSkillPoints enforces skill prerequisites and Alpha 5M SP cap
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT1) {
+            ch.clone_grade = 1; // Alpha
+            ch.skill_points = 5_000_000.0;
+            ch.free_skill_points = 100_000.0;
+        }
+        let sk = snap.skills.entry(PILOT1).or_default();
+        sk.insert(3380, TrainedSkillRecord { type_id: 3380, level: 1, skill_points: 250.0 });
+    });
+    let alpha_sp_err = rpc(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "ApplyFreeSkillPoints",
+        &[PyRep::Integer(3380), PyRep::Integer(10_000)],
+    )
+    .await
+    .expect_err("Alpha clone at 5M SP cannot apply free SP");
+    assert_eq!(alpha_sp_err.code, "AlphaCloneSpCapExceeded");
+
+    // 3. Issue #134 & #136: Sanctioned share creation credits corporation treasury, and PayoutDividend excludes treasury shares
+    let corp_id = 98_400_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.insert(
+            corp_id,
+            CorporationRecord {
+                corporation_id: corp_id,
+                name: "R3 Governance Corp".into(),
+                ticker: "R3GC".into(),
+                ceo_id: PILOT1,
+                master_wallet: IskCents::from_isk(10_000_000),
+                members: HashSet::from([PILOT1, CANDIDATE_CEO]),
+                member_roles: HashMap::from([(PILOT1, u64::MAX), (CANDIDATE_CEO, 0)]),
+                ..Default::default()
+            },
+        );
+        if let Some(c) = snap.corporations.get_mut(&corp_id) {
+            c.ensure_wallet_divisions();
+        }
+        let gov = snap.corp_governance.entry(corp_id).or_default();
+        gov.company_shares = 500;
+        gov.shares.insert(corp_id, 500);
+        gov.shares.insert(PILOT1, 500);
+    });
+    sess.corporation_id = Some(corp_id);
+    sess.corp_role = u64::MAX;
+
+    // Non-shareholder member CANDIDATE_CEO cannot vote when shares exist
+    let vc_rep = rpc(
+        &ctx,
+        &mut sess,
+        "voteManager",
+        "InsertVoteCase",
+        &[
+            PyRep::String("Mint 1000 Shares".into()),
+            PyRep::String("Issue new treasury shares".into()),
+            PyRep::Integer(5), // Create Shares
+            PyRep::Integer(1_000),
+        ],
+    )
+    .await
+    .expect("InsertVoteCase share creation");
+    let share_vc_id = vc_rep.dict_get("voteCaseID").and_then(|v| v.as_i64()).unwrap();
+
+    let mut non_sh_sess = setup_pilot(&ctx, 1402, "other", "other-secret", CANDIDATE_CEO).await;
+    non_sh_sess.corporation_id = Some(corp_id);
+    non_sh_sess.corp_role = 0;
+    let non_sh_vote = rpc(
+        &ctx,
+        &mut non_sh_sess,
+        "voteManager",
+        "InsertVote",
+        &[PyRep::Integer(share_vc_id), PyRep::Integer(1)],
+    )
+    .await
+    .expect_err("Zero-share member must not vote when shares exist");
+    assert_eq!(non_sh_vote.code, "CorpAccessDenied");
+
+    // Shareholder PILOT1 votes Yes and activates after voting closes -> shares go to corp_id treasury
+    rpc(
+        &ctx,
+        &mut sess,
+        "voteManager",
+        "InsertVote",
+        &[PyRep::Integer(share_vc_id), PyRep::Integer(1)],
+    )
+    .await
+    .expect("Shareholder vote");
+    ctx.advance_secs(86_401);
+    rpc(
+        &ctx,
+        &mut sess,
+        "voteManager",
+        "ActivateSanctionedAction",
+        &[PyRep::Integer(share_vc_id)],
+    )
+    .await
+    .expect("ActivateSanctionedAction share creation");
+    let (treasury_shares, pilot_shares) = ctx.db.with_snapshot(|snap| {
+        let g = &snap.corp_governance[&corp_id];
+        (
+            g.shares.get(&corp_id).copied().unwrap_or(0),
+            g.shares.get(&PILOT1).copied().unwrap_or(0),
+        )
+    });
+    assert_eq!(treasury_shares, 1_500, "New shares must be minted to corporation treasury");
+    assert_eq!(pilot_shares, 500, "Activating director must not personally receive newly minted shares");
+
+    // PayoutDividend to shareholders pays 100% of dividend to PILOT1 (the only non-treasury shareholder)
+    let p1_bal_before = ctx.db.get_character(PILOT1).unwrap().balance;
+    rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "PayoutDividend",
+        &[PyRep::Real(1_000_000.0), PyRep::Bool(true), PyRep::Integer(1)],
+    )
+    .await
+    .expect("PayoutDividend excluding treasury shares");
+    let p1_bal_after = ctx.db.get_character(PILOT1).unwrap().balance;
+    assert_eq!(p1_bal_after.0 - p1_bal_before.0, 100_000_000);
+
+    // 4. Issue #135: Non-director cannot call UpdateAttributes
+    let upd_err = rpc(&ctx, &mut non_sh_sess, "corpRegistry", "UpdateAttributes", &[])
+        .await
+        .expect_err("Non-director UpdateAttributes must fail");
+    assert_eq!(upd_err.code, "CorpRoleDenied");
+}

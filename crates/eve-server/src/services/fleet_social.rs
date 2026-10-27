@@ -1123,9 +1123,33 @@ pub(super) fn handle_corp_gov_tail(
             }
         }
         ("corpRegistry", "UpdateAttributes") | ("corpRegistry", "UpdateCorporationAbilities") => {
-            let member_limit = ctx.db.with_snapshot(|snap| {
-                snap.skills
-                    .get(&char_id)
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let mut skills_owner_id = char_id;
+                if let Some(corp) = snap.corporations.get(&corp_id) {
+                    let caller_role = corp
+                        .member_roles
+                        .get(&char_id)
+                        .copied()
+                        .unwrap_or(session.corp_role);
+                    if corp.ceo_id != 0
+                        && corp.ceo_id != char_id
+                        && !eve_db::corp_roles::has_role(
+                            caller_role,
+                            eve_db::corp_roles::ROLE_DIRECTOR,
+                        )
+                    {
+                        return Err(BridgeRpcError {
+                            code: "CorpRoleDenied".into(),
+                            message: "Updating corporation attributes requires CEO or Director role".into(),
+                        });
+                    }
+                    if corp.ceo_id > 0 && snap.skills.contains_key(&corp.ceo_id) {
+                        skills_owner_id = corp.ceo_id;
+                    }
+                }
+                let member_limit = snap
+                    .skills
+                    .get(&skills_owner_id)
                     .map(|skills| {
                         skills
                             .values()
@@ -1141,19 +1165,21 @@ pub(super) fn handle_corp_gov_tail(
                             .sum::<i64>()
                     })
                     .unwrap_or(0)
-            })
-            .max(1);
-            ctx.db.with_mut_snapshot(|snap| {
+                    .max(1);
                 snap.corp_governance
                     .entry(corp_id)
                     .or_default()
                     .member_limit = Some(member_limit as usize);
                 snap.corp_member_limits.insert(corp_id, member_limit);
+                Ok(member_limit)
             });
-            Some(Ok(PyRep::keyval([
-                ("corporationID", PyRep::Integer(corp_id)),
-                ("memberLimit", PyRep::Integer(member_limit)),
-            ])))
+            match res {
+                Ok(member_limit) => Some(Ok(PyRep::keyval([
+                    ("corporationID", PyRep::Integer(corp_id)),
+                    ("memberLimit", PyRep::Integer(member_limit)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
         }
         ("corpStationMgr", "MoveCorpHQHere") => {
             let station_id = args

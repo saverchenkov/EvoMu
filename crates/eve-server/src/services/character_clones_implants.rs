@@ -256,12 +256,17 @@ pub fn handle_clones_and_sheet(
             let mut station_owner_faction_id: Option<i64> = None;
             if is_structure {
                 let has_online_clone_bay = ctx.db.with_snapshot(|snap| {
-                    snap.items.values().any(|i| {
-                        i.location_id == station_id
-                            && i.type_id == 35894
-                            && i.flag.is_service_slot()
-                            && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true)
-                    })
+                    let st_powered = snap
+                        .structures
+                        .get(&station_id)
+                        .is_some_and(|st| st.quantum_core_installed && st.fuel_blocks > 0);
+                    st_powered
+                        && snap.items.values().any(|i| {
+                            i.location_id == station_id
+                                && i.type_id == 35894
+                                && i.flag.is_service_slot()
+                                && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true)
+                        })
                 });
                 if !has_online_clone_bay {
                     return Some(Err(BridgeRpcError {
