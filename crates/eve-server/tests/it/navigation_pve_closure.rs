@@ -5,7 +5,7 @@
 
 use crate::common;
 use eve_db::{
-    InventoryFlag, InventoryItemRecord, UpwellStructureRecord,
+    FleetRecord, InventoryFlag, InventoryItemRecord, UpwellStructureRecord,
 };
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
@@ -270,58 +270,52 @@ async fn test_ansiblex_jump_bridge_access_liquid_ozone_and_destination() {
 }
 
 #[tokio::test]
+// parity: feat:navigation.filament-needlejack
 async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
     let ship_id = 100_000_001;
+    let char_id_2 = 90_000_002;
+    let ship_id_2 = 100_000_002;
     let start_sys = 30_000_142; // Jita
     let mut sess = setup_pilot(&ctx, 8002, "demo", "demo-secret", char_id).await;
 
-    // Seed pilot in space in Jita with filaments in cargo
+    // Seed pilots in space in Jita with fleet and filaments in cargo
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = start_sys;
             ch.station_id = None;
             ch.structure_id = None;
         }
-        // Abyssal filament: type 47763 (Calm Firestorm Filament)
-        snap.items.insert(
-            1_300_000_001,
-            InventoryItemRecord {
-                item_id: 1_300_000_001,
-                type_id: 47763,
-                owner_id: char_id,
-                location_id: ship_id,
-                flag: InventoryFlag::Cargo,
-                quantity: 1,
-                singleton: false,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
+        if let Some(ch2) = snap.characters.get_mut(&char_id_2) {
+            ch2.solar_system_id = start_sys;
+            ch2.station_id = None;
+            ch2.structure_id = None;
+            ch2.active_ship_id = ship_id_2;
+        }
+        if let Some(ship2) = snap.items.get_mut(&ship_id_2) {
+            ship2.location_id = start_sys as i64;
+            ship2.flag = InventoryFlag::None;
+        }
+        snap.fleets.insert(
+            42_001,
+            FleetRecord {
+                fleet_id: 42_001,
+                boss_id: char_id,
+                members: vec![char_id, char_id_2],
+                ..Default::default()
             },
         );
-        // Needlejack filament: type 53977 (Noise-5 'Needlejack' Filament)
-        snap.items.insert(
-            1_300_000_002,
-            InventoryItemRecord {
-                item_id: 1_300_000_002,
-                type_id: 53977,
-                owner_id: char_id,
-                location_id: ship_id,
-                flag: InventoryFlag::Cargo,
-                quantity: 1,
-                singleton: false,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
+        // Filaments: Abyssal 47763, Needlejack 53977
+        for (iid, tid) in [(1_300_000_001, 47763), (1_300_000_002, 53977)] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid, type_id: tid, owner_id: char_id, location_id: ship_id,
+                    flag: InventoryFlag::Cargo, quantity: 1, singleton: false, version: 1, ..Default::default()
+                },
+            );
+        }
     });
 
     sess.solar_system_id = Some(start_sys);
@@ -347,6 +341,23 @@ async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
             ctx.build_ship_combat_state(char_id, ship_id, 601),
         )
         .await;
+    let _ = handle_start
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id_2,
+                type_id: 587,
+                position: DVec3::new(51_000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 1000.0,
+                inertia: 1.0,
+                mass: 100_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(char_id_2, ship_id_2, 587),
+        )
+        .await;
 
     // 1. Abyssal filament deployment returns UnimplementedRPC
     let abyssal_err = rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceDeployment", &[])
@@ -367,9 +378,21 @@ async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
         .expect_err("VoidSpacePlayerJump returns UnimplementedRPC");
     assert_eq!(void_err.code, "UnimplementedRPC");
 
-    // 4. Needlejack random jump filament
+    // 4. Needlejack random jump filament: session change timer initially active
+    const ERR_SESSION_CHANGE: &str = concat!("SessionChange", "InProgress");
+    let sess_err = rpc(&ctx, &mut sess, "randomJumpMgr", "ActivateRandomJumpFilament", &[PyRep::Integer(1_300_000_002)])
+        .await
+        .expect_err("blocked by session-change timer");
+    assert_eq!(sess_err.code, ERR_SESSION_CHANGE);
+
+    // After 12s, session timer has expired; invalid filament item is rejected
     ctx.advance_secs(12);
-    let random_res = rpc(&ctx, &mut sess, "randomJumpMgr", "ActivateRandomJumpFilament", &[])
+    let invalid_arg_err = rpc(&ctx, &mut sess, "randomJumpMgr", "ActivateRandomJumpFilament", &[PyRep::Integer(999_999_999)])
+        .await
+        .expect_err("requires valid filament item_id in cargo");
+    assert_eq!(invalid_arg_err.code, "FilamentNotInCargo");
+
+    let random_res = rpc(&ctx, &mut sess, "randomJumpMgr", "ActivateRandomJumpFilament", &[PyRep::Integer(1_300_000_002)])
         .await
         .expect("ActivateRandomJumpFilament");
     let dest_sys = random_res
@@ -379,23 +402,49 @@ async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
 
     // Verify destination system is a null-sec system in SDE
     let sys_record = ctx.sde.solar_systems.get(&dest_sys).expect("solar system in SDE");
-    assert!(
-        sys_record.security_status < 0.0,
-        "Needlejack must jump to a null-sec system (sec: {})",
-        sys_record.security_status
-    );
+    assert!(sys_record.security_status < 0.0, "Needlejack must jump to null-sec (sec: {})", sys_record.security_status);
     assert_eq!(sess.solar_system_id, Some(dest_sys));
+
+    // Verify both fleetmates jumped to destination null-sec system
+    let (c1_sys, c2_sys, s2_loc) = ctx.db.with_snapshot(|snap| {
+        (
+            snap.characters[&char_id].solar_system_id,
+            snap.characters[&char_id_2].solar_system_id,
+            snap.items[&ship_id_2].location_id,
+        )
+    });
+    assert_eq!(c1_sys, dest_sys, "Caller character moved to destination");
+    assert_eq!(c2_sys, dest_sys, "Fleetmate character transported together to destination");
+    assert_eq!(s2_loc, dest_sys as i64, "Fleetmate ship moved to destination");
+
+    // Verify Destiny balls moved from start to destination system
+    let handle_dest = ctx.systems.get_or_spawn(dest_sys);
+    assert!(handle_dest.get_ball_snapshot(ship_id).await.unwrap().is_some(), "Caller ball in dest");
+    assert!(handle_dest.get_ball_snapshot(ship_id_2).await.unwrap().is_some(), "Fleetmate ball in dest");
+    assert!(handle_start.get_ball_snapshot(ship_id).await.unwrap().is_none(), "Caller ball removed from start");
+    assert!(handle_start.get_ball_snapshot(ship_id_2).await.unwrap().is_none(), "Fleetmate ball removed from start");
+
+    // Verify 15-minute PvP log-off timer (900s) applied to all transported pilots
+    let now = ctx.now_unix();
+    let (t1, t2) = {
+        let cw = ctx.crimewatch.read().unwrap();
+        (
+            cw.states.get(&char_id).map(|c| c.pvp_timer_until_unix).unwrap_or(0),
+            cw.states.get(&char_id_2).map(|c| c.pvp_timer_until_unix).unwrap_or(0),
+        )
+    };
+    assert!(t1 >= now + 890, "Caller has 15-minute PvP timer");
+    assert!(t2 >= now + 890, "Fleetmate has 15-minute PvP timer");
 
     // Verify needlejack filament consumed
     let needle_exists = ctx.db.with_snapshot(|snap| snap.items.contains_key(&1_300_000_002));
     assert!(!needle_exists, "Needlejack filament was consumed");
 
-    // 5. Immediate second jump is blocked by the 10-second session-change timer
-    const ERR_SESSION_CHANGE: &str = concat!("SessionChange", "InProgress");
-    let timer_err = rpc(&ctx, &mut sess, "randomJumpMgr", "ActivateRandomJumpFilament", &[])
+    // 5. Subsequent jump is blocked by the active 15-minute PvP log-off timer
+    let pvp_err = rpc(&ctx, &mut sess, "randomJumpMgr", "ActivateRandomJumpFilament", &[PyRep::Integer(1_300_000_002)])
         .await
-        .expect_err("second jump blocked by session-change timer");
-    assert_eq!(timer_err.code, ERR_SESSION_CHANGE);
+        .expect_err("second jump blocked by active pvp timer");
+    assert_eq!(pvp_err.code, "PvpTimerActive");
 }
 
 #[tokio::test]

@@ -28,6 +28,7 @@ pub(crate) async fn handle(
         // parity: rpc:wormholeMgr.WormholeJump
         ("wormholeMgr", "WormholeJump") => Some(handle_wormhole_jump(ctx, session, args).await),
 
+        // parity: feat:navigation.filament-needlejack
         ("randomJumpMgr", "ActivateRandomJumpFilament") => {
             Some(handle_random_jump_filament(ctx, session, args).await)
         }
@@ -436,63 +437,33 @@ async fn handle_random_jump_filament(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     if session.station_id.is_some() || session.structure_id.is_some() {
-        return Err(BridgeRpcError {
-            code: "ShipDocked".into(),
-            message: "Cannot activate filament while docked".into(),
-        });
+        return Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot activate filament while docked".into() });
     }
     let Some(old_sys) = session.solar_system_id else {
-        return Err(BridgeRpcError {
-            code: "NoSolarSystem".into(),
-            message: "Session has no active solarSystemID".into(),
-        });
+        return Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solarSystemID".into() });
     };
     let Some(ship_id) = session.ship_id else {
-        return Err(BridgeRpcError {
-            code: "NoActiveShip".into(),
-            message: "Session has no active ship".into(),
-        });
+        return Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into() });
     };
     crate::sp6_lifecycle::require_no_pvp_timer_for_filament(ctx, char_id)?;
 
     let old_handle = ctx.systems.get_or_spawn(old_sys);
     let Some((cur_tick, mut current_ball)) = (match old_handle.get_ball_snapshot(ship_id).await {
         Ok(v) => v,
-        Err(e) => {
-            return Err(BridgeRpcError {
-                code: "DestinyQueryFailed".into(),
-                message: e,
-            })
-        }
+        Err(e) => return Err(BridgeRpcError { code: "DestinyQueryFailed".into(), message: e }),
     }) else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship ball is not in space".into(),
-        });
+        return Err(BridgeRpcError { code: "ShipNotInSpace".into(), message: "Active ship ball is not in space".into() });
     };
     let now_unix = ctx.now_unix();
     if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(
-        ctx,
-        char_id,
-        now_unix,
-        Some((old_sys, cur_tick)),
+        ctx, char_id, now_unix, Some((old_sys, cur_tick)),
     ) {
         return Err(BridgeRpcError {
             code: "SessionChangeInProgress".into(),
-            message: format!(
-                "Cannot activate jump filament while 10s session-change timer ({}) is active",
-                active_timer.reason
-            ),
+            message: format!("Cannot activate jump filament while 10s session-change timer ({}) is active", active_timer.reason),
         });
     }
-    crate::services::tactical_modules::prepare_ship_for_wormhole_jump(
-        ctx,
-        &old_handle,
-        char_id,
-        ship_id,
-        &mut current_ball,
-    )
-    .await?;
+    crate::services::tactical_modules::prepare_ship_for_wormhole_jump(ctx, &old_handle, char_id, ship_id, &mut current_ball).await?;
 
     if let Ok(Some(mut cs)) = old_handle.get_combat_state(ship_id).await {
         cs.sync_action_breaks();
@@ -504,6 +475,46 @@ async fn handle_random_jump_filament(
         }
     }
 
+    let caller_ship_group = ctx.sde.types.get(&current_ball.type_id).map(|t| t.group_id).unwrap_or(0);
+    if matches!(caller_ship_group, 30 | 485 | 547 | 659 | 883 | 1538 | 4594) {
+        return Err(BridgeRpcError { code: "ShipCapitalRestricted".into(), message: "Random jump filaments cannot be activated on capital ships".into() });
+    }
+
+    const GROUP_JUMP_FILAMENTS: u32 = 4041;
+    let fil_item_id = if let Some(id) = args.first().and_then(|a| a.as_i64()) {
+        id
+    } else {
+        ctx.db.with_snapshot(|snap| {
+            snap.items.values().find(|i| {
+                i.owner_id == char_id && i.location_id == ship_id && i.flag == eve_db::InventoryFlag::Cargo && i.quantity >= 1
+                    && ctx.sde.types.get(&i.type_id).map(|t| t.group_id).unwrap_or(0) == GROUP_JUMP_FILAMENTS
+            }).map(|i| i.item_id)
+        }).ok_or_else(|| BridgeRpcError {
+            code: "InvalidArguments".into(),
+            message: "ActivateRandomJumpFilament requires filament itemID argument".into(),
+        })?
+    };
+
+    let max_capacity = ctx.db.with_snapshot(|snap| {
+        let fil = snap.items.get(&fil_item_id).filter(|i| {
+            i.owner_id == char_id && i.location_id == ship_id && i.flag == eve_db::InventoryFlag::Cargo && i.quantity >= 1
+        });
+        let Some(fil) = fil else {
+            return Err(BridgeRpcError { code: "FilamentNotInCargo".into(), message: format!("Filament {fil_item_id} not found in active ship Cargo") });
+        };
+        let sde_type = ctx.sde.types.get(&fil.type_id).filter(|t| t.group_id == GROUP_JUMP_FILAMENTS).ok_or_else(|| {
+            BridgeRpcError { code: "InvalidItemType".into(), message: "Item is not a jump filament".into() }
+        })?;
+        let cap = if sde_type.name.contains("-25") || sde_type.name.contains(" 25") {
+            25
+        } else if sde_type.name.contains("-15") || sde_type.name.contains(" 15") {
+            15
+        } else {
+            5
+        };
+        Ok(cap)
+    })?;
+
     let nullsec_systems: Vec<u32> = ctx
         .sde
         .solar_systems
@@ -512,94 +523,90 @@ async fn handle_random_jump_filament(
         .map(|(&sid, _)| sid)
         .collect();
     if nullsec_systems.is_empty() {
-        return Err(BridgeRpcError {
-            code: "NoNullsecSystemInSde".into(),
-            message: "No destination nullsec solar system found in SDE".into(),
-        });
+        return Err(BridgeRpcError { code: "NoNullsecSystemInSde".into(), message: "No destination nullsec solar system found in SDE".into() });
     }
-    let idx = ((char_id as usize) ^ (old_sys as usize) ^ (ctx.now_unix() as usize)) % nullsec_systems.len();
+    let idx = ((char_id as usize) ^ (old_sys as usize) ^ (now_unix as usize)) % nullsec_systems.len();
     let dest_sys_id = nullsec_systems[idx];
-    let dest_sys = ctx.sde.solar_systems.get(&dest_sys_id).ok_or_else(|| BridgeRpcError {
-        code: "NoNullsecSystemInSde".into(),
-        message: "Destination nullsec solar system not found in SDE".into(),
+    let dest_sys = ctx.sde.solar_systems.get(&dest_sys_id).ok_or_else(|| {
+        BridgeRpcError { code: "NoNullsecSystemInSde".into(), message: "Destination nullsec solar system not found in SDE".into() }
     })?;
-    let requested_item_id = args.first().and_then(|a| a.as_i64());
 
-    const GROUP_JUMP_FILAMENTS: u32 = 4041;
-    let updated_ch = ctx.db.try_with_mut_snapshot(|snap| {
-        let fil_id = snap
-            .items
-            .values()
-            .find(|i| {
-                i.owner_id == char_id
-                    && i.location_id == ship_id
-                    && i.flag == eve_db::InventoryFlag::Cargo
-                    && requested_item_id.is_none_or(|req_id| i.item_id == req_id)
-                    && ctx
-                        .sde
-                        .types
-                        .get(&i.type_id)
-                        .is_some_and(|t| t.group_id == GROUP_JUMP_FILAMENTS)
-                    && i.quantity >= 1
-            })
-            .map(|i| i.item_id);
-        let Some(iid) = fil_id else {
-            return Err(BridgeRpcError {
-                code: "FilamentNotInCargo".into(),
-                message: format!(
-                    "Activating a random jump filament requires filament in active ship {ship_id} Cargo"
-                ),
-            });
-        };
-        let Some(ch) = snap.characters.get_mut(&char_id) else {
-            return Err(BridgeRpcError {
-                code: "CharacterNotFound".into(),
-                message: format!("Character {char_id} not found"),
-            });
-        };
-        ch.solar_system_id = dest_sys_id;
-        ch.constellation_id = dest_sys.constellation_id;
-        ch.region_id = dest_sys.region_id;
-        ch.station_id = None;
-        ch.structure_id = None;
-        let updated = ch.clone();
-        if let Some(item) = snap.items.get_mut(&iid) {
+    let caller_pos = current_ball.position;
+    let mut jumpers = vec![(char_id, ship_id, current_ball)];
+    let fleet_members: Vec<i64> = ctx.db.with_snapshot(|snap| {
+        snap.fleets.values().find(|f| f.members.contains(&char_id)).map(|f| f.members.clone()).unwrap_or_default()
+    });
+    for mate_id in fleet_members {
+        if mate_id == char_id || jumpers.len() >= max_capacity {
+            continue;
+        }
+        let mate_ship_info = ctx.db.with_snapshot(|snap| {
+            snap.characters.get(&mate_id).filter(|ch| ch.solar_system_id == old_sys && ch.station_id.is_none() && ch.structure_id.is_none())
+                .map(|ch| (ch.active_ship_id, snap.items.get(&ch.active_ship_id).map(|i| i.type_id).unwrap_or(0)))
+        });
+        let Some((m_ship_id, m_type_id)) = mate_ship_info else { continue; };
+        let m_grp = ctx.sde.types.get(&m_type_id).map(|t| t.group_id).unwrap_or(0);
+        if matches!(m_grp, 30 | 485 | 547 | 659 | 883 | 1538 | 4594) { continue; }
+        if crate::sp6_lifecycle::require_no_pvp_timer_for_filament(ctx, mate_id).is_err() { continue; }
+        if let Ok(Some((_, m_ball))) = old_handle.get_ball_snapshot(m_ship_id).await {
+            if caller_pos.distance(m_ball.position) <= 6_000.0 {
+                jumpers.push((mate_id, m_ship_id, m_ball));
+            }
+        }
+    }
+
+    ctx.db.try_with_mut_snapshot(|snap| {
+        if let Some(item) = snap.items.get_mut(&fil_item_id) {
             if item.quantity > 1 {
                 item.quantity -= 1;
                 item.version += 1;
             } else {
-                snap.items.remove(&iid);
+                snap.items.remove(&fil_item_id);
             }
         }
-        Ok(updated)
+        for &(p_char, p_ship, _) in &jumpers {
+            if let Some(ch) = snap.characters.get_mut(&p_char) {
+                ch.solar_system_id = dest_sys_id;
+                ch.constellation_id = dest_sys.constellation_id;
+                ch.region_id = dest_sys.region_id;
+                ch.station_id = None;
+                ch.structure_id = None;
+            }
+            if let Some(ship) = snap.items.get_mut(&p_ship) {
+                ship.location_id = dest_sys_id as i64;
+            }
+        }
+        Ok::<(), BridgeRpcError>(())
     })?;
-    let existing_ball = old_handle.remove_ball(ship_id).await;
-    crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
-    ctx.sync_character_local_chat(char_id, Some(old_sys), dest_sys_id);
 
     let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
-    let mut new_ball = existing_ball.unwrap_or(current_ball);
-    new_ball.position = DVec3::new(100_000_000.0, 0.0, 0.0);
-    new_ball.velocity = DVec3::ZERO;
-    new_ball.speed_fraction = 0.0;
-    new_ball.mode = MovementMode::Stop;
-    let combat_state = ctx.build_ship_combat_state(char_id, ship_id, new_ball.type_id);
-    let dest_tick = new_handle
-        .spawn_ball_with_combat(new_ball, combat_state)
-        .await
-        .unwrap_or(0);
-    crate::services::space_destiny::record_session_change_timer(
-        ctx,
-        char_id,
-        now_unix,
-        dest_sys_id,
-        dest_tick,
-        "filamentJump",
-    );
+    let pvp_until = now_unix.saturating_add(crate::sp6_lifecycle::PVP_TIMER_SECS);
+    for (j_idx, (p_char, p_ship, mut b)) in jumpers.into_iter().enumerate() {
+        let _ = old_handle.remove_ball(p_ship).await;
+        crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, p_char, p_ship);
+        ctx.sync_character_local_chat(p_char, Some(old_sys), dest_sys_id);
 
-    session.solar_system_id = Some(updated_ch.solar_system_id);
-    session.constellation_id = Some(updated_ch.constellation_id);
-    session.region_id = Some(updated_ch.region_id);
+        b.position = DVec3::new(100_000_000.0 + (j_idx as f64) * 200.0, 0.0, 0.0);
+        b.velocity = DVec3::ZERO;
+        b.speed_fraction = 0.0;
+        b.mode = MovementMode::Stop;
+        let combat_state = ctx.build_ship_combat_state(p_char, p_ship, b.type_id);
+        let dest_tick = new_handle.spawn_ball_with_combat(b, combat_state).await.unwrap_or(0);
+        crate::services::space_destiny::record_session_change_timer(ctx, p_char, now_unix, dest_sys_id, dest_tick, "filamentJump");
+        {
+            let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+            let pilot_cw = cw.get_or_create(p_char);
+            pilot_cw.pvp_timer_until_unix = pilot_cw.pvp_timer_until_unix.max(pvp_until);
+        }
+        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _snap| {
+            st.pvp_timers_until.insert(p_char, pvp_until);
+        });
+        crate::services::combat_crimewatch::emit_crimewatch_timer_notifications(ctx, p_char, now_unix);
+    }
+
+    session.solar_system_id = Some(dest_sys_id);
+    session.constellation_id = Some(dest_sys.constellation_id);
+    session.region_id = Some(dest_sys.region_id);
     session.station_id = None;
     session.structure_id = None;
     crate::services::map_service::record_solar_system_visit(ctx, char_id, dest_sys_id);

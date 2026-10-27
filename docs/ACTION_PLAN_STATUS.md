@@ -4,19 +4,19 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 5356 / 6351 ledger rows closed (84.33%)**, 2257 NA, 868 tagged tests, 1047 passing tests. Flagged fake by the gap auditor: 28.
+**Parity: 5366 / 6351 ledger rows closed (84.49%)**, 2257 NA, 884 tagged tests, 1071 passing tests. Flagged fake by the gap auditor: 57.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 43 | 9 | 0 |
 | effect | 1 | 1 | 0 | 0 |
 | esi | 197 | 196 | 0 | 1 |
-| feat | 1603 | 1095 | 94 | 414 |
+| feat | 1603 | 1116 | 94 | 393 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 205 | 656 | 450 |
 | plan | 117 | 53 | 0 | 64 |
-| quasar | 1455 | 115 | 1328 | 12 |
-| rpc | 1373 | 1235 | 113 | 25 |
+| quasar | 1455 | 112 | 1328 | 15 |
+| rpc | 1373 | 1227 | 113 | 33 |
 | sde | 213 | 156 | 57 | 0 |
 
 Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is accepted only when the ledger row is DONE).
@@ -111,7 +111,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | C-5 | Asteroid belts and mining | MISSING | 0/0 | — | PARTIAL | Superseded by Phase 5M (MN-01..MN-18); partial mining cycle and belt spawning in place. | d740ac4f 2026-10-18 |
 | C-6 | Reprocessing (real) | MISSING | 0/0 | — | PARTIAL | Superseded by MN-11 (compression) and MN-12 (reprocessing) using SDE typeMaterials, station base yield, skills, and scrapmetal processing. | d740ac4f 2026-10-18 |
 | C-7 | Salvage, tractor, drones | BLOCKED_BY_FEATURES | 18/25 | test_c7_salvage_mechanics_tractor_beam_and_combat_drones | PARTIAL | Salvager wreck consumption and salvage yield, tractor beam pull physics, drone bandwidth validation, launch, orbit, and recall tested; blocked by remaining features. | 1405b8ed 2026-10-18 |
-| C-8 | CrimeWatch and CONCORD | BLOCKED_BY_FEATURES | 39/44 | test_c8_crimewatch_state_machine_timers_flags_and_concord | PARTIAL | Weapon timer, aggression tracking, suspect and criminal timers, sec status penalty and gain, and highsec CONCORD retaliation response tested; blocked by remaining features. | 773713c0 2026-10-21 |
+| C-8 | CrimeWatch and CONCORD | BLOCKED_BY_FEATURES | 38/44 | test_c8_crimewatch_state_machine_timers_flags_and_concord | PARTIAL | Weapon timer, aggression tracking, suspect and criminal timers, sec status penalty and gain, and highsec CONCORD retaliation response tested; blocked by remaining features. | 773713c0 2026-10-21 |
 
 ## Phase 5M: Full mining system
 
@@ -133,7 +133,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | MN-14 | Metenox Moon Drill (automated) | MISSING | 1/1 | — | PARTIAL | Automated Metenox moon drill (autoMoonMining) 40% efficiency R4..R64 extraction, 5 fuel blocks + 55 Magmatic Gas per hour consumption, and fuel starvation halt tested. | cdc48d99 2026-10-19 |
 | MN-15 | Mining sites | MISSING | 4/4 | — | PARTIAL | K-space/sov ore anomalies, guarded W-space ore and Fullerite gas sites, regional ice belt 4h respawn, and Null-Sec phased asteroid field + Mobile Phase Anchor lifecycle tested. | cdc48d99 2026-10-19 |
 | MN-16 | Mining ledgers | MISSING | 2/2 | — | PARTIAL | Character mining ledger (characterMiningLedger.GetCharacterLogs 30d rolling daily aggregation) and corporate observer ledger (corpMiningLedger CRowset + role gating) tested. | d740ac4f 2026-10-18 |
-| MN-17 | NPC interaction | MISSING | 2/2 | — | PARTIAL | Living-world NPC mining operations (Venture/Retriever/Mackinaw/Skiff fleets, Hauler ore pickup and station market order replenishment, response fleet on aggression, Strongboxes) tested. | e99a2c2f 2026-10-18 |
+| MN-17 | NPC interaction | MISSING | 0/2 | — | PARTIAL | Living-world NPC mining operations (Venture/Retriever/Mackinaw/Skiff fleets, Hauler ore pickup and station market order replenishment, response fleet on aggression, Strongboxes) tested. | e99a2c2f 2026-10-18 |
 | MN-18 | Missions, goals and market | MISSING | 4/4 | — | PARTIAL | L1-L4 mining agent missions with private pocket asteroid extraction, ore/mineral market orders, and ledger-verified AIR Career Program / daily mining goal progression tested. | 5c8c7035 2026-10-21 |
 
 ## Phase 6: Character progression and GM tooling
@@ -203,7 +203,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Z-2 | Close every notify: row. Server-emitted notifications are sent with correct payl… | MISSING | 0/0 | — | PARTIAL | 11/1311 notify rows closed; remaining notifications open. | e19dce39 2026-10-18 |
 | Z-3 | Close every destiny: and ballmode: row on the binary destiny stream. | MISSING | 0/0 | — | PARTIAL | 22/52 destiny rows DONE and 10/52 NA; 20 destiny actions and ball modes remain open. | eb6186dd 2026-10-18 |
 | Z-4 | Close every sde: row and effect:. | MISSING | 0/0 | — | PARTIAL | 37/213 sde rows closed and 0/1 effect rows closed (176 sde rows and 217 expression-only effects open). | 322b1bae 2026-10-18 |
-| Z-5 | Close every feat: row, including every row the gap auditor has appended. Fix eve… | MISSING | 0/0 | — | PARTIAL | 220/1381 feat rows closed; auditor-flagged rows remain FLAGGED_FAKE pending next gap audit. DATA GAP (feat:pve.triglavian-sites): the real Triglavian minor-victory system list (empire-space systems wo | a7e5196d 2026-10-18 |
+| Z-5 | Close every feat: row, including every row the gap auditor has appended. Fix eve… | MISSING | 0/0 | — | PARTIAL | 220/1381 feat rows closed; auditor-flagged rows remain FLAGGED_FAKE pending next gap audit. | a7e5196d 2026-10-18 |
 | Z-6 | Pass every journey: row on the real client through tools/client-harness/run_jour… | MISSING | 0/0 | — | NOT STARTED | 0/29 real-client journeys closed; requires execution via tools/client-harness/run_journeys. | e2be34b6 2026-10-18 |
 | Z-7 | Reach workspace line coverage ≥ 90% and mutation score ≥ 85% on every crate. | MISSING | 0/0 | — | PARTIAL | scripts/qa/verify_cov_and_mutants.py harness present; full workspace >=90% coverage and >=85% mutation gate pending. | 609a8780 2026-10-21 |
 | Z-8 | Final acceptance. The claims review is PASS and the gap audit is CLEAN on the fi… | MISSING | 0/0 | — | NOT STARTED | — | 609a8780 2026-10-21 |
