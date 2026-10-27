@@ -192,15 +192,20 @@ pub async fn handle_fighters(
                 }));
             };
 
-            let carrier_type_id = if let Some(struct_id) = session.structure_id {
-                ctx.db
-                    .with_snapshot(|snap| snap.structures.get(&struct_id).map(|s| s.type_id))
+            let carrier_type_id = ctx.db.with_snapshot(|snap| {
+                if let Some(struct_id) = session.structure_id {
+                    if ship_id == struct_id || !snap.items.contains_key(&ship_id) {
+                        if let Some(st) = snap.structures.get(&struct_id) {
+                            return st.type_id;
+                        }
+                    }
+                }
+                snap.items
+                    .get(&ship_id)
+                    .map(|s| s.type_id)
+                    .or_else(|| snap.structures.get(&ship_id).map(|s| s.type_id))
                     .unwrap_or(0)
-            } else {
-                ctx.db
-                    .with_snapshot(|snap| snap.items.get(&ship_id).map(|s| s.type_id))
-                    .unwrap_or(0)
-            };
+            });
             let tube_count = ctx
                 .sde
                 .types
@@ -369,15 +374,20 @@ pub async fn handle_fighters(
                 }));
             };
             let raw_tube = args.first().and_then(|a| a.as_i64()).unwrap_or(-1);
-            let carrier_type_id = if let Some(struct_id) = session.structure_id {
-                ctx.db
-                    .with_snapshot(|snap| snap.structures.get(&struct_id).map(|s| s.type_id))
+            let carrier_type_id = ctx.db.with_snapshot(|snap| {
+                if let Some(struct_id) = session.structure_id {
+                    if ship_id == struct_id || !snap.items.contains_key(&ship_id) {
+                        if let Some(st) = snap.structures.get(&struct_id) {
+                            return st.type_id;
+                        }
+                    }
+                }
+                snap.items
+                    .get(&ship_id)
+                    .map(|s| s.type_id)
+                    .or_else(|| snap.structures.get(&ship_id).map(|s| s.type_id))
                     .unwrap_or(0)
-            } else {
-                ctx.db
-                    .with_snapshot(|snap| snap.items.get(&ship_id).map(|s| s.type_id))
-                    .unwrap_or(0)
-            };
+            });
             let tube_count = ctx
                 .sde
                 .types
@@ -459,15 +469,20 @@ pub async fn handle_fighters(
                 v.into_iter().map(|x| if (159..=163).contains(&x) { (x - 159) as usize } else { x as usize }).collect()
             });
 
-            let carrier_type_id = if let Some(struct_id) = session.structure_id {
-                ctx.db
-                    .with_snapshot(|snap| snap.structures.get(&struct_id).map(|s| s.type_id))
+            let carrier_type_id = ctx.db.with_snapshot(|snap| {
+                if let Some(struct_id) = session.structure_id {
+                    if ship_id == struct_id || !snap.items.contains_key(&ship_id) {
+                        if let Some(st) = snap.structures.get(&struct_id) {
+                            return st.type_id;
+                        }
+                    }
+                }
+                snap.items
+                    .get(&ship_id)
+                    .map(|s| s.type_id)
+                    .or_else(|| snap.structures.get(&ship_id).map(|s| s.type_id))
                     .unwrap_or(0)
-            } else {
-                ctx.db
-                    .with_snapshot(|snap| snap.items.get(&ship_id).map(|s| s.type_id))
-                    .unwrap_or(0)
-            };
+            });
             let tube_count = ctx
                 .sde
                 .types
@@ -688,6 +703,12 @@ pub async fn handle_fighters(
                     .map(|v| v as i32)
                     .unwrap_or(9);
                 ctx.db.with_mut_snapshot(|snap| {
+                    if let Some(main_it) = snap.items.get_mut(&f.item_id) {
+                        main_it.location_id = ship_id;
+                        main_it.flag = InventoryFlag::FighterBay;
+                        main_it.version += 1;
+                    }
+                    snap.item_positions.remove(&f.item_id);
                     let cur_qty = snap
                         .items
                         .get(&f.item_id)

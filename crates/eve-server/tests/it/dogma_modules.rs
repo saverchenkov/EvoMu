@@ -1357,3 +1357,177 @@ fn assert_rig_trashed_item_change(notes: &[(String, Vec<PyRep>)], item_id: i64, 
     assert!((92..=99).contains(&old_flag), "old flag {old_flag} must be a rig slot");
     assert!(notes.iter().all(|(n, _)| n != "OnModuleUnfitted"));
 }
+
+#[tokio::test]
+async fn test_r2_track2_dogma_fitting_overload_targeters_and_weapons() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(4099);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let char_id = 90_000_001i64;
+    let ship_id = 100_000_001i64;
+    let station_id = 60_003_760i64;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    // 1. #83: T3C Subsystem cannot be unfitted or destroyed while modules are fitted
+    let loki_id = 100_990_001i64;
+    seed_item(&ctx, loki_id, 29990, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    seed_item(&ctx, 100_990_002, 45633, char_id, loki_id, InventoryFlag::SubSystemSlot0, 1, true);
+    seed_item(&ctx, 100_990_003, 45597, char_id, loki_id, InventoryFlag::SubSystemSlot1, 1, true);
+    seed_item(&ctx, 100_990_004, 45607, char_id, loki_id, InventoryFlag::SubSystemSlot2, 1, true);
+    seed_item(&ctx, 100_990_005, 45620, char_id, loki_id, InventoryFlag::SubSystemSlot3, 1, true);
+    seed_item(&ctx, 100_990_006, 2048, char_id, loki_id, InventoryFlag::LoSlot0, 1, true);
+    let sub_unfit_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "Add",
+            &[
+                PyRep::Integer(100_990_002),
+                PyRep::Integer(station_id),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Unfitting subsystem with fitted module must fail");
+    assert_eq!(sub_unfit_err.code, "SubsystemHasFittedModules");
+    let sub_destroy_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "DestroyFitting",
+            &[PyRep::Integer(100_990_002)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Destroying subsystem with fitted module must fail");
+    assert_eq!(sub_destroy_err.code, "SubsystemHasFittedModules");
+
+    // 2. #95: LinkWeapons rejects mismatched weapon types or non-high-slot modules
+    seed_item(&ctx, 100_990_010, 2889, char_id, ship_id, InventoryFlag::HiSlot0, 1, true); // 200mm AutoCannon II
+    seed_item(&ctx, 100_990_011, 439, char_id, ship_id, InventoryFlag::MedSlot0, 1, true); // 1MN Afterburner I
+    let bad_link = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "LinkWeapons",
+            &[
+                PyRep::Integer(ship_id),
+                PyRep::Integer(100_990_010),
+                PyRep::Integer(100_990_011),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Linking high-slot weapon with med-slot module must fail");
+    assert_eq!(bad_link.code, "InvalidWeaponGroup");
+
+    // 3. #95: GetTargeters returns balls locking the active ship in space
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock");
+    let sys = ctx.systems.get_or_spawn(30_000_142);
+    let attacker_ball_id = 990_990_001i64;
+    sys.spawn_ball_with_combat(
+        Ball {
+            id: attacker_ball_id,
+            type_id: 587,
+            position: DVec3::new(2_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 3.0,
+            mass: 1_350_000.0,
+            radius: 35.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState::default(),
+    )
+    .await
+    .expect("spawn attacker");
+    sys.add_target_lock(
+        attacker_ball_id,
+        eve_destiny::TargetLock {
+            target_id: ship_id,
+            lock_time_ms: 0.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: Some(25_000.0),
+        },
+    )
+    .await
+    .expect("add_target_lock");
+
+    let targeters_rep = ctx
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "GetTargeters", &[], &kw, None)
+        .await
+        .expect("GetTargeters");
+    assert_eq!(
+        targeters_rep,
+        PyRep::List(vec![PyRep::Integer(attacker_ball_id)])
+    );
+
+    // 4. #91: Overload on an already-active propulsion module toggles overload without double-draining capacitor
+    grant_all_required_skills_for_type(&ctx, char_id, 439);
+    ctx.db.with_mut_snapshot(|s| {
+        s.module_online_states.insert(100_990_011, true);
+        s.skills.entry(char_id).or_default().insert(
+            28609,
+            eve_db::TrainedSkillRecord {
+                type_id: 28609,
+                level: 4,
+                skill_points: 100_000.0,
+            },
+        );
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[PyRep::Integer(100_990_011)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate AB");
+    let cap_after_act = sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor;
+    let ov_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Overload",
+            &[PyRep::Integer(100_990_011)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Overload active AB");
+    assert_eq!(ov_rep.dict_get("overloaded"), Some(&PyRep::Bool(true)));
+    let cap_after_ov = sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor;
+    assert!(
+        (cap_after_ov - cap_after_act).abs() < 1e-6,
+        "Overloading an already-active module must not drain capacitor a second time"
+    );
+}
+

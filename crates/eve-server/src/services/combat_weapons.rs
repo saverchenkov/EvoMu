@@ -484,17 +484,31 @@ pub async fn handle_weapons(
                 .get(&120)
                 .copied()
                 .unwrap_or(1.0);
-            let optimal_range = mod_type
-                .default_attributes
-                .get(&54)
-                .copied()
-                .unwrap_or(5_000.0)
-                * range_mult;
-            let falloff_range = mod_type
-                .default_attributes
-                .get(&158)
-                .copied()
-                .unwrap_or(5_000.0);
+            let base_opt = {
+                let v = mod_state.get_attribute(54, &ctx.sde);
+                if v > 0.0 {
+                    v
+                } else {
+                    mod_type.default_attributes.get(&54).copied().unwrap_or(5_000.0)
+                }
+            };
+            let optimal_range = if mod_state
+                .modifiers
+                .iter()
+                .any(|m| m.target_attribute_id == 54 && m.source_item_id == charge_item_id)
+            {
+                base_opt
+            } else {
+                base_opt * range_mult
+            };
+            let falloff_range = {
+                let v = mod_state.get_attribute(158, &ctx.sde);
+                if v > 0.0 {
+                    v
+                } else {
+                    mod_type.default_attributes.get(&158).copied().unwrap_or(5_000.0)
+                }
+            };
             let dist = attacker_ball.position.distance(target_ball.position);
 
             if !is_missile_launcher && dist > optimal_range + 3.0 * falloff_range {
@@ -537,9 +551,24 @@ pub async fn handle_weapons(
             {
                 0.0
             } else {
-                let raw_cap = mod_type.default_attributes.get(&6).copied().unwrap_or(0.0);
+                let raw_cap = {
+                    let v = mod_state.get_attribute(6, &ctx.sde);
+                    if v > 0.0 {
+                        v
+                    } else {
+                        mod_type.default_attributes.get(&6).copied().unwrap_or(0.0)
+                    }
+                };
                 let cap_bonus_pct = charge_type.default_attributes.get(&317).copied().unwrap_or(0.0);
-                (raw_cap * (1.0 + cap_bonus_pct / 100.0)).max(0.0)
+                if mod_state
+                    .modifiers
+                    .iter()
+                    .any(|m| m.target_attribute_id == 6 && m.source_item_id == charge_item_id)
+                {
+                    raw_cap.max(0.0)
+                } else {
+                    (raw_cap * (1.0 + cap_bonus_pct / 100.0)).max(0.0)
+                }
             };
             let mut cap_before = 0.0;
             let mut cap_after = 0.0;
@@ -703,12 +732,23 @@ pub async fn handle_weapons(
                 .get(&244)
                 .copied()
                 .unwrap_or(1.0);
-            let tracking_speed = mod_type
-                .default_attributes
-                .get(&160)
-                .copied()
-                .unwrap_or(100.0)
-                * tracking_mult;
+            let base_tracking = {
+                let v = mod_state.get_attribute(160, &ctx.sde);
+                if v > 0.0 {
+                    v
+                } else {
+                    mod_type.default_attributes.get(&160).copied().unwrap_or(100.0)
+                }
+            };
+            let tracking_speed = if mod_state
+                .modifiers
+                .iter()
+                .any(|m| m.target_attribute_id == 160 && m.source_item_id == charge_item_id)
+            {
+                base_tracking
+            } else {
+                base_tracking * tracking_mult
+            };
             let turret_sig_res = mod_type
                 .default_attributes
                 .get(&620)

@@ -382,6 +382,21 @@ pub async fn handle(
                         return Some(Err(BridgeRpcError { code: "CannotUnfitInSpace".into(), message: "Unfitting modules requires being docked at a station/structure or within range of a Mobile Depot or capital SMA".into() }));
                     }
                 }
+                if let Some(src_item) = &source_item_opt {
+                    if matches!(src_item.flag as u16, 125..=129) {
+                        if let Ok(mut check_fit) = ctx.get_or_rebuild_ship_fitting(char_id, src_item.location_id) {
+                            if let Err(msg) = check_fit.unfit_module(item_id, &ctx.sde) {
+                                return Some(Err(BridgeRpcError {
+                                    code: "SubsystemHasFittedModules".into(),
+                                    message: msg,
+                                }));
+                            }
+                        }
+                    }
+                    if let Some(sys_id) = session.solar_system_id {
+                        let _ = ctx.systems.get_or_spawn(sys_id).remove_module_cycle(src_item.location_id, item_id).await;
+                    }
+                }
                 ctx.remove_projected_ewar_by_module(item_id);
             }
 
@@ -395,6 +410,7 @@ pub async fn handle(
                         snap.module_active_charges.remove(&item_id);
                     });
                     ctx.invalidate_ship_fitting(old_loc);
+                    let _ = ctx.get_or_rebuild_ship_fitting(char_id, old_loc);
                     // Rigs are destroyed on removal; the V24 client derives `OnModuleUnfitted`
                     // from this `OnItemChange` (`ixFlag` left a fitting flag).
                     let _ = ctx.notify_fitted_item_trashed(
@@ -1278,6 +1294,8 @@ pub async fn handle(
                                 snap.module_active_states.remove(&item_id);
                                 snap.module_active_charges.remove(&item_id);
                             });
+                            ctx.invalidate_ship_fitting(old_loc_id);
+                            let _ = ctx.get_or_rebuild_ship_fitting(char_id, old_loc_id);
                             // `OnModuleUnfitted` is derived client-side from the `OnItemChange`
                             // (ixLocationID/ixFlag change) already sent above for this move.
                         }

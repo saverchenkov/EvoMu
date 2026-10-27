@@ -202,6 +202,7 @@ pub(crate) fn step_cycles_and_capacitor(
     }
 
     let mut finished_indices = Vec::new();
+    let mut burned_ship_modules: Vec<(BallId, i64)> = Vec::new();
     for (idx, cycle) in active_module_cycles.iter_mut().enumerate() {
         // [plan:DG-4] Targeted module cycles automatically deactivate if target leaves ballpark or exceeds maximum effective range.
         if let Some(target_id) = cycle.target_id {
@@ -563,6 +564,7 @@ pub(crate) fn step_cycles_and_capacitor(
                                     if adj_burned {
                                         snap.module_online_states.insert(adj_id, false);
                                         snap.module_active_states.remove(&adj_id);
+                                        burned_ship_modules.push((cycle.ship_id, adj_id));
                                     }
                                 }
                             }
@@ -636,9 +638,14 @@ pub(crate) fn step_cycles_and_capacitor(
                                             c_item.quantity = c_item.quantity.saturating_sub(1);
                                             if c_item.quantity == 0 {
                                                 snap.items.remove(&cid);
+                                                crystal_shattered_empty = true;
                                             }
                                         }
                                     }
+                                } else if cycle.ammo_type_id.is_some()
+                                    && cycle.damage_vector.total() > 0.0
+                                {
+                                    crystal_shattered_empty = true;
                                 }
                             }
                         }
@@ -784,6 +791,15 @@ pub(crate) fn step_cycles_and_capacitor(
             }
         }
     }
+    for (burned_ship_id, burned_mod_id) in burned_ship_modules {
+        for (other_idx, c) in active_module_cycles.iter().enumerate() {
+            if c.ship_id == burned_ship_id && c.module_id == burned_mod_id {
+                finished_indices.push(other_idx);
+            }
+        }
+    }
+    finished_indices.sort_unstable();
+    finished_indices.dedup();
     for idx in finished_indices.into_iter().rev() {
         let finished = active_module_cycles.remove(idx);
         cleanup_removed_module_cycle(ballpark, &finished, db_opt);

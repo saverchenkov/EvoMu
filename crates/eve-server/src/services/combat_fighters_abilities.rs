@@ -686,6 +686,43 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
         }));
     };
 
+    let sys_sec = ctx
+        .sde
+        .solar_systems
+        .get(&sys_id)
+        .map(|s| s.security_status)
+        .unwrap_or(0.0);
+    if (fa.disallow_in_high_sec || fa.target_mode == "pointTargeted") && sys_sec >= 0.45 {
+        return Some(Err(BridgeRpcError {
+            code: "BombForbiddenInHighSec".into(),
+            message: "Point-targeted fighter bomb abilities cannot be used in high-security space".into(),
+        }));
+    }
+
+    let now_unix = ctx.now_unix();
+    let cd_secs = slot_def.cooldown_seconds.unwrap_or(60.0).max(1.0) as u64;
+    {
+        let cds = ctx.fighter_cooldown_state.read().unwrap();
+        if let Some(&ready_at) = cds.get(&(fighter_ball_id, slot_id)) {
+            if now_unix < ready_at {
+                return Some(Err(BridgeRpcError {
+                    code: "AbilityOnCooldown".into(),
+                    message: format!("Fighter ability slot {slot_id} is on cooldown"),
+                }));
+            }
+        }
+    }
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    if let Ok(Some((_, fb))) = sys_handle.get_ball_snapshot(fighter_ball_id).await {
+        if fb.position.distance(target_point) > 100_000.0 {
+            return Some(Err(BridgeRpcError {
+                code: "TargetOutOfRange".into(),
+                message: "Target point is out of fighter ability range".into(),
+            }));
+        }
+    }
+
     let charge_count = slot_def.charges.as_ref().map(|c| c.charge_count).unwrap_or(1);
     let remaining_charges = {
         let mut guard = ctx.fighter_charge_state.write().unwrap();
@@ -699,8 +736,11 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
         *entry = entry.saturating_add(1);
         (charge_count as i64).saturating_sub(*entry as i64)
     };
+    ctx.fighter_cooldown_state
+        .write()
+        .unwrap()
+        .insert((fighter_ball_id, slot_id), now_unix + cd_secs);
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let bomb_dmg = DamageVector::new(1000.0, 1000.0, 1000.0, 1000.0);
     let aoe_radius = 15_000.0f64;
 

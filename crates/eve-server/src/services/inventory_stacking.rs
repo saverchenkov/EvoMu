@@ -356,7 +356,7 @@ pub(crate) async fn handle_multi_add(
     } else {
         None
     };
-    let mut fitted_unfit_ids = Vec::new();
+    let mut fitted_unfit_ids: Vec<(i64, i64, u16)> = Vec::new();
     ctx.db.with_snapshot(|snap| {
         let ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
@@ -490,7 +490,7 @@ pub(crate) async fn handle_multi_add(
                 });
             }
             if matches!(item.flag as u16, 11..=34 | 125..=132) {
-                fitted_unfit_ids.push(item_id);
+                fitted_unfit_ids.push((item.location_id, item_id, item.flag as u16));
             }
             let is_courier = snap
                 .item_custom_names
@@ -644,11 +644,28 @@ pub(crate) async fn handle_multi_add(
             near_service =
                 fitting_containers_ships::is_near_in_space_fitting_service(ctx, sys_id, ship_id).await;
         }
-        if !near_service {
+        if ! near_service {
             return Err(BridgeRpcError {
                 code: "CannotUnfitInSpace".into(),
                 message: "Unfitting modules requires being docked at a station/structure or within range of a Mobile Depot or capital SMA".into(),
             });
+        }
+    }
+    for &(old_loc, item_id, old_flag) in &fitted_unfit_ids {
+        if (125..=129).contains(&old_flag) {
+            if let Ok(mut check_fit) = ctx.get_or_rebuild_ship_fitting(char_id, old_loc) {
+                for &(_, other_id, other_flag) in &fitted_unfit_ids {
+                    if other_id != item_id && (11..=34).contains(&other_flag) {
+                        let _ = check_fit.modules.remove(&other_id);
+                    }
+                }
+                if let Err(msg) = check_fit.unfit_module(item_id, &ctx.sde) {
+                    return Err(BridgeRpcError {
+                        code: "SubsystemHasFittedModules".into(),
+                        message: msg,
+                    });
+                }
+            }
         }
     }
     let moved = ctx.db.try_with_mut_snapshot(|snap| {
@@ -668,8 +685,17 @@ pub(crate) async fn handle_multi_add(
         }
         Ok(moved)
     })?;
-    for &item_id in &fitted_unfit_ids {
+    let mut source_ships = HashSet::new();
+    for &(old_loc, item_id, _) in &fitted_unfit_ids {
         ctx.remove_projected_ewar_by_module(item_id);
+        if let Some(sys_id) = session.solar_system_id {
+            let _ = ctx.systems.get_or_spawn(sys_id).remove_module_cycle(old_loc, item_id).await;
+        }
+        source_ships.insert(old_loc);
+    }
+    for old_ship in source_ships {
+        ctx.invalidate_ship_fitting(old_ship);
+        let _ = ctx.get_or_rebuild_ship_fitting(char_id, old_ship);
     }
     if is_ship_hold || matches!(flag_u16, 90 | 155) {
         ctx.invalidate_ship_fitting(new_loc);

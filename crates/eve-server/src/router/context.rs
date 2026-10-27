@@ -1101,6 +1101,7 @@ impl ServerContext {
             _ => 3,
         });
 
+        let mut auto_offlined = Vec::new();
         for item in fittable_items {
             let online = online_states.get(&item.item_id).copied().unwrap_or(true);
             let fit_res = fit.fit_module_with_state(
@@ -1110,18 +1111,39 @@ impl ServerContext {
                 online,
                 &self.sde,
             );
-            let is_online = if fit_res.is_err() && online {
-                let _ = fit.fit_module_with_state(
-                    item.item_id,
-                    item.type_id,
-                    item.flag as u16,
-                    false,
-                    &self.sde,
-                );
+            let is_online = if let Err(ref err_msg) = fit_res {
+                if online {
+                    let _ = fit.fit_module_with_state(
+                        item.item_id,
+                        item.type_id,
+                        item.flag as u16,
+                        false,
+                        &self.sde,
+                    );
+                    if err_msg.contains("Insufficient CPU")
+                        || err_msg.contains("Insufficient Powergrid")
+                    {
+                        auto_offlined.push(item.item_id);
+                    }
+                }
                 false
             } else {
-                online && fit_res.is_ok()
+                online
             };
+            if let Some(m) = fit.modules.get_mut(&item.item_id) {
+                if let Some(&dmg) = item.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE) {
+                    m.damage_hp = dmg;
+                }
+                if let Some(&hp) = item.dynamic_attributes.get(&eve_sde::attr_ids::HP_STRUCT) {
+                    m.max_hp = hp;
+                }
+                let mut overrides = item.dynamic_attributes.clone();
+                overrides.remove(&eve_sde::attr_ids::DAMAGE);
+                overrides.remove(&eve_sde::attr_ids::HP_STRUCT);
+                if !overrides.is_empty() {
+                    m.dynamic_attribute_overrides = overrides;
+                }
+            }
             if is_online && active_states.contains(&item.item_id) {
                 let _ = fit.activate_module(item.item_id, false, &self.sde);
             }
@@ -1131,6 +1153,17 @@ impl ServerContext {
                     m.charge_quantity = m.charge_quantity.max(1);
                 }
             }
+        }
+        fit.recalculate_stats(&self.sde);
+        let post_offlined = fit.enforce_post_unfit_or_offline_constraints(&self.sde);
+        auto_offlined.extend(post_offlined);
+        if !auto_offlined.is_empty() {
+            self.db.with_mut_snapshot(|snap| {
+                for mid in auto_offlined {
+                    snap.module_online_states.insert(mid, false);
+                    snap.module_active_states.remove(&mid);
+                }
+            });
         }
 
         // Attach loaded charges / scripts and owned drones
