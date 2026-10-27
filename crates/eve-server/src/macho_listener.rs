@@ -531,7 +531,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
 
                         let (bound_id, method, call_args, call_kwargs) =
                             extract_macho_call_req(&pkt.payload);
-                        let pre_rpc_notifs = session
+                        let mut pre_rpc_notifs = session
                             .character_id
                             .map(|cid| ctx.drain_notifications_for_char(cid))
                             .unwrap_or_default();
@@ -670,7 +670,15 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         }
 
                         if let Some(cid) = session.character_id {
-                            let _ = ctx.drain_notifications_for_char(cid);
+                            for notif in ctx.drain_notifications_for_char(cid) {
+                                if !session
+                                    .notifications
+                                    .iter()
+                                    .any(|(ev, a)| ev == &notif.event && a == &notif.args)
+                                {
+                                    pre_rpc_notifs.push(notif);
+                                }
+                            }
                         }
                         let mut notif_write_failed = false;
                         for notif in pre_rpc_notifs {
@@ -745,23 +753,25 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
         }
     }
 
-    if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
-        if session.station_id.is_none() && session.structure_id.is_none() {
-            let handle = ctx.systems.get_or_spawn(sys_id);
-            if let Ok(Some((_, ball))) = handle.get_ball_snapshot(ship_id).await {
-                ctx.db.with_mut_snapshot(|snap| {
-                    snap.item_positions.insert(ship_id, [ball.position.x, ball.position.y, ball.position.z]);
-                });
-            }
-        }
-    }
-
     reader_task.abort();
     ctx.unregister_session_closer(session_id);
     ctx.release_session_bindings(session_id);
     if let Some(uid) = session.user_id {
         // A dropped connection that still held the character online is a log-off for watchers and triggers SP-6 in-space logoff handling.
         if ctx.db.release_online_lock(uid, session_id) {
+            if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
+                if session.station_id.is_none() && session.structure_id.is_none() {
+                    let handle = ctx.systems.get_or_spawn(sys_id);
+                    if let Ok(Some((_, ball))) = handle.get_ball_snapshot(ship_id).await {
+                        ctx.db.with_mut_snapshot(|snap| {
+                            snap.item_positions.insert(
+                                ship_id,
+                                [ball.position.x, ball.position.y, ball.position.z],
+                            );
+                        });
+                    }
+                }
+            }
             if let Some(cid) = session.character_id {
                 let _ = crate::sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, cid).await;
                 crate::services::character_skills::notify_watchlist_presence(&ctx, cid, false);

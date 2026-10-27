@@ -366,12 +366,22 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
             }
         }
         ("shipCosmeticsMgr", "GetEnabledCosmetics") => {
-            // const-ok: enabled cosmetics dictionary for ship (empty dict when no custom cosmetics applied)
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(Ok(PyRep::Dict(Vec::new())))
+            let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
+            let entries = ctx.db.with_snapshot(|snap| {
+                snap.quasar_state_blobs
+                    .get("quasar_cosmetics_live")
+                    .and_then(|s| serde_json::from_str::<crate::services::quasar_cosmetics_live::CosmeticsLiveData>(s).ok())
+                    .and_then(|d| d.ship_logos.get(&(ship_id.max(0) as u64)).cloned())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(slot, kind)| (PyRep::Integer(slot as i64), PyRep::Integer(kind as i64)))
+                    .collect::<Vec<_>>()
+            });
+            Some(Ok(PyRep::Dict(entries)))
         }
         // parity: feat:ui.overview-presets
         ("overviewPresetMgr", "StoreLinkAndGetID") => Some(handle_store_link(ctx, session, args, LinkKind::OverviewPreset)),

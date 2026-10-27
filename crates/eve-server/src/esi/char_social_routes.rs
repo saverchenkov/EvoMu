@@ -737,6 +737,12 @@ pub fn dispatch_char_social_route(
                         format!("Calendar event {event_id} not found"),
                     );
                 };
+                if ev.owner_id != char_id && !ev.attendees.is_empty() && !ev.attendees.contains(&char_id) {
+                    return RouteExecutionResult::error(
+                        403,
+                        format!("Character {char_id} is not invited to calendar event {event_id}"),
+                    );
+                }
                 let invited = ev.owner_id == char_id
                     || ev.attendees.contains(&char_id)
                     || (ev.owner_type == "corporation" && ev.owner_id == ch.corporation_id);
@@ -897,6 +903,12 @@ pub fn dispatch_char_social_route(
                         format!("Calendar event {event_id} not found"),
                     );
                 };
+                if ev.owner_id != char_id && !ev.attendees.is_empty() && !ev.attendees.contains(&char_id) {
+                    return RouteExecutionResult::error(
+                        403,
+                        format!("Character {char_id} is not invited to calendar event {event_id}"),
+                    );
+                }
                 let resp_guard = ctx
                     .esi_state
                     .calendar_responses

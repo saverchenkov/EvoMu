@@ -92,6 +92,13 @@ pub(super) fn handle_mail_and_calendar(
                                 .map(|g| g.restrict_corp_mails)
                                 .unwrap_or(false);
                             if let Some(c) = snap.corporations.get(&corp_or_alliance_id) {
+                                let caller_corp = snap.characters.get(&char_id).map(|ch| ch.corporation_id);
+                                if caller_corp != Some(corp_or_alliance_id) && !c.members.contains(&char_id) {
+                                    return Err(BridgeRpcError {
+                                        code: "CorpMailAccessDenied".into(),
+                                        message: "Only corporation members can send corporation mail".into(),
+                                    });
+                                }
                                 let role = c.member_roles.get(&char_id).copied().unwrap_or(0);
                                 if restrict && char_id != c.ceo_id && role == 0 {
                                     return Err(BridgeRpcError {
@@ -103,6 +110,14 @@ pub(super) fn handle_mail_and_calendar(
                                 return Ok(c.members.iter().copied().collect());
                             }
                             if let Some(a) = snap.alliances.get(&corp_or_alliance_id) {
+                                let caller_al = snap.characters.get(&char_id).and_then(|ch| ch.alliance_id);
+                                let caller_corp = snap.characters.get(&char_id).map(|ch| ch.corporation_id).unwrap_or(0);
+                                if caller_al != Some(corp_or_alliance_id) && !a.member_corp_ids.contains(&caller_corp) {
+                                    return Err(BridgeRpcError {
+                                        code: "AllianceMailAccessDenied".into(),
+                                        message: "Only alliance members can send alliance mail".into(),
+                                    });
+                                }
                                 target_label = 8;
                                 let mut m = Vec::new();
                                 for cid in &a.member_corp_ids {
@@ -137,6 +152,13 @@ pub(super) fn handle_mail_and_calendar(
                     let mut lbl = target_label;
                     for &id in &recipient_ids {
                         if let Some(c) = snap.corporations.get(&id) {
+                            let caller_corp = snap.characters.get(&char_id).map(|ch| ch.corporation_id);
+                            if caller_corp != Some(id) && !c.members.contains(&char_id) {
+                                return Err(BridgeRpcError {
+                                    code: "CorpMailAccessDenied".into(),
+                                    message: "Only corporation members can send corporation mail".into(),
+                                });
+                            }
                             let restrict = snap
                                 .corp_governance
                                 .get(&id)
@@ -152,6 +174,14 @@ pub(super) fn handle_mail_and_calendar(
                             lbl = 4;
                             extra.extend(c.members.iter().copied());
                         } else if let Some(a) = snap.alliances.get(&id) {
+                            let caller_al = snap.characters.get(&char_id).and_then(|ch| ch.alliance_id);
+                            let caller_corp = snap.characters.get(&char_id).map(|ch| ch.corporation_id).unwrap_or(0);
+                            if caller_al != Some(id) && !a.member_corp_ids.contains(&caller_corp) {
+                                return Err(BridgeRpcError {
+                                    code: "AllianceMailAccessDenied".into(),
+                                    message: "Only alliance members can send alliance mail".into(),
+                                });
+                            }
                             lbl = 8;
                             for cid in &a.member_corp_ids {
                                 if let Some(c) = snap.corporations.get(cid) {

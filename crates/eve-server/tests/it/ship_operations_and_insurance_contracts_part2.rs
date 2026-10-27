@@ -521,3 +521,88 @@ async fn test_r2_track5_economy_market_and_trading() {
     assert_eq!(trade_err.code, "NotDockedAtStation");
 }
 
+#[tokio::test]
+async fn test_r2_track6_quasar_esi_and_protocol() {
+    let ctx = new_test_ctx();
+    let mut sess = SessionState::new(8991);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let kw = HashMap::new();
+    let char_id = 90_000_001i64;
+    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None).await.unwrap();
+
+    // 1. Issue #101: LSC SendMessage rejects spoofing a foreign solar system or corporation channel
+    let chat_sys_err = ctx.dispatch_rpc(
+        &mut sess,
+        "LSC",
+        None,
+        "SendMessage",
+        &[PyRep::String("solarsystemid2:30002187".into()), PyRep::String("spoofed".into())],
+        &kw,
+        None,
+    ).await.unwrap_err();
+    assert_eq!(chat_sys_err.code, "ChannelAccessDenied");
+
+    let chat_corp_err = ctx.dispatch_rpc(
+        &mut sess,
+        "LSC",
+        None,
+        "SendMessage",
+        &[PyRep::String("corpid:98999999".into()), PyRep::String("spoofed".into())],
+        &kw,
+        None,
+    ).await.unwrap_err();
+    assert_eq!(chat_corp_err.code, "ChannelAccessDenied");
+
+    // 2. Issue #101: mailMgr.SendMail rejects sending mass mail to a foreign corporation
+    ctx.db.with_mut_snapshot(|s| {
+        s.corporations.insert(
+            98_999_999,
+            eve_db::CorporationRecord {
+                corporation_id: 98_999_999,
+                name: "Foreign Corp".into(),
+                ticker: "FRGN".into(),
+                ceo_id: 90_000_002,
+                members: [90_000_002].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+    });
+    let mail_err = ctx.dispatch_rpc(
+        &mut sess,
+        "mailMgr",
+        None,
+        "SendMail",
+        &[
+            PyRep::List(Vec::new()),
+            PyRep::None,
+            PyRep::Integer(98_999_999),
+            PyRep::String("Spam".into()),
+            PyRep::String("Body".into()),
+        ],
+        &kw,
+        None,
+    ).await.unwrap_err();
+    assert_eq!(mail_err.code, "CorpMailAccessDenied");
+
+    // 3. Issue #109: shipCosmeticsMgr.GetEnabledCosmetics returns persisted ship_logos from quasar_cosmetics_live
+    let ship_id = sess.ship_id.unwrap_or(100_000_001);
+    ctx.db.with_mut_snapshot(|s| {
+        let mut live = eve_server::services::quasar_cosmetics_live::CosmeticsLiveData::default();
+        let mut slots = std::collections::BTreeMap::new();
+        slots.insert(0, 2u8);
+        live.ship_logos.insert(ship_id as u64, slots);
+        s.quasar_state_blobs.insert("quasar_cosmetics_live".into(), serde_json::to_string(&live).unwrap());
+    });
+    let enabled_res = ctx.dispatch_rpc(
+        &mut sess,
+        "shipCosmeticsMgr",
+        None,
+        "GetEnabledCosmetics",
+        &[PyRep::Integer(ship_id)],
+        &kw,
+        None,
+    ).await.unwrap();
+    let PyRep::Dict(entries) = enabled_res else { panic!("expected Dict") };
+    assert_eq!(entries.len(), 1);
+}
+

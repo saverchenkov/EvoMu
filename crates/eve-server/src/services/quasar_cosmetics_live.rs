@@ -172,7 +172,20 @@ fn ship_state(snap: &WorldStateSnapshot, sde: &SdeRegistry, ship_id: u64) -> Opt
             put_seq(1, skin_id as u64, &mut first);
             encode_bytes_field(1, &first, &mut skin);
         }
-        None => encode_varint_field(3, 1, &mut skin), // no_skin
+        None => {
+            let third_hex = snap
+                .quasar_state_blobs
+                .get("quasar_cosmetics_skinr")
+                .and_then(|s| serde_json::from_str::<super::quasar_cosmetics_skinr::SkinrCosmeticsData>(s).ok())
+                .and_then(|d| d.applied_thirdparty_skins.get(&ship_id).cloned());
+            if let Some(design_hex) = third_hex {
+                let mut third = Vec::new();
+                encode_bytes_field(1, design_hex.as_bytes(), &mut third);
+                encode_bytes_field(2, &third, &mut skin);
+            } else {
+                encode_varint_field(3, 1, &mut skin); // no_skin
+            }
+        }
     }
     let mut out = Vec::new();
     put_seq(1, item.owner_id.max(0) as u64, &mut out);

@@ -749,10 +749,18 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state_ms_all = Arc::clone(&state);
     router.register_handler(
         "eve_public.corporation.skill.plan.milestone.GetAllRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
             let plan_id = extract_id(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing skill_plan Identifier.uuid".into()))?;
             let plans = state_ms_all.skill_plans.read().unwrap_or_else(|e| e.into_inner());
             let plan = plans.get(&plan_id).ok_or((STATUS_NOT_FOUND, "Corporation skill plan not found".into()))?;
+            if let (Some(cid), Some(db)) = (ctx.effective_character_id(), state_ms_all.db.as_ref()) {
+                let caller_corp = db.with_snapshot(|s| s.characters.get(&(cid as i64)).map(|c| c.corporation_id as u32));
+                if let Some(c_corp) = caller_corp {
+                    if plan.corp_id != 0 && plan.corp_id != c_corp && crate::quasar_gateway::require_admin_role(ctx).is_err() {
+                        return Err((STATUS_FORBIDDEN, "Not a member of the skill plan's corporation".into()));
+                    }
+                }
+            }
             let mut out = Vec::new();
             for (mid, desc) in &plan.milestones {
                 let mut m_bytes = Vec::new();
