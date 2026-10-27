@@ -517,7 +517,7 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
 }
 
 
-fn build_special_site_npc_combat_state(
+pub(crate) fn build_special_site_npc_combat_state(
     sde: &eve_sde::SdeRegistry,
     type_id: u32,
 ) -> eve_destiny::CombatState {

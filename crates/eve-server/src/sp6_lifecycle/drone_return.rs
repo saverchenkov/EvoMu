@@ -487,7 +487,8 @@ pub async fn step_repeating_drone_mining(ctx: &ServerContext, now_unix: u64) {
             continue;
         }
 
-        let extraction = match sys.mine_asteroid(m.asteroid_id, m.yield_units, m.waste_prob).await {
+        let eff_waste = if m.waste_prob > 1.0 { m.waste_prob / 100.0 } else { m.waste_prob };
+        let extraction = match sys.mine_asteroid(m.asteroid_id, m.yield_units, eff_waste).await {
             Ok(e) => e,
             Err(_) => {
                 with_mut_combat_runtime(ctx, |rt| {

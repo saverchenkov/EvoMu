@@ -596,7 +596,7 @@ fn process_configuration(
         let it = snap
             .items
             .get(item_id)
-            .filter(|it| it.owner_id == caller.cid || it.location_id == hub_id)
+            .filter(|it| it.owner_id == caller.cid || (caller.corp > 0 && it.owner_id == caller.corp))
             .ok_or((STATUS_NOT_FOUND, format!("Upgrade item {item_id} not found in your inventory")))?;
         if !item_at_hub(snap, caller, it, hub_id, sys) {
             return Err((STATUS_BAD_REQUEST, format!("Upgrade item {item_id} is not inside the hub or your ship at the hub")));
@@ -650,11 +650,26 @@ fn process_configuration(
 /// `true` when an item may be consumed by a hub operation: it sits inside the hub itself, or in
 /// the caller's active ship while the caller is in the hub's solar system.
 pub(crate) fn item_at_hub(snap: &WorldStateSnapshot, caller: &Caller, it: &InventoryItemRecord, hub_id: i64, hub_sys: u32) -> bool {
-    it.location_id == hub_id
-        || snap
-            .characters
-            .get(&caller.cid)
-            .is_some_and(|ch| ch.active_ship_id == it.location_id && ch.solar_system_id == hub_sys)
+    (it.owner_id == caller.cid || (caller.corp > 0 && it.owner_id == caller.corp))
+        && matches!(
+            it.flag,
+            eve_db::InventoryFlag::Hangar
+                | eve_db::InventoryFlag::Cargo
+                | eve_db::InventoryFlag::SubSystemSlot0
+                | eve_db::InventoryFlag::CorpSAG1
+                | eve_db::InventoryFlag::CorpSAG2
+                | eve_db::InventoryFlag::CorpSAG3
+                | eve_db::InventoryFlag::CorpSAG4
+                | eve_db::InventoryFlag::CorpSAG5
+                | eve_db::InventoryFlag::CorpSAG6
+                | eve_db::InventoryFlag::CorpSAG7
+        )
+        && !snap.is_item_locked_in_contract_or_job(it.item_id)
+        && (it.location_id == hub_id
+            || snap
+                .characters
+                .get(&caller.cid)
+                .is_some_and(|ch| ch.active_ship_id == it.location_id && ch.solar_system_id == hub_sys))
 }
 
 /// Removes `qty` units from an inventory stack, deleting it when empty.
@@ -764,7 +779,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                     let it = snap
                         .items
                         .get(&item_id)
-                        .filter(|it| it.owner_id == c.cid)
+                        .filter(|it| it.owner_id == c.cid || (c.corp > 0 && it.owner_id == c.corp))
                         .ok_or((STATUS_NOT_FOUND, format!("Fuel item {item_id} not found in your inventory")))?;
                     if !item_at_hub(snap, &c, it, hub_id, sys) {
                         return Err((STATUS_BAD_REQUEST, format!("Fuel item {item_id} is not inside the hub or your ship at the hub")));

@@ -512,6 +512,16 @@ pub fn handle_structure_compression_mgr(
                         ),
                     });
                 }
+                if !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
+                    snap, structure_id, char_id,
+                ) {
+                    return Err(BridgeRpcError {
+                        code: "AccessDenied".into(),
+                        message: format!(
+                            "Character {char_id} is denied access to structure {structure_id} by its access profile"
+                        ),
+                    });
+                }
 
                 if snap.is_item_locked_in_contract_or_job(item_id) {
                     return Err(BridgeRpcError {
@@ -520,13 +530,18 @@ pub fn handle_structure_compression_mgr(
                     });
                 }
 
+                let caller_corp = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .unwrap_or(0);
                 let Some(item) = snap.items.get_mut(&item_id) else {
                     return Err(BridgeRpcError {
                         code: "CompressionFailed".into(),
                         message: format!("Item {item_id} not found"),
                     });
                 };
-                if item.owner_id != char_id {
+                if item.owner_id != char_id && !(caller_corp > 0 && item.owner_id == caller_corp) {
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: "Character does not own this item".into(),
@@ -539,8 +554,28 @@ pub fn handle_structure_compression_mgr(
                     });
                 }
                 let reachable = (item.location_id == structure_id
-                    && item.flag == InventoryFlag::Hangar)
-                    || (Some(item.location_id) == session.ship_id);
+                    && ((item.owner_id == char_id && item.flag == InventoryFlag::Hangar)
+                        || (caller_corp > 0
+                            && item.owner_id == caller_corp
+                            && matches!(
+                                item.flag,
+                                InventoryFlag::Hangar
+                                    | InventoryFlag::CorpSAG1
+                                    | InventoryFlag::CorpSAG2
+                                    | InventoryFlag::CorpSAG3
+                                    | InventoryFlag::CorpSAG4
+                                    | InventoryFlag::CorpSAG5
+                                    | InventoryFlag::CorpSAG6
+                                    | InventoryFlag::CorpSAG7
+                            ))))
+                    || (Some(item.location_id) == session.ship_id
+                        && matches!(
+                            item.flag,
+                            InventoryFlag::Cargo
+                                | InventoryFlag::SpecializedOreHold
+                                | InventoryFlag::SpecializedGasHold
+                                | InventoryFlag::SpecializedIceHold
+                        ));
                 if !reachable || item.quantity < 1 {
                     return Err(BridgeRpcError {
                         code: "CompressionFailed".into(),
@@ -878,16 +913,20 @@ pub async fn handle_compression(
             let sess_role = session.corp_role;
             let res = ctx.db.with_snapshot(|snap| {
                 let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                if let Some(st) = snap.structures.get(&observer_id) {
-                    if st.owner_corp_id != caller_corp {
-                        return Err(BridgeRpcError {
-                            code: "CrpAccessDenied".into(),
-                            message: format!(
-                                "Character {char_id} (corp {caller_corp}) lacks ACL access to observer {observer_id} (owner corp {})",
-                                st.owner_corp_id
-                            ),
-                        });
-                    }
+                let Some(st) = snap.structures.get(&observer_id) else {
+                    return Err(BridgeRpcError {
+                        code: "CrpAccessDenied".into(),
+                        message: format!("Observer structure {observer_id} not found or access denied"),
+                    });
+                };
+                if st.owner_corp_id != caller_corp {
+                    return Err(BridgeRpcError {
+                        code: "CrpAccessDenied".into(),
+                        message: format!(
+                            "Character {char_id} (corp {caller_corp}) lacks ACL access to observer {observer_id} (owner corp {})",
+                            st.owner_corp_id
+                        ),
+                    });
                 }
                 let effective_role = snap
                     .corporations

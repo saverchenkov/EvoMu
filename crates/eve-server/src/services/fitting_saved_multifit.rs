@@ -489,6 +489,19 @@ pub(crate) async fn handle_ships_and_services(
                 let active_ship_colocated = current_ship
                     .map(|sid| snap.is_ship_colocated_with_character(char_id, sid, current_dock))
                     .unwrap_or(false);
+                let is_fitted_slot = matches!(
+                    target_item.flag as u16,
+                    11..=34 | 87 | 92..=94 | 125..=132 | 158
+                );
+                if is_fitted_slot {
+                    return Err(BridgeRpcError {
+                        code: "CannotMutateFittedItem".into(),
+                        message: format!(
+                            "Target item {target_item_id} is currently fitted in slot {:?} and must be unfitted to Cargo or Hangar before mutating",
+                            target_item.flag
+                        ),
+                    });
+                }
                 let target_reachable = (current_dock.is_some()
                     && Some(target_item.location_id) == current_dock
                     && target_item.flag == InventoryFlag::Hangar)

@@ -927,6 +927,10 @@ pub async fn handle(
         }
 
         ("moonExtractions", "GetMoonResourcesForStructure") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let Some(structure_id) = resolve_moon_structure_id(ctx, session, args, _kwargs) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
@@ -935,15 +939,32 @@ pub async fn handle(
             };
 
             let struct_info = ctx.db.with_snapshot(|snap| {
-                let st = snap.structures.get(&structure_id)?;
+                let caller_corp = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .unwrap_or(0);
+                let Some(st) = snap.structures.get(&structure_id) else {
+                    return Err(BridgeRpcError {
+                        code: "StructureNotFound".into(),
+                        message: format!("Structure {structure_id} not found"),
+                    });
+                };
+                if st.owner_corp_id != caller_corp {
+                    return Err(BridgeRpcError {
+                        code: "NotStructureOwnerCorp".into(),
+                        message: format!(
+                            "Character {char_id} (corp {caller_corp}) does not belong to structure {structure_id} owner corp {}",
+                            st.owner_corp_id
+                        ),
+                    });
+                }
                 let existing_moon = snap.moon_extractions.get(&structure_id).map(|e| e.moon_id);
-                Some((st.solar_system_id, st.position, existing_moon))
+                Ok((st.solar_system_id, st.position, existing_moon))
             });
-            let Some((sys_id, pos, existing_moon)) = struct_info else {
-                return Some(Err(BridgeRpcError {
-                    code: "StructureNotFound".into(),
-                    message: format!("Structure {structure_id} not found"),
-                }));
+            let (sys_id, pos, existing_moon) = match struct_info {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
             };
             let Some(moon_id) = existing_moon.or_else(|| resolve_structure_moon_id(&ctx.sde, sys_id, pos)) else {
                 return Some(Err(BridgeRpcError {
@@ -976,6 +997,10 @@ pub async fn handle(
         }
 
         ("moonExtractions", "GetExtractionAndEventIDFromStructureID") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let Some(structure_id) = resolve_moon_structure_id(ctx, session, args, _kwargs) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
@@ -984,10 +1009,35 @@ pub async fn handle(
             };
 
             let now = ctx.now_unix();
-            let (ext, delay_secs) = ctx.db.with_snapshot(|snap| {
+            let check_res = ctx.db.with_snapshot(|snap| {
+                let caller_corp = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .unwrap_or(0);
+                if let Some(st) = snap.structures.get(&structure_id) {
+                    if st.owner_corp_id != caller_corp {
+                        return Err(BridgeRpcError {
+                            code: "NotStructureOwnerCorp".into(),
+                            message: format!(
+                                "Character {char_id} (corp {caller_corp}) does not belong to structure {structure_id} owner corp {}",
+                                st.owner_corp_id
+                            ),
+                        });
+                    }
+                } else {
+                    return Err(BridgeRpcError {
+                        code: "StructureNotFound".into(),
+                        message: format!("Structure {structure_id} not found"),
+                    });
+                }
                 let d = compute_auto_fracture_delay_secs(&ctx.sde, snap, structure_id);
-                (snap.moon_extractions.get(&structure_id).cloned(), d)
+                Ok((snap.moon_extractions.get(&structure_id).cloned(), d))
             });
+            let (ext, delay_secs) = match check_res {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
 
             if let Some(e) = ext {
                 let effective_status = if e.status != "Cancelled" && now >= e.natural_decay_unix {

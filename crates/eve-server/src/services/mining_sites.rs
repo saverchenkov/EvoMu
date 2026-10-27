@@ -972,12 +972,24 @@ pub async fn handle(
                     if !requested_upgrade_type.map_or(true, |rt| it.type_id == rt) {
                         continue;
                     }
-                    let owned_or_installed = it.owner_id == char_id
-                        || it.owner_id == caller_corp_id
-                        || it.location_id == hub_id;
+                    let owned = it.owner_id == char_id
+                        || (caller_corp_id > 0 && it.owner_id == caller_corp_id);
                     let in_hub = it.location_id == hub_id;
                     let in_ship = active_ship_id == Some(it.location_id);
-                    if !owned_or_installed || (!in_hub && !in_ship) {
+                    let valid_flag = matches!(
+                        it.flag,
+                        eve_db::InventoryFlag::Hangar
+                            | eve_db::InventoryFlag::Cargo
+                            | eve_db::InventoryFlag::SubSystemSlot0
+                            | eve_db::InventoryFlag::CorpSAG1
+                            | eve_db::InventoryFlag::CorpSAG2
+                            | eve_db::InventoryFlag::CorpSAG3
+                            | eve_db::InventoryFlag::CorpSAG4
+                            | eve_db::InventoryFlag::CorpSAG5
+                            | eve_db::InventoryFlag::CorpSAG6
+                            | eve_db::InventoryFlag::CorpSAG7
+                    );
+                    if !owned || (!in_hub && !in_ship) || !valid_flag {
                         continue;
                     }
                     if in_ship && !in_hub {
@@ -1032,9 +1044,37 @@ pub async fn handle(
                 let was_already_installed = snap.items.get(&up_iid).is_some_and(|it| {
                     it.location_id == hub_id && it.flag == eve_db::InventoryFlag::SubSystemSlot0
                 });
-                if let Some(up_it) = snap.items.get_mut(&up_iid) {
+                let split_new = snap
+                    .items
+                    .get(&up_iid)
+                    .filter(|it| !was_already_installed && it.quantity > 1)
+                    .cloned();
+                if let Some(src) = split_new {
+                    if let Some(up_it) = snap.items.get_mut(&up_iid) {
+                        up_it.quantity -= 1;
+                        up_it.version += 1;
+                    }
+                    snap.next_entity_id += 1;
+                    let new_iid = snap.next_entity_id;
+                    snap.items.insert(
+                        new_iid,
+                        eve_db::InventoryItemRecord {
+                            item_id: new_iid,
+                            type_id: src.type_id,
+                            owner_id: src.owner_id,
+                            location_id: hub_id,
+                            flag: eve_db::InventoryFlag::SubSystemSlot0,
+                            quantity: 1,
+                            singleton: true,
+                            version: 1,
+                            ..Default::default()
+                        },
+                    );
+                } else if let Some(up_it) = snap.items.get_mut(&up_iid) {
                     up_it.location_id = hub_id;
                     up_it.flag = eve_db::InventoryFlag::SubSystemSlot0;
+                    up_it.singleton = true;
+                    up_it.version += 1;
                 }
                 snap.sov_prospecting_levels.insert(sys_id, u32::from(*level));
                 if let Some(st) = snap.system_states.get_mut(&sys_id) {

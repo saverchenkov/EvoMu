@@ -456,7 +456,7 @@ pub fn publish_incursion_tale_stopped_if_ended(
 pub async fn process_incursion_site_completion_and_payout_core(
     systems: &Arc<SystemRegistry>,
     db: &Arc<WorldRepository>,
-    _sde: &Arc<SdeRegistry>,
+    sde: &Arc<SdeRegistry>,
     caller_char_id: Option<CharacterId>,
     caller_fleet_id: Option<i64>,
     site_sys: SolarSystemId,
@@ -711,25 +711,43 @@ pub async fn process_incursion_site_completion_and_payout_core(
     ) = step_res;
 
     if let Some((new_bid, new_tid, new_escorts)) = next_boss_ball {
+        systems.claim_special_site_ball(target_sys, new_bid);
         let _ = sys_handle
-            .spawn_ball(make_site_npc_ball(
-                new_bid,
-                new_tid,
-                site_pos,
-            ))
+            .spawn_ball_with_combat(
+                make_site_npc_ball(new_bid, new_tid, site_pos),
+                crate::services::pve_special_sites::build_special_site_npc_combat_state(sde, new_tid),
+            )
             .await;
         for (esc_bid, esc_tid, esc_offset) in new_escorts {
+            systems.claim_special_site_ball(target_sys, esc_bid);
             let esc_pos = site_pos + DVec3::new(esc_offset[0], esc_offset[1], esc_offset[2]);
-            let _ = sys_handle.spawn_ball(make_site_npc_ball(esc_bid, esc_tid, esc_pos)).await;
+            let _ = sys_handle
+                .spawn_ball_with_combat(
+                    make_site_npc_ball(esc_bid, esc_tid, esc_pos),
+                    crate::services::pve_special_sites::build_special_site_npc_combat_state(sde, esc_tid),
+                )
+                .await;
         }
     }
 
     if let Some((ms_sys, ms_bid, ms_tid, ms_pos, ms_escorts)) = ms_to_spawn {
         let ms_handle = systems.get_or_spawn(ms_sys);
-        let _ = ms_handle.spawn_ball(make_site_npc_ball(ms_bid, ms_tid, ms_pos)).await;
+        systems.claim_special_site_ball(ms_sys, ms_bid);
+        let _ = ms_handle
+            .spawn_ball_with_combat(
+                make_site_npc_ball(ms_bid, ms_tid, ms_pos),
+                crate::services::pve_special_sites::build_special_site_npc_combat_state(sde, ms_tid),
+            )
+            .await;
         for (esc_bid, esc_tid, esc_offset) in ms_escorts {
+            systems.claim_special_site_ball(ms_sys, esc_bid);
             let esc_pos = ms_pos + DVec3::new(esc_offset[0], esc_offset[1], esc_offset[2]);
-            let _ = ms_handle.spawn_ball(make_site_npc_ball(esc_bid, esc_tid, esc_pos)).await;
+            let _ = ms_handle
+                .spawn_ball_with_combat(
+                    make_site_npc_ball(esc_bid, esc_tid, esc_pos),
+                    crate::services::pve_special_sites::build_special_site_npc_combat_state(sde, esc_tid),
+                )
+                .await;
         }
     }
 
