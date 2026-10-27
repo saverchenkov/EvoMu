@@ -156,9 +156,9 @@ async fn test_d6_industry_pi_and_market_wallet_history_durable_across_sqlite_res
 
         // 1. Start Moon Extraction & Metenox, advance to chunk arrival, fracture & mine moon asteroid, deploy PI network while undocked
         call(&ctx, &mut sess_p1, "moonExtractions", "StartNewExtraction", &[PyRep::Integer(athanor_id), PyRep::Integer(518_400)]).await.expect("StartNewExtraction");
-        call(&ctx, &mut sess_p1, "autoMoonMining", "RequestMiningDetails", &[PyRep::Integer(metenox_id)]).await.expect("RequestMiningDetails");
-        ctx.advance_time_seconds(518_400);
-        call(&ctx, &mut sess_p1, "autoMoonMining", "RequestMiningCycleOutput", &[PyRep::Integer(metenox_id), PyRep::Integer(2)]).await.expect("RequestMiningCycleOutput");
+        ctx.advance_time_seconds(511_200);
+        ctx.db.with_mut_snapshot(|s| { s.structures.get_mut(&metenox_id).unwrap().fuel_blocks = 200; s.items.get_mut(&910_020).unwrap().quantity = 500; s.auto_moon_miners.remove(&metenox_id); });
+        ctx.advance_time_seconds(7_200); call(&ctx, &mut sess_p1, "autoMoonMining", "RequestMiningCycleOutput", &[PyRep::Integer(metenox_id)]).await.expect("RequestMiningCycleOutput");
         let frac = call(&ctx, &mut sess_p1, "moonExtractions", "FractureChunkWithStructure", &[PyRep::Integer(athanor_id)]).await.expect("FractureChunkWithStructure");
         let PyRep::List(ast_ids) = frac.dict_get("asteroidIDs").unwrap() else { panic!("Expected asteroidIDs") };
         let first_ast_id = ast_ids[0].as_i64().unwrap();
@@ -254,8 +254,8 @@ async fn test_d6_industry_pi_and_market_wallet_history_durable_across_sqlite_res
         assert_eq!(esi_pocos.as_array().unwrap()[0]["corporation_tax_rate"], 0.075);
         let prov = call(&ctx, &mut sess_p1, "posMgr", "GetMoonProcessInfoForTower", &[PyRep::Integer(athanor_id)]).await.expect("GetMoonProcessInfoForTower");
         assert_eq!(prov.as_i64(), Some(16634));
-        let ext_info = call(&ctx, &mut sess_p1, "moonExtractions", "GetExtractionAndEventIDFromStructureID", &[PyRep::Integer(athanor_id)]).await.expect("GetExtractionAndEventIDFromStructureID");
-        assert_eq!(ext_info.dict_get("status").and_then(|v| v.as_str()), Some("Fractured"));
+        let PyRep::Tuple(ext_tup) = call(&ctx, &mut sess_p1, "moonExtractions", "GetExtractionAndEventIDFromStructureID", &[PyRep::Integer(athanor_id)]).await.expect("GetExtractionAndEventIDFromStructureID") else { panic!() };
+        assert_eq!(ext_tup[0].dict_get("status").and_then(|v| v.as_str()), Some("Fractured"));
         let esi_exts = esi_get(&router, &format!("/v1/corporation/{CORP_ID}/mining/extractions/"), Some(&token));
         assert_eq!(esi_exts.as_array().unwrap()[0]["structure_id"], athanor_id);
         let met_det = call(&ctx, &mut sess_p1, "autoMoonMining", "RequestMiningDetails", &[PyRep::Integer(metenox_id)]).await.expect("RequestMiningDetails after restart");

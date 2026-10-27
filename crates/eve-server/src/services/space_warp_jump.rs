@@ -435,6 +435,15 @@ async fn handle_cmd_warp_to_stuff(
     if !is_covert_cloaked {
         let _ = handle.break_gate_cloak(ship_id).await;
     }
+    let target_belt_id = ctx
+        .sde
+        .celestials_in_system(sys_id)
+        .into_iter()
+        .find(|c| c.group_id == 9 && (c.celestial_id == target_id || c.position.distance(dest_pos) <= 200_000.0))
+        .map(|c| c.celestial_id);
+    if target_belt_id.is_some() {
+        let _ = handle.populate_asteroid_belt_entities().await;
+    }
     match handle.set_movement_mode(ship_id, mode).await {
         Ok(tick) => {
             // [plan:DG-4] Entering warp halts active non-warp module cycles (weapons, scrams, webs, mining lasers, etc.)
@@ -466,13 +475,8 @@ async fn handle_cmd_warp_to_stuff(
                     PyRep::Real(warp_speed),
                 ],
             );
-            if ctx
-                .sde
-                .celestials_in_system(sys_id)
-                .iter()
-                .any(|c| c.celestial_id == target_id && c.group_id == 9)
-            {
-                let _ = ctx.notify_warp_to_asteroid_belt(char_id, target_id);
+            if let Some(belt_id) = target_belt_id {
+                let _ = ctx.notify_warp_to_asteroid_belt(char_id, belt_id);
             }
             Ok(PyRep::Integer(tick as i64))
         }

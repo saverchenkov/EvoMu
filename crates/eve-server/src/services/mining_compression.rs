@@ -874,7 +874,7 @@ pub async fn handle_compression(
                 }));
             };
             let now = ctx.now_unix();
-            let cutoff = now.saturating_sub(30 * 86_400);
+            let cutoff = now.saturating_sub(90 * 86_400);
             let sess_role = session.corp_role;
             let res = ctx.db.with_snapshot(|snap| {
                 let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
@@ -964,11 +964,12 @@ pub async fn handle_compression(
                 Err(e) => return Some(Err(e)),
             };
             let now = ctx.now_unix();
-            let cutoff = now.saturating_sub(30 * 86_400);
-            let records = ctx.db.get_mining_ledger(char_id);
+            let cutoff = now.saturating_sub(90 * 86_400);
+            let records = ctx.db.get_mining_ledger_with_waste(char_id);
             let mut agg_order: Vec<(String, u32, TypeId)> = Vec::new();
             let mut agg_qty: HashMap<(String, u32, TypeId), i64> = HashMap::new();
-            for r in records {
+            let mut agg_waste: HashMap<(String, u32, TypeId), i64> = HashMap::new();
+            for (r, waste) in records {
                 if r.timestamp_unix > 0 && r.timestamp_unix < cutoff {
                     continue;
                 }
@@ -976,12 +977,15 @@ pub async fn handle_compression(
                 if !agg_qty.contains_key(&key) {
                     agg_order.push(key.clone());
                 }
-                *agg_qty.entry(key).or_insert(0) += r.quantity;
+                *agg_qty.entry(key.clone()).or_insert(0) += r.quantity;
+                *agg_waste.entry(key).or_insert(0) += waste;
             }
             let items: Vec<PyRep> = agg_order
                 .into_iter()
                 .map(|(date, sys_id, type_id)| {
-                    let qty = agg_qty.get(&(date.clone(), sys_id, type_id)).copied().unwrap_or(0);
+                    let key = (date.clone(), sys_id, type_id);
+                    let qty = agg_qty.get(&key).copied().unwrap_or(0);
+                    let waste = agg_waste.get(&key).copied().unwrap_or(0);
                     let (group_id, category_id) = ctx
                         .sde
                         .types
@@ -995,6 +999,8 @@ pub async fn handle_compression(
                         ("groupID", PyRep::Integer(group_id)),
                         ("categoryID", PyRep::Integer(category_id)),
                         ("quantity", PyRep::Integer(qty)),
+                        ("quantityWasted", PyRep::Integer(waste)),
+                        ("waste", PyRep::Integer(waste)),
                     ])
                 })
                 .collect();
@@ -1051,10 +1057,6 @@ pub(crate) fn derive_metenox_moon_materials(
 }
 
 pub(crate) struct MetenoxDrillInspection {
-    pub(crate) 
-    st_owner_corp: i64,
-    pub(crate) caller_corp: i64,
-    pub(crate) st_sys_id: u32,
     pub(crate) moon_id: i64,
     pub(crate) total_struct_fuel: u32,
     pub(crate) total_struct_gas: u32,
@@ -1100,7 +1102,8 @@ pub(crate) fn inspect_metenox_drill(
             message: format!("Structure {structure_id} not found"),
         });
     };
-    if !matches!(st.type_id, 81826 | 81824) {
+    // SDE group 4744 (Upwell Moon Drill, type 81826 Metenox Moon Drill).
+    if !sde.types.get(&st.type_id).is_some_and(|t| t.group_id == 4744) {
         return Err(BridgeRpcError {
             code: "InvalidStructureType".into(),
             message: format!(
@@ -1109,26 +1112,16 @@ pub(crate) fn inspect_metenox_drill(
             ),
         });
     }
-    let caller_corp = snap
-        .characters
-        .get(&char_id)
-        .map(|c| c.corporation_id)
-        .unwrap_or(0);
+    let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
     let st_owner_corp = st.owner_corp_id;
-    if st_owner_corp != caller_corp
-        || !caller_has_structure_extraction_role(snap, char_id, caller_corp, 0)
-    {
+    if st_owner_corp != caller_corp || !caller_has_structure_extraction_role(snap, char_id, caller_corp, 0) {
         return Err(BridgeRpcError {
             code: "AccessDenied".into(),
             message: "Character lacks corporation permissions for auto moon mining".into(),
         });
     }
     let st_sys_id = st.solar_system_id;
-    let sec = sde
-        .solar_systems
-        .get(&st_sys_id)
-        .map(|s| s.security_status)
-        .unwrap_or(0.0);
+    let sec = sde.solar_systems.get(&st_sys_id).map(|s| s.security_status).unwrap_or(0.0);
     if sec >= 0.45 && st_sys_id < 31_000_000 {
         return Err(BridgeRpcError {
             code: "InvalidSystemSecurity".into(),
@@ -1138,61 +1131,123 @@ pub(crate) fn inspect_metenox_drill(
         });
     }
     let matches_reagent_owner = |item_owner_id: i64| -> bool {
-        if st_owner_corp != 0 {
-            item_owner_id == st_owner_corp
-        } else {
-            item_owner_id == char_id || item_owner_id == caller_corp
-        }
+        if st_owner_corp != 0 { item_owner_id == st_owner_corp } else { item_owner_id == char_id || item_owner_id == caller_corp }
     };
-    let item_fuel_blocks: u32 = snap
-        .items
-        .values()
-        .filter(|it| {
-            it.location_id == structure_id
-                && matches_reagent_owner(it.owner_id)
-                && it.quantity > 0
-                && it.flag != InventoryFlag::Locked
-                && !snap.is_item_locked_in_contract_or_job(it.item_id)
-                && sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136)
-        })
+    let item_fuel_blocks: u32 = snap.items.values()
+        .filter(|it| it.location_id == structure_id && matches_reagent_owner(it.owner_id) && it.quantity > 0 && it.flag != InventoryFlag::Locked && !snap.is_item_locked_in_contract_or_job(it.item_id) && sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136))
         .fold(0u32, |acc, it| acc.saturating_add(it.quantity.max(0) as u32));
     let total_struct_fuel = st.fuel_blocks.saturating_add(item_fuel_blocks);
-    let total_struct_gas: u32 = snap
-        .items
-        .values()
-        .filter(|it| {
-            it.location_id == structure_id
-                && matches_reagent_owner(it.owner_id)
-                && it.quantity > 0
-                && it.flag != InventoryFlag::Locked
-                && !snap.is_item_locked_in_contract_or_job(it.item_id)
-                && it.type_id == 81143
-        })
+    let total_struct_gas: u32 = snap.items.values()
+        .filter(|it| it.location_id == structure_id && matches_reagent_owner(it.owner_id) && it.quantity > 0 && it.flag != InventoryFlag::Locked && !snap.is_item_locked_in_contract_or_job(it.item_id) && it.type_id == 81143)
         .fold(0u32, |acc, it| acc.saturating_add(it.quantity.max(0) as u32));
     let Some(moon_id) = super::resolve_structure_moon_id(sde, st_sys_id, st.position) else {
-        return Err(BridgeRpcError {
-            code: "NoMoonInSystem".into(),
-            message: format!("No SDE moon celestial found in system {st_sys_id}"),
-        });
+        return Err(BridgeRpcError { code: "NoMoonInSystem".into(), message: format!("No SDE moon celestial found in system {st_sys_id}") });
     };
     let hourly_materials = derive_metenox_moon_materials(sde, st_sys_id, moon_id, efficiency, 1);
     let Some(&(primary_mat_tid, _)) = hourly_materials.first() else {
-        return Err(BridgeRpcError {
-            code: "NoMoonMaterials".into(),
-            message: format!("Moon {moon_id} in system {st_sys_id} yields no group-427 moon materials"),
-        });
+        return Err(BridgeRpcError { code: "NoMoonMaterials".into(), message: format!("Moon {moon_id} in system {st_sys_id} yields no group-427 moon materials") });
     };
     let hourly_yield: u64 = hourly_materials.iter().map(|&(_, q)| q).sum();
     Ok(MetenoxDrillInspection {
-        st_owner_corp,
-        caller_corp,
-        st_sys_id,
-        moon_id,
-        total_struct_fuel,
-        total_struct_gas,
-        primary_mat_tid,
-        hourly_yield,
-        hourly_materials,
+        moon_id, total_struct_fuel, total_struct_gas,
+        primary_mat_tid, hourly_yield, hourly_materials,
     })
+}
+
+/// Computes the Upwell structure base reprocessing yield from SDE `35899` attribute `717` (`0.50`)
+/// and the hull's SDE attribute `2722` `strRefiningYieldBonus` (`+2.0%` -> `0.51` for Athanor `35835`;
+/// `+5.5%` -> `0.5275` for Tatara `35836`; `0.0%` -> `0.50` for other Upwell structures).
+pub fn compute_structure_reprocessing_base_yield(sde: &SdeRegistry, st_type_id: TypeId) -> f64 {
+    let service_base = sde
+        .types
+        .get(&35899)
+        .and_then(|t| t.default_attributes.get(&717).copied())
+        .unwrap_or(0.50);
+    let bonus_pct = sde
+        .types
+        .get(&st_type_id)
+        .and_then(|t| t.default_attributes.get(&2722).copied())
+        .unwrap_or(0.0);
+    ((service_base * (1.0 + bonus_pct / 100.0)) * 100_000.0).round() / 100_000.0
+}
+
+pub fn compute_structure_rigged_base_yield(
+    sde: &SdeRegistry,
+    snap: &WorldStateSnapshot,
+    structure_id: i64,
+    inv_type: Option<&InvType>,
+) -> f64 {
+    let Some(st) = snap.structures.get(&structure_id) else { return 0.50; };
+    let unrigged = compute_structure_reprocessing_base_yield(sde, st.type_id);
+    let hull_mult = unrigged / 0.50;
+    let st_rig_size = sde.types.get(&st.type_id).and_then(|t| t.default_attributes.get(&1547).copied()).unwrap_or(2.0);
+    let sec_attr_id: u16 = if st.solar_system_id >= 31_000_000 {
+        2357
+    } else {
+        let sec = sde.solar_systems.get(&st.solar_system_id).map(|s| crate::services::mining_sites::displayed_security(s.security_status)).unwrap_or(1.0);
+        if sec <= 0.0 { 2357 } else if sec < 0.5 { 2356 } else { 2355 }
+    };
+    let mut best_rig_yield: Option<f64> = None;
+    for it in snap.items.values() {
+        if it.location_id != structure_id || !matches!(it.flag, InventoryFlag::RigSlot0 | InventoryFlag::RigSlot1 | InventoryFlag::RigSlot2) { continue; }
+        let Some(rig_t) = sde.types.get(&it.type_id) else { continue; };
+        if !matches!(rig_t.group_id, 1941..=1945) { continue; }
+        let rig_size = rig_t.default_attributes.get(&1547).copied().unwrap_or(0.0);
+        if (rig_size - st_rig_size).abs() > 0.1 { continue; }
+        let matches_item = match inv_type {
+            None => true,
+            Some(ty) => {
+                let is_ice = ty.group_id == 465 || ty.group_id == 4033;
+                let is_moon = matches!(ty.group_id, 1884 | 1920..=1923);
+                let is_ast = (ty.category_id == 25 || ty.group_id == 4932) && !is_ice && !is_moon;
+                match rig_t.group_id {
+                    1941 => is_ast, 1942 => is_ice, 1943 => is_moon, 1944 | 1945 => is_ast || is_ice || is_moon, _ => false,
+                }
+            }
+        };
+        if !matches_item { continue; }
+        let Some(&rig_base) = rig_t.default_attributes.get(&717) else { continue; };
+        let sec_mult = rig_t.default_attributes.get(&sec_attr_id).copied().unwrap_or(1.0);
+        let candidate = rig_base * sec_mult * hull_mult;
+        if best_rig_yield.is_none_or(|b| candidate > b) { best_rig_yield = Some(candidate); }
+    }
+    best_rig_yield.unwrap_or(unrigged)
+}
+
+/// DERIVED: CCP stores Prismaticite & Unrefined Mineral outputs in `randomizedTypeMaterials` rather than
+/// `sde_type_materials`; equal-ISK batch quantities (`524,288 ISK / base_price` per 100 units) are
+/// derived from each SDE mineral's `base_price` (`34..=40`, `11399`).
+pub fn resolve_reprocessable_materials(
+    sde: &SdeRegistry,
+    inv_type: &InvType,
+    item_id: i64,
+    next_entity_id: i64,
+    rng_bits: u64,
+    deterministic_quote: bool,
+) -> Option<Vec<eve_sde::TypeMaterialEntry>> {
+    if let Some(mats) = sde.type_materials.get(&inv_type.type_id).filter(|m| !m.is_empty()) {
+        return Some(mats.clone());
+    }
+    let mut standard_minerals: Vec<&InvType> = sde.types.values().filter(|t| t.group_id == 18 && t.published && t.type_id <= 11399 && t.base_price > 0.0).collect();
+    standard_minerals.sort_by_key(|t| t.type_id);
+    if standard_minerals.is_empty() { return None; }
+    if inv_type.group_id == 4932 {
+        let mineral_name = inv_type.name.strip_prefix("Unrefined ")?;
+        let min_t = standard_minerals.into_iter().find(|t| t.name == mineral_name)?;
+        let qty = (524_288.0 / min_t.base_price.max(2.0)).round().max(1.0) as u64;
+        return Some(vec![eve_sde::TypeMaterialEntry { material_type_id: min_t.type_id, quantity: qty }]);
+    }
+    if inv_type.group_id == 4915 || matches!(inv_type.type_id, 90041 | 90307) {
+        let idx = if deterministic_quote {
+            (item_id.unsigned_abs() as usize) % standard_minerals.len()
+        } else {
+            let seed = (item_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(next_entity_id as u64) ^ rng_bits;
+            (seed as usize) % standard_minerals.len()
+        };
+        let min_t = standard_minerals[idx];
+        let qty = (524_288.0 / min_t.base_price.max(2.0)).round().max(1.0) as u64;
+        return Some(vec![eve_sde::TypeMaterialEntry { material_type_id: min_t.type_id, quantity: qty }]);
+    }
+    None
 }
 

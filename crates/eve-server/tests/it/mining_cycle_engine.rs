@@ -274,8 +274,8 @@ pub(crate) fn seed_for(crits: &[bool], chance: f64) -> u64 {
 
 #[tokio::test]
 async fn test_mn04_venture_miner_i_cycles_deliver_exact_sde_yield_until_hold_full_or_depleted() {
-    // parity: feat:mining.mining-laser-cycle, feat:mining.mining-crits
-    eve_testkit::attest(&["feat:mining.mining-laser-cycle", "feat:mining.mining-crits"]);
+    // parity: feat:mining.mining-laser-cycle, feat:mining.mining-crits, plan:MN-03, plan:MN-04
+    eve_testkit::attest(&["feat:mining.mining-laser-cycle", "feat:mining.mining-crits", "plan:MN-03", "plan:MN-04"]);
     let laser = 800_400_001;
     let skills = [(SKILL_MINING, 5), (SKILL_MINING_FRIGATE, 5)];
     let mut p = pilot(VENTURE, &skills, &[(laser, MINER_I, InventoryFlag::HiSlot0)]).await;
@@ -385,6 +385,8 @@ async fn test_mn04_venture_miner_i_cycles_deliver_exact_sde_yield_until_hold_ful
 
 #[tokio::test]
 async fn test_mn04_activation_requirements_and_cycle_interruptions() {
+    // parity: plan:MN-04
+    eve_testkit::attest(&["plan:MN-04"]);
     let (laser, ice, deep) = (800_400_011, 800_400_012, 800_400_013);
     let skills = [(SKILL_MINING, 5), (SKILL_MINING_FRIGATE, 5), (SKILL_DEEP_CORE, 1), (SKILL_ASTROGEOLOGY, 5), (SKILL_TARGET_MANAGEMENT, 5)];
     let mods = [(laser, MINER_I, InventoryFlag::HiSlot0), (ice, ICE_HARVESTER_I, InventoryFlag::HiSlot1), (deep, DEEP_CORE_LASER_I, InventoryFlag::HiSlot2)];
@@ -469,8 +471,8 @@ async fn test_mn04_activation_requirements_and_cycle_interruptions() {
 
 #[tokio::test]
 async fn test_mn04_retriever_strip_miner_yield_matches_wiki_with_barge_and_upgrade_bonuses() {
-    // parity: feat:mining.strip-miner
-    eve_testkit::attest(&["feat:mining.strip-miner"]);
+    // parity: feat:mining.strip-miner, plan:MN-07
+    eve_testkit::attest(&["feat:mining.strip-miner", "plan:MN-07"]);
     let (strip, mlu_a, mlu_b) = (800_400_021, 800_400_022, 800_400_023);
     let skills = [(SKILL_MINING, 5), (SKILL_ASTROGEOLOGY, 5), (SKILL_MINING_BARGE, 5), (SKILL_MINING_FRIGATE, 5), (22_578, 4), (3_380, 5), (3_327, 5)];
     let mods = [(strip, STRIP_MINER_I, InventoryFlag::HiSlot0), (mlu_a, MLU_II, InventoryFlag::LoSlot0), (mlu_b, MLU_II, InventoryFlag::LoSlot1)];

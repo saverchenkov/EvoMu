@@ -279,6 +279,41 @@ impl SystemHandle {
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
     }
 
+    pub fn try_spawn_asteroid(&self, asteroid: AsteroidState, ball: Ball) {
+        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+        let ball_id = ball.id;
+        super::ensure_default_slim_meta(&mut bp, &ball, &st.sde_opt);
+        let _ = bp.add_ball(ball.clone());
+        st.asteroid_templates.insert(ball_id, (asteroid.clone(), ball));
+        st.asteroids.insert(ball_id, asteroid);
+        super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+    }
+
+    pub fn sync_asteroid_quantity(&self, asteroid_id: BallId, remaining_units: u64, due_unix_on_belt_empty: u64) {
+        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+        let mut belt_id_opt = None;
+        if let Some(ast) = st.asteroids.get_mut(&asteroid_id) {
+            ast.remaining_units = remaining_units;
+            ast.depleted = remaining_units == 0;
+            if remaining_units == 0 {
+                belt_id_opt = Some(ast.belt_id);
+            }
+        }
+        if let Some(belt_id) = belt_id_opt {
+            let belt_fully_depleted = st
+                .asteroids
+                .values()
+                .filter(|a| a.belt_id == belt_id)
+                .all(|a| a.remaining_units == 0);
+            if belt_fully_depleted {
+                for belt_ast in st.asteroids.values_mut().filter(|a| a.belt_id == belt_id) {
+                    belt_ast.respawn_at_tick = Some(due_unix_on_belt_empty);
+                }
+            }
+        }
+    }
+
     pub fn try_spawn_ball_with_meta(
         &self,
         ball: Ball,

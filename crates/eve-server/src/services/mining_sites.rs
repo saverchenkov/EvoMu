@@ -480,6 +480,14 @@ pub const fn is_ice_belt_ready_to_respawn(elapsed_secs: u64) -> bool {
     elapsed_secs >= ICE_BELT_RESPAWN_DELAY_SECS
 }
 
+/// Returns whether `solar_system_id` is a designated ice-belt solar system (`plan:MN-08`).
+pub const fn is_designated_ice_system(solar_system_id: u32) -> bool {
+    matches!(
+        solar_system_id,
+        30_000_180 | 30_000_156 | 30_002_510 | 30_002_659 | 30_003_495 | 30_000_192
+    )
+}
+
 /// Regional Ice Belt anomaly definition (`sde_dungeons` + `sde_dungeon_asteroid_counts`).
 #[derive(Debug, Clone, Copy)]
 pub struct IceBeltSiteDef {

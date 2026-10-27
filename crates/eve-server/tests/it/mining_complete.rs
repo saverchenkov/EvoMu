@@ -238,8 +238,8 @@ async fn test_mn01_mn02_c5_static_data_and_belt_ore_distribution() {
 // ====================================================================
 #[tokio::test]
 async fn test_mn05_special_holds_and_mining_to_jetcan() {
-    // parity: feat:ships.special-holds, feat:mining.ore-hold, feat:mining.mining-to-jetcan, rpc:ship.Jettison
-    eve_testkit::attest(&["feat:ships.special-holds", "feat:mining.ore-hold", "feat:mining.mining-to-jetcan"]);
+    // parity: feat:ships.special-holds, feat:mining.ore-hold, feat:mining.mining-to-jetcan, rpc:ship.Jettison, plan:MN-05
+    eve_testkit::attest(&["feat:ships.special-holds", "feat:mining.ore-hold", "feat:mining.mining-to-jetcan", "plan:MN-05"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
@@ -551,8 +551,8 @@ async fn test_mn05_special_holds_and_mining_to_jetcan() {
 // ====================================================================
 #[tokio::test]
 async fn test_mn08_ice_and_gas_harvesting() {
-    // parity: feat:mining.ice-belts, feat:mining.ice-harvester, feat:mining.gas-harvesting
-    eve_testkit::attest(&["feat:mining.ice-belts", "feat:mining.ice-harvester", "feat:mining.gas-harvesting"]);
+    // parity: feat:mining.ice-belts, feat:mining.ice-harvester, feat:mining.gas-harvesting, plan:MN-08
+    eve_testkit::attest(&["feat:mining.ice-belts", "feat:mining.ice-harvester", "feat:mining.gas-harvesting", "plan:MN-08"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;

@@ -606,12 +606,18 @@ impl ServerContext {
         });
         if secs > 0 {
             crate::sp6_lifecycle::on_advance_secs(self, prev_unix, secs);
+            crate::services::mining_advanced::tick_all_metenox_moon_drills(
+                self,
+                prev_unix,
+                self.now_unix_secs(),
+            );
             crate::services::implant_plugging::purge_expired_boosters_all(
                 self,
                 self.now_unix_secs(),
             );
             self.advance_skill_queues(secs as f64);
             crate::services::fleet_social::fleet_social_notify::tick_fleet_lifecycle(self);
+            crate::services::space_mining_harvest::tick_all_ice_belt_respawns_sync(self);
             let now = self.now_unix_secs();
             crate::services::fleet_social::sweep_expired_bookmarks_and_notify(self, now);
             let mut balls_to_remove: Vec<(u32, i64)> = Vec::new();
@@ -1047,6 +1053,9 @@ impl ServerContext {
                     && e.booster_side_effects == active_booster_side_effects
             })
         {
+            let needs_recalc = existing.character_skills != skill_levels
+                || existing.implants != active_implants
+                || existing.projected_ewar != active_projected;
             existing.set_character_skills(skill_levels);
             existing.set_implants(active_implants);
             crate::services::combat_crimewatch::with_combat_runtime(self, |rt| {
@@ -1061,7 +1070,7 @@ impl ServerContext {
                     }
                 }
             });
-            if existing.projected_ewar != active_projected {
+            if needs_recalc {
                 existing.projected_ewar = active_projected;
                 existing.recalculate_stats(&self.sde);
             }

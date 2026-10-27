@@ -494,14 +494,25 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
         }
         left
     });
-    if delivered > 0 {
-        let _ = ctx.db.record_mining_ledger_entry(
+    let due_unix = crate::system_actor::next_downtime_unix_secs(
+        ctx.now_unix_secs(),
+        ctx.systems.belt_respawn_interval_secs(),
+        ctx.systems.downtime_utc_secs_of_day(),
+    );
+    ctx.systems
+        .get_or_spawn(cycle.solar_system_id)
+        .sync_asteroid_quantity(cycle.target_id, remaining.max(0) as u64, due_unix);
+    if delivered > 0 || residue_units > 0 {
+        let _ = ctx.db.record_mining_ledger_entry_with_waste(
             cycle.char_id,
             cycle.solar_system_id,
             asteroid.type_id,
             delivered,
+            residue_units,
             ctx.now_unix_secs(),
         );
+    }
+    if delivered > 0 {
         crate::services::space_mining_harvest::dispatch_mining_gameplay_events(
             ctx,
             cycle.char_id,
@@ -569,7 +580,8 @@ const SITE_ROCK_RADIUS_M: f64 = 50_000.0;
 
 /// After an asteroid empties, marks every uncleared anomaly near it whose rocks are all empty as
 /// cleared and collapses the matching cosmic signature (MN-15 "despawns after it's cleared").
-fn clear_emptied_sites(ctx: &ServerContext, sys_id: u32, ast_pos: DVec3) {
+pub(crate) fn clear_emptied_sites(ctx: &ServerContext, sys_id: u32, ast_pos: DVec3) {
+    let now = ctx.now_unix_secs();
     ctx.db.with_mut_snapshot(|snap| {
         let rock_left_near = |snap: &eve_db::WorldStateSnapshot, center: DVec3| {
             snap.asteroids.values().any(|a| {
@@ -598,6 +610,7 @@ fn clear_emptied_sites(ctx: &ServerContext, sys_id: u32, ast_pos: DVec3) {
             if let Some(anom) = snap.cosmic_anomalies.get_mut(&sys_id).and_then(|v| v.get_mut(idx)) {
                 anom.cleared = true;
                 anom.remaining_volume = 0.0;
+                anom.created_unix = now;
                 cleared.push(anom.anomaly_id.clone());
             }
         }

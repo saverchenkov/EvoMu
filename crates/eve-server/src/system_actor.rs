@@ -16,7 +16,8 @@ mod types;
 pub use types::*;
 
 use belts::{
-    build_tick_broadcast, ensure_default_slim_meta, handle_mine_asteroid, respawn_due_asteroids,
+    build_tick_broadcast, ensure_default_slim_meta, handle_mine_asteroid,
+    reconcile_spawned_belt_asteroids, respawn_due_asteroids,
 };
 use eve_destiny::wire::{
     encode_destiny_updates, encode_set_state_payload, encode_set_state_update,
@@ -274,7 +275,30 @@ impl SystemRegistry {
         if let Some(sde) = &sde_opt {
             populate_system_celestials(&mut initial_ballpark, solar_system_id, sde);
         }
+        let mut initial_asteroids = HashMap::new();
+        let mut initial_asteroid_templates = HashMap::new();
         let initial_pending_disruptors = if let (Some(sde), Some(db)) = (&sde_opt, &db_opt) {
+            let first_sde_belt_ast_id = 750_000_000i64
+                + if solar_system_id == 30_000_144 {
+                    0
+                } else {
+                    ((solar_system_id as i64 % 10_000_000).max(1)) * 1_000
+                };
+            let has_persisted_belt_asteroids =
+                db.with_snapshot(|s| s.asteroids.contains_key(&first_sde_belt_ast_id));
+            if has_persisted_belt_asteroids {
+                let spawned = populate_asteroid_belt_entities(&mut initial_ballpark, solar_system_id, sde);
+                let _ = reconcile_spawned_belt_asteroids(
+                    &mut initial_ballpark,
+                    solar_system_id,
+                    spawned,
+                    &mut initial_asteroids,
+                    &mut initial_asteroid_templates,
+                    &db_opt,
+                    belt_interval_atomic.load(std::sync::atomic::Ordering::Relaxed),
+                    downtime_utc_atomic.load(std::sync::atomic::Ordering::Relaxed),
+                );
+            }
             crate::sp6_lifecycle::populate_persisted_space_objects(
                 &mut initial_ballpark,
                 solar_system_id,
@@ -294,6 +318,8 @@ impl SystemRegistry {
         let ballpark_shared = Arc::new(RwLock::new(initial_ballpark));
         let ballpark_actor = ballpark_shared.clone();
         let actor_state_shared = Arc::new(RwLock::new(SystemActorState {
+            asteroids: initial_asteroids,
+            asteroid_templates: initial_asteroid_templates,
             pending_anchoring_disruptors: initial_pending_disruptors,
             sde_opt,
             db_opt,
@@ -413,6 +439,20 @@ impl SystemRegistry {
                                     },
                                 );
                                 ballpark.add_ball(ball.clone());
+                                if let Some(db) = &db_opt {
+                                    if db.get_asteroid(ball_id).is_none() {
+                                        let _ = db.spawn_asteroid(eve_db::AsteroidRecord {
+                                            asteroid_id: ball_id,
+                                            belt_id: asteroid.belt_id,
+                                            type_id: ball.type_id,
+                                            solar_system_id,
+                                            position: (ball.position.x, ball.position.y, ball.position.z),
+                                            quantity: i64::try_from(asteroid.remaining_units).unwrap_or(i64::MAX),
+                                            initial_quantity: i64::try_from(asteroid.initial_units).unwrap_or(i64::MAX),
+                                            radius: ball.radius,
+                                        });
+                                    }
+                                }
                                 asteroid_templates.insert(ball_id, (asteroid.clone(), ball));
                                 asteroids.insert(ball_id, asteroid);
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
@@ -451,22 +491,37 @@ impl SystemRegistry {
                                 let _ = reply.send(broken);
                             }
                             SystemCommand::PopulateAsteroids { reply } => {
-                                let mut populated = Vec::new();
-                                if let Some(sde) = &sde_opt {
-                                    let spawned = populate_asteroid_belt_entities(&mut ballpark, solar_system_id, sde);
-                                    for ast in spawned {
-                                        if let Some(ball) = ballpark.balls.get(&ast.asteroid_id).cloned() {
-                                            asteroid_templates.insert(ast.asteroid_id, (ast.clone(), ball));
-                                            asteroids.insert(ast.asteroid_id, ast.clone());
-                                            populated.push(ast);
-                                        }
+                                let first_sde_belt_ast_id = 750_000_000i64
+                                    + if solar_system_id == 30_000_144 {
+                                        0
+                                    } else {
+                                        ((solar_system_id as i64 % 10_000_000).max(1)) * 1_000
+                                    };
+                                let mut populated = if !asteroid_templates.contains_key(&first_sde_belt_ast_id) {
+                                    if let Some(sde) = &sde_opt {
+                                        let spawned = populate_asteroid_belt_entities(&mut ballpark, solar_system_id, sde);
+                                        reconcile_spawned_belt_asteroids(
+                                            &mut ballpark,
+                                            solar_system_id,
+                                            spawned,
+                                            asteroids,
+                                            asteroid_templates,
+                                            &db_opt,
+                                            belt_interval_atomic.load(std::sync::atomic::Ordering::Relaxed),
+                                            downtime_utc_atomic.load(std::sync::atomic::Ordering::Relaxed),
+                                        )
+                                    } else {
+                                        Vec::new()
                                     }
-                                }
+                                } else {
+                                    Vec::new()
+                                };
                                 for ast in asteroids.values() {
                                     if !populated.iter().any(|p| p.asteroid_id == ast.asteroid_id) {
                                         populated.push(ast.clone());
                                     }
                                 }
+                                populated.sort_by_key(|a| a.asteroid_id);
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let _ = reply.send(populated);
                             }

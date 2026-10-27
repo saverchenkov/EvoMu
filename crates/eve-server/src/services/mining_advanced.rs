@@ -18,26 +18,13 @@
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::{
     AutoMoonMinerRecord, InventoryFlag, InventoryItemRecord, MoonExtractionRecord,
-    ObserverMiningRecord,
 };
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use eve_sde::TypeId;
+use eve_sde::{SdeRegistry, TypeId};
 use glam::DVec3;
 use std::collections::HashMap;
-
-/// Canonical R4 moon ores used as fallback only if SDE moon ore groups are unavailable:
-#[allow(dead_code)]
-const MOON_ORE_ZEOLITES: TypeId = 45490;
-#[allow(dead_code)]
-const MOON_ORE_SYLVITE: TypeId = 45491;
-#[allow(dead_code)]
-const MOON_ORE_BITUMENS: TypeId = 45492;
-#[allow(dead_code)]
-const MOON_ORE_COESITE: TypeId = 45493;
-#[allow(dead_code)]
-const MOON_ORE_COBALTITE: TypeId = 45494;
 
 /// Resolves the nearest SDE moon celestial (`group_id == 8`) in `solar_system_id` to `pos`.
 pub(crate) fn resolve_structure_moon_id(
@@ -78,54 +65,21 @@ pub(crate) fn derive_moon_ores_from_sde(
         .unwrap_or(0.0);
     let restrict_to_r4 = sec >= 0.45 || solar_system_id >= 31_000_000;
     let is_base_moon_ore = |t: &eve_sde::InvType| -> bool {
-        t.published
-            && !t.name.contains("Compressed")
-            && !t.name.contains("Brimful")
-            && !t.name.contains("Bountiful")
-            && !t.name.contains("Shining")
-            && !t.name.contains("Glistening")
-            && !t.name.contains("Glowing")
-            && !t.name.contains("Twinkling")
-            && !t.name.contains("Shimmering")
-            && !t.name.contains("Resplendent")
-            && !t.name.contains("Sparkling")
-            && !t.name.contains("Dazzling")
-            && !t.name.contains("Lavish")
+        t.published && !["Compressed", "Brimful", "Bountiful", "Shining", "Glistening", "Glowing", "Twinkling", "Shimmering", "Resplendent", "Sparkling", "Dazzling", "Lavish"].iter().any(|p| t.name.contains(p))
     };
-    let mut base_moon_ores: Vec<TypeId> = sde
-        .types
-        .values()
-        .filter(|t| {
-            let group_ok = if restrict_to_r4 {
-                t.group_id == 1884
-            } else {
-                matches!(t.group_id, 1884 | 1920..=1923)
-            };
-            group_ok && is_base_moon_ore(t)
-        })
-        .map(|t| t.type_id)
-        .collect();
+    let mut base_moon_ores: Vec<TypeId> = sde.types.values()
+        .filter(|t| (if restrict_to_r4 { t.group_id == 1884 } else { matches!(t.group_id, 1884 | 1920..=1923) }) && is_base_moon_ore(t))
+        .map(|t| t.type_id).collect();
     base_moon_ores.sort_unstable();
     if base_moon_ores.len() < 3 {
-        return vec![
-            (MOON_ORE_BITUMENS, 0.40),
-            (MOON_ORE_ZEOLITES, 0.35),
-            (MOON_ORE_COBALTITE, 0.25),
-        ];
+        return vec![(45492, 0.40), (45490, 0.35), (45494, 0.25)];
     }
     let h = (moon_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     let mut idx0 = (h as usize) % base_moon_ores.len();
     if !restrict_to_r4 {
-        let higher_ores: Vec<usize> = base_moon_ores
-            .iter()
-            .enumerate()
-            .filter(|(_, &tid)| {
-                sde.types
-                    .get(&tid)
-                    .is_some_and(|t| matches!(t.group_id, 1920..=1923))
-            })
-            .map(|(i, _)| i)
-            .collect();
+        let higher_ores: Vec<usize> = base_moon_ores.iter().enumerate()
+            .filter(|(_, &tid)| sde.types.get(&tid).is_some_and(|t| matches!(t.group_id, 1920..=1923)))
+            .map(|(i, _)| i).collect();
         if !higher_ores.is_empty() {
             idx0 = higher_ores[(h as usize) % higher_ores.len()];
         }
@@ -285,78 +239,186 @@ fn build_moon_chunk_asteroids(
     (spawned_ids, spawned_specs)
 }
 
-async fn maybe_auto_fracture_moon_extraction(ctx: &ServerContext, structure_id: i64) {
+async fn spawn_moon_asteroid_balls(
+    ctx: &ServerContext,
+    sys_id: u32,
+    structure_id: i64,
+    spawned_specs: Vec<(i64, TypeId, u64, f64, DVec3)>,
+) -> Vec<PyRep> {
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let mut ore_tids = Vec::with_capacity(spawned_specs.len());
+    for (ast_id, ore_tid, units, uvol, pos) in spawned_specs {
+        ore_tids.push(PyRep::Integer(ore_tid as i64));
+        let ball = Ball {
+            id: ast_id, type_id: ore_tid, position: pos, velocity: DVec3::ZERO,
+            max_velocity: 0.0, inertia: 1.0, mass: 50_000.0, radius: 60.0,
+            speed_fraction: 0.0, mode: MovementMode::Stop,
+        };
+        let ast_state = crate::system_actor::AsteroidState {
+            asteroid_id: ast_id, belt_id: structure_id, type_id: ore_tid,
+            initial_units: units, remaining_units: units, unit_volume: uvol,
+            depleted: false, respawn_at_tick: None,
+        };
+        let _ = handle.spawn_asteroid(ast_state, ball).await;
+    }
+    ore_tids
+}
+
+const FRACTURED_FIELDS_BLOB_KEY: &str = "moon_fractured_fields";
+
+fn load_fractured_moon_fields(snap: &eve_db::WorldStateSnapshot) -> Vec<(i64, u32, u64, Vec<i64>)> {
+    snap.service_state_blobs
+        .get(FRACTURED_FIELDS_BLOB_KEY)
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default()
+}
+
+fn record_fractured_moon_field(
+    snap: &mut eve_db::WorldStateSnapshot,
+    structure_id: i64,
+    sys_id: u32,
+    decay_unix: u64,
+    asteroid_ids: Vec<i64>,
+) {
+    if asteroid_ids.is_empty() {
+        return;
+    }
+    let mut fields = load_fractured_moon_fields(snap);
+    if !fields.iter().any(|(_, _, d, ids)| *d == decay_unix && *ids == asteroid_ids) {
+        fields.push((structure_id, sys_id, decay_unix, asteroid_ids));
+        if let Ok(json) = serde_json::to_string(&fields) {
+            snap.service_state_blobs.insert(FRACTURED_FIELDS_BLOB_KEY.into(), json);
+        }
+    }
+}
+
+fn resolve_moon_structure_id(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<i64> {
+    args.first()
+        .and_then(|a| a.as_i64())
+        .or_else(|| kwargs.get("structureID").and_then(|v| v.as_i64()))
+        .or(session.structure_id)
+        .or(session.station_id)
+        .or_else(|| {
+            session
+                .ship_id
+                .filter(|sid| ctx.db.with_snapshot(|snap| snap.structures.contains_key(sid)))
+        })
+        .or_else(|| {
+            session.character_id.and_then(|cid| {
+                ctx.db.with_snapshot(|snap| {
+                    snap.characters
+                        .get(&cid)
+                        .and_then(|c| c.structure_id.or(c.station_id))
+                        .filter(|sid| snap.structures.contains_key(sid))
+                })
+            })
+        })
+}
+
+/// Server-driven moon extraction auto-fracture (3h after `chunk_arrival_unix`) and 48h fractured
+/// asteroid field decay tick (`plan:MN-13`, `R-MN13-LAZY-LEAK`).
+pub async fn tick_all_moon_extractions(ctx: &ServerContext) {
     let now = ctx.now_unix();
-    let auto_res = ctx.db.try_with_mut_snapshot(|snap| -> Result<Option<(u32, Vec<(i64, TypeId, u64, f64, DVec3)>)>, BridgeRpcError> {
-        let Some(st) = snap.structures.get(&structure_id) else {
-            return Ok(None);
-        };
-        let sys_id = st.solar_system_id;
-        let st_pos = st.position;
-        let delay_secs = compute_auto_fracture_delay_secs(&ctx.sde, snap, structure_id);
-        let Some(ext) = snap.moon_extractions.get(&structure_id) else {
-            return Ok(None);
-        };
-        if (ext.status != "Started" && ext.status != "Ready")
-            || now < ext.chunk_arrival_unix.saturating_add(delay_secs)
-            || now >= ext.natural_decay_unix
-        {
-            return Ok(None);
+    let (decayed_balls, auto_fractures) = ctx.db.with_mut_snapshot(|snap| {
+        let mut decayed: Vec<(u32, Vec<i64>)> = Vec::new();
+        let mut active_fields = Vec::new();
+        for (sid, sys_id, decay_unix, ids) in load_fractured_moon_fields(snap) {
+            if now >= decay_unix {
+                for &aid in &ids {
+                    snap.asteroids.remove(&aid);
+                }
+                decayed.push((sys_id, ids));
+            } else {
+                active_fields.push((sid, sys_id, decay_unix, ids));
+            }
         }
-        let base_ores = if ext.moon_ores.is_empty() {
-            derive_moon_ores_from_sde(&ctx.sde, sys_id, ext.moon_id)
-        } else {
-            ext.moon_ores.clone()
-        };
-        let duration_secs = ext
-            .chunk_arrival_unix
-            .saturating_sub(ext.extraction_start_unix)
-            .max(518_400);
-        let total_chunk_volume_m3 = (duration_secs as f64 / 3600.0) * 30_000.0;
-        let (spawned_ids, spawned_specs) = build_moon_chunk_asteroids(
-            &ctx.sde,
-            snap,
-            structure_id,
-            sys_id,
-            st_pos,
-            &base_ores,
-            total_chunk_volume_m3,
-            false,
-        );
-        if let Some(ext_mut) = snap.moon_extractions.get_mut(&structure_id) {
-            ext_mut.status = "Fractured".into();
-            ext_mut.auto_fracture = true;
-            ext_mut.spawned_asteroid_ids = spawned_ids;
+        if let Ok(json) = serde_json::to_string(&active_fields) {
+            snap.service_state_blobs.insert(FRACTURED_FIELDS_BLOB_KEY.into(), json);
         }
-        Ok(Some((sys_id, spawned_specs)))
+
+        let struct_ids: Vec<i64> = snap.moon_extractions.keys().copied().collect();
+        let mut auto_list = Vec::new();
+        for structure_id in struct_ids {
+            let Some(st) = snap.structures.get(&structure_id) else { continue; };
+            let (sys_id, st_pos, owner_corp) = (st.solar_system_id, st.position, st.owner_corp_id);
+            let delay_secs = compute_auto_fracture_delay_secs(&ctx.sde, snap, structure_id);
+            let Some(ext) = snap.moon_extractions.get(&structure_id).cloned() else { continue; };
+
+            if ext.status != "Cancelled" && now >= ext.natural_decay_unix {
+                if let Some(ext_mut) = snap.moon_extractions.get_mut(&structure_id) {
+                    let ids = std::mem::take(&mut ext_mut.spawned_asteroid_ids);
+                    for &aid in &ids {
+                        snap.asteroids.remove(&aid);
+                    }
+                    ext_mut.status = "Decayed".into();
+                    if !ids.is_empty() {
+                        decayed.push((sys_id, ids));
+                    }
+                }
+                continue;
+            }
+
+            if (ext.status == "Started" || ext.status == "Ready")
+                && now >= ext.chunk_arrival_unix.saturating_add(delay_secs)
+                && now < ext.natural_decay_unix
+            {
+                let base_ores = if ext.moon_ores.is_empty() {
+                    derive_moon_ores_from_sde(&ctx.sde, sys_id, ext.moon_id)
+                } else {
+                    ext.moon_ores.clone()
+                };
+                let (moon_id, start_ts, arr_ts, dec_ts) = (
+                    ext.moon_id,
+                    ext.extraction_start_unix,
+                    ext.chunk_arrival_unix,
+                    ext.natural_decay_unix,
+                );
+                let duration_secs = arr_ts.saturating_sub(start_ts).max(518_400);
+                let total_chunk_volume_m3 = (duration_secs as f64 / 3600.0) * 30_000.0;
+                let (spawned_ids, spawned_specs) = build_moon_chunk_asteroids(
+                    &ctx.sde, snap, structure_id, sys_id, st_pos, &base_ores, total_chunk_volume_m3, false,
+                );
+                record_fractured_moon_field(snap, structure_id, sys_id, dec_ts, spawned_ids.clone());
+                if let Some(ext_mut) = snap.moon_extractions.get_mut(&structure_id) {
+                    ext_mut.status = "Fractured".into();
+                    ext_mut.auto_fracture = true;
+                    ext_mut.spawned_asteroid_ids = spawned_ids;
+                }
+                let update_rep = PyRep::keyval([
+                    ("structureID", PyRep::Integer(structure_id)),
+                    ("moonID", PyRep::Integer(moon_id)),
+                    ("extractionStartTime", PyRep::Integer(start_ts as i64)),
+                    ("chunkArrivalTime", PyRep::Integer(arr_ts as i64)),
+                    ("naturalDecayTime", PyRep::Integer(dec_ts as i64)),
+                    ("status", PyRep::String("Fractured".into())),
+                    ("autoFractured", PyRep::Bool(true)),
+                    ("readyToFracture", PyRep::Bool(true)),
+                ]);
+                auto_list.push((structure_id, sys_id, owner_corp, update_rep, spawned_specs));
+            }
+        }
+        (decayed, auto_list)
     });
-    if let Ok(Some((sys_id, spawned_specs))) = auto_res {
+
+    for (sys_id, ids) in decayed_balls {
         let handle = ctx.systems.get_or_spawn(sys_id);
-        for (ast_id, ore_tid, units, uvol, pos) in spawned_specs {
-            let ball = Ball {
-                id: ast_id,
-                type_id: ore_tid,
-                position: pos,
-                velocity: DVec3::ZERO,
-                max_velocity: 0.0,
-                inertia: 1.0,
-                mass: 50_000.0,
-                radius: 60.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            };
-            let ast_state = crate::system_actor::AsteroidState {
-                asteroid_id: ast_id,
-                belt_id: structure_id,
-                type_id: ore_tid,
-                initial_units: units,
-                remaining_units: units,
-                unit_volume: uvol,
-                depleted: false,
-                respawn_at_tick: None,
-            };
-            let _ = handle.spawn_asteroid(ast_state, ball).await;
+        for aid in ids {
+            let _ = handle.remove_ball(aid).await;
         }
+    }
+    for (structure_id, sys_id, owner_corp, update_rep, spawned_specs) in auto_fractures {
+        let _ = spawn_moon_asteroid_balls(ctx, sys_id, structure_id, spawned_specs).await;
+        ctx.notify(
+            NotificationTarget::Corporation(owner_corp),
+            "OnMoonExtractionUpdate",
+            "corpid",
+            vec![update_rep],
+        );
     }
 }
 
@@ -383,7 +445,26 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
 
-            let Some(structure_id) = args.first().and_then(|a| a.as_i64()) else {
+            let sess_struct_id = resolve_moon_structure_id(ctx, session, &[], _kwargs);
+            let (structure_id, explicit_dur) = if args.len() >= 2 {
+                (args.first().and_then(|a| a.as_i64()), args.get(1).and_then(|a| a.as_i64()))
+            } else if let Some(arg0) = args.first().and_then(|a| a.as_i64()) {
+                let arg0_is_known_struct = ctx.db.with_snapshot(|snap| snap.structures.contains_key(&arg0));
+                if !arg0_is_known_struct && sess_struct_id.is_some() && arg0 < 100_000_000 {
+                    (sess_struct_id, Some(arg0))
+                } else {
+                    (Some(arg0), None)
+                }
+            } else {
+                (
+                    sess_struct_id,
+                    _kwargs
+                        .get("duration")
+                        .or_else(|| _kwargs.get("extractionLength"))
+                        .and_then(|v| v.as_i64()),
+                )
+            };
+            let Some(structure_id) = structure_id else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "StartNewExtraction requires structureID".into(),
@@ -394,7 +475,6 @@ pub async fn handle(
             // duration must be in 6d..=56d (`518_400..=4_838_400` seconds, default 6d = 518,400s),
             // natural decay window fixed at 48h (172,800s) after chunk arrival.
             let now = ctx.now_unix();
-            let explicit_dur = args.get(1).and_then(|a| a.as_i64());
             let duration_secs = match explicit_dur {
                 Some(raw_dur) => {
                     let secs = if raw_dur > now as i64 {
@@ -465,19 +545,22 @@ pub async fn handle(
                     });
                 }
 
-                if let Some(existing) = snap.moon_extractions.get(&structure_id) {
-                    let is_active = (existing.status == "Started" || existing.status == "Ready")
-                        && now < existing.natural_decay_unix;
+                let st_sys_id = st.solar_system_id;
+                if let Some((prev_decay, prev_ids)) = snap.moon_extractions.get(&structure_id).map(|e| {
+                    let is_active = (e.status == "Started" || e.status == "Ready") && now < e.natural_decay_unix;
                     if is_active {
                         return Err(BridgeRpcError {
                             code: "ExtractionAlreadyActive".into(),
-                            message: format!(
-                                "Structure {structure_id} already has an active moon extraction in state {}",
-                                existing.status
-                            ),
+                            message: format!("Structure {structure_id} already has an active moon extraction in state {}", e.status),
                         });
                     }
+                    Ok((e.natural_decay_unix, e.spawned_asteroid_ids.clone()))
+                }).transpose()? {
+                    if !prev_ids.is_empty() {
+                        record_fractured_moon_field(snap, structure_id, st_sys_id, prev_decay, prev_ids);
+                    }
                 }
+                let st = snap.structures.get(&structure_id).unwrap();
 
                 let Some(moon_id) = resolve_structure_moon_id(&ctx.sde, st.solar_system_id, st.position) else {
                     return Err(BridgeRpcError {
@@ -538,55 +621,21 @@ pub async fn handle(
                 };
 
                 snap.moon_extractions.insert(structure_id, record);
-
-                Ok((
-                    structure_id,
-                    moon_id,
-                    start_time,
-                    arrival_time,
-                    decay_time,
-                    event_id,
-                    moon_ores,
-                    st_corp,
-                    arrival_ft,
-                    decay_mins,
-                    ev_title,
-                    ev_desc,
-                ))
+                Ok((structure_id, moon_id, start_time, arrival_time, decay_time, event_id, moon_ores, st_corp, arrival_ft, decay_mins, ev_title, ev_desc))
             });
 
             match res {
-                Ok((
-                    s_id,
-                    m_id,
-                    st,
-                    arr,
-                    dec,
-                    ev_id,
-                    ores,
-                    st_corp,
-                    arrival_ft,
-                    decay_mins,
-                    ev_title,
-                    ev_desc,
-                )) => {
+                Ok((s_id, m_id, st, arr, dec, ev_id, ores, st_corp, arrival_ft, decay_mins, ev_title, ev_desc)) => {
                     {
-                        let mut s = ctx.social_extras.lock().unwrap();
+                        let mut s = ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner());
                         s.next_id = s.next_id.max(ev_id);
                         s.calendar_events.insert(
                             ev_id,
                             crate::services::fleet_social::fleet_social_persistence::CalendarEventState {
-                                event_id: ev_id,
-                                owner_id: st_corp,
-                                creator_id: char_id,
-                                event_date_time: arrival_ft,
-                                duration: decay_mins,
-                                importance: 1,
-                                title: ev_title.clone(),
-                                description: ev_desc,
-                                _scope: "Automated".into(),
-                                responses: HashMap::new(),
-                                is_deleted: false,
+                                event_id: ev_id, owner_id: st_corp, creator_id: char_id,
+                                event_date_time: arrival_ft, duration: decay_mins, importance: 1,
+                                title: ev_title.clone(), description: ev_desc,
+                                _scope: "Automated".into(), responses: HashMap::new(), is_deleted: false,
                             },
                         );
                     }
@@ -596,14 +645,9 @@ pub async fn handle(
                         "OnNewCalendarEvent",
                         "corpid",
                         vec![
-                            PyRep::Integer(ev_id),
-                            PyRep::Integer(st_corp),
-                            PyRep::Integer(arrival_ft),
-                            PyRep::Integer(decay_mins),
-                            PyRep::String(ev_title),
-                            PyRep::Integer(1),
-                            PyRep::Integer(1),
-                            PyRep::Bool(true),
+                            PyRep::Integer(ev_id), PyRep::Integer(st_corp), PyRep::Integer(arrival_ft),
+                            PyRep::Integer(decay_mins), PyRep::String(ev_title), PyRep::Integer(1),
+                            PyRep::Integer(1), PyRep::Bool(true),
                         ],
                     );
                     let chunk_vol_m3 = ((arr.saturating_sub(st)) as f64 / 3600.0) * 30_000.0;
@@ -618,7 +662,7 @@ pub async fn handle(
                         })
                         .collect();
 
-                    Some(Ok(PyRep::keyval([
+                    let reply = PyRep::keyval([
                         ("structureID", PyRep::Integer(s_id)),
                         ("moonID", PyRep::Integer(m_id)),
                         ("extractionStartTime", PyRep::Integer(st as i64)),
@@ -629,7 +673,9 @@ pub async fn handle(
                         ("eventID", PyRep::Integer(ev_id)),
                         ("readyToFracture", PyRep::Bool(false)),
                         ("moonOres", PyRep::List(ore_list)),
-                    ])))
+                    ]);
+                    ctx.notify(NotificationTarget::Corporation(st_corp), "OnMoonExtractionUpdate", "corpid", vec![reply.clone()]);
+                    Some(Ok(reply))
                 }
                 Err(e) => Some(Err(e)),
             }
@@ -641,7 +687,7 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
 
-            let Some(structure_id) = args.first().and_then(|a| a.as_i64()) else {
+            let Some(structure_id) = resolve_moon_structure_id(ctx, session, args, _kwargs) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "CancelExtraction requires structureID".into(),
@@ -655,18 +701,9 @@ pub async fn handle(
                         message: format!("Structure {structure_id} not found"),
                     });
                 };
-                let caller_corp = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| c.corporation_id)
-                    .unwrap_or(0);
+                let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 if st.owner_corp_id != caller_corp
-                    || !mining_compression::caller_has_structure_extraction_role(
-                        snap,
-                        char_id,
-                        caller_corp,
-                        session.corp_role,
-                    )
+                    || !mining_compression::caller_has_structure_extraction_role(snap, char_id, caller_corp, session.corp_role)
                 {
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
@@ -679,10 +716,15 @@ pub async fn handle(
                         message: format!("No active moon extraction on structure {structure_id}"),
                     });
                 };
+                if ext.status != "Started" && ext.status != "Ready" {
+                    return Err(BridgeRpcError {
+                        code: "CannotCancelExtraction".into(),
+                        message: format!("Cannot cancel moon extraction in status {}", ext.status),
+                    });
+                }
                 let ev_id = ext.event_id;
                 let arrival_ft = (ext.chunk_arrival_unix as i64 + 11_644_473_600) * 10_000_000;
                 ext.status = "Cancelled".into();
-                ext.spawned_asteroid_ids.clear();
                 if let Some(cev) = snap.calendar_events.get_mut(&ev_id) {
                     cev.is_deleted = true;
                 }
@@ -691,7 +733,7 @@ pub async fn handle(
 
             match res {
                 Ok((ev_id, caller_corp, arrival_ft)) => {
-                    if let Some(cev) = ctx.social_extras.lock().unwrap().calendar_events.get_mut(&ev_id) {
+                    if let Some(cev) = ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner()).calendar_events.get_mut(&ev_id) {
                         cev.is_deleted = true;
                     }
                     crate::services::fleet_social::persist_social_state(ctx);
@@ -699,12 +741,9 @@ pub async fn handle(
                         NotificationTarget::Corporation(caller_corp),
                         "OnRemoveCalendarEvent",
                         "corpid",
-                        vec![
-                            PyRep::Integer(ev_id),
-                            PyRep::Integer(arrival_ft),
-                            PyRep::Bool(true),
-                        ],
+                        vec![PyRep::Integer(ev_id), PyRep::Integer(arrival_ft), PyRep::Bool(true)],
                     );
+                    ctx.notify(NotificationTarget::Corporation(caller_corp), "OnMoonExtractionUpdate", "corpid", vec![PyRep::None]);
                     Some(Ok(PyRep::Bool(true)))
                 }
                 Err(e) => Some(Err(e)),
@@ -717,7 +756,7 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
 
-            let Some(structure_id) = args.first().and_then(|a| a.as_i64()) else {
+            let Some(structure_id) = resolve_moon_structure_id(ctx, session, args, _kwargs) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "FractureChunkWithStructure requires structureID".into(),
@@ -735,9 +774,7 @@ pub async fn handle(
                         message: format!("Structure {structure_id} not found"),
                     });
                 };
-                let sys_id = st.solar_system_id;
-                let st_pos = st.position;
-                let owner_corp_id = st.owner_corp_id;
+                let (sys_id, st_pos, owner_corp_id) = (st.solar_system_id, st.position, st.owner_corp_id);
 
                 let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 if owner_corp_id != caller_corp
@@ -789,39 +826,39 @@ pub async fn handle(
                 let duration_secs = ext.chunk_arrival_unix.saturating_sub(ext.extraction_start_unix).max(518_400);
                 let total_chunk_volume_m3 = (duration_secs as f64 / 3600.0) * 30_000.0;
 
+                let (moon_id, start_ts, arr_ts, dec_ts, ev_id) = (
+                    ext.moon_id,
+                    ext.extraction_start_unix,
+                    ext.chunk_arrival_unix,
+                    ext.natural_decay_unix,
+                    ext.event_id,
+                );
                 let (spawned_ids, spawned_specs) = build_moon_chunk_asteroids(
                     &ctx.sde, snap, structure_id, sys_id, st_pos, &base_ores, total_chunk_volume_m3, is_jackpot,
                 );
+                record_fractured_moon_field(snap, structure_id, sys_id, dec_ts, spawned_ids.clone());
 
                 let ext_mut = snap.moon_extractions.get_mut(&structure_id).unwrap();
                 ext_mut.status = "Fractured".into();
                 ext_mut.auto_fracture = false;
                 ext_mut.spawned_asteroid_ids = spawned_ids.clone();
 
-                Ok((sys_id, spawned_ids, spawned_specs, total_chunk_volume_m3))
+                Ok((sys_id, owner_corp_id, spawned_ids, spawned_specs, total_chunk_volume_m3, moon_id, start_ts, arr_ts, dec_ts, ev_id))
             });
 
             match commit_res {
-                Ok((sys_id, ast_ids, spawned_specs, total_chunk_volume_m3)) => {
-                    let handle = ctx.systems.get_or_spawn(sys_id);
-                    let mut ore_tids = Vec::with_capacity(spawned_specs.len());
-                    for (ast_id, ore_tid, units, uvol, pos) in spawned_specs {
-                        ore_tids.push(PyRep::Integer(ore_tid as i64));
-                        let ball = Ball {
-                            id: ast_id, type_id: ore_tid, position: pos, velocity: DVec3::ZERO,
-                            max_velocity: 0.0, inertia: 1.0, mass: 50_000.0, radius: 60.0,
-                            speed_fraction: 0.0, mode: MovementMode::Stop,
-                        };
-                        let ast_state = crate::system_actor::AsteroidState {
-                            asteroid_id: ast_id, belt_id: structure_id, type_id: ore_tid,
-                            initial_units: units, remaining_units: units, unit_volume: uvol,
-                            depleted: false, respawn_at_tick: None,
-                        };
-                        let _ = handle.spawn_asteroid(ast_state, ball).await;
-                    }
+                Ok((sys_id, owner_corp_id, ast_ids, spawned_specs, total_chunk_volume_m3, moon_id, start_ts, arr_ts, dec_ts, ev_id)) => {
+                    let ore_tids = spawn_moon_asteroid_balls(ctx, sys_id, structure_id, spawned_specs).await;
                     let ast_id_reps: Vec<PyRep> = ast_ids.iter().map(|&id| PyRep::Integer(id)).collect();
-                    Some(Ok(PyRep::keyval([
+                    let reply = PyRep::keyval([
                         ("structureID", PyRep::Integer(structure_id)),
+                        ("moonID", PyRep::Integer(moon_id)),
+                        ("extractionStartTime", PyRep::Integer(start_ts as i64)),
+                        ("chunkArrivalTime", PyRep::Integer(arr_ts as i64)),
+                        ("naturalDecayTime", PyRep::Integer(dec_ts as i64)),
+                        ("eventID", PyRep::Integer(ev_id)),
+                        ("readyToFracture", PyRep::Bool(false)),
+                        ("autoFractured", PyRep::Bool(false)),
                         ("fractured", PyRep::Bool(true)),
                         ("status", PyRep::String("Fractured".into())),
                         ("chunkVolumeM3", PyRep::Real(total_chunk_volume_m3)),
@@ -830,7 +867,9 @@ pub async fn handle(
                         ("oreTypes", PyRep::List(ore_tids)),
                         ("isJackpot", PyRep::Bool(is_jackpot)),
                         ("jackpotBonus", PyRep::Real(if is_jackpot { 2.0 } else { 1.0 })),
-                    ])))
+                    ]);
+                    ctx.notify(NotificationTarget::Corporation(owner_corp_id), "OnMoonExtractionUpdate", "corpid", vec![reply.clone()]);
+                    Some(Ok(reply))
                 }
                 Err(e) => Some(Err(e)),
             }
@@ -850,16 +889,6 @@ pub async fn handle(
                     code: "AccessDenied".into(),
                     message: format!("Cannot query moon extractions for foreign corporation {corp_id}"),
                 }));
-            }
-            let struct_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
-                snap.moon_extractions
-                    .keys()
-                    .copied()
-                    .filter(|sid| snap.structures.get(sid).map(|s| s.owner_corp_id == corp_id).unwrap_or(false))
-                    .collect()
-            });
-            for sid in struct_ids {
-                maybe_auto_fracture_moon_extraction(ctx, sid).await;
             }
             let now = ctx.now_unix();
             let extractions = ctx.db.with_snapshot(|snap| {
@@ -898,7 +927,7 @@ pub async fn handle(
         }
 
         ("moonExtractions", "GetMoonResourcesForStructure") => {
-            let Some(structure_id) = args.first().and_then(|a| a.as_i64()) else {
+            let Some(structure_id) = resolve_moon_structure_id(ctx, session, args, _kwargs) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "GetMoonResourcesForStructure requires structureID".into(),
@@ -947,14 +976,12 @@ pub async fn handle(
         }
 
         ("moonExtractions", "GetExtractionAndEventIDFromStructureID") => {
-            let Some(structure_id) = args.first().and_then(|a| a.as_i64()) else {
+            let Some(structure_id) = resolve_moon_structure_id(ctx, session, args, _kwargs) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "GetExtractionAndEventIDFromStructureID requires structureID".into(),
                 }));
             };
-
-            maybe_auto_fracture_moon_extraction(ctx, structure_id).await;
 
             let now = ctx.now_unix();
             let (ext, delay_secs) = ctx.db.with_snapshot(|snap| {
@@ -980,7 +1007,7 @@ pub async fn handle(
                     .iter()
                     .map(|&id| PyRep::Integer(id))
                     .collect();
-                Some(Ok(PyRep::keyval([
+                let extraction_kv = PyRep::keyval([
                     ("structureID", PyRep::Integer(e.structure_id)),
                     ("moonID", PyRep::Integer(e.moon_id)),
                     ("extractionStartTime", PyRep::Integer(e.extraction_start_unix as i64)),
@@ -992,9 +1019,13 @@ pub async fn handle(
                     ("eventID", PyRep::Integer(e.event_id)),
                     ("activeAsteroidCount", PyRep::Integer(active_count)),
                     ("asteroidIDs", PyRep::List(ast_id_reps)),
+                ]);
+                Some(Ok(PyRep::Tuple(vec![
+                    extraction_kv,
+                    PyRep::Integer(e.event_id),
                 ])))
             } else {
-                Some(Ok(PyRep::None))
+                Some(Ok(PyRep::Tuple(vec![PyRep::None, PyRep::None])))
             }
         }
 
@@ -1018,19 +1049,11 @@ pub async fn handle(
                 }));
             };
 
-            let fuel_per_cycle = ctx
-                .sde
-                .types
-                .get(&82941)
-                .and_then(|t| t.default_attributes.get(&2109).copied())
-                .unwrap_or(5.0)
-                .round()
-                .max(1.0) as u32;
-            // DERIVED: Metenox Moon Drill consumes Magmatic Gas (`type_id == 81143`) per hourly cycle (`docs/spec/03_economy_industry_social.md:64`).
+            let fuel_per_cycle = metenox_fuel_per_cycle(&ctx.sde);
             let gas_per_cycle: u32 = METENOX_MAGMATIC_GAS_PER_CYCLE;
-
             let now = ctx.now_unix();
-            // Read-only query (`R73 P2-4`): never mutate `snap.auto_moon_miners` on `RequestMiningDetails`.
+
+            // Read-only query (`R73 P2-4`, `R-MN14-FALSE`): never mutate `snap.auto_moon_miners` on `RequestMiningDetails`.
             let res = ctx.db.with_snapshot(|snap| {
                 let existing = snap.auto_moon_miners.get(&structure_id);
                 let efficiency = existing.map(|r| r.efficiency).unwrap_or(0.40);
@@ -1038,14 +1061,23 @@ pub async fn handle(
                 let last_cycle_unix = existing.map(|r| r.last_cycle_unix).unwrap_or(now);
 
                 let info = inspect_metenox_drill(&ctx.sde, snap, structure_id, char_id, efficiency)?;
-                let status = if info.total_struct_fuel >= fuel_per_cycle
-                    && info.total_struct_gas >= gas_per_cycle
-                {
-                    "Active".into()
-                } else if info.total_struct_fuel < fuel_per_cycle {
+                let (remaining_cap, bay_units) = metenox_output_bay_remaining_capacity(&ctx.sde, snap, structure_id);
+                let per_cycle_vol: f64 = info
+                    .hourly_materials
+                    .iter()
+                    .map(|&(tid, qty)| {
+                        let uvol = ctx.sde.types.get(&tid).map(|t| t.volume).unwrap_or(0.1);
+                        (qty as f64) * uvol
+                    })
+                    .sum();
+                let status = if info.total_struct_fuel < fuel_per_cycle {
                     "OutOfFuel".into()
-                } else {
+                } else if info.total_struct_gas < gas_per_cycle {
                     "OutOfMagmaticGas".into()
+                } else if remaining_cap < per_cycle_vol {
+                    "OutputBayFull".into()
+                } else {
+                    "Active".into()
                 };
 
                 let view = AutoMoonMinerRecord {
@@ -1060,11 +1092,24 @@ pub async fn handle(
                     status,
                 };
 
-                Ok((view, info.hourly_materials))
+                Ok((view, info.moon_id, info.hourly_materials, remaining_cap, bay_units))
             });
 
             match res {
-                Ok((rec, mats)) => {
+                Ok((rec, moon_id, mats, remaining_cap, bay_units)) => {
+                    let next_harvest_unix = rec.last_cycle_unix.saturating_add(rec.cycle_duration_seconds);
+                    let next_harvest_filetime = (next_harvest_unix as i64 + 11_644_473_600) * 10_000_000;
+                    let output_materials: Vec<PyRep> = mats
+                        .iter()
+                        .map(|&(tid, qty)| {
+                            let uvol = ctx.sde.types.get(&tid).map(|t| t.volume).unwrap_or(0.1);
+                            PyRep::Tuple(vec![
+                                PyRep::Integer(tid as i64),
+                                PyRep::Integer(qty as i64),
+                                PyRep::Real((qty as f64) * uvol),
+                            ])
+                        })
+                        .collect();
                     let mat_list: Vec<PyRep> = mats
                         .into_iter()
                         .map(|(tid, qty)| {
@@ -1075,6 +1120,11 @@ pub async fn handle(
                         })
                         .collect();
                     Some(Ok(PyRep::keyval([
+                        ("availableFuel", PyRep::Integer(rec.fuel_units_remaining as i64)),
+                        ("moonID", PyRep::Integer(moon_id)),
+                        ("nextHarvestTime", PyRep::Integer(next_harvest_filetime)),
+                        ("outputMaterials", PyRep::List(output_materials)),
+                        ("remainingOutputBayCapacity", PyRep::Real(remaining_cap)),
                         ("structureID", PyRep::Integer(rec.structure_id)),
                         ("efficiency", PyRep::Real(rec.efficiency)),
                         ("cycleTimeSeconds", PyRep::Integer(rec.cycle_duration_seconds as i64)),
@@ -1087,6 +1137,7 @@ pub async fn handle(
                         ("oreTypeID", PyRep::Integer(rec.ore_type_id as i64)),
                         ("primaryMaterialTypeID", PyRep::Integer(rec.ore_type_id as i64)),
                         ("hourlyMoonMaterials", PyRep::List(mat_list)),
+                        ("harvestedUnitsInBay", PyRep::Integer(bay_units)),
                     ])))
                 }
                 Err(e) => Some(Err(e)),
@@ -1110,287 +1161,169 @@ pub async fn handle(
                 }));
             };
 
-            let requested_cycles: Option<u32> = match args.get(1) {
-                None | Some(PyRep::None) => None,
-                Some(v) => {
-                    let Some(raw) = v.as_i64() else {
-                        return Some(Err(BridgeRpcError {
-                            code: "InvalidArgument".into(),
-                            message: "cycles must be an integer".into(),
-                        }));
-                    };
-                    if !(1..=1_000).contains(&raw) {
-                        return Some(Err(BridgeRpcError {
-                            code: "InvalidArgument".into(),
-                            message: format!("cycles {raw} out of valid range 1..=1000"),
-                        }));
-                    }
-                    Some(raw as u32)
-                }
-            };
-
-            let fuel_per_cycle = ctx
-                .sde
-                .types
-                .get(&82941)
-                .and_then(|t| t.default_attributes.get(&2109).copied())
-                .unwrap_or(5.0)
-                .round()
-                .max(1.0) as u32;
-            // DERIVED: Metenox Moon Drill consumes Magmatic Gas (`type_id == 81143`) per hourly cycle (`docs/spec/03_economy_industry_social.md:64`).
-            let gas_per_cycle: u32 = METENOX_MAGMATIC_GAS_PER_CYCLE;
-
-            let now = ctx.now_unix();
-            let default_start_unix = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(now)
-                .min(now);
-            let date = eve_db::unix_secs_to_date_string(now);
-
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let info = inspect_metenox_drill(&ctx.sde, snap, structure_id, char_id, 0.40)?;
-                let st_owner_corp = info.st_owner_corp;
-                let caller_corp = info.caller_corp;
-                let st_sys_id = info.st_sys_id;
-                let moon_id = info.moon_id;
-                let total_struct_fuel = info.total_struct_fuel;
-                let total_struct_gas = info.total_struct_gas;
-                let primary_mat_tid = info.primary_mat_tid;
-                let hourly_yield = info.hourly_yield;
-                let matches_reagent_owner = |item_owner_id: i64| -> bool {
-                    if st_owner_corp != 0 {
-                        item_owner_id == st_owner_corp
-                    } else {
-                        item_owner_id == char_id || item_owner_id == caller_corp
-                    }
-                };
-
-                let (cycles, efficiency, fuel_req, gas_req, fuel_rem) = {
-                    let auto_miner = snap.auto_moon_miners.entry(structure_id).or_insert_with(|| {
-                        AutoMoonMinerRecord {
-                            structure_id,
-                            fuel_units_remaining: total_struct_fuel,
-                            magmatic_gas_remaining: total_struct_gas,
-                            efficiency: 0.40,
-                            cycle_duration_seconds: 3600,
-                            last_cycle_unix: default_start_unix,
-                            ore_type_id: primary_mat_tid,
-                            hourly_yield,
-                            status: "Active".into(),
-                        }
-                    });
-                    // Authoritative sync from structure inventory (no `.max()` with stale record):
-                    auto_miner.fuel_units_remaining = total_struct_fuel;
-                    auto_miner.magmatic_gas_remaining = total_struct_gas;
-                    auto_miner.hourly_yield = hourly_yield;
-                    auto_miner.ore_type_id = primary_mat_tid;
-
-                    let cycle_secs = (auto_miner.cycle_duration_seconds.max(1)) as u64;
-                    let elapsed_secs = now.saturating_sub(auto_miner.last_cycle_unix);
-                    let elapsed_cycles = (elapsed_secs / cycle_secs).min(1_000) as u32;
-                    if elapsed_cycles == 0 {
-                        return Err(BridgeRpcError {
-                            code: "CycleNotComplete".into(),
-                            message: format!(
-                                "Metenox Moon Drill cycle has not completed yet ({elapsed_secs}s / {cycle_secs}s elapsed)"
-                            ),
-                        });
-                    }
-                    let cycles = match requested_cycles {
-                        Some(req) if req > elapsed_cycles => {
-                            return Err(BridgeRpcError {
-                                code: "CycleNotComplete".into(),
-                                message: format!(
-                                    "Requested {req} cycles but only {elapsed_cycles} cycles have elapsed since last harvest"
-                                ),
-                            });
-                        }
-                        Some(req) => req,
-                        None => elapsed_cycles,
-                    };
-
-                    let fuel_req = cycles.checked_mul(fuel_per_cycle).ok_or_else(|| BridgeRpcError {
-                        code: "InvalidArgument".into(),
-                        message: "Fuel requirement overflow".into(),
-                    })?;
-                    let gas_req = cycles.checked_mul(gas_per_cycle).ok_or_else(|| BridgeRpcError {
-                        code: "InvalidArgument".into(),
-                        message: "Magmatic gas requirement overflow".into(),
-                    })?;
-
-                    if auto_miner.fuel_units_remaining < fuel_req {
-                        auto_miner.status = "OutOfFuel".into();
-                        return Err(BridgeRpcError {
-                            code: "OutOfFuel".into(),
-                            message: format!(
-                                "Auto moon drill has {} fuel blocks in structure inventory, but {} required for {cycles} cycles",
-                                auto_miner.fuel_units_remaining, fuel_req
-                            ),
-                        });
-                    }
-                    if auto_miner.magmatic_gas_remaining < gas_req {
-                        auto_miner.status = "OutOfMagmaticGas".into();
-                        return Err(BridgeRpcError {
-                            code: "OutOfMagmaticGas".into(),
-                            message: format!(
-                                "Auto moon drill has {} Magmatic Gas (type 81143) in structure inventory, but {} required for {cycles} cycles",
-                                auto_miner.magmatic_gas_remaining, gas_req
-                            ),
-                        });
-                    }
-
-                    auto_miner.fuel_units_remaining -= fuel_req;
-                    auto_miner.magmatic_gas_remaining -= gas_req;
-                    auto_miner.last_cycle_unix += (cycles as u64) * cycle_secs;
-                    auto_miner.status = "Active".into();
-
-                    (
-                        cycles,
-                        auto_miner.efficiency,
-                        fuel_req,
-                        gas_req,
-                        auto_miner.fuel_units_remaining,
-                    )
-                };
-
-                // Deduct consumed fuel blocks and Magmatic Gas from structure inventory
-                let mut rem_fuel_to_deduct = fuel_req;
-                let mut rem_gas_to_deduct = gas_req;
-                if let Some(st_mut) = snap.structures.get_mut(&structure_id) {
-                    let from_bay = st_mut.fuel_blocks.min(rem_fuel_to_deduct);
-                    st_mut.fuel_blocks -= from_bay;
-                    rem_fuel_to_deduct -= from_bay;
-                }
-                for (rem_ref, is_fuel, err_code, label) in [
-                    (&mut rem_fuel_to_deduct, true, "OutOfFuel", "fuel blocks"),
-                    (&mut rem_gas_to_deduct, false, "OutOfMagmaticGas", "Magmatic Gas (type 81143)"),
-                ] {
-                    if *rem_ref > 0 {
-                        let mut item_ids: Vec<i64> = snap
-                            .items
-                            .values()
-                            .filter(|it| {
-                                it.location_id == structure_id
-                                    && matches_reagent_owner(it.owner_id)
-                                    && it.quantity > 0
-                                    && it.flag != InventoryFlag::Locked
-                                    && !snap.is_item_locked_in_contract_or_job(it.item_id)
-                                    && if is_fuel {
-                                        ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136)
-                                    } else {
-                                        it.type_id == 81143
-                                    }
-                            })
-                            .map(|it| it.item_id)
-                            .collect();
-                        item_ids.sort_unstable();
-                        for iid in item_ids {
-                            if *rem_ref == 0 {
-                                break;
-                            }
-                            if let Some(it) = snap.items.get_mut(&iid) {
-                                let take = (it.quantity.max(0) as u32).min(*rem_ref);
-                                it.quantity -= take as i32;
-                                *rem_ref -= take;
-                                if it.quantity <= 0 {
-                                    snap.items.remove(&iid);
-                                }
-                            }
-                        }
-                        if *rem_ref > 0 {
-                            return Err(BridgeRpcError {
-                                code: err_code.into(),
-                                message: format!("Insufficient {label} in structure {structure_id} ({rem_ref} short)"),
-                            });
-                        }
-                    }
-                }
-
-                // Compute harvested Moon Materials (`group_id == 427`, e.g. `16633..=16653`) for `cycles` hours
-                let cycle_materials =
-                    derive_metenox_moon_materials(&ctx.sde, st_sys_id, moon_id, efficiency, cycles);
-                if cycle_materials.is_empty() {
-                    return Err(BridgeRpcError {
-                        code: "NoMoonMaterials".into(),
-                        message: format!("Moon {moon_id} in system {st_sys_id} yields no group-427 moon materials"),
-                    });
-                }
-                let units_produced: u64 = cycle_materials.iter().map(|&(_, q)| q).sum();
-
-                // Deliver harvested Moon Materials to structure output bay / hangar and record in observer ledger
-                for &(mat_tid, mat_qty) in &cycle_materials {
-                    snap.next_entity_id += 1;
-                    let item_id = snap.next_entity_id;
-                    snap.items.insert(
-                        item_id,
-                        InventoryItemRecord {
-                            item_id,
-                            type_id: mat_tid,
-                            owner_id: st_owner_corp,
-                            location_id: structure_id,
-                            flag: InventoryFlag::Hangar,
-                            quantity: mat_qty as i32,
-                            singleton: false,
-                            version: 1,
-                            ..Default::default()
-                        },
-                    );
-
-                    snap.observer_mining_ledger
-                        .entry(structure_id)
-                        .or_default()
-                        .push(ObserverMiningRecord {
-                            observer_id: structure_id,
-                            character_id: char_id,
-                            recorded_corporation_id: caller_corp,
-                            type_id: mat_tid,
-                            quantity: mat_qty as i64,
-                            last_updated_date: date.clone(),
-                            timestamp_unix: now,
-                        });
-                }
-
-                Ok((
-                    structure_id,
-                    cycles,
-                    units_produced,
-                    primary_mat_tid,
-                    cycle_materials,
-                    fuel_req,
-                    gas_req,
-                    fuel_rem,
-                ))
+            // Read-only query (`client_expectations.json:50680-50681`, `R-MN14-FALSE`):
+            // returns per-cycle materials list `[(type_id, quantity, volume), ...]` for `OutputMaterialsSection(materials_per_cycle=)`.
+            let res = ctx.db.with_snapshot(|snap| {
+                let efficiency = snap
+                    .auto_moon_miners
+                    .get(&structure_id)
+                    .map(|r| r.efficiency)
+                    .unwrap_or(0.40);
+                let info = inspect_metenox_drill(&ctx.sde, snap, structure_id, char_id, efficiency)?;
+                let tuples: Vec<PyRep> = info
+                    .hourly_materials
+                    .into_iter()
+                    .map(|(tid, qty)| {
+                        let uvol = ctx.sde.types.get(&tid).map(|t| t.volume).unwrap_or(0.1);
+                        PyRep::Tuple(vec![
+                            PyRep::Integer(tid as i64),
+                            PyRep::Integer(qty as i64),
+                            PyRep::Real((qty as f64) * uvol),
+                        ])
+                    })
+                    .collect();
+                Ok(PyRep::List(tuples))
             });
 
-            match res {
-                Ok((s_id, cyc, produced, primary_tid, mats, f_used, g_used, f_rem)) => {
-                    let mat_list: Vec<PyRep> = mats
-                        .into_iter()
-                        .map(|(tid, qty)| {
-                            PyRep::keyval([
-                                ("typeID", PyRep::Integer(tid as i64)),
-                                ("quantity", PyRep::Integer(qty as i64)),
-                            ])
-                        })
-                        .collect();
-                    Some(Ok(PyRep::keyval([
-                        ("structureID", PyRep::Integer(s_id)),
-                        ("cyclesProcessed", PyRep::Integer(cyc as i64)),
-                        ("unitsProduced", PyRep::Integer(produced as i64)),
-                        ("oreTypeID", PyRep::Integer(primary_tid as i64)),
-                        ("primaryMaterialTypeID", PyRep::Integer(primary_tid as i64)),
-                        ("materialsProduced", PyRep::List(mat_list)),
-                        ("fuelConsumed", PyRep::Integer(f_used as i64)),
-                        ("magmaticGasConsumed", PyRep::Integer(g_used as i64)),
-                        ("fuelRemaining", PyRep::Integer(f_rem as i64)),
-                    ])))
-                }
-                Err(e) => Some(Err(e)),
-            }
+            Some(res)
         }
 
         _ => mining_compression::handle_compression(ctx, session, service, method, args, _kwargs)
             .await,
     }
 }
+
+fn metenox_fuel_per_cycle(sde: &SdeRegistry) -> u32 {
+    sde.types.get(&82941).and_then(|t| t.default_attributes.get(&2109).copied()).unwrap_or(5.0).round().max(1.0) as u32
+}
+
+fn metenox_output_bay_remaining_capacity(sde: &SdeRegistry, snap: &eve_db::WorldStateSnapshot, structure_id: i64) -> (f64, i64) {
+    // DERIVED: SDE type 81826 (Metenox Moon Drill) capacity attribute = 480,000 m³.
+    let default_cap = sde.types.get(&81826).map(|t| t.capacity).filter(|&c| c > 0.0).unwrap_or(480_000.0);
+    let total_cap = snap.structures.get(&structure_id).and_then(|st| sde.types.get(&st.type_id)).map(|t| t.capacity).filter(|&c| c > 0.0).unwrap_or(default_cap);
+    let mut used_vol = 0.0_f64;
+    let mut bay_units = 0_i64;
+    for it in snap.items.values() {
+        if it.location_id == structure_id && matches!(it.flag, InventoryFlag::SpecializedMineralHold | InventoryFlag::SpecializedMaterialBay) && it.quantity > 0 {
+            let uvol = sde.types.get(&it.type_id).map(|t| t.volume).unwrap_or(0.1);
+            used_vol += (it.quantity as f64) * uvol;
+            if sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 427) {
+                bay_units += it.quantity as i64;
+            }
+        }
+    }
+    ((total_cap - used_vol).max(0.0), bay_units)
+}
+
+/// Server-driven hourly Metenox Moon Drill production tick (`plan:MN-14`, `R-MN14-FALSE`, `R-MN14-PROD-TICK`).
+pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_unix: u64) {
+    let fuel_per_cycle = metenox_fuel_per_cycle(&ctx.sde);
+    let gas_per_cycle: u32 = METENOX_MAGMATIC_GAS_PER_CYCLE;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs.insert("metenox_last_tick_unix".into(), now_unix.to_string());
+        // SDE group 4744 (Upwell Moon Drill, type 81826 Metenox Moon Drill); extraction pauses while anchoring or reinforced.
+        let metenox_ids: Vec<(i64, u32, i64, [f64; 3])> = snap.structures.values()
+            .filter(|st| !matches!(st.state.as_str(), "Destroyed" | "Anchoring" | "Reinforced") && ctx.sde.types.get(&st.type_id).is_some_and(|t| t.group_id == 4744))
+            .map(|st| (st.structure_id, st.solar_system_id, st.owner_corp_id, st.position))
+            .collect();
+        if metenox_ids.is_empty() { return; }
+
+        for (structure_id, st_sys_id, st_owner_corp, st_pos) in metenox_ids {
+            let sec = ctx.sde.solar_systems.get(&st_sys_id).map(|s| s.security_status).unwrap_or(0.0);
+            if sec >= 0.45 && st_sys_id < 31_000_000 { continue; }
+            let Some(moon_id) = resolve_structure_moon_id(&ctx.sde, st_sys_id, st_pos) else { continue; };
+            let efficiency = snap.auto_moon_miners.get(&structure_id).map(|r| r.efficiency).unwrap_or(0.40);
+            let cycle_secs = snap.auto_moon_miners.get(&structure_id).map(|r| r.cycle_duration_seconds.max(1) as u64).unwrap_or(3600);
+            let hourly_materials = derive_metenox_moon_materials(&ctx.sde, st_sys_id, moon_id, efficiency, 1);
+            let Some(&(primary_mat_tid, _)) = hourly_materials.first() else { continue; };
+            let hourly_yield: u64 = hourly_materials.iter().map(|&(_, q)| q).sum();
+            let per_cycle_vol: f64 = hourly_materials.iter().map(|&(tid, qty)| (qty as f64) * ctx.sde.types.get(&tid).map(|t| t.volume).unwrap_or(0.1)).sum();
+
+            let count_reagents = |snap_ref: &eve_db::WorldStateSnapshot| -> (u32, u32) {
+                let st_fuel = snap_ref.structures.get(&structure_id).map(|s| s.fuel_blocks).unwrap_or(0);
+                let mut item_fuel = 0u32;
+                let mut gas = 0u32;
+                for it in snap_ref.items.values() {
+                    if it.location_id == structure_id && (st_owner_corp == 0 || it.owner_id == st_owner_corp) && it.quantity > 0 && it.flag != InventoryFlag::Locked && !snap_ref.is_item_locked_in_contract_or_job(it.item_id) {
+                        if ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136) {
+                            item_fuel = item_fuel.saturating_add(it.quantity as u32);
+                        } else if it.type_id == 81143 {
+                            gas = gas.saturating_add(it.quantity as u32);
+                        }
+                    }
+                }
+                (st_fuel.saturating_add(item_fuel), gas)
+            };
+
+            let (init_fuel, init_gas) = count_reagents(snap);
+            let last_cycle_unix = snap.auto_moon_miners.entry(structure_id).or_insert_with(|| AutoMoonMinerRecord {
+                structure_id, fuel_units_remaining: init_fuel, magmatic_gas_remaining: init_gas, efficiency,
+                cycle_duration_seconds: cycle_secs, last_cycle_unix: prev_unix, ore_type_id: primary_mat_tid,
+                hourly_yield, status: "Active".into(),
+            }).last_cycle_unix;
+
+            let elapsed_cycles = (now_unix.saturating_sub(last_cycle_unix) / cycle_secs).min(1_000) as u32;
+            if elapsed_cycles == 0 { continue; }
+
+            let (rem_cap_before, _) = metenox_output_bay_remaining_capacity(&ctx.sde, snap, structure_id);
+            let max_cap_cycles = if per_cycle_vol > 0.0 { (rem_cap_before / per_cycle_vol).floor() as u32 } else { elapsed_cycles };
+            let runnable_cycles = elapsed_cycles.min(init_fuel / fuel_per_cycle).min(init_gas / gas_per_cycle).min(max_cap_cycles);
+
+            if runnable_cycles > 0 {
+                let mut rem_fuel_to_deduct = runnable_cycles * fuel_per_cycle;
+                let mut rem_gas_to_deduct = runnable_cycles * gas_per_cycle;
+                if let Some(st_mut) = snap.structures.get_mut(&structure_id) {
+                    let from_bay = st_mut.fuel_blocks.min(rem_fuel_to_deduct);
+                    st_mut.fuel_blocks -= from_bay;
+                    rem_fuel_to_deduct -= from_bay;
+                }
+                for (rem_ref, is_fuel) in [(&mut rem_fuel_to_deduct, true), (&mut rem_gas_to_deduct, false)] {
+                    if *rem_ref > 0 {
+                        let mut item_ids: Vec<i64> = snap.items.values()
+                            .filter(|it| it.location_id == structure_id && (st_owner_corp == 0 || it.owner_id == st_owner_corp) && it.quantity > 0 && it.flag != InventoryFlag::Locked && !snap.is_item_locked_in_contract_or_job(it.item_id) && if is_fuel { ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136) } else { it.type_id == 81143 })
+                            .map(|it| it.item_id).collect();
+                        item_ids.sort_unstable();
+                        for iid in item_ids {
+                            if *rem_ref == 0 { break; }
+                            if let Some(it) = snap.items.get_mut(&iid) {
+                                let take = (it.quantity.max(0) as u32).min(*rem_ref);
+                                it.quantity -= take as i32;
+                                *rem_ref -= take;
+                                if it.quantity <= 0 { snap.items.remove(&iid); }
+                            }
+                        }
+                    }
+                }
+
+                for &(mat_tid, per_cycle_qty) in &hourly_materials {
+                    let mat_qty = per_cycle_qty.saturating_mul(runnable_cycles as u64);
+                    let add_qty = i32::try_from(mat_qty).unwrap_or(i32::MAX);
+                    if let Some(existing_item) = snap.items.values_mut().find(|it| it.location_id == structure_id && it.owner_id == st_owner_corp && it.flag == InventoryFlag::SpecializedMineralHold && it.type_id == mat_tid && !it.singleton) {
+                        existing_item.quantity = existing_item.quantity.saturating_add(add_qty);
+                    } else {
+                        snap.next_entity_id += 1;
+                        let item_id = snap.next_entity_id;
+                        snap.items.insert(item_id, InventoryItemRecord {
+                            item_id, type_id: mat_tid, owner_id: st_owner_corp, location_id: structure_id,
+                            flag: InventoryFlag::SpecializedMineralHold, quantity: add_qty,
+                            singleton: false, version: 1, ..Default::default()
+                        });
+                    }
+                }
+            }
+
+            let (after_fuel, after_gas) = count_reagents(snap);
+            let (rem_cap_after, _) = metenox_output_bay_remaining_capacity(&ctx.sde, snap, structure_id);
+            if let Some(am) = snap.auto_moon_miners.get_mut(&structure_id) {
+                am.fuel_units_remaining = after_fuel;
+                am.magmatic_gas_remaining = after_gas;
+                am.ore_type_id = primary_mat_tid;
+                am.hourly_yield = hourly_yield;
+                am.last_cycle_unix = if runnable_cycles < elapsed_cycles { now_unix } else { last_cycle_unix.saturating_add((runnable_cycles as u64) * cycle_secs) };
+                am.status = if after_fuel < fuel_per_cycle { "OutOfFuel".into() } else if after_gas < gas_per_cycle { "OutOfMagmaticGas".into() } else if rem_cap_after < per_cycle_vol { "OutputBayFull".into() } else { "Active".into() };
+            }
+        }
+    });
+}
+

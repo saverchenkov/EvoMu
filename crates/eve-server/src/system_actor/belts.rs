@@ -154,12 +154,18 @@ pub fn populate_asteroid_belt_entities(
     sde: &SdeRegistry,
 ) -> Vec<AsteroidState> {
     let mut states = Vec::new();
-    let mut ast_id_counter = 750_000_000i64;
+    let sys_offset = if solar_system_id == 30_000_144 {
+        0
+    } else {
+        ((solar_system_id as i64 % 10_000_000).max(1)) * 1_000
+    };
+    let mut ast_id_counter = 750_000_000i64 + sys_offset;
 
     let Some(sys) = sde.solar_systems.get(&solar_system_id) else {
         return states;
     };
     let sec = sys.security_status;
+    let is_pochven = sys.region_id == 10_000_070;
 
     let mut base_ores: Vec<&eve_sde::InvType> = sde
         .types
@@ -167,7 +173,7 @@ pub fn populate_asteroid_belt_entities(
         .filter(|t| {
             t.category_id == 25
                 && t.published
-                && (450..=469).contains(&t.group_id)
+                && ((450..=469).contains(&t.group_id) || (4029..=4031).contains(&t.group_id))
                 && t.group_id != 465
                 && sde.groups.get(&t.group_id).is_some_and(|g| g.name == t.name)
         })
@@ -180,10 +186,11 @@ pub fn populate_asteroid_belt_entities(
     });
 
     // DERIVED (OF-36 / R57-P1-2): security-band volume thresholds (highsec >= 0.45: <= 0.35 m3,
-    // lowsec 0.05..0.45: 0.35..3.0 m3, nullsec < 0.05: 3.0..16.0 m3) and initial asteroid
-    // quantity/radius/mass scaling ((2,000 / unit_volume) rounded to portion size batch,
+    // lowsec 0.05..0.45: 0.35..=3.0 m3 including Hedbergite 21, nullsec < 0.05: 3.0..=40.0 m3
+    // including Mercoxit 11396, Pochven region 10000070: groups 4029..=4031 Bezdnacine/Rakovene/Talassonite)
+    // and initial asteroid quantity/radius/mass scaling ((2,000 / unit_volume) rounded to portion size batch,
     // radius clamp 60..2,500m, mass total_m3 * 5e7) are derived server-side heuristics
-    // because belt ore tables are server-only and not present in V24 client ResFiles.
+    // because regional belt ore tables are server-only and not present in V24 client ResFiles.
     // `feat:mining.belt-ore-distribution` and `feat:mining.ice-belts` remain open until
     // regional/ice spawn tables are wired.
     for cel in sde.celestials_in_system(solar_system_id) {
@@ -193,12 +200,16 @@ pub fn populate_asteroid_belt_entities(
                 .iter()
                 .copied()
                 .filter(|t| {
-                    if sec >= 0.45 {
+                    if is_pochven {
+                        (4029..=4031).contains(&t.group_id)
+                    } else if (4029..=4031).contains(&t.group_id) {
+                        false
+                    } else if sec >= 0.45 {
                         t.volume <= 0.35
                     } else if sec >= 0.05 {
-                        t.volume > 0.35 && t.volume < 3.0
+                        t.volume > 0.35 && t.volume <= 3.0
                     } else {
-                        t.volume >= 3.0 && t.volume <= 16.0
+                        t.volume > 3.0 && t.volume <= 40.0
                     }
                 })
                 .collect();
@@ -354,6 +365,78 @@ pub(super) fn restore_asteroid_from_template(
     }
 }
 
+pub(super) fn reconcile_spawned_belt_asteroids(
+    ballpark: &mut Ballpark,
+    solar_system_id: SolarSystemId,
+    spawned: Vec<AsteroidState>,
+    asteroids: &mut HashMap<BallId, AsteroidState>,
+    asteroid_templates: &mut HashMap<BallId, (AsteroidState, Ball)>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    belt_interval_secs: u64,
+    downtime_utc_secs: u64,
+) -> Vec<AsteroidState> {
+    let mut populated = Vec::new();
+    for mut ast in spawned {
+        if let Some(ball) = ballpark.balls.get(&ast.asteroid_id).cloned() {
+            asteroid_templates.insert(ast.asteroid_id, (ast.clone(), ball.clone()));
+            if let Some(db) = db_opt {
+                if let Some(existing) = db.get_asteroid(ast.asteroid_id) {
+                    if existing.quantity <= 0 {
+                        ast.remaining_units = 0;
+                        ast.depleted = true;
+                        let _ = ballpark.remove_ball(ast.asteroid_id);
+                    } else {
+                        ast.remaining_units = existing.quantity as u64;
+                    }
+                } else {
+                    let init_qty = i64::try_from(ast.initial_units).unwrap_or(i64::MAX);
+                    let _ = db.spawn_asteroid(eve_db::AsteroidRecord {
+                        asteroid_id: ast.asteroid_id,
+                        belt_id: ast.belt_id,
+                        type_id: ast.type_id,
+                        solar_system_id,
+                        position: (ball.position.x, ball.position.y, ball.position.z),
+                        quantity: i64::try_from(ast.remaining_units).unwrap_or(i64::MAX),
+                        initial_quantity: init_qty,
+                        radius: ball.radius,
+                    });
+                }
+            }
+            asteroids.insert(ast.asteroid_id, ast.clone());
+            populated.push(ast);
+        }
+    }
+    if let Some(db) = db_opt {
+        let due_unix = next_downtime_unix_secs(
+            db.clock().now_unix_secs(),
+            belt_interval_secs,
+            downtime_utc_secs,
+        );
+        let mut belt_ids: Vec<BallId> = asteroid_templates
+            .values()
+            .filter(|(a, _)| a.belt_id > 0)
+            .map(|(a, _)| a.belt_id)
+            .collect();
+        belt_ids.sort_unstable();
+        belt_ids.dedup();
+        for belt_id in belt_ids {
+            let belt_empty = asteroids
+                .values()
+                .filter(|a| a.belt_id == belt_id)
+                .all(|a| a.remaining_units == 0);
+            if belt_empty {
+                for a in asteroids.values_mut().filter(|a| a.belt_id == belt_id) {
+                    a.respawn_at_tick = Some(due_unix);
+                }
+                for a in populated.iter_mut().filter(|a| a.belt_id == belt_id) {
+                    a.respawn_at_tick = Some(due_unix);
+                }
+            }
+        }
+    }
+    populated
+}
+
 pub(super) fn respawn_due_asteroids(
     ballpark: &mut Ballpark,
     asteroids: &mut HashMap<BallId, AsteroidState>,
@@ -367,6 +450,7 @@ pub(super) fn respawn_due_asteroids(
     let now_unix = db.clock().now_unix_secs();
     let mut belt_ids: Vec<BallId> = asteroid_templates
         .values()
+        .filter(|(ast, _)| ast.belt_id > 0)
         .map(|(ast, _)| ast.belt_id)
         .collect();
     belt_ids.sort_unstable();
@@ -394,6 +478,22 @@ pub(super) fn respawn_due_asteroids(
                         asteroids,
                         sde_opt,
                     );
+                    let init_qty = i64::try_from(orig_ast.initial_units).unwrap_or(i64::MAX);
+                    db.with_mut_snapshot(|snap| {
+                        snap.asteroids.insert(
+                            id,
+                            eve_db::AsteroidRecord {
+                                asteroid_id: id,
+                                belt_id: orig_ast.belt_id,
+                                type_id: orig_ast.type_id,
+                                solar_system_id: ballpark.solar_system_id,
+                                position: (orig_ball.position.x, orig_ball.position.y, orig_ball.position.z),
+                                quantity: init_qty,
+                                initial_quantity: init_qty,
+                                radius: orig_ball.radius,
+                            },
+                        );
+                    });
                     respawned.push(id);
                 }
             }
@@ -438,6 +538,13 @@ pub(super) fn handle_mine_asteroid(
             let remaining_units = ast.remaining_units;
             let ore_type_id = ast.type_id;
             let belt_id = ast.belt_id;
+            if let Some(db) = db_opt {
+                db.with_mut_snapshot(|snap| {
+                    if let Some(a) = snap.asteroids.get_mut(&asteroid_id) {
+                        a.quantity = i64::try_from(remaining_units).unwrap_or(0);
+                    }
+                });
+            }
             if depleted {
                 let _ = ballpark.remove_ball(asteroid_id);
                 let belt_fully_depleted = asteroids

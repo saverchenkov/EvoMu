@@ -454,32 +454,8 @@ pub async fn step_repeating_drone_mining(ctx: &ServerContext, now_unix: u64) {
             continue;
         }
 
-        let extraction = match sys.mine_asteroid(m.asteroid_id, m.yield_units, m.waste_prob).await {
-            Ok(e) => e,
-            Err(_) => {
-                with_mut_combat_runtime(ctx, |rt| {
-                    rt.active_drone_miners.remove(&m.drone_id);
-                    if let Some(d) = rt.active_drones_in_space.get_mut(&m.drone_id) {
-                        d.target_id = None;
-                        d.activity_state = 0;
-                    }
-                });
-                let _ = sys.emit_destiny_event(m.drone_id, eve_destiny::DestinyEvent::OnDroneStateChange {
-                    drone_id: m.drone_id, owner_id: m.owner_char_id, controller_id: m.ship_id,
-                    activity_state: 0, type_id: 0, controller_owner_id: m.owner_char_id, target_id: None,
-                }).await;
-                continue;
-            }
-        };
-
-        ctx.db.with_mut_snapshot(|snap| {
-            if let Some(ast) = snap.asteroids.get_mut(&m.asteroid_id) {
-                ast.quantity = extraction.remaining_units as i64;
-            }
-        });
-
-        let ore_vol = ctx.sde.types.get(&m.ore_type_id).map(|t| t.volume).unwrap_or(0.1);
-        let needed_vol = ore_vol * (extraction.mined_units as f64);
+        let ore_vol = ctx.sde.types.get(&m.ore_type_id).map(|t| t.volume).unwrap_or(0.1).max(0.001);
+        let needed_vol = ore_vol * (m.yield_units as f64);
         let (hold_cap, used_vol) = ctx.db.with_snapshot(|snap| {
             let stid = snap.items.get(&m.ship_id).map(|s| s.type_id).unwrap_or(0);
             let st = ctx.sde.types.get(&stid);
@@ -511,9 +487,41 @@ pub async fn step_repeating_drone_mining(ctx: &ServerContext, now_unix: u64) {
             continue;
         }
 
+        let extraction = match sys.mine_asteroid(m.asteroid_id, m.yield_units, m.waste_prob).await {
+            Ok(e) => e,
+            Err(_) => {
+                with_mut_combat_runtime(ctx, |rt| {
+                    rt.active_drone_miners.remove(&m.drone_id);
+                    if let Some(d) = rt.active_drones_in_space.get_mut(&m.drone_id) {
+                        d.target_id = None;
+                        d.activity_state = 0;
+                    }
+                });
+                let _ = sys.emit_destiny_event(m.drone_id, eve_destiny::DestinyEvent::OnDroneStateChange {
+                    drone_id: m.drone_id, owner_id: m.owner_char_id, controller_id: m.ship_id,
+                    activity_state: 0, type_id: 0, controller_owner_id: m.owner_char_id, target_id: None,
+                }).await;
+                continue;
+            }
+        };
+
+        let ast_pos_opt = ctx.db.with_mut_snapshot(|snap| {
+            let mut pos_opt = None;
+            if let Some(ast) = snap.asteroids.get_mut(&m.asteroid_id) {
+                ast.quantity = extraction.remaining_units as i64;
+                pos_opt = Some(glam::DVec3::new(ast.position.0, ast.position.1, ast.position.2));
+            }
+            pos_opt
+        });
+        if extraction.depleted {
+            if let Some(ast_pos) = ast_pos_opt {
+                crate::services::mining_cycle::clear_emptied_sites(ctx, m.solar_system_id, ast_pos);
+            }
+        }
+
         if extraction.mined_units > 0 {
-            crate::services::space_mining_harvest::deposit_mined_ore_and_record_ledger(
-                ctx, m.owner_char_id, m.ship_id, m.solar_system_id, m.destination_flag, m.ore_type_id, extraction.mined_units,
+            crate::services::space_mining_harvest::deposit_mined_ore_and_record_ledger_with_waste(
+                ctx, m.owner_char_id, m.ship_id, m.solar_system_id, m.destination_flag, m.ore_type_id, extraction.mined_units, extraction.wasted_units,
             );
         }
 

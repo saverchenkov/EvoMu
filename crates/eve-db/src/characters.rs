@@ -596,8 +596,30 @@ impl WorldRepository {
         quantity: i64,
         timestamp_unix: u64,
     ) -> Result<(), DbError> {
+        self.record_mining_ledger_entry_with_waste(
+            character_id,
+            solar_system_id,
+            type_id,
+            quantity,
+            0,
+            timestamp_unix,
+        )
+    }
+
+    /// Records an entry in the character's mining ledger including wasted/residue quantity (`MN-16`),
+    /// and mirrors the mining event to any observer structures in the system (`MN-15`, `corpMiningLedger`).
+    pub fn record_mining_ledger_entry_with_waste(
+        &self,
+        character_id: i64,
+        solar_system_id: u32,
+        type_id: u32,
+        quantity: i64,
+        wasted_quantity: i64,
+        timestamp_unix: u64,
+    ) -> Result<(), DbError> {
         let date = crate::types::unix_secs_to_date_string(timestamp_unix);
         self.try_with_mut_snapshot(|guard| {
+            let idx = guard.mining_ledger.len();
             guard.mining_ledger.push(MiningLedgerRecord {
                 character_id,
                 solar_system_id,
@@ -606,6 +628,17 @@ impl WorldRepository {
                 date: date.clone(),
                 timestamp_unix,
             });
+            if wasted_quantity > 0 {
+                let mut waste_map: std::collections::BTreeMap<usize, i64> = guard
+                    .service_state_blobs
+                    .get("mining_ledger_waste")
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                waste_map.insert(idx, wasted_quantity);
+                if let Ok(json) = serde_json::to_string(&waste_map) {
+                    guard.service_state_blobs.insert("mining_ledger_waste".into(), json);
+                }
+            }
 
             // Mirror to observers in the same solar system (MN-15 observer volume tracking)
             let corp_id = guard
@@ -648,6 +681,23 @@ impl WorldRepository {
             .iter()
             .filter(|r| r.character_id == character_id)
             .cloned()
+            .collect()
+    }
+
+    /// Returns all mining ledger entries with their wasted/residue quantities for a character (`MN-16`).
+    pub fn get_mining_ledger_with_waste(&self, character_id: i64) -> Vec<(MiningLedgerRecord, i64)> {
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let waste_map: std::collections::BTreeMap<usize, i64> = guard
+            .service_state_blobs
+            .get("mining_ledger_waste")
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        guard
+            .mining_ledger
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.character_id == character_id)
+            .map(|(idx, r)| (r.clone(), waste_map.get(&idx).copied().unwrap_or(0)))
             .collect()
     }
 

@@ -1483,6 +1483,10 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/moonmining/schedulingSvc.pyj:76 SchedulingSvc.FireLaser(): sm.ScatterEvent('OnMiningLaserFiredFailedLocal', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnMiningLaserFiredFailedLocal' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnMiningLaserFiredLocal": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/moonmining/schedulingSvc.pyj:73 SchedulingSvc.FireLaser(): sm.ScatterEvent('OnMiningLaserFiredLocal', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnMiningLaserFiredLocal' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
+  },
   "notify:OnMultipleCharactersTrainingRefreshed": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/services/skillQueueSvc.pyj:1369 SkillQueueService.OnMultipleCharactersTrainingUpdated(): sm.ScatterEvent('OnMultipleCharactersTrainingRefreshed', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnMultipleCharactersTrainingRefreshed' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."

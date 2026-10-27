@@ -1074,6 +1074,18 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     }
 
     on_advance_secs(ctx, now_unix, 0);
+    let prev_metenox_tick = ctx.db.with_mut_snapshot(|snap| {
+        let prev = snap
+            .service_state_blobs
+            .get("metenox_last_tick_unix")
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(now_unix);
+        snap.service_state_blobs
+            .insert("metenox_last_tick_unix".into(), now_unix.to_string());
+        prev
+    });
+    crate::services::mining_advanced::tick_all_metenox_moon_drills(ctx, prev_metenox_tick, now_unix);
+    crate::services::mining_advanced::tick_all_moon_extractions(ctx).await;
     ctx.advance_skill_queues(1.0);
 
     ctx.db.with_mut_snapshot(|snap| {

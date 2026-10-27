@@ -1142,6 +1142,7 @@ pub async fn tick_sov_prospecting_deposit_respawn(ctx: &ServerContext, sys_id: u
 /// Seeds the cosmic ore anomaly, hidden ore signature and gas site for `sys_id`, once per system.
 pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32) {
     tick_sov_prospecting_deposit_respawn(ctx, sys_id).await;
+    crate::services::space_mining_harvest::tick_ice_belt_respawn_sync(ctx, sys_id);
 
     let Some(sys) = ctx.sde.solar_systems.get(&sys_id) else {
         return;
