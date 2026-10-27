@@ -277,6 +277,18 @@ pub async fn handle_fighters(
                     message: format!("Fighter item {fighter_item_id} not in pilot's fighter bay"),
                 }));
             }
+            if ctx
+                .fighter_tube_loads
+                .read()
+                .unwrap()
+                .iter()
+                .any(|(&(sid, tidx), &fid)| sid == ship_id && tidx != tube_idx && fid == fighter_item_id)
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "FighterAlreadyLoadedInTube".into(),
+                    message: format!("Fighter item {fighter_item_id} is already loaded in another fighter tube"),
+                }));
+            }
             let is_fighter_category = ctx
                 .sde
                 .types
@@ -562,7 +574,22 @@ pub async fn handle_fighters(
                 let item_opt = ctx
                     .db
                     .with_snapshot(|snap| snap.items.get(&fighter_item_id).cloned());
-                let Some(item) = item_opt else { continue };
+                let Some(item) = item_opt else {
+                    return Some(Err(BridgeRpcError {
+                        code: "ItemNotFound".into(),
+                        message: format!("Fighter item {fighter_item_id} in tube {tube_idx} no longer exists"),
+                    }));
+                };
+                if item.owner_id != char_id
+                    || item.location_id != ship_id
+                    || item.flag != InventoryFlag::FighterBay
+                    || item.quantity <= 0
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "ItemNotInFighterBay".into(),
+                        message: format!("Fighter item {fighter_item_id} is no longer owned by pilot in ship's fighter bay"),
+                    }));
+                }
 
                 let ball_id = ctx.db.with_mut_snapshot(|snap| {
                     snap.next_entity_id += 1;
@@ -673,6 +700,7 @@ pub async fn handle_fighters(
                 .values()
                 .filter(|f| {
                     f.parent_ship_id == ship_id
+                        && !f.is_abandoned
                         && filter_ids
                             .as_ref()
                             .map(|ids| {
@@ -687,6 +715,9 @@ pub async fn handle_fighters(
 
             let mut recalled = Vec::new();
             for f in fighters_to_recall {
+                if sys_handle.get_ball_snapshot(f.ball_id).await.ok().flatten().is_none() {
+                    continue;
+                }
                 ctx.active_fighters.write().unwrap().remove(&f.ball_id);
                 ctx.fighter_charge_state
                     .write()
@@ -704,6 +735,13 @@ pub async fn handle_fighters(
                     .and_then(|t| t.default_attributes.get(&2215).copied())
                     .map(|v| v as i32)
                     .unwrap_or(9);
+                let loaded_tube_ids: std::collections::HashSet<i64> = ctx
+                    .fighter_tube_loads
+                    .read()
+                    .unwrap()
+                    .values()
+                    .copied()
+                    .collect();
                 ctx.db.with_mut_snapshot(|snap| {
                     if let Some(main_it) = snap.items.get_mut(&f.item_id) {
                         main_it.location_id = ship_id;
@@ -726,6 +764,7 @@ pub async fn handle_fighters(
                                     && i.flag == InventoryFlag::FighterBay
                                     && i.type_id == f.type_id
                                     && i.item_id != f.item_id
+                                    && !loaded_tube_ids.contains(&i.item_id)
                                     && i.quantity > 0
                             })
                             .map(|i| i.item_id)

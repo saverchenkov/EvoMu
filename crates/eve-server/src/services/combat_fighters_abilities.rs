@@ -752,15 +752,32 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
             if b.id != fighter_ball_id && b.id != fighter.parent_ship_id {
                 let d = b.position.distance(target_point);
                 if d <= aoe_radius {
-                    if let Ok(Some((app, _, _))) = sys_handle.apply_damage_with_attacker(b.id, bomb_dmg, Some(char_id)).await {
+                    let bomb_vic = ctx.db.with_snapshot(|snap| {
+                        snap.characters.values().find(|c| c.active_ship_id == b.id).map(|c| c.character_id)
+                            .or_else(|| snap.items.get(&b.id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
+                    });
+                    if let Some(vcid) = bomb_vic {
+                        if crate::services::space_destiny::is_location_change_invulnerable(ctx, vcid, now_unix) {
+                            continue;
+                        }
+                    }
+                    if let Ok(Some((app, destroyed, _))) = sys_handle.apply_damage_with_attacker(b.id, bomb_dmg, Some(char_id)).await {
                         if app > 0.0 {
-                            let bomb_vic = ctx.db.with_snapshot(|snap| {
-                                snap.characters.values().find(|c| c.active_ship_id == b.id).map(|c| c.character_id)
-                                    .or_else(|| snap.items.get(&b.id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
-                            });
                             if let Some(vcid) = bomb_vic.filter(|&v| v != char_id) {
-                                crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, ctx.now_unix());
+                                crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, now_unix);
                             }
+                        }
+                        if destroyed {
+                            super::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(
+                                ctx,
+                                sys_id,
+                                char_id,
+                                b.id,
+                                b.type_id,
+                                b.position,
+                                now_unix,
+                            )
+                            .await;
                         }
                     }
                 }

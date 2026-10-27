@@ -907,15 +907,25 @@ pub async fn handle_crimewatch(
                         ),
                     });
                 }
+                let station_id = session.station_id.unwrap_or(0);
+                let ship_id_opt = session.ship_id;
                 let tag_item_id = snap
                     .items
                     .values()
-                    .find(|i| i.owner_id == char_id && i.type_id == tag_type_id && i.quantity >= qty)
+                    .find(|i| {
+                        i.owner_id == char_id
+                            && i.type_id == tag_type_id
+                            && i.quantity >= qty
+                            && ((i.location_id == station_id && i.flag == InventoryFlag::Hangar)
+                                || (ship_id_opt.is_some_and(|sid| i.location_id == sid)
+                                    && i.flag == InventoryFlag::Cargo))
+                            && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                    })
                     .map(|i| i.item_id);
                 let Some(iid) = tag_item_id else {
                     return Err(BridgeRpcError {
                         code: "InsufficientSecurityTags".into(),
-                        message: format!("Missing {qty}x tag type {tag_type_id}"),
+                        message: format!("Missing {qty}x unlocked tag type {tag_type_id} in local station hangar or active ship cargo"),
                     });
                 };
                 if let Some(it) = snap.items.get_mut(&iid) {

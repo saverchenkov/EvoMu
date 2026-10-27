@@ -603,6 +603,12 @@ pub async fn handle_wrecks_killmails(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotSelfDestructWhileDocked".into(),
+                    message: "Cannot self-destruct a ship while docked in a station or structure".into(),
+                }));
+            }
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
@@ -616,56 +622,53 @@ pub async fn handle_wrecks_killmails(
                 }));
             };
             let now_unix = ctx.now_unix();
-            let start_countdown = args.first().and_then(|a| a.as_i64()).is_some();
-            if start_countdown {
-                let existing = with_combat_runtime(ctx, |rt| {
-                    rt.self_destruct_countdowns.get(&ship_id).cloned()
-                });
-                if let Some(cd) = existing {
-                    if now_unix < cd.detonate_at_unix {
-                        let remaining = cd.detonate_at_unix.saturating_sub(now_unix);
-                        return Some(Ok(PyRep::keyval([
-                            ("shipID", PyRep::Integer(ship_id)),
-                            ("countdownStarted", PyRep::Bool(true)),
-                            ("detonated", PyRep::Bool(false)),
-                            ("remainingSeconds", PyRep::Integer(remaining as i64)),
-                            ("detonateAtUnix", PyRep::Integer(cd.detonate_at_unix as i64)),
-                        ])));
-                    }
-                } else {
-                    let detonate_at = now_unix.saturating_add(SELF_DESTRUCT_COUNTDOWN_SECS);
-                    with_mut_combat_runtime(ctx, |rt| {
-                        rt.self_destruct_countdowns.insert(
-                            ship_id,
-                            SelfDestructCountdown {
-                                ship_id,
-                                char_id,
-                                solar_system_id: sys_id,
-                                started_unix: now_unix,
-                                detonate_at_unix: detonate_at,
-                            },
-                        );
-                    });
-                    // parity: feat:lifecycle.self-destruct-server-timer, plan:SP-7
-                    crate::sp6_lifecycle::register_self_destruct_countdown(
-                        ctx,
-                        ship_id,
-                        char_id,
-                        sys_id,
-                        now_unix,
-                        detonate_at,
-                    );
+            let existing = with_combat_runtime(ctx, |rt| {
+                rt.self_destruct_countdowns.get(&ship_id).cloned()
+            });
+            if let Some(cd) = existing {
+                if now_unix < cd.detonate_at_unix {
+                    let remaining = cd.detonate_at_unix.saturating_sub(now_unix);
                     return Some(Ok(PyRep::keyval([
                         ("shipID", PyRep::Integer(ship_id)),
                         ("countdownStarted", PyRep::Bool(true)),
                         ("detonated", PyRep::Bool(false)),
-                        (
-                            "remainingSeconds",
-                            PyRep::Integer(SELF_DESTRUCT_COUNTDOWN_SECS as i64),
-                        ),
-                        ("detonateAtUnix", PyRep::Integer(detonate_at as i64)),
+                        ("remainingSeconds", PyRep::Integer(remaining as i64)),
+                        ("detonateAtUnix", PyRep::Integer(cd.detonate_at_unix as i64)),
                     ])));
                 }
+            } else {
+                let detonate_at = now_unix.saturating_add(SELF_DESTRUCT_COUNTDOWN_SECS);
+                with_mut_combat_runtime(ctx, |rt| {
+                    rt.self_destruct_countdowns.insert(
+                        ship_id,
+                        SelfDestructCountdown {
+                            ship_id,
+                            char_id,
+                            solar_system_id: sys_id,
+                            started_unix: now_unix,
+                            detonate_at_unix: detonate_at,
+                        },
+                    );
+                });
+                // parity: feat:lifecycle.self-destruct-server-timer, plan:SP-7
+                crate::sp6_lifecycle::register_self_destruct_countdown(
+                    ctx,
+                    ship_id,
+                    char_id,
+                    sys_id,
+                    now_unix,
+                    detonate_at,
+                );
+                return Some(Ok(PyRep::keyval([
+                    ("shipID", PyRep::Integer(ship_id)),
+                    ("countdownStarted", PyRep::Bool(true)),
+                    ("detonated", PyRep::Bool(false)),
+                    (
+                        "remainingSeconds",
+                        PyRep::Integer(SELF_DESTRUCT_COUNTDOWN_SECS as i64),
+                    ),
+                    ("detonateAtUnix", PyRep::Integer(detonate_at as i64)),
+                ])));
             }
 
             with_mut_combat_runtime(ctx, |rt| {
@@ -682,7 +685,7 @@ pub async fn handle_wrecks_killmails(
                 .map(|(_, b)| b.position)
                 .unwrap_or(DVec3::ZERO);
 
-            let (ship_type_id, is_capsule, vic_corp, vic_all) =
+            let (ship_type_id, is_capsule, _vic_corp, _vic_all) =
                 ctx.db.with_snapshot(|snap| {
                     let stid = snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(670);
                     let (corp, all) = snap
@@ -744,21 +747,16 @@ pub async fn handle_wrecks_killmails(
                         .last()
                         .map(|a| a.attacker_char_id)
                         .unwrap_or(char_id);
-                    let hull_cs = ctx.build_type_combat_state(ship_type_id);
-                    let hull_hp = (hull_cs.max_shield_hp + hull_cs.max_armor_hp + hull_cs.max_structure_hp).max(1.0);
-                    let mut km_attackers = Vec::new();
-                    if recent_assists.is_empty() {
-                        km_attackers.push(KillmailAttackerEntry {
-                            character_id: char_id,
-                            corporation_id: vic_corp,
-                            alliance_id: vic_all,
-                            ship_type_id,
-                            weapon_type_id: ship_type_id,
-                            damage_done: hull_hp,
-                            final_blow: true,
-                            security_status: 0.0,
-                        });
-                    } else {
+                    let km_hash = compute_killmail_esi_hash(
+                        char_id,
+                        final_blow_char_id,
+                        ship_type_id,
+                        now_unix,
+                    );
+                    if !recent_assists.is_empty() {
+                        let hull_cs = ctx.build_type_combat_state(ship_type_id);
+                        let hull_hp = (hull_cs.max_shield_hp + hull_cs.max_armor_hp + hull_cs.max_structure_hp).max(1.0);
+                        let mut km_attackers = Vec::new();
                         for a in &recent_assists {
                             km_attackers.push(KillmailAttackerEntry {
                                 character_id: a.attacker_char_id,
@@ -771,26 +769,20 @@ pub async fn handle_wrecks_killmails(
                                 security_status: 0.0,
                             });
                         }
+                        let assist_dmg: f64 = km_attackers.iter().map(|a| a.damage_done).sum();
+                        ctx.db.with_mut_snapshot(|snap| {
+                            if let Some(km) = snap.killmails.get_mut(&death.killmail_id) {
+                                km.attacker_character_id = final_blow_char_id;
+                            }
+                        });
+                        with_mut_combat_runtime(ctx, |rt| {
+                            if let Some(dkm) = rt.detailed_killmails.get_mut(&death.killmail_id) {
+                                dkm.victim_damage_taken = assist_dmg.max(hull_hp);
+                                dkm.attackers = km_attackers;
+                                dkm.killmail_hash = km_hash.clone();
+                            }
+                        });
                     }
-                    let assist_dmg: f64 = km_attackers.iter().map(|a| a.damage_done).sum();
-                    let km_hash = compute_killmail_esi_hash(
-                        char_id,
-                        final_blow_char_id,
-                        ship_type_id,
-                        now_unix,
-                    );
-                    ctx.db.with_mut_snapshot(|snap| {
-                        if let Some(km) = snap.killmails.get_mut(&death.killmail_id) {
-                            km.attacker_character_id = final_blow_char_id;
-                        }
-                    });
-                    with_mut_combat_runtime(ctx, |rt| {
-                        if let Some(dkm) = rt.detailed_killmails.get_mut(&death.killmail_id) {
-                            dkm.victim_damage_taken = assist_dmg.max(hull_hp);
-                            dkm.attackers = km_attackers;
-                            dkm.killmail_hash = km_hash.clone();
-                        }
-                    });
 
                     if let Some(cap_id) = death.ejected_capsule_id {
                         session.ship_id = Some(cap_id);

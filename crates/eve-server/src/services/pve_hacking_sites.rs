@@ -641,11 +641,26 @@ pub async fn handle_pve_hacking(
                 }));
             }
 
+            let sys_sec = ctx
+                .sde
+                .solar_systems
+                .get(&sys_id)
+                .map(|s| s.security_status)
+                .unwrap_or(0.0);
+            let min_difficulty: u8 = if is_ghost {
+                4
+            } else if (31_000_000..32_000_000).contains(&sys_id) || sys_sec <= 0.0 {
+                3
+            } else if sys_sec < 0.45 || is_relic {
+                2
+            } else {
+                2
+            };
             let difficulty = args
                 .get(4)
                 .and_then(|a| a.as_i64())
-                .map(|d| (d as u8).clamp(1, 5))
-                .unwrap_or(if (31_000_000..32_000_000).contains(&sys_id) { 3 } else { 2 });
+                .map(|d| (d as u8).clamp(min_difficulty, 5))
+                .unwrap_or(min_difficulty);
             let rng_seed = ctx.mechanic_rng.try_next_u64().unwrap_or(0);
             let game = with_pve_exploration_reg(ctx, |reg| {
                 let game_id = 500_000 + next_pve_seq(reg);
@@ -830,8 +845,6 @@ pub async fn handle_pve_hacking(
                 if let Some(u) = t_ref.utility_drop.take() {
                     if let Some(empty_slot) = game.utilities.iter_mut().find(|s| s.is_none()) {
                         *empty_slot = Some(u);
-                    } else {
-                        game.utilities.push(Some(u));
                     }
                 }
                 if t_ref.coherence > 0 {
@@ -1107,7 +1120,7 @@ pub async fn handle_pve_hacking(
                 Err(e) => return Some(Err(e)),
             };
             let (container_id, slot_idx) = match args {
-                [PyRep::Integer(a), PyRep::Integer(b)] => {
+                [PyRep::Integer(a), PyRep::Integer(b), ..] => {
                     if *a > 1000 { (*a, *b as usize) } else { (*b, *a as usize) }
                 }
                 [PyRep::Integer(a)] => {
@@ -1134,6 +1147,7 @@ pub async fn handle_pve_hacking(
                     }));
                 }
             };
+            let target_tile_opt = args.get(2).and_then(|a| a.as_i64()).map(|t| t.max(0) as u32);
 
             let res = with_pve_exploration_reg(ctx, |reg| {
                 let Some(game) = reg.hacking_games.get_mut(&(char_id, container_id)) else {
@@ -1160,7 +1174,15 @@ pub async fn handle_pve_hacking(
                             (game.virus_coherence + 30).min(game.max_virus_coherence);
                     }
                     HackingUtilityKind::KernelRot => {
-                        if let Some(t) = game.tiles.iter_mut().find(|t| t.revealed && t.coherence > 0) {
+                        if let Some(tid) = target_tile_opt {
+                            if let Some(t) = game
+                                .tiles
+                                .iter_mut()
+                                .find(|t| t.tile_index == tid && t.revealed && t.coherence > 0)
+                            {
+                                t.coherence = (t.coherence / 2).max(1);
+                            }
+                        } else if let Some(t) = game.tiles.iter_mut().find(|t| t.revealed && t.coherence > 0) {
                             t.coherence = (t.coherence / 2).max(1);
                         }
                     }
@@ -1168,7 +1190,21 @@ pub async fn handle_pve_hacking(
                         game.polymorphic_shield_charges += 2;
                     }
                     HackingUtilityKind::SecondaryVector => {
-                        game.secondary_vector_target = Some((0, 3));
+                        let chosen_tile = target_tile_opt
+                            .and_then(|tid| {
+                                game.tiles
+                                    .iter()
+                                    .find(|t| t.tile_index == tid && t.revealed && t.coherence > 0)
+                                    .map(|t| t.tile_index)
+                            })
+                            .or_else(|| {
+                                game.tiles
+                                    .iter()
+                                    .find(|t| t.revealed && t.coherence > 0)
+                                    .map(|t| t.tile_index)
+                            })
+                            .unwrap_or(0);
+                        game.secondary_vector_target = Some((chosen_tile, 3));
                     }
                 }
                 Ok(PyRep::keyval([

@@ -302,6 +302,7 @@ pub async fn step_combat_system(
     for tid in dot_targets {
         let dot_opt = with_combat_runtime(ctx, |rt| rt.active_breacher_dots.get(&tid).cloned());
         if let Some(mut dot) = dot_opt {
+            let mut destroyed_by_dot = false;
             if let Ok(Some(mut cs)) = sys_handle.get_combat_state(tid).await {
                 let total_max_hp = (cs.max_shield_hp + cs.max_armor_hp + cs.max_structure_hp).max(1.0);
                 let dps = breacher_pod_tick_damage(total_max_hp, dot.pct_cap_fraction, dot.flat_cap_dps);
@@ -324,16 +325,44 @@ pub async fn step_combat_system(
                     let take = cs.structure_hp.min(rem);
                     cs.structure_hp -= take;
                 }
+                if cs.structure_hp <= 1e-6 {
+                    cs.structure_hp = 0.0;
+                    destroyed_by_dot = true;
+                }
                 let _ = sys_handle.set_combat_state(tid, cs).await;
             }
             dot.remaining_s -= dt;
             with_mut_combat_runtime(ctx, |rt| {
-                if dot.remaining_s <= 1e-6 {
+                if destroyed_by_dot || dot.remaining_s <= 1e-6 {
                     rt.active_breacher_dots.remove(&tid);
                 } else {
-                    rt.active_breacher_dots.insert(tid, dot);
+                    rt.active_breacher_dots.insert(tid, dot.clone());
                 }
             });
+            if destroyed_by_dot {
+                let (ball_type_id, ball_pos) = sys_handle
+                    .get_ball_snapshot(tid)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|(_, b)| (b.type_id, b.position))
+                    .unwrap_or_else(|| {
+                        let stid = ctx.db.with_snapshot(|snap| {
+                            snap.items.get(&tid).map(|i| i.type_id).unwrap_or(0)
+                        });
+                        (stid, DVec3::ZERO)
+                    });
+                handle_destroyed_ball_from_missile_or_aoe(
+                    ctx,
+                    solar_system_id,
+                    dot.source_char_id,
+                    tid,
+                    ball_type_id,
+                    ball_pos,
+                    ctx.now_unix(),
+                )
+                .await;
+            }
         }
     }
 
@@ -359,7 +388,7 @@ pub async fn step_combat_system(
             .flatten()
             .map(|(_, b)| b.position)
             .unwrap_or(DVec3::ZERO);
-        let (ship_type_id, vic_corp, vic_all) = ctx.db.with_snapshot(|snap| {
+        let (ship_type_id, _vic_corp, _vic_all) = ctx.db.with_snapshot(|snap| {
             let stid = snap.items.get(&cd.ship_id).map(|i| i.type_id).unwrap_or(670);
             let (corp, all) = snap
                 .characters
@@ -396,25 +425,14 @@ pub async fn step_combat_system(
                 }
                 valid
             });
-            let final_blow_char_id = recent_assists
-                .last()
-                .map(|a| a.attacker_char_id)
-                .unwrap_or(cd.char_id);
-            let hull_cs = ctx.build_type_combat_state(ship_type_id);
-            let hull_hp = (hull_cs.max_shield_hp + hull_cs.max_armor_hp + hull_cs.max_structure_hp).max(1.0);
-            let mut km_attackers = Vec::new();
-            if recent_assists.is_empty() {
-                km_attackers.push(KillmailAttackerEntry {
-                    character_id: cd.char_id,
-                    corporation_id: vic_corp,
-                    alliance_id: vic_all,
-                    ship_type_id,
-                    weapon_type_id: ship_type_id,
-                    damage_done: hull_hp,
-                    final_blow: true,
-                    security_status: 0.0,
-                });
-            } else {
+            if !recent_assists.is_empty() {
+                let final_blow_char_id = recent_assists
+                    .last()
+                    .map(|a| a.attacker_char_id)
+                    .unwrap_or(cd.char_id);
+                let hull_cs = ctx.build_type_combat_state(ship_type_id);
+                let hull_hp = (hull_cs.max_shield_hp + hull_cs.max_armor_hp + hull_cs.max_structure_hp).max(1.0);
+                let mut km_attackers = Vec::new();
                 for a in &recent_assists {
                     km_attackers.push(KillmailAttackerEntry {
                         character_id: a.attacker_char_id,
@@ -427,26 +445,26 @@ pub async fn step_combat_system(
                         security_status: 0.0,
                     });
                 }
+                let assist_dmg: f64 = km_attackers.iter().map(|a| a.damage_done).sum();
+                let km_hash = compute_killmail_esi_hash(
+                    cd.char_id,
+                    final_blow_char_id,
+                    ship_type_id,
+                    now_unix,
+                );
+                ctx.db.with_mut_snapshot(|snap| {
+                    if let Some(km) = snap.killmails.get_mut(&death.killmail_id) {
+                        km.attacker_character_id = final_blow_char_id;
+                    }
+                });
+                with_mut_combat_runtime(ctx, |rt| {
+                    if let Some(dkm) = rt.detailed_killmails.get_mut(&death.killmail_id) {
+                        dkm.victim_damage_taken = assist_dmg.max(hull_hp);
+                        dkm.attackers = km_attackers;
+                        dkm.killmail_hash = km_hash;
+                    }
+                });
             }
-            let assist_dmg: f64 = km_attackers.iter().map(|a| a.damage_done).sum();
-            let km_hash = compute_killmail_esi_hash(
-                cd.char_id,
-                final_blow_char_id,
-                ship_type_id,
-                now_unix,
-            );
-            ctx.db.with_mut_snapshot(|snap| {
-                if let Some(km) = snap.killmails.get_mut(&death.killmail_id) {
-                    km.attacker_character_id = final_blow_char_id;
-                }
-            });
-            with_mut_combat_runtime(ctx, |rt| {
-                if let Some(dkm) = rt.detailed_killmails.get_mut(&death.killmail_id) {
-                    dkm.victim_damage_taken = assist_dmg.max(hull_hp);
-                    dkm.attackers = km_attackers;
-                    dkm.killmail_hash = km_hash;
-                }
-            });
         }
     }
 
@@ -472,6 +490,24 @@ pub async fn activate_aoe_or_defender_module(
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
             // 2. Smartbomb (`group_id == 72`, `feat:modules.smartbomb`)
             if mod_type.group_id == 72 {
+                let safety = with_combat_runtime(ctx, |rt| {
+                    rt.safety_levels
+                        .get(&char_id)
+                        .copied()
+                        .unwrap_or(SafetyLevel::Red)
+                });
+                if sys_sec >= 0.45 && safety != SafetyLevel::Red {
+                    return Some(Err(BridgeRpcError {
+                        code: "SafetyLevelRestricted".into(),
+                        message: "Smartbombs cannot be activated in high-security space unless safety is set to Red".into(),
+                    }));
+                }
+                if sys_sec > 0.0 && sys_sec < 0.45 && safety == SafetyLevel::Green {
+                    return Some(Err(BridgeRpcError {
+                        code: "SafetyLevelRestricted".into(),
+                        message: "Smartbombs cannot be activated in low-security space while safety is set to Green".into(),
+                    }));
+                }
                 let cap_need = mod_type
                     .default_attributes
                     .get(&6)
@@ -537,26 +573,31 @@ pub async fn activate_aoe_or_defender_module(
                 // Apply AoE damage to all dynamic ship/NPC/drone balls within emp_range (including fleetmates!)
                 let all_balls = sys_handle.list_balls().await.unwrap_or_default();
                 let mut hit_ball_ids = Vec::new();
-                let mut illegal_capsuleer_hit: Option<i64> = None;
+                let mut illegal_capsuleer_hits: Vec<(i64, bool)> = Vec::new();
                 for b in all_balls {
                     if b.id == ship_id || !(b.id < 700_000_000 || (b.id >= 1_895_000_000 && b.id < 1_900_000_000)) || destroyed_missile_ids.contains(&b.id) {
                         continue;
                     }
                     if attacker_ball.position.distance(b.position) <= emp_range {
+                        let victim_char_opt = ctx.db.with_snapshot(|snap| {
+                            snap.characters
+                                .values()
+                                .find(|c| c.active_ship_id == b.id)
+                                .map(|c| c.character_id)
+                                .or_else(|| {
+                                    snap.items
+                                        .get(&b.id)
+                                        .map(|i| i.owner_id)
+                                        .filter(|oid| snap.characters.contains_key(oid))
+                                })
+                        });
+                        if let Some(vcid) = victim_char_opt {
+                            if crate::services::space_destiny::is_location_change_invulnerable(ctx, vcid, now_unix) {
+                                continue;
+                            }
+                        }
                         if let Ok(Some((applied, destroyed, _))) = sys_handle.apply_damage_with_attacker(b.id, sb_dmg, Some(char_id)).await {
                             hit_ball_ids.push(b.id);
-                            let victim_char_opt = ctx.db.with_snapshot(|snap| {
-                                snap.characters
-                                    .values()
-                                    .find(|c| c.active_ship_id == b.id)
-                                    .map(|c| c.character_id)
-                                    .or_else(|| {
-                                        snap.items
-                                            .get(&b.id)
-                                            .map(|i| i.owner_id)
-                                            .filter(|oid| snap.characters.contains_key(oid))
-                                    })
-                            });
                             if let Some(vcid) = victim_char_opt.filter(|&v| v != char_id) {
                                 if applied > 0.0 {
                                     crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, now_unix);
@@ -571,7 +612,7 @@ pub async fn activate_aoe_or_defender_module(
                                     rt.has_limited_engagement_with(vcid, char_id, now_unix)
                                 });
                                 if !is_legal {
-                                    illegal_capsuleer_hit = Some(vcid);
+                                    illegal_capsuleer_hits.push((vcid, b.type_id == 670));
                                 }
                             }
                             if let Ok(Some(t_cs)) = sys_handle.get_combat_state(b.id).await {
@@ -613,7 +654,7 @@ pub async fn activate_aoe_or_defender_module(
                     .unwrap_or_else(|e| e.into_inner())
                     .trigger_weapon_timer(char_id, now_unix);
                 let mut concord_triggered = false;
-                if let Some(vcid) = illegal_capsuleer_hit {
+                for (vcid, is_pod) in illegal_capsuleer_hits {
                     if sys_sec >= 0.45 {
                         concord_triggered = true;
                         let _ = ctx
@@ -626,7 +667,7 @@ pub async fn activate_aoe_or_defender_module(
                                 ship_id,
                                 sys_id,
                                 sys_sec,
-                                false,
+                                is_pod,
                                 now_unix,
                             );
                     } else if sys_sec > 0.0 {
@@ -640,7 +681,7 @@ pub async fn activate_aoe_or_defender_module(
                                 ship_id,
                                 sys_id,
                                 sys_sec,
-                                false,
+                                is_pod,
                                 now_unix,
                             );
                     }
@@ -669,6 +710,18 @@ pub async fn activate_aoe_or_defender_module(
                         message: format!(
                             "Bomb launchers cannot be activated in high-security space (system {sys_id} security {sys_sec:.2})"
                         ),
+                    }));
+                }
+                let safety = with_combat_runtime(ctx, |rt| {
+                    rt.safety_levels
+                        .get(&char_id)
+                        .copied()
+                        .unwrap_or(SafetyLevel::Red)
+                });
+                if sys_sec > 0.0 && safety == SafetyLevel::Green {
+                    return Some(Err(BridgeRpcError {
+                        code: "SafetyLevelRestricted".into(),
+                        message: "Bomb launchers cannot be activated in low-security space while safety is set to Green".into(),
                     }));
                 }
 
@@ -751,6 +804,15 @@ pub async fn activate_aoe_or_defender_module(
                         continue;
                     }
                     if b.position.distance(detonation_pos) <= blast_radius {
+                        let bomb_vic = ctx.db.with_snapshot(|snap| {
+                            snap.characters.values().find(|c| c.active_ship_id == b.id).map(|c| c.character_id)
+                                .or_else(|| snap.items.get(&b.id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
+                        });
+                        if let Some(vcid) = bomb_vic {
+                            if crate::services::space_destiny::is_location_change_invulnerable(ctx, vcid, now_unix) {
+                                continue;
+                            }
+                        }
                         let target_sig = if let Ok(Some(cs)) = sys_handle.get_combat_state(b.id).await {
                             if cs.signature_radius > 0.0 {
                                 cs.signature_radius
@@ -766,20 +828,42 @@ pub async fn activate_aoe_or_defender_module(
                             if let Ok(Some((app, destroyed, _))) = sys_handle.apply_damage_with_attacker(b.id, scaled_dmg, Some(char_id)).await {
                                 total_dmg_applied += app;
                                 hit_targets.push(b.id);
-                                let bomb_vic = ctx.db.with_snapshot(|snap| {
-                                    snap.characters.values().find(|c| c.active_ship_id == b.id).map(|c| c.character_id)
-                                        .or_else(|| snap.items.get(&b.id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
-                                });
                                 if app > 0.0 {
                                     if let Some(vcid) = bomb_vic.filter(|&v| v != char_id) {
-                                        crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, ctx.now_unix());
+                                        crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, now_unix);
+                                        if sys_sec > 0.0 {
+                                            let is_legal = ctx.db.with_snapshot(|snap| {
+                                                is_legal_war_or_suspect_target(snap, char_id, vcid, now_unix)
+                                            }) || {
+                                                let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+                                                let st = cw.get_or_create(vcid);
+                                                st.is_suspect(now_unix) || st.is_criminal(now_unix)
+                                            } || with_combat_runtime(ctx, |rt| {
+                                                rt.has_limited_engagement_with(vcid, char_id, now_unix)
+                                            });
+                                            if !is_legal {
+                                                let _ = ctx
+                                                    .crimewatch
+                                                    .write()
+                                                    .unwrap_or_else(|e| e.into_inner())
+                                                    .handle_combat_aggression(
+                                                        char_id,
+                                                        vcid,
+                                                        ship_id,
+                                                        sys_id,
+                                                        sys_sec,
+                                                        b.type_id == 670,
+                                                        now_unix,
+                                                    );
+                                            }
+                                        }
                                     }
                                 }
                                 if let Ok(Some(t_cs)) = sys_handle.get_combat_state(b.id).await {
                                     emit_combat_log_and_damage_state(
                                         ctx,
                                         char_id,
-                                        None,
+                                        bomb_vic,
                                         ship_id,
                                         b.id,
                                         bomb_type_id,

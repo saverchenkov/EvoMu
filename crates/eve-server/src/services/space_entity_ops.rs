@@ -312,25 +312,45 @@ pub async fn handle(
                 return Some(Err(e));
             }
             let bm_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let bm_opt = ctx.db.with_snapshot(|s| {
-                s.bookmarks.get(&bm_id).cloned()
+            let now_unix = ctx.now_unix();
+            let bm_res = ctx.db.with_snapshot(|s| -> Result<eve_db::BookmarkRecord, BridgeRpcError> {
+                let Some(bm) = s.bookmarks.get(&bm_id).cloned() else {
+                    return Err(BridgeRpcError {
+                        code: "BookmarkNotFound".into(),
+                        message: format!("Bookmark {bm_id} not found"),
+                    });
+                };
+                if crate::services::fleet_social::is_bookmark_expired_in_snap(s, bm_id, now_unix) {
+                    return Err(BridgeRpcError {
+                        code: "BookmarkExpired".into(),
+                        message: format!("Bookmark {bm_id} has expired"),
+                    });
+                }
+                let caller_corp = session
+                    .corporation_id
+                    .or_else(|| s.characters.get(&char_id).map(|c| c.corporation_id))
+                    .unwrap_or(0);
+                let has_acl = bm.folder_id.and_then(|fid| s.bookmark_folders.get(&fid)).is_some_and(|f| {
+                    crate::services::fleet_social::fleet_social_access_group_bookmarks::folder_access_level(
+                        s, session, char_id, f,
+                    ) >= crate::services::fleet_social::fleet_social_access_group_bookmarks::AccessLevel::Use
+                });
+                let can_access = bm.owner_id == char_id
+                    || (caller_corp != 0 && caller_corp == bm.owner_id)
+                    || has_acl
+                    || (bm.is_shared && bm.folder_id.is_none());
+                if !can_access {
+                    return Err(BridgeRpcError {
+                        code: "AccessDenied".into(),
+                        message: "Cannot access bookmark".into(),
+                    });
+                }
+                Ok(bm)
             });
-            let Some(bm) = bm_opt else {
-                return Some(Err(BridgeRpcError {
-                    code: "BookmarkNotFound".into(),
-                    message: format!("Bookmark {bm_id} not found"),
-                }));
+            let bm = match bm_res {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
             };
-            let caller_corp = session.corporation_id.unwrap_or(0);
-            let can_access = bm.owner_id == char_id
-                || bm.is_shared
-                || (caller_corp != 0 && caller_corp == bm.owner_id);
-            if !can_access {
-                return Some(Err(BridgeRpcError {
-                    code: "AccessDenied".into(),
-                    message: "Cannot access bookmark".into(),
-                }));
-            }
             if bm.solar_system_id != sys_id {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidTarget".into(),
@@ -358,11 +378,27 @@ pub async fn handle(
             let dist = (dest - cur_pos).length();
             let _ = handle.break_gate_cloak(ship_id).await;
             if dist >= 150_000.0 {
+                if let Err(e) = crate::services::combat_crimewatch::check_crimewatch_action_restriction(
+                    ctx,
+                    char_id,
+                    ship_id,
+                    sys_id,
+                    "warp",
+                    now_unix,
+                ) {
+                    return Some(Err(e));
+                }
                 if handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
                     return Some(Err(BridgeRpcError {
                         code: "WarpScrambled".into(),
                         message: "WarpScrambled: Warp drive disabled by warp disruption/scrambler effect".into(),
                     }));
+                }
+                if let Ok(Some(mut cs_check)) = handle.get_combat_state(ship_id).await {
+                    if cs_check.is_cloaked && cs_check.gate_cloak_remaining_ticks == 0 && !cs_check.is_covert_cloak {
+                        cs_check.is_cloaked = false;
+                        let _ = handle.set_combat_state(ship_id, cs_check).await;
+                    }
                 }
                 let warp_speed = crate::services::space_destiny::compute_ship_warp_speed_au_s(ctx, ball.type_id);
                 let warp_dir = (dest - cur_pos).normalize_or_zero();

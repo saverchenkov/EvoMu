@@ -91,6 +91,25 @@ pub async fn attempt_salvage_wreck(
         // Success: select canonical SDE salvage materials
         // 25588: Alloyed Tritanium Bar, 25595: Armor Plates, 25597: Burned Logic Circuit
         let salvage_materials = vec![(25588, 4), (25595, 2), (25597, 3)];
+        let salvage_vol: f64 = salvage_materials
+            .iter()
+            .map(|&(tid, qty)| {
+                ctx.sde.types.get(&tid).map(|t| t.volume).unwrap_or(0.01) * (qty as f64)
+            })
+            .sum();
+        let ship_cap_opt = ctx
+            .get_or_rebuild_ship_fitting(char_id, ship_id)
+            .ok()
+            .map(|fs| fs.ship.get_attribute(eve_sde::attr_ids::CAPACITY, &ctx.sde))
+            .filter(|&c| c > 0.0)
+            .or_else(|| {
+                ctx.db.with_snapshot(|s| {
+                    s.items
+                        .get(&ship_id)
+                        .and_then(|it| ctx.sde.types.get(&it.type_id).map(|t| t.capacity))
+                        .filter(|&c| c > 0.0)
+                })
+            });
         let wreck_pos = [
             wreck_ball.position.x,
             wreck_ball.position.y,
@@ -98,6 +117,20 @@ pub async fn attempt_salvage_wreck(
         ];
 
         let spawned_can_opt = ctx.db.try_with_mut_snapshot(|snap| {
+            if let Some(ship_cap) = ship_cap_opt {
+                let used_cargo: f64 = snap
+                    .items
+                    .values()
+                    .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::Cargo)
+                    .map(|i| {
+                        ctx.sde.types.get(&i.type_id).map(|t| t.volume).unwrap_or(0.01)
+                            * (i.quantity.max(1) as f64)
+                    })
+                    .sum();
+                if used_cargo + salvage_vol > ship_cap + 1e-4 {
+                    return Err("NotEnoughCargoSpace".to_string());
+                }
+            }
             let wreck_owner = snap
                 .items
                 .get(&wreck_item_id)
@@ -282,7 +315,29 @@ pub async fn execute_wreck_salvage_cycle(
         });
     }
 
-    if salvager_type_id_opt.is_none() {
+    if let Some(salvager_tid) = salvager_type_id_opt {
+        if let (Some((_, sb)), Some(ref wb)) = (
+            sys_handle.get_ball_snapshot(ship_id).await.ok().flatten(),
+            &wreck_ball_opt,
+        ) {
+            let max_mod_range = ctx
+                .sde
+                .types
+                .get(&salvager_tid)
+                .and_then(|t| t.default_attributes.get(&54).copied())
+                .unwrap_or(6_000.0)
+                .max(6_000.0);
+            let dist = (sb.position.distance(wb.position) - sb.radius - wb.radius).max(0.0);
+            if dist > max_mod_range {
+                return Err(BridgeRpcError {
+                    code: "TargetOutOfRange".into(),
+                    message: format!(
+                        "Wreck {wreck_id} is {dist:.1} m away (exceeds salvager module range {max_mod_range:.1} m)"
+                    ),
+                });
+            }
+        }
+    } else {
         let Some(ref wb) = wreck_ball_opt else {
             return Err(BridgeRpcError {
                 code: "TargetNotInSpace".into(),
@@ -397,12 +452,51 @@ pub async fn execute_wreck_salvage_cycle(
     };
 
     let yielded_type_ids: Vec<u32> = salvage_table.iter().map(|&(t, _)| t).collect();
+    let salvage_vol: f64 = salvage_table
+        .iter()
+        .map(|&(tid, qty)| {
+            ctx.sde.types.get(&tid).map(|t| t.volume).unwrap_or(0.01) * (qty as f64)
+        })
+        .sum();
+    let ship_cap_opt = ctx
+        .get_or_rebuild_ship_fitting(char_id, ship_id)
+        .ok()
+        .map(|fs| fs.ship.get_attribute(eve_sde::attr_ids::CAPACITY, &ctx.sde))
+        .filter(|&c| c > 0.0)
+        .or_else(|| {
+            ctx.db.with_snapshot(|s| {
+                s.items
+                    .get(&ship_id)
+                    .and_then(|it| ctx.sde.types.get(&it.type_id).map(|t| t.capacity))
+                    .filter(|&c| c > 0.0)
+            })
+        });
     let wreck_pos = wreck_ball_opt
         .as_ref()
         .map(|b| [b.position.x, b.position.y, b.position.z])
         .or_else(|| ctx.db.with_snapshot(|s| s.item_positions.get(&wreck_id).copied()))
         .unwrap_or([0.0, 0.0, 0.0]);
-    let spawned_can_opt = ctx.db.with_mut_snapshot(|snap| {
+    let spawned_can_opt = ctx.db.try_with_mut_snapshot(|snap| {
+        if let Some(ship_cap) = ship_cap_opt {
+            let used_cargo: f64 = snap
+                .items
+                .values()
+                .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::Cargo)
+                .map(|i| {
+                    ctx.sde.types.get(&i.type_id).map(|t| t.volume).unwrap_or(0.01)
+                        * (i.quantity.max(1) as f64)
+                })
+                .sum();
+            if used_cargo + salvage_vol > ship_cap + 1e-4 {
+                return Err(BridgeRpcError {
+                    code: "NotEnoughCargoSpace".into(),
+                    message: format!(
+                        "Insufficient ship cargo space for salvage ({salvage_vol:.2} m³ needed, {:.2}/{ship_cap:.2} m³ used)",
+                        used_cargo
+                    ),
+                });
+            }
+        }
         let wreck_owner = snap.items.get(&wreck_id).map(|i| i.owner_id).unwrap_or(char_id);
         let child_ids: Vec<i64> = snap
             .items
@@ -462,8 +556,8 @@ pub async fn execute_wreck_salvage_cycle(
                 },
             );
         }
-        can_id_opt
-    });
+        Ok(can_id_opt)
+    })?;
     if let Some((can_id, wreck_owner)) = spawned_can_opt {
         crate::services::combat_crimewatch::register_container_lifetime(
             ctx,
