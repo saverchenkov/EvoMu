@@ -780,11 +780,22 @@ pub async fn handle_character_logoff_or_disconnect(
 
     let (weap_until, npc_until, pvp_until, crim_until) =
         active_timers_for_char(ctx, char_id, now_unix);
+    let has_active_combat_engagement = sys_handle.has_active_modules_or_cloak_sync(ship_id)
+        || !sys_handle
+            .get_target_locks(ship_id)
+            .await
+            .unwrap_or_default()
+            .is_empty();
+    let base_remove_secs = if has_active_combat_engagement {
+        NPC_TIMER_SECS
+    } else {
+        UNAGGRESSED_LOGOFF_REMOVE_SECS
+    };
     let remove_at_unix = pvp_until
         .max(crim_until)
         .max(npc_until)
         .max(weap_until)
-        .max(now_unix.saturating_add(UNAGGRESSED_LOGOFF_REMOVE_SECS));
+        .max(now_unix.saturating_add(base_remove_secs));
 
     let sys_sec = ctx
         .sde
@@ -819,6 +830,7 @@ pub async fn handle_character_logoff_or_disconnect(
         emergency_warp_dest,
         last_position: [current_pos.x, current_pos.y, current_pos.z],
         removed_from_space: false,
+        pre_warp_position: Some([current_pos.x, current_pos.y, current_pos.z]),
     };
 
     with_mut_sp6_state(&ctx.db, |st, snap| {
@@ -844,7 +856,7 @@ pub fn reconnect_character_in_space_sync(
     cluster_tick::on_advance_secs(ctx, now_unix, 0);
     cluster_tick::collapse_stranded_abyssal_if_needed_sync(ctx, char_id, now_unix);
 
-    let (sys_id, ship_id, ship_type_id, pos_arr, had_live_disc, corp_id, alliance_id, sec_status) =
+    let (sys_id, ship_id, ship_type_id, pos_arr, had_live_disc, pre_warp_pos_opt, corp_id, alliance_id, sec_status) =
         with_mut_sp6_state(&ctx.db, |st, snap| {
             let ch = snap.characters.get(&char_id)?;
             if ch.station_id.is_some() || ch.structure_id.is_some() {
@@ -863,6 +875,7 @@ pub fn reconnect_character_in_space_sync(
                 .disconnected_ships
                 .remove(&char_id)
                 .filter(|d| d.ship_id == ship_id && snap.items.contains_key(&d.ship_id));
+            let pre_warp_pos_opt = disc_entry.as_ref().and_then(|d| d.pre_warp_position);
             let disc_pos = disc_entry.map(|d| d.last_position);
             st.safe_logoffs.remove(&char_id);
 
@@ -880,6 +893,7 @@ pub fn reconnect_character_in_space_sync(
                 ship_type_id,
                 pos_arr,
                 disc_pos.is_some(),
+                pre_warp_pos_opt,
                 corp_id,
                 alliance_id,
                 sec_status,
@@ -887,10 +901,21 @@ pub fn reconnect_character_in_space_sync(
         })?;
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let (group_id, category_id, mass, radius, max_vel, inertia, warp_speed) =
+        sde_ship_physics(&ctx.sde, ship_type_id);
 
     // If the character's ship is already active in space, preserve the live ball position,
     // capacitor, tackle warp scrambles, and combat status instead of resetting to origin or defaults.
+    // If the ship emergency-warped off grid, automatically initiate a return warp back to the pre-disconnect grid spot.
     if let Some(existing_pos) = sys_handle.get_ball_position_sync(ship_id) {
+        if let Some(orig_arr) = pre_warp_pos_opt {
+            let orig_pos = DVec3::from_array(orig_arr);
+            if existing_pos.distance(orig_pos) > 10_000.0 {
+                if let Ok(mut bp) = sys_handle.ballpark.write() {
+                    let _ = bp.set_mode(ship_id, MovementMode::new_warp(existing_pos, orig_pos, warp_speed));
+                }
+            }
+        }
         let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
             snap.item_positions
                 .insert(ship_id, [existing_pos.x, existing_pos.y, existing_pos.z]);
@@ -916,8 +941,16 @@ pub fn reconnect_character_in_space_sync(
     sys_handle.try_remove_ball(ship_id);
 
     let cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type_id);
-    let (group_id, category_id, mass, radius, max_vel, inertia, _warp_speed) =
-        sde_ship_physics(&ctx.sde, ship_type_id);
+    let initial_mode = if let Some(orig_arr) = pre_warp_pos_opt {
+        let orig_pos = DVec3::from_array(orig_arr);
+        if final_pos.distance(orig_pos) > 10_000.0 {
+            MovementMode::new_warp(final_pos, orig_pos, warp_speed)
+        } else {
+            MovementMode::Stop
+        }
+    } else {
+        MovementMode::Stop
+    };
 
     sys_handle.try_spawn_ball_with_meta(
         Ball {
@@ -930,7 +963,7 @@ pub fn reconnect_character_in_space_sync(
             mass,
             radius,
             speed_fraction: 0.0,
-            mode: MovementMode::Stop,
+            mode: initial_mode,
         },
         cs,
         SlimItemMeta {

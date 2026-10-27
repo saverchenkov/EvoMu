@@ -1232,3 +1232,179 @@ async fn test_sp3_subwarp_navigation_orbit_keep_at_range_align_goto_stop() {
         }
     }
 }
+
+#[tokio::test]
+async fn test_r2_track1_nullifier_skill_scaling_cyno_guards_and_ewarp_reconnect() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(3099);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let char_id = 90_000_001;
+    let ship_id = 100_000_001;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    // 1. Issue #70: Interdiction Nullification skill (57319) scaling & hull class restriction
+    let (dur_0, cd_0) =
+        eve_server::services::tactical_modules::compute_nullifier_duration_and_cooldown(10.0, 150.0, 0);
+    let (dur_5, cd_5) =
+        eve_server::services::tactical_modules::compute_nullifier_duration_and_cooldown(10.0, 150.0, 5);
+    assert!((dur_0 - 10.0).abs() < 1e-6 && (cd_0 - 150.0).abs() < 1e-6);
+    assert!(
+        (dur_5 - 15.0).abs() < 1e-6 && (cd_5 - 75.0).abs() < 1e-6,
+        "Interdiction Nullification V must scale duration +50% and cooldown -50%"
+    );
+
+    let nullifier_id = 60_000_401;
+    grant_all_test_skills(&ctx, char_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.retain(|_, i| i.location_id != ship_id);
+        snap.items.get_mut(&ship_id).unwrap().type_id = 587; // Rifter (Frigate group 25 - NOT nullifier-capable)
+        snap.items.insert(
+            nullifier_id,
+            make_item(nullifier_id, 58919, char_id, ship_id, InventoryFlag::HiSlot0, 1, true),
+        );
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock");
+
+    let hull_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(nullifier_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        hull_err.code, "InvalidShipGroup",
+        "Non-eligible hull must be rejected when activating Interdiction Nullifier"
+    );
+
+    // Switch hull to Ares (Interceptor group 831) -> allowed before warp, rejected mid-warp
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&ship_id).unwrap().type_id = 11202; // Ares (group 831)
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    let sys_id = sess.solar_system_id.unwrap();
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let mut mid_warp_mode = MovementMode::new_warp(DVec3::ZERO, DVec3::new(1e9, 0.0, 0.0), 3.0);
+    if let MovementMode::Warp { ref mut phase, .. } = mid_warp_mode {
+        *phase = eve_destiny::WarpPhase::Cruising;
+    }
+    sys_handle.set_movement_mode(ship_id, mid_warp_mode).await.unwrap();
+    let in_warp_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(nullifier_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        in_warp_err.code, "CannotActivateInWarp",
+        "Interdiction Nullifier must reject activation after entering warp tunnel"
+    );
+    sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await.unwrap();
+
+    // 2. Issue #74: Mobile Cyno Inhibitor uses live ballpark position
+    let inhib_id = 60_000_402;
+    let live_inhib_pos = DVec3::new(500_000.0, 0.0, 0.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            inhib_id,
+            make_item(
+                inhib_id,
+                33476,
+                char_id,
+                sys_id as i64,
+                InventoryFlag::None,
+                1,
+                true,
+            ),
+        );
+        // Put stale position at 0,0,0 in snapshot, while live ball is at +500 km
+        snap.item_positions.insert(inhib_id, [0.0, 0.0, 0.0]);
+    });
+    sys_handle
+        .spawn_ball(Ball {
+            id: inhib_id,
+            type_id: 33476,
+            position: live_inhib_pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 10_000.0,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Rigid,
+        })
+        .await
+        .unwrap();
+    let inhibited_near_live = ctx.db.with_snapshot(|snap| {
+        eve_server::services::structure_acl_defense_rules::is_cyno_inhibited(
+            &ctx,
+            snap,
+            sys_id,
+            Some(DVec3::new(550_000.0, 0.0, 0.0)),
+        )
+    });
+    let inhibited_near_stale = ctx.db.with_snapshot(|snap| {
+        eve_server::services::structure_acl_defense_rules::is_cyno_inhibited(
+            &ctx,
+            snap,
+            sys_id,
+            Some(DVec3::new(10_000.0, 0.0, 0.0)),
+        )
+    });
+    assert!(
+        inhibited_near_live && !inhibited_near_stale,
+        "Mobile Cyno Inhibitor must evaluate live ballpark coordinates over stale snapshot coordinates"
+    );
+
+    // 3. Issue #93: Disconnect emergency warp preserves pre-warp position and initiates return warp on reconnect
+    let grid_origin = DVec3::new(250_000.0, -100_000.0, 50_000.0);
+    sys_handle.set_ball_position(ship_id, grid_origin).await;
+    let disc_entry = eve_server::sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, char_id)
+        .await
+        .expect("disconnect entry");
+    assert_eq!(
+        disc_entry.pre_warp_position,
+        Some([grid_origin.x, grid_origin.y, grid_origin.z])
+    );
+    // Simulate ship arriving at deep-space emergency warp spot
+    let ewarp_spot = DVec3::from_array(disc_entry.emergency_warp_dest.unwrap());
+    sys_handle.set_ball_position(ship_id, ewarp_spot).await;
+    sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await.unwrap();
+    let _ = eve_server::sp6_lifecycle::reconnect_character_in_space_sync(&ctx, char_id)
+        .expect("reconnect in space");
+    let (_, reconnected_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let MovementMode::Warp { destination, .. } = reconnected_ball.mode else {
+        panic!("Reconnected ship at deep-space e-warp spot must automatically initiate return warp to pre-disconnect grid spot");
+    };
+    assert!(
+        destination.distance(grid_origin) < 1.0,
+        "Return warp destination must match pre-disconnect grid position"
+    );
+}

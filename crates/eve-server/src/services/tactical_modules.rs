@@ -22,6 +22,19 @@ pub fn compute_triage_strontium_cost(skill_level: u8) -> u32 {
     (200i32 - 25i32 * (skill_level.min(5) as i32)).max(75) as u32
 }
 
+/// Scales Interdiction Nullifier (`group 4117`) duration (+10%/lvl) and reactivation delay (-10%/lvl)
+/// based on the pilot's Interdiction Nullification (`57319`) skill level (`feat:modules.interdiction-nullifier`).
+pub fn compute_nullifier_duration_and_cooldown(
+    base_duration_s: f64,
+    base_reactivation_delay_s: f64,
+    skill_level: u8,
+) -> (f64, f64) {
+    let lvl = skill_level.min(5) as f64;
+    let duration_s = base_duration_s * (1.0 + 0.10 * lvl);
+    let reactivation_delay_s = (base_reactivation_delay_s * (1.0 - 0.10 * lvl)).max(0.0);
+    (duration_s, reactivation_delay_s)
+}
+
 #[derive(Debug, Clone)]
 pub struct ProjectedRemoteAssistance {
     pub source_ship_id: i64,

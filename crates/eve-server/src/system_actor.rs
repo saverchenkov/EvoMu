@@ -443,14 +443,7 @@ impl SystemRegistry {
                                 let _ = reply.send(asteroids.get(&asteroid_id).cloned());
                             }
                             SystemCommand::BreakGateCloak { ball_id, reply } => {
-                                let mut broken = false;
-                                if let Some(cs) = ballpark.combat_states.get_mut(&ball_id) {
-                                    if cs.gate_cloak_remaining_ticks > 0 || cs.is_cloaked {
-                                        cs.gate_cloak_remaining_ticks = 0;
-                                        cs.is_cloaked = false;
-                                        broken = true;
-                                    }
-                                }
+                                let broken = ballpark.deactivate_cloak(ball_id);
                                 if let Some(mut meta) = ballpark.ball_slim_meta.get(&ball_id).cloned() {
                                     meta.is_cloaked = false;
                                     ballpark.change_slim_item(ball_id, meta);

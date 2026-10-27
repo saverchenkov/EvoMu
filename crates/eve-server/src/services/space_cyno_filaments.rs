@@ -743,6 +743,20 @@ async fn handle_cmd_jump_to_structure_beacon(
         });
     }
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
+    let now_check = ctx.now_unix();
+    if ctx
+        .crimewatch
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .states
+        .get(&char_id)
+        .is_some_and(|st| st.is_weapon_timer_active(now_check))
+    {
+        return Err(BridgeRpcError {
+            code: "WeaponsTimerActive".into(),
+            message: "Cannot jump while a Weapons Timer is active".into(),
+        });
+    }
 
     let target_struct = ctx
         .db
@@ -907,7 +921,28 @@ fn validate_beacon_and_distance(
         code: "NoSolarSystem".into(),
         message: "Session has no active solarSystemID".into(),
     })?;
+    let cur_sys_handle = ctx.systems.get_or_spawn(cur_sys_id);
+    if cur_sys_handle.is_ball_scrambled_sync(ship_id) {
+        return Err(BridgeRpcError {
+            code: "WarpScrambled".into(),
+            message: "Cannot bridge or jump while warp scrambled".into(),
+        });
+    }
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
+    let now_check = ctx.now_unix();
+    if ctx
+        .crimewatch
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .states
+        .get(&char_id)
+        .is_some_and(|st| st.is_weapon_timer_active(now_check))
+    {
+        return Err(BridgeRpcError {
+            code: "WeaponsTimerActive".into(),
+            message: "Cannot bridge or jump while a Weapons Timer is active".into(),
+        });
+    }
     let (target_sys_hint, target_struct_id) = if args.len() >= 2 {
         (
             args.first().and_then(|a| a.as_i64()).map(|s| s as u32),
@@ -1198,6 +1233,20 @@ async fn handle_cmd_beacon_jump_fleet(
         });
     }
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
+    let now_check = ctx.now_unix();
+    if ctx
+        .crimewatch
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .states
+        .get(&char_id)
+        .is_some_and(|st| st.is_weapon_timer_active(now_check))
+    {
+        return Err(BridgeRpcError {
+            code: "WeaponsTimerActive".into(),
+            message: "Cannot jump while a Weapons Timer is active".into(),
+        });
+    }
 
     let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
     let _target_ship_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);

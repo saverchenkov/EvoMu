@@ -56,6 +56,52 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                 let mut hic_mass_addition: Option<f64> = None;
                 let mut mjd_jump_distance_m: Option<f64> = None;
                 let grants_interdiction_nullification = mod_type.group_id == 4117;
+                if grants_interdiction_nullification {
+                    // Interdiction Nullifiers (`group 4117`) can only be activated on Interceptors (831),
+                    // Blockade Runners (1202), Deep Space Transports (380), Covert Ops (830), Stealth Bombers (834),
+                    // Force Recons (833), Combat Recons (906), Strategic Cruisers (963), Expedition Frigates (1283/2001),
+                    // Luxury Yachts (1534), or hulls explicitly listed in `canFitShipGroup*`/`canFitShipType*`.
+                    let mut hull_allowed = matches!(
+                        ship_group_id,
+                        831 | 1202 | 380 | 830 | 834 | 833 | 906 | 963 | 1283 | 2001 | 1534
+                    );
+                    if !hull_allowed {
+                        for aid in [1298u16, 1299, 1300, 1301, 1872, 1879, 1880, 1881] {
+                            if let Some(&g) = mod_type.default_attributes.get(&aid) {
+                                if g as u32 == ship_group_id {
+                                    hull_allowed = true;
+                                }
+                            }
+                        }
+                        for aid in [1302u16, 1303, 1304, 1305] {
+                            if let Some(&t) = mod_type.default_attributes.get(&aid) {
+                                if t as u32 == fit.ship.type_id {
+                                    hull_allowed = true;
+                                }
+                            }
+                        }
+                    }
+                    if !hull_allowed {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidShipGroup".into(),
+                            message: format!(
+                                "Interdiction Nullifier cannot be activated on hull group {ship_group_id}"
+                            ),
+                        }));
+                    }
+                    if let Ok(Some((_, sb))) = sys.get_ball_snapshot(ship_id).await {
+                        if matches!(
+                            sb.mode,
+                            eve_destiny::MovementMode::Warp { phase, .. }
+                                if phase != eve_destiny::WarpPhase::Aligning
+                        ) {
+                            return Some(Err(BridgeRpcError {
+                                code: "CannotActivateInWarp".into(),
+                                message: "Interdiction Nullifier must be activated before entering the warp tunnel".into(),
+                            }));
+                        }
+                    }
+                }
                 let mut target_velocity_multiplier: Option<f64> = None;
                 let mut immobilize_self = false;
                 let mut self_disallow_assistance = false;
