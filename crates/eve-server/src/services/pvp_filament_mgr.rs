@@ -490,6 +490,39 @@ pub async fn handle(
                 }));
             }
 
+            let queued_candidates: Vec<(i64, i64, u32)> = ctx.db.with_snapshot(|snap| {
+                let store = load_pvp_store(snap);
+                store
+                    .queue
+                    .iter()
+                    .filter_map(|(&cid, qe)| {
+                        if cid == char_id {
+                            return None;
+                        }
+                        let opp_ch = snap.characters.get(&cid)?;
+                        if opp_ch.station_id.is_some()
+                            || opp_ch.structure_id.is_some()
+                            || opp_ch.active_ship_id <= 0
+                        {
+                            return None;
+                        }
+                        let opp_sys_id = if qe.solar_system_id > 0 {
+                            qe.solar_system_id
+                        } else {
+                            opp_ch.solar_system_id
+                        };
+                        Some((cid, opp_ch.active_ship_id, opp_sys_id))
+                    })
+                    .collect()
+            });
+            let ready_opponents: std::collections::HashSet<i64> = queued_candidates
+                .into_iter()
+                .filter(|&(cid, ship_id, sys_id)| {
+                    crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, cid, ship_id, sys_id).is_ok()
+                })
+                .map(|(cid, _, _)| cid)
+                .collect();
+
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_pvp_store(snap);
                 if store.queue.contains_key(&char_id) {
@@ -599,18 +632,7 @@ pub async fn handle(
                         {
                             return false;
                         }
-                        let opp_sys_id = if qe.solar_system_id > 0 {
-                            qe.solar_system_id
-                        } else {
-                            opp_ch.solar_system_id
-                        };
-                        crate::sp6_lifecycle::require_ship_ready_for_filament_jump(
-                            ctx,
-                            cid,
-                            opp_ch.active_ship_id,
-                            opp_sys_id,
-                        )
-                        .is_ok()
+                        ready_opponents.contains(&cid)
                     })
                     .map(|(&cid, qe)| (cid, qe.solar_system_id, qe.location_id));
 
