@@ -989,6 +989,20 @@ pub(crate) async fn handle_module_cycles(
 
             let react_delay_ms = mod_state.get_attribute(669, &ctx.sde);
             let reactivation_delay_s = if react_delay_ms > 0.0 { react_delay_ms / 1000.0 } else { 0.0 };
+            let (duration_s, reactivation_delay_s) = if grants_interdiction_nullification {
+                let null_skill_lvl = ctx
+                    .character_skill_levels(char_id)
+                    .get(&57319)
+                    .copied()
+                    .unwrap_or(0);
+                crate::services::tactical_modules::compute_nullifier_duration_and_cooldown(
+                    duration_s,
+                    reactivation_delay_s,
+                    null_skill_lvl,
+                )
+            } else {
+                (duration_s, reactivation_delay_s)
+            };
 
             let rack_idx = match m.flag_id {
                 27..=34 => 0,

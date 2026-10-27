@@ -779,10 +779,11 @@ impl Ballpark {
     /// clearing its Cloak Stabilization timer (`3118`), and broadcasting `AddBalls2` to grid observers (`SP-3`).
     pub fn deactivate_cloak(&mut self, ball_id: BallId) -> bool {
         let mut was_cloaked = false;
+        let mut was_gate_cloak = false;
         if let Some(cs) = self.combat_states.get_mut(&ball_id) {
-            if cs.is_cloaked {
+            if cs.is_cloaked || cs.gate_cloak_remaining_ticks > 0 {
                 was_cloaked = true;
-                let was_gate_cloak = cs.gate_cloak_remaining_ticks > 0;
+                was_gate_cloak = cs.gate_cloak_remaining_ticks > 0;
                 cs.is_cloaked = false;
                 cs.is_covert_cloak = false;
                 cs.gate_cloak_remaining_ticks = 0;
@@ -794,6 +795,17 @@ impl Ballpark {
         }
         if was_cloaked {
             self.emit_event(Some(ball_id), DestinyEvent::CloakBall { ball_id, cloaked: 0 });
+            if was_gate_cloak {
+                self.emit_event(
+                    Some(ball_id),
+                    DestinyEvent::OnSpecialFX {
+                        ball_id,
+                        module_id: None,
+                        guid: "effects.Cloak".to_string(),
+                        is_active: false,
+                    },
+                );
+            }
             if let Some(meta) = self.ball_slim_meta.get_mut(&ball_id) {
                 meta.is_cloaked = false;
             }
@@ -1006,6 +1018,16 @@ impl Ballpark {
             }
         }
         if uncloaked {
+            self.emit_event(Some(ball_id), DestinyEvent::CloakBall { ball_id, cloaked: 0 });
+            self.emit_event(
+                Some(ball_id),
+                DestinyEvent::OnSpecialFX {
+                    ball_id,
+                    module_id: None,
+                    guid: "effects.Cloak".to_string(),
+                    is_active: false,
+                },
+            );
             if let Some(meta) = self.ball_slim_meta.get_mut(&ball_id) {
                 meta.is_cloaked = false;
             }

@@ -55,6 +55,7 @@ pub(crate) struct FleetModuleBeacon {
 pub(crate) struct ActiveJumpBridge {
     pub bridger_char_id: i64,
     pub bridger_ship_id: i64,
+    pub portal_module_id: i64,
     pub portal_module_type_id: TypeId,
     pub origin_system_id: u32,
     pub beacon: FleetModuleBeacon,
@@ -349,10 +350,12 @@ async fn light_cyno(
     if !is_covert && active_cyno_jammer(ctx, sys_id).is_some() {
         return Err(err("CynoJammed", format!("A cynosural jammer is active in system {sys_id}")));
     }
-    let ship_pos = ctx.db.with_snapshot(|snap| {
-        snap.item_positions
-            .get(&ship_id)
-            .map(|p| glam::DVec3::from_array(*p))
+    let ship_pos = sys.get_ball_position_sync(ship_id).or_else(|| {
+        ctx.db.with_snapshot(|snap| {
+            snap.item_positions
+                .get(&ship_id)
+                .map(|p| glam::DVec3::from_array(*p))
+        })
     });
     let is_inhibited = ctx.db.with_snapshot(|snap| {
         crate::services::structure_acl_defense_rules::is_cyno_inhibited(ctx, snap, sys_id, ship_pos)
@@ -588,6 +591,43 @@ async fn caller_in_space(ctx: &ServerContext, session: &SessionState) -> Result<
         return Err(err("ShipInWarp", "Cannot jump while in warp"));
     }
     let now = ctx.now_unix();
+    let release_portal_mod = cyno_state()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .bridges
+        .get(&(ctx_key(ctx), char_id))
+        .and_then(|b| {
+            let is_covert_portal = ctx
+                .sde
+                .types
+                .get(&b.portal_module_type_id)
+                .is_some_and(|t| type_attr(ctx, t, ATTR_IS_COVERT) > 0.0 || t.type_id == 28652);
+            (b.bridger_ship_id == ship_id && (b.expires_at_unix <= now || is_covert_portal))
+                .then_some(b.portal_module_id)
+        });
+    if let Some(pmod_id) = release_portal_mod {
+        let _ = handle.remove_module_cycle(ship_id, pmod_id).await;
+    }
+    if handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
+        return Err(err(
+            "WarpScrambled",
+            "Cannot jump or bridge while warp scrambled or inside a warp disruption bubble",
+        ));
+    }
+    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
+    let has_weapons_timer = ctx
+        .crimewatch
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .states
+        .get(&char_id)
+        .is_some_and(|st| st.is_weapon_timer_active(now));
+    if has_weapons_timer {
+        return Err(err(
+            "WeaponsTimerActive",
+            "Cannot jump or bridge while a Weapons Timer is active",
+        ));
+    }
     let cd = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.jump_cooldown_until_unix).unwrap_or(0));
     if cd > now {
         return Err(err("JumpReactivationCooldown", format!("Jump activation cooldown active for {} s", cd - now)));
@@ -622,6 +662,27 @@ async fn resolve_fleet_beacon(
     }
     let item_info = ctx.db.with_snapshot(|s| {
         let caller_fleet = fleet_of(s, char_id);
+        let caller_corp = s.characters.get(&char_id).map(|c| c.corporation_id);
+        let caller_alliance = s.characters.get(&char_id).and_then(|c| c.alliance_id);
+        let is_deployable_allowed = |owner_id: i64| -> bool {
+            if owner_id == char_id {
+                return true;
+            }
+            let owner_fleet = fleet_of(s, owner_id);
+            if caller_fleet.is_some() && caller_fleet == owner_fleet {
+                return true;
+            }
+            let owner_corp = s.characters.get(&owner_id).map(|c| c.corporation_id).or(Some(owner_id));
+            if caller_corp.is_some() && caller_corp == owner_corp {
+                return true;
+            }
+            let owner_alliance = s
+                .characters
+                .get(&owner_id)
+                .and_then(|c| c.alliance_id)
+                .or_else(|| s.corporations.get(&owner_id).and_then(|c| c.alliance_id));
+            caller_alliance.is_some() && caller_alliance == owner_alliance
+        };
         let is_deployable_beacon = |it: &eve_db::InventoryItemRecord| {
             let is_cyno_type = matches!(it.type_id, 56099 | 56488);
             if !is_cyno_type {
@@ -639,19 +700,13 @@ async fn resolve_fleet_beacon(
         };
         if beacon_id != 0 {
             if let Some(it) = s.items.get(&beacon_id) {
-                let owner_fleet = fleet_of(s, it.owner_id);
-                let allowed = it.owner_id == char_id
-                    || (caller_fleet.is_some() && caller_fleet == owner_fleet);
-                if allowed && is_deployable_beacon(it) && (target_sys == 0 || it.location_id == target_sys as i64) {
+                if is_deployable_allowed(it.owner_id) && is_deployable_beacon(it) && (target_sys == 0 || it.location_id == target_sys as i64) {
                     return Some((it.item_id, it.type_id, it.owner_id, it.location_id as u32));
                 }
             }
         }
         s.items.values().find(|it| {
-            let owner_fleet = fleet_of(s, it.owner_id);
-            let allowed = it.owner_id == char_id
-                || (caller_fleet.is_some() && caller_fleet == owner_fleet);
-            allowed
+            is_deployable_allowed(it.owner_id)
                 && is_deployable_beacon(it)
                 && (target_sys == 0 || it.location_id == target_sys as i64)
                 && (beacon_id == 0 || it.item_id == beacon_id)
@@ -798,6 +853,7 @@ async fn bridge_to_fleet_beacon(
         ActiveJumpBridge {
             bridger_char_id: char_id,
             bridger_ship_id: ship_id,
+            portal_module_id: portal_id,
             portal_module_type_id: portal_tid,
             origin_system_id: sys_id,
             beacon: beacon.clone(),
@@ -961,6 +1017,16 @@ async fn jump_through_fleet(ctx: &ServerContext, session: &mut SessionState, arg
     let (char_id, ship_id, sys_id, ball) = caller_in_space(ctx, session).await?;
     if bridge.origin_system_id != sys_id {
         return Err(err("NoActiveBridge", "Jump portal is in a different solar system"));
+    }
+    let origin_handle = ctx.systems.get_or_spawn(sys_id);
+    if let Some(bridger_pos) = origin_handle.get_ball_position_sync(bridge.bridger_ship_id) {
+        let dist_m = ball.position.distance(bridger_pos);
+        if dist_m > 2_500.0 {
+            return Err(err(
+                "OutOfPortalRange",
+                format!("Ship is {dist_m:.1} m from bridging ship (must be <= 2,500 m)"),
+            ));
+        }
     }
     let beacon = live_beacon(ctx, bridge.beacon.char_id, bridge.beacon.beacon_id, bridge.beacon.solar_system_id)
         .unwrap_or_else(|_| bridge.beacon.clone());

@@ -555,3 +555,218 @@ fn test_non_finite_coordinates_and_warp_speed_rejected() {
         )
         .is_err());
 }
+
+#[test]
+fn test_issue_69_no_aligning_teleport_or_mid_flight_yank_on_late_bubble() {
+    let mut park = Ballpark::new(30_000_142);
+    park.add_ball(Ball {
+        id: 2001,
+        type_id: 587,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 365.0,
+        inertia: 3.45,
+        mass: 1_067_000.0,
+        radius: 37.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    // Anchor a bubble 300 km ahead (outside scramble radius, within 500 km of origin)
+    // and warp toward +10,000 km.
+    park.add_warp_bubble(9001, DVec3::new(300_000.0, 0.0, 0.0), 20_000.0);
+    park.set_mode(
+        2001,
+        MovementMode::new_warp(DVec3::ZERO, DVec3::new(10_000_000.0, 0.0, 0.0), 3.0),
+    )
+    .unwrap();
+    // Step 1 second during sub-warp alignment: ship must NOT be teleported 280 km into the bubble!
+    park.step(1.0);
+    assert!(
+        park.balls[&2001].position.x < 1_000.0,
+        "Aligning ship must not be teleported 300 km forward into bubble during alignment (got x={})",
+        park.balls[&2001].position.x
+    );
+    assert!(
+        matches!(
+            park.balls[&2001].mode,
+            MovementMode::Warp {
+                phase: WarpPhase::Aligning,
+                ..
+            }
+        ),
+        "Ship must remain in Aligning phase on tick 1"
+    );
+
+    // Clear bubble and test mid-flight cruising immunity to newly anchored bubbles
+    park.remove_warp_bubble(9001);
+    let mut park2 = Ballpark::new(30_000_142);
+    park2.add_ball(Ball {
+        id: 2002,
+        type_id: 587,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 365.0,
+        inertia: 3.45,
+        mass: 1_067_000.0,
+        radius: 37.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    park2
+        .set_mode(
+            2002,
+            MovementMode::new_warp(DVec3::ZERO, DVec3::new(50_000_000_000.0, 0.0, 0.0), 3.0),
+        )
+        .unwrap();
+    // Step until ship is in Accelerating/Cruising phase (past 5.1s alignment)
+    for _ in 0..8 {
+        park2.step(1.0);
+    }
+    let pos_in_tunnel = park2.balls[&2002].position;
+    assert!(pos_in_tunnel.x > 10_000.0);
+    // Anchor a bubble at the ship's current tunnel position and near destination AFTER warp entry
+    park2.add_warp_bubble(9002, pos_in_tunnel, 20_000.0);
+    park2.add_warp_bubble(9003, DVec3::new(50_000_000_000.0, 0.0, 0.0), 20_000.0);
+    park2.step(1.0);
+    assert!(
+        matches!(park2.balls[&2002].mode, MovementMode::Warp { .. }),
+        "Ship already in warp tunnel must not be yanked out of warp by newly anchored bubble"
+    );
+}
+
+#[test]
+fn test_issue_71_gate_cloak_expiry_emits_cloak_ball_special_fx_and_add_balls2() {
+    let mut park = Ballpark::new(30_000_142);
+    let mut cs_a = CombatState::default();
+    cs_a.is_cloaked = true;
+    cs_a.gate_cloak_remaining_ticks = 1;
+    let mut meta_a = SlimItemMeta::default();
+    meta_a.is_cloaked = true;
+    park.set_ball_slim_meta(3001, meta_a);
+    park.add_ball(Ball {
+        id: 3001,
+        type_id: 587,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 3.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    park.combat_states.insert(3001, cs_a);
+    // Add grid observer 3002
+    park.add_ball(Ball {
+        id: 3002,
+        type_id: 587,
+        position: DVec3::new(5_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 3.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    let _ = park.drain_observer_events(3002);
+
+    let evs = park.step(1.0);
+    assert!(!park.combat_states[&3001].is_cloaked);
+    assert!(!park.ball_slim_meta[&3001].is_cloaked);
+    assert!(evs.iter().any(|e| matches!(
+        e,
+        DestinyEvent::CloakBall {
+            ball_id: 3001,
+            cloaked: 0
+        }
+    )));
+    assert!(evs.iter().any(|e| matches!(
+        e,
+        DestinyEvent::OnSpecialFX {
+            ball_id: 3001,
+            is_active: false,
+            ..
+        }
+    )));
+    let obs_evs = park.drain_observer_events(3002);
+    assert!(
+        obs_evs
+            .iter()
+            .any(|e| matches!(e, DestinyEvent::AddBalls2 { balls } if balls.iter().any(|b| b.id == 3001))),
+        "Grid observer must receive AddBalls2 when gate cloak expires"
+    );
+}
+
+#[test]
+fn test_issue_72_proximity_decloak_ignores_warp_bubbles_and_catches_high_speed_swept_pass() {
+    let mut park = Ballpark::new(30_000_142);
+    let mut cs_cloaked = CombatState::default();
+    cs_cloaked.is_cloaked = true;
+    cs_cloaked.is_covert_cloak = true;
+    park.add_ball(Ball {
+        id: 4001,
+        type_id: 11172,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 3.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    park.combat_states.insert(4001, cs_cloaked);
+    // Add an intangible Field warp bubble (radius 20,000 m) centered 5,000 m away.
+    // Even though surface_dist = 5000 - 40 - 20000 < 2000, a warp bubble must NOT decloak the ship!
+    park.add_interdiction_sphere(4002, DVec3::new(5_000.0, 0.0, 0.0), 20_000.0);
+    park.step(1.0);
+    assert!(
+        park.combat_states[&4001].is_cloaked,
+        "Intangible warp disruption bubble must not proximity-decloak a cloaked ship"
+    );
+
+    // Add a second cloaked ship 500 m away: two cloaked ships must not decloak each other.
+    let mut cs_cloaked2 = CombatState::default();
+    cs_cloaked2.is_cloaked = true;
+    park.add_ball(Ball {
+        id: 4003,
+        type_id: 11172,
+        position: DVec3::new(500.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 3.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    park.combat_states.insert(4003, cs_cloaked2);
+    park.step(1.0);
+    assert!(
+        park.combat_states[&4001].is_cloaked && park.combat_states[&4003].is_cloaked,
+        "Two cloaked ships must not decloak each other"
+    );
+
+    // Now add an uncloaked fast interceptor that starts at x = -3000, y = 500 and moves at +6000 m/s
+    // so at tick end it is at x = +3000, y = 500 (> 3000 m away at both endpoints, but 500 m at t=0.5!).
+    park.add_ball(Ball {
+        id: 4004,
+        type_id: 11176,
+        position: DVec3::new(-3_000.0, 500.0, 0.0),
+        velocity: DVec3::new(6_000.0, 0.0, 0.0),
+        max_velocity: 6_000.0,
+        inertia: 0.01,
+        mass: 1_000_000.0,
+        radius: 30.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::GotoDirection {
+            direction: DVec3::X,
+        },
+    });
+    park.step(1.0);
+    assert!(
+        !park.combat_states[&4001].is_cloaked,
+        "Swept-sphere closest approach must decloak ship when fast pass crosses within 2,000 m mid-tick"
+    );
+}

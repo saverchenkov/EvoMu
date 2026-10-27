@@ -143,8 +143,12 @@ impl Ballpark {
                     .get(&ball.id)
                     .map(|cs| cs.is_interdiction_nullified)
                     .unwrap_or(false);
-                // In-flight warp bubble interception: if ship enters a bubble during flight, drop out of warp
-                if !is_nullified && self.warp_bubble_mgr.is_scrambled_at(ball.position) {
+                // While still sub-warp aligning, entering or sitting in a bubble aborts alignment immediately.
+                // Once in the warp tunnel (Accelerating/Cruising/Decelerating), newly anchored bubbles do not yank ships mid-flight.
+                if phase == WarpPhase::Aligning
+                    && !is_nullified
+                    && self.warp_bubble_mgr.is_scrambled_at(ball.position)
+                {
                     ball.velocity = DVec3::ZERO;
                     ball.speed_fraction = 0.0;
                     ball.mode = MovementMode::Stop;
@@ -152,7 +156,7 @@ impl Ballpark {
                     continue;
                 }
 
-                let pos_before = ball.position;
+                let was_aligning = phase == WarpPhase::Aligning;
                 let exited = step_warp_ball(
                     ball,
                     dt,
@@ -163,23 +167,18 @@ impl Ballpark {
                     &mut phase,
                     &mut elapsed_warp_time,
                 );
-                if !is_nullified {
+                if !is_nullified && was_aligning && phase != WarpPhase::Aligning {
                     if let Some((_bid, intercept_pos)) =
-                        self.warp_bubble_mgr.check_interception(pos_before, ball.position)
+                        self.warp_bubble_mgr.check_interception(origin, destination)
                     {
-                        ball.position = intercept_pos;
-                        ball.velocity = DVec3::ZERO;
-                        ball.speed_fraction = 0.0;
-                        ball.mode = MovementMode::Stop;
-                        warp_exit_stops.push(ball.id);
-                        continue;
-                    }
-                    if exited {
-                        if let Some((_bid, intercept_pos)) =
-                            self.warp_bubble_mgr.check_interception(origin, destination)
+                        if let MovementMode::Warp {
+                            destination: ref mut dest_mut,
+                            total_distance: ref mut total_dist_mut,
+                            ..
+                        } = ball.mode
                         {
-                            ball.position = intercept_pos;
-                            ball.velocity = DVec3::ZERO;
+                            *dest_mut = intercept_pos;
+                            *total_dist_mut = (intercept_pos - origin).length();
                         }
                     }
                 }
@@ -363,6 +362,7 @@ impl Ballpark {
         }
 
         // Gate cloak, post-warp invulnerability, and undock invulnerability decay and break on active movement (`SP-3`, `SP-4`, `SP-5`)
+        let mut gate_decloaked = Vec::new();
         for (&id, cs) in &mut self.combat_states {
             cs.sync_action_breaks();
             if cs.gate_cloak_remaining_ticks > 0 {
@@ -376,12 +376,14 @@ impl Ballpark {
                     cs.is_cloaked = false;
                     cs.undock_invulnerable_remaining_ticks = 0;
                     cs.sync_invuln_with_undock_timer = false;
+                    gate_decloaked.push(id);
                 } else {
                     cs.gate_cloak_remaining_ticks =
                         cs.gate_cloak_remaining_ticks.saturating_sub(1);
                     if cs.gate_cloak_remaining_ticks == 0 {
                         cs.is_cloaked = false;
                         cs.sync_invuln_with_undock_timer = false;
+                        gate_decloaked.push(id);
                     } else {
                         cs.is_cloaked = true;
                     }
@@ -427,6 +429,11 @@ impl Ballpark {
             .map(|b| (b.id, b.position, b.radius))
             .collect();
 
+        let cloaked_snapshot: std::collections::HashSet<BallId> = self
+            .combat_states
+            .iter()
+            .filter_map(|(&id, c)| if c.is_cloaked { Some(id) } else { None })
+            .collect();
         let mut proximity_decloaked = Vec::new();
         let mut mjfg_completed_ids = Vec::new();
         let mut dot_updates = Vec::new();
@@ -440,6 +447,17 @@ impl Ballpark {
                 .target_locks
                 .get(&id_a)
                 .is_some_and(|locks| !locks.is_empty());
+            let is_in_warp_tunnel_a = self.balls.get(&id_a).is_some_and(|b| {
+                matches!(b.mode, MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning)
+            });
+            let is_field_or_bubble_b = |id_b: BallId| {
+                self.warp_bubble_mgr.bubbles.contains_key(&id_b)
+                    || self.balls.get(&id_b).is_some_and(|b| {
+                        matches!(b.mode, MovementMode::Field | MovementMode::Mushroom)
+                            || matches!(b.mode, MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning)
+                    })
+                    || cloaked_snapshot.contains(&id_b)
+            };
             if let Some(cs) = self.combat_states.get_mut(&id_a) {
                 if cs.is_tethered {
                     if has_target_locks || is_scrambled || cs.is_mwd_mjd_disabled || cs.disallow_assistance {
@@ -485,10 +503,22 @@ impl Ballpark {
                         }
                     }
                 }
-                if cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0 {
+                if cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0 && !is_in_warp_tunnel_a {
+                    let start_a = positions.get(&id_a).map(|&(p, _)| p).unwrap_or(pos_a);
                     for &(id_b, pos_b, rad_b) in &updated_positions {
-                        if id_a != id_b {
-                            let surface_dist = (pos_a - pos_b).length() - rad_a - rad_b;
+                        if id_a != id_b && !is_field_or_bubble_b(id_b) {
+                            let start_b = positions.get(&id_b).map(|&(p, _)| p).unwrap_or(pos_b);
+                            let p0 = start_a - start_b;
+                            let dp = (pos_a - start_a) - (pos_b - start_b);
+                            let dp_len2 = dp.length_squared();
+                            let t_min = if dp_len2 > 1e-9 {
+                                (-p0.dot(dp) / dp_len2).clamp(0.0, 1.0)
+                            } else {
+                                1.0
+                            };
+                            let min_center_dist =
+                                (p0 + dp * t_min).length().min((pos_a - pos_b).length());
+                            let surface_dist = min_center_dist - rad_a - rad_b;
                             if surface_dist <= DECLOAK_DISTANCE_METERS {
                                 cs.is_cloaked = false;
                                 cs.is_covert_cloak = false;
@@ -558,7 +588,9 @@ impl Ballpark {
         for mjfg_id in mjfg_completed_ids {
             let _ = self.micro_jump_field(mjfg_id, 100_000.0, 6_000.0, 25);
         }
-        for decloaked_id in proximity_decloaked {
+        let gate_decloaked_set: std::collections::HashSet<BallId> =
+            gate_decloaked.iter().copied().collect();
+        for decloaked_id in gate_decloaked.into_iter().chain(proximity_decloaked) {
             self.emit_event(
                 Some(decloaked_id),
                 DestinyEvent::CloakBall {
@@ -566,6 +598,17 @@ impl Ballpark {
                     cloaked: 0,
                 },
             );
+            if gate_decloaked_set.contains(&decloaked_id) {
+                self.emit_event(
+                    Some(decloaked_id),
+                    DestinyEvent::OnSpecialFX {
+                        ball_id: decloaked_id,
+                        module_id: None,
+                        guid: "effects.Cloak".to_string(),
+                        is_active: false,
+                    },
+                );
+            }
             if let Some(orig_v) = self
                 .combat_states
                 .get_mut(&decloaked_id)

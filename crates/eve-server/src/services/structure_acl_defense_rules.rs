@@ -648,8 +648,12 @@ pub fn is_cyno_inhibited(
             return false;
         }
         if let Some(test_pos) = pos {
-            if let Some(item_pos) = snap.item_positions.get(&i.item_id) {
-                let inhibitor_pos = DVec3::from_array(*item_pos);
+            let live_or_snap_pos = ctx
+                .systems
+                .get_or_spawn(sys_id)
+                .get_ball_position_sync(i.item_id)
+                .or_else(|| snap.item_positions.get(&i.item_id).map(|p| DVec3::from_array(*p)));
+            if let Some(inhibitor_pos) = live_or_snap_pos {
                 return test_pos.distance(inhibitor_pos) <= MOBILE_CYNO_INHIBITOR_RANGE_M;
             }
         }

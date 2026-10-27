@@ -63,6 +63,8 @@ pub struct DisconnectedShipEntry {
     pub emergency_warp_dest: Option<[f64; 3]>,
     pub last_position: [f64; 3],
     pub removed_from_space: bool,
+    #[serde(default)]
+    pub pre_warp_position: Option<[f64; 3]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
