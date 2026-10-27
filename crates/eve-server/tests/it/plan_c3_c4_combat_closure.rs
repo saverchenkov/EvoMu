@@ -20,7 +20,7 @@ use eve_server::combat::npc_ai::{
 };
 use eve_server::router::{BoundObjectEntry, ServerContext};
 use eve_server::services::combat_crimewatch::combat_npc_ai::{
-    destroy_specialized_npc_and_queue_bounty, spawn_specialized_npc_entity, step_extended_npc_ai_sync,
+    destroy_specialized_npc_and_queue_bounty, record_npc_threat_event, spawn_specialized_npc_entity, step_extended_npc_ai_sync,
 };
 use eve_server::services::combat_crimewatch::combat_weapons_spool::handle_ship_or_npc_destruction;
 use eve_server::services::combat_crimewatch::{
@@ -432,6 +432,7 @@ async fn test_c3_courier_package_destroyed_and_missile_death_pipeline() {
     let (issuer_id, hauler_id, attacker_id) = (90_000_001i64, 90_000_002i64, 90_000_003i64);
     let (hauler_ship_id, wrap_item_id, wrapped_cargo_id) = (610_030_001i64, 610_030_100i64, 610_030_101i64);
     let (contract_id, zero_collat_contract_id, zero_collat_item_id) = (710_001i64, 710_002i64, 610_030_200i64);
+    let (jet_can_id, jet_wrap_id, jet_cargo_id, jet_contract_id) = (610_030_300i64, 610_030_301i64, 610_030_302i64, 710_003i64);
 
     let issuer_initial_bal = ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&hauler_id) {
@@ -450,6 +451,15 @@ async fn test_c3_courier_package_destroyed_and_missile_death_pipeline() {
             start_station_id, end_station_id: 60_004_588, item_ids: vec![wrapped_cargo_id], expiration_unix: 1_700_086_400, num_days: 1,
             ..Default::default()
         });
+        snap.items.insert(jet_can_id, new_item(jet_can_id, 23, hauler_id, sys_id as i64, InventoryFlag::None, 1, true));
+        snap.items.insert(jet_wrap_id, new_item(jet_wrap_id, 3468, hauler_id, jet_can_id, InventoryFlag::Cargo, 1, true));
+        snap.items.insert(jet_cargo_id, new_item(jet_cargo_id, 34, issuer_id, jet_wrap_id, InventoryFlag::Locked, 100, false));
+        snap.contracts.insert(jet_contract_id, ContractRecord {
+            contract_id: jet_contract_id, issuer_id, acceptor_id: Some(hauler_id), contract_type: "Courier".to_string(), status: "InProgress".to_string(),
+            price: IskCents(0), reward: IskCents::from_f64_isk(50_000.0), collateral: IskCents::from_f64_isk(1_000_000.0),
+            start_station_id, end_station_id: 60_004_588, item_ids: vec![jet_cargo_id], expiration_unix: 1_700_086_400, num_days: 1,
+            ..Default::default()
+        });
         snap.items.insert(zero_collat_item_id, new_item(zero_collat_item_id, 35, issuer_id, 60_008_494, InventoryFlag::Locked, 250, false));
         snap.contracts.insert(zero_collat_contract_id, ContractRecord {
             contract_id: zero_collat_contract_id, issuer_id, acceptor_id: Some(hauler_id), contract_type: "Courier".to_string(), status: "InProgress".to_string(),
@@ -460,21 +470,25 @@ async fn test_c3_courier_package_destroyed_and_missile_death_pipeline() {
         ibal
     });
 
-    // 1. Test missile impact destroying hauler's ship and triggering the death pipeline + courier failure
+    // 1. Test missile impact destroying hauler's ship, a jettisoned courier container, a drone, and an NPC
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let mut low_hp_cs = ctx.build_type_combat_state(587);
     low_hp_cs.shield_hp = 0.0;
     low_hp_cs.armor_hp = 0.0;
     low_hp_cs.structure_hp = 10.0;
     let _ = sys_handle.spawn_ball_with_combat(new_ball(hauler_ship_id, 587, DVec3::new(500.0, 0.0, 0.0)), low_hp_cs.clone()).await;
+    let _ = sys_handle.spawn_ball_with_combat(new_ball(jet_can_id, 23, DVec3::new(700.0, 0.0, 0.0)), low_hp_cs.clone()).await;
+    let npc_target_id = spawn_specialized_npc_entity(&ctx, sys_id, 33132, "CloneSoldier", 500_010, DVec3::new(600.0, 0.0, 0.0)).await;
+    let _ = sys_handle.set_combat_state(npc_target_id, low_hp_cs.clone()).await;
 
-    let (missile_id, drone_id, drone_missile_id) = (699_001_001i64, 610_030_900i64, 699_001_002i64);
+    let (missile_id, drone_id, drone_missile_id, can_missile_id, npc_missile_id) = (699_001_001i64, 610_030_900i64, 699_001_002i64, 699_001_003i64, 699_001_004i64);
     ctx.db.with_mut_snapshot(|s| { s.items.insert(drone_id, new_item(drone_id, 2454, issuer_id, sys_id as i64, InventoryFlag::None, 1, true)); });
     let _ = sys_handle.spawn_ball_with_combat(new_ball(drone_id, 2454, DVec3::new(900.0, 0.0, 0.0)), low_hp_cs).await;
-    let _ = sys_handle.spawn_ball_with_combat(new_ball(missile_id, 204, DVec3::new(400.0, 0.0, 0.0)), CombatState::default()).await;
-    let _ = sys_handle.spawn_ball_with_combat(new_ball(drone_missile_id, 204, DVec3::new(850.0, 0.0, 0.0)), CombatState::default()).await;
+    for (mid, pos) in [(missile_id, 400.0), (drone_missile_id, 850.0), (can_missile_id, 650.0), (npc_missile_id, 550.0)] {
+        let _ = sys_handle.spawn_ball_with_combat(new_ball(mid, 204, DVec3::new(pos, 0.0, 0.0)), CombatState::default()).await;
+    }
     with_mut_combat_runtime(&ctx, |rt| {
-        for (mid, tid) in [(missile_id, hauler_ship_id), (drone_missile_id, drone_id)] {
+        for (mid, tid) in [(missile_id, hauler_ship_id), (drone_missile_id, drone_id), (can_missile_id, jet_can_id), (npc_missile_id, npc_target_id)] {
             rt.in_flight_missiles.insert(mid, InFlightMissileState {
                 missile_ball_id: mid, solar_system_id: sys_id, attacker_char_id: attacker_id, attacker_ship_id: 610_030_003,
                 launcher_module_id: 610_030_004, launcher_type_id: 2410, missile_type_id: 204, target_ball_id: tid,
@@ -490,16 +504,18 @@ async fn test_c3_courier_package_destroyed_and_missile_death_pipeline() {
     step_combat_system(&ctx, sys_id, 1.0).await;
     assert!(sys_handle.get_ball_snapshot(drone_id).await.unwrap().is_none(), "Destroyed drone ball must be removed");
     assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&issuer_id).unwrap().active_ship_id), issuer_ship_before, "Destroying a player's drone must not pod the player");
+    assert!(with_combat_runtime(&ctx, |rt| rt.pending_bounty_ticks.get(&(sys_id, attacker_id)).is_some_and(|&isk| isk > 0.0)), "Missile kill of NPC must queue SDE bounty tick");
 
-    // Verify Contract 1 failed, collateral paid to issuer, and wrapped cargo is either in wreck or destroyed (never at start_station_id)
+    // Verify Contract 1 & jettisoned Contract 3 failed, collateral paid to issuer, and no orphaned items remain
     ctx.db.with_mut_snapshot(|snap| {
-        let c1 = snap.contracts.get(&contract_id).expect("contract 1 exists");
-        assert_eq!(c1.status, "Failed", "Destroyed courier package must fail the contract");
+        assert_eq!(snap.contracts.get(&contract_id).unwrap().status, "Failed", "Destroyed courier package must fail the contract");
+        assert_eq!(snap.contracts.get(&jet_contract_id).unwrap().status, "Failed", "Destroyed jettisoned courier package must fail the contract");
+        assert!(!snap.items.contains_key(&jet_wrap_id) && !snap.items.contains_key(&jet_cargo_id), "Destroyed jetcan must remove nested wrap and inner courier cargo without orphans");
         let issuer_after = snap.characters.get(&issuer_id).expect("issuer exists").balance;
         assert_eq!(
             issuer_after,
-            issuer_initial_bal.checked_add(IskCents::from_f64_isk(5_100_000.0)).unwrap(),
-            "Issuer must receive collateral payout + escrowed reward refund when courier package is destroyed"
+            issuer_initial_bal.checked_add(IskCents::from_f64_isk(6_150_000.0)).unwrap(),
+            "Issuer must receive collateral payout + escrowed reward refund for both destroyed courier packages"
         );
         assert!(!snap.items.contains_key(&wrap_item_id), "Destroyed Plastic Wrap container must be removed");
         let hauler_wreck_id = snap.items.values().find(|i| i.owner_id == hauler_id && i.location_id == sys_id as i64 && i.type_id != 670).map(|i| i.item_id).expect("hauler wreck exists");
@@ -536,37 +552,21 @@ async fn test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns() {
     let ctx = ServerContext::new();
 
     // 1. Verify Clone Soldier security band gating (0.1..=0.4 low-sec only; never in high-sec or null-sec)
-    assert_eq!(clone_soldier_type_for_security(0.9), None);
-    assert_eq!(clone_soldier_type_for_security(0.5), None);
-    assert_eq!(clone_soldier_type_for_security(0.4), Some(33132));
-    assert_eq!(clone_soldier_type_for_security(0.3), Some(33142));
-    assert_eq!(clone_soldier_type_for_security(0.2), Some(33163));
-    assert_eq!(clone_soldier_type_for_security(0.1), Some(33175));
-    assert_eq!(clone_soldier_type_for_security(0.0), None);
-    assert_eq!(clone_soldier_type_for_security(-0.5), None);
+    for (sec, exp) in [(0.9, None), (0.5, None), (0.4, Some(33132)), (0.3, Some(33142)), (0.2, Some(33163)), (0.1, Some(33175)), (0.0, None), (-0.5, None)] {
+        assert_eq!(clone_soldier_type_for_security(sec), exp);
+    }
 
-    let lowsec_sys_id = ctx
-        .sde
-        .solar_systems
-        .values()
-        .find(|s| (0.10..0.45).contains(&(s.security_status as f64)))
-        .map(|s| s.solar_system_id)
-        .unwrap_or(30_002_537);
+    let lowsec_sys_id = ctx.sde.solar_systems.values().find(|s| (0.10..0.45).contains(&(s.security_status as f64))).map(|s| s.solar_system_id).unwrap_or(30_002_537);
     let expected_faction = regional_pirate_faction_id(&ctx, lowsec_sys_id);
     assert!(clone_soldier_type_for_security_and_faction(&ctx.sde, 0.3, expected_faction).is_some());
 
     let mut spawn_mgr = NpcSpawnManager::new();
-    let spawned_ids = spawn_mgr
-        .spawn_belt_rats_for_system(&ctx, lowsec_sys_id)
-        .await
-        .expect("spawn_belt_rats_for_system must succeed");
+    let spawned_ids = spawn_mgr.spawn_belt_rats_for_system(&ctx, lowsec_sys_id).await.expect("spawn_belt_rats_for_system must succeed");
     assert!(!spawned_ids.is_empty());
 
     let cs_ball_id = *spawned_ids.last().expect("clone soldier ball spawned");
-    let cs_npc = with_combat_runtime(&ctx, |rt| rt.npc_entities.get(&cs_ball_id).cloned())
-        .expect("Clone Soldier registered in extended NPC runtime");
-    assert_eq!(cs_npc.archetype, "CloneSoldier");
-    assert_eq!(cs_npc.faction_id, expected_faction);
+    let cs_npc = with_combat_runtime(&ctx, |rt| rt.npc_entities.get(&cs_ball_id).cloned()).expect("Clone Soldier registered in extended NPC runtime");
+    assert_eq!((cs_npc.archetype.as_str(), cs_npc.faction_id), ("CloneSoldier", expected_faction));
     let tag_tid = cs_npc.tag_drop_type_id.expect("Clone Soldier must have a security tag drop");
     assert!(matches!(tag_tid, 33138..=33141) && ctx.sde.types.get(&tag_tid).map(|t| t.group_id) == Some(1206));
     assert!(matches!(ctx.sde.types.get(&cs_npc.type_id).map(|t| t.group_id), Some(551 | 552 | 556 | 566 | 574)));
@@ -579,11 +579,13 @@ async fn test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns() {
     let killer_id = 90_000_001i64;
     let (cs_wreck_id, bounty, dropped_types) = destroy_specialized_npc_and_queue_bounty(&ctx, lowsec_sys_id, cs_ball_id, killer_id).await;
     assert_eq!(bounty, ctx.sde.types.get(&cs_npc.type_id).and_then(|t| t.default_attributes.get(&481).copied()).unwrap_or(0.0));
-    assert!(dropped_types.contains(&tag_tid));
-    let has_tag = ctx.db.with_snapshot(|snap| {
-        snap.items.values().any(|i| i.location_id == cs_wreck_id && i.type_id == tag_tid)
-    });
-    assert!(has_tag, "Clone Soldier wreck must contain its tier security tag");
+    assert!(dropped_types.contains(&tag_tid) && ctx.db.with_snapshot(|snap| snap.items.values().any(|i| i.location_id == cs_wreck_id && i.type_id == tag_tid)));
+    let cooldown_spawns = spawn_mgr.spawn_belt_rats_for_system(&ctx, lowsec_sys_id).await.unwrap();
+    assert!(cooldown_spawns.iter().all(|id| with_combat_runtime(&ctx, |rt| !rt.npc_entities.contains_key(id))), "Clone Soldier must not respawn during 1200s cooldown");
+    spawn_mgr.clone_soldier_respawn_timers.insert(lowsec_sys_id, 0);
+    with_mut_combat_runtime(&ctx, |rt| { rt.clone_soldier_cooldown_until.insert(lowsec_sys_id, 0); });
+    let post_cd_spawns = spawn_mgr.spawn_belt_rats_for_system(&ctx, lowsec_sys_id).await.unwrap();
+    assert!(post_cd_spawns.iter().any(|id| with_combat_runtime(&ctx, |rt| rt.npc_entities.get(id).is_some_and(|n| n.archetype == "CloneSoldier"))), "Clone Soldier must respawn after cooldown expires");
 
     // 2. Test NpcSpawnManager::step_ai (Idle -> Chase -> Orbit/Attack), SP-7 timer scheduling, and target switching
     let sys_id = 30_000_142u32;
@@ -617,12 +619,7 @@ async fn test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns() {
         assert_eq!(rt.npc_entities.get(&npc_id).unwrap().scram_range, 24_000.0, "Negotiator scrams at 24 km");
     });
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        if let Some(n) = rt.npc_entities.get_mut(&npc_id) {
-            n.aggression_threat.insert(ship_a, 200.0);
-            n.threat_table.insert(ship_a, 200.0);
-        }
-    });
+    record_npc_threat_event(&ctx, npc_id, ship_a, 200.0, false, false);
     step_extended_npc_ai_sync(&ctx, sys_id);
     assert_eq!(
         with_combat_runtime(&ctx, |rt| rt.npc_entities.get(&npc_id).and_then(|n| n.target_id)),
@@ -630,12 +627,7 @@ async fn test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns() {
         "NPC must initially target Ship A"
     );
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        if let Some(n) = rt.npc_entities.get_mut(&npc_id) {
-            n.aggression_threat.insert(ship_b, 750.0);
-            n.threat_table.insert(ship_b, 750.0);
-        }
-    });
+    record_npc_threat_event(&ctx, npc_id, ship_b, 300.0, true, false);
     step_extended_npc_ai_sync(&ctx, sys_id);
     assert_eq!(
         with_combat_runtime(&ctx, |rt| rt.npc_entities.get(&npc_id).and_then(|n| n.target_id)),

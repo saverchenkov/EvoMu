@@ -370,6 +370,7 @@ pub struct CombatRuntimeState {
     pub ess_main_bank_thefts: HashMap<u32, Vec<(i64, f64, u64)>>,
     pub ess_reserve_bank_thefts: HashMap<u32, Vec<(i64, f64, u64)>>,
     pub ess_reserve_unlocked_until: HashMap<u32, u64>,
+    pub clone_soldier_cooldown_until: HashMap<u32, u64>,
 }
 
 #[derive(Debug, Clone)]

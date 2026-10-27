@@ -372,14 +372,22 @@ pub fn record_killmail_assist_action(
     is_ewar: bool,
     action_unix: u64,
 ) {
-    let (corp_id, alliance_id) = ctx
+    let (corp_id, alliance_id, attacker_ship_id) = ctx
         .db
         .with_snapshot(|snap| {
             snap.characters
                 .get(&attacker_char_id)
-                .map(|c| (c.corporation_id, c.alliance_id))
-                .unwrap_or((1_000_125, None))
+                .map(|c| (c.corporation_id, c.alliance_id, c.active_ship_id))
+                .unwrap_or((1_000_125, None, attacker_char_id))
         });
+    crate::services::combat_crimewatch::combat_npc_ai::record_npc_threat_event(
+        ctx,
+        victim_id,
+        attacker_ship_id,
+        damage_done,
+        is_ewar,
+        false,
+    );
     with_mut_combat_runtime(ctx, |rt| {
         let entries = rt.aggression_assist_log.entry(victim_id).or_default();
         if let Some(existing) = entries
@@ -450,69 +458,7 @@ pub fn register_container_lifetime(
     });
 }
 
-/// Immediately removes an empty jettisoned cargo container (`type_id == 23`) from inventory,
-/// `container_lifetimes`, and the solar system `Ballpark`, broadcasting `RemoveBall` with the
-/// ballpark's current destiny tick stamp (`feat:lifecycle.jetcan-empty`).
-pub async fn despawn_empty_jetcan_if_needed(
-    ctx: &ServerContext,
-    sys_id: Option<u32>,
-    cont_id: i64,
-) -> bool {
-    if cont_id <= 0 {
-        return false;
-    }
-    let resolved_sys_opt = ctx.db.with_mut_snapshot(|snap| {
-        let is_empty_jetcan = snap
-            .items
-            .get(&cont_id)
-            .is_some_and(|c| c.type_id == 23 && c.flag == InventoryFlag::None)
-            && !snap.items.values().any(|i| i.location_id == cont_id);
-        if !is_empty_jetcan {
-            return None;
-        }
-        let loc_sys = snap
-            .items
-            .remove(&cont_id)
-            .and_then(|c| u32::try_from(c.location_id).ok());
-        snap.item_positions.remove(&cont_id);
-        snap.sp6_lifecycle.space_object_meta.remove(&cont_id);
-        snap.sp6_lifecycle.ship_combat_hp.remove(&cont_id);
-        Some(sys_id.or(loc_sys))
-    });
-    let Some(sys_opt) = resolved_sys_opt else {
-        return false;
-    };
-    with_mut_combat_runtime(ctx, |rt| {
-        rt.container_lifetimes.remove(&cont_id);
-    });
-    if let Some(sid) = sys_opt {
-        let sys_handle = ctx.systems.get_or_spawn(sid);
-        let stamp = sys_handle
-            .get_ball_snapshot(cont_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|(t, _)| t as i64)
-            .unwrap_or(1);
-        let _ = sys_handle.remove_ball(cont_id).await;
-        ctx.notify(
-            NotificationTarget::SolarSystem(sid),
-            "DoDestinyUpdate",
-            "clientID",
-            vec![
-                PyRep::List(vec![PyRep::Tuple(vec![
-                    PyRep::Integer(stamp),
-                    PyRep::Tuple(vec![
-                        PyRep::String("RemoveBall".into()),
-                        PyRep::Tuple(vec![PyRep::Integer(cont_id)]),
-                    ]),
-                ])]),
-                PyRep::Bool(false),
-            ],
-        );
-    }
-    true
-}
+pub use crate::services::inventory_stacking::despawn_empty_jetcan_if_needed;
 
 /// Despawns wrecks (> 7200s = 2h), jetcans (> 3600s = 1h), and anchored Mobile Warp Disruptors
 /// (> 48h SDE decay lifetime) whose lifetime has expired (`feat:combat.wreck-lifetime`,

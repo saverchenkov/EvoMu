@@ -3,10 +3,12 @@
 #![forbid(unsafe_code)]
 
 use crate::router::{context::BoundObjectEntry, ServerContext};
-use crate::services::inventory_fitting::fitting_containers_ships;
+use crate::services::inventory_fitting::{
+    fitting_containers_ships, get_effective_corp_roles_at_location, item_to_packed_cells,
+};
 use eve_db::{InventoryFlag, TypeId};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
 use std::collections::{HashMap, HashSet};
 
 pub(super) fn handle_stack_ops(
@@ -914,4 +916,179 @@ pub(super) async fn handle_get_container_contents(
     }
     ctx.get_container_contents(session, bound_entry, char_id, container_id)
         .await
+}
+
+pub(super) fn handle_list(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let Some(bound_loc_id) = bound_entry
+        .map(|b| b.object_id)
+        .or(session.station_id)
+        .or(session.structure_id)
+        .or(session.ship_id)
+    else {
+        return Err(BridgeRpcError {
+            code: "InvalidLocation".into(),
+            message: "invbroker.List requires a bound inventory location or active station/ship".into(),
+        });
+    };
+    if ((60_000_000..=69_999_999).contains(&bound_loc_id) || bound_loc_id >= 1_000_000_000_000)
+        && session.station_id != Some(bound_loc_id)
+        && session.structure_id != Some(bound_loc_id)
+    {
+        return Err(BridgeRpcError {
+            code: "BoundObjectOwnershipViolation".into(),
+            message: format!("Character {char_id} is not docked at bound inventory location {bound_loc_id}"),
+        });
+    }
+    let list_flag_filter = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()))
+        .filter(|&f| f > 0);
+    if let Some(flag_val) = list_flag_filter {
+        if (116..=122).contains(&flag_val) {
+            let corp_id = session.corporation_id.or_else(|| {
+                ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id))
+            }).unwrap_or(0);
+            let (is_ceo, roles) = get_effective_corp_roles_at_location(ctx, corp_id, char_id, Some(bound_loc_id));
+            let div_idx = (flag_val - 116) as u32;
+            let req_query_role = 1u64 << (20 + div_idx);
+            if !is_ceo && !eve_db::corp_roles::has_role(roles, req_query_role) {
+                return Err(BridgeRpcError {
+                    code: "CorpRoleDenied".into(),
+                    message: format!("Corporation role denied for division {} query", div_idx + 1),
+                });
+            }
+        }
+    }
+    let is_deployable_or_shipping_unit = ctx.db.with_snapshot(|snap| {
+        if let Some(it) = snap.items.get(&bound_loc_id) {
+            let cat = ctx.sde.types.get(&it.type_id).map(|t| t.category_id).unwrap_or(0);
+            let grp = ctx.sde.types.get(&it.type_id).map(|t| t.group_id).unwrap_or(0);
+            let is_personal = cat == 22 || grp == 340;
+            let is_unit = cat == 22 || matches!(grp, 12 | 340 | 448 | 649);
+            let is_fleet_auth = !is_personal
+                && snap.fleets.values().any(|f| f.members.contains(&char_id) && f.members.contains(&it.owner_id))
+                && crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                    rt.authorized_shipping_storage.contains(&(bound_loc_id, char_id))
+                });
+            let is_auth = session.has_gm_role() || it.owner_id == char_id || it.owner_id == 0 || is_fleet_auth;
+            if !is_unit || !is_auth { return false; }
+            if it.owner_id != char_id && !session.has_gm_role() {
+                let sys_id = session.solar_system_id.unwrap_or(0);
+                if sys_id == 0 || it.location_id != sys_id as i64 { return false; }
+                let sys_handle = ctx.systems.get_or_spawn(sys_id);
+                let s_pos = sys_handle.get_ball_position_sync(session.ship_id.unwrap_or(0));
+                let u_pos = sys_handle.get_ball_position_sync(bound_loc_id);
+                s_pos.zip(u_pos).map(|(s, u)| s.distance(u) <= 5_000.0).unwrap_or(false)
+            } else { true }
+        } else { false }
+    });
+    let rows = if is_deployable_or_shipping_unit {
+        ctx.db.with_snapshot(|snap| {
+            snap.items
+                .values()
+                .filter(|i| i.location_id == bound_loc_id && list_flag_filter.map_or(true, |f| (i.flag as i64) == f))
+                .map(|i| item_to_packed_cells(ctx, i))
+                .collect()
+        })
+    } else if let Some(flag_val) = list_flag_filter {
+        if (116..=122).contains(&flag_val) {
+            let corp_id = session.corporation_id.or_else(|| {
+                ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id))
+            }).unwrap_or(0);
+            ctx.db.with_snapshot(|snap| {
+                snap.items
+                    .values()
+                    .filter(|i| i.location_id == bound_loc_id && i.owner_id == corp_id && (i.flag as i64) == flag_val)
+                    .map(|i| item_to_packed_cells(ctx, i))
+                    .collect()
+            })
+        } else {
+            ctx.db
+                .get_items_for_character(char_id)
+                .into_iter()
+                .filter(|i| i.location_id == bound_loc_id && (i.flag as i64) == flag_val)
+                .map(|i| item_to_packed_cells(ctx, &i))
+                .collect()
+        }
+    } else {
+        ctx.db
+            .get_items_for_character(char_id)
+            .into_iter()
+            .filter(|i| i.location_id == bound_loc_id)
+            .map(|i| item_to_packed_cells(ctx, &i))
+            .collect()
+    };
+    Ok(DBRowDescriptor::inv_item_header().build_crowset(rows))
+}
+
+/// Immediately removes an empty jettisoned cargo container (`type_id == 23`) from inventory,
+/// `container_lifetimes`, and the solar system `Ballpark`, broadcasting `RemoveBall` with the
+/// ballpark's current destiny tick stamp (`feat:lifecycle.jetcan-empty`).
+pub async fn despawn_empty_jetcan_if_needed(
+    ctx: &ServerContext,
+    sys_id: Option<u32>,
+    cont_id: i64,
+) -> bool {
+    if cont_id <= 0 {
+        return false;
+    }
+    let resolved_sys_opt = ctx.db.with_mut_snapshot(|snap| {
+        let is_empty_jetcan = snap
+            .items
+            .get(&cont_id)
+            .is_some_and(|c| c.type_id == 23 && c.flag == InventoryFlag::None)
+            && !snap.items.values().any(|i| i.location_id == cont_id);
+        if !is_empty_jetcan {
+            return None;
+        }
+        let loc_sys = snap
+            .items
+            .remove(&cont_id)
+            .and_then(|c| u32::try_from(c.location_id).ok());
+        snap.item_positions.remove(&cont_id);
+        snap.sp6_lifecycle.space_object_meta.remove(&cont_id);
+        snap.sp6_lifecycle.ship_combat_hp.remove(&cont_id);
+        Some(sys_id.or(loc_sys))
+    });
+    let Some(sys_opt) = resolved_sys_opt else {
+        return false;
+    };
+    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        rt.container_lifetimes.remove(&cont_id);
+    });
+    if let Some(sid) = sys_opt {
+        let sys_handle = ctx.systems.get_or_spawn(sid);
+        let stamp = sys_handle
+            .get_ball_snapshot(cont_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(t, _)| t as i64)
+            .unwrap_or(1);
+        let _ = sys_handle.remove_ball(cont_id).await;
+        ctx.notify(
+            crate::router::NotificationTarget::SolarSystem(sid),
+            "DoDestinyUpdate",
+            "clientID",
+            vec![
+                PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::Integer(stamp),
+                    PyRep::Tuple(vec![
+                        PyRep::String("RemoveBall".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(cont_id)]),
+                    ]),
+                ])]),
+                PyRep::Bool(false),
+            ],
+        );
+    }
+    true
 }

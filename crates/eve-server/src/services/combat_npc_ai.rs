@@ -236,25 +236,8 @@ pub async fn spawn_specialized_npc_entity(
     // Clone Soldier tier security tag mapping from SDE group 1206 (`Security Tags`, `feat:npc.clone-soldier-spawns`)
     let tag_drop = if archetype == "CloneSoldier" {
         let name = sde_type.map(|t| t.name.as_str()).unwrap_or("");
-        let (tier_str, fallback_tag) = if name.contains("Trainer") {
-            ("Trainer", 33138)
-        } else if name.contains("Recruiter") {
-            ("Recruiter", 33139)
-        } else if name.contains("Transporter") {
-            ("Transporter", 33140)
-        } else {
-            ("Negotiator", 33141)
-        };
-        ctx.sde
-            .types
-            .values()
-            .find(|t| {
-                t.group_id == 1206
-                    && t.name.contains("Clone Soldier")
-                    && t.name.contains(tier_str)
-            })
-            .map(|t| t.type_id)
-            .or(Some(fallback_tag))
+        let tier_str = if name.contains("Trainer") { "Trainer" } else if name.contains("Recruiter") { "Recruiter" } else if name.contains("Transporter") { "Transporter" } else { "Negotiator" };
+        ctx.sde.types.values().find(|t| t.group_id == 1206 && t.name.contains("Clone Soldier") && t.name.contains(tier_str)).map(|t| t.type_id)
     } else {
         None
     };
@@ -262,19 +245,14 @@ pub async fn spawn_specialized_npc_entity(
     let (web_factor, web_range, scram_str, scram_range) = if archetype == "CloneSoldier" {
         let name = sde_type.map(|t| t.name.as_str()).unwrap_or("");
         if name.contains("Transporter") {
-            (-55.0, 10_000.0, 0.0, 0.0) // Transporters web at 10 km
+            (attr(20).unwrap_or(-55.0), attr(580).unwrap_or(10_000.0).min(10_000.0), 0.0, 0.0)
         } else if name.contains("Negotiator") {
-            (0.0, 0.0, 2.0, 24_000.0) // Negotiators warp scram at 24 km
+            (0.0, 0.0, attr(105).unwrap_or(2.0).max(2.0), attr(582).unwrap_or(24_000.0).max(24_000.0))
         } else {
             (attr(20).unwrap_or(0.0), attr(580).unwrap_or(10_000.0), 0.0, 0.0)
         }
     } else {
-        (
-            attr(20).unwrap_or(-50.0),
-            attr(580).unwrap_or(10_000.0),
-            attr(105).unwrap_or(2.0),
-            attr(582).unwrap_or(20_000.0),
-        )
+        (attr(20).unwrap_or(-50.0), attr(580).unwrap_or(10_000.0), attr(105).unwrap_or(2.0), attr(582).unwrap_or(20_000.0))
     };
 
     let mut cs = ctx.build_type_combat_state(npc_type_id);
@@ -701,15 +679,29 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             {
                 continue;
             }
-            let is_capital = ctx.db.with_snapshot(|snap| {
-                snap.items.get(&cand_id).and_then(|i| {
-                    ctx.sde.types.get(&i.type_id).map(|t| matches!(t.group_id, 485 | 547 | 1538 | 30 | 659))
-                }).unwrap_or(false)
+            let (is_capital, sig_radius, has_ewar, has_logi) = ctx.db.with_snapshot(|snap| {
+                let st = snap.items.get(&cand_id).and_then(|i| ctx.sde.types.get(&i.type_id));
+                let cap = st.is_some_and(|t| matches!(t.group_id, 485 | 547 | 1538 | 30 | 659));
+                let sig = st.and_then(|t| t.default_attributes.get(&552).copied()).unwrap_or(40.0);
+                let mut ewar = false;
+                let mut logi = false;
+                for it in snap.items.values() {
+                    if it.location_id == cand_id && snap.module_active_states.contains(&it.item_id) {
+                        if let Some(mt) = ctx.sde.types.get(&it.type_id) {
+                            if matches!(mt.group_id, 52 | 65 | 201 | 208 | 291 | 357) { ewar = true; }
+                            if matches!(mt.group_id, 41 | 325 | 585) { logi = true; }
+                        }
+                    }
+                }
+                (cap, sig, ewar, logi)
             });
-            let base_threat = if is_capital { 200.0 } else if is_player_drone { 120.0 } else { 100.0 };
+            // DERIVED: threat weighting combines hull class/drone base, signature radius (attr 552), EWAR (1.5x), and logistics (1.3x).
+            let sig_weight = (sig_radius / 40.0).clamp(0.5, 5.0) * 10.0;
+            let role_mult = if has_ewar { 1.5 } else if has_logi { 1.3 } else { 1.0 };
+            let base_threat = ((if is_capital { 200.0 } else if is_player_drone { 120.0 } else { 100.0 }) + sig_weight) * role_mult;
             let entry = npc.aggression_threat.entry(cand_id).or_insert(base_threat);
-            if is_capital && *entry < 200.0 {
-                *entry = 200.0;
+            if *entry < base_threat {
+                *entry = base_threat;
             }
         }
 
@@ -849,6 +841,37 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
     }
 }
 
+/// Accumulates threat against an NPC (`npc_ball_id`) from `attacker_ball_id` based on
+/// weapon damage dealt, EWAR application (`1.5x` weight), remote logistics (`1.3x` weight),
+/// and the attacker's signature radius (`attr 552`) (`feat:npc.npc-target-switching`).
+pub fn record_npc_threat_event(
+    ctx: &ServerContext,
+    npc_ball_id: i64,
+    attacker_ball_id: i64,
+    damage_dealt: f64,
+    is_ewar: bool,
+    is_logistics: bool,
+) {
+    let sig_radius = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .get(&attacker_ball_id)
+            .and_then(|i| ctx.sde.types.get(&i.type_id))
+            .and_then(|t| t.default_attributes.get(&552).copied())
+            .unwrap_or(40.0)
+    });
+    // DERIVED: signature radius bonus relative to 40m baseline; EWAR 1.5x and logistics 1.3x multipliers.
+    let sig_weight = (sig_radius / 40.0).clamp(0.5, 5.0) * 10.0;
+    let role_mult = if is_ewar { 1.5 } else if is_logistics { 1.3 } else { 1.0 };
+    let delta = (damage_dealt.max(if is_ewar || is_logistics { 120.0 } else { 0.0 }) + sig_weight) * role_mult;
+    with_mut_combat_runtime(ctx, |rt| {
+        if let Some(npc) = rt.npc_entities.get_mut(&npc_ball_id) {
+            let entry = npc.aggression_threat.entry(attacker_ball_id).or_insert(100.0);
+            *entry += delta;
+            npc.threat_table.insert(attacker_ball_id, *entry);
+        }
+    });
+}
+
 pub async fn step_extended_npc_ai(ctx: &ServerContext, solar_system_id: u32) {
     step_extended_npc_ai_sync(ctx, solar_system_id);
 }
@@ -862,25 +885,23 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
     killer_char_id: i64,
 ) -> (i64, f64, Vec<u32>) {
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-    let pos = sys_handle
-        .get_ball_snapshot(npc_ball_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|(_, b)| b.position)
-        .unwrap_or(DVec3::ZERO);
+    let ball_opt = sys_handle.get_ball_snapshot(npc_ball_id).await.ok().flatten().map(|(_, b)| b);
+    let pos = ball_opt.as_ref().map(|b| b.position).unwrap_or(DVec3::ZERO);
     let _ = sys_handle.remove_ball(npc_ball_id).await;
 
     let npc_opt = with_mut_combat_runtime(ctx, |rt| rt.npc_entities.remove(&npc_ball_id));
     let convoy_opt = ctx.living_world.get_convoy(npc_ball_id);
+    let sde_bounty = |tid: u32| -> f64 {
+        ctx.sde.types.get(&tid).and_then(|t| t.default_attributes.get(&481).copied()).unwrap_or(0.0)
+    };
     let (archetype, bounty_isk, tag_drop_opt, npc_type_id, faction_id, custom_loot) = match npc_opt {
         Some(n) => (n.archetype, n.bounty_isk, n.tag_drop_type_id, Some(n.type_id), n.faction_id, n.custom_cargo_loot),
         None => {
             if let Some(ref conv) = convoy_opt {
-                ("Hauler".to_string(), 100_000.0, None, Some(conv.ship_type_id), 500_001, Some((conv.cargo_type_id, conv.cargo_quantity as i64)))
+                ("Hauler".to_string(), sde_bounty(conv.ship_type_id), None, Some(conv.ship_type_id), 500_001, Some((conv.cargo_type_id, conv.cargo_quantity as i64)))
             } else {
-                let tid = ctx.db.with_snapshot(|snap| snap.items.get(&npc_ball_id).map(|i| i.type_id));
-                ("BeltRat".to_string(), 50_000.0, None, tid, 0, None)
+                let tid = ball_opt.as_ref().map(|b| b.type_id).or_else(|| ctx.db.with_snapshot(|snap| snap.items.get(&npc_ball_id).map(|i| i.type_id)));
+                ("BeltRat".to_string(), tid.map(sde_bounty).unwrap_or(0.0), None, tid, 0, None)
             }
         }
     };
@@ -889,6 +910,12 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
     });
     if convoy_opt.is_some() {
         ctx.living_world.mark_convoy_destroyed(npc_ball_id);
+    }
+    if archetype == "CloneSoldier" {
+        let until = ctx.now_unix().saturating_add(1_200);
+        with_mut_combat_runtime(ctx, |rt| {
+            rt.clone_soldier_cooldown_until.insert(solar_system_id, until);
+        });
     }
 
     let effective_bounty = if solar_system_id >= 31_000_000 || archetype == "Sleeper" {

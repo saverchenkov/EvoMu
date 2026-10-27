@@ -575,6 +575,15 @@ pub fn execute_death_pipeline_sync(
     });
 
     sys_handle.try_remove_ball(victim_ship_id);
+    let (wreck_grp, wreck_cat) = if is_pod {
+        ctx.sde
+            .types
+            .get(&25)
+            .map(|t| (t.group_id, t.category_id))
+            .unwrap_or((14, 2))
+    } else {
+        (186, 2)
+    };
     sys_handle.try_spawn_ball_with_meta(
         Ball {
             id: wreck_item_id,
@@ -598,8 +607,8 @@ pub fn execute_death_pipeline_sync(
             ..eve_destiny::CombatState::default()
         },
         SlimItemMeta {
-            group_id: if is_pod { 14 } else { 186 },
-            category_id: 2,
+            group_id: wreck_grp,
+            category_id: wreck_cat,
             owner_id: victim_char_id,
             char_id: None,
             corp_id: -1,

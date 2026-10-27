@@ -368,6 +368,14 @@ impl NpcSpawnManager {
         if let Some(cs_type_id) =
             clone_soldier_type_for_security_and_faction(&ctx.sde, sys_sec, reg_faction)
         {
+            if let Some(rt_until) = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                rt.clone_soldier_cooldown_until.get(&sys_id).copied()
+            }) {
+                let entry = self.clone_soldier_respawn_timers.entry(sys_id).or_insert(rt_until);
+                if rt_until > *entry {
+                    *entry = rt_until;
+                }
+            }
             let on_cooldown = self
                 .clone_soldier_respawn_timers
                 .get(&sys_id)
@@ -425,7 +433,7 @@ impl NpcSpawnManager {
             all_balls.iter().map(|b| (b.id, b.position)).collect();
 
         // Find potential player targets (ships that are not NPCs, not cloaked, not warping, and alive)
-        let player_targets: Vec<(i64, DVec3)> = all_balls
+        let player_targets: Vec<(i64, DVec3, f64)> = all_balls
             .into_iter()
             .filter(|b| {
                 !self.entities.contains_key(&b.id)
@@ -433,7 +441,25 @@ impl NpcSpawnManager {
                     && !matches!(b.mode, MovementMode::Warp { .. })
                     && !cloaked_or_dead.contains(&b.id)
             })
-            .map(|b| (b.id, b.position))
+            .map(|b| {
+                let weight = ctx.db.with_snapshot(|snap| {
+                    let sig = ctx.sde.types.get(&b.type_id).and_then(|t| t.default_attributes.get(&552).copied()).unwrap_or(40.0);
+                    let mut ewar = false;
+                    let mut logi = false;
+                    for it in snap.items.values() {
+                        if it.location_id == b.id && snap.module_active_states.contains(&it.item_id) {
+                            if let Some(mt) = ctx.sde.types.get(&it.type_id) {
+                                if matches!(mt.group_id, 52 | 65 | 201 | 208 | 291 | 357) { ewar = true; }
+                                if matches!(mt.group_id, 41 | 325 | 585) { logi = true; }
+                            }
+                        }
+                    }
+                    // DERIVED: EWAR 1.5x, logistics 1.3x, and signature radius threat weight.
+                    let mult = if ewar { 1.5 } else if logi { 1.3 } else { 1.0 };
+                    (100.0 + (sig / 40.0).clamp(0.5, 5.0) * 10.0) * mult
+                });
+                (b.id, b.position, weight)
+            })
             .collect();
 
         let mut to_remove = Vec::new();
@@ -446,14 +472,19 @@ impl NpcSpawnManager {
                 continue;
             };
 
-            // Find closest candidate player target
-            let closest = player_targets
+            // Pick highest-threat candidate within 50 km (breaking ties by closest distance)
+            let best_in_range = player_targets
                 .iter()
-                .map(|&(pid, pos)| (pid, pos, (pos - npc_pos).length()))
-                .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+                .map(|&(pid, pos, weight)| (pid, pos, (pos - npc_pos).length(), weight))
+                .filter(|&(_, _, dist, _)| dist <= 50_000.0)
+                .max_by(|a, b| {
+                    a.3.partial_cmp(&b.3)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
+                });
 
-            match closest {
-                Some((target_id, _target_pos, dist)) if dist <= 50_000.0 => {
+            match best_in_range {
+                Some((target_id, _target_pos, dist, _)) => {
                     let target_changed = entity.target_id != Some(target_id);
                     entity.target_id = Some(target_id);
 
@@ -568,18 +599,19 @@ impl NpcSpawnManager {
         let bounty = entity.bounty_isk;
 
         // Record respawn cooldown: 20 minutes (1,200 seconds)
+        let until = now_unix.saturating_add(1_200);
         if crate::services::combat_crimewatch::combat_npc_ai::derive_npc_archetype(
             ctx,
             entity.type_id,
         ) == "CloneSoldier"
         {
-            self.clone_soldier_respawn_timers
-                .insert(sys_id, now_unix.saturating_add(1_200));
+            self.clone_soldier_respawn_timers.insert(sys_id, until);
+            crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                rt.clone_soldier_cooldown_until.insert(sys_id, until);
+            });
         } else {
-            self.respawn_timers.insert(
-                (sys_id, entity.spawn_group_id),
-                now_unix.saturating_add(1_200),
-            );
+            self.respawn_timers
+                .insert((sys_id, entity.spawn_group_id), until);
         }
 
         let res = ctx.db.try_with_mut_snapshot(|snap| {

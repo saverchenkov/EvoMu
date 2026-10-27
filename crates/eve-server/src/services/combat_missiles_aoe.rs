@@ -27,7 +27,8 @@ pub(crate) fn active_ship_victim_char_id(ctx: &ServerContext, ball_id: i64) -> O
 }
 
 /// Cleans up a destroyed non-ship ball in space (drone, wreck, jetcan, container, or corpse)
-/// without invoking the capsuleer ship death pipeline.
+/// without invoking the capsuleer ship death pipeline, failing any courier contracts inside
+/// and deleting all nested descendant items so no orphans remain (`feat:lifecycle.courier-package-destroyed`).
 pub(crate) async fn cleanup_destroyed_non_ship_ball(
     ctx: &ServerContext,
     sys_id: u32,
@@ -40,22 +41,89 @@ pub(crate) async fn cleanup_destroyed_non_ship_ball(
         rt.active_drone_miners.remove(&ball_id);
         rt.container_lifetimes.remove(&ball_id);
     });
+    let now_unix = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
         if snap.items.remove(&ball_id).is_some() {
             snap.item_positions.remove(&ball_id);
             snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
             snap.sp6_lifecycle.ship_combat_hp.remove(&ball_id);
-            let child_ids: Vec<i64> = snap
-                .items
+            let mut to_visit = vec![ball_id];
+            let mut all_descendants = Vec::new();
+            while let Some(parent_id) = to_visit.pop() {
+                let children: Vec<i64> = snap
+                    .items
+                    .values()
+                    .filter(|i| i.location_id == parent_id && i.item_id != parent_id)
+                    .map(|i| i.item_id)
+                    .collect();
+                for cid in children {
+                    if !all_descendants.contains(&cid) {
+                        all_descendants.push(cid);
+                        to_visit.push(cid);
+                    }
+                }
+            }
+            let courier_cids: Vec<i64> = snap
+                .contracts
                 .values()
-                .filter(|i| i.location_id == ball_id)
-                .map(|i| i.item_id)
+                .filter(|c| {
+                    c.contract_type == "Courier"
+                        && c.status == "InProgress"
+                        && c.item_ids.iter().any(|iid| all_descendants.contains(iid))
+                })
+                .map(|c| c.contract_id)
                 .collect();
-            for cid in child_ids {
+            for cid in courier_cids {
+                snap.fail_courier_contract(cid, now_unix);
+            }
+            for cid in all_descendants {
                 snap.items.remove(&cid);
+                snap.item_positions.remove(&cid);
             }
         }
     });
+}
+
+/// Routes a ball destroyed by missile, smartbomb, or bomb to the capsuleer death pipeline,
+/// the NPC destruction & bounty pipeline, or non-ship space object cleanup.
+pub(crate) async fn handle_destroyed_ball_from_missile_or_aoe(
+    ctx: &ServerContext,
+    sys_id: u32,
+    attacker_char_id: i64,
+    ball_id: i64,
+    ball_type_id: u32,
+    ball_pos: DVec3,
+    now_unix: u64,
+) {
+    if let Some(vcid) = active_ship_victim_char_id(ctx, ball_id) {
+        let _ = crate::combat::death_pipeline::execute_death_pipeline(
+            ctx,
+            sys_id,
+            vcid,
+            ball_id,
+            attacker_char_id,
+            ball_pos,
+            now_unix,
+        )
+        .await;
+    } else if with_combat_runtime(ctx, |rt| rt.npc_entities.contains_key(&ball_id))
+        || ctx.living_world.get_convoy(ball_id).is_some()
+        || ctx
+            .sde
+            .types
+            .get(&ball_type_id)
+            .is_some_and(|t| t.category_id == 11)
+    {
+        let _ = super::combat_npc_ai::destroy_specialized_npc_and_queue_bounty(
+            ctx,
+            sys_id,
+            ball_id,
+            attacker_char_id,
+        )
+        .await;
+    } else {
+        cleanup_destroyed_non_ship_ball(ctx, sys_id, ball_id).await;
+    }
 }
 
 /// (`feat:combat.missile-flight-physics-destruction`, `feat:modules.breacher-pods`).
@@ -168,6 +236,7 @@ pub async fn step_combat_system(
                     } else if mstate.attacker_char_id > 0 {
                         crate::sp6_lifecycle::record_npc_aggression_timer(ctx, mstate.attacker_char_id, now_unix);
                     }
+                    super::combat_npc_ai::record_npc_threat_event(ctx, mstate.target_ball_id, mstate.attacker_ship_id, applied, false, false);
                 }
                 if let Ok(Some(t_cs)) = sys_handle.get_combat_state(mstate.target_ball_id).await {
                     let sr = (t_cs.shield_hp / t_cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0);
@@ -188,20 +257,16 @@ pub async fn step_combat_system(
                     );
                 }
                 if destroyed {
-                    if let Some(vcid) = active_ship_victim_char_id(ctx, mstate.target_ball_id) {
-                        let _ = crate::combat::death_pipeline::execute_death_pipeline(
-                            ctx,
-                            mstate.solar_system_id,
-                            vcid,
-                            mstate.target_ball_id,
-                            mstate.attacker_char_id,
-                            t_ball.position,
-                            now_unix,
-                        )
-                        .await;
-                    } else {
-                        cleanup_destroyed_non_ship_ball(ctx, mstate.solar_system_id, mstate.target_ball_id).await;
-                    }
+                    handle_destroyed_ball_from_missile_or_aoe(
+                        ctx,
+                        mstate.solar_system_id,
+                        mstate.attacker_char_id,
+                        mstate.target_ball_id,
+                        t_ball.type_id,
+                        t_ball.position,
+                        now_unix,
+                    )
+                    .await;
                 }
             }
             with_mut_combat_runtime(ctx, |rt| {
@@ -523,21 +588,20 @@ pub async fn activate_aoe_or_defender_module(
                                     (t_cs.structure_hp / t_cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0),
                                 );
                             }
+                            if applied > 0.0 {
+                                super::combat_npc_ai::record_npc_threat_event(ctx, b.id, ship_id, applied, false, false);
+                            }
                             if destroyed {
-                                if let Some(vcid) = active_ship_victim_char_id(ctx, b.id) {
-                                    let _ = crate::combat::death_pipeline::execute_death_pipeline(
-                                        ctx,
-                                        sys_id,
-                                        vcid,
-                                        b.id,
-                                        char_id,
-                                        b.position,
-                                        now_unix,
-                                    )
-                                    .await;
-                                } else {
-                                    cleanup_destroyed_non_ship_ball(ctx, sys_id, b.id).await;
-                                }
+                                handle_destroyed_ball_from_missile_or_aoe(
+                                    ctx,
+                                    sys_id,
+                                    char_id,
+                                    b.id,
+                                    b.type_id,
+                                    b.position,
+                                    now_unix,
+                                )
+                                .await;
                             }
                         }
                     }
@@ -725,21 +789,20 @@ pub async fn activate_aoe_or_defender_module(
                                         (t_cs.structure_hp / t_cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0),
                                     );
                                 }
+                                if app > 0.0 {
+                                    super::combat_npc_ai::record_npc_threat_event(ctx, b.id, ship_id, app, false, false);
+                                }
                                 if destroyed {
-                                    if let Some(vcid) = active_ship_victim_char_id(ctx, b.id) {
-                                        let _ = crate::combat::death_pipeline::execute_death_pipeline(
-                                            ctx,
-                                            sys_id,
-                                            vcid,
-                                            b.id,
-                                            char_id,
-                                            b.position,
-                                            ctx.now_unix(),
-                                        )
-                                        .await;
-                                    } else {
-                                        cleanup_destroyed_non_ship_ball(ctx, sys_id, b.id).await;
-                                    }
+                                    handle_destroyed_ball_from_missile_or_aoe(
+                                        ctx,
+                                        sys_id,
+                                        char_id,
+                                        b.id,
+                                        b.type_id,
+                                        b.position,
+                                        ctx.now_unix(),
+                                    )
+                                    .await;
                                 }
                             }
                         }

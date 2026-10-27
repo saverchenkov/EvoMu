@@ -447,6 +447,12 @@ pub async fn handle_ship_or_npc_destruction(
 
     if is_pod_target {
         if generated_corpse_id > 0 {
+            let (corpse_grp, corpse_cat) = ctx
+                .sde
+                .types
+                .get(&25)
+                .map(|t| (t.group_id, t.category_id))
+                .unwrap_or((14, 2));
             let _ = sys_handle
                 .spawn_ball_with_meta(
                     eve_destiny::Ball {
@@ -456,13 +462,14 @@ pub async fn handle_ship_or_npc_destruction(
                     },
                     ctx.build_type_combat_state(25),
                     eve_destiny::SlimItemMeta {
-                        group_id: 14, category_id: 2, owner_id: victim_id, char_id: None,
+                        group_id: corpse_grp, category_id: corpse_cat, owner_id: victim_id, char_id: None,
                         corp_id: -1, alliance_id: -1, security_status: 0.0, is_cloaked: false,
                     },
                 )
                 .await;
         }
-        if let Some((vcid, vship_id)) = player_target_info {
+        if let Some(vcid) = victim_char_opt {
+            let vship_id = target_ball_id;
             crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, vcid, vship_id, sys_id);
             crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
                 st.disconnected_ships.remove(&vcid);
@@ -492,7 +499,8 @@ pub async fn handle_ship_or_npc_destruction(
             );
             crate::services::map_service::record_solar_system_visit(ctx, vcid, new_sys_id);
         }
-    } else if let Some((vcid, vship_id)) = player_target_info {
+    } else if let Some(vcid) = victim_char_opt {
+        let vship_id = target_ball_id;
         crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, vcid, vship_id, sys_id);
         crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
             st.disconnected_ships.remove(&vcid);
@@ -589,8 +597,13 @@ pub async fn handle_ship_or_npc_destruction(
                     .get(&eve_sde::attr_ids::ENTITY_KILL_BOUNTY)
                     .copied()
             })
-            .unwrap_or(50_000.0);
+            .unwrap_or(0.0);
         if bounty > 0.0 {
+            with_mut_combat_runtime(ctx, |rt| {
+                *rt.pending_bounty_ticks
+                    .entry((sys_id, attacker_char_id))
+                    .or_insert(0.0) += bounty;
+            });
             let old_sec = ctx.db.with_snapshot(|snap| {
                 snap.characters
                     .get(&attacker_char_id)
