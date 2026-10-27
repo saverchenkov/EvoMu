@@ -8,8 +8,9 @@
 use crate::formulas::compute_reprocessing_yield_rate;
 use crate::router::{BoundObjectEntry, ServerContext};
 pub use crate::services::mining_advanced::mining_compression::{
-    compute_structure_reprocessing_base_yield, compute_structure_rigged_base_yield,
-    resolve_reprocessable_materials, structure_has_online_reprocessing_service,
+    caller_can_take_corp_hangar_item, compute_structure_reprocessing_base_yield,
+    compute_structure_rigged_base_yield, resolve_reprocessable_materials,
+    structure_has_online_reprocessing_service,
 };
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldStateSnapshot};
 use eve_sde::{InvType, SdeRegistry, TypeId};
@@ -283,6 +284,21 @@ pub(crate) async fn handle_mine(
         .unwrap_or(ship_ball.type_id);
 
     let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
+    let unit_vol = ast_state.unit_volume.max(0.001);
+    let ore_type_rec = ctx.sde.types.get(&ast_state.type_id);
+    let ore_group_id = ore_type_rec.map(|t| t.group_id).unwrap_or(0);
+    let ore_category_id = ore_type_rec.map(|t| t.category_id).unwrap_or(0);
+    let mod_compatible = |type_id: TypeId| -> bool {
+        let Some(t) = ctx.sde.types.get(&type_id) else { return false };
+        if ore_group_id == 711 {
+            t.group_id == 737
+        } else if ore_group_id == 465 {
+            matches!(t.group_id, 54 | 464 | 483)
+                && (t.name.to_ascii_lowercase().contains("ice") || t.default_attributes.contains_key(&780))
+        } else {
+            matches!(t.group_id, 54 | 464 | 483) && !t.name.to_ascii_lowercase().contains("ice harvester")
+        }
+    };
 
     let mut per_drone_yield_m3: std::collections::HashMap<i64, f64> = std::collections::HashMap::new();
     let mut per_drone_dur_secs: std::collections::HashMap<i64, u64> = std::collections::HashMap::new();
@@ -467,46 +483,45 @@ pub(crate) async fn handle_mine(
                     * ind_core_ore_mult;
                 (mult, base_dur_s)
             };
-            let max_vel = drone_t
-                .and_then(|t| t.default_attributes.get(&37).copied())
-                .unwrap_or(250.0)
-                .max(1.0);
-            let travel_dur_s = (2.0 * ast_surface_dist_m) / max_vel;
-            let eff_dur = (mine_dur_s + travel_dur_s).round().max(1.0) as u64;
+            let max_vel = drone_t.and_then(|t| t.default_attributes.get(&37).copied()).unwrap_or(250.0).max(1.0);
+            let eff_dur = (mine_dur_s + (2.0 * ast_surface_dist_m) / max_vel).round().max(1.0) as u64;
             per_drone_dur_secs.insert(d_item.item_id, eff_dur);
-            let stack_qty = (d_item.quantity.max(1)) as f64;
-            let single_drone_yield = d_yield * drone_mult * stack_qty;
+            let single_drone_yield = d_yield * drone_mult * ((d_item.quantity.max(1)) as f64);
             per_drone_yield_m3.insert(d_item.item_id, single_drone_yield);
             total_drone_yield += single_drone_yield;
         }
         (total_drone_yield, max_waste_prob)
     } else if let (Some(fit), Some(mod_id)) = (&fit, primary_id) {
+        let Some(m) = fit.modules.get(&mod_id) else {
+            return Err(BridgeRpcError { code: "InvalidMiningModule".into(), message: "Mining module is not fitted to active ship".into() });
+        };
+        if m.state == eve_dogma::ModuleState::Offline || !mod_compatible(m.type_id) {
+            return Err(BridgeRpcError { code: "InvalidMiningModule".into(), message: "Specified module is offline or incompatible with target resource".into() });
+        }
         let y = fit.get_module_effective_attribute(mod_id, 77, &ctx.sde);
         let raw_w = fit.get_module_effective_attribute(mod_id, 3154, &ctx.sde);
-        let w = if raw_w > 1.0 { raw_w / 100.0 } else { raw_w };
-        (y, w)
+        (y, if raw_w > 1.0 { raw_w / 100.0 } else { raw_w })
     } else if let Some(fit) = &fit {
-        let m = fit.modules.values().find(|m| {
-            ctx.sde.types.get(&m.type_id).map(|t| matches!(t.group_id, 54 | 464 | 483 | 737)).unwrap_or(false)
-        });
+        let m = fit.modules.values().find(|m| m.state != eve_dogma::ModuleState::Offline && mod_compatible(m.type_id));
         if let Some(m) = m {
             let y = fit.get_module_effective_attribute(m.item_id, 77, &ctx.sde);
             let raw_w = fit.get_module_effective_attribute(m.item_id, 3154, &ctx.sde);
-            let w = if raw_w > 1.0 { raw_w / 100.0 } else { raw_w };
-            (y, w)
+            (y, if raw_w > 1.0 { raw_w / 100.0 } else { raw_w })
         } else {
+            let has_any_mining_mod = fit.modules.values().any(|m| {
+                ctx.sde.types.get(&m.type_id).is_some_and(|t| matches!(t.group_id, 54 | 464 | 483 | 737))
+            });
+            if has_any_mining_mod || ore_group_id == 711 || ore_group_id == 465 || !matches!(ship_id, 100_000_001 | 100_000_002) {
+                return Err(BridgeRpcError { code: "NoMiningModuleFitted".into(), message: "Ship has no online compatible mining/harvesting module fitted".into() });
+            }
             (40.0, 0.0)
         }
     } else {
+        if ore_group_id == 711 || ore_group_id == 465 || !matches!(ship_id, 100_000_001 | 100_000_002) {
+            return Err(BridgeRpcError { code: "NoMiningModuleFitted".into(), message: "Ship has no online compatible mining/harvesting module fitted".into() });
+        }
         (40.0, 0.0)
     };
-
-    let unit_vol = ast_state.unit_volume.max(0.001);
-
-    // Determine target hold: SpecializedOreHold (134), SpecializedGasHold (135), SpecializedIceHold (181), or Cargo (5)
-    let ore_type_rec = ctx.sde.types.get(&ast_state.type_id);
-    let ore_group_id = ore_type_rec.map(|t| t.group_id).unwrap_or(0);
-    let ore_category_id = ore_type_rec.map(|t| t.category_id).unwrap_or(0);
 
     let ship_attrs = ctx.sde.types.get(&ship_type_id).map(|t| &t.default_attributes);
     let has_ore_hold = ship_attrs.is_some_and(|a| a.get(&1556).copied().unwrap_or(0.0) > 0.0 || a.get(&3227).copied().unwrap_or(0.0) > 0.0);
@@ -624,7 +639,22 @@ pub(crate) async fn handle_mine(
         let mut pos_opt = None;
         if let Some(ast) = snap.asteroids.get_mut(&asteroid_id) {
             ast.quantity = extraction.remaining_units as i64;
+            if ast.belt_id == 0 && ast_state.belt_id != 0 {
+                ast.belt_id = ast_state.belt_id;
+            }
             pos_opt = Some(DVec3::new(ast.position.0, ast.position.1, ast.position.2));
+        } else if ast_state.belt_id != 0 {
+            snap.asteroids.insert(asteroid_id, eve_db::AsteroidRecord {
+                asteroid_id,
+                type_id: ast_state.type_id,
+                solar_system_id: sys_id,
+                belt_id: ast_state.belt_id,
+                quantity: extraction.remaining_units as i64,
+                initial_quantity: ast_state.initial_units as i64,
+                position: (ship_ball.position.x, ship_ball.position.y, ship_ball.position.z),
+                radius: 60.0,
+            });
+            pos_opt = Some(ship_ball.position);
         }
         if extraction.depleted {
             if let Some(ast_pos) = pos_opt {
@@ -1003,154 +1033,64 @@ pub async fn handle(
                     });
                 }
 
-                let caller_corp = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| c.corporation_id)
-                    .unwrap_or(0);
+                let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 let mut batch_results = Vec::with_capacity(item_ids.len());
                 for item_id in item_ids {
                     let Some(item) = snap.items.get(&item_id).cloned() else {
-                        return Err(BridgeRpcError {
-                            code: "ItemNotFound".into(),
-                            message: format!("Item {item_id} does not exist"),
-                        });
+                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {item_id} does not exist") });
                     };
-                    let valid_owner_and_flag = (item.owner_id == char_id
-                        && item.flag == InventoryFlag::Hangar)
-                        || (caller_corp > 0
-                            && item.owner_id == caller_corp
-                            && matches!(
-                                item.flag,
-                                InventoryFlag::Hangar
-                                    | InventoryFlag::CorpSAG1
-                                    | InventoryFlag::CorpSAG2
-                                    | InventoryFlag::CorpSAG3
-                                    | InventoryFlag::CorpSAG4
-                                    | InventoryFlag::CorpSAG5
-                                    | InventoryFlag::CorpSAG6
-                                    | InventoryFlag::CorpSAG7
-                            ));
-                    if !valid_owner_and_flag || item.location_id != station_id || item.quantity <= 0
-                    {
+                    let valid_owner_and_flag = (item.owner_id == char_id && item.flag == InventoryFlag::Hangar)
+                        || (caller_corp > 0 && item.owner_id == caller_corp && caller_can_take_corp_hangar_item(snap, char_id, caller_corp, item.flag, session.corp_role));
+                    if !valid_owner_and_flag || item.location_id != station_id || item.quantity <= 0 {
                         return Err(BridgeRpcError {
                             code: "OwnershipOrLocationViolation".into(),
-                            message: format!(
-                                "Item {item_id} must be owned by character {char_id} in the hangar at station {station_id}"
-                            ),
+                            message: format!("Item {item_id} must be owned by character {char_id} or an authorized corporate division at station {station_id}"),
                         });
                     }
-                    let active_ship_id = snap
-                        .characters
-                        .get(&char_id)
-                        .map(|c| c.active_ship_id)
-                        .or(session.ship_id);
+                    let active_ship_id = snap.characters.get(&char_id).map(|c| c.active_ship_id).or(session.ship_id);
                     if active_ship_id == Some(item_id) {
-                        return Err(BridgeRpcError {
-                            code: "CannotReprocessActiveShip".into(),
-                            message: format!(
-                                "Item {item_id} is your currently active ship and cannot be reprocessed"
-                            ),
-                        });
+                        return Err(BridgeRpcError { code: "CannotReprocessActiveShip".into(), message: format!("Item {item_id} is your currently active ship and cannot be reprocessed") });
                     }
                     let Some(inv_type) = ctx.sde.types.get(&item.type_id) else {
-                        return Err(BridgeRpcError {
-                            code: "ItemNotReprocessable".into(),
-                            message: format!("Unknown item type {}", item.type_id),
-                        });
+                        return Err(BridgeRpcError { code: "ItemNotReprocessable".into(), message: format!("Unknown item type {}", item.type_id) });
                     };
                     let rng_bits = (ctx.mechanic_rng.try_unit_f64().unwrap_or(0.5) * (u64::MAX as f64)) as u64;
-                    let Some(materials) = resolve_reprocessable_materials(
-                        &ctx.sde,
-                        inv_type,
-                        item_id,
-                        snap.next_entity_id,
-                        rng_bits,
-                        false,
-                    ) else {
-                        return Err(BridgeRpcError {
-                            code: "ItemNotReprocessable".into(),
-                            message: format!(
-                                "Item type {} ({}) has no SDE typeMaterials and cannot be reprocessed",
-                                item.type_id, inv_type.name
-                            ),
-                        });
+                    let Some(materials) = resolve_reprocessable_materials(&ctx.sde, inv_type, item_id, snap.next_entity_id, rng_bits, false) else {
+                        return Err(BridgeRpcError { code: "ItemNotReprocessable".into(), message: format!("Item type {} ({}) has no SDE typeMaterials and cannot be reprocessed", item.type_id, inv_type.name) });
                     };
                     if item.singleton || snap.items.values().any(|child| child.location_id == item_id) {
-                        return Err(BridgeRpcError {
-                            code: "ItemMustBeRepackaged".into(),
-                            message: format!(
-                                "Item {item_id} must be emptied and repackaged before reprocessing"
-                            ),
-                        });
+                        return Err(BridgeRpcError { code: "ItemMustBeRepackaged".into(), message: format!("Item {item_id} must be emptied and repackaged before reprocessing") });
                     }
-                    if item.flag == InventoryFlag::Locked
-                        || snap.is_item_locked_in_contract_or_job(item_id)
-                    {
-                        return Err(BridgeRpcError {
-                            code: "ItemLocked".into(),
-                            message: format!("Item {item_id} is locked and cannot be reprocessed"),
-                        });
+                    if item.flag == InventoryFlag::Locked || snap.is_item_locked_in_contract_or_job(item_id) {
+                        return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} is locked and cannot be reprocessed") });
                     }
-
                     let portion_size = inv_type.portion_size.max(1) as i32;
                     if item.quantity < portion_size {
-                        return Err(BridgeRpcError {
-                            code: "InsufficientBatchPortion".into(),
-                            message: format!(
-                                "Need at least {portion_size} units to reprocess type {} (have {})",
-                                item.type_id, item.quantity
-                            ),
-                        });
+                        return Err(BridgeRpcError { code: "InsufficientBatchPortion".into(), message: format!("Need at least {portion_size} units to reprocess type {} (have {})", item.type_id, item.quantity) });
                     }
-
                     let (station_base_yield, yield_rate, station_tax_rate) =
                         compute_reprocessing_rates_for_item(&ctx.sde, snap, char_id, station_id, inv_type);
-
                     let portions = item.quantity / portion_size;
                     let remainder = item.quantity % portion_size;
-
                     let mut gross_value_cents = 0_i64;
                     for mat in &materials {
-                        let unit_val = ctx
-                            .sde
-                            .types
-                            .get(&mat.material_type_id)
-                            .map(|t| t.base_price.max(4.0))
-                            .unwrap_or(4.0);
+                        let unit_val = ctx.sde.types.get(&mat.material_type_id).map(|t| t.base_price.max(4.0)).unwrap_or(4.0);
                         let unit_cents = IskCents::from_f64_isk(unit_val).0;
-                        let est_qty =
-                            ((portions as f64) * (mat.quantity as f64) * yield_rate).floor() as i64;
-                        gross_value_cents = gross_value_cents
-                            .saturating_add(unit_cents.saturating_mul(est_qty.max(0)));
+                        let est_qty = ((portions as f64) * (mat.quantity as f64) * yield_rate).floor() as i64;
+                        gross_value_cents = gross_value_cents.saturating_add(unit_cents.saturating_mul(est_qty.max(0)));
                     }
                     let tax_cents = if station_tax_rate > 0.0 && gross_value_cents > 0 {
-                        IskCents(
-                            ((gross_value_cents as f64) * station_tax_rate)
-                                .round()
-                                .max(100.0) as i64,
-                        )
+                        IskCents(((gross_value_cents as f64) * station_tax_rate).round().max(100.0) as i64)
                     } else {
                         IskCents(0)
                     };
                     let tax_isk = (tax_cents.0 as f64) / 100.0;
                     if tax_cents.0 > 0 {
-                        let char_balance = snap
-                            .characters
-                            .get(&char_id)
-                            .map(|c| c.balance)
-                            .unwrap_or(IskCents(0));
+                        let char_balance = snap.characters.get(&char_id).map(|c| c.balance).unwrap_or(IskCents(0));
                         if char_balance < tax_cents {
-                            return Err(BridgeRpcError {
-                                code: "InsufficientFunds".into(),
-                                message: format!(
-                                    "Insufficient ISK to pay reprocessing tax ({:.2} ISK required)",
-                                    tax_isk
-                                ),
-                            });
+                            return Err(BridgeRpcError { code: "InsufficientFunds".into(), message: format!("Insufficient ISK to pay reprocessing tax ({:.2} ISK required)", tax_isk) });
                         }
                     }
-
                     if remainder > 0 {
                         if let Some(im) = snap.items.get_mut(&item_id) {
                             im.quantity = remainder;
@@ -1159,14 +1099,10 @@ pub async fn handle(
                     } else {
                         snap.items.remove(&item_id);
                     }
-
                     let mut outputs: Vec<(i64, TypeId, i32)> = Vec::with_capacity(materials.len());
                     for mat in &materials {
-                        let out_qty =
-                            ((portions as f64) * (mat.quantity as f64) * yield_rate).floor() as i32;
-                        if out_qty <= 0 {
-                            continue;
-                        }
+                        let out_qty = ((portions as f64) * (mat.quantity as f64) * yield_rate).floor() as i32;
+                        if out_qty <= 0 { continue; }
                         snap.next_entity_id += 1;
                         let mid = snap.next_entity_id;
                         snap.items.insert(
@@ -1174,9 +1110,9 @@ pub async fn handle(
                             InventoryItemRecord {
                                 item_id: mid,
                                 type_id: mat.material_type_id,
-                                owner_id: char_id,
+                                owner_id: item.owner_id,
                                 location_id: station_id,
-                                flag: InventoryFlag::Hangar,
+                                flag: item.flag,
                                 quantity: out_qty,
                                 singleton: false,
                                 version: 1,

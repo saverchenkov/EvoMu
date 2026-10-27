@@ -90,159 +90,77 @@ pub async fn handle_legacy_and_ess(
                 Err(e) => return Some(Err(e)),
             };
             if session.station_id.is_some() || session.structure_id.is_some() {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipDocked".into(),
-                    message: "Cannot fire weapons while docked".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot fire weapons while docked".into() }));
             }
             let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "Session has no active ship".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into() }));
             };
             let Some(target_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidTarget".into(),
-                    message: "FireWeapon requires an explicit integer targetID".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidTarget".into(), message: "FireWeapon requires an explicit integer targetID".into() }));
             };
             if target_id <= 0 || target_id == char_id || target_id == ship_id {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidTarget".into(),
-                    message: "Invalid or self combat target".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidTarget".into(), message: "Invalid or self combat target".into() }));
             }
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
             };
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
-
-            // Require the attacker's ship ball to exist in the current solar system's Ballpark
-            let Some((attacker_tick, attacker_ball)) =
-                (match sys_handle.get_ball_snapshot(ship_id).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return Some(Err(BridgeRpcError {
-                            code: "DestinyQueryFailed".into(),
-                            message: e,
-                        }))
-                    }
-                })
-            else {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipNotInSpace".into(),
-                    message: format!("Attacker ship {ship_id} is not spawned in space"),
-                }));
+            let Some((attacker_tick, attacker_ball)) = (match sys_handle.get_ball_snapshot(ship_id).await {
+                Ok(v) => v,
+                Err(e) => return Some(Err(BridgeRpcError { code: "DestinyQueryFailed".into(), message: e })),
+            }) else {
+                return Some(Err(BridgeRpcError { code: "ShipNotInSpace".into(), message: format!("Attacker ship {ship_id} is not spawned in space") }));
             };
-
-            // Require a fitted, online high-slot offensive weapon (flag 27..=34) on the active ship
             let fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
                 Ok(f) => f,
                 Err(e) => return Some(Err(e)),
             };
-            let requested_mod_or_flag = args
-                .get(1)
-                .and_then(|a| a.as_i64())
+            let requested_mod_or_flag = args.get(1).and_then(|a| a.as_i64())
                 .or_else(|| kwargs.get("moduleID").and_then(|v| v.as_i64()))
                 .or_else(|| kwargs.get("flagID").and_then(|v| v.as_i64()));
             let is_weapon_group = |group_id: u32| -> bool {
-                matches!(
-                    group_id,
-                    53 | 55 | 74 | 506..=511 | 1986 | 4060 | 4500 | 4805 | 4807
-                )
+                matches!(group_id, 53 | 55 | 74 | 506..=511 | 1986 | 4060 | 4500 | 4805 | 4807)
             };
-            let mut online_weapons: Vec<&eve_dogma::FittedModule> = fit
-                .modules
-                .values()
-                .filter(|m| {
-                    (27..=34).contains(&m.flag_id)
-                        && m.state != eve_dogma::ModuleState::Offline
-                        && ctx
-                            .sde
-                            .types
-                            .get(&m.type_id)
-                            .map(|t| is_weapon_group(t.group_id))
-                            .unwrap_or(false)
-                        && requested_mod_or_flag
-                            .map(|req| m.item_id == req || (m.flag_id as i64) == req)
-                            .unwrap_or(true)
-                })
-                .collect();
+            let mut online_weapons: Vec<&eve_dogma::FittedModule> = fit.modules.values().filter(|m| {
+                (27..=34).contains(&m.flag_id)
+                    && m.state != eve_dogma::ModuleState::Offline
+                    && ctx.sde.types.get(&m.type_id).is_some_and(|t| is_weapon_group(t.group_id))
+                    && requested_mod_or_flag.is_none_or(|req| m.item_id == req || (m.flag_id as i64) == req)
+            }).collect();
             online_weapons.sort_by_key(|m| (m.flag_id, m.item_id));
             if online_weapons.is_empty() {
                 return Some(Err(BridgeRpcError {
                     code: "NoWeaponFitted".into(),
-                    message: format!(
-                        "Active ship {ship_id} has no fitted online high-slot weapon module (flags 27..=34)"
-                    ),
+                    message: format!("Active ship {ship_id} has no fitted online high-slot weapon module (flags 27..=34)"),
                 }));
             }
-            let mut armed_weapon: Option<(&eve_dogma::FittedModule, &eve_sde::InvType, i64, u32)> =
-                None;
+            let mut armed_weapon: Option<(&eve_dogma::FittedModule, &eve_sde::InvType, i64, u32)> = None;
             let mut skill_err: Option<BridgeRpcError> = None;
             ctx.db.with_snapshot(|snap| {
                 for m in &online_weapons {
-                    let Some(wt) = ctx.sde.types.get(&m.type_id) else {
-                        continue;
-                    };
-                    let loaded_opt = snap
-                        .items
-                        .values()
-                        .find(|i| {
-                            i.owner_id == char_id
-                                && i.location_id == ship_id
-                                && (i.flag as u16) == m.flag_id
-                                && i.quantity > 0
-                                && ctx
-                                    .sde
-                                    .types
-                                    .get(&i.type_id)
-                                    .map(|ct| {
-                                        ServerContext::is_charge_compatible_with_weapon(wt, ct)
-                                    })
-                                    .unwrap_or(false)
-                        })
-                        .map(|i| (i.item_id, i.type_id));
+                    let Some(wt) = ctx.sde.types.get(&m.type_id) else { continue; };
+                    let loaded_opt = snap.items.values().find(|i| {
+                        i.owner_id == char_id && i.location_id == ship_id && (i.flag as u16) == m.flag_id && i.quantity > 0
+                            && ctx.sde.types.get(&i.type_id).is_some_and(|ct| ServerContext::is_charge_compatible_with_weapon(wt, ct))
+                    }).map(|i| (i.item_id, i.type_id));
                     if let Some((cid, ctid)) = loaded_opt {
                         match ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, ctid) {
-                            Ok(()) => {
-                                armed_weapon = Some((*m, wt, cid, ctid));
-                                break;
-                            }
-                            Err(e) => {
-                                if skill_err.is_none() {
-                                    skill_err = Some(e);
-                                }
-                            }
+                            Ok(()) => { armed_weapon = Some((*m, wt, cid, ctid)); break; }
+                            Err(e) => if skill_err.is_none() { skill_err = Some(e); },
                         }
                     }
                 }
             });
             if armed_weapon.is_none() {
-                if let Some(e) = skill_err {
-                    return Some(Err(e));
-                }
+                if let Some(e) = skill_err { return Some(Err(e)); }
                 let first_wt = online_weapons[0];
-                let wt_name = ctx
-                    .sde
-                    .types
-                    .get(&first_wt.type_id)
-                    .map(|t| t.name.as_str())
-                    .unwrap_or("weapon");
+                let wt_name = ctx.sde.types.get(&first_wt.type_id).map(|t| t.name.as_str()).unwrap_or("weapon");
                 return Some(Err(BridgeRpcError {
                     code: "NoAmmoLoaded".into(),
-                    message: format!(
-                        "Weapon {} in slot {} on ship {ship_id} has no compatible charge loaded in its weapon slot",
-                        wt_name, first_wt.flag_id
-                    ),
+                    message: format!("Weapon {} in slot {} on ship {ship_id} has no compatible charge loaded in its weapon slot", wt_name, first_wt.flag_id),
                 }));
             }
-            let (_weapon_mod, weapon_type, loaded_charge_item_id, charge_tid) =
-                armed_weapon.unwrap();
+            let (_weapon_mod, weapon_type, loaded_charge_item_id, charge_tid) = armed_weapon.unwrap();
 
             let weapon_kind = match weapon_type.group_id {
                 506..=511 => "MissileLauncher",
@@ -1185,89 +1103,43 @@ pub async fn handle_legacy_and_ess(
                 Err(e) => return Some(Err(e)),
             };
             if session.station_id.is_some() || session.structure_id.is_some() {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipDocked".into(),
-                    message: "Cannot link to ESS while docked".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot link to ESS while docked".into() }));
             }
             let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "Session has no active ship".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into() }));
             };
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
             };
-            let sys_sec = ctx
-                .sde
-                .solar_systems
-                .get(&sys_id)
-                .map(|s| s.security_status)
-                .unwrap_or(1.0);
+            let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0);
             if !(sys_sec <= 0.0 && sys_id < 31_000_000) {
                 return Some(Err(BridgeRpcError {
                     code: "EssOnlyInNullSec".into(),
-                    message: format!(
-                        "ESS banks only exist in K-space null-sec systems (system {sys_id} has security {sys_sec:.2})"
-                    ),
+                    message: format!("ESS banks only exist in K-space null-sec systems (system {sys_id} has security {sys_sec:.2})"),
                 }));
             }
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
-
-            let Some((current_tick, ship_ball)) =
-                (match sys_handle.get_ball_snapshot(ship_id).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return Some(Err(BridgeRpcError {
-                            code: "DestinyQueryFailed".into(),
-                            message: e,
-                        }))
-                    }
-                })
-            else {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipNotInSpace".into(),
-                    message: "Active ship ball is not in space".into(),
-                }));
+            let Some((current_tick, ship_ball)) = (match sys_handle.get_ball_snapshot(ship_id).await {
+                Ok(v) => v,
+                Err(e) => return Some(Err(BridgeRpcError { code: "DestinyQueryFailed".into(), message: e })),
+            }) else {
+                return Some(Err(BridgeRpcError { code: "ShipNotInSpace".into(), message: "Active ship ball is not in space".into() }));
             };
-
             let Some(ess_ball_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "EssBeaconNotPresent".into(),
-                    message: "ESS link requires an explicit integer essBallID".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "EssBeaconNotPresent".into(), message: "ESS link requires an explicit integer essBallID".into() }));
             };
             let Some((_, ess_ball)) = (match sys_handle.get_ball_snapshot(ess_ball_id).await {
                 Ok(v) => v,
-                Err(e) => {
-                    return Some(Err(BridgeRpcError {
-                        code: "DestinyQueryFailed".into(),
-                        message: e,
-                    }))
-                }
+                Err(e) => return Some(Err(BridgeRpcError { code: "DestinyQueryFailed".into(), message: e })),
             }) else {
-                return Some(Err(BridgeRpcError {
-                    code: "EssBeaconNotPresent".into(),
-                    message: format!("No ESS beacon present in solar system {sys_id}"),
-                }));
+                return Some(Err(BridgeRpcError { code: "EssBeaconNotPresent".into(), message: format!("No ESS beacon present in solar system {sys_id}") }));
             };
             if ess_ball.type_id != 32882 {
-                return Some(Err(BridgeRpcError {
-                    code: "EssBeaconNotPresent".into(),
-                    message: format!("Ball {ess_ball_id} is not an Encounter Surveillance System (32882)"),
-                }));
+                return Some(Err(BridgeRpcError { code: "EssBeaconNotPresent".into(), message: format!("Ball {ess_ball_id} is not an Encounter Surveillance System (32882)") }));
             }
-
             let dist = ship_ball.position.distance(ess_ball.position);
             if dist > 2_500.0 {
-                return Some(Err(BridgeRpcError {
-                    code: "OutsideEssLinkRange".into(),
-                    message: format!("Ship is {:.1} m from ESS beacon (must be <= 2500 m)", dist),
-                }));
+                return Some(Err(BridgeRpcError { code: "OutsideEssLinkRange".into(), message: format!("Ship is {:.1} m from ESS beacon (must be <= 2500 m)", dist) }));
             }
 
             let now_unix = ctx.now_unix();
@@ -1278,108 +1150,73 @@ pub async fn handle_legacy_and_ess(
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let is_reserve = method == "AttemptLinkToReserveBank";
                 let mut unlocked_until_new: Option<u64> = None;
-                let mut pulse_st =
-                    crate::services::space_destiny::get_ess_reserve_pulses_from_blobs(
-                        &snap.service_state_blobs,
-                        sys_id,
-                    );
+                let mut clear_unlock = false;
+                let mut pulse_st = crate::services::space_destiny::get_ess_reserve_pulses_from_blobs(&snap.service_state_blobs, sys_id);
                 if is_reserve {
                     if let Some(other) = pulse_st.reserve_linked_character_id {
                         if other != char_id {
-                            return Err(BridgeRpcError {
-                                code: "EssReserveAlreadyLinked".into(),
-                                message: format!("ESS Reserve Bank in system {sys_id} is already linked by character {other}"),
-                            });
+                            return Err(BridgeRpcError { code: "EssReserveAlreadyLinked".into(), message: format!("ESS Reserve Bank in system {sys_id} is already linked by character {other}") });
                         }
                     }
                 } else if let Some(st) = snap.system_states.get(&sys_id) {
                     if let Some(other) = st.ess_linked_character_id {
                         if other != char_id && pulse_st.reserve_linked_character_id != Some(other) {
-                            return Err(BridgeRpcError {
-                                code: "EssAlreadyLinked".into(),
-                                message: format!("ESS Main Bank in system {sys_id} is already linked by character {other}"),
-                            });
+                            return Err(BridgeRpcError { code: "EssAlreadyLinked".into(), message: format!("ESS Main Bank in system {sys_id} is already linked by character {other}") });
                         }
                     }
                 }
                 let already_linked = if is_reserve {
                     pulse_st.reserve_linked_character_id == Some(char_id)
                 } else {
-                    snap.system_states
-                        .get(&sys_id)
-                        .map(|st| {
-                            st.ess_linked_character_id == Some(char_id)
-                                && pulse_st.reserve_linked_character_id != Some(char_id)
-                        })
-                        .unwrap_or(false)
+                    snap.system_states.get(&sys_id).is_some_and(|st| st.ess_linked_character_id == Some(char_id) && pulse_st.reserve_linked_character_id != Some(char_id))
                 };
-                // Reserve Bank links require and consume an ESS Reserve Security Key (type 57714..=57721, group 4102) (`feat:pve.ess-reserve`)
-                // Unless the reserve bank is currently unlocked by a prior key activation (`P1-01`).
-                if is_reserve && !already_linked && !is_unlocked {
-                    let key_info = snap
-                        .items
-                        .values()
-                        .find(|i| {
-                            i.owner_id == char_id
-                                && i.location_id == ship_id
-                                && i.flag == InventoryFlag::Cargo
-                                && i.quantity >= 1
-                                && ((57714..=57721).contains(&i.type_id)
-                                    || ctx.sde.types.get(&i.type_id).map(|t| t.group_id == 4102).unwrap_or(false))
-                        })
-                        .map(|i| (i.item_id, i.type_id));
-                    let Some((key_id, key_type_id)) = key_info else {
-                        return Err(BridgeRpcError {
-                            code: "MissingEssReserveSecurityKey".into(),
-                            message: "Linking to the ESS Reserve Bank requires an ESS Reserve Security Key (type 57714..57721) in active ship cargo".into(),
-                        });
-                    };
-                    if let Some(key_item) = snap.items.get_mut(&key_id) {
-                        if key_item.quantity > 1 {
-                            key_item.quantity -= 1;
-                            key_item.version += 1;
-                        } else {
-                            snap.items.remove(&key_id);
-                        }
+                if is_reserve && !already_linked {
+                    if is_unlocked && pulse_st.pulses_total == 0 && pulse_st.last_pulse_sec.is_none() {
+                        pulse_st.pulses_total = 3;
+                        pulse_st.pulses_remaining = 3;
                     }
-                    let dur_mins: u64 = if matches!(key_type_id, 57715 | 57717 | 57719 | 57721) {
-                        45
+                    if is_unlocked {
+                        if pulse_st.pulses_remaining == 0 {
+                            return Err(BridgeRpcError { code: "EssReservePulsesExhausted".into(), message: "All ESS Reserve Bank pulses for this key have been exhausted".into() });
+                        }
+                        if pulse_st.last_pulse_sec.is_some_and(|last| now_unix < last.saturating_add(60)) {
+                            return Err(BridgeRpcError { code: "EssReservePulseCooldown".into(), message: "ESS Reserve Bank pulse is on 60s cooldown".into() });
+                        }
                     } else {
-                        15
-                    };
-                    unlocked_until_new = Some(now_unix + dur_mins * 60);
-                    if pulse_st.pulses_remaining == 0 {
-                        pulse_st.pulses_remaining = dur_mins as u32;
+                        let key_info = snap.items.values().find(|i| {
+                            i.owner_id == char_id && i.location_id == ship_id && i.flag == InventoryFlag::Cargo && i.quantity >= 1
+                                && ((57714..=57721).contains(&i.type_id) || ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 4102))
+                        }).map(|i| (i.item_id, i.type_id));
+                        let Some((key_id, key_type_id)) = key_info else {
+                            return Err(BridgeRpcError {
+                                code: "MissingEssReserveSecurityKey".into(),
+                                message: "Linking to the ESS Reserve Bank requires an ESS Reserve Security Key (type 57714..57721) in active ship cargo".into(),
+                            });
+                        };
+                        if let Some(key_item) = snap.items.get_mut(&key_id) {
+                            if key_item.quantity > 1 { key_item.quantity -= 1; key_item.version += 1; }
+                            else { snap.items.remove(&key_id); }
+                        }
+                        let dur_mins: u64 = if matches!(key_type_id, 57715 | 57717 | 57719 | 57721) { 45 } else { 15 };
+                        unlocked_until_new = Some(now_unix + dur_mins * 60);
+                        pulse_st.pulses_total = 1;
+                        pulse_st.pulses_remaining = 1;
+                        pulse_st.last_pulse_sec = None;
                     }
                 }
                 let Some(st) = snap.system_states.get_mut(&sys_id) else {
-                    return Err(BridgeRpcError {
-                        code: "SystemStateNotFound".into(),
-                        message: format!("No ESS state for solar system {sys_id}"),
-                    });
+                    return Err(BridgeRpcError { code: "SystemStateNotFound".into(), message: format!("No ESS state for solar system {sys_id}") });
                 };
-                let bank_available = if is_reserve {
-                    st.ess_reserve_bank.0
-                } else {
-                    st.ess_main_bank.0
-                };
+                let bank_available = if is_reserve { st.ess_reserve_bank.0 } else { st.ess_main_bank.0 };
                 if bank_available <= 0 {
-                    return Err(BridgeRpcError {
-                        code: "EssBankEmpty".into(),
-                        message: format!("ESS Bank in system {sys_id} is empty"),
-                    });
+                    return Err(BridgeRpcError { code: "EssBankEmpty".into(), message: format!("ESS Bank in system {sys_id} is empty") });
                 }
 
-                // Step 1: If not yet linked to this bank, establish link and require 5 elapsed ticks before payout (#54)
                 if !already_linked {
                     if is_reserve {
                         pulse_st.reserve_linked_character_id = Some(char_id);
                         pulse_st.reserve_link_started_tick = Some(current_tick);
-                        crate::services::space_destiny::set_ess_reserve_pulses_in_blobs(
-                            &mut snap.service_state_blobs,
-                            sys_id,
-                            &pulse_st,
-                        );
+                        crate::services::space_destiny::set_ess_reserve_pulses_in_blobs(&mut snap.service_state_blobs, sys_id, &pulse_st);
                         if st.ess_linked_character_id.is_none() {
                             st.ess_linked_character_id = Some(char_id);
                             st.ess_link_started_tick = Some(current_tick);
@@ -1388,22 +1225,14 @@ pub async fn handle_legacy_and_ess(
                         if pulse_st.reserve_linked_character_id == Some(char_id) {
                             pulse_st.reserve_linked_character_id = None;
                             pulse_st.reserve_link_started_tick = None;
-                            crate::services::space_destiny::set_ess_reserve_pulses_in_blobs(
-                                &mut snap.service_state_blobs,
-                                sys_id,
-                                &pulse_st,
-                            );
+                            crate::services::space_destiny::set_ess_reserve_pulses_in_blobs(&mut snap.service_state_blobs, sys_id, &pulse_st);
                         }
                         st.ess_linked_character_id = Some(char_id);
                         st.ess_link_started_tick = Some(current_tick);
                     }
-                    return Ok((0.0, true, unlocked_until_new));
+                    return Ok((0.0, true, unlocked_until_new, false));
                 }
-                let start_tick = if is_reserve {
-                    pulse_st.reserve_link_started_tick.unwrap_or(current_tick)
-                } else {
-                    st.ess_link_started_tick.unwrap_or(current_tick)
-                };
+                let start_tick = if is_reserve { pulse_st.reserve_link_started_tick.unwrap_or(current_tick) } else { st.ess_link_started_tick.unwrap_or(current_tick) };
                 if current_tick < start_tick.saturating_add(5) {
                     return Err(BridgeRpcError {
                         code: "EssLinkTimerNotElapsed".into(),
@@ -1411,24 +1240,28 @@ pub async fn handle_legacy_and_ess(
                     });
                 }
                 let bank = if is_reserve {
+                    if pulse_st.pulses_remaining == 0 {
+                        return Err(BridgeRpcError { code: "EssReservePulsesExhausted".into(), message: "All ESS Reserve Bank pulses for this key have been exhausted".into() });
+                    }
+                    if pulse_st.last_pulse_sec.is_some_and(|last| now_unix < last.saturating_add(60)) {
+                        return Err(BridgeRpcError { code: "EssReservePulseCooldown".into(), message: "ESS Reserve Bank pulse is on 60s cooldown".into() });
+                    }
                     pulse_st.reserve_linked_character_id = None;
                     pulse_st.reserve_link_started_tick = None;
                     if st.ess_linked_character_id == Some(char_id) {
                         st.ess_linked_character_id = None;
                         st.ess_link_started_tick = None;
                     }
-                    if pulse_st.pulses_remaining > 0 {
-                        let rem = pulse_st.pulses_remaining.max(1) as i64;
-                        let p = (st.ess_reserve_bank.0 / rem).max(1).min(st.ess_reserve_bank.0);
-                        st.ess_reserve_bank = IskCents(st.ess_reserve_bank.0.saturating_sub(p));
-                        pulse_st.pulses_remaining = pulse_st.pulses_remaining.saturating_sub(1);
-                        pulse_st.last_pulse_sec = Some(ctx.now_unix());
-                        crate::services::space_destiny::set_ess_reserve_pulses_in_blobs(&mut snap.service_state_blobs, sys_id, &pulse_st);
-                        IskCents(p)
-                    } else {
-                        crate::services::space_destiny::set_ess_reserve_pulses_in_blobs(&mut snap.service_state_blobs, sys_id, &pulse_st);
-                        let b = st.ess_reserve_bank; st.ess_reserve_bank = IskCents(0); b
+                    let rem = pulse_st.pulses_remaining.max(1) as i64;
+                    let p = (st.ess_reserve_bank.0 / rem).max(1).min(st.ess_reserve_bank.0);
+                    st.ess_reserve_bank = IskCents(st.ess_reserve_bank.0.saturating_sub(p));
+                    pulse_st.pulses_remaining = pulse_st.pulses_remaining.saturating_sub(1);
+                    pulse_st.last_pulse_sec = Some(now_unix);
+                    if pulse_st.pulses_remaining == 0 {
+                        clear_unlock = true;
                     }
+                    crate::services::space_destiny::set_ess_reserve_pulses_in_blobs(&mut snap.service_state_blobs, sys_id, &pulse_st);
+                    IskCents(p)
                 } else {
                     st.ess_linked_character_id = None;
                     st.ess_link_started_tick = None;
@@ -1438,14 +1271,15 @@ pub async fn handle_legacy_and_ess(
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.balance = ch.balance.checked_add(bank).unwrap_or(ch.balance);
                 }
-                Ok((bank.to_wire_f64(), false, unlocked_until_new))
+                Ok((bank.to_wire_f64(), false, unlocked_until_new, clear_unlock))
             });
             match res {
-                Ok((payout, link_started_only, unlocked_until_new)) => {
+                Ok((payout, link_started_only, unlocked_until_new, clear_unlock)) => {
                     if let Some(until) = unlocked_until_new {
-                        with_mut_combat_runtime(ctx, |rt| {
-                            rt.ess_reserve_unlocked_until.insert(sys_id, until);
-                        });
+                        with_mut_combat_runtime(ctx, |rt| { rt.ess_reserve_unlocked_until.insert(sys_id, until); });
+                    }
+                    if clear_unlock {
+                        with_mut_combat_runtime(ctx, |rt| { rt.ess_reserve_unlocked_until.remove(&sys_id); });
                     }
                     if payout > 0.0 {
                         let now_u = ctx.now_unix();

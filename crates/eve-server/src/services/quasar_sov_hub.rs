@@ -650,20 +650,27 @@ fn process_configuration(
 /// `true` when an item may be consumed by a hub operation: it sits inside the hub itself, or in
 /// the caller's active ship while the caller is in the hub's solar system.
 pub(crate) fn item_at_hub(snap: &WorldStateSnapshot, caller: &Caller, it: &InventoryItemRecord, hub_id: i64, hub_sys: u32) -> bool {
-    (it.owner_id == caller.cid || (caller.corp > 0 && it.owner_id == caller.corp))
-        && matches!(
+    let valid_owner = if it.owner_id == caller.cid {
+        matches!(
             it.flag,
             eve_db::InventoryFlag::Hangar
                 | eve_db::InventoryFlag::Cargo
                 | eve_db::InventoryFlag::SubSystemSlot0
-                | eve_db::InventoryFlag::CorpSAG1
-                | eve_db::InventoryFlag::CorpSAG2
-                | eve_db::InventoryFlag::CorpSAG3
-                | eve_db::InventoryFlag::CorpSAG4
-                | eve_db::InventoryFlag::CorpSAG5
-                | eve_db::InventoryFlag::CorpSAG6
-                | eve_db::InventoryFlag::CorpSAG7
         )
+    } else if caller.corp > 0 && it.owner_id == caller.corp {
+        crate::services::mining_advanced::mining_compression::caller_can_take_corp_hangar_item(
+            snap,
+            caller.cid,
+            caller.corp,
+            it.flag,
+            0,
+        )
+    } else {
+        false
+    };
+    valid_owner
+        && it.quantity >= 1
+        && it.flag != eve_db::InventoryFlag::Locked
         && !snap.is_item_locked_in_contract_or_job(it.item_id)
         && (it.location_id == hub_id
             || snap
@@ -929,7 +936,11 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                 transact(&db, |snap| {
                     let c = caller(ctx, snap)?;
                     require_roles(ctx, HUB_MANAGER_ROLES, "uninstall sovereignty hub upgrades")?;
-                    let sys = owned_structure(snap, &c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?.solar_system_id;
+                    let st = owned_structure(snap, &c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?;
+                    if st.owner_corp_id != c.corp {
+                        return Err((STATUS_FORBIDDEN, format!("Sovereignty hub {hub_id} is not owned by your corporation")));
+                    }
+                    let sys = st.solar_system_id;
                     run_simulation(snap, &sde, &pending, hub_id, ctx.now_unix());
                     let before = hub_views(snap, &sde, &[hub_id]);
                     let original = snap.clone_sov_hub(hub_id);
@@ -945,13 +956,22 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                         snap.sov_runtime.sov_hubs.insert(hub_id, original);
                         return Err(e);
                     }
+                    let out_owner = if c.corp > 0
+                        && (c.corp != 98_000_001
+                            || snap.corporations.get(&c.corp).is_some_and(|co| co.ceo_id != c.cid))
+                    {
+                        c.corp
+                    } else {
+                        c.cid
+                    };
                     snap.next_entity_id += 1;
                     let item_id = snap.next_entity_id;
                     snap.items.insert(item_id, InventoryItemRecord {
                         item_id,
                         type_id,
-                        owner_id: c.cid,
+                        owner_id: out_owner,
                         location_id: hub_id,
+                        flag: eve_db::InventoryFlag::Hangar,
                         quantity: 1,
                         ..Default::default()
                     });

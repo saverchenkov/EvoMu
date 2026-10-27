@@ -21,22 +21,12 @@ pub(crate) const AU_METERS: f64 = 149_597_870_700.0;
 pub mod fw_insurgency;
 pub use fw_insurgency::*;
 
-pub fn derive_system_site_position_from_sde(
-    ctx: &ServerContext,
-    sys_id: u32,
-    slot: usize,
-    au_scale: f64,
-) -> [f64; 3] {
+pub fn derive_system_site_position_from_sde(ctx: &ServerContext, sys_id: u32, slot: usize, au_scale: f64) -> [f64; 3] {
     let mut cels = ctx.sde.celestials_in_system(sys_id);
     cels.sort_by_key(|c| c.celestial_id);
     let base_dir = if !cels.is_empty() {
-        let c = &cels[slot % cels.len()];
-        let v = c.position;
-        if v.length_squared() > 1.0 {
-            v.normalize()
-        } else {
-            DVec3::new(0.6, 0.4, -0.5).normalize()
-        }
+        let v = cels[slot % cels.len()].position;
+        if v.length_squared() > 1.0 { v.normalize() } else { DVec3::new(0.6, 0.4, -0.5).normalize() }
     } else {
         DVec3::new(0.6, 0.4, -0.5).normalize()
     };
@@ -45,42 +35,22 @@ pub fn derive_system_site_position_from_sde(
         1 => DVec3::new(-base_dir.y, base_dir.x, base_dir.z * 0.8),
         2 => DVec3::new(base_dir.z, -base_dir.x, base_dir.y),
         _ => DVec3::new(-base_dir.x, -base_dir.z, base_dir.y),
-    }
-    .normalize_or_zero();
-    let dir = if offset_dir.length_squared() > 0.1 {
-        offset_dir
-    } else {
-        DVec3::X
-    };
+    }.normalize_or_zero();
+    let dir = if offset_dir.length_squared() > 0.1 { offset_dir } else { DVec3::X };
     let pos = dir * (au_scale * AU_METERS);
     [pos.x, pos.y, pos.z]
 }
 
 /// Evaluates server-clock respawn timers for depleted Sovereignty Hub prospecting deposits in `sys_id`.
-///
-/// Each upgrade level's deposit has a wiki-sourced respawn duration (`SovDepositDef::respawn_seconds`,
-/// e.g. `36_000`s = 10h for `Large Veldspar Deposit` per `eve-wiki/articles/Asteroids_and_ore.md:242`).
-/// When all asteroids of an active `SovOre` deposit are mined out, it transitions to `cleared = true`
-/// with `created_unix = now` and `lifetime_seconds = respawn_seconds`. Once the server clock passes
-/// `created_unix + lifetime_seconds` and the Sovereignty Hub still has the prospecting upgrade installed
-/// in `SubSystemSlot0`, a fresh replacement deposit is spawned.
 pub async fn tick_sov_prospecting_deposit_respawn(ctx: &ServerContext, sys_id: u32) {
     let has_sov_anom = ctx.db.with_snapshot(|snap| {
-        snap.cosmic_anomalies
-            .get(&sys_id)
-            .is_some_and(|list| list.iter().any(|a| a.anomaly_type == "SovOre"))
+        snap.cosmic_anomalies.get(&sys_id).is_some_and(|list| list.iter().any(|a| a.anomaly_type == "SovOre"))
     });
-    if !has_sov_anom {
-        return;
-    }
+    if !has_sov_anom { return; }
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let sov_asteroid_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
-        snap.asteroids
-            .values()
-            .filter(|a| a.solar_system_id == sys_id && a.belt_id == 0)
-            .map(|a| a.asteroid_id)
-            .collect()
+        snap.asteroids.values().filter(|a| a.solar_system_id == sys_id && a.belt_id == 0).map(|a| a.asteroid_id).collect()
     });
     let mut live_ast_states = Vec::with_capacity(sov_asteroid_ids.len());
     for aid in sov_asteroid_ids {
@@ -98,37 +68,24 @@ pub async fn tick_sov_prospecting_deposit_respawn(ctx: &ServerContext, sys_id: u
         }
     }
     let type_vol_rad = |tid: u32| -> (f64, f64) {
-        ctx.sde
-            .types
-            .get(&tid)
-            .map(|t| (t.volume.max(0.001), t.radius.max(50.0)))
-            .unwrap_or((0.001, 50.0))
+        ctx.sde.types.get(&tid).map(|t| (t.volume.max(0.001), t.radius.max(50.0))).unwrap_or((0.001, 50.0))
     };
     let sov_pos = derive_system_site_position_from_sde(ctx, sys_id, 3, 5.0);
     let now = ctx.now_unix();
 
     let newly_spawned = ctx.db.with_mut_snapshot(|snap| {
         for &(aid, rem) in &live_ast_states {
-            if let Some(ast) = snap.asteroids.get_mut(&aid) {
-                ast.quantity = rem;
-            }
+            if let Some(ast) = snap.asteroids.get_mut(&aid) { ast.quantity = rem; }
         }
-
-        let installed_upgrade = snap
-            .structures
-            .values()
-            .filter(|s| s.solar_system_id == sys_id)
-            .find_map(|s| {
-                snap.items.values().find_map(|it| {
-                    if it.location_id == s.structure_id
-                        && it.flag == eve_db::InventoryFlag::SubSystemSlot0
-                    {
-                        modelled.get(&it.type_id)
-                    } else {
-                        None
-                    }
-                })
-            });
+        let installed_upgrade = snap.structures.values().filter(|s| s.solar_system_id == sys_id).find_map(|s| {
+            snap.items.values().find_map(|it| {
+                if it.location_id == s.structure_id && it.flag == eve_db::InventoryFlag::SubSystemSlot0 {
+                    modelled.get(&it.type_id)
+                } else {
+                    None
+                }
+            })
+        });
         let default_respawn_secs = installed_upgrade.map(|(r, _)| *r).unwrap_or(36_000);
 
         let mut newly_cleared_anom_ids = Vec::new();
@@ -540,6 +497,12 @@ pub async fn handle(
                     message: format!("Faction {faction_id} is not a valid FW/Insurgency militia faction"),
                 }));
             }
+            let militia_corp_opt = ctx
+                .sde
+                .factions
+                .get(&(faction_id as u32))
+                .and_then(|f| f.militia_corporation_id)
+                .map(i64::from);
             let now_u = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let store = crate::services::fw_enlistment::load_store(snap);
@@ -557,13 +520,27 @@ pub async fn handle(
                         message: "Character not found".into(),
                     });
                 };
+                let old_corp_id = ch.corporation_id;
+                let in_player_corp = snap.corporations.contains_key(&old_corp_id);
+                if ch.war_faction_id == Some(faction_id)
+                    || (ch.war_faction_id.is_some()
+                        && (!in_player_corp
+                            || snap
+                                .item_custom_names
+                                .contains_key(&crate::services::fw_enlistment::FW_ENLISTMENT_STORE_KEY)))
+                {
+                    return Err(BridgeRpcError {
+                        code: "FwAlreadyEnlisted".into(),
+                        message: "Character is already enlisted in Factional Warfare".into(),
+                    });
+                }
                 if ch.standings.get(&faction_id).copied().unwrap_or(0.0) < 0.0 {
                     return Err(BridgeRpcError {
                         code: "FwStandingTooLow".into(),
                         message: "Standing with militia faction is below 0.0".into(),
                     });
                 }
-                if let Some(allowed) = store.corp_allowed.get(&ch.corporation_id) {
+                if let Some(allowed) = store.corp_allowed.get(&old_corp_id) {
                     if !allowed.contains(&faction_id) {
                         return Err(BridgeRpcError {
                             code: "FwFactionNotAllowedByCorp".into(),
@@ -571,9 +548,27 @@ pub async fn handle(
                         });
                     }
                 }
+                let mut new_corp_opt = None;
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.war_faction_id = Some(faction_id);
+                    if !in_player_corp {
+                        if let Some(militia_corp_id) = militia_corp_opt {
+                            if militia_corp_id != old_corp_id {
+                                ch.corporation_id = militia_corp_id;
+                                new_corp_opt = Some((old_corp_id, militia_corp_id));
+                            }
+                        }
+                    }
                     ch.version += 1;
+                }
+                if let Some((old_cid, new_cid)) = new_corp_opt {
+                    crate::services::fleet_social::fleet_social_corps::record_corp_join_in_snap_pub(
+                        snap,
+                        char_id,
+                        old_cid,
+                        new_cid,
+                        now_u,
+                    );
                 }
                 let rec = snap.fw_character_stats.entry(char_id).or_insert_with(|| {
                     eve_db::snapshot_ext::FwCharacterStatsRecord {
@@ -588,10 +583,14 @@ pub async fn handle(
                 });
                 rec.faction_id = Some(faction_id);
                 rec.enlisted_on_unix = Some(now_u);
-                Ok(())
+                Ok(new_corp_opt)
             });
-            if let Err(e) = res {
-                return Some(Err(e));
+            let new_corp_opt = match res {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if let Some((_, new_cid)) = new_corp_opt {
+                session.corporation_id = Some(new_cid);
             }
             session.war_faction_id = Some(faction_id);
             Some(Ok(PyRep::keyval([

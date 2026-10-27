@@ -638,7 +638,7 @@ pub fn handle_pi_orbitals(
                 let mut export_tax_isk = 0.0_f64;
                 let mut orbital_tid: TypeId = 2233;
                 let is_cc = destination == "CommandCenterLaunch" || destination == "CommandCenter";
-                if destination == "CustomsOffice" || destination == "Skyhook" || is_cc {
+                if destination == "CustomsOffice" || destination == "Skyhook" || destination == "Hangar" || is_cc {
                     let max_vol = if is_cc { 500.0 } else { 10_000.0 };
                     if total_vol_m3 > max_vol + 1e-6 {
                         let code = if is_cc { "CommandCenterLaunchCapacityExceeded" } else { "LaunchpadCapacityExceeded" };
@@ -660,7 +660,7 @@ pub fn handle_pi_orbitals(
                     });
                 }
 
-                if destination == "CustomsOffice" || destination == "Skyhook" || is_cc {
+                if destination == "CustomsOffice" || destination == "Skyhook" || destination == "Hangar" || is_cc {
                     let (player_poco_rate, otid) = resolve_character_orbital_access_and_tax(snap, char_id, planet_id)?;
                     orbital_tid = otid;
                     let customs_lvl = snap.skills.get(&char_id).and_then(|m| m.get(&33467)).map(|s| s.level.clamp(0, 5)).unwrap_or(0);

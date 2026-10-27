@@ -604,10 +604,7 @@ pub fn is_stronghold_invulnerable_in_db(
     solar_system_id: u32,
     ball_id: i64,
 ) -> bool {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now = db.clock().now_unix_secs();
     db.with_snapshot(|snap| {
         for camp in snap.insurgency_runtime.campaigns.values() {
             if camp.fob_solar_system_id == solar_system_id {
@@ -649,10 +646,7 @@ pub fn notify_stronghold_destruction(
     notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::cache_notifications::PendingMachoNotification)>>,
     info: &StrongholdDestructionInfo,
 ) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now = db.clock().now_unix_secs();
 
     if let Some(gw) = gw {
         let q_payload = encode_pirate_increased_notice(
@@ -780,10 +774,7 @@ pub async fn on_insurgency_stronghold_destroyed_core(
     ball_id: i64,
     killer_char_id: Option<i64>,
 ) -> Option<StrongholdDestructionInfo> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now = db.clock().now_unix_secs();
     let destruction_info = db.with_mut_snapshot(|snap| {
         let mut matched = None;
         for camp in snap.insurgency_runtime.campaigns.values_mut() {

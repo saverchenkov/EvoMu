@@ -526,6 +526,12 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
         if !has_structure_manager_role(snap, session, char_id, caller_corp) {
             return Err(err("InsufficientCorpRoles", "Fitting or unfitting structure modules requires Director or Station Manager role"));
         }
+        let caller_sys = session.solar_system_id.or_else(|| snap.characters.get(&char_id).map(|c| c.solar_system_id)).unwrap_or(0);
+        if (caller_sys != 0 && caller_sys != st.solar_system_id && session.structure_id != Some(structure_id))
+            || session.structure_id.is_some_and(|sid| sid != structure_id)
+        {
+            return Err(err("NotAtStructure", format!("Character {char_id} must be at structure {structure_id} to modify its fitting")));
+        }
         if !is_target_fit_slot {
             // Unfitting from structure
             if new_loc != structure_id && session.ship_id != Some(new_loc) {
@@ -545,6 +551,13 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
             snap.module_online_states.remove(&item_id);
             if was_service {
                 life::sync_structure(ctx, snap, &mut ext, structure_id, now);
+                if let Some(st_after) = snap.structures.get(&structure_id).cloned() {
+                    let power_after = life::power_state(ctx, snap, &ext, &st_after, now);
+                    let max_after = life::effective_max_shield(ctx, snap, &profile, structure_id, power_after);
+                    if let Some(s) = snap.structures.get_mut(&structure_id) {
+                        s.shield_hp = s.shield_hp.min(max_after);
+                    }
+                }
                 save_ext_state(snap, &ext);
             }
             return Ok((structure_id, item_id, src.type_id, false, false, was_service));
@@ -552,6 +565,17 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
         // Fitting into structure slot
         if src.owner_id != char_id && src.owner_id != st.owner_corp_id {
             return Err(err("ItemOwnershipViolation", format!("Character {char_id} does not own module {item_id}")));
+        }
+        if src.owner_id == st.owner_corp_id
+            && !crate::services::mining_advanced::mining_compression::caller_can_take_corp_hangar_item(
+                snap,
+                char_id,
+                caller_corp,
+                src.flag,
+                session.corp_role,
+            )
+        {
+            return Err(err("CrpAccessDenied", "Caller lacks corporate hangar division take permission for this module"));
         }
         if src.location_id != structure_id && session.ship_id != Some(src.location_id) {
             return Err(err("InvalidItemLocation", format!("Module {item_id} must be in structure {structure_id} or active ship cargo")));
@@ -606,11 +630,14 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
         if is_service {
             let max_before = life::effective_max_shield(ctx, snap, &profile, structure_id, life::PowerState::LowPower);
             life::sync_structure(ctx, snap, &mut ext, structure_id, now);
-            let power_now = life::power_state(ctx, snap, &ext, &st, now);
+            let st_after = snap.structures.get(&structure_id).cloned().unwrap_or(st.clone());
+            let power_now = life::power_state(ctx, snap, &ext, &st_after, now);
             let max_after = life::effective_max_shield(ctx, snap, &profile, structure_id, power_now);
-            if will_online && st.shield_hp + 1e-3 >= max_before {
-                if let Some(s) = snap.structures.get_mut(&structure_id) {
+            if let Some(s) = snap.structures.get_mut(&structure_id) {
+                if will_online && st.shield_hp + 1e-3 >= max_before {
                     s.shield_hp = max_after;
+                } else {
+                    s.shield_hp = s.shield_hp.min(max_after);
                 }
             }
             save_ext_state(snap, &ext);
@@ -653,6 +680,12 @@ pub fn handle_structure_module_online(ctx: &ServerContext, session: &mut Session
         if !has_structure_manager_role(snap, session, char_id, caller_corp) {
             return Err(err("InsufficientCorpRoles", "Onlining or offlining structure modules requires Director or Station Manager role"));
         }
+        let caller_sys = session.solar_system_id.or_else(|| snap.characters.get(&char_id).map(|c| c.solar_system_id)).unwrap_or(0);
+        if (caller_sys != 0 && caller_sys != st.solar_system_id && session.structure_id != Some(structure_id))
+            || session.structure_id.is_some_and(|sid| sid != structure_id)
+        {
+            return Err(err("NotAtStructure", format!("Character {char_id} must be at structure {structure_id} to online/offline modules")));
+        }
         let item = snap.items.get(&module_id).cloned().filter(|i| i.location_id == structure_id).ok_or_else(|| err("ModuleNotFound", format!("Module {module_id} not fitted to structure {structure_id}")))?;
         let is_service = (164..=171).contains(&(item.flag as u16));
         if set_online && is_service {
@@ -664,11 +697,14 @@ pub fn handle_structure_module_online(ctx: &ServerContext, session: &mut Session
         let max_before = life::effective_max_shield(ctx, snap, &profile, structure_id, life::power_state(ctx, snap, &ext, &st, now));
         snap.module_online_states.insert(module_id, set_online);
         life::sync_structure(ctx, snap, &mut ext, structure_id, now);
-        let power_after = life::power_state(ctx, snap, &ext, &st, now);
+        let st_after = snap.structures.get(&structure_id).cloned().unwrap_or(st.clone());
+        let power_after = life::power_state(ctx, snap, &ext, &st_after, now);
         let max_after = life::effective_max_shield(ctx, snap, &profile, structure_id, power_after);
-        if set_online && st.shield_hp + 1e-3 >= max_before {
-            if let Some(s) = snap.structures.get_mut(&structure_id) {
+        if let Some(s) = snap.structures.get_mut(&structure_id) {
+            if set_online && st.shield_hp + 1e-3 >= max_before {
                 s.shield_hp = max_after;
+            } else {
+                s.shield_hp = s.shield_hp.min(max_after);
             }
         }
         save_ext_state(snap, &ext);
