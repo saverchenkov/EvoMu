@@ -606,11 +606,12 @@ impl EsiRouter {
                         .get(&path_corp_id)
                         .map(|corp| {
                             corp.ceo_id == claims.character_id
-                                || corp
+                                || (corp
                                     .member_roles
                                     .get(&claims.character_id)
                                     .copied()
                                     .unwrap_or(0)
+                                    & eve_db::corp_roles::ROLE_DIRECTOR)
                                     != 0
                         })
                         .unwrap_or(false)
@@ -618,10 +619,9 @@ impl EsiRouter {
                             .corp_role_assignments
                             .get(&(path_corp_id, claims.character_id))
                             .map(|r| {
-                                r.roles != 0
-                                    || r.roles_at_hq != 0
-                                    || r.roles_at_base != 0
-                                    || r.roles_at_other != 0
+                                ((r.roles | r.roles_at_hq | r.roles_at_base | r.roles_at_other)
+                                    & eve_db::corp_roles::ROLE_DIRECTOR)
+                                    != 0
                             })
                             .unwrap_or(false);
                     (c_corp, has_role)
