@@ -303,14 +303,20 @@ pub(crate) async fn handle_multi_add(
             ("items", PyRep::List(Vec::new())),
         ]));
     }
-    let Some(new_loc) = args
-        .get(1)
-        .and_then(|a| a.as_i64())
-        .or_else(|| bound_entry.map(|b| b.object_id))
-        .or(session.ship_id)
-        .or(session.station_id)
-        .or(session.structure_id)
-    else {
+    let first_src_loc = item_ids
+        .first()
+        .and_then(|&id| ctx.db.with_snapshot(|s| s.items.get(&id).map(|i| i.location_id)));
+    let Some(new_loc) = (match (
+        args.get(1).and_then(|a| a.as_i64()),
+        bound_entry.map(|b| b.object_id),
+        first_src_loc,
+    ) {
+        (Some(a1), Some(bid), Some(sloc)) if a1 == sloc && bid != sloc => Some(bid),
+        (a1, bid, _) => a1.or(bid),
+    })
+    .or(session.ship_id)
+    .or(session.station_id)
+    .or(session.structure_id) else {
         return Err(BridgeRpcError {
             code: "InvalidLocation".into(),
             message: "MultiAdd requires target location".into(),
@@ -346,6 +352,21 @@ pub(crate) async fn handle_multi_add(
         fitting_containers_ships::validate_container_and_bay_move(
             ctx, char_id, item_id, new_loc, flag_u16, kwargs, None,
         )?;
+    }
+    let mut looted_from_space_ids: HashSet<i64> = HashSet::new();
+    let mut any_foreign_theft = false;
+    for &item_id in &item_ids {
+        let src_opt = ctx.db.with_snapshot(|snap| snap.items.get(&item_id).cloned());
+        if let Some(src_item) = src_opt {
+            let (from_space, foreign_theft) =
+                evaluate_space_wreck_or_jetcan_loot(ctx, char_id, &src_item)?;
+            if from_space {
+                looted_from_space_ids.insert(item_id);
+            }
+            if foreign_theft {
+                any_foreign_theft = true;
+            }
+        }
     }
     let is_ship_hold = matches!(flag_u16, 5 | 87 | 158 | 133..=151 | 179 | 181 | 182 | 185);
     let eval_cargo_cap = if flag_u16 == 5 {
@@ -458,7 +479,7 @@ pub(crate) async fn handle_multi_add(
                     message: format!("Item {item_id} not found"),
                 });
             };
-            if item.owner_id != char_id {
+            if item.owner_id != char_id && !looted_from_space_ids.contains(&item_id) {
                 return Err(BridgeRpcError {
                     code: "ItemOwnershipViolation".into(),
                     message: format!("Character {char_id} is not authorized to move item {item_id}"),
@@ -690,6 +711,7 @@ pub(crate) async fn handle_multi_add(
             } else if (116..=122).contains(&old_flag_u16)
                 || matches!(flag, InventoryFlag::Hangar | InventoryFlag::Cargo)
                 || is_ship_hold
+                || looted_from_space_ids.contains(&item_id)
             {
                 it.owner_id = char_id;
             }
@@ -716,8 +738,110 @@ pub(crate) async fn handle_multi_add(
     if is_ship_hold || matches!(flag_u16, 90 | 155) {
         ctx.invalidate_ship_fitting(new_loc);
     }
+    if any_foreign_theft {
+        apply_space_loot_suspect_flag(ctx, session, char_id);
+    }
     Ok(PyRep::keyval([
         ("movedCount", PyRep::Integer(moved.len() as i64)),
         ("items", PyRep::List(moved.into_iter().map(PyRep::Integer).collect())),
+        ("suspectFlagged", PyRep::Bool(any_foreign_theft)),
     ]))
+}
+
+pub(crate) fn apply_space_loot_suspect_flag(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+) {
+    let until = ctx.now_unix_secs().saturating_add(900);
+    ctx.crimewatch
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_create(char_id)
+        .suspect_flag_until_unix = until;
+    let sys_id = session.solar_system_id.or_else(|| {
+        ctx.db
+            .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
+            .filter(|&s| s > 0)
+    });
+    if let Some(sys_id) = sys_id {
+        // V24 client derives `OnSuspectsAndCriminalsUpdate` from `OnSystemCriminalFlagUpdates`.
+        let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[], &[char_id], &[]);
+    }
+}
+
+/// Evaluates CrimeWatch theft legality when taking an item from a space wreck (`group_id == 186`, any flag)
+/// or jetcan (`type_id == 23`) (`feat:lifecycle.wreck-take_item`).
+pub(crate) fn evaluate_space_wreck_or_jetcan_loot(
+    ctx: &ServerContext,
+    char_id: i64,
+    src_item: &eve_db::InventoryItemRecord,
+) -> Result<(bool, bool), BridgeRpcError> {
+    let now_unix = ctx.now_unix_secs();
+    let info = ctx.db.with_snapshot(|snap| {
+        let ch_sys = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.solar_system_id as i64)
+            .unwrap_or(0);
+        let cont = snap.items.get(&src_item.location_id)?;
+        let is_wreck = ctx
+            .sde
+            .types
+            .get(&cont.type_id)
+            .is_some_and(|t| t.group_id == 186);
+        if !(cont.type_id == 23 || is_wreck) || cont.location_id != ch_sys || ch_sys <= 0 {
+            return None;
+        }
+        let owner_id = if cont.owner_id != 0 {
+            cont.owner_id
+        } else {
+            src_item.owner_id
+        };
+        let c1 = snap.characters.get(&char_id).map(|c| c.corporation_id);
+        let c2 = snap.characters.get(&owner_id).map(|c| c.corporation_id);
+        let same_player_corp = (c1.is_some() && c1 == c2 && c1.unwrap_or(0) > 2_000_000)
+            || (owner_id > 2_000_000 && c1 == Some(owner_id));
+        let same_fleet = snap
+            .fleets
+            .values()
+            .any(|f| f.members.contains(&char_id) && f.members.contains(&owner_id));
+        Some((
+            cont.item_id,
+            owner_id,
+            cont.owner_id == 0,
+            same_player_corp || same_fleet,
+        ))
+    });
+    let Some((cont_id, owner_id, snap_abandoned, same_corp_or_fleet)) = info else {
+        return Ok((false, false));
+    };
+    let owner_is_criminal = ctx
+        .crimewatch
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_create(owner_id)
+        .is_criminal(now_unix);
+    let rt_abandoned = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        rt.container_lifetimes
+            .get(&cont_id)
+            .is_some_and(|c| c.is_abandoned)
+    });
+    let is_abandoned = snap_abandoned || owner_is_criminal || rt_abandoned;
+    if owner_id == char_id || is_abandoned || same_corp_or_fleet {
+        return Ok((true, false));
+    }
+    let safety = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        rt.safety_levels
+            .get(&char_id)
+            .copied()
+            .unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red)
+    });
+    if safety == crate::services::combat_crimewatch::SafetyLevel::Green {
+        return Err(BridgeRpcError {
+            code: "SafetyLevelRestricted".into(),
+            message: "Safety Green blocks taking items from a foreign wreck or container that triggers a Suspect flag".into(),
+        });
+    }
+    Ok((true, true))
 }

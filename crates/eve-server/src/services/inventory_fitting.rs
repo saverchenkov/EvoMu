@@ -267,7 +267,11 @@ pub async fn handle(
             let Some(mut item_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Add requires itemID".into() }));
             };
-            let Some(new_loc) = args.get(1).and_then(|a| a.as_i64()).or_else(|| bound_entry.map(|b| b.object_id)).or(session.ship_id).or(session.station_id).or(session.structure_id) else {
+            let mut source_item_opt = ctx.db.with_snapshot(|snap| snap.items.get(&item_id).cloned());
+            let Some(new_loc) = (match (args.get(1).and_then(|a| a.as_i64()), bound_entry.map(|b| b.object_id), source_item_opt.as_ref().map(|i| i.location_id)) {
+                (Some(a1), Some(bid), Some(sloc)) if a1 == sloc && bid != sloc => Some(bid),
+                (a1, bid, _) => a1.or(bid),
+            }).or(session.ship_id).or(session.station_id).or(session.structure_id) else {
                 return Some(Err(BridgeRpcError { code: "InvalidLocation".into(), message: "Add requires a target locationID, bound inventory, or active ship/station".into() }));
             };
             let raw_flag_opt = args.get(2).and_then(|a| a.as_i64()).or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()));
@@ -292,7 +296,6 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError::user_error("InvalidQuantity")));
                 }
             }
-            let mut source_item_opt = ctx.db.with_snapshot(|snap| snap.items.get(&item_id).cloned());
             let split_qty_opt = requested_qty_opt.and_then(|q| {
                 let q_i32 = i32::try_from(q).ok()?;
                 source_item_opt.as_ref().and_then(|src| {
@@ -328,30 +331,14 @@ pub async fn handle(
                     }
                 }
             }
-            let (looted_from_space, looted_foreign_jetcan) = source_item_opt.as_ref().map(|src_item| {
-                ctx.db.with_snapshot(|snap| {
-                    let ch_sys = snap
-                        .characters
-                        .get(&char_id)
-                        .map(|c| c.solar_system_id as i64)
-                        .unwrap_or(0);
-                    snap.items.get(&src_item.location_id).and_then(|cont| {
-                        let is_wreck = ctx
-                            .sde
-                            .types
-                            .get(&cont.type_id)
-                            .is_some_and(|t| t.group_id == 186);
-                        if (cont.type_id == 23 || is_wreck)
-                            && cont.flag == InventoryFlag::None
-                            && cont.location_id == ch_sys
-                        {
-                            Some((true, cont.owner_id != char_id || src_item.owner_id != char_id))
-                        } else {
-                            None
-                        }
-                    })
-                }).unwrap_or((false, false))
-            }).unwrap_or((false, false));
+            let (looted_from_space, looted_foreign_jetcan) = if let Some(src_item) = &source_item_opt {
+                match super::inventory_stacking::evaluate_space_wreck_or_jetcan_loot(ctx, char_id, src_item) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                }
+            } else {
+                (false, false)
+            };
 
             let is_fitting_slot = matches!(flag_u16, 11..=34 | 92..=94 | 125..=132);
             let src_is_fitted_module = source_item_opt.as_ref().is_some_and(|src_item| {
@@ -844,7 +831,7 @@ pub async fn handle(
                     if let Some(parent) = snap.items.get(&moving.location_id) {
                         let p_cat = ctx.sde.types.get(&parent.type_id).map(|t| t.category_id).unwrap_or(0);
                         let p_grp = ctx.sde.types.get(&parent.type_id).map(|t| t.group_id).unwrap_or(0);
-                        let is_foreign_unit = (p_cat == 22 || matches!(p_grp, 12 | 340 | 448 | 649)) && parent.owner_id != char_id && parent.owner_id != 0;
+                        let is_foreign_unit = (p_cat == 22 || matches!(p_grp, 12 | 340 | 448 | 649)) && parent.type_id != 23 && parent.owner_id != char_id && parent.owner_id != 0;
                         let is_foreign_ship = p_cat == 6 && parent.owner_id != char_id;
                         if is_foreign_unit {
                             is_storage_auth_and_near(parent.item_id)
@@ -1162,17 +1149,7 @@ pub async fn handle(
                         });
                     }
                     if looted_foreign_jetcan {
-                        let now_unix = ctx.now_unix_secs();
-                        let until = now_unix.saturating_add(900);
-                        ctx.crimewatch
-                            .write()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .get_or_create(char_id)
-                            .suspect_flag_until_unix = until;
-                        if let Some(sys_id) = session.solar_system_id {
-                            // V24 client derives `OnSuspectsAndCriminalsUpdate` from this.
-                            let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[], &[char_id], &[]);
-                        }
+                        super::inventory_stacking::apply_space_loot_suspect_flag(ctx, session, char_id);
                     }
                     if let Some(ship_id) = session.ship_id {
                         ctx.invalidate_ship_fitting(ship_id);
@@ -1262,17 +1239,7 @@ pub async fn handle(
                         }
                     });
                     if looted_foreign_jetcan {
-                        let now_unix = ctx.now_unix_secs();
-                        let until = now_unix.saturating_add(900);
-                        ctx.crimewatch
-                            .write()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .get_or_create(char_id)
-                            .suspect_flag_until_unix = until;
-                        if let Some(sys_id) = session.solar_system_id {
-                            // V24 client derives `OnSuspectsAndCriminalsUpdate` from this.
-                            let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[], &[char_id], &[]);
-                        }
+                        super::inventory_stacking::apply_space_loot_suspect_flag(ctx, session, char_id);
                     }
                     if let Some(ship_id) = session.ship_id {
                         ctx.invalidate_ship_fitting(ship_id);
@@ -1284,45 +1251,24 @@ pub async fn handle(
                         "charid",
                         vec![
                             PyRep::keyval([
-                                ("itemID", PyRep::Integer(updated.item_id)),
-                                ("typeID", PyRep::Integer(updated.type_id as i64)),
-                                ("locationID", PyRep::Integer(updated.location_id)),
-                                ("flagID", PyRep::Integer(updated.flag as i64)),
+                                ("itemID", PyRep::Integer(updated.item_id)), ("typeID", PyRep::Integer(updated.type_id as i64)),
+                                ("locationID", PyRep::Integer(updated.location_id)), ("flagID", PyRep::Integer(updated.flag as i64)),
                                 ("quantity", PyRep::Integer(updated.quantity as i64)),
                             ]),
-                            PyRep::Dict(vec![
-                                (PyRep::Integer(3), PyRep::Integer(old_loc_id)),
-                                (PyRep::Integer(4), PyRep::Integer(old_flag_id)),
-                            ]),
+                            PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(old_loc_id)), (PyRep::Integer(4), PyRep::Integer(old_flag_id))]),
                         ],
                     );
                     ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),
                         "ProcessInventoryChange",
                         "charid",
-                        vec![
-                            PyRep::Integer(updated.item_id),
-                            PyRep::Integer(updated.location_id),
-                            PyRep::Integer(updated.flag as i64),
-                        ],
+                        vec![PyRep::Integer(updated.item_id), PyRep::Integer(updated.location_id), PyRep::Integer(updated.flag as i64)],
                     );
 
                     if is_fitting_slot {
-                        ctx.db.with_mut_snapshot(|snap| {
-                            snap.module_online_states.insert(item_id, online);
-                        });
-                        ctx.notify(
-                            crate::router::NotificationTarget::Character(char_id),
-                            "OnModuleFitted",
-                            "charid",
-                            vec![PyRep::Integer(item_id), PyRep::Integer(flag as i64)],
-                        );
-                        ctx.notify(
-                            crate::router::NotificationTarget::Character(char_id),
-                            "OnModuleAttributeChanges",
-                            "charid",
-                            vec![PyRep::Integer(item_id)],
-                        );
+                        ctx.db.with_mut_snapshot(|snap| { snap.module_online_states.insert(item_id, online); });
+                        ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnModuleFitted", "charid", vec![PyRep::Integer(item_id), PyRep::Integer(flag as i64)]);
+                        ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnModuleAttributeChanges", "charid", vec![PyRep::Integer(item_id)]);
                     } else if let Some(src_item) = &source_item_opt {
                         if matches!(src_item.flag as u16, 11..=34 | 92..=94 | 125..=132) {
                             ctx.db.with_mut_snapshot(|snap| {
@@ -1332,16 +1278,12 @@ pub async fn handle(
                             });
                             ctx.invalidate_ship_fitting(old_loc_id);
                             let _ = ctx.get_or_rebuild_ship_fitting(char_id, old_loc_id);
-                            // `OnModuleUnfitted` is derived client-side from the `OnItemChange`
-                            // (ixLocationID/ixFlag change) already sent above for this move.
                         }
                     }
 
                     Some(Ok(PyRep::keyval([
-                        ("itemID", PyRep::Integer(updated.item_id)),
-                        ("locationID", PyRep::Integer(updated.location_id)),
-                        ("flagID", PyRep::Integer(updated.flag as i64)),
-                        ("version", PyRep::Integer(updated.version as i64)),
+                        ("itemID", PyRep::Integer(updated.item_id)), ("locationID", PyRep::Integer(updated.location_id)),
+                        ("flagID", PyRep::Integer(updated.flag as i64)), ("version", PyRep::Integer(updated.version as i64)),
                         ("suspectFlagged", PyRep::Bool(looted_foreign_jetcan)),
                     ])))
                 }

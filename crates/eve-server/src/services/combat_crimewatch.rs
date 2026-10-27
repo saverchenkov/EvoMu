@@ -802,14 +802,35 @@ pub fn is_legal_war_or_suspect_target(
     let att_entity = att.alliance_id.unwrap_or(att.corporation_id);
     let vic_entity = vic.alliance_id.unwrap_or(vic.corporation_id);
     snap.wars.values().any(|w| {
-        w.active
-            && now_unix >= w.started_unix.saturating_add(86_400)
-            && ((w.aggressor_corp_id == att_entity && w.defender_corp_id == vic_entity)
-                || (w.aggressor_corp_id == vic_entity && w.defender_corp_id == att_entity)
-                || (w.aggressor_corp_id == att.corporation_id
-                    && w.defender_corp_id == vic.corporation_id)
-                || (w.aggressor_corp_id == vic.corporation_id
-                    && w.defender_corp_id == att.corporation_id))
+        if !w.active {
+            return false;
+        }
+        if snap
+            .war_state
+            .wars
+            .get(&w.war_id)
+            .and_then(|m| m.finish_at_unix)
+            .is_some_and(|f| now_unix >= f)
+        {
+            return false;
+        }
+        if !w.mutual && now_unix < w.started_unix.saturating_add(86_400) {
+            return false;
+        }
+        let is_agg = |ent: i64, corp: i64| w.aggressor_corp_id == ent || w.aggressor_corp_id == corp;
+        let is_def_or_ally = |ent: i64, corp: i64| {
+            w.defender_corp_id == ent
+                || w.defender_corp_id == corp
+                || snap.war_state.negotiations.iter().any(|n| {
+                    n.war_id == w.war_id
+                        && n.kind == eve_db::PersistedNegKind::Ally
+                        && n.status == "Accepted"
+                        && now_unix >= n.effective_unix.unwrap_or(0)
+                        && (n.from_corp == ent || n.from_corp == corp)
+                })
+        };
+        (is_agg(att_entity, att.corporation_id) && is_def_or_ally(vic_entity, vic.corporation_id))
+            || (is_agg(vic_entity, vic.corporation_id) && is_def_or_ally(att_entity, att.corporation_id))
     })
 }
 

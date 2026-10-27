@@ -142,22 +142,22 @@ async fn handle_wormhole_jump(
 
     let wh_arg_i64 = args.first().and_then(|a| a.as_i64());
     let wh_arg_str = args.first().and_then(|a| a.as_str());
+    let now_unix = ctx.now_unix();
     if wh_arg_i64 != Some(750_000_001) {
+        crate::services::combat_crimewatch::check_crimewatch_action_restriction(
+            ctx, char_id, ship_id, old_sys, "wormhole_jump", now_unix,
+        )?;
         if let Some(res) = execute_cosmic_wormhole_jump(
-            ctx,
-            session,
-            char_id,
-            old_sys,
-            ship_id,
-            current_ball.clone(),
-            wh_arg_i64,
-            wh_arg_str,
+            ctx, session, char_id, old_sys, ship_id, current_ball.clone(), wh_arg_i64, wh_arg_str,
         )
         .await
         {
             return res;
         }
     }
+    crate::services::combat_crimewatch::check_crimewatch_action_restriction(
+        ctx, char_id, ship_id, old_sys, "wh_jump", now_unix,
+    )?;
 
     let Some(wh_ball_id) = wh_arg_i64 else {
         return Err(BridgeRpcError {
@@ -165,15 +165,11 @@ async fn handle_wormhole_jump(
             message: "WormholeJump requires an explicit wormhole ballID argument".into(),
         });
     };
-    let Some((_, wh_ball)) = (match old_handle.get_ball_snapshot(wh_ball_id).await {
-        Ok(v) => v,
-        Err(e) => {
-            return Err(BridgeRpcError {
-                code: "DestinyQueryFailed".into(),
-                message: e,
-            })
-        }
-    }) else {
+    let Some((_, wh_ball)) = old_handle
+        .get_ball_snapshot(wh_ball_id)
+        .await
+        .map_err(|e| BridgeRpcError { code: "DestinyQueryFailed".into(), message: e })?
+    else {
         return Err(BridgeRpcError {
             code: "WormholeNotPresent".into(),
             message: format!("No wormhole present in solar system {old_sys}"),
@@ -190,15 +186,11 @@ async fn handle_wormhole_jump(
     if dist > 2_500.0 {
         return Err(BridgeRpcError {
             code: "OutsideWormholeJumpRange".into(),
-            message: format!(
-                "Ship is {:.1} m from wormhole (must be <= 2500 m)",
-                dist
-            ),
+            message: format!("Ship is {:.1} m from wormhole (must be <= 2500 m)", dist),
         });
     }
 
     let ship_mass = current_ball.mass;
-    let now_unix = ctx.now_unix();
     if let Some(_active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
         return Err(BridgeRpcError {
             code: "SessionChangeTimerActive".into(),
@@ -802,19 +794,9 @@ async fn handle_cmd_jump_to_structure_beacon(
     }
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
     let now_check = ctx.now_unix();
-    if ctx
-        .crimewatch
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .states
-        .get(&char_id)
-        .is_some_and(|st| st.is_weapon_timer_active(now_check))
-    {
-        return Err(BridgeRpcError {
-            code: "WeaponsTimerActive".into(),
-            message: "Cannot jump while a Weapons Timer is active".into(),
-        });
-    }
+    crate::services::combat_crimewatch::check_crimewatch_action_restriction(
+        ctx, char_id, ship_id, cur_sys_id, "jump_drive", now_check,
+    )?;
 
     let target_struct = ctx
         .db
@@ -947,9 +929,9 @@ fn validate_beacon_and_distance(
     }
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
     let now_check = ctx.now_unix();
-    if ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner()).states.get(&char_id).is_some_and(|st| st.is_weapon_timer_active(now_check)) {
-        return Err(BridgeRpcError { code: "WeaponsTimerActive".into(), message: "Cannot bridge or jump while a Weapons Timer is active".into() });
-    }
+    crate::services::combat_crimewatch::check_crimewatch_action_restriction(
+        ctx, char_id, ship_id, cur_sys_id, "jump_drive", now_check,
+    )?;
     let (target_sys_hint, target_struct_id) = if args.len() >= 2 {
         (args.first().and_then(|a| a.as_i64()).map(|s| s as u32), args.get(1).and_then(|a| a.as_i64()).unwrap_or(0))
     } else {
@@ -1216,19 +1198,9 @@ async fn handle_cmd_beacon_jump_fleet(
     }
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
     let now_check = ctx.now_unix();
-    if ctx
-        .crimewatch
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .states
-        .get(&char_id)
-        .is_some_and(|st| st.is_weapon_timer_active(now_check))
-    {
-        return Err(BridgeRpcError {
-            code: "WeaponsTimerActive".into(),
-            message: "Cannot jump while a Weapons Timer is active".into(),
-        });
-    }
+    crate::services::combat_crimewatch::check_crimewatch_action_restriction(
+        ctx, char_id, ship_id, cur_sys_id, "jump_drive", now_check,
+    )?;
 
     let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
     let _target_ship_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);

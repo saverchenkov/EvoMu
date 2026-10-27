@@ -58,6 +58,22 @@ impl SystemHandle {
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
     }
 
+    pub fn try_stop_ball(&self, ball_id: BallId) {
+        if let Ok(mut bp) = self.ballpark.write() {
+            let _ = bp.set_mode(ball_id, MovementMode::Stop);
+            if let Some(b) = bp.balls.get_mut(&ball_id) {
+                b.speed_fraction = 0.0;
+                b.velocity = DVec3::ZERO;
+            }
+        }
+        let (tx, _) = oneshot::channel();
+        let _ = self.cmd_tx.try_send(SystemCommand::SetMovementMode {
+            ball_id,
+            mode: MovementMode::Stop,
+            reply: tx,
+        });
+    }
+
     pub async fn spawn_ball(&self, ball: Ball) -> Result<u64, String> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx

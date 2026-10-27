@@ -626,7 +626,9 @@ pub async fn handle_fighters(
                         it.location_id = sys_id as i64;
                         it.flag = eve_db::InventoryFlag::None;
                     }
+                    crate::sp6_lifecycle::record_drone_ball_meta_in_snap(snap, fighter_item_id, ball_id);
                     snap.item_positions.insert(fighter_item_id, ball_pos);
+                    snap.item_positions.insert(ball_id, ball_pos);
                 });
                 ctx.active_fighters.write().unwrap().insert(ball_id, squad);
                 launched_ball_ids.push(PyRep::Integer(ball_id));
@@ -979,6 +981,8 @@ pub async fn handle_fighters(
                         && target_fighter_id.map(|tid| tid == f.ball_id).unwrap_or(true)
                     {
                         f.is_abandoned = true;
+                        f.parent_ship_id = 0;
+                        f.target_id = None;
                         abandoned.push(f.ball_id);
                         abandoned_item_ids.push(f.item_id);
                     }
@@ -996,6 +1000,7 @@ pub async fn handle_fighters(
                 });
             }
             for &bid in &abandoned {
+                sys_handle.try_stop_ball(bid);
                 let _ = sys_handle
                     .set_movement_mode(bid, eve_destiny::MovementMode::Stop)
                     .await;
@@ -1047,7 +1052,11 @@ async fn handle_scoop_abandoned_fighter(
     };
     let squad = {
         let fighters = ctx.active_fighters.read().unwrap();
-        let Some(squad) = fighters.get(&target_fighter_id).cloned() else {
+        let Some(squad) = fighters
+            .get(&target_fighter_id)
+            .or_else(|| fighters.values().find(|f| f.item_id == target_fighter_id))
+            .cloned()
+        else {
             return Some(Err(BridgeRpcError {
                 code: "FighterNotFound".into(),
                 message: format!("Fighter squadron {target_fighter_id} not found in space"),
@@ -1075,8 +1084,24 @@ async fn handle_scoop_abandoned_fighter(
         squad
     };
 
-    let f_pos = ctx.systems.get_ball_position_sync(sys_id, squad.ball_id);
-    let s_pos = ctx.systems.get_ball_position_sync(sys_id, ship_id);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let f_pos = sys_handle.get_ball_position_sync(squad.ball_id).or_else(|| {
+        ctx.db.with_snapshot(|snap| {
+            snap.item_positions
+                .get(&squad.ball_id)
+                .or_else(|| snap.item_positions.get(&squad.item_id))
+                .copied()
+                .map(DVec3::from_array)
+        })
+    });
+    let s_pos = sys_handle.get_ball_position_sync(ship_id).or_else(|| {
+        ctx.db.with_snapshot(|snap| {
+            snap.item_positions
+                .get(&ship_id)
+                .copied()
+                .map(DVec3::from_array)
+        })
+    });
     let Some(f_pos) = f_pos else {
         return Some(Err(BridgeRpcError {
             code: "FighterNotInSystem".into(),
@@ -1134,6 +1159,8 @@ async fn handle_scoop_abandoned_fighter(
             item.flag = InventoryFlag::FighterBay;
             item.version += 1;
         }
+        snap.item_positions.remove(&squad.item_id);
+        snap.item_positions.remove(&squad.ball_id);
         Ok(())
     });
     if let Err(e) = db_res {
@@ -1142,9 +1169,8 @@ async fn handle_scoop_abandoned_fighter(
 
     {
         let mut fighters = ctx.active_fighters.write().unwrap();
-        fighters.remove(&target_fighter_id);
+        fighters.remove(&squad.ball_id);
     }
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let _ = sys_handle.remove_ball(squad.ball_id).await;
     Some(Ok(PyRep::Bool(true)))
 }

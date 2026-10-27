@@ -178,251 +178,7 @@ pub async fn activate_salvager_or_tractor_module(
     Some(res)
 }
 
-/// Core wreck salvaging cycle shared by Salvager modules (`25861`/`30836`) and Salvage Drones (`32787`)
-/// (`feat:modules.salvager`, `feat:combat.wreck-size-salvage-difficulty`, `feat:drones.salvage-drones`).
-pub async fn execute_wreck_salvage_cycle(
-    ctx: &ServerContext,
-    sys_id: u32,
-    char_id: i64,
-    ship_id: i64,
-    wreck_id: i64,
-    salvager_type_id_opt: Option<u32>,
-) -> Result<PyRep, BridgeRpcError> {
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let wreck_ball_opt = sys_handle.get_ball_snapshot(wreck_id).await.ok().flatten().map(|(_, b)| b);
-    let wreck_type_id = ctx.db.with_snapshot(|snap| {
-        let Some(it) = snap.items.get(&wreck_id) else {
-            return Err(BridgeRpcError {
-                code: "TargetNotInSpace".into(),
-                message: format!("Target wreck {wreck_id} does not exist"),
-            });
-        };
-        if it.location_id != sys_id as i64 {
-            return Err(BridgeRpcError {
-                code: "TargetNotInSpace".into(),
-                message: format!("Target {wreck_id} is not in solar system {sys_id}"),
-            });
-        }
-        let is_wreck = it.type_id == 26468
-            || ctx
-                .sde
-                .types
-                .get(&it.type_id)
-                .is_some_and(|t| t.group_id == 186);
-        if !is_wreck {
-            return Err(BridgeRpcError {
-                code: "InvalidSalvageTarget".into(),
-                message: format!("Target {wreck_id} (type {}) is not a salvageable wreck", it.type_id),
-            });
-        }
-        Ok(it.type_id)
-    })?;
-
-    if salvager_type_id_opt.is_none() {
-        let Some(ref wb) = wreck_ball_opt else {
-            return Err(BridgeRpcError {
-                code: "TargetNotInSpace".into(),
-                message: format!("Target wreck {wreck_id} is not in space in solar system {sys_id}"),
-            });
-        };
-        if let Some((_, sb)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() {
-            let max_drone_range =
-                super::compute_drone_control_range(ctx, char_id, ship_id).max(60_000.0);
-            let dist = sb.position.distance(wb.position);
-            if dist > max_drone_range {
-                return Err(BridgeRpcError {
-                    code: "TargetOutOfRange".into(),
-                    message: format!(
-                        "Wreck {wreck_id} is {dist:.1} m away (exceeds salvage drone range {max_drone_range:.1} m)"
-                    ),
-                });
-            }
-        }
-    }
-
-    let wreck_difficulty_bonus = ctx
-        .sde
-        .types
-        .get(&wreck_type_id)
-        .and_then(|t| t.default_attributes.get(&901).copied())
-        .unwrap_or(20.0);
-
-    let mod_access_bonus = salvager_type_id_opt
-        .and_then(|tid| ctx.sde.types.get(&tid))
-        .and_then(|t| {
-            t.default_attributes
-                .get(&902)
-                .copied()
-                .or_else(|| t.default_attributes.get(&901).copied())
-        })
-        .unwrap_or(3.0); // Salvage Drone I base access bonus per cycle
-
-    let (salvaging_skill_lv, rig_access_bonus) = ctx.db.with_snapshot(|snap| {
-        let sk_lv = snap
-            .skills
-            .get(&char_id)
-            .and_then(|m| m.get(&3438))
-            .map(|s| s.level as f64)
-            .unwrap_or(0.0);
-        let rig_bonus: f64 = snap
-            .items
-            .values()
-            .filter(|i| {
-                i.location_id == ship_id
-                    && matches!(
-                        i.flag,
-                        InventoryFlag::RigSlot0 | InventoryFlag::RigSlot1 | InventoryFlag::RigSlot2
-                    )
-            })
-            .filter_map(|i| ctx.sde.types.get(&i.type_id))
-            .filter_map(|t| t.default_attributes.get(&901).copied())
-            .sum();
-        (sk_lv, rig_bonus)
-    });
-
-    let access_chance_pct =
-        mod_access_bonus + 5.0 * salvaging_skill_lv + rig_access_bonus + wreck_difficulty_bonus;
-    if access_chance_pct <= 0.0 {
-        return Ok(PyRep::keyval([
-            ("wreckID", PyRep::Integer(wreck_id)),
-            ("wreckTypeID", PyRep::Integer(wreck_type_id as i64)),
-            ("wreckDifficultyBonus", PyRep::Real(wreck_difficulty_bonus)),
-            ("accessChancePct", PyRep::Real(access_chance_pct)),
-            ("salvaged", PyRep::Bool(false)),
-            ("reason", PyRep::String("InsufficientAccessChance".into())),
-        ]));
-    }
-
-    let roll_pct = 10.0;
-    if roll_pct >= access_chance_pct {
-        return Ok(PyRep::keyval([
-            ("wreckID", PyRep::Integer(wreck_id)),
-            ("wreckTypeID", PyRep::Integer(wreck_type_id as i64)),
-            ("wreckDifficultyBonus", PyRep::Real(wreck_difficulty_bonus)),
-            ("accessChancePct", PyRep::Real(access_chance_pct)),
-            ("salvaged", PyRep::Bool(false)),
-            ("reason", PyRep::String("CycleRollFailed".into())),
-        ]));
-    }
-
-    // Select T1, T2, or Sleeper salvage loot table based on wreck's SDE accessDifficultyBonus (`attr 901`)
-    let salvage_table: &[(u32, i32)] = if wreck_difficulty_bonus <= -15.0 {
-        // Sleeper / Drifter wreck -> Ancient / Sleeper salvage (`30259` Melted Nanoribbons, `30258` Modified Fluid Router)
-        &[(30259, 2), (30258, 3)]
-    } else if wreck_difficulty_bonus < 0.0 {
-        // Tech II / Elite wreck -> T2 salvage (`25605` Artificial Neural Network, `25600` Capacitor Console)
-        &[(25605, 2), (25600, 3)]
-    } else {
-        // Tech I frigate/cruiser/battleship/capital wreck -> T1 salvage (`25588` Alloyed Tritanium Bar, `25595` Armor Plates)
-        &[(25588, 4), (25595, 2), (25597, 3)]
-    };
-
-    let yielded_type_ids: Vec<u32> = salvage_table.iter().map(|&(t, _)| t).collect();
-    let wreck_pos = wreck_ball_opt
-        .as_ref()
-        .map(|b| [b.position.x, b.position.y, b.position.z])
-        .or_else(|| ctx.db.with_snapshot(|s| s.item_positions.get(&wreck_id).copied()))
-        .unwrap_or([0.0, 0.0, 0.0]);
-    let spawned_can_id = ctx.db.with_mut_snapshot(|snap| {
-        let wreck_owner = snap.items.get(&wreck_id).map(|i| i.owner_id).unwrap_or(char_id);
-        let child_ids: Vec<i64> = snap
-            .items
-            .values()
-            .filter(|i| i.location_id == wreck_id)
-            .map(|i| i.item_id)
-            .collect();
-        let can_id_opt = if !child_ids.is_empty() {
-            snap.next_entity_id += 1;
-            let can_id = snap.next_entity_id;
-            snap.items.insert(
-                can_id,
-                InventoryItemRecord {
-                    item_id: can_id,
-                    type_id: 23,
-                    owner_id: wreck_owner,
-                    location_id: sys_id as i64,
-                    flag: InventoryFlag::None,
-                    quantity: 1,
-                    singleton: true,
-                    version: 1,
-                    ..Default::default()
-                },
-            );
-            snap.item_positions.insert(can_id, wreck_pos);
-            for cid in child_ids {
-                if let Some(child) = snap.items.get_mut(&cid) {
-                    child.location_id = can_id;
-                    child.version += 1;
-                }
-            }
-            Some(can_id)
-        } else {
-            None
-        };
-        snap.items.remove(&wreck_id);
-        snap.item_positions.remove(&wreck_id);
-        for &(tid, qty) in salvage_table {
-            snap.next_entity_id += 1;
-            let iid = snap.next_entity_id;
-            snap.items.insert(
-                iid,
-                InventoryItemRecord {
-                    item_id: iid,
-                    type_id: tid,
-                    owner_id: char_id,
-                    location_id: ship_id,
-                    flag: InventoryFlag::Cargo,
-                    quantity: qty,
-                    singleton: false,
-                    version: 1,
-                    dynamic_attributes: HashMap::new(),
-                    source_mutaplasmid_id: None,
-                    insured_payout_isk: 0.0,
-                    is_blueprint_copy: false,
-                    blueprint_runs_remaining: None,
-                },
-            );
-        }
-        can_id_opt
-    });
-    if let Some(can_id) = spawned_can_id {
-        let _ = sys_handle
-            .spawn_ball(Ball {
-                id: can_id,
-                type_id: 23,
-                position: DVec3::from_array(wreck_pos),
-                velocity: DVec3::ZERO,
-                max_velocity: 0.0,
-                inertia: 1.0,
-                mass: 1_000.0,
-                radius: 20.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            })
-            .await;
-    }
-    with_mut_combat_runtime(ctx, |rt| {
-        rt.container_lifetimes.remove(&wreck_id);
-    });
-    let _ = sys_handle.remove_ball(wreck_id).await;
-
-    Ok(PyRep::keyval([
-        ("wreckID", PyRep::Integer(wreck_id)),
-        ("wreckTypeID", PyRep::Integer(wreck_type_id as i64)),
-        ("wreckDifficultyBonus", PyRep::Real(wreck_difficulty_bonus)),
-        ("accessChancePct", PyRep::Real(access_chance_pct)),
-        ("salvaged", PyRep::Bool(true)),
-        (
-            "salvageTypeIDs",
-            PyRep::List(
-                yielded_type_ids
-                    .into_iter()
-                    .map(|t| PyRep::Integer(t as i64))
-                    .collect(),
-            ),
-        ),
-    ]))
-}
+pub use crate::combat::drones_salvage_tractor::execute_wreck_salvage_cycle;
 
 /// Steps automatic drone aggression (`feat:drones.aggressive-passive`) and fleet Assist / Guard (`feat:drones.assist-guard`).
 /// - If `attacker_of_owner_opt` is `Some(aggressor_ball_id)` and owner's drone setting is `aggressive == true`,
@@ -771,6 +527,14 @@ pub async fn handle_npcs_drones(
                     cs.structure_hp = mut_hp;
                     cs.max_structure_hp = mut_hp;
                 }
+                if let Some(&mut_sh) = rec.dynamic_attributes.get(&263) {
+                    cs.shield_hp = mut_sh;
+                    cs.max_shield_hp = mut_sh;
+                }
+                if let Some(&mut_ar) = rec.dynamic_attributes.get(&265) {
+                    cs.armor_hp = mut_ar;
+                    cs.max_armor_hp = mut_ar;
+                }
                 let _ = sys_handle
                     .spawn_ball_with_combat(
                         Ball {
@@ -892,11 +656,20 @@ pub async fn handle_npcs_drones(
                 _ => None,
             };
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let ship_pos = sys_handle
+                .get_ball_snapshot(ship_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, b)| b.position)
+                .unwrap_or(DVec3::ZERO);
+            let max_ctrl_range = compute_drone_control_range(ctx, char_id, ship_id);
             let drones: Vec<DroneSpaceState> = with_combat_runtime(ctx, |rt| {
                 rt.active_drones_in_space
                     .values()
                     .filter(|d| {
-                        d.parent_ship_id == ship_id
+                        d.solar_system_id == sys_id
+                            && d.parent_ship_id == ship_id
                             && !d.is_abandoned
                             && filter_drone_ids
                                 .as_ref()
@@ -908,6 +681,16 @@ pub async fn handle_npcs_drones(
             });
             let mut count = 0;
             for mut d in drones {
+                let dist = sys_handle
+                    .get_ball_snapshot(d.ball_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|(_, b)| ship_pos.distance(b.position))
+                    .unwrap_or(0.0);
+                if dist > max_ctrl_range {
+                    continue;
+                }
                 d.target_id = None;
                 d.activity_state = 0;
                 if d.is_sentry {
@@ -991,7 +774,8 @@ pub async fn handle_npcs_drones(
                 rt.active_drones_in_space
                     .values()
                     .filter(|d| {
-                        d.parent_ship_id == ship_id
+                        d.solar_system_id == sys_id
+                            && d.parent_ship_id == ship_id
                             && !d.is_abandoned
                             && filter_drones
                                 .as_ref()
@@ -1008,6 +792,16 @@ pub async fn handle_npcs_drones(
             let now_unix = ctx.now_unix();
 
             for mut d in drones {
+                let dist = sys_handle
+                    .get_ball_snapshot(d.ball_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|(_, b)| ship_pos.distance(b.position))
+                    .unwrap_or(0.0);
+                if dist > max_ctrl_range {
+                    continue;
+                }
                 d.target_id = Some(target_id);
                 d.activity_state = 1;
                 if !d.is_sentry {

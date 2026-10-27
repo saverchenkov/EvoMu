@@ -607,19 +607,9 @@ async fn caller_in_space(ctx: &ServerContext, session: &SessionState) -> Result<
         ));
     }
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
-    let has_weapons_timer = ctx
-        .crimewatch
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .states
-        .get(&char_id)
-        .is_some_and(|st| st.is_weapon_timer_active(now));
-    if has_weapons_timer {
-        return Err(err(
-            "WeaponsTimerActive",
-            "Cannot jump or bridge while a Weapons Timer is active",
-        ));
-    }
+    crate::services::combat_crimewatch::check_crimewatch_action_restriction(
+        ctx, char_id, ship_id, sys_id, "jump_drive", now,
+    )?;
     let cd = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.jump_cooldown_until_unix).unwrap_or(0));
     if cd > now {
         return Err(err("JumpReactivationCooldown", format!("Jump activation cooldown active for {} s", cd - now)));

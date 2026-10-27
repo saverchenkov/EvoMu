@@ -94,6 +94,14 @@ async fn handle_cmd_warp_to_stuff(
     };
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp")?;
     crate::services::tourney_service::check_tourney_warp_restricted(ctx, sys_id, char_id)?;
+    crate::services::combat_crimewatch::check_crimewatch_action_restriction(
+        ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        "warp",
+        ctx.now_unix(),
+    )?;
     let (is_stuff_call, stuff_type, target_id, target_str_opt, raw_min_range) =
         if let Some(s) = args.first().and_then(|a| a.as_str()) {
             (
@@ -421,7 +429,7 @@ async fn handle_cmd_warp_to_stuff(
         Ok(tick) => {
             // [plan:DG-4] Entering warp halts active non-warp module cycles (weapons, scrams, webs, mining lasers, etc.)
             let _ = handle.stop_non_warp_module_cycles(ship_id).await;
-            crate::sp6_lifecycle::disconnect_drones_for_ship_on_warp_sync(ctx, char_id, ship_id, sys_id);
+            crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, sys_id);
             let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_if_needed(
                 ctx, char_id, sys_id, dest_pos,
             );
@@ -519,19 +527,14 @@ async fn handle_cmd_stargate_jump(
     }
 
     let now_unix = ctx.now_unix();
-    let has_weapons_timer = ctx
-        .crimewatch
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .states
-        .get(&char_id)
-        .is_some_and(|st| st.is_weapon_timer_active(now_unix));
-    if has_weapons_timer {
-        return Err(BridgeRpcError {
-            code: "WeaponsTimerActive".into(),
-            message: "Cannot jump through stargate while a 60s Weapons Timer is active".into(),
-        });
-    }
+    crate::services::combat_crimewatch::check_crimewatch_action_restriction(
+        ctx,
+        char_id,
+        ship_id,
+        old_sys,
+        "stargate_jump",
+        now_unix,
+    )?;
 
     let old_handle = ctx.systems.get_or_spawn(old_sys);
     let Some((cur_tick, current_ball)) = (match old_handle.get_ball_snapshot(ship_id).await {

@@ -468,7 +468,9 @@ async fn activate_single_fighter_ability(
                     victim_char_id,
                     now_unix,
                 );
-                let is_legal = {
+                let is_legal = ctx.db.with_snapshot(|snap| {
+                    is_legal_war_or_suspect_target(snap, char_id, victim_char_id, now_unix)
+                }) || {
                     let cw = ctx.crimewatch.read().unwrap();
                     if let Some(vic_st) = cw.states.get(&victim_char_id) {
                         vic_st.is_suspect(now_unix) || vic_st.is_criminal(now_unix)

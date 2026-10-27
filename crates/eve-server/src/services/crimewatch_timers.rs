@@ -209,9 +209,20 @@ pub fn check_crimewatch_action_restriction(
         .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id == 670).unwrap_or(false));
     let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
     let st = cw.get_or_create(char_id);
+    let has_pending_concord = st.pending_concord_arrival.is_some();
     let has_weapon_timer = st.is_weapon_timer_active(now_unix);
     let has_pvp_timer = st.is_pvp_active(now_unix);
     let has_criminal_timer = st.is_criminal(now_unix);
+
+    if matches!(action, "wormhole_jump" | "wh_jump")
+        && !is_capsule
+        && (has_pending_concord || (has_criminal_timer && sys_sec >= 0.45))
+    {
+        return Err(BridgeRpcError {
+            code: "CriminalActionRestricted".into(),
+            message: "Mysterious technology prevents a criminal with a pending CONCORD response from entering this wormhole".into(),
+        });
+    }
 
     if has_criminal_timer && sys_sec >= 0.45 {
         if action == "warp" && !is_capsule {
@@ -222,7 +233,16 @@ pub fn check_crimewatch_action_restriction(
         }
         if matches!(
             action,
-            "eject" | "stargate_jump" | "dock" | "store_ship" | "switch_ship" | "wormhole_jump"
+            "eject"
+                | "stargate_jump"
+                | "dock"
+                | "store_ship"
+                | "switch_ship"
+                | "wormhole_jump"
+                | "wh_jump"
+                | "jump_drive"
+                | "jump_bridge"
+                | "jump_portal"
         ) && !is_capsule
         {
             return Err(BridgeRpcError {
@@ -235,13 +255,17 @@ pub fn check_crimewatch_action_restriction(
     }
 
     if has_weapon_timer {
-        // Wormhole jumping IS allowed under a weapons/PvP timer (unless criminal in high-sec above)
+        // Cosmic wormhole jumping IS allowed under a weapons/PvP timer (unless criminal in high-sec above)
         if action == "wormhole_jump" {
             return Ok(());
         }
         if matches!(
             action,
             "stargate_jump"
+                | "wh_jump"
+                | "jump_drive"
+                | "jump_bridge"
+                | "jump_portal"
                 | "dock"
                 | "acceleration_gate"
                 | "eject"

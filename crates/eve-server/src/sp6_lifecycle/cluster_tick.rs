@@ -168,7 +168,7 @@ pub fn populate_persisted_space_objects(
             let is_jetcan = item.type_id == 23;
             let is_corpse = item.type_id == 25;
             let is_mwd_bubble = group_id == 361;
-            let is_drone = category_id == 18;
+            let is_drone = category_id == 18 || category_id == 87;
             let is_deployable_or_container = category_id == 22
                 || sde.types.get(&item.type_id).is_some_and(|t| t.effect_ids.contains(&649))
                 || obj_meta.and_then(|m| m.anchor_start_unix).is_some()
@@ -405,6 +405,7 @@ pub fn populate_persisted_space_objects(
 // parity: feat:lifecycle.drones-in-space-persist-restart
 pub fn seed_persisted_abandoned_drones(ctx: &ServerContext) {
     let mut drones = Vec::new();
+    let mut fighters = Vec::new();
     ctx.db.with_snapshot(|snap| {
         for item in snap.items.values() {
             if !(30_000_000..=34_000_000).contains(&item.location_id) {
@@ -413,15 +414,36 @@ pub fn seed_persisted_abandoned_drones(ctx: &ServerContext) {
             let Some(t) = ctx.sde.types.get(&item.type_id) else {
                 continue;
             };
-            if t.category_id != 18 {
-                continue;
-            }
             let ball_id = snap
                 .sp6_lifecycle
                 .space_object_meta
                 .get(&item.item_id)
                 .and_then(|m| m.drone_ball_id)
                 .unwrap_or(item.item_id);
+            if t.category_id == 87 {
+                let max_squadron_size = t
+                    .default_attributes
+                    .get(&2215)
+                    .copied()
+                    .map(|v| v as u32)
+                    .unwrap_or(9);
+                fighters.push(crate::router::context::ActiveFighterSquadron {
+                    ball_id,
+                    item_id: item.item_id,
+                    type_id: item.type_id,
+                    owner_char_id: item.owner_id,
+                    parent_ship_id: 0,
+                    tube_index: 0,
+                    squadron_size: (item.quantity.max(1) as u32).min(max_squadron_size),
+                    target_id: None,
+                    is_abandoned: true,
+                    mwd_active: false,
+                });
+                continue;
+            }
+            if t.category_id != 18 {
+                continue;
+            }
             let bw_used = item
                 .dynamic_attributes
                 .get(&1272)
@@ -465,6 +487,13 @@ pub fn seed_persisted_abandoned_drones(ctx: &ServerContext) {
                 rt.active_drones_in_space.insert(d.ball_id, d);
             }
         });
+    }
+    if !fighters.is_empty() {
+        if let Ok(mut guard) = ctx.active_fighters.write() {
+            for f in fighters {
+                guard.insert(f.ball_id, f);
+            }
+        }
     }
 }
 

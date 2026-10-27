@@ -58,6 +58,32 @@ pub async fn attempt_salvage_wreck(
         ));
     }
 
+    let can_capacity = ctx
+        .sde
+        .types
+        .get(&23)
+        .map(|t| t.capacity)
+        .filter(|&c| c > 0.0 && c <= 27_500.0)
+        .unwrap_or(27_500.0);
+    let loot_volume: f64 = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .filter(|i| i.location_id == wreck_item_id)
+            .map(|i| {
+                let unit_vol = ctx
+                    .sde
+                    .types
+                    .get(&i.type_id)
+                    .map(|t| t.volume)
+                    .unwrap_or(1.0);
+                unit_vol * (i.quantity.max(1) as f64)
+            })
+            .sum()
+    });
+    if loot_volume > can_capacity + 1e-4 {
+        return Err("SalvageTooMuchLootBody".to_string());
+    }
+
     // Base salvage chance: 20% + salvager access bonus (e.g. +30% for Salvager I = 50%)
     let chance = (0.20 + salvager_access_bonus).clamp(0.05, 0.95);
 
@@ -65,10 +91,56 @@ pub async fn attempt_salvage_wreck(
         // Success: select canonical SDE salvage materials
         // 25588: Alloyed Tritanium Bar, 25595: Armor Plates, 25597: Burned Logic Circuit
         let salvage_materials = vec![(25588, 4), (25595, 2), (25597, 3)];
+        let wreck_pos = [
+            wreck_ball.position.x,
+            wreck_ball.position.y,
+            wreck_ball.position.z,
+        ];
 
-        ctx.db.try_with_mut_snapshot(|snap| {
+        let spawned_can_opt = ctx.db.try_with_mut_snapshot(|snap| {
+            let wreck_owner = snap
+                .items
+                .get(&wreck_item_id)
+                .map(|i| i.owner_id)
+                .unwrap_or(char_id);
+            let child_ids: Vec<i64> = snap
+                .items
+                .values()
+                .filter(|i| i.location_id == wreck_item_id)
+                .map(|i| i.item_id)
+                .collect();
+            let can_id_opt = if !child_ids.is_empty() {
+                snap.next_entity_id += 1;
+                let can_id = snap.next_entity_id;
+                snap.items.insert(
+                    can_id,
+                    InventoryItemRecord {
+                        item_id: can_id,
+                        type_id: 23,
+                        owner_id: wreck_owner,
+                        location_id: sys_id as i64,
+                        flag: InventoryFlag::None,
+                        quantity: 1,
+                        singleton: true,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+                snap.item_positions.insert(can_id, wreck_pos);
+                for cid in child_ids {
+                    if let Some(child) = snap.items.get_mut(&cid) {
+                        child.location_id = can_id;
+                        child.version += 1;
+                    }
+                }
+                Some((can_id, wreck_owner))
+            } else {
+                None
+            };
+
             // Remove wreck item from world repository
             snap.items.remove(&wreck_item_id);
+            snap.item_positions.remove(&wreck_item_id);
 
             // Insert salvage items into character's ship cargo
             for &(tid, qty) in &salvage_materials {
@@ -93,8 +165,34 @@ pub async fn attempt_salvage_wreck(
                     },
                 );
             }
-            Ok::<_, String>(())
+            Ok::<_, String>(can_id_opt)
         })?;
+
+        if let Some((can_id, wreck_owner)) = spawned_can_opt {
+            crate::services::combat_crimewatch::register_container_lifetime(
+                ctx,
+                can_id,
+                sys_id,
+                23,
+                wreck_owner,
+                ctx.now_unix(),
+                false,
+            );
+            let _ = sys_handle
+                .spawn_ball(Ball {
+                    id: can_id,
+                    type_id: 23,
+                    position: wreck_ball.position,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 1.0,
+                    mass: 1_000.0,
+                    radius: 20.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                })
+                .await;
+        }
 
         // Remove physical wreck ball from Ballpark
         let _ = sys_handle.remove_ball(wreck_item_id).await;
@@ -111,6 +209,288 @@ pub async fn attempt_salvage_wreck(
             reason: "Salvager cycle failed to extract materials",
         })
     }
+}
+
+/// Core wreck salvaging cycle shared by Salvager modules (`25861`/`30836`) and Salvage Drones (`32787`)
+/// (`feat:modules.salvager`, `feat:combat.wreck-size-salvage-difficulty`, `feat:drones.salvage-drones`, `feat:lifecycle.wreck-salvage_with_loot`).
+pub async fn execute_wreck_salvage_cycle(
+    ctx: &ServerContext,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+    wreck_id: i64,
+    salvager_type_id_opt: Option<u32>,
+) -> Result<eve_proto::PyRep, eve_proto::BridgeRpcError> {
+    use eve_proto::{BridgeRpcError, PyRep};
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let wreck_ball_opt = sys_handle.get_ball_snapshot(wreck_id).await.ok().flatten().map(|(_, b)| b);
+    let (wreck_type_id, loot_volume) = ctx.db.with_snapshot(|snap| {
+        let Some(it) = snap.items.get(&wreck_id) else {
+            return Err(BridgeRpcError {
+                code: "TargetNotInSpace".into(),
+                message: format!("Target wreck {wreck_id} does not exist"),
+            });
+        };
+        if it.location_id != sys_id as i64 {
+            return Err(BridgeRpcError {
+                code: "TargetNotInSpace".into(),
+                message: format!("Target {wreck_id} is not in solar system {sys_id}"),
+            });
+        }
+        let is_wreck = it.type_id == 26468
+            || ctx
+                .sde
+                .types
+                .get(&it.type_id)
+                .is_some_and(|t| t.group_id == 186);
+        if !is_wreck {
+            return Err(BridgeRpcError {
+                code: "InvalidSalvageTarget".into(),
+                message: format!("Target {wreck_id} (type {}) is not a salvageable wreck", it.type_id),
+            });
+        }
+        let vol: f64 = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == wreck_id)
+            .map(|i| {
+                let unit_vol = ctx
+                    .sde
+                    .types
+                    .get(&i.type_id)
+                    .map(|t| t.volume)
+                    .unwrap_or(1.0);
+                unit_vol * (i.quantity.max(1) as f64)
+            })
+            .sum();
+        Ok((it.type_id, vol))
+    })?;
+
+    let can_capacity = ctx
+        .sde
+        .types
+        .get(&23)
+        .map(|t| t.capacity)
+        .filter(|&c| c > 0.0 && c <= 27_500.0)
+        .unwrap_or(27_500.0);
+    if loot_volume > can_capacity + 1e-4 {
+        return Err(BridgeRpcError {
+            code: "SalvageTooMuchLootBody".into(),
+            message: format!(
+                "Salvaging wreck {wreck_id} failed: SalvageTooMuchLootBody ({loot_volume:.1} m³ exceeds cargo container capacity {can_capacity:.1} m³)"
+            ),
+        });
+    }
+
+    if salvager_type_id_opt.is_none() {
+        let Some(ref wb) = wreck_ball_opt else {
+            return Err(BridgeRpcError {
+                code: "TargetNotInSpace".into(),
+                message: format!("Target wreck {wreck_id} is not in space in solar system {sys_id}"),
+            });
+        };
+        if let Some((_, sb)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() {
+            let max_drone_range =
+                crate::services::combat_crimewatch::compute_drone_control_range(ctx, char_id, ship_id).max(60_000.0);
+            let dist = sb.position.distance(wb.position);
+            if dist > max_drone_range {
+                return Err(BridgeRpcError {
+                    code: "TargetOutOfRange".into(),
+                    message: format!(
+                        "Wreck {wreck_id} is {dist:.1} m away (exceeds salvage drone range {max_drone_range:.1} m)"
+                    ),
+                });
+            }
+        }
+    }
+
+    let wreck_difficulty_bonus = ctx
+        .sde
+        .types
+        .get(&wreck_type_id)
+        .and_then(|t| t.default_attributes.get(&901).copied())
+        .unwrap_or(20.0);
+
+    let mod_access_bonus = salvager_type_id_opt
+        .and_then(|tid| ctx.sde.types.get(&tid))
+        .and_then(|t| {
+            t.default_attributes
+                .get(&902)
+                .copied()
+                .or_else(|| t.default_attributes.get(&901).copied())
+        })
+        .unwrap_or(3.0);
+
+    let (salvaging_skill_lv, rig_access_bonus) = ctx.db.with_snapshot(|snap| {
+        let sk_lv = snap
+            .skills
+            .get(&char_id)
+            .and_then(|m| m.get(&3438))
+            .map(|s| s.level as f64)
+            .unwrap_or(0.0);
+        let rig_bonus: f64 = snap
+            .items
+            .values()
+            .filter(|i| {
+                i.location_id == ship_id
+                    && matches!(
+                        i.flag,
+                        InventoryFlag::RigSlot0 | InventoryFlag::RigSlot1 | InventoryFlag::RigSlot2
+                    )
+            })
+            .filter_map(|i| ctx.sde.types.get(&i.type_id))
+            .filter_map(|t| t.default_attributes.get(&901).copied())
+            .sum();
+        (sk_lv, rig_bonus)
+    });
+
+    let access_chance_pct =
+        mod_access_bonus + 5.0 * salvaging_skill_lv + rig_access_bonus + wreck_difficulty_bonus;
+    if access_chance_pct <= 0.0 {
+        return Ok(PyRep::keyval([
+            ("wreckID", PyRep::Integer(wreck_id)),
+            ("wreckTypeID", PyRep::Integer(wreck_type_id as i64)),
+            ("wreckDifficultyBonus", PyRep::Real(wreck_difficulty_bonus)),
+            ("accessChancePct", PyRep::Real(access_chance_pct)),
+            ("salvaged", PyRep::Bool(false)),
+            ("reason", PyRep::String("InsufficientAccessChance".into())),
+        ]));
+    }
+
+    let roll_pct = 10.0;
+    if roll_pct >= access_chance_pct {
+        return Ok(PyRep::keyval([
+            ("wreckID", PyRep::Integer(wreck_id)),
+            ("wreckTypeID", PyRep::Integer(wreck_type_id as i64)),
+            ("wreckDifficultyBonus", PyRep::Real(wreck_difficulty_bonus)),
+            ("accessChancePct", PyRep::Real(access_chance_pct)),
+            ("salvaged", PyRep::Bool(false)),
+            ("reason", PyRep::String("CycleRollFailed".into())),
+        ]));
+    }
+
+    let salvage_table: &[(u32, i32)] = if wreck_difficulty_bonus <= -15.0 {
+        &[(30259, 2), (30258, 3)]
+    } else if wreck_difficulty_bonus < 0.0 {
+        &[(25605, 2), (25600, 3)]
+    } else {
+        &[(25588, 4), (25595, 2), (25597, 3)]
+    };
+
+    let yielded_type_ids: Vec<u32> = salvage_table.iter().map(|&(t, _)| t).collect();
+    let wreck_pos = wreck_ball_opt
+        .as_ref()
+        .map(|b| [b.position.x, b.position.y, b.position.z])
+        .or_else(|| ctx.db.with_snapshot(|s| s.item_positions.get(&wreck_id).copied()))
+        .unwrap_or([0.0, 0.0, 0.0]);
+    let spawned_can_opt = ctx.db.with_mut_snapshot(|snap| {
+        let wreck_owner = snap.items.get(&wreck_id).map(|i| i.owner_id).unwrap_or(char_id);
+        let child_ids: Vec<i64> = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == wreck_id)
+            .map(|i| i.item_id)
+            .collect();
+        let can_id_opt = if !child_ids.is_empty() {
+            snap.next_entity_id += 1;
+            let can_id = snap.next_entity_id;
+            snap.items.insert(
+                can_id,
+                InventoryItemRecord {
+                    item_id: can_id,
+                    type_id: 23,
+                    owner_id: wreck_owner,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.item_positions.insert(can_id, wreck_pos);
+            for cid in child_ids {
+                if let Some(child) = snap.items.get_mut(&cid) {
+                    child.location_id = can_id;
+                    child.version += 1;
+                }
+            }
+            Some((can_id, wreck_owner))
+        } else {
+            None
+        };
+        snap.items.remove(&wreck_id);
+        snap.item_positions.remove(&wreck_id);
+        for &(tid, qty) in salvage_table {
+            snap.next_entity_id += 1;
+            let iid = snap.next_entity_id;
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::Cargo,
+                    quantity: qty,
+                    singleton: false,
+                    version: 1,
+                    dynamic_attributes: HashMap::new(),
+                    source_mutaplasmid_id: None,
+                    insured_payout_isk: 0.0,
+                    is_blueprint_copy: false,
+                    blueprint_runs_remaining: None,
+                },
+            );
+        }
+        can_id_opt
+    });
+    if let Some((can_id, wreck_owner)) = spawned_can_opt {
+        crate::services::combat_crimewatch::register_container_lifetime(
+            ctx,
+            can_id,
+            sys_id,
+            23,
+            wreck_owner,
+            ctx.now_unix(),
+            false,
+        );
+        let _ = sys_handle
+            .spawn_ball(Ball {
+                id: can_id,
+                type_id: 23,
+                position: DVec3::from_array(wreck_pos),
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 1_000.0,
+                radius: 20.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await;
+    }
+    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        rt.container_lifetimes.remove(&wreck_id);
+    });
+    let _ = sys_handle.remove_ball(wreck_id).await;
+
+    Ok(PyRep::keyval([
+        ("wreckID", PyRep::Integer(wreck_id)),
+        ("wreckTypeID", PyRep::Integer(wreck_type_id as i64)),
+        ("wreckDifficultyBonus", PyRep::Real(wreck_difficulty_bonus)),
+        ("accessChancePct", PyRep::Real(access_chance_pct)),
+        ("salvaged", PyRep::Bool(true)),
+        (
+            "salvageTypeIDs",
+            PyRep::List(
+                yielded_type_ids
+                    .into_iter()
+                    .map(|t| PyRep::Integer(t as i64))
+                    .collect(),
+            ),
+        ),
+    ]))
 }
 
 /// Simulates a tractor beam pull on a wreck towards the player ship:
