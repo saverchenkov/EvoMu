@@ -87,6 +87,20 @@ pub(crate) async fn execute_shipcaster_jump(
         return Err(rpc_err("ShipNotInSpace", "Active ship ball not in space in origin solar system"));
     };
 
+    if matches!(ship_ball.type_id, 670 | 33328) {
+        return Err(rpc_err("CapsuleCannotJumpShipcaster", "Capsules cannot jump through a shipcaster"));
+    }
+
+    {
+        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+        if cw.get_or_create(char_id).is_weapon_timer_active(now_unix) {
+            return Err(rpc_err(
+                "WeaponsTimerActive",
+                "Cannot jump through shipcaster while weapons timer is active",
+            ));
+        }
+    }
+
     if let Some(active_timer) =
         crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, Some((origin_sys, cur_tick)))
     {
@@ -126,6 +140,7 @@ pub(crate) async fn execute_shipcaster_jump(
         }
     });
 
+    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, origin_sys);
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let existing_ball = old_handle.remove_ball(ship_id).await;
     ctx.sync_character_local_chat(char_id, Some(origin_sys), dest_sys);
@@ -164,6 +179,7 @@ pub(crate) async fn execute_shipcaster_jump(
     session.region_id = Some(updated_ch.region_id);
     session.station_id = None;
     session.structure_id = None;
+    let _ = ctx.bind_object(session, "beyonce", dest_sys as i64);
 
     let _ = new_handle.push_set_state(ship_id).await;
 
@@ -350,14 +366,12 @@ pub async fn handle(
 
             let (launchers, pads) = with_misc_state(ctx, |st| (st.launchers.clone(), st.landing_pads.clone()));
 
-            // Resolve origin launcher (a0, a2, a1, or sys_id):
+            // Resolve origin launcher (a0, a2, or a1):
             let launcher = if let Some(l) = launchers.iter().find(|l| l.item_id == a0) {
                 l.clone()
             } else if let Some(l) = launchers.iter().find(|l| l.item_id == a2) {
                 l.clone()
             } else if let Some(l) = launchers.iter().find(|l| l.item_id == a1) {
-                l.clone()
-            } else if let Some(l) = launchers.iter().find(|l| l.solar_system_id == sys_id) {
                 l.clone()
             } else {
                 return Some(Err(rpc_err("LauncherNotFound", format!("Shipcaster launcher {a0} not registered"))));

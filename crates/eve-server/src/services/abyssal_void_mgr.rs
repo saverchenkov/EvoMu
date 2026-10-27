@@ -275,8 +275,8 @@ async fn activate_trace(
     let cur_sys = session.solar_system_id.ok_or_else(err_no_solar_system)?;
     let ship_id = session.ship_id.ok_or_else(err_no_active_ship)?;
 
-    // 2. Caller has no active PvP timer
-    crate::sp6_lifecycle::require_no_pvp_timer_for_filament(ctx, char_id)?;
+    // 2. Caller has no active PvP/Weapons/NPC timer, nav lock, warp, or scramble (#76)
+    crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, cur_sys)?;
 
     // 3. trace.origin_solar_system_id == current_sys
     if trace.origin_solar_system_id != cur_sys {
@@ -410,8 +410,8 @@ async fn activate_inventory_filament(
     // Ship hull class check
     validate_allowed_ship_hull(ctx, ship_id)?;
 
-    // PvP timer check
-    crate::sp6_lifecycle::require_no_pvp_timer_for_filament(ctx, char_id)?;
+    // PvP/Weapons/NPC timer, nav lock, warp, and scramble check (#76)
+    crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, cur_sys)?;
     let now_unix = ctx.now_unix();
 
     // BF-02: verify filament item is in ship cargo (i.location_id == ship_id) and consume it
@@ -903,9 +903,9 @@ async fn handle_void_space_player_jump(
     let cur_sys = session.solar_system_id.ok_or_else(err_no_solar_system)?;
     let ship_id = session.ship_id.ok_or_else(err_no_active_ship)?;
 
-    // BF-01: Enforce subcapital ship and timer constraints
+    // BF-01: Enforce subcapital ship and timer/tackle constraints (#76)
     validate_allowed_ship_hull(ctx, ship_id)?;
-    crate::sp6_lifecycle::require_no_pvp_timer_for_filament(ctx, char_id)?;
+    crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, cur_sys)?;
 
     let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
     if target_id <= 0 {
@@ -1014,7 +1014,8 @@ async fn handle_void_space_player_jump(
         now_unix.saturating_add(1_200),
     );
 
-    // Remove ship ball from origin system destiny engine
+    // Remove ship ball from origin system destiny engine and abandon in-space drones (#78)
+    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys);
     origin_handle.try_remove_ball(ship_id);
 
     // Relocate character and ship to void space in DB
@@ -1029,8 +1030,26 @@ async fn handle_void_space_player_jump(
         Ok::<(), BridgeRpcError>(())
     });
 
-    // Spawn ship ball in void space destiny engine
+    // Spawn ship ball and exit conduit gate balls in void space destiny engine
     let void_handle = ctx.systems.get_or_spawn(VOID_SPACE_SYSTEM_ID);
+    for exit_gid in [888_001_i64, 888_002_i64] {
+        if void_handle.get_ball_snapshot(exit_gid).await.ok().flatten().is_none() {
+            let _ = void_handle
+                .spawn_ball(eve_destiny::Ball {
+                    id: exit_gid,
+                    type_id: 47_956,
+                    position: glam::DVec3::ZERO,
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 1.0,
+                    mass: 10_000_000.0,
+                    radius: 100.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                })
+                .await;
+        }
+    }
     let ship_type = ctx
         .db
         .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(621));
@@ -1080,9 +1099,16 @@ async fn handle_void_space_end_gate_activation(
     // BF-04: Require active ship from session
     let ship_id = session.ship_id.ok_or_else(err_no_active_ship)?;
 
-    // BF-01: 3. Require an active Void Space session record (separate from an Abyssal pocket session)
+    if gate_id <= 0 {
+        return Err(BridgeRpcError {
+            code: "InvalidGate".into(),
+            message: "VoidSpaceEndGateActivation requires a valid exit gateID".into(),
+        });
+    }
+
+    // 3. Inspect active Void Space session record BEFORE removing (#77)
     let void_session = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-        reg.void_space_sessions.remove(&char_id)
+        reg.void_space_sessions.get(&char_id).cloned()
     });
     let Some(vs) = void_session else {
         return Err(BridgeRpcError {
@@ -1091,8 +1117,67 @@ async fn handle_void_space_end_gate_activation(
         });
     };
 
+    let now_unix = ctx.now_unix();
+    if vs.expires_at_sec > 0 && now_unix >= vs.expires_at_sec {
+        crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+            reg.void_space_sessions.remove(&char_id);
+        });
+        crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
+        return Err(BridgeRpcError {
+            code: "PocketCollapsed".into(),
+            message: "Void Space pocket has expired and collapsed".into(),
+        });
+    }
+
+    if let Some(active_timer) =
+        crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None)
+    {
+        if !matches!(active_timer.reason.as_str(), "login" | "undock") {
+            return Err(BridgeRpcError {
+                code: "SessionChangeInProgress".into(),
+                message: format!(
+                    "Cannot activate Void Space exit gate while 10s session-change timer ({}) is active",
+                    active_timer.reason
+                ),
+            });
+        }
+    }
+
+    let void_handle = ctx.systems.get_or_spawn(VOID_SPACE_SYSTEM_ID);
+    if void_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
+        return Err(BridgeRpcError {
+            code: "WarpScrambled".into(),
+            message: "Cannot activate Void Space exit gate while warp scrambled".into(),
+        });
+    }
+
+    let Some((_, gb)) = void_handle.get_ball_snapshot(gate_id).await.ok().flatten() else {
+        return Err(BridgeRpcError {
+            code: "InvalidGate".into(),
+            message: format!("Gate {gate_id} is not present in Void Space"),
+        });
+    };
+    if !is_valid_void_entrance_gate(ctx, gate_id, gb.type_id) {
+        return Err(BridgeRpcError {
+            code: "InvalidGate".into(),
+            message: format!("Ball {gate_id} (type {}) is not a valid Void Space exit gate", gb.type_id),
+        });
+    }
+    if let Some((_, sb)) = void_handle.get_ball_snapshot(ship_id).await.ok().flatten() {
+        let surface_dist = (sb.position.distance(gb.position) - sb.radius - gb.radius).max(0.0);
+        if surface_dist > 2_500.0 {
+            return Err(BridgeRpcError {
+                code: "GateOutOfRange".into(),
+                message: format!("Distance {surface_dist:.1} m exceeds 2,500 m gate activation proximity"),
+            });
+        }
+    }
+
+    crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+        reg.void_space_sessions.remove(&char_id);
+    });
     crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
-    ctx.systems.get_or_spawn(VOID_SPACE_SYSTEM_ID).try_remove_ball(ship_id);
+    void_handle.try_remove_ball(ship_id);
 
     // BF-01: 4. Restore the character's recorded entry position rather than hardcoded [145_000.0, -75_000.0, 42_000.0] or fallback to Jita
     let origin_sys = vs.origin_solar_system_id;

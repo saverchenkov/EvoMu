@@ -595,13 +595,26 @@ pub fn on_advance_secs(ctx: &ServerContext, _prev_unix: u64, secs: u64) {
     let blocked_safe_char_ids: std::collections::HashSet<i64> = pending_safe_entries
         .into_iter()
         .filter(|entry| {
-            !safe_logoff_blocking_space_conditions(
-                ctx,
-                entry.char_id,
-                entry.ship_id,
-                entry.solar_system_id,
-            )
-            .is_empty()
+            let (weap_until, npc_until, pvp_until, crim_until) =
+                super::active_timers_for_char(ctx, entry.char_id, now_unix);
+            let has_timer = weap_until > now_unix
+                || npc_until > now_unix
+                || pvp_until > now_unix
+                || crim_until > now_unix;
+            let sd_active = with_combat_runtime(ctx, |rt| {
+                rt.self_destruct_countdowns
+                    .get(&entry.ship_id)
+                    .is_some_and(|cd| now_unix < cd.detonate_at_unix)
+            });
+            has_timer
+                || sd_active
+                || !safe_logoff_blocking_space_conditions(
+                    ctx,
+                    entry.char_id,
+                    entry.ship_id,
+                    entry.solar_system_id,
+                )
+                .is_empty()
                 || ctx
                     .systems
                     .is_ball_scrambled_sync(entry.solar_system_id, entry.ship_id)

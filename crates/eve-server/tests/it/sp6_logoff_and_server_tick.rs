@@ -679,3 +679,224 @@ async fn test_sp7_abyssal_disconnect_20m_collapse_destroys_ship_and_pod() {
         assert!(pocket_kms.iter().any(|km| km.ship_type_id != 670), "Ship killmail must be recorded");
     });
 }
+
+#[tokio::test]
+async fn test_r2_track3_lifecycle_filaments_salvage_and_drones() {
+    let ctx = ServerContext::new();
+    let empty = HashMap::new();
+    let (mut sess, sys_id, ship_id) = setup_pilot_in_space(&ctx, 90_000_001).await;
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+    // 1. Issue #75: SafeLogoff blocked while in warp or with persisted module_active_states
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            990_750,
+            InventoryItemRecord {
+                item_id: 990_750,
+                type_id: 34593, // Entosis Link I
+                owner_id: 90_000_001,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_active_states.insert(990_750);
+    });
+    let sl_err = ctx
+        .dispatch_rpc(&mut sess, "ship", None, "SafeLogoff", &[], &empty, None)
+        .await
+        .expect("SafeLogoff with persisted active module");
+    assert_eq!(
+        sl_err,
+        PyRep::List(vec![PyRep::String("SAFE_LOGOFF_ACTIVE_MODULES".into())])
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.remove(&990_750);
+    });
+
+    // 2. Issue #76: Filament jump blocked while warp scrambled
+    let fil_id = 990_760;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.type_id = 626; // Vexor (Cruiser)
+        }
+        snap.items.insert(
+            fil_id,
+            InventoryItemRecord {
+                item_id: fil_id,
+                type_id: 47_765,
+                owner_id: 90_000_001,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    if let Ok(mut bp) = sys_handle.ballpark.write() {
+        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+            cs.warp_scramble_strength = 2;
+        }
+    }
+    let scram_fil = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "abyssalMgr",
+            None,
+            "AbyssalEntranceGateActivation",
+            &[PyRep::Integer(fil_id)],
+            &empty,
+            None,
+        )
+        .await
+        .expect_err("Warp-scrambled ship must not activate Abyssal filament");
+    assert_eq!(scram_fil.code, "WarpScrambled");
+    if let Ok(mut bp) = sys_handle.ballpark.write() {
+        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+            cs.warp_scramble_strength = 0;
+        }
+    }
+
+    // 3. Issue #81: LaunchDrones deduplicates drone_ids, requires DroneBay + category 18, and splits stacks
+    let stack_drone_id = 990_810;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            stack_drone_id,
+            InventoryItemRecord {
+                item_id: stack_drone_id,
+                type_id: 2454, // Hobgoblin I (category 18)
+                owner_id: 90_000_001,
+                location_id: ship_id,
+                flag: InventoryFlag::DroneBay,
+                quantity: 5,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let launched = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "ship",
+            None,
+            "LaunchDrones",
+            &[PyRep::List(vec![
+                PyRep::Integer(stack_drone_id),
+                PyRep::Integer(stack_drone_id),
+            ])],
+            &empty,
+            None,
+        )
+        .await
+        .expect("LaunchDrones from stack with duplicate ID");
+    let PyRep::List(balls) = launched else {
+        panic!("Expected list of launched drone ball IDs");
+    };
+    assert_eq!(balls.len(), 1, "Duplicate drone IDs must be deduplicated");
+    let rem_qty = ctx
+        .db
+        .with_snapshot(|s| s.items.get(&stack_drone_id).map(|i| i.quantity).unwrap_or(0));
+    assert_eq!(rem_qty, 4, "Launching 1 drone from stack of 5 must leave 4 in DroneBay");
+
+    // 4. Issue #80: ScoopToDroneBay rejects non-drone items (ships/structures)
+    let foreign_ship_id = 990_800;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            foreign_ship_id,
+            InventoryItemRecord {
+                item_id: foreign_ship_id,
+                type_id: 626, // Vexor (Ship, category 6)
+                owner_id: 90_000_002,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let ship_pos = sys_handle
+        .get_ball_position_sync(ship_id)
+        .unwrap_or(glam::DVec3::ZERO);
+    let _ = sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: foreign_ship_id,
+            type_id: 626,
+            position: ship_pos + glam::DVec3::new(500.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 200.0,
+            inertia: 1.0,
+            mass: 10_000_000.0,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+    let scoop_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "ship",
+            None,
+            "ScoopToDroneBay",
+            &[PyRep::Integer(foreign_ship_id)],
+            &empty,
+            None,
+        )
+        .await
+        .expect_err("Must not scoop a ship into DroneBay");
+    assert_eq!(scoop_err.code, "NotADrone");
+
+    // 5. Issue #79: CmdSalvage rejects non-wreck targets (must never delete ships/structures)
+    let salv_drone_id = 990_790;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            salv_drone_id,
+            InventoryItemRecord {
+                item_id: salv_drone_id,
+                type_id: 32787, // Salvage Drone I
+                owner_id: 90_000_001,
+                location_id: ship_id,
+                flag: InventoryFlag::DroneBay,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    ctx.dispatch_rpc(
+        &mut sess,
+        "ship",
+        None,
+        "LaunchDrones",
+        &[PyRep::List(vec![PyRep::Integer(salv_drone_id)])],
+        &empty,
+        None,
+    )
+    .await
+    .expect("Launch Salvage Drone I");
+    let salv_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "entity",
+            None,
+            "CmdSalvage",
+            &[PyRep::Integer(foreign_ship_id)],
+            &empty,
+            None,
+        )
+        .await
+        .expect_err("CmdSalvage must reject non-wreck ship target");
+    assert_eq!(salv_err.code, "InvalidSalvageTarget");
+    assert!(
+        ctx.db.with_snapshot(|s| s.items.contains_key(&foreign_ship_id)),
+        "Non-wreck ship must never be deleted by CmdSalvage"
+    );
+}

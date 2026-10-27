@@ -23,6 +23,11 @@ pub(crate) async fn handle_module_cycles(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let _ = crate::sp6_lifecycle::maybe_abort_safe_logoff_on_action(
+                ctx,
+                char_id,
+                "SAFE_LOGOFF_ABORT_MODULE",
+            );
             let raw_module_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let effect_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("defaultEffect").to_string();
             let target_id_opt = args.get(2).and_then(|a| a.as_i64())
