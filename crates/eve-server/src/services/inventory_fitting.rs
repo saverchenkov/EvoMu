@@ -1076,8 +1076,27 @@ pub async fn handle(
                 }
             } else if let Some(split_qty) = split_qty_opt {
                 let orig_id = item_id;
-                match ctx.db.split_stack(char_id, item_id, split_qty) {
-                    Ok((_orig, split_item)) => { did_split = Some((orig_id, split_qty)); item_id = split_item.item_id; source_item_opt = Some(split_item); }
+                let split_owner = source_item_opt.as_ref().map(|i| i.owner_id).unwrap_or(char_id);
+                let corp_id = session.corporation_id.unwrap_or(0);
+                let target_owner = if (116..=122).contains(&flag_u16) && corp_id > 0 {
+                    corp_id
+                } else {
+                    char_id
+                };
+                match ctx.db.split_stack(split_owner, item_id, split_qty) {
+                    Ok((_orig, mut split_item)) => {
+                        if split_item.owner_id != target_owner {
+                            ctx.db.with_mut_snapshot(|snap| {
+                                if let Some(it) = snap.items.get_mut(&split_item.item_id) {
+                                    it.owner_id = target_owner;
+                                }
+                            });
+                            split_item.owner_id = target_owner;
+                        }
+                        did_split = Some((orig_id, split_qty));
+                        item_id = split_item.item_id;
+                        source_item_opt = Some(split_item);
+                    }
                     Err(e) => return Some(Err(BridgeRpcError { code: "SplitFailed".into(), message: e.to_string() })),
                 }
             }
@@ -1106,7 +1125,7 @@ pub async fn handle(
                             && i.location_id == new_loc
                             && i.flag == flag
                             && i.type_id == moving.type_id
-                            && i.owner_id == moving.owner_id
+                            && (i.owner_id == moving.owner_id || i.owner_id == char_id)
                             && !i.singleton
                             && !i.is_blueprint_copy
                             && i.dynamic_attributes.is_empty()
@@ -1185,17 +1204,34 @@ pub async fn handle(
 
             let old_loc_id = source_item_opt.as_ref().map(|i| i.location_id).unwrap_or(0);
             let old_flag_id = source_item_opt.as_ref().map(|i| i.flag as i64).unwrap_or(0);
+            let corp_id_for_owner = session.corporation_id.unwrap_or(0);
             let move_res: Result<eve_db::InventoryItemRecord, String> = ctx
                 .db
                 .move_item_transactional(char_id, item_id, new_loc, flag, expected_version, idem_key)
                 .map_err(|e| e.to_string())
+                .and_then(|mut rec| {
+                    if (116..=122).contains(&flag_u16) && corp_id_for_owner > 0 && rec.owner_id != corp_id_for_owner {
+                        ctx.db.with_mut_snapshot(|snap| {
+                            if let Some(it) = snap.items.get_mut(&item_id) {
+                                it.owner_id = corp_id_for_owner;
+                            }
+                        });
+                        rec.owner_id = corp_id_for_owner;
+                    }
+                    Ok(rec)
+                })
                 .or_else(|msg| {
                     if msg.contains("is not authorized") || msg.contains("is not owned by character") {
                         ctx.db.try_with_mut_snapshot(|snap| {
                             let it = snap.items.get_mut(&item_id).ok_or_else(|| format!("Item {item_id} not found"))?;
                             it.location_id = new_loc;
                             it.flag = flag;
-                            if matches!(flag, InventoryFlag::Hangar | InventoryFlag::Cargo) {
+                            if (116..=122).contains(&flag_u16) && corp_id_for_owner > 0 {
+                                it.owner_id = corp_id_for_owner;
+                            } else if matches!(flag, InventoryFlag::Hangar | InventoryFlag::Cargo)
+                                || dest_is_ship_hold
+                                || (116..=122).contains(&old_flag_id)
+                            {
                                 it.owner_id = char_id;
                             }
                             it.version += 1;

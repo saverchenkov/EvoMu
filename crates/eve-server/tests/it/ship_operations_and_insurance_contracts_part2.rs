@@ -395,3 +395,77 @@ async fn test_ship_bays_scoop_store_board_space_and_password() {
     let PyRep::KeyVal(ff_s_kv) = ff_store_ok else { panic!("expected KeyVal") };
     assert_eq!(ff_s_kv.get("storedShipID").and_then(|v| v.as_i64()), Some(second_frigate_id));
 }
+
+#[tokio::test]
+async fn test_r2_track4_corp_hangars_structures_and_market() {
+    let ctx = new_test_ctx();
+    let mut sess = SessionState::new(8901);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let kw = HashMap::new();
+    let char_id = 90_000_001i64;
+    let foreign_char_id = 90_000_002i64;
+    let station_id = 60_003_760i64;
+    let sys_id = 30_000_142u32;
+    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None).await.unwrap();
+    let corp_id = sess.corporation_id.unwrap_or(98_000_001);
+    sess.corp_role = u64::MAX;
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(corp) = s.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(char_id, u64::MAX);
+        }
+        s.corp_role_assignments.insert(
+            (corp_id, char_id),
+            eve_db::snapshot_ext::CorpMemberRoleAssignment {
+                character_id: char_id,
+                roles: u64::MAX,
+                roles_at_hq: u64::MAX,
+                roles_at_base: u64::MAX,
+                roles_at_other: u64::MAX,
+                ..Default::default()
+            },
+        );
+    });
+
+    // 1. Issue #86: Splitting a stack from CorpSAG1 preserves corp_id on the residual stack
+    let corp_stack_id = 890_001i64;
+    seed_item(&ctx, corp_stack_id, 34, corp_id, station_id, InventoryFlag::CorpSAG1, 100, false);
+    let mut split_kw = HashMap::new();
+    split_kw.insert("qty".into(), PyRep::Integer(40));
+    let _ = ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(corp_stack_id), PyRep::Integer(station_id), PyRep::Integer(4)], &split_kw, None).await.unwrap();
+    let (res_owner, res_qty) = ctx.db.with_snapshot(|s| {
+        let it = s.items.get(&corp_stack_id).unwrap();
+        (it.owner_id, it.quantity)
+    });
+    assert_eq!(res_owner, corp_id, "Residual stack in CorpSAG1 must retain corporation owner_id");
+    assert_eq!(res_qty, 60);
+
+    // 2. Issue #97: GetBlueprintDataByOwner & GetJobsByOwner reject foreign owner_id
+    let bp_err = ctx.dispatch_rpc(&mut sess, "blueprintManager", None, "GetBlueprintDataByOwner", &[PyRep::Integer(foreign_char_id)], &kw, None).await.unwrap_err();
+    assert_eq!(bp_err.code, "OwnerAccessDenied");
+    let job_err = ctx.dispatch_rpc(&mut sess, "industryManager", None, "GetJobsByOwner", &[PyRep::Integer(foreign_char_id)], &kw, None).await.unwrap_err();
+    assert_eq!(job_err.code, "OwnerAccessDenied");
+
+    // 3. Issue #82: LootAll rejects foreign Mobile Depot (group 1246, type 33474)
+    let ship_id = sess.ship_id.unwrap_or(100_000_001);
+    sess.station_id = None;
+    sess.solar_system_id = Some(sys_id);
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        if let Some(sh) = s.items.get_mut(&ship_id) {
+            sh.location_id = sys_id as i64;
+            sh.flag = InventoryFlag::None;
+        }
+    });
+    spawn_space_item(&ctx, sys_id, ship_id, 587, 25, 6, char_id, DVec3::ZERO).await;
+    let foreign_depot_id = 890_002i64;
+    seed_item(&ctx, foreign_depot_id, 33474, foreign_char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    seed_item(&ctx, 890_003i64, 34, foreign_char_id, foreign_depot_id, InventoryFlag::Cargo, 10, false);
+    spawn_space_item(&ctx, sys_id, foreign_depot_id, 33474, 1246, 22, foreign_char_id, DVec3::new(500.0, 0.0, 0.0)).await;
+    let loot_err = ctx.dispatch_rpc(&mut sess, "invbroker", None, "LootAll", &[PyRep::Integer(foreign_depot_id)], &kw, None).await.unwrap_err();
+    assert_eq!(loot_err.code, "AccessDenied");
+}
+

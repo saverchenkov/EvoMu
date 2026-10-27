@@ -185,7 +185,8 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         // parity: feat:structures.structure-description
         ("structureDirectory", "SetStructureDescription") => Some(handle_set_structure_description(ctx, session, args)),
         ("structureDirectory", "GetStructureDescription") => Some(handle_get_structure_description(ctx, session, args)),
-        ("structureDirectory", "GetStructures") | ("structureDirectory", "GetCorporationStructures") => Some(handle_get_structures(ctx, session)),
+        ("structureDirectory", "GetStructures") => Some(handle_get_structures(ctx, session, false)),
+        ("structureDirectory", "GetCorporationStructures") => Some(handle_get_structures(ctx, session, true)),
         ("structureDirectory", "GetStructureInfo") => Some(handle_get_structure_info(ctx, session, args)),
         // parity: feat:structures.deliveries
         ("structureDeliveries", "Deliver") => Some(handle_structure_deliver(ctx, session, args)),
@@ -414,9 +415,29 @@ fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut Sessi
         }
         let mut ext = load_ext_state(snap);
         let Some(wrap) = ext.asset_safety_wraps.get(&wrap_id).cloned() else { return Err(err("AssetSafetyWrapNotFound", format!("Asset safety wrap {wrap_id} not found"))); };
-        let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+        let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
         if (wrap.is_corp && wrap.owner_id != caller_corp) || (!wrap.is_corp && wrap.owner_id != char_id) {
             return Err(err("NotAssetSafetyWrapOwner", format!("Wrap {wrap_id} is not owned by the caller")));
+        }
+        if wrap.is_corp {
+            let has_dir = session.has_gm_role()
+                || (session.corp_role & eve_db::corp_roles::ROLE_DIRECTOR) != 0
+                || snap.corporations.get(&caller_corp).is_some_and(|c| {
+                    c.ceo_id == char_id
+                        || c.member_roles
+                            .get(&char_id)
+                            .is_some_and(|&r| (r & eve_db::corp_roles::ROLE_DIRECTOR) != 0)
+                })
+                || snap
+                    .corp_role_assignments
+                    .get(&(caller_corp, char_id))
+                    .is_some_and(|a| (a.roles & eve_db::corp_roles::ROLE_DIRECTOR) != 0);
+            if !has_dir {
+                return Err(err(
+                    "InsufficientCorpRoles",
+                    "Delivering corporate asset safety wrap requires Director or CEO role",
+                ));
+            }
         }
         if wrap.delivered_to_id.is_some() {
             return Err(err("AssetSafetyWrapAlreadyDelivered", format!("Asset safety wrap {wrap_id} has already been delivered")));
@@ -425,6 +446,21 @@ fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut Sessi
             return Err(err("AssetSafetyCooldownActive", format!("Wrap {wrap_id} deliverable after {} (now {now_unix})", wrap.deliverable_after_unix)));
         }
         let dest_sys = if let Some(st) = snap.structures.get(&dest_id) { Some(st.solar_system_id) } else { ctx.sde.stations.get(&dest_id).map(|s| s.solar_system_id) };
+        if dest_sys != Some(wrap.solar_system_id) && Some(dest_id) != wrap.nearest_npc_station_id {
+            return Err(err(
+                "InvalidAssetSafetyDestination",
+                format!(
+                    "Destination {dest_id} is not in source system {} or nearest NPC station",
+                    wrap.solar_system_id
+                ),
+            ));
+        }
+        if !dest_is_station && !evaluate_character_structure_access_in_snap(snap, dest_id, char_id) {
+            return Err(err(
+                "InvalidAssetSafetyDestination",
+                format!("Character {char_id} does not have docking access to structure {dest_id}"),
+            ));
+        }
         let fee_rate = if dest_sys == Some(wrap.solar_system_id) && now_unix < wrap.created_unix + 20 * 86_400 { 0.005 } else { ASSET_SAFETY_FEE_FRACTION };
         let fee = eve_db::IskCents::from_f64_isk(wrap.estimated_value_isk * fee_rate);
         let ch = snap.characters.get_mut(&char_id).ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?;
@@ -1180,13 +1216,31 @@ fn build_structure_dir_entry(ctx: &ServerContext, snap: &WorldStateSnapshot, ext
     ])
 }
 
-fn handle_get_structures(ctx: &ServerContext, session: &mut SessionState) -> Result<PyRep, BridgeRpcError> {
+fn handle_get_structures(ctx: &ServerContext, session: &mut SessionState, corp_only: bool) -> Result<PyRep, BridgeRpcError> {
     use super::structure_lifecycle as life;
-    let _ = ServerContext::require_character(session)?;
+    let (_, char_id) = ServerContext::require_character(session)?;
     let now = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
+        let caller_corp = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.corporation_id)
+            .or(session.corporation_id)
+            .unwrap_or(0);
         let ext = load_ext_state(snap);
-        let mut list: Vec<&UpwellStructureRecord> = snap.structures.values().filter(|s| s.state != life::STATE_DESTROYED).collect();
+        let mut list: Vec<&UpwellStructureRecord> = snap
+            .structures
+            .values()
+            .filter(|s| {
+                s.state != life::STATE_DESTROYED
+                    && if corp_only {
+                        s.owner_corp_id == caller_corp
+                    } else {
+                        s.owner_corp_id == caller_corp
+                            || evaluate_character_structure_access_in_snap(snap, s.structure_id, char_id)
+                    }
+            })
+            .collect();
         list.sort_by_key(|s| s.structure_id);
         Ok(PyRep::Dict(list.into_iter().map(|st| (PyRep::Integer(st.structure_id), build_structure_dir_entry(ctx, snap, &ext, st, now))).collect()))
     })

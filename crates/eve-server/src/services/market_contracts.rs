@@ -1157,7 +1157,24 @@ pub fn handle(
                             region_id: Some(resting.region_id),
                         });
                         if !resting.is_npc {
-                            let _ = snap.adjust_plex_vault(resting.owner_id, fill_qty as i64);
+                            if snap.adjust_plex_vault(resting.owner_id, fill_qty as i64).is_none() {
+                                snap.next_entity_id += 1;
+                                let delivery_item_id = snap.next_entity_id;
+                                snap.items.insert(
+                                    delivery_item_id,
+                                    InventoryItemRecord {
+                                        item_id: delivery_item_id,
+                                        type_id: PLEX_TYPE_ID,
+                                        owner_id: resting.owner_id,
+                                        location_id: resting.station_id,
+                                        flag: InventoryFlag::Deliveries,
+                                        quantity: fill_qty,
+                                        singleton: false,
+                                        version: 1,
+                                        ..Default::default()
+                                    },
+                                );
+                            }
                         }
                         if let Some(o_mut) = snap.market_orders.get_mut(&bid_oid) {
                             o_mut.vol_remaining -= fill_qty;

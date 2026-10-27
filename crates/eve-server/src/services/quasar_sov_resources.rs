@@ -9,7 +9,7 @@ use crate::quasar_gateway::{
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, DynamicQuasarMessage,
+    encode_bytes_field, encode_varint_field, DynamicQuasarMessage,
     DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
@@ -56,17 +56,25 @@ pub fn register_handlers(
             "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
                 let mut out = Vec::new();
-                for &(_type_id, name, power, workforce) in PLANET_RESOURCE_TABLE.iter() {
+                for &(type_id, _name, power, workforce) in PLANET_RESOURCE_TABLE.iter() {
                     let mut def_buf = Vec::new();
-                    let mut id_buf = Vec::new();
-                    encode_string_field(1, name, &mut id_buf);
-                    encode_bytes_field(1, &id_buf, &mut def_buf);
-
-                    let mut attr_buf = Vec::new();
-                    encode_varint_field(1, power, &mut attr_buf);
-                    encode_varint_field(2, workforce, &mut attr_buf);
-                    encode_bytes_field(2, &attr_buf, &mut def_buf);
-
+                    encode_id_field(1, u64::from(type_id), &mut def_buf);
+                    encode_varint_field(2, power, &mut def_buf);
+                    encode_varint_field(3, workforce, &mut def_buf);
+                    if type_id == 12 || type_id == 2015 {
+                        let reagent_type = if type_id == 12 {
+                            super::sov_services::TYPE_SUPERIONIC_ICE
+                        } else {
+                            super::sov_services::TYPE_MAGMATIC_GAS
+                        };
+                        let mut r_def = Vec::new();
+                        encode_id_field(1, u64::from(reagent_type), &mut r_def);
+                        let mut amt = Vec::new();
+                        encode_varint_field(1, 50, &mut amt);
+                        encode_varint_field(2, 3_600, &mut amt);
+                        encode_bytes_field(2, &amt, &mut r_def);
+                        encode_bytes_field(4, &r_def, &mut def_buf);
+                    }
                     encode_bytes_field(1, &def_buf, &mut out);
                 }
                 let mut ver_buf = Vec::new();
@@ -120,12 +128,25 @@ pub fn register_handlers(
                 let mut count = 0;
                 for cel in sde_cfg.celestials_in_system(sys_id as u32) {
                     if cel.group_id == 7 {
+                        let (power, workforce) = super::quasar_sov_hub::planet_yield(cel.type_id);
                         let mut cfg_buf = Vec::new();
                         encode_id_field(1, cel.celestial_id as u64, &mut cfg_buf);
-                        encode_id_field(2, sys_id as u64, &mut cfg_buf);
-                        let mut res_id = Vec::new();
-                        encode_string_field(1, "PlanetaryWorkforce", &mut res_id);
-                        encode_bytes_field(3, &res_id, &mut cfg_buf);
+                        encode_varint_field(2, power, &mut cfg_buf);
+                        encode_varint_field(3, workforce, &mut cfg_buf);
+                        if cel.type_id == 12 || cel.type_id == 2015 {
+                            let reagent_type = if cel.type_id == 12 {
+                                super::sov_services::TYPE_SUPERIONIC_ICE
+                            } else {
+                                super::sov_services::TYPE_MAGMATIC_GAS
+                            };
+                            let mut r_def = Vec::new();
+                            encode_id_field(1, u64::from(reagent_type), &mut r_def);
+                            let mut amt = Vec::new();
+                            encode_varint_field(1, 50, &mut amt);
+                            encode_varint_field(2, 3_600, &mut amt);
+                            encode_bytes_field(2, &amt, &mut r_def);
+                            encode_bytes_field(4, &r_def, &mut cfg_buf);
+                        }
                         encode_bytes_field(1, &cfg_buf, &mut out);
                         count += 1;
                         if count >= 8 { break; }

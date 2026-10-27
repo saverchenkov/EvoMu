@@ -38,10 +38,21 @@ fn encode_skyhook(snap: &WorldStateSnapshot, id: i64, now: u64) -> Vec<u8> {
     if let Some((reagent_type, stock)) = snap.sov_runtime.skyhook_reagents.get(&id).copied() {
         let mut sim = Vec::new();
         encode_varint_field(1, stock, &mut sim);
+        encode_varint_field(2, stock / 2, &mut sim);
+        ts_field(3, now, &mut sim);
         let mut r = Vec::new();
         id_field(1, u64::from(reagent_type), &mut r);
+        encode_bytes_field(2, &sim, &mut r);
         encode_bytes_field(4, &sim, &mut r);
         encode_bytes_field(2, &r, &mut b);
+
+        let mut r_def = Vec::new();
+        id_field(1, u64::from(reagent_type), &mut r_def);
+        let mut amt = Vec::new();
+        encode_varint_field(1, 50, &mut amt);
+        encode_varint_field(2, 3_600, &mut amt);
+        encode_bytes_field(2, &amt, &mut r_def);
+        encode_bytes_field(4, &r_def, &mut b);
     }
     let active = snap.sov_runtime.skyhook_active.get(&id).copied().unwrap_or(true);
     encode_varint_field(3, u64::from(active), &mut b);
@@ -55,6 +66,7 @@ fn encode_skyhook(snap: &WorldStateSnapshot, id: i64, now: u64) -> Vec<u8> {
         None => encode_varint_field(1, 0, &mut theft),
     }
     encode_bytes_field(5, &theft, &mut b);
+    id_field(6, 40_009_077, &mut b);
     let mut wf = Vec::new();
     encode_varint_field(2, 1, &mut wf); // Workforce.none: skyhook workforce is not simulated
     encode_bytes_field(7, &wf, &mut b);

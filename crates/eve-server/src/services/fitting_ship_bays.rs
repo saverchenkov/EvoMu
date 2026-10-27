@@ -55,8 +55,8 @@ pub(crate) async fn board_stored_ship(
     }
     if host_is_ship {
         let has_bay_access = ctx.db.with_snapshot(|snap| {
-            fitting_containers_ships::can_character_access_ship_bay_snap(
-                snap, char_id, host_id, host_owner, true,
+            fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
+                snap, char_id, host_id, host_owner, true, _supplied_password,
             )
         });
         if !has_bay_access {
@@ -69,7 +69,17 @@ pub(crate) async fn board_stored_ship(
     if !can_board {
         return Err(err("OwnershipViolation", format!("Ship {stored_id} is not owned by character {char_id}")));
     }
+    ctx.db.with_snapshot(|snap| {
+        if snap.skills.get(&char_id).is_some_and(|m| !m.is_empty()) {
+            ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, stored.type_id)
+        } else {
+            Ok(())
+        }
+    })?;
     let prev_ship_id = session.ship_id;
+    if prev_ship_id == Some(host_id) {
+        return Err(err("CannotBoardFromOwnBay", "Cannot board a ship stored inside the ship you are currently piloting"));
+    }
     let mut launch_pos = None;
     match dock_id {
         Some(dock) => {
@@ -80,7 +90,28 @@ pub(crate) async fn board_stored_ship(
         None => {
             let sys_id = session.solar_system_id.ok_or_else(|| err("NoSolarSystem", "Session has no solarSystemID"))?;
             let cur = prev_ship_id.ok_or_else(|| err("NoActiveShip", "No active ship in space"))?;
+            if ctx
+                .crimewatch
+                .read()
+                .ok()
+                .and_then(|cw| cw.states.get(&char_id).map(|st| st.is_weapon_timer_active(ctx.now_unix())))
+                .unwrap_or(false)
+            {
+                return Err(err("UserError", "WeaponsTimerActive"));
+            }
             let sys = ctx.systems.get_or_spawn(sys_id);
+            if let Ok(Some((_, cb))) = sys.get_ball_snapshot(cur).await {
+                if matches!(cb.mode, eve_destiny::MovementMode::Warp { .. }) {
+                    return Err(err("ShipInWarp", "Cannot board stored ship while in warp"));
+                }
+            }
+            let is_scrambled = {
+                let bp = sys.ballpark.read().unwrap_or_else(|e| e.into_inner());
+                bp.combat_states.get(&cur).is_some_and(|cs| cs.warp_scramble_strength > 0)
+            };
+            if is_scrambled {
+                return Err(err("WarpScrambled", "Cannot board stored ship while warp scrambled"));
+            }
             let cur_pos = sys.get_ball_snapshot(cur).await.ok().flatten().map(|(_, cb)| cb.position)
                 .or_else(|| ctx.db.with_snapshot(|s| s.item_positions.get(&cur).map(|p| DVec3::new(p[0], p[1], p[2]))));
             let host_snap = sys.get_ball_snapshot(host_id).await.ok().flatten().map(|(_, hb)| (hb.position, hb.radius))
@@ -106,6 +137,7 @@ pub(crate) async fn board_stored_ship(
     let capsule_group = ctx.sde.groups.values().find(|g| g.name == "Capsule").map(|g| g.group_id);
     let (removed_capsule, prev_is_capsule) = ctx.db.with_mut_snapshot(|snap| {
         if let Some(s) = snap.items.get_mut(&stored_id) {
+            s.owner_id = char_id;
             s.location_id = dock_id.or(session.solar_system_id.map(|v| v as i64)).unwrap_or(s.location_id);
             s.flag = if dock_id.is_some() { InventoryFlag::Hangar } else { InventoryFlag::None };
             s.version += 1;
@@ -136,6 +168,8 @@ pub(crate) async fn board_stored_ship(
             let _ = sys.remove_ball(cap).await;
         } else if let Some(old_id) = prev_ship_id {
             if !prev_is_capsule {
+                crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, old_id);
+                crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, old_id, sys_id);
                 let meta_opt = {
                     let mut bp = sys.ballpark.write().unwrap_or_else(|e| e.into_inner());
                     if let Some(meta) = bp.ball_slim_meta.get_mut(&old_id) {
