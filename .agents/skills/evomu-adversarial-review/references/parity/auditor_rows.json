@@ -96,6 +96,26 @@
       "flagged_by_audit": "20261025-200428"
     },
     {
+      "evidence": "data/air_career_goals.json and crates/eve-server/src/services/quasar_career_goals.rs use DERIVED career goal UUIDs ([67, 71, ...]) and message ID offsets because individual career goal definitions are served dynamically by live Quasar and not shipped in V24 client FSD.",
+      "id": "feat:pve.air-career-program",
+      "flagged_by_audit": "20261026-170000"
+    },
+    {
+      "evidence": "data/air_career_goals.json and crates/eve-server/src/services/quasar_career_goals.rs use DERIVED career goal UUIDs ([67, 71, ...]) and message ID offsets because individual career goal definitions are served dynamically by live Quasar and not shipped in V24 client FSD.",
+      "id": "feat:quasar.career",
+      "flagged_by_audit": "20261026-170000"
+    },
+    {
+      "evidence": "data/air_career_goals.json and crates/eve-server/src/services/quasar_career_goals.rs use DERIVED career goal UUIDs ([67, 71, ...]) and message ID offsets because individual career goal definitions are served dynamically by live Quasar and not shipped in V24 client FSD.",
+      "id": "quasar:eveProto/generated/eve_public/career/goal/api/requests_pb2.pyj",
+      "flagged_by_audit": "20261026-170000"
+    },
+    {
+      "evidence": "data/air_career_goals.json and crates/eve-server/src/services/quasar_career_goals.rs use DERIVED career goal UUIDs ([67, 71, ...]) and message ID offsets because individual career goal definitions are served dynamically by live Quasar and not shipped in V24 client FSD.",
+      "id": "quasar:eveProto/generated/eve_public/career/goal/api/notices_pb2.pyj",
+      "flagged_by_audit": "20261026-170000"
+    },
+    {
       "evidence": "Category membership is a hand-written match over achievement IDs: crates/eve-server/src/services/quasar_achievements.rs:166-171 and :278-283 ('Industry / Mining', 'Exploration / Navigation', 'Enforcer / Combat', default 4). It is labelled DERIVED, not imported. Achievement names are also a hardcoded match table (:63-135) instead of being read from static data. The category score served by GetRequest comes from this invented bucketing.",
       "id": "quasar:eveProto/generated/eve_public/achievement/category/api/requests_pb2.pyj",
       "flagged_by_audit": "20261026-153450"

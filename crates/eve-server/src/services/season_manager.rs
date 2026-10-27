@@ -1078,6 +1078,182 @@ pub fn handle_season_manager(
                 .collect();
             Some(Ok(PyRep::List(list)))
         }
+        ("seasonManager", "get_character_progress_by_character_id") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if let Some(raw_goal_id) = args.first().and_then(|a| a.as_i64()) {
+                let Ok(goal_id) = u32::try_from(raw_goal_id) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidGoalId".into(),
+                        message: format!("goal_id {raw_goal_id} is out of valid u32 range"),
+                    }));
+                };
+                let milestone = crate::services::quasar_career_goals::default_career_milestones()
+                    .into_iter()
+                    .find(|m| m.milestone_id == goal_id);
+                let sde_goal = ctx.sde.career_goals.get(&goal_id);
+                if milestone.is_none() && sde_goal.is_none() {
+                    return Some(Err(BridgeRpcError {
+                        code: "ChallengeNotFound".into(),
+                        message: format!("Goal or challenge {goal_id} not found"),
+                    }));
+                }
+                let is_mining_career = milestone
+                    .as_ref()
+                    .is_some_and(|m| m.career_id == Some(2))
+                    || sde_goal
+                        .is_some_and(|g| g.career_path.eq_ignore_ascii_case("Industrialist"));
+                let res = with_season_state(ctx, char_id, |st, snap| {
+                    let defs = load_challenge_definitions(snap);
+                    ensure_character_challenges(st, &defs, snap, char_id, ctx.now_blueos_filetime_ticks());
+                    sync_character_challenges(st, snap, char_id);
+                    let prog = if is_mining_career {
+                        snap.mining_ledger
+                            .iter()
+                            .filter(|r| r.character_id == char_id)
+                            .map(|r| r.quantity.max(0) as u64)
+                            .sum()
+                    } else {
+                        snap.npe_progress
+                            .get(&char_id)
+                            .and_then(|n| n.career_goal_progress.get(&goal_id).copied())
+                            .unwrap_or(0)
+                    };
+                    let challenges = sorted_challenge_keyvals(st);
+                    let claimed_cnt = st.challenges.values().filter(|c| c.claimed).count() as i64;
+                    Ok(PyRep::keyval([
+                        ("goalID", PyRep::Integer(goal_id as i64)),
+                        ("currentProgress", PyRep::Integer(prog as i64)),
+                        ("verifiedFromLedger", PyRep::Bool(is_mining_career)),
+                        ("season_id", PyRep::Integer(st.selected_season_id)),
+                        ("seasonID", PyRep::Integer(st.selected_season_id)),
+                        ("total_points", PyRep::Integer(st.season_points)),
+                        ("season_points", PyRep::Integer(st.season_points)),
+                        ("seasonPoints", PyRep::Integer(st.season_points)),
+                        ("current_reward_index", PyRep::Integer(claimed_cnt)),
+                        ("challenges", PyRep::List(challenges)),
+                    ]))
+                });
+                return Some(res);
+            }
+
+            let res = with_season_state(ctx, char_id, |st, snap| {
+                let defs = load_challenge_definitions(snap);
+                ensure_character_challenges(st, &defs, snap, char_id, ctx.now_blueos_filetime_ticks());
+                sync_character_challenges(st, snap, char_id);
+                let challenges = sorted_challenge_keyvals(st);
+                let claimed_cnt = st.challenges.values().filter(|c| c.claimed).count() as i64;
+                Ok(PyRep::keyval([
+                    ("season_id", PyRep::Integer(st.selected_season_id)),
+                    ("seasonID", PyRep::Integer(st.selected_season_id)),
+                    ("total_points", PyRep::Integer(st.season_points)),
+                    ("season_points", PyRep::Integer(st.season_points)),
+                    ("seasonPoints", PyRep::Integer(st.season_points)),
+                    ("current_reward_index", PyRep::Integer(claimed_cnt)),
+                    ("challenges", PyRep::List(challenges)),
+                ]))
+            });
+            Some(res)
+        }
+        ("seasonManager", "claim_goal_reward") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let raw_goal_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let Ok(goal_id) = u32::try_from(raw_goal_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidGoalId".into(),
+                    message: format!("goal_id {raw_goal_id} is out of valid u32 range"),
+                }));
+            };
+            let milestones = crate::services::quasar_career_goals::default_career_milestones();
+            let base_sp = milestones
+                .iter()
+                .find(|m| m.career_id.is_none())
+                .map(|m| m.sp_reward)
+                .unwrap_or(50_000.0);
+            let resolved = if let Some(g) = ctx.sde.career_goals.get(&goal_id) {
+                Some((
+                    g.target_progress,
+                    g.sp_reward as f64,
+                    g.career_path.eq_ignore_ascii_case("Industrialist"),
+                ))
+            } else {
+                milestones
+                    .iter()
+                    .find(|m| m.milestone_id == goal_id)
+                    .map(|m| {
+                        let is_mining = m.career_id == Some(2);
+                        let target = ((m.required_points as u64) * 2) / 3;
+                        let sp = if is_mining { base_sp } else { m.sp_reward };
+                        (target.max(1), sp, is_mining)
+                    })
+            };
+            let Some((target_prog, sp_reward, is_mining_career)) = resolved else {
+                return Some(Err(BridgeRpcError {
+                    code: "ChallengeNotFound".into(),
+                    message: format!("Goal or challenge {goal_id} not found"),
+                }));
+            };
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let npe = snap.npe_progress.entry(char_id).or_insert_with(|| {
+                    eve_db::NpeProgressRecord {
+                        character_id: char_id,
+                        node_graph_id: 473,
+                        current_node_id: 1,
+                        completed: false,
+                        career_goal_progress: Default::default(),
+                        claimed_goals: Default::default(),
+                    }
+                });
+                let cur_prog = if is_mining_career {
+                    let total_mined: u64 = snap
+                        .mining_ledger
+                        .iter()
+                        .filter(|r| r.character_id == char_id)
+                        .map(|r| r.quantity.max(0) as u64)
+                        .sum();
+                    npe.career_goal_progress.insert(goal_id, total_mined);
+                    total_mined
+                } else {
+                    npe.career_goal_progress.get(&goal_id).copied().unwrap_or(0)
+                };
+                if cur_prog < target_prog {
+                    return Err(BridgeRpcError {
+                        code: "GoalProgressIncomplete".into(),
+                        message: format!(
+                            "Career goal {goal_id} requires progress {target_prog}, current is {cur_prog}"
+                        ),
+                    });
+                }
+                if !npe.claimed_goals.insert(goal_id) {
+                    return Err(BridgeRpcError {
+                        code: "GoalAlreadyClaimed".into(),
+                        message: format!("Career goal {goal_id} has already been claimed"),
+                    });
+                }
+                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    ch.free_skill_points += sp_reward;
+                    Ok(ch.free_skill_points)
+                } else {
+                    Err(BridgeRpcError {
+                        code: "CharacterNotFound".into(),
+                        message: format!("Character {char_id} not found"),
+                    })
+                }
+            });
+            match res {
+                Ok(new_free_sp) => Some(Ok(PyRep::keyval([
+                    ("goalID", PyRep::Integer(goal_id as i64)),
+                    ("spReward", PyRep::Real(sp_reward)),
+                    ("freeSkillPoints", PyRep::Real(new_free_sp)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
         ("seasonManager", "reload_fsd_data") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,

@@ -48,6 +48,8 @@ pub struct RedeemTokenEntry {
     pub quantity: i32,
     pub description: String,
     pub station_id: Option<i64>,
+    #[serde(default)]
+    pub expire_date_time: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -101,6 +103,35 @@ pub fn load_store(snap: &eve_db::WorldStateSnapshot) -> AccountServicesStore {
         .get(&ACCOUNT_SERVICES_STORE_KEY)
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default()
+}
+
+pub fn enqueue_redeem_token_in_snapshot(
+    snap: &mut eve_db::WorldStateSnapshot,
+    uid: u64,
+    type_id: u32,
+    quantity: i32,
+    description: String,
+    station_id: Option<i64>,
+    expire_date_time: Option<i64>,
+) -> i64 {
+    let mut store = load_store(snap);
+    let id = store.alloc_id();
+    store
+        .redeem_tokens
+        .entry(uid)
+        .or_default()
+        .push(RedeemTokenEntry {
+            token_id: id,
+            type_id,
+            quantity,
+            description,
+            station_id,
+            expire_date_time,
+        });
+    if let Ok(json) = serde_json::to_string(&store) {
+        snap.item_custom_names.insert(ACCOUNT_SERVICES_STORE_KEY, json);
+    }
+    id
 }
 
 pub fn with_store<R>(
@@ -420,7 +451,7 @@ fn handle_inner(
     session: &mut SessionState,
     service: &str,
     method: &str,
-    args: &[PyRep], _kwargs: &HashMap<String, PyRep>,
+    args: &[PyRep], kwargs: &HashMap<String, PyRep>,
 ) -> Result<Option<PyRep>, BridgeRpcError> {
     match (service, method) {
         ("subscriptionMgr", "GetSubscriptionTime") => {
@@ -549,6 +580,7 @@ fn handle_inner(
                         quantity: qty,
                         description: desc.clone(),
                         station_id: None,
+                        expire_date_time: None,
                     });
                 id
             });
@@ -582,6 +614,10 @@ fn handle_inner(
                             "stationID",
                             t.station_id.map(PyRep::Integer).unwrap_or(PyRep::None),
                         ),
+                        (
+                            "expireDateTime",
+                            t.expire_date_time.map(PyRep::Integer).unwrap_or(PyRep::None),
+                        ),
                     ])
                 })
                 .collect();
@@ -590,29 +626,51 @@ fn handle_inner(
         ("userSvc", "ClaimRedeemTokens") => {
             let uid = ServerContext::require_auth(session)?;
             let mut token_ids = Vec::new();
-            let mut target_cid = session.character_id;
-            for arg in args {
-                match arg {
-                    PyRep::List(items) | PyRep::Tuple(items) => {
-                        for it in items {
-                            if let Some(id) = it.as_i64() {
+            let mut target_cid = args
+                .get(1)
+                .and_then(|v| v.as_i64())
+                .or_else(|| {
+                    kwargs
+                        .get("charID")
+                        .or_else(|| kwargs.get("characterID"))
+                        .and_then(|v| v.as_i64())
+                })
+                .or(session.character_id);
+            let tokens_arg = args.first().or_else(|| kwargs.get("tokens"));
+            match tokens_arg {
+                Some(PyRep::List(items) | PyRep::Tuple(items)) => {
+                    for it in items {
+                        if let Some(id) = it.as_i64() {
+                            token_ids.push(id);
+                        } else if let PyRep::Tuple(pair) | PyRep::List(pair) = it {
+                            if let Some(id) = pair.first().and_then(|p| p.as_i64()) {
                                 token_ids.push(id);
-                            } else if let PyRep::Tuple(pair) = it {
-                                if let Some(id) = pair.first().and_then(|p| p.as_i64()) {
-                                    token_ids.push(id);
-                                }
+                            }
+                        } else if let PyRep::Dict(entries) = it {
+                            if let Some(id) = entries
+                                .iter()
+                                .find(|(k, _)| k.as_str() == Some("tokenID"))
+                                .and_then(|(_, v)| v.as_i64())
+                            {
+                                token_ids.push(id);
+                            }
+                        } else if let PyRep::KeyVal(kv) = it {
+                            if let Some(id) = kv.get("tokenID").and_then(|v| v.as_i64()) {
+                                token_ids.push(id);
                             }
                         }
                     }
-                    PyRep::Integer(v) => {
-                        if ctx.db.with_snapshot(|s| s.characters.contains_key(v)) {
-                            target_cid = Some(*v);
-                        } else {
-                            token_ids.push(*v);
-                        }
-                    }
-                    _ => {}
                 }
+                Some(PyRep::Integer(v)) => {
+                    if args.len() >= 2 {
+                        token_ids.push(*v);
+                    } else if ctx.db.with_snapshot(|s| s.characters.contains_key(v)) {
+                        target_cid = Some(*v);
+                    } else {
+                        token_ids.push(*v);
+                    }
+                }
+                _ => {}
             }
             let Some(cid) = target_cid else {
                 return Err(err(
@@ -633,6 +691,12 @@ fn handle_inner(
                         "Cannot redeem tokens to a character on another account",
                     ));
                 }
+                if token_ids.is_empty() {
+                    return Err(err(
+                        "RedeemTokenNotFound",
+                        "No matching redeem tokens found",
+                    ));
+                }
                 let dest_loc = ch
                     .station_id
                     .or(ch.structure_id)
@@ -642,7 +706,7 @@ fn handle_inner(
                 let mut created_items = Vec::new();
                 let mut remaining = Vec::new();
                 for tok in list.drain(..) {
-                    if token_ids.is_empty() || token_ids.contains(&tok.token_id) {
+                    if token_ids.contains(&tok.token_id) {
                         snap.next_entity_id += 1;
                         let item_id = snap.next_entity_id;
                         let is_ship = ctx
@@ -697,6 +761,10 @@ fn handle_inner(
                 for it in items {
                     if let Some(id) = it.as_i64() {
                         token_ids.push(id);
+                    } else if let PyRep::Tuple(pair) | PyRep::List(pair) = it {
+                        if let Some(id) = pair.first().and_then(|p| p.as_i64()) {
+                            token_ids.push(id);
+                        }
                     }
                 }
             } else if let Some(id) = args.first().and_then(|a| a.as_i64()) {

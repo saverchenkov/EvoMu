@@ -816,6 +816,139 @@ pub fn encode_career_goal_definition_wire(def: &CareerGoalDef, out: &mut Vec<u8>
     encode_bytes_field(2, &attr_bytes, out);
 }
 
+pub fn encode_career_milestone_definition_wire(ms: &CareerMilestoneDef, out: &mut Vec<u8>) {
+    let uuid = career_milestone_uuid(ms.milestone_id);
+    let mut id_bytes = Vec::new();
+    encode_career_goal_identifier(&uuid, &mut id_bytes);
+    encode_bytes_field(1, &id_bytes, out);
+
+    let mut attr_bytes = Vec::new();
+    let name_msg_id = ms
+        .career_id
+        .and_then(|cid| {
+            CAREER_PATH_MESSAGE_IDS
+                .iter()
+                .find(|(id, _, _)| *id == cid)
+                .map(|(_, n, _)| *n)
+        })
+        .unwrap_or(582_520 + ms.milestone_id);
+    let desc_msg_id = 659_200 + ms.milestone_id;
+
+    let mut name_id = Vec::new();
+    encode_varint_field(1, name_msg_id as u64, &mut name_id);
+    encode_bytes_field(1, &name_id, &mut attr_bytes);
+
+    let mut desc_id = Vec::new();
+    encode_varint_field(1, desc_msg_id as u64, &mut desc_id);
+    encode_bytes_field(2, &desc_id, &mut attr_bytes);
+
+    encode_varint_field(3, 0, &mut attr_bytes);
+    encode_varint_field(4, ms.required_points.max(1) as u64, &mut attr_bytes);
+    let (group, subtype) = if ms.career_id.is_some() {
+        ("Career Graduation", "CAREER_PATH_GOAL")
+    } else {
+        ("Overall", "OVERALL_GOAL")
+    };
+    encode_bytes_field(6, &encode_ui_annotation("group", group), &mut attr_bytes);
+    encode_bytes_field(6, &encode_ui_annotation("subtype", subtype), &mut attr_bytes);
+    encode_bytes_field(6, &encode_ui_annotation("name", &ms.description), &mut attr_bytes);
+    encode_bytes_field(6, &encode_ui_annotation("description", &ms.description), &mut attr_bytes);
+    encode_varint_field(7, 1, &mut attr_bytes);
+    encode_varint_field(8, 0, &mut attr_bytes);
+    encode_varint_field(9, ms.career_id.unwrap_or(1).clamp(1, 4) as u64, &mut attr_bytes);
+    encode_varint_field(10, 0, &mut attr_bytes);
+    encode_varint_field(11, 0, &mut attr_bytes);
+    if ms.sp_reward > 0.0 {
+        let mut rtype = Vec::new();
+        encode_varint_field(3, ms.sp_reward as u64, &mut rtype);
+        let mut rew = Vec::new();
+        encode_bytes_field(1, &rtype, &mut rew);
+        encode_varint_field(2, 1, &mut rew);
+        encode_bytes_field(12, &rew, &mut attr_bytes);
+    }
+
+    encode_bytes_field(2, &attr_bytes, out);
+}
+
+pub fn encode_internal_career_milestone_definition_wire(ms: &CareerMilestoneDef, out: &mut Vec<u8>) {
+    let uuid = career_milestone_uuid(ms.milestone_id);
+    let mut id_bytes = Vec::new();
+    encode_career_goal_identifier(&uuid, &mut id_bytes);
+    encode_bytes_field(1, &id_bytes, out);
+
+    let mut attr_bytes = Vec::new();
+    let name_msg_id = ms
+        .career_id
+        .and_then(|cid| {
+            CAREER_PATH_MESSAGE_IDS
+                .iter()
+                .find(|(id, _, _)| *id == cid)
+                .map(|(_, n, _)| *n)
+        })
+        .unwrap_or(582_520 + ms.milestone_id);
+    let desc_msg_id = 659_200 + ms.milestone_id;
+
+    let mut name_id = Vec::new();
+    encode_varint_field(1, name_msg_id as u64, &mut name_id);
+    encode_bytes_field(1, &name_id, &mut attr_bytes);
+
+    let mut desc_id = Vec::new();
+    encode_varint_field(1, desc_msg_id as u64, &mut desc_id);
+    encode_bytes_field(2, &desc_id, &mut attr_bytes);
+
+    encode_varint_field(3, ms.required_points.max(1) as u64, &mut attr_bytes);
+    let (group, subtype) = if ms.career_id.is_some() {
+        ("Career Graduation", "CAREER_PATH_GOAL")
+    } else {
+        ("Overall", "OVERALL_GOAL")
+    };
+    encode_bytes_field(5, &encode_ui_annotation("group", group), &mut attr_bytes);
+    encode_bytes_field(5, &encode_ui_annotation("subtype", subtype), &mut attr_bytes);
+    encode_bytes_field(5, &encode_ui_annotation("name", &ms.description), &mut attr_bytes);
+    encode_varint_field(6, 1, &mut attr_bytes);
+    encode_varint_field(7, ms.career_id.unwrap_or(1).clamp(1, 4) as u64, &mut attr_bytes);
+    encode_varint_field(8, 0, &mut attr_bytes);
+    if ms.sp_reward > 0.0 {
+        let mut rtype = Vec::new();
+        encode_varint_field(3, ms.sp_reward as u64, &mut rtype);
+        let mut rew = Vec::new();
+        encode_bytes_field(1, &rtype, &mut rew);
+        encode_varint_field(2, 1, &mut rew);
+        encode_bytes_field(9, &rew, &mut attr_bytes);
+    }
+
+    encode_bytes_field(2, &attr_bytes, out);
+}
+
+pub fn encode_career_milestone_goal_wire(
+    ms: &CareerMilestoneDef,
+    progress: u32,
+    reached: bool,
+    claimed: bool,
+    out: &mut Vec<u8>,
+) {
+    let uuid = career_milestone_uuid(ms.milestone_id);
+    let mut id_bytes = Vec::new();
+    encode_career_goal_identifier(&uuid, &mut id_bytes);
+    encode_bytes_field(1, &id_bytes, out);
+
+    encode_varint_field(2, progress.min(ms.required_points) as u64, out);
+    encode_varint_field(3, if reached { 0 } else { 1 }, out);
+
+    let mut label_state = Vec::new();
+    encode_varint_field(1, 1, &mut label_state);
+    if claimed {
+        let ts_proto = GoogleTimestamp {
+            seconds: 0,
+            nanos: 0,
+        };
+        encode_bytes_field(2, &ts_proto.encode_proto(), &mut label_state);
+    } else {
+        encode_varint_field(3, 1, &mut label_state);
+    }
+    encode_bytes_field(5, &label_state, out);
+}
+
 /// Wire encoder for `eve.career.goal.api.GetDefinitionsResponse.Goal` (`eve.career.goal.Attributes`):
 /// `1: name, 2: description, 3: target, 5: ui_annotations, 6: threat, 7: career, 8: career_points, 9: rewards`.
 pub fn encode_internal_career_goal_definition_wire(def: &CareerGoalDef, out: &mut Vec<u8>) {
@@ -934,6 +1067,12 @@ pub fn register_career_goal_handlers(
                 encode_career_goal_wire(g, &mut gw);
                 encode_bytes_field(1, &gw, &mut out);
             }
+            for (ms, reached, claimed) in mgr.get_character_milestones(cid) {
+                let cp = mgr.career_points_for_character(cid, ms.career_id);
+                let mut mw = Vec::new();
+                encode_career_milestone_goal_wire(&ms, cp, reached, claimed, &mut mw);
+                encode_bytes_field(1, &mw, &mut out);
+            }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.GetAllResponse"),
                 value: out,
@@ -952,6 +1091,11 @@ pub fn register_career_goal_handlers(
                 let mut gw = Vec::new();
                 encode_career_goal_definition_wire(def, &mut gw);
                 encode_bytes_field(1, &gw, &mut out);
+            }
+            for ms in &mgr_defs.milestones {
+                let mut mw = Vec::new();
+                encode_career_milestone_definition_wire(ms, &mut mw);
+                encode_bytes_field(1, &mw, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!(
@@ -1106,6 +1250,12 @@ pub fn register_career_goal_handlers(
                 encode_career_goal_wire(g, &mut gw);
                 encode_bytes_field(1, &gw, &mut out);
             }
+            for (ms, reached, claimed) in mgr.get_character_milestones(cid) {
+                let cp = mgr.career_points_for_character(cid, ms.career_id);
+                let mut mw = Vec::new();
+                encode_career_milestone_goal_wire(&ms, cp, reached, claimed, &mut mw);
+                encode_bytes_field(1, &mw, &mut out);
+            }
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve_public.app.eveonline.career.goal.GetAllResponse"
@@ -1156,6 +1306,11 @@ pub fn register_career_goal_handlers(
                     encode_internal_career_goal_definition_wire(def, &mut gw);
                     encode_bytes_field(1, &gw, &mut out);
                 }
+                for ms in &mgr_eve_defs.milestones {
+                    let mut mw = Vec::new();
+                    encode_internal_career_milestone_definition_wire(ms, &mut mw);
+                    encode_bytes_field(1, &mw, &mut out);
+                }
                 Ok(GoogleAny {
                     type_url: format!(
                         "{TYPE_GOOGLEAPIS_PREFIX}eve.career.goal.api.GetDefinitionsResponse"
@@ -1187,6 +1342,12 @@ pub fn register_career_goal_handlers(
                     let mut gw = Vec::new();
                     encode_career_goal_wire(g, &mut gw);
                     encode_bytes_field(1, &gw, &mut out);
+                }
+                for (ms, reached, claimed) in mgr.get_character_milestones(target_char) {
+                    let cp = mgr.career_points_for_character(target_char, ms.career_id);
+                    let mut mw = Vec::new();
+                    encode_career_milestone_goal_wire(&ms, cp, reached, claimed, &mut mw);
+                    encode_bytes_field(1, &mw, &mut out);
                 }
                 Ok(GoogleAny {
                     type_url: format!(

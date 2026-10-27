@@ -386,9 +386,30 @@ async fn test_account_redeem_tokens_claim_to_character_station() {
         .expect_err("cross-account claim");
     assert_eq!(cross.code, "CharacterOwnershipMismatch");
 
-    // Claim to the selected character: item delivered to its station hangar.
+    // Empty token list must be rejected and must NOT mass-redeem all tokens.
+    let empty_claim = ctx
+        .dispatch_rpc(&mut gm, "userSvc", None, "ClaimRedeemTokens", &[PyRep::List(vec![]), PyRep::Integer(90_000_003)], &kw, None)
+        .await
+        .expect_err("empty token list must not mass-redeem");
+    assert_eq!(empty_claim.code, "RedeemTokenNotFound");
+
+    // Claim to the selected character using V24 (tokenID, massTokenID) tuple format: item delivered to its station hangar.
     let claim = ctx
-        .dispatch_rpc(&mut gm, "userSvc", None, "ClaimRedeemTokens", &[PyRep::List(vec![PyRep::Integer(tok_id)]), PyRep::Integer(90_000_003)], &kw, None)
+        .dispatch_rpc(
+            &mut gm,
+            "userSvc",
+            None,
+            "ClaimRedeemTokens",
+            &[
+                PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::Integer(tok_id),
+                    PyRep::Integer(tok_id),
+                ])]),
+                PyRep::Integer(90_000_003),
+            ],
+            &kw,
+            None,
+        )
         .await
         .expect("ClaimRedeemTokens");
     let PyRep::KeyVal(ckv) = claim else { panic!("expected KeyVal") };

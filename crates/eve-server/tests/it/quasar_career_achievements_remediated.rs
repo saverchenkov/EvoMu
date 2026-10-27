@@ -156,7 +156,11 @@ async fn test_authentic_career_goals_and_milestones_remediated() {
 
     let wm1 = WireMessage::decode(&r1_payload.value).expect("decode GetAllResponse");
     let goal_fields: Vec<_> = wm1.fields.iter().filter(|f| f.field_number == 1).collect();
-    assert_eq!(goal_fields.len(), 188, "Must return 188 authentic AIR Career Program goals");
+    assert_eq!(
+        goal_fields.len(),
+        196,
+        "Must return 188 AIR Career Program goals + 8 career/overall milestones"
+    );
 
     // Inspect first goal: verify field 1 is Identifier { uuid: bytes }
     let g1_bytes = goal_fields[0].value.as_bytes().expect("g1 bytes");
@@ -166,14 +170,18 @@ async fn test_authentic_career_goals_and_milestones_remediated() {
     let uuid_bytes = id_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()).expect("uuid");
     assert_eq!(uuid_bytes.len(), 16, "Career goal identifier uuid must be 16 bytes");
 
-    // 2. GetDefinitionsRequest returns all 188 authentic career goal definitions
+    // 2. GetDefinitionsRequest returns all 188 career goal definitions + 8 milestone definitions
     let r2 = quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.GetDefinitionsRequest", Vec::new(), b"cg-02").await;
     assert_eq!(r2.status_code, STATUS_OK);
     let r2_payload = r2.payload.expect("r2 payload");
     assert_eq!(r2_payload.normalized_type_name(), "eve_public.career.goal.api.GetDefinitionsResponse");
     let wm2 = WireMessage::decode(&r2_payload.value).expect("decode GetDefinitionsResponse");
     let def_fields: Vec<_> = wm2.fields.iter().filter(|f| f.field_number == 1).collect();
-    assert_eq!(def_fields.len(), 188, "Must return 188 authentic career goal definitions");
+    assert_eq!(
+        def_fields.len(),
+        196,
+        "Must return 188 career goal definitions + 8 milestone definitions"
+    );
     let reg = QuasarDescriptorRegistry::open_default().expect("open QuasarDescriptorRegistry");
     let defs_dyn = reg
         .decode_dynamic("eve_public.career.goal.api.GetDefinitionsResponse", &r2_payload.value)
