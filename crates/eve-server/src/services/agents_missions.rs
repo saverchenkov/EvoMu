@@ -1272,16 +1272,64 @@ pub async fn handle(
                             (t, false)
                         };
                         if storyline {
-                            if let Some(storyline_mission_id) = ctx.sde.missions
+                            if let Some(storyline_tmpl) = ctx.sde.missions
                                 .values().filter(|sm| {
                                     is_storyline_template(sm)
                                         && !snap.active_missions.contains_key(&(char_id, sm.mission_id))
-                                }).map(|sm| sm.mission_id)
-                                .min()
+                                }).min_by_key(|sm| sm.mission_id)
                             {
+                                let storyline_mission_id = storyline_tmpl.mission_id;
+                                let sl_agent = ctx.sde.agents.get(&storyline_agent_id);
+                                let ct = storyline_tmpl.content_template.as_deref().unwrap_or_default();
+                                let is_trade = ct.contains("BasicTrade") || ct.contains("TradeMission") || ct.contains("Trade");
+                                let is_courier = !is_trade && (storyline_tmpl.is_courier || ct.contains("BasicCourier"));
+                                let is_kill = ct.contains("BasicKill") || ct.contains("Kill") || ct.contains("Encounter");
+                                let is_mining = !is_kill && !is_trade && !is_courier && (ct.contains("BasicMining")
+                                    || storyline_tmpl.title.to_lowercase().contains("mining")
+                                    || sl_agent.is_some_and(|a| a.division_id == 23));
+                                let (req_tid, req_qty, origin_sid, dest_sid, sl_npcs) = if is_courier {
+                                    if let Some(sa) = sl_agent.and_then(|a| resolve_courier_mission_details(ctx, storyline_tmpl, a).ok()) {
+                                        (Some(sa.cargo_type_id), sa.cargo_quantity, Some(sa.origin_station_id), Some(sa.destination_station_id), 0)
+                                    } else {
+                                        (None, 0, sl_agent.and_then(|a| a.station_id), None, 0)
+                                    }
+                                } else if is_trade {
+                                    let td = resolve_trade_mission_details(ctx, storyline_tmpl);
+                                    (Some(td.trade_type_id), td.trade_quantity, sl_agent.and_then(|a| a.station_id), None, 0)
+                                } else if is_mining {
+                                    let md = resolve_mining_mission_details(ctx, storyline_tmpl);
+                                    (Some(md.ore_type_id), md.required_units, sl_agent.and_then(|a| a.station_id), None, 0)
+                                } else if let Some(sa) = sl_agent {
+                                    let enc = resolve_security_mission_encounter(ctx, storyline_tmpl, sa, sys_id);
+                                    (None, 0, sa.station_id, None, enc.wave_npc_count)
+                                } else {
+                                    (None, 0, None, None, 1)
+                                };
+                                save_mission_meta(
+                                    snap,
+                                    char_id,
+                                    &MissionTimingAndCargoMeta {
+                                        mission_id: storyline_mission_id,
+                                        agent_id: storyline_agent_id,
+                                        offered_at_unix: now,
+                                        offer_expiry_unix: now + 604_800,
+                                        accepted_at_unix: None,
+                                        accept_expiry_unix: None,
+                                        bonus_expiry_unix: None,
+                                        completed_at_unix: None,
+                                        required_delivery_type_id: req_tid,
+                                        required_delivery_qty: req_qty,
+                                        granted_courier_item_id: None,
+                                        granted_courier_qty: 0,
+                                        is_anomic_burner: false,
+                                        chosen_branch: None,
+                                        destination_station_id: dest_sid,
+                                        origin_station_id: origin_sid,
+                                    },
+                                );
                                 snap.active_missions
                                     .entry((char_id, storyline_mission_id))
-                                    .or_insert(ActiveMissionRecord { mission_id: storyline_mission_id, character_id: char_id, agent_id: storyline_agent_id, solar_system_id: sys_id, state: "Offered".into(), current_room_id: 1, npcs_remaining: 0, spawned_npc_ball_ids: Vec::new() });
+                                    .or_insert(ActiveMissionRecord { mission_id: storyline_mission_id, character_id: char_id, agent_id: storyline_agent_id, solar_system_id: sys_id, state: "Offered".into(), current_room_id: 1, npcs_remaining: sl_npcs, spawned_npc_ball_ids: Vec::new() });
                             }
                         }
                         Ok((new_st, t, storyline, bonus_paid, st_changes))

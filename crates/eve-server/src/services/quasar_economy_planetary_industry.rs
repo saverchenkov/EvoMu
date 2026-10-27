@@ -284,7 +284,15 @@ pub fn register_economy_planetary_industry_handlers(
     // 4. eve.loyaltypoints.assetholding.operation.api.WithdrawRequest
     router.register_handler(
         "eve.loyaltypoints.assetholding.operation.api.WithdrawRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
+        Arc::new(move |ctx, _any, _dyn_msg| {
+            if ctx.effective_character_id().is_none()
+                && crate::quasar_gateway::require_admin_role(ctx).is_err()
+            {
+                return Err((
+                    crate::quasar_gateway::STATUS_FORBIDDEN,
+                    "Authentication required for loyaltypoints assetholding WithdrawRequest".into(),
+                ));
+            }
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.assetholding.operation.api.WithdrawResponse"
@@ -297,7 +305,15 @@ pub fn register_economy_planetary_industry_handlers(
     // 5. eve.loyaltypoints.assetholding.operation.api.DepositRequest
     router.register_handler(
         "eve.loyaltypoints.assetholding.operation.api.DepositRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
+        Arc::new(move |ctx, _any, _dyn_msg| {
+            if ctx.effective_character_id().is_none()
+                && crate::quasar_gateway::require_admin_role(ctx).is_err()
+            {
+                return Err((
+                    crate::quasar_gateway::STATUS_FORBIDDEN,
+                    "Authentication required for loyaltypoints assetholding DepositRequest".into(),
+                ));
+            }
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.assetholding.operation.api.DepositResponse"
@@ -517,7 +533,8 @@ pub fn register_economy_planetary_industry_handlers(
     // 11. eve.planet.skyhook.admin.api.ChangeOwnerRequest
     router.register_handler(
         "eve.planet.skyhook.admin.api.ChangeOwnerRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
+        Arc::new(move |ctx, _any, _dyn_msg| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve.planet.skyhook.admin.api.ChangeOwnerResponse"

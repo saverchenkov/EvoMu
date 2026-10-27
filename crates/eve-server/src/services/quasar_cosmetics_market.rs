@@ -806,7 +806,7 @@ fn skin_get(
     ctx: &AuthoritativeContext,
     msg: &DynamicQuasarMessage,
 ) -> HandlerResult {
-    let _cid = require_char(ctx)?;
+    let cid = require_char(ctx)?;
     let uuid = uuid_of(msg, 1)
         .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing skin listing UUID".to_string()))?;
     let rec = st
@@ -817,6 +817,28 @@ fn skin_get(
         .get(&hex(&uuid))
         .cloned()
         .ok_or_else(|| (STATUS_NOT_FOUND, "Skin listing not found".to_string()))?;
+    let (corp_id, alliance_id) = st.db.with_snapshot(|s| {
+        s.characters
+            .get(&(cid as i64))
+            .map(|c| {
+                let corp = c.corporation_id as u32;
+                let al = s
+                    .corporations
+                    .get(&c.corporation_id)
+                    .and_then(|cr| cr.alliance_id)
+                    .map(|a| a as u32);
+                (corp, al)
+            })
+            .unwrap_or((1_000_009, None))
+    });
+    if !skin_visible_to(&rec, cid, corp_id, alliance_id, None)
+        && crate::quasar_gateway::require_admin_role(ctx).is_err()
+    {
+        return Err((
+            STATUS_FORBIDDEN,
+            "Caller is not eligible for this targeted SKIN listing".to_string(),
+        ));
+    }
     let mut out = Vec::new();
     encode_bytes_field(1, &encode_skin_entry(&rec), &mut out);
     Ok(any(
@@ -1065,12 +1087,29 @@ fn skin_initiate_purchase(
                 "Caller is not eligible for this targeted SKIN listing".to_string(),
             ));
         }
+        if let Some(l_mut) = data.skin_listings.get_mut(&key) {
+            l_mut.quantity = l_mut.quantity.saturating_sub(quantity);
+            if l_mut.quantity == 0 {
+                data.skin_listings.remove(&key);
+            }
+        }
         let tx = next_uuid(&mut data, b"COSMTXID");
         (l, tx)
+    };
+    let rollback_listing_qty = |st_ref: &CosmeticsMarketState, orig: &SkinListingRecord, qty: u32| {
+        let mut data = st_ref.data.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(l_mut) = data.skin_listings.get_mut(&key) {
+            l_mut.quantity = l_mut.quantity.saturating_add(qty);
+        } else {
+            let mut restored = orig.clone();
+            restored.quantity = qty;
+            data.skin_listings.insert(key.clone(), restored);
+        }
     };
 
     let tax_pct: u64 = if listing.branded { 10 } else { 20 };
     let Some(tier_u32) = st.skin_tier_for_hex(&listing.skin_hex) else {
+        rollback_listing_qty(st, &listing, quantity);
         return Err((
             STATUS_NOT_FOUND,
             format!("SKIN design '{}' not found", listing.skin_hex),
@@ -1078,61 +1117,83 @@ fn skin_initiate_purchase(
     };
     let tier = u64::from(tier_u32);
     let fee_per_unit = if listing.branded { tier * 2_500 } else { tier * 1_000 };
-    let buyer_lp_fee = fee_per_unit
+    let Some(buyer_lp_fee) = fee_per_unit
         .checked_mul(quantity_u64)
         .and_then(|v| i64::try_from(v).ok())
-        .ok_or_else(|| (STATUS_BAD_REQUEST, "Buyer EverMark fee overflows".to_string()))?;
+    else {
+        rollback_listing_qty(st, &listing, quantity);
+        return Err((STATUS_BAD_REQUEST, "Buyer EverMark fee overflows".to_string()));
+    };
 
     let buyer_lp = st.db.with_snapshot(|s| {
         s.characters.get(&(cid as i64)).and_then(|c| c.loyalty_points.get(&(PARAGON_CORP_ID as i64)).copied()).unwrap_or(0)
     });
     if buyer_lp < buyer_lp_fee {
+        rollback_listing_qty(st, &listing, quantity);
         queue_transaction_notice(cid, &tx_uuid, false, now);
         return Err((STATUS_PRECONDITION_FAILED, "Insufficient EverMarks for buyer fee".to_string()));
     }
 
     let checked_isk_settlement = match listing.price_isk {
         Some(isk_unit) => {
-            if isk_unit > MAX_LISTING_PRICE_UNITS {
-                return Err((STATUS_BAD_REQUEST, "Listing ISK price exceeds maximum safe bounds".to_string()));
+            let calc = (|| -> Result<(IskCents, IskCents), (u32, String)> {
+                if isk_unit > MAX_LISTING_PRICE_UNITS {
+                    return Err((STATUS_BAD_REQUEST, "Listing ISK price exceeds maximum safe bounds".to_string()));
+                }
+                let total_isk = isk_unit
+                    .checked_mul(quantity_u64)
+                    .ok_or_else(|| (STATUS_BAD_REQUEST, "Total ISK price overflows".to_string()))?;
+                let total_cost = checked_isk_cents(total_isk)
+                    .ok_or_else(|| (STATUS_BAD_REQUEST, "Total ISK price exceeds limit".to_string()))?;
+                let tax_isk = total_isk
+                    .checked_mul(tax_pct)
+                    .map(|v| v / 100)
+                    .ok_or_else(|| (STATUS_BAD_REQUEST, "ISK tax calculation overflows".to_string()))?;
+                let net_isk = total_isk
+                    .checked_sub(tax_isk)
+                    .ok_or_else(|| (STATUS_BAD_REQUEST, "ISK net calculation underflows".to_string()))?;
+                let net_credit = checked_isk_cents(net_isk)
+                    .ok_or_else(|| (STATUS_BAD_REQUEST, "Net ISK credit exceeds limit".to_string()))?;
+                Ok((total_cost, net_credit))
+            })();
+            match calc {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    rollback_listing_qty(st, &listing, quantity);
+                    return Err(e);
+                }
             }
-            let total_isk = isk_unit
-                .checked_mul(quantity_u64)
-                .ok_or_else(|| (STATUS_BAD_REQUEST, "Total ISK price overflows".to_string()))?;
-            let total_cost = checked_isk_cents(total_isk)
-                .ok_or_else(|| (STATUS_BAD_REQUEST, "Total ISK price exceeds limit".to_string()))?;
-            let tax_isk = total_isk
-                .checked_mul(tax_pct)
-                .map(|v| v / 100)
-                .ok_or_else(|| (STATUS_BAD_REQUEST, "ISK tax calculation overflows".to_string()))?;
-            let net_isk = total_isk
-                .checked_sub(tax_isk)
-                .ok_or_else(|| (STATUS_BAD_REQUEST, "ISK net calculation underflows".to_string()))?;
-            let net_credit = checked_isk_cents(net_isk)
-                .ok_or_else(|| (STATUS_BAD_REQUEST, "Net ISK credit exceeds limit".to_string()))?;
-            Some((total_cost, net_credit))
         }
         None => None,
     };
     let checked_plex_settlement = match listing.price_plex_cents {
         Some(plex_cents) => {
-            let total_cents = plex_cents
-                .checked_mul(quantity_u64)
-                .filter(|&c| c <= MAX_LISTING_PRICE_UNITS)
-                .ok_or_else(|| (STATUS_BAD_REQUEST, "Total PLEX price overflows".to_string()))?;
-            let total_plex = total_cents
-                .checked_add(99)
-                .map(|v| v / 100)
-                .ok_or_else(|| (STATUS_BAD_REQUEST, "Total PLEX units overflow".to_string()))?;
-            let total_plex_i64 = i64::try_from(total_plex)
-                .map_err(|_| (STATUS_BAD_REQUEST, "Total PLEX units exceed i64".to_string()))?;
-            let tax_plex = total_plex
-                .checked_mul(tax_pct)
-                .map(|v| v / 100)
-                .ok_or_else(|| (STATUS_BAD_REQUEST, "PLEX tax calculation overflows".to_string()))?;
-            let net_plex_i64 = i64::try_from(total_plex.saturating_sub(tax_plex))
-                .map_err(|_| (STATUS_BAD_REQUEST, "Net PLEX credit exceeds i64".to_string()))?;
-            Some((total_plex_i64, net_plex_i64))
+            let calc = (|| -> Result<(i64, i64), (u32, String)> {
+                let total_cents = plex_cents
+                    .checked_mul(quantity_u64)
+                    .filter(|&c| c <= MAX_LISTING_PRICE_UNITS)
+                    .ok_or_else(|| (STATUS_BAD_REQUEST, "Total PLEX price overflows".to_string()))?;
+                let total_plex = total_cents
+                    .checked_add(99)
+                    .map(|v| v / 100)
+                    .ok_or_else(|| (STATUS_BAD_REQUEST, "Total PLEX units overflow".to_string()))?;
+                let total_plex_i64 = i64::try_from(total_plex)
+                    .map_err(|_| (STATUS_BAD_REQUEST, "Total PLEX units exceed i64".to_string()))?;
+                let tax_plex = total_plex
+                    .checked_mul(tax_pct)
+                    .map(|v| v / 100)
+                    .ok_or_else(|| (STATUS_BAD_REQUEST, "PLEX tax calculation overflows".to_string()))?;
+                let net_plex_i64 = i64::try_from(total_plex.saturating_sub(tax_plex))
+                    .map_err(|_| (STATUS_BAD_REQUEST, "Net PLEX credit exceeds i64".to_string()))?;
+                Ok((total_plex_i64, net_plex_i64))
+            })();
+            match calc {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    rollback_listing_qty(st, &listing, quantity);
+                    return Err(e);
+                }
+            }
         }
         None => None,
     };
@@ -1193,15 +1254,6 @@ fn skin_initiate_purchase(
 
     if settled {
         {
-            let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
-            if let Some(l) = data.skin_listings.get_mut(&key) {
-                l.quantity = l.quantity.saturating_sub(quantity);
-                if l.quantity == 0 {
-                    data.skin_listings.remove(&key);
-                }
-            }
-        }
-        {
             let mut skinr_data = st.skinr.data.write().unwrap_or_else(|e| e.into_inner());
             let s_key = SkinrCosmeticsState::skin_lic_key(listing.seller_id, &listing.skin_hex);
             if let Some(lic) = skinr_data.skin_licenses.get_mut(&s_key) {
@@ -1220,6 +1272,8 @@ fn skin_initiate_purchase(
         }
         st.skinr.save();
         st.save();
+    } else {
+        rollback_listing_qty(st, &listing, quantity);
     }
     st.save();
     queue_transaction_notice(cid, &tx_uuid, settled, now);

@@ -682,6 +682,12 @@ fn transfer_lp(
         }));
     };
     let npc_corp_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1_000_035);
+    if npc_corp_id <= 0 {
+        return Some(Err(BridgeRpcError {
+            code: "InvalidCorpID".into(),
+            message: "LP issuer corpID must be positive".into(),
+        }));
+    }
     let amount = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
     if amount <= 0 {
         return Some(Err(BridgeRpcError {
@@ -697,6 +703,21 @@ fn transfer_lp(
                 message: format!("Character {char_id} not found"),
             });
         };
+        let target_exists = snap.corporations.contains_key(&target_corp_id)
+            || ctx.sde.npc_corporations.contains_key(&target_corp_id)
+            || target_corp_id == 98_000_001;
+        if !target_exists {
+            return Err(BridgeRpcError {
+                code: "CorporationNotFound".into(),
+                message: format!("Target corporation {target_corp_id} does not exist"),
+            });
+        }
+        if is_from_corp && target_corp_id == ch.corporation_id {
+            return Err(BridgeRpcError {
+                code: "InvalidTargetCorp".into(),
+                message: "Cannot transfer corporation LP to the same corporation".into(),
+            });
+        }
         let (sender_remaining, lp_before) = if is_from_corp {
             let sender_corp_id = ch.corporation_id;
             check_corp_lp_role(snap, session, char_id, sender_corp_id)?;

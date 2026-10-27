@@ -441,7 +441,15 @@ pub fn register_inventory_asset_handlers(
     // 16. eve.inventory.assetholding.operation.api.HoldItemsRequest
     router.register_handler(
         "eve.inventory.assetholding.operation.api.HoldItemsRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            if ctx.effective_character_id().is_none()
+                && crate::quasar_gateway::require_admin_role(ctx).is_err()
+            {
+                return Err((
+                    crate::quasar_gateway::STATUS_FORBIDDEN,
+                    "Authentication required for inventory assetholding HoldItemsRequest".into(),
+                ));
+            }
             let op_id = extract_u64_from_field(dyn_msg, 1);
             let mut out = Vec::new();
             encode_identifier(1, 999_001, &mut out); // container id
@@ -462,7 +470,15 @@ pub fn register_inventory_asset_handlers(
     // 17. eve.inventory.assetholding.operation.api.HoldItemsOfTypeRequest
     router.register_handler(
         "eve.inventory.assetholding.operation.api.HoldItemsOfTypeRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            if ctx.effective_character_id().is_none()
+                && crate::quasar_gateway::require_admin_role(ctx).is_err()
+            {
+                return Err((
+                    crate::quasar_gateway::STATUS_FORBIDDEN,
+                    "Authentication required for inventory assetholding HoldItemsOfTypeRequest".into(),
+                ));
+            }
             let op_id = extract_u64_from_field(dyn_msg, 1);
             let mut out = Vec::new();
             encode_identifier(1, 999_002, &mut out);
@@ -483,7 +499,15 @@ pub fn register_inventory_asset_handlers(
     // 18. eve.inventory.assetholding.operation.api.SpawnItemsOfTypeRequest
     router.register_handler(
         "eve.inventory.assetholding.operation.api.SpawnItemsOfTypeRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            if ctx.effective_character_id().is_none()
+                && crate::quasar_gateway::require_admin_role(ctx).is_err()
+            {
+                return Err((
+                    crate::quasar_gateway::STATUS_FORBIDDEN,
+                    "Authentication required for inventory assetholding SpawnItemsOfTypeRequest".into(),
+                ));
+            }
             let op_id = extract_u64_from_field(dyn_msg, 1);
             let mut out = Vec::new();
             encode_identifier(1, op_id.max(1), &mut out);
@@ -507,6 +531,19 @@ pub fn register_inventory_asset_handlers(
         Arc::new(move |ctx, _any, dyn_msg| {
             let req_cid = extract_u64_from_field(dyn_msg, 1) as i64;
             let effective_cid = ctx.effective_character_id().unwrap_or(0) as i64;
+            let is_admin = crate::quasar_gateway::require_admin_role(ctx).is_ok();
+            if effective_cid == 0 && !is_admin {
+                return Err((
+                    crate::quasar_gateway::STATUS_FORBIDDEN,
+                    "Authentication required for GetAssetsItemsRequest".into(),
+                ));
+            }
+            if req_cid != 0 && effective_cid != 0 && req_cid != effective_cid && !is_admin {
+                return Err((
+                    crate::quasar_gateway::STATUS_FORBIDDEN,
+                    "Cannot query assets of another character".into(),
+                ));
+            }
             let target_cid = if req_cid != 0 { req_cid } else { effective_cid };
 
             let items = db_clone.with_snapshot(|snap| {
@@ -544,6 +581,19 @@ pub fn register_inventory_asset_handlers(
         Arc::new(move |ctx, _any, dyn_msg| {
             let req_cid = extract_u64_from_field(dyn_msg, 1) as i64;
             let effective_cid = ctx.effective_character_id().unwrap_or(0) as i64;
+            let is_admin = crate::quasar_gateway::require_admin_role(ctx).is_ok();
+            if effective_cid == 0 && !is_admin {
+                return Err((
+                    crate::quasar_gateway::STATUS_FORBIDDEN,
+                    "Authentication required for GetShipAssetsRequest".into(),
+                ));
+            }
+            if req_cid != 0 && effective_cid != 0 && req_cid != effective_cid && !is_admin {
+                return Err((
+                    crate::quasar_gateway::STATUS_FORBIDDEN,
+                    "Cannot query ship assets of another character".into(),
+                ));
+            }
             let target_cid = if req_cid != 0 { req_cid } else { effective_cid };
 
             let ships = db_clone.with_snapshot(|snap| {
@@ -554,14 +604,13 @@ pub fn register_inventory_asset_handlers(
                             && sde_clone
                                 .types
                                 .get(&item.type_id)
-                                .map(|t| {
-                                    sde_clone
-                                        .groups
-                                        .get(&t.group_id)
-                                        .map(|g| g.category_id == 6)
-                                        .unwrap_or(false)
+                                .is_some_and(|t| {
+                                    t.category_id == 6
+                                        || sde_clone
+                                            .groups
+                                            .get(&t.group_id)
+                                            .is_some_and(|g| g.category_id == 6)
                                 })
-                                .unwrap_or(false)
                     })
                     .cloned()
                     .collect::<Vec<_>>()
