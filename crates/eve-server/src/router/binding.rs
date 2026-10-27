@@ -734,6 +734,44 @@ impl ServerContext {
                 q.push(notif.clone());
             }
             let _ = notify_tx.send((char_id, notif));
+
+            let auto_reload_ev: Option<(Vec<i64>, u32, f64)> = db.with_mut_snapshot(|snap| {
+                snap.service_state_blobs
+                    .remove(&format!("auto_reloaded_event:{}", cycle.module_id))
+                    .and_then(|s| serde_json::from_str(&s).ok())
+            });
+            if let Some((mod_ids, charge_tid, reload_ms)) = auto_reload_ev {
+                let reload_args = vec![
+                    PyRep::List(mod_ids.into_iter().map(PyRep::Integer).collect()),
+                    PyRep::Integer(charge_tid as i64),
+                    PyRep::Real(reload_ms),
+                ];
+                let (r_pkt, r_marshaled) = ServerContext::build_macho_notification_packet(
+                    char_id,
+                    user_id,
+                    "OnChargeBeingLoadedToModule",
+                    "charid",
+                    reload_args.clone(),
+                );
+                let r_notif = PendingMachoNotification {
+                    recipient_char_id: char_id,
+                    event: "OnChargeBeingLoadedToModule".to_string(),
+                    id_type: "charid".to_string(),
+                    args: reload_args,
+                    packet: r_pkt,
+                    marshaled_packet: r_marshaled,
+                    created_filetime: now,
+                };
+                {
+                    let mut q_guard = pending.write().unwrap_or_else(|e| e.into_inner());
+                    let q = q_guard.entry(char_id).or_default();
+                    if q.len() >= 512 {
+                        q.remove(0);
+                    }
+                    q.push(r_notif.clone());
+                }
+                let _ = notify_tx.send((char_id, r_notif));
+            }
         }));
     }
 }

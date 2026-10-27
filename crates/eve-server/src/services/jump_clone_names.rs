@@ -1000,9 +1000,13 @@ pub(crate) async fn handle_qa_move_me_to(
         let old_handle = ctx.systems.get_or_spawn(old_sys_id);
         let existing_ball = old_handle.remove_ball(ship_id).await;
         let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
+        let ship_tid = ctx
+            .db
+            .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id))
+            .unwrap_or(587);
         let mut new_ball = existing_ball.unwrap_or(eve_destiny::Ball {
             id: ship_id,
-            type_id: 601,
+            type_id: ship_tid,
             position: glam::DVec3::ZERO,
             velocity: glam::DVec3::ZERO,
             max_velocity: 300.0,

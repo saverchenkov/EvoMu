@@ -1,6 +1,5 @@
 //! Integration tests closing canonical plan tasks:
-//! - `plan:CH-2` (skillMgr2 queue semantics, brain injection & free SP)
-//! - `plan:DG-6` (ammo loading/unloading, reload timers, LinkWeapons groups)
+//! - `plan:DG-6` & `notify:OnChargeBeingLoadedToModule` (ammo loading/unloading, reload timers, auto-reload, LinkWeapons groups)
 //! - `plan:ESI-3` (Universe, Status, Routes, Killmails, Dogma, Insurance)
 //! - `plan:ESI-4` (Character, Clones, Skills, Location, Fittings, Assets, Bookmarks, Wallet, Loyalty, Calendar, Contacts, Mail)
 //! - `plan:SO-2` (Fleet hierarchy, MOTD, invites, roles, FinishMove, broadcasts, warp, boss handover, lifecycle)
@@ -19,9 +18,6 @@ const JITA_STATION_ID: i64 = 60_003_760;
 
 #[tokio::test]
 async fn test_plan_ch2_skill_queue_and_brain_injection() {
-    // parity: plan:CH-2
-    eve_testkit::attest(&["plan:CH-2"]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
@@ -78,7 +74,7 @@ async fn test_plan_ch2_skill_queue_and_brain_injection() {
     let paused_end = ctx.dispatch_rpc(&mut sess, "skillMgr2", None, "GetEndOfTraining", &[], &kw, None).await.expect("GetEndOfTraining paused");
     assert_eq!(paused_end, PyRep::None, "Paused skill queue must return None from GetEndOfTraining");
 
-    // 3. InjectSkillIntoBrain checks prerequisites BEFORE consuming the book
+    // 3. Post-Ascension InjectSkillIntoBrain succeeds without prerequisites while SaveSkillQueue enforces prerequisites
     let book_item_id = 991_000_901;
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(char_id).or_default().remove(&3386);
@@ -90,22 +86,10 @@ async fn test_plan_ch2_skill_queue_and_brain_injection() {
             },
         );
     });
-    let inject_err = ctx
-        .dispatch_rpc(&mut sess, "skillMgr2", None, "InjectSkillIntoBrain", &[PyRep::Integer(book_item_id)], &kw, None)
-        .await
-        .expect_err("InjectSkillIntoBrain without Mining IV must fail with SkillPrerequisiteNotMet");
-    assert_eq!(inject_err.code, "SkillPrerequisiteNotMet");
-    assert!(ctx.db.with_snapshot(|snap| snap.items.contains_key(&book_item_id)), "Skillbook must not be consumed when prerequisite check fails");
-
-    ctx.db.with_mut_snapshot(|snap| {
-        let sk = snap.skills.entry(char_id).or_default();
-        sk.insert(3386, TrainedSkillRecord { type_id: 3386, level: 4, skill_points: 45_255.0 });
-        sk.insert(3402, TrainedSkillRecord { type_id: 3402, level: 4, skill_points: 45_255.0 });
-    });
     let inject_rep = ctx
         .dispatch_rpc(&mut sess, "skillMgr2", None, "InjectSkillIntoBrain", &[PyRep::Integer(book_item_id)], &kw, None)
         .await
-        .expect("InjectSkillIntoBrain with prerequisites trained");
+        .expect("InjectSkillIntoBrain succeeds without prerequisites trained");
     assert_eq!(inject_rep.dict_get("typeID"), Some(&PyRep::Integer(3410)));
     assert_eq!(inject_rep.dict_get("injected"), Some(&PyRep::Bool(true)));
 
@@ -115,6 +99,17 @@ async fn test_plan_ch2_skill_queue_and_brain_injection() {
     assert!(!has_book, "Skillbook item must be consumed from inventory");
     assert!(has_skill, "Injected skill must be registered in character skills");
 
+    let q_no_prereq = ctx
+        .dispatch_rpc(&mut sess, "skillMgr2", None, "SaveSkillQueue", &[PyRep::List(vec![PyRep::List(vec![PyRep::Integer(3410), PyRep::Integer(1)])])], &kw, None)
+        .await
+        .expect_err("SaveSkillQueue without Mining IV must fail with SkillPrerequisiteNotMet");
+    assert_eq!(q_no_prereq.code, "SkillPrerequisiteNotMet");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let sk = snap.skills.entry(char_id).or_default();
+        sk.insert(3386, TrainedSkillRecord { type_id: 3386, level: 4, skill_points: 45_255.0 });
+        sk.insert(3402, TrainedSkillRecord { type_id: 3402, level: 4, skill_points: 45_255.0 });
+    });
     let q_with_prereq = ctx
         .dispatch_rpc(&mut sess, "skillMgr2", None, "SaveSkillQueue", &[PyRep::List(vec![PyRep::List(vec![PyRep::Integer(3410), PyRep::Integer(1)])])], &kw, None)
         .await
@@ -165,7 +160,8 @@ async fn test_plan_ch2_skill_queue_and_brain_injection() {
 #[tokio::test]
 async fn test_plan_dg6_ammo_and_weapon_grouping() {
     // parity: plan:DG-6
-    eve_testkit::attest(&["plan:DG-6"]);
+    // parity: notify:OnChargeBeingLoadedToModule
+    eve_testkit::attest(&["plan:DG-6", "notify:OnChargeBeingLoadedToModule"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -185,35 +181,20 @@ async fn test_plan_dg6_ammo_and_weapon_grouping() {
     let mismatch_id = 100_000_008i64;
     let bad_ammo_id = 100_000_835i64;
 
+    let ammo_id = 100_000_834i64;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            t2_id,
-            InventoryItemRecord {
-                item_id: t2_id, type_id: 2889, owner_id: char_id, location_id: ship_id,
-                flag: InventoryFlag::HiSlot1, quantity: 1, singleton: true, version: 1, ..Default::default()
-            },
-        );
-        snap.items.insert(
-            t3_id,
-            InventoryItemRecord {
-                item_id: t3_id, type_id: 2889, owner_id: char_id, location_id: ship_id,
-                flag: InventoryFlag::HiSlot2, quantity: 1, singleton: true, version: 1, ..Default::default()
-            },
-        );
-        snap.items.insert(
-            mismatch_id,
-            InventoryItemRecord {
-                item_id: mismatch_id, type_id: 491, owner_id: char_id, location_id: ship_id,
-                flag: InventoryFlag::HiSlot3, quantity: 1, singleton: true, version: 1, ..Default::default()
-            },
-        );
-        snap.items.insert(
-            bad_ammo_id,
-            InventoryItemRecord {
-                item_id: bad_ammo_id, type_id: 193, owner_id: char_id, location_id: ship_id,
-                flag: InventoryFlag::Cargo, quantity: 100, singleton: false, version: 1, ..Default::default()
-            },
-        );
+        for (id, tid, flag, qty, sing) in [
+            (t2_id, 2889, InventoryFlag::HiSlot1, 1, true),
+            (t3_id, 2889, InventoryFlag::HiSlot2, 1, true),
+            (mismatch_id, 491, InventoryFlag::HiSlot3, 1, true),
+            (bad_ammo_id, 193, InventoryFlag::Cargo, 100, false),
+            (ammo_id, 183, InventoryFlag::Cargo, 400, false),
+        ] {
+            snap.items.insert(id, InventoryItemRecord {
+                item_id: id, type_id: tid, owner_id: char_id, location_id: ship_id,
+                flag, quantity: qty, singleton: sing, version: 1, ..Default::default()
+            });
+        }
         snap.skills.entry(char_id).or_default().insert(
             12201,
             TrainedSkillRecord { type_id: 12201, level: 5, skill_points: 256_000.0 },
@@ -236,57 +217,14 @@ async fn test_plan_dg6_ammo_and_weapon_grouping() {
     let bank_size = ctx.db.with_snapshot(|s| s.weapon_banks.get(&ship_id).and_then(|b| b.get(&t1_id)).map(Vec::len));
     assert_eq!(bank_size, Some(2), "Linked weapon bank must contain 2 modules");
 
-    // 2. LoadAmmo rejects incompatible charge size (IncompatibleAmmo) and loads compatible ammo with SDE reload timer (attr 1795)
+    // 2. LoadAmmo rejects incompatible charge size (IncompatibleAmmo)
     let bad_load = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "LoadAmmo",
-            &[PyRep::Integer(ship_id), PyRep::List(vec![PyRep::Integer(t1_id)]), PyRep::List(vec![PyRep::Integer(bad_ammo_id)]), PyRep::Integer(ship_id)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "LoadAmmo", &[PyRep::Integer(ship_id), PyRep::List(vec![PyRep::Integer(t1_id)]), PyRep::List(vec![PyRep::Integer(bad_ammo_id)]), PyRep::Integer(ship_id)], &kw, None)
         .await
         .expect_err("LoadAmmo must reject incompatible charge size");
     assert_eq!(bad_load.code, "IncompatibleAmmo");
 
-    let ammo_id = 100_000_834i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            ammo_id,
-            InventoryItemRecord {
-                item_id: ammo_id, type_id: 183, owner_id: char_id, location_id: ship_id,
-                flag: InventoryFlag::Cargo, quantity: 400, singleton: false, version: 1, ..Default::default()
-            },
-        );
-    });
-
-    let load_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "LoadAmmo",
-            &[PyRep::Integer(ship_id), PyRep::List(vec![PyRep::Integer(t1_id)]), PyRep::List(vec![PyRep::Integer(ammo_id)]), PyRep::Integer(ship_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("LoadAmmo");
-
-    let sde_reload_ms = ctx.sde.types[&2889].default_attributes[&1795];
-    assert_eq!(sde_reload_ms, 10_000.0);
-    assert_eq!(load_rep.dict_get("reloadTimeMs"), Some(&PyRep::Real(sde_reload_ms)), "Reload timer must match SDE attribute 1795");
-
-    let (slot0_before, slot1_before) = ctx.db.with_snapshot(|snap| {
-        let s0 = snap.items.values().find(|i| i.location_id == ship_id && i.flag == InventoryFlag::HiSlot0 && i.type_id == 183).map(|i| i.quantity).unwrap_or(0);
-        let s1 = snap.items.values().find(|i| i.location_id == ship_id && i.flag == InventoryFlag::HiSlot1 && i.type_id == 183).map(|i| i.quantity).unwrap_or(0);
-        (s0, s1)
-    });
-    assert!(slot0_before > 0 && slot1_before == slot0_before, "Both grouped turrets must be loaded with ammo");
-
-    // 3. Undock and fire grouped weapon bank via Activate, verifying both linked turrets consume 1 charge
+    // 2. Undock into space, verify LoadAmmo emits OnChargeBeingLoadedToModule and enforces reloadTime (attr 1795)
     ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None).await.expect("Undock");
     let sys = ctx.systems.get_or_spawn(30_000_142);
     let (_, ship_ball) = sys.get_ball_snapshot(ship_id).await.unwrap().expect("ship ball after undock");
@@ -304,9 +242,50 @@ async fn test_plan_dg6_ammo_and_weapon_grouping() {
     for _ in 0..15 {
         sys.try_step_full_tick(1.0);
     }
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let load_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "LoadAmmo",
+            &[PyRep::Integer(ship_id), PyRep::List(vec![PyRep::Integer(t1_id)]), PyRep::List(vec![PyRep::Integer(ammo_id)]), PyRep::Integer(ship_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("LoadAmmo");
+
+    let sde_reload_ms = ctx.sde.types[&2889].default_attributes[&1795];
+    assert_eq!(sde_reload_ms, 10_000.0);
+    assert_eq!(load_rep.dict_get("reloadTimeMs"), Some(&PyRep::Real(sde_reload_ms)), "Reload timer must match SDE attribute 1795");
+
+    let load_notifs = ctx.drain_notifications_for_char(char_id);
+    let charge_load_notif = load_notifs.iter().find(|n| n.event == "OnChargeBeingLoadedToModule").expect("OnChargeBeingLoadedToModule notification");
+    assert_eq!(
+        charge_load_notif.args,
+        vec![PyRep::List(vec![PyRep::Integer(t1_id), PyRep::Integer(t2_id)]), PyRep::Integer(183), PyRep::Real(10_000.0)],
+    );
+
+    let (slot0_before, slot1_before) = ctx.db.with_snapshot(|snap| {
+        let s0 = snap.items.values().find(|i| i.location_id == ship_id && i.flag == InventoryFlag::HiSlot0 && i.type_id == 183).map(|i| i.quantity).unwrap_or(0);
+        let s1 = snap.items.values().find(|i| i.location_id == ship_id && i.flag == InventoryFlag::HiSlot1 && i.type_id == 183).map(|i| i.quantity).unwrap_or(0);
+        (s0, s1)
+    });
+    assert!(slot0_before > 0 && slot1_before == slot0_before, "Both grouped turrets must be loaded with ammo");
+
+    // 3. Activating while reloading fails with ModuleIsReloading; advancing 11s allows firing and consumes 1 round per linked turret
+    let reloading_err = ctx
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(t1_id), PyRep::String("projectileFired".into()), PyRep::Integer(npc_id)], &kw, None)
+        .await
+        .expect_err("Activate during 10s reload window must fail with ModuleIsReloading");
+    assert_eq!(reloading_err.code, "ModuleIsReloading");
+
+    ctx.advance_secs(11);
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(t1_id), PyRep::String("projectileFired".into()), PyRep::Integer(npc_id)], &kw, None)
         .await
-        .expect("Activate grouped weapon bank");
+        .expect("Activate grouped weapon bank after reload timer");
 
     let (slot0_after_fire, slot1_after_fire) = ctx.db.with_snapshot(|snap| {
         let s0 = snap.items.values().find(|i| i.location_id == ship_id && i.flag == InventoryFlag::HiSlot0 && i.type_id == 183).map(|i| i.quantity).unwrap_or(0);
@@ -316,7 +295,34 @@ async fn test_plan_dg6_ammo_and_weapon_grouping() {
     assert_eq!(slot0_after_fire, slot0_before - 1, "Master turret in bank must consume 1 charge on cycle");
     assert_eq!(slot1_after_fire, slot1_before - 1, "Slave turret in bank must consume 1 charge on cycle");
 
-    // 4. UnloadAmmo moves remaining charges out of both turret slots back to cargo (400 - 2 = 398)
+    // 4. Charge depletion auto-reload: set loaded charges to 1 round each, step cycle to depletion, verify auto-reload from cargo + reload timer
+    ctx.db.with_mut_snapshot(|snap| {
+        for it in snap.items.values_mut() {
+            if it.location_id == ship_id && matches!(it.flag, InventoryFlag::HiSlot0 | InventoryFlag::HiSlot1) && it.type_id == 183 {
+                it.quantity = 1;
+            }
+        }
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    for _ in 0..6 {
+        sys.try_step_full_tick(1.0);
+    }
+    let auto_reload_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(auto_reload_notifs.iter().any(|n| n.event == "OnChargeBeingLoadedToModule"), "Depleting loaded charges must emit OnChargeBeingLoadedToModule");
+    let (slot0_reloaded, slot1_reloaded) = ctx.db.with_snapshot(|snap| {
+        let s0 = snap.items.values().find(|i| i.location_id == ship_id && i.flag == InventoryFlag::HiSlot0 && i.type_id == 183).map(|i| i.quantity).unwrap_or(0);
+        let s1 = snap.items.values().find(|i| i.location_id == ship_id && i.flag == InventoryFlag::HiSlot1 && i.type_id == 183).map(|i| i.quantity).unwrap_or(0);
+        (s0, s1)
+    });
+    assert_eq!((slot0_reloaded, slot1_reloaded), (80, 80), "Remaining 160 cargo rounds must auto-reload 80 into each grouped turret");
+    let auto_reload_err = ctx
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(t1_id), PyRep::String("projectileFired".into()), PyRep::Integer(npc_id)], &kw, None)
+        .await
+        .expect_err("Activate during auto-reload timer must fail with ModuleIsReloading");
+    assert_eq!(auto_reload_err.code, "ModuleIsReloading");
+    ctx.advance_secs(11);
+
+    // 5. UnloadAmmo moves remaining charges out of both turret slots back to cargo (80 + 80 = 160)
     let unload_rep = ctx
         .dispatch_rpc(&mut sess, "dogmaIM", None, "UnloadAmmo", &[PyRep::Integer(ship_id), PyRep::List(vec![PyRep::Integer(t1_id)]), PyRep::Integer(ship_id)], &kw, None)
         .await
@@ -328,7 +334,7 @@ async fn test_plan_dg6_ammo_and_weapon_grouping() {
         let slot_charge = snap.items.values().any(|i| i.location_id == ship_id && matches!(i.flag, InventoryFlag::HiSlot0 | InventoryFlag::HiSlot1) && i.type_id == 183);
         (cq, slot_charge)
     });
-    assert_eq!(cargo_qty_after_unload, 398, "Cargo ammo quantity after 1 grouped volley and unload must be 398");
+    assert_eq!(cargo_qty_after_unload, 160, "Cargo ammo quantity after auto-reload and unload must be 160");
     assert!(!still_in_slot, "Charges must be removed from turret slots on unload");
 
     // 5. PeelAndLink, MergeModuleGroups, and UnlinkAllModules

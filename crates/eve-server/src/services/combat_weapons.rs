@@ -119,6 +119,11 @@ pub async fn handle_weapons(
                     message: format!("Module {module_id} is offline"),
                 }));
             }
+            if let Err(e) =
+                crate::services::inventory_fitting::check_module_reloading(ctx, ship_id, module_id)
+            {
+                return Some(Err(e));
+            }
             let Some(mod_type) = ctx.sde.types.get(&m.type_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "ModuleNotFound".into(),

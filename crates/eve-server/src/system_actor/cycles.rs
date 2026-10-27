@@ -645,7 +645,114 @@ pub(crate) fn step_cycles_and_capacitor(
                                 } else if cycle.ammo_type_id.is_some()
                                     && cycle.damage_vector.total() > 0.0
                                 {
+                                    snap.items.retain(|_, i| {
+                                        !(i.location_id == cycle.ship_id
+                                            && i.flag == t_flag
+                                            && i.item_id != turret_id
+                                            && i.quantity <= 0)
+                                    });
                                     crystal_shattered_empty = true;
+                                }
+                            }
+                        }
+                        if crystal_shattered_empty && cycle.crystal_volatility_damage == 0.0 {
+                            if let Some(ammo_tid) = cycle.ammo_type_id {
+                                let cargo_stack_opt = snap
+                                    .items
+                                    .values()
+                                    .find(|i| {
+                                        i.location_id == cycle.ship_id
+                                            && matches!(
+                                                i.flag,
+                                                eve_db::InventoryFlag::Cargo
+                                                    | eve_db::InventoryFlag::SpecializedAmmoHold
+                                            )
+                                            && i.type_id == ammo_tid
+                                            && i.quantity > 0
+                                    })
+                                    .map(|i| (i.item_id, i.owner_id, i.quantity));
+                                let num_mods = cycle.linked_turrets.len().max(1) as i32;
+                                if let Some((stack_id, owner_id, avail_qty)) = cargo_stack_opt {
+                                    if avail_qty >= num_mods {
+                                        let charge_vol = sde_opt
+                                            .as_ref()
+                                            .and_then(|sde| sde.types.get(&ammo_tid))
+                                            .map(|t| t.volume.max(0.0001))
+                                            .unwrap_or(0.0025);
+                                        let (rounds_per_mod, reload_time_ms) = sde_opt
+                                            .as_ref()
+                                            .and_then(|sde| sde.types.get(&cycle.module_type_id))
+                                            .map(|mt| {
+                                                let r = if mt.capacity > 0.0 {
+                                                    (mt.capacity / charge_vol).floor() as i32
+                                                } else {
+                                                    1
+                                                };
+                                                let rt = mt
+                                                    .default_attributes
+                                                    .get(&1795)
+                                                    .copied()
+                                                    .unwrap_or(10_000.0);
+                                                (r.max(1), rt)
+                                            })
+                                            .unwrap_or((1, 10_000.0));
+                                        let actual_per_mod =
+                                            rounds_per_mod.min(avail_qty / num_mods).max(1);
+                                        let total_needed = actual_per_mod * num_mods;
+                                        if let Some(st) = snap.items.get_mut(&stack_id) {
+                                            if st.quantity > total_needed {
+                                                st.quantity -= total_needed;
+                                                st.version += 1;
+                                            } else {
+                                                snap.items.remove(&stack_id);
+                                            }
+                                        }
+                                        for &tid in &cycle.linked_turrets {
+                                            if let Some(tf) = snap.items.get(&tid).map(|i| i.flag) {
+                                                snap.next_entity_id += 1;
+                                                let new_cid = snap.next_entity_id;
+                                                snap.items.insert(
+                                                    new_cid,
+                                                    eve_db::InventoryItemRecord {
+                                                        item_id: new_cid,
+                                                        type_id: ammo_tid,
+                                                        owner_id,
+                                                        location_id: cycle.ship_id,
+                                                        flag: tf,
+                                                        quantity: actual_per_mod,
+                                                        singleton: false,
+                                                        version: 1,
+                                                        ..Default::default()
+                                                    },
+                                                );
+                                            }
+                                        }
+                                        let now_unix = db_ref.clock().now_unix_secs();
+                                        let reload_until =
+                                            now_unix + (reload_time_ms / 1000.0).ceil() as u64;
+                                        let mut map: HashMap<i64, u64> = snap
+                                            .service_state_blobs
+                                            .get("module_reload_until_unix")
+                                            .and_then(|s| serde_json::from_str(s).ok())
+                                            .unwrap_or_default();
+                                        for &tid in &cycle.linked_turrets {
+                                            map.insert(tid, reload_until);
+                                        }
+                                        if let Ok(json) = serde_json::to_string(&map) {
+                                            snap.service_state_blobs
+                                                .insert("module_reload_until_unix".into(), json);
+                                        }
+                                        if let Ok(ev_json) = serde_json::to_string(&(
+                                            cycle.linked_turrets.clone(),
+                                            ammo_tid,
+                                            reload_time_ms,
+                                        )) {
+                                            snap.service_state_blobs.insert(
+                                                format!("auto_reloaded_event:{}", cycle.module_id),
+                                                ev_json,
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }

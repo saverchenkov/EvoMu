@@ -563,8 +563,8 @@ pub async fn handle(
                     message: format!("slash.SlashCmd '{cmd}' requires role mask 0x{req_role:x}"),
                 }));
             }
-            record_gm_audit(ctx, cid, cmd, true);
-            if let Some(rest) = cmd.strip_prefix("/giveisk ") {
+            let res: Option<Result<PyRep, BridgeRpcError>> = async {
+                if let Some(rest) = cmd.strip_prefix("/giveisk ") {
                 let Ok(amount) = rest.trim().parse::<i64>() else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
@@ -1215,9 +1215,10 @@ pub async fn handle(
                     let old_handle = ctx.systems.get_or_spawn(old_sys_id);
                     let existing_ball = old_handle.remove_ball(ship_id).await;
                     let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
+                    let ship_tid = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(587);
                     let mut new_ball = existing_ball.unwrap_or(Ball {
                         id: ship_id,
-                        type_id: 601,
+                        type_id: ship_tid,
                         position: DVec3::ZERO,
                         velocity: DVec3::ZERO,
                         max_velocity: 300.0,
@@ -1298,6 +1299,12 @@ pub async fn handle(
                     message: format!("Unknown or unsupported slash command '{cmd}'"),
                 }))
             }
+            }
+            .await;
+            if let Some(ref r) = res {
+                record_gm_audit(ctx, cid, cmd, r.is_ok());
+            }
+            res
         }
 
         _ => super::config_service::handle(ctx, session, service, method, args, kwargs),

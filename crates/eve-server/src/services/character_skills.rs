@@ -1147,37 +1147,9 @@ pub fn handle(
                     }
                 }
 
-                for (skill_attr, level_attr) in eve_dogma::REQUIRED_SKILL_ATTR_IDS
-                    .into_iter()
-                    .zip(eve_dogma::REQUIRED_SKILL_LEVEL_ATTR_IDS)
-                {
-                    if let Some(&req_skill_f) = skill_type.default_attributes.get(&skill_attr) {
-                        let req_skill_id = req_skill_f as TypeId;
-                        if req_skill_id > 0 {
-                            let req_lvl = skill_type
-                                .default_attributes
-                                .get(&level_attr)
-                                .copied()
-                                .unwrap_or(1.0)
-                                .max(1.0) as u8;
-                            let trained_lvl = snap
-                                .skills
-                                .get(&char_id)
-                                .and_then(|m| m.get(&req_skill_id))
-                                .map(|s| s.level)
-                                .unwrap_or(0);
-                            if trained_lvl < req_lvl {
-                                return Err(BridgeRpcError {
-                                    code: "SkillPrerequisiteNotMet".into(),
-                                    message: format!(
-                                        "Skill {} (type {skill_type_id}) requires prerequisite skill {req_skill_id} at level {req_lvl}",
-                                        skill_type.name
-                                    ),
-                                });
-                            }
-                        }
-                    }
-                }
+                // Note: In modern EVE Online (post-Ascension), characters can inject any skillbook into
+                // their brain regardless of prerequisites; prerequisites are enforced when adding the
+                // skill to the training queue (`SaveSkillQueue`).
 
                 // R-SKB-01: Injection strictly requires an owned, reachable skillbook item to consume
                 let book_item = if let Some(item) = snap.items.get(&raw_id) {

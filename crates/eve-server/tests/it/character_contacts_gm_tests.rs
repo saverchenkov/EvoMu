@@ -663,10 +663,12 @@ async fn test_ch5_gm_spawn_attr_fit_kill_location_online_and_qa_tools() {
     let PyRep::KeyVal(move_kv) = move_rep else { panic!("Expected KeyVal from MoveMeTo") };
     assert_eq!(move_kv.get("solarSystemID").and_then(|v| v.as_i64()), Some(30_002_537));
 
-    // Verify structured GM command audit log for /spawn, /unspawn, /setattr, /getattr, /fit, /kill, /location, /online
+    // Verify structured GM command audit log for /spawn, /unspawn, /setattr, /getattr, /fit, /kill, /location, /online, and failed command
+    let _ = ctx.dispatch_rpc(&mut gm_sess, "slash", None, "SlashCmd", &[PyRep::String("/giveisk -5".into())], &kw, None).await.expect_err("negative /giveisk fails");
     let audit_log = ctx.db.with_snapshot(|s| s.service_state_blobs.get("gm_audit_log").cloned()).expect("gm_audit_log must exist");
     let entries: Vec<serde_json::Value> = serde_json::from_str(&audit_log).expect("valid audit JSON");
-    assert!(entries.iter().all(|e| e.get("ts").and_then(|v| v.as_u64()).unwrap_or(0) > 0 && e.get("ok") == Some(&serde_json::Value::Bool(true))));
+    assert!(entries.iter().any(|e| e.get("cmd").and_then(|v| v.as_str()) == Some("/giveisk -5") && e.get("ok") == Some(&serde_json::Value::Bool(false))));
+    assert!(entries.iter().filter(|e| e.get("cmd").and_then(|v| v.as_str()) != Some("/giveisk -5")).all(|e| e.get("ts").and_then(|v| v.as_u64()).unwrap_or(0) > 0 && e.get("ok") == Some(&serde_json::Value::Bool(true))));
     for expected in ["/spawn", "/unspawn", "/setattr", "/getattr", "/fit", "/kill", "/location", "/online"] {
         assert!(audit_log.contains(expected), "Audit log must contain {expected}");
     }
