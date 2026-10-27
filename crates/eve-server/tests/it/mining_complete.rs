@@ -470,7 +470,7 @@ async fn test_mn05_special_holds_and_mining_to_jetcan() {
             "ship",
             None,
             "Jettison",
-            &[PyRep::List(vec![PyRep::Integer(mined_ore_item_id)])],
+            &[PyRep::List(vec![PyRep::Integer(mined_ore_item_id), PyRep::Integer(mineral_stack_id)])],
             &kw,
             None,
         )

@@ -696,7 +696,13 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             // DERIVED: threat weighting combines hull class/drone base, signature radius (attr 552), EWAR (1.5x), and logistics (1.3x).
             let sig_weight = (sig_radius / 40.0).clamp(0.5, 5.0) * 10.0;
             let role_mult = if has_ewar { 1.5 } else if has_logi { 1.3 } else { 1.0 };
-            let base_threat = ((if is_capital { 200.0 } else if is_player_drone { 120.0 } else { 100.0 }) + sig_weight) * role_mult;
+            let base_threat = if is_capital {
+                if npc.archetype == "Sleeper" { 1_000.0 } else { (200.0 + sig_weight) * role_mult }
+            } else if is_player_drone {
+                120.0 * role_mult
+            } else {
+                (100.0 + sig_weight) * role_mult
+            };
             let entry = npc.aggression_threat.entry(cand_id).or_insert(base_threat);
             if *entry < base_threat {
                 *entry = base_threat;

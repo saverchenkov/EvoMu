@@ -698,14 +698,18 @@ pub(crate) async fn handle_multi_add(
                 .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
         })
         .unwrap_or(0);
-    let moved = ctx.db.try_with_mut_snapshot(|snap| {
+    let (moved, old_containers) = ctx.db.try_with_mut_snapshot(|snap| {
         let mut moved = Vec::with_capacity(item_ids.len());
+        let mut old_containers = HashSet::new();
         for &item_id in &item_ids {
             let it = snap.items.get_mut(&item_id).ok_or_else(|| BridgeRpcError {
                 code: "ItemNotFound".into(),
                 message: format!("Item {item_id} not found"),
             })?;
             let old_flag_u16 = it.flag as u16;
+            if it.location_id != new_loc {
+                old_containers.insert(it.location_id);
+            }
             it.location_id = new_loc;
             it.flag = flag;
             if (116..=122).contains(&flag_u16) && caller_corp_id > 0 {
@@ -723,8 +727,11 @@ pub(crate) async fn handle_multi_add(
             snap.module_active_charges.remove(&item_id);
             moved.push(item_id);
         }
-        Ok(moved)
+        Ok((moved, old_containers))
     })?;
+    for old_cont in old_containers {
+        let _ = despawn_empty_jetcan_if_needed(ctx, session.solar_system_id, old_cont).await;
+    }
     let mut source_ships = HashSet::new();
     for &(old_loc, item_id, _) in &fitted_unfit_ids {
         ctx.remove_projected_ewar_by_module(item_id);
