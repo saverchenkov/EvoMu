@@ -608,6 +608,13 @@ pub async fn handle(
             if !session.has_gm_role() {
                 return Some(Err(BridgeRpcError { code: "GmRoleRequired".into(), message: "CmdTurboDock requires GM role".into() }));
             }
+            if let Some(ship_id) = session.ship_id {
+                if let Err(e) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "dock")
+                    .and_then(|()| crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "dock"))
+                {
+                    return Some(Err(e));
+                }
+            }
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let is_sde_station = ctx.sde.stations.contains_key(&target_id);
             let is_struct = ctx.db.with_snapshot(|snap| snap.structures.contains_key(&target_id));

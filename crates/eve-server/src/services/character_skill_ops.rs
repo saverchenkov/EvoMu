@@ -631,6 +631,22 @@ pub async fn post_inventory_fitting_hook(
                 });
             }
         }
+        "Activate"
+        | "Overload"
+        | "Deactivate"
+        | "TakeModuleOffline"
+        | "DestroyFitting"
+        | "Add"
+        | "MultiAdd" => {
+            if session.station_id.is_none() && session.structure_id.is_none() {
+                if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
+                    crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(
+                        ctx, char_id, sys_id, ship_id,
+                    )
+                    .await;
+                }
+            }
+        }
         _ => {}
     }
 }

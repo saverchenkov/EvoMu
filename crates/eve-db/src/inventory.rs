@@ -59,7 +59,7 @@ impl WorldRepository {
 
             // Authorize destination: must be the character's current station, structure, co-located active ship,
             // or a live structure's fuel bay in the character's current solar system.
-            let valid_structure_fuel_bay = new_flag == InventoryFlag::SpecializedFuelBay
+            let valid_structure_fuel_bay = matches!(new_flag, InventoryFlag::StructureFuel | InventoryFlag::SpecializedFuelBay)
                 && guard.structures.get(&new_location_id).is_some_and(|st| {
                     st.solar_system_id == ch.solar_system_id && st.state != "Destroyed"
                 });

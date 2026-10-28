@@ -730,7 +730,7 @@ pub(crate) async fn handle_module_cycles(
             let duration_s = if duration_ms > 0.0 { duration_ms / 1000.0 } else { 1.0 };
             let mut cap_need = mod_state.get_attribute(attr_ids::CAPACITOR_NEED, &ctx.sde);
             let speed_factor = mod_state.get_attribute(attr_ids::SPEED_FACTOR, &ctx.sde);
-            let speed_boost_factor = if speed_factor > 0.0 { speed_factor / 100.0 } else { 0.0 };
+            let speed_boost_factor = if mod_type.group_id != 330 && speed_factor > 0.0 { speed_factor / 100.0 } else { 0.0 };
 
             let raw_shield = mod_state.get_attribute(68, &ctx.sde);
             let raw_armor = mod_state.get_attribute(84, &ctx.sde);

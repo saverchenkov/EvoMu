@@ -228,6 +228,7 @@ pub enum InventoryFlag {
     SpecializedMaterialBay = 151,
     FleetHangar = 155,
     FighterBay = 158,
+    StructureFuel = 163,
     ServiceSlot0 = 164,
     ServiceSlot1 = 165,
     ServiceSlot2 = 166,
@@ -327,6 +328,7 @@ impl InventoryFlag {
             151 => Self::SpecializedMaterialBay,
             155 => Self::FleetHangar,
             158 => Self::FighterBay,
+            163 => Self::StructureFuel,
             164 => Self::ServiceSlot0,
             165 => Self::ServiceSlot1,
             166 => Self::ServiceSlot2,
@@ -345,17 +347,7 @@ impl InventoryFlag {
     }
 
     pub fn is_service_slot(&self) -> bool {
-        matches!(
-            self,
-            Self::ServiceSlot0
-                | Self::ServiceSlot1
-                | Self::ServiceSlot2
-                | Self::ServiceSlot3
-                | Self::ServiceSlot4
-                | Self::ServiceSlot5
-                | Self::ServiceSlot6
-                | Self::ServiceSlot7
-        )
+        matches!(self as &Self, Self::ServiceSlot0 | Self::ServiceSlot1 | Self::ServiceSlot2 | Self::ServiceSlot3 | Self::ServiceSlot4 | Self::ServiceSlot5 | Self::ServiceSlot6 | Self::ServiceSlot7)
     }
 }
 

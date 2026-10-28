@@ -634,6 +634,7 @@ async fn caller_in_space(ctx: &ServerContext, session: &SessionState) -> Result<
         ));
     }
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
+    crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "jump")?;
     crate::services::combat_crimewatch::check_crimewatch_action_restriction(
         ctx, char_id, ship_id, sys_id, "jump_drive", now,
     )?;
@@ -1043,7 +1044,9 @@ async fn group_jump_to_fleet_beacon(
         if let Ok(Some((_, ball))) = origin_handle.get_ball_snapshot(m_ship).await {
             let in_warp = matches!(ball.mode, MovementMode::Warp { .. });
             let is_scrambled = origin_handle.is_ball_scrambled(m_ship).await.unwrap_or(false);
-            if !in_warp && !is_scrambled && ball.position.distance(caller_ball.position) <= 10_000.0 {
+            let is_immobilized = crate::services::tactical_modules::check_ship_navigation_lock(ctx, m_ship, "jump").is_err()
+                || crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, m_ship, "jump").is_err();
+            if !in_warp && !is_scrambled && !is_immobilized && ball.position.distance(caller_ball.position) <= 10_000.0 {
                 qualified_passengers.push((m_char, m_ship));
             }
         }

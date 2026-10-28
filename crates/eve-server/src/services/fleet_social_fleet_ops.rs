@@ -307,6 +307,12 @@ pub(super) async fn handle_fleet_ops(
                     message: "Caller ship is not in space".into(),
                 }));
             };
+            if let Err(e) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, caller_ship_id, "warp") {
+                return Some(Err(e));
+            }
+            if let Err(e) = crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, caller_ship_id, "warp") {
+                return Some(Err(e));
+            }
             if caller_ball.max_velocity <= 0.0 || sys.is_ball_scrambled(caller_ship_id).await.unwrap_or(false) {
                 return Some(Err(BridgeRpcError {
                     code: "WarpScrambled".into(),
@@ -520,6 +526,11 @@ pub(super) async fn handle_fleet_ops(
             for (idx, (member_char_id, ship_id)) in eligible_ship_ids.into_iter().enumerate() {
                 if let Ok(Some((_, ball))) = sys.get_ball_snapshot(ship_id).await {
                     if ball.max_velocity <= 0.0 {
+                        continue;
+                    }
+                    if crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp").is_err()
+                        || crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "warp").is_err()
+                    {
                         continue;
                     }
                     if sys.is_ball_scrambled(ship_id).await.unwrap_or(false) {

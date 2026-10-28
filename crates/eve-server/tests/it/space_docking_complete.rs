@@ -352,8 +352,11 @@ async fn test_session_change_timer_triggers_and_coverage() {
     let lock_err = rpc(&ctx, &mut attacker_sess, "dogmaIM", "AddTarget", &[PyRep::Integer(ship_id)]).await;
     assert_eq!(lock_err.unwrap_err().code, "TargetInvulnerable");
 
-    // Advance clock past 60s: targeting succeeds
+    // Advance clock and destiny ticks past 60s: invulnerability + jump cloak expire and targeting succeeds
     ctx.advance_secs(65);
+    for _ in 0..60 {
+        let _ = dest_handle.step_manual(1.0).await;
+    }
     let lock_ok = rpc(&ctx, &mut attacker_sess, "dogmaIM", "AddTarget", &[PyRep::Integer(ship_id)]).await;
     assert!(lock_ok.is_ok(), "AddTarget must succeed after 60s invulnerability window expires");
 

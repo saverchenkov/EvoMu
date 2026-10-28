@@ -112,18 +112,20 @@ async fn test_c3_ship_death_session_change_timer_and_wreck_owner_victim() {
     });
     assert!(saw_session_change, "OnSessionChanged must be emitted for ship death -> capsule");
     let mut saw_rx2 = false;
-    while let Ok((cid, n)) = notify_rx2.try_recv() {
+    for _ in 0..64 {
+        let Ok((cid, n)) = notify_rx2.try_recv() else { break };
         if cid == victim_id && n.event == "OnSessionChanged" && format!("{:?}", n.args).contains(&capsule_id.to_string()) {
             saw_rx2 = true;
         }
     }
     assert!(saw_rx2, "Second session stream must also receive OnSessionChanged");
 
-    // 2. Session change timer (10s) must block immediate Dock even if session still has old ship_id
+    // 2. Session change timer (10s) must block immediate CmdDock even if session still has old ship_id
+    let bid = ctx.bind_object(&mut victim_sess, "beyonce", sys_id as i64).expect("bind beyonce");
     let dock_err = ctx
-        .dispatch_rpc(&mut victim_sess, "beyonce", None, "Dock", &[PyRep::Integer(60_003_760)], &HashMap::new(), None)
+        .dispatch_rpc(&mut victim_sess, "beyonce", Some(bid), "CmdDock", &[PyRep::Integer(60_003_760), PyRep::Integer(capsule_id)], &HashMap::new(), None)
         .await
-        .expect_err("Dock during 10s death sessionChangeTimer must fail");
+        .expect_err("CmdDock during 10s death sessionChangeTimer must fail");
     assert_eq!(dock_err.code, "SessionChangeInProgress");
 
     // 3. Wreck owner must be the VICTIM (`feat:lifecycle.wreck-owner-victim`), not the attacker

@@ -98,13 +98,18 @@ pub async fn sync_tether(ctx: &ServerContext, char_id: i64, sys_id: u32, ship_id
                 (range > 0.0).then(|| (DVec3::from_array(st.position), ty.radius + range))
             })
             .collect();
-        let disallow = snap.items.values().any(|it| {
-            it.location_id == ship_id
-                && snap.module_active_states.contains(&it.item_id)
-                && disallow_attr
-                    .and_then(|a| ctx.sde.types.get(&it.type_id)?.default_attributes.get(&a).copied())
-                    .is_some_and(|v| v != 0.0)
-        });
+        let disallow = crate::services::space_navigation_advanced::check_immobilizing_module_active(
+            ctx, ship_id, "tether",
+        )
+        .is_err()
+            || snap.items.values().any(|it| {
+                it.location_id == ship_id
+                    && matches!(it.flag as u16, 11..=34 | 125..=132)
+                    && snap.module_active_states.contains(&it.item_id)
+                    && disallow_attr
+                        .and_then(|a| ctx.sde.types.get(&it.type_id)?.default_attributes.get(&a).copied())
+                        .is_some_and(|v| v != 0.0)
+            });
         (anchors, disallow)
     });
     let handle = ctx.systems.get_or_spawn(sys_id);
@@ -194,7 +199,10 @@ pub(crate) async fn emit_cloak_transition(ctx: &ServerContext, sys_id: u32, ship
     let module_states: Vec<(i64, i64, u32, i64, f64, f64)> = ctx.db.with_snapshot(|snap| {
         snap.items
             .values()
-            .filter(|i| i.location_id == ship_id && matches!(i.type_id, 11370 | 11578))
+            .filter(|i| {
+                i.location_id == ship_id
+                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 330)
+            })
             .map(|i| (i.owner_id, i.item_id, 2, time_ft, new_v, old_v))
             .collect()
     });
@@ -260,7 +268,7 @@ fn skill_level(ctx: &ServerContext, char_id: i64, skill_name: &str) -> f64 {
 }
 
 /// Light-year distance between two systems from SDE galactic coordinates.
-pub(crate) fn distance_ly(ctx: &ServerContext, a: u32, b: u32) -> f64 {
+pub fn distance_ly(ctx: &ServerContext, a: u32, b: u32) -> f64 {
     let pos = |s: u32| {
         ctx.sde
             .solar_systems
@@ -831,36 +839,47 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
     sys_id: u32,
     ship_id: i64,
 ) {
-    let (has_cloak_mod, active_cloak_type, active_cap_mjfg) = ctx.db.with_snapshot(|snap| {
-        let mut has_cloak = false;
-        let mut active_cloak: Option<u32> = None;
-        let mut cap_mjfg = false;
-        for item in snap.items.values() {
-            if item.owner_id == char_id && item.location_id == ship_id {
-                let is_active = snap.module_active_states.contains(&item.item_id);
-                if matches!(item.type_id, 11370 | 11578) {
-                    has_cloak = true;
-                    if is_active {
-                        active_cloak = Some(item.type_id);
+    let (has_cloak_mod, active_cloak, active_cap_mjfg, db_ship_type_id) =
+        ctx.db.with_snapshot(|snap| {
+            let mut has_cloak = false;
+            let mut active_cloak: Option<(i64, u32)> = None;
+            let mut cap_mjfg = false;
+            let ship_tid = snap.items.get(&ship_id).map(|i| i.type_id);
+            for item in snap.items.values() {
+                if item.owner_id == char_id
+                    && item.location_id == ship_id
+                    && matches!(item.flag as u16, 11..=34 | 125..=132)
+                {
+                    let is_active = snap.module_active_states.contains(&item.item_id);
+                    let is_cloak = ctx
+                        .sde
+                        .types
+                        .get(&item.type_id)
+                        .map(|t| t.group_id == 330)
+                        .unwrap_or(false);
+                    if is_cloak {
+                        has_cloak = true;
+                        if is_active {
+                            active_cloak = Some((item.item_id, item.type_id));
+                        }
+                    }
+                    if item.type_id == 83485 && is_active {
+                        cap_mjfg = true;
                     }
                 }
-                if item.type_id == 83485 && is_active {
-                    cap_mjfg = true;
-                }
             }
-        }
-        (has_cloak, active_cloak, cap_mjfg)
-    });
+            (has_cloak, active_cloak, cap_mjfg, ship_tid)
+        });
 
     sync_tether(ctx, char_id, sys_id, ship_id).await;
-    if !has_cloak_mod && !active_cap_mjfg {
-        return;
-    }
 
     let handle = ctx.systems.get_or_spawn(sys_id);
     let Some(mut cs) = handle.get_combat_state(ship_id).await.ok().flatten() else {
         return;
     };
+    if !has_cloak_mod && !active_cap_mjfg && !cs.is_cloaked && !cs.is_capital_mjfg {
+        return;
+    }
     let Some((_, mut ball)) = handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
         return;
     };
@@ -868,12 +887,52 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
     let mut cs_changed = false;
     let mut ball_changed = false;
     let cloak_before = cs.is_cloaked;
+    let ship_type_id = db_ship_type_id.unwrap_or(ball.type_id);
 
-    if let Some(cloak_type_id) = active_cloak_type {
-        let is_covert = cloak_type_id == 11578;
-        let vel_mult = if is_covert { 1.0 } else { 0.25 };
-        let targeting_delay_s = if is_covert { 5.0 } else { 30.0 };
-        if !cs.is_cloaked && cs.decloak_targeting_delay_remaining_s <= 0.0 {
+    if let Some((cloak_item_id, cloak_type_id)) = active_cloak {
+        let is_covert = ctx
+            .sde
+            .types
+            .get(&cloak_type_id)
+            .map(|t| {
+                t.effect_ids.iter().any(|&eid| {
+                    ctx.sde
+                        .effects
+                        .get(&eid)
+                        .is_some_and(|e| e.name == "cloakingWarpSafe" || e.is_warp_safe)
+                })
+            })
+            .unwrap_or(false);
+        let vel_attr_id =
+            crate::services::space_navigation_advanced::max_velocity_cloak_attr_id(&ctx.sde);
+        let vel_mult = if is_covert {
+            1.0
+        } else {
+            vel_attr_id
+                .and_then(|aid| {
+                    ctx.sde
+                        .types
+                        .get(&cloak_type_id)
+                        .and_then(|t| t.default_attributes.get(&aid).copied())
+                })
+                .unwrap_or(1.0)
+        };
+        let cloaking_skill = ctx
+            .character_skill_levels(char_id)
+            .get(&11579)
+            .copied()
+            .unwrap_or(0);
+        let targeting_delay_s =
+            crate::services::space_navigation_advanced::compute_decloak_targeting_delay_for_module(
+                ctx,
+                char_id,
+                ship_id,
+                ship_type_id,
+                Some(cloak_item_id),
+                cloak_type_id,
+                cloaking_skill as u8,
+            );
+        if !cs.is_cloaked {
             let orig_v = cs.cloak_original_max_velocity.unwrap_or(ball.max_velocity);
             cs.cloak_original_max_velocity = Some(orig_v);
             ball.max_velocity = orig_v * vel_mult;
@@ -883,18 +942,17 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
             cs.cloak_configured_targeting_delay_s = targeting_delay_s;
             cs_changed = true;
             ball_changed = true;
+        } else if (cs.cloak_configured_targeting_delay_s - targeting_delay_s).abs() > 1e-6 {
+            cs.cloak_configured_targeting_delay_s = targeting_delay_s;
+            cs_changed = true;
         }
-    } else if has_cloak_mod && cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0 {
+    } else if cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0 {
         cs.is_cloaked = false;
+        cs.is_covert_cloak = false;
         cs.cloak_stabilization_remaining_s = 0.0;
-        let delay = if cs.cloak_configured_targeting_delay_s > 0.0 {
-            cs.cloak_configured_targeting_delay_s
-        } else if cs.is_covert_cloak {
-            5.0
-        } else {
-            30.0
-        };
-        cs.decloak_targeting_delay_remaining_s = delay;
+        cs.decloak_targeting_delay_remaining_s = cs
+            .decloak_targeting_delay_remaining_s
+            .max(cs.cloak_configured_targeting_delay_s);
         if let Some(orig_v) = cs.cloak_original_max_velocity.take() {
             ball.max_velocity = orig_v;
             ball_changed = true;

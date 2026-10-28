@@ -113,10 +113,6 @@ pub(crate) async fn handle_dogma_ops(
                 }
             }
 
-            if session.ship_id == Some(source_id) {
-                crate::services::space_warp_jump::break_location_change_invulnerability(ctx, char_id);
-            }
-
             let fit_res = ctx.get_or_rebuild_ship_fitting(char_id, source_id);
 
             if let Ok(Some(cs)) = sys.get_combat_state(source_id).await {
@@ -124,6 +120,14 @@ pub(crate) async fn handle_dogma_ops(
                     return Some(Err(BridgeRpcError {
                         code: "ShipJammed".into(),
                         message: "Targeting systems are jammed by ECM".into(),
+                    }));
+                }
+                if (cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0)
+                    || cs.decloak_targeting_delay_remaining_s > 0.0
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "TargetingFailed".into(),
+                        message: "Targeting systems cannot acquire lock while cloaked or during sensor recalibration delay".into(),
                     }));
                 }
             }
@@ -188,6 +192,10 @@ pub(crate) async fn handle_dogma_ops(
                     code: "TargetingFailed".into(),
                     message: e,
                 }));
+            }
+
+            if session.ship_id == Some(source_id) {
+                crate::services::space_warp_jump::break_location_change_invulnerability(ctx, char_id);
             }
 
             ctx.notify(

@@ -129,6 +129,7 @@ pub use space_destiny::space_warp_jump;
 pub mod space_entity_mining;
 pub mod space_entity_ops;
 pub mod space_mining_harvest;
+pub mod space_navigation_advanced;
 pub mod station_structure;
 pub mod station_structure_handlers;
 pub mod structure_acl_defense_rules;

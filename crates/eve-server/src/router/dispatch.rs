@@ -105,7 +105,7 @@ impl ServerContext {
                             vec![guest_row()],
                         );
                     }
-                } else if method == "Dock" {
+                } else if matches!(method, "Dock" | "CmdDock") {
                     if let Some(st_id) = session.station_id.filter(|_| prev_station_id.is_none()) {
                         self.notify(
                             crate::router::NotificationTarget::Station(st_id),
@@ -119,7 +119,7 @@ impl ServerContext {
                     );
                 }
             }
-        } else if res.is_ok() && method == "Dock" {
+        } else if res.is_ok() && matches!(method, "Dock" | "CmdDock") {
             if let Some(cid) = session.character_id {
                 crate::services::fleet_social::execute_pending_auto_kicks_for_docked_char(
                     self, session, cid,

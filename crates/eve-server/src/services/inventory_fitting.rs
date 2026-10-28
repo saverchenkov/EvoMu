@@ -135,7 +135,7 @@ pub async fn handle(
             };
             let raw_flag_opt = args.get(2).and_then(|a| a.as_i64()).or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()));
             if let Some(rf) = raw_flag_opt {
-                if !matches!(rf, 0 | 4 | 5 | 11..=34 | 87 | 90 | 92..=94 | 116..=122 | 125..=151 | 155 | 164..=171 | 179 | 181 | 182 | 185) {
+                if !matches!(rf, 0 | 4 | 5 | 11..=34 | 87 | 90 | 92..=94 | 116..=122 | 125..=151 | 155 | 163..=171 | 179 | 181 | 182 | 185) {
                     return Some(Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: format!("Invalid or restricted inventory flag {rf}") }));
                 }
             }
@@ -893,7 +893,7 @@ pub async fn handle(
                 } else if (60_000_000..=69_999_999).contains(&new_loc) {
                     ch_dock == new_loc
                 } else if new_loc >= 1_000_000_000_000 {
-                    let is_fuel_flag = matches!(flag_u16, 133) || flag == InventoryFlag::SpecializedFuelBay;
+                    let is_fuel_flag = matches!(flag_u16, 133 | 163) || matches!(flag, InventoryFlag::StructureFuel | InventoryFlag::SpecializedFuelBay);
                     if is_fuel_flag {
                         let m_grp = ctx.sde.types.get(&moving.type_id).map(|t| t.group_id).unwrap_or(0);
                         if !matches!(m_grp, 423 | 497 | 1136 | 4729) {
@@ -1098,6 +1098,9 @@ pub async fn handle(
                             .and_then(|t| t.quantity.checked_add(moving.quantity));
                         if let Some(new_qty) = target_qty {
                             snap.items.remove(&item_id);
+                            snap.module_online_states.remove(&item_id);
+                            snap.module_active_states.remove(&item_id);
+                            snap.module_active_charges.remove(&item_id);
                             let target_item = snap.items.get_mut(&target_iid).unwrap();
                             target_item.quantity = new_qty;
                             target_item.version += 1;

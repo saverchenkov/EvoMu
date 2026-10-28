@@ -295,6 +295,11 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
     let saved_hull_tid = pod_ball.type_id;
     pod_ball.type_id = 670;
     pod_ball.mode = MovementMode::Stop;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(it) = snap.items.get_mut(&first_ship_id) {
+            it.type_id = 670;
+        }
+    });
     sys_handle.spawn_ball(pod_ball).await.unwrap();
     ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Dock", &[PyRep::Integer(station_id)], &kw, None)
         .await
@@ -307,6 +312,11 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
     restored_ball.type_id = saved_hull_tid;
     restored_ball.position = station_pos + DVec3::new(1_000.0, 0.0, 0.0);
     restored_ball.mode = MovementMode::Stop;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(it) = snap.items.get_mut(&first_ship_id) {
+            it.type_id = saved_hull_tid;
+        }
+    });
     sys_handle.spawn_ball(restored_ball).await.unwrap();
 
     {
@@ -443,6 +453,11 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
         .unwrap();
     let orig_type_id = cap_ball.type_id;
     cap_ball.type_id = 23757; // Archon (Carrier, group 547)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(it) = snap.items.get_mut(&first_ship_id) {
+            it.type_id = 23757;
+        }
+    });
     sys_handle
         .spawn_ball(cap_ball.clone())
         .await
@@ -461,6 +476,11 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
         .unwrap_err();
     assert_eq!(size_err.code, "ShipTooLargeForStructure");
     cap_ball.type_id = orig_type_id;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(it) = snap.items.get_mut(&first_ship_id) {
+            it.type_id = orig_type_id;
+        }
+    });
     sys_handle
         .spawn_ball(cap_ball)
         .await
@@ -489,15 +509,24 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
         cw.get_or_create(90_000_001).weapon_timer_until_unix = 0;
     }
 
-    // 4d. Authorized subcap within docking perimeter docks and undocks cleanly (also exercise beyonce.Dock)
+    // 4d. Authorized subcap within docking perimeter docks and undocks cleanly (also exercise beyonce.CmdDock)
     ctx.advance_secs(12);
-    ctx.dispatch_rpc(&mut sess, "beyonce", None, "Dock", &[PyRep::Integer(struct_id)], &kw, None)
-        .await
-        .expect("beyonce.Dock at structure");
+    let bid_dock = ctx.bind_object(&mut sess, "beyonce", 30_000_142).expect("bind beyonce");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(bid_dock),
+        "CmdDock",
+        &[PyRep::Integer(struct_id), PyRep::Integer(first_ship_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("beyonce.CmdDock at structure");
     ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "structureDocking", None, "Undock", &[], &kw, None)
         .await
-        .expect("Undock after beyonce.Dock");
+        .expect("Undock after beyonce.CmdDock");
     let (_, mut dock_test_ball2) = sys_handle.get_ball_snapshot(first_ship_id).await.unwrap().unwrap();
     dock_test_ball2.position = struct_pos + DVec3::new(1_500.0, 0.0, 0.0);
     dock_test_ball2.mode = MovementMode::Stop;

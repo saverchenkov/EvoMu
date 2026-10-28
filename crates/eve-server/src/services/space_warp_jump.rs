@@ -58,7 +58,7 @@ pub(crate) async fn handle(
         }
         // parity: plan:SP-4, plan:SP-5, feat:navigation.dock-station, feat:navigation.dock-structure, feat:navigation.undock, feat:navigation.session-change-timer-triggers
         // parity: rpc:beyonce.SetSessionCheck, rpc:beyonce.CmdDock
-        ("beyonce", "Dock") | ("beyonce", "CmdDock") => {
+        ("beyonce", "CmdDock") => {
             Some(handle_dock(ctx, session, bound_entry, args).await)
         }
         // parity: feat:navigation.undock
@@ -93,6 +93,7 @@ async fn handle_cmd_warp_to_stuff(
         });
     };
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp")?;
+    crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "warp")?;
     crate::services::tourney_service::check_tourney_warp_restricted(ctx, sys_id, char_id)?;
     crate::services::combat_crimewatch::check_crimewatch_action_restriction(
         ctx,
@@ -516,14 +517,16 @@ async fn handle_cmd_stargate_jump(
             message: "Session has no active ship".into(),
         });
     };
+    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
+    crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "jump")?;
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp")?;
+    crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "warp")?;
     let Some(gate_id) = args.first().and_then(|a| a.as_i64()) else {
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "CmdStargateJump requires integer stargateID".into(),
         });
     };
-    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
     let Some(jump) = ctx.sde.jumps.get(&gate_id) else {
         return Err(BridgeRpcError {
             code: "UnknownStargate".into(),
@@ -585,25 +588,45 @@ async fn handle_cmd_stargate_jump(
         });
     }
 
+    let ship_type_id = ctx
+        .db
+        .with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id))
+        .unwrap_or(current_ball.type_id);
     let ship_group_id = ctx
         .sde
         .types
-        .get(&current_ball.type_id)
+        .get(&ship_type_id)
         .map(|t| t.group_id)
         .unwrap_or(0);
     let is_restricted_capital = matches!(ship_group_id, 30 | 485 | 547 | 659 | 883 | 1538 | 4594);
     let is_zarzakh_gate =
         old_sys == SOLAR_SYSTEM_ZARZAKH || jump.to_solar_system_id == SOLAR_SYSTEM_ZARZAKH;
-    let is_zarzakh_restricted = is_zarzakh_gate && matches!(ship_group_id, 513 | 902 | 941);
-    if is_restricted_capital || is_zarzakh_restricted {
+    let is_orca = ship_type_id == 28606 || ship_group_id == 941;
+    let is_freighter = matches!(ship_group_id, 513 | 902);
+    let is_zarzakh_restricted = is_zarzakh_gate
+        && !is_orca
+        && (is_restricted_capital || is_freighter);
+
+    if is_zarzakh_restricted {
         return Err(BridgeRpcError {
-            code: "CapitalShipCannotJumpStargate".into(),
+            code: "ShipCannotUseStargate".into(),
             message: format!(
-                "Capital ship type {} (group {}) cannot jump stargate {gate_id}",
-                current_ball.type_id, ship_group_id
+                "Capital ship or freighter type {} (group {}) cannot jump stargate {gate_id}",
+                ship_type_id, ship_group_id
             ),
         });
     }
+
+    if is_restricted_capital {
+        return Err(BridgeRpcError {
+            code: "CapitalShipCannotJumpStargate".into(),
+            message: format!(
+                "Capital ship or freighter type {} (group {}) cannot jump stargate {gate_id}",
+                ship_type_id, ship_group_id
+            ),
+        });
+    }
+
 
     if old_sys == SOLAR_SYSTEM_ZARZAKH {
         let locked_gate = ctx
@@ -787,6 +810,7 @@ async fn handle_dock(
         });
     };
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "dock")?;
+    crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "dock")?;
     let Some(sys_id) = bound_entry
         .map(|b| b.object_id as u32)
         .or(session.solar_system_id)
@@ -821,6 +845,12 @@ async fn handle_dock(
             }
         }
     }
+    if args.get(1).and_then(|a| a.as_i64()).is_some_and(|req| req != ship_id) {
+        return Err(BridgeRpcError {
+            code: "InvalidShipId".into(),
+            message: "Requested shipID does not match pilot's active ship".into(),
+        });
+    }
     let cur_tick_opt = ball_snap.as_ref().map(|(cur_tick, _)| (sys_id, *cur_tick));
     if let Some(active_timer) =
         check_session_change_timer_active(ctx, char_id, now_unix, cur_tick_opt)
@@ -846,13 +876,17 @@ async fn handle_dock(
         .get(&sys_id)
         .map(|s| s.security_status)
         .unwrap_or(1.0);
+    let ship_type_id = ctx
+        .db
+        .with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id))
+        .unwrap_or(ball.type_id);
     let ship_group_id = ctx
         .sde
         .types
-        .get(&ball.type_id)
+        .get(&ship_type_id)
         .map(|t| t.group_id)
         .unwrap_or(0);
-    let is_capsule = ball.type_id == 670 || ship_group_id == 29;
+    let is_capsule = ship_type_id == 670 || ship_group_id == 29;
 
     {
         let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());
@@ -942,6 +976,7 @@ async fn handle_dock(
         }
         DVec3::from_array(st.position)
     } else {
+        crate::services::space_navigation_advanced::validate_npc_station_docking(ship_group_id, true)?;
         let st_opt = ctx
             .sde
             .stations
@@ -988,6 +1023,7 @@ async fn handle_dock(
                 session.structure_id = None;
             }
             record_session_change_timer(ctx, char_id, now_unix, sys_id, cur_tick, "dock");
+            ctx.quasar_gateway.on_session_changed(session, now_unix);
             Ok(PyRep::keyval([
                 ("locationID", PyRep::Integer(dock_id)),
                 ("isStructure", PyRep::Bool(is_structure)),

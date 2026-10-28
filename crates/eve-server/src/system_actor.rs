@@ -958,11 +958,12 @@ impl SystemRegistry {
                                 let _ = reply.send(locks);
                             }
                             SystemCommand::AddTargetLock { source_id, lock, reply } => {
-                                if let Some(cs) = ballpark.combat_states.get_mut(&source_id) {
-                                    cs.undock_invulnerable_remaining_ticks = 0;
-                                }
-                                ballpark.add_target_lock(source_id, lock);
-                                let _ = reply.send(Ok(()));
+                                let res = if ballpark.add_target_lock(source_id, lock) {
+                                    Ok(())
+                                } else {
+                                    Err("Targeting systems cannot acquire lock while cloaked or during sensor recalibration delay, or target is untargetable".to_string())
+                                };
+                                let _ = reply.send(res);
                             }
                             SystemCommand::RemoveTargetLock { source_id, target_id, reply } => {
                                 let removed = ballpark.remove_target_lock(source_id, target_id);

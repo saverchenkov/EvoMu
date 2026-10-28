@@ -754,6 +754,44 @@ pub(crate) async fn handle_multi_add(
                 .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
         })
         .unwrap_or(0);
+    let unfitted_active_cloaks: Vec<(i64, i64, u32, u32)> =
+        if !fitted_unfit_ids.is_empty() && session.station_id.is_none() && session.structure_id.is_none() {
+            ctx.db.with_snapshot(|snap| {
+                fitted_unfit_ids
+                    .iter()
+                    .filter_map(|&(old_loc, item_id, old_flag)| {
+                        if !(11..=34).contains(&old_flag) || !snap.module_active_states.contains(&item_id) {
+                            return None;
+                        }
+                        let it = snap.items.get(&item_id)?;
+                        if !ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 330) {
+                            return None;
+                        }
+                        let ship_type_id = snap.items.get(&old_loc).map(|s| s.type_id).unwrap_or(0);
+                        Some((old_loc, item_id, it.type_id, ship_type_id))
+                    })
+                    .collect()
+            })
+        } else {
+            Vec::new()
+        };
+    let mut precomputed_cloak_delays: std::collections::HashMap<i64, f64> = std::collections::HashMap::new();
+    if !unfitted_active_cloaks.is_empty() {
+        let cloaking_skill = ctx.character_skill_levels(char_id).get(&11579).copied().unwrap_or(0) as u8;
+        for &(old_ship, cloak_item_id, cloak_type_id, ship_type_id) in &unfitted_active_cloaks {
+            let delay_s = crate::services::space_navigation_advanced::compute_decloak_targeting_delay_for_module(
+                ctx,
+                char_id,
+                old_ship,
+                ship_type_id,
+                Some(cloak_item_id),
+                cloak_type_id,
+                cloaking_skill,
+            );
+            let entry = precomputed_cloak_delays.entry(old_ship).or_insert(0.0);
+            *entry = entry.max(delay_s);
+        }
+    }
     let (moved, old_containers) = ctx.db.try_with_mut_snapshot(|snap| {
         let mut moved = Vec::with_capacity(item_ids.len());
         let mut old_containers = HashSet::new();
@@ -811,6 +849,22 @@ pub(crate) async fn handle_multi_add(
     for old_ship in source_ships {
         ctx.invalidate_ship_fitting(old_ship);
         let _ = ctx.get_or_rebuild_ship_fitting(char_id, old_ship);
+        if session.station_id.is_none() && session.structure_id.is_none() {
+            if let Some(sys_id) = session.solar_system_id {
+                if let Some(&delay_s) = precomputed_cloak_delays.get(&old_ship) {
+                    let sys = ctx.systems.get_or_spawn(sys_id);
+                    if let Ok(Some(mut cs)) = sys.get_combat_state(old_ship).await {
+                        cs.cloak_configured_targeting_delay_s =
+                            cs.cloak_configured_targeting_delay_s.max(delay_s);
+                        let _ = sys.set_combat_state(old_ship, cs).await;
+                    }
+                }
+                crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(
+                    ctx, char_id, sys_id, old_ship,
+                )
+                .await;
+            }
+        }
     }
     if is_ship_hold || matches!(flag_u16, 90 | 155) {
         ctx.invalidate_ship_fitting(new_loc);

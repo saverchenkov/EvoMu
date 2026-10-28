@@ -731,6 +731,7 @@ async fn handle_cmd_jump_to_structure_beacon(
         });
     }
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
+    crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "jump")?;
     let now_check = ctx.now_unix();
     crate::services::combat_crimewatch::check_crimewatch_action_restriction(
         ctx, char_id, ship_id, cur_sys_id, "jump_drive", now_check,
@@ -874,6 +875,7 @@ fn validate_beacon_and_distance(
         return Err(BridgeRpcError { code: "WarpScrambled".into(), message: "Cannot bridge or jump while warp scrambled".into() });
     }
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
+    crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "jump")?;
     let now_check = ctx.now_unix();
     crate::services::combat_crimewatch::check_crimewatch_action_restriction(
         ctx, char_id, ship_id, cur_sys_id, "jump_drive", now_check,
@@ -1183,6 +1185,7 @@ async fn handle_cmd_beacon_jump_fleet(
         });
     }
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
+    crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "jump")?;
     let now_check = ctx.now_unix();
     crate::services::combat_crimewatch::check_crimewatch_action_restriction(
         ctx, char_id, ship_id, cur_sys_id, "jump_drive", now_check,

@@ -251,9 +251,19 @@ async fn test_dg4_module_cycles_stop_on_leave_space_and_dock() {
 
     let _ = ctx.drain_notifications_for_char(90_000_001);
     ctx.advance_secs(12);
-    let _ = rpc(&ctx, &mut sess, "beyonce", "Dock", &[PyRep::Integer(JITA_STATION_ID)])
+    let bid = ctx.bind_object(&mut sess, "beyonce", JITA_SYSTEM_ID as i64).expect("bind beyonce");
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(bid),
+            "CmdDock",
+            &[PyRep::Integer(JITA_STATION_ID), PyRep::Integer(ship_id)],
+            &HashMap::new(),
+            None,
+        )
         .await
-        .expect("Dock at Jita 4-4");
+        .expect("CmdDock at Jita 4-4");
     assert_eq!(sess.station_id, Some(JITA_STATION_ID));
 
     assert!(!ctx.db.with_snapshot(|snap| snap.module_active_states.contains(&ab_id)));

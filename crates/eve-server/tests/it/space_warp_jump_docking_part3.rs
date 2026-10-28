@@ -72,6 +72,11 @@ async fn test_sp4_stargate_capital_restriction_session_timers_and_jump_cloak_imm
         assert_eq!(ctx.sde.types[&cap_type_id].group_id, expected_group_id);
         let (_, mut b) = jita_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
         b.type_id = cap_type_id;
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(it) = snap.items.get_mut(&ship_id) {
+                it.type_id = cap_type_id;
+            }
+        });
         jita_handle.spawn_ball(b).await.unwrap();
 
         ctx.advance_secs(12);
@@ -101,6 +106,11 @@ async fn test_sp4_stargate_capital_restriction_session_timers_and_jump_cloak_imm
 
     let (_, mut orca_ball) = jita_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     orca_ball.type_id = 28606; // Orca
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(it) = snap.items.get_mut(&ship_id) {
+            it.type_id = 28606;
+        }
+    });
     jita_handle.spawn_ball(orca_ball).await.unwrap();
 
     let jump_ok = ctx

@@ -240,8 +240,8 @@ async fn test_structure_jumpbridge_safety_and_deliveries() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
-    let sys_a = 30_000_142u32; // Jita
-    let sys_b = 30_000_144u32; // Perimeter
+    let sys_a = 30_004_712u32; // NOL-M9 (Delve sov null-sec)
+    let sys_b = 30_004_713u32; // O-IOAI (Delve sov null-sec, ~1.10 LY)
     let gate_a_id = 992_000_201;
     let gate_b_id = 992_000_202;
     let ship_id = 100_000_001;
@@ -274,7 +274,7 @@ async fn test_structure_jumpbridge_safety_and_deliveries() {
                 type_id: 35841, // Ansiblex Jump Gate
                 owner_corp_id: CORP_1,
                 solar_system_id: sys_a,
-                name: "Ansiblex Jita Alpha".into(),
+                name: "Ansiblex NOL-M9 Alpha".into(),
                 position: gate_a_pos,
                 state: "ShieldVulnerable".into(),
                 quantum_core_installed: true,
@@ -294,7 +294,7 @@ async fn test_structure_jumpbridge_safety_and_deliveries() {
                 type_id: 35841, // Ansiblex Jump Gate
                 owner_corp_id: CORP_1,
                 solar_system_id: sys_b,
-                name: "Ansiblex Perimeter Beta".into(),
+                name: "Ansiblex O-IOAI Beta".into(),
                 position: gate_b_pos,
                 state: "ShieldVulnerable".into(),
                 quantum_core_installed: true,
@@ -307,6 +307,10 @@ async fn test_structure_jumpbridge_safety_and_deliveries() {
                 last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
+        let mut ext = eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        ext.jump_bridge_links.insert(gate_a_id, gate_b_id);
+        ext.jump_bridge_links.insert(gate_b_id, gate_a_id);
+        eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
 
         // Add 1,000 units of Liquid Ozone fuel to Gate A
         snap.items.insert(
@@ -316,7 +320,7 @@ async fn test_structure_jumpbridge_safety_and_deliveries() {
                 type_id: 16273, // Liquid Ozone
                 owner_id: CORP_1,
                 location_id: gate_a_id,
-                flag: InventoryFlag::Cargo,
+                flag: InventoryFlag::StructureFuel,
                 quantity: 1_000,
                 singleton: false,
                 version: 1,
@@ -357,7 +361,7 @@ async fn test_structure_jumpbridge_safety_and_deliveries() {
     let linked = rpc(&ctx, &mut sess1, "structureJumpBridgeMgr", "GetLinkedStructure", &[PyRep::Integer(gate_a_id)])
         .await
         .expect("GetLinkedStructure");
-    assert_eq!(linked, PyRep::Integer(gate_b_id));
+    assert_eq!(linked, PyRep::Tuple(vec![PyRep::Integer(gate_b_id), PyRep::Integer(sys_b as i64)]));
 
     // 2. structureJumpBridgeMgr: GetJbStructureDestination
     let dest = rpc(&ctx, &mut sess1, "structureJumpBridgeMgr", "GetJbStructureDestination", &[PyRep::Integer(gate_a_id)])

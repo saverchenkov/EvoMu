@@ -555,6 +555,9 @@ pub async fn handle(
                     message: "Dock requires an explicit station or structure ID argument".into(),
                 }));
             };
+            if args.get(1).and_then(|a| a.as_i64()).is_some_and(|req| req != ship_id) {
+                return Some(Err(BridgeRpcError { code: "InvalidShipId".into(), message: "Requested shipID does not match active ship".into() }));
+            }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
@@ -595,13 +598,15 @@ pub async fn handle(
                 .get(&sys_id)
                 .map(|s| s.security_status)
                 .unwrap_or(1.0);
-            let ship_group_id = ctx
-                .sde
-                .types
-                .get(&ball.type_id)
-                .map(|t| t.group_id)
-                .unwrap_or(0);
-            let is_capsule = ball.type_id == 670 || ship_group_id == 29;
+            let ship_type_id = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(ball.type_id);
+            let ship_group_id = ctx.sde.types.get(&ship_type_id).map(|t| t.group_id).unwrap_or(0);
+            if let Err(e) = crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "dock") {
+                return Some(Err(e));
+            }
+            if let Err(e) = crate::services::space_navigation_advanced::validate_npc_station_docking(ship_group_id, !is_structure) {
+                return Some(Err(e));
+            }
+            let is_capsule = ship_type_id == 670 || ship_group_id == 29;
             {
                 let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());
                 if let Some(cw_state) = cw.states.get(&char_id) {
@@ -828,6 +833,7 @@ pub async fn handle(
                             vec![PyRep::Integer(dock_id), hv_state],
                         );
                     }
+                    ctx.quasar_gateway.on_session_changed(session, now_unix);
                     Some(Ok(PyRep::keyval([
                         ("locationID", PyRep::Integer(dock_id)),
                         ("isStructure", PyRep::Bool(is_structure)),

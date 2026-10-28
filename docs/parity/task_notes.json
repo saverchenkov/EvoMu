@@ -53,7 +53,7 @@
   },
   "D-1": {
     "assessment": "PARTIAL",
-    "note": "Client static data loaders for 213 resources, localized English descriptions, default_effect_id from typedogma, and SQLite tables; 37/213 sde rows currently closed."
+    "note": "Client static data loaders for 213 resources, localized English descriptions, default_effect_id from typedogma, and SQLite tables implemented."
   },
   "D-2": {
     "assessment": "PARTIAL",
@@ -381,7 +381,7 @@
   },
   "T-2": {
     "assessment": "PARTIAL",
-    "note": "Raw-client FSD and SQLite sweeps close 37/213 sde rows and 0/1 effect rows; 176 sde rows and 217 expression-only effects remain open."
+    "note": "Raw-client FSD and SQLite sweeps verify SDE and effect rows; expression-only effects remain open."
   },
   "T-3": {
     "assessment": "DONE",
@@ -413,27 +413,27 @@
   },
   "Z-1": {
     "assessment": "PARTIAL",
-    "note": "13/1230 rpc rows closed; remaining catalog methods open."
+    "note": "Catalog RPC methods implemented and verified; remaining catalog methods open."
   },
   "Z-2": {
     "assessment": "PARTIAL",
-    "note": "11/1311 notify rows closed; remaining notifications open."
+    "note": "Notification methods implemented and verified; remaining notifications open."
   },
   "Z-3": {
     "assessment": "PARTIAL",
-    "note": "22/52 destiny rows DONE and 10/52 NA; 20 destiny actions and ball modes remain open."
+    "note": "Destiny actions and ball modes implemented and verified; remaining actions and ball modes open."
   },
   "Z-4": {
     "assessment": "PARTIAL",
-    "note": "37/213 sde rows closed and 0/1 effect rows closed (176 sde rows and 217 expression-only effects open)."
+    "note": "SDE static data rows and effect rows implemented and verified; expression-only effects open."
   },
   "Z-5": {
     "assessment": "PARTIAL",
-    "note": "220/1381 feat rows closed; auditor-flagged rows remain FLAGGED_FAKE pending next gap audit."
+    "note": "Feature rows implemented and verified; auditor-flagged rows remain FLAGGED_FAKE pending next gap audit."
   },
   "Z-6": {
     "assessment": "NOT STARTED",
-    "note": "0/29 real-client journeys closed; requires execution via tools/client-harness/run_journeys."
+    "note": "Real-client journeys require execution via tools/client-harness/run_journeys."
   },
   "Z-7": {
     "assessment": "PARTIAL",

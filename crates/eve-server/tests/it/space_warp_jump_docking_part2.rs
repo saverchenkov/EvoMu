@@ -342,19 +342,21 @@ async fn test_sp3_warp_to_disrupted_capacitor_cost_and_exit_invulnerability() {
         )
         .await
         .unwrap();
-    sys_handle
-        .add_target_lock(
-            attacker_ball_id,
-            eve_destiny::TargetLock {
-                target_id: ship_id,
-                lock_time_ms: 1_000.0,
-                remaining_lock_ms: 1_000.0,
-                locked: false,
-                max_range_m: Some(50_000.0),
-            },
-        )
-        .await
-        .unwrap();
+    assert!(
+        sys_handle
+            .add_target_lock(
+                attacker_ball_id,
+                eve_destiny::TargetLock {
+                    target_id: ship_id,
+                    lock_time_ms: 1_000.0,
+                    remaining_lock_ms: 1_000.0,
+                    locked: false,
+                    max_range_m: Some(50_000.0),
+                },
+            )
+            .await
+            .is_err()
+    );
     let attacker_locks = sys_handle.get_target_locks(attacker_ball_id).await.unwrap();
     assert!(attacker_locks.is_empty());
 

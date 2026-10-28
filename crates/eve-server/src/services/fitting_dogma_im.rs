@@ -502,8 +502,20 @@ pub(crate) async fn handle_dogma_im(
                 Ok(f) => f,
                 Err(e) => return Some(Err(e)),
             };
+            let was_active_type = fit
+                .modules
+                .get(&module_id)
+                .filter(|m| matches!(m.state, eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded))
+                .map(|m| m.type_id);
             if let Err(e) = fit.take_module_offline(module_id, &ctx.sde) {
                 return Some(Err(BridgeRpcError { code: "FittingValidationFailed".into(), message: e }));
+            }
+            if let Some(m_tid) = was_active_type {
+                let mod_state = fit.build_effective_module_state(module_id, m_tid, false, &ctx.sde);
+                let react_delay_ms = mod_state.get_attribute(669, &ctx.sde);
+                if react_delay_ms > 0.0 {
+                    ctx.record_module_reactivation_delay(ship_id, module_id, react_delay_ms / 1000.0);
+                }
             }
             let offline_mod_ids: Vec<i64> = fit
                 .modules
@@ -589,8 +601,6 @@ pub(crate) async fn handle_dogma_im(
                     return Some(Err(BridgeRpcError { code: "TargetInvulnerable".into(), message: format!("Target character {t_char} is invulnerable due to recent location change") }));
                 }
             }
-            crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
-
             let fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
                 Ok(f) => f,
                 Err(e) => return Some(Err(e)),
@@ -599,6 +609,9 @@ pub(crate) async fn handle_dogma_im(
             if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
                 if cs.ecm_jammed_remaining_s > 0.0 {
                     return Some(Err(BridgeRpcError { code: "ShipJammed".into(), message: "Targeting systems are jammed by ECM".into() }));
+                }
+                if (cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0) || cs.decloak_targeting_delay_remaining_s > 0.0 {
+                    return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: "Targeting systems cannot acquire lock while cloaked or during sensor recalibration delay".into() }));
                 }
             }
 
@@ -657,6 +670,7 @@ pub(crate) async fn handle_dogma_im(
             if let Err(e) = sys.add_target_lock(ship_id, lock).await {
                 return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: e }));
             }
+            crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
 
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),

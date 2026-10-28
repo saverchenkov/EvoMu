@@ -62,8 +62,8 @@ async fn test_ansiblex_jump_bridge_access_liquid_ozone_and_destination() {
     crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let ship_id = 100_000_001;
-    let sys_a = 30_000_142; // Jita
-    let sys_b = 30_000_144; // Perimeter
+    let sys_a = 30_004_712; // NOL-M9 (Delve sov null-sec)
+    let sys_b = 30_004_713; // O-IOAI (Delve sov null-sec, ~1.10 LY)
     let mut sess = setup_pilot(&ctx, 8001, "demo", "demo-secret", char_id).await;
 
     let gate_a_id = 1_100_000_001_i64;
@@ -86,7 +86,7 @@ async fn test_ansiblex_jump_bridge_access_liquid_ozone_and_destination() {
                 type_id: 35841, // Ansiblex Jump Gate
                 owner_corp_id: 98_000_001,
                 solar_system_id: sys_a,
-                name: "Ansiblex Jita".into(),
+                name: "Ansiblex NOL-M9".into(),
                 position: gate_a_pos,
                 state: "ShieldVulnerable".into(),
                 quantum_core_installed: true,
@@ -106,7 +106,7 @@ async fn test_ansiblex_jump_bridge_access_liquid_ozone_and_destination() {
                 type_id: 35841, // Ansiblex Jump Gate
                 owner_corp_id: 98_000_001,
                 solar_system_id: sys_b,
-                name: "Ansiblex Perimeter".into(),
+                name: "Ansiblex O-IOAI".into(),
                 position: gate_b_pos,
                 state: "ShieldVulnerable".into(),
                 quantum_core_installed: true,
@@ -119,6 +119,10 @@ async fn test_ansiblex_jump_bridge_access_liquid_ozone_and_destination() {
                 last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
+        let mut ext = eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        ext.jump_bridge_links.insert(gate_a_id, gate_b_id);
+        ext.jump_bridge_links.insert(gate_b_id, gate_a_id);
+        eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
         // Add 1,000 units of Liquid Ozone fuel to Gate A
         snap.items.insert(
             1_200_000_001,
@@ -127,7 +131,7 @@ async fn test_ansiblex_jump_bridge_access_liquid_ozone_and_destination() {
                 type_id: 16273, // Liquid Ozone
                 owner_id: 98_000_001,
                 location_id: gate_a_id,
-                flag: InventoryFlag::Cargo,
+                flag: InventoryFlag::StructureFuel,
                 quantity: 1_000,
                 singleton: false,
                 version: 1,
@@ -183,7 +187,7 @@ async fn test_ansiblex_jump_bridge_access_liquid_ozone_and_destination() {
     let linked = rpc(&ctx, &mut sess, "structureJumpBridgeMgr", "GetLinkedStructure", &[PyRep::Integer(gate_a_id)])
         .await
         .expect("GetLinkedStructure");
-    assert_eq!(linked.as_i64(), Some(gate_b_id));
+    assert_eq!(linked, PyRep::Tuple(vec![PyRep::Integer(gate_b_id), PyRep::Integer(sys_b as i64)]));
 
     // 3. structureJumpBridgeMgr.GetJbStructureDestination
     let dest = rpc(&ctx, &mut sess, "structureJumpBridgeMgr", "GetJbStructureDestination", &[PyRep::Integer(gate_a_id)])
@@ -218,7 +222,7 @@ async fn test_ansiblex_jump_bridge_access_liquid_ozone_and_destination() {
     // 5. Liquid Ozone fuel check: empty the ozone fuel
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(item) = snap.items.get_mut(&1_200_000_001) {
-            item.quantity = 100; // less than 500 required
+            item.quantity = 0; // empty fuel bay
         }
     });
     ctx.advance_secs(12);
@@ -256,11 +260,13 @@ async fn test_ansiblex_jump_bridge_access_liquid_ozone_and_destination() {
     );
     assert!(jump_res.dict_get("beyonceBoundID").is_some());
 
-    // Verify 500 units of Liquid Ozone were consumed
+    // Verify Liquid Ozone was consumed based on mass and distance
+    let dist_ly = eve_server::services::space_destiny::space_nav_travel::distance_ly(&ctx, sys_a, sys_b).max(0.01);
+    let expected_cost = ((100_000.0 * dist_ly * 0.000003 + 50.0).round() as i32).max(50);
     let remaining_ozone = ctx.db.with_snapshot(|snap| {
         snap.items.get(&1_200_000_001).map(|i| i.quantity).unwrap_or(0)
     });
-    assert_eq!(remaining_ozone, 500, "500 units of Liquid Ozone must be consumed");
+    assert_eq!(remaining_ozone, 1_000 - expected_cost, "Liquid Ozone must be consumed based on mass and distance");
 
     // Verify pilot session and ball in System B
     assert_eq!(sess.solar_system_id, Some(sys_b));
