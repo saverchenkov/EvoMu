@@ -81,24 +81,29 @@ pub fn emit_sov_structures_updated(ctx: &ServerContext, sys_id: u32, structs: Ve
     );
 }
 
-/// Broadcasts `OnSolarSystemDevIndexChanged` notification when indices increase.
-pub fn emit_dev_index_changed(ctx: &ServerContext, sys_id: u32, dev_indices: &HashMap<String, i64>) {
-    let dict_items: Vec<(PyRep, PyRep)> = dev_indices
-        .iter()
-        .map(|(k, v)| (PyRep::String(k.clone()), PyRep::Integer(*v)))
-        .collect();
+/// Broadcasts `OnSolarSystemDevIndexChanged` notification (single solarsystemID payload matching V24 client expectation).
+pub fn emit_dev_index_changed(ctx: &ServerContext, sys_id: u32) {
     ctx.notify(
         NotificationTarget::SolarSystem(sys_id),
         "OnSolarSystemDevIndexChanged",
         "solarsystemid",
-        vec![
-            PyRep::Integer(i64::from(sys_id)),
-            PyRep::Dict(dict_items),
-        ],
+        vec![PyRep::Integer(i64::from(sys_id))],
     );
 }
 
 /// Marks a Skyhook as hackable and emits `OnSkyhookCanBeHacked`.
+pub fn emit_skyhook_can_be_hacked(ctx: &ServerContext, sys_id: u32, skyhook_id: i64) {
+    ctx.notify(
+        NotificationTarget::SolarSystem(sys_id),
+        "OnSkyhookCanBeHacked",
+        "solarsystemid",
+        vec![
+            PyRep::Integer(i64::from(sys_id)),
+            PyRep::Integer(skyhook_id),
+        ],
+    );
+}
+
 pub fn set_skyhook_hackable(ctx: &ServerContext, sys_id: u32, skyhook_id: i64, can_hack: bool) {
     with_sov_runtime(ctx, |rt| {
         rt.skyhook_hackable.insert(skyhook_id, can_hack);
@@ -107,15 +112,7 @@ pub fn set_skyhook_hackable(ctx: &ServerContext, sys_id: u32, skyhook_id: i64, c
         }
     });
     if can_hack {
-        ctx.notify(
-            NotificationTarget::SolarSystem(sys_id),
-            "OnSkyhookCanBeHacked",
-            "solarsystemid",
-            vec![
-                PyRep::Integer(i64::from(sys_id)),
-                PyRep::Integer(skyhook_id),
-            ],
-        );
+        emit_skyhook_can_be_hacked(ctx, sys_id, skyhook_id);
     }
 }
 
@@ -132,12 +129,11 @@ pub fn record_hub_hack(ctx: &ServerContext, sys_id: u32, hub_id: i64, disruption
     let until = now + disruption_seconds;
     ctx.db.with_mut_snapshot(|snap| {
         snap.sov_runtime.hacked_hubs.insert(hub_id, until);
-        if let Some(st) = snap.structures.get_mut(&hub_id) {
-            if st.state == "ShieldVulnerable" {
-                st.state = "ArmorReinforced".into();
-            }
-            if st.reinforced_until_unix == 0 {
-                st.reinforced_until_unix = until;
+        if let Some(hub) = snap.sov_runtime.sov_hubs.get_mut(&hub_id) {
+            for u in &mut hub.upgrades {
+                if u.online {
+                    u.low_power = true;
+                }
             }
         }
         snap.sov_campaign_scores.entry(hub_id).or_insert(
@@ -175,6 +171,7 @@ pub fn claim_system_sovereignty(
     corp_id: i64,
     _hub_id: i64,
 ) -> Result<(), BridgeRpcError> {
+    let now = ctx.now_unix();
     ctx.db.try_with_mut_snapshot(|snap| {
         let Some(st) = snap.system_states.get_mut(&sys_id) else {
             return Err(BridgeRpcError {
@@ -190,10 +187,12 @@ pub fn claim_system_sovereignty(
                 });
             }
         }
+        st.solar_system_id = sys_id;
         st.sov_alliance_id = Some(alliance_id);
         st.military_index = st.military_index.max(1);
         st.industrial_index = st.industrial_index.max(1);
         st.strategic_index = st.strategic_index.max(1);
+        snap.sov_runtime.sov_claimed_since_unix.entry(sys_id).or_insert(now);
         Ok(())
     })?;
 
@@ -371,6 +370,10 @@ pub async fn handle(
                 false
             });
             Some(Ok(PyRep::Bool(allowed)))
+        }
+
+        ("sovMgr", "ConfirmSkyhookSovManagement") => {
+            Some(crate::services::sov_gameplay::handle_confirm_skyhook_sov_management(ctx, session, args).await)
         }
 
         ("sovMgr", "DestroySkyhooks") => {
@@ -575,20 +578,34 @@ pub async fn handle(
                     message: "Session has no active solar system".into(),
                 }));
             };
-            let (is_jammed, cyno_suppressed, inhibitor_active) = ctx.db.with_snapshot(|snap| {
-                let structure_jammed = snap.structures.values().any(|s| {
+            let now = ctx.now_unix();
+            let (is_jammed, cyno_suppressed, inhibitor_active, spooling_up) = ctx.db.with_snapshot(|snap| {
+                let tenebrex_active =
+                    crate::services::sov_gameplay::is_tenebrex_jammer_active_in_snap(snap, sys_id, now);
+                let spooling = snap.structures.values().any(|s| {
                     s.solar_system_id == sys_id
-                        && (s.type_id == TYPE_TENEBREX_CYNO_JAMMER
-                            || s.type_id == 81926
+                        && s.type_id == TYPE_TENEBREX_CYNO_JAMMER
+                        && s.fuel_blocks > 0
+                        && matches!(s.state.as_str(), "ShieldVulnerable" | "Online")
+                        && snap
+                            .sov_runtime
+                            .tenebrex_spool_ready_unix
+                            .get(&s.structure_id)
+                            .is_some_and(|&ready| now < ready)
+                });
+                let other_structure_jammed = snap.structures.values().any(|s| {
+                    s.solar_system_id == sys_id
+                        && s.type_id != TYPE_TENEBREX_CYNO_JAMMER
+                        && (s.type_id == 81926
                             || ctx.sde.types.get(&s.type_id).is_some_and(|t| {
                                 t.default_attributes.get(&3038).copied().unwrap_or(0.0) > 0.0
                             }))
                         && s.type_id != TYPE_PHAROLUX_CYNO_BEACON
                         && s.type_id != 35841
-                        && s.state != "Destroyed"
-                        && s.state != "Anchoring"
+                        && matches!(s.state.as_str(), "ShieldVulnerable" | "Online")
                         && s.fuel_blocks > 0
                 });
+                let structure_jammed = tenebrex_active || other_structure_jammed;
                 let item_inhibitor = snap.items.values().any(|i| {
                     i.location_id == sys_id as i64
                         && (i.type_id == 33700
@@ -596,12 +613,13 @@ pub async fn handle(
                                 t.default_attributes.get(&3038).copied().unwrap_or(0.0) > 0.0
                             }))
                 });
-                (structure_jammed || item_inhibitor, structure_jammed, item_inhibitor)
+                (structure_jammed || item_inhibitor, structure_jammed, item_inhibitor, spooling)
             });
             Some(Ok(PyRep::keyval([
                 ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
                 ("isJammed", PyRep::Bool(is_jammed)),
                 ("active", PyRep::Bool(is_jammed)),
+                ("spoolingUp", PyRep::Bool(spooling_up)),
                 ("cynoSuppression", PyRep::Bool(cyno_suppressed)),
                 ("structureInhibitor", PyRep::Bool(inhibitor_active)),
             ])))

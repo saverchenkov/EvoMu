@@ -257,7 +257,7 @@ pub fn sync_d6(
         }
     }
 
-    let sp6_h = fp_json(&snap.sp6_lifecycle);
+    let sp6_h = super::fingerprints::fp_sp6_lifecycle(&snap.sp6_lifecycle);
     if df.sp6_lifecycle_fp != sp6_h {
         changed = true;
         let js = serde_json::to_string(&snap.sp6_lifecycle).map_err(|e| e.to_string())?;

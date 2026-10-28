@@ -348,9 +348,25 @@ fn is_active(u: &PersistedHubUpgrade) -> bool {
 pub fn compute_hub_resources(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -> Option<HubResources> {
     let st = snap.structures.get(&hub_id)?;
     let y = system_yield(sde, st.solar_system_id);
+    // DERIVED (synthetic): Mercenary Den anarchy stage 2..=3 siphons 500 * (stage - 1) workforce/h; stage >= 4 freezes local workforce transport.
+    let mut siphoned_w: u64 = 0;
+    let mut any_workforce_frozen = false;
+    for d in snap.sov_runtime.mercenary_dens.values().filter(|d| d.solar_system_id == st.solar_system_id && d.enabled) {
+        let stage = u64::from(super::quasar_sov_mercden::stage_for_level(d.anarchy_level));
+        if stage >= 4 {
+            any_workforce_frozen = true;
+        } else if stage >= 2 {
+            siphoned_w += 500 * (stage - 1);
+        }
+    }
+    let effective_workforce = if any_workforce_frozen {
+        0
+    } else {
+        y.planet_workforce.saturating_sub(siphoned_w)
+    };
     let mut r = HubResources {
         power_local: y.stars.iter().map(|s| s.1).sum::<u64>() + y.planet_power,
-        workforce_local: y.planet_workforce,
+        workforce_local: effective_workforce,
         ..Default::default()
     };
     let (mut produced_p, mut produced_w) = (0u64, 0u64);
@@ -367,6 +383,34 @@ pub fn compute_hub_resources(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_i
     r.power_available = r.power_local + produced_p;
     r.workforce_available = (r.workforce_local + produced_w + imported).saturating_sub(exported);
     Some(r)
+}
+
+/// Takes consumer upgrades into `low_power = true` if power or workforce is overloaded
+/// (e.g. when a Power Monitoring upgrade runs out of fuel or anarchy siphons workforce).
+pub fn enforce_hub_power_overload(snap: &mut WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -> bool {
+    let mut changed = false;
+    loop {
+        let Some(r) = compute_hub_resources(snap, sde, hub_id) else {
+            break;
+        };
+        if r.power_allocated <= r.power_available && r.workforce_allocated <= r.workforce_available {
+            break;
+        }
+        let Some(h) = snap.sov_runtime.sov_hubs.get_mut(&hub_id) else {
+            break;
+        };
+        if let Some(u) = h.upgrades.iter_mut().rev().find(|u| {
+            is_active(u)
+                && upgrade_definition(sde, u.type_id)
+                    .is_some_and(|d| d.power_required > 0 || d.workforce_required > 0)
+        }) {
+            u.low_power = true;
+            changed = true;
+        } else {
+            break;
+        }
+    }
+    changed
 }
 
 /// Observable per-hub state used to diff before/after a transition.
@@ -472,6 +516,7 @@ pub(crate) fn run_simulation(snap: &mut WorldStateSnapshot, sde: &SdeRegistry, p
     if !simulate_fuel(sde, hub, now) {
         return;
     }
+    enforce_hub_power_overload(snap, sde, hub_id);
     let mut n = Vec::new();
     encode_bytes_field(1, &encode_hub_upgrades(sde, hub_id, snap.sov_runtime.sov_hubs.get(&hub_id)), &mut n);
     push_notice(pending, sys, "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice", n);

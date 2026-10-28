@@ -266,6 +266,52 @@ pub struct PersistedFwState {
     pub system_advantage: HashMap<u32, (f64, f64)>,
     #[serde(default)]
     pub battlefield_instances: Vec<PersistedBattlefieldRecord>,
+    #[serde(default)]
+    pub battlefield_zones: HashMap<i64, [i64; 3]>,
+    #[serde(default)]
+    pub battlefield_participants: HashMap<i64, Vec<i64>>,
+    #[serde(default)]
+    pub battlefield_waves: HashMap<i64, u32>,
+    #[serde(default)]
+    pub battlefield_respawn_unix: HashMap<u32, u64>,
+    #[serde(default)]
+    pub fw_complexes: HashMap<i64, (u32, String, i64, f64, bool)>,
+    #[serde(default)]
+    pub ihub_lp_donations: HashMap<u32, i64>,
+    #[serde(default)]
+    pub ihub_tiers: HashMap<u32, u8>,
+    #[serde(default)]
+    pub ihub_vulnerable: HashMap<u32, bool>,
+    #[serde(default)]
+    pub ihub_vulnerable_since_unix: HashMap<u32, u64>,
+    #[serde(default)]
+    pub last_ihub_attacked_unix: HashMap<u32, u64>,
+    #[serde(default)]
+    pub corp_war_factions: HashMap<i64, i64>,
+    /// Pilots inside a FW complex pocket after `keeper.ActivateAccelerationGate`: `complex_id -> Vec<(char_id, ship_id)>`.
+    #[serde(default)]
+    pub complex_occupants: HashMap<i64, Vec<(i64, i64)>>,
+    /// Active FW Supply Cache / Supply Depot / Listening Post targets in space: `entity_id -> (solar_system_id, site_kind, faction_id)`.
+    #[serde(default)]
+    pub supply_sites: HashMap<i64, (u32, String, i64)>,
+    /// Direct individual militia enlistments (`character_id -> faction_id`), preserved across corporation withdrawal.
+    #[serde(default)]
+    pub direct_enlisted_chars: HashMap<i64, i64>,
+    /// Last unix timestamp when an active FW complex capture was stepped: `complex_id -> last_step_unix`.
+    #[serde(default)]
+    pub complex_last_step_unix: HashMap<i64, u64>,
+    /// Accumulated capture seconds elapsed inside complex: `complex_id -> elapsed_seconds`.
+    #[serde(default)]
+    pub complex_seconds_elapsed: HashMap<i64, u64>,
+    /// Defender NPC guard clearance status inside complex: `complex_id -> cleared`.
+    #[serde(default)]
+    pub complex_guards_cleared: HashMap<i64, bool>,
+    /// Per-tier complex respawn cooldown timestamps: `"system_id:tier" -> respawn_unix`.
+    #[serde(default)]
+    pub complex_tier_cooldowns: HashMap<String, u64>,
+    /// Spawned NPC wave entity IDs inside battlefield sites: `battlefield_id -> Vec<i64>`.
+    #[serde(default)]
+    pub battlefield_npc_waves: HashMap<i64, Vec<i64>>,
 }
 
 /// One upgrade installed into a Sovereignty Hub (`eve_public.sovereignty.hub.upgrade`).
@@ -339,7 +385,7 @@ pub struct PersistedMercenaryActivity {
     pub infomorph_bonus: u32,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PersistedSovState {
     #[serde(default)]
     pub fuel_access_groups: HashMap<i64, i64>,
@@ -353,6 +399,8 @@ pub struct PersistedSovState {
     /// `UpwellStructureRecord.state`. Defaults to `true` when absent.
     #[serde(default)]
     pub skyhook_active: BTreeMap<i64, bool>,
+    #[serde(default)]
+    pub skyhook_planets: HashMap<i64, i64>,
     /// Scheduled skyhook theft vulnerability windows: skyhook id -> (start, end) unix seconds.
     #[serde(default)]
     pub skyhook_theft_windows: HashMap<i64, (u64, u64)>,
@@ -365,6 +413,53 @@ pub struct PersistedSovState {
     pub mercenary_activities: BTreeMap<String, PersistedMercenaryActivity>,
     #[serde(default)]
     pub next_mercenary_activity_seq: u64,
+    /// Skyhook secure/insecure reagent bays: `skyhook_id -> (reagent_type_id, secure_qty, insecure_qty, last_cycle_unix)`.
+    #[serde(default)]
+    pub skyhook_reagent_bays: HashMap<i64, (u32, u64, u64, u64)>,
+    /// Mercenary Den reinforcement & shield state: `den_id -> (reinforced_until_unix, vuln_window_end_unix, shield_pct)`.
+    #[serde(default)]
+    pub mercenary_den_reinforcement: HashMap<i64, (u64, u64, u8)>,
+    /// Mercenary Den sovereignty owner tax percentage: `den_id -> tax_pct`.
+    #[serde(default)]
+    pub mercenary_den_tax_pct: HashMap<i64, u8>,
+    /// Constellation Command Nodes spawned for a reinforced Sovereignty Hub: `node_id -> (hub_id, solar_system_id, capturing_alliance_id)`.
+    #[serde(default)]
+    pub command_nodes: HashMap<i64, (i64, u32, i64)>,
+    /// Accumulated NPC kills per null-sec system for Military Index progression.
+    #[serde(default)]
+    pub sov_npc_kills: HashMap<u32, u64>,
+    /// Accumulated mined units per null-sec system for Industrial Index progression.
+    #[serde(default)]
+    pub sov_mined_units: HashMap<u32, u64>,
+    /// ADM-scaled unix vulnerability windows for sovereignty hubs/structures: `structure_id -> (start_unix, end_unix)`.
+    #[serde(default)]
+    pub adm_vulnerability_windows: HashMap<i64, (u64, u64)>,
+    /// Sub-unit batch rate & remainder `(batch_qty, rem)` for exact 1 Hz Skyhook reagent maturity.
+    #[serde(default)]
+    pub skyhook_maturity_rem: HashMap<i64, (u64, u128)>,
+    /// Last unix timestamp at which hourly planetary reagent output was harvested into a Skyhook's insecure bay.
+    #[serde(default)]
+    pub skyhook_last_harvest_unix: HashMap<i64, u64>,
+    /// Active 10-minute Skyhook Reagent Silo ship links: `skyhook_id -> (char_id, ship_id, completes_at_unix, orig_max_vel)`.
+    #[serde(default)]
+    pub skyhook_silo_links: HashMap<i64, (i64, i64, u64, f64)>,
+    /// Post-warmup ADM-scaled Entosis capture progress: `target_id -> (ship_id, char_id, alliance_id, accumulated_secs, last_tick_unix)`.
+    #[serde(default)]
+    pub entosis_capture_progress: HashMap<i64, (i64, i64, i64, f64, u64)>,
+    /// Tenebrex Cyno Jammer 5-minute spool-up completion timestamps (`structure_id -> ready_unix`) and notification state.
+    #[serde(default)]
+    pub tenebrex_spool_ready_unix: HashMap<i64, u64>,
+    #[serde(default)]
+    pub tenebrex_spool_notified: HashMap<i64, bool>,
+    /// Unix timestamp when system sovereignty was claimed (`solar_system_id -> claimed_unix`) for Strategic Index progression.
+    #[serde(default)]
+    pub sov_claimed_since_unix: HashMap<u32, u64>,
+    /// Active Mercenary Tactical Operation target entities in space (`entity_id -> activity_uuid_hex`).
+    #[serde(default)]
+    pub mto_site_balls: HashMap<i64, String>,
+    /// Constellation Command Node capture scores per reinforced Sovereignty Hub (`hub_id -> Vec<(alliance_id, score)>`).
+    #[serde(default)]
+    pub command_node_scores: HashMap<i64, Vec<(i64, f64)>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -411,6 +506,18 @@ pub struct PersistedInsurgencyState {
     pub insurgency_instances: Vec<PersistedInsurgencySiteRecord>,
     #[serde(default)]
     pub ice_heist_instances: Vec<PersistedIceHeistRecord>,
+    #[serde(default)]
+    pub pirate_ambition_modifier: HashMap<i64, u8>,
+    #[serde(default)]
+    pub empire_ambition_modifier: HashMap<i64, u8>,
+    #[serde(default)]
+    pub fob_armor_reinforced_until: HashMap<i64, u64>,
+    #[serde(default)]
+    pub campaign_contributions: HashMap<i64, Vec<(i64, i64, i64)>>,
+    #[serde(default)]
+    pub campaign_outcomes: HashMap<i64, String>,
+    #[serde(default)]
+    pub surrender_ihub_vulnerable_unix: HashMap<u32, u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

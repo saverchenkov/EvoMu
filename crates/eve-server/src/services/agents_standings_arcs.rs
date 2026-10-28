@@ -1236,15 +1236,15 @@ pub async fn handle_extended(
 
         ("keeper", "ActivateAccelerationGate") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            if session.station_id.is_some() || session.structure_id.is_some() {
-                return Some(Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot activate dungeon acceleration gate while docked".into() }));
-            }
             let is_mission = args.first().and_then(|a| a.as_i64()).and_then(|raw_id| u32::try_from(raw_id).ok()).is_some_and(|mid| {
                 ctx.db
                     .with_snapshot(|snap| snap.active_missions.contains_key(&(char_id, mid)))
             });
             if !is_mission {
                 return None;
+            }
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot activate dungeon acceleration gate while docked".into() }));
             }
             let Some(raw) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError { code: "InvalidMissionId".into(), message: "mission_id argument is required".into() }));

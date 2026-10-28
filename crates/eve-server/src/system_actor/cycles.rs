@@ -1273,11 +1273,16 @@ impl SystemHandle {
             }
         }
         if let Some(db) = db_opt {
-            for (&bid, cs) in &bp.combat_states {
-                if !bp.is_static_ball(bid) && bid < 700_000_000 {
-                    crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, bid, cs);
-                }
-            }
+            crate::sp6_lifecycle::persist_ship_combat_hp_batch_in_db(
+                db,
+                bp.combat_states.iter().filter_map(|(&bid, cs)| {
+                    if !bp.is_static_ball(bid) && bid < 700_000_000 {
+                        Some((bid, cs))
+                    } else {
+                        None
+                    }
+                }),
+            );
         }
         sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
         {

@@ -40,7 +40,7 @@ pub fn is_rnd_agent(agent: &eve_sde::AgentInfo) -> bool {
 pub fn is_fw_agent(agent: &eve_sde::AgentInfo) -> bool {
     matches!(
         agent.corporation_id,
-        1000121 | 1000147 | 1000085 | 1000009
+        1000121 | 1000147 | 1000085 | 1000009 | 1000179 | 1000180 | 1000181 | 1000182
     )
 }
 
@@ -93,10 +93,10 @@ pub fn mission_matches_agent_pool(
 pub fn resolve_fw_warzone_system(agent_corp_id: i64) -> u32 {
     // Selects a canonical FW warzone system appropriate for militia
     match agent_corp_id {
-        1000121 => 30002062, // Federal Defense Union -> Onnamon
-        1000147 => 30002097, // 24th Imperial Crusade -> Mehatoor
-        1000085 => 30002098, // Tribal Liberation Force -> Amo
-        1000009 => 30002061, // State Protectorate -> Pynekoh
+        1000121 | 1000181 => 30002062, // Federal Defense Union -> Onnamon
+        1000147 | 1000179 => 30002097, // 24th Imperial Crusade -> Mehatoor
+        1000085 | 1000182 => 30002098, // Tribal Liberation Force -> Amo
+        1000009 | 1000180 => 30002061, // State Protectorate -> Pynekoh
         _ => 30002062,
     }
 }

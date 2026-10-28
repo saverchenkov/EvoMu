@@ -971,11 +971,16 @@ impl SystemRegistry {
                                     );
                                 }
                                 if let Some(db) = &db_opt {
-                                    for (&bid, cs) in &ballpark.combat_states {
-                                        if !ballpark.is_static_ball(bid) && bid < 700_000_000 {
-                                            crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, bid, cs);
-                                        }
-                                    }
+                                    crate::sp6_lifecycle::persist_ship_combat_hp_batch_in_db(
+                                        db,
+                                        ballpark.combat_states.iter().filter_map(|(&bid, cs)| {
+                                            if !ballpark.is_static_ball(bid) && bid < 700_000_000 {
+                                                Some((bid, cs))
+                                            } else {
+                                                None
+                                            }
+                                        }),
+                                    );
                                 }
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let broadcast = build_tick_broadcast(solar_system_id, &mut ballpark, events);

@@ -75,6 +75,18 @@ pub(crate) fn mark_hacking_container_unlocked(ctx: &ServerContext, char_id: i64,
             }
         }
     });
+    let hub_sys = ctx.db.with_snapshot(|snap| {
+        snap.structures.get(&target_id).and_then(|st| {
+            if st.type_id == crate::services::sov_services::TYPE_SOVEREIGNTY_HUB {
+                Some(st.solar_system_id)
+            } else {
+                None
+            }
+        })
+    });
+    if let Some(sys) = hub_sys {
+        crate::services::sov_services::record_hub_hack(ctx, sys, target_id, 3_600);
+    }
 }
 
 const SHIP_CLONE_OFFERS_KEY: &str = "jumpCloneSvc:ship_clone_offers";
@@ -404,6 +416,13 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
             if let Err(e) = scanner_range_check(ctx, sys, ship_id, target_id, mod_state, 54).await {
                 return Some(Err(e));
             }
+            let base_coherence = mod_state.get_attribute(1909, &ctx.sde).max(mod_type.default_attributes.get(&1909).copied().unwrap_or(40.0));
+            let base_strength = mod_state.get_attribute(1910, &ctx.sde).max(mod_type.default_attributes.get(&1910).copied().unwrap_or(20.0));
+            if let Some(res) = crate::services::sov_gameplay::try_handle_sov_hub_data_hack(
+                ctx, char_id, target_id, module_id, base_coherence, base_strength,
+            ) {
+                return Some(res);
+            }
             if let Some(st_owner_corp) = ctx.db.with_snapshot(|s| s.structures.get(&target_id).map(|st| st.owner_corp_id)) {
                 let caller_corp = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id)).unwrap_or(0);
                 if caller_corp != 0 && caller_corp == st_owner_corp {
@@ -662,8 +681,19 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
         }
 
         // Entosis Link (`group_id == 1313`, e.g. `34593` Entosis Link I, `34595` Entosis Link II)
-        1313 => Some(
-            crate::services::tactical_modules::handle_entosis_link_activation(
+        1313 => {
+            let mut is_sov_target = false;
+            if let Some(target_id) = target_id_opt {
+                match crate::services::sov_gameplay::precheck_entosis_activation(
+                    ctx, target_id, ship_id, char_id,
+                )
+                .await
+                {
+                    Ok(flag) => is_sov_target = flag,
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            let res = crate::services::tactical_modules::handle_entosis_link_activation(
                 ctx,
                 sys,
                 char_id,
@@ -672,8 +702,23 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
                 mod_type,
                 target_id_opt,
             )
-            .await,
-        ),
+            .await;
+            if let (Ok(ref rep), Some(target_id), true) = (&res, target_id_opt, is_sov_target) {
+                let cycle_dur = rep
+                    .dict_get("cycleDurationSeconds")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(300.0);
+                let warmup_done = ctx.now_unix() + (cycle_dur.round() as u64);
+                crate::services::sov_gameplay::register_entosis_capture_target(
+                    ctx,
+                    target_id,
+                    ship_id,
+                    char_id,
+                    warmup_done,
+                );
+            }
+            Some(res)
+        }
 
         // Clone Vat Bay I (`type_id == 23735`, `group_id == 815`)
         815 => Some(Ok(PyRep::keyval([

@@ -305,6 +305,9 @@ fn handle_update_reinforce_times(ctx: &ServerContext, session: &mut SessionState
         ext.pending_reinforce_schedule.insert(structure_id, (hour as u8, weekday as u8, apply_after));
         let hacked_chars: Vec<i64> = ext.hacked_reinforce_reveals.get(&structure_id).cloned().unwrap_or_default().into_iter().collect();
         save_ext_state(snap, &ext);
+        if st.type_id == crate::services::sov_services::TYPE_SOVEREIGNTY_HUB {
+            let _ = crate::services::sov_gameplay::apply_adm_scaled_vulnerability_window_in_snap(snap, structure_id, hour as u32);
+        }
         Ok((st, ch as i64, cd as i64, apply_after, hacked_chars))
     })?;
     let hack_tuple = PyRep::Tuple(vec![PyRep::Integer(cur_day), PyRep::Integer(cur_hour), PyRep::Integer(weekday), PyRep::Integer(hour), PyRep::Integer(apply_after as i64)]);

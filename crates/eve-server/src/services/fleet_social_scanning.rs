@@ -711,7 +711,13 @@ pub(super) async fn handle_scanning_and_wormholes(
         // =====================================================================
         ("keeper", "ActivateAccelerationGate")
         | ("beyonce", "ActivateAccelerationGate") => {
-            let (_, _char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "NotInSpace".into(),
+                    message: "Cannot activate an acceleration gate while docked".into(),
+                }));
+            }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
@@ -725,6 +731,14 @@ pub(super) async fn handle_scanning_and_wormholes(
                 }));
             };
             let gate_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            if ctx.db.with_snapshot(|snap| snap.fw_runtime.fw_complexes.contains_key(&gate_id)) {
+                return Some(
+                    crate::services::fw_gameplay::activate_fw_complex_gate_in_space(
+                        ctx, char_id, ship_id, sys_id, gate_id,
+                    )
+                    .await,
+                );
+            }
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let Some((_, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
                 return Some(Err(BridgeRpcError {

@@ -699,6 +699,13 @@ pub async fn handle_ship_or_npc_destruction(
             0,
             "ship_loss",
         );
+        crate::services::fw_gameplay::on_player_ship_destroyed_in_combat(
+            ctx,
+            sys_id,
+            attacker_char_id,
+            vcid,
+            target_ball.type_id,
+        );
     } else {
         if (32_000_000..33_000_000).contains(&sys_id) {
             crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_core(
@@ -709,6 +716,21 @@ pub async fn handle_ship_or_npc_destruction(
             )
             .await;
         }
+        crate::services::sov_gameplay::on_space_entity_destroyed(
+            ctx,
+            sys_id,
+            (attacker_char_id > 0).then_some(attacker_char_id),
+            target_ball_id,
+            target_ball.type_id,
+        );
+        crate::services::fw_gameplay::on_space_entity_destroyed(
+            ctx,
+            sys_id,
+            (attacker_char_id > 0).then_some(attacker_char_id),
+            target_ball_id,
+            target_ball.type_id,
+        )
+        .await;
         let bounty = ctx
             .sde
             .types

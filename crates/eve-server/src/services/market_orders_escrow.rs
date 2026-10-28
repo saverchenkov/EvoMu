@@ -232,7 +232,10 @@ pub fn handle_orders_escrow(
                 let broker_rate = if is_structure {
                     super::resolve_structure_broker_rate(snap, docked_station_id)
                 } else {
-                    compute_broker_fee_rate(broker_lvl, faction_standing, corp_standing)
+                    let m_sys = ctx.sde.stations.get(&docked_station_id).map(|s| s.solar_system_id).unwrap_or(0);
+                    let m_tier = snap.fw_runtime.ihub_tiers.get(&m_sys).copied().unwrap_or(0);
+                    let tier_mult = 1.0 - (f64::from(m_tier) * 0.10).min(0.50);
+                    compute_broker_fee_rate(broker_lvl, faction_standing, corp_standing) * tier_mult
                 };
                 let broker_ppm = (broker_rate * 1_000_000.0).round() as i128;
 

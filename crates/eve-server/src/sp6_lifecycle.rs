@@ -214,15 +214,43 @@ pub fn persist_ship_combat_hp_in_db(
     ball_id: i64,
     cs: &CombatState,
 ) {
+    persist_ship_combat_hp_batch_in_db(db, [(ball_id, cs)]);
+}
+
+/// Persists multiple ship combat HPs into `snap.sp6_lifecycle.ship_combat_hp` in a single mutation,
+/// skipping snapshot lock/write entirely if none of the ship HP values changed.
+pub fn persist_ship_combat_hp_batch_in_db<'a, I>(
+    db: &Arc<WorldRepository>,
+    updates: I,
+) where
+    I: IntoIterator<Item = (i64, &'a CombatState)>,
+{
+    let to_update: Vec<(i64, PersistedCombatHp)> = db.with_snapshot(|snap| {
+        updates
+            .into_iter()
+            .filter_map(|(bid, cs)| {
+                let new_hp = PersistedCombatHp {
+                    shield_hp: cs.shield_hp.max(0.0),
+                    armor_hp: cs.armor_hp.max(0.0),
+                    hull_hp: cs.structure_hp.max(0.0),
+                };
+                if snap.sp6_lifecycle.ship_combat_hp.get(&bid) != Some(&new_hp) {
+                    Some((bid, new_hp))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    });
+
+    if to_update.is_empty() {
+        return;
+    }
+
     let _ = db.try_with_mut_snapshot(|snap| -> Result<(), String> {
-        snap.sp6_lifecycle.ship_combat_hp.insert(
-            ball_id,
-            PersistedCombatHp {
-                shield_hp: cs.shield_hp.max(0.0),
-                armor_hp: cs.armor_hp.max(0.0),
-                hull_hp: cs.structure_hp.max(0.0),
-            },
-        );
+        for (bid, hp) in to_update {
+            snap.sp6_lifecycle.ship_combat_hp.insert(bid, hp);
+        }
         Ok(())
     });
 }

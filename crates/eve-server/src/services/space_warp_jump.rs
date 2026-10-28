@@ -1025,7 +1025,11 @@ async fn handle_dock(
         }
     }
 
-    let is_structure = dock_id >= 1_000_000_000_000;
+    let is_structure = dock_id >= 1_000_000_000_000
+        || ctx.db.with_snapshot(|snap| snap.structures.contains_key(&dock_id));
+    if let Err(e) = crate::services::fw_gameplay::check_docking_allowed(ctx, char_id, sys_id, dock_id, is_structure) {
+        return Err(e);
+    }
     let target_pos = if is_structure {
         let st_opt = ctx
             .db

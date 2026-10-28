@@ -42,8 +42,13 @@ pub const ACTIVITY_LIFETIME_SECS: u64 = 3 * 86_400;
 const MAX_LEVEL: u32 = 100;
 /// DERIVED (synthetic): levels per development / anarchy stage.
 const STAGE_WIDTH: u32 = 20;
-/// DERIVED (synthetic): infomorph cargo capacity.
-const INFOMORPH_CARGO_CAPACITY: u32 = 2_000;
+/// SDE (V24 type_id = 85230 Mercenary Den capacity): infomorph cargo capacity at stage 5.
+pub const INFOMORPH_CARGO_CAPACITY: u32 = 3_000;
+
+/// DERIVED (synthetic): infomorph cargo capacity scaled by development stage (`1..=5`, `1000 + 400 * stage`) up to the 3,000 SDE capacity cap.
+pub fn infomorph_cargo_capacity(dev_stage: u32) -> u32 {
+    (1_000 + 400 * dev_stage.clamp(1, 5)).min(INFOMORPH_CARGO_CAPACITY)
+}
 
 const EVOLUTION_NOTICE: &str = "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice";
 
@@ -72,6 +77,14 @@ fn owned_den(snap: &WorldStateSnapshot, cid: i64, den_id: i64) -> Result<Persist
     if den.owner_char_id != cid {
         return Err((STATUS_FORBIDDEN, format!("Mercenary den {den_id} is not owned by character {cid}")));
     }
+    if let Some(&(_, _, shield_pct)) = snap.sov_runtime.mercenary_den_reinforcement.get(&den_id) {
+        if !den.enabled || shield_pct < 50 {
+            return Err((
+                STATUS_CONFLICT,
+                format!("Mercenary den {den_id} is reinforced and inaccessible until shields are repaired to >=50%"),
+            ));
+        }
+    }
     Ok(den.clone())
 }
 
@@ -93,9 +106,11 @@ pub fn simulate_den(den: &mut PersistedMercenaryDen, now: u64) -> bool {
     let units = units.min(u64::from(MAX_LEVEL)) as u32;
     den.development_level = (den.development_level + units).min(MAX_LEVEL);
     den.anarchy_level = (den.anarchy_level + units).min(MAX_LEVEL);
-    let per_unit = 3 * stage_for_level(den.development_level);
-    den.infomorphs = (den.infomorphs + per_unit * units).min(INFOMORPH_CARGO_CAPACITY);
-    before != (stage_for_level(den.development_level), stage_for_level(den.anarchy_level))
+    let dev_stage = stage_for_level(den.development_level);
+    let per_unit = 3 * dev_stage;
+    let cap = infomorph_cargo_capacity(dev_stage);
+    den.infomorphs = (den.infomorphs + per_unit * units).min(cap);
+    before != (dev_stage, stage_for_level(den.anarchy_level))
 }
 
 fn encode_level_sim(level: u32, simulated_at: u64) -> Vec<u8> {
@@ -229,6 +244,56 @@ fn encode_activity_entry(a: &PersistedMercenaryActivity) -> Vec<u8> {
     b
 }
 
+pub(crate) fn complete_mercenary_activity_in_snap(
+    snap: &mut WorldStateSnapshot,
+    pending: &PendingNotices,
+    a: &PersistedMercenaryActivity,
+    den_id: i64,
+    solar_system_id: u32,
+) {
+    let mut owner_cid = a.started_by;
+    if let Some(den_mut) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
+        if owner_cid <= 0 {
+            owner_cid = den_mut.owner_char_id;
+        }
+        den_mut.development_level = (den_mut.development_level as i32 + a.development_impact)
+            .clamp(0, MAX_LEVEL as i32) as u32;
+        den_mut.anarchy_level =
+            (den_mut.anarchy_level as i32 + a.anarchy_impact).clamp(0, MAX_LEVEL as i32) as u32;
+        let cap = infomorph_cargo_capacity(stage_for_level(den_mut.development_level));
+        den_mut.infomorphs = den_mut.infomorphs.saturating_add(a.infomorph_bonus).min(cap);
+        push_evolution_notice(pending, den_mut);
+    }
+    // DERIVED (synthetic): ISK completion reward per Mercenary Tactical Operation (50,000 ISK per infomorph bonus unit).
+    let isk_reward = i64::from(a.infomorph_bonus.max(10)) * 50_000;
+    if owner_cid > 0 {
+        if let Some(ch) = snap.characters.get_mut(&owner_cid) {
+            ch.balance = eve_db::IskCents(
+                ch.balance.0.saturating_add(eve_db::IskCents::from_isk(isk_reward).0),
+            );
+        }
+    }
+    let hex_key = hex(&a.uuid);
+    snap.sov_runtime.mto_site_balls.retain(|&bid, v| {
+        if v == &hex_key {
+            snap.items.remove(&bid);
+            snap.item_positions.remove(&bid);
+            false
+        } else {
+            true
+        }
+    });
+    push_activity_completed_notice(
+        pending,
+        solar_system_id,
+        den_id,
+        &a.uuid,
+        a.development_impact,
+        a.anarchy_impact,
+        a.infomorph_bonus,
+    );
+}
+
 /// Expires stale operations and, when the generation timer elapsed, fills the den up to its
 /// capacity — emitting `RemovedNotice` / `AddedNotice` for each change.
 pub(crate) fn refresh_activities(snap: &mut WorldStateSnapshot, pending: &PendingNotices, den_id: i64, now: u64) {
@@ -258,21 +323,7 @@ pub(crate) fn refresh_activities(snap: &mut WorldStateSnapshot, pending: &Pendin
         .collect();
     for key in completed {
         if let Some(a) = snap.sov_runtime.mercenary_activities.remove(&key) {
-            if let Some(den_mut) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
-                den_mut.development_level = (den_mut.development_level as i32 + a.development_impact).clamp(0, MAX_LEVEL as i32) as u32;
-                den_mut.anarchy_level = (den_mut.anarchy_level as i32 + a.anarchy_impact).clamp(0, MAX_LEVEL as i32) as u32;
-                den_mut.infomorphs = den_mut.infomorphs.saturating_add(a.infomorph_bonus);
-                push_evolution_notice(pending, den_mut);
-            }
-            push_activity_completed_notice(
-                pending,
-                den.solar_system_id,
-                den_id,
-                &a.uuid,
-                a.development_impact,
-                a.anarchy_impact,
-                a.infomorph_bonus,
-            );
+            complete_mercenary_activity_in_snap(snap, pending, &a, den_id, den.solar_system_id);
         }
     }
     if !den.enabled || now < den.next_activity_generation_unix {
@@ -422,8 +473,9 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 encode_bytes_field(1, &encode_evolution_definition(), &mut evo);
                 encode_bytes_field(2, &encode_evolution_simulation(&den), &mut evo);
                 let (mut info_def, mut contents, mut infomorphs) = (Vec::new(), Vec::new(), Vec::new());
+                let cap = infomorph_cargo_capacity(stage_for_level(den.development_level));
                 encode_varint_field(2, EVOLUTION_UNIT_SECS, &mut info_def);
-                encode_varint_field(4, u64::from(INFOMORPH_CARGO_CAPACITY), &mut info_def);
+                encode_varint_field(4, u64::from(cap), &mut info_def);
                 encode_varint_field(1, u64::from(den.infomorphs), &mut contents);
                 ts_field(2, den.simulated_at_unix, &mut contents);
                 encode_bytes_field(1, &info_def, &mut infomorphs);
@@ -536,10 +588,36 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                     if a.expiry_unix <= now {
                         return Err((STATUS_CONFLICT, format!("Activity {key} has expired")));
                     }
+                    snap.next_entity_id += 1;
+                    let site_ball_id = snap.next_entity_id;
+                    let sys_id_u32 = a.solar_system_id;
+                    snap.items.insert(
+                        site_ball_id,
+                        eve_db::InventoryItemRecord {
+                            item_id: site_ball_id,
+                            type_id: 24_690,
+                            owner_id: 500_010,
+                            location_id: i64::from(sys_id_u32),
+                            quantity: 1,
+                            singleton: true,
+                            ..Default::default()
+                        },
+                    );
+                    // DERIVED (synthetic): derive MTO tactical site position relative to the host den/skyhook anchor in space.
+                    let den_pos = snap
+                        .item_positions
+                        .get(&a.den_id)
+                        .copied()
+                        .or_else(|| snap.structures.get(&a.den_id).map(|s| s.position))
+                        .unwrap_or([250_000.0, 0.0, 0.0]);
+                    let mto_pos = [den_pos[0] + 15_000.0, den_pos[1] + 5_000.0, den_pos[2]];
+                    snap.item_positions.insert(site_ball_id, mto_pos);
+                    snap.sov_runtime.mto_site_balls.insert(site_ball_id, key.clone());
                     let entry = snap.sov_runtime.mercenary_activities.get_mut(&key).ok_or((STATUS_NOT_FOUND, key.clone()))?;
                     let previous_expiry = entry.expiry_unix;
                     entry.started = true;
                     entry.started_by = cid;
+                    entry.dungeon_id = (site_ball_id as u64 & 0x7FFF_FFFF) as u32;
                     entry.expiry_unix = now + 1_800;
                     push_activity_expiry_changed_notice(&pending, entry.solar_system_id, entry, previous_expiry);
                     let attrs = encode_activity_attributes(entry);

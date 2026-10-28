@@ -36,10 +36,17 @@ fn encode_skyhook(snap: &WorldStateSnapshot, id: i64, now: u64) -> Vec<u8> {
     let mut b = Vec::new();
     id_field(1, id as u64, &mut b);
     if let Some((reagent_type, stock)) = snap.sov_runtime.skyhook_reagents.get(&id).copied() {
+        let (sec_stock, insec_stock, sim_ts) = snap
+            .sov_runtime
+            .skyhook_reagent_bays
+            .get(&id)
+            .copied()
+            .map(|(_, sec, insec, ts)| (sec, insec, if ts > 0 { ts } else { now }))
+            .unwrap_or((stock, stock / 2, now));
         let mut sim = Vec::new();
-        encode_varint_field(1, stock, &mut sim);
-        encode_varint_field(2, stock / 2, &mut sim);
-        ts_field(3, now, &mut sim);
+        encode_varint_field(1, sec_stock, &mut sim);
+        encode_varint_field(2, insec_stock, &mut sim);
+        ts_field(3, sim_ts, &mut sim);
         let mut r = Vec::new();
         id_field(1, u64::from(reagent_type), &mut r);
         encode_bytes_field(2, &sim, &mut r);
@@ -66,7 +73,13 @@ fn encode_skyhook(snap: &WorldStateSnapshot, id: i64, now: u64) -> Vec<u8> {
         None => encode_varint_field(1, 0, &mut theft),
     }
     encode_bytes_field(5, &theft, &mut b);
-    id_field(6, 40_009_077, &mut b);
+    let planet_id = snap
+        .sov_runtime
+        .skyhook_planets
+        .get(&id)
+        .copied()
+        .unwrap_or(40_009_077);
+    id_field(6, planet_id as u64, &mut b);
     let mut wf = Vec::new();
     encode_varint_field(2, 1, &mut wf); // Workforce.none: skyhook workforce is not simulated
     encode_bytes_field(7, &wf, &mut b);
@@ -92,11 +105,13 @@ pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldReposi
             "eve_public.sovereignty.skyhook.api.GetRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
                 let id = required_id(dyn_msg, 1, "Skyhook")?;
-                let body = db.with_snapshot(|snap| {
+                let now = ctx.now_unix();
+                let body = db.try_with_mut_snapshot(|snap| {
                     if !is_skyhook(snap, id) {
                         return Err::<Vec<u8>, RpcError>((STATUS_NOT_FOUND, format!("Skyhook {id} not found")));
                     }
-                    Ok(encode_skyhook(snap, id, ctx.now_unix()))
+                    let _ = super::sov_gameplay::advance_skyhook_reagents_in_snap(snap, id, now);
+                    Ok(encode_skyhook(snap, id, now))
                 })?;
                 Ok(any("eve_public.sovereignty.skyhook.api.GetResponse", body))
             }),

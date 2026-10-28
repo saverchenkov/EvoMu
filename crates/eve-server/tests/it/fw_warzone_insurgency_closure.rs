@@ -1,0 +1,380 @@
+//! Integration tests for Faction Warfare Frontlines, Complex Hull Gating, Supply Sites, Advantage, Battlefields & LP (`SO-5`, `Q-8`).
+
+#![forbid(unsafe_code)]
+
+use crate::sovereignty_equinox_gameplay_closure::{
+    drain_notif_events, fit_siege_artillery, make_ball, open_sqlite_ctx, register_online_pilot,
+    rpc_call, set_pilot_location, step_weapon_ticks, temp_sqlite_path,
+};
+use eve_db::snapshot_ext::FwSystemOccupationRecord;
+use eve_db::{InventoryFlag, InventoryItemRecord};
+use eve_proto::PyRep;
+use eve_server::router::ServerContext;
+use eve_server::services::fw_gameplay::{BATTLEFIELD_RESPAWN_COOLDOWN_SECS, BATTLEFIELD_ZONE_CENTERS};
+use eve_server::services::fw_services::{
+    STATUS_COMMAND, STATUS_FRONTLINE, STATUS_REARGUARD,
+};
+use glam::DVec3;
+
+/// Finds a connected 4-system low-sec chain `enemy -- front -- cmd -- rear` in SDE and configures
+/// Caldari (`500001`) / Gallente (`500004`) occupation so `front` is Frontline, `cmd` is Command Operations,
+/// and `rear` is Rearguard.
+pub(crate) fn setup_warzone_chain(ctx: &ServerContext) -> (u32, u32, u32, u32) {
+    let mut lowsec: Vec<u32> = ctx
+        .sde
+        .solar_systems
+        .values()
+        .filter(|s| s.security_status > 0.0 && s.security_status < 0.45 && s.solar_system_id < 31_000_000)
+        .map(|s| s.solar_system_id)
+        .collect();
+    lowsec.sort_unstable();
+    let neighbors = |sys: u32| -> Vec<u32> {
+        let mut v: Vec<u32> = ctx
+            .sde
+            .jumps
+            .values()
+            .filter(|j| j.from_solar_system_id == sys)
+            .map(|j| j.to_solar_system_id)
+            .filter(|t| lowsec.binary_search(t).is_ok())
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let mut chosen = None;
+    'outer: for &front in &lowsec {
+        let fnbs = neighbors(front);
+        for &enemy in &fnbs {
+            for &cmd in &fnbs {
+                if cmd == enemy || neighbors(cmd).contains(&enemy) {
+                    continue;
+                }
+                for &rear in &neighbors(cmd) {
+                    if rear != front && rear != enemy && !neighbors(rear).contains(&enemy) && !neighbors(rear).contains(&front) {
+                        chosen = Some((enemy, front, cmd, rear));
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    }
+    let (enemy, front, cmd, rear) = chosen.expect("connected 4-system low-sec chain in SDE");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fw_system_occupations.clear();
+        let mut caldari_set = vec![front, cmd, rear];
+        for base in [cmd, rear] {
+            for nb in neighbors(base) {
+                if nb != enemy && !caldari_set.contains(&nb) {
+                    caldari_set.push(nb);
+                }
+            }
+        }
+        snap.fw_system_occupations.insert(
+            enemy,
+            FwSystemOccupationRecord {
+                solar_system_id: enemy,
+                owner_faction_id: 500_004,
+                occupier_faction_id: 500_004,
+                victory_points: 0,
+                victory_points_threshold: 3_000,
+            },
+        );
+        for sys in caldari_set {
+            snap.fw_system_occupations.insert(
+                sys,
+                FwSystemOccupationRecord {
+                    solar_system_id: sys,
+                    owner_faction_id: 500_001,
+                    occupier_faction_id: 500_001,
+                    victory_points: 0,
+                    victory_points_threshold: 3_000,
+                },
+            );
+        }
+    });
+    (enemy, front, cmd, rear)
+}
+
+#[tokio::test]
+async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and_lp() {
+    // parity: feat:fw.frontline-system-designation
+    // parity: feat:fw.complex-ship-size-gating
+    // parity: feat:fw.plexes
+    // parity: feat:fw.supply-caches-depots
+    // parity: feat:fw.advantage-mechanics
+    // parity: feat:fw.fw-site-dungeons
+    // parity: feat:fw.battlefield-capture-rules
+    // parity: feat:fw.battlefield-gameplay
+    // parity: feat:fw.fw-lp
+    eve_testkit::attest(&[
+        "feat:fw.frontline-system-designation",
+        "feat:fw.complex-ship-size-gating",
+        "feat:fw.plexes",
+        "feat:fw.supply-caches-depots",
+        "feat:fw.advantage-mechanics",
+        "feat:fw.fw-site-dungeons",
+        "feat:fw.battlefield-capture-rules",
+        "feat:fw.battlefield-gameplay",
+        "feat:fw.fw-lp",
+    ]);
+
+    let db_path = temp_sqlite_path("fw_warzone_f1");
+    let ctx = open_sqlite_ctx(&db_path, true);
+    crate::common::seed_test_lp_store_offers(&ctx);
+    let (_enemy_sys, front_sys, cmd_sys, rear_sys) = setup_warzone_chain(&ctx);
+
+    let gal_cid = 90_000_011i64;
+    let gal_ship = 100_000_011i64;
+    let cal_cid = 90_000_012i64;
+    let cal_ship = 100_000_012i64;
+
+    let mut s_gal = register_online_pilot(
+        &ctx, 81_001, "demo", "demo-secret", gal_cid, 98_000_011, None,
+        front_sys, gal_ship, 593, DVec3::new(100_000.0, 0.0, 0.0), 0, // Tristan (T1 Frigate)
+    ).await;
+    let mut s_cal = register_online_pilot(
+        &ctx, 81_002, "demo2", "demo2-secret", cal_cid, 98_000_012, None,
+        front_sys, cal_ship, 587, DVec3::new(100_000.0, 5_000.0, 0.0), 0, // Rifter
+    ).await;
+
+    rpc_call(&ctx, &mut s_gal, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(500_004)])
+        .await.expect("enlist Gallente");
+    rpc_call(&ctx, &mut s_cal, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(500_001)])
+        .await.expect("enlist Caldari");
+
+    // 1. Verify Frontline (1), Command Operations (2), Rearguard (3) stargate adjacency & site seeding.
+    let occ_adj = |rep: &PyRep| -> Option<i64> {
+        let PyRep::Tuple(t) = rep else { return None };
+        t.get(1)?.dict_get("adjacencyState")?.as_i64()
+    };
+    set_pilot_location(&ctx, &mut s_gal, front_sys, None);
+    let f_state = rpc_call(&ctx, &mut s_gal, "fwWarzoneSolarsystem", "GetLocalOccupationState", &[]).await.unwrap();
+    set_pilot_location(&ctx, &mut s_gal, cmd_sys, None);
+    let c_state = rpc_call(&ctx, &mut s_gal, "fwWarzoneSolarsystem", "GetLocalOccupationState", &[]).await.unwrap();
+    set_pilot_location(&ctx, &mut s_gal, rear_sys, None);
+    let r_state = rpc_call(&ctx, &mut s_gal, "fwWarzoneSolarsystem", "GetLocalOccupationState", &[]).await.unwrap();
+    assert_eq!(occ_adj(&f_state), Some(STATUS_FRONTLINE));
+    assert_eq!(occ_adj(&c_state), Some(STATUS_COMMAND));
+    assert_eq!(occ_adj(&r_state), Some(STATUS_REARGUARD));
+    let _ = rpc_call(&ctx, &mut s_gal, "fwWarzoneSolarsystem", "GetAllWarzonesOccupationStates", &[]).await.unwrap();
+
+    // Seed warzone sites across Rearguard, Command, and Frontline: Large/Open + Battlefields ONLY in Frontline!
+    let tiers_in = |ctx: &ServerContext, sys: u32| -> Vec<String> {
+        ctx.db.with_snapshot(|s| {
+            s.fw_runtime.fw_complexes.values()
+                .filter(|(csys, _, _, _, done)| *csys == sys && !*done)
+                .map(|(_, t, _, _, _)| t.clone())
+                .collect()
+        })
+    };
+    set_pilot_location(&ctx, &mut s_gal, rear_sys, None);
+    let r_sites = rpc_call(&ctx, &mut s_gal, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await.unwrap();
+    let r_tiers = tiers_in(&ctx, rear_sys);
+    assert!(!r_tiers.is_empty() && !r_tiers.iter().any(|t| t == "Medium" || t == "Large" || t == "Open"));
+
+    set_pilot_location(&ctx, &mut s_gal, cmd_sys, None);
+    let c_sites = rpc_call(&ctx, &mut s_gal, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await.unwrap();
+    let c_bfs = rpc_call(&ctx, &mut s_gal, "dungeonInstanceCacheMgr", "GetFactionWarfareBattlefieldInstances", &[]).await.unwrap();
+    let c_tiers = tiers_in(&ctx, cmd_sys);
+    assert!(c_tiers.iter().any(|t| t == "Medium") && !c_tiers.iter().any(|t| t == "Large" || t == "Open"));
+    assert_eq!(c_bfs, PyRep::List(Vec::new()));
+
+    set_pilot_location(&ctx, &mut s_gal, front_sys, None);
+    let f_sites = rpc_call(&ctx, &mut s_gal, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await.unwrap();
+    let f_bfs = rpc_call(&ctx, &mut s_gal, "dungeonInstanceCacheMgr", "GetFactionWarfareBattlefieldInstances", &[]).await.unwrap();
+    let f_tiers = tiers_in(&ctx, front_sys);
+    assert!(f_tiers.iter().any(|t| t == "Large") && f_tiers.iter().any(|t| t == "Open"));
+    let site_count = |rep: &PyRep| match rep {
+        PyRep::Dict(m) => m.first().and_then(|(_, v)| match v { PyRep::Dict(inner) => Some(inner.len()), _ => None }).unwrap_or(m.len()),
+        _ => 0,
+    };
+    assert!(site_count(&r_sites) < site_count(&c_sites) && site_count(&c_sites) < site_count(&f_sites));
+    assert!(matches!(f_bfs, PyRep::List(ref v) if !v.is_empty()));
+
+    let gates: Vec<(i64, String, DVec3)> = ctx.db.with_snapshot(|s| {
+        let mut v: Vec<_> = s.fw_runtime.fw_complexes.iter()
+            .filter(|(_, (sys, _, _, _, done))| *sys == front_sys && !*done)
+            .map(|(&gid, (_, tier, _, _, _))| (gid, tier.clone(), DVec3::from_array(s.item_positions[&gid])))
+            .collect();
+        v.sort_by_key(|x| x.0);
+        v
+    });
+    let gate_for = |tier: &str| -> (i64, DVec3) {
+        let g = gates.iter().find(|(_, t, _)| t == tier).unwrap();
+        (g.0, g.2)
+    };
+    let (novice_gate, novice_pos) = gate_for("Novice");
+    let (small_gate, small_pos) = gate_for("Small");
+    let (medium_gate, medium_pos) = gate_for("Medium");
+    let (large_gate, large_pos) = gate_for("Large");
+    let (open_gate, open_pos) = gate_for("Open");
+
+    // 2. Live `keeper.ActivateAccelerationGate`: docked, >2500m range, Pirate/T2 frigate on Novice, and hull size limits!
+    set_pilot_location(&ctx, &mut s_gal, front_sys, Some(60_003_760));
+    assert_eq!(
+        rpc_call(&ctx, &mut s_gal, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(novice_gate)]).await.unwrap_err().code,
+        "NotInSpace"
+    );
+    set_pilot_location(&ctx, &mut s_gal, front_sys, None);
+
+    let set_hull = |ctx: &ServerContext, ship_id: i64, tid: u32, pos: DVec3| {
+        let sys_h = ctx.systems.get_or_spawn(front_sys);
+        ctx.db.with_mut_snapshot(|s| {
+            if let Some(it) = s.items.get_mut(&ship_id) {
+                it.type_id = tid;
+            }
+        });
+        async move {
+            let _ = sys_h.spawn_ball(make_ball(ship_id, tid, pos)).await;
+        }
+    };
+
+    set_hull(&ctx, gal_ship, 593, novice_pos + DVec3::new(6_000.0, 0.0, 0.0)).await;
+    assert_eq!(
+        rpc_call(&ctx, &mut s_gal, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(novice_gate)]).await.unwrap_err().code,
+        "OutsideGateActivationRange"
+    );
+    // Pirate Frigate (`17932` Dramiel) & T2 Assault Frigate (`11381` Hawk) rejected from Novice (`ShipTypeNotAllowedInComplex`).
+    for bad_frig in [17_932u32, 11_381] {
+        set_hull(&ctx, gal_ship, bad_frig, novice_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
+        assert_eq!(
+            rpc_call(&ctx, &mut s_gal, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(novice_gate)]).await.unwrap_err().code,
+            "ShipTypeNotAllowedInComplex"
+        );
+    }
+    // Destroyer (`16242` Thrasher) -> Novice, Cruiser (`621` Caracal) -> Small, BS (`638` Raven) -> Medium, Dread (`19726` Phoenix) -> Large (`ShipTooLargeForGate`).
+    for (hull_tid, gid, gpos) in [
+        (16_242u32, novice_gate, novice_pos),
+        (621, small_gate, small_pos),
+        (638, medium_gate, medium_pos),
+        (19_726, large_gate, large_pos),
+    ] {
+        set_hull(&ctx, gal_ship, hull_tid, gpos + DVec3::new(1_000.0, 0.0, 0.0)).await;
+        assert_eq!(
+            rpc_call(&ctx, &mut s_gal, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(gid)]).await.unwrap_err().code,
+            "ShipTooLargeForGate"
+        );
+    }
+    // Dreadnought (`19726`) CAN enter `Open` complex; Destroyer (`16242`) CAN enter `Small` complex!
+    set_hull(&ctx, gal_ship, 19_726, open_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
+    assert!(rpc_call(&ctx, &mut s_gal, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(open_gate)]).await.is_ok());
+    // Clear occupancy on `open_gate` before testing Novice capture.
+    ctx.db.with_mut_snapshot(|s| { s.fw_runtime.complex_occupants.clear(); });
+
+    // 3. Live `structureControl.AttackStructure` on FW Supply Cache/Depot/ListeningPost/Propaganda:
+    //    raises attacker Advantage (`OnSolarsystemAdvantageStateUpdated_Local`), drops Cargo Container (`23`) loot, and speeds up complex capture!
+    fit_siege_artillery(&ctx, gal_cid, gal_ship, 997_000);
+    let supply_sites: Vec<(i64, DVec3)> = ctx.db.with_snapshot(|s| {
+        s.fw_runtime.supply_sites.iter()
+            .filter(|(_, (sys, _, _))| *sys == front_sys)
+            .map(|(&sid, _)| (sid, DVec3::from_array(s.structures[&sid].position)))
+            .collect()
+    });
+    assert!(supply_sites.len() >= 2);
+    let _ = drain_notif_events(&ctx, gal_cid);
+    for &(sid, spos) in supply_sites.iter().take(2) {
+        set_hull(&ctx, gal_ship, 19_722, spos + DVec3::new(2_000.0, 0.0, 0.0)).await;
+        for _ in 0..5 {
+            // rpc-lint: allow canonical action_plan S-7 / feat:structures structureControl.AttackStructure live combat RPC
+            let r = rpc_call(&ctx, &mut s_gal, "structureControl", "AttackStructure", &[PyRep::Integer(sid)]).await.unwrap();
+            step_weapon_ticks(&ctx, front_sys).await;
+            ctx.advance_secs(25);
+            if r.dict_get("state").and_then(|v| v.as_str()) == Some("Destroyed") {
+                break;
+            }
+        }
+    }
+    assert!(drain_notif_events(&ctx, gal_cid).iter().any(|e| e == "OnSolarsystemAdvantageStateUpdated_Local"));
+    let balls_after_supply = ctx.systems.get_or_spawn(front_sys).list_balls().await.unwrap();
+    assert!(balls_after_supply.iter().any(|b| b.type_id == 23), "destroyed FW Supply site drops loot container");
+
+    // 4. Live Novice complex capture via `keeper.ActivateAccelerationGate` + `tick_background_cluster`:
+    //    opposing militia ship in pocket pauses timer; removing defender completes capture in <4 ticks thanks to Advantage,
+    //    crediting Federation Navy (`1000181`) LP redeemable via `LPStoreMgr.TakeOfferForCharacter`!
+    set_hull(&ctx, gal_ship, 593, novice_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
+    set_hull(&ctx, cal_ship, 587, novice_pos + DVec3::new(1_200.0, 0.0, 0.0)).await;
+    rpc_call(&ctx, &mut s_gal, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(novice_gate)]).await.unwrap();
+    rpc_call(&ctx, &mut s_cal, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(novice_gate)]).await.unwrap();
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    let prog_contested = ctx.db.with_snapshot(|s| s.fw_runtime.fw_complexes[&novice_gate].3);
+    assert_eq!(prog_contested, 0.0, "opposing militia ship inside pocket pauses FW complex capture timer");
+
+    // Warp defender out of pocket and clear guard -> Advantage (>0%) lets Gallente advance >25% on first 150s tick and finish in 4 ticks (600s total)!
+    set_hull(&ctx, cal_ship, 587, DVec3::new(0.0, 0.0, 0.0)).await;
+    let guard_id = novice_gate + 500_000_000;
+    let _ = ctx.systems.get_or_spawn(front_sys).remove_ball(guard_id).await;
+    ctx.db.with_mut_snapshot(|s| {
+        s.fw_runtime.complex_guards_cleared.insert(novice_gate, true);
+    });
+    ctx.advance_secs(150);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    let prog_adv = ctx.db.with_snapshot(|s| s.fw_runtime.fw_complexes[&novice_gate].3);
+    assert!(prog_adv > 25.0, "Gallente Advantage speeds up complex capture rate above 25%/tick (got {prog_adv})");
+    for _ in 0..3 {
+        ctx.advance_secs(150);
+        eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    }
+    let gal_lp = ctx.db.with_snapshot(|s| s.characters[&gal_cid].loyalty_points.get(&1_000_181).copied().unwrap_or(0));
+    assert!(gal_lp >= 10_000, "Frontline Novice capture awards Federation Navy (1000181) LP (got {gal_lp})");
+    let lp_bals = rpc_call(&ctx, &mut s_gal, "LPSvc", "GetAllMyCharacterWalletLPBalances", &[]).await.unwrap();
+    assert!(format!("{lp_bals:?}").contains("1000181"));
+
+    // Redeem militia LP at an NPC station via `LPStoreMgr.TakeOfferForCharacter`.
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&gal_cid).unwrap().loyalty_points.insert(1_000_125, 5_000);
+    });
+    set_pilot_location(&ctx, &mut s_gal, 30_000_142, Some(60_003_760));
+    rpc_call(&ctx, &mut s_gal, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(1_000_125), PyRep::Integer(5001), PyRep::Integer(1)])
+        .await.expect("redeem LP offer");
+    set_pilot_location(&ctx, &mut s_gal, front_sys, None);
+
+    // 5. Live 3-zone Frontline Battlefield capture:
+    //    place 31 Gallente militia ships across the 3 `BATTLEFIELD_ZONE_CENTERS` -> verify `> 30` pilot LP scaling
+    //    (`150,000 * 30 / 31 = 145,161 LP`), 4-hour `battlefield_respawn_unix` cooldown, and SQLite durability!
+    for idx in 0..30i64 {
+        let extra_cid = 90_100_000 + idx;
+        let extra_ship = 100_100_000 + idx;
+        let zc = DVec3::from_array(BATTLEFIELD_ZONE_CENTERS[(idx as usize) % 3]);
+        ctx.db.with_mut_snapshot(|s| {
+            let mut wch = s.characters[&gal_cid].clone();
+            wch.character_id = extra_cid;
+            wch.name = format!("BF Wingman {idx}");
+            wch.solar_system_id = front_sys;
+            wch.active_ship_id = extra_ship;
+            wch.war_faction_id = Some(500_004);
+            s.characters.insert(extra_cid, wch);
+            s.items.insert(
+                extra_ship,
+                InventoryItemRecord {
+                    item_id: extra_ship,
+                    type_id: 621,
+                    owner_id: extra_cid,
+                    location_id: front_sys as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        });
+        let _ = ctx.systems.get_or_spawn(front_sys).spawn_ball(make_ball(extra_ship, 621, zc + DVec3::new(500.0, 0.0, 0.0))).await;
+    }
+    set_hull(&ctx, gal_ship, 621, DVec3::from_array(BATTLEFIELD_ZONE_CENTERS[0])).await;
+    let lp_before_bf = ctx.db.with_snapshot(|s| s.characters[&gal_cid].loyalty_points[&1_000_181]);
+    for _ in 0..2 {
+        eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    }
+    let lp_after_bf = ctx.db.with_snapshot(|s| s.characters[&gal_cid].loyalty_points[&1_000_181]);
+    let bf_award = lp_after_bf - lp_before_bf;
+    assert_eq!(bf_award, (150_000 * 30) / 31, "31 pilots in 3-zone Battlefield scale 150k LP to 145,161 LP");
+
+    let bf_cd = ctx.db.with_snapshot(|s| s.fw_runtime.battlefield_respawn_unix[&front_sys]);
+    assert_eq!(bf_cd - ctx.now_unix(), BATTLEFIELD_RESPAWN_COOLDOWN_SECS);
+    let bfs_on_cd = rpc_call(&ctx, &mut s_gal, "dungeonInstanceCacheMgr", "GetFactionWarfareBattlefieldInstances", &[]).await.unwrap();
+    assert_eq!(bfs_on_cd, PyRep::List(Vec::new()), "4h cooldown blocks immediate Battlefield respawn");
+
+    drop(ctx);
+    let ctx_restarted = open_sqlite_ctx(&db_path, false);
+    assert_eq!(ctx_restarted.db.with_snapshot(|s| s.fw_runtime.battlefield_respawn_unix.get(&front_sys).copied()), Some(bf_cd));
+    let _ = std::fs::remove_file(&db_path);
+}

@@ -355,7 +355,7 @@ async fn test_cosmos_constellations_storyline_agents_and_sites() {
         .agents
         .values()
         .filter(|a| {
-            a.agent_type_id == 9
+            a.agent_type_id == 8
                 && a.solar_system_id
                     .and_then(|sid| ctx.sde.solar_systems.get(&sid))
                     .map(|s| s.constellation_id == 20_000_449)
@@ -384,10 +384,10 @@ async fn test_cosmos_constellations_storyline_agents_and_sites() {
         "Contested Caldari Mining Facilities COSMOS site must exist in SDE"
     );
 
-    // 3. COSMOS Storyline Agent Interaction (Level 1 COSMOS Agent 3019001)
-    let agent_id = 3_019_001;
-    let cosmos_agent = ctx.sde.agents.get(&agent_id).expect("COSMOS agent 3019001");
-    assert_eq!(cosmos_agent.agent_type_id, 9, "Agent type must be 9 (COSMOS)");
+    // 3. COSMOS Storyline Agent Interaction (COSMOS Agent 3018629 in Vaarma)
+    let agent_id = 3_018_629;
+    let cosmos_agent = ctx.sde.agents.get(&agent_id).expect("COSMOS agent 3018629");
+    assert_eq!(cosmos_agent.agent_type_id, 8, "Agent type must be 8 (COSMOS)");
     let agent_corp_id = cosmos_agent.corporation_id;
     let agent_sys_id = cosmos_agent.solar_system_id.expect("Agent system");
     let agent_station_id = cosmos_agent.station_id.expect("Agent station");

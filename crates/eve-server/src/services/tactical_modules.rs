@@ -82,6 +82,13 @@ pub fn check_ship_navigation_lock(ctx: &ServerContext, ship_id: i64, action: &st
             message: format!("Cannot {action} while Cynosural Field Generator is active"),
         });
     }
+    drop(st);
+    if crate::services::sov_gameplay::is_ship_skyhook_linked(ctx, ship_id, now_unix) {
+        return Err(BridgeRpcError {
+            code: "SkyhookLinkActive".into(),
+            message: format!("Cannot {action} while linked to an Orbital Skyhook Reagent Silo"),
+        });
+    }
     Ok(())
 }
 
@@ -926,8 +933,11 @@ pub async fn handle_entosis_link_activation(
     let db_key = db_key_of(ctx);
     let now_unix = ctx.now_unix_secs();
     if let Some(existing) = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner()).entosis_active_links.get(&(db_key, ship_id)) {
-        if existing.module_id != module_id && now_unix < existing.expires_unix {
-            return Err(BridgeRpcError { code: "MaxGroupActiveExceeded".into(), message: "Only 1 Entosis Link can be active per ship".into() });
+        if now_unix < existing.expires_unix {
+            if existing.module_id != module_id {
+                return Err(BridgeRpcError { code: "MaxGroupActiveExceeded".into(), message: "Only 1 Entosis Link can be active per ship".into() });
+            }
+            return Err(BridgeRpcError { code: "ModuleAlreadyActive".into(), message: "Entosis Link is already cycling".into() });
         }
     }
 

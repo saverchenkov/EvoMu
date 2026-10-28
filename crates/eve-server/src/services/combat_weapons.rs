@@ -1180,13 +1180,14 @@ pub async fn handle_weapons(
                     } else {
                         sys_sec
                     };
-                    let _ = cw.handle_combat_aggression(
+                    let _ = cw.handle_combat_aggression_with_pod(
                         char_id,
                         victim_char_id,
                         ship_id,
                         sys_id,
                         effective_sec,
                         is_legal,
+                        is_pod_target,
                         now_unix,
                     );
                     cw.get_or_create(char_id).pvp_timer_until_unix = now_unix.saturating_add(900);
@@ -1198,7 +1199,6 @@ pub async fn handle_weapons(
                             || is_anchored_container
                             || (is_secure_container && sys_sec >= 0.45))
                     {
-                        // Attacking a capsule in low-sec, an anchored container, or a secure container in high-sec triggers a Criminal flag
                         let st = cw.get_or_create(char_id);
                         st.criminal_flag_until_unix = now_unix.saturating_add(900);
                         st.suspect_flag_until_unix = 0;
@@ -1231,7 +1231,12 @@ pub async fn handle_weapons(
                     ctx.notify(NotificationTarget::Character(char_id), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(victim_char_id), PyRep::Integer(timeout_ft)]);
                     ctx.notify(NotificationTarget::Character(victim_char_id), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(char_id), PyRep::Integer(timeout_ft)]);
                 }
-                if !is_legal && sys_sec > 0.0 && !is_mobile_struct {
+                let corr_stage5 = ctx.db.with_snapshot(|snap| {
+                    snap.system_states
+                        .get(&sys_id)
+                        .is_some_and(|st| st.insurgency_corruption_stage >= 5)
+                });
+                if !is_legal && sys_sec > 0.0 && !is_mobile_struct && !(corr_stage5 && sys_sec < 0.45) {
                     let old_sec = ctx.db.with_snapshot(|snap| {
                         snap.characters
                             .get(&char_id)

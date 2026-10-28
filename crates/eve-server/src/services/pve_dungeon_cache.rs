@@ -961,6 +961,17 @@ pub async fn handle(
         return None;
     }
 
+    if method == "GetFactionWarfareBattlefieldInstances" {
+        if let Some(sys_id) = args
+            .first()
+            .and_then(|a| a.as_i64())
+            .and_then(|v| u32::try_from(v).ok())
+            .or(session.solar_system_id)
+        {
+            crate::services::fw_gameplay::ensure_warzone_sites_spawned(ctx, sys_id).await;
+        }
+        return None;
+    }
     if !matches!(
         method,
         "GetCombatAnomalyInstances"
@@ -1074,8 +1085,32 @@ pub async fn handle(
             Some(Ok(PyRep::Dict(entries)))
         }
         "GetFactionWarfareInstances" => {
+            crate::services::fw_gameplay::ensure_warzone_sites_spawned(ctx, sys_id).await;
             let by_dng: BTreeMap<u32, Vec<i64>> = ctx.db.with_snapshot(|snap| {
                 let mut out: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
+                for (&cid, (csys, tier, fac, _, completed)) in &snap.fw_runtime.fw_complexes {
+                    if *csys == sys_id && !*completed {
+                        let arch_id: u32 = match tier.as_str() {
+                            "Novice" => 32,
+                            "Small" => 33,
+                            "Medium" => 34,
+                            "Large" => 35,
+                            _ => 36,
+                        };
+                        let did = ctx
+                            .sde
+                            .dungeons
+                            .values()
+                            .filter(|d| {
+                                d.archetype_id == Some(arch_id)
+                                    && (d.faction_id == Some(*fac as u32) || d.faction_id.is_none())
+                            })
+                            .map(|d| d.dungeon_id)
+                            .min()
+                            .unwrap_or(arch_id);
+                        out.entry(did).or_default().push(cid);
+                    }
+                }
                 for bf in &snap.fw_runtime.battlefield_instances {
                     if bf.solar_system_id == sys_id && !bf.completed {
                         let bf_did = ctx

@@ -792,7 +792,7 @@ pub fn handle(
                     }));
                 };
 
-            let (broker_lvl, _acct_lvl, mt_lvl, vis_lvl, faction_standing, corp_standing, max_open_orders) =
+            let (broker_lvl, _acct_lvl, mt_lvl, vis_lvl, faction_standing, corp_standing, max_open_orders, m_tier) =
                 ctx.db.with_snapshot(|snap| {
                     let sk = snap.skills.get(&char_id);
                     let b_lvl = sk.and_then(|m| m.get(&3446)).map(|s| s.level).unwrap_or(0);
@@ -814,7 +814,9 @@ pub fn handle(
                     let c_st = ch
                         .and_then(|c| c.standings.get(&owner_corp_id).copied())
                         .unwrap_or(0.0);
-                    (b_lvl, a_lvl, m_lvl, v_lvl, f_st, c_st, order_limit)
+                    let m_sys = ctx.sde.stations.get(&station_id).map(|s| s.solar_system_id).unwrap_or(0);
+                    let tier = snap.fw_runtime.ihub_tiers.get(&m_sys).copied().unwrap_or(0);
+                    (b_lvl, a_lvl, m_lvl, v_lvl, f_st, c_st, order_limit, tier)
                 });
             if type_id != PLEX_TYPE_ID
                 && duration_days > 0
@@ -831,7 +833,8 @@ pub fn handle(
             let broker_rate = if let Some((_, st_rate)) = structure_broker_opt {
                 st_rate
             } else {
-                compute_broker_fee_rate(broker_lvl, faction_standing, corp_standing)
+                let tier_mult = 1.0 - (f64::from(m_tier) * 0.10).min(0.50);
+                compute_broker_fee_rate(broker_lvl, faction_standing, corp_standing) * tier_mult
             };
             let order_price = IskCents::from_f64_isk(price_isk);
             let Some(max_order_cost) = order_price.checked_mul_qty(quantity) else {

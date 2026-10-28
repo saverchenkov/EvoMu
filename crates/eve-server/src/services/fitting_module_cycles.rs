@@ -286,6 +286,23 @@ pub(crate) async fn handle_module_cycles(
                 }
             }
 
+            if matches!(mod_type.group_id, 41 | 1697) {
+                if let Some(tid) = target_id_opt.filter(|&t| t > 0) {
+                    let is_mercden = ctx.db.with_snapshot(|s| s.sov_runtime.mercenary_dens.contains_key(&tid));
+                    if is_mercden {
+                        let rep_hp = mod_type.default_attributes.get(&68).copied().unwrap_or(1_500.0);
+                        return Some(
+                            crate::services::sov_gameplay::apply_mercenary_den_shield_repair(ctx, sys_id, ship_id, tid, rep_hp)
+                                .await
+                                .map(|(pct, enabled)| PyRep::keyval([
+                                    ("moduleID", PyRep::Integer(module_id)), ("targetID", PyRep::Integer(tid)),
+                                    ("shieldPct", PyRep::Integer(pct as i64)), ("denEnabled", PyRep::Bool(enabled)),
+                                ])),
+                        );
+                    }
+                }
+            }
+
             // Scan Probe Launcher (`group_id == 481`, e.g., `Core Probe Launcher I` `17938`)
             if mod_type.group_id == 481 {
                 return Some(
@@ -315,7 +332,10 @@ pub(crate) async fn handle_module_cycles(
                     .get(&sys_id)
                     .map(|s| s.security_status)
                     .unwrap_or(1.0);
-                if sys_sec > 0.0 {
+                let corruption_stage5 = ctx.db.with_snapshot(|snap| {
+                    snap.system_states.get(&sys_id).map(|st| st.insurgency_corruption_stage >= 5).unwrap_or(false)
+                });
+                if sys_sec >= 0.45 || (sys_sec > 0.0 && !corruption_stage5) {
                     return Some(Err(BridgeRpcError {
                         code: "CannotLaunchInterdictionProbeInEmpire".into(),
                         message: format!(

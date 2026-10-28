@@ -902,13 +902,15 @@ pub fn sync_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &
     if st.state == STATE_DESTROYED {
         return None;
     }
+    if crate::services::fw_gameplay::is_fw_or_insurgency_structure_in_snap(snap, &ctx.sde, structure_id, st.type_id)
+        || st.type_id == crate::services::sov_gameplay::TYPE_MERCENARY_DEN
+        || st.type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK
+    {
+        return None;
+    }
     if !st.state.starts_with("Reinforced")
-        && !matches!(
-            st.state.as_str(),
-            STATE_ARMOR_REINFORCED | STATE_HULL_REINFORCED | STATE_ARMOR_VULNERABLE | STATE_HULL_VULNERABLE
-        )
-        && st.reinforced_until_unix <= now
-        && ext.unanchoring_until_unix.get(&structure_id).is_some_and(|&until| now >= until)
+        && !matches!(st.state.as_str(), STATE_ARMOR_REINFORCED | STATE_HULL_REINFORCED | STATE_ARMOR_VULNERABLE | STATE_HULL_VULNERABLE)
+        && st.reinforced_until_unix <= now && ext.unanchoring_until_unix.get(&structure_id).is_some_and(|&until| now >= until)
     {
         return Some(package_structure(ctx, snap, ext, structure_id, now));
     }
@@ -966,6 +968,10 @@ pub fn sync_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &
                 life.armor_reinforce_secs_applied = None;
                 life.unjittered_reinforce_exit_unix = None;
                 repair_now = true;
+                if st.type_id == crate::services::sov_gameplay::TYPE_TENEBREX_CYNO_JAMMER {
+                    snap.sov_runtime.tenebrex_spool_ready_unix.insert(structure_id, timer + crate::services::sov_gameplay::TENEBREX_SPOOL_UP_SECS);
+                    snap.sov_runtime.tenebrex_spool_notified.insert(structure_id, false);
+                }
             }
             // Leaving a reinforcement starts a repair timer at the exit time while preserving
             // `shield_fight_started_unix` for multi-timer exit date calculation (`Vulnerability.md`).
@@ -1032,6 +1038,11 @@ pub fn sync_all_structures(ctx: &ServerContext) -> Vec<(i64, DisposalOutcome)> {
         let mut gone = Vec::new();
         for id in ids {
             if let Some(st) = snap.structures.get(&id).cloned() {
+                if crate::services::fw_gameplay::is_fw_or_insurgency_structure_in_snap(snap, &ctx.sde, id, st.type_id)
+                    || st.type_id == crate::services::sov_gameplay::TYPE_MERCENARY_DEN || st.type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK
+                {
+                    continue;
+                }
                 if st.type_id == crate::services::sov_services::TYPE_SOVEREIGNTY_HUB
                     && st.state == STATE_ONLINING
                     && now >= st.reinforced_until_unix

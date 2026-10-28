@@ -49,6 +49,14 @@ pub fn dispatch_mining_gameplay_events(ctx: &ServerContext, char_id: i64, units:
             units,
             Some(ore_type_id as i64),
         );
+        let ore_vol = ctx
+            .sde
+            .types
+            .get(&ore_type_id)
+            .map(|t| t.volume.max(0.1))
+            .unwrap_or(1.0)
+            * (units as f64);
+        crate::services::sov_gameplay::record_sov_system_activity(ctx, sys_id, 0, ore_vol);
     }
 }
 

@@ -1175,6 +1175,8 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     });
     crate::services::space_destiny::expire_and_respawn_wormholes_in_cluster(ctx, now_unix).await;
     crate::services::space_destiny::expire_all_overdue_probes(ctx, now_unix).await;
+    crate::services::sov_gameplay::tick_sov_gameplay(ctx, now_unix).await;
+    crate::services::fw_gameplay::tick_fw_gameplay(ctx, now_unix).await;
 
     let mut temp_cw = crate::combat::crimewatch::CrimeWatchDirector::new();
     if let Ok(mut cw) = ctx.crimewatch.write() {

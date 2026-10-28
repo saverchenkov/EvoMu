@@ -426,7 +426,14 @@ pub async fn handle(
                             return Some(Err(BridgeRpcError { code: "EpicArcOnCooldown".into(), message: format!("Epic Arc {arc_id} (agent {agent_id}) is on 90-day repeat cooldown") }));
                         }
                     }
-                    if matches!(agent_info.agent_type_id, 5 | 8 | 9 | 12) {
+                    if agent_info.agent_type_id == 9 {
+                        let req_fac = ctx.sde.factions.values().find(|f| f.militia_corporation_id == Some(agent_info.corporation_id)).map(|f| f.faction_id as i64);
+                        let ch_fac = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).and_then(|c| c.war_faction_id));
+                        if req_fac.is_some() && ch_fac != req_fac {
+                            return Some(Err(BridgeRpcError { code: "NotEnlistedInMilitia".into(), message: format!("FW agent {agent_id} requires enlistment in militia faction {req_fac:?} (have {ch_fac:?})") }));
+                        }
+                    }
+                    if matches!(agent_info.agent_type_id, 5 | 8 | 12) {
                         let already_done = ctx.db.with_snapshot(|snap| {
                             snap.active_missions.values().any(|m| {
                                 m.character_id == char_id
@@ -439,7 +446,7 @@ pub async fn handle(
                         }
                     }
 
-                    if matches!(agent_info.agent_type_id, 5 | 8 | 9 | 12) {
+                    if matches!(agent_info.agent_type_id, 5 | 8 | 12) {
                         let cosmos_expired = ctx.db.with_snapshot(|snap| {
                             snap.active_missions.values().any(|m| {
                                 m.character_id == char_id && m.agent_id == agent_id && m.state == "Expired"

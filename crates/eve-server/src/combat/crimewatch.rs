@@ -79,6 +79,7 @@ impl AggressionManager {
 pub struct CrimeWatchDirector {
     pub states: HashMap<i64, CharacterCrimeWatchState>,
     pub aggression_mgr: AggressionManager,
+    pub system_corruption_stages: HashMap<u32, u8>,
 }
 
 /// Durable read/write lock wrapper around [`CrimeWatchDirector`] backed directly by [`eve_db::WorldRepository`] (`D-6`).
@@ -143,6 +144,11 @@ impl CrimeWatchLock {
                 aggression_mgr: AggressionManager {
                     records: std::mem::take(&mut snap.crimewatch_aggressions),
                 },
+                system_corruption_stages: snap
+                    .system_states
+                    .iter()
+                    .map(|(&sid, st)| (sid, st.insurgency_corruption_stage))
+                    .collect(),
             };
             let out = f(&mut dir);
             snap.crimewatch_states = dir.states;
@@ -162,6 +168,11 @@ impl CrimeWatchLock {
                 aggression_mgr: AggressionManager {
                     records: std::mem::take(&mut snap.crimewatch_aggressions),
                 },
+                system_corruption_stages: snap
+                    .system_states
+                    .iter()
+                    .map(|(&sid, st)| (sid, st.insurgency_corruption_stage))
+                    .collect(),
             };
             let res = f(&mut dir);
             snap.crimewatch_states = dir.states;
@@ -174,10 +185,14 @@ impl CrimeWatchLock {
         &self,
     ) -> Result<CrimeWatchReadGuard<'_>, std::sync::PoisonError<CrimeWatchReadGuard<'_>>> {
         let guard = self.lock.read().unwrap_or_else(|e| e.into_inner());
-        let (states, records) = self.db.with_snapshot(|s| {
+        let (states, records, stages) = self.db.with_snapshot(|s| {
             (
                 s.crimewatch_states.clone(),
                 s.crimewatch_aggressions.clone(),
+                s.system_states
+                    .iter()
+                    .map(|(&sid, st)| (sid, st.insurgency_corruption_stage))
+                    .collect(),
             )
         });
         Ok(CrimeWatchReadGuard {
@@ -185,6 +200,7 @@ impl CrimeWatchLock {
             director: CrimeWatchDirector {
                 states,
                 aggression_mgr: AggressionManager { records },
+                system_corruption_stages: stages,
             },
         })
     }
@@ -193,10 +209,14 @@ impl CrimeWatchLock {
         &self,
     ) -> Result<CrimeWatchWriteGuard<'_>, std::sync::PoisonError<CrimeWatchWriteGuard<'_>>> {
         let guard = self.lock.write().unwrap_or_else(|e| e.into_inner());
-        let (states, records) = self.db.with_snapshot(|s| {
+        let (states, records, stages) = self.db.with_snapshot(|s| {
             (
                 s.crimewatch_states.clone(),
                 s.crimewatch_aggressions.clone(),
+                s.system_states
+                    .iter()
+                    .map(|(&sid, st)| (sid, st.insurgency_corruption_stage))
+                    .collect(),
             )
         });
         Ok(CrimeWatchWriteGuard {
@@ -207,6 +227,7 @@ impl CrimeWatchLock {
             director: CrimeWatchDirector {
                 states,
                 aggression_mgr: AggressionManager { records },
+                system_corruption_stages: stages,
             },
         })
     }
@@ -296,15 +317,38 @@ impl CrimeWatchDirector {
         is_legal: bool,
         now_unix: u64,
     ) -> AggressionEvaluation {
+        self.handle_combat_aggression_with_pod(character_id, victim_char_id, ship_id, sys_id, sys_sec, is_legal, false, now_unix)
+    }
+
+    /// Evaluates combat aggression against another pilot with pod/capsule awareness:
+    /// - High-sec unprovoked attack against ship (`sys_sec >= 0.45`):
+    ///   - Stage 5 corruption (Highsec Only): Suspect flag, no criminal timer or CONCORD response.
+    ///   - Normal: Criminal flag (15m), weapon timer (60s), PvP timer (15m), schedules CONCORD.
+    /// - High-sec unprovoked attack against capsule (`is_pod`): Always Criminal flag + CONCORD response (even at Stage 5).
+    /// - Low-sec unprovoked attack against ship (`0.0 < sys_sec < 0.45`): Suspect flag (15m).
+    /// - Low-sec unprovoked attack against capsule: Criminal flag (15m).
+    /// - Legal aggression: Weapon timer (60s), PvP timer (15m).
+    pub fn handle_combat_aggression_with_pod(
+        &mut self,
+        character_id: i64,
+        victim_char_id: i64,
+        ship_id: i64,
+        sys_id: u32,
+        sys_sec: f64,
+        is_legal: bool,
+        is_pod: bool,
+        now_unix: u64,
+    ) -> AggressionEvaluation {
         self.aggression_mgr.record_aggression(
             character_id,
             victim_char_id,
             sys_id,
             is_legal,
-            false,
+            is_pod,
             now_unix,
         );
 
+        let is_stage5 = self.system_corruption_stages.get(&sys_id).copied().unwrap_or(0) >= 5;
         let st = self.get_or_create(character_id);
         st.weapon_timer_until_unix = now_unix.saturating_add(60);
         st.pvp_timer_until_unix = now_unix.saturating_add(900);
@@ -314,27 +358,40 @@ impl CrimeWatchDirector {
         }
 
         if sys_sec >= 0.45 {
-            // High-sec illegal attack -> Criminal flag + CONCORD response
-            st.criminal_flag_until_unix = now_unix.saturating_add(900);
-            let delay_sec = match (sys_sec * 10.0).round() as i32 {
-                10 | 9 => 6.0,
-                8 => 8.0,
-                7 => 11.0,
-                6 => 14.0,
-                5 => 19.0,
-                _ => concord_response_delay_sec(sys_sec),
-            };
-            let arrival_unix = now_unix.saturating_add(delay_sec.ceil() as u64);
-            st.pending_concord_arrival = Some((sys_id, arrival_unix, ship_id, victim_char_id));
+            if is_stage5 && !is_pod {
+                // Highsec Stage 5 max corruption: attacking ships/structures gives Suspect flag without CONCORD response
+                st.suspect_flag_until_unix = now_unix.saturating_add(900);
+                AggressionEvaluation::SuspectFlagTriggered
+            } else {
+                // Normal High-sec or pod kill -> Criminal flag + CONCORD response
+                st.criminal_flag_until_unix = now_unix.saturating_add(900);
+                let delay_sec = match (sys_sec * 10.0).round() as i32 {
+                    10 | 9 => 6.0,
+                    8 => 8.0,
+                    7 => 11.0,
+                    6 => 14.0,
+                    5 => 19.0,
+                    _ => concord_response_delay_sec(sys_sec),
+                };
+                let arrival_unix = now_unix.saturating_add(delay_sec.ceil() as u64);
+                st.pending_concord_arrival = Some((sys_id, arrival_unix, ship_id, victim_char_id));
 
-            AggressionEvaluation::CriminalFlagTriggered {
-                concord_delay_sec: delay_sec,
-                arrival_unix,
+                AggressionEvaluation::CriminalFlagTriggered {
+                    concord_delay_sec: delay_sec,
+                    arrival_unix,
+                }
             }
         } else if sys_sec > 0.0 {
-            // Low-sec unprovoked attack -> Suspect flag
-            st.suspect_flag_until_unix = now_unix.saturating_add(900);
-            AggressionEvaluation::SuspectFlagTriggered
+            if is_pod {
+                st.criminal_flag_until_unix = now_unix.saturating_add(900);
+                AggressionEvaluation::CriminalFlagTriggered {
+                    concord_delay_sec: 0.0,
+                    arrival_unix: now_unix,
+                }
+            } else {
+                st.suspect_flag_until_unix = now_unix.saturating_add(900);
+                AggressionEvaluation::SuspectFlagTriggered
+            }
         } else {
             // Null-sec / W-space: no CrimeWatch penalties
             AggressionEvaluation::LegalEngagement

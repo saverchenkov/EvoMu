@@ -343,7 +343,7 @@ pub async fn step_sentry_gun_grid_aggression(
             .map(|st| st.insurgency_corruption_stage)
             .unwrap_or(0)
     });
-    if sys_sec <= 0.0 || (sys_sec < 0.45 && corruption_stage >= 3) {
+    if sys_sec <= 0.0 || (sys_sec <= 0.4 && sys_sec > 0.0 && corruption_stage >= 3) {
         return (false, 0.0);
     }
 

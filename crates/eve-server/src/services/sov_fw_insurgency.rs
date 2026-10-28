@@ -587,6 +587,7 @@ pub async fn handle(
                 });
                 rec.faction_id = Some(faction_id);
                 rec.enlisted_on_unix = Some(now_u);
+                snap.fw_runtime.direct_enlisted_chars.insert(char_id, faction_id);
                 Ok(new_corp_opt)
             });
             let new_corp_opt = match res {
@@ -836,7 +837,7 @@ pub async fn handle(
                     let mil = st.map(|s| s.military_index).unwrap_or(0);
                     let ind = st.map(|s| s.industrial_index).unwrap_or(0);
                     let strat = st.map(|s| s.strategic_index).unwrap_or(0);
-                    let adm_val = 1.0 + (mil as f64) * 0.4 + (ind as f64) * 0.4 + (strat as f64) * 0.2;
+                    let adm_val = crate::services::sov_services::calculate_adm(mil, ind, strat);
                     let cont = st.map(|s| s.fw_contested_pct > 0.0).unwrap_or(false);
                     (aid, exec_corp, hub, claim.or(hub), cont, adm_val)
                 });
@@ -1053,6 +1054,11 @@ pub async fn handle(
             ])))
         }
 
-        _ => fw_insurgency::handle_hub_and_scan(ctx, session, service, method, args, kwargs).await,
+        _ => {
+            if let Some(res) = crate::services::fw_gameplay::handle(ctx, session, service, method, args, kwargs).await {
+                return Some(res);
+            }
+            fw_insurgency::handle_hub_and_scan(ctx, session, service, method, args, kwargs).await
+        }
     }
 }

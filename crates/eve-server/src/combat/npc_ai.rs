@@ -206,7 +206,15 @@ impl NpcSpawnManager {
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
         let mut spawned_ball_ids = Vec::new();
 
+        let count = spawn_group.npc_type_ids.len() as i64;
+        let start_ball_id = ctx.db.with_mut_snapshot(|snap| {
+            let start = snap.next_entity_id + 1;
+            snap.next_entity_id += count;
+            start
+        });
+
         for (idx, &npc_type_id) in spawn_group.npc_type_ids.iter().enumerate() {
+            let ball_id = start_ball_id + idx as i64;
             let (bounty, max_vel, opt_range, orb_range, base_dps) = ctx
                 .sde
                 .types
@@ -224,11 +232,6 @@ impl NpcSpawnManager {
                     (b, v, opt, orb, dps)
                 })
                 .unwrap_or((25_000.0, 320.0, 8_000.0, 5_000.0, 40.0));
-
-            let ball_id = ctx.db.with_mut_snapshot(|snap| {
-                snap.next_entity_id += 1;
-                snap.next_entity_id
-            });
 
             // Disperse ships slightly around spawn center
             let offset = DVec3::new(

@@ -354,6 +354,71 @@ pub(crate) fn fp_skill_queue(q: &[SkillQueueEntry]) -> u64 {
     h.finish()
 }
 
+pub(crate) fn fp_sp6_lifecycle(st: &crate::Sp6PersistedState) -> u64 {
+    let mut h = FnvHasher::new();
+    h.write_u64(st.safe_logoffs.len() as u64);
+    for (&k, v) in &st.safe_logoffs {
+        h.write_i64(k);
+        h.write_u32(v.solar_system_id);
+        h.write_u64(v.complete_at_unix);
+    }
+    h.write_u64(st.disconnected_ships.len() as u64);
+    for (&k, v) in &st.disconnected_ships {
+        h.write_i64(k);
+        h.write_u32(v.solar_system_id);
+        h.write_u64(v.disconnected_at_unix);
+    }
+    h.write_u64(st.self_destructs.len() as u64);
+    for (&k, v) in &st.self_destructs {
+        h.write_i64(k);
+        h.write_u64(v.detonate_at_unix);
+    }
+    h.write_u64(st.abyssal_sessions.len() as u64);
+    for (&k, v) in &st.abyssal_sessions {
+        h.write_i64(k);
+        h.write_u64(v.collapse_at_unix);
+    }
+    h.write_u64(st.pvp_timers_until.len() as u64);
+    for (&k, &v) in &st.pvp_timers_until {
+        h.write_i64(k);
+        h.write_u64(v);
+    }
+    h.write_u64(st.npc_timers_until.len() as u64);
+    for (&k, &v) in &st.npc_timers_until {
+        h.write_i64(k);
+        h.write_u64(v);
+    }
+    h.write_u64(st.weapon_timers_until.len() as u64);
+    for (&k, &v) in &st.weapon_timers_until {
+        h.write_i64(k);
+        h.write_u64(v);
+    }
+    h.write_u64(st.criminal_timers_until.len() as u64);
+    for (&k, &v) in &st.criminal_timers_until {
+        h.write_i64(k);
+        h.write_u64(v);
+    }
+    h.write_u64(st.last_downtime_day_idx.unwrap_or(0));
+    h.write_u64(st.ship_combat_hp.len() as u64);
+    for (&k, v) in &st.ship_combat_hp {
+        h.write_i64(k);
+        h.write_f64(v.shield_hp);
+        h.write_f64(v.armor_hp);
+        h.write_f64(v.hull_hp);
+    }
+    h.write_u64(st.space_object_meta.len() as u64);
+    for (&k, v) in &st.space_object_meta {
+        h.write_i64(k);
+        h.write_u64(v.created_unix.unwrap_or(0));
+    }
+    h.write_u64(st.missions_awaiting_downtime_respawn.len() as u64);
+    for &(c, m) in &st.missions_awaiting_downtime_respawn {
+        h.write_i64(c);
+        h.write_u32(m);
+    }
+    h.finish()
+}
+
 pub(crate) fn fp_json<T: serde::Serialize>(val: &T) -> u64 {
     let mut h = FnvHasher::new();
     if let Ok(s) = serde_json::to_string(val) {

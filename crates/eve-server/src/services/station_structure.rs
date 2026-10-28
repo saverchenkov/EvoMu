@@ -168,6 +168,10 @@ pub async fn handle(
                 let services = op
                     .map(|o| o.services.iter().map(|&sid| PyRep::Integer(i64::from(sid))).collect())
                     .unwrap_or_default();
+                let hq_services: Vec<PyRep> = crate::services::fw_gameplay::get_war_hq_services(sys_id)
+                    .map(|(_, svcs)| svcs.into_iter().map(|s| PyRep::String(s.into())).collect())
+                    .unwrap_or_default();
+                let is_war_hq = !hq_services.is_empty();
                 Some(Ok(PyRep::keyval([
                     ("stationID", PyRep::Integer(st.station_id)),
                     ("stationName", PyRep::String(st.name)),
@@ -177,6 +181,8 @@ pub async fn handle(
                     ("operationID", PyRep::Integer(i64::from(st.operation_id))),
                     ("serviceMask", PyRep::Integer(service_mask)),
                     ("services", PyRep::List(services)),
+                    ("isWarHQ", PyRep::Bool(is_war_hq)),
+                    ("warHQServices", PyRep::List(hq_services)),
                     ("reprocessingEfficiency", PyRep::Real(st.reprocessing_efficiency)),
                     ("reprocessingStationsTake", PyRep::Real(st.reprocessing_stations_take)),
                 ])))
@@ -569,7 +575,9 @@ pub async fn handle(
                     message: "Session has no active solarSystemID".into(),
                 }));
             };
-            let is_structure = service == "structureDocking" || dock_id >= 1_000_000_000_000;
+            let is_structure = service == "structureDocking"
+                || dock_id >= 1_000_000_000_000
+                || ctx.db.with_snapshot(|snap| snap.structures.contains_key(&dock_id));
 
             let handle = ctx.systems.get_or_spawn(sys_id);
             let Some((_, ball)) = (match handle.get_ball_snapshot(ship_id).await {
@@ -638,6 +646,9 @@ pub async fn handle(
             }
 
             if let Err(e) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "dock") {
+                return Some(Err(e));
+            }
+            if let Err(e) = crate::services::fw_gameplay::check_docking_allowed(ctx, char_id, sys_id, dock_id, is_structure) {
                 return Some(Err(e));
             }
 
@@ -1000,7 +1011,8 @@ pub async fn handle(
                 .get(&sys_id)
                 .map(|s| s.security_status)
                 .unwrap_or(1.0);
-            if item_type.group_id == 361 && sys_sec > 0.0 {
+            let corr5 = ctx.db.with_snapshot(|s| s.system_states.get(&sys_id).is_some_and(|st| st.insurgency_corruption_stage >= 5));
+            if item_type.group_id == 361 && (sys_sec >= 0.45 || (sys_sec > 0.0 && !corr5)) {
                 return Some(Err(BridgeRpcError {
                     code: "CantAnchorInEmpire".into(),
                     message: format!(

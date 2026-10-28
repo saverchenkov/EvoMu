@@ -14,23 +14,12 @@ fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError { code: code.into(), message: message.into() }
 }
 
-pub(crate) fn has_structure_manager_role(
-    snap: &eve_db::WorldStateSnapshot,
-    session: &SessionState,
-    char_id: i64,
-    corp_id: i64,
-) -> bool {
+pub(crate) fn has_structure_manager_role(snap: &eve_db::WorldStateSnapshot, session: &SessionState, char_id: i64, corp_id: i64) -> bool {
     let req_roles = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
     session.has_gm_role()
         || (session.corp_role & req_roles) != 0
-        || snap.corporations.get(&corp_id).is_some_and(|c| {
-            c.ceo_id == char_id
-                || c.member_roles.get(&char_id).is_some_and(|&r| (r & req_roles) != 0)
-        })
-        || snap
-            .corp_role_assignments
-            .get(&(corp_id, char_id))
-            .is_some_and(|a| (a.roles & req_roles) != 0)
+        || snap.corporations.get(&corp_id).is_some_and(|c| c.ceo_id == char_id || c.member_roles.get(&char_id).is_some_and(|&r| (r & req_roles) != 0))
+        || snap.corp_role_assignments.get(&(corp_id, char_id)).is_some_and(|a| (a.roles & req_roles) != 0)
 }
 
 /// `structureDeployment.Anchor(typeID, name)`: deploys the structure at the anchoring ship's
@@ -59,14 +48,30 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
             Err(err("ItemNotFound", format!("Item or structure type {first_arg} not found")))
         }
     })?;
+    if type_id == crate::services::sov_gameplay::TYPE_MERCENARY_DEN {
+        return crate::services::sov_gameplay::handle_anchor_mercenary_den_rpc(ctx, session, args).await;
+    }
+    if type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK {
+        return crate::services::sov_gameplay::handle_anchor_skyhook_rpc(ctx, session, args).await;
+    }
+    if ctx.sde.types.get(&type_id).is_some_and(|t| t.category_id == 22 || t.group_id == 361 || t.effect_ids.contains(&649)) {
+        if let Some(res) = Box::pin(crate::services::station_structure::handle(
+            ctx, session, "posMgr", "AnchorStructure", args, &std::collections::HashMap::new(),
+        )).await {
+            return res;
+        }
+    }
     if type_id == 40340 {
         let palatine_exists = ctx.db.with_snapshot(|snap| snap.structures.values().any(|s| s.type_id == 40340 && s.state != "Destroyed"));
         if palatine_exists {
             return Err(err("PalatineKeepstarLimitReached", "Only one Upwell Palatine Keepstar (type 40340) can exist in the universe"));
         }
     }
-    let profile = life::structure_profile(ctx, type_id).ok_or_else(|| err("InvalidStructureType", format!("Type {type_id} is not an anchorable Upwell structure (category {})", life::CATEGORY_STRUCTURE)))?;
     let sys_id = session.solar_system_id.ok_or_else(|| err("NoSolarSystem", "Session has no active solarSystemID"))?;
+    if matches!(type_id, 35840 | 35841 | crate::services::sov_gameplay::TYPE_TENEBREX_CYNO_JAMMER) {
+        crate::services::sov_gameplay::require_flex_sov_upgrade_online(ctx, sys_id, type_id)?;
+    }
+    let profile = life::structure_profile(ctx, type_id).ok_or_else(|| err("InvalidStructureType", format!("Type {type_id} is not an anchorable Upwell structure (category {})", life::CATEGORY_STRUCTURE)))?;
     let (_, is_thera, is_shattered, _) = crate::services::space_destiny::system_wormhole_profile(sys_id);
     if is_thera || is_shattered {
         return Err(err("AnchoringDisallowedInTheraOrShattered", format!("Anchoring structures or starbases is disallowed in Thera or shattered wormhole system {sys_id}")));
@@ -423,6 +428,8 @@ pub async fn apply_damage_structure_or_ball(
         .flatten()
         .map(|(a, d, _)| (a, d, d)))
 }
+
+pub use crate::services::structure_combat_attack::handle_attack;
 
 const CAN_FIT_SHIP_GROUP_ATTRS: [u16; 20] = [
     1298, 1299, 1300, 1301, 1872, 1879, 1880, 1881, 2065, 2396,

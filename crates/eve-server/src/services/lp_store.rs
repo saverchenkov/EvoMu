@@ -355,8 +355,9 @@ fn take_offer(
         }
     };
 
-    // Check Triglavian (500026 / 1000298) or EDENCOM (500027 / 1000299) standing gate if applicable
+    // Check Triglavian, EDENCOM, or FW militia standing/enlistment gates if applicable
     let is_trig_or_edencom = matches!(offer.corp_id, 500_026 | 500_027 | 1_000_298 | 1_000_299);
+    let is_fw_militia_corp = matches!(offer.corp_id, 1_000_179 | 1_000_180 | 1_000_181 | 1_000_182 | 1_000_127 | 1_000_135);
 
     let Some(total_lp_cost) = offer.lp_cost.checked_mul(qty) else {
         return Some(Err(BridgeRpcError {
@@ -424,6 +425,26 @@ fn take_offer(
                         "LP store offer {} requires at least {:.2} standing with corporation {} (have {:.2})",
                         offer.offer_id, min_st, offer.corp_id, cur_st
                     ),
+                });
+            }
+        }
+
+        if is_fw_militia_corp {
+            let char_fac = ch.war_faction_id.unwrap_or(0);
+            let expected_fac = match offer.corp_id {
+                1_000_179 => 500_003, // Amarr
+                1_000_180 => 500_001, // Caldari
+                1_000_181 => 500_004, // Gallente
+                1_000_182 => 500_002, // Minmatar
+                1_000_127 => 500_010,
+                1_000_135 => 500_011,
+                _ => 0,
+            };
+            let standing = ch.standings.get(&offer.corp_id).copied().unwrap_or(0.0);
+            if char_fac != expected_fac && standing < 0.0 {
+                return Err(BridgeRpcError {
+                    code: "InsufficientStanding".into(),
+                    message: format!("Character must be enlisted in militia {expected_fac} or have non-negative standing (have {standing:.2})"),
                 });
             }
         }
@@ -568,7 +589,20 @@ fn take_offer(
             save_corp_lp_balances(snap, player_corp_id, &corp_balances);
             (rem, current_lp)
         } else {
-            let current_lp = ch.loyalty_points.get(&offer.corp_id).copied().unwrap_or(0);
+            let (lp_key, current_lp) = if let Some(&lp) = ch.loyalty_points.get(&offer.corp_id) {
+                (offer.corp_id, lp)
+            } else {
+                let fac_id = match offer.corp_id {
+                    1_000_179 => 500_003, // Amarr
+                    1_000_180 => 500_001, // Caldari
+                    1_000_181 => 500_004, // Gallente
+                    1_000_182 => 500_002, // Minmatar
+                    1_000_127 | 1_000_437 => 500_010, // Guristas / Commando Guri
+                    1_000_135 | 1_000_138 | 1_000_436 => 500_011, // Angel Cartel / Gistii Domination
+                    _ => 0,
+                };
+                (fac_id, ch.loyalty_points.get(&fac_id).copied().unwrap_or(0))
+            };
             if current_lp < total_lp_cost {
                 return Err(BridgeRpcError {
                     code: "InsufficientLoyaltyPoints".into(),
@@ -594,7 +628,7 @@ fn take_offer(
             }
             let rem = current_lp - total_lp_cost;
             if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
-                ch_mut.loyalty_points.insert(offer.corp_id, rem);
+                ch_mut.loyalty_points.insert(lp_key, rem);
             }
             if total_lp_cost > 0 {
                 record_lp_reward_log(

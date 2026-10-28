@@ -213,19 +213,22 @@ pub fn active_cyno_jammer(ctx: &ServerContext, sys_id: u32) -> Option<i64> {
                 .collect::<Vec<_>>()
         })
         .collect();
+    let now = ctx.now_unix();
     let jammed = ctx.db.with_snapshot(|snap| {
-        let structure_jam = snap.structures.values().any(|st| {
+        let tenebrex_jam =
+            crate::services::sov_gameplay::is_tenebrex_jammer_active_in_snap(snap, sys_id, now);
+        let other_structure_jam = snap.structures.values().any(|st| {
             st.solar_system_id == sys_id
+                && st.type_id != crate::services::sov_gameplay::TYPE_TENEBREX_CYNO_JAMMER
                 && jammer_structure_types.contains(&st.type_id)
                 && st.fuel_blocks > 0
-                && st.state != "Destroyed"
-                && st.state != "Anchoring"
+                && matches!(st.state.as_str(), "ShieldVulnerable" | "Online")
         });
         let item_jam = snap.items.values().any(|i| {
             i.location_id == sys_id as i64
                 && ctx.sde.types.get(&i.type_id).is_some_and(|t| type_attr(ctx, t, ATTR_IS_CYNO_JAMMER) > 0.0 || t.type_id == 33700)
         });
-        structure_jam || item_jam
+        tenebrex_jam || other_structure_jam || item_jam
     });
     jammed.then(|| ctx.now_blueos_filetime_ticks())
 }

@@ -291,6 +291,8 @@ pub fn capture_warzone_system(
         let owner = occ.owner_faction_id;
         let threshold_i = occ.victory_points_threshold;
         snap.fw_runtime.system_victory_points.insert(sys_id, 0);
+        snap.fw_runtime.ihub_tiers.insert(sys_id, 0);
+        snap.fw_runtime.ihub_lp_donations.insert(sys_id, 0);
         if let Some(st) = snap.system_states.get_mut(&sys_id) {
             st.fw_contested_pct = 0.0;
         }
@@ -333,6 +335,16 @@ pub fn capture_warzone_system(
 
 /// Transitions a Faction Warfare bunker's vulnerability state and emits `OnFacWarBunkerVulnerable` or `OnFacWarBunkerNonVulnerable`.
 pub fn set_facwar_bunker_vulnerable(ctx: &ServerContext, sys_id: u32, attacker_id: i64, vulnerable: bool) {
+    let now = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fw_runtime.ihub_vulnerable.insert(sys_id, vulnerable);
+        if vulnerable {
+            snap.fw_runtime.ihub_vulnerable_since_unix.insert(sys_id, now);
+        } else {
+            snap.fw_runtime.ihub_vulnerable_since_unix.remove(&sys_id);
+            snap.fw_runtime.last_ihub_attacked_unix.remove(&sys_id);
+        }
+    });
     let event = if vulnerable {
         "OnFacWarBunkerVulnerable"
     } else {
@@ -415,11 +427,12 @@ pub fn spawn_battlefield_site(ctx: &ServerContext, sys_id: u32, faction_id: i64,
 }
 
 /// Scales FW LP reward based on solar system frontline status (`feat:fw.fw-lp`).
+/// Frontline pays 100% (1.0x), Command Operation pays 75% (0.75x), Rearguard pays 50% (0.50x).
 pub fn calculate_fw_lp_reward(base_lp: i64, status: i64) -> i64 {
     let mult = match status {
-        STATUS_FRONTLINE => 1.5,
-        STATUS_COMMAND => 1.0,
-        STATUS_REARGUARD => 0.75,
+        STATUS_FRONTLINE => 1.0,
+        STATUS_COMMAND => 0.75,
+        STATUS_REARGUARD => 0.50,
         _ => 1.0,
     };
     ((base_lp as f64) * mult).round() as i64
@@ -559,11 +572,6 @@ pub async fn handle(
                     message: "Session has no active solar system".into(),
                 }));
             };
-            ctx.db.with_mut_snapshot(|snap| {
-                if snap.fw_system_occupations.is_empty() {
-                    snap.backfill_fw_system_occupations();
-                }
-            });
             let occ_state = ctx.db.with_snapshot(|snap| {
                 let occ = snap.fw_system_occupations.get(&sys_id)?;
                 let c = snap
@@ -672,7 +680,7 @@ pub async fn handle(
             let instances = read_fw_runtime(ctx, |rt| {
                 rt.battlefield_instances
                     .iter()
-                    .filter(|b| sys_id.map(|s| b.solar_system_id == s).unwrap_or(true))
+                    .filter(|b| !b.completed && sys_id.map(|s| b.solar_system_id == s).unwrap_or(true))
                     .map(|b| {
                         PyRep::keyval([
                             ("instanceID", PyRep::Integer(b.instance_id)),

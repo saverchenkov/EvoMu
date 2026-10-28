@@ -444,7 +444,13 @@ pub fn compute_industry_job_costs_for_char(
         .or_else(|| taxes.get(&1))
         .copied()
         .unwrap_or(0.10);
-    let facility_tax_isk = ((base_job_cost_isk * facility_tax_rate) * 100.0).round() / 100.0;
+    let raw_facility_tax_isk = ((base_job_cost_isk * facility_tax_rate) * 100.0).round() / 100.0;
+    let fw_tier = snap.fw_runtime.ihub_tiers.get(&sys_id).copied().unwrap_or(0);
+    let facility_tax_isk = if fw_tier > 0 {
+        ((crate::services::industry_pi::compute_facility_tax_bonus_for_tier(raw_facility_tax_isk, fw_tier)) * 100.0).round() / 100.0
+    } else {
+        raw_facility_tax_isk
+    };
     // Viridian/Equinox 4.0% SCC surcharge (reduced by 90% to 0.4% at Fulcrum for pirate subcaps)
     let fulcrum_bonus =
         is_fulcrum_pirate_ship_bonus_applicable(ctx, snap, char_id, bp_type_id, activity_id, facility_id);

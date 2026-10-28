@@ -979,6 +979,18 @@ async fn handle_call_component_from_client(
     })?;
     let comp_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("");
     let comp_method = args.get(2).and_then(|a| a.as_str()).unwrap_or("");
+    if matches!(comp_name, "linkWithShip" | "orbitalSkyhook") {
+        return crate::services::sov_gameplay::handle_skyhook_component_call(
+            ctx, session, sys_id, char_id, ship_id, trader_id, comp_name, comp_method, args,
+        )
+        .await;
+    }
+    if comp_name == "mercenaryDen" {
+        return crate::services::sov_gameplay::handle_mercden_component_call(
+            ctx, session, sys_id, char_id, ship_id, trader_id, comp_name, comp_method, args,
+        )
+        .await;
+    }
     if comp_name != "itemTrader" || comp_method != "ProcessTrade" {
         return Err(BridgeRpcError {
             code: "UnsupportedComponentCall".into(),

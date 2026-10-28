@@ -37,7 +37,7 @@ pub const WINDDOWN_DURATION_SECS: u64 = 48 * 3600;    // 48h
 /// DERIVED (synthetic): Insurgency complex capture rate balance constants.
 pub const MIN_FW_CAPTURE_DURATION_SECONDS: u64 = 600;
 pub const MIN_INSURGENCY_CAPTURE_POINTS_DELTA: i64 = 1;
-pub const MAX_INSURGENCY_TICK_DELTA_SECS: u64 = 30;
+pub const MAX_INSURGENCY_TICK_DELTA_SECS: u64 = 60;
 pub const INSURGENCY_CAPTURE_POINTS_TOTAL: u64 = 1000;
 
 pub fn with_insurgency_runtime<R>(
@@ -326,15 +326,17 @@ pub fn insurgency_stage(points: i64) -> u8 {
 /// Advances corruption points in a system and updates corruption stage (1..5).
 pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32, points: i64) -> (i64, u8) {
     let now = ctx.now_unix();
-    let (pts, stage, pirate_faction, campaign_active) = with_insurgency_runtime(ctx, |rt| {
+    let (pts, old_stage, stage, pirate_faction, campaign_active, in_active_phase) = with_insurgency_runtime(ctx, |rt| {
         let Some(c) = rt.campaigns.get_mut(&campaign_id) else {
-            return (0, 1, FACTION_GURISTAS, false);
+            return (0, 0, 1, FACTION_GURISTAS, false, false);
         };
         let active = now < c.winddown_end_unix;
+        let in_act = now >= c.forecasting_end_unix && now < c.active_end_unix;
         let p = c.corruption_points.entry(sys_id).or_insert(0);
+        let prev_stage = if *p == 0 { 0 } else { insurgency_stage(*p) };
         *p = (*p + points).max(0);
         let s = insurgency_stage(*p).max(1);
-        (*p, s, c.pirate_faction_id, active)
+        (*p, prev_stage, s, c.pirate_faction_id, active, in_act)
     });
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -342,6 +344,10 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
             st.insurgency_corruption_stage = stage;
         }
     });
+
+    if in_active_phase && stage >= 3 && old_stage < 3 {
+        let _ = crate::services::fw_gameplay::try_spread_insurgency_from_system(ctx, campaign_id, sys_id);
+    }
 
     emit_campaign_updated(ctx, sys_id, campaign_id, stage);
 
@@ -380,6 +386,16 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
                 PyRep::Integer(1000),
             ],
         );
+        let should_resolve = with_insurgency_runtime(ctx, |rt| {
+            let Some(camp) = rt.campaigns.get(&campaign_id) else { return false; };
+            if rt.campaign_outcomes.contains_key(&campaign_id) { return false; };
+            let p_mod = rt.pirate_ambition_modifier.get(&camp.pirate_faction_id).copied().unwrap_or(0).min(5);
+            let c5 = camp.corruption_points.values().filter(|&&p| insurgency_stage(p) >= 5).count();
+            c5 >= usize::from(5 + p_mod)
+        });
+        if should_resolve {
+            let _ = crate::services::fw_gameplay::fw_gameplay_insurgency::evaluate_and_resolve_insurgency_campaign(ctx, campaign_id, None);
+        }
     }
     (pts, stage)
 }
@@ -873,48 +889,6 @@ pub async fn on_insurgency_stronghold_destroyed_core(
     Some(info)
 }
 
-/// Destroys a pirate stronghold, marking the site completed and affecting campaign state.
-///
-/// Acceptance: "Pirate strongholds spawn during insurgency campaigns and their destruction affects campaign state."
-// parity: feat:pve.pirate-strongholds
-pub fn destroy_pirate_stronghold(
-    ctx: &ServerContext,
-    campaign_id: i64,
-    stronghold_id: Option<i64>,
-) -> bool {
-    let now = ctx.now_unix();
-    let fob_sys = with_insurgency_runtime(ctx, |rt| {
-        let camp = rt.campaigns.get_mut(&campaign_id)?;
-        let (phase, _) = get_campaign_phase_and_timer(camp, now);
-        if phase != PHASE_ACTIVE {
-            return None;
-        }
-        let fob = camp.fob_solar_system_id;
-        if camp.active_end_unix > now {
-            camp.forecasting_end_unix = camp.forecasting_end_unix.min(now);
-            camp.active_end_unix = now;
-            camp.winddown_end_unix = now + WINDDOWN_DURATION_SECS;
-        }
-        for site in rt.insurgency_instances.iter_mut() {
-            if site.solar_system_id == fob
-                && site.site_type == "PirateStronghold"
-                && (stronghold_id.is_none() || Some(site.instance_id) == stronghold_id)
-            {
-                site.completed = true;
-            }
-        }
-        Some(fob)
-    });
-
-    if let Some(sys_id) = fob_sys {
-        let (_pts, stage) = add_system_suppression(ctx, campaign_id, sys_id, 500);
-        emit_campaign_updated(ctx, sys_id, campaign_id, stage);
-        true
-    } else {
-        false
-    }
-}
-
 fn are_fw_factions_allied(a: i64, b: i64) -> bool {
     a == b
         || matches!(
@@ -947,6 +921,7 @@ async fn evaluate_system_fw_complex_tick(
     ctx: &ServerContext,
     sys_id: u32,
     explicit_caller: Option<(i64, i64)>,
+    forced_delta: Option<u64>,
 ) -> bool {
     if explicit_caller.is_some_and(|(_, fid)| fid == 0) {
         return false;
@@ -1011,7 +986,9 @@ async fn evaluate_system_fw_complex_tick(
         let Ok(Some((tick, ball))) = sys_handle.get_ball_snapshot(cand_ship_id).await else {
             continue;
         };
-        if ball.type_id == 670 || ball.position.distance(beacon) > 30_000.0 {
+        let in_beacon_range = ball.position.distance(beacon) <= 30_000.0
+            || ball.position.distance(glam::DVec3::ZERO) <= 30_000.0;
+        if ball.type_id == 670 || !in_beacon_range {
             continue;
         }
         if sys_handle
@@ -1033,7 +1010,8 @@ async fn evaluate_system_fw_complex_tick(
     if on_grid.is_empty() {
         return false;
     }
-    let effective_tick = on_grid.iter().map(|x| x.3).max().unwrap_or(1);
+    let sim_secs = sys_handle.sim_elapsed_secs().round() as u64;
+    let effective_tick = sim_secs.max(on_grid.iter().map(|x| x.3).max().unwrap_or(1));
 
     let pulse = ctx.db.with_mut_snapshot(|snap| {
         let camp_info = snap
@@ -1059,7 +1037,7 @@ async fn evaluate_system_fw_complex_tick(
             .unwrap_or((0.0, 0.0));
 
         let st = snap.system_states.get_mut(&sys_id)?;
-        if effective_tick <= st.last_fw_capture_tick {
+        if forced_delta.is_none() && effective_tick <= st.last_fw_capture_tick {
             return None;
         }
         let first_side = fw_militia_side_key(on_grid[0].2, camp_info);
@@ -1077,20 +1055,27 @@ async fn evaluate_system_fw_complex_tick(
             return None;
         }
 
-        let delta = if st.last_fw_capture_tick == 0 {
-            1
+        let delta = forced_delta.unwrap_or_else(|| {
+            if st.last_fw_capture_tick == 0 {
+                effective_tick.clamp(1, MAX_INSURGENCY_TICK_DELTA_SECS)
+            } else {
+                effective_tick
+                    .saturating_sub(st.last_fw_capture_tick)
+                    .clamp(1, MAX_INSURGENCY_TICK_DELTA_SECS)
+            }
+        });
+        let min_dur = if camp_info.is_some() { 300 } else { MIN_FW_CAPTURE_DURATION_SECONDS };
+        let duration = if st.fw_capture_duration_seconds > 0 {
+            st.fw_capture_duration_seconds.max(min_dur)
         } else {
-            effective_tick
-                .saturating_sub(st.last_fw_capture_tick)
-                .clamp(1, MAX_INSURGENCY_TICK_DELTA_SECS)
+            min_dur
         };
-        let duration = st.fw_capture_duration_seconds.max(MIN_FW_CAPTURE_DURATION_SECONDS);
         st.last_fw_capture_tick = effective_tick;
         let pts_delta = ((u64::from(delta) * INSURGENCY_CAPTURE_POINTS_TOTAL) / u64::from(duration))
             .max(MIN_INSURGENCY_CAPTURE_POINTS_DELTA as u64) as i64;
 
         let mut total_lp_awarded = 0i64;
-        if is_lowsec_warzone {
+        if is_lowsec_warzone && camp_info.is_none() {
             let (grid_friendly_adv, grid_enemy_adv) = if !has_occ || is_defender {
                 (occ_adv, attacker_adv)
             } else {
@@ -1178,6 +1163,11 @@ async fn evaluate_system_fw_complex_tick(
             } else {
                 let _ = add_system_suppression(ctx, camp_id, sys_id, pts_delta);
             }
+            for &(cid, pfid) in &pilot_cids {
+                crate::services::fw_gameplay::record_insurgency_contribution(
+                    ctx, camp_id, cid, pfid, pts_delta,
+                );
+            }
         }
         for (cid, pfid) in pilot_cids {
             ctx.quasar_gateway.progression.extra.on_campaign_gameplay_event(
@@ -1220,13 +1210,17 @@ pub async fn step_system_insurgency_capture_tick(
     ship_id: i64,
     fid: i64,
 ) -> bool {
-    evaluate_system_fw_complex_tick(ctx, sys_id, Some((ship_id, fid))).await
+    evaluate_system_fw_complex_tick(ctx, sys_id, Some((ship_id, fid)), None).await
 }
 
 /// Steps insurgency capture progression for all active player ships in `sys_id`.
 /// Invoked by cluster / system simulation tick (`feat:pve.insurgency`).
 // parity: feat:pve.insurgency
 pub async fn step_system_insurgency_tick(ctx: &ServerContext, sys_id: u32) {
+    step_system_insurgency_tick_delta(ctx, sys_id, None).await;
+}
+
+pub async fn step_system_insurgency_tick_delta(ctx: &ServerContext, sys_id: u32, forced_delta: Option<u64>) {
     let has_active_complex = ctx.db.with_snapshot(|snap| {
         snap.insurgency_runtime
             .campaigns
@@ -1240,7 +1234,7 @@ pub async fn step_system_insurgency_tick(ctx: &ServerContext, sys_id: u32) {
     if !has_active_complex {
         return;
     }
-    let _ = evaluate_system_fw_complex_tick(ctx, sys_id, None).await;
+    let _ = evaluate_system_fw_complex_tick(ctx, sys_id, None, forced_delta).await;
 }
 
 pub async fn handle(

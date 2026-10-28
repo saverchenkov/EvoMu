@@ -40,7 +40,10 @@ pub fn is_outlaw_ship_docking_refused(
         .get(&solar_system_id)
         .map(|s| s.security_status)
         .unwrap_or(0.0);
-    if sys_sec < 0.45 {
+    if sys_sec < 0.45
+        || is_concord_suppressed_in_system(ctx, solar_system_id)
+        || is_sentry_disabled_by_corruption(ctx, solar_system_id)
+    {
         return false;
     }
     let (char_sec, is_capsule) = ctx.db.with_snapshot(|snap| {
@@ -68,7 +71,10 @@ pub async fn check_and_spawn_faction_police(
         .get(&solar_system_id)
         .map(|s| s.security_status)
         .unwrap_or(0.0);
-    if sys_sec < 0.45 {
+    if sys_sec < 0.45
+        || is_concord_suppressed_in_system(ctx, solar_system_id)
+        || is_faction_police_suppressed(ctx, solar_system_id)
+    {
         return Vec::new();
     }
     let threshold = faction_police_sec_threshold(sys_sec).unwrap_or(-5.0);
@@ -213,7 +219,10 @@ pub fn scan_and_enforce_highsec_contraband(
         .get(&solar_system_id)
         .map(|s| s.security_status)
         .unwrap_or(0.0);
-    if sys_sec < 0.45 {
+    if sys_sec < 0.45
+        || is_concord_suppressed_in_system(ctx, solar_system_id)
+        || is_faction_police_suppressed(ctx, solar_system_id)
+    {
         return Vec::new();
     }
     let sys_faction = ctx
@@ -369,4 +378,26 @@ pub fn scan_and_enforce_highsec_contraband(
     }
 
     found
+}
+
+/// Returns whether CONCORD response is suppressed in the solar system (e.g., Insurgency Corruption Stage 5).
+pub fn is_concord_suppressed_in_system(ctx: &ServerContext, solar_system_id: SolarSystemId) -> bool {
+    ctx.db.with_snapshot(|snap| {
+        snap.system_states.get(&solar_system_id).map(|st| st.insurgency_corruption_stage >= 5).unwrap_or(false)
+    })
+}
+
+/// Returns whether gate and station sentry guns are disabled in the solar system (Insurgency Corruption Stage 3+ in low-sec).
+pub fn is_sentry_disabled_by_corruption(ctx: &ServerContext, solar_system_id: SolarSystemId) -> bool {
+    let sys_sec = ctx.sde.solar_systems.get(&solar_system_id).map(|s| s.security_status).unwrap_or(0.0);
+    sys_sec > 0.0 && sys_sec < 0.45 && ctx.db.with_snapshot(|snap| {
+        snap.system_states.get(&solar_system_id).map(|st| st.insurgency_corruption_stage >= 3).unwrap_or(false)
+    })
+}
+
+/// Returns whether Empire Navy / Faction Police patrols are suppressed (Insurgency Corruption Stage 2+).
+pub fn is_faction_police_suppressed(ctx: &ServerContext, solar_system_id: SolarSystemId) -> bool {
+    ctx.db.with_snapshot(|snap| {
+        snap.system_states.get(&solar_system_id).map(|st| st.insurgency_corruption_stage >= 2).unwrap_or(false)
+    })
 }
