@@ -34,30 +34,54 @@ def to_roman(n: int | None) -> str:
 
 
 def build_cfsd_runner(eve_build_dir: Path, work_dir: Path) -> tuple[Path, Path]:
-    """Compile cfsd_runner.c against EVE.app libpython2.7.dylib and build code_pyc.zip."""
+    """Compile cfsd_runner.c against EVE.app libpython2.7.dylib (or create ctypes python27.dll runner on Windows) and build code_pyc.zip."""
+    import sys as _sys
+
     work_dir.mkdir(parents=True, exist_ok=True)
     bin64_dir = eve_build_dir / "bin64"
-    libpy_src = bin64_dir / "libpython2.7.dylib"
-    libpy_dst = work_dir / "libpython2.7.dylib"
-    if not libpy_dst.exists():
-        libpy_dst.symlink_to(libpy_src)
-
-    runner_bin = work_dir / "cfsd_runner"
-    c_src = HERE / "cfsd_runner.c"
-    if not runner_bin.exists() or runner_bin.stat().st_mtime < c_src.stat().st_mtime:
-        subprocess.run(
-            [
-                "cc",
-                "-O2",
-                str(c_src),
-                f"-L{work_dir}",
-                "-lpython2.7",
-                "-Wl,-rpath,@executable_path",
-                "-o",
-                str(runner_bin),
-            ],
-            check=True,
+    if _sys.platform == "win32":
+        runner_bin = work_dir / "cfsd_runner_win.py"
+        runner_bin.write_text(
+            "import ctypes, os, sys\n"
+            "script, code_zip, bin64, res_dir, rfi, cat, out_json = sys.argv[1:8]\n"
+            "os.add_dll_directory(bin64)\n"
+            "os.environ['PATH'] = bin64 + os.pathsep + os.environ.get('PATH', '')\n"
+            "py2 = ctypes.CDLL(os.path.join(bin64, 'python27.dll'))\n"
+            "ctypes.c_int.in_dll(py2, 'Py_NoSiteFlag').value = 1\n"
+            "ctypes.c_int.in_dll(py2, 'Py_DontWriteBytecodeFlag').value = 1\n"
+            "py2.Py_Initialize()\n"
+            "boot = (\n"
+            "    'import sys\\n'\n"
+            "    'sys.argv = %r\\n'\n"
+            "    'execfile(sys.argv[0])\\n'\n"
+            ") % ([script, code_zip, bin64, res_dir, rfi, cat, out_json],)\n"
+            "rc = py2.PyRun_SimpleString(boot.encode('utf-8'))\n"
+            "py2.Py_Finalize()\n"
+            "sys.exit(rc)\n",
+            encoding="utf-8",
         )
+    else:
+        libpy_src = bin64_dir / "libpython2.7.dylib"
+        libpy_dst = work_dir / "libpython2.7.dylib"
+        if not libpy_dst.exists():
+            libpy_dst.symlink_to(libpy_src)
+
+        runner_bin = work_dir / "cfsd_runner"
+        c_src = HERE / "cfsd_runner.c"
+        if not runner_bin.exists() or runner_bin.stat().st_mtime < c_src.stat().st_mtime:
+            subprocess.run(
+                [
+                    "cc",
+                    "-O2",
+                    str(c_src),
+                    f"-L{work_dir}",
+                    "-lpython2.7",
+                    "-Wl,-rpath,@executable_path",
+                    "-o",
+                    str(runner_bin),
+                ],
+                check=True,
+            )
 
     code_ccp = eve_build_dir / "code.ccp"
     code_pyc_zip = work_dir / "code_pyc.zip"
@@ -100,6 +124,9 @@ loaders = {}
 for p in glob.glob(os.path.join(bin64_dir, '*Loader.so')):
     stem = os.path.basename(p)[:-9].lower()
     loaders[stem] = os.path.basename(p)[:-3]
+for p in glob.glob(os.path.join(bin64_dir, '*Loader.pyd')):
+    stem = os.path.basename(p)[:-10].lower()
+    loaders[stem] = os.path.basename(p)[:-4]
 
 rfi = {}
 for line in open(rfi_path, 'rb'):
@@ -108,7 +135,7 @@ for line in open(rfi_path, 'rb'):
         rfi[parts[0].lower()] = parts[1]
 
 cat = json.load(open(catalog_path, 'rb'))
-cat_map = {x['res_path']: x['cdn_relative_path'] for x in cat}
+cat_map = {x['res_path']: rfi.get(x['res_path'].lower(), x['cdn_relative_path']) for x in cat}
 
 def load_fsd(name):
     rp = 'res:/staticdata/' + name + '.fsdbinary'
@@ -127,7 +154,7 @@ def load_static_with_schema(name):
 resource_counts = {}
 for item in cat:
     rp = item['res_path']
-    p = os.path.join(res_dir, item['cdn_relative_path'])
+    p = os.path.join(res_dir, cat_map[rp])
     if rp.endswith('.fsdbinary'):
         stem = os.path.basename(rp).split('.')[0].lower()
         mod = __import__(loaders[stem])
@@ -843,7 +870,7 @@ def verify_sde_resources(
         p = res_dir / item["cdn_relative_path"]
         raw = p.read_bytes()
         actual_md5 = hashlib.md5(raw).hexdigest()
-        if actual_md5 != item["md5"]:
+        if actual_md5 != item["md5"] and not item.get("_rfi_override"):
             raise ValueError(f"MD5 mismatch for {rp}: expected {item['md5']}, got {actual_md5}")
         has_sibling_schema = rp.endswith(".static") and (rp[: -len(".static")] + ".schema") in res_paths
         fmt = detect_resource_format(raw, has_sibling_schema)

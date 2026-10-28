@@ -214,20 +214,24 @@ pub fn handle_char_unbound(
                 }));
             }
 
-            // V24 signature: CreateCharacterWithDoll(charactername, bloodlineID, genderID, ancestryID, charInfo, portraitInfo, schoolID)
+            // V24.01 ccSvc.CreateCharacterWithDoll passes 10 args:
+            // (charactername, raceID, bloodlineID, genderID, ancestryID, charInfo, portraitInfo, schoolID, None, qa_starter_system_id)
+            // Also support legacy 7-arg callers without raceID at args[1].
             if args.len() < 7 {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
-                    message: "CreateCharacterWithDoll requires (charactername, bloodlineID, genderID, ancestryID, charInfo, portraitInfo, schoolID)".into(),
+                    message: "CreateCharacterWithDoll requires (charactername, [raceID,] bloodlineID, genderID, ancestryID, charInfo, portraitInfo, schoolID)".into(),
                 }));
             }
-            let Some(bloodline_id) = args.get(1).and_then(|a| a.as_i64()).map(|v| v as u32) else {
+            let has_race_arg = args.len() >= 8 && is_valid_doll_or_portrait_payload(args.get(5).unwrap_or(&PyRep::None));
+            let offset = usize::from(has_race_arg);
+            let Some(bloodline_id) = args.get(1 + offset).and_then(|a| a.as_i64()).map(|v| v as u32) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "CreateCharacterWithDoll requires integer bloodlineID".into(),
                 }));
             };
-            let Some(gid) = args.get(2).and_then(|a| a.as_i64()) else {
+            let Some(gid) = args.get(2 + offset).and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "CreateCharacterWithDoll requires integer genderID (0 or 1)".into(),
@@ -240,19 +244,19 @@ pub fn handle_char_unbound(
                 }));
             }
             let gender_id = gid as u32;
-            let Some(ancestry_id) = args.get(3).and_then(|a| a.as_i64()).map(|v| v as u32) else {
+            let Some(ancestry_id) = args.get(3 + offset).and_then(|a| a.as_i64()).map(|v| v as u32) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "CreateCharacterWithDoll requires integer ancestryID".into(),
                 }));
             };
-            let Some(char_info_rep) = args.get(4) else {
+            let Some(char_info_rep) = args.get(4 + offset) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidDollInfo".into(),
                     message: "Missing charInfo doll appearance argument".into(),
                 }));
             };
-            let Some(portrait_info_rep) = args.get(5) else {
+            let Some(portrait_info_rep) = args.get(5 + offset) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidDollInfo".into(),
                     message: "Missing portraitInfo argument".into(),
@@ -266,7 +270,7 @@ pub fn handle_char_unbound(
                     message: "charInfo and portraitInfo must be non-empty structured appearance descriptors (KeyVal or Dict)".into(),
                 }));
             }
-            let Some(school_id) = args.get(6).and_then(|a| a.as_i64()).map(|v| v as u32) else {
+            let Some(school_id) = args.get(6 + offset).and_then(|a| a.as_i64()).map(|v| v as u32) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "CreateCharacterWithDoll requires integer schoolID".into(),
@@ -331,7 +335,7 @@ pub fn handle_char_unbound(
                 Ok(u) => u,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(char_id) = args.first().and_then(|a| a.as_i64()) else {
+            let Some(char_id) = args.first().and_then(|a| a.as_i64()).or_else(|| _kwargs.get("charID").and_then(|a| a.as_i64())) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "SelectCharacterID requires integer characterID".into(),

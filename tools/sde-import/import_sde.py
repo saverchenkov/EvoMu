@@ -37,7 +37,11 @@ from sde_extractors import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
-DEFAULT_SHARED_CACHE = Path(os.path.expanduser("~/Library/Application Support/EVE Online/SharedCache"))
+DEFAULT_SHARED_CACHE = (
+    Path("C:/Games/EVE")
+    if sys.platform == "win32" and Path("C:/Games/EVE/tq/resfileindex.txt").exists()
+    else Path(os.path.expanduser("~/Library/Application Support/EVE Online/SharedCache"))
+)
 DEFAULT_OUT_DB = REPO_ROOT / "data" / "evomu_sde.sqlite"
 DEFAULT_MANIFEST = REPO_ROOT / "data" / "sde_import_manifest.json"
 STATIC_CATALOG = REPO_ROOT / "docs" / "index" / "staticdata_catalog.json"
@@ -49,7 +53,12 @@ def run_import(
     manifest_path: Path,
     force_extract: bool = False,
 ) -> dict:
-    eve_build_dir = shared_cache / "tq" / "EVE.app" / "Contents" / "Resources" / "build"
+    win_build_dir = shared_cache / "tq"
+    eve_build_dir = (
+        win_build_dir
+        if (win_build_dir / "resfileindex.txt").exists()
+        else shared_cache / "tq" / "EVE.app" / "Contents" / "Resources" / "build"
+    )
     res_dir = shared_cache / "ResFiles"
     rfi_path = eve_build_dir / "resfileindex.txt"
     map_objects_db = eve_build_dir / "bin64" / "staticdata" / "mapObjects.db"
@@ -64,9 +73,10 @@ def run_import(
         py2_script_path = work_dir / "extract_py2.py"
         py2_script_path.write_text(PY2_EXTRACTOR_SCRIPT, encoding="utf-8")
 
+        cmd = [sys.executable, str(runner_bin)] if str(runner_bin).endswith(".py") else [str(runner_bin)]
         subprocess.run(
-            [
-                str(runner_bin),
+            cmd
+            + [
                 str(py2_script_path),
                 str(code_pyc_zip),
                 str(eve_build_dir / "bin64"),
@@ -80,6 +90,16 @@ def run_import(
 
     fsd_data = json.loads(py2_out_json.read_text(encoding="utf-8"))
     catalog = json.loads(STATIC_CATALOG.read_text(encoding="utf-8"))
+    rfi_map = {}
+    for line in rfi_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        parts = line.strip().split(",")
+        if len(parts) >= 2:
+            rfi_map[parts[0].lower()] = parts[1]
+    for x in catalog:
+        rel = x["cdn_relative_path"]
+        if not (res_dir / rel).exists() and x["res_path"].lower() in rfi_map:
+            x["cdn_relative_path"] = rfi_map[x["res_path"].lower()]
+            x["_rfi_override"] = True
     cat_by_path = {x["res_path"]: x for x in catalog}
 
     # Load English localization labels
