@@ -167,12 +167,15 @@ pub async fn is_near_in_space_fitting_service(
         return true;
     };
     for pid in provider_ids {
-        if let Ok(Some((_, p_ball))) = sys_handle.get_ball_snapshot(pid).await {
-            if (ship_ball.position - p_ball.position).length() <= 3_000.0 {
+        let p_pos = if let Ok(Some((_, p_ball))) = sys_handle.get_ball_snapshot(pid).await {
+            Some(p_ball.position)
+        } else {
+            ctx.db.with_snapshot(|snap| snap.item_positions.get(&pid).map(|p| glam::DVec3::from_array(*p)))
+        };
+        if let Some(pos) = p_pos {
+            if (ship_ball.position - pos).length() <= 3_000.0 {
                 return true;
             }
-        } else {
-            return true;
         }
     }
     false
@@ -670,7 +673,7 @@ pub(crate) fn validate_container_and_bay_move(
     Ok(())
 }
 
-async fn validate_single_item_can_be_opened(
+pub async fn validate_single_item_can_be_opened(
     ctx: &ServerContext,
     char_id: i64,
     item_id: i64,
@@ -678,7 +681,7 @@ async fn validate_single_item_can_be_opened(
     if item_id <= 0 {
         return Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Valid itemID required".into() });
     }
-    let (item_type_id, _owner_id, location_id, singleton) = ctx.db.with_snapshot(|snap| {
+    let (item_type_id, owner_id, location_id, singleton) = ctx.db.with_snapshot(|snap| {
         let it = snap.items.get(&item_id).ok_or_else(|| BridgeRpcError {
             code: "ItemNotFound".into(),
             message: format!("Container item {item_id} not found"),
@@ -693,11 +696,20 @@ async fn validate_single_item_can_be_opened(
     }
     let grp = ctx.sde.types.get(&item_type_id).map(|t| t.group_id).unwrap_or(0);
     let cat = ctx.sde.types.get(&item_type_id).map(|t| t.category_id).unwrap_or(0);
-    if !(is_container_group(grp, item_type_id) || grp == 186 || cat == 6 || cat == 2 || item_type_id == 23) {
+    if !(is_container_group(grp, item_type_id) || grp == 186 || cat == 6 || cat == 2 || item_type_id == 23 || grp == 1246 || grp == 1250) {
         return Err(BridgeRpcError {
             code: "NotAContainer".into(),
             message: format!("Item {item_id} (type {item_type_id}) is not a container"),
         });
+    }
+    if (grp == 1246 || grp == 1250) && owner_id != char_id {
+        return Err(BridgeRpcError {
+            code: "OwnershipViolation".into(),
+            message: "Only the owner may access this structure's inventory".into(),
+        });
+    }
+    if grp == 1246 {
+        crate::services::mobile_deployables::touch_mobile_depot_interaction(ctx, item_id);
     }
     crate::services::character_skill_ops::verify_in_space_container_proximity(ctx, char_id, location_id, item_id).await?;
     let st = read_container_ship_state(ctx);

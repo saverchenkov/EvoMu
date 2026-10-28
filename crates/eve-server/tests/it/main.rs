@@ -194,6 +194,7 @@ mod station_entry_inventory;
 mod structures;
 mod structures_lifecycle_complete;
 mod structures_upwell_complete;
+mod mobile_structures_closure;
 mod system;
 mod time_control;
 mod wallet_ledger_complete;

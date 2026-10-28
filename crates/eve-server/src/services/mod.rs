@@ -61,6 +61,7 @@ pub mod market_trading;
 pub mod mining_advanced;
 pub mod mining_cycle;
 pub mod mining_sites;
+pub mod mobile_deployables;
 pub mod operations_manager;
 pub mod operations_manager_helpers;
 pub mod petitioner_ops;

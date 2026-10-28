@@ -218,12 +218,15 @@ pub async fn handle_weapons(
                             is_legal_war_or_suspect_target(snap, char_id, vc, now_unix)
                         }) || v_suspect_or_crim
                             || with_combat_runtime(ctx, |rt| rt.has_limited_engagement_with(vc, char_id, now_unix));
+                        let is_mobile_struct = ctx.db.with_snapshot(|s| {
+                            s.items.get(&tid).is_some_and(|it| crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, it.type_id))
+                        });
                         if !is_legal {
                             let safety = with_combat_runtime(ctx, |rt| {
                                 rt.safety_levels.get(&char_id).copied().unwrap_or(SafetyLevel::Red)
                             });
-                            let would_be_criminal = sys_sec >= 0.45 || (sys_sec > 0.0 && is_pod_target);
-                            let would_be_suspect = sys_sec > 0.0 && sys_sec < 0.45 && !is_pod_target;
+                            let would_be_criminal = !is_mobile_struct && (sys_sec >= 0.45 || (sys_sec > 0.0 && is_pod_target));
+                            let would_be_suspect = (is_mobile_struct && sys_sec > 0.0) || (sys_sec > 0.0 && sys_sec < 0.45 && !is_pod_target);
                             if safety == SafetyLevel::Green && (would_be_criminal || would_be_suspect) {
                                 return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
                             }
@@ -242,14 +245,15 @@ pub async fn handle_weapons(
                         }
                         {
                             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-                            let _ = cw.handle_combat_aggression(char_id, vc, ship_id, sys_id, sys_sec, is_legal, now_unix);
+                            let effective_sec = if is_mobile_struct { sys_sec.min(0.40) } else { sys_sec };
+                            let _ = cw.handle_combat_aggression(char_id, vc, ship_id, sys_id, effective_sec, is_legal, now_unix);
                             if !is_legal && sys_sec > 0.0 && sys_sec < 0.45 && is_pod_target {
                                 let st = cw.get_or_create(char_id);
                                 st.criminal_flag_until_unix = now_unix.saturating_add(900);
                                 st.suspect_flag_until_unix = 0;
                             }
                         }
-                        if !is_legal && sys_sec > 0.0 {
+                        if !is_legal && sys_sec > 0.0 && !is_mobile_struct {
                             let old_sec = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0));
                             let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, is_pod_target, sys_sec);
                             ctx.db.with_mut_snapshot(|s| {
@@ -1149,19 +1153,21 @@ pub async fn handle_weapons(
                     rt.has_limited_engagement_with(victim_char_id, char_id, now_unix)
                 });
                 let is_pod_target = target_ball.type_id == 670;
+                let is_mobile_struct = crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, target_ball.type_id);
                 let (is_anchored_container, is_secure_container, is_unanchored_jetcan) =
                     ctx.db.with_snapshot(|snap| {
                         let anchored = snap
                             .sp6_lifecycle
                             .space_object_meta
                             .get(&resolved_target_id)
-                            .is_some_and(|m| m.anchor_start_unix.is_some());
+                            .is_some_and(|m| m.anchor_start_unix.is_some())
+                            && !is_mobile_struct;
                         let secure = ctx
                             .sde
                             .types
                             .get(&target_ball.type_id)
                             .is_some_and(|t| matches!(t.group_id, 340 | 448));
-                        let jetcan = target_ball.type_id == 23 && !anchored;
+                        let jetcan = (target_ball.type_id == 23 && !anchored) || is_mobile_struct;
                         (anchored, secure, jetcan)
                     });
                 {

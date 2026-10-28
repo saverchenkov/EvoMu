@@ -950,6 +950,13 @@ async fn handle_cmd_unanchor(
         }
     });
 
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(meta) = snap.sp6_lifecycle.space_object_meta.get_mut(&target_id) {
+            meta.anchor_start_unix = None;
+            meta.anchor_completed = false;
+        }
+    });
+
     Ok(PyRep::keyval([
         ("targetID", PyRep::Integer(target_id)),
         ("unanchored", PyRep::Bool(true)),

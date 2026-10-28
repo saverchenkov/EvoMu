@@ -1096,6 +1096,12 @@ pub(crate) async fn ship_scoop_and_store(
                 return Err(err("CannotScoopAnchored", "Cannot scoop an anchored or anchoring object"));
             }
         }
+        if !crate::services::mobile_deployables::can_deployable_be_scooped(it_grp) {
+            return Err(err("CannotScoop", "This mobile deployable cannot be scooped"));
+        }
+        if it_grp == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT && it.owner_id != char_id {
+            return Err(err("OwnershipViolation", "Only the owner may access or scoop this Mobile Depot"));
+        }
         if it_cat == 65 {
             return Err(err("CannotScoopStructure", "Structures cannot be scooped into ship holds"));
         }
@@ -1300,6 +1306,9 @@ pub(crate) async fn ship_scoop_and_store(
         snap.sp6_lifecycle.space_object_meta.remove(&item_id);
         Ok((to_transfer, false))
     })?;
+    if let Ok(Some(cs)) = sys.get_combat_state(item_id).await {
+        crate::services::mobile_deployables::record_scooped_deployable_damage(ctx, item_id, &cs);
+    }
     let _ = sys.remove_ball(item_id).await;
     write_container_ship_state(ctx, |st| {
         st.custom_item_flags.insert(item_id, target_flag_u16);

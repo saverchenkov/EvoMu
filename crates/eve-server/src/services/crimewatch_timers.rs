@@ -1107,8 +1107,9 @@ pub fn evaluate_and_record_pvp_aggression(
         };
         let anchored = snap.sp6_lifecycle.space_object_meta.get(&target_id).is_some_and(|m| m.anchor_start_unix.is_some());
         let it_tid = snap.items.get(&target_id).map(|i| i.type_id).unwrap_or(0);
+        let is_mobile = crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, it_tid);
         let secure = ctx.sde.types.get(&it_tid).is_some_and(|t| matches!(t.group_id, 340 | 448));
-        (vcid, anchored, secure, it_tid == 23 && !anchored)
+        (vcid, anchored && !is_mobile, secure, (it_tid == 23 && !anchored) || is_mobile)
     });
 
     if let Some(vcid) = victim_char_opt.filter(|&v| v != attacker_char_id) {

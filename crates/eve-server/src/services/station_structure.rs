@@ -869,7 +869,7 @@ pub async fn handle(
 
         ("structureDeployment", "Anchor") => Some(structure_lifecycle_rpc::handle_anchor(ctx, session, args).await),
 
-        // parity: feat:modules.mobile-warp-disruptor
+        // parity: feat:modules.mobile-warp-disruptor, feat:structures.mobile-depot, feat:structures.mobile-tractor, feat:structures.mobile-cyno-beacon, feat:structures.mobile-micro-jump-unit, feat:structures.mobile-deploy-restrictions
         ("posMgr", "AnchorStructure") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -1028,6 +1028,18 @@ pub async fn handle(
                 _ => ship_ball.position + DVec3::new(250.0, 0.0, 0.0),
             };
 
+            if let Err(e) = crate::services::mobile_deployables::check_mobile_deployment_restrictions(
+                ctx,
+                session,
+                item_id,
+                item.type_id,
+                item_type.group_id,
+                sys_id,
+                anchor_pos,
+            ) {
+                return Some(Err(e));
+            }
+
             let is_warp_disruptor = item_type.group_id == 361;
             let bubble_radius = if is_warp_disruptor {
                 item_type
@@ -1093,28 +1105,46 @@ pub async fn handle(
                         message: e,
                     }));
                 }
-            } else if let Err(e) = sys_handle
-                .spawn_ball_with_combat(
-                    eve_destiny::Ball {
-                        id: item_id,
-                        type_id: item.type_id,
-                        position: anchor_pos,
-                        velocity: DVec3::ZERO,
-                        max_velocity: 0.0,
-                        inertia: 1.0,
-                        mass: item_type.mass.max(10_000.0),
-                        radius: item_type.radius.max(30.0),
-                        speed_fraction: 0.0,
-                        mode: eve_destiny::MovementMode::Stop,
-                    },
-                    ctx.build_type_combat_state(item.type_id),
-                )
-                .await
-            {
-                return Some(Err(BridgeRpcError {
-                    code: "SystemActorError".into(),
-                    message: e,
-                }));
+            } else {
+                let preserved_damage = crate::services::mobile_deployables::register_mobile_deployable(
+                    ctx,
+                    item_id,
+                    item.type_id,
+                    item_type.group_id,
+                    char_id,
+                    sys_id,
+                    anchoring_delay_s.ceil() as u64,
+                    anchor_pos,
+                );
+                let mut combat_state = ctx.build_type_combat_state(item.type_id);
+                if let Some(dmg) = preserved_damage {
+                    combat_state.shield_hp = dmg.shield_hp;
+                    combat_state.armor_hp = dmg.armor_hp;
+                    combat_state.structure_hp = dmg.structure_hp;
+                }
+                if let Err(e) = sys_handle
+                    .spawn_ball_with_combat(
+                        eve_destiny::Ball {
+                            id: item_id,
+                            type_id: item.type_id,
+                            position: anchor_pos,
+                            velocity: DVec3::ZERO,
+                            max_velocity: 0.0,
+                            inertia: 1.0,
+                            mass: item_type.mass.max(10_000.0),
+                            radius: item_type.radius.max(30.0),
+                            speed_fraction: 0.0,
+                            mode: eve_destiny::MovementMode::Stop,
+                        },
+                        combat_state,
+                    )
+                    .await
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "SystemActorError".into(),
+                        message: e,
+                    }));
+                }
             }
 
             let despawn_unix = if is_secure_container {
@@ -1124,6 +1154,16 @@ pub async fn handle(
                     &ctx.sde,
                     item.type_id,
                 ))
+            } else if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
+                now_unix.saturating_add(crate::services::mobile_deployables::DEPOT_LIFETIME_SECS)
+            } else if matches!(item_type.group_id, crate::services::mobile_deployables::GROUP_MOBILE_TRACTOR | crate::services::mobile_deployables::GROUP_MOBILE_MICRO_JUMP_UNIT) {
+                now_unix.saturating_add(crate::services::mobile_deployables::MTU_LIFETIME_SECS)
+            } else if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_CYNO_BEACON {
+                if item.type_id == crate::services::mobile_deployables::TYPE_COVERT_MOBILE_CYNO_BEACON {
+                    now_unix.saturating_add(crate::services::mobile_deployables::COVERT_CYNO_BEACON_DURATION_SECS)
+                } else {
+                    now_unix.saturating_add(crate::services::mobile_deployables::CYNO_BEACON_DURATION_SECS)
+                }
             } else {
                 0
             };

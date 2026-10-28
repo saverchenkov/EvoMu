@@ -894,13 +894,14 @@ impl SystemRegistry {
                                     .as_ref()
                                     .map(|db| crate::services::insurgency_services::is_stronghold_invulnerable_in_db(db, solar_system_id, ball_id))
                                     .unwrap_or(false);
+                                let now_unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
                                 if is_invuln_stronghold {
                                     if let Some(b) = ballpark.balls.get(&ball_id).cloned() {
                                         let _ = reply.send(Some((0.0, false, b)));
                                     } else {
                                         let _ = reply.send(None);
                                     }
-                                } else if let Some((applied, destroyed, ball_opt)) = ballpark.apply_damage_to_ball(ball_id, damage) {
+                                } else if let Some((applied, destroyed, ball_opt)) = crate::services::mobile_deployables::handle_ball_damage_in_actor(&db_opt, &sde_opt, solar_system_id, ball_id, damage, &mut ballpark, now_unix).or_else(|| ballpark.apply_damage_to_ball(ball_id, damage)) {
                                     if applied > 0.0 || damage.total() > 0.0 {
                                         let entry = rah_incoming_damage.entry(ball_id).or_insert([0.0; 4]);
                                         entry[0] += damage.em;
