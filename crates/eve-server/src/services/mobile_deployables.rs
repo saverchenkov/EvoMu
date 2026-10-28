@@ -76,10 +76,11 @@ pub struct MobileDeployableRecord {
     pub anchor_start_unix: u64,
     pub anchor_duration_secs: u64,
     pub anchor_completed: bool,
+    #[serde(default)]
+    pub is_unanchored: bool,
     pub expires_at_unix: u64,
     pub last_interaction_unix: u64,
     pub reinforced_until_unix: Option<u64>,
-    pub reinforcement_used: bool,
     pub position: [f64; 3],
 }
 
@@ -91,7 +92,6 @@ pub struct PersistedDamageRecord {
     pub max_armor_hp: f64,
     pub structure_hp: f64,
     pub max_structure_hp: f64,
-    pub reinforcement_used: bool,
 }
 
 pub fn read_deployable_state_snap(snap: &eve_db::WorldStateSnapshot) -> MobileDeployableRuntimeState {
@@ -151,13 +151,24 @@ pub fn write_deployable_state<R>(
 /// Mobile Warp Disruptors (group 361) and anchorable containers are NOT mobile structures.
 pub fn is_mobile_structure(sde: &SdeRegistry, type_id: u32) -> bool {
     sde.types.get(&type_id).is_some_and(|t| {
+        let cat = t.category_id;
+        let grp = t.group_id;
         matches!(
-            t.group_id,
+            grp,
             GROUP_MOBILE_DEPOT
+                | 1247
+                | 1249
                 | GROUP_MOBILE_TRACTOR
+                | 1274
+                | 1275
                 | GROUP_MOBILE_MICRO_JUMP_UNIT
+                | 1297
+                | 1312
                 | GROUP_MOBILE_CYNO_BEACON
-        )
+                | 4107
+                | 4137
+                | 4913
+        ) || (cat == CATEGORY_DEPLOYABLE && !matches!(grp, 361 | 1149 | 4477 | 4499 | 4810))
     })
 }
 
@@ -343,10 +354,10 @@ pub fn register_mobile_deployable(
             anchor_start_unix: now_unix,
             anchor_duration_secs,
             anchor_completed: false,
+            is_unanchored: false,
             expires_at_unix: now_unix.saturating_add(lifetime_secs),
             last_interaction_unix: now_unix,
             reinforced_until_unix: None,
-            reinforcement_used: damaged.as_ref().map(|d| d.reinforcement_used).unwrap_or(false),
             position: [position.x, position.y, position.z],
         };
         st.deployables.insert(item_id, record);
@@ -374,7 +385,6 @@ pub fn record_scooped_deployable_damage(
     combat: &eve_destiny::CombatState,
 ) {
     write_deployable_state(ctx, |st| {
-        let reinf_used = st.deployables.get(&item_id).map(|r| r.reinforcement_used).unwrap_or(false);
         st.deployables.remove(&item_id);
         st.damaged_items.insert(
             item_id,
@@ -385,7 +395,6 @@ pub fn record_scooped_deployable_damage(
                 max_armor_hp: combat.max_armor_hp,
                 structure_hp: combat.structure_hp,
                 max_structure_hp: combat.max_structure_hp,
-                reinforcement_used: reinf_used,
             },
         );
     });
@@ -439,7 +448,22 @@ pub fn step_mobile_deployables_in_actor(
         });
     }
 
-    // 2. MTU tractoring and looting
+    // 2. Clear expired reinforcement timers
+    db.with_mut_snapshot(|snap| {
+        write_deployable_state_snap(snap, |st| {
+            for rec in st.deployables.values_mut() {
+                if rec.solar_system_id == solar_system_id {
+                    if let Some(reinf_until) = rec.reinforced_until_unix {
+                        if now_unix >= reinf_until {
+                            rec.reinforced_until_unix = None;
+                        }
+                    }
+                }
+            }
+        });
+    });
+
+    // 3. MTU tractoring and looting
     let active_mtus: Vec<MobileDeployableRecord> = db.with_snapshot(|snap| {
         let st = read_deployable_state_snap(snap);
         st.deployables
@@ -447,8 +471,9 @@ pub fn step_mobile_deployables_in_actor(
             .filter(|r| {
                 r.solar_system_id == solar_system_id
                     && r.group_id == GROUP_MOBILE_TRACTOR
+                    && !r.is_unanchored
                     && snap.items.contains_key(&r.item_id)
-                    && (r.anchor_completed || now_unix >= r.anchor_start_unix.saturating_add(r.anchor_duration_secs))
+                    && (r.anchor_completed || (r.anchor_start_unix > 0 && now_unix >= r.anchor_start_unix.saturating_add(r.anchor_duration_secs)))
             })
             .cloned()
             .collect()
@@ -508,7 +533,7 @@ pub fn step_mobile_deployables_in_actor(
                 .values()
                 .filter(|c| c.location_id == mtu.item_id && c.quantity > 0)
                 .map(|c| {
-                    let u_vol = sde.types.get(&c.type_id).map(|t| t.volume).unwrap_or(0.1);
+                    let u_vol = crate::services::inventory_fitting::fitting_containers_ships::effective_item_unit_volume(sde, c);
                     u_vol * (c.quantity.max(1) as f64)
                 })
                 .sum()
@@ -546,7 +571,7 @@ pub fn step_mobile_deployables_in_actor(
                         // Targets sitting in loot range that cannot fit in MTU capacity are processed (MD-P1-1)
                         if dist <= loot_radius {
                             let can_loot_any = items_in_target.iter().any(|c| {
-                                let u_vol = sde.types.get(&c.type_id).map(|t| t.volume).unwrap_or(0.1);
+                                let u_vol = crate::services::inventory_fitting::fitting_containers_ships::effective_item_unit_volume(sde, c);
                                 current_mtu_vol + u_vol * (c.quantity.max(1) as f64) <= mtu_capacity
                             });
                             if !can_loot_any {
@@ -580,7 +605,7 @@ pub fn step_mobile_deployables_in_actor(
                     .values()
                     .filter(|c| c.location_id == mtu.item_id && c.quantity > 0)
                     .map(|c| {
-                        let u_vol = sde.types.get(&c.type_id).map(|t| t.volume).unwrap_or(0.1);
+                        let u_vol = crate::services::inventory_fitting::fitting_containers_ships::effective_item_unit_volume(sde, c);
                         u_vol * (c.quantity.max(1) as f64)
                     })
                     .sum();
@@ -594,7 +619,7 @@ pub fn step_mobile_deployables_in_actor(
 
                 for cid in child_ids {
                     let Some(child) = snap.items.get(&cid).cloned() else { continue; };
-                    let u_vol = sde.types.get(&child.type_id).map(|t| t.volume).unwrap_or(0.1);
+                    let u_vol = crate::services::inventory_fitting::fitting_containers_ships::effective_item_unit_volume(sde, &child);
                     let total_vol = u_vol * (child.quantity.max(1) as f64);
                     if current_vol + total_vol <= mtu_capacity {
                         if let Some(child_mut) = snap.items.get_mut(&cid) {
@@ -659,9 +684,11 @@ pub fn handle_ball_damage_in_actor(
                 }
             }
 
-            // Anchoring phase: never reinforces!
-            let is_anchoring = !rec.anchor_completed && now_unix < rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs);
-            if is_anchoring {
+            // Anchoring phase or unanchored: takes direct damage, never reinforces!
+            let is_anchored = !rec.is_unanchored
+                && (rec.anchor_completed
+                    || (rec.anchor_start_unix > 0 && now_unix >= rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs)));
+            if !is_anchored {
                 let (applied, destroyed) = cs.apply_damage(damage);
                 if destroyed {
                     ballpark.balls.remove(&ball_id);
@@ -671,7 +698,7 @@ pub fn handle_ball_damage_in_actor(
 
             // Reinforcement threshold at <= 25% shield HP
             let shield_threshold = cs.max_shield_hp * DEPOT_REINFORCE_SHIELD_THRESHOLD;
-            if !rec.reinforcement_used && cs.shield_hp > shield_threshold {
+            if cs.shield_hp > shield_threshold {
                 let damage_to_threshold = cs.shield_hp - shield_threshold;
                 let incoming_total = damage.total();
                 if incoming_total >= damage_to_threshold {
@@ -681,7 +708,6 @@ pub fn handle_ball_damage_in_actor(
                         write_deployable_state_snap(snap, |st| {
                             if let Some(r) = st.deployables.get_mut(&ball_id) {
                                 r.reinforced_until_unix = Some(reinf_until);
-                                r.reinforcement_used = true;
                             }
                         });
                     });

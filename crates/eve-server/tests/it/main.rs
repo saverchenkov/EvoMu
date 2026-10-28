@@ -196,6 +196,7 @@ mod structures_lifecycle_complete;
 mod structures_upwell_complete;
 mod mobile_structures_closure;
 mod mobile_structures_closure_part2;
+mod mobile_structures_closure_part3;
 mod system;
 mod time_control;
 mod wallet_ledger_complete;

@@ -958,6 +958,8 @@ async fn handle_cmd_unanchor(
         crate::services::mobile_deployables::write_deployable_state_snap(snap, |st| {
             if let Some(r) = st.deployables.get_mut(&target_id) {
                 r.anchor_completed = false;
+                r.anchor_start_unix = 0;
+                r.is_unanchored = true;
             }
         });
     });

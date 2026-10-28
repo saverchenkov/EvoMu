@@ -194,7 +194,6 @@ async fn test_mobile_depot_anchoring_refit_storage_reinforce() {
     let rec_reinf = read_deployable_state(&ctx).deployables.get(&depot_item_id).cloned().expect("rec");
     let expected_reinf_until = now_before_hit.saturating_add(DEPOT_REINFORCE_DURATION_SECS);
     assert_eq!(rec_reinf.reinforced_until_unix, Some(expected_reinf_until), "Reinforce duration must be exactly 48 hours (172,800s)");
-    assert!(rec_reinf.reinforcement_used);
 
     // 6. Invulnerability while reinforced
     let follow_up_damage = DamageVector { em: 500.0, thermal: 500.0, kinetic: 500.0, explosive: 500.0 };
@@ -237,9 +236,24 @@ async fn test_mobile_depot_anchoring_refit_storage_reinforce() {
     let non_owner_scoop = ctx.dispatch_rpc(&mut _sess2, "ship", None, "Scoop", &[PyRep::Integer(depot_2_id)], &kw, None).await.unwrap_err();
     assert_eq!(non_owner_scoop.code, "OwnershipViolation", "Non-owner scoop must fail with OwnershipViolation");
 
+    // Loaded depot scoop negative test (MD-R2): cannot scoop non-empty container
+    let inside_item_id = 800_005i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(inside_item_id, InventoryItemRecord {
+            item_id: inside_item_id, type_id: 34, owner_id: PILOT_1,
+            location_id: depot_2_id, flag: InventoryFlag::Cargo, quantity: 10, singleton: false, ..Default::default()
+        });
+    });
+    let loaded_scoop = ctx.dispatch_rpc(&mut sess1, "ship", None, "Scoop", &[PyRep::Integer(depot_2_id)], &kw, None).await.unwrap_err();
+    assert_eq!(loaded_scoop.code, "CannotPutContainerInContainer", "Scooping loaded deployable must fail");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&inside_item_id).map(|i| i.location_id)), Some(depot_2_id));
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&depot_2_id).map(|i| i.location_id)), Some(TEST_SYSTEM as i64));
+    ctx.db.with_mut_snapshot(|snap| { snap.items.remove(&inside_item_id); });
+
     // Scoop depot 2 via real ship.Scoop RPC
     ctx.dispatch_rpc(&mut sess1, "ship", None, "Scoop", &[PyRep::Integer(depot_2_id)], &kw, None).await.expect("Scoop depot 2");
     assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&depot_2_id).map(|i| i.location_id)), Some(SHIP_1));
+    assert!(ctx.db.with_snapshot(|s| s.items.get(&depot_2_id).is_some_and(|i| i.singleton)), "Scooped deployable must retain singleton=true");
 
     // Redeploy depot 2
     let _redeploy_pos = ship_pos + DVec3::new(100.0, 0.0, 0.0);
@@ -261,9 +275,14 @@ async fn test_mobile_depot_anchoring_refit_storage_reinforce() {
     ctx.advance_secs(DEPOT_ANCHOR_TIME_SECS + 1);
     sys.step_manual(1.0).await.unwrap();
 
+    // Attack while shields <= 25% asserting destruction instead of reinforcement (MD-R3)
+    let mut cs_depleted = sys.get_combat_state(depot_2_id).await.unwrap().unwrap();
+    cs_depleted.shield_hp = cs_depleted.max_shield_hp * 0.20;
+    sys.set_combat_state(depot_2_id, cs_depleted).await.unwrap();
+
     let fatal_dmg = DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 };
     let (_, destroyed_after_redeploy, _) = sys.apply_damage(depot_2_id, fatal_dmg).await.unwrap().expect("hit");
-    assert!(destroyed_after_redeploy, "Depot attacked again after reinforcement consumed must be destroyed");
+    assert!(destroyed_after_redeploy, "Depot attacked while shields <= 25% must be destroyed without reinforcement");
 }
 
 /// Tests Mobile Depot 30-day lifetime enforcement, interaction refresh, and live expiry sweep (`feat:structures.mobile-depot-lifetime-reinforce`).

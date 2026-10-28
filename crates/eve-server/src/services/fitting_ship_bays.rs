@@ -1076,7 +1076,8 @@ pub(crate) async fn ship_scoop_and_store(
         if it.type_id == 23 {
             return Err(err("CannotPutContainerInContainer", "Cargo Containers cannot be scooped"));
         }
-        if it_cat == 2 && it_grp == 12 && snap.items.values().any(|child| child.location_id == item_id && child.quantity > 0) {
+        let is_deployable = crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, it.type_id);
+        if (it_cat == 2 && it_grp == 12 || is_deployable) && snap.items.values().any(|child| child.location_id == item_id && child.quantity > 0) {
             return Err(err("CannotPutContainerInContainer", "Cannot scoop non-empty container"));
         }
         if it.location_id != sys_id as i64 {
@@ -1297,7 +1298,7 @@ pub(crate) async fn ship_scoop_and_store(
         let it_mut = snap.items.get_mut(&item_id).unwrap();
         it_mut.location_id = host_ship_id;
         it_mut.flag = target_flag;
-        it_mut.singleton = it_cat == 6;
+        it_mut.singleton = it_cat == 6 || is_deployable;
         it_mut.version += 1;
         if to_transfer {
             it_mut.owner_id = char_id;

@@ -187,11 +187,14 @@ pub async fn handle_weapons(
                 let victim_char_opt = ctx.db.with_snapshot(|snap| {
                     if snap.characters.contains_key(&tid) {
                         Some(tid)
+                    } else if let Some(ch) = snap.characters.values().find(|c| c.active_ship_id == tid) {
+                        Some(ch.character_id)
+                    } else if let Some(it) = snap.items.get(&tid) {
+                        snap.characters.get(&it.owner_id).map(|c| c.character_id).or_else(|| {
+                            snap.corporations.get(&it.owner_id).and_then(|corp| snap.characters.get(&corp.ceo_id)).map(|c| c.character_id)
+                        })
                     } else {
-                        snap.characters
-                            .values()
-                            .find(|c| c.active_ship_id == tid)
-                            .map(|c| c.character_id)
+                        None
                     }
                 });
                 if let Some(vc) = victim_char_opt {
@@ -1190,6 +1193,7 @@ pub async fn handle_weapons(
                     cw.get_or_create(victim_char_id).pvp_timer_until_unix =
                         now_unix.saturating_add(900);
                     if !is_legal
+                        && !is_mobile_struct
                         && ((sys_sec > 0.0 && sys_sec < 0.45 && is_pod_target)
                             || is_anchored_container
                             || (is_secure_container && sys_sec >= 0.45))
@@ -1227,7 +1231,7 @@ pub async fn handle_weapons(
                     ctx.notify(NotificationTarget::Character(char_id), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(victim_char_id), PyRep::Integer(timeout_ft)]);
                     ctx.notify(NotificationTarget::Character(victim_char_id), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(char_id), PyRep::Integer(timeout_ft)]);
                 }
-                if !is_legal && sys_sec > 0.0 {
+                if !is_legal && sys_sec > 0.0 && !is_mobile_struct {
                     let old_sec = ctx.db.with_snapshot(|snap| {
                         snap.characters
                             .get(&char_id)

@@ -219,7 +219,14 @@ pub fn populate_persisted_space_objects(
                         continue;
                     }
                 }
-            } else if sde.types.get(&item.type_id).is_some_and(|t| t.effect_ids.contains(&649) && t.capacity > 0.0) {
+            } else if let Some(rec) = deployable_state.deployables.get(&item.item_id) {
+                if now_unix >= rec.expires_at_unix {
+                    expired_item_ids.push(item.item_id);
+                    continue;
+                }
+            } else if sde.types.get(&item.type_id).is_some_and(|t| t.effect_ids.contains(&649) && t.capacity > 0.0)
+                && !crate::services::mobile_deployables::is_mobile_structure(sde, item.type_id)
+            {
                 if let Some(anchor_start) =
                     obj_meta.and_then(|m| m.anchor_start_unix.or(m.created_unix))
                 {
@@ -227,11 +234,6 @@ pub fn populate_persisted_space_objects(
                         expired_item_ids.push(item.item_id);
                         continue;
                     }
-                }
-            } else if let Some(rec) = deployable_state.deployables.get(&item.item_id) {
-                if now_unix >= rec.expires_at_unix {
-                    expired_item_ids.push(item.item_id);
-                    continue;
                 }
             }
 
@@ -985,6 +987,7 @@ pub fn on_advance_secs(ctx: &ServerContext, _prev_unix: u64, secs: u64) {
     with_mut_sp6_state(&ctx.db, |st, snap| {
         let mut expired_ids: Vec<(i64, u32, bool)> = Vec::new();
         let mut newly_anchored_ids: Vec<i64> = Vec::new();
+        let deployable_state = crate::services::mobile_deployables::read_deployable_state_snap(snap);
 
         for item in snap.items.values() {
             if !(30_000_000..=34_000_000).contains(&item.location_id) {
@@ -1041,8 +1044,19 @@ pub fn on_advance_secs(ctx: &ServerContext, _prev_unix: u64, secs: u64) {
                         }
                     }
                 }
-            } else if matches!(group_id, 12 | 340 | 448)
-                || ctx.sde.types.get(&item.type_id).is_some_and(|t| t.effect_ids.contains(&649) && t.capacity > 0.0)
+            } else if let Some(rec) = deployable_state.deployables.get(&item.item_id) {
+                if now_unix >= rec.expires_at_unix {
+                    expired_ids.push((item.item_id, sys_id, false));
+                } else {
+                    let delay_s = obj_meta.map(|m| m.anchoring_delay_secs).unwrap_or(0.0);
+                    let already_done = obj_meta.is_some_and(|m| m.anchor_completed);
+                    if !already_done && !rec.is_unanchored && now_unix >= rec.anchor_start_unix.saturating_add(delay_s.ceil() as u64) {
+                        newly_anchored_ids.push(item.item_id);
+                    }
+                }
+            } else if (matches!(group_id, 12 | 340 | 448)
+                || ctx.sde.types.get(&item.type_id).is_some_and(|t| t.effect_ids.contains(&649) && t.capacity > 0.0))
+                && !crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, item.type_id)
             {
                 if let Some(start_u) = obj_meta.and_then(|m| m.anchor_start_unix) {
                     if now_unix >= start_u.saturating_add(super::SECURE_CONTAINER_DECAY_SECS) {
@@ -1069,14 +1083,19 @@ pub fn on_advance_secs(ctx: &ServerContext, _prev_unix: u64, secs: u64) {
                 .anchor_completed = true;
         }
 
-        for (iid, sys_id, is_bubble) in expired_ids {
-            snap.items.remove(&iid);
-            snap.item_positions.remove(&iid);
-            st.space_object_meta.remove(&iid);
-            st.ship_combat_hp.remove(&iid);
-            snap.items.retain(|_, child| child.location_id != iid);
-            balls_to_remove.push((sys_id, iid, is_bubble));
+        for (iid, sys_id, is_bubble) in &expired_ids {
+            snap.items.remove(iid);
+            snap.item_positions.remove(iid);
+            st.space_object_meta.remove(iid);
+            st.ship_combat_hp.remove(iid);
+            snap.items.retain(|_, child| child.location_id != *iid);
+            balls_to_remove.push((*sys_id, *iid, *is_bubble));
         }
+        crate::services::mobile_deployables::write_deployable_state_snap(snap, |dst| {
+            for (iid, _, _) in &expired_ids {
+                dst.deployables.remove(iid);
+            }
+        });
     });
 
     if !balls_to_remove.is_empty() {

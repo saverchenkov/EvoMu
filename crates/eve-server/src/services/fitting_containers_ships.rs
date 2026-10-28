@@ -460,7 +460,6 @@ pub(crate) fn validate_container_and_bay_move(
             if src_cont_owner != char_id {
                 return Err(BridgeRpcError { code: "OwnershipViolation".into(), message: "Only the owner may take items from this Mobile Depot".into() });
             }
-            crate::services::mobile_deployables::touch_mobile_depot_interaction(ctx, src_loc);
         }
         let mut st = read_container_ship_state(ctx);
         if let Some(req_pw) = st.container_passwords.get(&src_loc).cloned() {
@@ -478,6 +477,9 @@ pub(crate) fn validate_container_and_bay_move(
                 st.unlocked_containers.insert((src_loc, char_id));
                 save_container_ship_state(ctx, &st);
             }
+        }
+        if src_grp == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
+            crate::services::mobile_deployables::touch_mobile_depot_interaction(ctx, src_loc);
         }
         if cont_corp > 0 && cont_corp == char_corp {
             let (is_ceo, roles) = crate::services::inventory_bound::get_effective_corp_roles_at_location(
@@ -679,9 +681,6 @@ pub(crate) fn validate_container_and_bay_move(
     }
 
     if let Some((grp, _, _)) = snap_check {
-        if grp == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
-            crate::services::mobile_deployables::touch_mobile_depot_interaction(ctx, new_loc);
-        }
         let mut st = read_container_ship_state(ctx);
         if let Some(req_pw) = st.container_passwords.get(&new_loc).cloned() {
             if !req_pw.is_empty() && !st.unlocked_containers.contains(&(new_loc, char_id)) {
@@ -695,6 +694,9 @@ pub(crate) fn validate_container_and_bay_move(
                 st.unlocked_containers.insert((new_loc, char_id));
                 save_container_ship_state(ctx, &st);
             }
+        }
+        if grp == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
+            crate::services::mobile_deployables::touch_mobile_depot_interaction(ctx, new_loc);
         }
     }
 

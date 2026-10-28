@@ -942,7 +942,7 @@ pub async fn handle(
                     return true;
                 }
                 let st = crate::services::mobile_deployables::read_deployable_state_snap(snap);
-                st.deployables.contains_key(&item_id)
+                st.deployables.get(&item_id).is_some_and(|r| !r.is_unanchored)
             });
             if already_anchored {
                 return Some(Err(BridgeRpcError {
@@ -1106,7 +1106,7 @@ pub async fn handle(
                     .insert(item_id, [anchor_pos.x, anchor_pos.y, anchor_pos.z]);
             });
 
-            let is_secure_container = item_type.capacity > 0.0 && !is_warp_disruptor;
+            let is_secure_container = item_type.capacity > 0.0 && !is_warp_disruptor && !is_mobile;
             if is_secure_container {
                 crate::services::combat_crimewatch::register_container_lifetime(
                     ctx,
