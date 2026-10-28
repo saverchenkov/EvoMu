@@ -154,6 +154,7 @@ async fn test_war_targets_mutual_allies_and_retraction_crimewatch() {
         snap.module_online_states.insert(gun_id, true);
     });
     dispatch_combat_rpc(&ctx, &mut aggr_sess, "crimewatch", "SetSafetyLevel", &[PyRep::Integer(2)], &kw).await.unwrap();
+    let _ = ctx.systems.get_or_spawn(sys_id).add_target_lock(aggr_ship, eve_destiny::TargetLock { target_id: def_ship, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: Some(50_000.0) }).await;
 
     let now = ctx.now_unix_secs();
     // 1. Non-mutual war declared at `now` (within 24h spool-up): not yet legal in high-sec; weapon activation on Safety Green is rejected.

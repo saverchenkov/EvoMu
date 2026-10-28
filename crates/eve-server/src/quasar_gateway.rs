@@ -926,11 +926,12 @@ impl PublicGatewayRouter {
             Some(session_uid),
             session_cid,
             session.corporation_id.map(|c| c as u32),
-            session.corp_role | (session.role & eve_machonet::service_roles::ROLE_GM_MASK),
+            session.corp_role,
             self.tenant.clone(),
             self.gateway_instance_uuid.clone(),
             now_unix,
-        );
+        )
+        .with_service_roles(session.role);
 
         let handler_opt = self
             .handlers
@@ -1051,15 +1052,18 @@ impl PublicGatewayRouter {
         if event.occurred.is_none() {
             event.occurred = Some(GoogleTimestamp { seconds: now_unix as i64, nanos: 0 });
         }
-        event.authoritative_context = Some(AuthoritativeContext::for_session_at(
-            session.user_id.map(|u| u as i32),
-            session.character_id.map(|c| c as u32),
-            session.corporation_id.map(|c| c as u32),
-            session.corp_role,
-            self.tenant.clone(),
-            self.gateway_instance_uuid.clone(),
-            now_unix,
-        ));
+        event.authoritative_context = Some(
+            AuthoritativeContext::for_session_at(
+                session.user_id.map(|u| u as i32),
+                session.character_id.map(|c| c as u32),
+                session.corporation_id.map(|c| c as u32),
+                session.corp_role,
+                self.tenant.clone(),
+                self.gateway_instance_uuid.clone(),
+                now_unix,
+            )
+            .with_service_roles(session.role),
+        );
         if let Some(ref payload) = event.payload {
             crate::services::quasar_progression_extra::handle_opportunity_event(
                 &self.progression,
@@ -1119,8 +1123,7 @@ pub fn notice_to_pyrep(notice: &EvePublicNotice) -> PyRep {
 }
 
 pub fn require_admin_role(ctx: &AuthoritativeContext) -> Result<(), (u32, String)> {
-    let mask = ctx.identity.as_ref().and_then(|id| id.roles.as_ref()).map_or(0, |r| r.bitmask);
-    if (mask & eve_machonet::service_roles::ROLE_GM_MASK) == 0 {
+    if (ctx.service_role_mask & eve_machonet::service_roles::ROLE_GM_MASK) == 0 {
         return Err((STATUS_FORBIDDEN, "Admin/GM role required".into()));
     }
     Ok(())

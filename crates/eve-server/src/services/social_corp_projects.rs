@@ -26,6 +26,53 @@ pub const SERVER_TRACKED_MATCHERS: &[&str] = &[
     "EarnLoyaltyPoints",
 ];
 
+/// Delayed 24h division access/take role bits: hangar divisions (`13..=26`) + `ROLE_ACCOUNT_CAN_TAKE` (`27..=33`).
+pub(crate) const HANGAR_DIV_MASK: u64 = ((1u64 << 21) - 1) << 13;
+
+/// Computes `(is_ceo, effective_roles)` for `char_id` in `corp_id` from DB corporation state
+/// (`corp.member_roles`, `corp_role_assignments`, and 1-based title bitmasks `1 << (tid - 1)`),
+/// masking unmatured 24h `pending_role_grants` on `HANGAR_DIV_MASK` (`ROLE_ACCOUNT_CAN_TAKE` / hangar take).
+pub(crate) fn effective_corp_member_roles(
+    snap: &eve_db::WorldStateSnapshot,
+    corp_id: i64,
+    char_id: i64,
+    session_roles: u64,
+    now_unix: u64,
+) -> (bool, u64) {
+    let Some(corp) = snap.corporations.get(&corp_id) else {
+        return (false, session_roles);
+    };
+    let is_ceo = corp.ceo_id == char_id;
+    let mut roles = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+    if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
+        roles |= ra.roles;
+    }
+    if let Some(gov) = snap.corp_governance.get(&corp_id) {
+        let already_matured_div = roles & HANGAR_DIV_MASK;
+        let mut has_unmatured_grant = false;
+        if let Some(&(p_mask, matured_at)) = gov.pending_role_grants.get(&char_id) {
+            if now_unix >= matured_at {
+                roles |= p_mask;
+            } else {
+                has_unmatured_grant = true;
+                roles &= !HANGAR_DIV_MASK | already_matured_div;
+            }
+        }
+        if let Some(&tmask) = gov.member_titles.get(&char_id) {
+            for (&tid, &(_, troles)) in &gov.titles {
+                if (1..=64).contains(&tid) && (tmask & (1u64 << (tid - 1))) != 0 {
+                    roles |= if has_unmatured_grant {
+                        troles & (!HANGAR_DIV_MASK | already_matured_div)
+                    } else {
+                        troles
+                    };
+                }
+            }
+        }
+    }
+    (is_ceo, roles)
+}
+
 pub fn sweep_expired_corp_projects_in_snap(
     snap: &mut eve_db::WorldStateSnapshot,
     now_unix: u64,
@@ -331,13 +378,7 @@ pub(super) fn handle_corp_projects_rpc(
     }
     match method {
         "CreateGoalSubmit" => handle_create_project(ctx, session, args),
-        m if m.eq_ignore_ascii_case("createproject") || m.eq_ignore_ascii_case("createcorpproject") => {
-            handle_create_project(ctx, session, args)
-        }
         "GoalProgress" | "CompleteCorpProject" | "CompleteGoal" => {
-            handle_contribute_project(ctx, session, method, args)
-        }
-        m if m.eq_ignore_ascii_case("contributetoproject") => {
             handle_contribute_project(ctx, session, method, args)
         }
         "EditCorpProject" | "UpdateGoal" | "UpdateCorpProject" => {
@@ -502,22 +543,23 @@ pub(super) fn handle_corp_projects_rpc(
                                 .into(),
                     });
                 }
-                if let Some(corp) = snap.corporations.get(&corp_id) {
-                    let caller_roles = corp
-                        .member_roles
-                        .get(&char_id)
-                        .copied()
-                        .unwrap_or(session.corp_role);
-                    if corp.ceo_id != char_id
-                        && !corp_roles::has_role(caller_roles, corp_roles::ROLE_DIRECTOR)
-                        && !corp_roles::has_role(caller_roles, corp_roles::ROLE_ACCOUNTANT)
-                        && !corp_roles::has_role(caller_roles, corp_roles::ROLE_PROJECT_MANAGER)
-                    {
-                        return Err(BridgeRpcError {
-                            code: "CorpRoleDenied".into(),
-                            message: "Closing or deleting corporation projects requires Project Manager, Accountant, or Director role".into(),
-                        });
-                    }
+                let is_gm = session.has_gm_role();
+                let (is_ceo, caller_roles) = effective_corp_member_roles(
+                    snap,
+                    corp_id,
+                    char_id,
+                    session.corp_role,
+                    ctx.now_unix(),
+                );
+                if !is_ceo
+                    && !is_gm
+                    && !corp_roles::has_role(caller_roles, corp_roles::ROLE_DIRECTOR)
+                    && !corp_roles::has_role(caller_roles, corp_roles::ROLE_PROJECT_MANAGER)
+                {
+                    return Err(BridgeRpcError {
+                        code: "CorpRoleDenied".into(),
+                        message: "Closing or deleting corporation projects requires Project Manager or Director role".into(),
+                    });
                 }
                 let div_id = snap
                     .alliance_war_state
@@ -619,7 +661,7 @@ pub(super) fn handle_corp_projects_rpc(
     }
 }
 
-fn handle_edit_project(
+pub fn handle_edit_project(
     ctx: &ServerContext,
     session: &mut SessionState,
     args: &[PyRep],
@@ -646,21 +688,19 @@ fn handle_edit_project(
                 message: "Cannot edit a project belonging to another corporation".into(),
             });
         }
-        if let Some(corp) = snap.corporations.get(&corp_id) {
-            let caller_roles = corp
-                .member_roles
-                .get(&char_id)
-                .copied()
-                .unwrap_or(session.corp_role);
-            if corp.ceo_id != char_id
-                && !corp_roles::has_role(caller_roles, corp_roles::ROLE_DIRECTOR)
-                && !corp_roles::has_role(caller_roles, corp_roles::ROLE_PROJECT_MANAGER)
-            {
-                return Err(BridgeRpcError {
-                    code: "CorpRoleDenied".into(),
-                    message: "Editing corporation projects requires Project Manager or Director role".into(),
-                });
-            }
+        let is_gm = session.has_gm_role();
+        let (is_ceo, caller_roles) =
+            effective_corp_member_roles(snap, corp_id, char_id, session.corp_role, ctx.now_unix());
+        if snap.corporations.contains_key(&corp_id)
+            && !is_ceo
+            && !is_gm
+            && !corp_roles::has_role(caller_roles, corp_roles::ROLE_DIRECTOR)
+            && !corp_roles::has_role(caller_roles, corp_roles::ROLE_PROJECT_MANAGER)
+        {
+            return Err(BridgeRpcError {
+                code: "CorpRoleDenied".into(),
+                message: "Editing corporation projects requires Project Manager or Director role".into(),
+            });
         }
         if let Some(new_name) = &new_name_opt {
             if let Some(p) = snap.corp_projects.get_mut(&pid) {
@@ -774,26 +814,21 @@ fn handle_create_project(
                 });
             }
         }
+        let is_gm = session.has_gm_role();
+        let (is_ceo, caller_roles) =
+            effective_corp_member_roles(snap, corp_id, char_id, session.corp_role, ctx.now_unix());
         if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-            if !corp.member_roles.is_empty() {
-                let caller_roles = corp
-                    .member_roles
-                    .get(&char_id)
-                    .copied()
-                    .unwrap_or(session.corp_role);
-                let take_bit = 1u64 << (20 + (wallet_div.clamp(1, 7) - 1));
-                let has_explicit_div_roles = (caller_roles & (0x7Fu64 << 20)) != 0 || wallet_div > 1;
-                if corp.ceo_id != char_id
-                    && !corp_roles::has_role(caller_roles, corp_roles::ROLE_DIRECTOR)
-                    && !corp_roles::has_role(caller_roles, corp_roles::ROLE_ACCOUNTANT)
-                    && (!corp_roles::has_role(caller_roles, corp_roles::ROLE_PROJECT_MANAGER)
-                        || (escrow.raw_cents() > 0 && has_explicit_div_roles && !corp_roles::has_role(caller_roles, take_bit)))
-                {
-                    return Err(BridgeRpcError {
-                        code: "CorpRoleDenied".into(),
-                        message: "Creating corporation projects with escrow requires Project Manager + wallet division take access, Accountant, or Director role".into(),
-                    });
-                }
+            let take_bit = corp_roles::ROLE_ACCOUNT_CAN_TAKE[(wallet_div.clamp(1, 7) - 1) as usize];
+            if !is_ceo
+                && !is_gm
+                && !corp_roles::has_role(caller_roles, corp_roles::ROLE_DIRECTOR)
+                && (!corp_roles::has_role(caller_roles, corp_roles::ROLE_PROJECT_MANAGER)
+                    || (escrow.raw_cents() > 0 && !corp_roles::has_role(caller_roles, take_bit)))
+            {
+                return Err(BridgeRpcError {
+                    code: "CorpRoleDenied".into(),
+                    message: "Creating corporation projects with escrow requires Project Manager + wallet division take access, or Director role".into(),
+                });
             }
             corp.ensure_wallet_divisions();
             let div = corp

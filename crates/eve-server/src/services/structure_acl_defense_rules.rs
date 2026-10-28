@@ -49,50 +49,81 @@ pub fn is_acl_manager_or_admin(char_id: i64, grp: &ops::AccessGroupRecord) -> bo
         || grp.members.get(&char_id).copied() == Some(ACL_ROLE_MANAGER)
 }
 
+/// Handles `ownerGroupManager.UpdateMembershipTypes(groupID, memberIDs, membershipType)`
+/// (`eve/client/script/ui/structure/accessGroups/accessGroupsController.pyj`).
 pub fn handle_set_member_role(
     ctx: &ServerContext,
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let group_id = arg_i64(args, 0).ok_or_else(|| err("MissingGroupId", "SetMemberRole requires groupID"))?;
-    let entity_id = arg_i64(args, 1).ok_or_else(|| err("MissingEntityId", "SetMemberRole requires entityID"))?;
-    let role = arg_i64(args, 2).unwrap_or(ACL_ROLE_MEMBER);
-    if !matches!(role, ACL_ROLE_BLOCKED | ACL_ROLE_MEMBER | ACL_ROLE_ADMIN | ACL_ROLE_MANAGER) {
-        return Err(err("InvalidAclRole", format!("Role {role} is not a valid ACL role (-1, 0, 1, 2)")));
+    let group_id = arg_i64(args, 0).ok_or_else(|| err("MissingGroupId", "UpdateMembershipTypes requires groupID"))?;
+    let default_role = arg_i64(args, 2).unwrap_or(ACL_ROLE_MEMBER);
+    let updates: Vec<(i64, i64)> = match args.get(1) {
+        Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
+            let ids: Vec<i64> = items.iter().filter_map(|v| v.as_i64()).collect();
+            if ids.is_empty() {
+                return Err(err("MissingEntityId", "UpdateMembershipTypes requires memberIDs"));
+            }
+            ids.into_iter().map(|id| (id, default_role)).collect()
+        }
+        Some(PyRep::Dict(entries)) => {
+            let pairs: Vec<(i64, i64)> = entries
+                .iter()
+                .filter_map(|(k, v)| Some((k.as_i64()?, v.as_i64().unwrap_or(default_role))))
+                .collect();
+            if pairs.is_empty() {
+                return Err(err("MissingEntityId", "UpdateMembershipTypes requires memberIDs"));
+            }
+            pairs
+        }
+        _ => {
+            let eid = arg_i64(args, 1).ok_or_else(|| err("MissingEntityId", "UpdateMembershipTypes requires memberIDs"))?;
+            vec![(eid, default_role)]
+        }
+    };
+    for &(_, role) in &updates {
+        if !matches!(role, ACL_ROLE_BLOCKED | ACL_ROLE_MEMBER | ACL_ROLE_ADMIN | ACL_ROLE_MANAGER) {
+            return Err(err("InvalidAclRole", format!("Role {role} is not a valid ACL role (-1, 0, 1, 2)")));
+        }
     }
 
     let notify_corp = ctx.db.try_with_mut_snapshot(|snap| {
-        let (is_ally, is_corp, _) = ops::validate_and_classify_entity(snap, entity_id)?;
+        let mut classified = Vec::with_capacity(updates.len());
+        for &(entity_id, role) in &updates {
+            let (is_ally, is_corp, _) = ops::validate_and_classify_entity(snap, entity_id)?;
+            classified.push((entity_id, role, is_ally, is_corp));
+        }
         let mut ext = load_ext_state(snap);
         let grp = ext.owner_groups.get(&group_id).ok_or_else(|| err("AccessGroupNotFound", format!("Group {group_id} not found")))?;
 
-        // Permission check: modifying admin/manager requires admin or corp director
         let is_admin_or_dir = is_acl_admin(char_id, grp)
             || (grp.owner_corp_id != 0 && ops::require_corp_profile_manager(snap, session, char_id, grp.owner_corp_id).is_ok())
             || session.has_gm_role();
-        let target_existing_role = grp.members.get(&entity_id).copied().unwrap_or(0);
-        if entity_id == grp.creator_id && role != ACL_ROLE_ADMIN && !session.has_gm_role() {
-            return Err(err("InsufficientCorpRoles", "Cannot demote or block access group creator"));
-        }
-        if (matches!(role, ACL_ROLE_ADMIN | ACL_ROLE_MANAGER)
-            || entity_id == grp.creator_id
-            || matches!(target_existing_role, ACL_ROLE_ADMIN | ACL_ROLE_MANAGER))
-            && !is_admin_or_dir
-        {
-            return Err(err("InsufficientCorpRoles", "Modifying admin or manager role requires ACL Admin or Director"));
-        }
         if !is_admin_or_dir && !is_acl_manager_or_admin(char_id, grp) {
             return Err(err("InsufficientCorpRoles", "Caller lacks manager permissions in this access group"));
+        }
+        for &(entity_id, role, _, _) in &classified {
+            let target_existing_role = grp.members.get(&entity_id).copied().unwrap_or(0);
+            if entity_id == grp.creator_id && role != ACL_ROLE_ADMIN && !session.has_gm_role() {
+                return Err(err("InsufficientCorpRoles", "Cannot demote or block access group creator"));
+            }
+            if (matches!(role, ACL_ROLE_ADMIN | ACL_ROLE_MANAGER)
+                || entity_id == grp.creator_id
+                || matches!(target_existing_role, ACL_ROLE_ADMIN | ACL_ROLE_MANAGER))
+                && !is_admin_or_dir
+            {
+                return Err(err("InsufficientCorpRoles", "Modifying admin or manager role requires ACL Admin or Director"));
+            }
         }
 
         let owner_corp = grp.owner_corp_id;
         if let Some(grp_mut) = ext.owner_groups.get_mut(&group_id) {
-            grp_mut.members.insert(entity_id, role);
+            for &(entity_id, role, _, _) in &classified {
+                grp_mut.members.insert(entity_id, role);
+            }
         }
 
-        // Immediately sync to all linked profiles and structures
-        let is_blocked = role == ACL_ROLE_BLOCKED;
         let linked_pids: Vec<i64> = ext
             .profiles_by_id
             .values()
@@ -102,11 +133,14 @@ pub fn handle_set_member_role(
 
         for pid in linked_pids {
             if let Some(prof) = ext.profiles_by_id.get_mut(&pid) {
-                ops::apply_entity_to_profile(prof, entity_id, is_ally, is_corp, is_blocked, true);
-                if !is_blocked {
-                    ops::apply_entity_to_profile(prof, entity_id, is_ally, is_corp, true, false);
-                } else {
-                    ops::apply_entity_to_profile(prof, entity_id, is_ally, is_corp, false, false);
+                for &(entity_id, role, is_ally, is_corp) in &classified {
+                    let is_blocked = role == ACL_ROLE_BLOCKED;
+                    ops::apply_entity_to_profile(prof, entity_id, is_ally, is_corp, is_blocked, true);
+                    if !is_blocked {
+                        ops::apply_entity_to_profile(prof, entity_id, is_ally, is_corp, true, false);
+                    } else {
+                        ops::apply_entity_to_profile(prof, entity_id, is_ally, is_corp, false, false);
+                    }
                 }
             }
             ops::sync_assigned_structures_for_profile(&mut ext, pid);
@@ -761,8 +795,7 @@ pub fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        // rpc-lint: allow canonical ledger feat:structures.access-lists requires SetMemberRole
-        ("ownerGroupManager", "SetMemberRole") => Some(handle_set_member_role(ctx, session, args)),
+        ("ownerGroupManager", "UpdateMembershipTypes") => Some(handle_set_member_role(ctx, session, args)),
         ("ownerGroupManager", "EditGroup") | ("ownerGroupManager", "UpdateGroup") => {
             Some(handle_edit_group(ctx, session, args))
         }

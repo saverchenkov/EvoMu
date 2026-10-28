@@ -645,33 +645,15 @@ pub async fn handle(
             }
             let key_item_id_arg = args.first().and_then(|a| a.as_i64());
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let key_item_opt = snap
-                    .items
-                    .values()
-                    .find(|i| {
-                        i.owner_id == char_id
-                            && i.location_id == ship_id
-                            && i.flag == eve_db::InventoryFlag::Cargo
-                            && i.quantity >= 1
-                            && (if let Some(target_iid) = key_item_id_arg {
-                                i.item_id == target_iid || i.type_id as i64 == target_iid
-                            } else {
-                                (57714..=57721).contains(&i.type_id)
-                                    || ctx
-                                        .sde
-                                        .types
-                                        .get(&i.type_id)
-                                        .map(|t| t.group_id == 4102)
-                                        .unwrap_or(false)
-                            })
-                    })
-                    .map(|i| (i.item_id, i.type_id));
-                let Some((key_item_id, key_type_id)) = key_item_opt else {
-                    return Err(BridgeRpcError {
-                        code: "MissingEssReserveSecurityKey".into(),
-                        message: "Unlocking the ESS Reserve Bank requires an ESS Reserve Security Key (type 57714..57721) in cargo".into(),
-                    });
-                };
+                let (key_item_id, key_type_id, duration_mins) =
+                    crate::services::encounter_surveillance_system::select_ess_reserve_key_in_cargo(
+                        &ctx.sde,
+                        snap.items.values(),
+                        char_id,
+                        ship_id,
+                        sys_id,
+                        key_item_id_arg,
+                    )?;
                 if let Some(it) = snap.items.get_mut(&key_item_id) {
                     if it.quantity > 1 {
                         it.quantity -= 1;
@@ -680,11 +662,7 @@ pub async fn handle(
                         snap.items.remove(&key_item_id);
                     }
                 }
-                let duration_mins = match key_type_id {
-                    57715 | 57718 | 57719 | 57721 => 45,
-                    _ => 15,
-                };
-                let pulses = ((duration_mins / 5).max(3)) as u32;
+                let pulses = duration_mins as u32;
                 let prev_pulse = get_ess_reserve_pulses(snap, sys_id);
                 let pulse_st = EssReservePulseState {
                     pulses_total: pulses,

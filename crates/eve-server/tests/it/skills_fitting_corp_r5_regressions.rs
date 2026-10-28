@@ -248,12 +248,14 @@ async fn r5_228_229_230_233_fleet_warp_conduit_hierarchy_trash_and_alsc_cache() 
         snap.characters.insert(boss_id, clone_seeded_char(&base, boss_id, corp_id, None, sys_jita, boss_ship));
         snap.characters.insert(sc_id, clone_seeded_char(&base, sc_id, corp_id, None, sys_jita, sc_ship));
         snap.characters.insert(target_id, clone_seeded_char(&base, target_id, corp_id, Some(station_id), sys_jita, 0));
-        for &(iid, tid, owner, loc, flag) in &[
-            (boss_ship, 587_u32, boss_id, sys_jita as i64, InventoryFlag::None),
-            (sc_ship, 587_u32, sc_id, sys_jita as i64, InventoryFlag::None),
-            (space_unpiloted_ship, 587_u32, boss_id, sys_jita as i64, InventoryFlag::None),
-            (alsc_id, 17366_u32, boss_id, station_id, InventoryFlag::Hangar),
-            (locked_trit, 34_u32, boss_id, alsc_id, InventoryFlag::Unlocked),
+        for &(iid, tid, owner, loc, flag, qty) in &[
+            (boss_ship, 23757_u32, boss_id, sys_jita as i64, InventoryFlag::None, 1_i32),
+            (890_002_090, 16274_u32, boss_id, boss_ship, InventoryFlag::Cargo, 100_000_i32),
+            (890_002_091, 56099_u32, boss_id, sys_per as i64, InventoryFlag::None, 1_i32),
+            (sc_ship, 587_u32, sc_id, sys_jita as i64, InventoryFlag::None, 1_i32),
+            (space_unpiloted_ship, 587_u32, boss_id, sys_jita as i64, InventoryFlag::None, 1_i32),
+            (alsc_id, 17366_u32, boss_id, station_id, InventoryFlag::Hangar, 1_i32),
+            (locked_trit, 34_u32, boss_id, alsc_id, InventoryFlag::Unlocked, 1_i32),
         ] {
             snap.items.insert(
                 iid,
@@ -263,12 +265,16 @@ async fn r5_228_229_230_233_fleet_warp_conduit_hierarchy_trash_and_alsc_cache() 
                     owner_id: owner,
                     location_id: loc,
                     flag,
-                    quantity: 1,
-                    singleton: flag != InventoryFlag::Unlocked,
+                    quantity: qty,
+                    singleton: flag != InventoryFlag::Unlocked && flag != InventoryFlag::Cargo,
                     version: 1,
                     ..Default::default()
                 },
             );
+        }
+        let boss_sk = snap.skills.entry(boss_id).or_default();
+        for &stid in &[20533_u32, 21611, 21610, 24311, 24312] {
+            boss_sk.insert(stid, TrainedSkillRecord { type_id: stid, level: 5, skill_points: 256_000.0 });
         }
         let mut fleet = FleetRecord { fleet_id: 5501, boss_id, members: vec![boss_id, sc_id], ..Default::default() };
         fleet.member_details.insert(
@@ -307,14 +313,14 @@ async fn r5_228_229_230_233_fleet_warp_conduit_hierarchy_trash_and_alsc_cache() 
     });
 
     let jita_handle = ctx.systems.get_or_spawn(sys_jita);
-    for &(sid, x) in &[(boss_ship, 0.0), (sc_ship, 1_500.0), (space_unpiloted_ship, 500.0)] {
-        let mut cs = ctx.build_type_combat_state(587);
+    for &(sid, tid, x) in &[(boss_ship, 23757_u32, 0.0), (sc_ship, 587_u32, 1_500.0), (space_unpiloted_ship, 587_u32, 500.0)] {
+        let mut cs = ctx.build_type_combat_state(tid);
         if sid == sc_ship { cs.warp_scramble_strength = 2; }
         let _ = jita_handle
             .spawn_ball_with_combat(
                 Ball {
                     id: sid,
-                    type_id: 587,
+                    type_id: tid,
                     position: DVec3::new(x, 0.0, 0.0),
                     velocity: DVec3::ZERO,
                     max_velocity: 300.0,
@@ -329,7 +335,7 @@ async fn r5_228_229_230_233_fleet_warp_conduit_hierarchy_trash_and_alsc_cache() 
             .await;
     }
 
-    // #228: WarpToMember rejects scrambled ship; ConduitJump rejects invalid system & moves unscrambled ship
+    // #228: WarpToMember rejects scrambled ship; beyonce.CmdGroupJumpToFleetDeployableBeacon rejects invalid system & skips scrambled ship
     let mut sess_sc = make_session(sc_id, corp_id, None, sys_jita, sc_ship);
     sess_sc.fleet_id = Some(5501);
     let err_scram = ctx
@@ -341,17 +347,37 @@ async fn r5_228_229_230_233_fleet_warp_conduit_hierarchy_trash_and_alsc_cache() 
     let mut sess_boss = make_session(boss_id, corp_id, None, sys_jita, boss_ship);
     sess_boss.fleet_id = Some(5501);
     let err_bad_sys = ctx
-        .dispatch_rpc(&mut sess_boss, "fleetMgr", None, "ConduitJump", &[PyRep::Integer(5501), PyRep::Integer(99_999_999)], &kw, None)
+        .dispatch_rpc(
+            &mut sess_boss,
+            "beyonce",
+            None,
+            "CmdGroupJumpToFleetDeployableBeacon",
+            &[PyRep::Integer(boss_id), PyRep::Integer(99_999_999), PyRep::Integer(890_002_091)],
+            &kw,
+            None,
+        )
         .await
         .expect_err("invalid solar system must fail");
-    assert_eq!(err_bad_sys.code, "InvalidConduitDestination");
+    assert_eq!(err_bad_sys.code, "InvalidJumpDestination");
 
     let cj_res = ctx
-        .dispatch_rpc(&mut sess_boss, "fleetMgr", None, "ConduitJump", &[PyRep::Integer(5501), PyRep::Integer(sys_per as i64)], &kw, None)
+        .dispatch_rpc(
+            &mut sess_boss,
+            "beyonce",
+            None,
+            "CmdGroupJumpToFleetDeployableBeacon",
+            &[PyRep::Integer(boss_id), PyRep::Integer(sys_per as i64), PyRep::Integer(890_002_091)],
+            &kw,
+            None,
+        )
         .await
-        .expect("ConduitJump");
-    let Some(PyRep::List(jumped)) = cj_res.dict_get("jumpedMemberIDs") else { panic!("expected jumpedMemberIDs list") };
-    assert_eq!(jumped, &vec![PyRep::Integer(boss_id)], "scrambled sc_id must be excluded from conduit jump");
+        .expect("CmdGroupJumpToFleetDeployableBeacon");
+    assert_eq!(cj_res.dict_get("solarSystemID"), Some(&PyRep::Integer(sys_per as i64)));
+    assert_eq!(
+        ctx.db.with_snapshot(|snap| snap.characters.get(&sc_id).unwrap().solar_system_id),
+        sys_jita,
+        "scrambled sc_id must be excluded from conduit jump"
+    );
     assert_eq!(
         ctx.db.with_snapshot(|snap| snap.items.get(&boss_ship).unwrap().location_id),
         sys_per as i64,
@@ -448,13 +474,14 @@ async fn r5_232_234_235_236_237_projects_skills_fitting_clones_and_agents() {
             ceo_id: 90_000_001,
             master_wallet: IskCents::from_isk(20_000_000),
             members: HashSet::from([pilot_id]),
-            member_roles: HashMap::from([(pilot_id, (1u64 << 61) | (1u64 << 20))]),
+            member_roles: HashMap::from([(pilot_id, eve_db::corp_roles::ROLE_PROJECT_MANAGER | eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[0])]),
             ..Default::default()
         };
         corp.ensure_wallet_divisions();
         corp.set_division_balance(1, IskCents::from_isk(20_000_000));
         corp.set_division_balance(2, IskCents::from_isk(20_000_000));
         snap.corporations.insert(corp_id, corp);
+        snap.corp_governance.entry(corp_id).or_default().member_account_keys.insert(pilot_id, 1001);
 
         for &(iid, tid, flag) in &[
             (ship_id, 587_u32, InventoryFlag::Hangar),
@@ -492,21 +519,70 @@ async fn r5_232_234_235_236_237_projects_skills_fitting_clones_and_agents() {
     });
 
     let mut sess = make_session(pilot_id, corp_id, Some(station_id), sys_id, ship_id);
+    let (mut create_goal, mut curr_b, mut isk_b, mut pool_b) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    eve_proto::quasar::encode_string_field(1, "Div2 Exploit", &mut create_goal);
+    eve_proto::quasar::encode_varint_field(3, 10, &mut create_goal);
+    eve_proto::quasar::encode_varint_field(1, eve_proto::quasar::encode_zigzag64(100_000), &mut curr_b);
+    eve_proto::quasar::encode_bytes_field(1, &curr_b, &mut isk_b);
+    eve_proto::quasar::encode_bytes_field(2, &isk_b, &mut pool_b);
+    eve_proto::quasar::encode_bytes_field(8, &pool_b, &mut create_goal);
+    let now_q = ctx.now_unix();
+    let build_q = |role_mask: u64, payload: Vec<u8>| eve_proto::quasar::EvePublicRequest {
+        issued: Some(eve_proto::quasar::GoogleTimestamp { seconds: now_q as i64, nanos: 0 }),
+        correlation_uuid: vec![0x32; 16],
+        payload: Some(eve_proto::quasar::GoogleAny {
+            type_url: "type.googleapis.com/eve_public.goal.api.CreateRequest".into(),
+            value: payload,
+        }),
+        external_origin: "test".into(),
+        application_instance_uuid: vec![0x33; 16],
+        authoritative_context: Some(eve_proto::quasar::AuthoritativeContext::for_session_at(
+            Some(1), Some(pilot_id as u32), Some(corp_id as u32), role_mask, "tranquility", vec![0x34; 16], now_q,
+        )),
+        trace_context: None,
+    };
 
-    // #232: CreateProject enforces wallet division take role for non-Accountant Project Manager
-    let err_proj_div = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "corporationSvc",
-            None,
-            "CreateProject",
-            &[PyRep::String("Div2 Exploit".into()), PyRep::Integer(10), PyRep::Real(100_000.0), PyRep::String("DeliverItem".into()), PyRep::Bool(false), PyRep::Integer(1001)],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("Project Manager without AccountCanTake2 cannot escrow from div 2");
-    assert_eq!(err_proj_div.code, "CorpRoleDenied");
+    // #232a (R6-P0-01): Empty corp.member_roles + unprivileged member -> rejected on both RPC & Quasar
+    sess.corp_role = 0;
+    ctx.db.with_mut_snapshot(|s| {
+        s.corporations.get_mut(&corp_id).unwrap().member_roles.clear();
+        s.corp_governance.entry(corp_id).or_default().member_account_keys.insert(pilot_id, 1000);
+    });
+    let goal_args = [PyRep::String("Steal".into()), PyRep::Integer(10), PyRep::Real(10_000.0), PyRep::String("DestroyNPCShips".into()), PyRep::Bool(false), PyRep::Integer(1)];
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "corporationSvc", None, "CreateGoalSubmit", &goal_args, &kw, None).await.unwrap_err().code, "CorpRoleDenied");
+    assert_eq!(ctx.quasar_gateway.handle_public_request(&sess, &build_q(0, create_goal.clone()), None, false, now_q).status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
+
+    // #232b (R6-P0-01): ROLE_ACCOUNTANT cannot create corp projects or bypass wallet take role
+    sess.corp_role = eve_db::corp_roles::ROLE_ACCOUNTANT;
+    ctx.db.with_mut_snapshot(|s| { s.corporations.get_mut(&corp_id).unwrap().member_roles.insert(pilot_id, sess.corp_role); });
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "corporationSvc", None, "CreateGoalSubmit", &goal_args, &kw, None).await.unwrap_err().code, "CorpRoleDenied");
+    assert_eq!(ctx.quasar_gateway.handle_public_request(&sess, &build_q(sess.corp_role, create_goal.clone()), None, false, now_q).status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
+
+    // #232c (R6-P0-01): ROLE_PROJECT_MANAGER with ZERO wallet-take bits is rejected on Master Wallet (wallet_div = 1)
+    sess.corp_role = eve_db::corp_roles::ROLE_PROJECT_MANAGER;
+    ctx.db.with_mut_snapshot(|s| { s.corporations.get_mut(&corp_id).unwrap().member_roles.insert(pilot_id, sess.corp_role); });
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "corporationSvc", None, "CreateGoalSubmit", &goal_args, &kw, None).await.unwrap_err().code, "CorpRoleDenied");
+    let rsp_notake = ctx.quasar_gateway.handle_public_request(&sess, &build_q(sess.corp_role, create_goal.clone()), None, false, now_q);
+    assert_eq!(rsp_notake.status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
+    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].division_balance(1)), IskCents::from_isk(20_000_000));
+
+    // #232d: ROLE_PROJECT_MANAGER | ROLE_ACCOUNT_CAN_TAKE[0] rejected on div 2, allowed on div 1
+    sess.corp_role = eve_db::corp_roles::ROLE_PROJECT_MANAGER | eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[0];
+    ctx.db.with_mut_snapshot(|s| {
+        s.corporations.get_mut(&corp_id).unwrap().member_roles.insert(pilot_id, sess.corp_role);
+        s.corp_governance.entry(corp_id).or_default().member_account_keys.insert(pilot_id, 1001);
+    });
+    let rsp_div2 = ctx.quasar_gateway.handle_public_request(&sess, &build_q(sess.corp_role, create_goal.clone()), None, false, now_q);
+    assert_eq!(rsp_div2.status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
+    assert!(rsp_div2.status_message.contains("CorpRoleDenied"), "unexpected message: {}", rsp_div2.status_message);
+    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].division_balance(2)), IskCents::from_isk(20_000_000));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corp_governance.entry(corp_id).or_default().member_account_keys.insert(pilot_id, 1000);
+    });
+    let rsp_div1 = ctx.quasar_gateway.handle_public_request(&sess, &build_q(sess.corp_role, create_goal), None, false, now_q);
+    assert_eq!(rsp_div1.status_code, eve_server::quasar_gateway::STATUS_OK, "{}", rsp_div1.status_message);
+    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].division_balance(1)), IskCents::from_isk(19_900_000));
 
     // #234: ApplyFreeSkillPoints completing head starts next queue entry
     ctx.dispatch_rpc(&mut sess, "skillMgr2", None, "ApplyFreeSkillPoints", &[PyRep::Integer(3300), PyRep::Integer(2_000)], &kw, None)

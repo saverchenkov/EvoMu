@@ -27,7 +27,7 @@ const DROMI_SUPPORT_FIGHTER_TYPE_ID: u32 = 40561; // Dromi I Support Fighter (We
 const CENOBITE_SUPPORT_FIGHTER_TYPE_ID: u32 = 40560; // Cenobite I Support Fighter (Energy Neutralization)
 const SCARAB_SUPPORT_FIGHTER_TYPE_ID: u32 = 40562; // Scarab I Support Fighter (ECM Jammer)
 const EQUITE_LIGHT_FIGHTER_TYPE_ID: u32 = 40556; // Equite I Space Superiority Fighter
-const MANTA_HEAVY_FIGHTER_TYPE_ID: u32 = 40358; // Manta Heavy Fighter (AoE Torpedo/Bomb)
+const MANTA_HEAVY_FIGHTER_TYPE_ID: u32 = 40362; // Ametat I Long-Range Heavy Fighter (AoE Bomb)
 const TARGET_CRUISER_TYPE_ID: u32 = 626; // Vexor
 
 fn make_session(char_id: i64, ship_id: i64, sys_id: u32) -> SessionState {
@@ -339,7 +339,7 @@ async fn test_heavy_fighter_point_targeted_aoe_bomb_ability() {
     eve_testkit::attest(&["feat:drones.fighter-heavy-long-range-bomb"]);
 
     let ctx = ServerContext::new();
-    let sys_id = 30_002_187;
+    let sys_id = 30_000_021; // Kuharah (-1.0 nullsec; point-targeted AoE bombs forbidden in highsec)
     let carrier_char_id = 90_000_001i64;
     let carrier_ship_id = 104_000_201i64;
     let target_char_id = 90_000_002i64;
@@ -407,8 +407,7 @@ async fn test_heavy_fighter_point_targeted_aoe_bomb_ability() {
         &ctx,
         &mut carrier_sess,
         "fighterMgr",
-        // rpc-lint: allow auditor acceptance requires fighterMgr.ExecuteActivateAbilitySlotsOnPoint
-        "ExecuteActivateAbilitySlotsOnPoint",
+        "CmdActivateAbilitySlots",
         &[
             PyRep::Integer(manta_ball_id),
             PyRep::Integer(2), // Slot 2 = AoE Bomb
@@ -417,7 +416,7 @@ async fn test_heavy_fighter_point_targeted_aoe_bomb_ability() {
         &kw,
     )
     .await
-    .expect("ExecuteActivateAbilitySlotsOnPoint AoE Bomb");
+    .expect("CmdActivateAbilitySlots AoE Bomb");
 
     let PyRep::KeyVal(bomb_kv) = bomb_res else {
         panic!("Expected KeyVal response, got {bomb_res:?}");

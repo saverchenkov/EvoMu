@@ -68,7 +68,7 @@ async fn test_ess_reserve_pulses_audit() {
     let sys_id = 30_004_759u32;
     let ship_id = 910_000_104i64;
     let key_item_id = 920_000_104i64;
-    let key_type_id = 57715u32; // 45-minute key
+    let key_type_id = 57721u32; // 45-minute SW key for Delve (30_004_759)
     let ess_ball_id = 930_000_104i64;
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -184,8 +184,8 @@ async fn test_ess_reserve_pulses_audit() {
         .dict_get("reserveBankPulsesTotal")
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
-    assert_eq!(pulses_total, 9, "45-minute key gives 9 pulses");
-    assert_eq!(pulses_rem, 9);
+    assert_eq!(pulses_total, 45, "45-minute key gives 45 pulses");
+    assert_eq!(pulses_rem, 45);
     assert!(ess_data.dict_get("reserveBankLastPulseInitiated").is_some());
 }
 

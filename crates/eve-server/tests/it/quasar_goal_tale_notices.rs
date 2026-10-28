@@ -122,12 +122,16 @@ async fn goal_notices_follow_project_lifecycle_and_contributions() {
 
     // Manual progress set -> ProgressedNotice (no completion below target).
     let set = goal_req(&uuid, |b| encode_varint_field(3, 1, b));
-    assert_eq!(quasar_rpc(&ctx, &mut creator, "eve_public.goal.api.SetCurrentProgressRequest", set).await.status_code, STATUS_OK);
+    let set_rsp = quasar_rpc(&ctx, &mut creator, "eve_public.goal.api.SetCurrentProgressRequest", set).await;
+    assert_eq!(set_rsp.status_code, STATUS_OK);
+    assert_eq!(set_rsp.payload.as_ref().map(|p| p.normalized_type_name()), Some("eve_public.goal.api.SetCurrentProgressResponse"));
     let progressed = drain(&mut rx_mate, "eve_public.goal");
     let names: Vec<&str> = progressed.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(names, ["eve_public.goal.api.ProgressedNotice"]);
     assert_eq!(varint(&progressed[0].1, 2), Some(1));
-    let same = goal_req(&uuid, |b| encode_varint_field(3, 1, b));
+    let stale_cas = goal_req(&uuid, |b| { encode_varint_field(2, 0, b); encode_varint_field(3, 2, b); });
+    assert_eq!(quasar_rpc(&ctx, &mut creator, "eve_public.goal.api.SetCurrentProgressRequest", stale_cas).await.status_code, eve_server::quasar_gateway::STATUS_CONFLICT);
+    let same = goal_req(&uuid, |b| { encode_varint_field(2, 1, b); encode_varint_field(3, 1, b); });
     assert_eq!(quasar_rpc(&ctx, &mut creator, "eve_public.goal.api.SetCurrentProgressRequest", same).await.status_code, STATUS_OK);
     assert!(drain(&mut rx_mate, "eve_public.goal").is_empty(), "re-setting an unchanged value emits no ProgressedNotice");
 

@@ -354,8 +354,25 @@ async fn test_corp_recruitment_ads_expiry_and_search_filters() {
     eve_testkit::attest(&["rpc:corpRecProxy.SearchCorpAds"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
-    let corp_id = 1_000_170i64;
+    let corp_id = 2_000_170i64;
     let char_id = 90_000_001i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+        }
+        snap.corporations.insert(
+            corp_id,
+            eve_db::CorporationRecord {
+                corporation_id: corp_id,
+                name: "PvP Test Corp".into(),
+                ticker: "PVPT".into(),
+                ceo_id: char_id,
+                master_wallet: eve_db::IskCents::from_isk(10_000_000),
+                members: std::collections::HashSet::from([char_id]),
+                ..Default::default()
+            },
+        );
+    });
 
     let mut sess = SessionState::new(7005);
     sess.user_id = Some(1);

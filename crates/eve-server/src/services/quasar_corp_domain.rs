@@ -122,13 +122,15 @@ fn check_corp_admin_role(
         .effective_corporation_id()
         .or_else(|| db.with_snapshot(|s| s.characters.get(&(cid as i64)).map(|c| c.corporation_id as u32)))
         .ok_or_else(|| (STATUS_FORBIDDEN, "Missing corporation context".into()))? as i64;
-    let corp_role = ctx
-        .identity
-        .as_ref()
-        .and_then(|id| id.roles.as_ref().map(|r| r.bitmask))
-        .unwrap_or(0);
+    let corp_role = if ctx.corp_role_mask != 0 {
+        ctx.corp_role_mask
+    } else {
+        ctx.identity
+            .as_ref()
+            .and_then(|id| id.roles.as_ref().map(|r| r.bitmask))
+            .unwrap_or(0)
+    };
     let is_admin = (corp_role & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_PERSONNEL_MANAGER)) != 0
-        || (corp_role & eve_machonet::service_roles::ROLE_GM_MASK) != 0
         || require_admin_role(ctx).is_ok()
         || db.with_snapshot(|s| s.corporations.get(&corpid).is_some_and(|c| c.ceo_id == cid as i64));
     if !is_admin {

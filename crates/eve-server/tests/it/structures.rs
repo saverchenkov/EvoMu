@@ -238,39 +238,31 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
         .await;
     assert_eq!(claim_sov_docked.unwrap_err().code, "UnimplementedRPC");
 
-    let fw_docked = ctx
-        .dispatch_rpc(
-            &mut sess,
-            // rpc-lint: allow S-7 canonical task requires testing CaptureComplex
-            "facWarMgr",
-            None,
-            // rpc-lint: allow S-7 canonical task requires testing CaptureComplex
-            "CaptureComplex",
-            &[],
-            &kw,
-            None,
+    assert!(
+        !eve_server::services::insurgency_services::step_system_insurgency_capture_tick(
+            &ctx,
+            30_000_142,
+            100_000_001,
+            500_001,
         )
-        .await;
-    assert_eq!(fw_docked.unwrap_err().code, "ShipDocked");
+        .await,
+        "Docked ship must never advance FW complex capture on server tick"
+    );
 
     ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
         .await
         .expect("Undock in Jita");
 
-    let fw_highsec = ctx
-        .dispatch_rpc(
-            &mut sess,
-            // rpc-lint: allow S-7 canonical task requires testing CaptureComplex
-            "facWarMgr",
-            None,
-            // rpc-lint: allow S-7 canonical task requires testing CaptureComplex
-            "CaptureComplex",
-            &[],
-            &kw,
-            None,
+    assert!(
+        !eve_server::services::insurgency_services::step_system_insurgency_capture_tick(
+            &ctx,
+            30_000_142,
+            100_000_001,
+            500_001,
         )
-        .await;
-    assert_eq!(fw_highsec.unwrap_err().code, "NotLowSecWarzoneSystem");
+        .await,
+        "High-sec Jita must never advance FW complex capture on server tick"
+    );
 
     let skyhook_highsec = ctx
         .dispatch_rpc(&mut sess, "sovMgr", None, "AcquireSkyhooks", &[], &kw, None)
@@ -468,21 +460,19 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
         .spawn_ball_with_combat(ship_ball, eve_destiny::CombatState::default())
         .await
         .expect("spawn ship in Amamake");
-    let fw_far_beacon = ctx
-        .dispatch_rpc(
-            &mut sess,
-            // rpc-lint: allow S-7 canonical task requires testing CaptureComplex
-            "facWarMgr",
-            None,
-            // rpc-lint: allow S-7 canonical task requires testing CaptureComplex
-            "CaptureComplex",
-            &[],
-            &kw,
-            None,
+    let _ = fw_sys.step_manual(1.0).await;
+    assert!(
+        !eve_server::services::insurgency_services::step_system_insurgency_capture_tick(
+            &ctx,
+            30_002_537,
+            100_000_001,
+            500_001,
         )
-        .await;
+        .await,
+        "Ship 100 km outside 30 km FW complex beacon radius must not advance capture"
+    );
     assert_eq!(
-        fw_far_beacon.unwrap_err().code,
-        "OutsideComplexCaptureRadius"
+        ctx.db.with_snapshot(|s| s.system_states[&30_002_537].fw_capture_seconds_elapsed),
+        60
     );
 }

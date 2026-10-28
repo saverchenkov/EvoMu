@@ -205,6 +205,7 @@ async fn test_proving_grounds_weapon_kill_concludes_match_and_gates_exit() {
 
     // P1 destroys P2's ship with a real turret activation (125mm Railgun I + Antimatter Charge S)
     fit(&ctx, p1, ship1, (200_201, 10678), (200_202, 222, 10));
+    let _ = arena.add_target_lock(ship1, eve_destiny::TargetLock { target_id: ship2, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: Some(50_000.0) }).await;
     let mut cs = arena.get_combat_state(ship2).await.unwrap().unwrap();
     (cs.shield_hp, cs.armor_hp, cs.structure_hp) = (0.0, 0.0, 1.0);
     let _ = arena.set_combat_state(ship2, cs).await;
@@ -241,6 +242,7 @@ async fn test_proving_grounds_result_not_recorded_for_kills_outside_arena() {
     let _s2 = setup_pilot(&ctx, 7322, p2, ship2, 587, sys, DVec3::new(1_500.0, 0.0, 0.0)).await;
     let local = ctx.systems.get_or_spawn(sys);
     fit(&ctx, p1, ship1, (200_301, 10678), (200_302, 222, 10));
+    let _ = local.add_target_lock(ship1, eve_destiny::TargetLock { target_id: ship2, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: Some(50_000.0) }).await;
     ctx.set_invention_roll_override(Some(0.50));
     let entry = |cid: i64| eve_server::services::pvp_filament_mgr::PvpQueueCharacterEntry {
         item_id: cid + 1, type_id: 53965, location_id: cid, flag: 4, solar_system_id: sys, joined_unix: ctx.now_unix(),

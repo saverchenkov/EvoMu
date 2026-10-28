@@ -209,9 +209,9 @@ async fn test_d6_industry_pi_and_market_wallet_history_durable_across_sqlite_res
         call_kw(&ctx, &mut sess_p1, "planetOrbitalRegistryBroker", "UpdateSettings", &[PyRep::Integer(PLANET_ID)], &[("taxRateValues", PyRep::keyval([("corporation", PyRep::Real(0.075)), ("alliance", PyRep::Real(0.095))])), ("allowAlliance", PyRep::Bool(true)), ("allowStandings", PyRep::Bool(true)), ("minimumStanding", PyRep::Real(-2.0))]).await.expect("UpdateSettings");
         call(&ctx, &mut sess_p1, "posMgr", "ChangeStructureProvisionType", &[PyRep::Integer(athanor_id), PyRep::Integer(athanor_id), PyRep::Integer(16634)]).await.expect("ChangeStructureProvisionType");
 
-        let rnd_agent_id = ctx.sde.agents.values().filter(|a| a.agent_type_id == 4 || a.division_id == 18).map(|a| a.agent_id).min().expect("R&D agent");
-        ctx.db.with_mut_snapshot(|s| { if let Some(ch) = s.characters.get_mut(&P1) { ch.standings.insert(rnd_agent_id, 9.0); } });
-        call(&ctx, &mut sess_p1, "agentMgr", "DoAction", &[PyRep::Integer(12), PyRep::Integer(rnd_agent_id), PyRep::Integer(11448)]).await.expect("StartResearch");
+        let rnd = ctx.sde.agents.values().filter(|a| a.agent_type_id == 4 && a.station_id.is_some()).min_by_key(|a| a.agent_id).cloned().expect("R&D agent");
+        ctx.db.with_mut_snapshot(|s| { if let Some(ch) = s.characters.get_mut(&P1) { ch.standings.insert(rnd.agent_id, 9.0); ch.solar_system_id = rnd.solar_system_id.unwrap(); ch.station_id = rnd.station_id; } });
+        sess_p1.solar_system_id = rnd.solar_system_id; sess_p1.station_id = rnd.station_id; call(&ctx, &mut sess_p1, "agentMgr", "DoAction", &[PyRep::Integer(12), PyRep::Integer(rnd.agent_id), PyRep::Integer(11448)]).await.expect("StartResearch"); sess_p1.solar_system_id = Some(JITA_SYSTEM_ID); sess_p1.station_id = Some(JITA_STATION_ID); ctx.db.with_mut_snapshot(|s| { if let Some(ch) = s.characters.get_mut(&P1) { ch.solar_system_id = JITA_SYSTEM_ID; ch.station_id = Some(JITA_STATION_ID); } });
         let PyRep::Tuple(j_parts) = call(&ctx, &mut sess_p1, "agentMgr", "GetMyJournalDetails", &[]).await.expect("GetMyJournalDetails") else { panic!() };
         let PyRep::List(rnd_list_before) = &j_parts[1] else { panic!() };
         let rnd_rp_before = rnd_list_before[0].dict_get("points").and_then(|v| v.as_f64()).unwrap_or(0.0);

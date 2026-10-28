@@ -154,7 +154,7 @@ async fn test_d6_corp_governance_and_employment_history_persist_and_rollback() {
         .await;
         rpc(&ctx, &mut sess, "corporationSvc", "SetMedalStatus", &[PyRep::Dict(vec![(PyRep::Integer(medal_id), PyRep::Integer(3))])]).await;
 
-        rpc(&ctx, &mut sess, "corpRegistry", "UpdateTitle", &[PyRep::Integer(1), PyRep::String("Chief Archivist".into()), PyRep::Integer(corp_roles::ROLE_DIRECTOR as i64)]).await;
+        rpc(&ctx, &mut sess, "corpRegistry", "UpdateTitle", &[PyRep::Integer(1), PyRep::String("Chief Archivist".into()), PyRep::Integer(corp_roles::ROLE_PERSONNEL_MANAGER as i64)]).await;
         rpc(
             &ctx, &mut sess, "corpRegistry", "UpdateDivisionNames",
             &[
@@ -251,7 +251,7 @@ async fn test_d6_corp_governance_and_employment_history_persist_and_rollback() {
         assert_eq!(esi_get(&ctx2, "/corporations/{corporation_id}/members/limit", &[("corporation_id", corp_id)]), 100);
         let esi_titles = esi_get(&ctx2, "/corporations/{corporation_id}/titles", &[("corporation_id", corp_id)]);
         assert_eq!(esi_titles[0]["name"], "Chief Archivist");
-        assert_eq!(esi_titles[0]["roles"][0], "Director");
+        assert_eq!(esi_titles[0]["roles"][0], "Personnel_Manager");
         let mem_titles = esi_get(&ctx2, "/corporations/{corporation_id}/members/titles", &[("corporation_id", corp_id)]);
         assert!(mem_titles.to_string().contains(&OTHER.to_string()));
         let esi_roles = esi_get(&ctx2, "/corporations/{corporation_id}/roles", &[("corporation_id", corp_id)]);

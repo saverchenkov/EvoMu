@@ -512,11 +512,12 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
             &mut session,
             "corporationSvc",
             None,
-            "CreateProject", // rpc-lint: allow legacy/negative-test RPC (corporationSvc.CreateProject)
+            "CreateGoalSubmit",
             &[
                 PyRep::String("Mine Veldspar".into()),
                 PyRep::Integer(500),
                 PyRep::Real(100.0),
+                PyRep::String("MineMaterial".into()),
             ],
             &empty,
             None,
@@ -527,22 +528,17 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
         panic!("Expected project KeyVal");
     };
     let pid = pkv.get("projectID").unwrap().as_i64().unwrap();
-    let contrib = ctx
-        .dispatch_rpc(
-            &mut session,
-            "corporationSvc",
-            None,
-            "ContributeToProject", // rpc-lint: allow legacy/negative-test RPC (corporationSvc.ContributeToProject)
-            &[PyRep::Integer(pid), PyRep::Integer(500)],
-            &empty,
-            None,
-        )
-        .await
-        .unwrap();
-    let PyRep::KeyVal(ckv) = contrib else {
-        panic!("Expected contribution KeyVal");
-    };
-    assert_eq!(ckv.get("completed"), Some(&PyRep::Bool(true)));
+    crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
+        &ctx,
+        90_000_001,
+        &["MineMaterial"],
+        500,
+        None,
+    );
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.corp_projects[&pid].current_quantity),
+        500
+    );
 
     // Undock via RPC and verify AbyssalEntranceDeployment returns UnimplementedRPC
     ctx.advance_secs(12);

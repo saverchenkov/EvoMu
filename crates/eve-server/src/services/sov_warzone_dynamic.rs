@@ -56,40 +56,26 @@ pub(crate) fn collect_all_warzone_systems(ctx: &ServerContext) -> Vec<(u32, f64,
 
 fn dynamic_resource_settings() -> PyRep {
     PyRep::Dict(vec![
-        (
-            PyRep::String("bountyRiskModifierMax".into()),
-            PyRep::Real(2.0),
-        ),
-        (
-            PyRep::String("bountyRiskModifierMin".into()),
-            PyRep::Real(0.5),
-        ),
-        (
-            PyRep::String("bountyRiskModifierEquilibrium".into()),
-            PyRep::Real(1.15),
-        ),
+        (PyRep::String("bountyRiskModifierMax".into()), PyRep::Real(2.0)),
+        (PyRep::String("bountyRiskModifierMin".into()), PyRep::Real(0.5)),
+        (PyRep::String("bountyRiskModifierEquilibrium".into()), PyRep::Real(1.15)),
         (PyRep::String("mainBankShare".into()), PyRep::Real(0.05)),
         (PyRep::String("reserveBankShare".into()), PyRep::Real(0.05)),
-        (
-            PyRep::String("linkDurationSeconds".into()),
-            PyRep::Integer(300),
-        ),
-        (
-            PyRep::String("linkDistanceMeters".into()),
-            PyRep::Real(2500.0),
-        ),
-        (
-            PyRep::String("autoPayoutTimeSeconds".into()),
-            PyRep::Integer(10800),
-        ),
-        (
-            PyRep::String("reserveBankUnlockDurationSeconds".into()),
-            PyRep::Integer(2700),
-        ),
-        (
-            PyRep::String("reserveBankKeyGroupIDs".into()),
-            PyRep::List(vec![PyRep::Integer(4102)]),
-        ),
+        (PyRep::String("linkDurationSeconds".into()), PyRep::Integer(300)),
+        (PyRep::String("linkDistanceMeters".into()), PyRep::Real(2500.0)),
+        (PyRep::String("autoPayoutTimeSeconds".into()), PyRep::Integer(10800)),
+        (PyRep::String("reserveBankUnlockDurationSeconds".into()), PyRep::Integer(2700)),
+        (PyRep::String("reserveBankKeyGroupIDs".into()), PyRep::List(vec![PyRep::Integer(4102)])),
+        (PyRep::String("autopaymentIntervalSeconds".into()), PyRep::Integer(10800)),
+        (PyRep::String("bountiesCut".into()), PyRep::Real(0.10)),
+        (PyRep::String("bufferTimeSeconds".into()), PyRep::Integer(300)),
+        (PyRep::String("equilibriumValue".into()), PyRep::Real(1.15)),
+        (PyRep::String("mainBankPayRatio".into()), PyRep::Real(0.50)),
+        (PyRep::String("maxOutput".into()), PyRep::Real(2.0)),
+        (PyRep::String("minOutput".into()), PyRep::Real(0.5)),
+        (PyRep::String("reserveBankMaxPayout".into()), PyRep::Real(100_000_000.0)),
+        (PyRep::String("reserveBankTimeAccessFactor".into()), PyRep::Real(1.0)),
+        (PyRep::String("timeIntervalSeconds".into()), PyRep::Integer(60)),
     ])
 }
 
@@ -158,7 +144,7 @@ pub async fn handle(
             let unlocked_map =
                 with_combat_runtime(ctx, |rt| rt.ess_reserve_unlocked_until.clone());
             let entries = ctx.db.with_snapshot(|snap| {
-                let mut list = Vec::new();
+                let mut dict = Vec::new();
                 for (&sys_id, st) in &snap.system_states {
                     let sec = ctx
                         .sde
@@ -168,26 +154,34 @@ pub async fn handle(
                         .unwrap_or(1.0);
                     if sec <= 0.0 && sys_id < 31_000_000 {
                         let unlocked_until = unlocked_map.get(&sys_id).copied().unwrap_or(0);
-                        list.push(PyRep::keyval([
-                            ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
-                            ("mainBankValue", PyRep::Real(st.ess_main_bank.to_wire_f64())),
-                            ("reserveBankValue", PyRep::Real(st.ess_reserve_bank.to_wire_f64())),
-                            ("dbsMultiplier", PyRep::Real(st.dbs_multiplier)),
-                            (
-                                "linkedCharacterID",
-                                st.ess_linked_character_id
-                                    .map(PyRep::Integer)
-                                    .unwrap_or(PyRep::None),
-                            ),
-                            ("isLinked", PyRep::Bool(st.ess_linked_character_id.is_some())),
-                            ("unlockedUntil", PyRep::Integer(unlocked_until as i64)),
-                            ("isUnlocked", PyRep::Bool(unlocked_until > now_u)),
-                        ]));
+                        let is_unlocked = unlocked_until > now_u;
+                        let main_val = st.ess_main_bank.to_wire_f64();
+                        let res_val = st.ess_reserve_bank.to_wire_f64();
+                        dict.push((
+                            PyRep::Integer(i64::from(sys_id)),
+                            PyRep::Dict(vec![
+                                (PyRep::String("solarSystemID".into()), PyRep::Integer(i64::from(sys_id))),
+                                (PyRep::String("vaultOpen".into()), PyRep::Bool(is_unlocked)),
+                                (PyRep::String("mainValue".into()), PyRep::Real(main_val)),
+                                (PyRep::String("reserveValue".into()), PyRep::Real(res_val)),
+                                (PyRep::String("currentOutput".into()), PyRep::Real(st.dbs_multiplier)),
+                                (PyRep::String("mainBankValue".into()), PyRep::Real(main_val)),
+                                (PyRep::String("reserveBankValue".into()), PyRep::Real(res_val)),
+                                (PyRep::String("dbsMultiplier".into()), PyRep::Real(st.dbs_multiplier)),
+                                (
+                                    PyRep::String("linkedCharacterID".into()),
+                                    st.ess_linked_character_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                                ),
+                                (PyRep::String("isLinked".into()), PyRep::Bool(st.ess_linked_character_id.is_some())),
+                                (PyRep::String("unlockedUntil".into()), PyRep::Integer(unlocked_until as i64)),
+                                (PyRep::String("isUnlocked".into()), PyRep::Bool(is_unlocked)),
+                            ]),
+                        ));
                     }
                 }
-                list
+                dict
             });
-            Some(Ok(PyRep::List(entries)))
+            Some(Ok(PyRep::Dict(entries)))
         }
 
         ("dynamicResourceCacheMgr", "GetESSReserveBankKeys") => {
@@ -239,34 +233,30 @@ pub async fn handle(
             });
             let rep = ctx.db.with_snapshot(|snap| {
                 let st = snap.system_states.get(&sys_id);
-                PyRep::keyval([
-                    ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+                let is_unlocked = unlocked_until > now_u;
+                let rem_secs = if is_unlocked { (unlocked_until - now_u) as i64 } else { 0 };
+                let total_pulses = if is_unlocked { (unlocked_until - now_u).div_ceil(60) as i64 } else { 0 };
+                let active_links = if st.and_then(|s| s.ess_linked_character_id).is_some() { 1 } else { 0 };
+                PyRep::Dict(vec![
+                    (PyRep::String("solarSystemID".into()), PyRep::Integer(i64::from(sys_id))),
+                    (PyRep::String("activeLinks".into()), PyRep::Integer(active_links)),
+                    (PyRep::String("autopaymentWindowState".into()), PyRep::Integer(1)),
+                    (PyRep::String("reserveTimeChosen".into()), PyRep::Integer(rem_secs)),
+                    (PyRep::String("reserveTimeWindowState".into()), PyRep::Integer(if is_unlocked { 2 } else { 0 })),
+                    (PyRep::String("totalPulses".into()), PyRep::Integer(total_pulses)),
+                    (PyRep::String("mainBankValue".into()), PyRep::Real(st.map(|s| s.ess_main_bank.to_wire_f64()).unwrap_or(0.0))),
+                    (PyRep::String("reserveBankValue".into()), PyRep::Real(st.map(|s| s.ess_reserve_bank.to_wire_f64()).unwrap_or(0.0))),
+                    (PyRep::String("dbsMultiplier".into()), PyRep::Real(st.map(|s| s.dbs_multiplier).unwrap_or(1.0))),
                     (
-                        "mainBankValue",
-                        PyRep::Real(st.map(|s| s.ess_main_bank.to_wire_f64()).unwrap_or(0.0)),
+                        PyRep::String("linkedCharacterID".into()),
+                        st.and_then(|s| s.ess_linked_character_id).map(PyRep::Integer).unwrap_or(PyRep::None),
                     ),
                     (
-                        "reserveBankValue",
-                        PyRep::Real(st.map(|s| s.ess_reserve_bank.to_wire_f64()).unwrap_or(0.0)),
+                        PyRep::String("linkStartedTick".into()),
+                        st.and_then(|s| s.ess_link_started_tick).map(|t| PyRep::Integer(t as i64)).unwrap_or(PyRep::None),
                     ),
-                    (
-                        "dbsMultiplier",
-                        PyRep::Real(st.map(|s| s.dbs_multiplier).unwrap_or(1.0)),
-                    ),
-                    (
-                        "linkedCharacterID",
-                        st.and_then(|s| s.ess_linked_character_id)
-                            .map(PyRep::Integer)
-                            .unwrap_or(PyRep::None),
-                    ),
-                    (
-                        "linkStartedTick",
-                        st.and_then(|s| s.ess_link_started_tick)
-                            .map(|t| PyRep::Integer(t as i64))
-                            .unwrap_or(PyRep::None),
-                    ),
-                    ("unlockedUntil", PyRep::Integer(unlocked_until as i64)),
-                    ("isUnlocked", PyRep::Bool(unlocked_until > now_u)),
+                    (PyRep::String("unlockedUntil".into()), PyRep::Integer(unlocked_until as i64)),
+                    (PyRep::String("isUnlocked".into()), PyRep::Bool(is_unlocked)),
                 ])
             });
             Some(Ok(rep))

@@ -576,6 +576,9 @@ async fn test_pve_insurgency_campaigns_and_strongholds_complete() {
 
     // 6. Player activity: Join Caldari militia and capture for suppression
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_INSURGENT) {
+            ch.war_faction_id = None;
+        }
         let st = snap.system_states.entry(camp_sys).or_default();
         st.last_fw_capture_tick = 0;
     });

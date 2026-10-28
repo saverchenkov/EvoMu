@@ -418,14 +418,15 @@ pub(crate) fn handle_update_members(
                 .role_audit_log
                 .push((target_char_id, char_id, old_roles, new_roles, now_unix));
             if let Some(tm) = sp.title_mask_opt {
+                const TITLE_DELAY_MASK: u64 = ((1u64 << 21) - 1) << 13;
                 let mut new_title_hangar = 0u64;
                 for (&tid, &(_, troles)) in &state.titles {
-                    let bit = 1u64 << ((tid - 1).clamp(0, 62) as u64);
-                    if (tm & bit) != 0 || tm == tid as u64 {
-                        new_title_hangar |= troles & HANGAR_DIV_MASK;
+                    let bit = if (1..=64).contains(&tid) { 1u64 << (tid - 1) } else { 0 };
+                    if (tm & bit) != 0 {
+                        new_title_hangar |= troles & TITLE_DELAY_MASK;
                     }
                 }
-                let newly_title_hangar = new_title_hangar & !(old_roles & HANGAR_DIV_MASK);
+                let newly_title_hangar = new_title_hangar & !(old_roles & TITLE_DELAY_MASK);
                 if newly_title_hangar != 0 {
                     state.pending_role_grants.insert(
                         target_char_id,

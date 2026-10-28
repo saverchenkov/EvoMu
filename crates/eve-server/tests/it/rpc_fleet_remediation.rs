@@ -418,6 +418,7 @@ async fn test_fleet_object_and_manager_remediation_lifecycle() {
         ctx.build_type_combat_state(587),
     ).await;
 
+    let _ = sys_handle.add_target_lock(ship3_id, eve_destiny::TargetLock { target_id: ship1_id, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: Some(50_000.0) }).await;
     let _ = ctx.drain_notifications_for_char(PILOT2);
     ctx.set_invention_roll_override(Some(0.50));
     eve_server::services::combat_crimewatch::dispatch_combat_rpc(

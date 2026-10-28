@@ -304,7 +304,12 @@ async fn test_authentic_freelance_pirate_stargate_remediated() {
     assert_eq!((varint(&c_inc.value, 4), varint(&c_inc.value, 5)), (Some(1), Some(0)));
 
     // Enlist in Caldari State (500_001), reset complex tick guard, and step capture tick -> emits suppression IncreasedNotice.
-    ctx.db.with_mut_snapshot(|s| { s.system_states.get_mut(&TURNUR).unwrap().last_fw_capture_tick = 0; });
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&PILOT) {
+            ch.war_faction_id = None;
+        }
+        s.system_states.get_mut(&TURNUR).unwrap().last_fw_capture_tick = 0;
+    });
     ctx.dispatch_rpc(&mut jsess, "facWarMgr", None, "JoinFactionAsCharacter", &[PyRep::Integer(500_001)], &kw, None).await.expect("Join Caldari");
     eve_server::services::insurgency_services::step_system_insurgency_capture_tick(&ctx, TURNUR, ship_id, 500_001).await;
     ctx.dispatch_rpc(&mut jsess, "insurgencySolarsystem", None, "GetLocalCampaignClientSnapshot", &[], &kw, None).await.expect("GetLocalCampaignClientSnapshot anti-pirate");

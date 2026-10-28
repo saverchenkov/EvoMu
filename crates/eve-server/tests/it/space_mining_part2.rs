@@ -119,10 +119,49 @@ async fn test_mn03_mining_ledger_recording_and_char_mining_ledger_service() {
     // Advance virtual clock by 1 day (Day 2) and mine Scordite ore (1228), Clear Icicle ice (16262), and Fullerite-C50 gas (30370)
     ctx.advance_time_seconds(86_400);
     ctx.db.with_mut_snapshot(|snap| {
+        let sk = snap.skills.entry(90_000_001).or_default();
+        for sid in [3386u32, 16281, 25544] {
+            sk.insert(sid, eve_db::TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
+        }
         if let Some(sh) = snap.items.get_mut(&ship_id) {
-            sh.type_id = 654; // Kryos (Specialized Ice Hold 30,000 m3)
+            sh.type_id = 22548; // Mackinaw (Exhumer group 543, 31,500 m3 Mining Hold)
+            sh.dynamic_attributes.extend([(14, 3.0), (102, 3.0), (11, 500.0), (48, 500.0)]);
+        }
+        snap.items.retain(|_, it| {
+            !(it.location_id == ship_id
+                && matches!(
+                    it.flag,
+                    eve_db::InventoryFlag::HiSlot0
+                        | eve_db::InventoryFlag::HiSlot1
+                        | eve_db::InventoryFlag::HiSlot2
+                ))
+        });
+        for (iid, tid, flag) in [
+            (750_000_911i64, 483u32, eve_db::InventoryFlag::HiSlot0),
+            (750_000_912i64, 16278u32, eve_db::InventoryFlag::HiSlot1),
+            (750_000_913i64, 25266u32, eve_db::InventoryFlag::HiSlot2),
+        ] {
+            snap.items.insert(
+                iid,
+                eve_db::InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: 90_000_001,
+                    location_id: ship_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    dynamic_attributes: HashMap::new(),
+                    source_mutaplasmid_id: None,
+                    insured_payout_isk: 0.0,
+                    is_blueprint_copy: false,
+                    blueprint_runs_remaining: None,
+                },
+            );
         }
     });
+    ctx.invalidate_ship_fitting(ship_id);
     let ice_ast_id = 750_000_229i64;
     let gas_ast_id = 750_000_230i64;
     for (aid, tid, units, uvol) in [

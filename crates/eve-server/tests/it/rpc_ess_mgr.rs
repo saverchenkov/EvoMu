@@ -15,8 +15,8 @@ const SHIP_ID: i64 = 940_001;
 const ESS_BALL_ID: i64 = 940_010;
 const RIFTER_TYPE_ID: u32 = 587;
 const ESS_BEACON_TYPE_ID: u32 = 32882;
-const KEY_15M_TYPE_ID: u32 = 57714;
-const KEY_45M_TYPE_ID: u32 = 57715;
+const KEY_15M_TYPE_ID: u32 = 57720;
+const KEY_45M_TYPE_ID: u32 = 57721;
 
 async fn setup_ess_environment(
     ctx: &ServerContext,

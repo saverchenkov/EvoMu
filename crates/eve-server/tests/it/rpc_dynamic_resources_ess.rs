@@ -349,7 +349,7 @@ async fn test_dynamic_resource_cache_ess_details_and_keys() {
         other => panic!("Expected List for GetESSReserveBankKeys, got {other:?}"),
     }
 
-    // 2. GetESSSystemDetails (explicit sys_id & alias GetSolarSystemDynamicResourceData)
+    // 2. GetESSSystemDetails (explicit sys_id & V24 essSystemContentPiece.pyj dict keys)
     let details_rep = ctx
         .dispatch_rpc(
             &mut sess,
@@ -362,11 +362,29 @@ async fn test_dynamic_resource_cache_ess_details_and_keys() {
         )
         .await
         .expect("GetESSSystemDetails");
+    assert!(
+        matches!(details_rep, PyRep::Dict(_)),
+        "GetESSSystemDetails must return a subscriptable PyRep::Dict"
+    );
     let det_map = kv_map(&details_rep);
     assert_eq!(
         det_map.get("solarSystemID").and_then(|v| v.as_i64()),
         Some(NULLSEC_SYS_ID as i64)
     );
+    assert_eq!(det_map.get("activeLinks").and_then(|v| v.as_i64()), Some(0));
+    assert_eq!(
+        det_map.get("autopaymentWindowState").and_then(|v| v.as_i64()),
+        Some(1)
+    );
+    assert_eq!(
+        det_map.get("reserveTimeChosen").and_then(|v| v.as_i64()),
+        Some(0)
+    );
+    assert_eq!(
+        det_map.get("reserveTimeWindowState").and_then(|v| v.as_i64()),
+        Some(0)
+    );
+    assert_eq!(det_map.get("totalPulses").and_then(|v| v.as_i64()), Some(0));
     assert!(
         (det_map.get("mainBankValue").and_then(|v| v.as_f64()).unwrap_or(0.0) - 60_000_000.0).abs() < 1e-2
     );
@@ -378,7 +396,7 @@ async fn test_dynamic_resource_cache_ess_details_and_keys() {
         Some(false)
     );
 
-    // 3. GetESSAgencyData
+    // 3. GetESSAgencyData (V24 contentProviderESS.pyj solarSystemID-keyed Dict)
     let agency_rep = ctx
         .dispatch_rpc(
             &mut sess,
@@ -392,13 +410,24 @@ async fn test_dynamic_resource_cache_ess_details_and_keys() {
         .await
         .expect("GetESSAgencyData");
     match agency_rep {
-        PyRep::List(cards) => {
-            let found = cards.iter().any(|c| {
-                kv_map(c).get("solarSystemID").and_then(|v| v.as_i64()) == Some(NULLSEC_SYS_ID as i64)
-            });
-            assert!(found, "GetESSAgencyData must include active nullsec ESS system");
+        PyRep::Dict(cards) => {
+            let sys_entry = cards
+                .iter()
+                .find(|(k, _)| k.as_i64() == Some(NULLSEC_SYS_ID as i64))
+                .map(|(_, v)| kv_map(v))
+                .expect("GetESSAgencyData Dict must be keyed by NULLSEC_SYS_ID");
+            assert_eq!(sys_entry.get("vaultOpen").and_then(|v| v.as_bool()), Some(false));
+            assert!(
+                (sys_entry.get("mainValue").and_then(|v| v.as_f64()).unwrap_or(0.0) - 60_000_000.0).abs() < 1e-2
+            );
+            assert!(
+                (sys_entry.get("reserveValue").and_then(|v| v.as_f64()).unwrap_or(0.0) - 300_000_000.0).abs() < 1e-2
+            );
+            assert!(
+                (sys_entry.get("currentOutput").and_then(|v| v.as_f64()).unwrap_or(0.0) - 1.35).abs() < 1e-4
+            );
         }
-        other => panic!("Expected List for GetESSAgencyData, got {other:?}"),
+        other => panic!("Expected Dict keyed by solarSystemID for GetESSAgencyData, got {other:?}"),
     }
 
     // 4. P1-01 Verification: Unlocked Reserve Bank allows linking without a key in cargo!
@@ -425,7 +454,7 @@ async fn test_dynamic_resource_cache_ess_details_and_keys() {
         "P1-01: AttemptLinkToReserveBank must succeed without a key when bank is unlocked, got {link_res:?}"
     );
 
-    // Verify unlocked status reflected in GetESSSystemDetails
+    // Verify unlocked status and V24 fields reflected in GetESSSystemDetails
     let updated_details = ctx
         .dispatch_rpc(
             &mut sess,
@@ -444,6 +473,10 @@ async fn test_dynamic_resource_cache_ess_details_and_keys() {
         Some(true),
         "ESSSystemDetails must reflect isUnlocked = true"
     );
+    assert_eq!(upd_map.get("activeLinks").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(upd_map.get("reserveTimeChosen").and_then(|v| v.as_i64()), Some(1800));
+    assert_eq!(upd_map.get("reserveTimeWindowState").and_then(|v| v.as_i64()), Some(2));
+    assert_eq!(upd_map.get("totalPulses").and_then(|v| v.as_i64()), Some(30));
     assert_eq!(
         upd_map.get("linkedCharacterID").and_then(|v| v.as_i64()),
         Some(CHAR_ID),

@@ -72,6 +72,12 @@ pub struct AuthoritativeContext {
     pub gateway_instance_uuid: Vec<u8>,
     pub no_active_identity: bool,
     pub identity: Option<ActiveIdentity>,
+    /// Server-resolved account/cluster service roles (`session.role`), never OR-ed with `corp_role_mask`.
+    #[serde(default)]
+    pub service_role_mask: u64,
+    /// Server-resolved corporation roles (`session.corp_role` / DB corp governance), never OR-ed with `service_role_mask`.
+    #[serde(default)]
+    pub corp_role_mask: u64,
 }
 
 impl AuthoritativeContext {
@@ -124,6 +130,11 @@ impl AuthoritativeContext {
                 ),
                 None => (true, None, true, None),
             };
+        let resolved_corp_mask = if character_id.is_some() {
+            corp_roles_bitmask
+        } else {
+            0
+        };
         Self {
             received: Some(GoogleTimestamp {
                 seconds: now_unix as i64,
@@ -138,7 +149,14 @@ impl AuthoritativeContext {
             gateway_instance_uuid,
             no_active_identity,
             identity,
+            service_role_mask: 0,
+            corp_role_mask: resolved_corp_mask,
         }
+    }
+
+    pub fn with_service_roles(mut self, service_role_mask: u64) -> Self {
+        self.service_role_mask = service_role_mask;
+        self
     }
 
     pub fn effective_user_id(&self) -> Option<i32> {
@@ -265,7 +283,9 @@ impl QuasarMessage for AuthoritativeContext {
                 }
                 10 => {
                     if let Some(b) = f.value.as_bytes() {
-                        res.identity = Some(ActiveIdentity::decode_proto(b)?);
+                        let id = ActiveIdentity::decode_proto(b)?;
+                        res.corp_role_mask = id.roles.as_ref().map_or(0, |r| r.bitmask);
+                        res.identity = Some(id);
                         res.no_active_identity = false;
                     }
                 }

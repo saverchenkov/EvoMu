@@ -366,35 +366,15 @@ pub async fn handle_fit_ships(
                 });
             }
 
-            // maxTypeFitted (2431 / 1544) and maxGroupFitted (1548 / 1544)
+            // maxGroupFitted (1544 / 1548) and maxTypeFitted (2431 or 1548->1544)
             for &(tid, flag, _) in &desired_items {
                 let flag_u16 = flag as u16;
                 if matches!(flag_u16, 11..=34 | 92..=94 | 125..=132) {
                     let Some(m_type) = ctx.sde.types.get(&tid) else { continue; };
-                    let type_limit = m_type
-                        .default_attributes
-                        .get(&2431)
-                        .or_else(|| m_type.default_attributes.get(&1544))
-                        .copied();
-                    if let Some(limit_f) = type_limit {
-                        let limit = limit_f as usize;
-                        let existing = snap.items.values()
-                            .filter(|i| i.location_id == ship_id && matches!(i.flag as u16, 11..=34 | 92..=94 | 125..=132) && i.type_id == tid)
-                            .count();
-                        let planned = desired_items.iter()
-                            .filter(|(t, f, _)| matches!(*f as u16, 11..=34 | 92..=94 | 125..=132) && *t == tid)
-                            .count();
-                        if existing + planned > limit {
-                            return Err(BridgeRpcError {
-                                code: "UserError".into(),
-                                message: format!("MaxTypeFittedExceeded for type {tid}: limit {limit}"),
-                            });
-                        }
-                    }
                     let group_limit = m_type
                         .default_attributes
-                        .get(&763)
-                        .or_else(|| m_type.default_attributes.get(&1548))
+                        .get(&1548)
+                        .or_else(|| m_type.default_attributes.get(&1544))
                         .copied();
                     if let Some(limit_f) = group_limit {
                         let limit = limit_f as usize;
@@ -410,6 +390,32 @@ pub async fn handle_fit_ships(
                             return Err(BridgeRpcError {
                                 code: "UserError".into(),
                                 message: format!("MaxGroupFittedExceeded for group {}: limit {limit}", m_type.group_id),
+                            });
+                        }
+                    }
+                    let type_limit = m_type
+                        .default_attributes
+                        .get(&2431)
+                        .or_else(|| {
+                            if m_type.default_attributes.contains_key(&1548) {
+                                m_type.default_attributes.get(&1544)
+                            } else {
+                                None
+                            }
+                        })
+                        .copied();
+                    if let Some(limit_f) = type_limit {
+                        let limit = limit_f as usize;
+                        let existing = snap.items.values()
+                            .filter(|i| i.location_id == ship_id && matches!(i.flag as u16, 11..=34 | 92..=94 | 125..=132) && i.type_id == tid)
+                            .count();
+                        let planned = desired_items.iter()
+                            .filter(|(t, f, _)| matches!(*f as u16, 11..=34 | 92..=94 | 125..=132) && *t == tid)
+                            .count();
+                        if existing + planned > limit {
+                            return Err(BridgeRpcError {
+                                code: "UserError".into(),
+                                message: format!("MaxTypeFittedExceeded for type {tid}: limit {limit}"),
                             });
                         }
                     }
@@ -844,7 +850,7 @@ pub(crate) fn is_item_allowed_in_ship_hold(
         143 => item_type.category_id == 8,
         148 => item_type.group_id == 1027,
         149 => matches!(item_type.category_id, 42 | 43),
-        // parity: feat:ships.frigate-escape-bay
+        // Frigate Escape Bay
         179 => {
             item_type.group_id == 1246
                 || (ship_type.default_attributes.get(&3020).copied().unwrap_or(0.0) > 0.0

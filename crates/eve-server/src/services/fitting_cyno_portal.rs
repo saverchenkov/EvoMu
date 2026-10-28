@@ -535,6 +535,7 @@ async fn relocate_ship(
         }
         if let Some(sh) = snap.items.get_mut(&ship_id) {
             sh.location_id = to_sys as i64;
+            sh.version += 1;
         }
         snap.character_last_jump_unix.insert(char_id, now);
     });
@@ -944,6 +945,9 @@ async fn group_jump_to_fleet_beacon(
     let beacon_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
     if (31_000_000..32_000_000).contains(&target_sys) {
         return Err(err("JumpDriveForbiddenInWormholeSpace", format!("Jump drives cannot target wormhole system {target_sys}")));
+    }
+    if target_sys != 0 && (!ctx.sde.solar_systems.contains_key(&target_sys) || Some(target_sys) == session.solar_system_id) {
+        return Err(err("InvalidJumpDestination", format!("Invalid jump destination solar system {target_sys}")));
     }
     let (char_id, ship_id, sys_id, caller_ball) = caller_in_space(ctx, session).await?;
     if target_sys != 0 {

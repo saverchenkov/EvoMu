@@ -69,6 +69,18 @@ async fn test_corprec_proxy_rpcs() {
             ch.corporation_id = corp_id;
             ch.balance = eve_db::IskCents::from_isk(10_000_000);
         }
+        snap.corporations.insert(
+            corp_id,
+            eve_db::CorporationRecord {
+                corporation_id: corp_id,
+                name: "Frontier Exploits".into(),
+                ticker: "FEXP".into(),
+                ceo_id: PILOT_1,
+                master_wallet: eve_db::IskCents::from_isk(10_000_000),
+                members: std::collections::HashSet::from([PILOT_1]),
+                ..Default::default()
+            },
+        );
     });
 
     let mut sess = login_pilot_char(&ctx, 28_001, "demo", "demo-secret", PILOT_1).await;

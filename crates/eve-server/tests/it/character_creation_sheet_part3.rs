@@ -421,7 +421,8 @@ async fn test_s4_jump_clones_implants_and_cooldown() {
         );
     });
 
-    // 3. Attempting clone jump before 24h cooldown expires must fail
+    // 3. Attempting clone jump before 24h cooldown expires must fail (advance past 10s session-change timer)
+    ctx.advance_secs(12);
     let early_jump = ctx
         .dispatch_rpc(
             &mut sess,

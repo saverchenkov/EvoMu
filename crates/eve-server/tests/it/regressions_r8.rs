@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_review_r8_regressions() {
-    // parity: rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.LoadAmmo, rpc:dynamicItemService.CreateDynamicItem, rpc:fighterMgr.CmdActivateAbilitySlots, rpc:industryManager.CompleteJob, rpc:industryManager.InstallJob, rpc:jumpCloneSvc.GetPriceForClone, rpc:keeper.ActivateAccelerationGate, rpc:marketProxy.BuyMultipleItems, rpc:marketProxy.GetCharOrders, rpc:marketProxy.PlaceBuyOrder, rpc:marketProxy.PlaceMultiSellOrder, rpc:multiLoginBlocker.Login, rpc:planetMgr.UserUpdateNetwork, rpc:repackagingSvc.RepackageItems, rpc:ship.Board, rpc:shipCosmeticsMgr.ActivateSkinLicense, rpc:shipCosmeticsMgr.ApplySkinToShip, rpc:shipCosmeticsMgr.GiveSkin, rpc:standingMgr.GetStandingTransactions
+    // parity: rpc:dynamicItemService.CreateDynamicItem, rpc:fighterMgr.CmdActivateAbilitySlots, rpc:industryManager.CompleteJob, rpc:jumpCloneSvc.GetPriceForClone, rpc:keeper.ActivateAccelerationGate, rpc:marketProxy.BuyMultipleItems, rpc:marketProxy.GetCharOrders, rpc:multiLoginBlocker.Login, rpc:planetMgr.UserUpdateNetwork, rpc:repackagingSvc.RepackageItems, rpc:shipCosmeticsMgr.ActivateSkinLicense, rpc:shipCosmeticsMgr.ApplySkinToShip, rpc:shipCosmeticsMgr.GiveSkin, rpc:standingMgr.GetStandingTransactions
     use eve_db::InventoryFlag;
 
     let ctx = ServerContext::new();
@@ -17,58 +17,14 @@ async fn test_review_r8_regressions() {
     let kw = HashMap::new();
 
     let mut s1 = SessionState::new(30);
-    ctx.dispatch_rpc(
-        &mut s1,
-        "authentication",
-        None,
-        "Login",
-        &[
-            PyRep::String("demo".into()),
-            PyRep::String("demo-secret".into()),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .unwrap();
-    ctx.dispatch_rpc(
-        &mut s1,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(90_000_001)],
-        &kw,
-        None,
-    )
-    .await
-    .unwrap();
+    ctx.dispatch_rpc(&mut s1, "authentication", None, "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())], &kw, None).await.unwrap();
+    ctx.dispatch_rpc(&mut s1, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(90_000_001)], &kw, None).await.unwrap();
 
     let mut s2 = SessionState::new(31);
-    ctx.dispatch_rpc(
-        &mut s2,
-        "authentication",
-        None,
-        "Login",
-        &[
-            PyRep::String("other".into()),
-            PyRep::String("other-secret".into()),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .unwrap();
-    ctx.dispatch_rpc(
-        &mut s2,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(90_000_002)],
-        &kw,
-        None,
-    )
-    .await
-    .unwrap();
+    ctx.dispatch_rpc(&mut s2, "authentication", None, "Login", &[PyRep::String("other".into()), PyRep::String("other-secret".into())], &kw, None)
+        .await
+        .unwrap();
+    ctx.dispatch_rpc(&mut s2, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(90_000_002)], &kw, None).await.unwrap();
 
     // 1. R8-P0-1: Escrow 1MN Afterburner II (100_000_003, type 438) into an ItemExchange contract;
     // verify CreateDynamicItem cannot mutate a contract-locked item, AcceptContract fails with ContractEscrowItemMissing and zero ISK transfer if the escrowed item is missing, and DeleteContract restores it.
@@ -103,21 +59,9 @@ async fn test_review_r8_regressions() {
     };
     let cid_ab = cab_kv.get("contractID").unwrap().as_i64().unwrap();
 
-    let muta_locked = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "dynamicItemService",
-            None,
-            "CreateDynamicItem",
-            &[PyRep::Integer(47746), PyRep::Integer(100_000_003)],
-            &kw,
-            None,
-        )
-        .await;
-    assert_eq!(
-        muta_locked.unwrap_err().code,
-        "TargetItemLockedOrUnreachable"
-    );
+    let muta_locked =
+        ctx.dispatch_rpc(&mut s1, "dynamicItemService", None, "CreateDynamicItem", &[PyRep::Integer(47746), PyRep::Integer(100_000_003)], &kw, None).await;
+    assert_eq!(muta_locked.unwrap_err().code, "TargetItemLockedOrUnreachable");
 
     // Verify AcceptContract fails with ContractEscrowItemMissing and zero ISK transfer if the escrowed item is missing
     ctx.db.with_mut_snapshot(|snap| {
@@ -126,22 +70,9 @@ async fn test_review_r8_regressions() {
         }
     });
     let s2_bal_before = ctx.db.get_character(90_000_002).unwrap().balance.0;
-    let missing_acc = ctx
-        .dispatch_rpc(
-            &mut s2,
-            "contractProxy",
-            None,
-            "AcceptContract",
-            &[PyRep::Integer(cid_ab)],
-            &kw,
-            None,
-        )
-        .await;
+    let missing_acc = ctx.dispatch_rpc(&mut s2, "contractProxy", None, "AcceptContract", &[PyRep::Integer(cid_ab)], &kw, None).await;
     assert_eq!(missing_acc.unwrap_err().code, "ContractEscrowItemMissing");
-    assert_eq!(
-        ctx.db.get_character(90_000_002).unwrap().balance.0,
-        s2_bal_before
-    );
+    assert_eq!(ctx.db.get_character(90_000_002).unwrap().balance.0, s2_bal_before);
 
     // Restore lock and delete contract via DeleteContract; verify item 100_000_003 is back in Hangar at 60_003_760
     ctx.db.with_mut_snapshot(|snap| {
@@ -149,21 +80,8 @@ async fn test_review_r8_regressions() {
             it.flag = InventoryFlag::Locked;
         }
     });
-    ctx.dispatch_rpc(
-        &mut s1,
-        "contractProxy",
-        None,
-        "DeleteContract",
-        &[PyRep::Integer(cid_ab)],
-        &kw,
-        None,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        ctx.db.get_item(100_000_003).unwrap().flag,
-        InventoryFlag::Hangar
-    );
+    ctx.dispatch_rpc(&mut s1, "contractProxy", None, "DeleteContract", &[PyRep::Integer(cid_ab)], &kw, None).await.unwrap();
+    assert_eq!(ctx.db.get_item(100_000_003).unwrap().flag, InventoryFlag::Hangar);
 
     // 2. R8-P1-1: Install industry job (locks Rifter BPO 100_000_007), verify CreateContract rejects escrowing 100_000_007 with ContractItemLocked,
     // and verify CompleteJob rejects completion with BlueprintMissingOrUnlocked if blueprint was unlocked/moved.
@@ -221,37 +139,14 @@ async fn test_review_r8_regressions() {
             bp.flag = InventoryFlag::Hangar;
         }
     });
-    let comp_unlocked_err = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "industryManager",
-            None,
-            "CompleteJob",
-            &[PyRep::Integer(jid)],
-            &kw,
-            None,
-        )
-        .await;
-    assert_eq!(
-        comp_unlocked_err.unwrap_err().code,
-        "BlueprintMissingOrUnlocked"
-    );
+    let comp_unlocked_err = ctx.dispatch_rpc(&mut s1, "industryManager", None, "CompleteJob", &[PyRep::Integer(jid)], &kw, None).await;
+    assert_eq!(comp_unlocked_err.unwrap_err().code, "BlueprintMissingOrUnlocked");
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(bp) = snap.items.get_mut(&100_000_007) {
             bp.flag = InventoryFlag::Locked;
         }
     });
-    ctx.dispatch_rpc(
-        &mut s1,
-        "industryManager",
-        None,
-        "CompleteJob",
-        &[PyRep::Integer(jid)],
-        &kw,
-        None,
-    )
-    .await
-    .unwrap();
+    ctx.dispatch_rpc(&mut s1, "industryManager", None, "CompleteJob", &[PyRep::Integer(jid)], &kw, None).await.unwrap();
 
     // 3. R8-P1-2 & R9-P1-1: Expired contract settlement for both Outstanding and InProgress Courier contracts
     let exp_cour_item_id = ctx.db.with_mut_snapshot(|snap| {
@@ -304,28 +199,12 @@ async fn test_review_r8_regressions() {
         panic!("Expected cexp_kv");
     };
     let cid_exp = cexp_kv.get("contractID").unwrap().as_i64().unwrap();
-    assert_eq!(
-        ctx.db.get_character(90_000_001).unwrap().balance.0,
-        s1_bal_pre - 11_500_000
-    );
+    assert_eq!(ctx.db.get_character(90_000_001).unwrap().balance.0, s1_bal_pre - 11_500_000);
     ctx.advance_virtual_clock(86_405);
-    let acc_exp = ctx
-        .dispatch_rpc(
-            &mut s2,
-            "contractProxy",
-            None,
-            "AcceptContract",
-            &[PyRep::Integer(cid_exp)],
-            &kw,
-            None,
-        )
-        .await;
+    let acc_exp = ctx.dispatch_rpc(&mut s2, "contractProxy", None, "AcceptContract", &[PyRep::Integer(cid_exp)], &kw, None).await;
     assert_eq!(acc_exp.unwrap_err().code, "ContractExpired");
     // Escrowed 5,000 ISK reward and 100,000 ISK deposit were durably refunded to issuer s1 (10,000 ISK broker fee retained)
-    assert_eq!(
-        ctx.db.get_character(90_000_001).unwrap().balance.0,
-        s1_bal_pre - 1_000_000
-    );
+    assert_eq!(ctx.db.get_character(90_000_001).unwrap().balance.0, s1_bal_pre - 1_000_000);
 
     // R9-P1-1: InProgress Courier contract resets delivery deadline on acceptance; on expiry, issuer gets collateral + reward and contracted item transfers to acceptor at its current location (not teleported back to issuer)
     let c_inprog = ctx
@@ -361,18 +240,7 @@ async fn test_review_r8_regressions() {
     let create_exp = cin_kv.get("expirationUnix").unwrap().as_i64().unwrap();
     // Advance 80,000s (late in 24h offer window) and accept with s2
     ctx.advance_virtual_clock(80_000);
-    let acc_in = ctx
-        .dispatch_rpc(
-            &mut s2,
-            "contractProxy",
-            None,
-            "AcceptContract",
-            &[PyRep::Integer(cid_in)],
-            &kw,
-            None,
-        )
-        .await
-        .unwrap();
+    let acc_in = ctx.dispatch_rpc(&mut s2, "contractProxy", None, "AcceptContract", &[PyRep::Integer(cid_in)], &kw, None).await.unwrap();
     let PyRep::KeyVal(accin_kv) = acc_in else {
         panic!("Expected accin_kv");
     };
@@ -387,23 +255,10 @@ async fn test_review_r8_regressions() {
     assert!((delivery_exp - (create_exp + 80_000)).abs() <= 2);
     // Advance past the new 24h delivery deadline (86,405s) and call CompleteContract
     ctx.advance_virtual_clock(86_405);
-    let comp_exp = ctx
-        .dispatch_rpc(
-            &mut s2,
-            "contractProxy",
-            None,
-            "CompleteContract",
-            &[PyRep::Integer(cid_in)],
-            &kw,
-            None,
-        )
-        .await;
+    let comp_exp = ctx.dispatch_rpc(&mut s2, "contractProxy", None, "CompleteContract", &[PyRep::Integer(cid_in)], &kw, None).await;
     assert_eq!(comp_exp.unwrap_err().code, "ContractExpired");
-    // Issuer s1 received back the 5,000 ISK reward + 20,000 ISK forfeited collateral (1,000,000 cents first broker fee + 11,000,000 cents second contract fee - 2,000,000 cents collateral)
-    assert_eq!(
-        ctx.db.get_character(90_000_001).unwrap().balance.0,
-        s1_bal_pre - 10_000_000
-    );
+    // Issuer s1 received back the 100,000 ISK public courier deposit on acceptance + 5,000 ISK reward + 20,000 ISK forfeited collateral
+    assert_eq!(ctx.db.get_character(90_000_001).unwrap().balance.0, s1_bal_pre);
     // Contracted item 100_000_003 stayed in s2's ship (100_000_002) and transferred ownership to s2 (90_000_002)
     let forfeited_item = ctx.db.get_item(100_000_003).unwrap();
     assert_eq!(forfeited_item.owner_id, 90_000_002);
@@ -412,78 +267,38 @@ async fn test_review_r8_regressions() {
 
     // 4. R8-P1-4 & R9-P1-3: Accepting missions allocates unique NPC ball IDs per character and mission instance;
     // s1 accepting 909 & 910 and s2 accepting 909 produce 3 distinct NPC balls that never collide.
-    let PyRep::KeyVal(u1_kv) = ctx
-        .dispatch_rpc(&mut s1, "stationSvc", None, "Undock", &[], &kw, None)
-        .await
-        .unwrap()
-    else {
+    let PyRep::KeyVal(u1_kv) = ctx.dispatch_rpc(&mut s1, "stationSvc", None, "Undock", &[], &kw, None).await.unwrap() else {
         panic!("Expected u1_kv");
     };
     let s1_b_id = u1_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
-    ctx.dispatch_rpc(&mut s1, "beyonce", Some(s1_b_id), "CmdStop", &[], &kw, None)
-        .await
-        .unwrap();
-    let PyRep::KeyVal(u2_kv) = ctx
-        .dispatch_rpc(&mut s2, "stationSvc", None, "Undock", &[], &kw, None)
-        .await
-        .unwrap()
-    else {
+    ctx.dispatch_rpc(&mut s1, "beyonce", Some(s1_b_id), "CmdStop", &[], &kw, None).await.unwrap();
+    let PyRep::KeyVal(u2_kv) = ctx.dispatch_rpc(&mut s2, "stationSvc", None, "Undock", &[], &kw, None).await.unwrap() else {
         panic!("Expected u2_kv");
     };
     let s2_b_id = u2_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
-    ctx.dispatch_rpc(&mut s2, "beyonce", Some(s2_b_id), "CmdStop", &[], &kw, None)
-        .await
-        .unwrap();
+    ctx.dispatch_rpc(&mut s2, "beyonce", Some(s2_b_id), "CmdStop", &[], &kw, None).await.unwrap();
     let mut s1_mids = Vec::new();
     let mut s1_npcs = Vec::new();
     for _ in 0..2 {
-        let rm = ctx
-            .dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(2)], &kw, None)
-            .await
-            .unwrap();
+        let rm = ctx.dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(2)], &kw, None).await.unwrap();
         let PyRep::KeyVal(rm_kv) = rm else {
             panic!("Expected rm_kv");
         };
         let mid = rm_kv.get("missionID").unwrap().as_i64().unwrap();
         s1_mids.push(mid);
-        let am = ctx
-            .dispatch_rpc(
-                &mut s1,
-                "agentMgr",
-                None,
-                "DoAction",
-                &[PyRep::Integer(3), PyRep::Integer(mid)],
-                &kw,
-                None,
-            )
-            .await
-            .unwrap();
+        let am = ctx.dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(3), PyRep::Integer(mid)], &kw, None).await.unwrap();
         let PyRep::KeyVal(am_kv) = am else {
             panic!("Expected am_kv");
         };
         s1_npcs.push(am_kv.get("spawnedNpcBallID").unwrap().as_i64().unwrap());
     }
     assert_ne!(s1_mids[0], s1_mids[1]);
-    let rm_s2 = ctx
-        .dispatch_rpc(&mut s2, "agentMgr", None, "DoAction", &[PyRep::Integer(2)], &kw, None)
-        .await
-        .unwrap();
+    let rm_s2 = ctx.dispatch_rpc(&mut s2, "agentMgr", None, "DoAction", &[PyRep::Integer(2)], &kw, None).await.unwrap();
     let PyRep::KeyVal(rms2_kv) = rm_s2 else {
         panic!("Expected rms2_kv");
     };
     let s2_mid_1 = rms2_kv.get("missionID").unwrap().as_i64().unwrap();
-    let am_s2 = ctx
-        .dispatch_rpc(
-            &mut s2,
-            "agentMgr",
-            None,
-            "DoAction",
-            &[PyRep::Integer(3), PyRep::Integer(s2_mid_1)],
-            &kw,
-            None,
-        )
-        .await
-        .unwrap();
+    let am_s2 = ctx.dispatch_rpc(&mut s2, "agentMgr", None, "DoAction", &[PyRep::Integer(3), PyRep::Integer(s2_mid_1)], &kw, None).await.unwrap();
     let PyRep::KeyVal(ams2_kv) = am_s2 else {
         panic!("Expected ams2_kv");
     };
@@ -530,57 +345,20 @@ async fn test_review_r8_regressions() {
             },
         );
     });
-    ctx.dispatch_rpc(
-        &mut s1,
-        "dogmaIM",
-        None,
-        "LoadAmmo",
-        &[
-            PyRep::Integer(100_000_001),
-            PyRep::Integer(27),
-            PyRep::Integer(100_000_942),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .unwrap();
-    ctx.dispatch_rpc(
-        &mut s2,
-        "dogmaIM",
-        None,
-        "LoadAmmo",
-        &[
-            PyRep::Integer(100_000_002),
-            PyRep::Integer(27),
-            PyRep::Integer(100_000_943),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .unwrap();
+    ctx.dispatch_rpc(&mut s1, "dogmaIM", None, "LoadAmmo", &[PyRep::Integer(100_000_001), PyRep::Integer(27), PyRep::Integer(100_000_942)], &kw, None)
+        .await
+        .unwrap();
+    ctx.dispatch_rpc(&mut s2, "dogmaIM", None, "LoadAmmo", &[PyRep::Integer(100_000_002), PyRep::Integer(27), PyRep::Integer(100_000_943)], &kw, None)
+        .await
+        .unwrap();
 
     let jita_handle = ctx.systems.get_or_spawn(30_000_142);
     for _ in 0..4 {
         let _ = jita_handle.step_manual(1.0).await.unwrap();
     }
     // Third-party pilot (`s2`) cannot attack `s1`'s instanced mission pocket NPC
-    let cross_fire = ctx
-        .dispatch_rpc(
-            &mut s2,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[PyRep::Integer(s1_npcs[0])],
-            &kw,
-            None,
-        )
-        .await;
-    assert_eq!(
-        cross_fire.unwrap_err().code,
-        "MissionPocketInstanceRestricted"
-    );
+    let cross_fire = ctx.dispatch_rpc(&mut s2, "dogmaIM", None, "Activate", &[PyRep::Integer(s1_npcs[0])], &kw, None).await;
+    assert_eq!(cross_fire.unwrap_err().code, "MissionPocketInstanceRestricted");
 
     let mut fw1_destroyed = false;
     for shot in 0..10 {
@@ -589,18 +367,7 @@ async fn test_review_r8_regressions() {
                 let _ = jita_handle.step_manual(1.0).await.unwrap();
             }
         }
-        let fw1 = ctx
-            .dispatch_rpc(
-                &mut s1,
-                "dogmaIM",
-                None,
-                "Activate",
-                &[PyRep::Integer(s1_npcs[0])],
-                &kw,
-                None,
-            )
-            .await
-            .unwrap();
+        let fw1 = ctx.dispatch_rpc(&mut s1, "dogmaIM", None, "Activate", &[PyRep::Integer(s1_npcs[0])], &kw, None).await.unwrap();
         let PyRep::KeyVal(fw1_kv) = fw1 else {
             panic!("Expected fw1_kv");
         };
@@ -611,29 +378,9 @@ async fn test_review_r8_regressions() {
     }
     assert!(fw1_destroyed);
 
-    let gate_m2_early = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "keeper",
-            None,
-            "ActivateAccelerationGate",
-            &[PyRep::Integer(s1_mids[1])],
-            &kw,
-            None,
-        )
-        .await;
+    let gate_m2_early = ctx.dispatch_rpc(&mut s1, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(s1_mids[1])], &kw, None).await;
     assert_eq!(gate_m2_early.unwrap_err().code, "RoomNpcsRemaining");
-    let m2_early = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "agentMgr",
-            None,
-            "DoAction",
-            &[PyRep::Integer(6), PyRep::Integer(s1_mids[1])],
-            &kw,
-            None,
-        )
-        .await;
+    let m2_early = ctx.dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(6), PyRep::Integer(s1_mids[1])], &kw, None).await;
     assert_eq!(m2_early.unwrap_err().code, "MissionIncomplete");
 
     let mut fw2_destroyed = false;
@@ -641,18 +388,7 @@ async fn test_review_r8_regressions() {
         for _ in 0..4 {
             let _ = jita_handle.step_manual(1.0).await.unwrap();
         }
-        let fw2 = ctx
-            .dispatch_rpc(
-                &mut s1,
-                "dogmaIM",
-                None,
-                "Activate",
-                &[PyRep::Integer(s1_npcs[1])],
-                &kw,
-                None,
-            )
-            .await
-            .unwrap();
+        let fw2 = ctx.dispatch_rpc(&mut s1, "dogmaIM", None, "Activate", &[PyRep::Integer(s1_npcs[1])], &kw, None).await.unwrap();
         let PyRep::KeyVal(fw2_kv) = fw2 else {
             panic!("Expected fw2_kv");
         };
@@ -662,28 +398,8 @@ async fn test_review_r8_regressions() {
         }
     }
     assert!(fw2_destroyed);
-    ctx.dispatch_rpc(
-        &mut s1,
-        "keeper",
-        None,
-        "ActivateAccelerationGate",
-        &[PyRep::Integer(s1_mids[1])],
-        &kw,
-        None,
-    )
-    .await
-    .unwrap();
-    ctx.dispatch_rpc(
-        &mut s1,
-        "agentMgr",
-        None,
-        "DoAction",
-        &[PyRep::Integer(6), PyRep::Integer(s1_mids[1])],
-        &kw,
-        None,
-    )
-    .await
-    .unwrap();
+    ctx.dispatch_rpc(&mut s1, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(s1_mids[1])], &kw, None).await.unwrap();
+    ctx.dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(6), PyRep::Integer(s1_mids[1])], &kw, None).await.unwrap();
 
     // s2's mission NPC is still alive and independent; s2 destroys it and completes s2_mid_1
     let mut fws2_destroyed = false;
@@ -693,18 +409,7 @@ async fn test_review_r8_regressions() {
                 let _ = jita_handle.step_manual(1.0).await.unwrap();
             }
         }
-        let fw_s2 = ctx
-            .dispatch_rpc(
-                &mut s2,
-                "dogmaIM",
-                None,
-                "Activate",
-                &[PyRep::Integer(s2_npc_1001)],
-                &kw,
-                None,
-            )
-            .await
-            .unwrap();
+        let fw_s2 = ctx.dispatch_rpc(&mut s2, "dogmaIM", None, "Activate", &[PyRep::Integer(s2_npc_1001)], &kw, None).await.unwrap();
         let PyRep::KeyVal(fws2_kv) = fw_s2 else {
             panic!("Expected fws2_kv");
         };
@@ -714,142 +419,37 @@ async fn test_review_r8_regressions() {
         }
     }
     assert!(fws2_destroyed);
-    ctx.dispatch_rpc(
-        &mut s2,
-        "keeper",
-        None,
-        "ActivateAccelerationGate",
-        &[PyRep::Integer(s2_mid_1)],
-        &kw,
-        None,
-    )
-    .await
-    .unwrap();
-    ctx.dispatch_rpc(
-        &mut s2,
-        "agentMgr",
-        None,
-        "DoAction",
-        &[PyRep::Integer(6), PyRep::Integer(s2_mid_1)],
-        &kw,
-        None,
-    )
-    .await
-    .unwrap();
+    ctx.dispatch_rpc(&mut s2, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(s2_mid_1)], &kw, None).await.unwrap();
+    ctx.dispatch_rpc(&mut s2, "agentMgr", None, "DoAction", &[PyRep::Integer(6), PyRep::Integer(s2_mid_1)], &kw, None).await.unwrap();
 
     // Mission abandon/decline via RemoveOfferFromJournal despawns the pocket NPC and clears the journal entry
-    let rm_1003 = ctx
-        .dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(2)], &kw, None)
-        .await
-        .unwrap();
+    let rm_1003 = ctx.dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(2)], &kw, None).await.unwrap();
     let PyRep::KeyVal(rm1003_kv) = rm_1003 else {
         panic!("Expected rm1003_kv");
     };
     let s1_mid_3 = rm1003_kv.get("missionID").unwrap().as_i64().unwrap();
-    let am_1003 = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "agentMgr",
-            None,
-            "DoAction",
-            &[PyRep::Integer(3), PyRep::Integer(s1_mid_3)],
-            &kw,
-            None,
-        )
-        .await
-        .unwrap();
+    let am_1003 = ctx.dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(3), PyRep::Integer(s1_mid_3)], &kw, None).await.unwrap();
     let PyRep::KeyVal(am1003_kv) = am_1003 else {
         panic!("Expected am1003_kv");
     };
     let npc_1003 = am1003_kv.get("spawnedNpcBallID").unwrap().as_i64().unwrap();
-    assert!(jita_handle
-        .get_ball_snapshot(npc_1003)
-        .await
-        .unwrap()
-        .is_some());
-    ctx.dispatch_rpc(
-        &mut s1,
-        "agentMgr",
-        None,
-        "RemoveOfferFromJournal",
-        &[PyRep::Integer(s1_mid_3)],
-        &kw,
-        None,
-    )
-    .await
-    .unwrap();
-    assert!(jita_handle
-        .get_ball_snapshot(npc_1003)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(jita_handle.get_ball_snapshot(npc_1003).await.unwrap().is_some());
+    ctx.dispatch_rpc(&mut s1, "agentMgr", None, "RemoveOfferFromJournal", &[PyRep::Integer(s1_mid_3)], &kw, None).await.unwrap();
+    assert!(jita_handle.get_ball_snapshot(npc_1003).await.unwrap().is_none());
 
     // N1, N2 & R36-P1-7: Cannot abandon an already completed or already quit mission, cannot re-accept either, and client cannot supply mission_id to DoAction(RequestMission)
-    let quit_completed = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "agentMgr",
-            None,
-            "RemoveOfferFromJournal",
-            &[PyRep::Integer(s1_mids[1])],
-            &kw,
-            None,
-        )
-        .await;
+    let quit_completed = ctx.dispatch_rpc(&mut s1, "agentMgr", None, "RemoveOfferFromJournal", &[PyRep::Integer(s1_mids[1])], &kw, None).await;
     assert_eq!(quit_completed.unwrap_err().code, "MissionNotActive");
-    let quit_already_quit = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "agentMgr",
-            None,
-            "RemoveOfferFromJournal",
-            &[PyRep::Integer(s1_mid_3)],
-            &kw,
-            None,
-        )
-        .await;
+    let quit_already_quit = ctx.dispatch_rpc(&mut s1, "agentMgr", None, "RemoveOfferFromJournal", &[PyRep::Integer(s1_mid_3)], &kw, None).await;
     assert_eq!(quit_already_quit.unwrap_err().code, "MissionNotActive");
-    let reaccept_completed = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "agentMgr",
-            None,
-            "DoAction",
-            &[PyRep::Integer(3), PyRep::Integer(s1_mids[1])],
-            &kw,
-            None,
-        )
-        .await;
+    let reaccept_completed = ctx.dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(3), PyRep::Integer(s1_mids[1])], &kw, None).await;
     assert_eq!(reaccept_completed.unwrap_err().code, "InvalidMissionState");
-    let client_supplied_mid = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "agentMgr",
-            None,
-            "DoAction",
-            &[PyRep::Integer(2), PyRep::Integer(s1_mids[1])],
-            &kw,
-            None,
-        )
-        .await;
+    let client_supplied_mid = ctx.dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(2), PyRep::Integer(s1_mids[1])], &kw, None).await;
     assert_eq!(client_supplied_mid.unwrap_err().code, "UnknownAgent");
 
     // N4: Cannot fit a module into a ship slot while in space (`CannotFitInSpace`)
-    let fit_in_space = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "invbroker",
-            None,
-            "Add",
-            &[
-                PyRep::Integer(100_000_003),
-                PyRep::Integer(100_000_001),
-                PyRep::Integer(12),
-            ],
-            &kw,
-            None,
-        )
-        .await;
+    let fit_in_space =
+        ctx.dispatch_rpc(&mut s1, "invbroker", None, "Add", &[PyRep::Integer(100_000_003), PyRep::Integer(100_000_001), PyRep::Integer(12)], &kw, None).await;
     assert_eq!(fit_in_space.unwrap_err().code, "CannotFitInSpace");
 
     // N7: Cannot warp to arbitrary unscanned/unbookmarked coordinates (`InvalidWarpDestination`)
@@ -860,11 +460,7 @@ async fn test_review_r8_regressions() {
             "beyonce",
             Some(s1_bound),
             "CmdWarpToStuff",
-            &[
-                PyRep::Real(900_000_000_000.0),
-                PyRep::Real(900_000_000_000.0),
-                PyRep::Real(900_000_000_000.0),
-            ],
+            &[PyRep::Real(900_000_000_000.0), PyRep::Real(900_000_000_000.0), PyRep::Real(900_000_000_000.0)],
             &kw,
             None,
         )
@@ -887,65 +483,25 @@ async fn test_review_r8_regressions() {
             mode: eve_destiny::MovementMode::Stop,
         })
         .await;
-    let warp_to_other_ship = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "beyonce",
-            Some(s1_bound),
-            "CmdWarpToStuff",
-            &[PyRep::String("item".into()), PyRep::Integer(100_000_002)],
-            &kw,
-            None,
-        )
-        .await;
-    assert_eq!(
-        warp_to_other_ship.unwrap_err().code,
-        "InvalidWarpDestination"
-    );
+    let warp_to_other_ship =
+        ctx.dispatch_rpc(&mut s1, "beyonce", Some(s1_bound), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(100_000_002)], &kw, None).await;
+    assert_eq!(warp_to_other_ship.unwrap_err().code, "InvalidWarpDestination");
 
     // R12-P1-3: CmdWarpToStuff resolves ("item", stargate_id) and rejects invalid targets
-    let warp_stuff_ok = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "beyonce",
-            Some(s1_bound),
-            "CmdWarpToStuff",
-            &[PyRep::String("item".into()), PyRep::Integer(50_001_249)],
-            &kw,
-            None,
-        )
-        .await;
+    let warp_stuff_ok =
+        ctx.dispatch_rpc(&mut s1, "beyonce", Some(s1_bound), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(50_001_249)], &kw, None).await;
     assert!(warp_stuff_ok.is_ok(), "CmdWarpToStuff to stargate 50001249");
-    let warp_stuff_bad = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "beyonce",
-            Some(s1_bound),
-            "CmdWarpToStuff",
-            &[PyRep::String("item".into()), PyRep::Integer(999_999_999)],
-            &kw,
-            None,
-        )
-        .await;
+    let warp_stuff_bad =
+        ctx.dispatch_rpc(&mut s1, "beyonce", Some(s1_bound), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(999_999_999)], &kw, None).await;
     assert_eq!(warp_stuff_bad.unwrap_err().code, "InvalidWarpDestination");
 
     // R12-P1-1: Real SDE type 3520 (Heavy Pulse Laser II) has no fabricated capital damage (114..=118), and T2 BPO (11372) / rolled Abyssal (47749) are not sold on NPC market
     assert!(!ctx.sde.types[&3520].default_attributes.contains_key(&114));
     let (orders_11372, orders_47749) = ctx.db.with_snapshot(|snap| {
-        (
-            snap.market_orders
-                .values()
-                .filter(|o| o.type_id == 11372)
-                .count(),
-            snap.market_orders
-                .values()
-                .filter(|o| o.type_id == 47749)
-                .count(),
-        )
+        (snap.market_orders.values().filter(|o| o.type_id == 11372).count(), snap.market_orders.values().filter(|o| o.type_id == 47749).count())
     });
     assert_eq!(orders_11372, 0);
     assert_eq!(orders_47749, 0);
-
 
     let (s1, s2) = crate::regressions_r8_part2::run_r8_part2(&ctx, s1, s2).await;
     crate::regressions_r8_part3::run_r8_part3(&ctx, s1, s2).await;

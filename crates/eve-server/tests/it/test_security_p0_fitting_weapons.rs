@@ -586,3 +586,90 @@ async fn test_structure_fuel_bay_remote_proximity_and_fuel_type() {
     ).await.expect("In-range fuel move must succeed");
     assert!(matches!(ok_fuel, PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::None));
 }
+
+#[tokio::test]
+async fn test_fit_ships_dual_prop_allowed_while_max_group_and_type_fitted_enforced() {
+    let ctx = new_ctx();
+    let kw = HashMap::new();
+    let char_id = 90_000_001i64;
+    let station_id = 60_003_760i64;
+    let ship_id = 870_090i64;
+    let mut sess = SessionState::new(7199);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    sess.character_id = Some(char_id);
+    sess.station_id = Some(station_id);
+    sess.solar_system_id = Some(30_000_142);
+    sess.ship_id = Some(ship_id);
+
+    // Seed Caracal (621, 5 med slots, 4 low slots) + AB (438) + MWD (440) + 2x Damage Control I (2048, maxGroupFitted=1)
+    seed_item(&ctx, ship_id, 621, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    seed_item(&ctx, 870_091, 438, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    seed_item(&ctx, 870_092, 440, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    seed_item(&ctx, 870_093, 2048, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    seed_item(&ctx, 870_094, 2048, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        let sk = snap.skills.entry(char_id).or_default();
+        for &stid in &[3327u32, 3332, 3449, 3450, 3451, 3392, 3413, 3426] {
+            sk.insert(stid, eve_db::TrainedSkillRecord { type_id: stid, level: 5, skill_points: 256_000.0 });
+        }
+    });
+
+    // 1. Dual-prop (AB 438 + MWD 440, group 46 maxGroupActive=1, no maxGroupFitted) must succeed via FitShips
+    ctx.dispatch_rpc(
+        &mut sess,
+        "ship",
+        None,
+        "FitShips",
+        &[
+            PyRep::List(vec![PyRep::Integer(ship_id)]),
+            PyRep::List(vec![
+                PyRep::Tuple(vec![PyRep::Integer(438), PyRep::Integer(InventoryFlag::MedSlot0 as i64), PyRep::Integer(1)]),
+                PyRep::Tuple(vec![PyRep::Integer(440), PyRep::Integer(InventoryFlag::MedSlot1 as i64), PyRep::Integer(1)]),
+            ]),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Dual-prop AB + MWD must be allowed by ship.FitShips");
+
+    ctx.db.with_snapshot(|snap| {
+        let fitted_props: Vec<_> = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == ship_id && matches!(i.flag, InventoryFlag::MedSlot0 | InventoryFlag::MedSlot1))
+            .collect();
+        assert_eq!(fitted_props.len(), 2, "Both AB and MWD must be fitted to med slots");
+        let online_cnt = fitted_props
+            .iter()
+            .filter(|i| snap.module_online_states.get(&i.item_id).copied().unwrap_or(false))
+            .count();
+        assert_eq!(online_cnt, 1, "At most one propulsion module may be online due to maxGroupOnline/maxGroupActive");
+    });
+
+    // 2. Two Damage Control I (2048, maxGroupFitted=1) must still be rejected with MaxGroupFittedExceeded
+    let dc_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "ship",
+            None,
+            "FitShips",
+            &[
+                PyRep::List(vec![PyRep::Integer(ship_id)]),
+                PyRep::List(vec![
+                    PyRep::Tuple(vec![PyRep::Integer(2048), PyRep::Integer(InventoryFlag::LoSlot0 as i64), PyRep::Integer(1)]),
+                    PyRep::Tuple(vec![PyRep::Integer(2048), PyRep::Integer(InventoryFlag::LoSlot1 as i64), PyRep::Integer(1)]),
+                ]),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Fitting 2x Damage Control must fail MaxGroupFittedExceeded");
+    assert!(dc_err.message.contains("MaxGroupFittedExceeded"), "unexpected error: {}", dc_err.message);
+}

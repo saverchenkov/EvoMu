@@ -565,21 +565,26 @@ pub fn register_progression_extra_handlers(
                     d.with_snapshot(|s| s.characters.get(&(cid as i64)).map(|c| c.corporation_id as u32))
                 })
             });
-            let corp_role = ctx
-                .identity
-                .as_ref()
-                .and_then(|id| id.roles.as_ref().map(|r| r.bitmask))
-                .unwrap_or(0);
-            let is_ceo = corpid.zip(mgr.db.as_ref()).is_some_and(|(c_id, d)| {
-                d.with_snapshot(|s| s.corporations.get(&(c_id as i64)).is_some_and(|c| c.ceo_id == cid as i64))
+            let sess_role = ctx.corp_role_mask;
+            let now_u = ctx.now_unix();
+            let (is_ceo, corp_role, wallet_div) = corpid.zip(mgr.db.as_ref()).map_or((false, sess_role, 1u8), |(c_id, d)| {
+                d.with_snapshot(|s| {
+                    let cid_i = cid as i64;
+                    let c_id_i = c_id as i64;
+                    let (ceo, eff_roles) = crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                        s, c_id_i, cid_i, sess_role, now_u,
+                    );
+                    let acct = s.corp_governance.get(&c_id_i).and_then(|g| g.member_account_keys.get(&cid_i).copied()).unwrap_or(1000);
+                    let div = if (1000..=1006).contains(&acct) { (acct - 999) as u8 } else { 1 };
+                    (ceo, eff_roles, div)
+                })
             });
+            let is_gm = require_admin_role(ctx).is_ok();
             let has_corp_role = (corp_role
-                & (eve_db::corp_roles::ROLE_DIRECTOR
-                    | eve_db::corp_roles::ROLE_PROJECT_MANAGER
-                    | eve_db::corp_roles::ROLE_PERSONNEL_MANAGER))
+                & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_PROJECT_MANAGER))
                 != 0;
-            if !is_ceo && !has_corp_role && require_admin_role(ctx).is_err() {
-                return Err((STATUS_FORBIDDEN, "Insufficient corporation role to create corporation goal".into()));
+            if !is_ceo && !has_corp_role && !is_gm {
+                return Err((STATUS_FORBIDDEN, "CorpRoleDenied: Insufficient corporation role to create corporation goal".into()));
             }
 
             let name = dyn_msg
@@ -589,7 +594,6 @@ pub fn register_progression_extra_handlers(
                     _ => None,
                 })
                 .unwrap_or_else(|| "Organization Goal".to_string());
-
             let desc = dyn_msg
                 .get(2)
                 .and_then(|v| match v {
@@ -597,7 +601,6 @@ pub fn register_progression_extra_handlers(
                     _ => None,
                 })
                 .unwrap_or_default();
-
             let target = dyn_msg
                 .get(3)
                 .and_then(|v| match v {
@@ -606,8 +609,7 @@ pub fn register_progression_extra_handlers(
                     _ => None,
                 })
                 .unwrap_or(100);
-
-            let raw_initial_prog = dyn_msg
+            let initial_prog = dyn_msg
                 .get(5)
                 .and_then(|v| match v {
                     DynamicValue::Uint64(u) => Some(*u),
@@ -616,16 +618,10 @@ pub fn register_progression_extra_handlers(
                 })
                 .unwrap_or(0)
                 .min(target);
-            if raw_initial_prog > 0 && crate::quasar_gateway::require_admin_role(ctx).is_err() {
-                return Err((
-                    STATUS_FORBIDDEN,
-                    "Non-admin callers cannot seed initial goal progress on CreateRequest".into(),
-                ));
+            if initial_prog > 0 && !is_gm {
+                return Err((STATUS_FORBIDDEN, "Non-admin callers cannot seed initial goal progress on CreateRequest".into()));
             }
-            let initial_prog = raw_initial_prog;
-
-            let mut escrow_isk = 0i64;
-            let mut explicit_reward_per_unit = 0i64;
+            let (mut escrow_isk, mut explicit_reward_per_unit) = (0i64, 0i64);
             if let Some(pools) = dyn_msg.get(8) {
                 escrow_isk = escrow_isk.saturating_add(parse_isk_value(pools)?);
             }
@@ -635,9 +631,15 @@ pub fn register_progression_extra_handlers(
                     escrow_isk = escrow_isk.saturating_add(explicit_reward_per_unit.saturating_mul(target as i64));
                 }
             }
+            if escrow_isk > 0 && !is_ceo && !is_gm && (corp_role & eve_db::corp_roles::ROLE_DIRECTOR) == 0 {
+                let take_bit = eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[(wallet_div.clamp(1, 7) - 1) as usize];
+                if (corp_role & take_bit) == 0 {
+                    return Err((STATUS_FORBIDDEN, "CorpRoleDenied: Project Manager lacks wallet division take role for escrow".into()));
+                }
+            }
 
             let goal_id = if let (Some(ref cs), Some(c_id)) = (&mgr.corp_state, corpid) {
-                let gid = cs.create_goal(c_id, name.clone(), desc.clone(), target as i64, escrow_isk)?;
+                let gid = cs.create_goal_from_division(c_id, name.clone(), desc.clone(), target as i64, escrow_isk, wallet_div)?;
                 if initial_prog > 0 || explicit_reward_per_unit > 0 {
                     if let Some(cg) = cs.goals.write().unwrap_or_else(|e| e.into_inner()).get_mut(&gid) {
                         if initial_prog > 0 {
@@ -781,6 +783,24 @@ pub fn register_progression_extra_handlers(
         }),
     );
 
+    let can_manage_corp_goal = |mgr: &ProgressionExtraManager, caller_id: u32, goal_corp: Option<u32>, ctx: &eve_proto::quasar::AuthoritativeContext| -> bool {
+        goal_corp.is_some_and(|gc| {
+            gc != 0
+                && mgr.db.as_ref().is_some_and(|db| {
+                    db.with_snapshot(|s| {
+                        let caller_corp = s.characters.get(&(caller_id as i64)).map(|c| c.corporation_id as u32);
+                        if caller_corp != Some(gc) {
+                            return false;
+                        }
+                        let (ceo, eff) = crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                            s, gc as i64, caller_id as i64, ctx.corp_role_mask, ctx.now_unix(),
+                        );
+                        ceo || (eff & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_PROJECT_MANAGER)) != 0
+                    })
+                })
+        })
+    };
+
     let mgr = Arc::clone(&manager);
     router.register_handler(
         "eve_public.goal.api.CloseRequest",
@@ -793,28 +813,14 @@ pub fn register_progression_extra_handlers(
             };
             let hex = uuid_to_hex(&target_uuid);
             let goal_corp = mgr.goal_corp_id(&target_uuid);
-            let is_corp_director = goal_corp.is_some_and(|gc| {
-                gc != 0
-                    && mgr.db.as_ref().is_some_and(|db| {
-                        db.with_snapshot(|s| {
-                            let caller_corp = s.characters.get(&(caller_id as i64)).map(|c| c.corporation_id as u32);
-                            caller_corp == Some(gc)
-                                && s.corporations.get(&(gc as i64)).is_some_and(|corp| {
-                                    corp.ceo_id == caller_id as i64
-                                        || (corp.member_roles.get(&(caller_id as i64)).copied().unwrap_or(0)
-                                            & eve_db::corp_roles::ROLE_DIRECTOR)
-                                            != 0
-                                })
-                        })
-                    })
-            });
+            let is_corp_mgr = can_manage_corp_goal(&mgr, caller_id, goal_corp, ctx);
             let (creator_id, was_open) = {
                 let mut goals = mgr.generic_goals.write().unwrap_or_else(|e| e.into_inner());
                 let Some(g) = goals.get_mut(&hex) else {
                     return Err((STATUS_NOT_FOUND, "Goal not found".into()));
                 };
-                if g.creator_id != caller_id && !is_corp_director && crate::quasar_gateway::require_admin_role(ctx).is_err() {
-                    return Err((STATUS_FORBIDDEN, "Forbidden: not goal creator or corporation director".into()));
+                if g.creator_id != caller_id && !is_corp_mgr && crate::quasar_gateway::require_admin_role(ctx).is_err() {
+                    return Err((STATUS_FORBIDDEN, "Forbidden: not goal creator or corporation project manager/director".into()));
                 }
                 let was_open = !g.closed;
                 g.closed = true;
@@ -827,7 +833,6 @@ pub fn register_progression_extra_handlers(
                     cs.close_or_delete_goal(goal_id, false);
                 }
             }
-            // Closing is a one-way transition; re-closing a closed goal is a no-op without a notice.
             if was_open {
                 ctx_queue_notice(
                     notices::goal_scope(goal_corp, creator_id),
@@ -835,7 +840,10 @@ pub fn register_progression_extra_handlers(
                     ctx.now_unix(),
                 );
             }
-            Ok(GoogleEmpty.to_any())
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.api.CloseResponse"),
+                value: Vec::new(),
+            })
         }),
     );
 
@@ -847,6 +855,14 @@ pub fn register_progression_extra_handlers(
             let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
+            let expected_curr = dyn_msg
+                .get(2)
+                .and_then(|v| match v {
+                    DynamicValue::Uint64(u) => Some(*u),
+                    DynamicValue::Int64(i) if *i >= 0 => Some(*i as u64),
+                    _ => None,
+                })
+                .unwrap_or(0);
             let new_prog = dyn_msg
                 .get(3)
                 .and_then(|v| match v {
@@ -861,6 +877,12 @@ pub fn register_progression_extra_handlers(
                 let Some(g) = goals.get_mut(&hex) else {
                     return Err((STATUS_NOT_FOUND, "Goal not found".into()));
                 };
+                if expected_curr != g.current_progress {
+                    return Err((
+                        crate::quasar_gateway::STATUS_CONFLICT,
+                        format!("Goal current_progress CAS mismatch: expected {expected_curr}, actual {}", g.current_progress),
+                    ));
+                }
                 let prev = g.current_progress;
                 let c = new_prog.min(g.desired_progress);
                 g.current_progress = c;
@@ -876,8 +898,6 @@ pub fn register_progression_extra_handlers(
                     cs.sync_to_db();
                 }
             }
-            // Manual progress set -> ProgressedNotice only when the value actually changed;
-            // crossing the target also completes the goal.
             let scope = notices::goal_scope(mgr.goal_corp_id(&target_uuid), creator_id);
             if capped != prev {
                 ctx_queue_notice(scope.clone(), notices::goal_progressed(&target_uuid, capped), ctx.now_unix());
@@ -885,7 +905,10 @@ pub fn register_progression_extra_handlers(
             if capped >= desired && prev < desired {
                 ctx_queue_notice(scope, notices::goal_completed(&target_uuid), ctx.now_unix());
             }
-            Ok(GoogleEmpty.to_any())
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.api.SetCurrentProgressResponse"),
+                value: Vec::new(),
+            })
         }),
     );
 
@@ -900,30 +923,15 @@ pub fn register_progression_extra_handlers(
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
             let hex = uuid_to_hex(&target_uuid);
-            // Resolve the audience before the corporation ledger entry is removed.
             let goal_corp = mgr.goal_corp_id(&target_uuid);
-            let is_corp_director = goal_corp.is_some_and(|gc| {
-                gc != 0
-                    && mgr.db.as_ref().is_some_and(|db| {
-                        db.with_snapshot(|s| {
-                            let caller_corp = s.characters.get(&(caller_id as i64)).map(|c| c.corporation_id as u32);
-                            caller_corp == Some(gc)
-                                && s.corporations.get(&(gc as i64)).is_some_and(|corp| {
-                                    corp.ceo_id == caller_id as i64
-                                        || (corp.member_roles.get(&(caller_id as i64)).copied().unwrap_or(0)
-                                            & eve_db::corp_roles::ROLE_DIRECTOR)
-                                            != 0
-                                })
-                        })
-                    })
-            });
+            let is_corp_mgr = can_manage_corp_goal(&mgr, caller_id, goal_corp, ctx);
             let creator_id = {
                 let mut goals = mgr.generic_goals.write().unwrap_or_else(|e| e.into_inner());
                 let Some(g) = goals.get(&hex) else {
                     return Err((STATUS_NOT_FOUND, "Goal not found".into()));
                 };
-                if g.creator_id != caller_id && !is_corp_director && crate::quasar_gateway::require_admin_role(ctx).is_err() {
-                    return Err((STATUS_FORBIDDEN, "Forbidden: not goal creator or corporation director".into()));
+                if g.creator_id != caller_id && !is_corp_mgr && crate::quasar_gateway::require_admin_role(ctx).is_err() {
+                    return Err((STATUS_FORBIDDEN, "Forbidden: not goal creator or corporation project manager/director".into()));
                 }
                 let creator_id = g.creator_id;
                 goals.remove(&hex);
@@ -941,7 +949,10 @@ pub fn register_progression_extra_handlers(
                 notices::goal_deleted(&target_uuid),
                 ctx.now_unix(),
             );
-            Ok(GoogleEmpty.to_any())
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.api.DeleteResponse"),
+                value: Vec::new(),
+            })
         }),
     );
 

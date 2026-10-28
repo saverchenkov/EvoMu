@@ -125,17 +125,23 @@ impl QuasarCorpState {
     }
 
     pub fn create_goal(&self, corp_id: u32, name: String, description: String, target_progress: i64, escrow_isk: i64) -> Result<u64, (u32, String)> {
+        self.create_goal_from_division(corp_id, name, description, target_progress, escrow_isk, 1)
+    }
+
+    pub fn create_goal_from_division(&self, corp_id: u32, name: String, description: String, target_progress: i64, escrow_isk: i64, wallet_div: u8) -> Result<u64, (u32, String)> {
         let Some(ref db) = self.db else { return Err((STATUS_BAD_REQUEST, "Database not available".into())); };
         if escrow_isk < 0 || target_progress <= 0 {
             return Err((STATUS_BAD_REQUEST, "Invalid goal target or escrow amount".into()));
         }
         if escrow_isk > 0 {
             let cost = eve_db::IskCents::from_isk(escrow_isk);
+            let div = wallet_div.clamp(1, 7);
             let mut debited = false;
             db.with_mut_snapshot(|snap| {
                 if let Some(corp) = snap.corporations.get_mut(&(corp_id as i64)) {
-                    if let Some(rem) = corp.master_wallet.checked_sub(cost) {
-                        corp.set_division_balance(1, rem);
+                    let cur = if div == 1 { corp.master_wallet } else { corp.ensure_wallet_divisions(); corp.division_balance(div) };
+                    if let Some(rem) = cur.checked_sub(cost) {
+                        corp.set_division_balance(div, rem);
                         debited = true;
                     }
                 }
@@ -305,9 +311,13 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             return Err((STATUS_FORBIDDEN, "Authentication required".into()));
         };
         let corpid = resolve_corp_id(ctx, db)?;
-        let corp_role = ctx.identity.as_ref().and_then(|id| id.roles.as_ref().map(|r| r.bitmask)).unwrap_or(0);
+        let corp_role = if ctx.corp_role_mask != 0 {
+            ctx.corp_role_mask
+        } else {
+            ctx.identity.as_ref().and_then(|id| id.roles.as_ref().map(|r| r.bitmask)).unwrap_or(0)
+        };
         let is_admin = (corp_role & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_PERSONNEL_MANAGER)) != 0
-            || (corp_role & eve_machonet::service_roles::ROLE_GM_MASK) != 0;
+            || crate::quasar_gateway::require_admin_role(ctx).is_ok();
         if is_admin || db.map_or(false, |d| d.with_snapshot(|s| s.corporations.get(&(corpid as i64)).map_or(false, |c| c.ceo_id == cid as i64))) {
             return Ok((cid, corpid));
         }

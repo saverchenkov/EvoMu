@@ -329,44 +329,18 @@ async fn test_r5_213_214_pi_orbital_interbus_spoofing_and_locked_import_protecti
         snap.contracts.insert(
             contract_id,
             eve_db::ContractRecord {
-                contract_id,
-                issuer_id: char_id,
-                issuer_corp_id: 98_000_001,
-                assignee_id: 0,
-                acceptor_id: None,
-                contract_type: "item_exchange".into(),
-                status: "Outstanding".into(),
-                title: "Locked PI".into(),
-                for_corp: false,
-                availability: "public".into(),
-                date_issued_unix: 1000,
-                expiration_unix: 999999,
-                num_days: 1,
-                price: eve_db::IskCents(100),
-                reward: eve_db::IskCents(0),
-                collateral: eve_db::IskCents(0),
-                buyout: eve_db::IskCents(0),
-                current_bid: eve_db::IskCents(0),
-                current_bidder_id: None,
-                start_station_id: 60_003_760,
-                end_station_id: 60_003_760,
-                item_ids: vec![locked_pi_item],
-                requested_items: Vec::new(),
-                bid_history: Vec::new(),
+                contract_id, issuer_id: char_id, issuer_corp_id: 98_000_001, assignee_id: 0, acceptor_id: None,
+                contract_type: "item_exchange".into(), status: "Outstanding".into(), title: "Locked PI".into(),
+                for_corp: false, availability: "public".into(), date_issued_unix: 1000, expiration_unix: 999999,
+                num_days: 1, price: eve_db::IskCents(100), reward: eve_db::IskCents(0), collateral: eve_db::IskCents(0),
+                buyout: eve_db::IskCents(0), current_bid: eve_db::IskCents(0), current_bidder_id: None,
+                start_station_id: 60_003_760, end_station_id: 60_003_760, item_ids: vec![locked_pi_item],
+                requested_items: Vec::new(), bid_history: Vec::new(),
             },
         );
     });
     let import_err = ctx.db.try_with_mut_snapshot(|snap| {
-        eve_server::services::industry_pi::consume_pi_import_commodities(
-            snap,
-            char_id,
-            planet_id,
-            2389,
-            100,
-            None,
-            Some(60_003_760),
-            None,
-        )
+        eve_server::services::industry_pi::consume_pi_import_commodities(snap, char_id, planet_id, 2389, 100, None, Some(60_003_760), None)
     });
     assert!(import_err.is_err(), "Contract-locked PI items must not be consumed by PI import");
 }
@@ -411,11 +385,11 @@ async fn test_r5_215_acl_manager_cannot_demote_admin_or_leak_group_members() {
     let grp_rep = ctx.dispatch_rpc(&mut s_admin, "ownerGroupManager", None, "Create", &[PyRep::String("R5 ACL".into()), PyRep::String("Desc".into())], &kw, None).await.unwrap();
     let grp_id = grp_rep.dict_get("groupID").and_then(|v| v.as_i64()).unwrap();
 
-    // Admin grants Manager (role 2) to mgr_id
-    ctx.dispatch_rpc(&mut s_admin, "ownerGroupManager", None, "SetMemberRole", &[PyRep::Integer(grp_id), PyRep::Integer(mgr_id), PyRep::Integer(2)], &kw, None).await.unwrap();
+    // Admin grants Manager (role 2) to mgr_id via authentic V24 UpdateMembershipTypes
+    ctx.dispatch_rpc(&mut s_admin, "ownerGroupManager", None, "UpdateMembershipTypes", &[PyRep::Integer(grp_id), PyRep::List(vec![PyRep::Integer(mgr_id)]), PyRep::Integer(2)], &kw, None).await.unwrap();
 
-    // #215: Manager attempting to block/demote Admin (creator) via SetMemberRole is rejected
-    let demote_err = ctx.dispatch_rpc(&mut s_mgr, "ownerGroupManager", None, "SetMemberRole", &[PyRep::Integer(grp_id), PyRep::Integer(admin_id), PyRep::Integer(-1)], &kw, None).await.unwrap_err();
+    // #215: Manager attempting to block/demote Admin (creator) via UpdateMembershipTypes is rejected
+    let demote_err = ctx.dispatch_rpc(&mut s_mgr, "ownerGroupManager", None, "UpdateMembershipTypes", &[PyRep::Integer(grp_id), PyRep::List(vec![PyRep::Integer(admin_id)]), PyRep::Integer(-1)], &kw, None).await.unwrap_err();
     assert_eq!(demote_err.code, "InsufficientCorpRoles");
 
     // #215: Outsider cannot read GetMembers of private access group
@@ -430,7 +404,7 @@ async fn test_r5_217_ess_reserve_bank_pulse_cooldown_and_exhaustion() {
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     let char_id = 90_000_001;
     let ship_id = 100_000_001;
-    let null_sys = *ctx.sde.solar_systems.values().find(|s| s.security_status <= 0.0 && s.solar_system_id < 31_000_000).map(|s| &s.solar_system_id).unwrap();
+    let null_sys = 30_002_904u32; // VFK-IV (Deklein, NW quadrant)
     let ess_ball_id = 820_000_000 + null_sys as i64;
     let kw = HashMap::new();
 
@@ -445,7 +419,7 @@ async fn test_r5_217_ess_reserve_bank_pulse_cooldown_and_exhaustion() {
         }).await.unwrap();
     }
 
-    let key_id = 880_217_001;
+    let (trit_id, wrong_key_id, key_id) = (880_217_000, 880_217_002, 880_217_001);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.station_id = None;
@@ -456,13 +430,27 @@ async fn test_r5_217_ess_reserve_bank_pulse_cooldown_and_exhaustion() {
         let st = snap.system_states.entry(null_sys).or_default();
         st.solar_system_id = null_sys;
         st.ess_reserve_bank = eve_db::IskCents(30_000_000_00);
-        snap.items.insert(key_id, InventoryItemRecord {
-            item_id: key_id, type_id: 57714, owner_id: char_id, location_id: ship_id,
-            flag: InventoryFlag::Cargo, quantity: 1, singleton: false, version: 1, ..Default::default()
-        });
+        for (iid, tid) in [(trit_id, 34u32), (wrong_key_id, 57716u32), (key_id, 57714u32)] {
+            snap.items.insert(iid, InventoryItemRecord {
+                item_id: iid, type_id: tid, owner_id: char_id, location_id: ship_id,
+                flag: InventoryFlag::Cargo, quantity: 1, singleton: false, version: 1, ..Default::default()
+            });
+        }
     });
+    sess.solar_system_id = Some(null_sys);
+    sess.station_id = None;
+    sess.ship_id = Some(ship_id);
 
-    // Unlock Reserve Bank via RequestUnlockReserveBank (3 pulses)
+    // R6-P0-02: Non-key cargo item (Tritanium 34) and wrong-quadrant key (NE 57716 in NW Deklein) are rejected without consumption
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "essMgr", None, "RequestUnlockReserveBank", &[PyRep::Integer(34)], &kw, None).await.unwrap_err().code, "MissingEssReserveSecurityKey");
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "essMgr", None, "RequestUnlockReserveBank", &[PyRep::Integer(trit_id)], &kw, None).await.unwrap_err().code, "MissingEssReserveSecurityKey");
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "essMgr", None, "RequestUnlockReserveBank", &[PyRep::Integer(wrong_key_id)], &kw, None).await.unwrap_err().code, "EssReserveKeyWrongQuadrant");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&trit_id).map(|i| i.quantity)), Some(1));
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&wrong_key_id).map(|i| i.quantity)), Some(1));
+    let pre_ess = ctx.dispatch_rpc(&mut sess, "essMgr", None, "GetDataForClientSolarSystem", &[], &kw, None).await.unwrap();
+    assert_eq!(pre_ess.dict_get("reserveBankPulsesTotal").and_then(|v| v.as_i64()), Some(0));
+
+    // Unlock Reserve Bank via RequestUnlockReserveBank (15 pulses for NW 15-min key 57714)
     ctx.dispatch_rpc(&mut sess, "essMgr", None, "RequestUnlockReserveBank", &[PyRep::Integer(key_id)], &kw, None).await.expect("RequestUnlockReserveBank");
 
     // First pulse succeeds immediately after 5 ticks
@@ -471,6 +459,9 @@ async fn test_r5_217_ess_reserve_bank_pulse_cooldown_and_exhaustion() {
         let _ = sys_handle.step_manual(1.0).await.unwrap();
     }
     ctx.dispatch_rpc(&mut sess, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_ball_id)], &kw, None).await.expect("First pulse payout");
+    let ess_data = ctx.dispatch_rpc(&mut sess, "essMgr", None, "GetDataForClientSolarSystem", &[], &kw, None).await.unwrap();
+    assert_eq!(ess_data.dict_get("reserveBankPulsesTotal").and_then(|v| v.as_i64()), Some(15));
+    assert_eq!(ess_data.dict_get("reserveBankPulsesRemaining").and_then(|v| v.as_i64()), Some(14));
 
     // Immediate second link before 60s cooldown is rejected with EssReservePulseCooldown
     let cd_err = ctx.dispatch_rpc(&mut sess, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_ball_id)], &kw, None).await.unwrap_err();
@@ -620,4 +611,70 @@ async fn test_r5_218_219_220_221_223_224_mining_moon_drill_asset_safety_fw_insur
         !eve_server::services::insurgency_services::is_insurgency_stronghold_invulnerable(&ctx, sys_id, 1_898_000_011),
         "Stronghold must become vulnerable once simulated clock enters Active phase"
     );
+
+    // R6-P1-01: FW complex tick rejects pod/cloak, preserves tick across off-grid ally, pauses contested, and de-plexes for defender
+    let fw_sys = 30_002_537u32; // Amamake (lowsec)
+    let (ally_cid, def_cid) = (90_000_221i64, 90_000_222i64);
+    let (atk_ship, ally_ship, def_ship) = (880_221_001i64, 880_221_002i64, 880_221_003i64);
+    let uid2 = ctx.db.provision_player_account("fw_ally2", "secret2");
+    let uid3 = ctx.db.provision_player_account("fw_def3", "secret3");
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, uid, nm) in [(ally_cid, uid2, "FW Ally"), (def_cid, uid3, "FW Defender")] {
+            let mut c = snap.characters[&char_id].clone();
+            c.character_id = cid; c.user_id = uid; c.name = nm.into();
+            snap.characters.insert(cid, c);
+        }
+    });
+    let (mut s_ally, mut s_def) = (SessionState::new(521812), SessionState::new(521813));
+    login_pilot(&ctx, &mut s_ally, "fw_ally2", "secret2").await;
+    login_pilot(&ctx, &mut s_def, "fw_def3", "secret3").await;
+    ctx.dispatch_rpc(&mut s_ally, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(ally_cid)], &kw, None).await.unwrap();
+    ctx.dispatch_rpc(&mut s_def, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(def_cid)], &kw, None).await.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, sid, fid) in [(char_id, atk_ship, 500_002i64), (ally_cid, ally_ship, 500_002), (def_cid, def_ship, 500_003)] {
+            if let Some(c) = snap.characters.get_mut(&cid) {
+                c.solar_system_id = fw_sys; c.station_id = None; c.structure_id = None; c.active_ship_id = sid; c.war_faction_id = Some(fid);
+            }
+        }
+        snap.fw_system_occupations.insert(fw_sys, eve_db::FwSystemOccupationRecord {
+            solar_system_id: fw_sys, owner_faction_id: 500_002, occupier_faction_id: 500_003, victory_points: 0, victory_points_threshold: 3_000,
+        });
+        let st = snap.system_states.entry(fw_sys).or_default();
+        st.solar_system_id = fw_sys; st.fw_complex_position = Some([0.0, 0.0, 0.0]);
+        st.fw_capture_duration_seconds = 600; st.fw_capture_seconds_elapsed = 300; st.fw_contested_pct = 50.0; st.last_fw_capture_tick = 0;
+    });
+    let fw_h = ctx.systems.get_or_spawn(fw_sys);
+    let mk_ball = |id: i64, tid: u32, x: f64| eve_destiny::Ball {
+        id, type_id: tid, position: glam::DVec3::new(x, 0.0, 0.0), velocity: glam::DVec3::ZERO,
+        max_velocity: 300.0, inertia: 1.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
+    };
+    let mut cloaked_cs = ctx.build_type_combat_state(587);
+    cloaked_cs.is_cloaked = true; cloaked_cs.gate_cloak_remaining_ticks = 30;
+    fw_h.spawn_ball(mk_ball(atk_ship, 670, 0.0)).await.unwrap(); // Capsule cannot capture
+    fw_h.spawn_ball(mk_ball(ally_ship, 587, 80_000.0)).await.unwrap(); // Off-grid ally (>30km)
+    fw_h.spawn_ball_with_combat(mk_ball(def_ship, 587, 5_000.0), cloaked_cs.clone()).await.unwrap(); // Cloaked defender
+    let _ = fw_h.step_manual(1.0).await.unwrap();
+    eve_server::services::insurgency_services::step_system_insurgency_tick(&ctx, fw_sys).await;
+    assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&fw_sys].fw_capture_seconds_elapsed), 300, "Pod + cloaked ship must not advance or de-plex");
+
+    fw_h.remove_ball(atk_ship).await;
+    fw_h.spawn_ball(mk_ball(atk_ship, 587, 0.0)).await.unwrap(); // Uncloaked Minmatar attacker + off-grid ally
+    let _ = fw_h.step_manual(1.0).await.unwrap();
+    eve_server::services::insurgency_services::step_system_insurgency_tick(&ctx, fw_sys).await;
+    ctx.db.with_snapshot(|s| {
+        assert!(s.system_states[&fw_sys].fw_capture_seconds_elapsed > 300, "Attacker advances complex");
+        assert!(s.system_states[&fw_sys].last_fw_capture_tick > 0, "Off-grid ally must not clobber last_fw_capture_tick to 0");
+    });
+
+    let elapsed_before_contest = ctx.db.with_snapshot(|s| s.system_states[&fw_sys].fw_capture_seconds_elapsed);
+    fw_h.remove_ball(def_ship).await;
+    fw_h.spawn_ball(mk_ball(def_ship, 587, 5_000.0)).await.unwrap(); // Uncloaked Amarr defender joins grid -> contested!
+    let _ = fw_h.step_manual(1.0).await.unwrap();
+    eve_server::services::insurgency_services::step_system_insurgency_tick(&ctx, fw_sys).await;
+    assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&fw_sys].fw_capture_seconds_elapsed), elapsed_before_contest, "Contested grid must pause complex");
+
+    let _ = fw_h.set_ball_position(atk_ship, glam::DVec3::new(80_000.0, 0.0, 0.0)).await; // Attacker leaves grid -> defender de-plexes!
+    let _ = fw_h.step_manual(1.0).await.unwrap();
+    eve_server::services::insurgency_services::step_system_insurgency_tick(&ctx, fw_sys).await;
+    assert!(ctx.db.with_snapshot(|s| s.system_states[&fw_sys].fw_capture_seconds_elapsed) < elapsed_before_contest, "Defender must de-plex toward 0%");
 }

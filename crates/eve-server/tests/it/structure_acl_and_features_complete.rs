@@ -150,26 +150,26 @@ async fn test_structure_access_lists_and_docking_acl() {
     };
     assert!(group_id > 0);
 
-    // Set roles: member (0), manager (2), blocked (-1), admin (1)
+    // Set roles: member (0), manager (2), blocked (-1), admin (1) via UpdateMembershipTypes
     rpc(
         &ctx,
         &mut sess,
         "ownerGroupManager",
-        "SetMemberRole", // rpc-lint: allow canonical ledger feat:structures.access-lists requires SetMemberRole
-        &[PyRep::Integer(group_id), PyRep::Integer(other_char), PyRep::Integer(acl_rules::ACL_ROLE_MEMBER)],
+        "UpdateMembershipTypes",
+        &[PyRep::Integer(group_id), PyRep::List(vec![PyRep::Integer(other_char)]), PyRep::Integer(acl_rules::ACL_ROLE_MEMBER)],
     )
     .await
-    .expect("SetMemberRole other_char -> member");
+    .expect("UpdateMembershipTypes other_char -> member");
 
     rpc(
         &ctx,
         &mut sess,
         "ownerGroupManager",
-        "SetMemberRole", // rpc-lint: allow canonical ledger feat:structures.access-lists requires SetMemberRole
-        &[PyRep::Integer(group_id), PyRep::Integer(blocked_char), PyRep::Integer(acl_rules::ACL_ROLE_BLOCKED)],
+        "UpdateMembershipTypes",
+        &[PyRep::Integer(group_id), PyRep::List(vec![PyRep::Integer(blocked_char)]), PyRep::Integer(acl_rules::ACL_ROLE_BLOCKED)],
     )
     .await
-    .expect("SetMemberRole blocked_char -> blocked");
+    .expect("UpdateMembershipTypes blocked_char -> blocked");
 
     // Verify immediate effect via GetMembers
     let members_rep = rpc(&ctx, &mut sess, "ownerGroupManager", "GetMembers", &[PyRep::Integer(group_id)])

@@ -10,12 +10,113 @@ use eve_db::{InventoryFlag, IskCents};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum EssQuadrant {
+    Nw,
+    Ne,
+    Se,
+    Sw,
+}
+
+fn system_ess_quadrant(sde: &eve_sde::SdeRegistry, sys_id: u32) -> EssQuadrant {
+    let Some(sys) = sde.solar_systems.get(&sys_id) else {
+        return EssQuadrant::Nw;
+    };
+    match sys.region_id {
+        // SCC North-West Encounter Surveillance Quadrant (+ adjacent NPC null)
+        10_000_003 | 10_000_010 | 10_000_023 | 10_000_034 | 10_000_035 | 10_000_045
+        | 10_000_046 | 10_000_051 | 10_000_055 | 10_000_058 | 10_000_015 | 10_000_041
+        | 10_000_057 => EssQuadrant::Nw,
+        // SCC North-East Encounter Surveillance Quadrant
+        10_000_007 | 10_000_013 | 10_000_018 | 10_000_021 | 10_000_027 | 10_000_040
+        | 10_000_053 | 10_000_066 => EssQuadrant::Ne,
+        // SCC South-East Encounter Surveillance Quadrant (+ adjacent NPC null)
+        10_000_005 | 10_000_006 | 10_000_008 | 10_000_009 | 10_000_025 | 10_000_029
+        | 10_000_061 | 10_000_062 | 10_000_011 | 10_000_012 => EssQuadrant::Se,
+        // SCC South-West Encounter Surveillance Quadrant (+ adjacent NPC null)
+        10_000_014 | 10_000_031 | 10_000_039 | 10_000_047 | 10_000_050 | 10_000_056
+        | 10_000_059 | 10_000_060 | 10_000_063 | 10_000_022 => EssQuadrant::Sw,
+        _ => match (sys.galactic_pos_ly[0] > 0.0, sys.galactic_pos_ly[2] >= 0.0) {
+            (false, true) => EssQuadrant::Nw,
+            (true, true) => EssQuadrant::Ne,
+            (true, false) => EssQuadrant::Se,
+            (false, false) => EssQuadrant::Sw,
+        },
+    }
+}
+
+fn ess_key_quadrant_and_duration(type_id: u32) -> Option<(EssQuadrant, u64)> {
+    match type_id {
+        57714 => Some((EssQuadrant::Nw, 15)),
+        57715 => Some((EssQuadrant::Nw, 45)),
+        57716 => Some((EssQuadrant::Ne, 15)),
+        57719 => Some((EssQuadrant::Ne, 45)),
+        57717 => Some((EssQuadrant::Se, 15)),
+        57718 => Some((EssQuadrant::Se, 45)),
+        57720 => Some((EssQuadrant::Sw, 15)),
+        57721 => Some((EssQuadrant::Sw, 45)),
+        _ => None,
+    }
+}
+
+/// Validates and selects an ESS Reserve Security Key (`57714..=57721`, group `4102`) in `ship_id`
+/// cargo matching `sys_id`'s SCC quadrant. Never accepts non-key cargo items even when `target_arg` is provided.
+pub(crate) fn select_ess_reserve_key_in_cargo<'a>(
+    sde: &eve_sde::SdeRegistry,
+    items: impl Iterator<Item = &'a eve_db::InventoryItemRecord>,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    target_arg: Option<i64>,
+) -> Result<(i64, u32, u64), BridgeRpcError> {
+    let sys_quad = system_ess_quadrant(sde, sys_id);
+    let mut saw_wrong_quadrant_key = false;
+    for i in items {
+        if i.owner_id != char_id
+            || i.location_id != ship_id
+            || i.flag != InventoryFlag::Cargo
+            || i.quantity < 1
+        {
+            continue;
+        }
+        if let Some(target_iid) = target_arg {
+            if i.item_id != target_iid && i.type_id as i64 != target_iid {
+                continue;
+            }
+        }
+        let is_sde_ess_key_group = sde
+            .types
+            .get(&i.type_id)
+            .is_some_and(|t| t.group_id == 4102);
+        let Some((key_quad, dur_mins)) = ess_key_quadrant_and_duration(i.type_id) else {
+            let _ = is_sde_ess_key_group;
+            continue;
+        };
+        if key_quad != sys_quad {
+            saw_wrong_quadrant_key = true;
+            continue;
+        }
+        return Ok((i.item_id, i.type_id, dur_mins));
+    }
+    if saw_wrong_quadrant_key {
+        Err(BridgeRpcError {
+            code: "EssReserveKeyWrongQuadrant".into(),
+            message: format!(
+                "ESS Reserve Security Key quadrant does not match solar system {sys_id}"
+            ),
+        })
+    } else {
+        Err(BridgeRpcError {
+            code: "MissingEssReserveSecurityKey".into(),
+            message: "Unlocking the ESS Reserve Bank requires a matching-quadrant ESS Reserve Security Key (type 57714..57721) in active ship cargo".into(),
+        })
+    }
+}
+
 /// Canonical cache priming structure for system ESS reserve and main banks.
 ///
 /// Returns the expected cache priming structure for system ESS reserve and main banks
 /// as consumed by `eve/client/script/ui/shared/dynamicResource/dynamicResourceSvc.pyj`.
-///
-/// parity: rpc:essMgr.prime_cache_result
 pub fn prime_cache_result(
     ctx: &ServerContext,
     session: &SessionState,
@@ -212,9 +313,10 @@ pub async fn handle_ess_link(
     }
 
     let now_unix = ctx.now_unix();
-    let is_unlocked = with_combat_runtime(ctx, |rt| {
-        rt.ess_reserve_unlocked_until.get(&sys_id).copied().unwrap_or(0) > now_unix
+    let unlocked_until = with_combat_runtime(ctx, |rt| {
+        rt.ess_reserve_unlocked_until.get(&sys_id).copied().unwrap_or(0)
     });
+    let is_unlocked = unlocked_until > now_unix;
 
     let (payout, link_started_only, unlocked_until_new, clear_unlock) = ctx.db.try_with_mut_snapshot(|snap| {
         let is_reserve = method == "AttemptLinkToReserveBank";
@@ -255,11 +357,12 @@ pub async fn handle_ess_link(
                 .unwrap_or(false)
         };
         if is_reserve && !already_linked {
-            if is_unlocked && pulse_st.pulses_total == 0 && pulse_st.last_pulse_sec.is_none() {
-                pulse_st.pulses_total = 3;
-                pulse_st.pulses_remaining = 3;
-            }
             if is_unlocked {
+                if pulse_st.pulses_total == 0 && pulse_st.last_pulse_sec.is_none() {
+                    let mins = ((unlocked_until.saturating_sub(now_unix) + 59) / 60).max(1) as u32;
+                    pulse_st.pulses_total = mins;
+                    pulse_st.pulses_remaining = mins;
+                }
                 if pulse_st.pulses_remaining == 0 {
                     return Err(BridgeRpcError {
                         code: "EssReservePulsesExhausted".into(),
@@ -273,29 +376,14 @@ pub async fn handle_ess_link(
                     });
                 }
             } else {
-                let key_info = snap
-                    .items
-                    .values()
-                    .find(|i| {
-                        i.owner_id == char_id
-                            && i.location_id == ship_id
-                            && i.flag == InventoryFlag::Cargo
-                            && i.quantity >= 1
-                            && ((57714..=57721).contains(&i.type_id)
-                                || ctx
-                                    .sde
-                                    .types
-                                    .get(&i.type_id)
-                                    .map(|t| t.group_id == 4102)
-                                    .unwrap_or(false))
-                    })
-                    .map(|i| (i.item_id, i.type_id));
-                let Some((key_id, key_type_id)) = key_info else {
-                    return Err(BridgeRpcError {
-                        code: "MissingEssReserveSecurityKey".into(),
-                        message: "Linking to the ESS Reserve Bank requires an ESS Reserve Security Key (type 57714..57721) in active ship cargo".into(),
-                    });
-                };
+                let (key_id, _key_type_id, dur_mins) = select_ess_reserve_key_in_cargo(
+                    &ctx.sde,
+                    snap.items.values(),
+                    char_id,
+                    ship_id,
+                    sys_id,
+                    None,
+                )?;
                 if let Some(key_item) = snap.items.get_mut(&key_id) {
                     if key_item.quantity > 1 {
                         key_item.quantity -= 1;
@@ -304,14 +392,9 @@ pub async fn handle_ess_link(
                         snap.items.remove(&key_id);
                     }
                 }
-                let dur_mins: u64 = if matches!(key_type_id, 57715 | 57717 | 57719 | 57721) {
-                    45
-                } else {
-                    15
-                };
                 unlocked_until_new = Some(now_unix + dur_mins * 60);
-                pulse_st.pulses_total = 1;
-                pulse_st.pulses_remaining = 1;
+                pulse_st.pulses_total = dur_mins as u32;
+                pulse_st.pulses_remaining = dur_mins as u32;
                 pulse_st.last_pulse_sec = None;
             }
         }

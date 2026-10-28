@@ -17,7 +17,7 @@ const SHIP_B: i64 = 910_002;
 const ESS_BALL_ID: i64 = 940_010;
 const ESS_BEACON_TYPE_ID: u32 = 32882;
 const RIFTER_TYPE_ID: u32 = 587;
-const KEY_15M_TYPE_ID: u32 = 57714;
+const KEY_15M_TYPE_ID: u32 = 57720;
 
 fn kv_map(rep: &PyRep) -> HashMap<String, PyRep> {
     match rep {

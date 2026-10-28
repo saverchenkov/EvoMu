@@ -213,6 +213,14 @@ pub fn handle_clone_jump(
         }
         let effective_cooldown = if same_structure_swap { 0 } else { full_cooldown_sec };
 
+        // feat:clones.clone-jump-preconditions-and-fees: no session-change timer running
+        if crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None).is_some() {
+            return Err(BridgeRpcError {
+                code: "SessionChangeTimerActive".into(),
+                message: "Session change timer is active".into(),
+            });
+        }
+
         // feat:clones.same-location-clone-swap: jumping to clone stored in the same Upwell structure
         // with an online Standup Cloning Center I incurs no cooldown and is allowed while cooldown is active.
         if !same_structure_swap

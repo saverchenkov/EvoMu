@@ -43,6 +43,13 @@ pub(crate) async fn handle_activate_fighter_ability_slots(
             message: format!("Fighter ability slot {raw_slot_id} must be in 0..=2"),
         }));
     }
+    if matches!(
+        args.get(2),
+        Some(PyRep::List(items) | PyRep::Tuple(items)) if items.len() >= 3
+    ) || (args.len() >= 5 && args.get(2).and_then(|a| a.as_f64()).is_some() && args.get(4).and_then(|a| a.as_f64()).is_some())
+    {
+        return handle_activate_fighter_ability_slots_on_point(ctx, session, args).await;
+    }
     let slot_id = raw_slot_id as u32;
     let target_id = args.get(2).and_then(|a| a.as_i64());
 
@@ -721,7 +728,7 @@ async fn activate_single_fighter_ability(
     ])))
 }
 
-/// Handles `fighterMgr.ExecuteActivateAbilitySlotsOnPoint` (`feat:drones.fighter-heavy-long-range-bomb`).
+/// Handles point-targeted coordinate activations dispatched via `fighterMgr.CmdActivateAbilitySlots` (`feat:drones.fighter-heavy-long-range-bomb`).
 pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
     ctx: &ServerContext,
     session: &mut SessionState,

@@ -33,6 +33,9 @@ use std::sync::Arc;
 
 /// Extracts effective corp role bitmask from authoritative context.
 pub fn effective_roles(ctx: &AuthoritativeContext) -> u64 {
+    if ctx.corp_role_mask != 0 {
+        return ctx.corp_role_mask;
+    }
     ctx.identity
         .as_ref()
         .and_then(|id| id.roles.as_ref().map(|r| r.bitmask))

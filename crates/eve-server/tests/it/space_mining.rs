@@ -533,10 +533,43 @@ async fn test_mn02_ice_harvesting_and_gas_harvesting_cycles() {
 
     // 1. Ice harvesting cycle: Clear Icicle (type 16262, group 465, unit volume 1000.0 m3)
     ctx.db.with_mut_snapshot(|snap| {
+        let sk = snap.skills.entry(90_000_001).or_default();
+        for sid in [3386u32, 16281, 25544] {
+            sk.insert(sid, eve_db::TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
+        }
         if let Some(sh) = snap.items.get_mut(&ship_id) {
-            sh.type_id = 654; // Kryos (Specialized Ice Hold 30,000 m3)
+            sh.type_id = 22548; // Mackinaw (Exhumer group 543, 31,500 m3 Mining Hold)
+            sh.dynamic_attributes.extend([(14, 2.0), (102, 2.0), (11, 500.0), (48, 500.0)]);
+        }
+        snap.items.retain(|_, it| {
+            !(it.location_id == ship_id
+                && matches!(it.flag, InventoryFlag::HiSlot0 | InventoryFlag::HiSlot1))
+        });
+        for (iid, tid, flag) in [
+            (750_000_901i64, 16278u32, InventoryFlag::HiSlot0),
+            (750_000_902i64, 25266u32, InventoryFlag::HiSlot1),
+        ] {
+            snap.items.insert(
+                iid,
+                eve_db::InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: 90_000_001,
+                    location_id: ship_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    dynamic_attributes: HashMap::new(),
+                    source_mutaplasmid_id: None,
+                    insured_payout_isk: 0.0,
+                    is_blueprint_copy: false,
+                    blueprint_runs_remaining: None,
+                },
+            );
         }
     });
+    ctx.invalidate_ship_fitting(ship_id);
     let ice_ast_id = 750_000_465i64;
     jita.spawn_asteroid(
         AsteroidState {

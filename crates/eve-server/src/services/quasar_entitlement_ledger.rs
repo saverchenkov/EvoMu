@@ -260,36 +260,123 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>, sde: Arc
     router.register_handler("eve.assetholding.asset.api.HoldRequest", Arc::new(move |ctx, _any, msg| hold(&d, &s, ctx, msg)));
     let (d, s) = (Arc::clone(&db), Arc::clone(&sde));
     router.register_handler("eve.assetholding.asset.api.CreateRequest", Arc::new(move |ctx, _any, msg| create_asset(&d, &s, ctx, msg)));
-    let d = Arc::clone(&db);
+    let (d, s) = (Arc::clone(&db), Arc::clone(&sde));
     router.register_handler(
         "eve.assetholding.entitlement.api.DirectDeliveryRequest",
-        Arc::new(move |ctx, _any, msg| direct_delivery(&d, ctx, msg)),
+        Arc::new(move |ctx, _any, msg| direct_delivery(&d, &s, ctx, msg)),
     );
     let d = Arc::clone(&db);
     router.register_handler("eve_public.assetholding.entitlement.api.GetRequest", Arc::new(move |ctx, _any, msg| get(&d, ctx, msg, true)));
     let d = Arc::clone(&db);
     router.register_handler("eve.assetholding.entitlement.api.GetRequest", Arc::new(move |ctx, _any, msg| get(&d, ctx, msg, false)));
-    let d = Arc::clone(&db);
-    router.register_handler("eve_public.assetholding.entitlement.api.RedeemRequest", Arc::new(move |ctx, _any, msg| redeem(&d, ctx, msg, true, false)));
-    let d = Arc::clone(&db);
-    router.register_handler("eve.assetholding.entitlement.api.RedeemRequest", Arc::new(move |ctx, _any, msg| redeem(&d, ctx, msg, false, false)));
-    let d = Arc::clone(&db);
-    router.register_handler("eve.assetholding.entitlement.api.admin.RedeemRequest", Arc::new(move |ctx, _any, msg| redeem(&d, ctx, msg, false, true)));
+    let (d, s) = (Arc::clone(&db), Arc::clone(&sde));
+    router.register_handler("eve_public.assetholding.entitlement.api.RedeemRequest", Arc::new(move |ctx, _any, msg| redeem(&d, &s, ctx, msg, true, false)));
+    let (d, s) = (Arc::clone(&db), Arc::clone(&sde));
+    router.register_handler("eve.assetholding.entitlement.api.RedeemRequest", Arc::new(move |ctx, _any, msg| redeem(&d, &s, ctx, msg, false, false)));
+    let (d, s) = (Arc::clone(&db), Arc::clone(&sde));
+    router.register_handler("eve.assetholding.entitlement.api.admin.RedeemRequest", Arc::new(move |ctx, _any, msg| redeem(&d, &s, ctx, msg, false, true)));
     let d = Arc::clone(&db);
     router.register_handler("eve.assetholding.entitlement.api.DeleteRequest", Arc::new(move |ctx, _any, msg| delete_or_expire(&d, ctx, msg, "eve.assetholding.entitlement.api.DeleteResponse", false)));
     let d = Arc::clone(&db);
     router.register_handler("eve.assetholding.entitlement.api.admin.ExpireRequest", Arc::new(move |ctx, _any, msg| delete_or_expire(&d, ctx, msg, "eve.assetholding.entitlement.api.admin.ExpireResponse", true)));
     let d = Arc::clone(&db);
     router.register_handler("eve_public.assetholding.entitlement.api.admin.ExpireRequest", Arc::new(move |ctx, _any, msg| delete_or_expire(&d, ctx, msg, "eve_public.assetholding.entitlement.api.admin.ExpireResponse", true)));
-    let d = Arc::clone(&db);
-    router.register_handler("eve.assetholding.entitlement.api.admin.AutoRedeemRequest", Arc::new(move |ctx, _any, msg| auto_redeem(&d, ctx, msg, "eve.assetholding.entitlement.api.admin.AutoRedeemResponse")));
-    let d = Arc::clone(&db);
-    router.register_handler("eve_public.assetholding.entitlement.api.admin.AutoRedeemRequest", Arc::new(move |ctx, _any, msg| auto_redeem(&d, ctx, msg, "eve_public.assetholding.entitlement.api.admin.AutoRedeemResponse")));
+    let (d, s) = (Arc::clone(&db), Arc::clone(&sde));
+    router.register_handler("eve.assetholding.entitlement.api.admin.AutoRedeemRequest", Arc::new(move |ctx, _any, msg| auto_redeem(&d, &s, ctx, msg, "eve.assetholding.entitlement.api.admin.AutoRedeemResponse")));
+    let (d, s) = (Arc::clone(&db), Arc::clone(&sde));
+    router.register_handler("eve_public.assetholding.entitlement.api.admin.AutoRedeemRequest", Arc::new(move |ctx, _any, msg| auto_redeem(&d, &s, ctx, msg, "eve_public.assetholding.entitlement.api.admin.AutoRedeemResponse")));
     let d = Arc::clone(&db);
     router.register_handler("eve.assetholding.entitlement.api.admin.RedeliverStaleEntitlementsRequest", Arc::new(move |ctx, _any, msg| redeliver_stale(&d, ctx, msg)));
 }
 
 const MAX_LEDGER_ENTRIES: usize = 10_000;
+/// Maximum station / Upwell personal item hangar capacity (`m³`).
+pub const MAX_STATION_HANGAR_CAPACITY_M3: f64 = 9_000_000_000_000_000.0;
+
+fn asset_unit_volume_m3(sde: &SdeRegistry, asset: &AssetRecord) -> f64 {
+    asset
+        .stacks
+        .iter()
+        .map(|&(type_id, qty)| {
+            let probe = InventoryItemRecord {
+                type_id,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            };
+            crate::services::inventory_fitting::fitting_containers_ships::effective_item_unit_volume(
+                sde, &probe,
+            ) * (qty as f64)
+        })
+        .sum()
+}
+
+fn check_holder_hangar_volume(
+    db: &WorldRepository,
+    sde: &SdeRegistry,
+    ledger: &EntitlementLedger,
+    holder: u32,
+    incoming_vol_m3: f64,
+    include_unredeemed_reserved: bool,
+) -> Result<(), (u32, String)> {
+    if incoming_vol_m3 <= 0.0 {
+        return Ok(());
+    }
+    let reserved_vol_m3: f64 = if include_unredeemed_reserved {
+        ledger
+            .entitlements
+            .values()
+            .filter(|ent| ent.holder == holder && ent.total > ent.redeemed)
+            .map(|ent| {
+                let rem = ent.total.saturating_sub(ent.redeemed) as f64;
+                ledger
+                    .assets
+                    .get(&hex(&ent.asset))
+                    .map(|a| asset_unit_volume_m3(sde, a) * rem)
+                    .unwrap_or(0.0)
+            })
+            .sum()
+    } else {
+        0.0
+    };
+    let holder_i64 = holder as i64;
+    let (existing_vol_m3, cap_m3) = db.with_snapshot(|s| {
+        let Some(ch) = s.characters.get(&holder_i64) else {
+            return (0.0, MAX_STATION_HANGAR_CAPACITY_M3);
+        };
+        let location = ch.station_id.or(ch.structure_id).unwrap_or(ch.home_station_id);
+        let cap = s
+            .items
+            .get(&location)
+            .and_then(|loc_item| sde.types.get(&loc_item.type_id))
+            .map(|t| t.capacity)
+            .filter(|&c| c > 0.0 && !s.structures.contains_key(&location))
+            .unwrap_or(MAX_STATION_HANGAR_CAPACITY_M3);
+        let used: f64 = s
+            .items
+            .values()
+            .filter(|it| {
+                it.owner_id == holder_i64
+                    && it.location_id == location
+                    && it.flag == InventoryFlag::Hangar
+                    && it.quantity > 0
+            })
+            .map(|it| {
+                crate::services::inventory_fitting::fitting_containers_ships::effective_item_unit_volume(
+                    sde, it,
+                ) * (it.quantity as f64)
+            })
+            .sum();
+        (used, cap)
+    });
+    if existing_vol_m3 + reserved_vol_m3 + incoming_vol_m3 > cap_m3 + 1e-6 {
+        return Err((
+            STATUS_BAD_REQUEST,
+            "Destination hangar volume capacity exceeded".to_string(),
+        ));
+    }
+    Ok(())
+}
 
 /// GM: `SpawnRequest { internal_name = 2, itemstack = 6 { stacks = 1 } | character_title = 13 { title = 1, finite = 3 } }`.
 fn spawn(db: &WorldRepository, sde: &SdeRegistry, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> Result<GoogleAny, (u32, String)> {
@@ -487,7 +574,12 @@ fn save(db: &WorldRepository, ledger: &EntitlementLedger) {
 
 /// GM: `DirectDeliveryRequest { entitlements = 2 [{ entitlement = 2, quantity = 10 }] }` grants
 /// (or tops up) entitlements and notifies each holder with `GrantedNotice`.
-fn direct_delivery(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> Result<GoogleAny, (u32, String)> {
+fn direct_delivery(
+    db: &WorldRepository,
+    sde: &SdeRegistry,
+    ctx: &AuthoritativeContext,
+    msg: &DynamicQuasarMessage,
+) -> Result<GoogleAny, (u32, String)> {
     require_admin_role(ctx)?;
     let entries = repeated(msg, 2);
     if entries.is_empty() {
@@ -508,16 +600,24 @@ fn direct_delivery(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &Dynam
         if !ledger.entitlements.contains_key(&k) && ledger.entitlements.len() >= MAX_LEDGER_ENTRIES {
             return Err((STATUS_BAD_REQUEST, "Entitlement ledger capacity reached".to_string()));
         }
+        let unredeemed_reserved: u64 = ledger
+            .entitlements
+            .values()
+            .filter(|ent| ent.asset == key.asset)
+            .map(|ent| ent.total.saturating_sub(ent.redeemed))
+            .sum();
         let asset = ledger
             .assets
-            .get_mut(&hex(&key.asset))
+            .get(&hex(&key.asset))
+            .cloned()
             .ok_or_else(|| (STATUS_NOT_FOUND, "Asset not found".to_string()))?;
-        if let Some((_orig, rem)) = &mut asset.capacity {
-            if *rem < quantity {
+        if let Some((_orig, rem)) = asset.capacity {
+            if unredeemed_reserved.saturating_add(quantity) > rem {
                 return Err((STATUS_BAD_REQUEST, "Asset finite capacity exhausted".to_string()));
             }
-            *rem -= quantity;
         }
+        let incoming_vol_m3 = asset_unit_volume_m3(sde, &asset) * (quantity as f64);
+        check_holder_hangar_volume(db, sde, &ledger, key.holder, incoming_vol_m3, true)?;
         let rec = ledger.entitlements.entry(k).or_insert_with(|| EntitlementRecord {
             holder: key.holder,
             asset: key.asset,
@@ -574,13 +674,20 @@ fn get(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &DynamicQuasarMess
 
 /// Redeems every outstanding unit: materializes the asset's item stacks (× units) in the holder's
 /// current station hangar (home station when in space) and publishes `RedeemedNotice`.
-fn redeem(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage, is_public: bool, require_admin: bool) -> Result<GoogleAny, (u32, String)> {
+fn redeem(
+    db: &WorldRepository,
+    sde: &SdeRegistry,
+    ctx: &AuthoritativeContext,
+    msg: &DynamicQuasarMessage,
+    is_public: bool,
+    require_admin: bool,
+) -> Result<GoogleAny, (u32, String)> {
     if require_admin {
         require_admin_role(ctx)?;
     }
     let mut ledger = load(db);
     let (key, rec) = owned_entitlement(&ledger, ctx, msg, require_admin || !is_public)?;
-    redeem_record(db, &mut ledger, ctx.now_unix(), &key, rec)?;
+    redeem_record(db, sde, &mut ledger, ctx.now_unix(), &key, rec)?;
     save(db, &ledger);
     let rsp_type = if require_admin {
         "eve.assetholding.entitlement.api.admin.RedeemResponse"
@@ -592,13 +699,26 @@ fn redeem(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &DynamicQuasarM
     Ok(any(rsp_type, Vec::new()))
 }
 
-fn redeem_record(db: &WorldRepository, ledger: &mut EntitlementLedger, now_unix: u64, key: &str, rec: EntitlementRecord) -> Result<(), (u32, String)> {
+fn redeem_record(
+    db: &WorldRepository,
+    sde: &SdeRegistry,
+    ledger: &mut EntitlementLedger,
+    now_unix: u64,
+    key: &str,
+    rec: EntitlementRecord,
+) -> Result<(), (u32, String)> {
     let units = rec.total.saturating_sub(rec.redeemed);
     if units == 0 {
         return Err((STATUS_BAD_REQUEST, "Entitlement has nothing left to redeem".to_string()));
     }
     let asset_key = hex(&rec.asset);
     let mut asset = ledger.assets.get(&asset_key).cloned().ok_or_else(|| (STATUS_NOT_FOUND, "Asset not found".to_string()))?;
+    for (_type_id, qty) in &asset.stacks {
+        let _ = i32::try_from((*qty as u64).saturating_mul(units))
+            .map_err(|_| (STATUS_BAD_REQUEST, "Quantity overflow".to_string()))?;
+    }
+    let incoming_vol_m3 = asset_unit_volume_m3(sde, &asset) * (units as f64);
+    check_holder_hangar_volume(db, sde, ledger, rec.holder, incoming_vol_m3, false)?;
     let mut cap_claimed: Option<(u64, u64)> = None;
     if let Some((orig, rem)) = asset.capacity {
         if rem < units {
@@ -611,7 +731,7 @@ fn redeem_record(db: &WorldRepository, ledger: &mut EntitlementLedger, now_unix:
     let holder = rec.holder as i64;
     db.try_with_mut_snapshot(|s| {
         let ch = s.characters.get(&holder).ok_or_else(|| (STATUS_NOT_FOUND, "Character not found".to_string()))?;
-        let location = ch.station_id.unwrap_or(ch.home_station_id);
+        let location = ch.station_id.or(ch.structure_id).unwrap_or(ch.home_station_id);
         for (type_id, qty) in &asset.stacks {
             let quantity = i32::try_from((*qty as u64).saturating_mul(units)).map_err(|_| (STATUS_BAD_REQUEST, "Quantity overflow".to_string()))?;
             s.next_entity_id += 1;
@@ -708,7 +828,13 @@ fn delete_or_expire(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &Dyna
     Ok(any(rsp_type, Vec::new()))
 }
 
-fn auto_redeem(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage, rsp_type: &str) -> Result<GoogleAny, (u32, String)> {
+fn auto_redeem(
+    db: &WorldRepository,
+    sde: &SdeRegistry,
+    ctx: &AuthoritativeContext,
+    msg: &DynamicQuasarMessage,
+    rsp_type: &str,
+) -> Result<GoogleAny, (u32, String)> {
     require_admin_role(ctx)?;
     let target_key = EntitlementKey::parse(sub(msg, 1)).ok().map(|k| k.key());
     let target_holder = sub(msg, 1)
@@ -734,7 +860,7 @@ fn auto_redeem(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &DynamicQu
         .map(|(k, r)| (k.clone(), r.clone()))
         .collect();
     for (k, rec) in pending {
-        let _ = redeem_record(db, &mut ledger, ctx.now_unix(), &k, rec);
+        let _ = redeem_record(db, sde, &mut ledger, ctx.now_unix(), &k, rec);
     }
     save(db, &ledger);
     Ok(any(rsp_type, Vec::new()))

@@ -127,7 +127,7 @@ async fn test_r5_199_200_205_fighter_point_targeted_charges_death_pipeline_and_r
 
     let pt_err = ctx
         .dispatch_rpc(
-            &mut sess, "fighterMgr", None, "ExecuteActivateAbilitySlotsOnPoint",
+            &mut sess, "fighterMgr", None, "CmdActivateAbilitySlots",
             &[PyRep::Integer(f_ball_id), PyRep::Integer(0), PyRep::Tuple(vec![PyRep::Real(500.0), PyRep::Real(0.0), PyRep::Real(0.0)])],
             &kw, None,
         )

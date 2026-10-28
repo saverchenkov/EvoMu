@@ -910,27 +910,168 @@ pub fn destroy_pirate_stronghold(
     }
 }
 
-/// Advances insurgency capture progression for an active ship near a FW complex beacon.
-/// Can be invoked by system tick / capture hooks.
-pub async fn step_system_insurgency_capture_tick(
+fn are_fw_factions_allied(a: i64, b: i64) -> bool {
+    a == b
+        || matches!(
+            (a, b),
+            (500_001, 500_003) | (500_003, 500_001) | (500_002, 500_004) | (500_004, 500_002)
+        )
+}
+
+fn fw_militia_side_key(fid: i64, camp_info: Option<(i64, i64)>) -> u8 {
+    if let Some((_, pirate_fac)) = camp_info {
+        if fid == pirate_fac || fid == FACTION_GURISTAS || fid == FACTION_ANGEL_CARTEL {
+            10
+        } else {
+            20
+        }
+    } else {
+        match fid {
+            500_001 | 500_003 => 1,
+            500_002 | 500_004 => 2,
+            500_010 => 3,
+            500_011 => 4,
+            _ => 5,
+        }
+    }
+}
+
+/// Evaluates all eligible (online, undocked, non-capsule, uncloaked, `<= 30 km`) militia ships
+/// on the FW/insurgency complex grid in `sys_id` once per simulation tick (`feat:pve.insurgency`).
+async fn evaluate_system_fw_complex_tick(
     ctx: &ServerContext,
     sys_id: u32,
-    ship_id: i64,
-    fid: i64,
+    explicit_caller: Option<(i64, i64)>,
 ) -> bool {
-    let Ok(Some((tick, ship_ball))) = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(ship_id).await else {
+    if explicit_caller.is_some_and(|(_, fid)| fid == 0) {
+        return false;
+    }
+    let sys_sec = ctx
+        .sde
+        .solar_systems
+        .get(&sys_id)
+        .map(|s| s.security_status)
+        .unwrap_or(1.0);
+    let is_lowsec_warzone = sys_sec > 0.0 && sys_sec < 0.45;
+
+    let Some((beacon_arr, candidates)) = ctx.db.with_snapshot(|snap| {
+        let beacon_arr = snap.system_states.get(&sys_id)?.fw_complex_position?;
+        let mut cands: Vec<(Option<i64>, i64, i64)> = Vec::new();
+        if let Some((req_ship_id, req_fid)) = explicit_caller {
+            let pilot = snap
+                .characters
+                .values()
+                .find(|c| c.active_ship_id == req_ship_id)
+                .map(|c| (c.character_id, c.station_id.is_some() || c.structure_id.is_some()));
+            if pilot.is_some_and(|(_, docked)| docked) {
+                return None;
+            }
+            if snap.items.get(&req_ship_id).is_some_and(|it| it.type_id == 670) {
+                return None;
+            }
+            cands.push((pilot.map(|(cid, _)| cid), req_ship_id, req_fid));
+        }
+        for c in snap.characters.values() {
+            if c.solar_system_id != sys_id || c.station_id.is_some() || c.structure_id.is_some() {
+                continue;
+            }
+            let fid = c.war_faction_id.unwrap_or(0);
+            if fid == 0 || !ctx.is_character_online(c.character_id, c.user_id) {
+                continue;
+            }
+            if cands.iter().any(|&(_, sid, _)| sid == c.active_ship_id) {
+                continue;
+            }
+            if snap
+                .items
+                .get(&c.active_ship_id)
+                .is_some_and(|it| it.type_id == 670)
+            {
+                continue;
+            }
+            cands.push((Some(c.character_id), c.active_ship_id, fid));
+        }
+        Some((beacon_arr, cands))
+    }) else {
         return false;
     };
-    let effective_tick = tick.max(1);
-    let camp_pulse = ctx.db.with_mut_snapshot(|snap| {
-        let camp = snap.insurgency_runtime.campaigns.values().find(|c| c.systems.contains(&sys_id))?;
-        let camp_id = camp.campaign_id;
-        let pirate_fac = camp.pirate_faction_id;
-        let st = snap.system_states.get_mut(&sys_id)?;
-        let beacon = glam::DVec3::from_array(st.fw_complex_position?);
-        if ship_ball.position.distance(beacon) > 30_000.0 || effective_tick <= st.last_fw_capture_tick {
+    if candidates.is_empty() {
+        return false;
+    }
+
+    let beacon = glam::DVec3::from_array(beacon_arr);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let mut on_grid: Vec<(Option<i64>, i64, i64, u64)> = Vec::new();
+    for (pilot_cid, cand_ship_id, cand_fid) in candidates {
+        let Ok(Some((tick, ball))) = sys_handle.get_ball_snapshot(cand_ship_id).await else {
+            continue;
+        };
+        if ball.type_id == 670 || ball.position.distance(beacon) > 30_000.0 {
+            continue;
+        }
+        if sys_handle
+            .get_combat_state(cand_ship_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|cs| cs.is_cloaked || cs.structure_hp <= 0.0)
+        {
+            continue;
+        }
+        on_grid.push((pilot_cid, cand_ship_id, cand_fid, tick.max(1)));
+    }
+    if let Some((req_ship_id, _)) = explicit_caller {
+        if !on_grid.iter().any(|&(_, sid, _, _)| sid == req_ship_id) {
+            return false;
+        }
+    }
+    if on_grid.is_empty() {
+        return false;
+    }
+    let effective_tick = on_grid.iter().map(|x| x.3).max().unwrap_or(1);
+
+    let pulse = ctx.db.with_mut_snapshot(|snap| {
+        let camp_info = snap
+            .insurgency_runtime
+            .campaigns
+            .values()
+            .find(|c| c.systems.contains(&sys_id))
+            .map(|c| (c.campaign_id, c.pirate_faction_id));
+        if camp_info.is_none() && !is_lowsec_warzone {
             return None;
         }
+        let occupier_opt = snap
+            .fw_system_occupations
+            .get(&sys_id)
+            .map(|o| o.occupier_faction_id);
+        let status = crate::services::fw_services::compute_system_frontline_status(ctx, snap, sys_id);
+        let has_occ = occupier_opt.is_some();
+        let (occ_adv, attacker_adv) = snap
+            .fw_runtime
+            .system_advantage
+            .get(&sys_id)
+            .copied()
+            .unwrap_or((0.0, 0.0));
+
+        let st = snap.system_states.get_mut(&sys_id)?;
+        if effective_tick <= st.last_fw_capture_tick {
+            return None;
+        }
+        let first_side = fw_militia_side_key(on_grid[0].2, camp_info);
+        if on_grid
+            .iter()
+            .any(|&(_, _, f, _)| fw_militia_side_key(f, camp_info) != first_side)
+        {
+            st.last_fw_capture_tick = effective_tick;
+            return None;
+        }
+        let lead_fid = on_grid[0].2;
+        let is_defender = camp_info.is_none()
+            && occupier_opt.is_some_and(|occ_fid| are_fw_factions_allied(lead_fid, occ_fid));
+        if camp_info.is_none() && is_defender && st.fw_capture_seconds_elapsed == 0 {
+            return None;
+        }
+
         let delta = if st.last_fw_capture_tick == 0 {
             1
         } else {
@@ -942,13 +1083,123 @@ pub async fn step_system_insurgency_capture_tick(
         st.last_fw_capture_tick = effective_tick;
         let pts_delta = ((u64::from(delta) * INSURGENCY_CAPTURE_POINTS_TOTAL) / u64::from(duration))
             .max(MIN_INSURGENCY_CAPTURE_POINTS_DELTA as u64) as i64;
-        Some((camp_id, pirate_fac, pts_delta))
+
+        let mut total_lp_awarded = 0i64;
+        if is_lowsec_warzone {
+            let (grid_friendly_adv, grid_enemy_adv) = if !has_occ || is_defender {
+                (occ_adv, attacker_adv)
+            } else {
+                (attacker_adv, occ_adv)
+            };
+            let adv_mult = crate::services::fw_services::calculate_capture_speed_multiplier(
+                grid_friendly_adv,
+                grid_enemy_adv,
+            );
+            let capture_advance = ((delta as f64) * adv_mult).round().max(1.0) as u64;
+            if is_defender {
+                st.fw_capture_seconds_elapsed =
+                    st.fw_capture_seconds_elapsed.saturating_sub(capture_advance);
+            } else {
+                let prev_contested_pct = st.fw_contested_pct;
+                st.fw_capture_seconds_elapsed = st
+                    .fw_capture_seconds_elapsed
+                    .saturating_add(capture_advance)
+                    .min(duration);
+                if st.fw_capture_seconds_elapsed >= duration {
+                    let status_mult = if has_occ {
+                        match status {
+                            crate::services::fw_services::STATUS_FRONTLINE => 1.5,
+                            crate::services::fw_services::STATUS_COMMAND => 1.0,
+                            _ => 0.75,
+                        }
+                    } else if prev_contested_pct > 75.0 {
+                        1.5
+                    } else if prev_contested_pct > 25.0 {
+                        1.0
+                    } else {
+                        0.75
+                    };
+                    total_lp_awarded = (15_000.0 * status_mult) as i64;
+                    st.fw_complex_position = None;
+                    st.fw_capture_seconds_elapsed = 0;
+                }
+            }
+        }
+        let pilot_cids: Vec<(i64, i64)> = on_grid
+            .iter()
+            .filter_map(|&(cid_opt, _, pfid, _)| cid_opt.map(|cid| (cid, pfid)))
+            .collect();
+        if total_lp_awarded > 0 {
+            let n_pilots = pilot_cids.len().max(1) as i64;
+            let lp_each = total_lp_awarded / n_pilots;
+            for &(cid, pfid) in &pilot_cids {
+                if let Some(ch) = snap.characters.get_mut(&cid) {
+                    let militia_corp = ctx
+                        .sde
+                        .factions
+                        .get(&(pfid as u32))
+                        .and_then(|f| f.militia_corporation_id)
+                        .map(|c| c as i64)
+                        .unwrap_or(pfid);
+                    *ch.loyalty_points.entry(militia_corp).or_insert(0) += lp_each;
+                }
+            }
+            let mut new_sys_contested = None;
+            if let Some(occ) = snap.fw_system_occupations.get_mut(&sys_id) {
+                let vp_entry = snap
+                    .fw_runtime
+                    .system_victory_points
+                    .entry(sys_id)
+                    .or_insert(occ.victory_points);
+                *vp_entry = vp_entry.saturating_add(20);
+                occ.victory_points = *vp_entry;
+                let thresh = (occ.victory_points_threshold as f64).max(1.0);
+                new_sys_contested = Some(((*vp_entry as f64 / thresh) * 100.0).clamp(0.0, 100.0));
+            } else {
+                let vp_entry = snap.fw_runtime.system_victory_points.entry(sys_id).or_insert(0);
+                *vp_entry = vp_entry.saturating_add(20);
+            }
+            if let (Some(pct), Some(st2)) = (new_sys_contested, snap.system_states.get_mut(&sys_id)) {
+                st2.fw_contested_pct = pct;
+            }
+        }
+        Some((camp_info, pts_delta, lead_fid, pilot_cids, total_lp_awarded))
     });
-    if let Some((camp_id, pirate_fac, pts_delta)) = camp_pulse {
-        if fid == pirate_fac || fid == FACTION_GURISTAS || fid == FACTION_ANGEL_CARTEL {
-            let _ = add_system_corruption(ctx, camp_id, sys_id, pts_delta);
-        } else {
-            let _ = add_system_suppression(ctx, camp_id, sys_id, pts_delta);
+
+    if let Some((camp_info, pts_delta, lead_fid, pilot_cids, total_lp_awarded)) = pulse {
+        if let Some((camp_id, pirate_fac)) = camp_info {
+            if lead_fid == pirate_fac || lead_fid == FACTION_GURISTAS || lead_fid == FACTION_ANGEL_CARTEL {
+                let _ = add_system_corruption(ctx, camp_id, sys_id, pts_delta);
+            } else {
+                let _ = add_system_suppression(ctx, camp_id, sys_id, pts_delta);
+            }
+        }
+        for (cid, pfid) in pilot_cids {
+            ctx.quasar_gateway.progression.extra.on_campaign_gameplay_event(
+                cid as u32,
+                crate::services::quasar_campaign_state::CampaignEvent {
+                    method: "CaptureFWComplex",
+                    type_id: None,
+                    solar_system_id: Some(sys_id),
+                    faction_id: Some(pfid),
+                },
+                1,
+                ctx.now_unix(),
+                &ctx.quasar_gateway,
+            );
+            if total_lp_awarded > 0 {
+                ctx.quasar_gateway
+                    .progression
+                    .career_goals
+                    .on_gameplay_event(cid as u32, "faction_warfare", 1, &ctx.quasar_gateway);
+                crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
+                    ctx,
+                    cid,
+                    &["CaptureFWComplexes", "DefendFWComplexes"],
+                    1,
+                    Some(sys_id as i64),
+                );
+            }
         }
         true
     } else {
@@ -956,35 +1207,35 @@ pub async fn step_system_insurgency_capture_tick(
     }
 }
 
+/// Advances FW warzone and insurgency capture progression for an active ship near a FW complex beacon.
+/// Invoked strictly by the server simulation tick (never client RPC).
+pub async fn step_system_insurgency_capture_tick(
+    ctx: &ServerContext,
+    sys_id: u32,
+    ship_id: i64,
+    fid: i64,
+) -> bool {
+    evaluate_system_fw_complex_tick(ctx, sys_id, Some((ship_id, fid))).await
+}
+
 /// Steps insurgency capture progression for all active player ships in `sys_id`.
 /// Invoked by cluster / system simulation tick (`feat:pve.insurgency`).
 // parity: feat:pve.insurgency
 pub async fn step_system_insurgency_tick(ctx: &ServerContext, sys_id: u32) {
-    let has_campaign = read_insurgency_runtime(ctx, |rt| {
-        rt.campaigns.values().any(|c| c.systems.contains(&sys_id))
+    let has_active_complex = ctx.db.with_snapshot(|snap| {
+        snap.insurgency_runtime
+            .campaigns
+            .values()
+            .any(|c| c.systems.contains(&sys_id))
+            || snap
+                .system_states
+                .get(&sys_id)
+                .is_some_and(|st| st.fw_complex_position.is_some())
     });
-    if !has_campaign {
+    if !has_active_complex {
         return;
     }
-    let candidates: Vec<(i64, u64, i64, i64)> = ctx.db.with_snapshot(|snap| {
-        snap.characters
-            .values()
-            .filter(|c| c.solar_system_id == sys_id && c.station_id.is_none() && c.structure_id.is_none())
-            .filter_map(|c| {
-                let fid = c.war_faction_id.unwrap_or(0);
-                if fid != 0 {
-                    Some((c.character_id, c.user_id, c.active_ship_id, fid))
-                } else {
-                    None
-                }
-            })
-            .collect()
-    });
-    for (char_id, user_id, ship_id, fid) in candidates {
-        if ctx.is_character_online(char_id, user_id) {
-            let _ = step_system_insurgency_capture_tick(ctx, sys_id, ship_id, fid).await;
-        }
-    }
+    let _ = evaluate_system_fw_complex_tick(ctx, sys_id, None).await;
 }
 
 pub async fn handle(

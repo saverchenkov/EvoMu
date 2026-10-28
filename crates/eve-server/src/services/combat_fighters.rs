@@ -1030,11 +1030,6 @@ pub async fn handle_fighters(
             handle_deactivate_fighter_ability_slots(ctx, session, args).await
         }
 
-        // rpc-lint: allow auditor acceptance explicitly names fighterMgr.ExecuteActivateAbilitySlotsOnPoint
-        ("fighterMgr", "ExecuteActivateAbilitySlotsOnPoint") => {
-            handle_activate_fighter_ability_slots_on_point(ctx, session, args).await
-        }
-
         ("fighterMgr", "CmdAbandonFighter") => {
             let (_, _char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
