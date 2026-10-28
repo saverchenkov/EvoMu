@@ -625,20 +625,27 @@ pub fn register_progression_extra_handlers(
             let initial_prog = raw_initial_prog;
 
             let mut escrow_isk = 0i64;
+            let mut explicit_reward_per_unit = 0i64;
             if let Some(pools) = dyn_msg.get(8) {
                 escrow_isk = escrow_isk.saturating_add(parse_isk_value(pools)?);
             }
-            if escrow_isk == 0 {
-                if let Some(rewards) = dyn_msg.get(7) {
-                    escrow_isk = escrow_isk.saturating_add(parse_isk_value(rewards)?.saturating_mul(target as i64));
+            if let Some(rewards) = dyn_msg.get(7) {
+                explicit_reward_per_unit = parse_isk_value(rewards)?;
+                if escrow_isk == 0 {
+                    escrow_isk = escrow_isk.saturating_add(explicit_reward_per_unit.saturating_mul(target as i64));
                 }
             }
 
             let goal_id = if let (Some(ref cs), Some(c_id)) = (&mgr.corp_state, corpid) {
                 let gid = cs.create_goal(c_id, name.clone(), desc.clone(), target as i64, escrow_isk)?;
-                if initial_prog > 0 {
+                if initial_prog > 0 || explicit_reward_per_unit > 0 {
                     if let Some(cg) = cs.goals.write().unwrap_or_else(|e| e.into_inner()).get_mut(&gid) {
-                        cg.current_progress = initial_prog as i64;
+                        if initial_prog > 0 {
+                            cg.current_progress = initial_prog as i64;
+                        }
+                        if explicit_reward_per_unit > 0 {
+                            cg.reward_per_unit_isk = explicit_reward_per_unit;
+                        }
                     }
                     cs.sync_to_db();
                 }

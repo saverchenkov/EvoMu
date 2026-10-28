@@ -144,22 +144,26 @@ pub fn record_lp_reward_log(
             None => (false, 0.11),
         };
         if tax_rate > 0.0 {
-            let recent_rewards: Vec<(String, IskCents, String)> = snap
+            let recent_rewards: Vec<(i64, String, IskCents, String)> = snap
                 .wallet_journal
                 .iter()
                 .rev()
-                .take(2)
+                .filter(|e| e.character_id == char_id)
+                .take(4)
                 .filter(|e| {
-                    e.character_id == char_id
-                        && matches!(
-                            e.entry_type.as_str(),
-                            "agent_mission_reward" | "agent_mission_time_bonus_reward"
-                        )
-                        && e.amount >= IskCents::from_isk(100_000)
+                    matches!(
+                        e.entry_type.as_str(),
+                        "agent_mission_reward" | "agent_mission_time_bonus_reward"
+                    ) && e.amount >= IskCents::from_isk(100_000)
+                        && !snap
+                            .service_state_blobs
+                            .contains_key(&format!("mission_taxed_journal:{}", e.entry_id))
                 })
-                .map(|e| (e.entry_type.clone(), e.amount, e.reason.clone()))
+                .map(|e| (e.entry_id, e.entry_type.clone(), e.amount, e.reason.clone()))
                 .collect();
-            for (etype, gross_amt, ereason) in recent_rewards.into_iter().rev() {
+            for (eid, etype, gross_amt, ereason) in recent_rewards.into_iter().rev() {
+                snap.service_state_blobs
+                    .insert(format!("mission_taxed_journal:{eid}"), "1".to_string());
                 let tax_cents = IskCents::from_f64_isk(gross_amt.to_wire_f64() * tax_rate);
                 if tax_cents.raw_cents() <= 0 {
                     continue;
@@ -172,14 +176,8 @@ pub fn record_lp_reward_log(
                 };
                 if is_player_corp {
                     if let Some(corp) = snap.corporations.get_mut(&char_corp_id) {
-                        corp.ensure_wallet_divisions();
-                        corp.master_wallet = corp
-                            .master_wallet
-                            .checked_add(tax_cents)
-                            .unwrap_or(corp.master_wallet);
-                        if let Some(d0) = corp.wallet_divisions.first_mut() {
-                            d0.balance = d0.balance.checked_add(tax_cents).unwrap_or(d0.balance);
-                        }
+                        let cur = corp.division_balance(1);
+                        corp.set_division_balance(1, cur.checked_add(tax_cents).unwrap_or(cur));
                     }
                 }
                 snap.next_entity_id += 1;
@@ -471,6 +469,9 @@ fn take_offer(
                     && it.location_id == delivery_loc_id
                     && flag_matches
                     && it.flag != InventoryFlag::Locked
+                    && !it.is_blueprint_copy
+                    && it.dynamic_attributes.get(&3).copied().unwrap_or(0.0) <= 0.0
+                    && it.source_mutaplasmid_id.is_none()
                     && !is_active_ship
                     && !has_contained_items
                     && !is_courier_cargo

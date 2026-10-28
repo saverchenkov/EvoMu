@@ -11,13 +11,6 @@
 //! - Epic Arc / COSMOS / Data Center choice branching (`DoAction` 18/19)
 //! - `keeper.ActivateAccelerationGate` (including Anomic Burner ship restrictions) and AIR Career / NPE handlers
 
-// parity: plan:E-5
-// parity: feat:pve.mission-standing-gate, feat:pve.mission-faction-standing-loss, feat:pve.mission-tracker
-// parity: feat:pve.research-agents, feat:pve.locator-agents, feat:pve.career-agents, feat:pve.epic-arcs
-// parity: feat:pve.cosmos, feat:pve.data-centers, feat:pve.anomic-burner-missions, feat:pve.storyline-arcs-soe
-// parity: feat:standings.npc-standings, feat:standings.standing-gain-missions, feat:standings.standing-loss
-// parity: feat:standings.effective-standing, feat:standings.standing-compositions, feat:standings.corp-standings
-// parity: feat:standings.npc-npc-standings, feat:standings.standing-notifications, feat:standings.trig-edencom-standings
 
 #![forbid(unsafe_code)]
 
@@ -1071,7 +1064,6 @@ pub async fn handle_extended(
             Some(Ok(PyRep::Dict(msgs)))
         }
 
-        // parity: rpc:epicArcStatus.AgentHasEpicMissionsForCharacter
         ("epicArcStatus", "AgentHasEpicMissionsForCharacter") => {
             let (_, session_char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(agent_id) = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0) else {

@@ -45,6 +45,31 @@ pub struct CorpGoalRecord {
     pub contributors: HashMap<u32, (i64, bool)>, // char_id -> (progress, redeemed)
     #[serde(default)]
     pub escrow_isk: i64,
+    #[serde(default)]
+    pub initial_escrow_isk: i64,
+    #[serde(default)]
+    pub reward_per_unit_isk: i64,
+}
+
+impl CorpGoalRecord {
+    pub fn calc_reward_isk(&self, progress: i64) -> i64 {
+        if progress <= 0 {
+            return 0;
+        }
+        let pool = if self.initial_escrow_isk > 0 {
+            self.initial_escrow_isk
+        } else {
+            self.escrow_isk
+        };
+        let unit_rate = if self.reward_per_unit_isk > 0 {
+            self.reward_per_unit_isk
+        } else if self.target_progress > 0 && pool > 0 {
+            (pool / self.target_progress).clamp(1, 10_000)
+        } else {
+            10_000
+        };
+        progress.saturating_mul(unit_rate)
+    }
 }
 
 #[derive(Default)]
@@ -110,7 +135,7 @@ impl QuasarCorpState {
             db.with_mut_snapshot(|snap| {
                 if let Some(corp) = snap.corporations.get_mut(&(corp_id as i64)) {
                     if let Some(rem) = corp.master_wallet.checked_sub(cost) {
-                        corp.master_wallet = rem;
+                        corp.set_division_balance(1, rem);
                         debited = true;
                     }
                 }
@@ -125,6 +150,7 @@ impl QuasarCorpState {
             goals.insert(id, CorpGoalRecord {
                 id, corp_id, name, description, target_progress, current_progress: 0,
                 active: true, contributors: HashMap::new(), escrow_isk,
+                initial_escrow_isk: escrow_isk, reward_per_unit_isk: 0,
             });
         }
         self.sync_to_db();
@@ -153,7 +179,8 @@ impl QuasarCorpState {
             let credit = eve_db::IskCents::from_isk(amount_isk);
             db.with_mut_snapshot(|snap| {
                 if let Some(corp) = snap.corporations.get_mut(&(corp_id as i64)) {
-                    corp.master_wallet = corp.master_wallet.checked_add(credit).unwrap_or(corp.master_wallet);
+                    let next = corp.master_wallet.checked_add(credit).unwrap_or(corp.master_wallet);
+                    corp.set_division_balance(1, next);
                 }
             });
         }
@@ -879,20 +906,22 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 let g = goals
                     .get_mut(&goal_id)
                     .ok_or_else(|| (STATUS_NOT_FOUND, "Corporation goal not found".into()))?;
-                let entry = g
+                let entry_prog = g
                     .contributors
-                    .get_mut(&cid)
+                    .get(&cid)
                     .ok_or_else(|| (STATUS_PRECONDITION_FAILED, "No contributor progress for corporation goal".into()))?;
-                if entry.1 || entry.0 <= 0 {
+                if entry_prog.1 || entry_prog.0 <= 0 {
                     return Err((STATUS_PRECONDITION_FAILED, "No unredeemed rewards available for corporation goal".into()));
                 }
-                let calc_reward = entry.0.saturating_mul(10_000);
+                let calc_reward = g.calc_reward_isk(entry_prog.0);
                 let available = g.escrow_isk.max(0);
                 let p = calc_reward.min(available);
                 if p <= 0 {
                     return Err((STATUS_PRECONDITION_FAILED, "Corporation goal reward escrow is empty".into()));
                 }
-                entry.1 = true;
+                if let Some(entry) = g.contributors.get_mut(&cid) {
+                    entry.1 = true;
+                }
                 g.escrow_isk = g.escrow_isk.saturating_sub(p);
                 p
             };
@@ -961,17 +990,17 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             {
                 let mut goals = state_cg_redeem_all.goals.write().unwrap_or_else(|e| e.into_inner());
                 for g in goals.values_mut() {
-                    if let Some(entry) = g.contributors.get_mut(&cid) {
-                        if !entry.1 && entry.0 > 0 {
-                            let calc_reward = entry.0.saturating_mul(10_000);
-                            let available = g.escrow_isk.max(0);
-                            let payout = calc_reward.min(available);
-                            if payout > 0 {
+                    let calc_reward = g.contributors.get(&cid).map(|&(prog, red)| if !red && prog > 0 { g.calc_reward_isk(prog) } else { 0 }).unwrap_or(0);
+                    if calc_reward > 0 {
+                        let available = g.escrow_isk.max(0);
+                        let payout = calc_reward.min(available);
+                        if payout > 0 {
+                            if let Some(entry) = g.contributors.get_mut(&cid) {
                                 entry.1 = true;
-                                g.escrow_isk = g.escrow_isk.saturating_sub(payout);
-                                total_payout = total_payout.saturating_add(payout);
-                                redeemed_goals.push((g.id, payout));
                             }
+                            g.escrow_isk = g.escrow_isk.saturating_sub(payout);
+                            total_payout = total_payout.saturating_add(payout);
+                            redeemed_goals.push((g.id, payout));
                         }
                     }
                 }

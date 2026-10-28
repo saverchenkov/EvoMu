@@ -90,6 +90,42 @@ fn map_contract_availability(avail: &str) -> &'static str {
     }
 }
 
+fn is_character_party_to_contract(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    c: &eve_db::ContractRecord,
+) -> bool {
+    if c.issuer_id == char_id
+        || c.acceptor_id == Some(char_id)
+        || c.assignee_id == char_id
+        || c.current_bidder_id == Some(char_id)
+        || c.bid_history.iter().any(|&(b, _, _)| b == char_id)
+        || ((c.availability.is_empty() || c.availability.eq_ignore_ascii_case("Public"))
+            && c.assignee_id == 0)
+    {
+        return true;
+    }
+    snap.characters.get(&char_id).is_some_and(|ch| {
+        (ch.corporation_id != 0
+            && (c.assignee_id == ch.corporation_id
+                || (c.availability.eq_ignore_ascii_case("Corporation")
+                    && c.issuer_corp_id == ch.corporation_id)))
+            || ch.alliance_id.is_some_and(|a| a != 0 && c.assignee_id == a)
+    })
+}
+
+fn is_corp_contract(
+    corp: &eve_db::CorporationRecord,
+    corp_id: i64,
+    c: &eve_db::ContractRecord,
+) -> bool {
+    (c.for_corp
+        && (c.issuer_corp_id == corp_id
+            || (c.issuer_corp_id == 0 && corp.members.contains(&c.issuer_id))))
+        || c.assignee_id == corp_id
+        || c.acceptor_id == Some(corp_id)
+}
+
 fn contract_in_region(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
@@ -817,10 +853,7 @@ pub fn dispatch_economy_route(
                         format!("Contract {contract_id} not found"),
                     );
                 };
-                if c.issuer_id != char_id
-                    && c.acceptor_id != Some(char_id)
-                    && c.assignee_id != char_id
-                {
+                if !is_character_party_to_contract(snap, char_id, c) {
                     return RouteExecutionResult::error(
                         403,
                         format!("Character {char_id} is not a party to contract {contract_id}"),
@@ -852,10 +885,7 @@ pub fn dispatch_economy_route(
                         format!("Contract {contract_id} not found"),
                     );
                 };
-                if c.issuer_id != char_id
-                    && c.acceptor_id != Some(char_id)
-                    && c.assignee_id != char_id
-                {
+                if !is_character_party_to_contract(snap, char_id, c) {
                     return RouteExecutionResult::error(
                         403,
                         format!("Character {char_id} is not a party to contract {contract_id}"),
@@ -997,12 +1027,7 @@ pub fn dispatch_economy_route(
                 let mut contracts: Vec<_> = snap
                     .contracts
                     .values()
-                    .filter(|c| {
-                        (c.for_corp
-                            && (c.issuer_corp_id == corp_id || corp.members.contains(&c.issuer_id)))
-                            || c.assignee_id == corp_id
-                            || c.acceptor_id == Some(corp_id)
-                    })
+                    .filter(|c| is_corp_contract(corp, corp_id, c))
                     .collect();
                 contracts.sort_by_key(|c| c.contract_id);
                 let rows: Vec<Value> = contracts
@@ -1062,12 +1087,7 @@ pub fn dispatch_economy_route(
                         format!("Corporation {corp_id} not found"),
                     );
                 };
-                let Some(c) = snap.contracts.get(&contract_id).filter(|c| {
-                    (c.for_corp
-                        && (c.issuer_corp_id == corp_id || corp.members.contains(&c.issuer_id)))
-                        || c.assignee_id == corp_id
-                        || c.acceptor_id == Some(corp_id)
-                }) else {
+                let Some(c) = snap.contracts.get(&contract_id).filter(|c| is_corp_contract(corp, corp_id, c)) else {
                     return RouteExecutionResult::error(
                         404,
                         format!("Contract {contract_id} not found for corporation {corp_id}"),
@@ -1093,12 +1113,7 @@ pub fn dispatch_economy_route(
                         format!("Corporation {corp_id} not found"),
                     );
                 };
-                let Some(c) = snap.contracts.get(&contract_id).filter(|c| {
-                    (c.for_corp
-                        && (c.issuer_corp_id == corp_id || corp.members.contains(&c.issuer_id)))
-                        || c.assignee_id == corp_id
-                        || c.acceptor_id == Some(corp_id)
-                }) else {
+                let Some(c) = snap.contracts.get(&contract_id).filter(|c| is_corp_contract(corp, corp_id, c)) else {
                     return RouteExecutionResult::error(
                         404,
                         format!("Contract {contract_id} not found for corporation {corp_id}"),

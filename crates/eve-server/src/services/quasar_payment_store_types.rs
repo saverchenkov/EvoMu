@@ -423,13 +423,16 @@ pub fn register_plex_vault_extra_handlers(router: &PublicGatewayRouter, db: Arc<
                         }
                     }
                     let omega_notice = if offer.category_id == 1 {
+                        let omega_target_uid = recipient_cid
+                            .and_then(|cid| snap.characters.get(&cid).map(|c| c.user_id))
+                            .unwrap_or(uid);
                         let (_, n) = crate::services::quasar_auth_user::activate_user_omega_license_in_snapshot(
                             snap,
-                            uid,
+                            omega_target_uid,
                             30 * 86_400 * u64::from(qty),
                             now_unix,
                         );
-                        Some(n)
+                        Some((omega_target_uid, n))
                     } else {
                         None
                     };
@@ -445,8 +448,8 @@ pub fn register_plex_vault_extra_handlers(router: &PublicGatewayRouter, db: Arc<
                 })?;
 
             emit_balance_changed_notice(&pending_purch, uid, tx_id, -total_plex, new_bal, &desc, now_unix);
-            if let Some(n) = maybe_omega {
-                pending_purch.write().unwrap_or_else(|e| e.into_inner()).push((NoticeScope::User(uid as i32), n));
+            if let Some((omega_target_uid, n)) = maybe_omega {
+                pending_purch.write().unwrap_or_else(|e| e.into_inner()).push((NoticeScope::User(omega_target_uid as i32), n));
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.plex.vault.api.PurchaseResponse"),

@@ -310,12 +310,34 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     router.register_handler(
         "eve_public.auth.steam.AuthenticateSteamRequest",
         Arc::new(move |ctx, any, dyn_msg| {
+            let caller_uid = ctx
+                .effective_user_id()
+                .ok_or_else(|| {
+                    (
+                        crate::quasar_gateway::STATUS_UNAUTHORIZED,
+                        "Authentication required for Steam auth".to_string(),
+                    )
+                })? as u64;
             let steam_id = extract_dyn_string(dyn_msg, &any.value, 1).unwrap_or_default();
             let uid = if !steam_id.is_empty() {
-                read_identity_store(&db_steam_auth, |st| st.steam_links.get(&steam_id).copied())
-                    .unwrap_or_else(|| ctx.effective_user_id().unwrap_or(1) as u64)
+                let linked = read_identity_store(&db_steam_auth, |st| {
+                    st.steam_links.get(&steam_id).copied()
+                })
+                .ok_or_else(|| {
+                    (
+                        crate::quasar_gateway::STATUS_UNAUTHORIZED,
+                        format!("Steam account '{steam_id}' is not linked"),
+                    )
+                })?;
+                if linked != caller_uid && crate::quasar_gateway::require_admin_role(ctx).is_err() {
+                    return Err((
+                        crate::quasar_gateway::STATUS_FORBIDDEN,
+                        "Steam account is linked to a different user".to_string(),
+                    ));
+                }
+                linked
             } else {
-                ctx.effective_user_id().unwrap_or(1) as u64
+                caller_uid
             };
             let mut out = Vec::new();
             encode_string_field(1, &format!("evomu-steam-token-{uid}"), &mut out);
@@ -446,14 +468,17 @@ fn extract_dyn_u64(
             _ => None,
         }
     }
-    msg.get(field_num).and_then(from_val).or_else(|| {
-        let wm = eve_proto::quasar::WireMessage::decode(raw_bytes).ok()?;
-        wm.fields
-            .iter()
-            .find(|f| f.field_number == field_num || f.field_number == 90 + field_num)
-            .and_then(|f| f.value.as_varint())
-            .filter(|&v| v > 0)
-    })
+    msg.get(field_num)
+        .or_else(|| msg.get(90 + field_num))
+        .and_then(from_val)
+        .or_else(|| {
+            let wm = eve_proto::quasar::WireMessage::decode(raw_bytes).ok()?;
+            wm.fields
+                .iter()
+                .find(|f| f.field_number == field_num || f.field_number == 90 + field_num)
+                .and_then(|f| f.value.as_varint())
+                .filter(|&v| v > 0)
+        })
 }
 
 fn extract_dyn_string(
@@ -473,14 +498,17 @@ fn extract_dyn_string(
             _ => None,
         }
     }
-    msg.get(field_num).and_then(from_val).or_else(|| {
-        let wm = eve_proto::quasar::WireMessage::decode(raw_bytes).ok()?;
-        wm.fields
-            .iter()
-            .find(|f| f.field_number == field_num || f.field_number == 90 + field_num)
-            .and_then(|f| f.value.as_str().ok().flatten().map(str::to_string))
-            .filter(|s| !s.is_empty())
-    })
+    msg.get(field_num)
+        .or_else(|| msg.get(90 + field_num))
+        .and_then(from_val)
+        .or_else(|| {
+            let wm = eve_proto::quasar::WireMessage::decode(raw_bytes).ok()?;
+            wm.fields
+                .iter()
+                .find(|f| f.field_number == field_num || f.field_number == 90 + field_num)
+                .and_then(|f| f.value.as_str().ok().flatten().map(str::to_string))
+                .filter(|s| !s.is_empty())
+        })
 }
 
 fn register_federated_and_transfer_handlers(
@@ -853,25 +881,40 @@ fn register_federated_and_transfer_handlers(
                             format!("Character {char_id} is not owned by user {caller_uid}"),
                         ));
                     }
+                    if is_execute && dest_uid == ch.user_id {
+                        return Err((
+                            crate::quasar_gateway::STATUS_BAD_REQUEST,
+                            "Destination account must differ from source account".into(),
+                        ));
+                    }
+                    let Some(dest_acc) = snap.accounts.values().find(|a| a.user_id == dest_uid) else {
+                        return Err((
+                            crate::quasar_gateway::STATUS_NOT_FOUND,
+                            format!("Destination account {dest_uid} not found"),
+                        ));
+                    };
+                    if dest_acc.banned_until_unix.is_some_and(|u| u > now_unix) && !is_admin {
+                        return Err((
+                            crate::quasar_gateway::STATUS_FORBIDDEN,
+                            format!("Destination account {dest_uid} is banned"),
+                        ));
+                    }
+                    let consent_key = format!("char_transfer_consent_token:{dest_uid}");
                     if dest_uid != caller_uid && !is_admin {
-                        if let Some(dest_acc) = snap.accounts.values().find(|a| a.user_id == dest_uid) {
-                            if dest_acc.banned_until_unix.is_some_and(|u| u > now_unix) {
-                                return Err((
-                                    crate::quasar_gateway::STATUS_FORBIDDEN,
-                                    format!("Destination account {dest_uid} is banned"),
-                                ));
-                            }
-                        }
-                        if let Some(expected_tok) = snap
-                            .service_state_blobs
-                            .get(&format!("char_transfer_consent_token:{dest_uid}"))
-                        {
-                            if dest_consent_token.as_deref() != Some(expected_tok.as_str()) {
+                        if let Some(expected_tok) = snap.service_state_blobs.get(&consent_key) {
+                            if expected_tok.trim().is_empty()
+                                || dest_consent_token.as_deref() != Some(expected_tok.as_str())
+                            {
                                 return Err((
                                     crate::quasar_gateway::STATUS_FORBIDDEN,
                                     "Destination account transfer consent token mismatch".into(),
                                 ));
                             }
+                        } else if dest_consent_token.is_some() {
+                            return Err((
+                                crate::quasar_gateway::STATUS_FORBIDDEN,
+                                "Destination account has no active transfer consent token".into(),
+                            ));
                         }
                     }
                     // Must be in an NPC corporation (1_000_000..2_000_000) and not a player corp CEO
@@ -967,10 +1010,22 @@ fn register_federated_and_transfer_handlers(
                                 "Paid character transfer requires 1,000 PLEX transfer fee".into(),
                             ));
                         }
+                        let dest_omega_expiry = snap
+                            .owner_notes
+                            .get(&QUASAR_IDENTITY_NOTE_ID)
+                            .and_then(|n| serde_json::from_str::<QuasarIdentityStore>(&n.note).ok())
+                            .and_then(|st| st.omega_subscriptions.get(&dest_uid).copied())
+                            .unwrap_or(0);
                         if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
                             ch_mut.user_id = dest_uid;
+                            ch_mut.clone_grade = if dest_omega_expiry > now_unix { 2 } else { 1 };
                             ch_mut.version = ch_mut.version.wrapping_add(1);
                         }
+                        snap.service_state_blobs.remove(&consent_key);
+                        snap.service_state_blobs.insert(
+                            format!("char_transfer_evict_session:{char_id}"),
+                            now_unix.to_string(),
+                        );
                         snap.employment_history
                             .entry(char_id)
                             .or_default()

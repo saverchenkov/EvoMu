@@ -639,7 +639,7 @@ pub fn handle_industry_jobs(
                     let corp_bal = snap
                         .corporations
                         .get(&job_owner_id)
-                        .map(|c| c.master_wallet)
+                        .map(|c| c.division_balance(1))
                         .unwrap_or(IskCents(0));
                     if corp_bal < total_debit_cents {
                         return Err(BridgeRpcError {
@@ -811,12 +811,8 @@ pub fn handle_industry_jobs(
 
                 if use_corp && snap.corporations.contains_key(&job_owner_id) {
                     if let Some(corp_mut) = snap.corporations.get_mut(&job_owner_id) {
-                        corp_mut.ensure_wallet_divisions();
-                        corp_mut.master_wallet = corp_mut
-                            .master_wallet
-                            .checked_sub(total_debit_cents)
-                            .unwrap_or(IskCents(0));
-                        corp_mut.wallet_divisions[0].balance = corp_mut.master_wallet;
+                        let new_bal = corp_mut.division_balance(1).checked_sub(total_debit_cents).unwrap_or(IskCents(0));
+                        corp_mut.set_division_balance(1, new_bal);
                     }
                 }
 
@@ -827,7 +823,7 @@ pub fn handle_industry_jobs(
                     let corp_bal = snap
                         .corporations
                         .get(&job_owner_id)
-                        .map(|c| c.master_wallet)
+                        .map(|c| c.division_balance(1))
                         .unwrap_or(IskCents(0));
                     snap.append_journal_entry(eve_db::JournalEntryInput {
                         owner_id: job_owner_id,
@@ -1193,6 +1189,11 @@ pub fn handle_industry_jobs(
                         dyn_attrs.insert(ATTR_BLUEPRINT_ME, out_me);
                         dyn_attrs.insert(ATTR_BLUEPRINT_TE, out_te);
                         let t2_bpc_type_id: TypeId = if job.product_type_id > 0 { job.product_type_id } else { 11372 };
+                        let out_flag = if meta.use_corp && out_owner_id != char_id {
+                            restore_blueprint_flag(out_owner_id, &meta)
+                        } else {
+                            InventoryFlag::Hangar
+                        };
                         snap.items.insert(
                             bpc_item_id,
                             InventoryItemRecord {
@@ -1200,7 +1201,7 @@ pub fn handle_industry_jobs(
                                 type_id: t2_bpc_type_id,
                                 owner_id: out_owner_id,
                                 location_id: job.facility_id,
-                                flag: InventoryFlag::Hangar,
+                                flag: out_flag,
                                 quantity: 1,
                                 singleton: true,
                                 version: 1,
@@ -1244,6 +1245,11 @@ pub fn handle_industry_jobs(
                     if remove_consumed_bpc {
                         snap.items.remove(&job.blueprint_item_id);
                     }
+                    let out_flag = if meta.use_corp && out_owner_id != char_id {
+                        restore_blueprint_flag(out_owner_id, &meta)
+                    } else {
+                        InventoryFlag::Hangar
+                    };
 
                     if matches!(job.activity_id, 1 | 9) {
                         let prod_qty_per_run = ctx.sde.blueprints.get(&job.blueprint_type_id).and_then(|bp| {
@@ -1260,7 +1266,7 @@ pub fn handle_industry_jobs(
                                 type_id: job.product_type_id,
                                 owner_id: out_owner_id,
                                 location_id: bp_location_id,
-                                flag: InventoryFlag::Hangar,
+                                flag: out_flag,
                                 quantity: total_out_qty,
                                 singleton: total_out_qty == 1,
                                 version: 1,
@@ -1282,7 +1288,7 @@ pub fn handle_industry_jobs(
                                 type_id: job.blueprint_type_id,
                                 owner_id: out_owner_id,
                                 location_id: bp_location_id,
-                                flag: InventoryFlag::Hangar,
+                                flag: out_flag,
                                 quantity: 1,
                                 singleton: true,
                                 version: 1,

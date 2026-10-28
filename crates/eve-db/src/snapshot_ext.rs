@@ -1178,6 +1178,11 @@ impl WorldStateSnapshot {
         let issuer_entity_id = if c.for_corp && c.issuer_corp_id != 0 { c.issuer_corp_id } else { c.issuer_id };
         let refund_and_collateral = c.collateral.checked_add(c.reward).unwrap_or(c.collateral);
         self.credit_contract_issuer(&c, refund_and_collateral);
+        if let Some(dep_str) = self.service_state_blobs.remove(&format!("contract_deposit:{contract_id}")) {
+            if let Ok(dep_raw) = dep_str.parse::<i64>() {
+                self.credit_contract_issuer(&c, IskCents(dep_raw));
+            }
+        }
         let mut wraps_to_remove = Vec::new();
         for iid in &c.item_ids {
             let parent_loc = self.items.get(iid).map(|it| it.location_id).unwrap_or(0);
