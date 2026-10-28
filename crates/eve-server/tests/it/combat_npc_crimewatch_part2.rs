@@ -77,6 +77,7 @@ pub(crate) async fn setup_pilot_session(
 
     let mut sess = SessionState::new(client_id);
     let (user_id, corp_id) = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| (c.user_id, c.corporation_id)).unwrap_or((1, 1_000_002)));
+    let _ = ctx.db.acquire_online_lock(user_id, client_id, Some(char_id), true, ctx.now_unix());
     sess.user_id = Some(user_id);
     sess.character_id = Some(char_id);
     sess.corporation_id = Some(corp_id);

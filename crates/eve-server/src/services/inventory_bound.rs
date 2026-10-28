@@ -19,8 +19,10 @@
 #![forbid(unsafe_code)]
 
 use crate::router::{BoundObjectEntry, ServerContext};
+use eve_db::InventoryFlag;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
+use std::collections::HashMap;
 
 /// `inventorycommon/const.pyj: containerHangar` — the character's hangar at the docked station.
 const CONTAINER_HANGAR: i64 = 10_004;
@@ -479,4 +481,170 @@ pub(crate) fn get_effective_corp_roles_at_location(
         }
         (is_ceo, role_mask)
     })
+}
+
+/// Helper checking if an item or location is reachable and colocated with the character.
+pub(crate) fn is_inventory_location_colocated(
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    ch: &eve_db::CharacterRecord,
+    pre_balls: &HashMap<i64, (glam::DVec3, f64)>,
+    start_loc: i64,
+) -> bool {
+    let ch_dock = if session.station_id.is_none()
+        && session.structure_id.is_none()
+        && session.solar_system_id.is_some()
+    {
+        0
+    } else {
+        ch.station_id.or(ch.structure_id).unwrap_or(0)
+    };
+    let ch_sys = if ch.solar_system_id > 0 {
+        ch.solar_system_id as i64
+    } else {
+        session.solar_system_id.map(|s| s as i64).unwrap_or(0)
+    };
+    let caller_ship_id = session.ship_id.filter(|&id| id > 0).unwrap_or(ch.active_ship_id);
+    let mut cur = start_loc;
+    for _ in 0..4 {
+        if ch_dock > 0 {
+            if cur == ch_dock {
+                return true;
+            }
+            let Some(node) = snap.items.get(&cur) else {
+                return false;
+            };
+            cur = node.location_id;
+        } else if ch_sys > 0 {
+            if cur == ch_sys {
+                return true;
+            }
+            if let Some(st) = snap.structures.get(&cur) {
+                if st.solar_system_id as i64 == ch_sys {
+                    let caller_pos = pre_balls
+                        .get(&caller_ship_id)
+                        .map(|p| p.0)
+                        .or_else(|| snap.item_positions.get(&caller_ship_id).copied().map(glam::DVec3::from));
+                    let target_pos = pre_balls
+                        .get(&cur)
+                        .map(|p| p.0)
+                        .or_else(|| snap.item_positions.get(&cur).copied().map(glam::DVec3::from))
+                        .or(Some(glam::DVec3::from_array(st.position)));
+                    return match (caller_pos, target_pos) {
+                        (Some(s), Some(t)) => s.distance(t) <= 5_000.0,
+                        _ => true,
+                    };
+                }
+            }
+            let Some(node) = snap.items.get(&cur) else {
+                return false;
+            };
+            if node.location_id == ch_sys {
+                if cur == ch.active_ship_id || cur == caller_ship_id {
+                    return true;
+                }
+                let caller_pos = pre_balls
+                    .get(&caller_ship_id)
+                    .map(|p| p.0)
+                    .or_else(|| snap.item_positions.get(&caller_ship_id).copied().map(glam::DVec3::from));
+                let target_pos = pre_balls
+                    .get(&cur)
+                    .map(|p| p.0)
+                    .or_else(|| snap.item_positions.get(&cur).copied().map(glam::DVec3::from));
+                return match (caller_pos, target_pos) {
+                    (Some(s), Some(t)) => s.distance(t) <= 5_000.0,
+                    _ => true,
+                };
+            }
+            cur = node.location_id;
+        } else {
+            return false;
+        }
+    }
+    false
+}
+
+/// Upwell structure fuel bay & destination reachability authorization helper for `MultiAdd`.
+pub(crate) fn validate_multiadd_destination(
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    ch: &eve_db::CharacterRecord,
+    char_id: i64,
+    new_loc: i64,
+    dest_is_struct_fuel: bool,
+    pre_balls: &HashMap<i64, (glam::DVec3, f64)>,
+) -> Result<(), BridgeRpcError> {
+    if !dest_is_struct_fuel {
+        if let Some(st) = snap.structures.get(&new_loc) {
+            if st.state == "Destroyed" {
+                return Err(BridgeRpcError {
+                    code: "StructureDestroyed".into(),
+                    message: format!("Structure {new_loc} is destroyed"),
+                });
+            }
+            if st.owner_corp_id != ch.corporation_id
+                && !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
+                    snap, new_loc, char_id,
+                )
+            {
+                return Err(BridgeRpcError {
+                    code: "DestinationAccessDenied".into(),
+                    message: format!("Character {char_id} lacks structure access at {new_loc}"),
+                });
+            }
+        }
+        let ch_dock = if session.station_id.is_none()
+            && session.structure_id.is_none()
+            && session.solar_system_id.is_some()
+        {
+            0
+        } else {
+            ch.station_id.or(ch.structure_id).unwrap_or(0)
+        };
+        let dest_item_opt = snap.items.get(&new_loc);
+        let dst_reachable = is_inventory_location_colocated(snap, session, ch, pre_balls, new_loc)
+            && (ch_dock == new_loc
+                || dest_item_opt.is_some_and(|d| {
+                    d.owner_id == char_id
+                        || d.owner_id == 0
+                        || d.type_id == 23
+                        || (ch.corporation_id > 0 && d.owner_id == ch.corporation_id)
+                }));
+        if !dst_reachable {
+            return Err(BridgeRpcError {
+                code: "DestinationAccessDenied".into(),
+                message: format!("Destination {new_loc} not reachable"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Upwell structure fuel bay loading/unloading authorization helper for `MultiAdd`.
+pub(crate) fn validate_multiadd_structure_fuel_transfers(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    item: &eve_db::InventoryItemRecord,
+    new_loc: i64,
+    dest_is_struct_fuel: bool,
+    ch_dock: i64,
+    ch_sys: i64,
+    caller_ship_id: i64,
+    pre_balls: &HashMap<i64, (glam::DVec3, f64)>,
+) -> Result<bool, BridgeRpcError> {
+    let src_is_struct_fuel = item.flag == InventoryFlag::SpecializedFuelBay
+        && snap.structures.contains_key(&item.location_id);
+    if src_is_struct_fuel {
+        crate::services::structure_acl_defense_rules::validate_structure_fuel_bay_transfer(
+            ctx, snap, session, char_id, item.location_id, item.type_id, false, ch_dock, ch_sys, caller_ship_id, pre_balls,
+        )?;
+    }
+    if dest_is_struct_fuel {
+        crate::services::structure_acl_defense_rules::validate_structure_fuel_bay_transfer(
+            ctx, snap, session, char_id, new_loc, item.type_id, true, ch_dock, ch_sys, caller_ship_id, pre_balls,
+        )?;
+    }
+    Ok(src_is_struct_fuel)
 }

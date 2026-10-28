@@ -288,7 +288,7 @@ impl NpcSpawnManager {
         ctx: &ServerContext,
         sys_id: u32,
     ) -> Result<Vec<i64>, String> {
-        let mut belt_positions: Vec<DVec3> = ctx
+        let belt_positions: Vec<DVec3> = ctx
             .sde
             .celestials_in_system(sys_id)
             .into_iter()
@@ -297,7 +297,7 @@ impl NpcSpawnManager {
             .collect();
 
         if belt_positions.is_empty() {
-            belt_positions.push(DVec3::new(100_000.0, 0.0, 50_000.0));
+            return Ok(Vec::new());
         }
 
         let sys_sec = ctx

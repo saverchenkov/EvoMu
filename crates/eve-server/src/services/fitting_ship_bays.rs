@@ -97,14 +97,19 @@ pub(crate) async fn board_stored_ship(
         None => {
             let sys_id = session.solar_system_id.ok_or_else(|| err("NoSolarSystem", "Session has no solarSystemID"))?;
             let cur = prev_ship_id.ok_or_else(|| err("NoActiveShip", "No active ship in space"))?;
-            if ctx
+            let now_unix = ctx.now_unix();
+            let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0);
+            let (has_wpn, has_crim) = ctx
                 .crimewatch
                 .read()
                 .ok()
-                .and_then(|cw| cw.states.get(&char_id).map(|st| st.is_weapon_timer_active(ctx.now_unix())))
-                .unwrap_or(false)
-            {
-                return Err(err("UserError", "WeaponsTimerActive"));
+                .and_then(|cw| cw.states.get(&char_id).map(|st| (st.is_weapon_timer_active(now_unix), st.is_criminal(now_unix))))
+                .unwrap_or((false, false));
+            if sys_sec >= 0.45 && has_crim {
+                return Err(err("CannotBoardShipInHighSecAsCriminal", "UserError: Cannot board ships in space in high-sec while Criminal"));
+            }
+            if has_wpn {
+                return Err(err("CannotStoreShipActiveWeaponsTimer", "UserError: Cannot board or store ships in space while Weapons Timer is active"));
             }
             let sys = ctx.systems.get_or_spawn(sys_id);
             if let Ok(Some((_, cb))) = sys.get_ball_snapshot(cur).await {
@@ -315,6 +320,7 @@ pub(crate) async fn ship_jettison(
             ));
         }
     }
+    let is_crim = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner()).states.get(&char_id).is_some_and(|st| st.is_criminal(now_unix));
     let jetcan_id = ctx.db.try_with_mut_snapshot(|snap| {
         let mut total_vol = 0.0f64;
         for &iid in &item_ids {
@@ -378,7 +384,7 @@ pub(crate) async fn ship_jettison(
         snap.next_entity_id += 1;
         let jid = snap.next_entity_id;
         crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
-            snap, jid, now_unix, false,
+            snap, jid, now_unix, is_crim,
         );
         snap.items.insert(
             jid,
@@ -420,7 +426,7 @@ pub(crate) async fn ship_jettison(
     ctx.db.with_mut_snapshot(|snap| {
         snap.item_positions.insert(jetcan_id, [jetcan_pos.x, jetcan_pos.y, jetcan_pos.z]);
     });
-    crate::services::combat_crimewatch::register_container_lifetime(ctx, jetcan_id, sys_id, 23, char_id, now_unix, false);
+    crate::services::combat_crimewatch::register_container_lifetime(ctx, jetcan_id, sys_id, 23, char_id, now_unix, is_crim);
     let _ = sys.spawn_ball_with_meta(
         eve_destiny::Ball {
             id: jetcan_id, type_id: 23, position: jetcan_pos, velocity: DVec3::ZERO,
@@ -755,7 +761,7 @@ pub(crate) async fn ship_scoop_and_store(
         check_pos_forcefield_coverage(ctx, sys_id, char_id, active_ship_id, &[cp, hp]).await?;
         if target_ship_id == active_ship_id {
             if ctx.crimewatch.read().ok().and_then(|cw| cw.states.get(&char_id).map(|st| st.is_weapon_timer_active(ctx.now_unix()))).unwrap_or(false) {
-                return Err(err("UserError", "WeaponsTimerActive"));
+                return Err(err("CannotStoreShipActiveWeaponsTimer", "UserError: Cannot store ship while Weapons Timer is active"));
             }
             let pod_pos = cp + DVec3::new(100.0, 0.0, 0.0);
             let (capsule_id, res_flag_id) = ctx.db.try_with_mut_snapshot(|snap| {
@@ -917,7 +923,7 @@ pub(crate) async fn ship_scoop_and_store(
             ]));
         } else {
             if ctx.crimewatch.read().unwrap().states.get(&char_id).is_some_and(|st| st.is_weapon_timer_active(ctx.now_unix())) {
-                return Err(err("UserError", "WeaponsTimerActive"));
+                return Err(err("CannotStoreShipActiveWeaponsTimer", "UserError: Cannot store ship while Weapons Timer is active"));
             }
             let target_pos = sys.get_ball_snapshot(target_ship_id).await.ok().flatten().map(|(_, b)| b.position);
             let Some(tp) = target_pos else {

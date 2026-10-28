@@ -38,8 +38,6 @@ pub(crate) async fn handle(
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        // parity: plan:SP-3, feat:navigation.warp-to, feat:navigation.warp-disrupted, feat:navigation.warp-capacitor-cost, feat:navigation.warp-exit-invulnerability
-        // parity: rpc:beyonce.CmdWarpToStuff, rpc:beyonce.CmdWarpToStuffAutopilot
         ("beyonce", "CmdWarpToStuff") | ("beyonce", "CmdWarpToStuffAutopilot") => Some(
             handle_cmd_warp_to_stuff(
                 ctx,
@@ -51,8 +49,6 @@ pub(crate) async fn handle(
             )
             .await,
         ),
-        // parity: plan:SP-4, feat:navigation.stargate-capital-restriction, feat:navigation.session-change-timer-triggers, feat:navigation.jump-cloak-immunities
-        // parity: rpc:beyonce.CmdStargateJump, feat:navigation.stargate-jump
         ("beyonce", "CmdStargateJump") | ("beyonce", "StargateJump") => {
             Some(handle_cmd_stargate_jump(ctx, session, bound_entry, args, kwargs).await)
         }
@@ -61,7 +57,6 @@ pub(crate) async fn handle(
         ("beyonce", "CmdDock") => {
             Some(handle_dock(ctx, session, bound_entry, args).await)
         }
-        // parity: feat:navigation.undock
         ("beyonce", "Undock") => handle_undock(ctx, session, args, kwargs).await,
         ("beyonce", "SetSessionCheck") => {
             Some(handle_set_session_check(ctx, session, args).await)
@@ -993,7 +988,7 @@ async fn handle_dock(
             }
             if sys_sec >= 0.45 && cw_state.is_criminal(now_unix) && !is_capsule {
                 return Err(BridgeRpcError {
-                    code: "CriminalTimerActive".into(),
+                    code: "CantDockGlobalCriminalFlag".into(),
                     message: "Cannot dock a non-capsule ship in high-sec while a Criminal Timer is active".into(),
                 });
             }

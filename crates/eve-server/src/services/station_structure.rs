@@ -139,7 +139,6 @@ pub async fn handle(
             }
         }
 
-        // parity: feat:structures.npc-station-services
         ("stationSvc", "GetStation") | ("station", "GetStation") => {
             let _ = match ServerContext::require_auth(session) {
                 Ok(u) => u,
@@ -301,7 +300,6 @@ pub async fn handle(
             Some(Ok(PyRep::Bool(true)))
         }
 
-        // parity: feat:navigation.undock, rpc:ship.Undock
         ("stationSvc", "Undock") | ("structureDocking", "Undock") | ("ship", "Undock") => {
             let (user_id, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -618,7 +616,7 @@ pub async fn handle(
                     }
                     if sys_sec >= 0.45 && cw_state.is_criminal(now_unix) && !is_capsule {
                         return Some(Err(BridgeRpcError {
-                            code: "CriminalTimerActive".into(),
+                            code: "CantDockGlobalCriminalFlag".into(),
                             message: "Cannot dock a non-capsule ship in high-sec while a Criminal Timer is active".into(),
                         }));
                     }

@@ -85,6 +85,7 @@ pub struct CrimeWatchDirector {
 pub struct CrimeWatchLock {
     lock: std::sync::RwLock<()>,
     db: std::sync::Arc<eve_db::WorldRepository>,
+    concord_reports: std::sync::Mutex<Vec<ConcordExecutionReport>>,
 }
 
 pub struct CrimeWatchReadGuard<'a> {
@@ -104,6 +105,23 @@ impl CrimeWatchLock {
         Self {
             lock: std::sync::RwLock::new(()),
             db,
+            concord_reports: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn concord_reports(&self) -> Vec<ConcordExecutionReport> {
+        self.concord_reports
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn push_concord_reports(&self, reports: &[ConcordExecutionReport]) {
+        if !reports.is_empty() {
+            self.concord_reports
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(reports);
         }
     }
 
@@ -263,7 +281,6 @@ impl CrimeWatchDirector {
     /// - High-sec unprovoked attack (`sys_sec >= 0.45`): Criminal flag (15m), weapon timer (60s), PvP timer (15m), schedules CONCORD.
     /// - Low-sec unprovoked attack (`0.0 < sys_sec < 0.45`): Suspect flag (15m), weapon timer (60s), PvP timer (15m).
     /// - Legal aggression (active war or suspect victim): Weapon timer (60s), PvP timer (15m).
-    // parity: feat:crimewatch.concord-response-scaling
     pub fn handle_combat_aggression(
         &mut self,
         character_id: i64,
@@ -324,7 +341,6 @@ impl CrimeWatchDirector {
     /// - Applies 100% web, warp scramble, capacitor drain, and ECM jam to the criminal ship.
     /// - Destroys the criminal's ship via the real death pipeline (`C-3`), removing instant ball deletion!
     /// - Grants 30-day Kill Right to the victim and applies security status penalty.
-    // parity: feat:crimewatch.concord-response-scaling
     pub async fn step_concord(
         &mut self,
         ctx: &ServerContext,
@@ -381,11 +397,42 @@ impl CrimeWatchDirector {
                 .await;
 
             // 1b. CONCORD applies 100% web, warp scramble, capacitor drain, and ECM jam to the criminal ship
+            let pre_locks = sys_handle
+                .get_target_locks(criminal_ship_id)
+                .await
+                .map(|l| l.len())
+                .unwrap_or(0);
             let _ = sys_handle.set_speed_fraction(criminal_ship_id, 0.0).await;
             let _ = sys_handle.set_warp_scramble_strength(criminal_ship_id, 100).await;
             let _ = sys_handle.set_capacitor(criminal_ship_id, 0.0).await;
             let _ = sys_handle.apply_ecm_jam(criminal_ship_id, 60.0).await;
             let _ = sys_handle.clear_target_locks(criminal_ship_id).await;
+            let webbed_speed_fraction = sys_handle
+                .get_ball_snapshot(criminal_ship_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, b)| b.speed_fraction)
+                .unwrap_or(0.0);
+            let (warp_scramble_strength, capacitor_after_neut, ecm_jammed) = sys_handle
+                .get_combat_state(criminal_ship_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|cs| {
+                    (
+                        cs.warp_scramble_strength,
+                        cs.capacitor,
+                        cs.ecm_jammed_remaining_s > 0.0,
+                    )
+                })
+                .unwrap_or((100, 0.0, true));
+            let post_locks = sys_handle
+                .get_target_locks(criminal_ship_id)
+                .await
+                .map(|l| l.len())
+                .unwrap_or(0);
+            let locks_cleared = pre_locks.saturating_sub(post_locks);
 
             // 2. CONCORD destroys the criminal ship through the canonical death pipeline (C-3)
             let death_res = execute_death_pipeline(
@@ -425,10 +472,16 @@ impl CrimeWatchDirector {
                 victim_char_id,
                 concord_ball_id,
                 kill_right_id,
+                webbed_speed_fraction,
+                warp_scramble_strength,
+                capacitor_after_neut,
+                ecm_jammed,
+                locks_cleared,
                 death_result: death_res,
             });
         }
 
+        ctx.crimewatch.push_concord_reports(&reports);
         reports
     }
 }
@@ -451,5 +504,10 @@ pub struct ConcordExecutionReport {
     pub victim_char_id: i64,
     pub concord_ball_id: i64,
     pub kill_right_id: i64,
+    pub webbed_speed_fraction: f64,
+    pub warp_scramble_strength: i32,
+    pub capacitor_after_neut: f64,
+    pub ecm_jammed: bool,
+    pub locks_cleared: usize,
     pub death_result: Result<DeathPipelineResult, String>,
 }

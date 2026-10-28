@@ -426,6 +426,25 @@ pub async fn handle(
                         });
                     }
                     // parity: feat:modules.stasis-grappler-mechanics
+                    let is_ehe = matches!(item.type_id, 40714 | 40717)
+                        || ctx
+                            .sde
+                            .types
+                            .get(&item.type_id)
+                            .is_some_and(|t| t.effect_ids.contains(&6484));
+                    if is_ehe
+                        && item
+                            .dynamic_attributes
+                            .get(&eve_sde::attr_ids::DAMAGE)
+                            .copied()
+                            .unwrap_or(0.0)
+                            > 0.0
+                    {
+                        return Err(BridgeRpcError {
+                            code: "CannotRefitDamagedModule".into(),
+                            message: "UserError: Damaged or burned-out Capital Emergency Hull Energizer cannot be fitted".into(),
+                        });
+                    }
                     if let (Some(mod_t), Some(ship_t)) = (
                         ctx.sde.types.get(&item.type_id),
                         ctx.sde.types.get(&ship_item.type_id),
@@ -878,39 +897,24 @@ pub async fn handle(
                     if !crate::services::fitting_saved_apply::is_item_allowed_in_ship_hold(flag_u16, item_type, ship_type) {
                         return Err(BridgeRpcError::user_error("InvalidItemTypeForHold"));
                     }
-                    // parity: feat:ships.frigate-escape-bay
                     if flag_u16 == 179
                         && ship_type.default_attributes.get(&3020).copied().unwrap_or(0.0) > 0.0
                         && item_type.category_id == 6
                     {
                         if !moving_item.singleton || moving_item.quantity != 1 {
-                            return Err(BridgeRpcError {
-                                code: "ShipMustBeAssembled".into(),
-                                message: "UserError: Only an assembled frigate can be placed in the Frigate Escape Bay".into(),
-                            });
+                            return Err(BridgeRpcError { code: "ShipMustBeAssembled".into(), message: "UserError: Only an assembled frigate can be placed in the Frigate Escape Bay".into() });
                         }
                         let has_non_charge_cargo = snap.items.values().any(|c| {
-                            c.location_id == item_id
-                                && !matches!(c.flag as u16, 11..=34 | 92..=94 | 125..=132)
-                                && ctx.sde.types.get(&c.type_id).is_none_or(|t| t.category_id != 8)
+                            c.location_id == item_id && !matches!(c.flag as u16, 11..=34 | 92..=94 | 125..=132) && ctx.sde.types.get(&c.type_id).is_none_or(|t| t.category_id != 8)
                         });
                         if has_non_charge_cargo {
-                            return Err(BridgeRpcError {
-                                code: "ShipHasItemsInCargo".into(),
-                                message: "UserError: Frigate in Frigate Escape Bay cannot contain non-charge cargo items".into(),
-                            });
+                            return Err(BridgeRpcError { code: "ShipHasItemsInCargo".into(), message: "UserError: Frigate in Frigate Escape Bay cannot contain non-charge cargo items".into() });
                         }
                         let existing_frigate = snap.items.values().any(|i| {
-                            i.location_id == new_loc
-                                && (i.flag as u16) == 179
-                                && i.item_id != item_id
-                                && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 6)
+                            i.location_id == new_loc && (i.flag as u16) == 179 && i.item_id != item_id && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 6)
                         });
                         if existing_frigate {
-                            return Err(BridgeRpcError {
-                                code: "CapacityExceeded".into(),
-                                message: "UserError: Frigate Escape Bay can hold at most 1 assembled frigate".into(),
-                            });
+                            return Err(BridgeRpcError { code: "CapacityExceeded".into(), message: "UserError: Frigate Escape Bay can hold at most 1 assembled frigate".into() });
                         }
                     }
                     let hold_capacity = crate::services::fitting_saved_apply::get_ship_hold_capacity(flag_u16, ship_type, eval_cargo_cap);
@@ -966,11 +970,8 @@ pub async fn handle(
                 let orig_id = item_id;
                 let split_owner = source_item_opt.as_ref().map(|i| i.owner_id).unwrap_or(char_id);
                 let corp_id = session.corporation_id.unwrap_or(0);
-                let target_owner = if (116..=122).contains(&flag_u16) && corp_id > 0 {
-                    corp_id
-                } else {
-                    char_id
-                };
+                let struct_fuel_corp = (flag_u16 == 133).then(|| ctx.db.with_snapshot(|s| s.structures.get(&new_loc).map(|st| st.owner_corp_id))).flatten().unwrap_or(0);
+                let target_owner = if struct_fuel_corp > 0 { struct_fuel_corp } else if (116..=122).contains(&flag_u16) && corp_id > 0 { corp_id } else { char_id };
                 match ctx.db.split_stack(split_owner, item_id, split_qty) {
                     Ok((_orig, mut split_item)) => {
                         if split_item.owner_id != target_owner {
@@ -1096,18 +1097,18 @@ pub async fn handle(
             let old_loc_id = source_item_opt.as_ref().map(|i| i.location_id).unwrap_or(0);
             let old_flag_id = source_item_opt.as_ref().map(|i| i.flag as i64).unwrap_or(0);
             let corp_id_for_owner = session.corporation_id.unwrap_or(0);
+            let struct_fuel_owner = (flag_u16 == 133).then(|| ctx.db.with_snapshot(|s| s.structures.get(&new_loc).map(|st| st.owner_corp_id))).flatten().unwrap_or(0);
+            let dst_corp_owner = if struct_fuel_owner > 0 { struct_fuel_owner } else if (116..=122).contains(&flag_u16) || flag == InventoryFlag::StructureDeedBay { corp_id_for_owner } else { 0 };
             let move_res: Result<eve_db::InventoryItemRecord, String> = ctx
                 .db
                 .move_item_transactional(char_id, item_id, new_loc, flag, expected_version, idem_key)
                 .map_err(|e| e.to_string())
                 .and_then(|mut rec| {
-                    if ((116..=122).contains(&flag_u16) || flag == InventoryFlag::StructureDeedBay) && corp_id_for_owner > 0 && rec.owner_id != corp_id_for_owner {
+                    if dst_corp_owner > 0 && rec.owner_id != dst_corp_owner {
                         ctx.db.with_mut_snapshot(|snap| {
-                            if let Some(it) = snap.items.get_mut(&item_id) {
-                                it.owner_id = corp_id_for_owner;
-                            }
+                            if let Some(it) = snap.items.get_mut(&item_id) { it.owner_id = dst_corp_owner; }
                         });
-                        rec.owner_id = corp_id_for_owner;
+                        rec.owner_id = dst_corp_owner;
                     }
                     Ok(rec)
                 })
@@ -1117,11 +1118,12 @@ pub async fn handle(
                             let it = snap.items.get_mut(&item_id).ok_or_else(|| format!("Item {item_id} not found"))?;
                             it.location_id = new_loc;
                             it.flag = flag;
-                            if ((116..=122).contains(&flag_u16) || flag == InventoryFlag::StructureDeedBay) && corp_id_for_owner > 0 {
-                                it.owner_id = corp_id_for_owner;
+                            if dst_corp_owner > 0 {
+                                it.owner_id = dst_corp_owner;
                             } else if matches!(flag, InventoryFlag::Hangar | InventoryFlag::Cargo)
                                 || dest_is_ship_hold
                                 || (116..=122).contains(&old_flag_id)
+                                || old_flag_id == 133
                             {
                                 it.owner_id = char_id;
                             }

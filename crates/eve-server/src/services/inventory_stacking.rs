@@ -444,87 +444,13 @@ pub(crate) async fn handle_multi_add(
             session.solar_system_id.map(|s| s as i64).unwrap_or(0)
         };
         let caller_ship_id = session.ship_id.filter(|&id| id > 0).unwrap_or(ch.active_ship_id);
-        let is_loc_colocated = |start_loc: i64| -> bool {
-            let mut cur = start_loc;
-            for _ in 0..4 {
-                if ch_dock > 0 {
-                    if cur == ch_dock {
-                        return true;
-                    }
-                    let Some(node) = snap.items.get(&cur) else {
-                        return false;
-                    };
-                    cur = node.location_id;
-                } else if ch_sys > 0 {
-                    if cur == ch_sys {
-                        return true;
-                    }
-                    let Some(node) = snap.items.get(&cur) else {
-                        return false;
-                    };
-                    if node.location_id == ch_sys {
-                        if cur == ch.active_ship_id || cur == caller_ship_id {
-                            return true;
-                        }
-                        let caller_pos = pre_balls
-                            .get(&caller_ship_id)
-                            .map(|p| p.0)
-                            .or_else(|| snap.item_positions.get(&caller_ship_id).copied().map(glam::DVec3::from));
-                        let target_pos = pre_balls
-                            .get(&cur)
-                            .map(|p| p.0)
-                            .or_else(|| snap.item_positions.get(&cur).copied().map(glam::DVec3::from));
-                        return match (caller_pos, target_pos) {
-                            (Some(s), Some(t)) => s.distance(t) <= 5_000.0,
-                            _ => true,
-                        };
-                    }
-                    cur = node.location_id;
-                } else {
-                    return false;
-                }
-            }
-            false
-        };
 
         let foreign_dest = snap.items.get(&new_loc).is_some_and(|d| d.owner_id != char_id);
-        let dest_item_opt = snap.items.get(&new_loc);
-        let dest_type_opt = dest_item_opt.and_then(|d| ctx.sde.types.get(&d.type_id));
+        let dest_type_opt = snap.items.get(&new_loc).and_then(|d| ctx.sde.types.get(&d.type_id));
 
-        if !dest_is_struct_fuel {
-            if let Some(st) = snap.structures.get(&new_loc) {
-                if st.state == "Destroyed" {
-                    return Err(BridgeRpcError {
-                        code: "StructureDestroyed".into(),
-                        message: format!("Structure {new_loc} is destroyed"),
-                    });
-                }
-                if st.owner_corp_id != ch.corporation_id
-                    && !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
-                        snap, new_loc, char_id,
-                    )
-                {
-                    return Err(BridgeRpcError {
-                        code: "DestinationAccessDenied".into(),
-                        message: format!("Character {char_id} lacks structure access at {new_loc}"),
-                    });
-                }
-            }
-            let dst_reachable = is_loc_colocated(new_loc)
-                && (ch_dock == new_loc
-                    || dest_item_opt.is_some_and(|d| {
-                        d.owner_id == char_id
-                            || d.owner_id == 0
-                            || d.type_id == 23
-                            || (ch.corporation_id > 0 && d.owner_id == ch.corporation_id)
-                    }));
-            if !dst_reachable {
-                return Err(BridgeRpcError {
-                    code: "DestinationAccessDenied".into(),
-                    message: format!("Destination {new_loc} not reachable"),
-                });
-            }
-        }
+        crate::services::inventory_bound::validate_multiadd_destination(
+            snap, session, ch, char_id, new_loc, dest_is_struct_fuel, &pre_balls,
+        )?;
 
         let mut batch_vol = 0.0;
         for &item_id in &item_ids {
@@ -534,18 +460,9 @@ pub(crate) async fn handle_multi_add(
                     message: format!("Item {item_id} not found"),
                 });
             };
-            let src_is_struct_fuel = item.flag == InventoryFlag::SpecializedFuelBay
-                && snap.structures.contains_key(&item.location_id);
-            if src_is_struct_fuel {
-                crate::services::structure_acl_defense_rules::validate_structure_fuel_bay_transfer(
-                    ctx, snap, session, char_id, item.location_id, item.type_id, false, ch_dock, ch_sys, caller_ship_id, &pre_balls,
-                )?;
-            }
-            if dest_is_struct_fuel {
-                crate::services::structure_acl_defense_rules::validate_structure_fuel_bay_transfer(
-                    ctx, snap, session, char_id, new_loc, item.type_id, true, ch_dock, ch_sys, caller_ship_id, &pre_balls,
-                )?;
-            }
+            let src_is_struct_fuel = crate::services::inventory_bound::validate_multiadd_structure_fuel_transfers(
+                ctx, snap, session, char_id, item, new_loc, dest_is_struct_fuel, ch_dock, ch_sys, caller_ship_id, &pre_balls,
+            )?;
             let is_corp_item = ch.corporation_id > 0 && item.owner_id == ch.corporation_id;
             if is_corp_item && (116..=122).contains(&(item.flag as i64)) {
                 let (is_ceo, roles) = get_effective_corp_roles_at_location(
@@ -622,7 +539,9 @@ pub(crate) async fn handle_multi_add(
                     message: "Courier cargo cannot be moved into corporation hangar divisions or foreign containers/ships".into(),
                 });
             }
-            if !src_is_struct_fuel && !is_loc_colocated(item.location_id) {
+            if !src_is_struct_fuel && !crate::services::inventory_bound::is_inventory_location_colocated(
+                snap, session, ch, &pre_balls, item.location_id,
+            ) {
                 return Err(BridgeRpcError {
                     code: "ItemOwnershipViolation".into(),
                     message: format!("Item {item_id} location not reachable"),
@@ -835,6 +754,10 @@ pub(crate) async fn handle_multi_add(
     let (moved, old_containers) = ctx.db.try_with_mut_snapshot(|snap| {
         let mut moved = Vec::with_capacity(item_ids.len());
         let mut old_containers = HashSet::new();
+        let dst_struct_corp = (flag_u16 == 133 || flag == InventoryFlag::SpecializedFuelBay)
+            .then(|| snap.structures.get(&new_loc).map(|st| st.owner_corp_id))
+            .flatten()
+            .unwrap_or(0);
         for &item_id in &item_ids {
             let it = snap.items.get_mut(&item_id).ok_or_else(|| BridgeRpcError {
                 code: "ItemNotFound".into(),
@@ -850,9 +773,12 @@ pub(crate) async fn handle_multi_add(
             }
             it.location_id = new_loc;
             it.flag = flag;
-            if (116..=122).contains(&flag_u16) && caller_corp_id > 0 {
+            if dst_struct_corp > 0 {
+                it.owner_id = dst_struct_corp;
+            } else if (116..=122).contains(&flag_u16) && caller_corp_id > 0 {
                 it.owner_id = caller_corp_id;
             } else if (116..=122).contains(&old_flag_u16)
+                || old_flag_u16 == 133
                 || matches!(flag, InventoryFlag::Hangar | InventoryFlag::Cargo)
                 || is_ship_hold
                 || looted_from_space_ids.contains(&item_id)
@@ -952,7 +878,6 @@ pub(crate) fn evaluate_space_wreck_or_jetcan_loot(
     char_id: i64,
     src_item: &eve_db::InventoryItemRecord,
 ) -> Result<(bool, bool), BridgeRpcError> {
-    // parity: feat:crimewatch.suspect-timer-looting-ess, feat:crimewatch.safety-setting-action-block
     let now_unix = ctx.now_unix_secs();
     let info = ctx.db.with_snapshot(|snap| {
         let ch_sys = snap
@@ -1020,10 +945,7 @@ pub(crate) fn evaluate_space_wreck_or_jetcan_loot(
             .unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red)
     });
     if safety == crate::services::combat_crimewatch::SafetyLevel::Green {
-        return Err(BridgeRpcError {
-            code: "SafetyLevelRestricted".into(),
-            message: "UserError: CantDoInCurrentSafetyLevel - Safety Green blocks taking items from a foreign wreck or container that triggers a Suspect flag".into(),
-        });
+        return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
     }
     Ok((true, true))
 }

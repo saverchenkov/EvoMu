@@ -487,6 +487,17 @@ pub async fn handle_pvp_end_gate_activation(
     if let Some(gid) = cleanup_gate_id.filter(|&g| g > 70_001) {
         arena.try_remove_ball(gid);
     }
+    {
+        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(st) = cw.states.get_mut(&char_id) {
+            st.pvp_timer_until_unix = 0;
+            st.weapon_timer_until_unix = 0;
+        }
+    }
+    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
+        st.pvp_timers_until.remove(&char_id);
+        st.weapon_timers_until.remove(&char_id);
+    });
 
     let origin_sys_handle = ctx.systems.get_or_spawn(osys);
     let ship_type = ctx

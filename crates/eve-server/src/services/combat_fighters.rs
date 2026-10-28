@@ -1,12 +1,46 @@
 //! `combat_fighters` — Carrier / Structure Fighter Tubes, Launch, Recall, Movement, Abilities, Abandon & Squadron Losses (`S-2`).
-//!
-// parity: feat:drones.fighter-load-tubes, feat:drones.fighter-launch-recall, feat:drones.fighter-movement
-// parity: feat:drones.fighter-abilities, feat:drones.fighter-abandon, feat:drones.fighter-squadron-losses
-// parity: feat:drones.carrier-launch-tubes-and-flight-control
 
 #![forbid(unsafe_code)]
 
 use super::*;
+
+fn fighter_class_and_slot_attr(sde: &eve_sde::SdeRegistry, fighter_type_id: u32) -> Option<(u16, u16)> {
+    let attrs = &sde.types.get(&fighter_type_id)?.default_attributes;
+    for (f_attr, s_attr) in [(2212u16, 2217u16), (2213, 2218), (2214, 2219), (2740, 2737), (2741, 2738), (2742, 2739)] {
+        if attrs.get(&f_attr).copied().unwrap_or(0.0) > 0.0 {
+            return Some((f_attr, s_attr));
+        }
+    }
+    None
+}
+
+fn check_fighter_class_slot_limit(
+    ctx: &ServerContext, ship_id: i64, carrier_type_id: u32, fighter_type_id: u32,
+    count_loaded_tubes: bool, extra_squadrons: usize, replace_tube_idx: Option<usize>,
+) -> Result<(), BridgeRpcError> {
+    let Some((f_attr, s_attr)) = fighter_class_and_slot_attr(&ctx.sde, fighter_type_id) else { return Ok(()) };
+    let Some(raw_max) = ctx.sde.types.get(&carrier_type_id).and_then(|t| t.default_attributes.get(&s_attr).copied()) else {
+        return Ok(());
+    };
+    let max_slots = raw_max.max(0.0) as usize;
+    if max_slots == 0 {
+        let code = if count_loaded_tubes { "CannotLoadFighterTubeNoTubesExistForClass" } else { "CannotLaunchFighterNotEnoughTubesAvailableForClass" };
+        return Err(BridgeRpcError { code: code.into(), message: "UserError: No fighter launch tubes exist on this hull for that fighter class".into() });
+    }
+    let is_same_class = |tid: u32| ctx.sde.types.get(&tid).and_then(|t| t.default_attributes.get(&f_attr).copied()).unwrap_or(0.0) > 0.0;
+    let active_in_class = ctx.active_fighters.read().unwrap().values().filter(|f| f.parent_ship_id == ship_id && !f.is_abandoned && is_same_class(f.type_id)).count();
+    let loaded_in_class = if count_loaded_tubes {
+        let loads: Vec<i64> = ctx.fighter_tube_loads.read().unwrap().iter().filter(|&(&(sid, tidx), _)| sid == ship_id && Some(tidx) != replace_tube_idx).map(|(_, &fid)| fid).collect();
+        ctx.db.with_snapshot(|snap| loads.into_iter().filter(|fid| snap.items.get(fid).is_some_and(|it| is_same_class(it.type_id))).count())
+    } else {
+        0
+    };
+    if active_in_class + loaded_in_class + extra_squadrons > max_slots {
+        let code = if count_loaded_tubes { "CannotLoadFighterTubeNoTubesAvailableForClass" } else { "CannotLaunchFighterNotEnoughTubesAvailableForClass" };
+        return Err(BridgeRpcError { code: code.into(), message: format!("UserError: Fighter class limit ({max_slots}) exceeded for hull {carrier_type_id}") });
+    }
+    Ok(())
+}
 
 /// Applies incoming weapon/NPC damage to a deployed fighter squadron in space (`feat:drones.fighter-squadron-losses`).
 /// Each individual fighter unit in the squadron has unit HP (`attr 2214` / `attr 263` / `attr 9`, default `1,000.0`).
@@ -320,6 +354,17 @@ pub async fn handle_fighters(
                     ),
                 }));
             }
+            if let Err(e) = check_fighter_class_slot_limit(
+                ctx,
+                ship_id,
+                carrier_type_id,
+                item.type_id,
+                true,
+                1,
+                Some(tube_idx),
+            ) {
+                return Some(Err(e));
+            }
 
             let max_squadron_size = ctx
                 .sde
@@ -452,7 +497,6 @@ pub async fn handle_fighters(
             Some(Ok(PyRep::Bool(removed.is_some())))
         }
 
-        // parity: feat:drones.carrier-launch-tubes-and-flight-control
         ("fighterMgr", "LaunchFightersFromTubes") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -487,20 +531,28 @@ pub async fn handle_fighters(
             };
             if matches!(ship_ball.mode, eve_destiny::MovementMode::Warp { .. }) {
                 return Some(Err(BridgeRpcError {
-                    code: "CannotLaunchFightersInWarp".into(),
+                    code: "CannotOpenFighterTubesWhileWarping".into(),
                     message: "UserError: Cannot launch fighters while ship is in warp".into(),
                 }));
             }
+            crate::services::space_destiny::space_nav_travel::sync_tether(ctx, char_id, sys_id, ship_id).await;
+            let active_cloak_module = ctx.db.with_snapshot(|snap| {
+                snap.items.values().any(|it| {
+                    it.location_id == ship_id
+                        && snap.module_active_states.contains(&it.item_id)
+                        && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 330)
+                })
+            });
             if let Ok(Some(ship_cs)) = sys_handle.get_combat_state(ship_id).await {
-                if ship_cs.is_cloaked {
+                if ship_cs.is_cloaked || active_cloak_module {
                     return Some(Err(BridgeRpcError {
-                        code: "CannotLaunchFightersCloaked".into(),
+                        code: "CannotOpenFighterTubesWhileCloaked".into(),
                         message: "UserError: Cannot launch fighters while cloaked".into(),
                     }));
                 }
                 if ship_cs.is_tethered {
                     return Some(Err(BridgeRpcError {
-                        code: "CannotLaunchFightersTethered".into(),
+                        code: "DeniedTethered".into(),
                         message: "UserError: Cannot launch fighters while tethered to a structure".into(),
                     }));
                 }
@@ -607,6 +659,28 @@ pub async fn handle_fighters(
                     let _ = sys_handle.set_combat_state(ship_id, ship_cs).await;
                 }
             }
+
+            {
+                let mut per_class_launching: HashMap<u16, (u32, usize)> = HashMap::new();
+                let loads = ctx.fighter_tube_loads.read().unwrap().clone();
+                ctx.db.with_snapshot(|snap| {
+                    for &tidx in &tubes_to_launch {
+                        if let Some(&fid) = loads.get(&(ship_id, tidx)) {
+                            if let Some(it) = snap.items.get(&fid) {
+                                if let Some((f_attr, _)) = fighter_class_and_slot_attr(&ctx.sde, it.type_id) {
+                                    let entry = per_class_launching.entry(f_attr).or_insert((it.type_id, 0));
+                                    entry.1 += 1;
+                                }
+                            }
+                        }
+                    }
+                });
+                for (_, (sample_tid, count)) in per_class_launching {
+                    if let Err(e) = check_fighter_class_slot_limit(ctx, ship_id, carrier_type_id, sample_tid, false, count, None) {
+                        return Some(Err(e));
+                    }
+                }
+            }
             let mut launched_ball_ids = Vec::new();
             for tube_idx in tubes_to_launch {
                 let fighter_item_id = {
@@ -655,7 +729,14 @@ pub async fn handle_fighters(
                     },
                 };
                 let ball_pos = [ball.position.x, ball.position.y, ball.position.z];
-                let cs = ctx.build_type_combat_state(item.type_id);
+                let mut cs = ctx.build_type_combat_state(item.type_id);
+                let squad_size = (item.quantity as f64).max(1.0);
+                cs.shield_hp *= squad_size;
+                cs.max_shield_hp *= squad_size;
+                cs.armor_hp *= squad_size;
+                cs.max_armor_hp *= squad_size;
+                cs.structure_hp *= squad_size;
+                cs.max_structure_hp *= squad_size;
                 let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
 
                 let max_squadron_size = ctx
@@ -748,6 +829,7 @@ pub async fn handle_fighters(
                             .as_ref()
                             .map(|ids| {
                                 ids.contains(&(f.tube_index as i64))
+                                    || ids.contains(&(159 + f.tube_index as i64))
                                     || ids.contains(&f.ball_id)
                                     || ids.contains(&f.item_id)
                             })
@@ -838,7 +920,6 @@ pub async fn handle_fighters(
                     }
                 });
 
-                // parity: feat:drones.carrier-launch-tubes-and-flight-control
                 ctx.fighter_tube_loads
                     .write()
                     .unwrap()

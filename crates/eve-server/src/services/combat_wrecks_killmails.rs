@@ -1,9 +1,4 @@
 //! `combat_wrecks_killmails` — Wreck/Jetcan Lifetimes, LootAll, Detailed Killmails, SHA-1 ESI Hash, Crystal Damage & Self-Destruct (`C-1`, `C-3`).
-// parity: feat:combat.insurance-quote
-// parity: feat:combat.insurance-buy
-// parity: feat:combat.insurance-payout
-// parity: feat:combat.insurance-contracts
-// parity: feat:ships.ship-insurance-link
 
 #![forbid(unsafe_code)]
 
@@ -649,7 +644,6 @@ pub async fn handle_wrecks_killmails(
                         },
                     );
                 });
-                // parity: feat:lifecycle.self-destruct-server-timer, plan:SP-7
                 crate::sp6_lifecycle::register_self_destruct_countdown(
                     ctx,
                     ship_id,
@@ -1028,12 +1022,8 @@ pub async fn handle_wrecks_killmails(
                         .copied()
                         .unwrap_or(SafetyLevel::Red)
                 });
-                // parity: feat:crimewatch.suspect-timer-looting-ess, feat:crimewatch.safety-setting-action-block
                 if safety == SafetyLevel::Green {
-                    return Some(Err(BridgeRpcError {
-                        code: "SafetyLevelRestricted".into(),
-                        message: "UserError: CantDoInCurrentSafetyLevel - Safety Green blocks looting a foreign wreck that triggers a Suspect flag".into(),
-                    }));
+                    return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
                 }
                 {
                     let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());

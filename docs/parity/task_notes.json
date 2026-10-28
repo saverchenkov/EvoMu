@@ -120,8 +120,8 @@
     "note": "Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested; blocked by remaining features."
   },
   "ESI-1": {
-    "assessment": "DONE",
-    "note": "OAuth2 PKCE (S256) HTTP SSO server implemented with /v2/oauth/authorize, /token, and /verify endpoints with bearer token validation and machoNet SSO token login."
+    "assessment": "PARTIAL",
+    "note": "OAuth2 PKCE (S256) HTTP SSO server implemented with /v2/oauth/authorize, /token, and /verify endpoints with bearer token validation and machoNet SSO token login; blocked by journey:launch_login."
   },
   "ESI-2": {
     "assessment": "DONE",

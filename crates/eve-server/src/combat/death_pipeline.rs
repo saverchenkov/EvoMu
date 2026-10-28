@@ -187,7 +187,7 @@ pub fn execute_death_pipeline_sync_inner(
         let wreck_id = snap.next_entity_id;
 
         crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
-            snap, wreck_id, now_unix, false,
+            snap, wreck_id, now_unix, is_criminal,
         );
         snap.items.insert(
             wreck_id,
@@ -271,7 +271,6 @@ pub fn execute_death_pipeline_sync_inner(
             });
         }
 
-        // parity: feat:ships.frigate-escape-bay
         let escape_frigate_id: Option<i64> = if !is_pod {
             let has_feb = ctx
                 .sde
@@ -393,7 +392,6 @@ pub fn execute_death_pipeline_sync_inner(
         }
         if let Some(esc_id) = escape_frigate_id {
             if let Some(esc_item) = snap.items.get(&esc_id) {
-                // parity: feat:ships.frigate-escape-bay - frigate survives and is recorded on killmail
                 dropped_km.push(eve_db::KillmailItemEntry {
                     type_id: esc_item.type_id,
                     flag: 179,
@@ -690,7 +688,7 @@ pub fn execute_death_pipeline_sync_inner(
         wreck_type_id,
         victim_char_id,
         now_unix,
-        false,
+        is_criminal,
     );
 
     crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _snap| {

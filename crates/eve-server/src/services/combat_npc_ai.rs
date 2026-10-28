@@ -1,12 +1,4 @@
 //! `combat_npc_ai` — Extended NPC AI, Factions, Clone Soldiers, EWAR, Remote Repair, Bounties & Multi-Wave Encounters (`C-4`).
-//!
-// parity: plan:C-4
-// parity: feat:combat.bounty-payout-npc, feat:npc.belt-rats, feat:npc.npc-ai-targeting, feat:npc.npc-damage-types
-// parity: feat:npc.npc-loot, feat:npc.sentry-guns, feat:npc.sentry-gun-grid-aggression, feat:npc.drifters
-// parity: feat:npc.triglavians, feat:npc.sleepers, feat:npc.edencom-npc, feat:npc.rogue-drones
-// parity: feat:npc.incursion-npc, feat:npc.navy-npc, feat:npc.npc-hauler, feat:npc.npc-spawn-encounter
-// parity: feat:npc.npc-standings-aggression, feat:npc.officer-npc, feat:npc.npc-ewar-application
-// parity: feat:npc.npc-remote-repair, feat:npc.npc-target-switching, feat:npc.clone-soldier-spawns
 
 #![forbid(unsafe_code)]
 
@@ -16,8 +8,6 @@ use tracing::info;
 
 /// Derives NPC behavioral archetype dynamically from the NPC's `type_id` and `group_id` / `category_id`
 /// in `ctx.sde.types` / `ctx.sde.groups` rather than accepting an arbitrary string parameter.
-///
-/// parity: feat:npc.rogue-drones, feat:npc.incursion-npc, feat:npc.edencom-npc, feat:npc.officer-npc, feat:npc.sleepers
 pub fn derive_npc_archetype(ctx: &ServerContext, npc_type_id: u32) -> &'static str {
     let sde_type = ctx.sde.types.get(&npc_type_id);
     let group = sde_type.and_then(|t| ctx.sde.groups.get(&t.group_id));
@@ -679,30 +669,42 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 (cap, sig, ewar, logi)
             });
             // DERIVED: threat weighting combines hull class/drone base, signature radius (attr 552), proximity, DPS, EWAR (1.5x), and logistics (1.3x).
-            // parity: feat:drones.drone-npc-aggro-switching
             let sig_weight = (sig_radius / 40.0).clamp(0.5, 5.0) * 10.0;
             let role_mult = if has_ewar { 1.5 } else if has_logi { 1.3 } else { 1.0 };
-            let (drone_sig, drone_dps) = if is_player_drone {
+            let (drone_sig, drone_dps, drone_attacking) = if is_player_drone {
                 let d_state = with_combat_runtime(ctx, |rt| rt.active_drones_in_space.get(&cand_id).cloned());
                 let d_tid = d_state.as_ref().map(|d| d.type_id).unwrap_or(cand_ball.type_id);
                 let d_sig = ctx.sde.types.get(&d_tid).and_then(|t| t.default_attributes.get(&552).copied()).unwrap_or(25.0);
-                let d_dps = d_state.as_ref().map(|d| d.damage_vector.total()).unwrap_or(15.0);
-                (d_sig, d_dps)
+                let attacking = d_state
+                    .as_ref()
+                    .is_some_and(|d| d.activity_state == 1 && (d.target_id.is_none() || d.target_id == Some(npc.ball_id)));
+                let d_dps = if attacking {
+                    d_state.as_ref().map(|d| d.damage_vector.total()).unwrap_or(15.0)
+                } else {
+                    0.0
+                };
+                (d_sig, d_dps, attacking)
             } else {
-                (0.0, 0.0)
+                (0.0, 0.0, false)
             };
             let base_threat = if is_capital {
                 if npc.archetype == "Sleeper" { 1_000.0 } else { (200.0 + sig_weight) * role_mult }
             } else if is_player_drone {
-                let prox_bonus = (10_000.0 / dist.max(500.0)).clamp(0.0, 20.0);
                 let sig_bonus = (drone_sig / 25.0).clamp(0.5, 4.0) * 5.0;
-                let dps_bonus = (drone_dps / 10.0).clamp(0.0, 25.0);
-                (120.0 + prox_bonus + sig_bonus + dps_bonus) * role_mult
+                if drone_attacking {
+                    let prox_bonus = (10_000.0 / dist.max(500.0)).clamp(0.0, 20.0);
+                    let dps_bonus = (drone_dps / 10.0).clamp(0.0, 25.0);
+                    (140.0 + prox_bonus + sig_bonus + dps_bonus) * role_mult
+                } else {
+                    (55.0 + sig_bonus * 0.5) * role_mult
+                }
             } else {
                 (100.0 + sig_weight) * role_mult
             };
             let entry = npc.aggression_threat.entry(cand_id).or_insert(base_threat);
-            if *entry < base_threat {
+            if is_player_drone && !drone_attacking {
+                *entry = base_threat;
+            } else if *entry < base_threat {
                 *entry = base_threat;
             }
         }

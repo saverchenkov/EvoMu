@@ -1,7 +1,4 @@
 //! `crimewatch_timers` — CrimeWatch 2.0 Timers, High-Sec/Low-Sec Restrictions, Duels, Safety, Logi, Faction Police, Kill Rights, Security Tags & Sentry Guns (`C-8`).
-// parity: feat:combat.player-bounties
-// parity: feat:combat.bounty-leaderboards
-// parity: feat:admin.gm-bounty-tools
 
 #![forbid(unsafe_code)]
 
@@ -219,7 +216,7 @@ pub fn check_crimewatch_action_restriction(
         && (has_pending_concord || (has_criminal_timer && sys_sec >= 0.45))
     {
         return Err(BridgeRpcError {
-            code: "CriminalActionRestricted".into(),
+            code: "CantEnterWormholeGlobalCriminalFlag".into(),
             message: "Mysterious technology prevents a criminal with a pending CONCORD response from entering this wormhole".into(),
         });
     }
@@ -227,7 +224,7 @@ pub fn check_crimewatch_action_restriction(
     if has_criminal_timer && sys_sec >= 0.45 {
         if action == "warp" && !is_capsule {
             return Err(BridgeRpcError {
-                code: "CriminalWarpRestricted".into(),
+                code: "CantWarpAwayGlobalCriminalFlag".into(),
                 message: "Ships with an active criminal timer in high-security space cannot warp".into(),
             });
         }
@@ -245,8 +242,20 @@ pub fn check_crimewatch_action_restriction(
                 | "jump_portal"
         ) && !is_capsule
         {
+            const ERR_EJECT_CRIM: &str = "CannotEjectInvolvedInCrime";
+            let mut code = match action {
+                "stargate_jump" => "CantJumpGlobalCriminalFlag",
+                "dock" => "CantDockGlobalCriminalFlag",
+                "wormhole_jump" | "wh_jump" => "CantEnterWormholeGlobalCriminalFlag",
+                "jump_drive" | "jump_bridge" | "jump_portal" => "CantBeaconJumpGlobalCriminalFlag",
+                "store_ship" | "switch_ship" => "CannotBoardShipInHighSecAsCriminal",
+                _ => "CantJumpGlobalCriminalFlag",
+            };
+            if action == "eject" {
+                code = ERR_EJECT_CRIM;
+            }
             return Err(BridgeRpcError {
-                code: "CriminalActionRestricted".into(),
+                code: code.into(),
                 message: format!(
                     "Action '{action}' is blocked by an active high-security criminal timer / CONCORD response"
                 ),
@@ -276,10 +285,18 @@ pub fn check_crimewatch_action_restriction(
                 | "filament"
                 | "activate_filament"
         ) {
-            return Err(BridgeRpcError {
-                code: "WeaponsTimerActive".into(),
-                message: format!("Action '{action}' is prohibited while a 60s Weapons Timer is active"),
-            });
+            const ERR_EJECT_WPN: &str = "CannotEjectActiveWeaponsTimer";
+            let mut code = match action {
+                "dock" => "WeaponsTimerActive",
+                "stargate_jump" | "jump_drive" | "jump_bridge" | "jump_portal" | "acceleration_gate" => "CannotJumpWithWeaponsTimer",
+                "store_ship" | "switch_ship" => "CannotStoreShipActiveWeaponsTimer",
+                "refit" | "refit_in_space" => "CannotRefitInSpaceWithActiveWeaponsTimer",
+                _ => "CannotJumpWithWeaponsTimer",
+            };
+            if action == "eject" {
+                code = ERR_EJECT_WPN;
+            }
+            return Err(BridgeRpcError::user_error(code));
         }
     }
 
@@ -706,7 +723,6 @@ pub async fn handle_crimewatch(
             )))
         }
 
-        // parity: feat:crimewatch.safety-setting-action-block
         ("crimewatch", "SetSafetyLevel") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -724,13 +740,19 @@ pub async fn handle_crimewatch(
             with_mut_combat_runtime(ctx, |rt| {
                 rt.safety_levels.insert(char_id, lvl);
             });
+            session.push_notification("OnSafetyLevelChanged", vec![PyRep::Integer(lvl as i64)]);
+            ctx.notify(
+                NotificationTarget::Character(char_id),
+                "OnSafetyLevelChanged",
+                "charid",
+                vec![PyRep::Integer(lvl as i64)],
+            );
             Some(Ok(PyRep::keyval([
                 ("characterID", PyRep::Integer(char_id)),
                 ("safetyLevel", PyRep::Integer(lvl as i64)),
             ])))
         }
 
-        // parity: feat:crimewatch.limited-engagement-duel
         ("crimewatch", "StartDuelChallenge") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -742,12 +764,21 @@ pub async fn handle_crimewatch(
                     message: "StartDuelChallenge requires target characterID".into(),
                 }));
             };
-            let (from_corp_id, from_alliance_id) = ctx.db.with_snapshot(|s| {
-                let _ = s.characters.get(&target_char_id).map(|c| c.character_id);
+            if target_char_id <= 0 || target_char_id == char_id {
+                return Some(Err(BridgeRpcError::user_error("InvalidDuelTarget")));
+            }
+            let (target_user_opt, from_corp_id, from_alliance_id) = ctx.db.with_snapshot(|s| {
+                let tu = s.characters.get(&target_char_id).map(|c| c.user_id);
                 let corp = s.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 let all = s.characters.get(&char_id).and_then(|c| c.alliance_id);
-                (corp, all)
+                (tu, corp, all)
             });
+            let Some(target_user_id) = target_user_opt else {
+                return Some(Err(BridgeRpcError::user_error("InvalidDuelTarget")));
+            };
+            if !ctx.is_character_online(target_char_id, target_user_id) {
+                return Some(Err(BridgeRpcError::user_error("DuelChallengeFailNoSesssionForTarget")));
+            }
             let now_unix = ctx.now_unix();
             let expiry_ft = ctx.now_blueos_filetime_ticks() + 600_000_000;
             with_mut_combat_runtime(ctx, |rt| {
@@ -998,7 +1029,6 @@ pub async fn handle_crimewatch(
             Some(Ok(PyRep::Dict(entries)))
         }
 
-        // parity: feat:crimewatch.abyssal-suspect-flag-tier, feat:lifecycle.abyssal-restart
         ("abyssal_content_manager", "ActivateAbyssalKey") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             if session.station_id.is_some() || session.structure_id.is_some() {
@@ -1056,4 +1086,178 @@ pub async fn handle_crimewatch(
 
         _ => None,
     }
+}
+
+/// Evaluates ship safety, triggers 60s Weapons Timer, applies CrimeWatch Suspect/Criminal/CONCORD/PvP
+/// timers + security-status loss, and creates/refreshes 300s bidirectional Limited Engagements when legal.
+pub fn evaluate_and_record_pvp_aggression(
+    ctx: &ServerContext, attacker_char_id: i64, attacker_ship_id: i64, sys_id: u32, target_id: i64, is_pod_target: bool,
+) -> Result<(), BridgeRpcError> {
+    if (32_000_000..=33_000_000).contains(&sys_id) {
+        return Ok(());
+    }
+    let now_unix = ctx.now_unix();
+    let sys_sec = with_combat_runtime(ctx, |rt| rt.modified_system_securities.get(&sys_id).copied())
+        .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
+    let (victim_char_opt, is_anchored_cont, is_secure_cont, is_unanchored_jetcan) = ctx.db.with_snapshot(|snap| {
+        let vcid = if snap.characters.contains_key(&target_id) {
+            Some(target_id)
+        } else {
+            snap.characters.values().find(|c| c.active_ship_id == target_id).map(|c| c.character_id)
+                .or_else(|| snap.items.get(&target_id).and_then(|it| snap.characters.contains_key(&it.owner_id).then_some(it.owner_id)))
+        };
+        let anchored = snap.sp6_lifecycle.space_object_meta.get(&target_id).is_some_and(|m| m.anchor_start_unix.is_some());
+        let it_tid = snap.items.get(&target_id).map(|i| i.type_id).unwrap_or(0);
+        let secure = ctx.sde.types.get(&it_tid).is_some_and(|t| matches!(t.group_id, 340 | 448));
+        (vcid, anchored, secure, it_tid == 23 && !anchored)
+    });
+
+    if let Some(vcid) = victim_char_opt.filter(|&v| v != attacker_char_id) {
+        let v_suspect_or_crim = {
+            let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+            let st = cw.get_or_create(vcid);
+            st.is_suspect(now_unix) || st.is_criminal(now_unix)
+        };
+        let has_le = with_combat_runtime(ctx, |rt| rt.has_limited_engagement_with(vcid, attacker_char_id, now_unix));
+        let is_legal = ctx.db.with_snapshot(|snap| is_legal_war_or_suspect_target(snap, attacker_char_id, vcid, now_unix))
+            || v_suspect_or_crim || has_le;
+        let effective_sec = if is_unanchored_jetcan { sys_sec.min(0.40) } else { sys_sec };
+        if !is_legal {
+            let safety = with_combat_runtime(ctx, |rt| rt.safety_levels.get(&attacker_char_id).copied().unwrap_or(SafetyLevel::Red));
+            let would_be_criminal = effective_sec >= 0.45 || (sys_sec > 0.0 && is_pod_target)
+                || is_anchored_cont || (is_secure_cont && sys_sec >= 0.45);
+            let would_be_suspect = !would_be_criminal && effective_sec > 0.0;
+            if safety == SafetyLevel::Green && (would_be_criminal || would_be_suspect) {
+                return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
+            }
+            if safety == SafetyLevel::Yellow && would_be_criminal {
+                return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
+            }
+        }
+        {
+            let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+            let _ = cw.handle_combat_aggression(attacker_char_id, vcid, attacker_ship_id, sys_id, effective_sec, is_legal, now_unix);
+            cw.get_or_create(attacker_char_id).pvp_timer_until_unix = now_unix.saturating_add(900);
+            cw.get_or_create(vcid).pvp_timer_until_unix = now_unix.saturating_add(900);
+            if !is_legal && ((sys_sec > 0.0 && sys_sec < 0.45 && is_pod_target) || is_anchored_cont || (is_secure_cont && sys_sec >= 0.45)) {
+                let st = cw.get_or_create(attacker_char_id);
+                st.criminal_flag_until_unix = now_unix.saturating_add(900);
+                st.suspect_flag_until_unix = 0;
+            }
+        }
+        crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, attacker_char_id, vcid, now_unix);
+        let le_created = with_mut_combat_runtime(ctx, |rt| {
+            if v_suspect_or_crim || rt.has_limited_engagement_with(attacker_char_id, vcid, now_unix) {
+                rt.add_limited_engagement(attacker_char_id, vcid, now_unix);
+                rt.add_limited_engagement(vcid, attacker_char_id, now_unix);
+                true
+            } else { false }
+        });
+        if le_created {
+            let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
+            ctx.notify(NotificationTarget::Character(attacker_char_id), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(vcid), PyRep::Integer(timeout_ft)]);
+            ctx.notify(NotificationTarget::Character(vcid), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(attacker_char_id), PyRep::Integer(timeout_ft)]);
+        }
+        if !is_legal && sys_sec > 0.0 {
+            let old_sec = ctx.db.with_snapshot(|s| s.characters.get(&attacker_char_id).map(|c| c.security_status).unwrap_or(0.0));
+            let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, is_pod_target, sys_sec);
+            ctx.db.with_mut_snapshot(|s| {
+                if let Some(ch) = s.characters.get_mut(&attacker_char_id) { ch.security_status = (old_sec - loss).clamp(-10.0, 10.0); }
+            });
+        }
+    } else {
+        crate::sp6_lifecycle::record_npc_aggression_timer(ctx, attacker_char_id, now_unix);
+    }
+    Ok(())
+}
+
+/// Evaluates ship safety and flag inheritance when applying remote assistance (repair / cap transfer) to another pilot.
+pub fn evaluate_and_record_remote_assistance(
+    ctx: &ServerContext, helper_char_id: i64, helper_ship_id: i64, sys_id: u32, target_id: i64,
+) -> Result<(), BridgeRpcError> {
+    if (32_000_000..=33_000_000).contains(&sys_id) {
+        return Ok(());
+    }
+    let now_unix = ctx.now_unix();
+    let sys_sec = with_combat_runtime(ctx, |rt| rt.modified_system_securities.get(&sys_id).copied())
+        .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
+    let beneficiary_opt = ctx.db.with_snapshot(|snap| {
+        if snap.characters.contains_key(&target_id) {
+            Some(target_id)
+        } else {
+            snap.characters.values().find(|c| c.active_ship_id == target_id).map(|c| c.character_id)
+                .or_else(|| snap.items.get(&target_id).and_then(|it| snap.characters.contains_key(&it.owner_id).then_some(it.owner_id)))
+        }
+    });
+    let Some(ben_id) = beneficiary_opt.filter(|&b| b != helper_char_id) else { return Ok(()); };
+    let (ben_criminal, ben_suspect) = {
+        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+        let st = cw.get_or_create(ben_id);
+        (st.is_criminal(now_unix), st.is_suspect(now_unix))
+    };
+    let ben_le_partners: Vec<i64> = with_combat_runtime(ctx, |rt| {
+        rt.limited_engagements.get(&ben_id)
+            .map(|m| m.iter().filter(|&(&pid, &exp)| pid != helper_char_id && now_unix <= exp).map(|(&pid, _)| pid).collect())
+            .unwrap_or_default()
+    });
+    let safety = with_combat_runtime(ctx, |rt| rt.safety_levels.get(&helper_char_id).copied().unwrap_or(SafetyLevel::Red));
+    if ben_criminal && sys_sec > 0.0 && matches!(safety, SafetyLevel::Green | SafetyLevel::Yellow) {
+        return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
+    }
+    if ((ben_suspect && sys_sec > 0.0) || !ben_le_partners.is_empty()) && safety == SafetyLevel::Green {
+        return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
+    }
+    if ben_criminal && sys_sec > 0.0 {
+        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+        let _ = cw.handle_combat_aggression(helper_char_id, ben_id, helper_ship_id, sys_id, sys_sec, false, now_unix);
+        cw.get_or_create(helper_char_id).criminal_flag_until_unix = now_unix.saturating_add(900);
+        drop(cw);
+        let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[helper_char_id], &[], &[]);
+    } else if ben_suspect && sys_sec > 0.0 {
+        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+        let st = cw.get_or_create(helper_char_id);
+        st.weapon_timer_until_unix = now_unix.saturating_add(60);
+        st.pvp_timer_until_unix = now_unix.saturating_add(900);
+        st.suspect_flag_until_unix = now_unix.saturating_add(900);
+        drop(cw);
+        let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[], &[helper_char_id], &[]);
+    }
+    if !ben_le_partners.is_empty() {
+        {
+            let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+            let st = cw.get_or_create(helper_char_id);
+            st.weapon_timer_until_unix = st.weapon_timer_until_unix.max(now_unix.saturating_add(60));
+            st.pvp_timer_until_unix = st.pvp_timer_until_unix.max(now_unix.saturating_add(900));
+        }
+        with_mut_combat_runtime(ctx, |rt| {
+            for &pid in &ben_le_partners {
+                rt.add_limited_engagement(helper_char_id, pid, now_unix);
+                rt.add_limited_engagement(pid, helper_char_id, now_unix);
+            }
+        });
+        let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
+        for &pid in &ben_le_partners {
+            ctx.notify(NotificationTarget::Character(helper_char_id), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(pid), PyRep::Integer(timeout_ft)]);
+            ctx.notify(NotificationTarget::Character(pid), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(helper_char_id), PyRep::Integer(timeout_ft)]);
+        }
+    }
+    {
+        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(t_state) = cw.states.get(&ben_id).cloned() {
+            let l_state = cw.get_or_create(helper_char_id);
+            if t_state.is_weapon_timer_active(now_unix) {
+                l_state.weapon_timer_until_unix = l_state.weapon_timer_until_unix.max(t_state.weapon_timer_until_unix);
+            }
+            if t_state.is_pvp_active(now_unix) {
+                l_state.pvp_timer_until_unix = l_state.pvp_timer_until_unix.max(t_state.pvp_timer_until_unix);
+            }
+            if sys_sec <= 0.0 && t_state.is_suspect(now_unix) {
+                l_state.suspect_flag_until_unix = l_state.suspect_flag_until_unix.max(t_state.suspect_flag_until_unix);
+            }
+            if sys_sec <= 0.0 && t_state.is_criminal(now_unix) {
+                l_state.criminal_flag_until_unix = l_state.criminal_flag_until_unix.max(t_state.criminal_flag_until_unix);
+            }
+        }
+    }
+    Ok(())
 }

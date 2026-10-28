@@ -479,7 +479,7 @@ async fn test_subcap_additive_remote_repairs_and_smartbomb_salvager_cycle_and_lo
         .dispatch_rpc(&mut sess, "dogmaIM", None, "Overload", &[PyRep::Integer(sb_id), PyRep::String("empWave".into()), PyRep::None, PyRep::Integer(1)], &kw, None)
         .await
         .expect_err("Smartbomb on Safety Green in Lowsec must fail");
-    assert_eq!(sb_green_err.code, "SafetyLevelRestricted");
+    assert_eq!(sb_green_err.code, "CantDoInCurrentSafetyLevel");
     let leaked_sb_notes = sess.drain_notifications();
     assert!(
         leaked_sb_notes.iter().all(|(n, _)| n != "OnGodmaShipEffect" && n != "OnHeatAdded"),
@@ -497,11 +497,11 @@ async fn test_subcap_additive_remote_repairs_and_smartbomb_salvager_cycle_and_lo
         "Rejected Salvager activation must NOT leak OnGodmaShipEffect or OnHeatAdded: {leaked_salv_notes:?}"
     );
 
-    //    (b) Lowsec Smartbomb on Safety Yellow with `repeat = 1`:
+    //    (b) Lowsec Smartbomb on Safety Red with `repeat = 1`:
     //        - Deducts exact `1x` capNeed on cycle 1 (`t = 0`), damages `ally_ship` (`2,500m <= 5,000m`),
     //          flags pilot **Suspect** (`900s`) WITHOUT Criminal/CONCORD!
     //        - Auto-pulses again on cycle 2 (`t = 10s`) when `sys.step_manual` advances without re-calling `Activate`!
-    ctx.dispatch_rpc(&mut sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(1)], &kw, None).await.unwrap();
+    ctx.dispatch_rpc(&mut sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(0)], &kw, None).await.unwrap();
     sys.set_capacitor(ship_id, 10_000.0).await.unwrap();
     let mut sb_ally_cs = base_ally_cs.clone();
     sb_ally_cs.max_shield_hp = 5_000.0;
@@ -513,7 +513,7 @@ async fn test_subcap_additive_remote_repairs_and_smartbomb_salvager_cycle_and_lo
 
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(sb_id), PyRep::String("empWave".into()), PyRep::None, PyRep::Integer(1)], &kw, None)
         .await
-        .expect("Lowsec Smartbomb on Safety Yellow (repeat=1)");
+        .expect("Lowsec Smartbomb on Safety Red (repeat=1)");
     let cap_after_c1 = sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor;
     assert!(
         (10_000.0 - cap_after_c1 - sb_cap_need).abs() < 1e-2,

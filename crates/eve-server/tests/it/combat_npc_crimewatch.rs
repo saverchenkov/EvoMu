@@ -29,7 +29,7 @@ async fn test_c3_wrecks_loot_50pct_ownership_killmails_esi_hash_pod_corpse_and_s
     // parity: feat:combat.killmail-assist-timeout-ewar
     // parity: feat:combat.capsule-ejection-items
     // parity: feat:combat.self-destruct-pod
-    // parity: feat:crimewatch.criminal-wreck-auto-abandon, rpc:ship.SelfDestruct
+    // parity: rpc:ship.SelfDestruct
     eve_testkit::attest(&[
         "feat:combat.ship-destruction",
         "feat:combat.pod-destruction",
@@ -42,7 +42,6 @@ async fn test_c3_wrecks_loot_50pct_ownership_killmails_esi_hash_pod_corpse_and_s
         "feat:combat.killmail-assist-timeout-ewar",
         "feat:combat.capsule-ejection-items",
         "feat:combat.self-destruct-pod",
-        "feat:crimewatch.criminal-wreck-auto-abandon",
     ]);
 
     let ctx = ServerContext::new();
@@ -366,7 +365,7 @@ async fn test_c8_crimewatch_safety_timers_restrictions_and_lowsec_pod() {
     let green_err = dispatch_combat_rpc(&ctx, &mut sess_a, "dogmaIM", "Activate", &[PyRep::Integer(gun_a), PyRep::Integer(ship_b)], &HashMap::new())
         .await
         .expect_err("Safety Green must block low-sec Suspect attack");
-    assert_eq!(green_err.code, "SafetyLevelRestricted");
+    assert_eq!(green_err.code, "CantDoInCurrentSafetyLevel");
 
     // Set Safety to Yellow (1) -> allows low-sec Suspect ship attack, but blocks Criminal pod attack!
     let _ = dispatch_combat_rpc(&ctx, &mut sess_a, "crimewatch", "SetSafetyLevel", &[PyRep::Integer(1)], &HashMap::new()).await.expect("SetSafetyLevel Yellow");
@@ -394,7 +393,15 @@ async fn test_c8_crimewatch_safety_timers_restrictions_and_lowsec_pod() {
     // 3. Weapons Timer restrictions, Tether/Filament block, Wormhole exemption, and PvP Logoff restriction
     // (`feat:crimewatch.weapon-timer-scope`, `feat:crimewatch.weapon-timer-tether-filament-block`, `feat:navigation.wormhole-aggression-exemption`, `feat:crimewatch.pvp-logoff-timer-renewal`)
     let now_unix = ctx.now_unix();
-    for blocked_action in &["eject", "stargate_jump", "dock", "tether", "filament", "refit_in_space"] {
+    let eject_wpn_err = "CannotEjectActiveWeaponsTimer";
+    for &(blocked_action, expected_code) in &[
+        ("stargate_jump", "CannotJumpWithWeaponsTimer"),
+        ("dock", "WeaponsTimerActive"),
+        ("tether", "CannotJumpWithWeaponsTimer"),
+        ("filament", "CannotJumpWithWeaponsTimer"),
+        ("refit_in_space", "CannotRefitInSpaceWithActiveWeaponsTimer"),
+        ("eject", eject_wpn_err),
+    ] {
         let err = check_crimewatch_action_restriction(
             &ctx,
             char_a,
@@ -404,7 +411,7 @@ async fn test_c8_crimewatch_safety_timers_restrictions_and_lowsec_pod() {
             now_unix,
         )
         .expect_err("Weapons timer must block action");
-        assert_eq!(err.code, "WeaponsTimerActive");
+        assert_eq!(err.code, expected_code);
     }
     // Wormhole jump IS exempt under Weapons / PvP timer!
     check_crimewatch_action_restriction(&ctx, char_a, ship_a, lowsec_id, "wormhole_jump", now_unix).expect("Wormhole jump must be allowed under Weapons/PvP timer");
@@ -474,7 +481,7 @@ async fn test_c8_crimewatch_safety_timers_restrictions_and_lowsec_pod() {
 
     // 5. High-sec criminal warp block (`feat:crimewatch.highsec-criminal-restrictions`)
     let hs_warp_err = check_crimewatch_action_restriction(&ctx, char_a, ship_a, highsec_id, "warp", now_unix).expect_err("Criminal ship in high-sec cannot warp");
-    assert_eq!(hs_warp_err.code, "CriminalWarpRestricted");
+    assert_eq!(hs_warp_err.code, "CantWarpAwayGlobalCriminalFlag");
     // Capsules CAN warp even while criminal in high-sec
     check_crimewatch_action_restriction(&ctx, char_a, pod_target_id, highsec_id, "warp", now_unix).expect("Capsules must still be able to warp while criminal in high-sec");
 }

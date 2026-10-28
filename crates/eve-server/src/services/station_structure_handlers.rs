@@ -1,9 +1,22 @@
 //! `station_structure_handlers` — Helper routines for orbital and station structure operations.
 
 use crate::router::ServerContext;
-use crate::services::station_structure::structure_lifecycle;
+use crate::services::station_structure::{
+    structure_lifecycle,
+    structure_lifecycle as life,
+    structure_lifecycle_rpc::has_structure_manager_role,
+    structure_upwell_ops::{self, load_ext_state, StructureExtendedState},
+};
+use eve_db::WorldStateSnapshot;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
+
+fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
+    BridgeRpcError {
+        code: code.into(),
+        message: message.into(),
+    }
+}
 
 pub fn handle_upgrade_gantry(
     ctx: &ServerContext,
@@ -321,7 +334,7 @@ pub fn handle_anchor_orbital(
             code: "ItemNotFound".into(),
             message: format!("Gantry item {item_id} not found"),
         })?;
-        if it.owner_id != char_id && it.owner_id != char_corp {
+        if it.owner_id != char_corp && it.owner_id != char_id {
             return Err(BridgeRpcError {
                 code: "NotItemOwner".into(),
                 message: format!("Character {char_id} does not own item {item_id}"),
@@ -375,4 +388,108 @@ pub fn handle_anchor_orbital(
         ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
         ("state", PyRep::String("Anchored".into())),
     ]))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_structure_dir_entry(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    session: &SessionState,
+    ext: &StructureExtendedState,
+    st: &eve_db::UpwellStructureRecord,
+    now: u64,
+    char_id: i64,
+    caller_corp: i64,
+    has_acl_access: bool,
+) -> PyRep {
+    let can_view_services = caller_corp == st.owner_corp_id || has_acl_access;
+    let online_types = if can_view_services {
+        life::online_service_type_ids(ctx, snap, st.structure_id)
+    } else {
+        Vec::new()
+    };
+    let services: Vec<(PyRep, PyRep)> = online_types
+        .iter()
+        .filter_map(|&tid| structure_upwell_ops::service_id_for_module_type(tid).map(|svc_id| (PyRep::Integer(svc_id), PyRep::Integer(1))))
+        .collect();
+    let power = life::power_state(ctx, snap, ext, st, now);
+    let (hour, day) = snap
+        .structure_vulnerability_windows
+        .get(&st.structure_id)
+        .copied()
+        .or_else(|| snap.corp_governance.get(&st.owner_corp_id).map(|g| (u64::from(g.reinforce_hour), 5)))
+        .unwrap_or((18, 5));
+    let is_corp_manager = caller_corp == st.owner_corp_id && has_structure_manager_role(snap, session, char_id, caller_corp);
+    let hacked_reveal = ext.hacked_reinforce_reveals.get(&st.structure_id).is_some_and(|s| s.contains(&char_id));
+    let can_see_reinforce = caller_corp == st.owner_corp_id || hacked_reveal;
+    let can_see_pending = is_corp_manager || hacked_reveal;
+    let pending = ext.pending_reinforce_schedule.get(&st.structure_id).copied();
+    PyRep::keyval([
+        ("structureID", PyRep::Integer(st.structure_id)),
+        ("typeID", PyRep::Integer(i64::from(st.type_id))),
+        ("ownerID", PyRep::Integer(st.owner_corp_id)),
+        ("solarSystemID", PyRep::Integer(i64::from(st.solar_system_id))),
+        ("itemName", PyRep::String(st.name.clone())),
+        ("state", PyRep::String(st.state.clone())),
+        ("powerState", PyRep::String(power.as_str().into())),
+        ("fuelBlocks", if is_corp_manager { PyRep::Integer(i64::from(st.fuel_blocks)) } else { PyRep::None }),
+        ("services", PyRep::Dict(services)),
+        ("onlineServiceTypeIDs", PyRep::List(online_types.into_iter().map(|t| PyRep::Integer(i64::from(t))).collect())),
+        ("inSpace", PyRep::Bool(st.state != life::STATE_DESTROYED)),
+        ("reinforceHour", if can_see_reinforce { PyRep::Integer(hour as i64) } else { PyRep::None }),
+        ("reinforceWeekday", if can_see_reinforce { PyRep::Integer(day as i64) } else { PyRep::None }),
+        ("nextReinforceHour", if can_see_pending { pending.map_or(PyRep::None, |(nh, _, _)| PyRep::Integer(nh as i64)) } else { PyRep::None }),
+        ("nextReinforceWeekday", if can_see_pending { pending.map_or(PyRep::None, |(_, nd, _)| PyRep::Integer(nd as i64)) } else { PyRep::None }),
+        ("applyAfterUnix", if can_see_pending { pending.map_or(PyRep::None, |(_, _, at)| PyRep::Integer(at as i64)) } else { PyRep::None }),
+    ])
+}
+
+pub(crate) fn handle_get_structures(ctx: &ServerContext, session: &mut SessionState, corp_only: bool) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let now = ctx.now_unix();
+    ctx.db.with_snapshot(|snap| {
+        let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
+        let ext = load_ext_state(snap);
+        let mut list: Vec<(&eve_db::UpwellStructureRecord, bool)> = snap
+            .structures
+            .values()
+            .filter_map(|s| {
+                if s.state == life::STATE_DESTROYED {
+                    return None;
+                }
+                let has_acl = structure_upwell_ops::evaluate_character_structure_access_in_snap(snap, s.structure_id, char_id);
+                if s.owner_corp_id == caller_corp || (!corp_only && has_acl) {
+                    Some((s, has_acl))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        list.sort_by_key(|(s, _)| s.structure_id);
+        Ok(PyRep::Dict(
+            list.into_iter()
+                .map(|(st, has_acl)| (PyRep::Integer(st.structure_id), build_structure_dir_entry(ctx, snap, session, &ext, st, now, char_id, caller_corp, has_acl)))
+                .collect(),
+        ))
+    })
+}
+
+pub(crate) fn handle_get_structure_info(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let structure_id = args.first().and_then(|a| a.as_i64()).or(session.structure_id).ok_or_else(|| err("MissingStructureId", "GetStructureInfo requires structureID"))?;
+    let now = ctx.now_unix();
+    ctx.db.with_snapshot(|snap| {
+        let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
+        let st = snap
+            .structures
+            .get(&structure_id)
+            .filter(|s| s.state != life::STATE_DESTROYED)
+            .ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
+        let has_acl = structure_upwell_ops::evaluate_character_structure_access_in_snap(snap, structure_id, char_id);
+        if caller_corp != st.owner_corp_id && session.solar_system_id != Some(st.solar_system_id) && !has_acl {
+            return Err(err("StructureAccessDenied", format!("Character {char_id} lacks access to structure {structure_id}")));
+        }
+        let ext = load_ext_state(snap);
+        Ok(build_structure_dir_entry(ctx, snap, session, &ext, st, now, char_id, caller_corp, has_acl))
+    })
 }

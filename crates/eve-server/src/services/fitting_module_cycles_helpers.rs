@@ -751,10 +751,6 @@ pub(crate) async fn handle_ecm_or_burst_jammer_activation(
             crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
                 ctx, char_id, v_char, now_unix,
             );
-            crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-                rt.add_limited_engagement(char_id, v_char, now_unix);
-                rt.add_limited_engagement(v_char, char_id, now_unix);
-            });
             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
             cw.get_or_create(v_char).pvp_timer_until_unix = now_unix.saturating_add(900);
             let _ = cw.handle_combat_aggression(
@@ -1045,5 +1041,34 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
                 }
             }
         }
+    }
+}
+
+pub(crate) async fn evaluate_module_cycle_aggression_or_assistance(
+    ctx: &ServerContext,
+    sys: &SystemHandle,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+    group_id: u32,
+    target_id_opt: Option<i64>,
+) -> Result<(), BridgeRpcError> {
+    let Some(target_id) = target_id_opt else { return Ok(()); };
+    if matches!(
+        group_id,
+        52 | 53 | 55 | 65 | 68 | 71 | 74 | 201 | 208 | 291 | 379 | 506..=512
+            | 524 | 771 | 1245 | 1672 | 1674 | 1986 | 4060 | 4500 | 4805 | 4807
+    ) {
+        let is_pod = sys.get_ball_snapshot(target_id).await.ok().flatten().is_some_and(|(_, b)| b.type_id == 670)
+            || ctx.db.with_snapshot(|s| s.items.get(&target_id).is_some_and(|i| i.type_id == 670));
+        crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_pvp_aggression(
+            ctx, char_id, ship_id, sys_id, target_id, is_pod,
+        )
+    } else if matches!(group_id, 41 | 67 | 325 | 585 | 1697 | 1698 | 2018) {
+        crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_remote_assistance(
+            ctx, char_id, ship_id, sys_id, target_id,
+        )
+    } else {
+        Ok(())
     }
 }

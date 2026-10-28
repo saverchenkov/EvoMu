@@ -34,7 +34,7 @@ pub(crate) struct EwarCapitalPrep {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn prepare_ewar_and_capital_module(
     ctx: &ServerContext,
-    sys: &crate::system_actor::SystemHandle,
+    sys: &crate::system_actor::SystemHandle, _sys_id: u32,
     char_id: i64,
     ship_id: i64,
     ship_group_id: u32,
@@ -623,9 +623,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                     if max_range <= 0.0 {
                         max_range = mod_type.default_attributes.get(&54).copied().unwrap_or(20_000.0);
                     }
-                    let falloff = mod_state
-                        .get_attribute(2044, &ctx.sde)
-                        .max(mod_state.get_attribute(attr_ids::FALLOFF, &ctx.sde));
+                    let falloff = eve_dogma::get_module_falloff(&mod_state, &ctx.sde);
                     remote_optimal = max_range;
                     remote_falloff = falloff;
                     if let (Ok(Some((_, ship_ball))), Ok(Some((_, target_ball)))) = (
@@ -665,35 +663,6 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                             remote_cap_amount = mod_state.get_attribute(90, &ctx.sde) * ov_m;
                         }
                         _ => {}
-                    }
-                    // Crimewatch flag inheritance (`feat:modules.remote-shield`):
-                    // Assisting a pilot with active weapon/PvP/Suspect/Criminal timers propagates those flags to the logistics pilot!
-                    let target_owner_id = ctx
-                        .db
-                        .with_snapshot(|s| s.items.get(&target_id).map(|i| i.owner_id))
-                        .unwrap_or(target_id);
-                    if target_owner_id != char_id && target_owner_id > 0 {
-                        let now_unix = ctx.now_unix_secs();
-                        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-                        if let Some(t_state) = cw.states.get(&target_owner_id).cloned() {
-                            let l_state = cw.get_or_create(char_id);
-                            if t_state.is_weapon_timer_active(now_unix) {
-                                l_state.weapon_timer_until_unix =
-                                    l_state.weapon_timer_until_unix.max(t_state.weapon_timer_until_unix);
-                            }
-                            if t_state.is_pvp_active(now_unix) {
-                                l_state.pvp_timer_until_unix =
-                                    l_state.pvp_timer_until_unix.max(t_state.pvp_timer_until_unix);
-                            }
-                            if t_state.is_suspect(now_unix) {
-                                l_state.suspect_flag_until_unix =
-                                    l_state.suspect_flag_until_unix.max(t_state.suspect_flag_until_unix);
-                            }
-                            if t_state.is_criminal(now_unix) {
-                                l_state.criminal_flag_until_unix =
-                                    l_state.criminal_flag_until_unix.max(t_state.criminal_flag_until_unix);
-                            }
-                        }
                     }
                 }
 

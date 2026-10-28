@@ -1,7 +1,4 @@
 //! `combat_fighters_abilities` — Carrier / Structure Fighter Abilities, Support EWAR, Space Superiority, AoE Bombs (`S-2`).
-//!
-// parity: feat:drones.fighter-support-cenotaph-scarab, feat:drones.support-fighter-abilities
-// parity: feat:drones.light-fighter-space-superiority, feat:drones.fighter-heavy-long-range-bomb
 
 #![forbid(unsafe_code)]
 
@@ -389,10 +386,7 @@ async fn activate_single_fighter_ability(
                     if (safety == SafetyLevel::Green && (would_be_criminal || would_be_suspect))
                         || (safety == SafetyLevel::Yellow && would_be_criminal)
                     {
-                        return Some(Err(BridgeRpcError {
-                            code: "SafetyLevelRestricted".into(),
-                            message: "Ship safety prevents illegal fighter ability aggression".into(),
-                        }));
+                        return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
                     }
                 }
             }
@@ -844,10 +838,7 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
                 .unwrap_or(SafetyLevel::Red)
         });
         if safety == SafetyLevel::Green {
-            return Some(Err(BridgeRpcError {
-                code: "SafetyLevelRestricted".into(),
-                message: "Ship safety is set to Green; point-targeted AoE bombs in low-security space are prevented".into(),
-            }));
+            return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
         }
     }
 

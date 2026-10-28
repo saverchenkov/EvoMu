@@ -623,11 +623,11 @@ async fn test_npc_standings_aggression_player_drones_and_navy_police() {
 
     // Hostile pilot and hostile drone MUST be aggroed (-6.0 standing)
     assert!(threats.contains_key(&hostile_ship_id), "Hostile pilot ship (-6.0 standing) must be aggroed");
-    assert!(threats.contains_key(&hostile_drone_id), "Hostile pilot drone must be aggroed with ~120 threat");
-    assert!((threats[&hostile_drone_id] - 120.0).abs() < 15.0);
+    assert!(threats.contains_key(&hostile_drone_id), "Hostile pilot drone must be aggroed with base threat");
+    assert!((threats[&hostile_drone_id] - 57.5).abs() < 15.0);
 
     // Criminal pilot and criminal drone MUST be aggroed (sec status -3.5 < -2.0) even with positive standing (+5.0)
     assert!(threats.contains_key(&criminal_ship_id), "Criminal pilot ship must be aggroed");
-    assert!(threats.contains_key(&criminal_drone_id), "Criminal pilot drone must be aggroed with ~120 threat");
-    assert!((threats[&criminal_drone_id] - 120.0).abs() < 15.0);
+    assert!(threats.contains_key(&criminal_drone_id), "Criminal pilot drone must be aggroed with base threat");
+    assert!((threats[&criminal_drone_id] - 57.5).abs() < 15.0);
 }

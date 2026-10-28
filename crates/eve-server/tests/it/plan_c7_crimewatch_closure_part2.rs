@@ -167,7 +167,7 @@ async fn test_war_targets_mutual_allies_and_retraction_crimewatch() {
     assert!(!ctx.db.with_snapshot(|s| is_legal_war_or_suspect_target(s, aggr_char, def_char, now)));
     let pre_err = dispatch_combat_rpc(&ctx, &mut aggr_sess, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::Integer(def_ship)], &kw)
         .await.expect_err("Before 24h war spool-up, high-sec aggression on Safety Green must fail");
-    assert_eq!(pre_err.code, "SafetyLevelRestricted");
+    assert_eq!(pre_err.code, "CantDoInCurrentSafetyLevel");
 
     // 2. Active war (`started_unix + 86_400 <= now`) + accepted defender ally -> legal in high-sec for both defender and ally with zero sec status loss!
     ctx.db.with_mut_snapshot(|snap| {
@@ -262,24 +262,24 @@ async fn test_crimewatch_highsec_criminal_movement_and_wormhole_exemption() {
     let beyonce_bound = ctx.bind_object(&sess, "beyonce", sys_id as i64).unwrap();
     let warp_err = ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_bound), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(60_003_760), PyRep::Real(0.0)], &kw, None)
         .await.expect_err("High-sec criminal in non-capsule ship cannot warp");
-    assert_eq!(warp_err.code, "CriminalWarpRestricted");
+    assert_eq!(warp_err.code, "CantWarpAwayGlobalCriminalFlag");
 
     let gate_crim_err = ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_bound), "CmdStargateJump", &[PyRep::Integer(jita_gate.stargate_id)], &kw, None)
         .await.expect_err("High-sec criminal in non-capsule ship cannot jump stargate");
-    assert_eq!(gate_crim_err.code, "CriminalActionRestricted");
+    assert_eq!(gate_crim_err.code, "CantJumpGlobalCriminalFlag");
 
     let wh_crim_err = ctx.dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(wh_item_id)], &kw, None)
         .await.expect_err("High-sec criminal with pending CONCORD response cannot enter wormhole");
-    assert!(wh_crim_err.message.contains("Mysterious technology prevents a criminal"));
+    assert_eq!(wh_crim_err.code, "CantEnterWormholeGlobalCriminalFlag");
 
     let j1_err = ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_bound), "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(char_id), PyRep::Integer(30_000_144), PyRep::Integer(1)], &kw, None).await.unwrap_err();
-    assert_eq!(j1_err.code, "CriminalActionRestricted");
+    assert_eq!(j1_err.code, "CantBeaconJumpGlobalCriminalFlag");
     let j2_err = ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_bound), "CmdBridgeToFleetModuleBeacon", &[PyRep::Integer(char_id), PyRep::Integer(30_000_144), PyRep::Integer(1)], &kw, None).await.unwrap_err();
-    assert_eq!(j2_err.code, "CriminalActionRestricted");
+    assert_eq!(j2_err.code, "CantBeaconJumpGlobalCriminalFlag");
     let j3_err = ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_bound), "CmdJumpThroughFleet", &[PyRep::Integer(char_id), PyRep::Integer(ship_id)], &kw, None).await.unwrap_err();
-    assert_eq!(j3_err.code, "CriminalActionRestricted");
+    assert_eq!(j3_err.code, "CantBeaconJumpGlobalCriminalFlag");
     let j4_err = ctx.dispatch_rpc(&mut sess, "structureCynoBeaconMgr", None, "CmdJumpToStructureBeacon", &[PyRep::Integer(30_000_144), PyRep::Integer(struct_id)], &kw, None).await.unwrap_err();
-    assert_eq!(j4_err.code, "CriminalActionRestricted");
+    assert_eq!(j4_err.code, "CantBeaconJumpGlobalCriminalFlag");
 
     ctx.db.with_mut_snapshot(|snap| { snap.items.get_mut(&ship_id).unwrap().type_id = 670; });
     assert!(check_crimewatch_action_restriction(&ctx, char_id, ship_id, sys_id, "warp", now).is_ok());
@@ -308,22 +308,22 @@ async fn test_crimewatch_highsec_criminal_movement_and_wormhole_exemption() {
 
     let gate_wpn_err = ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_bound), "CmdStargateJump", &[PyRep::Integer(jita_gate.stargate_id)], &kw, None)
         .await.expect_err("Weapons timer blocks stargate jump");
-    assert_eq!(gate_wpn_err.code, "WeaponsTimerActive");
+    assert_eq!(gate_wpn_err.code, "CannotJumpWithWeaponsTimer");
     let dock_wpn_err = ctx.dispatch_rpc(&mut sess, "structureDocking", None, "Dock", &[PyRep::Integer(struct_id)], &kw, None)
         .await.expect_err("Active weapons timer blocks docking at structure");
     assert_eq!(dock_wpn_err.code, "WeaponsTimerActive");
     let jump_wpn_err = ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_bound), "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(char_id), PyRep::Integer(30_000_144), PyRep::Integer(1)], &kw, None)
         .await.expect_err("Active weapons timer blocks jump drive");
-    assert_eq!(jump_wpn_err.code, "WeaponsTimerActive");
+    assert_eq!(jump_wpn_err.code, "CannotJumpWithWeaponsTimer");
     let bridge_wpn_err = ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_bound), "CmdBridgeToFleetModuleBeacon", &[PyRep::Integer(char_id), PyRep::Integer(30_000_144), PyRep::Integer(1)], &kw, None)
         .await.expect_err("Active weapons timer blocks jump bridge");
-    assert_eq!(bridge_wpn_err.code, "WeaponsTimerActive");
+    assert_eq!(bridge_wpn_err.code, "CannotJumpWithWeaponsTimer");
     let portal_wpn_err = ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_bound), "CmdJumpThroughFleet", &[PyRep::Integer(char_id), PyRep::Integer(ship_id)], &kw, None)
         .await.expect_err("Active weapons timer blocks jump portal");
-    assert_eq!(portal_wpn_err.code, "WeaponsTimerActive");
+    assert_eq!(portal_wpn_err.code, "CannotJumpWithWeaponsTimer");
     let struct_wpn_err = ctx.dispatch_rpc(&mut sess, "structureCynoBeaconMgr", None, "CmdJumpToStructureBeacon", &[PyRep::Integer(30_000_144), PyRep::Integer(struct_id)], &kw, None)
         .await.expect_err("Active weapons timer blocks structure cyno jump");
-    assert_eq!(struct_wpn_err.code, "WeaponsTimerActive");
+    assert_eq!(struct_wpn_err.code, "CannotJumpWithWeaponsTimer");
 
     ctx.dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(wh_item_id)], &kw, None)
         .await.expect("WormholeJump succeeds with active weapons and PvP timers");
@@ -370,13 +370,13 @@ async fn test_wreck_take_item_add_multiadd_lootall_crimewatch() {
 
     // 1. Foreign wreck & foreign jetcan under Safety Green (`2`) must reject `Add`, `MultiAdd`, and `LootAll` with no state change.
     let g1_err = ctx.dispatch_rpc(&mut thief_sess, "invbroker", Some(ship_inv_bound), "Add", &[PyRep::Integer(item_unlocked), PyRep::Integer(wreck_id), PyRep::Integer(InventoryFlag::Cargo as i64)], &kw, None).await.unwrap_err();
-    assert_eq!(g1_err.code, "SafetyLevelRestricted");
+    assert_eq!(g1_err.code, "CantDoInCurrentSafetyLevel");
     let g2_err = ctx.dispatch_rpc(&mut thief_sess, "invbroker", Some(ship_inv_bound), "MultiAdd", &[PyRep::List(vec![PyRep::Integer(item_cargo)]), PyRep::Integer(wreck_id), PyRep::Integer(InventoryFlag::Cargo as i64)], &kw, None).await.unwrap_err();
-    assert_eq!(g2_err.code, "SafetyLevelRestricted");
+    assert_eq!(g2_err.code, "CantDoInCurrentSafetyLevel");
     let g3_err = ctx.dispatch_rpc(&mut thief_sess, "invbroker", Some(ship_inv_bound), "Add", &[PyRep::Integer(jetcan_item), PyRep::Integer(jetcan_id), PyRep::Integer(InventoryFlag::Cargo as i64)], &kw, None).await.unwrap_err();
-    assert_eq!(g3_err.code, "SafetyLevelRestricted");
+    assert_eq!(g3_err.code, "CantDoInCurrentSafetyLevel");
     let g4_err = ctx.dispatch_rpc(&mut thief_sess, "invbroker", Some(ship_inv_bound), "LootAll", &[PyRep::Integer(wreck_id)], &kw, None).await.unwrap_err();
-    assert_eq!(g4_err.code, "SafetyLevelRestricted");
+    assert_eq!(g4_err.code, "CantDoInCurrentSafetyLevel");
     assert_eq!(ctx.db.get_item(item_unlocked).unwrap().location_id, wreck_id);
     assert_eq!(ctx.db.get_item(jetcan_item).unwrap().location_id, jetcan_id);
 

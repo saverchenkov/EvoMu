@@ -201,9 +201,14 @@ pub async fn handle_weapons(
                             message: format!("Target character {vc} is invulnerable due to recent location change"),
                         }));
                     }
-                    // parity: feat:crimewatch.safety-setting-action-block, feat:crimewatch.limited-engagement-duel
                     if vc != char_id {
-                        let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.0);
+                        let is_pod_target = sys_handle
+                            .get_ball_snapshot(tid)
+                            .await
+                            .ok()
+                            .flatten()
+                            .is_some_and(|(_, b)| b.type_id == 670)
+                            || ctx.db.with_snapshot(|s| s.items.get(&tid).is_some_and(|i| i.type_id == 670));
                         let v_suspect_or_crim = {
                             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
                             let st = cw.get_or_create(vc);
@@ -217,19 +222,13 @@ pub async fn handle_weapons(
                             let safety = with_combat_runtime(ctx, |rt| {
                                 rt.safety_levels.get(&char_id).copied().unwrap_or(SafetyLevel::Red)
                             });
-                            let would_be_criminal = sys_sec >= 0.45;
-                            let would_be_suspect = sys_sec > 0.0 && sys_sec < 0.45;
+                            let would_be_criminal = sys_sec >= 0.45 || (sys_sec > 0.0 && is_pod_target);
+                            let would_be_suspect = sys_sec > 0.0 && sys_sec < 0.45 && !is_pod_target;
                             if safety == SafetyLevel::Green && (would_be_criminal || would_be_suspect) {
-                                return Some(Err(BridgeRpcError {
-                                    code: "SafetyLevelRestricted".into(),
-                                    message: "UserError: CantDoInCurrentSafetyLevel - Ship safety is set to Green; illegal suspect/criminal aggression is prevented".into(),
-                                }));
+                                return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
                             }
                             if safety == SafetyLevel::Yellow && would_be_criminal {
-                                return Some(Err(BridgeRpcError {
-                                    code: "SafetyLevelRestricted".into(),
-                                    message: "UserError: CantDoInCurrentSafetyLevel - Ship safety is set to Yellow; criminal aggression is prevented".into(),
-                                }));
+                                return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
                             }
                         }
                         if v_suspect_or_crim || with_combat_runtime(ctx, |rt| rt.has_limited_engagement_with(char_id, vc, now_unix)) {
@@ -237,13 +236,27 @@ pub async fn handle_weapons(
                                 rt.add_limited_engagement(char_id, vc, now_unix);
                                 rt.add_limited_engagement(vc, char_id, now_unix);
                             });
+                            let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
+                            ctx.notify(NotificationTarget::Character(char_id), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(vc), PyRep::Integer(timeout_ft)]);
+                            ctx.notify(NotificationTarget::Character(vc), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(char_id), PyRep::Integer(timeout_ft)]);
                         }
-                        if !is_legal {
-                            let _ = ctx
-                                .crimewatch
-                                .write()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .handle_combat_aggression(char_id, vc, ship_id, sys_id, sys_sec, false, now_unix);
+                        {
+                            let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+                            let _ = cw.handle_combat_aggression(char_id, vc, ship_id, sys_id, sys_sec, is_legal, now_unix);
+                            if !is_legal && sys_sec > 0.0 && sys_sec < 0.45 && is_pod_target {
+                                let st = cw.get_or_create(char_id);
+                                st.criminal_flag_until_unix = now_unix.saturating_add(900);
+                                st.suspect_flag_until_unix = 0;
+                            }
+                        }
+                        if !is_legal && sys_sec > 0.0 {
+                            let old_sec = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0));
+                            let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, is_pod_target, sys_sec);
+                            ctx.db.with_mut_snapshot(|s| {
+                                if let Some(ch) = s.characters.get_mut(&char_id) {
+                                    ch.security_status = (old_sec - loss).clamp(-10.0, 10.0);
+                                }
+                            });
                         }
                     }
                 }
@@ -296,12 +309,11 @@ pub async fn handle_weapons(
                         let _ = sys_handle.set_combat_state(tid, t_cs).await;
                     }
                 }
-
-                ctx.crimewatch
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .trigger_weapon_timer(char_id, now_unix);
                 if let Some(vcid) = victim_char_opt {
+                    ctx.crimewatch
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .trigger_weapon_timer(char_id, now_unix);
                     crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
                         ctx, char_id, vcid, now_unix,
                     );
@@ -510,20 +522,10 @@ pub async fn handle_weapons(
                         let is_pod_target = target_ball.type_id == 670;
                         let would_be_criminal = sys_sec >= 0.45 || (sys_sec > 0.0 && is_pod_target);
                         let would_be_suspect = sys_sec > 0.0 && sys_sec < 0.45 && !is_pod_target;
-                        // parity: feat:crimewatch.safety-setting-action-block
-                        if safety == SafetyLevel::Green
-                            && (would_be_criminal || would_be_suspect)
+                        if (safety == SafetyLevel::Green && (would_be_criminal || would_be_suspect))
+                            || (safety == SafetyLevel::Yellow && would_be_criminal)
                         {
-                            return Some(Err(BridgeRpcError {
-                                code: "SafetyLevelRestricted".into(),
-                                message: "UserError: CantDoInCurrentSafetyLevel - Ship safety is set to Green; illegal suspect/criminal aggression is prevented".into(),
-                            }));
-                        }
-                        if safety == SafetyLevel::Yellow && would_be_criminal {
-                            return Some(Err(BridgeRpcError {
-                                code: "SafetyLevelRestricted".into(),
-                                message: "UserError: CantDoInCurrentSafetyLevel - Ship safety is set to Yellow; criminal aggression is prevented".into(),
-                            }));
+                            return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
                         }
                     }
                 }
@@ -1132,11 +1134,11 @@ pub async fn handle_weapons(
             }
 
             // CrimeWatch timers & low-sec/high-sec aggression (`feat:crimewatch.lowsec-suspect-vs-criminal`, `feat:crimewatch.pod-timer`, `feat:crimewatch.npc-timers`)
-            ctx.crimewatch
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .trigger_weapon_timer(char_id, now_unix);
             if let Some((victim_char_id, _)) = player_target_info {
+                ctx.crimewatch
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .trigger_weapon_timer(char_id, now_unix);
                 let is_legal = ctx.db.with_snapshot(|snap| {
                     is_legal_war_or_suspect_target(snap, char_id, victim_char_id, now_unix)
                 }) || {
@@ -1192,27 +1194,33 @@ pub async fn handle_weapons(
                         st.suspect_flag_until_unix = 0;
                     }
                 }
-                // parity: feat:crimewatch.pvp-logoff-timer-renewal, plan:SP-6
                 crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
                     ctx,
                     char_id,
                     victim_char_id,
                     now_unix,
                 );
-                // parity: feat:crimewatch.limited-engagement-duel
                 let victim_is_suspect_or_criminal = {
                     let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
                     let st = cw.get_or_create(victim_char_id);
                     st.is_suspect(now_unix) || st.is_criminal(now_unix)
                 };
-                with_mut_combat_runtime(ctx, |rt| {
+                let le_created_or_refreshed = with_mut_combat_runtime(ctx, |rt| {
                     if victim_is_suspect_or_criminal
                         || rt.has_limited_engagement_with(char_id, victim_char_id, now_unix)
                     {
                         rt.add_limited_engagement(char_id, victim_char_id, now_unix);
                         rt.add_limited_engagement(victim_char_id, char_id, now_unix);
+                        true
+                    } else {
+                        false
                     }
                 });
+                if le_created_or_refreshed {
+                    let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
+                    ctx.notify(NotificationTarget::Character(char_id), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(victim_char_id), PyRep::Integer(timeout_ft)]);
+                    ctx.notify(NotificationTarget::Character(victim_char_id), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(char_id), PyRep::Integer(timeout_ft)]);
+                }
                 if !is_legal && sys_sec > 0.0 {
                     let old_sec = ctx.db.with_snapshot(|snap| {
                         snap.characters

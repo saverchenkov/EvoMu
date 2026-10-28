@@ -27,134 +27,43 @@ use eve_server::services::combat_crimewatch::{
 use glam::DVec3;
 use std::collections::HashMap;
 
-fn item_rec(
-    item_id: i64,
-    type_id: u32,
-    owner_id: i64,
-    location_id: i64,
-    flag: InventoryFlag,
-    quantity: i32,
-    singleton: bool,
-) -> InventoryItemRecord {
+fn item_rec(item_id: i64, type_id: u32, owner_id: i64, location_id: i64, flag: InventoryFlag, quantity: i32, singleton: bool) -> InventoryItemRecord {
     InventoryItemRecord {
-        item_id,
-        type_id,
-        owner_id,
-        location_id,
-        flag,
-        quantity,
-        singleton,
-        version: 1,
-        dynamic_attributes: HashMap::new(),
-        source_mutaplasmid_id: None,
-        insured_payout_isk: 0.0,
-        is_blueprint_copy: false,
-        blueprint_runs_remaining: None,
+        item_id, type_id, owner_id, location_id, flag, quantity, singleton, version: 1,
+        dynamic_attributes: HashMap::new(), source_mutaplasmid_id: None, insured_payout_isk: 0.0,
+        is_blueprint_copy: false, blueprint_runs_remaining: None,
     }
 }
 
 async fn setup_pilot_in_space(
-    ctx: &ServerContext,
-    client_id: u64,
-    char_id: i64,
-    corp_id: i64,
-    ship_id: i64,
-    ship_type_id: u32,
-    sys_id: u32,
-    pos: DVec3,
+    ctx: &ServerContext, client_id: u64, char_id: i64, corp_id: i64, ship_id: i64, ship_type_id: u32, sys_id: u32, pos: DVec3,
 ) -> SessionState {
     ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.insert(
-            char_id,
-            CharacterRecord {
-                character_id: char_id,
-                user_id: client_id,
-                name: format!("Pilot {char_id}"),
-                corporation_id: corp_id,
-                alliance_id: None,
-                war_faction_id: None,
-                station_id: None,
-                structure_id: None,
-                solar_system_id: sys_id,
-                constellation_id: 20_000_020,
-                region_id: 10_000_002,
-                active_ship_id: ship_id,
-                balance: IskCents::from_isk(100_000_000),
-                plex_balance: 0,
-                loyalty_points: HashMap::new(),
-                standings: HashMap::new(),
-                security_status: 0.0,
-                clone_grade: 2,
-                home_station_id: 60_003_760,
-                race_id: 1,
-                bloodline_id: 1,
-                ancestry_id: 1,
-                school_id: 1,
-                neural: NeuralAttributes::default(),
-                skill_points: 5_000_000.0,
-                activity_status: None,
-                free_skill_points: 0.0,
-                last_clone_jump_unix: 0,
-                jump_fatigue_minutes: 0.0,
-                jump_cooldown_until_unix: 0,
-                jump_fatigue_until_unix: 0,
-                description: String::new(),
-                title: String::new(),
-                gender: 1,
-                create_date_unix: 1_700_000_000,
-                fleet_id: None,
-                autopilot_waypoints: Vec::new(),
-                version: 1,
-                system_epoch: 0,
-            },
-        );
+        snap.characters.insert(char_id, CharacterRecord {
+            character_id: char_id, user_id: client_id, name: format!("Pilot {char_id}"), corporation_id: corp_id,
+            alliance_id: None, war_faction_id: None, station_id: None, structure_id: None, solar_system_id: sys_id,
+            constellation_id: 20_000_020, region_id: 10_000_002, active_ship_id: ship_id, balance: IskCents::from_isk(100_000_000),
+            plex_balance: 0, loyalty_points: HashMap::new(), standings: HashMap::new(), security_status: 0.0,
+            clone_grade: 2, home_station_id: 60_003_760, race_id: 1, bloodline_id: 1, ancestry_id: 1, school_id: 1,
+            neural: NeuralAttributes::default(), skill_points: 5_000_000.0, activity_status: None, free_skill_points: 0.0,
+            last_clone_jump_unix: 0, jump_fatigue_minutes: 0.0, jump_cooldown_until_unix: 0, jump_fatigue_until_unix: 0,
+            description: String::new(), title: String::new(), gender: 1, create_date_unix: 1_700_000_000,
+            fleet_id: None, autopilot_waypoints: Vec::new(), version: 1, system_epoch: 0,
+        });
         if !snap.accounts.values().any(|a| a.user_id == client_id) {
-            snap.accounts.insert(
-                format!("user_{client_id}"),
-                AccountRecord {
-                    user_id: client_id,
-                    username: format!("user_{client_id}"),
-                    password_token: String::new(),
-                    role: 0,
-                    banned_until_unix: None,
-                    ban_reason: None,
-                },
-            );
+            snap.accounts.insert(format!("user_{client_id}"), AccountRecord {
+                user_id: client_id, username: format!("user_{client_id}"), password_token: String::new(),
+                role: 0, banned_until_unix: None, ban_reason: None,
+            });
         }
-        snap.items.insert(
-            ship_id,
-            item_rec(
-                ship_id,
-                ship_type_id,
-                char_id,
-                sys_id as i64,
-                InventoryFlag::None,
-                1,
-                true,
-            ),
-        );
+        snap.items.insert(ship_id, item_rec(ship_id, ship_type_id, char_id, sys_id as i64, InventoryFlag::None, 1, true));
     });
-    let _ = ctx
-        .db
-        .acquire_online_lock(client_id, 7_000 + client_id, Some(char_id), true, ctx.now_unix());
+    let _ = ctx.db.acquire_online_lock(client_id, 7_000 + client_id, Some(char_id), true, ctx.now_unix());
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let _ = sys_handle
-        .spawn_ball_with_combat(
-            Ball {
-                id: ship_id,
-                type_id: ship_type_id,
-                position: pos,
-                velocity: DVec3::ZERO,
-                max_velocity: 300.0,
-                inertia: 2.5,
-                mass: 10_000_000.0,
-                radius: 50.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            ctx.build_type_combat_state(ship_type_id),
-        )
-        .await;
+    let _ = sys_handle.spawn_ball_with_combat(
+        Ball { id: ship_id, type_id: ship_type_id, position: pos, velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 2.5, mass: 10_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop },
+        ctx.build_type_combat_state(ship_type_id),
+    ).await;
     let mut sess = SessionState::new(7_000 + client_id);
     sess.user_id = Some(client_id);
     sess.character_id = Some(char_id);
@@ -394,7 +303,7 @@ async fn test_r4_155_156_smartbomb_safety_invulnerability_and_breacher_dot_letha
     )
     .await
     .expect_err("Smartbomb in highsec with Green safety must be blocked");
-    assert_eq!(sb_err.code, "SafetyLevelRestricted");
+    assert_eq!(sb_err.code, "CantDoInCurrentSafetyLevel");
 
     // 2. Lethal Breacher Pod DoT tick triggers death pipeline and removes destroyed ship ball
     let sys_handle = ctx.systems.get_or_spawn(jita_sys);
@@ -666,55 +575,20 @@ async fn test_r4_158_159_160_161_162_163_exploration_wormhole_dscan_and_salvage(
     let acl_bm_id = 87_161_002i64;
     let folder_id = 87_161_010i64;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.bookmarks.insert(
-            exp_bm_id,
-            BookmarkRecord {
-                bookmark_id: exp_bm_id,
-                owner_id: char_id,
-                folder_id: None,
-                is_shared: false,
-                solar_system_id: sys_id,
-                item_id: None,
-                label: "Expired".into(),
-                memo: String::new(),
-                x: 200_000.0,
-                y: 0.0,
-                z: 0.0,
-            },
-        );
-        snap.bookmark_expiries
-            .insert(exp_bm_id, ctx.now_unix().saturating_sub(10));
-        snap.bookmark_folders.insert(
-            folder_id,
-            BookmarkFolderRecord {
-                folder_id,
-                owner_id: 99_999_999,
-                folder_name: "Private Shared Folder".into(),
-                is_shared: true,
-                corporation_id: None,
-                description: String::new(),
-                admin_group_id: Some(99_999_999),
-                manage_group_id: Some(99_999_999),
-                use_group_id: Some(99_999_999),
-                view_group_id: Some(99_999_999),
-            },
-        );
-        snap.bookmarks.insert(
-            acl_bm_id,
-            BookmarkRecord {
-                bookmark_id: acl_bm_id,
-                owner_id: 99_999_999,
-                folder_id: Some(folder_id),
-                is_shared: true,
-                solar_system_id: sys_id,
-                item_id: None,
-                label: "ACL Restricted".into(),
-                memo: String::new(),
-                x: 200_000.0,
-                y: 0.0,
-                z: 0.0,
-            },
-        );
+        snap.bookmarks.insert(exp_bm_id, BookmarkRecord {
+            bookmark_id: exp_bm_id, owner_id: char_id, folder_id: None, is_shared: false,
+            solar_system_id: sys_id, item_id: None, label: "Expired".into(), memo: String::new(), x: 200_000.0, y: 0.0, z: 0.0,
+        });
+        snap.bookmark_expiries.insert(exp_bm_id, ctx.now_unix().saturating_sub(10));
+        snap.bookmark_folders.insert(folder_id, BookmarkFolderRecord {
+            folder_id, owner_id: 99_999_999, folder_name: "Private Shared Folder".into(), is_shared: true,
+            corporation_id: None, description: String::new(), admin_group_id: Some(99_999_999),
+            manage_group_id: Some(99_999_999), use_group_id: Some(99_999_999), view_group_id: Some(99_999_999),
+        });
+        snap.bookmarks.insert(acl_bm_id, BookmarkRecord {
+            bookmark_id: acl_bm_id, owner_id: 99_999_999, folder_id: Some(folder_id), is_shared: true,
+            solar_system_id: sys_id, item_id: None, label: "ACL Restricted".into(), memo: String::new(), x: 200_000.0, y: 0.0, z: 0.0,
+        });
     });
     let exp_err = ctx
         .dispatch_rpc(

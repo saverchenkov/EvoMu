@@ -368,10 +368,10 @@ async fn test_burst_jammer_t1_t2_radius_fitted_eccm_nonship_filter_multivictim_a
             .await
             .expect("Activate T1 Burst Jammer");
         if i == 0 {
-            // Verify BOTH neutral capsuleer victims received PvP timers and Limited Engagements!
+            // Verify BOTH neutral capsuleer victims received PvP timers (and unprovoked hit must NOT create LE)!
             let now_u = ctx.now_unix_secs();
-            assert!(with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(char_id, v_char_a, now_u)));
-            assert!(with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(char_id, v_char_b, now_u)));
+            assert!(!with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(char_id, v_char_a, now_u)));
+            assert!(!with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(char_id, v_char_b, now_u)));
             let (pvp_a, pvp_b) = ctx.crimewatch.with_crimewatch(|cw| {
                 (
                     cw.states.get(&v_char_a).map(|s| s.pvp_timer_until_unix).unwrap_or(0),
@@ -493,12 +493,12 @@ async fn test_burst_jammer_t1_t2_radius_fitted_eccm_nonship_filter_multivictim_a
         .dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(low_burst_id), PyRep::String("ecmBurst".into()), PyRep::None, PyRep::Integer(0)], &kw, None)
         .await
         .expect_err("Lowsec Burst Jammer on Safety Green must fail");
-    assert_eq!(low_green_err.code, "SafetyLevelRestricted");
+    assert_eq!(low_green_err.code, "CantDoInCurrentSafetyLevel");
 
-    ctx.dispatch_rpc(&mut sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(1)], &kw, None).await.unwrap();
+    ctx.dispatch_rpc(&mut sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(0)], &kw, None).await.unwrap();
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(low_burst_id), PyRep::String("ecmBurst".into()), PyRep::None, PyRep::Integer(0)], &kw, None)
         .await
-        .expect("Lowsec Burst Jammer on Safety Yellow must succeed");
+        .expect("Lowsec Burst Jammer on Safety Red must succeed");
     let cw_low = ctx.crimewatch.with_crimewatch(|cw| cw.states.get(&char_id).cloned().unwrap_or_default());
     assert!(cw_low.suspect_flag_until_unix >= ctx.now_unix_secs() + 895, "Lowsec Burst Jammer near neutral must grant 15m Suspect flag");
     assert_eq!(cw_low.criminal_flag_until_unix, 0, "Lowsec Burst Jammer must NOT grant Criminal flag");

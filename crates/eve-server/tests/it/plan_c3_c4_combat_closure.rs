@@ -596,7 +596,7 @@ async fn test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns() {
     assert!(with_combat_runtime(&ctx, |rt| rt.npc_entities.values().any(|n| n.solar_system_id == lowsec_sys_id && n.archetype == "CloneSoldier")), "Clone Soldier must respawn via SP-7 tick after cooldown expires");
 
     // 2. Test NpcSpawnManager::step_ai (Idle -> Chase -> Orbit/Attack), SP-7 timer scheduling, and target switching
-    let sys_id = 30_000_142u32;
+    let sys_id = 30_000_144u32;
     let (ship_a, ship_b, drone_a, cap_c) = (610_040_001i64, 610_040_002i64, 610_040_003i64, 610_040_004i64);
     let (char_a, char_b, char_c) = (90_000_001i64, 90_000_002i64, 90_000_003i64);
 

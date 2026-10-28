@@ -49,17 +49,29 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             }
             let now_unix = ctx.now_unix_secs();
             if method == "Eject" {
-                let has_weapon_timer = ctx
-                    .crimewatch
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .states
-                    .get(&char_id)
-                    .is_some_and(|cw| cw.is_weapon_timer_active(now_unix));
+                let (has_weapon_timer, has_criminal_timer) = {
+                    let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());
+                    let st = cw.states.get(&char_id);
+                    (
+                        st.is_some_and(|s| s.is_weapon_timer_active(now_unix)),
+                        st.is_some_and(|s| s.is_criminal(now_unix)),
+                    )
+                };
                 if has_weapon_timer {
                     return Some(Err(BridgeRpcError {
-                        code: "CannotEjectWithWeaponTimer".into(),
+                        code: "CannotEjectActiveWeaponsTimer".into(),
                         message: "Cannot eject from ship while a weapons timer is active".into(),
+                    }));
+                }
+                let sys_sec = session
+                    .solar_system_id
+                    .and_then(|sid| ctx.sde.solar_systems.get(&sid))
+                    .map(|s| s.security_status)
+                    .unwrap_or(0.0);
+                if has_criminal_timer && sys_sec >= 0.45 {
+                    return Some(Err(BridgeRpcError {
+                        code: "CannotEjectInvolvedInCrime".into(),
+                        message: "Cannot eject from ship while involved in a high-security crime".into(),
                     }));
                 }
             }
@@ -262,6 +274,32 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     }));
                 };
                 if cur_ship_id != target_ship_id {
+                    let (has_weapon_timer, has_criminal_timer) = {
+                        let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());
+                        let st = cw.states.get(&char_id);
+                        (
+                            st.is_some_and(|s| s.is_weapon_timer_active(now_unix)),
+                            st.is_some_and(|s| s.is_criminal(now_unix)),
+                        )
+                    };
+                    if has_weapon_timer {
+                        return Some(Err(BridgeRpcError {
+                            code: "CannotStoreShipActiveWeaponsTimer".into(),
+                            message: "Cannot board or switch ships in space while a weapons timer is active".into(),
+                        }));
+                    }
+                    let sys_sec = ctx
+                        .sde
+                        .solar_systems
+                        .get(&sys_id)
+                        .map(|s| s.security_status)
+                        .unwrap_or(0.0);
+                    if has_criminal_timer && sys_sec >= 0.45 {
+                        return Some(Err(BridgeRpcError {
+                            code: "CannotBoardShipInHighSecAsCriminal".into(),
+                            message: "Cannot board a ship in high-security space while a Criminal Timer is active".into(),
+                        }));
+                    }
                     let sys_handle = ctx.systems.get_or_spawn(sys_id);
                     let cur_ball = sys_handle.get_ball_snapshot(cur_ship_id).await.ok().flatten();
                     let tgt_ball = sys_handle
@@ -328,7 +366,6 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 if !is_ship {
                     return Err(BridgeRpcError { code: "NotAShip".into(), message: format!("Item {target_ship_id} is not a ship") });
                 }
-                // parity: feat:ships.board-ship-skill-and-clone-check
                 ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, ship.type_id)?;
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.active_ship_id = target_ship_id;
@@ -1220,12 +1257,10 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             Some(res)
         }
 
-        // parity: feat:character.safe-logoff, plan:SP-6, rpc:ship.SafeLogoff
         ("ship", "SafeLogoff") => {
             Some(crate::sp6_lifecycle::handle_safe_logoff(ctx, session).await)
         }
 
-        // parity: feat:character.safe-logoff, plan:SP-6, rpc:ship.AbortSafeLogoff
         ("ship", "AbortSafeLogoff") => Some(
             crate::sp6_lifecycle::handle_abort_safe_logoff(
                 ctx,

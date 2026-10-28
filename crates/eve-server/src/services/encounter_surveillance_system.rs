@@ -257,10 +257,7 @@ pub async fn handle_ess_link(
             .unwrap_or(SafetyLevel::Red)
     });
     if safety == SafetyLevel::Green {
-        return Err(BridgeRpcError {
-            code: "SafetyLevelRestricted".into(),
-            message: "UserError: CantDoInCurrentSafetyLevel - Safety Green blocks linking to an ESS bank because it triggers a Suspect Timer".into(),
-        });
+        return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
     }
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);

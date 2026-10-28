@@ -574,17 +574,8 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                 let safety = with_combat_runtime(ctx, |rt| {
                     rt.safety_levels.get(&char_id).copied().unwrap_or(SafetyLevel::Red)
                 });
-                if safety == SafetyLevel::Green && sys_sec > 0.0 {
-                    return Some(Err(BridgeRpcError {
-                        code: "SafetyLevelRestricted".into(),
-                        message: "UserError: CantDoInCurrentSafetyLevel - Safety Green blocks activating Smartbombs in empire space".into(),
-                    }));
-                }
-                if safety == SafetyLevel::Yellow && sys_sec >= 0.45 {
-                    return Some(Err(BridgeRpcError {
-                        code: "SafetyLevelRestricted".into(),
-                        message: "UserError: CantDoInCurrentSafetyLevel - Safety Yellow blocks activating Smartbombs in high-security space".into(),
-                    }));
+                if sys_sec > 0.0 && safety != SafetyLevel::Red {
+                    return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
                 }
                 let is_overloaded = m.state == eve_dogma::ModuleState::Overloaded;
                 let fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
@@ -671,6 +662,7 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                                 .or_else(|| snap.items.get(&b.id).map(|i| i.owner_id).filter(|&oid| snap.characters.contains_key(&oid)))
                         })
                         .or_else(|| with_combat_runtime(ctx, |rt| rt.active_drones_in_space.get(&b.id).map(|d| d.owner_char_id)))
+                        .or_else(|| ctx.active_fighters.read().ok().and_then(|af| af.get(&b.id).map(|f| f.owner_char_id)))
                         .or_else(|| ctx.active_scanner_probes.read().ok().and_then(|ap| ap.get(&b.id).map(|p| p.owner_char_id)));
                         if let Some(vcid) = victim_char_opt {
                             if crate::services::space_destiny::is_location_change_invulnerable(ctx, vcid, now_unix) {
@@ -679,6 +671,9 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                         }
                         if let Ok(Some((applied, destroyed, _))) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys_handle, sys_id, char_id, b.id, sb_dmg, 5.0, now_unix).await {
                             hit_ball_ids.push(b.id);
+                            if ctx.active_fighters.read().is_ok_and(|af| af.contains_key(&b.id)) {
+                                crate::services::combat_crimewatch::apply_damage_to_fighter_squadron(ctx, sys_id, b.id, sb_dmg).await;
+                            }
                             record_killmail_assist_action(ctx, b.id, char_id, attacker_ball.type_id, m.type_id, applied, false, now_unix);
                             if destroyed {
                                 if is_probe_b && !destroyed_probe_ids.contains(&b.id) {
@@ -741,10 +736,6 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                     .trigger_weapon_timer(char_id, now_unix);
                 let mut concord_triggered = false;
                 for (vcid, is_pod) in illegal_capsuleer_hits {
-                    with_mut_combat_runtime(ctx, |rt| {
-                        rt.add_limited_engagement(char_id, vcid, now_unix);
-                        rt.add_limited_engagement(vcid, char_id, now_unix);
-                    });
                     if sys_sec > 0.0 {
                         if sys_sec >= 0.45 {
                             concord_triggered = true;
@@ -820,10 +811,7 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                         .unwrap_or(SafetyLevel::Red)
                 });
                 if sys_sec > 0.0 && safety == SafetyLevel::Green {
-                    return Some(Err(BridgeRpcError {
-                        code: "SafetyLevelRestricted".into(),
-                        message: "Bomb launchers cannot be activated in low-security space while safety is set to Green".into(),
-                    }));
+                    return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
                 }
 
                 let loaded_bomb_opt = ctx.db.with_snapshot(|snap| {
@@ -908,7 +896,8 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                         let bomb_vic = ctx.db.with_snapshot(|snap| {
                             snap.characters.values().find(|c| c.active_ship_id == b.id).map(|c| c.character_id)
                                 .or_else(|| snap.items.get(&b.id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
-                        });
+                        })
+                        .or_else(|| ctx.active_fighters.read().ok().and_then(|af| af.get(&b.id).map(|f| f.owner_char_id)));
                         if let Some(vcid) = bomb_vic {
                             if crate::services::space_destiny::is_location_change_invulnerable(ctx, vcid, now_unix) {
                                 continue;
@@ -927,6 +916,9 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                         let scaled_dmg = bomb_dmg.scaled(sig_factor);
                         if scaled_dmg.total() > 0.0 {
                             if let Ok(Some((app, destroyed, _))) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys_handle, sys_id, char_id, b.id, scaled_dmg, 12.0, now_unix).await {
+                                if ctx.active_fighters.read().is_ok_and(|af| af.contains_key(&b.id)) {
+                                    crate::services::combat_crimewatch::apply_damage_to_fighter_squadron(ctx, sys_id, b.id, scaled_dmg).await;
+                                }
                                 total_dmg_applied += app;
                                 hit_targets.push(b.id);
                                 record_killmail_assist_action(
@@ -957,20 +949,23 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                                             cw.get_or_create(char_id).pvp_timer_until_unix = now_unix.saturating_add(900);
                                             cw.get_or_create(vcid).pvp_timer_until_unix = now_unix.saturating_add(900);
                                         }
-                                        let is_legal = ctx.db.with_snapshot(|snap| {
-                                            is_legal_war_or_suspect_target(snap, char_id, vcid, now_unix)
-                                        }) || {
+                                        let v_suspect_or_crim = {
                                             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
                                             let st = cw.get_or_create(vcid);
                                             st.is_suspect(now_unix) || st.is_criminal(now_unix)
-                                        } || with_combat_runtime(ctx, |rt| {
+                                        };
+                                        let is_legal = ctx.db.with_snapshot(|snap| {
+                                            is_legal_war_or_suspect_target(snap, char_id, vcid, now_unix)
+                                        }) || v_suspect_or_crim || with_combat_runtime(ctx, |rt| {
                                             rt.has_limited_engagement_with(vcid, char_id, now_unix)
                                         });
-                                        if !is_legal {
+                                        if v_suspect_or_crim || with_combat_runtime(ctx, |rt| rt.has_limited_engagement_with(char_id, vcid, now_unix)) {
                                             with_mut_combat_runtime(ctx, |rt| {
                                                 rt.add_limited_engagement(char_id, vcid, now_unix);
                                                 rt.add_limited_engagement(vcid, char_id, now_unix);
                                             });
+                                        }
+                                        if !is_legal {
                                             if sys_sec > 0.0 {
                                                 let is_pod = b.type_id == 670;
                                                 {
@@ -1270,6 +1265,10 @@ pub async fn activate_missile_or_breacher_launcher(
                     rt.in_flight_missiles.insert(missile_ball_id, in_flight);
                 });
 
+                ctx.crimewatch
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .trigger_weapon_timer(char_id, now_unix);
                 let defer_impact = is_fof_missile && has_explicit_target;
                 if defer_impact {
                     return Ok(PyRep::keyval([
@@ -1313,10 +1312,6 @@ pub async fn activate_missile_or_breacher_launcher(
                     false,
                     now_unix,
                 );
-                ctx.crimewatch
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .trigger_weapon_timer(char_id, now_unix);
                 return Ok(PyRep::keyval([
                     ("moduleID", PyRep::Integer(module_id)),
                     ("targetID", PyRep::Integer(target_ball_id)),

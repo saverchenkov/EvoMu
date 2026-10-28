@@ -1,18 +1,4 @@
 //! `combat_npcs_drones` — Salvagers, Tractor Beams, Complete Drone Lifecycle & NPC AI / Factions / Clone Soldiers / EWAR / Remote Repair / Bounties (`C-4`, `C-7`).
-//!
-// parity: plan:C-4, plan:C-7
-// parity: feat:modules.salvager, feat:combat.wreck-size-salvage-difficulty, feat:modules.tractor-beam
-// parity: feat:drones.launch-drones, feat:drones.recall-drones, feat:drones.return-orbit, feat:drones.engage-target
-// parity: feat:drones.assist-guard, feat:drones.aggressive-passive, feat:drones.abandon-scoop, feat:drones.reconnect-drones
-// parity: feat:drones.drone-bandwidth, feat:drones.drone-control-range, feat:drones.salvage-drones, feat:drones.logistic-drones
-// parity: feat:drones.ewar-drones, feat:drones.sentry-drones, feat:drones.drone-hp-loss, feat:drones.sentry-drone-scoop-distance
-// parity: feat:drones.gecko-augmented-mutated-drones, feat:drones.gecko-subverted-bandwidth
-// parity: feat:combat.bounty-payout-npc, feat:npc.belt-rats, feat:npc.npc-ai-targeting, feat:npc.npc-damage-types
-// parity: feat:npc.npc-loot, feat:npc.sentry-guns, feat:npc.sentry-gun-grid-aggression, feat:npc.drifters
-// parity: feat:npc.triglavians, feat:npc.sleepers, feat:npc.edencom-npc, feat:npc.rogue-drones
-// parity: feat:npc.incursion-npc, feat:npc.navy-npc, feat:npc.npc-hauler, feat:npc.npc-spawn-encounter
-// parity: feat:npc.npc-standings-aggression, feat:npc.officer-npc, feat:npc.npc-ewar-application
-// parity: feat:npc.npc-remote-repair, feat:npc.npc-target-switching, feat:npc.clone-soldier-spawns
 
 #![forbid(unsafe_code)]
 
@@ -67,7 +53,6 @@ impl DroneSpaceState {
     /// Computes the turret-style hit multiplier `(0.05..=1.0]` for this drone engaging `target_ball`
     /// using `effective_tracking_speed` (`attr 160`), `optimal_range` (`attr 54`), `effective_falloff_range` (`attr 158`),
     /// angular velocity `omega`, and target signature radius (`attr 552`).
-    // parity: feat:drones.sentry-drone-stationary-tracking
     pub fn compute_combat_hit_multiplier(
         &self,
         ctx: &ServerContext,
@@ -519,7 +504,6 @@ pub async fn handle_npcs_drones(
                 ctx.invalidate_ship_fitting(ship_id);
                 ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
             }
-            // parity: feat:drones.bandwidth-and-bay-constraints
             let (max_drones_allowed, ship_bw, _ship_drone_cap) = pilot_drone_capacity(ctx, char_id, ship_id, ship_fit_opt.as_ref());
             let (cur_count, cur_bw) = with_combat_runtime(ctx, |rt| {
                 let active: Vec<&DroneSpaceState> = rt
@@ -610,7 +594,6 @@ pub async fn handle_npcs_drones(
                         fit_eff.or(sde_base)
                     }
                 };
-                // parity: feat:drones.sentry-drone-stationary-tracking
                 let raw_vel = attr(37).unwrap_or(1_500.0);
                 let is_sentry = raw_vel < 1.0;
                 let max_vel = if is_sentry { 0.0 } else { raw_vel };
@@ -915,6 +898,22 @@ pub async fn handle_npcs_drones(
                     .collect()
             });
 
+            let has_offensive = drones.iter().any(|d| d.group_id != 640 && (d.damage_vector.total() > 0.0 || matches!(d.group_id, 639 | 641 | 544 | 545)));
+            let has_logi = drones.iter().any(|d| d.group_id == 640);
+            if has_offensive {
+                if let Err(e) = super::crimewatch_timers::evaluate_and_record_pvp_aggression(
+                    ctx, char_id, ship_id, sys_id, target_id, target_ball.type_id == 670,
+                ) {
+                    return Some(Err(e));
+                }
+            } else if has_logi {
+                if let Err(e) = super::crimewatch_timers::evaluate_and_record_remote_assistance(
+                    ctx, char_id, ship_id, sys_id, target_id,
+                ) {
+                    return Some(Err(e));
+                }
+            }
+
             let mut total_dmg_dealt = 0.0;
             let mut total_repaired = 0.0;
             let mut ewar_applied = false;
@@ -1029,12 +1028,12 @@ pub async fn handle_npcs_drones(
             }
 
             if total_dmg_dealt > 0.0 || ewar_applied {
-                ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).trigger_weapon_timer(char_id, now_unix);
                 let victim_char_opt = ctx.db.with_snapshot(|snap| {
                     snap.characters.values().find(|c| c.active_ship_id == target_id).map(|c| c.character_id)
                         .or_else(|| snap.items.get(&target_id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
                 });
                 if let Some(vcid) = victim_char_opt.filter(|&v| v != char_id) {
+                    ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).trigger_weapon_timer(char_id, now_unix);
                     crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, now_unix);
                 } else {
                     crate::sp6_lifecycle::record_npc_aggression_timer(ctx, char_id, now_unix);

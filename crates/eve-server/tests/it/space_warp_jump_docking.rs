@@ -288,7 +288,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
         )
         .await
         .unwrap_err();
-    assert_eq!(dock_crim_err.code, "CriminalTimerActive");
+    assert_eq!(dock_crim_err.code, "CantDockGlobalCriminalFlag");
 
     // Capsule (type 670) CAN dock in highsec even while a Criminal Timer is active
     let (_, mut pod_ball) = sys_handle.get_ball_snapshot(first_ship_id).await.unwrap().unwrap();

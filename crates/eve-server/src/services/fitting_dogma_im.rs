@@ -370,11 +370,21 @@ pub(crate) async fn handle_dogma_im(
             };
             let destroy_res = ctx.db.try_with_mut_snapshot(|snap| {
                 if let Some(item) = snap.items.get(&item_id) {
-                    if item.owner_id != char_id {
-                        return Ok(None);
-                    }
                     let loc = item.location_id;
                     let flag_u16 = item.flag as u16;
+                    let is_struct_slot = matches!(flag_u16, 11..=34 | 92..=94 | 164..=171);
+                    let struct_opt = snap.structures.get(&loc);
+                    if let Some(st) = struct_opt.filter(|st| is_struct_slot && item.owner_id == st.owner_corp_id) {
+                        let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
+                        if st.owner_corp_id != caller_corp {
+                            return Err(BridgeRpcError { code: "StructureOwnershipViolation".into(), message: "Only the owning corporation can destroy structure fittings".into() });
+                        }
+                        if !crate::services::station_structure::structure_lifecycle_rpc::has_structure_manager_role(snap, session, char_id, caller_corp) {
+                            return Err(BridgeRpcError { code: "InsufficientCorpRoles".into(), message: "Destroying structure fittings requires Director or Station Manager role".into() });
+                        }
+                    } else if item.owner_id != char_id {
+                        return Err(BridgeRpcError { code: "ItemNotOwnedByCharacter".into(), message: "Cannot destroy an item not owned by character".into() });
+                    }
                     if (125..=129).contains(&flag_u16) {
                         let has_fitted_modules = snap.items.values().any(|other| {
                             other.location_id == loc

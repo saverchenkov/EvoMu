@@ -628,7 +628,7 @@ pub(crate) async fn handle_module_cycles(
                     && already_active
                     && matches!(
                         mod_type.group_id,
-                        40 | 1156 | 41 | 1697 | 67 | 71 | 76 | 72 | 1122 | 650 | 80 | 353
+                        40 | 1156 | 41 | 1697 | 67 | 71 | 76 | 1122 | 650 | 80 | 353
                     )
                 {
                     return Some(Err(BridgeRpcError {
@@ -712,7 +712,6 @@ pub(crate) async fn handle_module_cycles(
                 }
 
 
-                // parity: feat:modules.stasis-grappler-mechanics, feat:modules.emergency-hull-energizer, feat:modules.mutadaptive-remote-armor-repairer
                 let EwarCapitalPrep {
                     warp_scramble_points,
                     disables_target_mwd_mjd,
@@ -740,7 +739,7 @@ pub(crate) async fn handle_module_cycles(
                     mutadaptive_spool_max,
                 } = match prepare_ewar_and_capital_module(
                     ctx,
-                    &sys,
+                    &sys, sys_id,
                     char_id,
                     ship_id,
                     ship_group_id,
@@ -1040,32 +1039,15 @@ pub(crate) async fn handle_module_cycles(
             };
 
             // Burst Jammer / ECM Burst (`group_id == 80 || group_id == 353`, e.g. `580` Burst Jammer I, `2117` Burst Jammer II)
-            // & Smartbomb (`group_id == 72`) Crimewatch safety check (`feat:crimewatch.safety-setting-action-block`)
-            // parity: feat:crimewatch.safety-setting-action-block, feat:crimewatch.limited-engagement-duel
+            // & Smartbomb (`group_id == 72`) Crimewatch safety check: require Safety Red in all empire space (`sys_sec > 0.0`)
             if matches!(mod_type.group_id, 72 | 80 | 353) {
-                let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                    rt.modified_system_securities.get(&sys_id).copied()
-                })
-                .unwrap_or_else(|| {
-                    ctx.sde
-                        .solar_systems
-                        .get(&sys_id)
-                        .map(|s| s.security_status)
-                        .unwrap_or(1.0)
-                });
+                let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| rt.modified_system_securities.get(&sys_id).copied())
+                    .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
                 let safety = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                    rt.safety_levels
-                        .get(&char_id)
-                        .copied()
-                        .unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red)
+                    rt.safety_levels.get(&char_id).copied().unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red)
                 });
-                let is_green = safety == crate::services::combat_crimewatch::SafetyLevel::Green;
-                let is_yellow = safety == crate::services::combat_crimewatch::SafetyLevel::Yellow;
-                if (sys_sec >= 0.45 && (is_green || is_yellow)) || (sys_sec > 0.0 && is_green) {
-                    return Some(Err(BridgeRpcError {
-                        code: "SafetyLevelRestricted".into(),
-                        message: "UserError: CantDoInCurrentSafetyLevel - Cannot activate AoE offensive module in empire space with current ship safety setting".into(),
-                    }));
+                if sys_sec > 0.0 && safety != crate::services::combat_crimewatch::SafetyLevel::Red {
+                    return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
                 }
             }
             if mod_type.group_id == 1122 {
@@ -1210,6 +1192,20 @@ pub(crate) async fn handle_module_cycles(
                 }));
             }
 
+            if let Err(e) = evaluate_module_cycle_aggression_or_assistance(
+                ctx, &sys, sys_id, char_id, ship_id, mod_type.group_id, target_id_opt,
+            ).await {
+                let _ = sys.remove_module_cycle(ship_id, module_id).await;
+                if cap_need > 0.0 {
+                    if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
+                        let _ = sys
+                            .set_capacitor(ship_id, (cs.capacitor + cap_need).min(cs.max_capacitor))
+                            .await;
+                    }
+                }
+                return Some(Err(e));
+            }
+
             let instant_rep_opt = match run_pre_notify_instant_module_effects(
                 ctx,
                 &sys,
@@ -1240,6 +1236,9 @@ pub(crate) async fn handle_module_cycles(
                     return Some(Err(e));
                 }
             };
+            if matches!(mod_type.group_id, 72 | 80 | 353 | 862) {
+                ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).trigger_weapon_timer(char_id, ctx.now_unix());
+            }
             ctx.db.with_mut_snapshot(|snap| {
                 if snap.items.contains_key(&module_id) {
                     snap.module_active_states.insert(module_id);
@@ -1251,7 +1250,7 @@ pub(crate) async fn handle_module_cycles(
             let _ = fit.activate_module(module_id, is_overloaded, &ctx.sde);
             let is_cycle_gated = matches!(
                 mod_type.group_id,
-                40 | 1156 | 41 | 1697 | 67 | 71 | 76 | 72 | 1122 | 650 | 80 | 353
+                72 | 40 | 1156 | 41 | 1697 | 67 | 71 | 76 | 1122 | 650 | 80 | 353
             );
             if is_cycle_gated || (repeat == 0 && reactivation_delay_s > 0.0) {
                 let total_delay = if mod_type.group_id == 40 {

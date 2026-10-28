@@ -1,533 +1,680 @@
-//! Integration tests closing `crimewatch.*` and `drones.*` parity rows:
+//! End-to-end integration tests closing Crimewatch parity rows:
 //! - `feat:crimewatch.concord-response-scaling`
+//! - `feat:crimewatch.criminal-wreck-auto-abandon`
 //! - `feat:crimewatch.limited-engagement-duel`
-//! - `feat:crimewatch.safety-setting-action-block`
 //! - `feat:crimewatch.suspect-timer-looting-ess`
-//! - `feat:drones.bandwidth-and-bay-constraints`
-//! - `feat:drones.sentry-drone-stationary-tracking`
-//! - `feat:drones.drone-npc-aggro-switching`
-//! - `feat:drones.carrier-launch-tubes-and-flight-control`
+//! - `feat:crimewatch.safety-setting-action-block`
 
-use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord};
-use eve_destiny::{Ball, MovementMode, SlimItemMeta, TargetLock};
+use eve_db::{AccountRecord, CharacterRecord, InventoryFlag, InventoryItemRecord, IskCents, NeuralAttributes, TrainedSkillRecord};
+use eve_destiny::{Ball, DamageVector, MovementMode, SlimItemMeta};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use eve_server::combat::crimewatch::{AggressionEvaluation, CrimeWatchDirector};
 use eve_server::router::ServerContext;
+use eve_server::services::combat_crimewatch::with_combat_runtime;
+use eve_server::sp6_lifecycle::tick_background_cluster;
 use glam::DVec3;
 use std::collections::HashMap;
 
-fn new_ctx() -> ServerContext {
-    let sde = std::sync::Arc::new(
-        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path())
-            .expect("open evomu_sde.sqlite"),
-    );
-    let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
-    ServerContext::with_sde_and_repository(sde, db)
+pub(crate) fn new_ctx() -> ServerContext {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    ctx
 }
 
-async fn call_service(
+pub(crate) async fn rpc(
     ctx: &ServerContext,
     sess: &mut SessionState,
     svc: &str,
+    bound: Option<u64>,
     method: &str,
-    args: Vec<PyRep>,
-    kw: HashMap<String, PyRep>,
+    args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    eve_server::services::combat_crimewatch::dispatch_combat_rpc(ctx, sess, svc, method, &args, &kw)
-        .await
+    ctx.dispatch_rpc(sess, svc, bound, method, args, &HashMap::new(), None).await
 }
 
-fn make_session(
-    sid: u64,
-    user_id: u32,
-    char_id: i64,
-    corp_id: i64,
-    station_id: Option<i64>,
-    sys_id: u32,
-    ship_id: Option<i64>,
-) -> SessionState {
-    let mut sess = SessionState::new(sid);
-    sess.user_id = Some(user_id as u64);
-    sess.character_id = Some(char_id);
-    sess.corporation_id = Some(corp_id);
-    sess.station_id = station_id;
-    sess.solar_system_id = Some(sys_id);
-    sess.ship_id = ship_id;
-    sess
-}
-
-fn seed_item(
-    ctx: &ServerContext,
-    item_id: i64,
-    type_id: u32,
-    owner_id: i64,
-    location_id: i64,
-    flag: InventoryFlag,
-    quantity: i32,
-    singleton: bool,
-) {
+pub(crate) fn seed_item(ctx: &ServerContext, item_id: i64, type_id: u32, owner_id: i64, location_id: i64, flag: InventoryFlag, quantity: i32, singleton: bool) {
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            item_id,
-            InventoryItemRecord {
-                item_id,
-                type_id,
-                owner_id,
-                location_id,
-                flag,
-                quantity,
-                singleton,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
+        snap.items.insert(item_id, InventoryItemRecord { item_id, type_id, owner_id, location_id, flag, quantity, singleton, version: 1, ..Default::default() });
     });
 }
 
-async fn spawn_ship_ball(ctx: &ServerContext, sys_id: u32, ship_id: i64, type_id: u32, owner_id: i64, x: f64) {
+pub(crate) async fn spawn_pilot(
+    ctx: &ServerContext, sid: u64, char_id: i64, corp_id: i64, ship_id: i64, ship_type_id: u32, sys_id: u32, pos: DVec3,
+) -> SessionState {
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.insert(char_id, CharacterRecord {
+            character_id: char_id, user_id: sid, name: format!("Pilot {char_id}"), corporation_id: corp_id,
+            alliance_id: None, war_faction_id: None, station_id: None, structure_id: None, solar_system_id: sys_id,
+            constellation_id: 20_000_020, region_id: 10_000_002, active_ship_id: ship_id,
+            balance: IskCents::from_isk(500_000_000), plex_balance: 0, loyalty_points: HashMap::new(),
+            standings: HashMap::new(), security_status: 2.0, clone_grade: 2, home_station_id: 60_003_760,
+            race_id: 1, bloodline_id: 1, ancestry_id: 1, school_id: 1, neural: NeuralAttributes::default(),
+            skill_points: 10_000.0 * 1_000.0, activity_status: None, free_skill_points: 0.0,
+            last_clone_jump_unix: 0, jump_fatigue_minutes: 0.0, jump_cooldown_until_unix: 0, jump_fatigue_until_unix: 0,
+            description: String::new(), title: String::new(), gender: 1, create_date_unix: 1_700_000_000,
+            fleet_id: None, autopilot_waypoints: Vec::new(), version: 1, system_epoch: 0,
+        });
+        snap.accounts.entry(format!("u_{sid}")).or_insert(AccountRecord {
+            user_id: sid, username: format!("u_{sid}"), password_token: String::new(), role: 0, banned_until_unix: None, ban_reason: None,
+        });
+        let sk = snap.skills.entry(char_id).or_default();
+        for tid in [3429, 3436, 11579] {
+            sk.insert(tid, TrainedSkillRecord { type_id: tid, level: 5, skill_points: 256_000.0 });
+        }
+    });
+    seed_item(ctx, ship_id, ship_type_id, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    let _ = ctx.db.acquire_online_lock(sid, 10_000 + sid, Some(char_id), true, ctx.now_unix());
     let sys_h = ctx.systems.get_or_spawn(sys_id);
-    let _ = sys_h
-        .spawn_ball_with_meta(
-            Ball {
-                id: ship_id,
-                type_id,
-                position: DVec3::new(x, 0.0, 0.0),
-                velocity: DVec3::ZERO,
-                max_velocity: 300.0,
-                inertia: 1.0,
-                mass: 10_000_000.0,
-                radius: 100.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            ctx.build_type_combat_state(type_id),
-            SlimItemMeta {
-                group_id: 26,
-                category_id: 6,
-                owner_id,
-                char_id: Some(owner_id),
-                corp_id: 1000009,
-                alliance_id: -1,
-                security_status: 0.0,
-                is_cloaked: false,
-            },
-        )
-        .await;
+    let grp = ctx.sde.types.get(&ship_type_id).map(|t| t.group_id).unwrap_or(25);
+    let _ = sys_h.spawn_ball_with_meta(
+        Ball { id: ship_id, type_id: ship_type_id, position: pos, velocity: DVec3::ZERO, max_velocity: 320.0, inertia: 2.0, mass: 1_200_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop },
+        ctx.build_type_combat_state(ship_type_id),
+        SlimItemMeta { group_id: grp, category_id: 6, owner_id: char_id, char_id: Some(char_id), corp_id, alliance_id: -1, security_status: 2.0, is_cloaked: false },
+    ).await;
+    let mut sess = SessionState::new(10_000 + sid);
+    sess.user_id = Some(sid);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(corp_id);
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(sys_id);
+    sess
+}
+
+pub(crate) fn fit_online(ctx: &ServerContext, char_id: i64, ship_id: i64, mod_id: i64, mod_tid: u32, flag: InventoryFlag, ammo: Option<(i64, u32, i32)>) {
+    seed_item(ctx, mod_id, mod_tid, char_id, ship_id, flag, 1, true);
+    if let Some((aid, atid, qty)) = ammo {
+        seed_item(ctx, aid, atid, char_id, ship_id, flag, qty, false);
+    }
+    let req_skills: Vec<u32> = ctx.sde.types.get(&mod_tid).map(|t| {
+        [182u16, 183, 184, 1285, 1289, 1290].into_iter()
+            .filter_map(|a| t.default_attributes.get(&a).copied())
+            .filter(|&v| v > 0.0).map(|v| v as u32).collect()
+    }).unwrap_or_default();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(mod_id, true);
+        let sk = snap.skills.entry(char_id).or_default();
+        for tid in req_skills.into_iter().chain([3413, 3426]) {
+            sk.insert(tid, TrainedSkillRecord { type_id: tid, level: 5, skill_points: 256_000.0 });
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+}
+
+pub(crate) async fn lock_target(ctx: &ServerContext, sess: &mut SessionState, sys_id: u32, target_id: i64) {
+    rpc(ctx, sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(target_id)]).await.expect("dogmaIM.AddTarget");
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    for _ in 0..60 {
+        let _ = sys_h.step_manual(1.0).await;
+    }
+}
+
+fn find_wreck_of_owner(ctx: &ServerContext, owner_id: i64, sys_id: u32) -> i64 {
+    ctx.db.with_snapshot(|s| {
+        s.items
+            .values()
+            .find(|i| {
+                i.owner_id == owner_id
+                    && i.location_id == sys_id as i64
+                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 186)
+            })
+            .map(|i| i.item_id)
+            .expect("Expected real wreck spawned by death_pipeline")
+    })
 }
 
 #[tokio::test]
 async fn test_crimewatch_concord_response_scaling_and_invulnerable_enforcement() {
+    // parity: feat:crimewatch.concord-response-scaling
+    eve_testkit::attest(&["feat:crimewatch.concord-response-scaling"]);
 
-    let ctx = ServerContext::new();
-    let attacker_char = 90_000_001;
-    let victim_char = 90_000_002;
-    let attacker_ship = 910_001;
-    let victim_ship = 910_002;
-    let jita_sys = 30_000_142;
-
-    // 1. Verify exact CONCORD response scaling table across 0.5–1.0 security ratings
-    for (sec, expected_delay_s) in [
-        (0.5, 19.0),
-        (0.6, 14.0),
-        (0.7, 11.0),
-        (0.8, 8.0),
-        (0.9, 6.0),
-        (1.0, 6.0),
-    ] {
-        let mut cw = CrimeWatchDirector::new();
-        let eval = cw.handle_combat_aggression(attacker_char, victim_char, attacker_ship, jita_sys, sec, false, 1_000);
-        match eval {
-            AggressionEvaluation::CriminalFlagTriggered { concord_delay_sec, arrival_unix } => {
-                assert!((concord_delay_sec - expected_delay_s).abs() < 1e-6);
-                assert_eq!(arrival_unix, 1_000 + expected_delay_s as u64);
-            }
-            other => panic!("Expected CriminalFlagTriggered at sec {sec}, got {other:?}"),
-        }
+    // 1. Live SDE high-sec solar systems across all 6 response tiers via real router `dogmaIM.Activate`
+    let tiers: [(u32, u64); 6] = [
+        (30_000_010, 19), // Chidah (~0.5)
+        (30_000_009, 14), // Sooma (~0.6)
+        (30_000_026, 11), // Ordize (~0.7)
+        (30_000_002, 8),  // Lashesih (~0.8)
+        (30_000_142, 6),  // Jita (~0.9)
+        (30_100_032, 6),  // Manifest (1.0)
+    ];
+    for (idx, (sys_id, expected_delay_s)) in tiers.into_iter().enumerate() {
+        let ctx = new_ctx();
+        let atk_c = 91_000_100 + idx as i64;
+        let vic_c = 91_000_200 + idx as i64;
+        let atk_s = 81_000_100 + idx as i64;
+        let vic_s = 81_000_200 + idx as i64;
+        let gun_id = 81_000_300 + idx as i64;
+        let ammo_id = 81_000_400 + idx as i64;
+        let mut atk_sess = spawn_pilot(&ctx, 100 + idx as u64, atk_c, 1_000_009, atk_s, 587, sys_id, DVec3::ZERO).await;
+        let _vic_sess = spawn_pilot(&ctx, 200 + idx as u64, vic_c, 1_000_010, vic_s, 587, sys_id, DVec3::new(1_000.0, 0.0, 0.0)).await;
+        fit_online(&ctx, atk_c, atk_s, gun_id, 486, InventoryFlag::HiSlot0, Some((ammo_id, 185, 50)));
+        lock_target(&ctx, &mut atk_sess, sys_id, vic_s).await;
+        rpc(&ctx, &mut atk_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(0)]).await.unwrap();
+        let t0 = ctx.now_unix();
+        rpc(&ctx, &mut atk_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(gun_id), PyRep::Integer(vic_s)]).await.expect("Unprovoked high-sec attack on Safety Red");
+        let (_, arrival, _, _) = ctx.crimewatch.read().unwrap().states[&atk_c].pending_concord_arrival.expect("CONCORD schedule");
+        assert_eq!(arrival, t0 + expected_delay_s, "Mismatch for system {sys_id} (expected {expected_delay_s}s)");
     }
 
-    // 2. Negative check: low-sec (0.4) triggers Suspect Flag without CONCORD
+    // 2. Low-sec (0.4, Onsooh 30_000_013) triggers Suspect Flag with zero CONCORD schedule
     {
-        let mut cw = CrimeWatchDirector::new();
-        let low = cw.handle_combat_aggression(attacker_char, victim_char, attacker_ship, jita_sys, 0.4, false, 1_000);
-        assert_eq!(low, AggressionEvaluation::SuspectFlagTriggered);
+        let ctx = new_ctx();
+        let (atk_c, vic_c, atk_s, vic_s) = (91_000_501, 91_000_502, 81_000_501, 81_000_502);
+        let mut atk_sess = spawn_pilot(&ctx, 301, atk_c, 1_000_009, atk_s, 587, 30_000_013, DVec3::ZERO).await;
+        let _vic_sess = spawn_pilot(&ctx, 302, vic_c, 1_000_010, vic_s, 587, 30_000_013, DVec3::new(1_000.0, 0.0, 0.0)).await;
+        fit_online(&ctx, atk_c, atk_s, 81_000_510, 486, InventoryFlag::HiSlot0, Some((81_000_511, 185, 50)));
+        lock_target(&ctx, &mut atk_sess, 30_000_013, vic_s).await;
+        rpc(&ctx, &mut atk_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(1)]).await.unwrap();
+        rpc(&ctx, &mut atk_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(81_000_510), PyRep::Integer(vic_s)]).await.unwrap();
+        let cw = ctx.crimewatch.read().unwrap();
+        assert!(cw.states[&atk_c].pending_concord_arrival.is_none(), "Low-sec must never schedule CONCORD");
+        assert!(cw.states[&atk_c].is_suspect(ctx.now_unix()));
     }
 
-    // 3. End-to-end CONCORD arrival in Jita (sec 0.9 -> 6s):
-    //    Spawns invulnerable CONCORD battleship (0.0 resonances), applies 100% web, warp scramble,
-    //    cap neut (0 cap), ECM jam, and executes criminal ship into a capsule without destroying the pod.
-    seed_item(&ctx, attacker_ship, 621, attacker_char, jita_sys as i64, InventoryFlag::None, 1, true);
-    seed_item(&ctx, victim_ship, 587, victim_char, jita_sys as i64, InventoryFlag::None, 1, true);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(c) = snap.characters.get_mut(&attacker_char) {
-            c.solar_system_id = jita_sys;
-            c.active_ship_id = attacker_ship;
-            c.station_id = None;
-        }
-    });
-    spawn_ship_ball(&ctx, jita_sys, attacker_ship, 621, attacker_char, 10_000.0).await;
+    // 3. Full CONCORD execution suite in Jita (0.9 -> 6s) driven by production `tick_background_cluster`
+    let ctx = new_ctx();
+    let jita = 30_000_142u32;
+    let (atk_c, vic_c, atk_s, vic_s) = (91_000_901, 91_000_902, 81_000_901, 81_000_902);
+    let mut atk_sess = spawn_pilot(&ctx, 401, atk_c, 1_000_009, atk_s, 621, jita, DVec3::new(5_000.0, 0.0, 0.0)).await;
+    let _vic_sess = spawn_pilot(&ctx, 402, vic_c, 1_000_010, vic_s, 587, jita, DVec3::new(6_000.0, 0.0, 0.0)).await;
+    fit_online(&ctx, atk_c, atk_s, 81_000_910, 486, InventoryFlag::HiSlot0, Some((81_000_911, 185, 50)));
+    let sys_h = ctx.systems.get_or_spawn(jita);
+    lock_target(&ctx, &mut atk_sess, jita, vic_s).await;
+    let jita_b = ctx.bind_object(&atk_sess, "beyonce", jita as i64).unwrap();
+    rpc(&ctx, &mut atk_sess, "beyonce", Some(jita_b), "CmdOrbit", &[PyRep::Integer(vic_s), PyRep::Real(1_000.0)]).await.unwrap();
 
-    let mut cw = CrimeWatchDirector::new();
-    let _ = cw.handle_combat_aggression(attacker_char, victim_char, attacker_ship, jita_sys, 0.9, false, 2_000);
-    // At t=2003 (3s elapsed < 6s): CONCORD has not arrived yet
-    let early = cw.step_concord(&ctx, 2_003, 42).await;
-    assert!(early.is_empty());
-    // At t=2006 (6s elapsed): CONCORD arrives, neutralizes & destroys criminal ship, leaves pod intact
-    let reports = cw.step_concord(&ctx, 2_006, 42).await;
+    rpc(&ctx, &mut atk_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(0)]).await.unwrap();
+    rpc(&ctx, &mut atk_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(81_000_910), PyRep::Integer(vic_s)]).await.unwrap();
+
+    // At t0 + 3s (< 6s): CONCORD has not arrived yet; at t0 + 6s: `tick_background_cluster` executes CONCORD
+    ctx.advance_virtual_clock(3);
+    tick_background_cluster(&ctx).await;
+    assert!(ctx.crimewatch.concord_reports().is_empty());
+    assert!(sys_h.get_ball_snapshot(atk_s).await.unwrap().is_some(), "Criminal hull intact before 6s arrival");
+
+    ctx.advance_virtual_clock(3);
+    tick_background_cluster(&ctx).await;
+    let reports = ctx.crimewatch.concord_reports();
     assert_eq!(reports.len(), 1);
-    assert_eq!(reports[0].criminal_char_id, attacker_char);
+    let rep = &reports[0];
+    assert_eq!(rep.criminal_char_id, atk_c);
+    assert_eq!(rep.webbed_speed_fraction, 0.0, "CONCORD must apply 100% stasis web");
+    assert!(rep.warp_scramble_strength >= 100, "CONCORD must warp scramble criminal hull");
+    assert_eq!(rep.capacitor_after_neut, 0.0, "CONCORD must completely drain capacitor");
+    assert!(rep.ecm_jammed, "CONCORD must apply ECM jam");
+    assert!(rep.locks_cleared >= 1, "CONCORD ECM jam must clear criminal target locks");
 
-    let sys_h = ctx.systems.get_or_spawn(jita_sys);
-    let concord_cs = sys_h
-        .get_combat_state(reports[0].concord_ball_id)
+    // Verify CONCORD battleship on grid is completely invulnerable to incoming damage
+    let concord_cs_before = sys_h.get_combat_state(rep.concord_ball_id).await.unwrap().expect("CONCORD ship on grid");
+    assert_eq!(concord_cs_before.shield_resonance, [0.0, 0.0, 0.0, 0.0]);
+    let (applied, destroyed, _) = sys_h
+        .apply_damage(rep.concord_ball_id, DamageVector::new(250_000.0, 250_000.0, 250_000.0, 250_000.0))
         .await
         .unwrap()
-        .expect("CONCORD ship combat state must exist on grid");
-    assert_eq!(concord_cs.shield_resonance, [0.0, 0.0, 0.0, 0.0]);
-    assert_eq!(concord_cs.armor_resonance, [0.0, 0.0, 0.0, 0.0]);
-    assert_eq!(concord_cs.structure_resonance, [0.0, 0.0, 0.0, 0.0]);
+        .expect("CONCORD ball present");
+    assert_eq!(applied, 0.0, "CONCORD hulls must take 0.0 damage");
+    assert!(!destroyed);
 
-    let new_active_ship = ctx
-        .db
-        .with_snapshot(|s| s.characters.get(&attacker_char).map(|c| c.active_ship_id).unwrap_or(0));
-    let new_ship_tid = ctx
-        .db
-        .with_snapshot(|s| s.items.get(&new_active_ship).map(|i| i.type_id).unwrap_or(0));
-    assert_eq!(new_ship_tid, 670, "CONCORD must destroy the criminal ship and leave the capsule intact");
+    // Criminal ship was destroyed and pilot is now in an intact Capsule (670)
+    assert!(sys_h.get_ball_snapshot(atk_s).await.unwrap().is_none(), "Criminal hull must be destroyed");
+    let pod_id = ctx.db.get_character(atk_c).unwrap().active_ship_id;
+    assert_eq!(ctx.db.get_item(pod_id).unwrap().type_id, 670, "Criminal pilot must be ejected into an intact capsule");
 }
 
 #[tokio::test]
-async fn test_crimewatch_safety_setting_block_duel_and_suspect_looting_ess() {
+async fn test_crimewatch_criminal_wreck_and_jetcan_auto_abandon_all_sec_bands() {
+    // parity: feat:crimewatch.criminal-wreck-auto-abandon
+    eve_testkit::attest(&["feat:crimewatch.criminal-wreck-auto-abandon"]);
+
     let ctx = new_ctx();
-    crate::common::pin_clock(&ctx);
-    let c1 = 90_000_001;
-    let c2 = 90_000_002;
-    let ship1 = 920_001;
-    let ship2 = 920_002;
-    let mod_scram = 920_010;
-    let mod_burst = 920_011;
-    let jita_sys = 30_000_142;
 
-    let burst_tid = ctx
-        .sde
-        .types
-        .values()
-        .find(|t| t.group_id == 80 && t.category_id == 7)
-        .map(|t| t.type_id)
-        .expect("Burst Jammer in SDE");
-    seed_item(&ctx, ship1, 587, c1, jita_sys as i64, InventoryFlag::None, 1, true);
-    seed_item(&ctx, ship2, 587, c2, jita_sys as i64, InventoryFlag::None, 1, true);
-    seed_item(&ctx, mod_scram, 447, c1, ship1, InventoryFlag::MedSlot0, 1, true);
-    seed_item(&ctx, mod_burst, burst_tid, c1, ship1, InventoryFlag::MedSlot1, 1, true);
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.module_online_states.insert(mod_scram, true);
-        snap.module_online_states.insert(mod_burst, true);
-        for (cid, sid) in [(c1, ship1), (c2, ship2)] {
-            if let Some(ch) = snap.characters.get_mut(&cid) {
-                ch.solar_system_id = jita_sys;
-                ch.active_ship_id = sid;
-                ch.station_id = None;
-            }
+    // 1. High-sec (`Jita` 30_000_142): pilot commits real criminal aggression (`dogmaIM.Activate`), jettisons a jetcan (`ship.Jettison`),
+    //    and is destroyed by CONCORD via `tick_background_cluster` -> real wreck & jetcan are auto-abandoned even after Criminal Timer expires!
+    let jita = 30_000_142u32;
+    let (hs_crim, hs_vic, hs_loot) = (92_100_001, 92_100_002, 92_100_003);
+    let (hs_crim_s, hs_vic_s, hs_loot_s) = (82_100_001, 82_100_002, 82_100_003);
+    let mut hs_crim_sess = spawn_pilot(&ctx, 501, hs_crim, 1_000_009, hs_crim_s, 587, jita, DVec3::ZERO).await;
+    let _hs_vic_sess = spawn_pilot(&ctx, 502, hs_vic, 1_000_010, hs_vic_s, 587, jita, DVec3::new(800.0, 0.0, 0.0)).await;
+    let mut hs_loot_sess = spawn_pilot(&ctx, 503, hs_loot, 1_000_011, hs_loot_s, 587, jita, DVec3::new(300.0, 0.0, 0.0)).await;
+    fit_online(&ctx, hs_crim, hs_crim_s, 82_100_101, 486, InventoryFlag::HiSlot0, Some((82_100_102, 185, 20)));
+    seed_item(&ctx, 82_100_200, 34, hs_crim, hs_crim_s, InventoryFlag::Cargo, 40, false);
+    for k in 1..=16 {
+        seed_item(&ctx, 82_100_200 + k, 34, hs_crim, hs_crim_s, InventoryFlag::Cargo, 5, true);
+    }
+    lock_target(&ctx, &mut hs_crim_sess, jita, hs_vic_s).await;
+    rpc(&ctx, &mut hs_crim_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(0)]).await.unwrap();
+    rpc(&ctx, &mut hs_crim_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(82_100_101), PyRep::Integer(hs_vic_s)]).await.unwrap();
+    assert!(ctx.crimewatch.read().unwrap().states[&hs_crim].is_criminal(ctx.now_unix()));
+
+    let PyRep::Tuple(hs_jet_t) = rpc(&ctx, &mut hs_crim_sess, "ship", None, "Jettison", &[PyRep::List(vec![PyRep::Integer(82_100_200)])]).await.unwrap() else { panic!() };
+    let PyRep::List(hs_jet_ids) = &hs_jet_t[0] else { panic!() };
+    let hs_jetcan = hs_jet_ids[0].as_i64().unwrap();
+    let hs_jet_item = ctx.db.with_snapshot(|s| s.items.values().find(|i| i.location_id == hs_jetcan).unwrap().item_id);
+
+    ctx.advance_virtual_clock(6);
+    tick_background_cluster(&ctx).await;
+    let hs_wreck = find_wreck_of_owner(&ctx, hs_crim, jita);
+
+    // Advance 901s so `hs_crim`'s Criminal Timer expires: wreck & jetcan created while criminal remain permanently abandoned!
+    ctx.advance_virtual_clock(901);
+    assert!(!ctx.crimewatch.read().unwrap().states[&hs_crim].is_criminal(ctx.now_unix()));
+    rpc(&ctx, &mut hs_loot_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(2)]).await.unwrap();
+    let hs_inv = ctx.bind_object(&hs_loot_sess, "invbroker", hs_loot_s).unwrap();
+    let hs_wrep = rpc(&ctx, &mut hs_loot_sess, "invbroker", Some(hs_inv), "LootAll", &[PyRep::Integer(hs_wreck)]).await.expect("High-sec criminal wreck auto-abandoned");
+    assert_eq!(hs_wrep.dict_get("abandoned"), Some(&PyRep::Bool(true)));
+    assert_eq!(hs_wrep.dict_get("suspectFlagTriggered"), Some(&PyRep::Bool(false)));
+    rpc(&ctx, &mut hs_loot_sess, "invbroker", Some(hs_inv), "Add", &[PyRep::Integer(hs_jet_item), PyRep::Integer(hs_jetcan), PyRep::Integer(InventoryFlag::Cargo as i64)]).await.expect("High-sec criminal jetcan auto-abandoned");
+    assert!(!ctx.crimewatch.read().unwrap().states.get(&hs_loot).is_some_and(|st| st.is_suspect(ctx.now_unix())));
+
+    // 2. Low-sec (`Amamake` 30_002_537): pilot EWAR-attacks a Capsule (`670`) via `dogmaIM.Activate` -> acquires live Criminal Timer,
+    //    jettisons a jetcan, and has their Impairor (`596`) destroyed via bounded Smartbomb (`14550`) cycles -> wreck & jetcan auto-abandoned!
+    let lowsec = 30_002_537u32;
+    let (ls_crim, ls_pod_c, ls_loot) = (92_200_001, 92_200_002, 92_200_003);
+    let (ls_crim_s, ls_pod_s, ls_loot_s) = (82_200_001, 82_200_002, 82_200_003);
+    let mut ls_crim_sess = spawn_pilot(&ctx, 511, ls_crim, 1_000_009, ls_crim_s, 596, lowsec, DVec3::ZERO).await;
+    let _ls_pod_sess = spawn_pilot(&ctx, 512, ls_pod_c, 1_000_010, ls_pod_s, 670, lowsec, DVec3::new(9_000.0, 0.0, 0.0)).await;
+    let mut ls_loot_sess = spawn_pilot(&ctx, 513, ls_loot, 1_000_011, ls_loot_s, 24692, lowsec, DVec3::new(400.0, 0.0, 0.0)).await;
+    fit_online(&ctx, ls_crim, ls_crim_s, 82_200_101, 3242, InventoryFlag::MedSlot0, None);
+    fit_online(&ctx, ls_loot, ls_loot_s, 82_200_102, 14550, InventoryFlag::HiSlot0, None);
+    seed_item(&ctx, 82_200_200, 34, ls_crim, ls_crim_s, InventoryFlag::Cargo, 40, false);
+    for k in 1..=16 {
+        seed_item(&ctx, 82_200_200 + k, 34, ls_crim, ls_crim_s, InventoryFlag::Cargo, 5, true);
+    }
+    lock_target(&ctx, &mut ls_crim_sess, lowsec, ls_pod_s).await;
+    rpc(&ctx, &mut ls_crim_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(0)]).await.unwrap();
+    rpc(&ctx, &mut ls_crim_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(82_200_101), PyRep::Integer(ls_pod_s)]).await.unwrap();
+    assert!(ctx.crimewatch.read().unwrap().states[&ls_crim].is_criminal(ctx.now_unix()));
+
+    let PyRep::Tuple(ls_jet_t) = rpc(&ctx, &mut ls_crim_sess, "ship", None, "Jettison", &[PyRep::List(vec![PyRep::Integer(82_200_200)])]).await.unwrap() else { panic!() };
+    let PyRep::List(ls_jet_ids) = &ls_jet_t[0] else { panic!() };
+    let ls_jetcan = ls_jet_ids[0].as_i64().unwrap();
+    let ls_jet_item = ctx.db.with_snapshot(|s| s.items.values().find(|i| i.location_id == ls_jetcan).unwrap().item_id);
+
+    rpc(&ctx, &mut ls_loot_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(0)]).await.unwrap();
+    for _ in 0..3 {
+        if ctx.db.get_item(ls_crim_s).is_none() {
+            break;
         }
-    });
-    spawn_ship_ball(&ctx, jita_sys, ship1, 587, c1, 0.0).await;
-    spawn_ship_ball(&ctx, jita_sys, ship2, 587, c2, 2_000.0).await;
-    let sys_h = ctx.systems.get_or_spawn(jita_sys);
-    let _ = sys_h
-        .add_target_lock(
-            ship1,
-            TargetLock {
-                target_id: ship2,
-                lock_time_ms: 0.0,
-                remaining_lock_ms: 0.0,
-                locked: true,
-                max_range_m: Some(20_000.0),
-            },
-        )
-        .await;
+        rpc(&ctx, &mut ls_loot_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(82_200_102)]).await.unwrap();
+        ctx.advance_virtual_clock(11);
+    }
+    assert!(ctx.db.get_item(ls_crim_s).is_none(), "Low-sec criminal ship must be destroyed");
+    let ls_wreck = find_wreck_of_owner(&ctx, ls_crim, lowsec);
 
-    let mut sess1 = make_session(1, 1, c1, 1000009, None, jita_sys, Some(ship1));
-    let mut sess2 = make_session(2, 2, c2, 1000010, None, jita_sys, Some(ship2));
+    rpc(&ctx, &mut ls_loot_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(2)]).await.unwrap();
+    let ls_inv = ctx.bind_object(&ls_loot_sess, "invbroker", ls_loot_s).unwrap();
+    let ls_wrep = rpc(&ctx, &mut ls_loot_sess, "invbroker", Some(ls_inv), "LootAll", &[PyRep::Integer(ls_wreck)]).await.expect("Low-sec criminal wreck auto-abandoned");
+    assert_eq!(ls_wrep.dict_get("abandoned"), Some(&PyRep::Bool(true)));
+    assert_eq!(ls_wrep.dict_get("suspectFlagTriggered"), Some(&PyRep::Bool(false)));
+    rpc(&ctx, &mut ls_loot_sess, "invbroker", Some(ls_inv), "Add", &[PyRep::Integer(ls_jet_item), PyRep::Integer(ls_jetcan), PyRep::Integer(InventoryFlag::Cargo as i64)]).await.expect("Low-sec criminal jetcan auto-abandoned");
+    assert!(!ctx.crimewatch.read().unwrap().states.get(&ls_loot).is_some_and(|st| st.is_suspect(ctx.now_unix())));
 
-    // 1. Safety Green (2) in high-sec blocks illegal EWAR and AoE Burst Jammer with CantDoInCurrentSafetyLevel
-    let _ = call_service(&ctx, &mut sess1, "crimewatch", "SetSafetyLevel", vec![PyRep::Integer(2)], HashMap::new()).await.unwrap();
-    let err_ewar = call_service(&ctx, &mut sess1, "dogmaIM", "Activate", vec![PyRep::Integer(mod_scram), PyRep::String("warpScramble".into()), PyRep::Integer(ship2)], HashMap::new()).await.expect_err("Safety Green must block illegal high-sec EWAR");
-    assert_eq!(err_ewar.code, "SafetyLevelRestricted");
-    assert!(err_ewar.message.contains("CantDoInCurrentSafetyLevel"));
+    // 3. Null-sec (`Kaira` 30_003_887 -> stargate 50_007_698 -> `A2-V27` 30_003_942): criminal pilot jumps stargate into null-sec
+    //    holding a live Criminal Timer, jettisons a jetcan, and is destroyed in null-sec -> wreck & jetcan auto-abandoned!
+    let (kaira, a2_v27, gate_id) = (30_003_887u32, 30_003_942u32, 50_007_698i64);
+    let gate_pos = DVec3::new(975_370_690_560.0, -4_693_133_598_720.0, -389_298_954_240.0);
+    let (ns_crim, ns_pod_c, ns_loot) = (92_300_001, 92_300_002, 92_300_003);
+    let (ns_crim_s, ns_pod_s, ns_loot_s) = (82_300_001, 82_300_002, 82_300_003);
+    let mut ns_crim_sess = spawn_pilot(&ctx, 521, ns_crim, 1_000_009, ns_crim_s, 596, kaira, gate_pos).await;
+    let _ns_pod_sess = spawn_pilot(&ctx, 522, ns_pod_c, 1_000_010, ns_pod_s, 670, kaira, gate_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
+    fit_online(&ctx, ns_crim, ns_crim_s, 82_300_101, 447, InventoryFlag::MedSlot0, None);
+    seed_item(&ctx, 82_300_200, 34, ns_crim, ns_crim_s, InventoryFlag::Cargo, 40, false);
+    for k in 1..=16 {
+        seed_item(&ctx, 82_300_200 + k, 34, ns_crim, ns_crim_s, InventoryFlag::Cargo, 5, true);
+    }
+    lock_target(&ctx, &mut ns_crim_sess, kaira, ns_pod_s).await;
+    rpc(&ctx, &mut ns_crim_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(0)]).await.unwrap();
+    rpc(&ctx, &mut ns_crim_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(82_300_101), PyRep::Integer(ns_pod_s)]).await.unwrap();
+    ctx.advance_virtual_clock(61); // 60s Weapons Timer expires; 839s of live Criminal Timer remains
+    let kaira_b = ctx.bind_object(&ns_crim_sess, "beyonce", kaira as i64).unwrap();
+    rpc(&ctx, &mut ns_crim_sess, "beyonce", Some(kaira_b), "CmdStargateJump", &[PyRep::Integer(gate_id)]).await.expect("Low-sec criminal jumps gate into null-sec");
+    assert_eq!(ns_crim_sess.solar_system_id, Some(a2_v27));
+    assert!(ctx.crimewatch.read().unwrap().states[&ns_crim].is_criminal(ctx.now_unix()));
 
-    let err_burst = call_service(&ctx, &mut sess1, "dogmaIM", "Activate", vec![PyRep::Integer(mod_burst), PyRep::String("ecmBurst".into())], HashMap::new()).await.expect_err("Safety Green must block high-sec Burst Jammer");
-    assert_eq!(err_burst.code, "SafetyLevelRestricted");
-    assert!(err_burst.message.contains("CantDoInCurrentSafetyLevel"));
+    let a2_h = ctx.systems.get_or_spawn(a2_v27);
+    let (_, ns_crim_ball) = a2_h.get_ball_snapshot(ns_crim_s).await.unwrap().unwrap();
+    let mut ns_loot_sess = spawn_pilot(&ctx, 523, ns_loot, 1_000_011, ns_loot_s, 24692, a2_v27, ns_crim_ball.position + DVec3::new(400.0, 0.0, 0.0)).await;
+    fit_online(&ctx, ns_loot, ns_loot_s, 82_300_102, 14550, InventoryFlag::HiSlot0, None);
+    let PyRep::Tuple(ns_jet_t) = rpc(&ctx, &mut ns_crim_sess, "ship", None, "Jettison", &[PyRep::List(vec![PyRep::Integer(82_300_200)])]).await.unwrap() else { panic!() };
+    let PyRep::List(ns_jet_ids) = &ns_jet_t[0] else { panic!() };
+    let ns_jetcan = ns_jet_ids[0].as_i64().unwrap();
+    let ns_jet_item = ctx.db.with_snapshot(|s| s.items.values().find(|i| i.location_id == ns_jetcan).unwrap().item_id);
 
-    // 2. Duel challenge -> accept creates 300s Limited Engagement, allowing legal engagement on Safety Green
-    //    and refreshing the LE back to 300s on subsequent EWAR/combat hits!
-    let _ = call_service(&ctx, &mut sess1, "crimewatch", "StartDuelChallenge", vec![PyRep::Integer(c2)], HashMap::new()).await.unwrap();
-    let accept_rep = call_service(&ctx, &mut sess2, "crimewatch", "RespondToDuelChallenge", vec![PyRep::Integer(c1), PyRep::Bool(true)], HashMap::new()).await.unwrap();
-    assert_eq!(accept_rep.dict_get("limitedEngagementSeconds").and_then(|v| v.as_i64()), Some(300));
+    for _ in 0..61 {
+        let _ = a2_h.step_manual(1.0).await; // Expire 60-tick post-jump gate cloak/invulnerability naturally
+    }
+    ctx.advance_virtual_clock(65);
+    assert!(ctx.crimewatch.read().unwrap().states[&ns_crim].is_criminal(ctx.now_unix()));
+    for _ in 0..3 {
+        if ctx.db.get_item(ns_crim_s).is_none() {
+            break;
+        }
+        rpc(&ctx, &mut ns_loot_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(82_300_102)]).await.unwrap();
+        ctx.advance_virtual_clock(11);
+    }
+    assert!(ctx.db.get_item(ns_crim_s).is_none(), "Null-sec criminal ship must be destroyed");
+    let ns_wreck = find_wreck_of_owner(&ctx, ns_crim, a2_v27);
 
-    let ewar_ok = call_service(&ctx, &mut sess1, "dogmaIM", "Activate", vec![PyRep::Integer(mod_scram), PyRep::String("warpScramble".into()), PyRep::Integer(ship2)], HashMap::new()).await.expect("Limited Engagement must allow EWAR under Safety Green without CONCORD");
-    assert_eq!(ewar_ok.dict_get("ewarAssistRecorded").and_then(|v| v.as_bool()), Some(true));
-    let has_le = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        rt.has_limited_engagement_with(c1, c2, ctx.now_unix_secs())
-    });
-    assert!(has_le, "Limited Engagement must be active between duelists");
+    rpc(&ctx, &mut ns_loot_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(2)]).await.unwrap();
+    let ns_inv = ctx.bind_object(&ns_loot_sess, "invbroker", ns_loot_s).unwrap();
+    let ns_wrep = rpc(&ctx, &mut ns_loot_sess, "invbroker", Some(ns_inv), "LootAll", &[PyRep::Integer(ns_wreck)]).await.expect("Null-sec criminal wreck auto-abandoned");
+    assert_eq!(ns_wrep.dict_get("abandoned"), Some(&PyRep::Bool(true)));
+    assert_eq!(ns_wrep.dict_get("suspectFlagTriggered"), Some(&PyRep::Bool(false)));
+    rpc(&ctx, &mut ns_loot_sess, "invbroker", Some(ns_inv), "Add", &[PyRep::Integer(ns_jet_item), PyRep::Integer(ns_jetcan), PyRep::Integer(InventoryFlag::Cargo as i64)]).await.expect("Null-sec criminal jetcan auto-abandoned");
 
-    // Advance virtual clock by 100s, attack again, assert timer refreshes to now + 300s
-    ctx.advance_virtual_clock(100);
-    let now_refresh = ctx.now_unix_secs();
-    let _ = call_service(&ctx, &mut sess1, "dogmaIM", "Activate", vec![PyRep::Integer(mod_scram), PyRep::String("warpScramble".into()), PyRep::Integer(ship2)], HashMap::new()).await.expect("Duel attack refreshes timer");
-    let (le1, le2) = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        let e1 = rt.limited_engagements.get(&c1).and_then(|m| m.get(&c2)).copied().unwrap_or(0);
-        let e2 = rt.limited_engagements.get(&c2).and_then(|m| m.get(&c1)).copied().unwrap_or(0);
-        (e1, e2)
-    });
-    assert!(le1 >= now_refresh + 300 && le2 >= now_refresh + 300, "Hostile action must refresh Limited Engagement timer to now + 300s");
-
-    // 3. Suspect timer (900s) from looting non-owned MTU (type 33475, group 1250) and linking ESS Main Bank
-    let mtu_id = 920_050;
-    let loot_id = 920_051;
-    let other_owner = 90_000_003;
-    seed_item(&ctx, mtu_id, 33475, other_owner, jita_sys as i64, InventoryFlag::None, 1, true);
-    seed_item(&ctx, loot_id, 34, other_owner, mtu_id, InventoryFlag::Cargo, 10, false);
-    spawn_ship_ball(&ctx, jita_sys, mtu_id, 33475, other_owner, 500.0).await;
-
-    let loot_green_err = call_service(&ctx, &mut sess1, "invbroker", "Add", vec![PyRep::Integer(loot_id), PyRep::Integer(ship1), PyRep::Integer(InventoryFlag::Cargo as i64)], HashMap::new()).await.expect_err("Safety Green must block looting another player's MTU");
-    assert_eq!(loot_green_err.code, "SafetyLevelRestricted");
-
-    let _ = call_service(&ctx, &mut sess1, "crimewatch", "SetSafetyLevel", vec![PyRep::Integer(1)], HashMap::new()).await.unwrap();
-    let now_loot = ctx.now_unix_secs();
-    let _ = call_service(&ctx, &mut sess1, "invbroker", "Add", vec![PyRep::Integer(loot_id), PyRep::Integer(ship1), PyRep::Integer(InventoryFlag::Cargo as i64)], HashMap::new()).await.expect("Safety Yellow must allow looting MTU and apply 900s Suspect timer");
-    let suspect_until = ctx.crimewatch.read().unwrap().states.get(&c1).map(|s| s.suspect_flag_until_unix).unwrap_or(0);
-    assert!(suspect_until >= now_loot + 900);
-
-    // ESS Main Bank link blocks on Safety Green and applies 900s Suspect timer on Safety Yellow
-    let null_sys = 30_004_759;
-    let ess_ball_id = 820_000_000 + null_sys as i64;
-    sess2.solar_system_id = Some(null_sys);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&c2) { ch.solar_system_id = null_sys; }
-        if let Some(sh) = snap.items.get_mut(&ship2) { sh.location_id = null_sys as i64; }
-        let st = snap.system_states.entry(null_sys).or_default();
-        st.ess_main_bank = IskCents::from_isk(50_000_000);
-    });
-    spawn_ship_ball(&ctx, null_sys, ship2, 587, c2, 0.0).await;
-    spawn_ship_ball(&ctx, null_sys, ess_ball_id, 32882, 0, 500.0).await;
-    let _ = call_service(&ctx, &mut sess2, "crimewatch", "SetSafetyLevel", vec![PyRep::Integer(2)], HashMap::new()).await.unwrap();
-    let ess_green_err = call_service(&ctx, &mut sess2, "essMgr", "AttemptLinkToMainBank", vec![PyRep::Integer(ess_ball_id)], HashMap::new()).await.expect_err("Safety Green must block ESS Main Bank theft link");
-    assert_eq!(ess_green_err.code, "SafetyLevelRestricted");
-
-    let _ = call_service(&ctx, &mut sess2, "crimewatch", "SetSafetyLevel", vec![PyRep::Integer(1)], HashMap::new()).await.unwrap();
-    let ess_ok = call_service(&ctx, &mut sess2, "essMgr", "AttemptLinkToMainBank", vec![PyRep::Integer(ess_ball_id)], HashMap::new()).await.expect("Safety Yellow must allow ESS Main Bank link with 900s Suspect timer");
-    assert!(ess_ok.dict_get("suspectTimerUntilUnix").and_then(|v| v.as_i64()).unwrap_or(0) >= (ctx.now_unix_secs() + 900) as i64);
-
-    // Concurrent link attempt by another character is rejected with EssAlreadyLinked (R-ESS-REGRESS-01)
-    let mut sess1_null = make_session(1, 1, c1, 1000009, None, null_sys, Some(ship1));
-    let _ = call_service(&ctx, &mut sess1_null, "crimewatch", "SetSafetyLevel", vec![PyRep::Integer(1)], HashMap::new()).await.unwrap();
-    spawn_ship_ball(&ctx, null_sys, ship1, 587, c1, 100.0).await;
-    let ess_concurrent_err = call_service(&ctx, &mut sess1_null, "essMgr", "AttemptLinkToMainBank", vec![PyRep::Integer(ess_ball_id)], HashMap::new()).await.expect_err("Concurrent ESS link must fail with EssAlreadyLinked");
-    assert_eq!(ess_concurrent_err.code, "EssAlreadyLinked");
+    // 4. Negative control: non-criminal pilot's jetcan and duel wreck are NOT auto-abandoned (`CantDoInCurrentSafetyLevel`)
+    let (cl_a, cl_b, cl_sa, cl_sb) = (92_400_001, 92_400_002, 82_400_001, 82_400_002);
+    let mut cl_sess_a = spawn_pilot(&ctx, 531, cl_a, 1_000_009, cl_sa, 596, lowsec, DVec3::new(50_000.0, 0.0, 0.0)).await;
+    let mut cl_sess_b = spawn_pilot(&ctx, 532, cl_b, 1_000_010, cl_sb, 24692, lowsec, DVec3::new(50_400.0, 0.0, 0.0)).await;
+    fit_online(&ctx, cl_b, cl_sb, 82_400_101, 14550, InventoryFlag::HiSlot0, None);
+    seed_item(&ctx, 82_400_200, 34, cl_a, cl_sa, InventoryFlag::Cargo, 20, false);
+    for k in 1..=16 {
+        seed_item(&ctx, 82_400_200 + k, 34, cl_a, cl_sa, InventoryFlag::Cargo, 5, true);
+    }
+    let PyRep::Tuple(cl_jet_t) = rpc(&ctx, &mut cl_sess_a, "ship", None, "Jettison", &[PyRep::List(vec![PyRep::Integer(82_400_200)])]).await.unwrap() else { panic!() };
+    let PyRep::List(cl_jet_ids) = &cl_jet_t[0] else { panic!() };
+    let cl_jetcan = cl_jet_ids[0].as_i64().unwrap();
+    let cl_jet_item = ctx.db.with_snapshot(|s| s.items.values().find(|i| i.location_id == cl_jetcan).unwrap().item_id);
+    rpc(&ctx, &mut cl_sess_a, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(cl_b)]).await.unwrap();
+    rpc(&ctx, &mut cl_sess_b, "crimewatch", None, "RespondToDuelChallenge", &[PyRep::Integer(cl_a), PyRep::Bool(true)]).await.unwrap();
+    rpc(&ctx, &mut cl_sess_b, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(0)]).await.unwrap();
+    for _ in 0..3 {
+        if ctx.db.get_item(cl_sa).is_none() {
+            break;
+        }
+        rpc(&ctx, &mut cl_sess_b, "dogmaIM", None, "Activate", &[PyRep::Integer(82_400_101)]).await.unwrap();
+        ctx.advance_virtual_clock(11);
+    }
+    assert!(ctx.db.get_item(cl_sa).is_none(), "Duel ship must be destroyed");
+    let cl_wreck = find_wreck_of_owner(&ctx, cl_a, lowsec);
+    let _ = ctx.systems.get_or_spawn(lowsec).set_ball_position(ls_loot_s, DVec3::new(50_200.0, 0.0, 0.0)).await;
+    assert_eq!(rpc(&ctx, &mut ls_loot_sess, "invbroker", Some(ls_inv), "LootAll", &[PyRep::Integer(cl_wreck)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
+    assert_eq!(rpc(&ctx, &mut ls_loot_sess, "invbroker", Some(ls_inv), "Add", &[PyRep::Integer(cl_jet_item), PyRep::Integer(cl_jetcan), PyRep::Integer(InventoryFlag::Cargo as i64)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
 }
 
 #[tokio::test]
-async fn test_drones_bandwidth_sentry_stationary_npc_aggro_and_carrier_tubes() {
-    // parity: feat:drones.bandwidth-and-bay-constraints
-    // parity: feat:drones.sentry-drone-stationary-tracking
+async fn test_crimewatch_duel_limited_engagement_and_suspect_looting_ess() {
+    // parity: feat:crimewatch.limited-engagement-duel, feat:crimewatch.suspect-timer-looting-ess, feat:crimewatch.safety-setting-action-block
     eve_testkit::attest(&[
-        "feat:drones.bandwidth-and-bay-constraints",
-        "feat:drones.sentry-drone-stationary-tracking",
+        "feat:crimewatch.limited-engagement-duel",
+        "feat:crimewatch.suspect-timer-looting-ess",
+        "feat:crimewatch.safety-setting-action-block",
     ]);
 
     let ctx = new_ctx();
-    let c1 = 90_000_001;
-    let sys_id = 30_000_142;
-    let vexor_id = 930_001;
-    let ogre_1 = 930_010;
-    let ogre_2 = 930_012;
-    let ogre_3 = 930_013;
-    let garde_id = 930_011;
+    let jita = 30_000_142u32;
+    let lowsec = 30_002_537u32;
+    let nullsec = 30_004_759u32;
+    let (c1, c2, c3) = (93_000_001, 93_000_002, 93_000_003);
+    let (s1, s2, s3) = (83_000_001, 83_000_002, 83_000_003);
+    let mut sess1 = spawn_pilot(&ctx, 701, c1, 1_000_009, s1, 587, jita, DVec3::ZERO).await;
+    let mut sess2 = spawn_pilot(&ctx, 702, c2, 1_000_010, s2, 587, jita, DVec3::new(1_500.0, 0.0, 0.0)).await;
+    let mut sess3 = spawn_pilot(&ctx, 703, c3, 1_000_011, s3, 587, jita, DVec3::new(2_000.0, 0.0, 0.0)).await;
 
-    seed_item(&ctx, vexor_id, 626, c1, sys_id as i64, InventoryFlag::None, 1, true);
-    seed_item(&ctx, ogre_1, 2444, c1, vexor_id, InventoryFlag::DroneBay, 1, true);
-    seed_item(&ctx, ogre_2, 2444, c1, vexor_id, InventoryFlag::DroneBay, 1, true);
-    seed_item(&ctx, ogre_3, 2444, c1, vexor_id, InventoryFlag::DroneBay, 1, true);
-    seed_item(&ctx, garde_id, 23561, c1, vexor_id, InventoryFlag::DroneBay, 1, true);
+    fit_online(&ctx, c1, s1, 83_000_101, 486, InventoryFlag::HiSlot0, Some((83_000_102, 185, 200)));
+    fit_online(&ctx, c1, s1, 83_000_103, 447, InventoryFlag::MedSlot0, None);
+    fit_online(&ctx, c2, s2, 83_000_201, 486, InventoryFlag::HiSlot0, Some((83_000_202, 185, 200)));
+    fit_online(&ctx, c3, s3, 83_000_301, 486, InventoryFlag::HiSlot0, Some((83_000_302, 185, 200)));
+
+    let sys_h = ctx.systems.get_or_spawn(jita);
+    lock_target(&ctx, &mut sess1, jita, s2).await;
+    lock_target(&ctx, &mut sess2, jita, s1).await;
+    lock_target(&ctx, &mut sess3, jita, s1).await;
+
+    // 1. Duel lifecycle: reject self/nonexistent/offline targets; challenge -> decline -> challenge -> accept -> 300s bidirectional LE
+    let c_offline = 93_000_050i64;
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&c1) {
-            ch.solar_system_id = sys_id;
-            ch.active_ship_id = vexor_id;
-            ch.station_id = None;
-        }
-        snap.skills.entry(c1).or_default().insert(3436, TrainedSkillRecord { type_id: 3436, level: 5, skill_points: 256_000.0 });
+        let mut ch = snap.characters[&c1].clone();
+        ch.character_id = c_offline;
+        ch.user_id = 750;
+        ch.active_ship_id = 0;
+        snap.characters.insert(c_offline, ch);
     });
-    spawn_ship_ball(&ctx, sys_id, vexor_id, 626, c1, 0.0).await;
-    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    assert_eq!(rpc(&ctx, &mut sess1, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(c1)]).await.unwrap_err().code, "InvalidDuelTarget");
+    assert_eq!(rpc(&ctx, &mut sess1, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(99_999_999)]).await.unwrap_err().code, "InvalidDuelTarget");
+    assert_eq!(rpc(&ctx, &mut sess1, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(c_offline)]).await.unwrap_err().code, "DuelChallengeFailNoSesssionForTarget");
 
-    let mut sess = make_session(10, 1, c1, 1000009, None, sys_id, Some(vexor_id));
+    let _ = ctx.drain_notifications_for_char(c1);
+    let _ = ctx.drain_notifications_for_char(c2);
+    rpc(&ctx, &mut sess1, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(c2)]).await.unwrap();
+    assert!(ctx.drain_notifications_for_char(c2).iter().any(|n| n.event == "OnDuelChallenge"));
+    rpc(&ctx, &mut sess2, "crimewatch", None, "RespondToDuelChallenge", &[PyRep::Integer(c1), PyRep::Bool(false)]).await.unwrap();
+    assert!(!with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(c1, c2, ctx.now_unix())));
 
-    // 0. Drone bay capacity (125 m3 on Vexor) and maxActiveDrones skill limit (skill 3436 level 1 -> max 1 drone)
-    let extra_full_ogre = 930_020;
-    let excess_cargo_ogre = 930_021;
-    seed_item(&ctx, extra_full_ogre, 2444, c1, vexor_id, InventoryFlag::DroneBay, 1, true);
-    seed_item(&ctx, excess_cargo_ogre, 2444, c1, vexor_id, InventoryFlag::Cargo, 1, true);
-    let bay_cap_err = call_service(&ctx, &mut sess, "invbroker", "Add", vec![PyRep::Integer(excess_cargo_ogre), PyRep::Integer(vexor_id), PyRep::Integer(87)], HashMap::new()).await.expect_err("Exceeding 125 m3 drone bay capacity must fail");
-    assert_eq!(bay_cap_err.code, "CapacityExceeded");
+    rpc(&ctx, &mut sess1, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(c2)]).await.unwrap();
+    let acc = rpc(&ctx, &mut sess2, "crimewatch", None, "RespondToDuelChallenge", &[PyRep::Integer(c1), PyRep::Bool(true)]).await.unwrap();
+    assert_eq!(acc.dict_get("limitedEngagementSeconds").and_then(|v| v.as_i64()), Some(300));
+    assert!(ctx.drain_notifications_for_char(c1).iter().any(|n| n.event == "OnCrimewatchEngagementCreated"));
 
-    // Untrained pilot with no Drones skill record gets 0 drone capacity and NoDroneManagementAbilities (R-DRONE-NOSKILL-5)
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.skills.entry(c1).or_default().remove(&3436);
-    });
-    ctx.invalidate_ship_fitting(vexor_id);
-    let no_skill_rec_err = call_service(&ctx, &mut sess, "ship", "LaunchDrones", vec![PyRep::List(vec![PyRep::Integer(ogre_1)])], HashMap::new()).await.expect_err("Launching drones with no Drones skill record must fail");
-    assert_eq!(no_skill_rec_err.code, "NoDroneManagementAbilities");
+    // Both duelists fight in high-sec on Safety Green (`2`) with zero CONCORD and zero sentry gun interference
+    rpc(&ctx, &mut sess1, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(2)]).await.unwrap();
+    rpc(&ctx, &mut sess2, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(2)]).await.unwrap();
+    rpc(&ctx, &mut sess1, "dogmaIM", None, "Activate", &[PyRep::Integer(83_000_101), PyRep::Integer(s2)]).await.expect("Duelist 1 turret hit");
+    rpc(&ctx, &mut sess2, "dogmaIM", None, "Activate", &[PyRep::Integer(83_000_201), PyRep::Integer(s1)]).await.expect("Duelist 2 return fire");
+    tick_background_cluster(&ctx).await;
+    assert!(ctx.crimewatch.read().unwrap().states.values().all(|st| st.pending_concord_arrival.is_none()), "CONCORD must ignore Limited Engagement");
+    assert!(!with_combat_runtime(&ctx, |rt| rt.sentry_gun_aggression.values().any(|s| s.active_on_grid)), "Sentry guns must ignore Limited Engagement");
 
-    // Launching when drone bay volume exceeds capacity must fail
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.skills.entry(c1).or_default().insert(3436, TrainedSkillRecord { type_id: 3436, level: 0, skill_points: 0.0 });
-    });
-    ctx.invalidate_ship_fitting(vexor_id);
-    let no_drone_err = call_service(&ctx, &mut sess, "ship", "LaunchDrones", vec![PyRep::List(vec![PyRep::Integer(ogre_1)])], HashMap::new()).await.expect_err("Launching drones with level 0 Drones skill must fail");
-    assert_eq!(no_drone_err.code, "NoDroneManagementAbilities");
+    // Subsequent offensive action after 120s resets LE back to `now + 300s`; after 301s idle, LE expires naturally
+    ctx.advance_virtual_clock(120);
+    let t_ref = ctx.now_unix();
+    rpc(&ctx, &mut sess1, "dogmaIM", None, "Activate", &[PyRep::Integer(83_000_103), PyRep::Integer(s2)]).await.expect("EWAR refreshes LE");
+    let (e1, e2) = with_combat_runtime(&ctx, |rt| (rt.limited_engagements[&c1][&c2], rt.limited_engagements[&c2][&c1]));
+    assert!(e1 >= t_ref + 300 && e2 >= t_ref + 300);
 
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.skills.entry(c1).or_default().insert(3436, TrainedSkillRecord { type_id: 3436, level: 1, skill_points: 250.0 });
-    });
-    ctx.invalidate_ship_fitting(vexor_id);
-    let max_drone_err = call_service(&ctx, &mut sess, "ship", "LaunchDrones", vec![PyRep::List(vec![PyRep::Integer(ogre_1), PyRep::Integer(ogre_2)])], HashMap::new()).await.expect_err("Launching 2 drones with level 1 Drones skill must fail");
-    assert_eq!(max_drone_err.code, "NoDroneManagementAbilitiesLeft");
+    ctx.advance_virtual_clock(301);
+    let post_le_err = rpc(&ctx, &mut sess1, "dogmaIM", None, "Activate", &[PyRep::Integer(83_000_101), PyRep::Integer(s2)]).await.unwrap_err();
+    assert_eq!(post_le_err.code, "CantDoInCurrentSafetyLevel");
 
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.skills.entry(c1).or_default().insert(3436, TrainedSkillRecord { type_id: 3436, level: 5, skill_points: 256_000.0 });
-    });
-    ctx.invalidate_ship_fitting(vexor_id);
+    // Unprovoked low-sec attack (Smartbomb requires Safety Red `0`) flags attacker Suspect WITHOUT creating an LE; victim returning fire creates 300s LE
+    let (ls_a, ls_b, ls_sa, ls_sb) = (93_000_011, 93_000_012, 83_000_011, 83_000_012);
+    let mut ls_sess_a = spawn_pilot(&ctx, 711, ls_a, 1_000_009, ls_sa, 626, lowsec, DVec3::ZERO).await;
+    let mut ls_sess_b = spawn_pilot(&ctx, 712, ls_b, 1_000_010, ls_sb, 587, lowsec, DVec3::new(1_000.0, 0.0, 0.0)).await;
+    fit_online(&ctx, ls_a, ls_sa, 83_000_401, 3953, InventoryFlag::HiSlot0, None);
+    fit_online(&ctx, ls_b, ls_sb, 83_000_402, 486, InventoryFlag::HiSlot0, Some((83_000_403, 185, 100)));
+    lock_target(&ctx, &mut ls_sess_b, lowsec, ls_sa).await;
+    rpc(&ctx, &mut ls_sess_a, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(1)]).await.unwrap();
+    assert_eq!(rpc(&ctx, &mut ls_sess_a, "dogmaIM", None, "Activate", &[PyRep::Integer(83_000_401)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
+    rpc(&ctx, &mut ls_sess_a, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(0)]).await.unwrap();
+    rpc(&ctx, &mut ls_sess_a, "dogmaIM", None, "Activate", &[PyRep::Integer(83_000_401)]).await.expect("Low-sec Smartbomb on Red");
+    assert!(ctx.crimewatch.read().unwrap().states[&ls_a].is_suspect(ctx.now_unix()));
+    assert!(!with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(ls_a, ls_b, ctx.now_unix())), "Unprovoked illegal hit must NOT create LE");
+    rpc(&ctx, &mut ls_sess_b, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(2)]).await.unwrap();
+    rpc(&ctx, &mut ls_sess_b, "dogmaIM", None, "Activate", &[PyRep::Integer(83_000_402), PyRep::Integer(ls_sa)]).await.expect("Victim returns fire against Suspect");
+    assert!(with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(ls_a, ls_b, ctx.now_unix())), "Returning fire against Suspect must create 300s LE");
 
-    // 1. Launch 1 Garde I (25 Mbit/s); launching 3x Ogre I (75 Mbit/s) alongside it exceeds 75 Mbit/s bandwidth!
-    let _ = call_service(&ctx, &mut sess, "ship", "LaunchDrones", vec![PyRep::List(vec![PyRep::Integer(garde_id)])], HashMap::new()).await.expect("Launching Garde I must succeed");
-    let bw_err = call_service(&ctx, &mut sess, "ship", "LaunchDrones", vec![PyRep::List(vec![PyRep::Integer(ogre_1), PyRep::Integer(ogre_2), PyRep::Integer(ogre_3)])], HashMap::new()).await.expect_err("Launching 3x Ogre I alongside 1x Garde I must exceed 75 Mbit/s bandwidth");
-    assert_eq!(bw_err.code, "MaxBandwidthExceeded");
+    // 2. Suspect timer (900s) from foreign Cargo Container (`23` via `ship.Jettison`), foreign Wreck (`26561`), foreign Mobile Tractor Unit (`33475`, group 1250), and ESS Main Bank (`32882`)
+    seed_item(&ctx, 83_099_001, 34, c2, s2, InventoryFlag::Cargo, 15, false);
+    let _ = sys_h.set_ball_position(s2, DVec3::new(400.0, 0.0, 0.0)).await;
+    let PyRep::Tuple(j_tup) = rpc(&ctx, &mut sess2, "ship", None, "Jettison", &[PyRep::List(vec![PyRep::Integer(83_099_001)])]).await.unwrap() else { panic!() };
+    let PyRep::List(j_ids) = &j_tup[0] else { panic!() };
+    let foreign_jetcan = j_ids[0].as_i64().unwrap();
+    assert_eq!(ctx.db.get_item(foreign_jetcan).unwrap().type_id, 23, "Jettison spawns Cargo Container (23)");
+    let foreign_jet_item = ctx.db.with_snapshot(|s| s.items.values().find(|i| i.location_id == foreign_jetcan).unwrap().item_id);
 
-    // 2. Sentry drone stationary tracking: Garde I remains stationary (max_velocity == 0), CmdReturnBay fails > 2500m
-    let active_garde_ball = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.values().find(|d| d.type_id == 23561).map(|d| d.ball_id)
-    }).expect("Active Garde I ball");
-    let (_, garde_ball_snap) = sys_h.get_ball_snapshot(active_garde_ball).await.unwrap().unwrap();
-    assert_eq!(garde_ball_snap.max_velocity, 0.0, "Sentry drone must have max_velocity == 0");
+    let inv1 = ctx.bind_object(&sess1, "invbroker", s1).unwrap();
+    rpc(&ctx, &mut sess1, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(2)]).await.unwrap();
+    assert_eq!(rpc(&ctx, &mut sess1, "invbroker", Some(inv1), "Add", &[PyRep::Integer(foreign_jet_item), PyRep::Integer(foreign_jetcan), PyRep::Integer(InventoryFlag::Cargo as i64)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
+    rpc(&ctx, &mut sess1, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(1)]).await.unwrap();
+    let now_j = ctx.now_unix();
+    rpc(&ctx, &mut sess1, "invbroker", Some(inv1), "Add", &[PyRep::Integer(foreign_jet_item), PyRep::Integer(foreign_jetcan), PyRep::Integer(InventoryFlag::Cargo as i64)]).await.unwrap();
+    assert_eq!(ctx.crimewatch.read().unwrap().states[&c1].suspect_flag_until_unix, now_j + 900);
 
-    let _ = call_service(&ctx, &mut sess, "entity", "CmdReturnAndOrbit", vec![PyRep::List(vec![PyRep::Integer(active_garde_ball)])], HashMap::new()).await.expect("CmdReturnAndOrbit on sentry drone succeeds");
-    let (_, garde_after_snap) = sys_h.get_ball_snapshot(active_garde_ball).await.unwrap().unwrap();
-    assert_eq!(garde_after_snap.max_velocity, 0.0, "Sentry drone remains stationary at 0 m/s");
+    for (offset, container_tid) in [(0i64, 26561u32), (20, 33475u32)] {
+        ctx.advance_virtual_clock(901); // Let previous 900s Suspect Timer expire naturally
+        let cid = 83_100_000 + offset;
+        let lid = 83_100_001 + offset;
+        seed_item(&ctx, cid, container_tid, c2, jita as i64, InventoryFlag::None, 1, true);
+        seed_item(&ctx, lid, 34, c2, cid, InventoryFlag::Cargo, 10, false);
+        let _ = sys_h.spawn_ball(Ball {
+            id: cid, type_id: container_tid, position: DVec3::new(500.0, 0.0, 0.0), velocity: DVec3::ZERO,
+            max_velocity: 0.0, inertia: 1.0, mass: 5_000.0, radius: 30.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+        }).await;
+        rpc(&ctx, &mut sess1, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(2)]).await.unwrap();
+        assert_eq!(rpc(&ctx, &mut sess1, "invbroker", Some(inv1), "Add", &[PyRep::Integer(lid), PyRep::Integer(cid), PyRep::Integer(InventoryFlag::Cargo as i64)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
+        rpc(&ctx, &mut sess1, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(1)]).await.unwrap();
+        let now_l = ctx.now_unix();
+        rpc(&ctx, &mut sess1, "invbroker", Some(inv1), "Add", &[PyRep::Integer(lid), PyRep::Integer(cid), PyRep::Integer(InventoryFlag::Cargo as i64)]).await.unwrap();
+        assert_eq!(ctx.crimewatch.read().unwrap().states[&c1].suspect_flag_until_unix, now_l + 900);
+    }
 
-    let _ = sys_h.set_ball_position(vexor_id, DVec3::new(4_000.0, 0.0, 0.0)).await;
-    let ret_err = call_service(&ctx, &mut sess, "entity", "CmdReturnBay", vec![PyRep::List(vec![PyRep::Integer(active_garde_ball)])], HashMap::new()).await.expect_err("CmdReturnBay beyond 2500m must fail");
-    assert_eq!(ret_err.code, "SentryDroneOutOfScoopRange");
-    let scoop_err = call_service(&ctx, &mut sess, "ship", "ScoopToDroneBay", vec![PyRep::Integer(active_garde_ball)], HashMap::new()).await.expect_err("Scooping sentry drone beyond 2500m must fail");
-    assert_eq!(scoop_err.code, "OutOfScoopRange");
-    let _ = sys_h.set_ball_position(vexor_id, DVec3::ZERO).await;
+    // Any other player (`c3`) in high-sec on Safety Green (`2`) freely attacks Suspect `c1` without CONCORD or security-status penalty
+    let sec3_before = ctx.db.get_character(c3).unwrap().security_status;
+    rpc(&ctx, &mut sess3, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(2)]).await.unwrap();
+    rpc(&ctx, &mut sess3, "dogmaIM", None, "Activate", &[PyRep::Integer(83_000_301), PyRep::Integer(s1)]).await.expect("Free high-sec attack on Suspect");
+    assert!(ctx.crimewatch.read().unwrap().states.values().all(|st| st.pending_concord_arrival.is_none()));
+    assert_eq!(ctx.db.get_character(c3).unwrap().security_status, sec3_before);
+    assert!(with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(c1, c3, ctx.now_unix())));
 
-    // 3. NPC aggro switching onto player drones based on threat/sig/proximity/DPS and back to ship on recall
-    let npc_id = eve_server::services::combat_crimewatch::spawn_specialized_npc_entity(
-        &ctx,
-        sys_id,
-        10004,
-        "Pirate",
-        1,
-        DVec3::new(1_000.0, 0.0, 0.0),
-    )
-    .await;
-    let _ = sys_h.add_target_lock(vexor_id, TargetLock { target_id: npc_id, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: Some(60_000.0) }).await;
-    let engage_rep = call_service(&ctx, &mut sess, "entity", "CmdEngage", vec![PyRep::List(vec![PyRep::Integer(active_garde_ball)]), PyRep::Integer(npc_id)], HashMap::new()).await.expect("Garde I engages NPC");
-    assert!(engage_rep.dict_get("totalDamageDealt").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
+    // ESS Main Bank hack in null-sec grants 900s Suspect Timer (blocked on Green with CantDoInCurrentSafetyLevel, allowed on Yellow)
+    let (ess_c, ess_s, ess_ball) = (93_000_099, 83_000_099, 820_000_000 + nullsec as i64);
+    let mut ess_sess = spawn_pilot(&ctx, 799, ess_c, 1_000_009, ess_s, 587, nullsec, DVec3::ZERO).await;
+    ctx.db.with_mut_snapshot(|snap| { snap.system_states.entry(nullsec).or_default().ess_main_bank = IskCents::from_isk(25_000_000); });
+    let _ = ctx.systems.get_or_spawn(nullsec).spawn_ball(Ball {
+        id: ess_ball, type_id: 32882, position: DVec3::new(500.0, 0.0, 0.0), velocity: DVec3::ZERO,
+        max_velocity: 0.0, inertia: 1.0, mass: 50_000.0, radius: 100.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }).await;
+    rpc(&ctx, &mut ess_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(2)]).await.unwrap();
+    let ess_err = rpc(&ctx, &mut ess_sess, "essMgr", None, "AttemptLinkToMainBank", &[PyRep::Integer(ess_ball)]).await.unwrap_err();
+    assert_eq!(ess_err.code, "CantDoInCurrentSafetyLevel");
+    rpc(&ctx, &mut ess_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(1)]).await.unwrap();
+    let now_ess = ctx.now_unix();
+    rpc(&ctx, &mut ess_sess, "essMgr", None, "AttemptLinkToMainBank", &[PyRep::Integer(ess_ball)]).await.expect("ESS link on Yellow");
+    assert_eq!(ctx.crimewatch.read().unwrap().states[&ess_c].suspect_flag_until_unix, now_ess + 900);
+}
 
-    // Sentry drone optimal, falloff, and tracking turret formula hit-chance evaluation
-    let (hit_opt, hit_falloff, hit_transversal) = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        let d = rt.active_drones_in_space.get(&active_garde_ball).unwrap();
-        let d_ball = Ball { id: active_garde_ball, type_id: 23561, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1000.0, radius: 10.0, speed_fraction: 0.0, mode: MovementMode::Stop };
-        let falloff = d.effective_falloff_range(&ctx);
-        let t_opt = Ball { id: npc_id, type_id: 10004, position: DVec3::new(d.optimal_range, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 100.0, inertia: 1.0, mass: 1000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop };
-        let t_falloff = Ball { id: npc_id, type_id: 10004, position: DVec3::new(d.optimal_range + falloff, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 100.0, inertia: 1.0, mass: 1000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop };
-        let t_trans = Ball { id: npc_id, type_id: 10004, position: DVec3::new(d.optimal_range, 0.0, 0.0), velocity: DVec3::new(0.0, 5000.0, 0.0), max_velocity: 5000.0, inertia: 1.0, mass: 1000.0, radius: 25.0, speed_fraction: 1.0, mode: MovementMode::Stop };
-        (
-            d.compute_combat_hit_multiplier(&ctx, &d_ball, &t_opt, 50.0),
-            d.compute_combat_hit_multiplier(&ctx, &d_ball, &t_falloff, 50.0),
-            d.compute_combat_hit_multiplier(&ctx, &d_ball, &t_trans, 25.0),
-        )
-    });
-    assert!((hit_opt - 1.0).abs() < 1e-3, "Stationary target at optimal has 1.0 hit chance");
-    assert!((hit_falloff - 0.5).abs() < 0.05, "Target at optimal + falloff has ~0.5 hit chance");
-    assert!(hit_transversal < 0.25, "High transversal tracking penalty drops hit chance");
+#[tokio::test]
+async fn test_crimewatch_safety_setting_green_yellow_red_enforcement() {
+    // parity: feat:crimewatch.safety-setting-action-block
+    eve_testkit::attest(&["feat:crimewatch.safety-setting-action-block"]);
 
-    eve_server::services::combat_crimewatch::step_extended_npc_ai(&ctx, sys_id).await;
-    let (npc_target, threat_dbg) = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        let n = rt.npc_entities.get(&npc_id).unwrap();
-        (n.target_id, n.aggression_threat.clone())
-    });
-    assert_eq!(npc_target, Some(active_garde_ball), "NPC must switch aggro onto high-threat player drone (threats={threat_dbg:?})");
+    let ctx = new_ctx();
+    let jita = 30_000_142u32;
+    let lowsec = 30_002_537u32;
+    let (atk_c, vic_c, ally_c) = (94_000_001, 94_000_002, 94_000_003);
+    let (atk_s, vic_s, ally_s) = (84_000_001, 84_000_002, 84_000_003);
+    let mut atk_sess = spawn_pilot(&ctx, 801, atk_c, 1_000_009, atk_s, 626, jita, DVec3::ZERO).await;
+    let mut vic_sess = spawn_pilot(&ctx, 802, vic_c, 1_000_010, vic_s, 587, jita, DVec3::new(1_000.0, 0.0, 0.0)).await;
+    let mut ally_sess = spawn_pilot(&ctx, 803, ally_c, 1_000_011, ally_s, 587, jita, DVec3::new(1_200.0, 0.0, 0.0)).await;
 
-    let _ = call_service(&ctx, &mut sess, "ship", "ScoopToDroneBay", vec![PyRep::Integer(active_garde_ball)], HashMap::new()).await.expect("Scooping Garde I within 2500m succeeds");
-    let garde_flag = ctx.db.with_snapshot(|s| s.items.get(&garde_id).map(|i| i.flag));
-    assert_eq!(garde_flag, Some(InventoryFlag::DroneBay), "Scooped drone must return to DroneBay");
-    eve_server::services::combat_crimewatch::record_npc_threat_event(&ctx, npc_id, vexor_id, 50.0, false, false);
-    eve_server::services::combat_crimewatch::step_extended_npc_ai(&ctx, sys_id).await;
-    let npc_target_after = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        rt.npc_entities.get(&npc_id).and_then(|n| n.target_id)
-    });
-    assert_eq!(npc_target_after, Some(vexor_id), "NPC must switch aggro back to player ship after drone recall");
+    let burst_tid = 580u32; // Burst Jammer I (group 80)
+    fit_online(&ctx, atk_c, atk_s, 84_000_101, 486, InventoryFlag::HiSlot0, Some((84_000_102, 185, 100)));
+    fit_online(&ctx, atk_c, atk_s, 84_000_103, 3953, InventoryFlag::HiSlot1, None);
+    fit_online(&ctx, atk_c, atk_s, 84_000_104, burst_tid, InventoryFlag::MedSlot0, None);
+    fit_online(&ctx, atk_c, atk_s, 84_000_105, 11355, InventoryFlag::HiSlot2, None); // Small Remote Armor Repairer I
+    assert!(ctx.get_or_rebuild_ship_fitting(atk_c, atk_s).unwrap().modules.contains_key(&84_000_105), "Remote repairer must reside in ShipFittingEngine.modules");
+    fit_online(&ctx, ally_c, ally_s, 84_000_107, 486, InventoryFlag::HiSlot0, Some((84_000_108, 185, 50)));
+    seed_item(&ctx, 84_000_106, 2454, atk_c, atk_s, InventoryFlag::DroneBay, 1, true);
+    seed_item(&ctx, 84_000_109, 34, vic_c, vic_s, InventoryFlag::Cargo, 20, false);
 
-    // 4. Carrier launch tubes & flight control (`Archon` 24483 + `Templar I` 23057):
-    let archon_id = 930_100;
-    let templar_item = 930_101;
-    let templar_oversize = 930_102;
-    seed_item(&ctx, archon_id, 24483, c1, sys_id as i64, InventoryFlag::None, 1, true);
-    seed_item(&ctx, templar_item, 23057, c1, archon_id, InventoryFlag::FighterBay, 9, false);
-    seed_item(&ctx, templar_oversize, 23057, c1, archon_id, InventoryFlag::FighterBay, 12, false);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&c1) { ch.active_ship_id = archon_id; }
-    });
-    sess.ship_id = Some(archon_id);
-    spawn_ship_ball(&ctx, sys_id, archon_id, 24483, c1, 0.0).await;
+    lock_target(&ctx, &mut atk_sess, jita, vic_s).await;
+    lock_target(&ctx, &mut atk_sess, jita, ally_s).await;
+    lock_target(&ctx, &mut ally_sess, jita, vic_s).await;
+    rpc(&ctx, &mut atk_sess, "ship", None, "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(84_000_106)])]).await.unwrap();
+    let hob_ball = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space.keys().copied().next().unwrap());
 
-    // Carrier has 4 tubes (0..3); tube 4 is invalid
-    let bad_tube = call_service(&ctx, &mut sess, "fighterMgr", "LoadFightersToTube", vec![PyRep::Integer(4), PyRep::Integer(templar_item)], HashMap::new()).await.expect_err("Carrier max 4 tubes");
-    assert_eq!(bad_tube.code, "InvalidFighterTube");
+    // 1. Safety Green (`2`) in high-sec blocks turret, Smartbomb, Burst Jammer, offensive drone, and remote repair onto LE/Suspect (`CantDoInCurrentSafetyLevel`)
+    let _ = ctx.drain_notifications_for_char(atk_c);
+    rpc(&ctx, &mut atk_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(2)]).await.unwrap();
+    assert!(ctx.drain_notifications_for_char(atk_c).iter().any(|n| n.event == "OnSafetyLevelChanged" && n.args == vec![PyRep::Integer(2)]));
 
-    // Supercarrier (Aeon 23919) has 5 tubes (0..4); tube 4 is valid, tube 5 is invalid
-    let aeon_id = 930_200;
-    let aeon_templar = 930_201;
-    seed_item(&ctx, aeon_id, 23919, c1, sys_id as i64, InventoryFlag::None, 1, true);
-    seed_item(&ctx, aeon_templar, 23057, c1, aeon_id, InventoryFlag::FighterBay, 9, false);
-    sess.ship_id = Some(aeon_id);
-    let aeon_load4 = call_service(&ctx, &mut sess, "fighterMgr", "LoadFightersToTube", vec![PyRep::Integer(4), PyRep::Integer(aeon_templar)], HashMap::new()).await.expect("Supercarrier tube 4 valid");
-    assert_eq!(aeon_load4.dict_get("success").and_then(|v| v.as_bool()), Some(true));
-    let aeon_load5 = call_service(&ctx, &mut sess, "fighterMgr", "LoadFightersToTube", vec![PyRep::Integer(5), PyRep::Integer(aeon_templar)], HashMap::new()).await.expect_err("Supercarrier max 5 tubes");
-    assert_eq!(aeon_load5.code, "InvalidFighterTube");
-    sess.ship_id = Some(archon_id);
+    assert_eq!(rpc(&ctx, &mut atk_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_101), PyRep::Integer(vic_s)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
+    assert_eq!(rpc(&ctx, &mut atk_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_103)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
+    assert_eq!(rpc(&ctx, &mut atk_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_104)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
+    assert_eq!(rpc(&ctx, &mut atk_sess, "entity", None, "CmdEngage", &[PyRep::List(vec![PyRep::Integer(hob_ball)]), PyRep::Integer(vic_s)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
 
-    // Oversized squadron size check (max_squadron_size attr 2215 == 6 for Dragonfly I): loading 12 caps to 6
-    let load_rep = call_service(&ctx, &mut sess, "fighterMgr", "LoadFightersToTube", vec![PyRep::Integer(0), PyRep::Integer(templar_oversize)], HashMap::new()).await.expect("LoadFightersToTube must succeed");
-    assert_eq!(load_rep.dict_get("success").and_then(|v| v.as_bool()), Some(true));
-    let loaded_qty = ctx.db.with_snapshot(|s| s.items.get(&templar_oversize).map(|i| i.quantity)).unwrap();
-    assert_eq!(loaded_qty, 6, "Loaded squadron size must be capped to max_squadron_size (6)");
+    // Live duel creates a real Limited Engagement on `ally_c` -> Green blocks remote repair (`CantDoInCurrentSafetyLevel`)
+    rpc(&ctx, &mut ally_sess, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(vic_c)]).await.unwrap();
+    rpc(&ctx, &mut vic_sess, "crimewatch", None, "RespondToDuelChallenge", &[PyRep::Integer(ally_c), PyRep::Bool(true)]).await.unwrap();
+    assert_eq!(rpc(&ctx, &mut atk_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_105), PyRep::Integer(ally_s)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
+    ctx.advance_virtual_clock(301); // Duel LE expires naturally
 
-    // Cannot launch fighters in warp:
-    let _ = sys_h.set_movement_mode(archon_id, eve_destiny::MovementMode::new_warp(DVec3::ZERO, DVec3::new(100_000_000.0, 0.0, 0.0), 3.0)).await;
-    let warp_launch_err = call_service(&ctx, &mut sess, "fighterMgr", "LaunchFightersFromTubes", vec![PyRep::List(vec![PyRep::Integer(0)])], HashMap::new()).await.expect_err("Cannot launch fighters in warp");
-    assert_eq!(warp_launch_err.code, "CannotLaunchFightersInWarp");
-    let _ = sys_h.set_movement_mode(archon_id, eve_destiny::MovementMode::Stop).await;
+    // Live theft gives `ally_c` a real Suspect Timer -> Green blocks remote repair (`CantDoInCurrentSafetyLevel`)
+    let PyRep::Tuple(vj_t) = rpc(&ctx, &mut vic_sess, "ship", None, "Jettison", &[PyRep::List(vec![PyRep::Integer(84_000_109)])]).await.unwrap() else { panic!() };
+    let PyRep::List(vj_ids) = &vj_t[0] else { panic!() };
+    let v_can = vj_ids[0].as_i64().unwrap();
+    let v_item = ctx.db.with_snapshot(|s| s.items.values().find(|i| i.location_id == v_can).unwrap().item_id);
+    let atk_inv = ctx.bind_object(&atk_sess, "invbroker", atk_s).unwrap();
+    assert_eq!(rpc(&ctx, &mut atk_sess, "invbroker", Some(atk_inv), "Add", &[PyRep::Integer(v_item), PyRep::Integer(v_can), PyRep::Integer(InventoryFlag::Cargo as i64)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
+    assert_eq!(rpc(&ctx, &mut atk_sess, "invbroker", Some(atk_inv), "LootAll", &[PyRep::Integer(v_can)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
+    rpc(&ctx, &mut ally_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(1)]).await.unwrap();
+    let ally_inv = ctx.bind_object(&ally_sess, "invbroker", ally_s).unwrap();
+    rpc(&ctx, &mut ally_sess, "invbroker", Some(ally_inv), "Add", &[PyRep::Integer(v_item), PyRep::Integer(v_can), PyRep::Integer(InventoryFlag::Cargo as i64)]).await.unwrap();
+    assert_eq!(rpc(&ctx, &mut atk_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_105), PyRep::Integer(ally_s)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
 
-    let launch_rep = call_service(&ctx, &mut sess, "fighterMgr", "LaunchFightersFromTubes", vec![PyRep::List(vec![PyRep::Integer(0)])], HashMap::new()).await.expect("LaunchFightersFromTubes must succeed");
-    let fighter_ball_id = match launch_rep {
-        PyRep::List(ref items) => items.first().and_then(|v| v.as_i64()).expect("launched fighter ball ID"),
-        _ => panic!("Expected list of launched fighter ball IDs"),
-    };
-    let move_rep = call_service(&ctx, &mut sess, "fighterMgr", "ExecuteMovementCommandOnFighters", vec![PyRep::List(vec![PyRep::Integer(fighter_ball_id)]), PyRep::String("ORBIT".into()), PyRep::Integer(npc_id)], HashMap::new()).await.expect("ExecuteMovementCommandOnFighters must succeed");
-    assert_eq!(move_rep.as_bool(), Some(true));
-    let recall_rep = call_service(&ctx, &mut sess, "fighterMgr", "RecallFightersToTubes", vec![PyRep::List(vec![PyRep::Integer(fighter_ball_id)])], HashMap::new()).await.expect("RecallFightersToTubes must succeed");
-    assert!(matches!(recall_rep, PyRep::List(ref items) if items.len() == 1));
-    let rearm_active = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        rt.fighter_tube_rearm_until.contains_key(&(archon_id, 0))
-    });
-    assert!(rearm_active, "Recalled carrier fighter tube must enter refuel/rearm state");
+    // 2. Safety Yellow (`1`) blocks Criminal actions (high-sec PvP, Smartbomb/Burst Jammer, repping Criminal, low-sec Capsule/AoE) while allowing Suspect actions
+    rpc(&ctx, &mut atk_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(1)]).await.unwrap();
+    assert_eq!(rpc(&ctx, &mut atk_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_101), PyRep::Integer(vic_s)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
+    assert_eq!(rpc(&ctx, &mut atk_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_103)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
+    assert_eq!(rpc(&ctx, &mut atk_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_104)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
+    rpc(&ctx, &mut atk_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_105), PyRep::Integer(ally_s)]).await.expect("Safety Yellow allows repping Suspect");
+    assert!(ctx.crimewatch.read().unwrap().states[&atk_c].is_suspect(ctx.now_unix()), "Repping Suspect must inherit Suspect flag");
+    rpc(&ctx, &mut atk_sess, "dogmaIM", None, "Deactivate", &[PyRep::Integer(84_000_105)]).await.unwrap();
+
+    // `ally_sess` switches to Red and shoots `vic_s` -> Criminal Timer -> `atk_sess` on Yellow blocked (`CantDoInCurrentSafetyLevel`), on Red inherits Criminal + CONCORD!
+    rpc(&ctx, &mut ally_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(0)]).await.unwrap();
+    rpc(&ctx, &mut ally_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_107), PyRep::Integer(vic_s)]).await.unwrap();
+    assert_eq!(rpc(&ctx, &mut atk_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_105), PyRep::Integer(ally_s)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
+
+    // Low-sec Green & Yellow vs Capsule (`670`), Smartbomb (`3953`), and Burst Jammer (`burst_tid`): all blocked with `CantDoInCurrentSafetyLevel`; Red (`0`) permits!
+    let (ls_c, ls_vc, ls_s, ls_pod) = (94_000_021, 94_000_022, 84_000_021, 84_000_022);
+    let mut ls_sess = spawn_pilot(&ctx, 821, ls_c, 1_000_009, ls_s, 626, lowsec, DVec3::ZERO).await;
+    let _ls_pod_sess = spawn_pilot(&ctx, 822, ls_vc, 1_000_010, ls_pod, 670, lowsec, DVec3::new(1_000.0, 0.0, 0.0)).await;
+    fit_online(&ctx, ls_c, ls_s, 84_000_201, 447, InventoryFlag::MedSlot0, None);
+    fit_online(&ctx, ls_c, ls_s, 84_000_202, 3953, InventoryFlag::HiSlot0, None);
+    fit_online(&ctx, ls_c, ls_s, 84_000_203, burst_tid, InventoryFlag::MedSlot1, None);
+    lock_target(&ctx, &mut ls_sess, lowsec, ls_pod).await;
+    for lvl in [2i64, 1i64] {
+        rpc(&ctx, &mut ls_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(lvl)]).await.unwrap();
+        assert_eq!(rpc(&ctx, &mut ls_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_201), PyRep::Integer(ls_pod)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
+        assert_eq!(rpc(&ctx, &mut ls_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_202)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
+        assert_eq!(rpc(&ctx, &mut ls_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_203)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
+    }
+    let pod_cs = ctx.systems.get_or_spawn(lowsec).get_combat_state(ls_pod).await.unwrap().unwrap();
+    assert_eq!(pod_cs.shield_hp, pod_cs.max_shield_hp, "Low-sec pod must take 0 Smartbomb damage under Safety Yellow");
+    assert_eq!(pod_cs.ecm_jammed_remaining_s, 0.0, "Low-sec pod must not be ECM-burst jammed under Safety Yellow");
+    assert!(!ctx.crimewatch.read().unwrap().states.get(&ls_c).is_some_and(|st| st.is_criminal(ctx.now_unix())));
+
+    ctx.advance_virtual_clock(35);
+    let ls_sec_before = ctx.db.get_character(ls_c).unwrap().security_status;
+    rpc(&ctx, &mut ls_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(0)]).await.unwrap();
+    rpc(&ctx, &mut ls_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_203)]).await.expect("Safety Red permits low-sec Burst Jammer near pod");
+    rpc(&ctx, &mut ls_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_202)]).await.expect("Safety Red permits low-sec Smartbomb near pod");
+    assert!(ctx.crimewatch.read().unwrap().states[&ls_c].is_criminal(ctx.now_unix()));
+    assert!(ctx.db.get_character(ls_c).unwrap().security_status < ls_sec_before);
+
+    rpc(&ctx, &mut atk_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(0)]).await.unwrap();
+    rpc(&ctx, &mut atk_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_105), PyRep::Integer(ally_s)]).await.expect("Safety Red permits repping Criminal in high-sec");
+    let atk_cw = ctx.crimewatch.read().unwrap().states[&atk_c].clone();
+    assert!(atk_cw.is_criminal(ctx.now_unix()) && atk_cw.pending_concord_arrival.is_some(), "Repping Criminal in high-sec on Red must schedule CONCORD");
+    rpc(&ctx, &mut atk_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_101), PyRep::Integer(vic_s)]).await.expect("Safety Red permits high-sec PvP");
+
+    // 3. R1 negative test: out-of-range or no-charge activation on a neutral leaves crimewatch flags and security status unchanged
+    let (neg_c, neg_vic, neg_s, neg_vs) = (94_000_031, 94_000_032, 84_000_031, 84_000_032);
+    let mut neg_sess = spawn_pilot(&ctx, 831, neg_c, 1_000_009, neg_s, 626, jita, DVec3::ZERO).await;
+    let _neg_vic_sess = spawn_pilot(&ctx, 832, neg_vic, 1_000_010, neg_vs, 587, jita, DVec3::new(30_000.0, 0.0, 0.0)).await;
+    fit_online(&ctx, neg_c, neg_s, 84_000_301, 447, InventoryFlag::MedSlot0, None); // Warp Scrambler I
+    fit_online(&ctx, neg_c, neg_s, 84_000_302, 529, InventoryFlag::HiSlot1, None); // Small Remote Capacitor Transmitter I (falloff 0)
+    lock_target(&ctx, &mut neg_sess, jita, neg_vs).await;
+    rpc(&ctx, &mut neg_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(0)]).await.unwrap();
+    let neg_sec_before = ctx.db.get_character(neg_c).unwrap().security_status;
+
+    // Out of range offensive module (30 km >> 9 km) -> fails with TargetOutOfRange; crimewatch flags and security status untouched
+    let oor_atk = rpc(&ctx, &mut neg_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_301), PyRep::Integer(neg_vs)]).await;
+    assert_eq!(oor_atk.unwrap_err().code, "TargetOutOfRange");
+    assert_eq!(ctx.db.get_character(neg_c).unwrap().security_status, neg_sec_before);
+    assert!(!ctx.crimewatch.read().unwrap().states.get(&neg_c).is_some_and(|st| st.is_criminal(ctx.now_unix())));
+
+    // Out of range remote assistance module (30 km >> 6 km, falloff 0) -> fails with TargetOutOfRange; crimewatch flags and sec status untouched
+    let oor_res = rpc(&ctx, &mut neg_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_302), PyRep::Integer(neg_vs)]).await;
+    assert_eq!(oor_res.unwrap_err().code, "TargetOutOfRange");
+    assert_eq!(ctx.db.get_character(neg_c).unwrap().security_status, neg_sec_before);
+    assert!(!ctx.crimewatch.read().unwrap().states.get(&neg_c).is_some_and(|st| st.is_criminal(ctx.now_unix())));
+
+    // In-range but drained capacitor -> fails with NotEnoughCapacitor; crimewatch flags and sec status untouched
+    let _ = ctx.systems.get_or_spawn(jita).set_ball_position(neg_vs, DVec3::new(1_000.0, 0.0, 0.0)).await;
+    let _ = ctx.systems.get_or_spawn(jita).set_capacitor(neg_s, 0.0).await;
+    let cap_res = rpc(&ctx, &mut neg_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_301), PyRep::Integer(neg_vs)]).await;
+    assert_eq!(cap_res.unwrap_err().code, "NotEnoughCapacitor");
+    assert_eq!(ctx.db.get_character(neg_c).unwrap().security_status, neg_sec_before);
+    assert!(!ctx.crimewatch.read().unwrap().states.get(&neg_c).is_some_and(|st| st.is_criminal(ctx.now_unix())));
 }
