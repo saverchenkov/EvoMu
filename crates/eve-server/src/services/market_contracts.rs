@@ -15,7 +15,7 @@ fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
 }
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, MarketOrderRecord};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, DBRowDescriptor, DbColumnType, PyRep};
+use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
 use eve_sde::TypeId;
 use std::collections::HashMap;
 
@@ -37,22 +37,7 @@ use super::market_trading::{
 };
 
 fn market_order_descriptor() -> DBRowDescriptor {
-    DBRowDescriptor::new([
-        ("price", DbColumnType::R8), ("volRemaining", DbColumnType::R8), ("typeID", DbColumnType::I4),
-        ("orderID", DbColumnType::I8), ("volEntered", DbColumnType::I4), ("minVolume", DbColumnType::I4),
-        ("bid", DbColumnType::Bool), ("stationID", DbColumnType::I8), ("regionID", DbColumnType::I4),
-        ("range", DbColumnType::I2), ("issueDate", DbColumnType::FileTime), ("duration", DbColumnType::I2),
-    ])
-}
-
-fn order_to_packed_cells(snap: &eve_db::WorldStateSnapshot, o: &MarketOrderRecord, default_unix: u64) -> Vec<PyRep> {
-    let meta = load_market_order_meta(snap, o, default_unix);
-    vec![
-        PyRep::Real(o.price.to_wire_f64()), PyRep::Real(o.vol_remaining as f64), PyRep::Integer(o.type_id as i64),
-        PyRep::Integer(o.order_id), PyRep::Integer(o.vol_entered as i64), PyRep::Integer(o.min_volume as i64),
-        PyRep::Bool(o.is_bid), PyRep::Integer(o.station_id), PyRep::Integer(o.region_id as i64),
-        PyRep::Integer(meta.range), PyRep::Integer(unix_to_filetime(meta.issue_unix)), PyRep::Integer(meta.duration),
-    ]
+    DBRowDescriptor::market_order_header()
 }
 
 /// Validates EVE's 4-significant-figure price tick rule (`feat:market.tick-size-four-significant-digits`).
@@ -219,7 +204,7 @@ pub(crate) fn sweep_and_notify_expired_for_char(ctx: &ServerContext, char_id: i6
 
 pub(crate) fn emit_expired_order_notifications(ctx: &ServerContext, expired: &[(i64, i64, bool, TypeId, i64)]) {
     for (oid, owner_id, is_bid, type_id, station_id) in expired {
-        notify_char(ctx, *owner_id, "OnOwnOrdersChanged", vec![PyRep::Integer(*oid), PyRep::String("Expiry".into()), PyRep::Bool(false)]);
+        notify_char(ctx, *owner_id, "OnOwnOrdersChanged", crate::services::market_price_history::build_own_order_changed_payload(ctx, *oid, "Expiry", false));
         if !*is_bid {
             notify_char(ctx, *owner_id, "OnMarketItemReceived", vec![PyRep::Integer(*oid), PyRep::Integer(*type_id as i64), PyRep::Integer(4), PyRep::Integer(*station_id)]);
         }
@@ -311,9 +296,9 @@ pub fn handle(
                     }
                     best_by_type.into_values().map(|o| {
                             vec![
-                                PyRep::Integer(o.type_id as i64),
                                 PyRep::Real(o.price.to_wire_f64()),
                                 PyRep::Real(o.vol_remaining as f64),
+                                PyRep::Integer(o.type_id as i64),
                                 PyRep::Integer(o.station_id),
                             ]
                         }).collect()
@@ -323,20 +308,23 @@ pub fn handle(
 
             "GetHistoryForManyTypeIDs" => {
                 let region_id = session.region_id.unwrap_or(THE_FORGE_REGION_ID);
-                let Some(PyRep::List(items) | PyRep::Tuple(items)) = args.first() else {
-                    return Some(Err(rpc_err("InvalidArgument", "GetHistoryForManyTypeIDs requires a list of typeIDs")));
+                let Some((tids, is_python_set)) = crate::services::market_price_history::extract_type_ids_arg(args.first()) else {
+                    return Some(Err(rpc_err("InvalidArgument", "GetHistoryForManyTypeIDs requires a list or set of typeIDs")));
                 };
                 let now_unix = ctx.now_unix();
                 let swept = ctx.db.with_mut_snapshot(|snap| sweep_expired_orders(snap, now_unix));
                 if !swept.is_empty() { emit_expired_order_notifications(ctx, &swept); }
                 let entries = ctx.db.with_snapshot(|snap| {
                     let hdr = DBRowDescriptor::market_history_header();
-                    let mut out = Vec::with_capacity(items.len());
-                    for item in items {
-                        if let Some(tid) = item.as_i64().filter(|&v| v > 0) {
-                            let rows = crate::services::market_price_history::build_price_history_rows(snap, tid as TypeId, region_id);
-                            out.push((PyRep::Integer(tid), hdr.build_crowset(rows)));
-                        }
+                    let mut out = Vec::with_capacity(tids.len());
+                    for tid in tids {
+                        let rows = crate::services::market_price_history::build_price_history_rows(snap, tid as TypeId, region_id);
+                        let val = if is_python_set {
+                            PyRep::Tuple(vec![hdr.build_crowset(Vec::new()), hdr.build_crowset(rows)])
+                        } else {
+                            hdr.build_crowset(rows)
+                        };
+                        out.push((PyRep::Integer(tid), val));
                     }
                     out
                 });
@@ -372,59 +360,27 @@ pub fn handle(
                     orders.into_iter().map(|o| {
                             let meta = load_market_order_meta(snap, o, now_unix);
                             let acct_key = meta.account_key.unwrap_or(1000) as i64;
-                            let issued_by = snap
-                                .corporations
-                                .get(&corp_id)
-                                .map(|c| c.ceo_id)
-                                .filter(|&id| id > 0)
-                                .unwrap_or(char_id);
+                            let issued_by = snap.market_order_meta.get(&o.order_id).and_then(|m| m.issued_by).unwrap_or_else(|| {
+                                snap.corporations.get(&corp_id).map(|c| c.ceo_id).filter(|&id| id > 0).unwrap_or(char_id)
+                            });
+                            let (sys_id, const_id) = crate::services::market_price_history::resolve_station_solar_and_constellation(ctx, snap, o.station_id);
                             vec![
-                                PyRep::Integer(o.order_id),
-                                PyRep::Integer(o.type_id as i64),
-                                PyRep::Integer(issued_by),
-                                PyRep::Integer(o.region_id as i64),
-                                PyRep::Integer(o.station_id),
-                                PyRep::Integer(meta.range),
-                                PyRep::Bool(o.is_bid),
-                                PyRep::Real(o.price.to_wire_f64()),
-                                PyRep::Integer(o.vol_entered as i64),
-                                PyRep::Integer(o.vol_remaining as i64),
-                                PyRep::Integer(unix_to_filetime(meta.issue_unix)),
-                                PyRep::Integer(1), // orderState 1 = open
-                                PyRep::Integer(o.min_volume as i64),
-                                PyRep::Bool(false),
-                                PyRep::Integer(acct_key),
-                                PyRep::Integer(meta.duration),
-                                PyRep::Bool(true), // isCorp = true
-                                PyRep::Integer(
-                                    resolve_station_solar_system(ctx, snap, o.station_id)
-                                        .unwrap_or(30_000_142) as i64,
-                                ),
-                                PyRep::Real(o.escrow.to_wire_f64()),
+                                PyRep::Integer(o.order_id), PyRep::Integer(o.type_id as i64), PyRep::Integer(issued_by),
+                                PyRep::Integer(o.region_id as i64), PyRep::Integer(o.station_id), PyRep::Integer(meta.range),
+                                PyRep::Bool(o.is_bid), PyRep::Real(o.price.to_wire_f64()), PyRep::Integer(o.vol_entered as i64),
+                                PyRep::Integer(o.vol_remaining as i64), PyRep::Integer(unix_to_filetime(meta.issue_unix)),
+                                PyRep::Integer(1), PyRep::Integer(o.min_volume as i64), PyRep::Bool(false),
+                                PyRep::Integer(acct_key), PyRep::Integer(meta.duration), PyRep::Bool(true),
+                                PyRep::Integer(sys_id as i64), PyRep::Real(o.escrow.to_wire_f64()),
+                                PyRep::Integer(acct_key), PyRep::Integer(const_id as i64),
                             ]
                         }).collect()
                 });
                 return Some(Ok(PyRep::rowset(
                     vec![
-                        "orderID",
-                        "typeID",
-                        "charID",
-                        "regionID",
-                        "stationID",
-                        "range",
-                        "bid",
-                        "price",
-                        "volEntered",
-                        "volRemaining",
-                        "issueDate",
-                        "orderState",
-                        "minVolume",
-                        "contraband",
-                        "accountID",
-                        "duration",
-                        "isCorp",
-                        "solarSystemID",
-                        "escrow",
+                        "orderID", "typeID", "charID", "regionID", "stationID", "range", "bid", "price",
+                        "volEntered", "volRemaining", "issueDate", "orderState", "minVolume", "contraband",
+                        "accountID", "duration", "isCorp", "solarSystemID", "escrow", "keyID", "constellationID",
                     ],
                     rows,
                 )));
@@ -469,29 +425,18 @@ pub fn handle(
                                 if was_expired { 4 } else if was_cancelled { 3 } else { 2 }
                             };
                             let is_corp = o.owner_id != char_id;
+                            let acct_key = meta.account_key.unwrap_or(1000) as i64;
+                            let last_change = unix_to_filetime(meta.closed_unix.unwrap_or(now_unix));
+                            let (sys_id, const_id) = crate::services::market_price_history::resolve_station_solar_and_constellation(ctx, snap, o.station_id);
                             Some(vec![
-                                PyRep::Integer(o.order_id),
-                                PyRep::Integer(o.type_id as i64),
-                                PyRep::Integer(char_id),
-                                PyRep::Integer(o.region_id as i64),
-                                PyRep::Integer(o.station_id),
-                                PyRep::Integer(meta.range),
-                                PyRep::Bool(o.is_bid),
-                                PyRep::Real(o.price.to_wire_f64()),
-                                PyRep::Integer(o.vol_entered as i64),
+                                PyRep::Integer(o.order_id), PyRep::Integer(o.type_id as i64), PyRep::Integer(char_id),
+                                PyRep::Integer(o.region_id as i64), PyRep::Integer(o.station_id), PyRep::Integer(meta.range),
+                                PyRep::Bool(o.is_bid), PyRep::Real(o.price.to_wire_f64()), PyRep::Integer(o.vol_entered as i64),
                                 PyRep::Integer(meta.final_vol_remaining.unwrap_or(0) as i64),
-                                PyRep::Integer(unix_to_filetime(meta.issue_unix)),
-                                PyRep::Integer(state_code),
-                                PyRep::Integer(o.min_volume as i64),
-                                PyRep::Bool(false),
-                                PyRep::Integer(meta.account_key.unwrap_or(1000) as i64),
-                                PyRep::Integer(meta.duration),
-                                PyRep::Bool(is_corp),
-                                PyRep::Integer(
-                                    resolve_station_solar_system(ctx, snap, o.station_id)
-                                        .unwrap_or(30_000_142) as i64,
-                                ),
-                                PyRep::Real(0.0),
+                                PyRep::Integer(unix_to_filetime(meta.issue_unix)), PyRep::Integer(state_code),
+                                PyRep::Integer(o.min_volume as i64), PyRep::Bool(false), PyRep::Integer(acct_key),
+                                PyRep::Integer(meta.duration), PyRep::Bool(is_corp), PyRep::Integer(sys_id as i64),
+                                PyRep::Real(0.0), PyRep::Integer(last_change), PyRep::Integer(acct_key), PyRep::Integer(const_id as i64),
                             ])
                         }).collect();
                     (swept, out)
@@ -499,25 +444,10 @@ pub fn handle(
                 emit_expired_order_notifications(ctx, &swept_list);
                 return Some(Ok(PyRep::rowset(
                     vec![
-                        "orderID",
-                        "typeID",
-                        "charID",
-                        "regionID",
-                        "stationID",
-                        "range",
-                        "bid",
-                        "price",
-                        "volEntered",
-                        "volRemaining",
-                        "issueDate",
-                        "orderState",
-                        "minVolume",
-                        "contraband",
-                        "accountID",
-                        "duration",
-                        "isCorp",
-                        "solarSystemID",
-                        "escrow",
+                        "orderID", "typeID", "charID", "regionID", "stationID", "range", "bid", "price",
+                        "volEntered", "volRemaining", "issueDate", "orderState", "minVolume", "contraband",
+                        "accountID", "duration", "isCorp", "solarSystemID", "escrow", "lastStateChange",
+                        "keyID", "constellationID",
                     ],
                     rows,
                 )));
@@ -800,7 +730,7 @@ pub fn handle(
                         old_price, new_price, relist_fee, scc_surcharge, final_escrow, escrow_delta,
                         meta, proc_lvl, mkt_lvl, day_lvl, vis_lvl, corp_delivered_qty,
                     )) => {
-                        notify_char(ctx, char_id, "OnOwnOrdersChanged", vec![PyRep::Integer(order_id), PyRep::String("Modify".into()), PyRep::Bool(false)]);
+                        notify_char(ctx, char_id, "OnOwnOrdersChanged", crate::services::market_price_history::build_own_order_changed_payload(ctx, order_id, "Modify", false));
                         Some(Ok(PyRep::keyval([
                             ("orderID", PyRep::Integer(order_id)),
                             ("oldPrice", PyRep::Real(old_price.to_wire_f64())),
@@ -844,9 +774,9 @@ pub fn handle(
                         }
                         let rows = if let Some(a) = min_ask {
                             vec![vec![
-                                PyRep::Integer(PLEX_TYPE_ID as i64),
                                 PyRep::Real(a.price.to_wire_f64()),
                                 PyRep::Real(a.vol_remaining as f64),
+                                PyRep::Integer(PLEX_TYPE_ID as i64),
                                 PyRep::Integer(a.station_id),
                             ]]
                         } else { Vec::new()
@@ -882,7 +812,7 @@ pub fn handle(
                         .filter(|o| o.type_id == PLEX_TYPE_ID && o.vol_remaining > 0).collect();
                     matching.sort_by_key(|o| o.order_id);
                     for o in matching {
-                        let cells = order_to_packed_cells(snap, o, now_unix);
+                        let cells = crate::services::market_price_history::order_to_packed_cells_with_ctx(ctx, snap, o, now_unix);
                         if o.is_bid { buys.push(cells); } else { sells.push(cells); }
                     }
                     (sells, buys)
@@ -912,7 +842,7 @@ pub fn handle(
                     Some(PyRep::KeyVal(kv)) => (
                         kv.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0),
                         kv.get("quantity").and_then(|v| v.as_i64()).unwrap_or(0),
-                        kv.get("duration").and_then(|v| v.as_i64()).unwrap_or(90),
+                        kv.get("duration").or_else(|| args.get(2)).and_then(|v| v.as_i64()).unwrap_or(90),
                     ),
                     _ => (
                         args.first().and_then(|a| a.as_f64()).unwrap_or(0.0),
@@ -1182,7 +1112,7 @@ pub fn handle(
 
                 return match res {
                     Ok((oid, filled_imm, broker_fee, sales_tax, rem_vault)) => {
-                        notify_char(ctx, char_id, "OnOwnOrdersChanged", vec![PyRep::Integer(oid), PyRep::String("Add".into()), PyRep::Bool(false)]);
+                        notify_char(ctx, char_id, "OnOwnOrdersChanged", crate::services::market_price_history::build_own_order_changed_payload(ctx, oid, "Add", false));
                         Some(Ok(PyRep::keyval([
                             ("orderID", PyRep::Integer(oid)), ("typeID", PyRep::Integer(PLEX_TYPE_ID as i64)), ("filledImmediately", PyRep::Bool(filled_imm)),
                             ("brokerFeeISK", PyRep::Real(broker_fee.to_wire_f64())), ("salesTaxISK", PyRep::Real(sales_tax.to_wire_f64())), ("plexRemainingVault", PyRep::Integer(rem_vault)),

@@ -116,7 +116,16 @@ fn buy_args(type_id: TypeId, price: f64, qty: i64, min_volume: i64) -> Vec<PyRep
 fn own_orders_changed(ctx: &ServerContext, char_id: i64, order_id: i64) -> bool {
     ctx.drain_notifications_for_char(char_id)
         .iter()
-        .any(|n| n.event == "OnOwnOrdersChanged" && n.args.first().and_then(|a| a.as_i64()) == Some(order_id))
+        .any(|n| {
+            n.event == "OnOwnOrdersChanged"
+                && match n.args.first() {
+                    Some(PyRep::Integer(oid)) => *oid == order_id,
+                    Some(PyRep::List(orders)) => orders.iter().any(|o| {
+                        o.dict_get("orderID").and_then(|v| v.as_i64()) == Some(order_id)
+                    }),
+                    _ => false,
+                }
+        })
 }
 
 #[tokio::test]

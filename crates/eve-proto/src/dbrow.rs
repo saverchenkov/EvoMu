@@ -266,7 +266,7 @@ impl DBRowDescriptor {
         ])
     }
 
-    /// Canonical regional market order book descriptor (`marketProxy.GetOrders`).
+    /// Canonical regional market order book descriptor (`marketProxy.GetOrders`, `GetPlexOrders`).
     pub fn market_order_header() -> Self {
         Self::new([
             ("price", DbColumnType::R8),
@@ -278,15 +278,22 @@ impl DBRowDescriptor {
             ("bid", DbColumnType::Bool),
             ("stationID", DbColumnType::I8),
             ("regionID", DbColumnType::I4),
+            ("range", DbColumnType::I2),
+            ("issueDate", DbColumnType::FileTime),
+            ("duration", DbColumnType::I2),
+            ("solarSystemID", DbColumnType::I4),
+            ("constellationID", DbColumnType::I4),
+            ("jumps", DbColumnType::I4),
         ])
     }
 
-    /// Canonical market ask summary descriptor (`typeID`, `price`, `volRemaining`, `stationID`).
+    /// Canonical market ask summary descriptor (`price`, `volRemaining`, `typeID`, `stationID`)
+    /// matching `marketutil.BestByOrder = namedtuple('BestByOrder', ['price', 'volRemaining', 'typeID', 'stationID'])`.
     pub fn market_summary_header() -> Self {
         Self::new([
-            ("typeID", DbColumnType::I4),
             ("price", DbColumnType::R8),
             ("volRemaining", DbColumnType::R8),
+            ("typeID", DbColumnType::I4),
             ("stationID", DbColumnType::I8),
         ])
     }

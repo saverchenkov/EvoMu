@@ -83,7 +83,7 @@ pub fn handle_orders_escrow(
             let expected_brokers_fee = match args.get(3) {
                 Some(PyRep::None) | None => None,
                 Some(v) => match v.as_f64() {
-                    Some(f) if f.is_finite() && f > 0.0 => Some(IskCents::from_f64_isk(f)),
+                    Some(f) if f.is_finite() && f > 0.0 => Some(f),
                     Some(f) if f == 0.0 => None,
                     _ => {
                         return Some(Err(BridgeRpcError {
@@ -745,16 +745,22 @@ pub fn handle_orders_escrow(
                     order_ids.push(PyRep::Integer(new_oid));
                 }
 
-                if let Some(expected_fee) = expected_brokers_fee {
-                    if total_broker_fee.0 > expected_fee.0.saturating_add(1) {
-                        return Err(BridgeRpcError {
-                            code: "BrokerFeeExceeded".into(),
-                            message: format!(
-                                "Actual broker fee {:.2} ISK exceeds expectedBrokersFee {:.2} ISK",
-                                total_broker_fee.to_wire_f64(),
-                                expected_fee.to_wire_f64()
-                            ),
-                        });
+                if let Some(expected_fee_raw) = expected_brokers_fee {
+                    if expected_fee_raw <= 1.0 {
+                        if broker_rate > expected_fee_raw + 1e-6 {
+                            return Err(BridgeRpcError {
+                                code: "BrokerFeeExceeded".into(),
+                                message: format!("Actual broker fee rate {broker_rate:.4} exceeds expectedBrokersFee {expected_fee_raw:.4}"),
+                            });
+                        }
+                    } else {
+                        let expected_fee = IskCents::from_f64_isk(expected_fee_raw);
+                        if total_broker_fee.0 > expected_fee.0.saturating_add(1) {
+                            return Err(BridgeRpcError {
+                                code: "BrokerFeeExceeded".into(),
+                                message: format!("Actual broker fee {:.2} ISK exceeds expectedBrokersFee {:.2} ISK", total_broker_fee.to_wire_f64(), expected_fee.to_wire_f64()),
+                            });
+                        }
                     }
                 }
 
@@ -772,22 +778,19 @@ pub fn handle_orders_escrow(
                             NotificationTarget::Character(buyer_id),
                             "OnOwnOrdersChanged",
                             "charid",
-                            vec![
-                                PyRep::Integer(matched_oid),
-                                PyRep::String("Change".into()),
-                                PyRep::Bool(false),
-                            ],
+                            crate::services::market_price_history::build_own_order_changed_payload(ctx, matched_oid, "Change", false),
                         );
                     }
                     ctx.notify(
                         NotificationTarget::Character(char_id),
                         "OnOwnOrdersChanged",
                         "charid",
-                        vec![
-                            PyRep::Integer(first_oid),
-                            PyRep::String(if all_filled_immediately { "Change" } else { "Add" }.into()),
-                            PyRep::Bool(false),
-                        ],
+                        crate::services::market_price_history::build_own_order_changed_payload(
+                            ctx,
+                            first_oid,
+                            if all_filled_immediately { "Change" } else { "Add" },
+                            use_corp,
+                        ),
                     );
                     Some(Ok(PyRep::keyval([
                         ("orderID", PyRep::Integer(first_oid)),
@@ -966,11 +969,7 @@ pub fn handle_orders_escrow(
                         NotificationTarget::Character(char_id),
                         "OnOwnOrdersChanged",
                         "charid",
-                        vec![
-                            PyRep::Integer(order_id),
-                            PyRep::String("Expiry".into()),
-                            PyRep::Bool(false),
-                        ],
+                        crate::services::market_price_history::build_own_order_changed_payload(ctx, order_id, "Expiry", false),
                     );
                     Some(Ok(PyRep::Bool(true)))
                 }
@@ -1030,7 +1029,7 @@ pub fn handle_orders_escrow(
                     ),
                     PyRep::KeyVal(kv) => (
                         kv.get("typeID").and_then(|e| e.as_i64()).unwrap_or(0),
-                        kv.get("quantity").and_then(|e| e.as_i64()).unwrap_or(0),
+                        kv.get("quantity").or_else(|| kv.get("qty")).and_then(|e| e.as_i64()).unwrap_or(0),
                         kv.get("maxPrice").or_else(|| kv.get("price")).and_then(|e| e.as_f64()),
                         kv.get("stationID").and_then(|e| e.as_i64()).unwrap_or(station_id),
                         kv.get("orderRange").or_else(|| kv.get("range")).and_then(|e| e.as_i64()).unwrap_or(-1),
@@ -1039,7 +1038,7 @@ pub fn handle_orders_escrow(
                         let find_key = |k: &str| kv.iter().find(|(ek, _)| ek.as_str() == Some(k)).map(|(_, ev)| ev);
                         (
                             find_key("typeID").and_then(|e| e.as_i64()).unwrap_or(0),
-                            find_key("quantity").and_then(|e| e.as_i64()).unwrap_or(0),
+                            find_key("quantity").or_else(|| find_key("qty")).and_then(|e| e.as_i64()).unwrap_or(0),
                             find_key("maxPrice").or_else(|| find_key("price")).and_then(|e| e.as_f64()),
                             find_key("stationID").and_then(|e| e.as_i64()).unwrap_or(station_id),
                             find_key("orderRange").or_else(|| find_key("range")).and_then(|e| e.as_i64()).unwrap_or(-1),
@@ -1284,14 +1283,20 @@ pub fn handle_orders_escrow(
             });
 
             match res {
-                Ok((line_count, total_qty, total_cost, total_sales_tax, orders_created, item_statuses)) => Some(Ok(PyRep::keyval([
-                    ("ordersCreated", PyRep::List(orders_created)),
-                    ("itemStatuses", PyRep::List(item_statuses)),
-                    ("purchasedCount", PyRep::Integer(line_count)),
-                    ("totalQuantity", PyRep::Integer(total_qty)),
-                    ("totalCostISK", PyRep::Real(total_cost.to_wire_f64())),
-                    ("salesTaxISK", PyRep::Real(total_sales_tax.to_wire_f64())),
-                ]))),
+                Ok((line_count, total_qty, total_cost, total_sales_tax, orders_created, item_statuses)) => {
+                    if args.len() >= 3 {
+                        Some(Ok(PyRep::List(orders_created)))
+                    } else {
+                        Some(Ok(PyRep::keyval([
+                            ("ordersCreated", PyRep::List(orders_created)),
+                            ("itemStatuses", PyRep::List(item_statuses)),
+                            ("purchasedCount", PyRep::Integer(line_count)),
+                            ("totalQuantity", PyRep::Integer(total_qty)),
+                            ("totalCostISK", PyRep::Real(total_cost.to_wire_f64())),
+                            ("salesTaxISK", PyRep::Real(total_sales_tax.to_wire_f64())),
+                        ])))
+                    }
+                }
                 Err(e) => Some(Err(e)),
             }
         }

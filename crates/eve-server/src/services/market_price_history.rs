@@ -452,3 +452,284 @@ pub fn build_price_history_rows(
     }
     rows
 }
+
+/// Resolves `(solar_system_id, constellation_id)` for a station or structure ID, defaulting to Jita (`30_000_142`, `20_000_020`).
+pub(crate) fn resolve_station_solar_and_constellation(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    station_id: i64,
+) -> (u32, u32) {
+    let sys_id = super::market_trading::resolve_station_solar_system(ctx, snap, station_id)
+        .unwrap_or(30_000_142);
+    let const_id = ctx
+        .sde
+        .solar_systems
+        .get(&sys_id)
+        .map(|s| s.constellation_id)
+        .filter(|&c| c > 0)
+        .unwrap_or(20_000_020);
+    (sys_id, const_id)
+}
+
+/// Packs a [`eve_db::MarketOrderRecord`] into the 15-column cell vector matching [`eve_proto::DBRowDescriptor::market_order_header`].
+pub(crate) fn order_to_packed_cells_with_ctx(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    o: &eve_db::MarketOrderRecord,
+    default_unix: u64,
+) -> Vec<PyRep> {
+    let meta = super::market_trading::load_market_order_meta(snap, o, default_unix);
+    let (solar_system_id, constellation_id) =
+        resolve_station_solar_and_constellation(ctx, snap, o.station_id);
+    vec![
+        PyRep::Real(o.price.to_wire_f64()),
+        PyRep::Real(o.vol_remaining as f64),
+        PyRep::Integer(o.type_id as i64),
+        PyRep::Integer(o.order_id),
+        PyRep::Integer(o.vol_entered as i64),
+        PyRep::Integer(o.min_volume as i64),
+        PyRep::Bool(o.is_bid),
+        PyRep::Integer(o.station_id),
+        PyRep::Integer(o.region_id as i64),
+        PyRep::Integer(meta.range),
+        PyRep::Integer(super::market_trading::unix_to_filetime(meta.issue_unix)),
+        PyRep::Integer(meta.duration),
+        PyRep::Integer(solar_system_id as i64),
+        PyRep::Integer(constellation_id as i64),
+        PyRep::Integer(0),
+    ]
+}
+
+/// Builds the V24.01 `OnOwnOrdersChanged(orders, reason, isCorp)` notification arguments
+/// where `orders` is a `PyRep::List` of order `KeyVal`s (`marketsvc.pyj:708-827`, `marketbase.pyj:10804`).
+pub(crate) fn build_own_order_changed_payload(
+    ctx: &ServerContext,
+    order_id: i64,
+    reason: &str,
+    is_corp: bool,
+) -> Vec<PyRep> {
+    let now_unix = ctx.now_unix();
+    let order_kv = ctx.db.with_snapshot(|snap| {
+        if let Some(o) = snap.market_orders.get(&order_id) {
+            let meta = super::market_trading::load_market_order_meta(snap, o, now_unix);
+            let (sys_id, const_id) =
+                resolve_station_solar_and_constellation(ctx, snap, o.station_id);
+            let state = meta
+                .order_state
+                .unwrap_or(if o.vol_remaining > 0 { 1 } else { 2 }) as i64;
+            PyRep::keyval([
+                ("orderID", PyRep::Integer(o.order_id)),
+                ("typeID", PyRep::Integer(o.type_id as i64)),
+                ("bid", PyRep::Bool(o.is_bid)),
+                ("duration", PyRep::Integer(meta.duration)),
+                ("volRemaining", PyRep::Integer(o.vol_remaining as i64)),
+                ("volEntered", PyRep::Integer(o.vol_entered as i64)),
+                ("minVolume", PyRep::Integer(o.min_volume as i64)),
+                ("price", PyRep::Real(o.price.to_wire_f64())),
+                ("stationID", PyRep::Integer(o.station_id)),
+                ("regionID", PyRep::Integer(o.region_id as i64)),
+                ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                ("constellationID", PyRep::Integer(const_id as i64)),
+                ("range", PyRep::Integer(meta.range)),
+                (
+                    "issueDate",
+                    PyRep::Integer(super::market_trading::unix_to_filetime(meta.issue_unix)),
+                ),
+                ("isCorp", PyRep::Bool(is_corp)),
+                ("orderState", PyRep::Integer(state)),
+            ])
+        } else {
+            PyRep::keyval([
+                ("orderID", PyRep::Integer(order_id)),
+                ("typeID", PyRep::Integer(34)),
+                ("bid", PyRep::Bool(false)),
+                ("duration", PyRep::Integer(90)),
+                ("volRemaining", PyRep::Integer(0)),
+                ("volEntered", PyRep::Integer(1)),
+                ("minVolume", PyRep::Integer(1)),
+                ("price", PyRep::Real(1.0)),
+                ("stationID", PyRep::Integer(60_003_760)),
+                ("regionID", PyRep::Integer(10_000_002)),
+                ("solarSystemID", PyRep::Integer(30_000_142)),
+                ("constellationID", PyRep::Integer(20_000_020)),
+                ("range", PyRep::Integer(-1)),
+                (
+                    "issueDate",
+                    PyRep::Integer(super::market_trading::unix_to_filetime(now_unix)),
+                ),
+                ("isCorp", PyRep::Bool(is_corp)),
+                ("orderState", PyRep::Integer(2)),
+            ])
+        }
+    });
+    vec![
+        PyRep::List(vec![order_kv]),
+        PyRep::String(reason.to_string()),
+        PyRep::Bool(is_corp),
+    ]
+}
+
+/// Extracts `(type_ids, is_python_set)` from the first argument to `marketProxy.GetHistoryForManyTypeIDs`.
+pub(crate) fn extract_type_ids_arg(arg: Option<&PyRep>) -> Option<(Vec<i64>, bool)> {
+    match arg? {
+        PyRep::List(items) | PyRep::Tuple(items) => {
+            let tids = items
+                .iter()
+                .filter_map(|i| i.as_i64().filter(|&v| v > 0))
+                .collect();
+            Some((tids, false))
+        }
+        PyRep::PySet(items) => {
+            let tids = items
+                .iter()
+                .filter_map(|i| i.as_i64().filter(|&v| v > 0))
+                .collect();
+            Some((tids, true))
+        }
+        PyRep::Object { args, .. } => {
+            if let PyRep::Tuple(t) = args.as_ref() {
+                if let Some(PyRep::List(items) | PyRep::Tuple(items)) = t.first() {
+                    let tids = items
+                        .iter()
+                        .filter_map(|i| i.as_i64().filter(|&v| v > 0))
+                        .collect();
+                    return Some((tids, true));
+                }
+            }
+            None
+        }
+        PyRep::ObjectEx { header, list, .. } => {
+            if !list.is_empty() {
+                let tids = list
+                    .iter()
+                    .filter_map(|i| i.as_i64().filter(|&v| v > 0))
+                    .collect();
+                return Some((tids, true));
+            }
+            if let PyRep::Tuple(hdr_els) = header.as_ref() {
+                if let Some(PyRep::Tuple(ctor_args)) = hdr_els.get(1) {
+                    if let Some(PyRep::List(items) | PyRep::Tuple(items)) = ctor_args.first() {
+                        let tids = items
+                            .iter()
+                            .filter_map(|i| i.as_i64().filter(|&v| v > 0))
+                            .collect();
+                        return Some((tids, true));
+                    }
+                }
+            }
+            Some((Vec::new(), true))
+        }
+        _ => None,
+    }
+}
+
+/// Handles `marketProxy.CharGetTransactions` and `marketProxy.CorpGetTransactions` (`marketSvc.pyj:3741-3948`).
+pub(crate) fn handle_market_transactions_rpc(
+    ctx: &ServerContext,
+    session: &eve_machonet::SessionState,
+    method: &str,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    match method {
+        "CharGetTransactions" | "CorpGetTransactions" => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let is_corp = method == "CorpGetTransactions";
+            let min_unix = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .filter(|&v| v > 0)
+                .map(|v| {
+                    if v > 100_000_000_000_000_000 {
+                        ((v / 10_000_000).saturating_sub(11_644_473_600)).max(0) as u64
+                    } else {
+                        v as u64
+                    }
+                })
+                .unwrap_or(0);
+            let filter_acct_key = if is_corp {
+                args.get(1).and_then(|a| a.as_i64()).filter(|&v| v >= 1000)
+            } else {
+                None
+            };
+            let rows = ctx.db.with_snapshot(|snap| {
+                let target_owner = if is_corp {
+                    session
+                        .corporation_id
+                        .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id))
+                        .unwrap_or(0)
+                } else {
+                    char_id
+                };
+                snap.market_transactions
+                    .iter()
+                    .filter(|tx| {
+                        tx.date_unix >= min_unix
+                            && (tx.buyer_id == target_owner || tx.seller_id == target_owner)
+                            && filter_acct_key.map_or(true, |ak| {
+                                (tx.buyer_id == target_owner && tx.buyer_account_key as i64 == ak)
+                                    || (tx.seller_id == target_owner
+                                        && tx.seller_account_key as i64 == ak)
+                            })
+                    })
+                    .map(|tx| {
+                        let acct_id = if tx.buyer_id == target_owner {
+                            tx.buyer_account_key as i64
+                        } else {
+                            tx.seller_account_key as i64
+                        };
+                        let client_id = if tx.buyer_id == target_owner {
+                            tx.seller_id
+                        } else {
+                            tx.buyer_id
+                        };
+                        let gross = (tx.price.0 as f64 / 100.0) * (tx.quantity as f64);
+                        let credit = if tx.seller_id == target_owner {
+                            gross
+                        } else {
+                            -gross
+                        };
+                        vec![
+                            PyRep::Integer(tx.transaction_id),
+                            PyRep::Integer(super::market_trading::unix_to_filetime(tx.date_unix)),
+                            PyRep::Integer(tx.type_id as i64),
+                            PyRep::Integer(tx.quantity),
+                            PyRep::Real(tx.price.to_wire_f64()),
+                            PyRep::Integer(tx.location_id),
+                            PyRep::Integer(tx.buyer_id),
+                            PyRep::Integer(tx.seller_id),
+                            PyRep::Integer(acct_id),
+                            PyRep::Integer(tx.buyer_account_key as i64),
+                            PyRep::Integer(tx.seller_account_key as i64),
+                            PyRep::Integer(client_id),
+                            PyRep::Real(credit),
+                            PyRep::Integer(tx.journal_ref_id),
+                        ]
+                    })
+                    .collect::<Vec<_>>()
+            });
+            Some(Ok(PyRep::rowset(
+                vec![
+                    "transactionID",
+                    "transactionDate",
+                    "typeID",
+                    "quantity",
+                    "price",
+                    "stationID",
+                    "buyerID",
+                    "sellerID",
+                    "accountID",
+                    "buyerAccountID",
+                    "sellerAccountID",
+                    "clientID",
+                    "credit",
+                    "journalTransactionID",
+                ],
+                rows,
+            )))
+        }
+        _ => None,
+    }
+}

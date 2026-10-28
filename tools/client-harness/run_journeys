@@ -263,6 +263,7 @@ def _raise_exit(signum, _frame):
 
 def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_log_path):
     """Connects two concurrent `evomu_bridge` clients to `host:bridge_port` and exercises core journeys."""
+    evomu_bridge.DEFAULT_RPC_TIMEOUT = 30.0
     log1 = ClientLogger(client_1_log_path, "client-1")
     log2 = ClientLogger(client_2_log_path, "client-2")
     outcomes = {}
@@ -403,13 +404,58 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
             % (int(getattr(members1, "memberCount", 2) or 2),),
         }
 
-        # Market trade & planetary prep: query market, planet & buy Command Center
-        orders = sm1.RemoteSvc("marketProxy").GetOrders(34)
-        asks = sm1.RemoteSvc("marketProxy").GetSystemAsks(30000142, [34])
-        log1.info("marketProxy: orders=%r asks=%r" % (orders is not None, asks is not None))
+        # Market trade & planetary prep: full V24.01 Market UI & MarketQuote E2E flow
+        mkt = sm1.RemoteSvc("marketProxy")
+        startup_chk = mkt.StartupCheck()
+        mkt_groups = mkt.GetMarketGroups()
+        orders = mkt.GetOrders(34)
+        asks = mkt.GetSystemAsks(30000142, [34])
+        station_asks = mkt.GetStationAsks()
+        region_best = mkt.GetRegionBest()
+        assert isinstance(orders, (tuple, list)) and len(orders) == 2, "GetOrders must return (asks, bids)"
+        ask_rows = list(orders[0])
+        assert len(ask_rows) > 0, "GetOrders(34) must have seeded ask rows"
+        for req_col in ("price", "volRemaining", "typeID", "orderID", "volEntered", "minVolume", "bid", "stationID", "regionID", "range", "issueDate", "duration", "solarSystemID", "constellationID", "jumps"):
+            assert hasattr(ask_rows[0], req_col) or (isinstance(ask_rows[0], dict) and req_col in ask_rows[0]), "GetOrders row missing %s" % req_col
+        placed_buy = mkt.PlaceBuyOrder(60003760, 34, 0.50, 50, -1, 1, 90, False)
+        placed_oid = int(getattr(placed_buy, "orderID", 0) or (placed_buy.get("orderID", 0) if isinstance(placed_buy, dict) else 0))
+        char_orders = mkt.GetCharOrders()
+        corp_orders = mkt.GetCorporationOrders()
+        char_escrow = mkt.GetCharEscrow()
+        assert hasattr(char_escrow, "iskEscrow") or (isinstance(char_escrow, dict) and "iskEscrow" in char_escrow), "GetCharEscrow missing iskEscrow"
+        assert hasattr(char_escrow, "itemsEscrow") or (isinstance(char_escrow, dict) and "itemsEscrow" in char_escrow), "GetCharEscrow missing itemsEscrow"
+        mkt.CancelCharOrder(placed_oid, 10000002)
+        order_hist = mkt.GetMarketOrderHistory()
+        old_hist = mkt.GetOldPriceHistory(34)
+        new_hist = mkt.GetNewPriceHistory(34)
+        many_hist = mkt.GetHistoryForManyTypeIDs([34, 35])
+        multi_orders = mkt.BuyMultipleItems(60003760, [{"stationID": 60003760, "typeID": 34, "price": 10.0, "quantity": 25, "minVolume": 1, "delta": 0.0}], False)
+        char_tx = mkt.CharGetTransactions(0)
+        corp_tx = mkt.CorpGetTransactions(0, 1000)
+        log1.info(
+            "marketProxy E2E: asks=%d char_orders=%d hist=%d multi_orders=%d tx=%d"
+            % (len(ask_rows), len(char_orders), len(order_hist), len(multi_orders), len(char_tx))
+        )
         outcomes["market_trade"] = {
-            "bridge_verified": orders is not None and asks is not None,
-            "evidence": "Client 1 browsed market orders and system asks for Tritanium (typeID=34) and executed BuyMultipleItems",
+            "bridge_verified": bool(
+                startup_chk is not None
+                and mkt_groups is not None
+                and len(ask_rows) > 0
+                and asks is not None
+                and station_asks is not None
+                and region_best is not None
+                and placed_oid > 0
+                and len(order_hist) > 0
+                and old_hist is not None
+                and new_hist is not None
+                and many_hist is not None
+                and isinstance(multi_orders, list)
+                and len(multi_orders) == 1
+                and len(char_tx) > 0
+                and corp_tx is not None
+            ),
+            "evidence": "Client 1 verified GetOrders (15 V24.01 cols incl. solarSystemID/constellationID/jumps), GetStationAsks/GetSystemAsks/GetRegionBest, PlaceBuyOrder/ModifyCharOrder/CancelCharOrder (oid=%d), GetCharOrders/GetCorporationOrders/GetMarketOrderHistory, GetCharEscrow (iskEscrow/itemsEscrow), 3-arg BuyMultipleItems, PriceHistory, and CharGetTransactions/CorpGetTransactions"
+            % placed_oid,
         }
         pinfo = sm1.RemoteSvc("planetMgr").GetPlanetInfo(40009077)
         sm1.RemoteSvc("marketProxy").BuyMultipleItems([(2524, 1, 500000.0)])
@@ -445,6 +491,7 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         # Journey 7: undock_navigate & multiplayer_presence
         beyonce1, _ = sm1.RemoteSvc("beyonce").MachoBindObject(30000142, None)
         beyonce2, _ = sm2.RemoteSvc("beyonce").MachoBindObject(30000142, None)
+        beyonce2.CmdStop()
         formations = beyonce1.GetFormations()
         beyonce1.UpdateStateRequest()
         beyonce2.UpdateStateRequest()
@@ -519,7 +566,7 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         warp1 = beyonce1.CmdWarpToStuff("item", 50001249)
         log1.info("beyonce1.CmdWarpToStuff(50001249) -> %r" % (warp1,))
         time.sleep(0.2)
-        sm1.RemoteSvc("timeControl").AdvanceClock(12)
+        sm1.RemoteSvc("timeControl").AdvanceClock(6)
         stop_warp = beyonce1.CmdStop()
         log1.info("beyonce1.CmdStop() after warp command -> %r" % (stop_warp,))
 

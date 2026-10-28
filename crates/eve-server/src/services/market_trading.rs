@@ -22,7 +22,7 @@ use crate::formulas::{compute_broker_fee_rate, compute_sales_tax_rate};
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, MarketOrderRecord};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, DBRowDescriptor, DbColumnType, PyRep};
+use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
 use eve_sde::TypeId;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -104,11 +104,7 @@ pub(crate) fn unix_to_filetime(unix_secs: u64) -> i64 {
 }
 
 fn market_order_descriptor() -> DBRowDescriptor {
-    DBRowDescriptor::new([
-        ("price", DbColumnType::R8), ("volRemaining", DbColumnType::R8), ("typeID", DbColumnType::I4), ("orderID", DbColumnType::I8),
-        ("volEntered", DbColumnType::I4), ("minVolume", DbColumnType::I4), ("bid", DbColumnType::Bool), ("stationID", DbColumnType::I8),
-        ("regionID", DbColumnType::I4), ("range", DbColumnType::I2), ("issueDate", DbColumnType::FileTime), ("duration", DbColumnType::I2),
-    ])
+    DBRowDescriptor::market_order_header()
 }
 
 pub(crate) fn resolve_station_solar_system(
@@ -291,28 +287,6 @@ pub fn compute_sales_tax_cents(fill_gross: IskCents, seller_acct_lvl: u8) -> Isk
     IskCents((((fill_gross.0 as i128) * tax_ppm + 500_000) / 1_000_000) as i64)
 }
 
-fn order_to_packed_cells(
-    snap: &eve_db::WorldStateSnapshot,
-    o: &MarketOrderRecord,
-    default_unix: u64,
-) -> Vec<PyRep> {
-    let meta = load_market_order_meta(snap, o, default_unix);
-    vec![
-        PyRep::Real(o.price.to_wire_f64()),
-        PyRep::Real(o.vol_remaining as f64),
-        PyRep::Integer(o.type_id as i64),
-        PyRep::Integer(o.order_id),
-        PyRep::Integer(o.vol_entered as i64),
-        PyRep::Integer(o.min_volume as i64),
-        PyRep::Bool(o.is_bid),
-        PyRep::Integer(o.station_id),
-        PyRep::Integer(o.region_id as i64),
-        PyRep::Integer(meta.range),
-        PyRep::Integer(unix_to_filetime(meta.issue_unix)),
-        PyRep::Integer(meta.duration),
-    ]
-}
-
 fn best_asks_to_summary_rows<'a>(
     orders: impl Iterator<Item = &'a MarketOrderRecord>,
 ) -> Vec<Vec<PyRep>> {
@@ -330,9 +304,9 @@ fn best_asks_to_summary_rows<'a>(
         .into_values()
         .map(|o| {
             vec![
-                PyRep::Integer(o.type_id as i64),
                 PyRep::Real(o.price.to_wire_f64()),
                 PyRep::Real(o.vol_remaining as f64),
+                PyRep::Integer(o.type_id as i64),
                 PyRep::Integer(o.station_id),
             ]
         })
@@ -463,7 +437,7 @@ pub fn handle(
                     .collect();
                 matching.sort_by_key(|o| o.order_id);
                 for o in matching {
-                    let cells = order_to_packed_cells(snap, o, now_unix);
+                    let cells = crate::services::market_price_history::order_to_packed_cells_with_ctx(ctx, snap, o, now_unix);
                     if o.is_bid {
                         buys.push(cells);
                     } else {
@@ -556,6 +530,12 @@ pub fn handle(
                     .into_iter()
                     .map(|o| {
                         let meta = load_market_order_meta(snap, o, now_unix);
+                        let (sys_id, const_id) =
+                            crate::services::market_price_history::resolve_station_solar_and_constellation(
+                                ctx,
+                                snap,
+                                o.station_id,
+                            );
                         vec![
                             PyRep::Integer(o.order_id),
                             PyRep::Integer(o.type_id as i64),
@@ -568,23 +548,26 @@ pub fn handle(
                             PyRep::Integer(meta.duration),
                             PyRep::Integer(o.min_volume as i64),
                             PyRep::Real(o.escrow.to_wire_f64()),
+                            PyRep::Integer(o.vol_entered as i64),
+                            PyRep::Integer(char_id),
+                            PyRep::Integer(o.region_id as i64),
+                            PyRep::Integer(sys_id as i64),
+                            PyRep::Integer(const_id as i64),
+                            PyRep::Integer(1),
+                            PyRep::Bool(false),
+                            PyRep::Integer(1000),
+                            PyRep::Integer(1000),
+                            PyRep::Bool(false),
                         ]
                     })
                     .collect()
             });
             Some(Ok(PyRep::rowset(
                 vec![
-                    "orderID",
-                    "typeID",
-                    "bid",
-                    "price",
-                    "volRemaining",
-                    "stationID",
-                    "range",
-                    "issueDate",
-                    "duration",
-                    "minVolume",
-                    "escrow",
+                    "orderID", "typeID", "bid", "price", "volRemaining", "stationID", "range",
+                    "issueDate", "duration", "minVolume", "escrow", "volEntered", "charID",
+                    "regionID", "solarSystemID", "constellationID", "orderState", "contraband",
+                    "accountID", "keyID", "isCorp",
                 ],
                 rows,
             )))
@@ -595,10 +578,15 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let (total_escrow, total_remaining_cost, rows) = ctx.db.with_snapshot(|snap| {
+            let (total_escrow, total_remaining_cost, items_escrow, rows) = ctx.db.with_snapshot(|snap| {
                 let mut esc_sum = IskCents(0);
                 let mut full_sum = IskCents(0);
+                let mut sell_items_sum = IskCents(0);
                 let mut order_rows = Vec::new();
+                for o in snap.market_orders.values().filter(|o| o.owner_id == char_id && !o.is_npc && !o.is_bid && o.vol_remaining > 0) {
+                    let val = o.price.checked_mul_qty(o.vol_remaining as i64).unwrap_or(IskCents(0));
+                    sell_items_sum = sell_items_sum.checked_add(val).unwrap_or(sell_items_sum);
+                }
                 let mut orders: Vec<&MarketOrderRecord> = snap
                     .market_orders
                     .values()
@@ -623,13 +611,15 @@ pub fn handle(
                         ("remainingCostISK", PyRep::Real(full_cost.to_wire_f64())),
                     ]));
                 }
-                (esc_sum, full_sum, order_rows)
+                (esc_sum, full_sum, sell_items_sum, order_rows)
             });
             let uncovered = total_remaining_cost
                 .checked_sub(total_escrow)
                 .unwrap_or(IskCents(0));
             Some(Ok(PyRep::keyval([
                 ("escrow", PyRep::Real(total_escrow.to_wire_f64())),
+                ("iskEscrow", PyRep::Real(total_escrow.to_wire_f64())),
+                ("itemsEscrow", PyRep::Real(items_escrow.to_wire_f64())),
                 ("totalEscrow", PyRep::Real(total_escrow.to_wire_f64())),
                 ("totalEscrowISK", PyRep::Real(total_escrow.to_wire_f64())),
                 (
@@ -1297,12 +1287,12 @@ pub fn handle(
             match res {
                 Ok((order_id, filled_immediately, actual_sales_tax_charged, escrow_cents, matched_sellers, delivered_items)) => {
                     for (matched_oid, seller_id) in matched_sellers {
-                        ctx.notify(NotificationTarget::Character(seller_id), "OnOwnOrdersChanged", "charid", vec![PyRep::Integer(matched_oid), PyRep::String("Change".into()), PyRep::Bool(false)]);
+                        ctx.notify(NotificationTarget::Character(seller_id), "OnOwnOrdersChanged", "charid", crate::services::market_price_history::build_own_order_changed_payload(ctx, matched_oid, "Change", false));
                     }
                     for (iid, tid, flag_id, loc_id) in delivered_items {
                         ctx.notify(NotificationTarget::Character(char_id), "OnMarketItemReceived", "charid", vec![PyRep::Integer(iid), PyRep::Integer(tid as i64), PyRep::Integer(flag_id), PyRep::Integer(loc_id)]);
                     }
-                    ctx.notify(NotificationTarget::Character(char_id), "OnOwnOrdersChanged", "charid", vec![PyRep::Integer(order_id), PyRep::String(if filled_immediately { "Change" } else { "Add" }.into()), PyRep::Bool(false)]);
+                    ctx.notify(NotificationTarget::Character(char_id), "OnOwnOrdersChanged", "charid", crate::services::market_price_history::build_own_order_changed_payload(ctx, order_id, if filled_immediately { "Change" } else { "Add" }, use_corp));
                     Some(Ok(PyRep::keyval([
                         ("orderID", PyRep::Integer(order_id)), ("filledImmediately", PyRep::Bool(filled_immediately)),
                         ("brokerFeeISK", PyRep::Real(broker_fee.to_wire_f64())), ("salesTaxISK", PyRep::Real(actual_sales_tax_charged.to_wire_f64())),
@@ -1313,6 +1303,10 @@ pub fn handle(
                 }
                 Err(e) => Some(Err(e)),
             }
+        }
+
+        "CharGetTransactions" | "CorpGetTransactions" => {
+            crate::services::market_price_history::handle_market_transactions_rpc(ctx, session, method, args)
         }
 
         _ => market_orders_escrow::handle_orders_escrow(ctx, session, service, method, args, _kwargs),
