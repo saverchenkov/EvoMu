@@ -1061,7 +1061,7 @@ async fn handle_recover_probes(
     let now_unix = ctx.now_unix();
     let (auto_returned, expired_lost) = expire_overdue_probes_for_char(ctx, char_id, now_unix).await;
 
-    let recovered_probes: Vec<crate::router::ActiveScannerProbe> =
+    let candidate_probes: Vec<crate::router::ActiveScannerProbe> =
         if let Ok(mut map) = ctx.active_scanner_probes.write() {
             let ids: Vec<i64> = map
                 .values()
@@ -1078,13 +1078,7 @@ async fn handle_recover_probes(
             Vec::new()
         };
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    for p in &recovered_probes {
-        let _ = sys_handle.remove_ball(p.probe_id).await;
-    }
-
-    let count = recovered_probes.len() as i32;
-    let ship_id_opt = session.ship_id.or_else(|| recovered_probes.first().map(|p| p.ship_id));
+    let ship_id_opt = session.ship_id.or_else(|| candidate_probes.first().map(|p| p.ship_id));
     let ship_cargo_cap = ship_id_opt
         .and_then(|sid| {
             ctx.get_or_rebuild_ship_fitting(char_id, sid)
@@ -1093,18 +1087,18 @@ async fn handle_recover_probes(
                 .filter(|&c| c > 0.0)
                 .or_else(|| {
                     ctx.db.with_snapshot(|s| {
-                        s.items
-                            .get(&sid)
-                            .and_then(|it| ctx.sde.types.get(&it.type_id).map(|t| t.capacity))
+                        s.items.get(&sid).and_then(|it| ctx.sde.types.get(&it.type_id).map(|t| t.capacity))
                     })
                 })
         })
         .unwrap_or(400.0);
 
-    let (to_launcher, to_cargo) = if count > 0 {
+    let (recovered_probes, unrecovered_probes, to_launcher, to_cargo) = if !candidate_probes.is_empty() {
         ctx.db.with_mut_snapshot(|snap| {
             let mut in_launcher = 0i32;
             let mut in_cargo = 0i32;
+            let mut rec = Vec::new();
+            let mut unrec = Vec::new();
             let add_stack = |items: &mut HashMap<i64, eve_db::InventoryItemRecord>,
                              next_id: &mut i64,
                              ship_id: i64,
@@ -1152,17 +1146,12 @@ async fn handle_recover_probes(
             } else {
                 0.0
             };
-            for p in &recovered_probes {
+            for p in candidate_probes {
                 let p_type_id = p.probe_type_id;
                 let ship_id = ship_id_opt.unwrap_or(p.ship_id);
                 let launcher_id = p.launcher_module_id;
                 let mut placed_in_launcher = false;
-                if let Some(li) = snap
-                    .items
-                    .get(&launcher_id)
-                    .cloned()
-                    .filter(|i| i.location_id == ship_id)
-                {
+                if let Some(li) = snap.items.get(&launcher_id).cloned().filter(|i| i.location_id == ship_id) {
                     let cur_clip: i32 = snap
                         .items
                         .values()
@@ -1182,47 +1171,43 @@ async fn handle_recover_probes(
                             && i.type_id == p_type_id
                     });
                     if cur_clip == 0 || (cur_clip < 8 && matching_clip) {
-                        add_stack(
-                            &mut snap.items,
-                            &mut snap.next_entity_id,
-                            ship_id,
-                            li.flag,
-                            p_type_id,
-                            1,
-                            launcher_id,
-                        );
+                        add_stack(&mut snap.items, &mut snap.next_entity_id, ship_id, li.flag, p_type_id, 1, launcher_id);
                         in_launcher += 1;
                         placed_in_launcher = true;
                     }
                 }
-                if !placed_in_launcher {
-                    let probe_vol = ctx
-                        .sde
-                        .types
-                        .get(&p_type_id)
-                        .map(|t| t.volume)
-                        .filter(|&v| v > 0.0)
-                        .unwrap_or(0.1);
+                if placed_in_launcher {
+                    rec.push(p);
+                } else {
+                    let probe_vol = ctx.sde.types.get(&p_type_id).map(|t| t.volume).filter(|&v| v > 0.0).unwrap_or(0.1);
                     if ship_cargo_cap <= 0.0 || used_cargo_vol + probe_vol <= ship_cargo_cap + 1e-6 {
-                        add_stack(
-                            &mut snap.items,
-                            &mut snap.next_entity_id,
-                            ship_id,
-                            InventoryFlag::Cargo,
-                            p_type_id,
-                            1,
-                            0,
-                        );
+                        add_stack(&mut snap.items, &mut snap.next_entity_id, ship_id, InventoryFlag::Cargo, p_type_id, 1, 0);
                         used_cargo_vol += probe_vol;
                         in_cargo += 1;
+                        rec.push(p);
+                    } else {
+                        unrec.push(p);
                     }
                 }
             }
-            (in_launcher, in_cargo)
+            (rec, unrec, in_launcher, in_cargo)
         })
     } else {
-        (0, 0)
+        (Vec::new(), Vec::new(), 0, 0)
     };
+
+    if !unrecovered_probes.is_empty() {
+        if let Ok(mut map) = ctx.active_scanner_probes.write() {
+            for p in unrecovered_probes {
+                map.insert(p.probe_id, p);
+            }
+        }
+    }
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for p in &recovered_probes {
+        let _ = sys_handle.remove_ball(p.probe_id).await;
+    }
+    let count = recovered_probes.len() as i32;
 
     let rec_ids: Vec<PyRep> = recovered_probes.iter().map(|p| PyRep::Integer(p.probe_id)).collect();
     if count > 0 {
@@ -1295,41 +1280,17 @@ async fn handle_destroy_probe(
         if let Ok(mut map) = ctx.active_scanner_probes.write() {
             let ids: Vec<i64> = map
                 .values()
-                .filter(|p| p.owner_char_id == char_id && (target_pid.is_none() || target_pid == Some(p.probe_id)))
+                .filter(|p| {
+                    p.owner_char_id == char_id
+                        && p.state >= 0
+                        && (target_pid.is_none() || target_pid == Some(p.probe_id))
+                })
                 .map(|p| p.probe_id)
                 .collect();
             ids.into_iter().filter_map(|id| map.remove(&id)).collect()
         } else {
             Vec::new()
         };
-
-    ctx.db.with_mut_snapshot(|snap| {
-        for p in &destroyed_probes {
-            if p.state == -1 {
-                if let Some(cid) = snap
-                    .items
-                    .values()
-                    .find(|i| {
-                        i.owner_id == char_id
-                            && i.location_id == p.ship_id
-                            && i.flag == InventoryFlag::Cargo
-                            && i.type_id == p.probe_type_id
-                            && i.quantity > 0
-                    })
-                    .map(|i| i.item_id)
-                {
-                    let mut zero = false;
-                    if let Some(it) = snap.items.get_mut(&cid) {
-                        it.quantity -= 1;
-                        zero = it.quantity <= 0;
-                    }
-                    if zero {
-                        snap.items.remove(&cid);
-                    }
-                }
-            }
-        }
-    });
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     for p in &destroyed_probes {

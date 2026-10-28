@@ -1032,23 +1032,13 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             (entrance_id, d_sys, exit_id)
         };
 
-        let pol_expiry = snap
-            .wh_polarizations
-            .get(&(char_id, dest_sys as i64))
-            .copied()
-            .unwrap_or(0)
-            .max(
-                snap.wh_polarizations
-                    .get(&(char_id, wh_id))
-                    .copied()
-                    .unwrap_or(0),
-            );
+        let pol_expiry = snap.wh_polarizations.get(&(char_id, wh_id)).copied().unwrap_or(0);
         if pol_expiry > now_unix {
             return Err(BridgeRpcError {
                 code: "WormholePolarized".into(),
                 message: format!(
-                    "Character is polarized for system {} for another {} seconds",
-                    dest_sys,
+                    "Character is polarized for wormhole {} for another {} seconds",
+                    wh_id,
                     pol_expiry.saturating_sub(now_unix)
                 ),
             });
@@ -1138,29 +1128,10 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
         let buckets = derive_wormhole_buckets(&sigs[wh_idx], now_unix, &ctx.sde);
         let rem_mass = sigs[wh_idx].remaining_mass_kg;
 
-        snap.wh_polarizations
-            .insert((char_id, dest_sys as i64), now_unix + 300);
-        snap.wh_polarizations
-            .insert((char_id, old_sys as i64), now_unix + 300);
-        snap.wh_polarizations
-            .insert((char_id, wh_id), now_unix + 300);
-        snap.wh_polarizations
-            .insert((char_id, exit_wh_id), now_unix + 300);
+        snap.wh_polarizations.insert((char_id, dest_sys as i64), now_unix + 300);
+        snap.wh_polarizations.insert((char_id, wh_id), now_unix + 300);
 
-        Ok((
-            dest_sys,
-            wh_id,
-            exit_wh_id,
-            sig_id_str,
-            rem_mass,
-            max_jump,
-            mass_stage,
-            wh_size,
-            life_stage,
-            wh_age,
-            is_collapsed,
-            buckets,
-        ))
+        Ok((dest_sys, wh_id, exit_wh_id, sig_id_str, rem_mass, max_jump, mass_stage, wh_size, life_stage, wh_age, is_collapsed, buckets))
     });
 
     for (b_sys, rem_id) in &collapsed_balls_to_remove {
@@ -1175,74 +1146,34 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
         rep_sig_id = Some(rep.signature_id.clone());
         rep_wh_id = Some(new_wh_id);
         rep_wh_type_id = rep.wormhole_type_id;
-        let _ = old_handle
-            .spawn_ball(Ball {
-                id: new_wh_id,
-                type_id: rep.wormhole_type_id.unwrap_or(26272),
-                position: DVec3::from_array(rep.position),
-                velocity: DVec3::ZERO,
-                max_velocity: 0.0,
-                inertia: 1.0,
-                mass: rep.remaining_mass_kg.max(1.0),
-                radius: 1500.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Rigid,
-            })
-            .await;
+        let _ = old_handle.spawn_ball(Ball {
+            id: new_wh_id, type_id: rep.wormhole_type_id.unwrap_or(26272),
+            position: DVec3::from_array(rep.position), velocity: DVec3::ZERO,
+            max_velocity: 0.0, inertia: 1.0, mass: rep.remaining_mass_kg.max(1.0),
+            radius: 1500.0, speed_fraction: 0.0, mode: MovementMode::Rigid,
+        }).await;
         if let Some(d_sys) = rep.destination_system_id {
             let new_exit_id = wormhole_exit_item_id_for_signature(d_sys, &rep.signature_id);
             let (exit_pos, _) = pick_system_celestial_position(ctx, d_sys, (new_wh_id as u32).wrapping_add(1));
             let dh = ctx.systems.get_or_spawn(d_sys);
-            let _ = dh
-                .spawn_ball(Ball {
-                    id: new_exit_id,
-                    type_id: 26272,
-                    position: DVec3::from_array(exit_pos),
-                    velocity: DVec3::ZERO,
-                    max_velocity: 0.0,
-                    inertia: 1.0,
-                    mass: rep.remaining_mass_kg.max(1.0),
-                    radius: 1500.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Rigid,
-                })
-                .await;
+            let _ = dh.spawn_ball(Ball {
+                id: new_exit_id, type_id: 26272, position: DVec3::from_array(exit_pos),
+                velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0,
+                mass: rep.remaining_mass_kg.max(1.0), radius: 1500.0,
+                speed_fraction: 0.0, mode: MovementMode::Rigid,
+            }).await;
         }
     }
 
     match res {
-        Ok((
-            dest_sys_id,
-            wh_item_id,
-            exit_wh_id,
-            sig_id_str,
-            remaining_mass,
-            max_jump_mass,
-            mass_stage,
-            wh_size,
-            life_stage,
-            wh_age,
-            is_collapsed,
-            buckets,
-        )) => {
-            crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
-                ctx, char_id, ship_id, old_sys,
-            );
-            crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(
-                ctx, char_id, ship_id,
-            );
+        Ok((dest_sys_id, wh_item_id, exit_wh_id, sig_id_str, remaining_mass, max_jump_mass, mass_stage, wh_size, life_stage, wh_age, is_collapsed, buckets)) => {
+            let prev_cs = old_handle.get_combat_state(ship_id).await.ok().flatten();
+            crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, old_sys);
+            crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
             let _ = old_handle.remove_ball(ship_id).await;
-            let updated_ch = match ctx
-                .db
-                .set_character_solar_system(char_id, dest_sys_id, &ctx.sde)
-            {
+            let updated_ch = match ctx.db.set_character_solar_system(char_id, dest_sys_id, &ctx.sde) {
                 Ok(c) => c,
-                Err(e) => {
-                    return Some(Err(BridgeRpcError {
-                        code: "SystemTransitionFailed".into(),
-                        message: e.to_string(),
-                    }))
-                }
+                Err(e) => return Some(Err(BridgeRpcError { code: "SystemTransitionFailed".into(), message: e.to_string() })),
             };
             ctx.sync_character_local_chat(char_id, Some(old_sys), dest_sys_id);
 
@@ -1253,8 +1184,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             session.structure_id = None;
 
             let _ = ensure_system_signatures_and_anomalies(ctx, dest_sys_id).await;
-            let (dest_wh_class, dest_is_thera, dest_is_shattered, env_effect) =
-                system_wormhole_profile(dest_sys_id);
+            let (dest_wh_class, dest_is_thera, dest_is_shattered, env_effect) = system_wormhole_profile(dest_sys_id);
 
             let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
             let mut new_ball = current_ball;
@@ -1289,20 +1219,20 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
                 }
                 _ => {}
             }
+            if let Some(pcs) = prev_cs {
+                let s_frac = (pcs.shield_hp / pcs.max_shield_hp.max(1.0)).clamp(0.0, 1.0);
+                let a_frac = (pcs.armor_hp / pcs.max_armor_hp.max(1.0)).clamp(0.0, 1.0);
+                let h_frac = (pcs.structure_hp / pcs.max_structure_hp.max(1.0)).clamp(0.0, 1.0);
+                let c_frac = (pcs.capacitor / pcs.max_capacitor.max(1.0)).clamp(0.0, 1.0);
+                combat_state.shield_hp = combat_state.max_shield_hp * s_frac;
+                combat_state.armor_hp = combat_state.max_armor_hp * a_frac;
+                combat_state.structure_hp = combat_state.max_structure_hp * h_frac;
+                combat_state.capacitor = combat_state.max_capacitor * c_frac;
+            }
             let mut slim_meta = ctx.build_ship_slim_meta(char_id, new_ball.type_id);
             slim_meta.is_cloaked = true;
-            let spawn_tick = new_handle
-                .spawn_ball_with_meta(new_ball, combat_state, slim_meta)
-                .await
-                .unwrap_or(0);
-            record_session_change_timer(
-                ctx,
-                char_id,
-                now_unix,
-                dest_sys_id,
-                spawn_tick,
-                "wormhole_jump",
-            );
+            let spawn_tick = new_handle.spawn_ball_with_meta(new_ball, combat_state, slim_meta).await.unwrap_or(0);
+            record_session_change_timer(ctx, char_id, now_unix, dest_sys_id, spawn_tick, "wormhole_jump");
 
             let new_beyonce_id = match ctx.bind_object(session, BEYONCE_SVC, dest_sys_id as i64) {
                 Ok(b) => b,
@@ -1310,50 +1240,23 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             };
 
             Some(Ok(PyRep::keyval([
-                ("success", PyRep::Bool(true)),
-                ("solarSystemID", PyRep::Integer(dest_sys_id as i64)),
-                ("destinationSystemID", PyRep::Integer(dest_sys_id as i64)),
-                ("beyonceBoundID", PyRep::Integer(new_beyonce_id as i64)),
-                ("wormholeID", PyRep::Integer(wh_item_id)),
-                ("exitWormholeID", PyRep::Integer(exit_wh_id)),
-                ("signatureID", PyRep::String(sig_id_str)),
-                ("shipJumpMassKg", PyRep::Real(ship_mass)),
-                ("propulsionMassAdditionKg", PyRep::Real(prop_mass_add)),
-                ("remainingMassKg", PyRep::Real(remaining_mass)),
-                ("maxJumpMassKg", PyRep::Real(max_jump_mass)),
-                ("massStage", PyRep::String(mass_stage.into())),
+                ("success", PyRep::Bool(true)), ("solarSystemID", PyRep::Integer(dest_sys_id as i64)),
+                ("destinationSystemID", PyRep::Integer(dest_sys_id as i64)), ("beyonceBoundID", PyRep::Integer(new_beyonce_id as i64)),
+                ("wormholeID", PyRep::Integer(wh_item_id)), ("exitWormholeID", PyRep::Integer(exit_wh_id)),
+                ("signatureID", PyRep::String(sig_id_str)), ("shipJumpMassKg", PyRep::Real(ship_mass)),
+                ("propulsionMassAdditionKg", PyRep::Real(prop_mass_add)), ("remainingMassKg", PyRep::Real(remaining_mass)),
+                ("maxJumpMassKg", PyRep::Real(max_jump_mass)), ("massStage", PyRep::String(mass_stage.into())),
                 ("massStabilityBucket", PyRep::String(buckets.mass_stability_bucket.into())),
-                (
-                    "massStabilityDescription",
-                    PyRep::String(buckets.mass_stability_description.into()),
-                ),
-                ("wormholeSize", PyRep::Real(wh_size)),
-                ("lifetimeStage", PyRep::String(life_stage.into())),
+                ("massStabilityDescription", PyRep::String(buckets.mass_stability_description.into())),
+                ("wormholeSize", PyRep::Real(wh_size)), ("lifetimeStage", PyRep::String(life_stage.into())),
                 ("lifetimeBucket", PyRep::String(buckets.lifetime_bucket.into())),
-                (
-                    "lifetimeDescription",
-                    PyRep::String(buckets.lifetime_description.into()),
-                ),
-                ("wormholeAge", PyRep::Integer(wh_age)),
-                ("collapsed", PyRep::Bool(is_collapsed)),
-                (
-                    "replacementSignatureID",
-                    rep_sig_id.map(PyRep::String).unwrap_or(PyRep::None),
-                ),
-                (
-                    "replacementWormholeID",
-                    rep_wh_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                ),
-                (
-                    "replacementWormholeTypeID",
-                    rep_wh_type_id
-                        .map(|t| PyRep::Integer(t as i64))
-                        .unwrap_or(PyRep::None),
-                ),
-                ("wormholeClass", PyRep::Integer(dest_wh_class as i64)),
-                ("isThera", PyRep::Bool(dest_is_thera)),
-                ("isShattered", PyRep::Bool(dest_is_shattered)),
-                ("delayedLocal", PyRep::Bool(dest_wh_class > 0)),
+                ("lifetimeDescription", PyRep::String(buckets.lifetime_description.into())),
+                ("wormholeAge", PyRep::Integer(wh_age)), ("collapsed", PyRep::Bool(is_collapsed)),
+                ("replacementSignatureID", rep_sig_id.map(PyRep::String).unwrap_or(PyRep::None)),
+                ("replacementWormholeID", rep_wh_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("replacementWormholeTypeID", rep_wh_type_id.map(|t| PyRep::Integer(t as i64)).unwrap_or(PyRep::None)),
+                ("wormholeClass", PyRep::Integer(dest_wh_class as i64)), ("isThera", PyRep::Bool(dest_is_thera)),
+                ("isShattered", PyRep::Bool(dest_is_shattered)), ("delayedLocal", PyRep::Bool(dest_wh_class > 0)),
                 ("environmentalEffect", PyRep::String(env_effect.into())),
             ])))
         }

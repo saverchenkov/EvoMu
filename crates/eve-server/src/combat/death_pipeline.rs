@@ -33,6 +33,28 @@ pub fn execute_death_pipeline_sync(
     victim_pos: DVec3,
     rng_seed: u64,
 ) -> Result<DeathPipelineResult, String> {
+    execute_death_pipeline_sync_inner(
+        ctx,
+        sys_id,
+        victim_char_id,
+        victim_ship_id,
+        attacker_char_id,
+        victim_pos,
+        rng_seed,
+        false,
+    )
+}
+
+pub fn execute_death_pipeline_sync_inner(
+    ctx: &ServerContext,
+    sys_id: u32,
+    victim_char_id: i64,
+    victim_ship_id: i64,
+    attacker_char_id: i64,
+    victim_pos: DVec3,
+    rng_seed: u64,
+    is_self_destruct: bool,
+) -> Result<DeathPipelineResult, String> {
     let (victim_ship_type_id, base_price, insured_payout) = ctx.db.with_snapshot(|snap| {
         let ship = snap
             .items
@@ -96,16 +118,46 @@ pub fn execute_death_pipeline_sync(
             .unwrap_or(26557)
     };
 
-    let calculated_insurance_payout = if is_pod {
-        0.0
-    } else if insured_payout > 0.0 {
-        insured_payout
-    } else {
-        compute_insurance_quote(base_price, 0.40).1
-    };
-
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let now_unix = ctx.now_unix();
+    let is_criminal = ctx
+        .crimewatch
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .states
+        .get(&victim_char_id)
+        .map(|s| s.is_criminal(now_unix))
+        .unwrap_or(false);
+    let rt_contract = crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        rt.insurance_contracts.remove(&victim_ship_id)
+    });
+    let cs_contract = crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(
+        ctx,
+        |st| st.insurance_contracts.remove(&victim_ship_id),
+    );
+    let (calculated_insurance_payout, ins_owner_id, ins_is_corp) = if is_pod || is_criminal {
+        (0.0, victim_char_id, false)
+    } else if let Some(c) = rt_contract {
+        if c.end_unix > now_unix {
+            let oid = if c.owner_id > 0 { c.owner_id } else { victim_char_id };
+            let is_corp = ctx.db.with_snapshot(|s| s.corporations.contains_key(&oid));
+            (c.payout_isk, oid, is_corp)
+        } else {
+            (compute_insurance_quote(base_price, 0.40).1, victim_char_id, false)
+        }
+    } else if let Some(c) = cs_contract {
+        if c.end_unix > now_unix {
+            let oid = if c.owner_id > 0 { c.owner_id } else { victim_char_id };
+            let is_corp = ctx.db.with_snapshot(|s| s.corporations.contains_key(&oid));
+            (c.payout_isk, oid, is_corp)
+        } else {
+            (compute_insurance_quote(base_price, 0.40).1, victim_char_id, false)
+        }
+    } else if insured_payout > 0.0 {
+        (insured_payout, victim_char_id, false)
+    } else {
+        (compute_insurance_quote(base_price, 0.40).1, victim_char_id, false)
+    };
     let hull_cs = ctx.build_type_combat_state(victim_ship_type_id);
     let hull_total_hp = (hull_cs.max_shield_hp + hull_cs.max_armor_hp + hull_cs.max_structure_hp).max(1.0);
     let hull_base_isk = if base_price > 0.0 {
@@ -442,21 +494,30 @@ pub fn execute_death_pipeline_sync(
 
         if calculated_insurance_payout > 0.0 {
             let payout_cents = IskCents::from_f64_isk(calculated_insurance_payout);
-            if let Some(vic) = snap.characters.get_mut(&victim_char_id) {
+            let (journal_char_id, bal_after) = if ins_is_corp {
+                if let Some(corp) = snap.corporations.get_mut(&ins_owner_id) {
+                    corp.master_wallet = corp.master_wallet.checked_add(payout_cents).unwrap_or(corp.master_wallet);
+                    if let Some(div0) = corp.wallet_divisions.first_mut() {
+                        div0.balance = corp.master_wallet;
+                    }
+                    (ins_owner_id, corp.master_wallet)
+                } else {
+                    (ins_owner_id, payout_cents)
+                }
+            } else if let Some(vic) = snap.characters.get_mut(&ins_owner_id) {
                 vic.balance = vic.balance.checked_add(payout_cents).unwrap_or(vic.balance);
-            }
+                (ins_owner_id, vic.balance)
+            } else {
+                (ins_owner_id, payout_cents)
+            };
             snap.next_entity_id += 1;
             let jid = snap.next_entity_id;
             snap.wallet_journal.push(WalletJournalEntry {
                 entry_id: jid,
-                character_id: victim_char_id,
+                character_id: journal_char_id,
                 entry_type: "insurance_payout".to_string(),
                 amount: payout_cents,
-                balance_after: snap
-                    .characters
-                    .get(&victim_char_id)
-                    .map(|c| c.balance)
-                    .unwrap_or(payout_cents),
+                balance_after: bal_after,
                 reason: format!("Insurance payout for loss of ship {victim_ship_id}"),
             });
             snap.next_entity_id += 1;
@@ -526,7 +587,7 @@ pub fn execute_death_pipeline_sync(
         ))
     })?;
 
-    if attacker_char_id > 0 && victim_char_id > 0 && attacker_char_id != victim_char_id {
+    if !is_self_destruct && attacker_char_id > 0 && victim_char_id > 0 && attacker_char_id != victim_char_id {
         let _ = crate::services::combat_crimewatch::claim_player_bounty_on_kill(
             ctx,
             attacker_char_id,
@@ -802,7 +863,16 @@ pub async fn execute_self_destruct(
         }
         latest.map(|(_, cid)| cid).unwrap_or(char_id)
     });
-    execute_death_pipeline(ctx, sys_id, char_id, ship_id, final_blow_char_id, pos, rng_seed).await
+    execute_death_pipeline_sync_inner(
+        ctx,
+        sys_id,
+        char_id,
+        ship_id,
+        final_blow_char_id,
+        pos,
+        rng_seed,
+        true,
+    )
 }
 
 /// Tracks 2-minute self-destruct countdown timers and cancellations (`feat:ships.self-destruct`).
