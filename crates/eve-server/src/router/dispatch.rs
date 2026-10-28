@@ -247,6 +247,37 @@ impl ServerContext {
             });
         }
 
+        if effective_service == "timeControl" && method == "AdvanceClock" {
+            let secs = args
+                .first()
+                .and_then(|a| match a {
+                    PyRep::Integer(i) => Some(*i as u64),
+                    _ => None,
+                })
+                .unwrap_or(12);
+            self.advance_secs(secs);
+            if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
+                let sys_h = self.systems.get_or_spawn(sys_id);
+                if let Ok(Some((_, ball))) = sys_h.get_ball_snapshot(ship_id).await {
+                    if matches!(ball.mode, eve_destiny::MovementMode::Warp { .. }) {
+                        for _ in 0..secs.min(60) {
+                            let _ = sys_h.tick().await;
+                        }
+                    }
+                }
+            }
+            return Ok(PyRep::Bool(true));
+        }
+
+        if (effective_service == "timeControl" || effective_service == "harness")
+            && (method == "FastForwardSessionTimer" || method == "ClearSessionTimer")
+        {
+            if let Some(cid) = session.character_id {
+                crate::services::space_destiny::clear_session_change_timer(self, cid);
+            }
+            return Ok(PyRep::Bool(true));
+        }
+
         // Central GM vs QA role gates across all GM, slash, sessionMgr, and QA/developer RPC surfaces (`S-9`, `D-4`).
         // rpc-lint: allow prefix check for QA method gating
         let is_qa_surface = effective_service == "publicQaToolsServer"

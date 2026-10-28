@@ -99,7 +99,7 @@ class ClientLogger(object):
         self._file = open(path, "w")
 
     def info(self, msg):
-        ts = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         with self._lock:
             self._file.write("[%s] [%s] INFO %s\n" % (ts, self.label, msg))
             self._file.flush()
@@ -633,7 +633,8 @@ def main():
                         # Created at startup via charUnboundMgr.CreateCharacterWithDoll so the
                         # real client's character selection lists a character for launch_login.
                         cf.write('[player_accounts.starter_character]\nname = "Demo Pilot"\n'
-                                 'bloodline_id = 1\ngender = 0\nancestry_id = 11\nschool_id = 17\n')
+                                 'bloodline_id = 1\ngender = 0\nancestry_id = 11\nschool_id = 17\n'
+                                 'solar_system_id = 30000142\nstation_id = 60003760\ninitial_balance_isk = 1000000000\n')
             srv_bin = find_server_binary(args.server_bin)
             if srv_bin is None:
                 raise RuntimeError("Could not locate compiled eve-server binary")

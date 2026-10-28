@@ -57,6 +57,29 @@ impl WorldRepository {
         school_id: u32,
         sde: &SdeRegistry,
     ) -> Result<CharacterRecord, DbError> {
+        self.create_character_with_system(
+            user_id,
+            name,
+            race_id,
+            bloodline_id,
+            ancestry_id,
+            school_id,
+            sde,
+            None,
+        )
+    }
+
+    pub fn create_character_with_system(
+        &self,
+        user_id: u64,
+        name: &str,
+        race_id: u32,
+        bloodline_id: u32,
+        ancestry_id: u32,
+        school_id: u32,
+        sde: &SdeRegistry,
+        qa_starter_system_id: Option<u32>,
+    ) -> Result<CharacterRecord, DbError> {
         if name.trim().len() < 3 {
             return Err(DbError::ValidationError(
                 "Character name must be at least 3 characters".into(),
@@ -130,12 +153,29 @@ impl WorldRepository {
             guard.next_entity_id += 1;
             let ship_id = guard.next_entity_id;
 
-            let station_id = school.station_id;
-            let sys_id = school.solar_system_id;
+            let (sys_id, station_id, const_id, reg_id) = if let Some(target_sys_id) = qa_starter_system_id {
+                if let Some(target_sys) = sde.solar_systems.get(&target_sys_id) {
+                    let st_id = target_sys
+                        .stations
+                        .iter()
+                        .find(|s| s.station_id == 60_003_760)
+                        .or_else(|| target_sys.stations.first())
+                        .map(|s| s.station_id)
+                        .unwrap_or(school.station_id);
+                    (target_sys_id, st_id, target_sys.constellation_id, target_sys.region_id)
+                } else {
+                    let sys = sde.solar_systems.get(&school.solar_system_id);
+                    let const_id = sys.map(|s| s.constellation_id).unwrap_or(20_000_020);
+                    let reg_id = sys.map(|s| s.region_id).unwrap_or(10_000_002);
+                    (school.solar_system_id, school.station_id, const_id, reg_id)
+                }
+            } else {
+                let sys = sde.solar_systems.get(&school.solar_system_id);
+                let const_id = sys.map(|s| s.constellation_id).unwrap_or(20_000_020);
+                let reg_id = sys.map(|s| s.region_id).unwrap_or(10_000_002);
+                (school.solar_system_id, school.station_id, const_id, reg_id)
+            };
             let corp_id = school.corporation_id;
-            let sys = sde.solar_systems.get(&sys_id);
-            let const_id = sys.map(|s| s.constellation_id).unwrap_or(20_000_020);
-            let reg_id = sys.map(|s| s.region_id).unwrap_or(10_000_002);
             let corvette_type_id = race.corvette_type_id.unwrap_or(0);
 
             let mut starter_skills_map = HashMap::new();

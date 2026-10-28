@@ -35,7 +35,7 @@ pub async fn provision_starter_characters(ctx: &ServerContext, cfg: &ServerConfi
         let mut session = SessionState::new(0);
         session.user_id = Some(account.user_id);
         session.role = account.role;
-        let args = [
+        let mut args = vec![
             PyRep::String(starter.name.clone()),
             PyRep::Integer(starter.bloodline_id),
             PyRep::Integer(starter.gender),
@@ -49,6 +49,10 @@ pub async fn provision_starter_characters(ctx: &ServerContext, cfg: &ServerConfi
             PyRep::Dict(vec![(PyRep::String("poseSelection".into()), PyRep::Integer(0))]),
             PyRep::Integer(starter.school_id),
         ];
+        if let Some(sys_id) = starter.solar_system_id {
+            args.push(PyRep::None);
+            args.push(PyRep::Integer(sys_id));
+        }
         let res = ctx
             .dispatch_rpc(&mut session, "charUnboundMgr", None, "CreateCharacterWithDoll", &args,
                 &HashMap::new(), Some("startup"))
@@ -56,6 +60,25 @@ pub async fn provision_starter_characters(ctx: &ServerContext, cfg: &ServerConfi
         match res {
             Ok(rep) => {
                 let char_id = rep.as_i64().unwrap_or_default();
+                if let Some(st_id) = starter.station_id {
+                    ctx.db.with_mut_snapshot(|snap| {
+                        if let Some(ch) = snap.characters.get_mut(&char_id) {
+                            ch.station_id = Some(st_id);
+                            ch.home_station_id = st_id;
+                            let ship_id = ch.active_ship_id;
+                            if let Some(ship_item) = snap.items.get_mut(&ship_id) {
+                                ship_item.location_id = st_id;
+                            }
+                        }
+                    });
+                }
+                if let Some(bal) = starter.initial_balance_isk {
+                    ctx.db.with_mut_snapshot(|snap| {
+                        if let Some(ch) = snap.characters.get_mut(&char_id) {
+                            ch.balance = eve_db::IskCents::from_isk(bal);
+                        }
+                    });
+                }
                 info!(username = %player.username, char_id, "starter character created");
                 created.push(char_id);
             }

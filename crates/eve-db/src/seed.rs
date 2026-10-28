@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
 impl WorldRepository {
-    pub fn with_demo_seed() -> Self {
+    pub fn create_demo_snapshot() -> WorldStateSnapshot {
         let mut accounts = HashMap::new();
         accounts.insert(
             "demo".to_string(),
@@ -452,11 +452,6 @@ impl WorldRepository {
         skills.insert(90_000_001, starter_skill_map.clone());
         skills.insert(90_000_002, starter_skill_map);
 
-        let snapshot_path = std::env::var("EVOMU_SNAPSHOT_PATH")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .map(std::path::PathBuf::from);
-
         let mut corporations = HashMap::new();
         corporations.insert(
             98_000_001,
@@ -546,6 +541,48 @@ impl WorldRepository {
         let mut initial_snap = initial_snap;
         initial_snap.fold_legacy_plex_balances();
         initial_snap.backfill_fw_system_occupations();
+        initial_snap
+    }
+
+    pub fn populate_demo_snapshot(snap: &mut WorldStateSnapshot) {
+        let demo = Self::create_demo_snapshot();
+        for (k, v) in demo.accounts {
+            snap.accounts.entry(k).or_insert(v);
+        }
+        for (k, v) in demo.characters {
+            snap.characters.entry(k).or_insert(v);
+        }
+        for (k, v) in demo.skills {
+            snap.skills.entry(k).or_insert(v);
+        }
+        for (k, v) in demo.skill_history {
+            snap.skill_history.entry(k).or_insert(v);
+        }
+        for (k, v) in demo.items {
+            snap.items.entry(k).or_insert(v);
+        }
+        for (k, v) in demo.market_orders {
+            snap.market_orders.entry(k).or_insert(v);
+        }
+        for (k, v) in demo.planetary_colonies {
+            snap.planetary_colonies.entry(k).or_insert(v);
+        }
+        for (k, v) in demo.corporations {
+            snap.corporations.entry(k).or_insert(v);
+        }
+        for (k, v) in demo.system_states {
+            snap.system_states.entry(k).or_insert(v);
+        }
+        for (k, v) in demo.npe_progress {
+            snap.npe_progress.entry(k).or_insert(v);
+        }
+        if snap.next_entity_id < demo.next_entity_id {
+            snap.next_entity_id = demo.next_entity_id;
+        }
+    }
+
+    pub fn with_demo_seed() -> Self {
+        let initial_snap = Self::create_demo_snapshot();
         let mut conn = rusqlite::Connection::open_in_memory()
             .expect("open in-memory SQLite connection for WorldRepository");
         sqlite_store::apply_migrations(&conn).expect("apply SQLite migrations for WorldRepository");
@@ -570,6 +607,11 @@ impl WorldRepository {
             #[cfg(test)]
             wal_fault_mode: std::sync::atomic::AtomicU8::new(0),
         };
+
+        let snapshot_path = std::env::var("EVOMU_SNAPSHOT_PATH")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(std::path::PathBuf::from);
 
         if let Some(ref p) = snapshot_path {
             if p.exists() {

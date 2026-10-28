@@ -16,7 +16,6 @@ pub mod fw_seed;
 pub mod inventory;
 pub mod ledger;
 pub mod persistence;
-#[cfg(any(test, feature = "demo-seed"))]
 pub mod seed;
 pub mod snapshot_ext;
 pub mod sqlite_store;

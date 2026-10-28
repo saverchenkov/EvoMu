@@ -374,6 +374,7 @@ async fn provision_starter_characters_creates_character_for_configured_account()
             gender: 0,
             ancestry_id: 11,
             school_id: 17,
+            ..Default::default()
         }),
     }];
     let created = eve_server::starter_characters::provision_starter_characters(&ctx, &cfg).await;

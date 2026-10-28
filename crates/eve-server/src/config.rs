@@ -38,13 +38,19 @@ pub struct PlayerAccountConfig {
 }
 
 /// `CreateCharacterWithDoll(charactername, bloodlineID, genderID, ancestryID, ..., schoolID)` inputs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct StarterCharacterConfig {
     pub name: String,
     pub bloodline_id: i64,
     pub gender: i64,
     pub ancestry_id: i64,
     pub school_id: i64,
+    #[serde(default)]
+    pub solar_system_id: Option<i64>,
+    #[serde(default)]
+    pub station_id: Option<i64>,
+    #[serde(default)]
+    pub initial_balance_isk: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

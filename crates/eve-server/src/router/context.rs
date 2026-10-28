@@ -406,6 +406,9 @@ impl ServerContext {
     pub fn seed_demo_world_fixtures(&self) {
         self.living_world.seed_default_convoys();
         self.db.with_mut_snapshot(|snap| {
+            if snap.characters.is_empty() {
+                eve_db::WorldRepository::populate_demo_snapshot(snap);
+            }
             if let Some(st) = snap.system_states.get_mut(&30_002_813) {
                 st.wormhole_remaining_mass_kg = 2_000_000_000.0;
                 st.wormhole_destination_system_id = Some(31_000_005);
@@ -427,6 +430,21 @@ impl ServerContext {
                 st.wormhole_destination_system_id = Some(30_002_813);
                 st.signature_position = Some([12_000.0, 0.0, 0.0]);
             }
+            snap.items.entry(100_000_200).or_insert_with(|| eve_db::InventoryItemRecord {
+                item_id: 100_000_200,
+                type_id: 53977, // Noise-5 'Needlejack' Filament
+                owner_id: 90_000_001,
+                location_id: 100_000_001,
+                flag: eve_db::InventoryFlag::Cargo,
+                quantity: 5,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: std::collections::HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            });
         });
     }
 

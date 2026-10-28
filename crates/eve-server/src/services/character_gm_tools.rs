@@ -223,7 +223,8 @@ pub fn handle_char_unbound(
                     message: "CreateCharacterWithDoll requires (charactername, [raceID,] bloodlineID, genderID, ancestryID, charInfo, portraitInfo, schoolID)".into(),
                 }));
             }
-            let has_race_arg = args.len() >= 8 && is_valid_doll_or_portrait_payload(args.get(5).unwrap_or(&PyRep::None));
+            let has_race_arg = !is_valid_doll_or_portrait_payload(args.get(4).unwrap_or(&PyRep::None))
+                && is_valid_doll_or_portrait_payload(args.get(5).unwrap_or(&PyRep::None));
             let offset = usize::from(has_race_arg);
             let Some(bloodline_id) = args.get(1 + offset).and_then(|a| a.as_i64()).map(|v| v as u32) else {
                 return Some(Err(BridgeRpcError {
@@ -284,8 +285,12 @@ pub fn handle_char_unbound(
             };
             let doll_str = serialize_doll_pyrep(char_info_rep);
             let portrait_str = serialize_doll_pyrep(portrait_info_rep);
+            let qa_starter_system_id = args
+                .get(8 + offset)
+                .and_then(|a| a.as_i64())
+                .map(|v| v as u32);
 
-            let res = ctx.db.create_character(
+            let res = ctx.db.create_character_with_system(
                 user_id,
                 name,
                 race_id,
@@ -293,6 +298,7 @@ pub fn handle_char_unbound(
                 ancestry_id,
                 school_id,
                 &ctx.sde,
+                qa_starter_system_id,
             );
             match res {
                 Ok(ch) => {
