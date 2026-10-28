@@ -17,7 +17,7 @@
 
 use super::*;
 use eve_destiny::{Ball, MovementMode};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{OnceLock, RwLock};
 
 const ATTR_CONSUMPTION_TYPE: AttributeId = 713;
 const ATTR_CONSUMPTION_QUANTITY: AttributeId = 714;
@@ -92,7 +92,7 @@ fn cyno_state() -> &'static RwLock<CynoPortalState> {
 
 /// Per-`ServerContext` key so independent server instances (tests) never share cyno state.
 fn ctx_key(ctx: &ServerContext) -> usize {
-    Arc::as_ptr(&ctx.db) as *const () as usize
+    ctx.instance_id as usize
 }
 
 /// Active cynosural field beacon counts per solar system for `map.GetBeaconCount`.

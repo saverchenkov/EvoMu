@@ -382,6 +382,12 @@ pub fn scan_and_enforce_highsec_contraband(
 
 /// Returns whether CONCORD response is suppressed in the solar system (e.g., Insurgency Corruption Stage 5).
 pub fn is_concord_suppressed_in_system(ctx: &ServerContext, solar_system_id: SolarSystemId) -> bool {
+    let in_insurgency = ctx.db.with_snapshot(|snap| {
+        snap.insurgency_runtime.campaigns.values().any(|c| c.systems.contains(&solar_system_id))
+    });
+    if !in_insurgency {
+        return false;
+    }
     ctx.db.with_snapshot(|snap| {
         snap.system_states.get(&solar_system_id).map(|st| st.insurgency_corruption_stage >= 5).unwrap_or(false)
     })
@@ -389,6 +395,12 @@ pub fn is_concord_suppressed_in_system(ctx: &ServerContext, solar_system_id: Sol
 
 /// Returns whether gate and station sentry guns are disabled in the solar system (Insurgency Corruption Stage 3+ in low-sec).
 pub fn is_sentry_disabled_by_corruption(ctx: &ServerContext, solar_system_id: SolarSystemId) -> bool {
+    let in_insurgency = ctx.db.with_snapshot(|snap| {
+        snap.insurgency_runtime.campaigns.values().any(|c| c.systems.contains(&solar_system_id))
+    });
+    if !in_insurgency {
+        return false;
+    }
     let sys_sec = ctx.sde.solar_systems.get(&solar_system_id).map(|s| s.security_status).unwrap_or(0.0);
     sys_sec > 0.0 && sys_sec < 0.45 && ctx.db.with_snapshot(|snap| {
         snap.system_states.get(&solar_system_id).map(|st| st.insurgency_corruption_stage >= 3).unwrap_or(false)
@@ -397,6 +409,12 @@ pub fn is_sentry_disabled_by_corruption(ctx: &ServerContext, solar_system_id: So
 
 /// Returns whether Empire Navy / Faction Police patrols are suppressed (Insurgency Corruption Stage 2+).
 pub fn is_faction_police_suppressed(ctx: &ServerContext, solar_system_id: SolarSystemId) -> bool {
+    let in_insurgency = ctx.db.with_snapshot(|snap| {
+        snap.insurgency_runtime.campaigns.values().any(|c| c.systems.contains(&solar_system_id))
+    });
+    if !in_insurgency {
+        return false;
+    }
     ctx.db.with_snapshot(|snap| {
         snap.system_states.get(&solar_system_id).map(|st| st.insurgency_corruption_stage >= 2).unwrap_or(false)
     })

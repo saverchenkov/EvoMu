@@ -1138,7 +1138,7 @@ pub fn evaluate_and_record_pvp_aggression(
         }
         {
             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-            let _ = cw.handle_combat_aggression(attacker_char_id, vcid, attacker_ship_id, sys_id, effective_sec, is_legal, now_unix);
+            let _ = cw.handle_combat_aggression_with_pod(attacker_char_id, vcid, attacker_ship_id, sys_id, effective_sec, is_legal, is_pod_target, now_unix);
             cw.get_or_create(attacker_char_id).pvp_timer_until_unix = now_unix.saturating_add(900);
             cw.get_or_create(vcid).pvp_timer_until_unix = now_unix.saturating_add(900);
             if !is_legal && ((sys_sec > 0.0 && sys_sec < 0.45 && is_pod_target) || is_anchored_cont || (is_secure_cont && sys_sec >= 0.45)) {

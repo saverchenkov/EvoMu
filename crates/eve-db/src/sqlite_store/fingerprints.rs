@@ -410,6 +410,13 @@ pub(crate) fn fp_sp6_lifecycle(st: &crate::Sp6PersistedState) -> u64 {
     for (&k, v) in &st.space_object_meta {
         h.write_i64(k);
         h.write_u64(v.created_unix.unwrap_or(0));
+        h.write_u8(v.is_npc_wreck as u8);
+        h.write_u64(v.anchor_start_unix.unwrap_or(0));
+        h.write_u64(v.anchoring_delay_secs.to_bits());
+        h.write_u8(v.anchor_completed as u8);
+        h.write_u64(v.bubble_radius_m.map(|r| r.to_bits()).unwrap_or(0));
+        h.write_i64(v.drone_ball_id.unwrap_or(0));
+        h.write_i64(v.planet_id.unwrap_or(0));
     }
     h.write_u64(st.missions_awaiting_downtime_respawn.len() as u64);
     for &(c, m) in &st.missions_awaiting_downtime_respawn {

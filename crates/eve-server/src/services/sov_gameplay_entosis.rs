@@ -652,6 +652,16 @@ pub fn require_flex_sov_upgrade_online(
     solar_system_id: u32,
     structure_type_id: u32,
 ) -> Result<(), BridgeRpcError> {
+    let sys_sec = ctx
+        .sde
+        .solar_systems
+        .get(&solar_system_id)
+        .map(|s| s.security_status)
+        .unwrap_or(1.0);
+    if sys_sec > 0.0 {
+        // Highsec and lowsec do not have Sovereignty Hubs
+        return Ok(());
+    }
     let Some(req_upgrade) = required_upgrade_for_flex_structure(structure_type_id) else {
         return Ok(());
     };

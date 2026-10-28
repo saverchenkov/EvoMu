@@ -811,6 +811,13 @@ pub fn execute_death_pipeline_sync_inner(
         sys_id,
         total_damage,
     );
+    crate::services::fw_gameplay::on_player_ship_destroyed_in_combat(
+        ctx,
+        sys_id,
+        attacker_char_id,
+        victim_char_id,
+        victim_ship_type_id,
+    );
 
     Ok(DeathPipelineResult {
         wreck_item_id,

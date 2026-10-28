@@ -68,9 +68,6 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
         }
     }
     let sys_id = session.solar_system_id.ok_or_else(|| err("NoSolarSystem", "Session has no active solarSystemID"))?;
-    if matches!(type_id, 35840 | 35841 | crate::services::sov_gameplay::TYPE_TENEBREX_CYNO_JAMMER) {
-        crate::services::sov_gameplay::require_flex_sov_upgrade_online(ctx, sys_id, type_id)?;
-    }
     let profile = life::structure_profile(ctx, type_id).ok_or_else(|| err("InvalidStructureType", format!("Type {type_id} is not an anchorable Upwell structure (category {})", life::CATEGORY_STRUCTURE)))?;
     let (_, is_thera, is_shattered, _) = crate::services::space_destiny::system_wormhole_profile(sys_id);
     if is_thera || is_shattered {
@@ -88,6 +85,9 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
     }
     if type_id == ANSIBLEX_TYPE_ID && !is_sovereign_nullsec_for_ansiblex(&ctx.sde, sys_id) {
         return Err(err("CannotAnchorAnsiblexOutsideSovNull", format!("Ansiblex Jump Gate ({ANSIBLEX_TYPE_ID}) can only be anchored in sovereign null-security space (system {sys_id})")));
+    }
+    if matches!(type_id, 35840 | 35841 | crate::services::sov_gameplay::TYPE_TENEBREX_CYNO_JAMMER) {
+        crate::services::sov_gameplay::require_flex_sov_upgrade_online(ctx, sys_id, type_id)?;
     }
     let (_, ship_ball) = ctx
         .systems

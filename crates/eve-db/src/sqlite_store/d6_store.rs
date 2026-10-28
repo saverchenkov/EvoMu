@@ -77,7 +77,7 @@ pub fn compute_d6_fingerprints(snap: &WorldStateSnapshot) -> D6Fingerprints {
         next_corporation_id: snap.next_corporation_id,
         next_notification_id: snap.next_notification_id,
         next_report_id: snap.next_report_id,
-        sp6_lifecycle_fp: fp_json(&snap.sp6_lifecycle),
+        sp6_lifecycle_fp: super::fingerprints::fp_sp6_lifecycle(&snap.sp6_lifecycle),
     }
 }
 
@@ -291,7 +291,7 @@ pub fn rollback_d6(conn: &Connection, snap: &mut WorldStateSnapshot, fp: &TableF
             .char_lp_logs
             .iter()
             .any(|(k, v)| df.char_lp_logs.get(k) != Some(&fp_json(v)));
-    let dirty_sp6 = fp_json(&snap.sp6_lifecycle) != df.sp6_lifecycle_fp;
+    let dirty_sp6 = super::fingerprints::fp_sp6_lifecycle(&snap.sp6_lifecycle) != df.sp6_lifecycle_fp;
     if !(dirty_notes || dirty_lp || dirty_logs || dirty_sp6) {
         return;
     }
