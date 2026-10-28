@@ -113,13 +113,19 @@ async fn test_mobile_tractor_unit_tractor_and_looting() {
     let wreck_owner_pos = ship_pos + DVec3::new(40_000.0, 0.0, 0.0);
     let item_a_id = 730_001i64;
     let item_b_id = 730_002i64;
+
+    // Spawn Pilot 1's second wreck at 60km from MTU (MD-P1-1)
+    let wreck_owner_2_id = 720_004i64;
+    let wreck_owner_2_pos = ship_pos + DVec3::new(60_000.0, 0.0, 0.0);
+    let item_c_id = 730_004i64;
+
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(wreck_owner_id, InventoryItemRecord {
             item_id: wreck_owner_id, type_id: 26557, owner_id: PILOT_1,
             location_id: TEST_SYSTEM as i64, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default()
         });
         snap.item_positions.insert(wreck_owner_id, wreck_owner_pos.to_array());
-        // Items in wreck: Tritanium (0.01 m3) and Pyerite (0.01 m3)
+        // Items in wreck 1: Tritanium (0.01 m3) and Pyerite (0.01 m3)
         snap.items.insert(item_a_id, InventoryItemRecord {
             item_id: item_a_id, type_id: 34, owner_id: PILOT_1,
             location_id: wreck_owner_id, flag: InventoryFlag::Cargo, quantity: 100, singleton: false, ..Default::default()
@@ -128,9 +134,24 @@ async fn test_mobile_tractor_unit_tractor_and_looting() {
             item_id: item_b_id, type_id: 35, owner_id: PILOT_1,
             location_id: wreck_owner_id, flag: InventoryFlag::Cargo, quantity: 50, singleton: false, ..Default::default()
         });
+
+        // Items in wreck 2: Tritanium
+        snap.items.insert(wreck_owner_2_id, InventoryItemRecord {
+            item_id: wreck_owner_2_id, type_id: 26557, owner_id: PILOT_1,
+            location_id: TEST_SYSTEM as i64, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default()
+        });
+        snap.item_positions.insert(wreck_owner_2_id, wreck_owner_2_pos.to_array());
+        snap.items.insert(item_c_id, InventoryItemRecord {
+            item_id: item_c_id, type_id: 34, owner_id: PILOT_1,
+            location_id: wreck_owner_2_id, flag: InventoryFlag::Cargo, quantity: 75, singleton: false, ..Default::default()
+        });
     });
     let _ = sys.spawn_ball(Ball {
         id: wreck_owner_id, type_id: 26557, position: wreck_owner_pos, velocity: DVec3::ZERO,
+        max_velocity: 1000.0, inertia: 1.0, mass: 10_000.0, radius: 30.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }).await;
+    let _ = sys.spawn_ball(Ball {
+        id: wreck_owner_2_id, type_id: 26557, position: wreck_owner_2_pos, velocity: DVec3::ZERO,
         max_velocity: 1000.0, inertia: 1.0, mass: 10_000.0, radius: 30.0, speed_fraction: 0.0, mode: MovementMode::Stop,
     }).await;
 
@@ -156,22 +177,41 @@ async fn test_mobile_tractor_unit_tractor_and_looting() {
     let other_pos = ctx.db.with_snapshot(|snap| snap.item_positions.get(&wreck_other_id).copied()).unwrap();
     assert_eq!(DVec3::from_array(other_pos), wreck_other_pos, "MTU must NOT tractor wrecks belonging to other pilots");
 
-    // 2. Verify Pilot 1's wreck was pulled towards MTU by 1,000m (tractoring speed: 1,000 m/s)
+    // 2. Verify Pilot 1's wreck 1 (closest, 40km) was pulled towards MTU by ~1,000m (tractoring speed: 1,000 m/s)
     let owner_pos_step1 = ctx.db.with_snapshot(|snap| snap.item_positions.get(&wreck_owner_id).copied()).unwrap();
     let initial_dist = (wreck_owner_pos - ship_pos).length();
     let post_dist = (DVec3::from_array(owner_pos_step1) - ship_pos).length();
-    assert!((initial_dist - post_dist - 1_000.0).abs() < 100.0, "Wreck must be pulled ~1,000m per 1.0s tick");
+    assert!((initial_dist - post_dist - 1_000.0).abs() < 100.0, "Wreck 1 must be pulled ~1,000m per 1.0s tick");
 
-    // Step until wreck arrives within 2,500m of MTU
+    // Verify wreck 2 (60km) has not been pulled yet
+    let owner_2_pos_step1 = ctx.db.with_snapshot(|snap| snap.item_positions.get(&wreck_owner_2_id).copied()).unwrap();
+    assert_eq!(DVec3::from_array(owner_2_pos_step1), wreck_owner_2_pos, "Wreck 2 must not be tractored while Wreck 1 is active");
+
+    // Step until wreck 1 arrives within 2,500m of MTU
     for _ in 0..40 {
         sys.step_manual(1.0).await.unwrap();
     }
 
-    // 3. Verify wreck items are transferred into the MTU cargo hold
+    // 3. Verify wreck 1 items are transferred into the MTU cargo hold
     let item_a_loc = ctx.db.with_snapshot(|snap| snap.items.get(&item_a_id).map(|i| i.location_id));
     let item_b_loc = ctx.db.with_snapshot(|snap| snap.items.get(&item_b_id).map(|i| i.location_id));
     assert_eq!(item_a_loc, Some(mtu_id), "Item A must be looted into MTU cargo hold");
     assert_eq!(item_b_loc, Some(mtu_id), "Item B must be looted into MTU cargo hold");
+
+    // 4. MTU now moves on to tractor wreck 2 (60km) (MD-P1-1)
+    let pre_w2_pos = ctx.db.with_snapshot(|snap| snap.item_positions.get(&wreck_owner_2_id).copied()).unwrap();
+    sys.step_manual(1.0).await.unwrap();
+    let post_w2_pos = ctx.db.with_snapshot(|snap| snap.item_positions.get(&wreck_owner_2_id).copied()).unwrap();
+    let w2_dist_pre = (DVec3::from_array(pre_w2_pos) - ship_pos).length();
+    let w2_dist_post = (DVec3::from_array(post_w2_pos) - ship_pos).length();
+    assert!((w2_dist_pre - w2_dist_post - 1_000.0).abs() < 100.0, "Wreck 2 must now be pulled ~1,000m per tick");
+
+    // Step until wreck 2 arrives within 2,500m of MTU and is looted
+    for _ in 0..60 {
+        sys.step_manual(1.0).await.unwrap();
+    }
+    let item_c_loc = ctx.db.with_snapshot(|snap| snap.items.get(&item_c_id).map(|i| i.location_id));
+    assert_eq!(item_c_loc, Some(mtu_id), "Item C must be looted into MTU cargo hold");
 
     // 4. Hold Capacity check: spawn an item that exceeds MTU capacity (27,000 m³)
     let huge_wreck_id = 720_003i64;
@@ -224,7 +264,7 @@ async fn test_mobile_tractor_unit_rules_and_destruction() {
     let sys = ctx.systems.get_or_spawn(TEST_SYSTEM);
     sys.step_manual(1.0).await.unwrap();
 
-    // Spawn a wreck at 20km
+    // Spawn a wreck at 20km with items
     let test_wreck_id = 720_010i64;
     let test_wreck_pos = ship_pos + DVec3::new(20_000.0, 0.0, 0.0);
     ctx.db.with_mut_snapshot(|snap| {
@@ -233,6 +273,10 @@ async fn test_mobile_tractor_unit_rules_and_destruction() {
             location_id: TEST_SYSTEM as i64, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default()
         });
         snap.item_positions.insert(test_wreck_id, test_wreck_pos.to_array());
+        snap.items.insert(730_010i64, InventoryItemRecord {
+            item_id: 730_010i64, type_id: 34, owner_id: PILOT_1,
+            location_id: test_wreck_id, flag: InventoryFlag::Cargo, quantity: 100, singleton: false, ..Default::default()
+        });
     });
     let _ = sys.spawn_ball(Ball {
         id: test_wreck_id, type_id: 26557, position: test_wreck_pos, velocity: DVec3::ZERO,
@@ -330,4 +374,39 @@ async fn test_mobile_tractor_unit_rules_and_destruction() {
     });
     assert!(container_found, "Cargo container must spawn upon MTU destruction");
     assert!(dropped_count > 0, "Some items must drop into the container per the 50% roll");
+
+    // MD-P0-1 Regression: verify record removed from st.deployables upon MTU destruction
+    let dep_st = read_deployable_state(&ctx);
+    assert!(!dep_st.deployables.contains_key(&mtu_loot_id), "Destroyed MTU must be removed from deployable runtime state");
+
+    // Spawn an owner wreck with contents at 20km from destroyed MTU
+    let after_wreck_id = 720_099i64;
+    let after_wreck_pos = loot_deploy_pos + DVec3::new(20_000.0, 0.0, 0.0);
+    let after_item_id = 730_099i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(after_wreck_id, InventoryItemRecord {
+            item_id: after_wreck_id, type_id: 26557, owner_id: PILOT_1,
+            location_id: TEST_SYSTEM as i64, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default()
+        });
+        snap.item_positions.insert(after_wreck_id, after_wreck_pos.to_array());
+        snap.items.insert(after_item_id, InventoryItemRecord {
+            item_id: after_item_id, type_id: 34, owner_id: PILOT_1,
+            location_id: after_wreck_id, flag: InventoryFlag::Cargo, quantity: 50, singleton: false, ..Default::default()
+        });
+    });
+    let _ = sys.spawn_ball(Ball {
+        id: after_wreck_id, type_id: 26557, position: after_wreck_pos, velocity: DVec3::ZERO,
+        max_velocity: 1000.0, inertia: 1.0, mass: 10_000.0, radius: 30.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }).await;
+
+    // Step system for 5 ticks
+    for _ in 0..5 {
+        sys.step_manual(1.0).await.unwrap();
+    }
+
+    // Assert wreck position does NOT change and contents are not looted
+    let cur_pos = ctx.db.with_snapshot(|snap| snap.item_positions.get(&after_wreck_id).copied()).unwrap();
+    assert_eq!(DVec3::from_array(cur_pos), after_wreck_pos, "Destroyed MTU must not tractor any wrecks");
+    let cur_loc = ctx.db.with_snapshot(|snap| snap.items.get(&after_item_id).map(|i| i.location_id));
+    assert_eq!(cur_loc, Some(after_wreck_id), "Contents must never be looted into destroyed MTU");
 }

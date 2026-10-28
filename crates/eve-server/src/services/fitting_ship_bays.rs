@@ -1309,6 +1309,9 @@ pub(crate) async fn ship_scoop_and_store(
     if let Ok(Some(cs)) = sys.get_combat_state(item_id).await {
         crate::services::mobile_deployables::record_scooped_deployable_damage(ctx, item_id, &cs);
     }
+    crate::services::mobile_deployables::write_deployable_state(ctx, |st| {
+        st.deployables.remove(&item_id);
+    });
     let _ = sys.remove_ball(item_id).await;
     write_container_ship_state(ctx, |st| {
         st.custom_item_flags.insert(item_id, target_flag_u16);

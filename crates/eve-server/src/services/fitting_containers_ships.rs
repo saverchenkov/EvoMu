@@ -102,7 +102,7 @@ pub(crate) fn write_container_ship_state<R>(
 }
 
 pub(crate) fn is_container_group(group_id: u32, type_id: TypeId) -> bool {
-    type_id == 23 || matches!(group_id, 12 | 340 | 448 | 649)
+    type_id == 23 || matches!(group_id, 12 | 340 | 448 | 649 | crate::services::mobile_deployables::GROUP_MOBILE_DEPOT)
 }
 
 /// Computes unit volume of an inventory item, respecting packaged hull/container volumes when `!item.singleton`.
@@ -453,9 +453,15 @@ pub(crate) fn validate_container_and_bay_move(
         } else {
             0
         };
-        Some((src_loc, src_cont.flag as i64, src_cont.location_id, cont_corp, char_corp))
+        Some((src_loc, src_cont.flag as i64, src_cont.location_id, cont_corp, char_corp, src_grp, src_cont.owner_id))
     });
-    if let Some((src_loc, src_cont_flag, src_cont_station, cont_corp, char_corp)) = src_cont_info {
+    if let Some((src_loc, src_cont_flag, src_cont_station, cont_corp, char_corp, src_grp, src_cont_owner)) = src_cont_info {
+        if src_grp == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
+            if src_cont_owner != char_id {
+                return Err(BridgeRpcError { code: "OwnershipViolation".into(), message: "Only the owner may take items from this Mobile Depot".into() });
+            }
+            crate::services::mobile_deployables::touch_mobile_depot_interaction(ctx, src_loc);
+        }
         let mut st = read_container_ship_state(ctx);
         if let Some(req_pw) = st.container_passwords.get(&src_loc).cloned() {
             if !req_pw.is_empty()
@@ -502,27 +508,17 @@ pub(crate) fn validate_container_and_bay_move(
         let Some(moving_item) = snap.items.get(&item_id) else {
             return Ok(None);
         };
-        if moving_item.flag == InventoryFlag::Locked
-            || snap.is_item_locked_in_contract_or_job(item_id)
-        {
-            return Err(BridgeRpcError {
-                code: "ItemLocked".into(),
-                message: format!("Item {item_id} is locked by a contract, industry job, or container"),
-            });
+        if moving_item.flag == InventoryFlag::Locked || snap.is_item_locked_in_contract_or_job(item_id) {
+            return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} is locked by contract or job") });
         }
         let moving_type = ctx.sde.types.get(&moving_item.type_id);
         let moving_grp = moving_type.map(|t| t.group_id).unwrap_or(0);
         let moving_cat = moving_type.map(|t| t.category_id).unwrap_or(0);
-        let moving_unit_vol = effective_item_unit_volume(&ctx.sde, moving_item);
         let move_qty = requested_qty.unwrap_or(moving_item.quantity as i64).max(1) as f64;
-        let moving_total_vol = moving_unit_vol * move_qty;
+        let moving_total_vol = effective_item_unit_volume(&ctx.sde, moving_item) * move_qty;
 
-        let Some(dest_item) = snap.items.get(&new_loc) else {
-            return Ok(None);
-        };
-        let Some(dest_type) = ctx.sde.types.get(&dest_item.type_id) else {
-            return Ok(None);
-        };
+        let Some(dest_item) = snap.items.get(&new_loc) else { return Ok(None); };
+        let Some(dest_type) = ctx.sde.types.get(&dest_item.type_id) else { return Ok(None); };
 
         // Station Container (`group 448`, unpacked volume >= 500,000 m3) cannot be moved into a ship when assembled
         if moving_grp == 448 && moving_item.singleton && dest_type.category_id == 6 {
@@ -532,9 +528,13 @@ pub(crate) fn validate_container_and_bay_move(
             });
         }
 
-        // Moving into a Container (`group 12 | 340 | 448 | 649` or jetcan `23`)
+        // Moving into a Container (`group 12 | 340 | 448 | 649`, jetcan `23`, or Mobile Depot `1246`)
         if is_container_group(dest_type.group_id, dest_type.type_id) {
-            if !dest_item.singleton {
+            if dest_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
+                if dest_item.owner_id != char_id {
+                    return Err(BridgeRpcError { code: "OwnershipViolation".into(), message: "Only the owner may store items in this Mobile Depot".into() });
+                }
+            } else if !dest_item.singleton {
                 return Err(BridgeRpcError {
                     code: "ContainerNotAssembled".into(),
                     message: format!("Target container {new_loc} must be assembled before storing items"),
@@ -678,7 +678,10 @@ pub(crate) fn validate_container_and_bay_move(
         });
     }
 
-    if snap_check.is_some() {
+    if let Some((grp, _, _)) = snap_check {
+        if grp == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
+            crate::services::mobile_deployables::touch_mobile_depot_interaction(ctx, new_loc);
+        }
         let mut st = read_container_ship_state(ctx);
         if let Some(req_pw) = st.container_passwords.get(&new_loc).cloned() {
             if !req_pw.is_empty() && !st.unlocked_containers.contains(&(new_loc, char_id)) {

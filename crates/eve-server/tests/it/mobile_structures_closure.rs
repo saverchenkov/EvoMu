@@ -127,7 +127,7 @@ async fn test_mobile_depot_anchoring_refit_storage_reinforce() {
     assert!(near_owner, "Pilot 1 (owner) within 2,500m of active Mobile Depot must have fitting service access");
 
     // Non-owner cannot use depot for refitting
-    let _sess2 = setup_pilot(&ctx, 102, PILOT_2, SHIP_2, TEST_SYSTEM, ship_pos + DVec3::new(100.0, 0.0, 0.0)).await;
+    let mut _sess2 = setup_pilot(&ctx, 102, PILOT_2, SHIP_2, TEST_SYSTEM, ship_pos + DVec3::new(100.0, 0.0, 0.0)).await;
     let near_non_owner = is_near_in_space_fitting_service(&ctx, TEST_SYSTEM, SHIP_2).await;
     assert!(!near_non_owner, "Pilot 2 (non-owner) must NOT have fitting service access from Pilot 1's depot");
 
@@ -143,21 +143,37 @@ async fn test_mobile_depot_anchoring_refit_storage_reinforce() {
     assert!(non_owner_res.is_err());
     assert_eq!(non_owner_res.unwrap_err().code, "OwnershipViolation");
 
-    // Test moving an item in and out of the depot
+    // Test moving an item in and out of the depot via real invbroker.Add RPC
     let stored_item_id = 800_001i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(stored_item_id, InventoryItemRecord {
             item_id: stored_item_id, type_id: 34, owner_id: PILOT_1,
-            location_id: depot_item_id, flag: InventoryFlag::Cargo, quantity: 50, singleton: false, ..Default::default()
+            location_id: SHIP_1, flag: InventoryFlag::Cargo, quantity: 50, singleton: false, ..Default::default()
         });
     });
+    ctx.dispatch_rpc(
+        &mut sess1,
+        "invbroker",
+        None,
+        "Add",
+        &[PyRep::Integer(stored_item_id), PyRep::Integer(depot_item_id), PyRep::Integer(InventoryFlag::Cargo as i64)],
+        &kw,
+        None,
+    ).await.expect("invbroker.Add to depot");
     let has_item = ctx.db.with_snapshot(|snap| snap.items.get(&stored_item_id).is_some_and(|i| i.location_id == depot_item_id));
     assert!(has_item, "Item must be stored inside Mobile Depot");
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(i) = snap.items.get_mut(&stored_item_id) {
-            i.location_id = SHIP_1;
-        }
-    });
+
+    ctx.dispatch_rpc(
+        &mut sess1,
+        "invbroker",
+        None,
+        "Add",
+        &[PyRep::Integer(stored_item_id), PyRep::Integer(SHIP_1), PyRep::Integer(InventoryFlag::Cargo as i64)],
+        &kw,
+        None,
+    ).await.expect("invbroker.Add back to ship");
+    let back_in_ship = ctx.db.with_snapshot(|snap| snap.items.get(&stored_item_id).is_some_and(|i| i.location_id == SHIP_1));
+    assert!(back_in_ship, "Item must be moved back to ship cargo");
 
     // 5. Reinforcement threshold at <= 25% shield HP
     let depot_cs = sys.get_combat_state(depot_item_id).await.unwrap().expect("depot combat state");
@@ -201,6 +217,10 @@ async fn test_mobile_depot_anchoring_refit_storage_reinforce() {
     ctx.dispatch_rpc(&mut sess1, "posMgr", None, "AnchorStructure", &[PyRep::Integer(depot_2_id)], &kw, None).await.unwrap();
     ctx.advance_secs(DEPOT_ANCHOR_TIME_SECS + 1);
 
+    // Attempt re-anchor exploit (MD-P1-2): re-calling AnchorStructure on already anchored depot
+    let reanchor_err = ctx.dispatch_rpc(&mut sess1, "posMgr", None, "AnchorStructure", &[PyRep::Integer(depot_2_id)], &kw, None).await.unwrap_err();
+    assert_eq!(reanchor_err.code, "StructureAlreadyAnchored", "Re-anchoring already anchored structure must fail");
+
     // Deal 50% shield damage to depot 2
     let d2_cs = sys.get_combat_state(depot_2_id).await.unwrap().unwrap();
     let dmg_half = DamageVector { em: d2_cs.max_shield_hp * 0.50, thermal: 0.0, kinetic: 0.0, explosive: 0.0 };
@@ -208,22 +228,42 @@ async fn test_mobile_depot_anchoring_refit_storage_reinforce() {
     let d2_post_cs = sys.get_combat_state(depot_2_id).await.unwrap().unwrap();
     let expected_damaged_shields = d2_post_cs.shield_hp;
 
-    // Scoop depot 2 to cargo
-    assert!(can_deployable_be_scooped(GROUP_MOBILE_DEPOT));
-    record_scooped_deployable_damage(&ctx, depot_2_id, &d2_post_cs);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(i) = snap.items.get_mut(&depot_2_id) {
-            i.location_id = SHIP_1;
-            i.flag = InventoryFlag::Cargo;
-        }
-        snap.item_positions.remove(&depot_2_id);
-    });
+    // Unanchor depot 2 via real entity.CmdUnanchor RPC
+    ctx.dispatch_rpc(&mut sess1, "entity", None, "CmdUnanchor", &[PyRep::Integer(depot_2_id)], &kw, None).await.expect("CmdUnanchor depot 2");
+
+    // Non-owner scoop negative test (MD-P1-3)
+    ctx.db.with_mut_snapshot(|snap| snap.item_positions.insert(SHIP_2, (depot_2_pos + DVec3::new(100.0, 0.0, 0.0)).to_array()));
+    let _ = sys.set_ball_position(SHIP_2, depot_2_pos + DVec3::new(100.0, 0.0, 0.0)).await;
+    let non_owner_scoop = ctx.dispatch_rpc(&mut _sess2, "ship", None, "Scoop", &[PyRep::Integer(depot_2_id)], &kw, None).await.unwrap_err();
+    assert_eq!(non_owner_scoop.code, "OwnershipViolation", "Non-owner scoop must fail with OwnershipViolation");
+
+    // Scoop depot 2 via real ship.Scoop RPC
+    ctx.dispatch_rpc(&mut sess1, "ship", None, "Scoop", &[PyRep::Integer(depot_2_id)], &kw, None).await.expect("Scoop depot 2");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&depot_2_id).map(|i| i.location_id)), Some(SHIP_1));
 
     // Redeploy depot 2
     let _redeploy_pos = ship_pos + DVec3::new(100.0, 0.0, 0.0);
     ctx.dispatch_rpc(&mut sess1, "posMgr", None, "AnchorStructure", &[PyRep::Integer(depot_2_id)], &kw, None).await.unwrap();
     let redeployed_cs = sys.get_combat_state(depot_2_id).await.unwrap().expect("redeployed combat state");
     assert!((redeployed_cs.shield_hp - expected_damaged_shields).abs() < 1.0, "Redeployed depot must retain pre-scoop damage state");
+
+    // Redeploy below 25% threshold asserting destruction instead of reinforcement (MD-P1-3)
+    ctx.advance_secs(DEPOT_ANCHOR_TIME_SECS + 1);
+    let dmg_to_reinf = DamageVector { em: redeployed_cs.shield_hp + 500.0, thermal: 0.0, kinetic: 0.0, explosive: 0.0 };
+    sys.apply_damage(depot_2_id, dmg_to_reinf).await.unwrap().unwrap();
+    ctx.advance_secs(DEPOT_REINFORCE_DURATION_SECS + 1);
+    sys.step_manual(1.0).await.unwrap();
+
+    ctx.dispatch_rpc(&mut sess1, "entity", None, "CmdUnanchor", &[PyRep::Integer(depot_2_id)], &kw, None).await.expect("CmdUnanchor depot 2 post-reinf");
+    ctx.dispatch_rpc(&mut sess1, "ship", None, "Scoop", &[PyRep::Integer(depot_2_id)], &kw, None).await.expect("Scoop depot 2 post-reinf");
+
+    ctx.dispatch_rpc(&mut sess1, "posMgr", None, "AnchorStructure", &[PyRep::Integer(depot_2_id)], &kw, None).await.expect("redeploy post-reinf");
+    ctx.advance_secs(DEPOT_ANCHOR_TIME_SECS + 1);
+    sys.step_manual(1.0).await.unwrap();
+
+    let fatal_dmg = DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 };
+    let (_, destroyed_after_redeploy, _) = sys.apply_damage(depot_2_id, fatal_dmg).await.unwrap().expect("hit");
+    assert!(destroyed_after_redeploy, "Depot attacked again after reinforcement consumed must be destroyed");
 }
 
 /// Tests Mobile Depot 30-day lifetime enforcement, interaction refresh, and live expiry sweep (`feat:structures.mobile-depot-lifetime-reinforce`).
@@ -260,8 +300,9 @@ async fn test_mobile_depot_lifetime_and_interaction_refresh() {
     sys.step_manual(1.0).await.unwrap();
     assert!(sys.get_combat_state(depot_id).await.unwrap().is_some(), "Depot must remain alive at day 15");
 
-    // Pilot interacts with Mobile Depot -> resets the 30-day lifetime from current time
-    touch_mobile_depot_interaction(&ctx, depot_id);
+    // Pilot interacts with Mobile Depot via in-space refitting service -> resets the 30-day lifetime from current time
+    let fitting_available = is_near_in_space_fitting_service(&ctx, TEST_SYSTEM, SHIP_1).await;
+    assert!(fitting_available, "Pilot must have in-space fitting service near depot");
     let rec1 = read_deployable_state(&ctx).deployables.get(&depot_id).cloned().expect("depot record");
     let expected_refreshed_expiry = start_unix + 15 * 86_400 + DEPOT_LIFETIME_SECS;
     assert_eq!(rec1.expires_at_unix, expected_refreshed_expiry, "Interaction must refresh 30-day lifetime from current timestamp");
@@ -390,6 +431,38 @@ async fn test_mobile_deploy_restrictions_and_gate_bubble_regression() {
     let depot_2_res = ctx.dispatch_rpc(&mut sess_valid, "posMgr", None, "AnchorStructure", &[PyRep::Integer(depot_2_id)], &kw, None).await;
     assert!(depot_2_res.is_err());
     assert_eq!(depot_2_res.unwrap_err().code, "DeploymentTooCloseToSameType", "Cannot anchor second depot within 5km of another depot");
+
+    // Proximity to Station (>= 50km) (MD-P1-3)
+    let st_pos = ctx.sde.stations.values().find(|s| s.solar_system_id == TEST_SYSTEM).map(|s| s.position).unwrap_or(DVec3::new(100_000.0, 0.0, 0.0));
+    let mut station_sess = setup_pilot(&ctx, 307, PILOT_1, SHIP_1, TEST_SYSTEM, st_pos + DVec3::new(10_000.0, 0.0, 0.0)).await;
+    let st_depot_id = 700_024i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(st_depot_id, InventoryItemRecord {
+            item_id: st_depot_id, type_id: TYPE_MOBILE_DEPOT, owner_id: PILOT_1,
+            location_id: SHIP_1, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default()
+        });
+    });
+    let st_res = ctx.dispatch_rpc(&mut station_sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(st_depot_id)], &kw, None).await;
+    assert_eq!(st_res.unwrap_err().code, "DeploymentTooCloseToStation", "Cannot deploy mobile structure within 50km of station");
+
+    // Proximity between two MTUs (>= 5km) (MD-P1-3)
+    let mtu_pos1 = valid_pos + DVec3::new(200_000.0, 0.0, 0.0);
+    let mut mtu_sess = setup_pilot(&ctx, 308, PILOT_1, SHIP_1, TEST_SYSTEM, mtu_pos1).await;
+    let mtu_1_id = 700_025i64;
+    let mtu_2_id = 700_026i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(mtu_1_id, InventoryItemRecord {
+            item_id: mtu_1_id, type_id: TYPE_MTU_STANDARD, owner_id: PILOT_1,
+            location_id: SHIP_1, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default()
+        });
+        snap.items.insert(mtu_2_id, InventoryItemRecord {
+            item_id: mtu_2_id, type_id: TYPE_MTU_STANDARD, owner_id: PILOT_1,
+            location_id: SHIP_1, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default()
+        });
+    });
+    ctx.dispatch_rpc(&mut mtu_sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(mtu_1_id)], &kw, None).await.unwrap();
+    let mtu_2_res = ctx.dispatch_rpc(&mut mtu_sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(mtu_2_id)], &kw, None).await;
+    assert_eq!(mtu_2_res.unwrap_err().code, "DeploymentTooCloseToSameType", "Cannot deploy second MTU within 5km of another MTU");
 
     // 5. Crimewatch Suspect Flag (MD-07): Pilot 2 attacks Pilot 1's anchored depot in highsec through real weapons dispatch
     let mut sess_p2 = setup_pilot(&ctx, 306, PILOT_2, SHIP_2, TEST_SYSTEM, valid_pos + DVec3::new(2_000.0, 0.0, 0.0)).await;

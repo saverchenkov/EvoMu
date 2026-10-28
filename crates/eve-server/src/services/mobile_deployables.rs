@@ -1,11 +1,9 @@
 //! `mobile_deployables` — Mobile Deployable Structures Service and Mechanics (`feat:structures.mobile-depot`,
 //! `feat:structures.mobile-depot-lifetime-reinforce`, `feat:structures.mobile-tractor`,
-//! `feat:structures.mobile-tractor-rules`, `feat:structures.mobile-cyno-beacon`,
-//! `feat:structures.mobile-micro-jump-unit`, `feat:structures.mobile-deploy-restrictions`).
+//! `feat:structures.mobile-tractor-rules`, `feat:structures.mobile-deploy-restrictions`).
 //!
 //! Handles deployment restrictions (starter systems, career-agent systems, proximity to gates/stations/structures/MTUs),
-//! anchoring lifecycles, Mobile Depot reinforcement & refitting, MTU automated tractoring & looting,
-//! Mobile Cynosural Beacon spool & fleet jump visibility, and Mobile Micro Jump Unit 12s warm-up & 100km jumps.
+//! anchoring lifecycles, Mobile Depot reinforcement & refitting, and MTU automated tractoring & looting.
 
 use crate::router::ServerContext;
 use eve_destiny::{BallId, DamageVector};
@@ -449,6 +447,7 @@ pub fn step_mobile_deployables_in_actor(
             .filter(|r| {
                 r.solar_system_id == solar_system_id
                     && r.group_id == GROUP_MOBILE_TRACTOR
+                    && snap.items.contains_key(&r.item_id)
                     && (r.anchor_completed || now_unix >= r.anchor_start_unix.saturating_add(r.anchor_duration_secs))
             })
             .cloned()
@@ -456,6 +455,16 @@ pub fn step_mobile_deployables_in_actor(
     });
 
     for mtu in active_mtus {
+        // Skip and remove records whose item was deleted/destroyed (MD-P0-1)
+        if !db.with_snapshot(|snap| snap.items.contains_key(&mtu.item_id)) {
+            db.with_mut_snapshot(|snap| {
+                write_deployable_state_snap(snap, |st| {
+                    st.deployables.remove(&mtu.item_id);
+                });
+            });
+            continue;
+        }
+
         // Owner must be present in the solar system and active in space (not docked elsewhere)
         let is_docked_or_elsewhere = db.with_snapshot(|snap| {
             snap.characters.get(&mtu.owner_id).is_some_and(|c| {
@@ -477,14 +486,35 @@ pub fn step_mobile_deployables_in_actor(
         }
 
         let mtu_pos = DVec3::from_array(mtu.position);
-        let mtu_capacity = sde
-            .types
-            .get(&mtu.type_id)
+        let mtu_type = sde.types.get(&mtu.type_id);
+        let mtu_capacity = mtu_type
             .map(|t| t.capacity)
             .filter(|&c| c > 0.0)
-            .unwrap_or(27_000.0);
+            .unwrap_or(27_000.0); // Derived fallback: 27,000 m³
 
-        // Find candidate wrecks and cargo containers within 125km owned by the MTU owner
+        // SDE dogma attribute 54 (maxRange) or 76 (maxTargetRange) for MTU tractor beam range (MD-P1-4)
+        let max_tractor_range = mtu_type
+            .and_then(|t| t.default_attributes.get(&54).or_else(|| t.default_attributes.get(&76)).copied())
+            .unwrap_or(125_000.0); // Derived fallback: 125km
+
+        // SDE dogma attribute 1045 (maxTractorVelocity) for MTU tractor beam pulling speed (MD-P1-4)
+        let tractor_speed = mtu_type
+            .and_then(|t| t.default_attributes.get(&1045).copied())
+            .unwrap_or(1_000.0); // Derived fallback: 1,000 m/s
+        let loot_radius = 2_500.0; // Derived: standard EVE looting radius
+
+        let current_mtu_vol: f64 = db.with_snapshot(|snap| {
+            snap.items
+                .values()
+                .filter(|c| c.location_id == mtu.item_id && c.quantity > 0)
+                .map(|c| {
+                    let u_vol = sde.types.get(&c.type_id).map(|t| t.volume).unwrap_or(0.1);
+                    u_vol * (c.quantity.max(1) as f64)
+                })
+                .sum()
+        });
+
+        // Find candidate wrecks and cargo containers within range owned by MTU owner (MD-P1-1)
         let candidates = db.with_snapshot(|snap| {
             let mut list = Vec::new();
             for it in snap.items.values() {
@@ -496,14 +526,33 @@ pub fn step_mobile_deployables_in_actor(
                 if !is_wreck && !is_container {
                     continue;
                 }
-                // Only wrecks/containers MTU owner may loot (wiki: "MTUs do not loot wrecks that are not yours")
                 if it.owner_id != mtu.owner_id {
                     continue;
                 }
+
+                // Exclude empty wrecks and cargo containers (MD-P1-1)
+                let items_in_target: Vec<&eve_db::InventoryItemRecord> = snap.items
+                    .values()
+                    .filter(|c| c.location_id == it.item_id && c.quantity > 0)
+                    .collect();
+                if items_in_target.is_empty() {
+                    continue;
+                }
+
                 if let Some(pos_arr) = snap.item_positions.get(&it.item_id) {
                     let p = DVec3::from_array(*pos_arr);
                     let dist = (p - mtu_pos).length();
-                    if dist <= 125_000.0 {
+                    if dist <= max_tractor_range {
+                        // Targets sitting in loot range that cannot fit in MTU capacity are processed (MD-P1-1)
+                        if dist <= loot_radius {
+                            let can_loot_any = items_in_target.iter().any(|c| {
+                                let u_vol = sde.types.get(&c.type_id).map(|t| t.volume).unwrap_or(0.1);
+                                current_mtu_vol + u_vol * (c.quantity.max(1) as f64) <= mtu_capacity
+                            });
+                            if !can_loot_any {
+                                continue;
+                            }
+                        }
                         list.push((it.item_id, dist, p));
                     }
                 }
@@ -523,7 +572,7 @@ pub fn step_mobile_deployables_in_actor(
             continue;
         };
 
-        if target_dist <= 2_500.0 {
+        if target_dist <= loot_radius {
             // Loot cargo into MTU hold, enforcing capacity
             db.with_mut_snapshot(|snap| {
                 let mut current_vol: f64 = snap
@@ -558,12 +607,11 @@ pub fn step_mobile_deployables_in_actor(
                 }
             });
         } else {
-            // Tractor target towards MTU at 1,000 m/s
+            // Tractor target towards MTU at tractor_speed
             let dir = (mtu_pos - target_pos).normalize_or_zero();
-            let tractor_speed = 1_000.0;
             let step = tractor_speed * dt;
-            let new_pos = if step >= target_dist - 2_500.0 {
-                mtu_pos - dir * 2_500.0
+            let new_pos = if step >= target_dist - loot_radius {
+                mtu_pos - dir * loot_radius
             } else {
                 target_pos + dir * step
             };
@@ -747,6 +795,9 @@ pub fn handle_ball_damage_in_actor(
                 snap.items.remove(&ball_id);
                 snap.item_positions.remove(&ball_id);
                 snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
+                write_deployable_state_snap(snap, |st| {
+                    st.deployables.remove(&ball_id);
+                });
             });
         }
         return Some((applied, destroyed, ball_opt));

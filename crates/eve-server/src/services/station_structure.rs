@@ -869,7 +869,7 @@ pub async fn handle(
 
         ("structureDeployment", "Anchor") => Some(structure_lifecycle_rpc::handle_anchor(ctx, session, args).await),
 
-        // parity: feat:modules.mobile-warp-disruptor, feat:structures.mobile-depot, feat:structures.mobile-tractor, feat:structures.mobile-cyno-beacon, feat:structures.mobile-micro-jump-unit, feat:structures.mobile-deploy-restrictions
+        // parity: feat:modules.mobile-warp-disruptor, feat:structures.mobile-depot, feat:structures.mobile-tractor, feat:structures.mobile-deploy-restrictions
         ("posMgr", "AnchorStructure") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -935,6 +935,26 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NotItemOwner".into(),
                     message: format!("Character {char_id} does not own item {item_id}"),
+                }));
+            }
+            let already_anchored = ctx.db.with_snapshot(|snap| {
+                if snap.sp6_lifecycle.space_object_meta.get(&item_id).is_some_and(|m| m.anchor_start_unix.is_some() || m.anchor_completed) {
+                    return true;
+                }
+                let st = crate::services::mobile_deployables::read_deployable_state_snap(snap);
+                st.deployables.contains_key(&item_id)
+            });
+            if already_anchored {
+                return Some(Err(BridgeRpcError {
+                    code: "StructureAlreadyAnchored".into(),
+                    message: format!("Structure {item_id} is already anchored in space; unanchor and scoop first"),
+                }));
+            }
+            let is_mobile = crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, item.type_id);
+            if is_mobile && item.location_id != ship_id {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidItemLocation".into(),
+                    message: format!("Mobile deployable {item_id} must be deployed from ship cargo"),
                 }));
             }
             if item.location_id != ship_id && item.location_id != sys_id as i64 {
