@@ -109,7 +109,6 @@ pub fn prime_cache_result(
 }
 
 /// Handles `essMgr.AttemptLinkToMainBank` and `essMgr.AttemptLinkToReserveBank`.
-// parity: feat:crimewatch.suspect-timer-looting-ess, feat:crimewatch.safety-setting-action-block
 pub async fn handle_ess_link(
     ctx: &ServerContext,
     session: &SessionState,
@@ -217,9 +216,10 @@ pub async fn handle_ess_link(
         rt.ess_reserve_unlocked_until.get(&sys_id).copied().unwrap_or(0) > now_unix
     });
 
-    let (payout, link_started_only, unlocked_until_new) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (payout, link_started_only, unlocked_until_new, clear_unlock) = ctx.db.try_with_mut_snapshot(|snap| {
         let is_reserve = method == "AttemptLinkToReserveBank";
         let mut unlocked_until_new: Option<u64> = None;
+        let mut clear_unlock = false;
         let mut pulse_st = crate::services::space_destiny::get_ess_reserve_pulses_from_blobs(
             &snap.service_state_blobs,
             sys_id,
@@ -254,46 +254,65 @@ pub async fn handle_ess_link(
                 })
                 .unwrap_or(false)
         };
-        if is_reserve && !already_linked && !is_unlocked {
-            let key_info = snap
-                .items
-                .values()
-                .find(|i| {
-                    i.owner_id == char_id
-                        && i.location_id == ship_id
-                        && i.flag == InventoryFlag::Cargo
-                        && i.quantity >= 1
-                        && ((57714..=57721).contains(&i.type_id)
-                            || ctx
-                                .sde
-                                .types
-                                .get(&i.type_id)
-                                .map(|t| t.group_id == 4102)
-                                .unwrap_or(false))
-                })
-                .map(|i| (i.item_id, i.type_id));
-            let Some((key_id, key_type_id)) = key_info else {
-                return Err(BridgeRpcError {
-                    code: "MissingEssReserveSecurityKey".into(),
-                    message: "Linking to the ESS Reserve Bank requires an ESS Reserve Security Key (type 57714..57721) in active ship cargo".into(),
-                });
-            };
-            if let Some(key_item) = snap.items.get_mut(&key_id) {
-                if key_item.quantity > 1 {
-                    key_item.quantity -= 1;
-                    key_item.version += 1;
-                } else {
-                    snap.items.remove(&key_id);
-                }
+        if is_reserve && !already_linked {
+            if is_unlocked && pulse_st.pulses_total == 0 && pulse_st.last_pulse_sec.is_none() {
+                pulse_st.pulses_total = 3;
+                pulse_st.pulses_remaining = 3;
             }
-            let dur_mins: u64 = if matches!(key_type_id, 57715 | 57717 | 57719 | 57721) {
-                45
+            if is_unlocked {
+                if pulse_st.pulses_remaining == 0 {
+                    return Err(BridgeRpcError {
+                        code: "EssReservePulsesExhausted".into(),
+                        message: "All ESS Reserve Bank pulses for this key have been exhausted".into(),
+                    });
+                }
+                if pulse_st.last_pulse_sec.is_some_and(|last| now_unix < last.saturating_add(60)) {
+                    return Err(BridgeRpcError {
+                        code: "EssReservePulseCooldown".into(),
+                        message: "ESS Reserve Bank pulse is on 60s cooldown".into(),
+                    });
+                }
             } else {
-                15
-            };
-            unlocked_until_new = Some(now_unix + dur_mins * 60);
-            if pulse_st.pulses_remaining == 0 {
-                pulse_st.pulses_remaining = dur_mins as u32;
+                let key_info = snap
+                    .items
+                    .values()
+                    .find(|i| {
+                        i.owner_id == char_id
+                            && i.location_id == ship_id
+                            && i.flag == InventoryFlag::Cargo
+                            && i.quantity >= 1
+                            && ((57714..=57721).contains(&i.type_id)
+                                || ctx
+                                    .sde
+                                    .types
+                                    .get(&i.type_id)
+                                    .map(|t| t.group_id == 4102)
+                                    .unwrap_or(false))
+                    })
+                    .map(|i| (i.item_id, i.type_id));
+                let Some((key_id, key_type_id)) = key_info else {
+                    return Err(BridgeRpcError {
+                        code: "MissingEssReserveSecurityKey".into(),
+                        message: "Linking to the ESS Reserve Bank requires an ESS Reserve Security Key (type 57714..57721) in active ship cargo".into(),
+                    });
+                };
+                if let Some(key_item) = snap.items.get_mut(&key_id) {
+                    if key_item.quantity > 1 {
+                        key_item.quantity -= 1;
+                        key_item.version += 1;
+                    } else {
+                        snap.items.remove(&key_id);
+                    }
+                }
+                let dur_mins: u64 = if matches!(key_type_id, 57715 | 57717 | 57719 | 57721) {
+                    45
+                } else {
+                    15
+                };
+                unlocked_until_new = Some(now_unix + dur_mins * 60);
+                pulse_st.pulses_total = 1;
+                pulse_st.pulses_remaining = 1;
+                pulse_st.last_pulse_sec = None;
             }
         }
         let Some(st) = snap.system_states.get_mut(&sys_id) else {
@@ -312,7 +331,7 @@ pub async fn handle_ess_link(
                 code: "EssBankEmpty".into(),
                 message: format!("ESS Bank in system {sys_id} is empty"),
             });
-        }
+        };
 
         if !already_linked {
             if is_reserve {
@@ -340,7 +359,7 @@ pub async fn handle_ess_link(
                 st.ess_linked_character_id = Some(char_id);
                 st.ess_link_started_tick = Some(current_tick);
             }
-            return Ok((0.0, true, unlocked_until_new));
+            return Ok((0.0, true, unlocked_until_new, false));
         }
         let start_tick = if is_reserve {
             pulse_st.reserve_link_started_tick.unwrap_or(current_tick)
@@ -357,34 +376,38 @@ pub async fn handle_ess_link(
             });
         }
         let bank = if is_reserve {
+            if pulse_st.pulses_remaining == 0 {
+                return Err(BridgeRpcError {
+                    code: "EssReservePulsesExhausted".into(),
+                    message: "All ESS Reserve Bank pulses for this key have been exhausted".into(),
+                });
+            }
+            if pulse_st.last_pulse_sec.is_some_and(|last| now_unix < last.saturating_add(60)) {
+                return Err(BridgeRpcError {
+                    code: "EssReservePulseCooldown".into(),
+                    message: "ESS Reserve Bank pulse is on 60s cooldown".into(),
+                });
+            }
             pulse_st.reserve_linked_character_id = None;
             pulse_st.reserve_link_started_tick = None;
             if st.ess_linked_character_id == Some(char_id) {
                 st.ess_linked_character_id = None;
                 st.ess_link_started_tick = None;
             }
-            if pulse_st.pulses_remaining > 0 {
-                let rem = pulse_st.pulses_remaining.max(1) as i64;
-                let p = (st.ess_reserve_bank.0 / rem).max(1).min(st.ess_reserve_bank.0);
-                st.ess_reserve_bank = IskCents(st.ess_reserve_bank.0.saturating_sub(p));
-                pulse_st.pulses_remaining = pulse_st.pulses_remaining.saturating_sub(1);
-                pulse_st.last_pulse_sec = Some(ctx.now_unix());
-                crate::services::space_destiny::set_ess_reserve_pulses_in_blobs(
-                    &mut snap.service_state_blobs,
-                    sys_id,
-                    &pulse_st,
-                );
-                IskCents(p)
-            } else {
-                crate::services::space_destiny::set_ess_reserve_pulses_in_blobs(
-                    &mut snap.service_state_blobs,
-                    sys_id,
-                    &pulse_st,
-                );
-                let b = st.ess_reserve_bank;
-                st.ess_reserve_bank = IskCents(0);
-                b
+            let rem = pulse_st.pulses_remaining.max(1) as i64;
+            let p = (st.ess_reserve_bank.0 / rem).max(1).min(st.ess_reserve_bank.0);
+            st.ess_reserve_bank = IskCents(st.ess_reserve_bank.0.saturating_sub(p));
+            pulse_st.pulses_remaining = pulse_st.pulses_remaining.saturating_sub(1);
+            pulse_st.last_pulse_sec = Some(now_unix);
+            if pulse_st.pulses_remaining == 0 {
+                clear_unlock = true;
             }
+            crate::services::space_destiny::set_ess_reserve_pulses_in_blobs(
+                &mut snap.service_state_blobs,
+                sys_id,
+                &pulse_st,
+            );
+            IskCents(p)
         } else {
             st.ess_linked_character_id = None;
             st.ess_link_started_tick = None;
@@ -396,12 +419,17 @@ pub async fn handle_ess_link(
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.balance = ch.balance.checked_add(bank).unwrap_or(ch.balance);
         }
-        Ok((bank.to_wire_f64(), false, unlocked_until_new))
+        Ok((bank.to_wire_f64(), false, unlocked_until_new, clear_unlock))
     })?;
 
     if let Some(until) = unlocked_until_new {
         with_mut_combat_runtime(ctx, |rt| {
             rt.ess_reserve_unlocked_until.insert(sys_id, until);
+        });
+    }
+    if clear_unlock {
+        with_mut_combat_runtime(ctx, |rt| {
+            rt.ess_reserve_unlocked_until.remove(&sys_id);
         });
     }
 

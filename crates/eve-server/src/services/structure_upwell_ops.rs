@@ -301,11 +301,33 @@ fn handle_move_assets_to_safety(ctx: &ServerContext, session: &mut SessionState,
                 || snap.corp_role_assignments.get(&(owner_id, char_id)).is_some_and(|a| (a.roles & eve_db::corp_roles::ROLE_DIRECTOR) != 0);
             if !has_dir { return Err(err("InsufficientCorpRoles", "Moving corporate assets to safety requires Director or CEO role")); }
         }
+        let has_locked_descendant = |root_id: i64| -> bool {
+            let mut visited = vec![root_id];
+            let mut front = vec![root_id];
+            while !front.is_empty() {
+                let mut next = Vec::new();
+                for ch in snap.items.values() {
+                    if !front.contains(&ch.location_id) || visited.contains(&ch.item_id) {
+                        continue;
+                    }
+                    if ch.flag == InventoryFlag::Locked
+                        || snap.is_item_locked_in_contract_or_job(ch.item_id)
+                    {
+                        return true;
+                    }
+                    visited.push(ch.item_id);
+                    next.push(ch.item_id);
+                }
+                front = next;
+            }
+            false
+        };
         let mut item_ids: Vec<i64> = snap.items.values().filter(|i| {
             i.owner_id == owner_id && i.location_id == structure_id && i.item_id != active_ship
                 && !matches!(i.flag as u16, 11..=34 | 87 | 92..=94 | 125..=132 | 163 | 164..=171)
                 && i.flag != InventoryFlag::SpecializedFuelBay && i.flag != InventoryFlag::Locked
                 && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                && !has_locked_descendant(i.item_id)
         }).map(|i| i.item_id).collect();
         item_ids.sort_unstable();
         if item_ids.is_empty() { return Err(err("NoAssetsToMoveToSafety", format!("Owner {owner_id} has no eligible items in structure {structure_id}"))); }
@@ -413,7 +435,7 @@ fn handle_get_items_in_safety(ctx: &ServerContext, session: &mut SessionState, i
 }
 
 fn handle_get_wrap_names(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
-    let _ = ServerContext::require_character(session)?;
+    let (_, char_id) = ServerContext::require_character(session)?;
     sync_auto_delivered_asset_safety_wraps(ctx);
     let ids: Vec<i64> = match args.first() {
         Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => items.iter().filter_map(|x| x.as_i64()).collect(),
@@ -421,8 +443,19 @@ fn handle_get_wrap_names(ctx: &ServerContext, session: &mut SessionState, args: 
         _ => Vec::new(),
     };
     ctx.db.with_snapshot(|snap| {
+        let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
         let ext = load_ext_state(snap);
-        Ok(PyRep::Dict(ids.into_iter().filter_map(|wid| ext.asset_safety_wraps.get(&wid).map(|w| (PyRep::Integer(wid), PyRep::String(w.source_structure_name.clone())))).collect()))
+        Ok(PyRep::Dict(
+            ids.into_iter()
+                .filter_map(|wid| {
+                    ext.asset_safety_wraps.get(&wid).filter(|w| {
+                        w.owner_id == char_id
+                            || (w.is_corp && caller_corp > 0 && w.owner_id == caller_corp)
+                            || session.has_gm_role()
+                    }).map(|w| (PyRep::Integer(wid), PyRep::String(w.source_structure_name.clone())))
+                })
+                .collect(),
+        ))
     })
 }
 
@@ -514,6 +547,16 @@ fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut Sessi
         let ch = snap.characters.get_mut(&char_id).ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?;
         if ch.balance < fee { return Err(err("InsufficientFunds", format!("Delivering wrap {wrap_id} requires fee {fee:?}"))); }
         ch.balance = ch.balance.checked_sub(fee).unwrap_or(ch.balance);
+        let bal_after = ch.balance;
+        if fee.0 > 0 {
+            snap.append_journal(
+                char_id,
+                "AssetSafetyRecoveryTax",
+                eve_db::IskCents(-fee.0),
+                bal_after,
+                format!("Asset Safety recovery fee for wrap {wrap_id} to destination {dest_id}"),
+            );
+        }
         for &iid in &wrap.item_ids {
             if let Some(it) = snap.items.get_mut(&iid) { it.location_id = dest_id; it.flag = InventoryFlag::Deliveries; }
         }
@@ -1005,10 +1048,21 @@ fn apply_group_member_batch(ctx: &ServerContext, session: &SessionState, args: &
             .collect::<Result<_, BridgeRpcError>>()?;
         let mut ext = load_ext_state(snap);
         if let Some(grp) = ext.owner_groups.get(&group_or_struct_id) {
-            if grp.owner_corp_id != 0 {
-                require_corp_profile_manager(snap, session, char_id, grp.owner_corp_id)?;
-            } else if grp.creator_id != char_id && !session.has_gm_role() {
-                return Err(err("InsufficientCorpRoles", "Caller is not an admin of this access group"));
+            let is_admin_or_dir = grp.creator_id == char_id
+                || grp.members.get(&char_id) == Some(&1)
+                || (grp.owner_corp_id != 0 && require_corp_profile_manager(snap, session, char_id, grp.owner_corp_id).is_ok())
+                || session.has_gm_role();
+            let is_mgr = is_admin_or_dir || grp.members.get(&char_id) == Some(&2);
+            if !is_mgr {
+                return Err(err("InsufficientCorpRoles", "Caller is not a manager or admin of this access group"));
+            }
+            for &(eid, blk, _) in &classified {
+                if eid == grp.creator_id && (!is_add || blk) && !session.has_gm_role() {
+                    return Err(err("InsufficientCorpRoles", "Cannot remove or block access group creator"));
+                }
+                if !is_admin_or_dir && (eid == grp.creator_id || matches!(grp.members.get(&eid).copied(), Some(1 | 2))) {
+                    return Err(err("InsufficientCorpRoles", "ACL Managers cannot overwrite or remove Admins or Managers"));
+                }
             }
             let owner_corp = grp.owner_corp_id;
             if let Some(grp_mut) = ext.owner_groups.get_mut(&group_or_struct_id) {

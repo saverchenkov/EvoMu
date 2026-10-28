@@ -71,9 +71,16 @@ pub fn handle_set_member_role(
         let is_admin_or_dir = is_acl_admin(char_id, grp)
             || (grp.owner_corp_id != 0 && ops::require_corp_profile_manager(snap, session, char_id, grp.owner_corp_id).is_ok())
             || session.has_gm_role();
-
-        if matches!(role, ACL_ROLE_ADMIN | ACL_ROLE_MANAGER) && !is_admin_or_dir {
-            return Err(err("InsufficientCorpRoles", "Assigning admin or manager role requires ACL Admin or Director"));
+        let target_existing_role = grp.members.get(&entity_id).copied().unwrap_or(0);
+        if entity_id == grp.creator_id && role != ACL_ROLE_ADMIN && !session.has_gm_role() {
+            return Err(err("InsufficientCorpRoles", "Cannot demote or block access group creator"));
+        }
+        if (matches!(role, ACL_ROLE_ADMIN | ACL_ROLE_MANAGER)
+            || entity_id == grp.creator_id
+            || matches!(target_existing_role, ACL_ROLE_ADMIN | ACL_ROLE_MANAGER))
+            && !is_admin_or_dir
+        {
+            return Err(err("InsufficientCorpRoles", "Modifying admin or manager role requires ACL Admin or Director"));
         }
         if !is_admin_or_dir && !is_acl_manager_or_admin(char_id, grp) {
             return Err(err("InsufficientCorpRoles", "Caller lacks manager permissions in this access group"));
@@ -159,11 +166,19 @@ pub fn handle_get_group(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let _ = ServerContext::require_character(session)?;
+    let (_, char_id) = ServerContext::require_character(session)?;
     let group_id = arg_i64(args, 0).ok_or_else(|| err("MissingGroupId", "GetGroup requires groupID"))?;
     ctx.db.with_snapshot(|snap| {
         let ext = load_ext_state(snap);
         let grp = ext.owner_groups.get(&group_id).ok_or_else(|| err("AccessGroupNotFound", format!("Group {group_id} not found")))?;
+        let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+        let can_view = grp.creator_id == char_id
+            || grp.members.get(&char_id).is_some_and(|&r| r >= 0)
+            || (grp.owner_corp_id != 0 && grp.owner_corp_id == caller_corp)
+            || session.has_gm_role();
+        if !can_view {
+            return Err(err("AccessGroupAccessDenied", "Caller does not have access to view this access group"));
+        }
         Ok(PyRep::keyval([
             ("groupID", PyRep::Integer(grp.group_id)),
             ("name", PyRep::String(grp.name.clone())),
@@ -180,11 +195,19 @@ pub fn handle_get_members(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let _ = ServerContext::require_character(session)?;
+    let (_, char_id) = ServerContext::require_character(session)?;
     let group_id = arg_i64(args, 0).ok_or_else(|| err("MissingGroupId", "GetMembers requires groupID"))?;
     ctx.db.with_snapshot(|snap| {
         let ext = load_ext_state(snap);
         let grp = ext.owner_groups.get(&group_id).ok_or_else(|| err("AccessGroupNotFound", format!("Group {group_id} not found")))?;
+        let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+        let can_view = grp.creator_id == char_id
+            || grp.members.get(&char_id).is_some_and(|&r| r >= 0)
+            || (grp.owner_corp_id != 0 && grp.owner_corp_id == caller_corp)
+            || session.has_gm_role();
+        if !can_view {
+            return Err(err("AccessGroupAccessDenied", "Caller does not have access to view this access group's members"));
+        }
         let mut entries = Vec::new();
         for (&eid, &role) in &grp.members {
             entries.push((PyRep::Integer(eid), PyRep::Integer(role)));

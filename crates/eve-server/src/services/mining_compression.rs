@@ -535,18 +535,36 @@ pub fn handle_structure_compression_mgr(
                     .get(&char_id)
                     .map(|c| c.corporation_id)
                     .unwrap_or(0);
+                let (item_owner, item_flag) = {
+                    let Some(it) = snap.items.get(&item_id) else {
+                        return Err(BridgeRpcError {
+                            code: "CompressionFailed".into(),
+                            message: format!("Item {item_id} not found"),
+                        });
+                    };
+                    (it.owner_id, it.flag)
+                };
+                if item_owner != char_id && !(caller_corp > 0 && item_owner == caller_corp) {
+                    return Err(BridgeRpcError {
+                        code: "AccessDenied".into(),
+                        message: "Character does not own this item".into(),
+                    });
+                }
+                if caller_corp > 0
+                    && item_owner == caller_corp
+                    && !caller_can_take_corp_hangar_item(snap, char_id, caller_corp, item_flag, session.corp_role)
+                {
+                    return Err(BridgeRpcError {
+                        code: "CrpAccessDenied".into(),
+                        message: "Character lacks corporation hangar take role for this division".into(),
+                    });
+                }
                 let Some(item) = snap.items.get_mut(&item_id) else {
                     return Err(BridgeRpcError {
                         code: "CompressionFailed".into(),
                         message: format!("Item {item_id} not found"),
                     });
                 };
-                if item.owner_id != char_id && !(caller_corp > 0 && item.owner_id == caller_corp) {
-                    return Err(BridgeRpcError {
-                        code: "AccessDenied".into(),
-                        message: "Character does not own this item".into(),
-                    });
-                }
                 if item.flag == InventoryFlag::Locked {
                     return Err(BridgeRpcError {
                         code: "ItemLocked".into(),
@@ -686,8 +704,43 @@ pub fn handle_structure_compression_mgr(
                         ),
                     });
                 }
+                if !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
+                    snap, structure_id, char_id,
+                ) {
+                    return Err(BridgeRpcError {
+                        code: "AccessDenied".into(),
+                        message: format!(
+                            "Character {char_id} is denied access to structure {structure_id} by its access profile"
+                        ),
+                    });
+                }
 
+                let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 let is_locked_in_contract_or_job = snap.is_item_locked_in_contract_or_job(item_id);
+                let (item_owner, item_flag) = {
+                    let Some(it) = snap.items.get(&item_id) else {
+                        return Err(BridgeRpcError {
+                            code: "ItemNotFound".into(),
+                            message: format!("Item {item_id} not found"),
+                        });
+                    };
+                    (it.owner_id, it.flag)
+                };
+                if item_owner != char_id && !(caller_corp > 0 && item_owner == caller_corp) {
+                    return Err(BridgeRpcError {
+                        code: "AccessDenied".into(),
+                        message: "Character does not own this item".into(),
+                    });
+                }
+                if caller_corp > 0
+                    && item_owner == caller_corp
+                    && !caller_can_take_corp_hangar_item(snap, char_id, caller_corp, item_flag, session.corp_role)
+                {
+                    return Err(BridgeRpcError {
+                        code: "CrpAccessDenied".into(),
+                        message: "Character lacks corporation hangar take role for this division".into(),
+                    });
+                }
 
                 let (raw_tid, decomp_qty) = {
                     let Some(item) = snap.items.get_mut(&item_id) else {
@@ -696,13 +749,6 @@ pub fn handle_structure_compression_mgr(
                             message: format!("Item {item_id} not found"),
                         });
                     };
-
-                    if item.owner_id != char_id {
-                        return Err(BridgeRpcError {
-                            code: "AccessDenied".into(),
-                            message: "Character does not own this item".into(),
-                        });
-                    }
 
                     if item.flag == InventoryFlag::Locked || is_locked_in_contract_or_job {
                         return Err(BridgeRpcError {
@@ -713,7 +759,21 @@ pub fn handle_structure_compression_mgr(
                         });
                     }
 
-                    if item.location_id != structure_id || item.flag != InventoryFlag::Hangar {
+                    let valid_hangar = (item.owner_id == char_id && item.flag == InventoryFlag::Hangar)
+                        || (caller_corp > 0
+                            && item.owner_id == caller_corp
+                            && matches!(
+                                item.flag,
+                                InventoryFlag::Hangar
+                                    | InventoryFlag::CorpSAG1
+                                    | InventoryFlag::CorpSAG2
+                                    | InventoryFlag::CorpSAG3
+                                    | InventoryFlag::CorpSAG4
+                                    | InventoryFlag::CorpSAG5
+                                    | InventoryFlag::CorpSAG6
+                                    | InventoryFlag::CorpSAG7
+                            ));
+                    if item.location_id != structure_id || !valid_hangar {
                         return Err(BridgeRpcError {
                             code: "ItemNotInStructureHangar".into(),
                             message: format!(
@@ -771,9 +831,9 @@ pub fn handle_structure_compression_mgr(
                     InventoryItemRecord {
                         item_id: new_id,
                         type_id: raw_tid,
-                        owner_id: char_id,
+                        owner_id: item_owner,
                         location_id: structure_id,
-                        flag: InventoryFlag::Hangar,
+                        flag: item_flag,
                         quantity: decomp_qty as i32,
                         singleton: false,
                         version: 1,
@@ -1059,40 +1119,21 @@ pub(crate) const METENOX_MAGMATIC_GAS_PER_CYCLE: u32 = 10;
 /// over `cycles` hours for the moon's ore composition (`derive_moon_ores_from_sde`).
 /// DERIVED: Metenox Moon Drill harvests `30,000 m³/hour` of the moon's composition at `40%` efficiency
 /// and outputs only `group_id == 427` Moon Materials (`docs/eve-wiki/Metenox_Moon_Drill.md:15,30`).
-pub(crate) fn derive_metenox_moon_materials(
-    sde: &eve_sde::SdeRegistry,
-    solar_system_id: u32,
-    moon_id: i64,
-    efficiency: f64,
-    cycles: u32,
-) -> Vec<(TypeId, u64)> {
+pub(crate) fn derive_metenox_moon_materials(sde: &eve_sde::SdeRegistry, solar_system_id: u32, moon_id: i64, efficiency: f64, cycles: u32) -> Vec<(TypeId, u64)> {
     let composition = super::derive_moon_ores_from_sde(sde, solar_system_id, moon_id);
     let mut totals: std::collections::BTreeMap<TypeId, f64> = std::collections::BTreeMap::new();
     for (ore_tid, frac) in composition {
-        let portion_vol = sde
-            .types
-            .get(&ore_tid)
-            .map(|t| t.volume.max(0.1) * (t.portion_size.max(1) as f64))
-            .unwrap_or(1_000.0);
+        let portion_vol = sde.types.get(&ore_tid).map(|t| t.volume.max(0.1) * (t.portion_size.max(1) as f64)).unwrap_or(1_000.0);
         let portions = (30_000.0 * frac * (cycles as f64)) / portion_vol;
         if let Some(mats) = sde.type_materials.get(&ore_tid) {
             for mat in mats {
-                let is_moon_material = sde
-                    .types
-                    .get(&mat.material_type_id)
-                    .is_some_and(|t| t.group_id == 427);
-                if is_moon_material {
-                    *totals.entry(mat.material_type_id).or_insert(0.0) +=
-                        portions * (mat.quantity as f64) * efficiency;
+                if sde.types.get(&mat.material_type_id).is_some_and(|t| t.group_id == 427) {
+                    *totals.entry(mat.material_type_id).or_insert(0.0) += portions * (mat.quantity as f64) * efficiency;
                 }
             }
         }
     }
-    totals
-        .into_iter()
-        .map(|(tid, qty)| (tid, qty.round() as u64))
-        .filter(|&(_, qty)| qty > 0)
-        .collect()
+    totals.into_iter().map(|(tid, qty)| (tid, qty.round() as u64)).filter(|&(_, qty)| qty > 0).collect()
 }
 
 pub(crate) struct MetenoxDrillInspection {
@@ -1104,28 +1145,29 @@ pub(crate) struct MetenoxDrillInspection {
     pub(crate) hourly_materials: Vec<(TypeId, u64)>,
 }
 
-pub(crate) fn caller_has_structure_extraction_role(
-    snap: &eve_db::WorldStateSnapshot,
-    char_id: i64,
-    corp_id: i64,
-    session_corp_role: u64,
-) -> bool {
+pub fn caller_can_take_corp_hangar_item(snap: &eve_db::WorldStateSnapshot, char_id: i64, corp_id: i64, flag: InventoryFlag, session_corp_role: u64) -> bool {
+    let Some(corp) = snap.corporations.get(&corp_id) else { return true };
+    if corp.ceo_id == 0 || corp.ceo_id == char_id { return true; }
+    let div_idx: u32 = match flag {
+        InventoryFlag::CorpSAG2 => 1, InventoryFlag::CorpSAG3 => 2, InventoryFlag::CorpSAG4 => 3,
+        InventoryFlag::CorpSAG5 => 4, InventoryFlag::CorpSAG6 => 5, InventoryFlag::CorpSAG7 => 6,
+        _ => 0,
+    };
+    let take_mask = eve_db::corp_roles::ROLE_DIRECTOR | (1u64 << (13 + div_idx)) | (1u64 << (43 + div_idx));
+    let mut role = session_corp_role | corp.member_roles.get(&char_id).copied().unwrap_or(0);
+    if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
+        role |= ra.roles | ra.roles_at_hq | ra.roles_at_base | ra.roles_at_other;
+    }
+    (role & take_mask) != 0
+}
+
+pub(crate) fn caller_has_structure_extraction_role(snap: &eve_db::WorldStateSnapshot, char_id: i64, corp_id: i64, session_corp_role: u64) -> bool {
     use eve_db::corp_roles::{ROLE_DIRECTOR, ROLE_STARBASE_CONFIG, ROLE_STATION_MANAGER};
     const MOON_ROLES: u64 = ROLE_DIRECTOR | ROLE_STATION_MANAGER | ROLE_STARBASE_CONFIG;
-    if (session_corp_role & MOON_ROLES) != 0 {
-        return true;
-    }
-    let Some(corp) = snap.corporations.get(&corp_id) else {
-        return true;
-    };
-    if corp.ceo_id == 0 || corp.ceo_id == char_id {
-        return true;
-    }
-    if corp.member_roles.is_empty() {
-        return true;
-    }
-    let member_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-    (member_role & MOON_ROLES) != 0
+    if (session_corp_role & MOON_ROLES) != 0 { return true; }
+    let Some(corp) = snap.corporations.get(&corp_id) else { return true };
+    if corp.ceo_id == 0 || corp.ceo_id == char_id || corp.member_roles.is_empty() { return true; }
+    (corp.member_roles.get(&char_id).copied().unwrap_or(0) & MOON_ROLES) != 0
 }
 
 pub(crate) fn inspect_metenox_drill(

@@ -1,7 +1,4 @@
 //! `combat_legacy_ess` — Legacy weapon fire RPC compatibility & Null-Sec ESS Main/Reserve Bank linking.
-// parity: feat:pve.ess
-// parity: feat:pve.ess-reserve
-// parity: feat:pve.dynamic-bounty
 
 #![forbid(unsafe_code)]
 
@@ -1179,7 +1176,6 @@ pub async fn handle_legacy_and_ess(
             }
         }
 
-        // parity: feat:crimewatch.suspect-timer-looting-ess, feat:crimewatch.safety-setting-action-block
         ("essMgr", "AttemptLinkToMainBank") | ("essMgr", "AttemptLinkToReserveBank") => Some(
             crate::services::encounter_surveillance_system::handle_ess_link(
                 ctx, session, method, args,

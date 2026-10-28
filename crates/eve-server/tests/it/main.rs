@@ -317,3 +317,4 @@ mod structures_mining_r4_regressions;
 mod crimewatch_drones_closure;
 mod ships_modules_closure;
 mod ess_reserve_main_concurrency;
+mod mining_structures_sov_r5_regressions;

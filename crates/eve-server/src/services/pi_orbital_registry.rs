@@ -136,12 +136,16 @@ pub fn handle_pi_orbital_registry(
                     owner_corp_id: char_corp,
                     ..Default::default()
                 });
-                if let Some(otid) = kwargs
-                    .get("orbitalTypeID")
-                    .and_then(|v| v.as_i64())
-                    .filter(|&id| matches!(id, 2233 | 4318 | 81080))
-                {
-                    cfg.orbital_type_id = otid as TypeId;
+                if let Some(otid) = kwargs.get("orbitalTypeID").and_then(|v| v.as_i64()) {
+                    if otid == 4318 && !session.has_gm_role() {
+                        return Err(BridgeRpcError {
+                            code: "InvalidOrbitalType".into(),
+                            message: "Players cannot set orbitalTypeID to NPC InterBus Customs Office (4318)".into(),
+                        });
+                    }
+                    if matches!(otid, 2233 | 4318 | 81080) {
+                        cfg.orbital_type_id = otid as TypeId;
+                    }
                 }
                 // Parse either V24 `(orbitalID, selectedHour, taxRateValues, standingValue, allowAlliance, allowStandings)` or KeyVal/kwargs
                 let tax_rep = args
@@ -171,7 +175,15 @@ pub fn handle_pi_orbital_registry(
                         cfg.standing_horrible_tax_rate = v.clamp(0.0, 1.0);
                     }
                     if let Some(v) = kv.get("orbitalTypeID").and_then(|x| x.as_i64()) {
-                        cfg.orbital_type_id = v as TypeId;
+                        if v == 4318 && !session.has_gm_role() {
+                            return Err(BridgeRpcError {
+                                code: "InvalidOrbitalType".into(),
+                                message: "Players cannot set orbitalTypeID to NPC InterBus Customs Office (4318)".into(),
+                            });
+                        }
+                        if matches!(v, 2233 | 4318 | 81080) {
+                            cfg.orbital_type_id = v as TypeId;
+                        }
                     }
                     if let Some(v) = kv.get("minimumStanding").and_then(|x| x.as_f64()) {
                         cfg.minimum_standing = v.clamp(-10.0, 10.0);
@@ -247,10 +259,13 @@ pub fn handle_pi_orbital_registry(
             if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
                 if !session.has_gm_role() {
                     let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                    let existing_owner = load_orbital_settings(snap, planet_id)
-                        .map(|c| c.owner_corp_id)
-                        .unwrap_or(char_corp);
-                    if existing_owner != char_corp {
+                    let Some(existing) = load_orbital_settings(snap, planet_id) else {
+                        return Err(BridgeRpcError {
+                            code: "CrpAccessDenied".into(),
+                            message: "Only an existing corporation-owned Customs Office can be reverted to InterBus".into(),
+                        });
+                    };
+                    if existing.owner_corp_id != char_corp {
                         return Err(BridgeRpcError {
                             code: "CrpAccessDenied".into(),
                             message: "Only the owning corporation or a GM can revert orbital ownership to InterBus".into(),
@@ -275,13 +290,13 @@ pub fn handle_pi_orbital_registry(
                     planet_id,
                     orbital_type_id: 4318, // InterBus Customs Office
                     owner_corp_id: 1_000_148,
-                    corporation_tax_rate: 0.0,
-                    alliance_tax_rate: 0.0,
-                    standing_high_tax_rate: 0.0,
-                    standing_good_tax_rate: 0.0,
-                    standing_neutral_tax_rate: 0.0,
-                    standing_bad_tax_rate: 0.0,
-                    standing_horrible_tax_rate: 0.0,
+                    corporation_tax_rate: 0.17,
+                    alliance_tax_rate: 0.17,
+                    standing_high_tax_rate: 0.17,
+                    standing_good_tax_rate: 0.17,
+                    standing_neutral_tax_rate: 0.17,
+                    standing_bad_tax_rate: 0.17,
+                    standing_horrible_tax_rate: 0.17,
                     allow_alliance: true,
                     allow_standings: true,
                     minimum_standing: -10.0,

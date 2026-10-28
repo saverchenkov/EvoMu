@@ -689,7 +689,7 @@ pub async fn handle(
                 let pulse_st = EssReservePulseState {
                     pulses_total: pulses,
                     pulses_remaining: pulses,
-                    last_pulse_sec: Some(ctx.now_unix()),
+                    last_pulse_sec: None,
                     reserve_linked_character_id: prev_pulse.reserve_linked_character_id,
                     reserve_link_started_tick: prev_pulse.reserve_link_started_tick,
                 };

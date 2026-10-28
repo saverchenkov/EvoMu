@@ -98,6 +98,26 @@ pub fn deposit_mined_ore_and_record_ledger_with_waste(
             wasted_units as i64,
             now_unix,
         );
+        ctx.db.with_mut_snapshot(|snap| {
+            let belt_obs = snap
+                .asteroids
+                .values()
+                .find(|a| a.solar_system_id == sys_id && a.type_id == ore_type_id && a.belt_id > 0)
+                .map(|a| a.belt_id)
+                .filter(|id| !snap.structures.get(id).is_some_and(|s| s.solar_system_id == sys_id));
+            if let Some(obs_id) = belt_obs {
+                let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                snap.observer_mining_ledger.entry(obs_id).or_default().push(eve_db::ObserverMiningRecord {
+                    observer_id: obs_id,
+                    character_id: char_id,
+                    recorded_corporation_id: corp_id,
+                    type_id: ore_type_id,
+                    quantity: mined_units as i64,
+                    last_updated_date: eve_db::unix_secs_to_date_string(now_unix),
+                    timestamp_unix: now_unix,
+                });
+            }
+        });
         dispatch_mining_gameplay_events(ctx, char_id, mined_units, sys_id, ore_type_id);
     }
 }

@@ -925,7 +925,7 @@ pub fn resolve_character_orbital_access_and_tax(
         return Ok((0.05, 2233));
     };
     if cfg.orbital_type_id == 4318 {
-        return Ok((0.0, 4318));
+        return Ok((cfg.standing_neutral_tax_rate.max(0.17), 4318));
     }
     let ch = snap.characters.get(&char_id);
     let char_corp = ch.map(|c| c.corporation_id).unwrap_or(0);
@@ -1044,7 +1044,12 @@ pub fn consume_pi_import_commodities(
         .items
         .values()
         .filter(|it| {
-            if it.owner_id != char_id || it.type_id != type_id || it.quantity <= 0 {
+            if it.owner_id != char_id
+                || it.type_id != type_id
+                || it.quantity <= 0
+                || it.flag == eve_db::InventoryFlag::Locked
+                || snap.is_item_locked_in_contract_or_job(it.item_id)
+            {
                 return false;
             }
             let in_cargo = ship_id_opt.is_some_and(|sid| it.location_id == sid)

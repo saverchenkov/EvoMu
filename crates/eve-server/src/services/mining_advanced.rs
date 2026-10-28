@@ -27,42 +27,42 @@ use glam::DVec3;
 use std::collections::HashMap;
 
 /// Resolves the nearest SDE moon celestial (`group_id == 8`) in `solar_system_id` to `pos`.
-pub(crate) fn resolve_structure_moon_id(
-    sde: &eve_sde::SdeRegistry,
-    solar_system_id: u32,
-    pos: [f64; 3],
-) -> Option<i64> {
-    sde.celestials_in_system(solar_system_id)
-        .into_iter()
-        .filter(|c| c.group_id == 8)
-        .min_by(|a, b| {
-            let da = (a.position.x - pos[0]).powi(2)
-                + (a.position.y - pos[1]).powi(2)
-                + (a.position.z - pos[2]).powi(2);
-            let db = (b.position.x - pos[0]).powi(2)
-                + (b.position.y - pos[1]).powi(2)
-                + (b.position.z - pos[2]).powi(2);
-            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .map(|c| c.celestial_id)
+pub(crate) fn resolve_structure_moon_id(sde: &eve_sde::SdeRegistry, solar_system_id: u32, pos: [f64; 3]) -> Option<i64> {
+    sde.celestials_in_system(solar_system_id).into_iter().filter(|c| c.group_id == 8).min_by(|a, b| {
+        let da = (a.position.x - pos[0]).powi(2) + (a.position.y - pos[1]).powi(2) + (a.position.z - pos[2]).powi(2);
+        let db = (b.position.x - pos[0]).powi(2) + (b.position.y - pos[1]).powi(2) + (b.position.z - pos[2]).powi(2);
+        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+    }).map(|c| c.celestial_id)
+}
+
+fn structure_has_online_moon_drill(snap: &eve_db::WorldStateSnapshot, structure_id: i64) -> bool {
+    let Some(st) = snap.structures.get(&structure_id) else { return false; };
+    if !crate::services::station_structure::structure_lifecycle::is_operational(&st.state)
+        || !st.quantum_core_installed
+        || st.fuel_blocks == 0
+    {
+        return false;
+    }
+    let has_fitted_online_drill = snap.items.values().any(|it| {
+        it.location_id == structure_id
+            && it.type_id == 35894
+            && it.flag != InventoryFlag::Hangar
+            && (it.flag.is_service_slot() || matches!(it.flag as u16, 11..=34))
+            && snap.module_online_states.get(&it.item_id).copied().unwrap_or(true)
+    });
+    if has_fitted_online_drill {
+        return true;
+    }
+    let has_any_drill_or_service = snap.items.values().any(|it| {
+        it.location_id == structure_id && (it.type_id == 35894 || it.flag.is_service_slot())
+    });
+    !has_any_drill_or_service
 }
 
 /// Deterministically derives a 3-ore moon composition from SDE moon ore groups (`1884`, `1920..=1923`)
 /// keyed by `solar_system_id` security band and the SDE `moon_id`.
-/// High-Sec (`sec >= 0.45`) and Wormhole (`solar_system_id >= 31_000_000`) moons only yield R4 Ubiquitous Moon Ores (`1884`),
-/// while Low-Sec and Null-Sec moons yield R4..R64 (`1884`, `1920..=1923`) per `docs/eve-wiki/Moon_mining.md:95-104`.
-/// DERIVED: CCP's public SDE does not contain Tranquility moon survey tables; ore types are selected
-/// from published SDE moon ore types seeded by `moon_id` and security band.
-pub(crate) fn derive_moon_ores_from_sde(
-    sde: &eve_sde::SdeRegistry,
-    solar_system_id: u32,
-    moon_id: i64,
-) -> Vec<(TypeId, f64)> {
-    let sec = sde
-        .solar_systems
-        .get(&solar_system_id)
-        .map(|s| s.security_status)
-        .unwrap_or(0.0);
+pub(crate) fn derive_moon_ores_from_sde(sde: &eve_sde::SdeRegistry, solar_system_id: u32, moon_id: i64) -> Vec<(TypeId, f64)> {
+    let sec = sde.solar_systems.get(&solar_system_id).map(|s| s.security_status).unwrap_or(0.0);
     let restrict_to_r4 = sec >= 0.45 || solar_system_id >= 31_000_000;
     let is_base_moon_ore = |t: &eve_sde::InvType| -> bool {
         t.published && !["Compressed", "Brimful", "Bountiful", "Shining", "Glistening", "Glowing", "Twinkling", "Shimmering", "Resplendent", "Sparkling", "Dazzling", "Lavish"].iter().any(|p| t.name.contains(p))
@@ -80,72 +80,33 @@ pub(crate) fn derive_moon_ores_from_sde(
         let higher_ores: Vec<usize> = base_moon_ores.iter().enumerate()
             .filter(|(_, &tid)| sde.types.get(&tid).is_some_and(|t| matches!(t.group_id, 1920..=1923)))
             .map(|(i, _)| i).collect();
-        if !higher_ores.is_empty() {
-            idx0 = higher_ores[(h as usize) % higher_ores.len()];
-        }
+        if !higher_ores.is_empty() { idx0 = higher_ores[(h as usize) % higher_ores.len()]; }
     }
     let idx1 = ((h >> 16) as usize % (base_moon_ores.len() - 1) + idx0 + 1) % base_moon_ores.len();
     let mut idx2 = ((h >> 32) as usize) % base_moon_ores.len();
-    while idx2 == idx0 || idx2 == idx1 {
-        idx2 = (idx2 + 1) % base_moon_ores.len();
-    }
+    while idx2 == idx0 || idx2 == idx1 { idx2 = (idx2 + 1) % base_moon_ores.len(); }
     let w0 = 35 + ((h >> 40) % 15) as u32;
     let w1 = 25 + ((h >> 48) % 15) as u32;
     let w2 = 100u32.saturating_sub(w0 + w1);
-    vec![
-        (base_moon_ores[idx0], (w0 as f64) / 100.0),
-        (base_moon_ores[idx1], (w1 as f64) / 100.0),
-        (base_moon_ores[idx2], (w2 as f64) / 100.0),
-    ]
+    vec![(base_moon_ores[idx0], (w0 as f64) / 100.0), (base_moon_ores[idx1], (w1 as f64) / 100.0), (base_moon_ores[idx2], (w2 as f64) / 100.0)]
 }
 
-/// Maps a standard moon ore `type_id` to its +15% improved variant (`Brimful`/`Bountiful`/`Replete`/`Copious`/`Lavish`) in the same SDE group.
 fn find_improved_variant(sde: &eve_sde::SdeRegistry, base_ore_tid: TypeId) -> TypeId {
-    let Some(base_t) = sde.types.get(&base_ore_tid) else {
-        return base_ore_tid;
-    };
-    sde.types
-        .values()
-        .find(|t| {
-            t.published
-                && t.group_id == base_t.group_id
-                && t.type_id != base_ore_tid
-                && !t.name.contains("Compressed")
-                && t.name.ends_with(&base_t.name)
-                && (t.name.starts_with("Brimful ")
-                    || t.name.starts_with("Bountiful ")
-                    || t.name.starts_with("Replete ")
-                    || t.name.starts_with("Copious ")
-                    || t.name.starts_with("Lavish "))
-        })
-        .map(|t| t.type_id)
-        .unwrap_or(base_ore_tid)
+    let Some(base_t) = sde.types.get(&base_ore_tid) else { return base_ore_tid; };
+    sde.types.values().find(|t| {
+        t.published && t.group_id == base_t.group_id && t.type_id != base_ore_tid && !t.name.contains("Compressed")
+            && t.name.ends_with(&base_t.name)
+            && ["Brimful ", "Bountiful ", "Replete ", "Copious ", "Lavish "].iter().any(|p| t.name.starts_with(p))
+    }).map(|t| t.type_id).unwrap_or(base_ore_tid)
 }
 
-/// Maps a standard moon ore `type_id` to its +100% jackpot variant in the same SDE group if present.
 fn find_jackpot_variant(sde: &eve_sde::SdeRegistry, base_ore_tid: TypeId) -> TypeId {
-    let Some(base_t) = sde.types.get(&base_ore_tid) else {
-        return base_ore_tid;
-    };
-    sde.types
-        .values()
-        .find(|t| {
-            t.published
-                && t.group_id == base_t.group_id
-                && t.type_id != base_ore_tid
-                && !t.name.contains("Compressed")
-                && t.name.ends_with(&base_t.name)
-                && (t.name.starts_with("Glistening ")
-                    || t.name.starts_with("Glowing ")
-                    || t.name.starts_with("Twinkling ")
-                    || t.name.starts_with("Shimmering ")
-                    || t.name.starts_with("Shining ")
-                    || t.name.starts_with("Resplendent ")
-                    || t.name.starts_with("Sparkling ")
-                    || t.name.starts_with("Dazzling "))
-        })
-        .map(|t| t.type_id)
-        .unwrap_or(base_ore_tid)
+    let Some(base_t) = sde.types.get(&base_ore_tid) else { return base_ore_tid; };
+    sde.types.values().find(|t| {
+        t.published && t.group_id == base_t.group_id && t.type_id != base_ore_tid && !t.name.contains("Compressed")
+            && t.name.ends_with(&base_t.name)
+            && ["Glistening ", "Glowing ", "Twinkling ", "Shimmering ", "Shining ", "Resplendent ", "Sparkling ", "Dazzling "].iter().any(|p| t.name.starts_with(p))
+    }).map(|t| t.type_id).unwrap_or(base_ore_tid)
 }
 
 /// Computes the auto-fracture delay after chunk arrival (default 3h = 10,800s, modified by refinery rigs).
@@ -538,10 +499,10 @@ pub async fn handle(
                         ),
                     });
                 }
-                if st.fuel_blocks == 0 || !st.quantum_core_installed {
+                if !structure_has_online_moon_drill(snap, structure_id) {
                     return Err(BridgeRpcError {
                         code: "StructureServiceOffline".into(),
-                        message: "Refinery must have a Quantum Core installed and fuel blocks to operate moon drill".into(),
+                        message: "Refinery must be operational with a Quantum Core, fuel blocks, and an online Standup Moon Drill I (35894)".into(),
                     });
                 }
 
@@ -788,6 +749,12 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: "Character lacks corporation permission to fracture chunk".into(),
+                    });
+                }
+                if !structure_has_online_moon_drill(snap, structure_id) {
+                    return Err(BridgeRpcError {
+                        code: "StructureServiceOffline".into(),
+                        message: "Refinery must be operational with a Quantum Core, fuel blocks, and an online Standup Moon Drill I (35894) to fracture chunk".into(),
                     });
                 }
 
