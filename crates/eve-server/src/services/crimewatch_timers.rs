@@ -740,7 +740,6 @@ pub async fn handle_crimewatch(
             with_mut_combat_runtime(ctx, |rt| {
                 rt.safety_levels.insert(char_id, lvl);
             });
-            session.push_notification("OnSafetyLevelChanged", vec![PyRep::Integer(lvl as i64)]);
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnSafetyLevelChanged",

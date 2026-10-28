@@ -118,10 +118,15 @@ impl CrimeWatchLock {
 
     pub fn push_concord_reports(&self, reports: &[ConcordExecutionReport]) {
         if !reports.is_empty() {
-            self.concord_reports
+            let mut guard = self.concord_reports
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .extend_from_slice(reports);
+                .unwrap_or_else(|e| e.into_inner());
+            guard.extend_from_slice(reports);
+            const MAX_CONCORD_REPORTS: usize = 32;
+            if guard.len() > MAX_CONCORD_REPORTS {
+                let excess = guard.len() - MAX_CONCORD_REPORTS;
+                guard.drain(0..excess);
+            }
         }
     }
 
@@ -413,7 +418,7 @@ impl CrimeWatchDirector {
                 .ok()
                 .flatten()
                 .map(|(_, b)| b.speed_fraction)
-                .unwrap_or(0.0);
+                .unwrap_or(1.0);
             let (warp_scramble_strength, capacitor_after_neut, ecm_jammed) = sys_handle
                 .get_combat_state(criminal_ship_id)
                 .await
@@ -426,7 +431,7 @@ impl CrimeWatchDirector {
                         cs.ecm_jammed_remaining_s > 0.0,
                     )
                 })
-                .unwrap_or((100, 0.0, true));
+                .unwrap_or((0, 1_000.0, false));
             let post_locks = sys_handle
                 .get_target_locks(criminal_ship_id)
                 .await

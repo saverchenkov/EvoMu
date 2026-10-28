@@ -1265,10 +1265,17 @@ pub async fn activate_missile_or_breacher_launcher(
                     rt.in_flight_missiles.insert(missile_ball_id, in_flight);
                 });
 
-                ctx.crimewatch
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .trigger_weapon_timer(char_id, now_unix);
+                let victim_char_opt = ctx.db.with_snapshot(|snap| {
+                    snap.characters.get(&target_ball_id).map(|c| c.character_id)
+                        .or_else(|| snap.characters.values().find(|c| c.active_ship_id == target_ball_id).map(|c| c.character_id))
+                        .or_else(|| snap.items.get(&target_ball_id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
+                });
+                if let Some(vcid) = victim_char_opt.filter(|&v| v != char_id) {
+                    ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).trigger_weapon_timer(char_id, now_unix);
+                    crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, now_unix);
+                } else {
+                    crate::sp6_lifecycle::record_npc_aggression_timer(ctx, char_id, now_unix);
+                }
                 let defer_impact = is_fof_missile && has_explicit_target;
                 if defer_impact {
                     return Ok(PyRep::keyval([

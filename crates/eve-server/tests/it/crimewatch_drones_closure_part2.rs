@@ -18,6 +18,12 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_crimewatch_weapons_timer_and_highsec_criminal_movement_restrictions() {
+    // parity: feat:crimewatch.weapons-timer-dock-jump-gate, feat:lifecycle.crimewatch-highsec-criminal-movement
+    eve_testkit::attest(&[
+        "feat:crimewatch.weapons-timer-dock-jump-gate",
+        "feat:lifecycle.crimewatch-highsec-criminal-movement",
+    ]);
+
     let ctx = new_ctx();
     let jita = 30_000_142u32;
     let lowsec = 30_002_537u32;
@@ -56,11 +62,13 @@ async fn test_crimewatch_weapons_timer_and_highsec_criminal_movement_restriction
         let (npc_hunter_c, npc_hunter_s) = (95_000_003, 85_000_003);
         let mut hunter_sess = spawn_pilot(&ctx, 903, npc_hunter_c, 1_000_009, npc_hunter_s, 626, nullsec, DVec3::ZERO).await;
         fit_online(&ctx, npc_hunter_c, npc_hunter_s, 85_000_120, 486, InventoryFlag::HiSlot0, Some((85_000_121, 185, 50)));
+        fit_online(&ctx, npc_hunter_c, npc_hunter_s, 85_000_122, 501, InventoryFlag::HiSlot1, Some((85_000_123, 209, 50)));
         let npc_bid = spawn_specialized_npc_entity(&ctx, nullsec, 10004, "Pirate", 1, DVec3::new(2_000.0, 0.0, 0.0)).await;
         lock_target(&ctx, &mut hunter_sess, nullsec, npc_bid).await;
         rpc(&ctx, &mut hunter_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(85_000_120), PyRep::Integer(npc_bid)]).await.unwrap();
+        rpc(&ctx, &mut hunter_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(85_000_122), PyRep::Integer(npc_bid)]).await.unwrap();
         let wt_npc = ctx.crimewatch.read().unwrap().states.get(&npc_hunter_c).map(|s| s.weapon_timer_until_unix).unwrap_or(0);
-        assert_eq!(wt_npc, 0, "Attacking an NPC must NOT initiate a Weapons Timer");
+        assert_eq!(wt_npc, 0, "Attacking an NPC with turrets or missiles must NOT initiate a Weapons Timer");
     }
 
     // 2a. High-sec Criminal Timer (acquired organically via pod EWAR in low-sec Agoze 30_003_787 -> stargate 50_004_205 -> Intaki 30_003_788):

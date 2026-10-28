@@ -575,7 +575,8 @@ async fn test_crimewatch_safety_setting_green_yellow_red_enforcement() {
     // 1. Safety Green (`2`) in high-sec blocks turret, Smartbomb, Burst Jammer, offensive drone, and remote repair onto LE/Suspect (`CantDoInCurrentSafetyLevel`)
     let _ = ctx.drain_notifications_for_char(atk_c);
     rpc(&ctx, &mut atk_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(2)]).await.unwrap();
-    assert!(ctx.drain_notifications_for_char(atk_c).iter().any(|n| n.event == "OnSafetyLevelChanged" && n.args == vec![PyRep::Integer(2)]));
+    let notifs = ctx.drain_notifications_for_char(atk_c);
+    assert_eq!(notifs.iter().filter(|n| n.event == "OnSafetyLevelChanged" && n.args == vec![PyRep::Integer(2)]).count(), 1);
 
     assert_eq!(rpc(&ctx, &mut atk_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_101), PyRep::Integer(vic_s)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
     assert_eq!(rpc(&ctx, &mut atk_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(84_000_103)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
