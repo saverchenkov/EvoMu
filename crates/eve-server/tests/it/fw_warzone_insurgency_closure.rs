@@ -289,6 +289,31 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     let balls_after_supply = ctx.systems.get_or_spawn(front_sys).list_balls().await.unwrap();
     assert!(balls_after_supply.iter().any(|b| b.type_id == 23), "destroyed FW Supply site drops loot container");
 
+    // Taking non-lethal damage on a friendly supply site and holding defense for 30s resolves defense:
+    if let Some(&(def_sid, def_pos)) = supply_sites.iter().skip(2).next() {
+        set_hull(&ctx, gal_ship, 19_722, def_pos + DVec3::new(2_000.0, 0.0, 0.0)).await;
+        lock_target_via_rpc(&ctx, &mut s_gal, front_sys, gal_ship, def_sid).await;
+        let _ = rpc_call(&ctx, &mut s_gal, "dogmaIM", "Activate", &[
+            PyRep::Integer(997_000),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(def_sid),
+        ]).await;
+        step_weapon_ticks(&ctx, front_sys).await;
+        assert!(ctx.db.with_snapshot(|s| s.structures[&def_sid].last_damage_unix > 0));
+
+        // Move attacker away, place friendly Caldari defender on grid:
+        set_hull(&ctx, gal_ship, 19_722, DVec3::new(0.0, 0.0, 0.0)).await;
+        set_hull(&ctx, cal_ship, 587, def_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
+        let _ = drain_notif_events(&ctx, cal_cid);
+
+        // Advance 31s and tick background cluster:
+        ctx.advance_secs(31);
+        eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+
+        assert_eq!(ctx.db.with_snapshot(|s| s.structures[&def_sid].last_damage_unix), 0, "friendly defense resolved timer reset");
+        assert!(drain_notif_events(&ctx, cal_cid).iter().any(|e| e == "OnSolarsystemAdvantageStateUpdated_Local"), "defense emits OnSolarsystemAdvantageStateUpdated_Local");
+    }
+
     // 4. Live Novice complex capture via `keeper.ActivateAccelerationGate` + `tick_background_cluster`:
     //    opposing militia ship in pocket pauses timer; removing defender completes capture in <4 ticks thanks to Advantage,
     //    crediting Federation Navy (`1000181`) LP redeemable via `LPStoreMgr.TakeOfferForCharacter`!
@@ -343,6 +368,7 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
             wch.solar_system_id = front_sys;
             wch.active_ship_id = extra_ship;
             wch.war_faction_id = Some(500_004);
+            wch.loyalty_points = Default::default();
             s.characters.insert(extra_cid, wch);
             s.items.insert(
                 extra_ship,
@@ -367,7 +393,10 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     }
     let lp_after_bf = ctx.db.with_snapshot(|s| s.characters[&gal_cid].loyalty_points[&1_000_181]);
     let bf_award = lp_after_bf - lp_before_bf;
-    assert_eq!(bf_award, (150_000 * 30) / 31, "31 pilots in 3-zone Battlefield scale 150k LP to 145,161 LP");
+    let expected_scaled = (150_000 * 30) / 31;
+    assert_eq!(bf_award, expected_scaled, "31 pilots in 3-zone Battlefield scale 150k LP to 145,161 LP");
+    let wingman_last_lp = ctx.db.with_snapshot(|s| s.characters[&(90_100_000 + 29)].loyalty_points.get(&1_000_181).copied().unwrap_or(0));
+    assert_eq!(wingman_last_lp, expected_scaled, "31st pilot also receives scaled LP");
 
     let bf_cd = ctx.db.with_snapshot(|s| s.fw_runtime.battlefield_respawn_unix[&front_sys]);
     assert_eq!(bf_cd - ctx.now_unix(), BATTLEFIELD_RESPAWN_COOLDOWN_SECS);

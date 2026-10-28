@@ -607,6 +607,7 @@ pub async fn apply_fw_or_insurgency_structure_damage(
                 }
             }
             if st.hull_hp > 0.0 {
+                st.last_damage_unix = now;
                 return Ok((false, st.shield_hp, st.armor_hp, st.hull_hp, pos, att_fac, 0, Vec::new()));
             }
             st.state = "Destroyed".into();
@@ -1284,7 +1285,7 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
             };
             let lp_corp = militia_lp_corp_id(&ctx.sde, bf_fac);
             let cleanup_npcs = ctx.db.with_mut_snapshot(|snap| {
-                for &cid in pilots_on_grid.iter().take(BATTLEFIELD_MAX_FULL_PAYOUT_PILOTS) {
+                for &cid in &pilots_on_grid {
                     if let Some(ch) = snap.characters.get_mut(&cid) {
                         *ch.loyalty_points.entry(lp_corp).or_insert(0) += per_pilot_lp;
                         let cur_st = ch.standings.get(&bf_fac).copied().unwrap_or(0.0);
