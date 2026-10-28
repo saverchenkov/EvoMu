@@ -1103,6 +1103,7 @@ pub fn dispatch_character_routes(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
+            crate::services::station_structure::structure_upwell_ops::sync_auto_delivered_asset_safety_wraps(ctx);
             Some(ctx.db.with_snapshot(|snap| {
                 if !snap.characters.contains_key(&char_id) {
                     return RouteExecutionResult::error(
@@ -1118,6 +1119,7 @@ pub fn dispatch_character_routes(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
+            crate::services::station_structure::structure_upwell_ops::sync_auto_delivered_asset_safety_wraps(ctx);
             Some(ctx.db.with_snapshot(|snap| {
                 if !snap.characters.contains_key(&char_id) {
                     return RouteExecutionResult::error(
@@ -1133,6 +1135,7 @@ pub fn dispatch_character_routes(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
+            crate::services::station_structure::structure_upwell_ops::sync_auto_delivered_asset_safety_wraps(ctx);
             Some(ctx.db.with_snapshot(|snap| {
                 if !snap.characters.contains_key(&char_id) {
                     return RouteExecutionResult::error(
@@ -1148,6 +1151,7 @@ pub fn dispatch_character_routes(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
+            crate::services::station_structure::structure_upwell_ops::sync_auto_delivered_asset_safety_wraps(ctx);
             Some(ctx.db.with_snapshot(|snap| {
                 if !snap.corporations.contains_key(&corp_id) {
                     return RouteExecutionResult::error(
@@ -1163,6 +1167,7 @@ pub fn dispatch_character_routes(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
+            crate::services::station_structure::structure_upwell_ops::sync_auto_delivered_asset_safety_wraps(ctx);
             Some(ctx.db.with_snapshot(|snap| {
                 if !snap.corporations.contains_key(&corp_id) {
                     return RouteExecutionResult::error(
@@ -1178,6 +1183,7 @@ pub fn dispatch_character_routes(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
+            crate::services::station_structure::structure_upwell_ops::sync_auto_delivered_asset_safety_wraps(ctx);
             Some(ctx.db.with_snapshot(|snap| {
                 if !snap.corporations.contains_key(&corp_id) {
                     return RouteExecutionResult::error(

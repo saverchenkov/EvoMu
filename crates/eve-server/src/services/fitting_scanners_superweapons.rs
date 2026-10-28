@@ -63,6 +63,7 @@ pub(crate) fn mark_hacking_container_unlocked(ctx: &ServerContext, char_id: i64,
     write_container_ship_state(ctx, |st| {
         st.unlocked_containers.insert((target_id, char_id));
     });
+    let _ = crate::services::station_structure::structure_lifecycle::record_structure_hack_reveal(ctx, char_id, target_id);
     ctx.db.with_mut_snapshot(|snap| {
         let locked_by_job = snap.is_item_locked_in_contract_or_job(target_id);
         if let Some(cont) = snap.items.get_mut(&target_id) {
@@ -402,6 +403,21 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
             };
             if let Err(e) = scanner_range_check(ctx, sys, ship_id, target_id, mod_state, 54).await {
                 return Some(Err(e));
+            }
+            if let Some(st_owner_corp) = ctx.db.with_snapshot(|s| s.structures.get(&target_id).map(|st| st.owner_corp_id)) {
+                let caller_corp = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id)).unwrap_or(0);
+                if caller_corp != 0 && caller_corp == st_owner_corp {
+                    return Some(Err(BridgeRpcError {
+                        code: "CannotHackOwnStructure".into(),
+                        message: "Cannot run a Data Analyzer hack against a structure owned by your own corporation".into(),
+                    }));
+                }
+                if mod_type.name.contains("Relic") || matches!(mod_type.type_id, 22177 | 22178) {
+                    return Some(Err(BridgeRpcError {
+                        code: "DataAnalyzerRequired".into(),
+                        message: "Hacking an Upwell structure requires a Data Analyzer".into(),
+                    }));
+                }
             }
             let skills = ctx.character_skill_levels(char_id);
             let hack_lvl = skills.get(&3405).copied().unwrap_or(0).max(skills.get(&3408).copied().unwrap_or(0));

@@ -674,6 +674,10 @@ pub fn execute_death_pipeline_sync_inner(
                 now_unix,
             );
         }
+        crate::services::station_structure::structure_lifecycle::prepare_home_station_respawn(
+            ctx,
+            victim_char_id,
+        );
         let _ = ctx
             .db
             .respawn_character_at_home_station(victim_char_id, victim_ship_id, &ctx.sde);

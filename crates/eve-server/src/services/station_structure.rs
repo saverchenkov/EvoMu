@@ -655,10 +655,16 @@ pub async fn handle(
                         ),
                     }));
                 }
-                if st.state == "Destroyed" || st.state == "Unanchored" {
+                if st.state == "Destroyed" {
                     return Some(Err(BridgeRpcError {
                         code: "StructureDestroyed".into(),
-                        message: format!("Structure {dock_id} is destroyed or unanchored"),
+                        message: format!("Structure {dock_id} is destroyed"),
+                    }));
+                }
+                if matches!(st.state.as_str(), "Unanchored" | "AnchorVulnerable" | "Anchoring") {
+                    return Some(Err(BridgeRpcError {
+                        code: "StructureNotDockable".into(),
+                        message: format!("Structure {dock_id} is in state '{}' and cannot be docked at", st.state),
                     }));
                 }
                 let acl_denied = ctx.db.with_snapshot(|snap| {
@@ -714,6 +720,9 @@ pub async fn handle(
                     code: "ShipInWarp".into(),
                     message: "Cannot dock while ship is still in warp".into(),
                 }));
+            }
+            if is_structure && handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
+                return Some(Err(BridgeRpcError { code: "ShipWarpScrambled".into(), message: "Cannot dock at an Upwell structure while ship is warp scrambled".into() }));
             }
             let dist = ball.position.distance(target_pos);
             if dist > 2_500.0 {
@@ -848,12 +857,6 @@ pub async fn handle(
 
         ("structureDeployment", "Anchor") => Some(structure_lifecycle_rpc::handle_anchor(ctx, session, args).await),
 
-        // rpc-lint: allow pre-existing handler (not a V24 client name) kept for tests/structures.rs and regressions (S-7); now fuels per SDE service fuel groups
-        ("structureControl", "FuelStructure") => Some(structure_lifecycle_rpc::handle_fuel(ctx, session, args)),
-
-        // rpc-lint: allow S-7 in action_plan.md names AttackStructure (proximity/state-machine checks); now resolved by structure_lifecycle
-        ("structureControl", "AttackStructure") => Some(structure_lifecycle_rpc::handle_attack(ctx, session, args).await),
-
         // parity: feat:modules.mobile-warp-disruptor
         ("posMgr", "AnchorStructure") => {
             let (_, char_id) = match ServerContext::require_character(session) {
@@ -902,12 +905,7 @@ pub async fn handle(
             let (_, is_thera, is_shattered, _) =
                 crate::services::space_destiny::system_wormhole_profile(sys_id);
             if is_thera || is_shattered {
-                return Some(Err(BridgeRpcError {
-                    code: "AnchoringDisallowedInTheraOrShattered".into(),
-                    message: format!(
-                        "Anchoring starbases or deployables is disallowed in Thera or shattered wormhole system {sys_id}"
-                    ),
-                }));
+                return Some(Err(BridgeRpcError { code: "AnchoringDisallowedInTheraOrShattered".into(), message: format!("Anchoring starbases or deployables is disallowed in Thera or shattered wormhole system {sys_id}") }));
             }
             if session.station_id.is_some() || session.structure_id.is_some() {
                 return Some(Err(BridgeRpcError {
@@ -1152,63 +1150,23 @@ pub async fn handle(
                         ),
                     }));
                 }
-                let region_id = ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id).unwrap_or(0);
-                if region_id == structure_lifecycle::POCHVEN_REGION_ID {
-                    if session.station_id.is_some() || session.structure_id.is_some() {
-                        return Some(Err(BridgeRpcError {
-                            code: "NotInSpace".into(),
-                            message: "Must be in space to anchor an orbital structure".into(),
-                        }));
-                    }
-                    let trig_standing = ctx.db.with_snapshot(|snap| {
-                        snap.characters
-                            .get(&char_id)
-                            .and_then(|c| c.standings.get(&500_026).copied())
-                            .unwrap_or(0.0)
-                    });
-                    if trig_standing < 1.5 {
-                        return Some(Err(BridgeRpcError {
-                            code: "InsufficientTriglavianStanding".into(),
-                            message: format!(
-                                "Anchoring orbitals in Pochven requires at least 1.5 standing with the Triglavian Collective (500026); pilot has {trig_standing:.2}"
-                            ),
-                        }));
-                    }
-                    if let Some(item_id) = args.first().and_then(|a| a.as_i64()) {
-                        let res = ctx.db.try_with_mut_snapshot(|snap| {
-                            let it = snap.items.get_mut(&item_id).ok_or_else(|| BridgeRpcError {
-                                code: "ItemNotFound".into(),
-                                message: format!("Orbital item {item_id} not found"),
-                            })?;
-                            if it.owner_id != char_id {
-                                return Err(BridgeRpcError {
-                                    code: "NotItemOwner".into(),
-                                    message: format!("Character {char_id} does not own item {item_id}"),
-                                });
-                            }
-                            let tid = it.type_id;
-                            it.location_id = i64::from(sys_id);
-                            it.flag = InventoryFlag::None;
-                            it.singleton = true;
-                            Ok(tid)
-                        });
-                        return match res {
-                            Ok(tid) => Some(Ok(PyRep::keyval([
-                                ("itemID", PyRep::Integer(item_id)),
-                                ("orbitalID", PyRep::Integer(item_id)),
-                                ("typeID", PyRep::Integer(i64::from(tid))),
-                                ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
-                                ("state", PyRep::String("Anchored".into())),
-                            ]))),
-                            Err(e) => Some(Err(e)),
-                        };
-                    }
-                }
                 if let Some(item_id) = args.first().and_then(|a| a.as_i64()) {
                     let is_gantry = ctx.db.with_snapshot(|snap| {
                         snap.items.get(&item_id).is_some_and(|it| it.type_id == 3962)
                     });
                     if is_gantry {
+                        let region_id = ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id).unwrap_or(0);
+                        if region_id == structure_lifecycle::POCHVEN_REGION_ID {
+                            let trig_standing = ctx.db.with_snapshot(|snap| {
+                                snap.characters.get(&char_id).and_then(|c| c.standings.get(&500_026).copied()).unwrap_or(0.0)
+                            });
+                            if trig_standing < 1.5 {
+                                return Some(Err(BridgeRpcError {
+                                    code: "InsufficientTriglavianStanding".into(),
+                                    message: format!("Anchoring orbitals in Pochven requires at least 1.5 standing with the Triglavian Collective (500026); pilot has {trig_standing:.2}"),
+                                }));
+                            }
+                        }
                         let sys_sec = ctx
                             .sde
                             .solar_systems

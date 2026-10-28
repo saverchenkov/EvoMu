@@ -237,6 +237,7 @@ pub enum InventoryFlag {
     ServiceSlot5 = 169,
     ServiceSlot6 = 170,
     ServiceSlot7 = 171,
+    StructureDeedBay = 172,
     Deliveries = 173,
     SpecializedMobileDepotHold = 179,
     SpecializedIceHold = 181,
@@ -245,22 +246,15 @@ pub enum InventoryFlag {
 }
 
 impl InventoryFlag {
-    #[allow(non_upper_case_globals)]
-    pub const OreHold: InventoryFlag = InventoryFlag::SpecializedOreHold;
-    #[allow(non_upper_case_globals)]
-    pub const GasHold: InventoryFlag = InventoryFlag::SpecializedGasHold;
-    #[allow(non_upper_case_globals)]
-    pub const IceHold: InventoryFlag = InventoryFlag::SpecializedIceHold;
-    #[allow(non_upper_case_globals)]
-    pub const MobileDepotHold: InventoryFlag = InventoryFlag::SpecializedMobileDepotHold;
-    #[allow(non_upper_case_globals)]
-    pub const FrigateEscapeBay: InventoryFlag = InventoryFlag::SpecializedMobileDepotHold;
-    #[allow(non_upper_case_globals)]
-    pub const InfrastructureHold: InventoryFlag = InventoryFlag::SpecializedInfrastructureHold;
-    #[allow(non_upper_case_globals)]
-    pub const Wardrobe: InventoryFlag = InventoryFlag::Pilot;
-    #[allow(non_upper_case_globals)]
-    pub const CorpHangar: InventoryFlag = InventoryFlag::CorpSAG1;
+    #[allow(non_upper_case_globals)] pub const QuantumCoreRoom: InventoryFlag = InventoryFlag::StructureDeedBay;
+    #[allow(non_upper_case_globals)] pub const OreHold: InventoryFlag = InventoryFlag::SpecializedOreHold;
+    #[allow(non_upper_case_globals)] pub const GasHold: InventoryFlag = InventoryFlag::SpecializedGasHold;
+    #[allow(non_upper_case_globals)] pub const IceHold: InventoryFlag = InventoryFlag::SpecializedIceHold;
+    #[allow(non_upper_case_globals)] pub const MobileDepotHold: InventoryFlag = InventoryFlag::SpecializedMobileDepotHold;
+    #[allow(non_upper_case_globals)] pub const FrigateEscapeBay: InventoryFlag = InventoryFlag::SpecializedMobileDepotHold;
+    #[allow(non_upper_case_globals)] pub const InfrastructureHold: InventoryFlag = InventoryFlag::SpecializedInfrastructureHold;
+    #[allow(non_upper_case_globals)] pub const Wardrobe: InventoryFlag = InventoryFlag::Pilot;
+    #[allow(non_upper_case_globals)] pub const CorpHangar: InventoryFlag = InventoryFlag::CorpSAG1;
 
     pub fn from_u16(v: u16) -> Self {
         match v {
@@ -337,6 +331,7 @@ impl InventoryFlag {
             169 => Self::ServiceSlot5,
             170 => Self::ServiceSlot6,
             171 => Self::ServiceSlot7,
+            172 => Self::StructureDeedBay,
             173 => Self::Deliveries,
             179 => Self::SpecializedMobileDepotHold,
             181 => Self::SpecializedIceHold,

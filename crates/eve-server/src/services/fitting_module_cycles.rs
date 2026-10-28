@@ -137,10 +137,48 @@ pub(crate) async fn handle_module_cycles(
             let Some(mod_type) = ctx.sde.types.get(&m.type_id) else {
                 return Some(Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module type {} not found in SDE", m.type_id) }));
             };
+            let is_upwell_weapon_or_aoe = (target_id_opt.is_some_and(|tid| {
+                tid >= 1_000_000_000_000 || ctx.db.with_snapshot(|s| s.structures.contains_key(&tid))
+            }) && matches!(
+                mod_type.group_id,
+                74 | 55 | 53 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807
+            )) || (matches!(mod_type.group_id, 72 | 862)
+                && ctx.db.with_snapshot(|s| {
+                    s.structures
+                        .values()
+                        .any(|st| st.solar_system_id == sys_id && st.state != "Destroyed")
+                }));
             if !matches!(mod_type.group_id, 1122 | 650)
-                && target_id_opt.is_some_and(|tid| ctx.db.with_snapshot(|s| s.items.get(&tid).and_then(|i| ctx.sde.types.get(&i.type_id)).is_some_and(|t| matches!(t.group_id, 340 | 448))))
+                && (is_upwell_weapon_or_aoe
+                    || target_id_opt.is_some_and(|tid| {
+                        ctx.db.with_snapshot(|s| {
+                            s.items
+                                .get(&tid)
+                                .and_then(|i| ctx.sde.types.get(&i.type_id))
+                                .is_some_and(|t| matches!(t.group_id, 340 | 448))
+                        })
+                    }))
             {
                 return crate::services::combat_crimewatch::combat_weapons::handle_weapons(ctx, session, service, method, args, kwargs).await;
+            }
+
+            if (matches!(
+                mod_type.group_id,
+                52 | 65 | 68 | 71 | 72 | 201 | 208 | 291 | 379 | 862 | 74 | 55 | 53 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807
+            ) || matches!(
+                effect_name.as_str(),
+                "empWave" | "useMissiles" | "targetAttack" | "projectileFired"
+            )) && sys
+                .get_combat_state(ship_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|cs| cs.is_tethered)
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "CantActivateWhileTethered".into(),
+                    message: "Cannot activate offensive modules, smartbombs, or bomb launchers while tethered".into(),
+                }));
             }
 
             // Mining lasers, strip miners, ice and gas harvesters run on the repeating MN-04 cycle engine.

@@ -25,6 +25,10 @@ fn kv_f64(rep: &PyRep, key: &str) -> f64 {
     kv_entry(rep, key).and_then(|v| v.as_f64()).unwrap_or(0.0)
 }
 
+fn kv_str(rep: &PyRep, key: &str) -> String {
+    kv_entry(rep, key).and_then(|v| v.as_str()).unwrap_or("").to_string()
+}
+
 async fn rpc(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let kw = HashMap::new();
     ctx.dispatch_rpc(sess, service, None, method, args, &kw, None).await
@@ -89,7 +93,7 @@ async fn undock_and_anchor(ctx: &ServerContext, sess: &mut SessionState, char_id
     ctx.advance_virtual_clock(life::ANCHOR_VULNERABLE_SECS + life::ANCHORING_SECS);
     rpc(ctx, sess, "structureDocking", "Dock", &[PyRep::Integer(id)]).await.expect("Dock");
     let core = grant_item(ctx, char_id, ship_id, 56201, InventoryFlag::Cargo, 1);
-    rpc(ctx, sess, "invbroker", "Add", &[PyRep::Integer(core), PyRep::Integer(id), PyRep::Integer(4)]).await.expect("insert core");
+    rpc(ctx, sess, "invbroker", "Add", &[PyRep::Integer(core), PyRep::Integer(id), PyRep::Integer(172)]).await.expect("insert core");
     rpc(ctx, sess, "structureDocking", "Undock", &[]).await.expect("Undock");
     ctx.advance_virtual_clock(life::ONLINING_SECS);
     rpc(ctx, sess, "structureGuests", "GetGuests", &[PyRep::Integer(id)]).await.expect("sync");
@@ -192,7 +196,12 @@ async fn test_manual_asset_safety_personal_and_corp_with_delay_and_fee() {
         .expect_err("already delivered");
     assert_eq!(again.code, "AssetSafetyWrapAlreadyDelivered");
 
-    // Corp wrap delivers too.
+    // Corp wrap delivers too (fund corp wallet division 1 for recovery fee).
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&corp_id) {
+            c.set_division_balance(1, eve_db::IskCents(10_000_000));
+        }
+    });
     rpc(&ctx, &mut sess, "structureAssetSafety", "MoveSafetyWrapToStructure", &[PyRep::Integer(corp_wrap), PyRep::Integer(station_id)]).await.expect("deliver corp wrap");
     ctx.db.with_snapshot(|snap| assert_eq!(snap.items.get(&corp_item).expect("corp item").location_id, station_id));
 }
@@ -332,7 +341,7 @@ async fn test_structure_unanchor_rename_control_and_schedule_regressions() {
     let sched = rpc(&ctx, &mut sess, "structureVulnerability", "UpdateReinforceTimesFromClient", &[PyRep::Integer(struct_id), PyRep::Integer(19), PyRep::Integer(4)])
         .await
         .expect("schedule");
-    assert_eq!(kv_i64(&sched, "applyAfterUnix"), ctx.now_unix() as i64 + 86_400);
+    assert_eq!(kv_i64(&sched, "applyAfterUnix"), ctx.now_unix() as i64 + 30 * 86_400);
 }
 
 #[tokio::test]
@@ -465,4 +474,105 @@ async fn test_r3_track2_structures_compression_special_sites_regressions() {
     .expect_err("#124: Upwell structures do not offer NPC ship insurance");
     assert_eq!(err_124.code, "StationServiceUnavailable");
     let _ = sys_id;
+}
+
+#[tokio::test]
+async fn test_lowsec_structure_hack_failure_does_not_explode_or_wipe() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let char_id = 90_000_001;
+    let rancer_sys_id = 30_002_718; // Low-sec (< 0.45 sec)
+    let sec = ctx.sde.solar_systems.get(&rancer_sys_id).unwrap().security_status;
+    assert!(sec < 0.45, "must be low-sec for hack explosion rules");
+
+    let mut sess = SessionState::new(3101);
+    rpc(&ctx, &mut sess, "authentication", "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())]).await.expect("Login");
+    rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)]).await.expect("SelectCharacterID");
+
+    let ship_id = grant_item(&ctx, char_id, i64::from(rancer_sys_id), 606, InventoryFlag::None, 1);
+    let _data_mod = grant_item(&ctx, char_id, ship_id, 22175, InventoryFlag::MedSlot0, 1);
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(rancer_sys_id);
+
+    let struct_id = 99_000_777;
+    let st_pos = glam::DVec3::new(100_000.0, 0.0, 0.0);
+    let fuel_item_id = grant_item(&ctx, char_id, struct_id, 4051, InventoryFlag::SpecializedFuelBay, 1_000);
+    let hangar_item_id = grant_item(&ctx, char_id, struct_id, 34, InventoryFlag::Hangar, 50_000);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.get(&char_id).unwrap().clone();
+        ch.solar_system_id = rancer_sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        snap.skills.entry(char_id).or_default().insert(21718, eve_db::TrainedSkillRecord { type_id: 21718, level: 5, skill_points: 256_000.0 });
+        snap.structures.insert(struct_id, eve_db::UpwellStructureRecord {
+            structure_id: struct_id, solar_system_id: rancer_sys_id, type_id: 35832, owner_corp_id: 1000001,
+            name: "Lowsec Hack Target Astrahus".into(), state: "ShieldVulnerable".into(), position: st_pos.to_array(),
+            shield_hp: 10_000_000.0, armor_hp: 10_000_000.0, hull_hp: 10_000_000.0, fuel_blocks: 1_000,
+            quantum_core_installed: true, reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
+        });
+    });
+
+    let rancer_sys = ctx.systems.get_or_spawn(rancer_sys_id);
+    let _ = rancer_sys.spawn_ball(eve_destiny::Ball {
+        id: ship_id, type_id: 606, position: st_pos + glam::DVec3::new(1_000.0, 0.0, 0.0),
+        velocity: glam::DVec3::ZERO, radius: 40.0, mass: 1.0e6,
+        mode: eve_destiny::MovementMode::Stop, speed_fraction: 0.0, max_velocity: 300.0, inertia: 1.0,
+    }).await;
+    let _ = rancer_sys.spawn_ball(eve_destiny::Ball {
+        id: struct_id, type_id: 35832, position: st_pos,
+        velocity: glam::DVec3::ZERO, radius: 1_000.0, mass: 1.0e9,
+        mode: eve_destiny::MovementMode::Stop, speed_fraction: 0.0, max_velocity: 0.0, inertia: 1.0,
+    }).await;
+
+    // Fail attempt 1
+    let g1 = rpc(&ctx, &mut sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(struct_id)]).await.expect("start game 1");
+    assert_eq!(kv_str(&g1, "status"), "InProgress");
+    eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        reg.hacking_games.get_mut(&(char_id, struct_id)).unwrap().virus_coherence = 0;
+    });
+    let s1 = rpc(&ctx, &mut sess, "hackingMgr", "ClickedOnTile", &[PyRep::Integer(struct_id), PyRep::Integer(1)]).await.expect("click 1");
+    assert_eq!(kv_str(&s1, "status"), "Failed");
+
+    // Fail attempt 2
+    let g2 = rpc(&ctx, &mut sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(struct_id)]).await.expect("start game 2");
+    assert_eq!(kv_str(&g2, "status"), "InProgress");
+    eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        reg.hacking_games.get_mut(&(char_id, struct_id)).unwrap().virus_coherence = 0;
+    });
+    let s2 = rpc(&ctx, &mut sess, "hackingMgr", "ClickedOnTile", &[PyRep::Integer(struct_id), PyRep::Integer(1)]).await.expect("click 2");
+    assert_eq!(kv_str(&s2, "status"), "Failed");
+
+    // RV-HACK-STRUCT-WIPE: In low-sec, container hack failure on attempt 2 explodes and wipes items.
+    // Structure must NEVER explode or wipe items/ball/snap.structures on hack failure!
+    assert!(rancer_sys.get_ball_snapshot(struct_id).await.unwrap().is_some(), "structure ball must NOT be removed from ballpark on 2nd hack failure");
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.structures.contains_key(&struct_id), "snap.structures must NOT be removed on 2nd hack failure");
+        assert!(snap.items.contains_key(&fuel_item_id), "structure fuel blocks must NOT be wiped");
+        assert!(snap.items.contains_key(&hangar_item_id), "structure player hangar items must NOT be wiped");
+    });
+
+    // 3rd attempt is locked out for the pilot who failed twice
+    let g3_err = rpc(&ctx, &mut sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(struct_id)]).await.expect_err("3rd attempt locked out");
+    assert_eq!(g3_err.code, "HackingGameAlreadyFinished");
+
+    // RV-HACKREVEAL-02: Second hacker can still attempt/reveal after another pilot has failed (lockouts are per-character, not global).
+    let char_id2 = 90_000_002;
+    let mut sess2 = SessionState::new(7302);
+    sess2.user_id = Some(2); sess2.character_id = Some(char_id2); sess2.corporation_id = Some(1000009); sess2.solar_system_id = Some(rancer_sys_id);
+    let ship_id2 = grant_item(&ctx, char_id2, i64::from(rancer_sys_id), 606, InventoryFlag::None, 1);
+    sess2.ship_id = Some(ship_id2);
+    grant_item(&ctx, char_id2, ship_id2, 22175, InventoryFlag::MedSlot0, 1);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch2 = snap.characters.get(&char_id).unwrap().clone();
+        ch2.character_id = char_id2; ch2.user_id = 2; ch2.name = "Second Hacker".into(); ch2.corporation_id = 1000009;
+        ch2.solar_system_id = rancer_sys_id; ch2.station_id = None; ch2.structure_id = None; ch2.active_ship_id = ship_id2;
+        snap.characters.insert(char_id2, ch2);
+        snap.skills.entry(char_id2).or_default().insert(21718, eve_db::TrainedSkillRecord { type_id: 21718, level: 5, skill_points: 256_000.0 });
+    });
+    let _ = rancer_sys.spawn_ball(eve_destiny::Ball { id: ship_id2, type_id: 606, position: st_pos + glam::DVec3::new(1_500.0, 0.0, 0.0), velocity: glam::DVec3::ZERO, radius: 40.0, mass: 1.0e6, mode: eve_destiny::MovementMode::Stop, speed_fraction: 0.0, max_velocity: 300.0, inertia: 1.0 }).await;
+    let g_hacker2 = rpc(&ctx, &mut sess2, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(struct_id)]).await.expect("second hacker attempt succeeds");
+    assert_eq!(kv_str(&g_hacker2, "status"), "InProgress");
 }

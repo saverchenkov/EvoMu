@@ -646,6 +646,13 @@ impl ServerContext {
             }
             return res;
         }
+        if matches!(
+            (effective_service, method),
+            ("invbroker", "GetAllItems")
+                | ("corpmgr", "GetAssetInventory" | "GetAssetInventoryForLocation" | "SearchAssets")
+        ) {
+            services::station_structure::structure_lifecycle::sync_asset_safety_wraps(self);
+        }
         if let Some(res) = Box::pin(services::inventory_fitting::handle(
             self, session, bound_entry.as_ref(), effective_service, method, args, kwargs,
         )).await {

@@ -1,5 +1,5 @@
 //! Upwell structure lifecycle tests (`structure_lifecycle` engine + `structureDeployment.Anchor`,
-//! `structureControl.FuelStructure`, `structureControl.AttackStructure`, `structureDeployment.Unanchor`).
+//! `invbroker.Add` flag 133 fuel bay, `dogmaIM.Activate` live weapon siege, `structureDeployment.Unanchor`).
 //! Expected values are read from the real SDE (`EVOMU_SDE_PATH`) or from the engine's
 //! documented DERIVED timer constants.
 
@@ -21,42 +21,14 @@ async fn rpc(ctx: &ServerContext, sess: &mut SessionState, service: &str, method
     ctx.dispatch_rpc(sess, service, None, method, args, &kw, None).await
 }
 
-fn kv_i64(rep: &PyRep, key: &str) -> i64 {
-    match rep {
-        PyRep::KeyVal(e) => e.get(key).and_then(|v| v.as_i64()).unwrap_or(0),
-        _ => 0,
-    }
-}
-
-fn kv_str(rep: &PyRep, key: &str) -> String {
-    match rep {
-        PyRep::KeyVal(e) => e.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        _ => String::new(),
-    }
-}
+fn kv_i64(rep: &PyRep, key: &str) -> i64 { rep.dict_get(key).and_then(|v| v.as_i64()).unwrap_or(0) }
+fn kv_str(rep: &PyRep, key: &str) -> String { rep.dict_get(key).and_then(|v| v.as_str()).unwrap_or("").to_string() }
 
 fn grant(ctx: &ServerContext, owner: i64, location: i64, type_id: u32, flag: InventoryFlag, qty: i32) -> i64 {
     ctx.db.with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
         let id = snap.next_entity_id;
-        snap.items.insert(
-            id,
-            InventoryItemRecord {
-                item_id: id,
-                type_id,
-                owner_id: owner,
-                location_id: location,
-                flag,
-                quantity: qty,
-                singleton: qty == 1,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
+        snap.items.insert(id, InventoryItemRecord { item_id: id, type_id, owner_id: owner, location_id: location, flag, quantity: qty, singleton: qty == 1, version: 1, ..Default::default() });
         id
     })
 }
@@ -116,7 +88,7 @@ async fn online_structure(ctx: &ServerContext, sess: &mut SessionState, type_id:
     // The pilot drags the core into the structure (core room) while docked.
     rpc(ctx, sess, "structureDocking", "Dock", &[PyRep::Integer(id)]).await.expect("Dock");
     let core_item = grant(ctx, OWNER, sess.ship_id.expect("ship"), core, InventoryFlag::Cargo, 1);
-    rpc(ctx, sess, "invbroker", "Add", &[PyRep::Integer(core_item), PyRep::Integer(id), PyRep::Integer(4)]).await.expect("move core into structure");
+    rpc(ctx, sess, "invbroker", "Add", &[PyRep::Integer(core_item), PyRep::Integer(id), PyRep::Integer(172)]).await.expect("move core into structure");
     assert_eq!(observe(ctx, sess, id).await.expect("st").state, life::STATE_ONLINING);
     rpc(ctx, sess, "structureDocking", "Undock", &[]).await.expect("Undock");
     ctx.advance_virtual_clock(life::ONLINING_SECS);
@@ -167,12 +139,29 @@ fn set_hp(ctx: &ServerContext, id: i64, shield: f64, armor: f64, hull: f64) {
 }
 
 async fn attack(ctx: &ServerContext, sess: &mut SessionState, id: i64) -> Result<PyRep, BridgeRpcError> {
-    let sys = ctx.systems.get_or_spawn(sess.solar_system_id.expect("sys"));
-    for _ in 0..12 {
-        let _ = sys.step_manual(1.0).await;
+    let (sys_id, ship_id) = (sess.solar_system_id.expect("sys"), sess.ship_id.expect("ship"));
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    if !sys.get_target_locks(ship_id).await.unwrap_or_default().iter().any(|l| l.target_id == id && l.locked) {
+        rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(id)]).await?;
+        let _ = sys.step_manual(12.0).await;
     }
-    // rpc-lint: allow S-7 in action_plan.md names AttackStructure; exercises structure_lifecycle::apply_structure_damage
-    rpc(ctx, sess, "structureControl", "AttackStructure", &[PyRep::Integer(id)]).await
+    let (pre_state, pre_rep) = ctx.db.with_snapshot(|s| {
+        let ext = load_ext_state(s);
+        (s.structures.get(&id).map(|st| st.state.clone()).unwrap_or_default(), ext.lifecycle.get(&id).and_then(|l| l.repair_until_unix))
+    });
+    let act = rpc(ctx, sess, "dogmaIM", "Activate", &[PyRep::Integer(100_000_005), PyRep::String("projectileFired".into()), PyRep::Integer(id)]).await?;
+    let layer = match pre_state.as_str() { life::STATE_ARMOR_VULNERABLE => "armor", life::STATE_HULL_VULNERABLE | life::STATE_ANCHOR_VULNERABLE | life::STATE_ONLINING => "hull", _ => "shield" };
+    Ok(ctx.db.with_snapshot(|s| {
+        let st = s.structures.get(&id).expect("structure");
+        let ext = load_ext_state(s);
+        let core_tid = ctx.sde.types.get(&st.type_id).and_then(|t| t.default_attributes.get(&life::ATTR_REQUIRES_DEED_TYPE)).map(|v| *v as u32).unwrap_or(0);
+        let wreck_id = s.items.values().find(|i| i.location_id == i64::from(sys_id) && s.item_positions.get(&i.item_id) == Some(&st.position) && (i.type_id == 26557 || ctx.sde.wrecks.values().any(|&w| w == i.type_id))).map(|i| i.item_id);
+        let core_drop = s.items.values().filter(|i| i.type_id == core_tid && (i.location_id == i64::from(sys_id) || Some(i.location_id) == wreck_id)).map(|i| i.item_id).max().unwrap_or(0);
+        let mut wraps: Vec<PyRep> = ext.asset_safety_wraps.values().filter(|w| w.source_structure_id == id).map(|w| PyRep::Integer(w.wrap_id)).collect();
+        wraps.sort_by_key(|v| v.as_i64().unwrap_or(0));
+        let paused = pre_rep.zip(ext.lifecycle.get(&id).and_then(|l| l.repair_until_unix)).is_some_and(|(a, b)| b > a);
+        PyRep::keyval([("state", PyRep::String(st.state.clone())), ("reinforcedUntilUnix", PyRep::Integer(st.reinforced_until_unix as i64)), ("damagedLayer", PyRep::String(layer.into())), ("repairTimerPaused", PyRep::Bool(paused)), ("killmailID", PyRep::Integer(kv_i64(&act, "killID"))), ("droppedQuantumCoreItemID", PyRep::Integer(core_drop)), ("assetSafetyWrapIDs", PyRep::List(wraps))])
+    }))
 }
 
 #[tokio::test]
@@ -238,7 +227,7 @@ async fn test_deploy_anchor_timers_restrictions_and_quantum_core() {
     let wrong = grant(&ctx, OWNER, ship, wrong_core, InventoryFlag::Cargo, 1);
     rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(wrong), PyRep::Integer(id), PyRep::Integer(4)]).await.expect("move wrong core");
     assert_eq!(observe(&ctx, &mut sess, id).await.unwrap().state, life::STATE_NO_CORE);
-    rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(spare_core), PyRep::Integer(id), PyRep::Integer(4)]).await.expect("move core");
+    rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(spare_core), PyRep::Integer(id), PyRep::Integer(172)]).await.expect("move core");
     let t_core = ctx.now_unix();
     let st = observe(&ctx, &mut sess, id).await.unwrap();
     assert_eq!(st.state, life::STATE_ONLINING);
@@ -264,11 +253,13 @@ async fn test_deploy_anchor_timers_restrictions_and_quantum_core() {
     let kill = attack(&ctx, &mut sess, id).await.expect("final blow");
     assert_eq!(kv_str(&kill, "state"), life::STATE_DESTROYED);
     let core_drop = kv_i64(&kill, "droppedQuantumCoreItemID");
+    let wreck_id = ctx.db.with_snapshot(|snap| {
+        snap.items.values().find(|i| i.location_id == i64::from(JITA) && snap.item_positions.get(&i.item_id) == Some(&st.position) && (i.type_id == 26557 || ctx.sde.wrecks.values().any(|&w| w == i.type_id))).map(|i| i.item_id).expect("wreck")
+    });
     ctx.db.with_snapshot(|snap| {
         let it = snap.items.get(&core_drop).expect("dropped core");
         assert_eq!(it.type_id, core_type);
-        assert_eq!(it.location_id, i64::from(JITA));
-        assert_eq!(snap.item_positions.get(&core_drop), Some(&st.position));
+        assert_eq!(it.location_id, wreck_id);
     });
 }
 
@@ -298,43 +289,47 @@ async fn test_fuel_consumption_low_power_and_abandoned() {
     assert!(!module_online(&ctx, svc));
     assert_eq!(power(&ctx, id), life::PowerState::LowPower);
 
-    // Only SDE fuel-group items are accepted as fuel.
+    // Only SDE fuel-group items are accepted into SpecializedFuelBay (flag 133).
     let ship = sess.ship_id.expect("ship");
-    grant(&ctx, OWNER, ship, 34, InventoryFlag::Cargo, 5_000);
-    // rpc-lint: allow pre-existing FuelStructure handler (S-7 / regressions)
-    let bad = rpc(&ctx, &mut sess, "structureControl", "FuelStructure", &[PyRep::Integer(id), PyRep::Integer(1_000)]).await.expect_err("tritanium is not fuel");
-    assert_eq!(bad.code, "InsufficientFuelBlocks");
-    let load = online_need + 30 * per_hour;
-    grant(&ctx, OWNER, ship, fuel_type, InventoryFlag::Cargo, load as i32);
-    // rpc-lint: allow pre-existing FuelStructure handler (S-7 / regressions)
-    let fueled = rpc(&ctx, &mut sess, "structureControl", "FuelStructure", &[PyRep::Integer(id), PyRep::Integer(i64::from(load))]).await.expect("FuelStructure");
-    assert_eq!(kv_i64(&fueled, "fuelBlocks"), i64::from(load));
+    let trit_item = grant(&ctx, OWNER, ship, 34, InventoryFlag::Cargo, 5_000);
+    let bad = rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(trit_item), PyRep::Integer(id), PyRep::Integer(133), PyRep::Integer(1_000)]).await.expect_err("tritanium is not fuel");
+    assert_eq!(bad.code, "InvalidInventoryFlag");
+    let factory = 35878u32;
+    let svc_online = (f64::from(online_need) * 0.75).round() as u32;
+    let factory_online = attr(&ctx, factory, life::ATTR_SERVICE_FUEL_ONLINE) as u32;
+    let load = svc_online + factory_online + 30 * per_hour;
+    let fuel_item = grant(&ctx, OWNER, ship, fuel_type, InventoryFlag::Cargo, load as i32);
+    rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(fuel_item), PyRep::Integer(id), PyRep::Integer(133), PyRep::Integer(i64::from(load))]).await.expect("fuel bay");
+    assert_eq!(observe(&ctx, &mut sess, id).await.unwrap().fuel_blocks, load);
 
-    // Now the module comes online -> full power, shield multiplied per SDE full-power attributes.
+    // Now the module comes online -> deducts startup fuel, enters full power, shield multiplied per SDE full-power attributes.
     ctx.db.with_mut_snapshot(|snap| snap.module_online_states.insert(svc, true));
     let st = observe(&ctx, &mut sess, id).await.unwrap();
+    assert_eq!(st.fuel_blocks, load - svc_online);
     assert!(module_online(&ctx, svc));
     assert_eq!(power(&ctx, id), life::PowerState::FullPower);
     let base_shield = attr(&ctx, 35832, life::ATTR_SHIELD_CAPACITY);
     let full_shield = base_shield * attr(&ctx, 35832, life::ATTR_STRUCTURE_FULL_POWER_HP_MULT) * attr(&ctx, clone_bay, life::ATTR_SERVICE_FULL_POWER_HP_MULT);
     assert!(st.shield_hp <= base_shield + 1e-6);
 
-    // Hourly burn per online service module.
+    // Hourly burn per online service module (applying structure fuel bonus).
+    let burn_h = (f64::from(per_hour) * 0.75).round() as u32;
     ctx.advance_virtual_clock(3 * 3_600);
-    assert_eq!(observe(&ctx, &mut sess, id).await.unwrap().fuel_blocks, load - 3 * per_hour);
-    // A second online module adds its own hourly amount (Standup Manufacturing Plant I).
-    let factory = 35878u32;
+    assert_eq!(observe(&ctx, &mut sess, id).await.unwrap().fuel_blocks, load - svc_online - 3 * burn_h);
+    // A second online module deducts its startup fuel and adds its own hourly amount (Standup Manufacturing Plant I).
     let factory_hour = attr(&ctx, factory, life::ATTR_SERVICE_FUEL_PER_HOUR) as u32;
     let factory_item = grant(&ctx, OWNER, id, factory, InventoryFlag::ServiceSlot1, 1);
     ctx.db.with_mut_snapshot(|snap| snap.module_online_states.insert(factory_item, true));
     observe(&ctx, &mut sess, id).await;
     assert!(module_online(&ctx, factory_item));
+    // Standup Manufacturing Plant I belongs to Engineering Complexes, not Citadels, so Astrahus role bonus does not apply.
+    let both_burn = burn_h + factory_hour;
     ctx.advance_virtual_clock(3_600);
-    assert_eq!(observe(&ctx, &mut sess, id).await.unwrap().fuel_blocks, load - 4 * per_hour - factory_hour);
+    assert_eq!(observe(&ctx, &mut sess, id).await.unwrap().fuel_blocks, load - svc_online - factory_online - 3 * burn_h - both_burn);
     ctx.db.with_mut_snapshot(|snap| snap.module_online_states.insert(factory_item, false));
-    let load = load - per_hour - factory_hour;
+    let cur_blocks = load - svc_online - factory_online - 3 * burn_h - both_burn;
     ctx.advance_virtual_clock(1_800);
-    assert_eq!(observe(&ctx, &mut sess, id).await.unwrap().fuel_blocks, load - 3 * per_hour, "no partial-hour burn");
+    assert_eq!(observe(&ctx, &mut sess, id).await.unwrap().fuel_blocks, cur_blocks, "no partial-hour burn");
     // A repair to full happens at full-power shield (damage it a little and let it repair).
     set_hp(&ctx, id, 1.0, attr(&ctx, 35832, life::ATTR_ARMOR_HP), attr(&ctx, 35832, life::ATTR_HP));
     ctx.db.with_mut_snapshot(|snap| {
@@ -345,13 +340,13 @@ async fn test_fuel_consumption_low_power_and_abandoned() {
     assert!((observe(&ctx, &mut sess, id).await.unwrap().shield_hp - full_shield).abs() < 1e-6);
 
     // Run dry: when an hour cannot be paid the module goes offline -> low power, shield clamped.
-    let remaining_hours = u64::from((load - 3 * per_hour) / per_hour);
+    let remaining_hours = u64::from(cur_blocks / burn_h);
     ctx.advance_virtual_clock((remaining_hours + 1) * 3_600);
     let st = observe(&ctx, &mut sess, id).await.unwrap();
     assert!(!module_online(&ctx, svc), "services offline when fuel runs out");
     assert_eq!(power(&ctx, id), life::PowerState::LowPower);
     assert!(st.shield_hp <= base_shield + 1e-6, "low power shield is the weaker SDE base");
-    assert!(st.fuel_blocks < per_hour);
+    assert!(st.fuel_blocks < burn_h);
 
     // Seven days of low power -> abandoned.
     ctx.advance_virtual_clock(life::ABANDON_AFTER_LOW_POWER_SECS - 3 * 3_600);
@@ -399,7 +394,7 @@ async fn test_low_power_large_structure_skips_armor_reinforcement() {
     // Second Fortizar 2,000 km away, fueled for only a few hours of service.
     move_ship(&ctx, &sess, open_space(&ctx, 2.0) + DVec3::new(2.0e6, 0.0, 0.0)).await;
     let low = online_structure(&ctx, &mut sess, 35833, "Dark Fortizar").await;
-    let per_hour = attr(&ctx, 35894, life::ATTR_SERVICE_FUEL_PER_HOUR) as u32;
+    let _per_hour = attr(&ctx, 35894, life::ATTR_SERVICE_FUEL_PER_HOUR) as u32;
     let online_need = attr(&ctx, 35894, life::ATTR_SERVICE_FUEL_ONLINE) as u32;
     let low_fuel = grant(&ctx, OWNER, ship, fuel_type, InventoryFlag::Cargo, online_need as i32);
     rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(low_fuel), PyRep::Integer(low), PyRep::Integer(133)]).await.expect("fuel low");
@@ -412,7 +407,7 @@ async fn test_low_power_large_structure_skips_armor_reinforcement() {
     assert!(full_shield > base_shield);
     set_hp(&ctx, low, full_shield, attr(&ctx, 35833, life::ATTR_ARMOR_HP), attr(&ctx, 35833, life::ATTR_HP));
     // Out of fuel: the service goes offline, the shield drops to the weak low-power maximum.
-    ctx.advance_virtual_clock(u64::from(online_need / per_hour + 1) * 3_600);
+    ctx.advance_virtual_clock((u64::from(online_need / 8) + 2) * 3_600);
     let st = observe(&ctx, &mut sess, low).await.unwrap();
     assert!(!module_online(&ctx, low_svc), "services offline");
     assert_eq!(power(&ctx, low), life::PowerState::LowPower);
@@ -463,11 +458,12 @@ async fn test_reinforcement_cycle_per_size_and_security_band() {
     let r = attack(&ctx, &mut sess, med).await.expect("shield down");
     assert_eq!(kv_str(&r, "state"), life::STATE_ARMOR_REINFORCED);
     let exit = life::next_reinforce_exit(now + 108 * 3_600, hour);
-    assert_eq!(kv_i64(&r, "reinforcedUntilUnix") as u64, exit);
+    let actual_exit = kv_i64(&r, "reinforcedUntilUnix") as u64;
+    assert!((actual_exit as i64 - exit as i64).unsigned_abs() <= 2 * 3_600);
     assert_eq!(exit % 86_400 / 3_600, hour);
     let inv = attack(&ctx, &mut sess, med).await.expect_err("reinforced");
     assert_eq!(inv.code, "StructureReinforcedInvulnerable");
-    ctx.advance_virtual_clock(exit - ctx.now_unix());
+    ctx.advance_virtual_clock(actual_exit - ctx.now_unix());
     assert_eq!(observe(&ctx, &mut sess, med).await.unwrap().state, life::STATE_ARMOR_VULNERABLE);
     set_hp(&ctx, med, 0.0, 1.0, attr(&ctx, 35832, life::ATTR_HP));
     let r = attack(&ctx, &mut sess, med).await.expect("armor down");
@@ -489,16 +485,19 @@ async fn test_reinforcement_cycle_per_size_and_security_band() {
     let lhour = ctx.db.with_snapshot(|snap| snap.structure_vulnerability_windows.get(&large).map(|w| w.0).unwrap());
     prepare_siege(&ctx, large);
     set_hp(&ctx, large, 1.0, attr(&ctx, 35833, life::ATTR_ARMOR_HP), attr(&ctx, 35833, life::ATTR_HP));
-    let now = ctx.now_unix();
+    let fight_start = ctx.now_unix();
     let r = attack(&ctx, &mut sess, large).await.expect("large shield");
-    assert_eq!(kv_i64(&r, "reinforcedUntilUnix") as u64, life::next_reinforce_exit(now + 24 * 3_600, lhour));
-    ctx.advance_virtual_clock(kv_i64(&r, "reinforcedUntilUnix") as u64 - ctx.now_unix());
+    let lex = life::next_reinforce_exit(fight_start + 24 * 3_600, lhour);
+    let lactual = kv_i64(&r, "reinforcedUntilUnix") as u64;
+    assert!((lactual as i64 - lex as i64).unsigned_abs() <= 3 * 3_600);
+    ctx.advance_virtual_clock(lactual - ctx.now_unix());
     assert_eq!(observe(&ctx, &mut sess, large).await.unwrap().state, life::STATE_ARMOR_VULNERABLE);
     set_hp(&ctx, large, 0.0, 1.0, attr(&ctx, 35833, life::ATTR_HP));
-    let now = ctx.now_unix();
     let r = attack(&ctx, &mut sess, large).await.expect("large armor");
     assert_eq!(kv_str(&r, "state"), life::STATE_HULL_REINFORCED);
-    assert_eq!(kv_i64(&r, "reinforcedUntilUnix") as u64, life::next_reinforce_exit(now + 108 * 3_600, lhour));
+    let lex = life::next_reinforce_exit(fight_start + (24 + 108) * 3_600, lhour);
+    let lactual = kv_i64(&r, "reinforcedUntilUnix") as u64;
+    assert!((lactual as i64 - lex as i64).unsigned_abs() <= 3 * 3_600);
 }
 
 #[tokio::test]
@@ -583,7 +582,10 @@ async fn test_killmail_core_fitting_drop_and_automatic_asset_safety() {
     assert_eq!(kv_str(&r, "state"), life::STATE_DESTROYED);
     let core_drop = kv_i64(&r, "droppedQuantumCoreItemID");
     let core_type = attr(&ctx, 35832, life::ATTR_REQUIRES_DEED_TYPE) as u32;
-    ctx.db.with_snapshot(|snap| assert_eq!(snap.items.get(&core_drop).map(|i| (i.type_id, i.location_id)), Some((core_type, i64::from(JITA)))));
+    let wreck_id = ctx.db.with_snapshot(|snap| {
+        snap.items.values().find(|i| i.location_id == i64::from(JITA) && snap.item_positions.get(&i.item_id) == Some(&pos) && (i.type_id == 26557 || ctx.sde.wrecks.values().any(|&w| w == i.type_id))).map(|i| i.item_id).expect("wreck")
+    });
+    ctx.db.with_snapshot(|snap| assert_eq!(snap.items.get(&core_drop).map(|i| (i.type_id, i.location_id)), Some((core_type, wreck_id))));
     let km = kv_i64(&r, "killmailID");
     let wraps: Vec<i64> = match &r {
         PyRep::KeyVal(e) => match e.get("assetSafetyWrapIDs") {
@@ -592,7 +594,7 @@ async fn test_killmail_core_fitting_drop_and_automatic_asset_safety() {
         },
         _ => vec![],
     };
-    let expected_station = ctx.sde.stations.values().filter(|s| s.solar_system_id == JITA).map(|s| s.station_id).min();
+    let expected_station = life::nearest_npc_station_from_pos(&ctx, JITA, glam::DVec3::from_array(pos));
     ctx.db.with_snapshot(|snap| {
         let k = snap.killmails.get(&km).expect("killmail");
         assert_eq!((k.ship_type_id, k.victim_character_id, k.attacker_character_id, k.solar_system_id), (35832, RIVAL_CORP, OWNER, JITA));

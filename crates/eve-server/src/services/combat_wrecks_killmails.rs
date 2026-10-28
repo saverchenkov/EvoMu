@@ -788,7 +788,7 @@ pub async fn handle_wrecks_killmails(
                     } else if let Ok(ch) = ctx.db.get_character(char_id) {
                         session.ship_id = Some(ch.active_ship_id);
                         session.station_id = ch.station_id;
-                        session.structure_id = None;
+                        session.structure_id = ch.structure_id;
                         session.solar_system_id = Some(ch.solar_system_id);
                         crate::services::map_service::record_solar_system_visit(ctx, char_id, ch.solar_system_id);
                     }
@@ -852,6 +852,9 @@ pub async fn handle_wrecks_killmails(
             if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
                 let _ = fit.deactivate_module(module_id, &ctx.sde);
                 ctx.store_ship_fitting(ship_id, fit);
+            }
+            if let Some(sys_id) = session.solar_system_id {
+                crate::services::space_destiny::space_nav_travel::sync_tether(ctx, char_id, sys_id, ship_id).await;
             }
             Some(Ok(PyRep::keyval([
                 ("moduleID", PyRep::Integer(module_id)),

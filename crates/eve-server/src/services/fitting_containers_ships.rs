@@ -1179,3 +1179,113 @@ pub(crate) async fn handle_containers_ships_and_fitting(
         _ => handle_ships_mastery_and_fitting_ext(ctx, session, bound_entry, service, method, args, kwargs).await,
     }
 }
+
+/// Strictly validates item ownership, ship ownership (`category_id == 6`), and co-location
+/// (docked at the same fitting-capable station/structure, or actively piloting the ship near an
+/// in-space fitting service without a weapons timer) before unfitting or destroying a ship module/rig.
+pub(crate) async fn validate_ship_module_unfit_auth(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    src_item: &eve_db::InventoryItemRecord,
+    new_loc: i64,
+) -> Result<(), BridgeRpcError> {
+    let in_space_ship = ctx.db.with_snapshot(|snap| -> Result<Option<(u32, i64)>, BridgeRpcError> {
+        if src_item.owner_id != char_id {
+            return Err(BridgeRpcError {
+                code: "ItemOwnershipViolation".into(),
+                message: format!("Item {} is not owned by {char_id}", src_item.item_id),
+            });
+        }
+        if src_item.flag == InventoryFlag::Locked
+            || snap.is_item_locked_in_contract_or_job(src_item.item_id)
+        {
+            return Err(BridgeRpcError {
+                code: "ItemLocked".into(),
+                message: format!("Item {} is locked and cannot be unfitted", src_item.item_id),
+            });
+        }
+        let Some(ship_item) = snap.items.get(&src_item.location_id) else {
+            return Err(BridgeRpcError {
+                code: "ShipNotFound".into(),
+                message: format!("Source ship {} not found", src_item.location_id),
+            });
+        };
+        let ship_cat = ctx.sde.types.get(&ship_item.type_id).map(|t| t.category_id).unwrap_or(0);
+        if ship_item.owner_id != char_id || ship_cat != 6 {
+            return Err(BridgeRpcError {
+                code: "ShipOwnershipViolation".into(),
+                message: format!("Source {} is not a ship owned by {char_id}", src_item.location_id),
+            });
+        }
+        let (char_dock, char_sys, active_ship_id) = snap
+            .characters
+            .get(&char_id)
+            .map(|c| (c.station_id.or(c.structure_id).unwrap_or(0), c.solar_system_id as i64, c.active_ship_id))
+            .unwrap_or((0, 0, 0));
+        let ch_dock = if let Some(d) = session.station_id.or(session.structure_id) {
+            d
+        } else if session.solar_system_id.is_some() {
+            0
+        } else {
+            char_dock
+        };
+        let ch_sys = if char_sys > 0 { char_sys } else { session.solar_system_id.map(|s| s as i64).unwrap_or(0) };
+        let resolves_to_loc = |start_loc: i64, target_loc: i64| -> bool {
+            let mut cur = start_loc;
+            for _ in 0..4 {
+                if cur == target_loc {
+                    return true;
+                }
+                let Some(node) = snap.items.get(&cur) else { return false };
+                cur = node.location_id;
+            }
+            false
+        };
+        if ch_dock > 0 {
+            crate::services::structure_acl_defense_rules::validate_docked_ship_fitting_facility_in_snap(
+                ctx, snap, ch_dock,
+            )?;
+            if !resolves_to_loc(ship_item.location_id, ch_dock) {
+                return Err(BridgeRpcError {
+                    code: "InvalidFittingTarget".into(),
+                    message: format!("Ship {} is not docked at current location {ch_dock}", ship_item.item_id),
+                });
+            }
+            if new_loc != ship_item.item_id && !resolves_to_loc(new_loc, ch_dock) {
+                return Err(BridgeRpcError {
+                    code: "InvalidItemLocation".into(),
+                    message: format!("Destination {new_loc} is not at current dock {ch_dock}"),
+                });
+            }
+            Ok(None)
+        } else {
+            let caller_ship = session.ship_id.filter(|&id| id > 0).unwrap_or(active_ship_id);
+            if ship_item.item_id != caller_ship || (ch_sys > 0 && ship_item.location_id != ch_sys) {
+                return Err(BridgeRpcError {
+                    code: "InvalidFittingTarget".into(),
+                    message: format!("Pilot {char_id} must be aboard ship {} in system {ch_sys} to unfit in space", ship_item.item_id),
+                });
+            }
+            let sys_u32 = session.solar_system_id.unwrap_or(ch_sys.max(0) as u32);
+            Ok(Some((sys_u32, caller_ship)))
+        }
+    })?;
+    if let Some((sys_id, ship_id)) = in_space_ship {
+        let now_unix = ctx.now_unix_secs();
+        let has_weapons_timer = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner()).states.get(&char_id).is_some_and(|cw| cw.is_weapon_timer_active(now_unix));
+        if has_weapons_timer {
+            return Err(BridgeRpcError {
+                code: "CannotRefitWithWeaponsTimer".into(),
+                message: "Cannot refit or unfit modules in space while weapons timer is active".into(),
+            });
+        }
+        if sys_id == 0 || !super::is_near_in_space_fitting_service(ctx, sys_id, ship_id).await {
+            return Err(BridgeRpcError {
+                code: "CannotUnfitInSpace".into(),
+                message: "Unfitting modules requires being docked at a station/structure or within range of a Mobile Depot or capital SMA".into(),
+            });
+        }
+    }
+    Ok(())
+}

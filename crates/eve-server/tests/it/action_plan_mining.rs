@@ -604,7 +604,7 @@ async fn test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_rep
         let ch = snap.characters.get_mut(&char_id).unwrap(); ch.station_id = None; ch.structure_id = Some(comp_structure_id);
     });
     sess.station_id = None; sess.structure_id = Some(comp_structure_id);
-    ctx.dispatch_rpc(&mut sess, "structureProfiles", None, "SaveProfileSettings", &[PyRep::Integer(comp_structure_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Real(0.04)])])], &kw, None).await.expect("SaveProfileSettings 4% reprocessing service tax");
+    ctx.dispatch_rpc(&mut sess, "structureSettings", None, "SaveProfileSettings", &[PyRep::Integer(comp_structure_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Real(0.04)])])], &kw, None).await.expect("SaveProfileSettings 4% reprocessing service tax");
     let comp_res = ctx.dispatch_rpc(&mut sess, "structureCompressionMgr", None, "CompressItemInStructure", &[PyRep::Integer(uncompressed_ore_id)], &kw, None).await.expect("CompressItemInStructure");
     assert_eq!((get_dict_val(&comp_res, "compressedTypeID").and_then(|v| v.as_i64()), get_dict_val(&comp_res, "compressedUnits").and_then(|v| v.as_i64()), get_dict_val(&comp_res, "remainderUnits").and_then(|v| v.as_i64())), (Some(62516), Some(1_234), Some(0)));
     let eff = ctx.dispatch_rpc(&mut sess, "structureCompressionMgr", None, "GetMyGasDecompressionEfficiency", &[PyRep::Integer(comp_structure_id)], &kw, None).await.expect("GetMyGasDecompressionEfficiency").as_f64().unwrap();

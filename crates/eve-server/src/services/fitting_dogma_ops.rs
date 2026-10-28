@@ -113,6 +113,15 @@ pub(crate) async fn handle_dogma_ops(
                 }
             }
 
+            if sys.get_combat_state(target_id).await.ok().flatten().is_some_and(|tcs| tcs.is_tethered) {
+                return Some(Err(BridgeRpcError {
+                    code: "TargetInvulnerable".into(),
+                    message: format!("Target {target_id} is tethered and invulnerable to target locks"),
+                }));
+            }
+            if session.ship_id == Some(source_id) {
+                crate::services::space_warp_jump::break_location_change_invulnerability(ctx, char_id);
+            }
             let fit_res = ctx.get_or_rebuild_ship_fitting(char_id, source_id);
 
             if let Ok(Some(cs)) = sys.get_combat_state(source_id).await {

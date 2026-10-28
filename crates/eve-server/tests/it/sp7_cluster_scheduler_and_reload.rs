@@ -523,35 +523,27 @@ async fn test_sp7_restart_reloads_structures_wrecks_jetcans_mwd_bubbles_and_dron
     assert_eq!(ctx2.db.with_snapshot(|s| s.items[&drone_item_id].location_id), ship_id2);
     // Target, dock, and undock at the restarted structure (`feat:lifecycle.structure-restart`)
     let _ = sys_handle2.set_ball_position(ship_id2, DVec3::new(120_000.0, 0.0, -80_000.0)).await;
-    ctx2.dispatch_rpc(&mut sess_re, "dogmaIM", None, "AddTarget", &[PyRep::Integer(structure_id)], &empty, None)
-        .await
-        .expect("AddTarget on restarted structure");
+    ctx2.dispatch_rpc(&mut sess_re, "dogmaIM", None, "AddTarget", &[PyRep::Integer(structure_id)], &empty, None).await.expect("AddTarget on restarted structure");
     ctx2.advance_secs(12);
-    ctx2.dispatch_rpc(&mut sess_re, "structureDocking", None, "Dock", &[PyRep::Integer(structure_id)], &empty, None)
-        .await
-        .expect("Dock at restarted structure");
+    ctx2.dispatch_rpc(&mut sess_re, "structureDocking", None, "Dock", &[PyRep::Integer(structure_id)], &empty, None).await.expect("Dock at restarted structure");
     assert_eq!(sess_re.structure_id, Some(structure_id));
     ctx2.advance_secs(12);
-    ctx2.dispatch_rpc(&mut sess_re, "structureDocking", None, "Undock", &[], &empty, None)
-        .await
-        .expect("Undock from restarted structure");
+    ctx2.dispatch_rpc(&mut sess_re, "structureDocking", None, "Undock", &[], &empty, None).await.expect("Undock from restarted structure");
     assert_eq!(sess_re.structure_id, None);
-    // Rival pilot 90_000_002 reconnects and attacks the restarted structure (`structureControl.AttackStructure`)
+    // Rival pilot 90_000_002 reconnects, locks, and attacks the restarted structure (`dogmaIM.Activate`)
     let (mut sess2_re, _, ship2_id_re) = setup_pilot_in_space(&ctx2, 90_000_002).await;
+    ctx2.db.with_mut_snapshot(|snap| {
+        let mut ammo = sp6_item(990_007_185, 185, 90_000_002, ship2_id_re, InventoryFlag::HiSlot0, HashMap::new());
+        ammo.quantity = 100;
+        ammo.singleton = false;
+        snap.items.insert(990_007_185, ammo);
+    });
+    if let Ok(mut bp) = sys_handle2.ballpark.write() { let _ = bp.set_mode(ship2_id_re, MovementMode::Stop); }
     let _ = sys_handle2.set_ball_position(ship2_id_re, DVec3::new(120_500.0, 0.0, -80_000.0)).await;
-    let atk_res = ctx2
-        .dispatch_rpc(
-            &mut sess2_re,
-            "structureControl",
-            None,
-            "AttackStructure", // rpc-lint: allow legacy/negative-test RPC (structureControl.AttackStructure)
-            &[PyRep::Integer(structure_id)],
-            &empty,
-            None,
-        )
-        .await
-        .expect("AttackStructure on restarted structure");
-    let PyRep::KeyVal(atk_kv) = atk_res else { panic!("expected AttackStructure KeyVal") };
+    ctx2.dispatch_rpc(&mut sess2_re, "dogmaIM", None, "AddTarget", &[PyRep::Integer(structure_id)], &empty, None).await.expect("AddTarget structure");
+    let _ = sys_handle2.step_manual(10.0).await;
+    let atk_res = ctx2.dispatch_rpc(&mut sess2_re, "dogmaIM", None, "Activate", &[PyRep::Integer(100_000_006), PyRep::String("projectileFired".into()), PyRep::Integer(structure_id)], &empty, None).await.expect("Activate weapon on restarted structure");
+    let PyRep::KeyVal(atk_kv) = atk_res else { panic!("expected Activate KeyVal") };
     assert!(atk_kv.get("appliedDamage").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
 
     // Advance past jetcan 1h lifetime (`T0 + 3601s`) -> jetcan decays while wreck (2h) remains

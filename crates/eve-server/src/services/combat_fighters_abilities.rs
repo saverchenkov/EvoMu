@@ -327,7 +327,11 @@ async fn activate_single_fighter_ability(
                 }
             }
         };
-        let dist = fighter_ball.position.distance(target_ball.position);
+        let dist = if tid >= 1_000_000_000_000 {
+            (fighter_ball.position.distance(target_ball.position) - target_ball.radius - fighter_ball.radius).max(0.0)
+        } else {
+            fighter_ball.position.distance(target_ball.position)
+        };
         if dist > max_range {
             return Some(Err(BridgeRpcError {
                 code: "TargetOutOfRange".into(),
@@ -518,8 +522,15 @@ async fn activate_single_fighter_ability(
 
         let is_ewar = matches!(ability_id, 2 | 10 | 11 | 12 | 14 | 17 | 18 | 36);
         if dmg.em + dmg.thermal + dmg.kinetic + dmg.explosive > 0.0 {
-            if let Ok(Some((applied, destroyed, _))) =
-                sys_handle.apply_damage_with_attacker(tid, dmg, Some(char_id)).await
+            let res = match crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
+                ctx, &sys_handle, sys_id, char_id, tid, dmg, 4.0, now_unix,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if let Some((applied, destroyed, _)) = res
             {
                 super::combat_wrecks_killmails::record_killmail_assist_action(
                     ctx,
@@ -930,7 +941,10 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
                         }
                     }
                     if let Ok(Some((app, destroyed, _))) =
-                        sys_handle.apply_damage_with_attacker(b.id, bomb_dmg, Some(char_id)).await
+                        crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
+                            ctx, &sys_handle, sys_id, char_id, b.id, bomb_dmg, 10.0, now_unix,
+                        )
+                        .await
                     {
                         if app > 0.0 {
                             super::combat_wrecks_killmails::record_killmail_assist_action(

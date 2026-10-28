@@ -14,9 +14,7 @@ use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_sde::attr_ids;
 use eve_server::router::ServerContext;
-use eve_server::services::{
-    combat_crimewatch, sov_services, station_structure::structure_lifecycle_rpc,
-};
+use eve_server::services::{combat_crimewatch, sov_services};
 use std::collections::HashMap;
 
 const P1: i64 = 90_000_001;
@@ -241,9 +239,8 @@ async fn test_structure_dock_undock_and_lifecycle_notifications() {
     // 3. Fit and online a Standup Cloning Center I (35894) in ServiceSlot0: emits OnStructureServiceChanged.
     let svc_item_id = 770_001;
     seed_item(&ctx, svc_item_id, 35894, P1, structure_id, InventoryFlag::Hangar, 1);
-    structure_lifecycle_rpc::handle_structure_fit_move(&ctx, &mut s1, svc_item_id, structure_id, InventoryFlag::ServiceSlot0, true)
-        .expect("fit service module");
-    assert_eq!(events(&ctx, P1, "OnStructureServiceChanged"), vec![vec![PyRep::Integer(structure_id), PyRep::Integer(35894), PyRep::Bool(true)]]);
+    call(&ctx, &mut s1, "invbroker", "Add", &[PyRep::Integer(svc_item_id), PyRep::Integer(structure_id), PyRep::Integer(InventoryFlag::ServiceSlot0 as i64)]).await;
+    assert_eq!(events(&ctx, P1, "OnStructureServiceChanged"), vec![vec![PyRep::Integer(structure_id)]]);
 
     // 4. Undock from the structure: emits OnCharacterLeftStructure and OnInvulunOnUndockingUpdated.
     call(&ctx, &mut s1, "structureDocking", "Undock", &[]).await;
@@ -339,6 +336,12 @@ async fn test_structure_upwell_asset_safety_and_access_notifications() {
     assert_eq!(events(&ctx, P1, "OnStructureTargetRemoved"), vec![vec![PyRep::Integer(structure_id), PyRep::Integer(0)]]);
 
     // 5. MovePersonalAssetsToSafety & MoveSafetyWrapToStructure -> emits OnAssetSafetyCreated and OnAssetSafetyDelivered.
+    s1.structure_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&P1) {
+            ch.structure_id = None;
+        }
+    });
     seed_item(&ctx, 880_002_001, 34, P1, structure_id, InventoryFlag::Hangar, 500);
     let wrap_res = call(&ctx, &mut s1, "structureAssetSafety", "MovePersonalAssetsToSafety", &[PyRep::Integer(i64::from(JITA)), PyRep::Integer(structure_id)]).await;
     let wrap_id = wrap_res.dict_get("wrapID").or_else(|| wrap_res.dict_get("wrapItemID")).and_then(|v| v.as_i64()).expect("wrapID");
@@ -353,7 +356,7 @@ async fn test_structure_upwell_asset_safety_and_access_notifications() {
     assert_eq!(events(&ctx, P1, "OnHomeStationMovedFromStructure"), vec![vec![]]);
     assert!(events(&ctx, P1, "OnStructureRemoved").is_empty());
     ctx.advance_virtual_clock(7 * 86_400 + 10);
-    call(&ctx, &mut s1, "structureDirectory", "GetStructures", &[]).await;
+    let _ = call(&ctx, &mut s1, "structureDirectory", "GetStructures", &[]).await;
     assert_eq!(events(&ctx, P1, "OnStructureRemoved"), vec![vec![PyRep::Integer(i64::from(JITA)), PyRep::Integer(structure_id)]]);
     assert_eq!(events(&ctx, P1, "OnStructureRemovedFromSpace"), vec![vec![PyRep::Integer(structure_id)]]);
 }

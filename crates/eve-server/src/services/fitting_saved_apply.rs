@@ -114,6 +114,9 @@ pub async fn handle_fit_ships(
     }
 
     let ship_check = ctx.db.with_snapshot(|snap| {
+        crate::services::structure_acl_defense_rules::validate_docked_ship_fitting_facility_in_snap(
+            ctx, snap, station_id,
+        )?;
         for &ship_id in &target_ship_ids {
             let Some(sh) = snap.items.get(&ship_id) else {
                 return Err(BridgeRpcError {

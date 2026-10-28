@@ -104,6 +104,9 @@ pub(crate) async fn handle_destroyed_ball_from_missile_or_aoe(
     ball_pos: DVec3,
     now_unix: u64,
 ) {
+    if ctx.db.with_snapshot(|s| s.structures.contains_key(&ball_id)) {
+        return;
+    }
     if let Some(vcid) = active_ship_victim_char_id(ctx, ball_id) {
         let _ = crate::combat::death_pipeline::execute_death_pipeline(
             ctx,
@@ -197,9 +200,10 @@ pub async fn step_missiles_and_breachers(
         };
 
         let to_target = t_ball.position - m_ball.position;
-        let dist = to_target.length();
-        let dir = if dist > 1e-3 {
-            to_target / dist
+        let raw_len = to_target.length();
+        let dist = if mstate.target_ball_id >= 1_000_000_000_000 { (raw_len - t_ball.radius).max(0.0) } else { raw_len };
+        let dir = if raw_len > 1e-3 {
+            to_target / raw_len
         } else {
             DVec3::X
         };
@@ -233,7 +237,7 @@ pub async fn step_missiles_and_breachers(
                 mstate.drf,
             );
             let scaled = mstate.base_damage.scaled(factor);
-            if let Ok(Some((applied, destroyed, _))) = sys_handle.apply_damage_with_attacker(mstate.target_ball_id, scaled, Some(mstate.attacker_char_id)).await {
+            if let Ok(Some((applied, destroyed, _))) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys_handle, mstate.solar_system_id, mstate.attacker_char_id, mstate.target_ball_id, scaled, mstate.flight_time_s.max(1.0), ctx.now_unix()).await {
                 mstate.applied_damage = applied;
                 let victim_char_opt = ctx.db.with_snapshot(|snap| {
                     snap.characters.values().find(|c| c.active_ship_id == mstate.target_ball_id).map(|c| c.character_id)
@@ -673,7 +677,7 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                                 continue;
                             }
                         }
-                        if let Ok(Some((applied, destroyed, _))) = sys_handle.apply_damage_with_attacker(b.id, sb_dmg, Some(char_id)).await {
+                        if let Ok(Some((applied, destroyed, _))) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys_handle, sys_id, char_id, b.id, sb_dmg, 5.0, now_unix).await {
                             hit_ball_ids.push(b.id);
                             record_killmail_assist_action(ctx, b.id, char_id, attacker_ball.type_id, m.type_id, applied, false, now_unix);
                             if destroyed {
@@ -922,7 +926,7 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                         let sig_factor = (target_sig / exp_radius).min(1.0);
                         let scaled_dmg = bomb_dmg.scaled(sig_factor);
                         if scaled_dmg.total() > 0.0 {
-                            if let Ok(Some((app, destroyed, _))) = sys_handle.apply_damage_with_attacker(b.id, scaled_dmg, Some(char_id)).await {
+                            if let Ok(Some((app, destroyed, _))) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys_handle, sys_id, char_id, b.id, scaled_dmg, 12.0, now_unix).await {
                                 total_dmg_applied += app;
                                 hit_targets.push(b.id);
                                 record_killmail_assist_action(

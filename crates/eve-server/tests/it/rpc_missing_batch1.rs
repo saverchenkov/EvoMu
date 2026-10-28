@@ -282,6 +282,8 @@ async fn repair_svc_quotes_station_structure_and_fuel_jettison() {
             quantum_core_installed: true, fuel_blocks: 500, shield_hp: 1_000_000.0, armor_hp: 1_000_000.0,
             hull_hp: 1_000_000.0, reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
         });
+        snap.items.insert(950_200_099, make_item(950_200_099, 35895, corp_id, structure_id, InventoryFlag::ServiceSlot0, 1, true, false));
+        snap.module_online_states.insert(950_200_099, true);
     });
 
     let mut sess = SessionState::new(81_002);

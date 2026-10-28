@@ -171,6 +171,8 @@ pub struct PveExplorationRegistry {
     pub hacked_containers: std::collections::HashSet<(SolarSystemId, ItemId)>,
     #[serde(default, with = "tuple_map_serde")]
     pub failure_counts: HashMap<(SolarSystemId, ItemId), u8>,
+    #[serde(default, with = "tuple_map_serde")]
+    pub structure_char_failures: HashMap<(CharacterId, ItemId), u8>,
     pub sim_clock_sec: u64,
     pub next_id_seq: i64,
     #[serde(default)]

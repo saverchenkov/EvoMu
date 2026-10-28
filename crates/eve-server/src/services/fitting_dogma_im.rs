@@ -581,6 +581,14 @@ pub(crate) async fn handle_dogma_im(
                 return Some(Err(e));
             }
             let sys = ctx.systems.get_or_spawn(sys_id);
+            let is_upwell_target = target_id >= 1_000_000_000_000
+                || ctx.db.with_snapshot(|s| s.structures.contains_key(&target_id));
+            if is_upwell_target {
+                crate::services::station_structure::structure_lifecycle_rpc::ensure_structure_ball_in_space(
+                    ctx, sys_id, target_id,
+                )
+                .await;
+            }
             let Some((_, ship_ball)) = sys.get_ball_snapshot(ship_id).await.unwrap_or(None) else {
                 return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: format!("Ship ball {ship_id} not found in system") }));
             };
@@ -588,19 +596,27 @@ pub(crate) async fn handle_dogma_im(
                 return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: format!("Target ball {target_id} not found in system") }));
             };
 
-            let target_char_id = ctx.db.with_snapshot(|snap| {
-                if snap.characters.contains_key(&target_id) {
-                    Some(target_id)
-                } else {
-                    snap.characters.values().find(|c| c.active_ship_id == target_id).map(|c| c.character_id)
-                }
-            });
+            let target_char_id = if is_upwell_target {
+                None
+            } else {
+                ctx.db.with_snapshot(|snap| {
+                    if snap.characters.contains_key(&target_id) {
+                        Some(target_id)
+                    } else {
+                        snap.characters.values().find(|c| c.active_ship_id == target_id).map(|c| c.character_id)
+                    }
+                })
+            };
             if let Some(t_char) = target_char_id {
                 let now_unix = ctx.now_unix();
                 if crate::services::space_destiny::is_location_change_invulnerable(ctx, t_char, now_unix) {
                     return Some(Err(BridgeRpcError { code: "TargetInvulnerable".into(), message: format!("Target character {t_char} is invulnerable due to recent location change") }));
                 }
             }
+            if sys.get_combat_state(target_id).await.ok().flatten().is_some_and(|tcs| tcs.is_tethered) {
+                return Some(Err(BridgeRpcError { code: "TargetInvulnerable".into(), message: format!("Target {target_id} is tethered and invulnerable to target locks") }));
+            }
+            crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
             let fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
                 Ok(f) => f,
                 Err(e) => return Some(Err(e)),
@@ -616,7 +632,8 @@ pub(crate) async fn handle_dogma_im(
             }
 
             let max_range = fit.ship.get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde);
-            let dist = (ship_ball.position - target_ball.position).length();
+            let surface_offset = if is_upwell_target { ship_ball.radius + target_ball.radius } else { 0.0 };
+            let dist = ((ship_ball.position - target_ball.position).length() - surface_offset).max(0.0);
             if dist > max_range {
                 return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: format!("Target distance ({dist:.1} m) exceeds maxTargetRange ({max_range:.1} m)") }));
             }
@@ -665,7 +682,7 @@ pub(crate) async fn handle_dogma_im(
                 lock_time_ms,
                 remaining_lock_ms: lock_time_ms,
                 locked: false,
-                max_range_m: Some(max_range),
+                max_range_m: Some(max_range + surface_offset),
             };
             if let Err(e) = sys.add_target_lock(ship_id, lock).await {
                 return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: e }));

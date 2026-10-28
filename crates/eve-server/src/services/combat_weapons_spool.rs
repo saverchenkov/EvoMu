@@ -564,6 +564,7 @@ pub async fn handle_ship_or_npc_destruction(
                     now_unix,
                 );
             }
+            crate::services::station_structure::structure_lifecycle::prepare_home_station_respawn(ctx, vcid);
             let _ = ctx
                 .db
                 .respawn_character_at_home_station(vcid, vship_id, &ctx.sde);
@@ -953,8 +954,24 @@ pub async fn step_system_entropic_spools(
                 state.elapsed_in_cycle = 0.0;
             }
 
+            let now_unix = ctx.now_unix();
+            let is_upwell = match crate::services::station_structure::structure_lifecycle_rpc::validate_upwell_structure_attack_precheck(
+                ctx, solar_system_id, state.attacker_char_id, state.target_id, now_unix,
+            ) {
+                Ok(v) => v,
+                Err(_) => {
+                    let _ = sys_handle.remove_target_lock(ship_id, state.target_id).await;
+                    stop_entropic_spool_and_deactivate(ctx, state.attacker_char_id, ship_id, module_id);
+                    stopped = true;
+                    break;
+                }
+            };
             // Pre-validate range
-            let dist = attacker_ball.position.distance(target_ball.position);
+            let dist = if is_upwell {
+                (attacker_ball.position.distance(target_ball.position) - target_ball.radius - attacker_ball.radius).max(0.0)
+            } else {
+                attacker_ball.position.distance(target_ball.position)
+            };
             if dist > optimal_range + 3.0 * falloff_range {
                 stop_entropic_spool_and_deactivate(ctx, state.attacker_char_id, ship_id, module_id);
                 stopped = true;
@@ -1051,20 +1068,29 @@ pub async fn step_system_entropic_spools(
             state.current_multiplier = (1.0f64 + (state.cycles as f64) * state.per_cycle_bonus).min(max_mult);
 
             let scaled_dmg = shot_dmg.scaled(state.current_multiplier);
-            let (applied_dmg, destroyed) = if scaled_dmg.total() > 0.0 {
+            let (applied_dmg, destroyed, became_invuln) = if scaled_dmg.total() > 0.0 {
                 let is_invuln = crate::services::insurgency_services::is_insurgency_stronghold_invulnerable(ctx, solar_system_id, state.target_id);
                 if is_invuln {
-                    (0.0, false)
-                } else if let Ok(Some((app, dest, _))) = sys_handle
-                    .apply_damage_with_attacker(state.target_id, scaled_dmg, Some(state.attacker_char_id))
+                    (0.0, false, false)
+                } else if let Ok(Some((app, dest, inv))) =
+                    crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
+                        ctx,
+                        &sys_handle,
+                        solar_system_id,
+                        state.attacker_char_id,
+                        state.target_id,
+                        scaled_dmg,
+                        state.duration_s,
+                        now_unix,
+                    )
                     .await
                 {
-                    (app, dest)
+                    (app, dest, inv)
                 } else {
-                    (0.0, false)
+                    (0.0, false, false)
                 }
             } else {
-                (0.0, false)
+                (0.0, false, false)
             };
 
             // Emit combat log and damage state
@@ -1145,7 +1171,7 @@ pub async fn step_system_entropic_spools(
                 crate::sp6_lifecycle::record_npc_aggression_timer(ctx, state.attacker_char_id, now_unix);
             }
 
-            if destroyed {
+            if destroyed && !is_upwell {
                 handle_ship_or_npc_destruction(
                     ctx,
                     &sys_handle,
@@ -1160,6 +1186,11 @@ pub async fn step_system_entropic_spools(
                     applied_dmg,
                     ctx.now_unix(),
                 ).await;
+                stop_entropic_spool_and_deactivate(ctx, state.attacker_char_id, ship_id, module_id);
+                stopped = true;
+                break;
+            } else if became_invuln {
+                let _ = sys_handle.remove_target_lock(ship_id, state.target_id).await;
                 stop_entropic_spool_and_deactivate(ctx, state.attacker_char_id, ship_id, module_id);
                 stopped = true;
                 break;

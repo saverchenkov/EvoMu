@@ -1053,9 +1053,7 @@ pub(crate) async fn handle_ships_and_services(
             });
             match res {
                 Ok((assembled_id, ver)) => Some(Ok(PyRep::keyval([
-                    ("itemID", PyRep::Integer(assembled_id)),
-                    ("singleton", PyRep::Bool(true)),
-                    ("version", PyRep::Integer(ver as i64)),
+                    ("itemID", PyRep::Integer(assembled_id)), ("singleton", PyRep::Bool(true)), ("version", PyRep::Integer(ver as i64)),
                 ]))),
                 Err(e) => Some(Err(e)),
             }
@@ -1064,15 +1062,19 @@ pub(crate) async fn handle_ships_and_services(
         ("repairSvc", "GetRepairQuotes") => {
             Some(crate::services::sov_services::handle_repair_get_quotes(ctx, session, args))
         }
-        ("repairSvc", "RepairItemsInStation") | ("repairSvc", "RepairItemsInStructure") => {
+        ("repairSvc", "RepairItems")
+        | ("repairSvc", "RepairItemsInStation")
+        | ("repairSvc", "RepairItemsInStructure") => {
+            let in_struct = method == "RepairItemsInStructure"
+                || session.structure_id.is_some();
             Some(crate::services::sov_services::handle_repair_items_in_location(
                 ctx,
                 session,
-                method == "RepairItemsInStructure",
+                in_struct,
                 args,
             ))
         }
-        ("repairSvc", "RepairAll") | ("repairSvc", "RepairItems") => {
+        ("repairSvc", "RepairAll") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

@@ -134,6 +134,16 @@ pub async fn handle_weapons(
             };
 
             let is_overloaded = method == "Overload";
+            if matches!(
+                mod_type.group_id,
+                52 | 65 | 68 | 71 | 72 | 201 | 208 | 291 | 379 | 862 | 74 | 55 | 53 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807
+            ) && sys_handle.get_combat_state(ship_id).await.ok().flatten().is_some_and(|cs| cs.is_tethered)
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "CantActivateWhileTethered".into(),
+                    message: "Cannot activate offensive modules, smartbombs, or bomb launchers while tethered".into(),
+                }));
+            }
             let mod_state =
                 fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde);
             let now_unix = ctx.now_unix();
@@ -489,7 +499,9 @@ pub async fn handle_weapons(
             };
 
             let player_target_info = ctx.db.with_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get(&resolved_target_id) {
+                if snap.structures.contains_key(&resolved_target_id) {
+                    None
+                } else if let Some(ch) = snap.characters.get(&resolved_target_id) {
                     Some((ch.character_id, ch.active_ship_id))
                 } else if let Some(ch) = snap
                     .characters
@@ -573,6 +585,13 @@ pub async fn handle_weapons(
                 }
             }
 
+            let is_upwell_target = match crate::services::station_structure::structure_lifecycle_rpc::validate_upwell_structure_attack_precheck(
+                ctx, sys_id, char_id, target_ball_id, now_unix,
+            ) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+
             // Weapon classification & pre-validation
             let is_missile_launcher = matches!(
                 mod_type.group_id,
@@ -618,7 +637,11 @@ pub async fn handle_weapons(
                     mod_type.default_attributes.get(&158).copied().unwrap_or(5_000.0)
                 }
             };
-            let dist = attacker_ball.position.distance(target_ball.position);
+            let dist = if is_upwell_target {
+                (attacker_ball.position.distance(target_ball.position) - target_ball.radius - attacker_ball.radius).max(0.0)
+            } else {
+                attacker_ball.position.distance(target_ball.position)
+            };
 
             if !is_missile_launcher && dist > optimal_range + 3.0 * falloff_range {
                 return Some(Err(BridgeRpcError {
@@ -892,6 +915,12 @@ pub async fn handle_weapons(
                 (0u32, 1.0)
             };
 
+            let cycle_secs = {
+                let v = mod_state.get_attribute(51, &ctx.sde);
+                if v > 0.0 { v / 1000.0 } else { mod_type.default_attributes.get(&51).copied().unwrap_or(3000.0) / 1000.0 }
+            }
+            .max(0.1);
+
             // Vorton Projector arc chaining (`feat:modules.vorton-projector`)
             let mut vorton_secondary_targets = Vec::new();
             let final_dmg = if is_vorton {
@@ -993,9 +1022,20 @@ pub async fn handle_weapons(
                             exp_vel,
                             drf,
                         );
-                        if let Ok(Some((arc_app, arc_destroyed, _))) = sys_handle
-                            .apply_damage_with_attacker(arc_id, base_dmg.scaled(arc_factor), session.character_id)
+                        if let Some((arc_app, arc_destroyed, _)) =
+                            crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
+                                ctx,
+                                &sys_handle,
+                                sys_id,
+                                char_id,
+                                arc_id,
+                                base_dmg.scaled(arc_factor),
+                                cycle_secs,
+                                now_unix,
+                            )
                             .await
+                            .ok()
+                            .flatten()
                         {
                             vorton_secondary_targets.push(arc_id);
                             record_killmail_assist_action(
@@ -1074,28 +1114,38 @@ pub async fn handle_weapons(
                 shot_dmg
             };
 
-            let (applied_dmg, destroyed) = if final_dmg.total() > 0.0 {
-                if let Ok(Some((app, dest, _))) =
-                    sys_handle.apply_damage_with_attacker(target_ball_id, final_dmg, session.character_id).await
+            let (applied_dmg, destroyed, sr, ar, hr, became_invuln) = if is_upwell_target {
+                match crate::services::station_structure::structure_lifecycle_rpc::apply_live_combat_damage_to_upwell_structure(
+                    ctx, &sys_handle, sys_id, char_id, target_ball_id, final_dmg, cycle_secs, now_unix,
+                )
+                .await
                 {
-                    (app, dest)
-                } else {
-                    (0.0, false)
+                    Ok(Some(res)) => res,
+                    Ok(None) => (0.0, false, 0.0, 0.0, 0.0, false),
+                    Err(e) => return Some(Err(e)),
                 }
             } else {
-                (0.0, false)
-            };
-
-            let (sr, ar, hr) = if let Ok(Some(t_cs)) =
-                sys_handle.get_combat_state(target_ball_id).await
-            {
-                (
-                    (t_cs.shield_hp / t_cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0),
-                    (t_cs.armor_hp / t_cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0),
-                    (t_cs.structure_hp / t_cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0),
-                )
-            } else {
-                (0.0, 0.0, 0.0)
+                let (app, dest) = if final_dmg.total() > 0.0 {
+                    sys_handle
+                        .apply_damage_with_attacker(target_ball_id, final_dmg, session.character_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|(a, d, _)| (a, d))
+                        .unwrap_or((0.0, false))
+                } else {
+                    (0.0, false)
+                };
+                let (s_r, a_r, h_r) = if let Ok(Some(t_cs)) = sys_handle.get_combat_state(target_ball_id).await {
+                    (
+                        (t_cs.shield_hp / t_cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0),
+                        (t_cs.armor_hp / t_cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0),
+                        (t_cs.structure_hp / t_cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0),
+                    )
+                } else {
+                    (0.0, 0.0, 0.0)
+                };
+                (app, dest, s_r, a_r, h_r, false)
             };
 
             let victim_char_opt = player_target_info.map(|(vcid, _)| vcid);
@@ -1255,13 +1305,22 @@ pub async fn handle_weapons(
                             });
                     });
                 }
+            } else if is_upwell_target {
+                ctx.crimewatch
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get_or_create(char_id)
+                    .pvp_timer_until_unix = now_unix.saturating_add(900);
             } else {
                 // Attacking an NPC sets the 5-minute (300s) NPC timer (`feat:crimewatch.npc-timers`)
                 crate::sp6_lifecycle::record_npc_aggression_timer(ctx, char_id, now_unix);
             }
 
             // Handle target destruction: 50% Loot Fairy wreck drop, DetailedKillmail with 15-min assist window & SHA-1 hash, and Pod Corpse / Implant destruction
-            let (generated_kill_id, generated_wreck_id, generated_corpse_id, generated_km_hash) = if destroyed {
+            let (generated_kill_id, generated_wreck_id, generated_corpse_id, generated_km_hash) = if destroyed && is_upwell_target {
+                let kid = ctx.db.with_snapshot(|snap| snap.killmails.keys().max().copied().unwrap_or(0));
+                (kid, 0, 0, String::new())
+            } else if destroyed {
                 combat_weapons_spool::handle_ship_or_npc_destruction(
                     ctx,
                     &sys_handle,
@@ -1280,11 +1339,21 @@ pub async fn handle_weapons(
                 (0, 0, 0, String::new())
             };
 
-            ctx.db.with_mut_snapshot(|snap| {
-                snap.module_active_states.insert(module_id);
-                snap.module_active_charges.insert(module_id, charge_type_id);
-            });
-            let _ = fit.activate_module(module_id, is_overloaded, &ctx.sde);
+            if became_invuln {
+                let _ = sys_handle.remove_target_lock(ship_id, target_ball_id).await;
+                ctx.db.with_mut_snapshot(|snap| {
+                    snap.module_active_states.remove(&module_id);
+                    snap.module_active_charges.remove(&module_id);
+                });
+                let _ = fit.deactivate_module(module_id, &ctx.sde);
+                combat_weapons_spool::reset_entropic_spool(ctx, ship_id, module_id);
+            } else {
+                ctx.db.with_mut_snapshot(|snap| {
+                    snap.module_active_states.insert(module_id);
+                    snap.module_active_charges.insert(module_id, charge_type_id);
+                });
+                let _ = fit.activate_module(module_id, is_overloaded, &ctx.sde);
+            }
             ctx.store_ship_fitting(ship_id, fit);
 
             Some(Ok(PyRep::keyval([

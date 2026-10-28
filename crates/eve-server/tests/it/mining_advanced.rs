@@ -399,3 +399,96 @@ async fn test_mn15_corp_mining_ledger_service_and_observer_tracking() {
     assert_eq!(ledger[1].type_id, 45492);
     assert_eq!(ledger[1].quantity, 1_200);
 }
+
+// ============================================================================
+// R-P0-METENOX-FUEL-DUP: Fuel blocks single source of truth & exhaustion
+// ============================================================================
+#[tokio::test]
+async fn test_metenox_moon_drill_fuel_exhaustion_regression() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let mut sess = create_auth_session(&ctx, 1402).await;
+
+    let structure_id = 1_040_000_000_142_i64;
+    let corp_id = sess.corporation_id.unwrap();
+    let lowsec_system_id = 30_000_012_u32;
+    let fuel_item_id = 890_001_i64;
+    let gas_item_id = 890_002_i64;
+
+    // Deposit N = 23 fuel blocks into SpecializedFuelBay (flag 133).
+    // Fuel per cycle is 5; gas per cycle is 10.
+    // Expected runnable cycles = floor(23 / 5) = 4 cycles.
+    let initial_fuel_blocks = 23;
+    let initial_gas = 100;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            structure_id,
+            make_structure(structure_id, 81826, corp_id, lowsec_system_id, "Asabona Exhaustion Drill", [200_000.0, 0.0, -100_000.0], initial_fuel_blocks),
+        );
+        snap.items.insert(
+            fuel_item_id,
+            make_item(fuel_item_id, 4247, corp_id, structure_id, InventoryFlag::SpecializedFuelBay, initial_fuel_blocks as i32, false),
+        );
+        snap.items.insert(
+            gas_item_id,
+            make_item(gas_item_id, 81143, corp_id, structure_id, InventoryFlag::Hangar, initial_gas, false),
+        );
+        snap.auto_moon_miners.insert(
+            structure_id,
+            AutoMoonMinerRecord {
+                structure_id,
+                fuel_units_remaining: initial_fuel_blocks,
+                magmatic_gas_remaining: initial_gas as u32,
+                efficiency: 0.40,
+                cycle_duration_seconds: 3600,
+                last_cycle_unix: ctx.now_unix(),
+                ore_type_id: 16633,
+                hourly_yield: 500,
+                status: "Active".into(),
+            },
+        );
+    });
+
+    // Advance by 10 hours (10 cycles). Only 4 cycles have enough fuel (20 blocks needed, 3 remainder).
+    ctx.advance_secs(10 * 3600);
+
+    let details1 = ctx
+        .dispatch_rpc(&mut sess, "autoMoonMining", None, "RequestMiningDetails", &[PyRep::Integer(structure_id)], &kw, None)
+        .await
+        .expect("RequestMiningDetails after 10h");
+    let PyRep::KeyVal(kv1) = details1 else { panic!("Expected KeyVal") };
+    assert_eq!(kv1["fuelRemaining"].as_i64(), Some(3), "23 fuel blocks must leave exactly 3 after 4 cycles");
+    assert_eq!(kv1["magmaticGasRemaining"].as_i64(), Some(60), "100 gas must leave 60 after 4 cycles (4 * 10 = 40 consumed)");
+    assert_eq!(kv1["status"].as_str(), Some("OutOfFuel"), "Drill must be OutOfFuel when remaining fuel (3) < fuel_per_cycle (5)");
+
+    // Assert bay items and st.fuel_blocks are in sync and not duplicated
+    ctx.db.with_snapshot(|snap| {
+        let st_fuel = snap.structures.get(&structure_id).unwrap().fuel_blocks;
+        assert_eq!(st_fuel, 3, "st.fuel_blocks must be synced to 3");
+        let item_fuel = snap.items.get(&fuel_item_id).map(|i| i.quantity).unwrap_or(0);
+        assert_eq!(item_fuel, 3, "InventoryItemRecord quantity must be decremented to 3");
+    });
+
+    // Advance by another 10 hours (10 more cycles) with drill in OutOfFuel state.
+    // Assert NO infinite refill occurred, no extra cycles ran, and fuel remains exactly 3.
+    ctx.advance_secs(10 * 3600);
+
+    let details2 = ctx
+        .dispatch_rpc(&mut sess, "autoMoonMining", None, "RequestMiningDetails", &[PyRep::Integer(structure_id)], &kw, None)
+        .await
+        .expect("RequestMiningDetails after additional 10h");
+    let PyRep::KeyVal(kv2) = details2 else { panic!("Expected KeyVal") };
+    assert_eq!(kv2["fuelRemaining"].as_i64(), Some(3), "Fuel must remain 3 without any infinite refill");
+    assert_eq!(kv2["status"].as_str(), Some("OutOfFuel"));
+
+    let moon_mats = ctx.db.with_snapshot(|snap| {
+        snap.items.values()
+            .filter(|it| it.location_id == structure_id && it.flag == InventoryFlag::SpecializedMineralHold && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 427))
+            .map(|it| it.quantity as i64)
+            .sum::<i64>()
+    });
+    let hourly_yield = kv1["hourlyYield"].as_i64().unwrap();
+    assert!(hourly_yield > 0, "Hourly moon material yield must be positive");
+    assert_eq!(moon_mats, hourly_yield * 4, "Must produce exactly 4 cycles of moon materials, never minting beyond fuel");
+}

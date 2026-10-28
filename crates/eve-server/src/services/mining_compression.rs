@@ -374,6 +374,18 @@ pub async fn handle_in_space_compression_mgr(
                 message: "Cannot compress ore while ship is cloaked".into(),
             });
         }
+        if handle
+            .get_combat_state(sid)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|cs| cs.is_tethered)
+        {
+            return Err(BridgeRpcError {
+                code: "CannotCompressWhileTethered".into(),
+                message: "Cannot compress ore in space while ship is tethered".into(),
+            });
+        }
     }
     let my_pos = match ship_id {
         Some(sid) => handle.get_ball_snapshot(sid).await.ok().flatten().map(|(_, b)| b.position),
@@ -1217,7 +1229,7 @@ pub(crate) fn inspect_metenox_drill(
     let item_fuel_blocks: u32 = snap.items.values()
         .filter(|it| it.location_id == structure_id && matches_reagent_owner(it.owner_id) && it.quantity > 0 && it.flag != InventoryFlag::Locked && !snap.is_item_locked_in_contract_or_job(it.item_id) && sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136))
         .fold(0u32, |acc, it| acc.saturating_add(it.quantity.max(0) as u32));
-    let total_struct_fuel = st.fuel_blocks.saturating_add(item_fuel_blocks);
+    let total_struct_fuel = if item_fuel_blocks > 0 { item_fuel_blocks } else { st.fuel_blocks };
     let total_struct_gas: u32 = snap.items.values()
         .filter(|it| it.location_id == structure_id && matches_reagent_owner(it.owner_id) && it.quantity > 0 && it.flag != InventoryFlag::Locked && !snap.is_item_locked_in_contract_or_job(it.item_id) && it.type_id == 81143)
         .fold(0u32, |acc, it| acc.saturating_add(it.quantity.max(0) as u32));

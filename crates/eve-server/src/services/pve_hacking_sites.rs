@@ -221,6 +221,9 @@ pub async fn handle_second_hack_failure_explosion(
     container_id: ItemId,
     is_relic: bool,
 ) -> (bool, f64, Vec<i64>, usize) {
+    if site_id.starts_with("STRUCTURE_") {
+        return (false, 0.0, Vec::new(), 0);
+    }
     let sys_sec = ctx
         .sde
         .solar_systems
@@ -469,52 +472,38 @@ pub async fn handle_pve_hacking(
                 })
             };
             if container_id == 0 {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetNotFound".into(),
-                    message: "Target container not specified".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "TargetNotFound".into(), message: "Target container not specified".into() }));
             }
 
+            let struct_info = ctx.db.with_snapshot(|s| {
+                let caller_corp = s.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
+                s.structures.get(&container_id).filter(|st| st.solar_system_id == sys_id && st.state != "Destroyed").map(|st| (st.position, st.owner_corp_id, caller_corp))
+            });
+            if let Some((_, owner_corp_id, caller_corp)) = struct_info {
+                if caller_corp != 0 && caller_corp == owner_corp_id {
+                    return Some(Err(BridgeRpcError { code: "CannotHackOwnStructure".into(), message: "Cannot run a Data Analyzer hack against a structure owned by your own corporation".into() }));
+                }
+            }
+            let struct_pos = struct_info.map(|(p, _, _)| p);
             let site_res = with_pve_exploration_reg(ctx, |reg| {
-                let sites = reg.sites_by_system.get_mut(&sys_id).ok_or_else(|| BridgeRpcError {
-                    code: "TargetNotFound".into(),
-                    message: "Target container not found".into(),
-                })?;
-
-                let s = sites
-                    .iter_mut()
-                    .find(|x| x.hackable_can_ids.contains(&container_id) && !x.cleared)
-                    .ok_or_else(|| BridgeRpcError {
-                        code: "TargetNotFound".into(),
-                        message: "Target container not found".into(),
-                    })?;
-
-                if reg.hacked_containers.contains(&(sys_id, container_id))
-                    || reg.failure_counts.get(&(sys_id, container_id)).copied().unwrap_or(0) >= 2
-                {
-                    return Err(BridgeRpcError {
-                        code: "HackingGameAlreadyFinished".into(),
-                        message: "Container has already been hacked or emptied".into(),
-                    });
+                if let Some(st_pos) = struct_pos {
+                    if reg.structure_char_failures.get(&(char_id, container_id)).copied().unwrap_or(0) >= 2 {
+                        return Err(BridgeRpcError { code: "HackingGameAlreadyFinished".into(), message: "You have failed to hack this structure twice and are locked out".into() });
+                    }
+                    if reg.hacking_games.values().any(|g| g.container_id == container_id && g.status == "InProgress") {
+                        return Err(BridgeRpcError { code: "HackingGameAlreadyInProgress".into(), message: "Another pilot is already hacking this target".into() });
+                    }
+                    return Ok((format!("STRUCTURE_{container_id}"), false, false, false, st_pos));
                 }
-
-                if reg
-                    .hacking_games
-                    .values()
-                    .any(|g| g.container_id == container_id && g.status == "InProgress")
-                {
-                    return Err(BridgeRpcError {
-                        code: "HackingGameAlreadyInProgress".into(),
-                        message: "Another pilot is already hacking this container".into(),
-                    });
+                let sites = reg.sites_by_system.get_mut(&sys_id).ok_or_else(|| BridgeRpcError { code: "TargetNotFound".into(), message: "Target container not found".into() })?;
+                let s = sites.iter_mut().find(|x| x.hackable_can_ids.contains(&container_id) && !x.cleared).ok_or_else(|| BridgeRpcError { code: "TargetNotFound".into(), message: "Target container not found".into() })?;
+                if reg.hacked_containers.contains(&(sys_id, container_id)) || reg.failure_counts.get(&(sys_id, container_id)).copied().unwrap_or(0) >= 2 {
+                    return Err(BridgeRpcError { code: "HackingGameAlreadyFinished".into(), message: "Container has already been hacked or emptied".into() });
                 }
-
-                let is_ghost = s.site_category == "Ghost";
-                let is_relic = s.site_category == "Relic";
-                let is_sleeper_cache = s.site_category == "SleeperCache";
-                let site_id = s.site_id.clone();
-                let site_pos = s.position;
-                Ok((site_id, is_relic, is_ghost, is_sleeper_cache, site_pos))
+                if reg.hacking_games.values().any(|g| g.container_id == container_id && g.status == "InProgress") {
+                    return Err(BridgeRpcError { code: "HackingGameAlreadyInProgress".into(), message: "Another pilot is already hacking this container".into() });
+                }
+                Ok((s.site_id.clone(), s.site_category == "Relic", s.site_category == "Ghost", s.site_category == "SleeperCache", s.position))
             });
 
             let (site_id, is_relic, is_ghost, is_sleeper_cache, site_pos) = match site_res {
@@ -524,19 +513,11 @@ pub async fn handle_pve_hacking(
 
             // BF-PVE-HACK-PROXIMITY-FAILOPEN-04: Explicitly reject hacking while docked or without a ship in space
             if session.station_id.is_some() || session.structure_id.is_some() {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipDocked".into(),
-                    message: "Cannot initiate hacking minigame while docked".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot initiate hacking minigame while docked".into() }));
             }
             let ship_id = match session.ship_id {
                 Some(sid) if sid > 0 => sid,
-                _ => {
-                    return Some(Err(BridgeRpcError {
-                        code: "NoActiveShip".into(),
-                        message: "Session has no active ship".into(),
-                    }));
-                }
+                _ => return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into() })),
             };
 
             let ghost_expired = with_pve_exploration_reg(ctx, |reg| {
@@ -887,7 +868,7 @@ pub async fn handle_pve_hacking(
                     game.status = "Failed".into();
                 } else if core_destroyed {
                     game.status = "Won".into();
-                    if !already_hacked {
+                    if !already_hacked && !game.site_id.starts_with("STRUCTURE_") {
                         let center = reg
                             .sites_by_system
                             .get(&game.solar_system_id)
@@ -922,17 +903,19 @@ pub async fn handle_pve_hacking(
                     }
                 }
 
+                let is_structure = game.site_id.starts_with("STRUCTURE_");
                 let mut failed_twice = false;
                 if game.status == "Won" {
-                    reg.hacked_containers.insert((game.solar_system_id, container_id));
+                    if !is_structure { reg.hacked_containers.insert((game.solar_system_id, container_id)); }
                 } else if game.status == "Failed" {
-                    let fc = reg.failure_counts.entry((game.solar_system_id, container_id)).or_insert(0);
-                    *fc += 1;
-                    if *fc >= 2 || game.is_ghost_site {
-                        reg.hacked_containers.insert((game.solar_system_id, container_id));
-                    }
-                    if *fc >= 2 && !game.is_ghost_site {
-                        failed_twice = true;
+                    if is_structure {
+                        let fc = reg.structure_char_failures.entry((game.character_id, container_id)).or_insert(0);
+                        *fc += 1;
+                    } else {
+                        let fc = reg.failure_counts.entry((game.solar_system_id, container_id)).or_insert(0);
+                        *fc += 1;
+                        if *fc >= 2 || game.is_ghost_site { reg.hacked_containers.insert((game.solar_system_id, container_id)); }
+                        if *fc >= 2 && !game.is_ghost_site { failed_twice = true; }
                     }
                 }
 
@@ -961,12 +944,11 @@ pub async fn handle_pve_hacking(
             } else {
                 (0.0, Vec::new())
             };
-            let (can_exploded, can_explosion_dmg, damaged_ships, destroyed_loot_count) =
-                if trigger_second_fail_explosion {
-                    handle_second_hack_failure_explosion(ctx, sys_id, &site_id, container_id, is_relic).await
-                } else {
-                    (false, 0.0, Vec::new(), 0)
-                };
+            let (can_exploded, can_explosion_dmg, damaged_ships, destroyed_loot_count) = if trigger_second_fail_explosion && !site_id.starts_with("STRUCTURE_") {
+                handle_second_hack_failure_explosion(ctx, sys_id, &site_id, container_id, is_relic).await
+            } else {
+                (false, 0.0, Vec::new(), 0)
+            };
 
             if status == "Won" {
                 crate::services::inventory_fitting::fitting_scanners_superweapons::mark_hacking_container_unlocked(
@@ -1028,27 +1010,29 @@ pub async fn handle_pve_hacking(
                 })
                 .collect();
 
+            let revealed_reinforce = (status == "Won" && site_id.starts_with("STRUCTURE_")).then(|| {
+                ctx.db.with_snapshot(|s| {
+                    (s.structure_vulnerability_windows.get(&container_id).copied().unwrap_or((18, 5)),
+                     crate::services::station_structure::structure_upwell_ops::load_ext_state(s).pending_reinforce_schedule.get(&container_id).copied())
+                })
+            });
             Some(Ok(PyRep::keyval([
-                ("containerID", PyRep::Integer(container_id)),
-                ("tileIndex", PyRep::Integer(tile_idx as i64)),
-                ("hexQ", PyRep::Integer(q as i64)),
-                ("hexR", PyRep::Integer(r as i64)),
-                ("nodeKind", PyRep::String(tile_kind_str)),
-                ("nodeCoherence", PyRep::Integer(tile_coh as i64)),
-                ("distanceIndicator", PyRep::Integer(dist_indicator as i64)),
-                ("virusCoherence", PyRep::Integer(virus_coh as i64)),
-                ("virusStrength", PyRep::Integer(eff_strength as i64)),
-                ("status", PyRep::String(status)),
-                ("spewedContainers", PyRep::List(spew_py)),
-                ("containerDestroyed", PyRep::Bool(can_exploded)),
-                ("containerExploded", PyRep::Bool(can_exploded)),
-                ("explosionDamage", PyRep::Real(can_explosion_dmg)),
-                ("damagedShipIDs", PyRep::List(dmg_ships_py)),
-                ("destroyedLootCount", PyRep::Integer(destroyed_loot_count as i64)),
-                ("ghostDetonated", PyRep::Bool(trigger_ghost_detonation)),
-                ("ghostExplosiveDamage", PyRep::Real(ghost_dmg)),
+                ("containerID", PyRep::Integer(container_id)), ("tileIndex", PyRep::Integer(tile_idx as i64)),
+                ("hexQ", PyRep::Integer(q as i64)), ("hexR", PyRep::Integer(r as i64)),
+                ("nodeKind", PyRep::String(tile_kind_str)), ("nodeCoherence", PyRep::Integer(tile_coh as i64)),
+                ("distanceIndicator", PyRep::Integer(dist_indicator as i64)), ("virusCoherence", PyRep::Integer(virus_coh as i64)),
+                ("virusStrength", PyRep::Integer(eff_strength as i64)), ("status", PyRep::String(status)),
+                ("spewedContainers", PyRep::List(spew_py)), ("containerDestroyed", PyRep::Bool(can_exploded)),
+                ("containerExploded", PyRep::Bool(can_exploded)), ("explosionDamage", PyRep::Real(can_explosion_dmg)),
+                ("damagedShipIDs", PyRep::List(dmg_ships_py)), ("destroyedLootCount", PyRep::Integer(destroyed_loot_count as i64)),
+                ("ghostDetonated", PyRep::Bool(trigger_ghost_detonation)), ("ghostExplosiveDamage", PyRep::Real(ghost_dmg)),
                 ("ghostSpawnedNpcBallIDs", PyRep::List(ghost_npcs.into_iter().map(PyRep::Integer).collect())),
                 ("sleeperPuzzleSolved", PyRep::Bool(sleeper_puzzle_solved)),
+                ("reinforceHour", revealed_reinforce.map_or(PyRep::None, |((h, _), _)| PyRep::Integer(h as i64))),
+                ("reinforceWeekday", revealed_reinforce.map_or(PyRep::None, |((_, d), _)| PyRep::Integer(d as i64))),
+                ("nextReinforceHour", revealed_reinforce.and_then(|(_, p)| p.map(|(nh, _, _)| PyRep::Integer(nh as i64))).unwrap_or(PyRep::None)),
+                ("nextReinforceWeekday", revealed_reinforce.and_then(|(_, p)| p.map(|(_, nd, _)| PyRep::Integer(nd as i64))).unwrap_or(PyRep::None)),
+                ("applyAfterUnix", revealed_reinforce.and_then(|(_, p)| p.map(|(_, _, at)| PyRep::Integer(at as i64))).unwrap_or(PyRep::None)),
             ])))
         }
 

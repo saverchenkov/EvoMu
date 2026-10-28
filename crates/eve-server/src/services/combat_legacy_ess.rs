@@ -598,12 +598,13 @@ pub async fn handle_legacy_and_ess(
                     // CONCORD kill voids any active ship insurance contract (`feat:combat.insurance-payout`)
                     let _ = process_ship_insurance_payout(ctx, char_id, ship_id, attacker_ball.type_id, true);
                     // Destroy the criminal's ship + cargo/modules and respawn in a Capsule at home_station_id
+                    crate::services::station_structure::structure_lifecycle::prepare_home_station_respawn(ctx, char_id);
                     if let Ok((respawned_ch, capsule)) =
                         ctx.db.respawn_character_at_home_station(char_id, ship_id, &ctx.sde)
                     {
                         session.ship_id = Some(capsule.item_id);
                         session.station_id = respawned_ch.station_id;
-                        session.structure_id = None;
+                        session.structure_id = respawned_ch.structure_id;
                         session.solar_system_id = Some(respawned_ch.solar_system_id);
                         session.constellation_id = Some(respawned_ch.constellation_id);
                         session.region_id = Some(respawned_ch.region_id);
@@ -983,6 +984,7 @@ pub async fn handle_legacy_and_ess(
                     .unwrap();
                 if destroyed {
                     if is_pod_target {
+                        crate::services::station_structure::structure_lifecycle::prepare_home_station_respawn(ctx, victim_char_id);
                         let _ = ctx.db.respawn_character_at_home_station(
                             victim_char_id,
                             victim_ship_id,

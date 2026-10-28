@@ -971,6 +971,14 @@ impl SystemRegistry {
                                 let _ = reply.send(locks);
                             }
                             SystemCommand::AddTargetLock { source_id, lock, reply } => {
+                                if ballpark.combat_states.get(&lock.target_id).is_some_and(|tcs| tcs.is_tethered) {
+                                    let _ = reply.send(Err("Target is tethered and invulnerable to target locks".into()));
+                                    continue;
+                                }
+                                if let Some(cs) = ballpark.combat_states.get_mut(&source_id) {
+                                    cs.undock_invulnerable_remaining_ticks = 0;
+                                    cs.is_tethered = false;
+                                }
                                 let res = if ballpark.add_target_lock(source_id, lock) {
                                     Ok(())
                                 } else {

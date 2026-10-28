@@ -74,28 +74,48 @@ pub(crate) fn structure_access_allowed(
 /// bastion, command bursts, ...) and not in warp. While tethered the ship is invulnerable
 /// (`CombatState::is_invulnerable`) and repaired; DERIVED repair step: 25% of each layer per sync.
 pub async fn sync_tether(ctx: &ServerContext, char_id: i64, sys_id: u32, ship_id: i64) {
-    let range_attr = attr_id_by_name(ctx, "tetheringRange");
     let disallow_attr = attr_id_by_name(ctx, "disallowTethering");
+    let now = ctx.now_unix();
     let corp_id = ctx
         .db
         .get_character(char_id)
         .map(|c| c.corporation_id)
         .unwrap_or(0);
-    let (anchors, disallow_active) = ctx.db.with_snapshot(|snap| {
+    let fit_active_ids: std::collections::HashSet<i64> = ctx
+        .ship_fittings
+        .read()
+        .ok()
+        .and_then(|fits| {
+            fits.get(&ship_id).map(|fit| {
+                fit.modules
+                    .values()
+                    .filter(|m| matches!(m.state, eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded))
+                    .map(|m| m.item_id)
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+    let (anchors, disallow_active, is_piloted) = ctx.db.with_snapshot(|snap| {
+        let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        let piloted = char_id > 0
+            && snap
+                .characters
+                .get(&char_id)
+                .is_some_and(|c| c.active_ship_id == ship_id && c.station_id.is_none() && c.structure_id.is_none());
         let anchors: Vec<(DVec3, f64)> = snap
             .structures
             .values()
             .filter(|st| {
                 st.solar_system_id == sys_id
                     && st.quantum_core_installed
-                    && st.state != "Destroyed"
-                    && st.state != "Abandoned"
+                    && crate::services::station_structure::structure_lifecycle::is_operational(&st.state)
+                    && crate::services::station_structure::structure_lifecycle::power_state(ctx, snap, &ext, st, now)
+                        != crate::services::station_structure::structure_lifecycle::PowerState::Abandoned
                     && structure_access_allowed(snap, char_id, corp_id, st)
             })
             .filter_map(|st| {
-                let ty = ctx.sde.types.get(&st.type_id)?;
-                let range = range_attr.and_then(|a| ty.default_attributes.get(&a).copied())?;
-                (range > 0.0).then(|| (DVec3::from_array(st.position), ty.radius + range))
+                let range = crate::services::station_structure::structure_lifecycle::tether_range_m(ctx, st.type_id);
+                (range > 0.0).then(|| (DVec3::from_array(st.position), range))
             })
             .collect();
         let disallow = crate::services::space_navigation_advanced::check_immobilizing_module_active(
@@ -103,14 +123,18 @@ pub async fn sync_tether(ctx: &ServerContext, char_id: i64, sys_id: u32, ship_id
         )
         .is_err()
             || snap.items.values().any(|it| {
-                it.location_id == ship_id
-                    && matches!(it.flag as u16, 11..=34 | 125..=132)
-                    && snap.module_active_states.contains(&it.item_id)
-                    && disallow_attr
-                        .and_then(|a| ctx.sde.types.get(&it.type_id)?.default_attributes.get(&a).copied())
+                if it.location_id != ship_id
+                    || (!snap.module_active_states.contains(&it.item_id) && !fit_active_ids.contains(&it.item_id))
+                {
+                    return false;
+                }
+                let Some(ty) = ctx.sde.types.get(&it.type_id) else { return false };
+                matches!(ty.group_id, 515 | 658 | 842 | 1770)
+                    || disallow_attr
+                        .and_then(|a| ty.default_attributes.get(&a).copied())
                         .is_some_and(|v| v != 0.0)
             });
-        (anchors, disallow)
+        (anchors, disallow, piloted)
     });
     let handle = ctx.systems.get_or_spawn(sys_id);
     let Some(mut cs) = handle.get_combat_state(ship_id).await.ok().flatten() else {
@@ -122,27 +146,38 @@ pub async fn sync_tether(ctx: &ServerContext, char_id: i64, sys_id: u32, ship_id
     let Some((_, ball)) = handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
         return;
     };
-    let now = ctx.now_unix();
     let weapons_timer = ctx
         .crimewatch
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .states
         .get(&char_id)
-        .is_some_and(|st| st.is_weapon_timer_active(now));
+        .is_some_and(|st| st.is_weapon_timer_active(now) || st.is_pvp_active(now));
+    let jump_timer = ctx.db.with_snapshot(|snap| {
+        snap.characters.get(&char_id).is_some_and(|c| c.jump_cooldown_until_unix > now)
+    });
     let scrambled = handle.is_ball_scrambled(ship_id).await.unwrap_or(false);
     let has_locks = handle
         .get_target_locks(ship_id)
         .await
         .map(|l| !l.is_empty())
         .unwrap_or(false);
+    let has_fighters = ctx
+        .active_fighters
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .values()
+        .any(|f| f.parent_ship_id == ship_id && !f.is_abandoned);
     let in_range = anchors
         .iter()
         .any(|(pos, reach)| ball.position.distance(*pos) <= *reach);
-    let should = in_range
+    let should = is_piloted
+        && in_range
         && !weapons_timer
+        && !jump_timer
         && !scrambled
         && !has_locks
+        && !has_fighters
         && !disallow_active
         && !matches!(ball.mode, MovementMode::Warp { .. });
     let tether_toggled = cs.is_tethered != should;

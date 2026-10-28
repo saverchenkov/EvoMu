@@ -736,7 +736,7 @@ pub async fn activate_superweapon_or_lance(
                 let to_ball = b.position - ship_pos;
                 let along_beam = to_ball.dot(beam_dir);
                 if along_beam >= 100.0 && along_beam <= effective_range && (to_ball - beam_dir * along_beam).length() <= beam_radius {
-                    let (applied, destroyed) = sys.apply_damage_with_attacker(b.id, dmg_vec, Some(char_id)).await.ok().flatten().map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
+                    let (applied, destroyed) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys, sys_id, char_id, b.id, dmg_vec, 10.0, now_unix).await.ok().flatten().map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
                     crate::services::combat_crimewatch::record_killmail_assist_action(ctx, b.id, char_id, ship_type_id, mod_type_id, applied, false, now_unix);
                     if let Ok(Some(mut v_cs)) = sys.get_combat_state(b.id).await {
                         v_cs.capacitor = (v_cs.capacitor - 10_000.0).max(0.0);
@@ -844,7 +844,7 @@ pub async fn activate_superweapon_or_lance(
     if is_slash {
         for b in all_balls {
             if b.id != ship_id && (is_combatant_ship_or_entity_ball(Some(&ctx.sde), Some(&ctx.db), b.id, b.type_id) || (b.id >= 1_895_000_000 && b.id < 1_900_000_000)) && (b.position - ship_pos).length() <= 100_000.0 {
-                let (app, destroyed) = sys.apply_damage_with_attacker(b.id, dmg_vec, Some(char_id)).await.ok().flatten().map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
+                let (app, destroyed) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys, sys_id, char_id, b.id, dmg_vec, 10.0, now_unix).await.ok().flatten().map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
                 crate::services::combat_crimewatch::record_killmail_assist_action(ctx, b.id, char_id, ship_type_id, mod_type_id, app, false, now_unix);
                 if destroyed {
                     crate::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(ctx, sys_id, char_id, b.id, b.type_id, b.position, now_unix).await;
@@ -853,7 +853,7 @@ pub async fn activate_superweapon_or_lance(
             }
         }
     } else if let Some(tb) = single_target_ball {
-        let (app, destroyed) = sys.apply_damage_with_attacker(tb.id, dmg_vec, Some(char_id)).await.ok().flatten().map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
+        let (app, destroyed) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys, sys_id, char_id, tb.id, dmg_vec, 10.0, now_unix).await?.map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
         crate::services::combat_crimewatch::record_killmail_assist_action(ctx, tb.id, char_id, ship_type_id, mod_type_id, app, false, now_unix);
         if destroyed {
             crate::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(ctx, sys_id, char_id, tb.id, tb.type_id, tb.position, now_unix).await;

@@ -260,7 +260,7 @@ async fn test_structure_settings_parity() {
     // Line member without Director/Station Manager role is denied on profile, ACL, and structure management RPCs
     sess.corp_role = 0;
     let profile_settings_2_5 = PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Real(0.025)])]);
-    assert_eq!(rpc(&ctx, &mut sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(structure_id), profile_settings_2_5.clone()]).await.unwrap_err().code, "InsufficientCorpRoles");
+    assert_eq!(rpc(&ctx, &mut sess, "structureSettings", "SaveProfileSettings", &[PyRep::Integer(structure_id), profile_settings_2_5.clone()]).await.unwrap_err().code, "InsufficientCorpRoles");
     assert_eq!(rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Integer(PILOT2)]), PyRep::Bool(true)]).await.unwrap_err().code, "InsufficientCorpRoles");
     assert_eq!(rpc(&ctx, &mut sess, "structureDeployment", "Unanchor", &[PyRep::Integer(structure_id)]).await.unwrap_err().code, "InsufficientCorpRoles");
     assert_eq!(rpc(&ctx, &mut sess, "structureDeployment", "CancelUnanchor", &[PyRep::Integer(structure_id)]).await.unwrap_err().code, "InsufficientCorpRoles");
@@ -280,7 +280,7 @@ async fn test_structure_settings_parity() {
     rpc(&ctx, &mut sess, "structureDeployment", "CancelUnanchor", &[PyRep::Integer(structure_id)]).await.expect("CancelUnanchor with Director");
     for bad_tax in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.5, 1.5] {
         let bad_settings = PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Real(bad_tax)])]);
-        let tax_err = rpc(&ctx, &mut sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(structure_id), bad_settings]).await;
+        let tax_err = rpc(&ctx, &mut sess, "structureSettings", "SaveProfileSettings", &[PyRep::Integer(structure_id), bad_settings]).await;
         assert_eq!(tax_err.unwrap_err().code, "InvalidStructureTaxRate");
     }
     assert_eq!(
@@ -289,15 +289,15 @@ async fn test_structure_settings_parity() {
         "Rejected NaN/inf tax rate must never corrupt or wipe StructureExtendedState"
     );
 
-    // Standalone ownerGroupManager.Create + structureProfiles.CreateProfile / UpdateProfile / SaveProfileSettings / ChangeProfiles
+    // Standalone ownerGroupManager.Create + structureSettings.CreateProfile / UpdateProfile / SaveProfileSettings / ChangeProfiles
     let grp_kv = rpc(&ctx, &mut sess, "ownerGroupManager", "Create", &[PyRep::String("Citadel ACL".into()), PyRep::String("Main ACL".into()), PyRep::Bool(true)]).await.expect("ownerGroupManager.Create");
     let group_id = grp_kv.dict_get("groupID").and_then(|v| v.as_i64()).expect("groupID");
     assert!(group_id >= 80_000_001);
-    let profile_id = rpc(&ctx, &mut sess, "structureProfiles", "CreateProfile", &[PyRep::String("Trade Profile".into()), PyRep::String("Desc".into())]).await.expect("CreateProfile").as_i64().expect("profileID");
+    let profile_id = rpc(&ctx, &mut sess, "structureSettings", "CreateProfile", &[PyRep::String("Trade Profile".into()), PyRep::String("Desc".into())]).await.expect("CreateProfile").as_i64().expect("profileID");
     assert!(profile_id >= 70_000_001);
-    assert_eq!(rpc(&ctx, &mut sess, "structureProfiles", "UpdateProfile", &[PyRep::Integer(profile_id), PyRep::String("Updated Trade Profile".into()), PyRep::String("Updated Desc".into())]).await.expect("UpdateProfile"), PyRep::Bool(true));
-    assert_eq!(rpc(&ctx, &mut sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(profile_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(group_id), PyRep::Real(0.025)])])]).await.expect("SaveProfileSettings on profile_id"), PyRep::Bool(true));
-    assert_eq!(rpc(&ctx, &mut sess, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(structure_id)]), PyRep::Integer(profile_id)]).await.expect("ChangeProfiles"), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "structureSettings", "UpdateProfile", &[PyRep::Integer(profile_id), PyRep::String("Updated Trade Profile".into()), PyRep::String("Updated Desc".into())]).await.expect("UpdateProfile"), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "structureSettings", "SaveProfileSettings", &[PyRep::Integer(profile_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(group_id), PyRep::Real(0.025)])])]).await.expect("SaveProfileSettings on profile_id"), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "structureSettings", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(structure_id)]), PyRep::Integer(profile_id)]).await.expect("ChangeProfiles"), PyRep::Bool(true));
     assert_eq!(
         ctx.db.with_snapshot(|s| load_ext_state(s).access_profiles.get(&structure_id).and_then(|p| p.service_settings.get(&1)).copied()),
         Some(250),
@@ -309,9 +309,9 @@ async fn test_structure_settings_parity() {
         .expect("CharacterGetService updated");
     assert_eq!(get_market_updated, PyRep::Real(0.025));
 
-    // Allowed vs blocked character/alliance test via structureProfiles & ownerGroupManager RPCs
+    // Allowed vs blocked character/alliance test via structureSettings & ownerGroupManager RPCs
     let mut sess_blocked = setup_pilot(&ctx, 102, "other", "other-secret", PILOT2).await;
-    let foreign_save = rpc(&ctx, &mut sess_blocked, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Real(0.05)])])]).await;
+    let foreign_save = rpc(&ctx, &mut sess_blocked, "structureSettings", "SaveProfileSettings", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Real(0.05)])])]).await;
     assert_eq!(foreign_save.unwrap_err().code, "StructureOwnershipViolation");
 
     // Atomic batch rollback: valid PILOT2 + invalid 888_777_666 must fail and leave PILOT2 unblocked

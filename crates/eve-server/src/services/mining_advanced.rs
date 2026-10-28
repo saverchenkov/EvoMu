@@ -1270,7 +1270,8 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
                         }
                     }
                 }
-                (st_fuel.saturating_add(item_fuel), gas)
+                let effective_fuel = if item_fuel > 0 { item_fuel } else { st_fuel };
+                (effective_fuel, gas)
             };
 
             let (init_fuel, init_gas) = count_reagents(snap);
@@ -1288,28 +1289,36 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
             let runnable_cycles = elapsed_cycles.min(init_fuel / fuel_per_cycle).min(init_gas / gas_per_cycle).min(max_cap_cycles);
 
             if runnable_cycles > 0 {
-                let mut rem_fuel_to_deduct = runnable_cycles * fuel_per_cycle;
-                let mut rem_gas_to_deduct = runnable_cycles * gas_per_cycle;
-                if let Some(st_mut) = snap.structures.get_mut(&structure_id) {
-                    let from_bay = st_mut.fuel_blocks.min(rem_fuel_to_deduct);
-                    st_mut.fuel_blocks -= from_bay;
-                    rem_fuel_to_deduct -= from_bay;
-                }
-                for (rem_ref, is_fuel) in [(&mut rem_fuel_to_deduct, true), (&mut rem_gas_to_deduct, false)] {
-                    if *rem_ref > 0 {
-                        let mut item_ids: Vec<i64> = snap.items.values()
-                            .filter(|it| it.location_id == structure_id && (st_owner_corp == 0 || it.owner_id == st_owner_corp) && it.quantity > 0 && it.flag != InventoryFlag::Locked && !snap.is_item_locked_in_contract_or_job(it.item_id) && if is_fuel { ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136) } else { it.type_id == 81143 })
-                            .map(|it| it.item_id).collect();
-                        item_ids.sort_unstable();
-                        for iid in item_ids {
-                            if *rem_ref == 0 { break; }
-                            if let Some(it) = snap.items.get_mut(&iid) {
-                                let take = (it.quantity.max(0) as u32).min(*rem_ref);
-                                it.quantity -= take as i32;
-                                *rem_ref -= take;
-                                if it.quantity <= 0 { snap.items.remove(&iid); }
-                            }
+                let fuel_to_deduct = runnable_cycles * fuel_per_cycle;
+                let mut rem_gas = runnable_cycles * gas_per_cycle;
+                let mut rem_fuel = fuel_to_deduct;
+                for (rem_ref, is_fuel) in [(&mut rem_fuel, true), (&mut rem_gas, false)] {
+                    if *rem_ref == 0 { continue; }
+                    let mut ids: Vec<i64> = snap.items.values()
+                        .filter(|it| it.location_id == structure_id && (st_owner_corp == 0 || it.owner_id == st_owner_corp) && it.quantity > 0 && it.flag != InventoryFlag::Locked && !snap.is_item_locked_in_contract_or_job(it.item_id) && if is_fuel { ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136) } else { it.type_id == 81143 })
+                        .map(|it| it.item_id).collect();
+                    ids.sort_unstable();
+                    for iid in ids {
+                        if *rem_ref == 0 { break; }
+                        if let Some(it) = snap.items.get_mut(&iid) {
+                            let take = (it.quantity.max(0) as u32).min(*rem_ref);
+                            it.quantity -= take as i32;
+                            it.version += 1;
+                            *rem_ref -= take;
+                            if it.quantity <= 0 { snap.items.remove(&iid); }
                         }
+                    }
+                }
+                let rem_bay: u32 = if fuel_to_deduct > rem_fuel {
+                    snap.items.values()
+                        .filter(|it| it.location_id == structure_id && (st_owner_corp == 0 || it.owner_id == st_owner_corp) && it.quantity > 0 && it.flag != InventoryFlag::Locked && !snap.is_item_locked_in_contract_or_job(it.item_id) && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136))
+                        .map(|it| it.quantity as u32).fold(0u32, u32::saturating_add)
+                } else { 0 };
+                if let Some(st_mut) = snap.structures.get_mut(&structure_id) {
+                    if fuel_to_deduct > rem_fuel {
+                        st_mut.fuel_blocks = rem_bay;
+                    } else {
+                        st_mut.fuel_blocks = st_mut.fuel_blocks.saturating_sub(fuel_to_deduct);
                     }
                 }
 
@@ -1333,14 +1342,11 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
             let (after_fuel, after_gas) = count_reagents(snap);
             let (rem_cap_after, _) = metenox_output_bay_remaining_capacity(&ctx.sde, snap, structure_id);
             if let Some(am) = snap.auto_moon_miners.get_mut(&structure_id) {
-                am.fuel_units_remaining = after_fuel;
-                am.magmatic_gas_remaining = after_gas;
-                am.ore_type_id = primary_mat_tid;
-                am.hourly_yield = hourly_yield;
+                am.fuel_units_remaining = after_fuel; am.magmatic_gas_remaining = after_gas;
+                am.ore_type_id = primary_mat_tid; am.hourly_yield = hourly_yield;
                 am.last_cycle_unix = if runnable_cycles < elapsed_cycles { now_unix } else { last_cycle_unix.saturating_add((runnable_cycles as u64) * cycle_secs) };
                 am.status = if after_fuel < fuel_per_cycle { "OutOfFuel".into() } else if after_gas < gas_per_cycle { "OutOfMagmaticGas".into() } else if rem_cap_after < per_cycle_vol { "OutputBayFull".into() } else { "Active".into() };
             }
         }
     });
 }
-

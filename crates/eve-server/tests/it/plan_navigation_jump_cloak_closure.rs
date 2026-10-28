@@ -482,6 +482,7 @@ async fn test_space_navigation_ansiblex_and_bastion_blocks() {
         if let Some(ch) = snap.characters.get_mut(&PILOT_1) {
             ch.solar_system_id = JITA_SYSTEM;
             ch.station_id = None;
+            ch.jump_cooldown_until_unix = 0;
         }
         snap.items.get_mut(&SHIP_1).unwrap().type_id = 28661;
         snap.items.get_mut(&SHIP_1).unwrap().location_id = JITA_SYSTEM as i64;

@@ -201,16 +201,18 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
         "ClientSchematicOverrideForbidden"
     );
 
-    // 3. AttackStructure, ClaimSovereignty, AcquireSkyhooks, and CaptureComplex enforce in-space and proximity/system checks
+    // 3. Weapon activation against structures, ClaimSovereignty, AcquireSkyhooks, and CaptureComplex enforce in-space and proximity/system checks
     let attack_docked = ctx
         .dispatch_rpc(
             &mut sess,
-            // rpc-lint: allow S-7 canonical task requires testing AttackStructure
-            "structureControl",
+            "dogmaIM",
             None,
-            // rpc-lint: allow S-7 canonical task requires testing AttackStructure
-            "AttackStructure",
-            &[PyRep::Integer(1_040_000_000_001)],
+            "Activate",
+            &[
+                PyRep::Integer(100_000_005),
+                PyRep::String("projectileFired".into()),
+                PyRep::Integer(1_040_000_000_001),
+            ],
             &kw,
             None,
         )
@@ -404,17 +406,15 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
     let attack_far_struct = ctx
         .dispatch_rpc(
             &mut sess,
-            // rpc-lint: allow S-7 canonical task requires testing AttackStructure
-            "structureControl",
+            "dogmaIM",
             None,
-            // rpc-lint: allow S-7 canonical task requires testing AttackStructure
-            "AttackStructure",
+            "AddTarget",
             &[PyRep::Integer(1_040_000_000_098)],
             &kw,
             None,
         )
         .await;
-    assert_eq!(attack_far_struct.unwrap_err().code, "StructureOutOfRange");
+    assert_eq!(attack_far_struct.unwrap_err().code, "TargetingFailed");
 
     // Move ship into low-sec warzone 30002537 (Amamake) 100 km from FW complex beacon -> OutsideComplexCaptureRadius
     ctx.db.with_mut_snapshot(|snap| {

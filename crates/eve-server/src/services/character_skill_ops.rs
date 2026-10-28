@@ -403,6 +403,9 @@ fn strip_ship_fitting(
         })?;
 
     let stripped = ctx.db.try_with_mut_snapshot(|snap| {
+        crate::services::structure_acl_defense_rules::validate_docked_ship_fitting_facility_in_snap(
+            ctx, snap, dock_id,
+        )?;
         let Some(ship) = snap.items.get(&ship_id) else {
             return Err(BridgeRpcError {
                 code: "ShipNotFound".into(),

@@ -335,7 +335,7 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
         snap.items.insert(taxed_ore_id, make_item(taxed_ore_id, 1230, char_id, tatara_id, InventoryFlag::Hangar, 1_000, false));
     });
     session.corporation_id = Some(owner_corp_id);
-    ctx.dispatch_rpc(&mut session, "structureProfiles", None, "SaveProfileSettings", &[PyRep::Integer(tatara_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Real(0.03)])])], &kw, None).await.expect("SaveProfileSettings 3% reprocessing tax");
+    ctx.dispatch_rpc(&mut session, "structureSettings", None, "SaveProfileSettings", &[PyRep::Integer(tatara_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Real(0.03)])])], &kw, None).await.expect("SaveProfileSettings 3% reprocessing tax");
     let st_tax_res = ctx.dispatch_rpc(&mut session, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(taxed_ore_id)], &kw, None).await.expect("Reprocess in structure with 3% owner tax");
     assert!((get_dict_val(&st_tax_res, "stationTaxRate").unwrap().as_f64().unwrap() - 0.03).abs() < 1e-6);
     assert!(get_dict_val(&st_tax_res, "reprocessingTaxISK").unwrap().as_f64().unwrap() > 0.0);

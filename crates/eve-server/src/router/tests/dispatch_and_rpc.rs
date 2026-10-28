@@ -181,10 +181,15 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
     let st_id = st_kv.get("structureID").unwrap().as_i64().unwrap();
     ctx.dispatch_rpc(
         &mut session,
-        "structureControl",
+        "invbroker",
         None,
-        "FuelStructure", // rpc-lint: allow legacy/negative-test RPC (structureControl.FuelStructure)
-        &[PyRep::Integer(st_id), PyRep::Integer(50)],
+        "Add",
+        &[
+            PyRep::Integer(100_000_033),
+            PyRep::Integer(st_id),
+            PyRep::Integer(133),
+            PyRep::Integer(50),
+        ],
         &empty,
         None,
     )
@@ -202,9 +207,9 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
     });
     ctx.dispatch_rpc(
         &mut sess2,
-        "corpmgr",
+        "corpRegistry",
         None,
-        "CreateCorporation", // rpc-lint: allow legacy/negative-test RPC (corpmgr.CreateCorporation)
+        "AddCorporation",
         &[
             PyRep::String("Rival Raiders".into()),
             PyRep::String("RVL".into()),
@@ -216,13 +221,44 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
     .await
     .unwrap();
     // Verify attacking a high-sec structure without an active war fails even if attacker owns a personal kill right
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            990_000_185,
+            eve_db::InventoryItemRecord {
+                item_id: 990_000_185,
+                type_id: 185,
+                owner_id: 90_000_002,
+                location_id: 100_000_002,
+                flag: eve_db::InventoryFlag::HiSlot0,
+                quantity: 100,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    ctx.dispatch_rpc(
+        &mut sess2,
+        "dogmaIM",
+        None,
+        "AddTarget",
+        &[PyRep::Integer(st_id)],
+        &empty,
+        None,
+    )
+    .await
+    .unwrap();
+    let _ = jita_handle.step_manual(10.0).await.unwrap();
     let no_war_atk = ctx
         .dispatch_rpc(
             &mut sess2,
-            "structureControl",
+            "dogmaIM",
             None,
-            "AttackStructure", // rpc-lint: allow legacy/negative-test RPC (structureControl.AttackStructure)
-            &[PyRep::Integer(st_id)],
+            "Activate",
+            &[
+                PyRep::Integer(100_000_006),
+                PyRep::String("projectileFired".into()),
+                PyRep::Integer(st_id),
+            ],
             &empty,
             None,
         )
@@ -261,15 +297,20 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
     let _ = jita_handle.step_manual(1.0).await.unwrap();
     ctx.dispatch_rpc(
         &mut sess2,
-        "structureControl",
+        "dogmaIM",
         None,
-        "AttackStructure", // rpc-lint: allow legacy/negative-test RPC (structureControl.AttackStructure)
-        &[PyRep::Integer(st_id)],
+        "Activate",
+        &[
+            PyRep::Integer(100_000_006),
+            PyRep::String("projectileFired".into()),
+            PyRep::Integer(st_id),
+        ],
         &empty,
         None,
     )
     .await
     .unwrap();
+    ctx.advance_virtual_clock(65);
 
     // Dock both sess2 (contract issuer) and session (courier) at anchored structure `st_id`
     crate::services::station_structure::structure_upwell_ops::configure_structure_access_profile(

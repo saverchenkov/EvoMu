@@ -18,35 +18,15 @@ use eve_proto::BridgeRpcError;
 use std::collections::{HashMap, HashSet};
 
 // ---- SDE dogma attribute IDs (sde_dogma_attributes) ----
-pub const ATTR_HP: u16 = 9; // hp (hull)
-pub const ATTR_LOW_SLOTS: u16 = 12;
-pub const ATTR_MED_SLOTS: u16 = 13;
-pub const ATTR_HI_SLOTS: u16 = 14;
-pub const ATTR_SHIELD_CAPACITY: u16 = 263;
-pub const ATTR_ARMOR_HP: u16 = 265;
-pub const ATTR_RIG_SLOTS: u16 = 1137;
-pub const ATTR_RIG_SIZE: u16 = 1547;
-pub const ATTR_DISALLOW_IN_HIGHSEC: u16 = 1970;
-pub const ATTR_SHIELD_DAMAGE_LIMIT: u16 = 2034;
-pub const ATTR_ARMOR_DAMAGE_LIMIT: u16 = 2035;
-pub const ATTR_STRUCTURE_DAMAGE_LIMIT: u16 = 2036;
-pub const ATTR_SERVICE_SLOTS: u16 = 2056;
-pub const ATTR_SERVICE_FUEL_GROUP: u16 = 2108; // serviceModuleFuelConsumptionGroup
-pub const ATTR_SERVICE_FUEL_PER_HOUR: u16 = 2109; // serviceModuleFuelAmount
-pub const ATTR_SERVICE_FUEL_ONLINE: u16 = 2110; // serviceModuleFuelOnlineAmount
-pub const ATTR_STRUCTURE_FULL_POWER_HP_MULT: u16 = 2743; // structureFullPowerStateHitpointMultiplier
-pub const ATTR_SERVICE_FULL_POWER_HP_MULT: u16 = 2744; // serviceModuleFullPowerStateHitpointMultiplier
-pub const ATTR_REQUIRES_DEED_TYPE: u16 = 3101; // structureRequiresDeedType (quantum core type)
-pub const ATTR_PAUSE_SHIELD_REPAIR_DPS: u16 = 3354;
-pub const ATTR_PAUSE_ARMOR_REPAIR_DPS: u16 = 3355;
-pub const ATTR_PAUSE_HULL_REPAIR_DPS: u16 = 3356;
-pub const ATTR_STRUCTURE_ROLE_BONUS: u16 = 2333; // structureRoleBonus (Citadel fuel reduction %)
-pub const ATTR_SERVICE_ROLE_BONUS: u16 = 2339; // structureServiceRoleBonus (EC/Refinery service fuel reduction %)
-pub const ATTR_ENG_MAT_BONUS: u16 = 2600; // strEngMatBonus
-pub const ATTR_ENG_COST_BONUS: u16 = 2601; // strEngCostBonus
-pub const ATTR_ENG_TIME_BONUS: u16 = 2602; // strEngTimeBonus
-pub const ATTR_REACTION_TIME_MULT: u16 = 2721; // strReactionTimeMultiplier
-pub const ATTR_REFINING_YIELD_BONUS: u16 = 2722; // strRefiningYieldBonus
+pub const ATTR_HP: u16 = 9; pub const ATTR_LOW_SLOTS: u16 = 12; pub const ATTR_MED_SLOTS: u16 = 13; pub const ATTR_HI_SLOTS: u16 = 14;
+pub const ATTR_SHIELD_CAPACITY: u16 = 263; pub const ATTR_ARMOR_HP: u16 = 265; pub const ATTR_RIG_SLOTS: u16 = 1137; pub const ATTR_RIG_SIZE: u16 = 1547;
+pub const ATTR_DISALLOW_IN_HIGHSEC: u16 = 1970; pub const ATTR_SHIELD_DAMAGE_LIMIT: u16 = 2034; pub const ATTR_ARMOR_DAMAGE_LIMIT: u16 = 2035; pub const ATTR_STRUCTURE_DAMAGE_LIMIT: u16 = 2036;
+pub const ATTR_SERVICE_SLOTS: u16 = 2056; pub const ATTR_SERVICE_FUEL_GROUP: u16 = 2108; pub const ATTR_SERVICE_FUEL_PER_HOUR: u16 = 2109; pub const ATTR_SERVICE_FUEL_ONLINE: u16 = 2110;
+pub const ATTR_STRUCTURE_FULL_POWER_HP_MULT: u16 = 2743; pub const ATTR_SERVICE_FULL_POWER_HP_MULT: u16 = 2744; pub const ATTR_REQUIRES_DEED_TYPE: u16 = 3101;
+pub const ATTR_PAUSE_SHIELD_REPAIR_DPS: u16 = 3354; pub const ATTR_PAUSE_ARMOR_REPAIR_DPS: u16 = 3355; pub const ATTR_PAUSE_HULL_REPAIR_DPS: u16 = 3356;
+pub const ATTR_STRUCTURE_ROLE_BONUS: u16 = 2333; pub const ATTR_SERVICE_ROLE_BONUS: u16 = 2339;
+pub const ATTR_ENG_MAT_BONUS: u16 = 2600; pub const ATTR_ENG_COST_BONUS: u16 = 2601; pub const ATTR_ENG_TIME_BONUS: u16 = 2602;
+pub const ATTR_REACTION_TIME_MULT: u16 = 2721; pub const ATTR_REFINING_YIELD_BONUS: u16 = 2722; pub const ATTR_TETHERING_RANGE: u16 = 2268;
 /// SDE category of Upwell structures.
 pub const CATEGORY_STRUCTURE: u32 = 65;
 /// SDE type ID of Upwell Palatine Keepstar (cluster-wide limit of 1 active).
@@ -63,10 +43,12 @@ pub const ANCHORING_SECS: u64 = 24 * 3_600;
 pub const ONLINING_SECS: u64 = 15 * 60;
 /// DERIVED (Vulnerability.md): repair timer for shield/armor damage.
 pub const REPAIR_SHIELD_ARMOR_SECS: u64 = 15 * 60;
-/// DERIVED (Vulnerability.md): repair timer for hull damage.
+/// DERIVED (Vulnerability.md:17,64,89): 30-minute hull repair window (15m shield/armor, 30m hull).
 pub const REPAIR_HULL_SECS: u64 = 30 * 60;
 /// DERIVED (Vulnerability.md "Structures in abandoned state (no fuel used for 7 days)").
 pub const ABANDON_AFTER_LOW_POWER_SECS: u64 = 7 * 86_400;
+/// Asset safety wraps auto-deliver to the nearest NPC station after 20 days (`feat:lifecycle.asset_safety-auto_delivery`).
+pub const ASSET_SAFETY_AUTO_DELIVERY_SECS: u64 = 20 * 86_400;
 /// DERIVED (Upwell_structure.md): minimum distance from stations, gates, belts, structures.
 pub const MIN_ANCHOR_DISTANCE_M: f64 = 1_000_000.0;
 /// Fuel is burned per hour (`serviceModuleFuelAmount` is an hourly amount).
@@ -190,10 +172,10 @@ pub fn structure_profile(ctx: &ServerContext, type_id: u32) -> Option<StructureP
         service_slots: a(ATTR_SERVICE_SLOTS).unwrap_or(0.0) as u32,
         rig_slots: a(ATTR_RIG_SLOTS).unwrap_or(0.0) as u32,
         full_power_hp_mult: a(ATTR_STRUCTURE_FULL_POWER_HP_MULT).unwrap_or(1.0),
-        fuel_bonus_pct: a(ATTR_STRUCTURE_ROLE_BONUS).or_else(|| a(ATTR_SERVICE_ROLE_BONUS)).unwrap_or(0.0),
-        eng_mat_bonus_pct: a(ATTR_ENG_MAT_BONUS).unwrap_or(0.0),
-        eng_cost_bonus_pct: a(ATTR_ENG_COST_BONUS).unwrap_or(0.0),
-        eng_time_bonus_pct: a(ATTR_ENG_TIME_BONUS).unwrap_or(0.0),
+        fuel_bonus_pct: a(ATTR_SERVICE_ROLE_BONUS).or_else(|| a(ATTR_STRUCTURE_ROLE_BONUS)).unwrap_or(0.0),
+        eng_mat_bonus_pct: a(ATTR_ENG_MAT_BONUS).map(|v| (v - 1.0) * 100.0).unwrap_or(0.0),
+        eng_cost_bonus_pct: a(ATTR_ENG_COST_BONUS).map(|v| (v - 1.0) * 100.0).unwrap_or(0.0),
+        eng_time_bonus_pct: a(ATTR_ENG_TIME_BONUS).map(|v| (v - 1.0) * 100.0).unwrap_or(0.0),
         reaction_time_mult: a(ATTR_REACTION_TIME_MULT).unwrap_or(1.0),
         refining_yield_bonus: a(ATTR_REFINING_YIELD_BONUS).unwrap_or(0.0),
     })
@@ -225,12 +207,38 @@ fn is_rig_slot(flag: InventoryFlag) -> bool {
     (92..=94).contains(&(flag as u16))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceFamily {
+    Citadel,
+    Engineering,
+    Refinery,
+    Other,
+}
+
+pub fn service_family_for_module(ctx: &ServerContext, type_id: u32) -> ServiceFamily {
+    match ctx.sde.types.get(&type_id).map(|t| t.group_id) {
+        Some(1321) => ServiceFamily::Citadel, // Structure Citadel Service Module (Market, Clone Bay)
+        Some(1415 | 1416) => ServiceFamily::Engineering, // Structure Engineering & Research Service Modules
+        Some(1322 | 1887) => ServiceFamily::Refinery, // Structure Resource Processing & Moon Drilling Modules
+        _ => ServiceFamily::Other,
+    }
+}
+
+pub fn structure_family(group_id: u32) -> ServiceFamily {
+    match group_id {
+        1657 => ServiceFamily::Citadel,
+        1404 | 1876 => ServiceFamily::Engineering,
+        1406 => ServiceFamily::Refinery,
+        _ => ServiceFamily::Other,
+    }
+}
+
 fn is_fitting_slot(flag: InventoryFlag) -> bool {
     matches!(flag as u16, 11..=34) || is_rig_slot(flag) || is_service_slot(flag)
 }
 
-/// Service modules fitted to the structure: `(item_id, fuel/hour, online fuel, full-power HP mult)`.
-fn fitted_service_modules(ctx: &ServerContext, snap: &WorldStateSnapshot, structure_id: i64) -> Vec<(i64, u32, u32, f64)> {
+/// Service modules fitted to the structure: `(item_id, type_id, fuel/hour, online fuel, full-power HP mult)`.
+fn fitted_service_modules(ctx: &ServerContext, snap: &WorldStateSnapshot, structure_id: i64) -> Vec<(i64, u32, u32, u32, f64)> {
     let mut out: Vec<_> = snap
         .items
         .values()
@@ -240,14 +248,19 @@ fn fitted_service_modules(ctx: &ServerContext, snap: &WorldStateSnapshot, struct
             let per_hour = *t.default_attributes.get(&ATTR_SERVICE_FUEL_PER_HOUR)?;
             let online = t.default_attributes.get(&ATTR_SERVICE_FUEL_ONLINE).copied().unwrap_or(0.0);
             let mult = t.default_attributes.get(&ATTR_SERVICE_FULL_POWER_HP_MULT).copied().unwrap_or(1.0);
-            Some((i.item_id, per_hour as u32, online as u32, mult))
+            Some((i.item_id, i.type_id, per_hour as u32, online as u32, mult))
         })
         .collect();
     out.sort_by_key(|m| m.0);
     out
 }
 
-fn online_service_modules(ctx: &ServerContext, snap: &WorldStateSnapshot, structure_id: i64) -> Vec<(i64, u32, u32, f64)> {
+fn online_service_modules(ctx: &ServerContext, snap: &WorldStateSnapshot, structure_id: i64) -> Vec<(i64, u32, u32, u32, f64)> {
+    if snap.structures.get(&structure_id).is_some_and(|st| {
+        !st.quantum_core_installed && structure_profile(ctx, st.type_id).is_some_and(|p| p.core_type_id.is_some())
+    }) {
+        return Vec::new();
+    }
     fitted_service_modules(ctx, snap, structure_id).into_iter().filter(|m| snap.module_online_states.get(&m.0).copied().unwrap_or(false)).collect()
 }
 
@@ -256,13 +269,17 @@ pub fn is_operational(state: &str) -> bool {
 }
 
 /// Power state: full power with at least one online service module, low power otherwise,
-/// abandoned after [`ABANDON_AFTER_LOW_POWER_SECS`] continuously in low power.
+/// abandoned after [`ABANDON_AFTER_LOW_POWER_SECS`] continuously in low power (except Faction
+/// Fortizars `47512..=47516`, which never enter the Abandoned state per `Asset_safety.md:68`).
 pub fn power_state(ctx: &ServerContext, snap: &WorldStateSnapshot, ext: &StructureExtendedState, st: &UpwellStructureRecord, now: u64) -> PowerState {
     if !is_operational(&st.state) {
         return PowerState::NotOperational;
     }
     if !online_service_modules(ctx, snap, st.structure_id).is_empty() {
         return PowerState::FullPower;
+    }
+    if matches!(st.type_id, 47512..=47516) {
+        return PowerState::LowPower;
     }
     let since = ext.lifecycle.get(&st.structure_id).and_then(|l| l.low_power_since_unix);
     match since {
@@ -279,7 +296,7 @@ pub fn effective_max_shield(ctx: &ServerContext, snap: &WorldStateSnapshot, prof
     if power != PowerState::FullPower {
         return profile.shield_hp;
     }
-    let module_mult = online_service_modules(ctx, snap, structure_id).iter().map(|m| m.3).fold(1.0_f64, f64::max);
+    let module_mult = online_service_modules(ctx, snap, structure_id).iter().map(|m| m.4).fold(1.0_f64, f64::max);
     profile.shield_hp * profile.full_power_hp_mult * module_mult
 }
 
@@ -393,10 +410,20 @@ fn new_space_item(snap: &mut WorldStateSnapshot, type_id: u32, owner_id: i64, sy
     id
 }
 
+const AU_METERS: f64 = 149_597_870_700.0;
+
 /// Nearest NPC station by Euclidean distance in AU (`galactic_pos_ly`) within the allowed
 /// security band (`high -> high` for `sec >= 0.45`, `low -> low` / `null -> low` for `sec < 0.45`),
 /// tie-broken by lowest station ID (`feat:lifecycle.asset_safety-auto_delivery`).
 pub fn nearest_npc_station(ctx: &ServerContext, origin: u32) -> Option<i64> {
+    nearest_npc_station_from_pos_opt(ctx, origin, None)
+}
+
+pub fn nearest_npc_station_from_pos(ctx: &ServerContext, origin: u32, pos: glam::DVec3) -> Option<i64> {
+    nearest_npc_station_from_pos_opt(ctx, origin, Some(pos))
+}
+
+fn nearest_npc_station_from_pos_opt(ctx: &ServerContext, origin: u32, pos_opt: Option<glam::DVec3>) -> Option<i64> {
     let origin_sys = ctx.sde.solar_systems.get(&origin);
     let origin_sec = origin_sys.map(|s| s.security_status).unwrap_or(-1.0);
     let origin_pos = origin_sys
@@ -418,7 +445,11 @@ pub fn nearest_npc_station(ctx: &ServerContext, origin: u32) -> Option<i64> {
             continue;
         }
         let dist_au = if st.solar_system_id == origin {
-            0.0
+            if let Some(pos) = pos_opt {
+                pos.distance(st.position) / AU_METERS
+            } else {
+                0.0
+            }
         } else if let Some(cand_sys) = ctx.sde.solar_systems.get(&st.solar_system_id) {
             origin_pos.distance(glam::DVec3::from_array(cand_sys.galactic_pos_ly)) * 63_241.077
         } else {
@@ -438,10 +469,15 @@ pub fn nearest_npc_station(ctx: &ServerContext, origin: u32) -> Option<i64> {
     best.map(|(_, id)| id)
 }
 
+pub fn sync_asset_safety_wraps(ctx: &ServerContext) {
+    super::structure_upwell_ops::sync_auto_delivered_asset_safety_wraps(ctx);
+}
+
 /// What happened to a structure's contents when it left space.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DisposalOutcome {
     pub killmail_id: Option<i64>,
+    pub wreck_item_id: Option<i64>,
     pub dropped_core_item_id: Option<i64>,
     pub packaged_item_id: Option<i64>,
     pub asset_safety_wrap_ids: Vec<i64>,
@@ -454,6 +490,7 @@ pub struct DisposalOutcome {
 /// at the structure position; in non-abandoned K-space fitted modules drop/are destroyed
 /// (destruction) or join asset safety (unanchor) and hangar contents go to per-owner wraps.
 fn dispose_contents(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &mut StructureExtendedState, st: &UpwellStructureRecord, destroyed: bool, now: u64, out: &mut DisposalOutcome) {
+    crate::services::structure_acl_defense_rules::materialize_structure_fuel_for_disposal(ctx, snap, st.structure_id);
     let wormhole = space_class(ctx, st.solar_system_id) == SpaceClass::Wormhole;
     let abandoned = destroyed && power_state(ctx, snap, ext, st, now) == PowerState::Abandoned;
     let mut contents: Vec<(i64, i64, InventoryFlag)> = snap.items.values().filter(|i| i.location_id == st.structure_id).map(|i| (i.item_id, i.owner_id, i.flag)).collect();
@@ -493,7 +530,7 @@ fn dispose_contents(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &mu
     if to_safety.is_empty() {
         return;
     }
-    let station = nearest_npc_station(ctx, st.solar_system_id);
+    let station = nearest_npc_station_from_pos(ctx, st.solar_system_id, glam::DVec3::from_array(st.position));
     let mut by_owner: HashMap<i64, Vec<i64>> = HashMap::new();
     for (iid, owner) in to_safety {
         by_owner.entry(owner).or_default().push(iid);
@@ -553,58 +590,31 @@ fn dispose_contents(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &mu
 /// Removes the structure's ball, emits `OnStructureRemoved` / `OnStructureRemovedFromSpace` at
 /// completion, and spawns balls at the structure position for dropped core, fittings, and
 /// packaged structure item (`feat:lifecycle.structure-leave_space`).
-fn emit_structure_left_space_and_spawn_drops(
-    ctx: &ServerContext,
-    snap: &WorldStateSnapshot,
-    st: &UpwellStructureRecord,
-    out: &DisposalOutcome,
-) {
-    let active_handle = ctx
-        .systems
-        .active_system_handles()
-        .into_iter()
-        .find(|(id, _)| *id == st.solar_system_id)
-        .map(|(_, h)| h);
+fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldStateSnapshot, st: &UpwellStructureRecord, out: &DisposalOutcome) {
+    let active_handle = ctx.systems.active_system_handles().into_iter().find(|(id, _)| *id == st.solar_system_id).map(|(_, h)| h);
     if let Some(handle) = active_handle {
         handle.try_remove_ball(st.structure_id);
         let pos = glam::DVec3::from_array(st.position);
-        let alliance_id = snap
-            .corporations
-            .get(&st.owner_corp_id)
-            .and_then(|c| c.alliance_id)
-            .unwrap_or(0);
-        for iid in out
-            .dropped_core_item_id
-            .into_iter()
-            .chain(out.packaged_item_id)
-            .chain(out.dropped_item_ids.iter().copied())
-        {
+        let alliance_id = snap.corporations.get(&st.owner_corp_id).and_then(|c| c.alliance_id).unwrap_or(0);
+        for iid in out.wreck_item_id.into_iter().chain(out.dropped_core_item_id).chain(out.packaged_item_id).chain(out.dropped_item_ids.iter().copied()) {
             if let Some(it) = snap.items.get(&iid) {
+                if it.location_id != i64::from(st.solar_system_id) {
+                    continue;
+                }
                 let rad = ctx.sde.types.get(&it.type_id).map(|t| t.radius.max(10.0)).unwrap_or(25.0);
                 let mass = ctx.sde.types.get(&it.type_id).map(|t| t.mass.max(1.0)).unwrap_or(1_000.0);
                 handle.try_spawn_ball_with_meta(
                     eve_destiny::Ball {
-                        id: iid,
-                        type_id: it.type_id,
-                        position: pos,
-                        velocity: glam::DVec3::ZERO,
-                        max_velocity: 0.0,
-                        inertia: 1.0,
-                        mass,
-                        radius: rad,
-                        speed_fraction: 0.0,
+                        id: iid, type_id: it.type_id, position: pos, velocity: glam::DVec3::ZERO,
+                        max_velocity: 0.0, inertia: 1.0, mass, radius: rad, speed_fraction: 0.0,
                         mode: eve_destiny::MovementMode::Stop,
                     },
                     ctx.build_type_combat_state(it.type_id),
                     eve_destiny::SlimItemMeta {
-                        owner_id: it.owner_id,
-                        char_id: None,
-                        corp_id: st.owner_corp_id,
-                        alliance_id,
-                        group_id: ctx.sde.types.get(&it.type_id).map(|t| t.group_id).unwrap_or(1657),
-                        category_id: 65,
-                        security_status: 0.0,
-                        is_cloaked: false,
+                        owner_id: it.owner_id, char_id: None, corp_id: st.owner_corp_id, alliance_id,
+                        group_id: ctx.sde.types.get(&it.type_id).map(|t| t.group_id).unwrap_or(186),
+                        category_id: ctx.sde.types.get(&it.type_id).map(|t| t.category_id).unwrap_or(65),
+                        security_status: 0.0, is_cloaked: false,
                     },
                 );
             }
@@ -660,15 +670,43 @@ fn emit_structure_left_space_and_spawn_drops(
     }
 }
 
-/// Destroys a structure: killmail, quantum core drop, fitting drop and automatic asset safety.
+/// Maximum tethering distance from the structure center in meters:
+/// hull collision radius + SDE attribute 2268 (`tetheringRange`).
+pub fn tether_range_m(ctx: &ServerContext, st_type_id: u32) -> f64 {
+    let ty = ctx.sde.types.get(&st_type_id);
+    let radius = ty.map(|t| t.radius).unwrap_or(0.0);
+    let tether_extra = ty
+        .and_then(|t| t.default_attributes.get(&ATTR_TETHERING_RANGE).copied())
+        .unwrap_or(10_000.0);
+    radius + tether_extra
+}
+
+/// Destroys a structure: killmail, structure wreck, quantum core in wreck, and asset safety.
 pub fn destroy_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &mut StructureExtendedState, structure_id: i64, attacker_char_id: i64, now: u64) -> DisposalOutcome {
     let mut out = DisposalOutcome::default();
     let Some(st) = snap.structures.get(&structure_id).cloned() else { return out };
     dispose_contents(ctx, snap, ext, &st, true, now, &mut out);
-    // Quantum_Cores.md: cores always drop from destroyed structures that had them installed.
+    let wreck_type_id = ctx.sde.wrecks.get(&st.type_id).copied().unwrap_or(26557);
+    snap.next_entity_id += 1;
+    let wreck_id = snap.next_entity_id;
+    crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, wreck_id, now, false);
+    snap.items.insert(wreck_id, InventoryItemRecord {
+        item_id: wreck_id, type_id: wreck_type_id, owner_id: st.owner_corp_id,
+        location_id: i64::from(st.solar_system_id), flag: InventoryFlag::None,
+        quantity: 1, singleton: true, version: 1, ..Default::default()
+    });
+    snap.item_positions.insert(wreck_id, st.position);
+    out.wreck_item_id = Some(wreck_id);
     if st.quantum_core_installed {
         if let Some(core) = structure_profile(ctx, st.type_id).and_then(|p| p.core_type_id) {
-            out.dropped_core_item_id = Some(new_space_item(snap, core, st.owner_corp_id, st.solar_system_id, st.position, 1));
+            snap.next_entity_id += 1;
+            let core_item_id = snap.next_entity_id;
+            snap.items.insert(core_item_id, InventoryItemRecord {
+                item_id: core_item_id, type_id: core, owner_id: st.owner_corp_id,
+                location_id: wreck_id, flag: InventoryFlag::Cargo,
+                quantity: 1, singleton: false, version: 1, ..Default::default()
+            });
+            out.dropped_core_item_id = Some(core_item_id);
         }
     }
     snap.next_entity_id += 1;
@@ -688,27 +726,61 @@ pub fn destroy_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext
     }
     ext.lifecycle.remove(&structure_id);
     ext.unanchoring_until_unix.remove(&structure_id);
+    ext.active_pilot_by_structure.remove(&structure_id); ext.previous_ship_by_structure.remove(&structure_id);
     // feat:clones.clone-destroyed-structure: clones in destroyed structure are moved home (implants lost) per V24 rules.
-    relocate_structure_clones_to_home(snap, structure_id);
+    relocate_structure_clones_to_home(ctx, snap, &st);
     emit_structure_left_space_and_spawn_drops(ctx, snap, &st, &out);
     out
 }
 
+pub fn resolve_char_school_or_nearest_station(ctx: &ServerContext, snap: &WorldStateSnapshot, char_id: i64, fallback_sys_id: u32) -> i64 {
+    snap.characters
+        .get(&char_id)
+        .and_then(|c| {
+            ctx.sde
+                .schools
+                .get(&c.school_id)
+                .or_else(|| ctx.sde.schools.values().find(|s| s.race_id == c.race_id))
+                .map(|s| s.station_id)
+        })
+        .or_else(|| nearest_npc_station(ctx, fallback_sys_id))
+        .or_else(|| ctx.sde.stations.values().map(|s| s.station_id).min())
+        .unwrap_or(0)
+}
+
 /// Relocates all jump clones installed in a structure to their character's home station with implants destroyed.
-fn relocate_structure_clones_to_home(snap: &mut WorldStateSnapshot, structure_id: i64) {
-    for clones in snap.jump_clones.values_mut() {
-        for jc in clones.iter_mut() {
-            if jc.location_id == structure_id {
-                let home = snap
-                    .characters
-                    .get(&jc.character_id)
-                    .map(|c| if c.home_station_id > 0 && c.home_station_id != structure_id { c.home_station_id } else { 60_003_760 })
-                    .unwrap_or(60_003_760);
-                jc.location_id = home;
-                jc.implants.clear();
+fn relocate_structure_clones_to_home(ctx: &ServerContext, snap: &mut WorldStateSnapshot, st: &UpwellStructureRecord) {
+    let structure_id = st.structure_id;
+    let char_ids: Vec<i64> = snap.jump_clones.keys().copied().collect();
+    for cid in char_ids {
+        let fallback = resolve_char_school_or_nearest_station(ctx, snap, cid, st.solar_system_id);
+        let home = snap
+            .characters
+            .get(&cid)
+            .map(|c| if c.home_station_id > 0 && c.home_station_id != structure_id { c.home_station_id } else { fallback })
+            .unwrap_or(fallback);
+        if let Some(clones) = snap.jump_clones.get_mut(&cid) {
+            for jc in clones.iter_mut() {
+                if jc.location_id == structure_id {
+                    jc.location_id = home;
+                    jc.implants.clear();
+                }
             }
         }
     }
+}
+
+/// Syncs structures and clears an Upwell `home_station_id` if Clone Bay or ACL access is no longer valid before pod respawn.
+pub fn prepare_home_station_respawn(ctx: &ServerContext, char_id: i64) {
+    sync_all_structures(ctx);
+    ctx.db.with_mut_snapshot(|snap| {
+        let Some(home_id) = snap.characters.get(&char_id).map(|c| c.home_station_id) else { return };
+        if home_id >= 1_000_000_000_000 && validate_home_station_structure(ctx, snap, char_id, home_id).is_err() {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.home_station_id = 0;
+            }
+        }
+    });
 }
 
 /// Completes decommissioning: the structure is packaged into an item in space at its position,
@@ -726,10 +798,11 @@ pub fn package_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext
     snap.structures.remove(&structure_id);
     ext.lifecycle.remove(&structure_id);
     ext.unanchoring_until_unix.remove(&structure_id);
+    ext.active_pilot_by_structure.remove(&structure_id); ext.previous_ship_by_structure.remove(&structure_id);
     ext.descriptions.remove(&structure_id);
     snap.structure_vulnerability_windows.remove(&structure_id);
     // feat:clones.clone-destroyed-structure: clones in unanchored/packaged structure are moved home (implants lost) per V24 rules.
-    relocate_structure_clones_to_home(snap, structure_id);
+    relocate_structure_clones_to_home(ctx, snap, &st);
     emit_structure_left_space_and_spawn_drops(ctx, snap, &st, &out);
     out
 }
@@ -740,7 +813,7 @@ fn installed_core_item(snap: &WorldStateSnapshot, st: &UpwellStructureRecord, co
     let mut ids: Vec<i64> = snap
         .items
         .values()
-        .filter(|i| i.location_id == st.structure_id && i.type_id == core_type && (i.owner_id == corp || snap.characters.get(&i.owner_id).map(|c| c.corporation_id == corp).unwrap_or(false)))
+        .filter(|i| i.location_id == st.structure_id && i.flag == InventoryFlag::StructureDeedBay && i.type_id == core_type && (i.owner_id == corp || snap.characters.get(&i.owner_id).map(|c| c.corporation_id == corp).unwrap_or(false)))
         .map(|i| i.item_id)
         .collect();
     ids.sort_unstable();
@@ -763,28 +836,26 @@ fn full_repair(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &Structu
 
 /// Burns hourly service-module fuel up to `now`; modules go offline when the bay runs dry.
 fn burn_fuel(ctx: &ServerContext, snap: &mut WorldStateSnapshot, life: &mut StructureLifecycleState, structure_id: i64, now: u64) {
-    let fuel_groups = service_fuel_groups(ctx);
-    let bay_items: Vec<(i64, u32)> = snap
-        .items
-        .values()
-        .filter(|i| i.location_id == structure_id && i.flag == InventoryFlag::SpecializedFuelBay && i.quantity > 0 && ctx.sde.types.get(&i.type_id).is_some_and(|t| fuel_groups.contains(&t.group_id)))
-        .map(|i| (i.item_id, i.quantity as u32))
-        .collect();
-    for (iid, qty) in bay_items {
-        snap.items.remove(&iid);
-        if let Some(st) = snap.structures.get_mut(&structure_id) {
-            st.fuel_blocks = st.fuel_blocks.saturating_add(qty);
-        }
-    }
-    // Onlining requirement (Anchoring_structures.md): a module only comes online when the fuel
-    // bay holds its `serviceModuleFuelOnlineAmount`.
-    let fuel_now = snap.structures.get(&structure_id).map(|s| s.fuel_blocks).unwrap_or(0);
-    for (iid, _, online_amount, _) in online_service_modules(ctx, snap, structure_id) {
+    use crate::services::structure_acl_defense_rules as rules;
+    rules::sync_seeded_structure_fuel_bay(ctx, snap, structure_id);
+    let first_init = life.last_fuel_tick_unix.is_none();
+    let st_type_id = snap.structures.get(&structure_id).map(|s| s.type_id).unwrap_or(0);
+    for (iid, mod_tid, _, _, _) in online_service_modules(ctx, snap, structure_id) {
         if !life.online_modules.contains(&iid) {
-            if fuel_now >= online_amount {
-                life.online_modules.push(iid);
+            if first_init {
+                let avail = snap.structures.get(&structure_id).map(|s| s.fuel_blocks).unwrap_or(0);
+                if avail > 0 {
+                    life.online_modules.push(iid);
+                } else {
+                    snap.module_online_states.insert(iid, false);
+                }
             } else {
-                snap.module_online_states.insert(iid, false);
+                let cost = rules::service_module_online_fuel_cost(ctx, st_type_id, mod_tid);
+                if rules::consume_structure_fuel_blocks(ctx, snap, structure_id, cost) {
+                    life.online_modules.push(iid);
+                } else {
+                    snap.module_online_states.insert(iid, false);
+                }
             }
         }
     }
@@ -796,11 +867,16 @@ fn burn_fuel(ctx: &ServerContext, snap: &mut WorldStateSnapshot, life: &mut Stru
         if online.is_empty() {
             continue;
         }
-        let need: u32 = online.iter().map(|m| m.1).sum();
-        let Some(st) = snap.structures.get_mut(&structure_id) else { return };
-        if st.fuel_blocks >= need {
-            st.fuel_blocks -= need;
-        } else {
+        if !snap.structures.contains_key(&structure_id) {
+            return;
+        }
+        let mut need = 0u32;
+        for &(_, mod_tid, per_hour, _, _) in &online {
+            let mod_mult = rules::service_module_fuel_multiplier(ctx, st_type_id, mod_tid);
+            let mod_burn = (f64::from(per_hour) * mod_mult).round().max(1.0) as u32;
+            need = need.saturating_add(mod_burn);
+        }
+        if !rules::consume_structure_fuel_blocks(ctx, snap, structure_id, need) {
             for m in &online {
                 snap.module_online_states.insert(m.0, false);
             }
@@ -834,7 +910,8 @@ pub fn sync_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &
         return Some(package_structure(ctx, snap, ext, structure_id, now));
     }
     let profile = structure_profile(ctx, st.type_id)?;
-    super::structure_upwell_ops::apply_pending_reinforce_schedule(snap, ext, structure_id, now);
+    super::structure_upwell_ops::apply_pending_reinforce_schedule(ctx, snap, ext, structure_id, now);
+    super::structure_upwell_ops::apply_pending_profile_applications(ext, now);
     for _ in 0..16 {
         let st = snap.structures.get(&structure_id).cloned()?;
         let timer = st.reinforced_until_unix;
@@ -842,22 +919,26 @@ pub fn sync_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &
             STATE_ANCHOR_VULNERABLE if now >= timer => Some((STATE_ANCHORING, timer + ANCHORING_SECS)),
             STATE_ANCHORING if now >= timer => Some(if profile.core_type_id.is_some() { (STATE_NO_CORE, 0) } else { (STATE_ONLINING, timer + ONLINING_SECS) }),
             STATE_NO_CORE => {
-                let core_type = profile.core_type_id.unwrap_or(0);
-                installed_core_item(snap, &st, core_type).map(|core_item| {
-                    match snap.items.get_mut(&core_item) {
-                        Some(it) if it.quantity > 1 => {
-                            it.quantity -= 1;
-                            it.version += 1;
+                if ctx.sde.solar_systems.get(&st.solar_system_id).map(|s| s.region_id) == Some(POCHVEN_REGION_ID) {
+                    None
+                } else {
+                    let core_type = profile.core_type_id.unwrap_or(0);
+                    installed_core_item(snap, &st, core_type).map(|core_item| {
+                        match snap.items.get_mut(&core_item) {
+                            Some(it) if it.quantity > 1 => {
+                                it.quantity -= 1;
+                                it.version += 1;
+                            }
+                            _ => {
+                                snap.items.remove(&core_item);
+                            }
                         }
-                        _ => {
-                            snap.items.remove(&core_item);
+                        if let Some(s) = snap.structures.get_mut(&structure_id) {
+                            s.quantum_core_installed = true;
                         }
-                    }
-                    if let Some(s) = snap.structures.get_mut(&structure_id) {
-                        s.quantum_core_installed = true;
-                    }
-                    (STATE_ONLINING, now + ONLINING_SECS)
-                })
+                        (STATE_ONLINING, now + ONLINING_SECS)
+                    })
+                }
             }
             STATE_ONLINING if now >= timer => Some((STATE_SHIELD_VULNERABLE, 0)),
             STATE_ARMOR_REINFORCED if now >= timer => Some((STATE_ARMOR_VULNERABLE, 0)),
@@ -878,16 +959,20 @@ pub fn sync_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &
                 life.low_power_since_unix = Some(timer);
                 life.repair_until_unix = None;
                 life.fight_started_unix = None;
+                life.shield_fight_started_unix = None;
+                life.armor_reinforce_secs_applied = None;
+                life.unjittered_reinforce_exit_unix = None;
                 repair_now = true;
             }
-            // Leaving a reinforcement starts a repair timer at the exit time.
+            // Leaving a reinforcement starts a repair timer at the exit time while preserving
+            // `shield_fight_started_unix` for multi-timer exit date calculation (`Vulnerability.md`).
             STATE_ARMOR_VULNERABLE if leaving == STATE_ARMOR_REINFORCED => {
                 life.repair_until_unix = Some(timer + REPAIR_SHIELD_ARMOR_SECS);
-                life.fight_started_unix = Some(timer);
+                life.fight_started_unix = Some(life.unjittered_reinforce_exit_unix.take().unwrap_or(timer));
             }
             STATE_HULL_VULNERABLE if leaving == STATE_HULL_REINFORCED => {
                 life.repair_until_unix = Some(timer + REPAIR_HULL_SECS);
-                life.fight_started_unix = Some(timer);
+                life.fight_started_unix = Some(life.unjittered_reinforce_exit_unix.take().unwrap_or(timer));
             }
             _ => {}
         }
@@ -903,6 +988,9 @@ pub fn sync_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &
         if repair_due {
             life.repair_until_unix = None;
             life.fight_started_unix = None;
+            life.shield_fight_started_unix = None;
+            life.armor_reinforce_secs_applied = None;
+            life.unjittered_reinforce_exit_unix = None;
         }
         ext.lifecycle.insert(structure_id, life);
         if repair_due {
@@ -918,6 +1006,9 @@ pub fn sync_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &
         if life.repair_until_unix.is_some_and(|t| now >= t) {
             life.repair_until_unix = None;
             life.fight_started_unix = None;
+            life.shield_fight_started_unix = None;
+            life.armor_reinforce_secs_applied = None;
+            life.unjittered_reinforce_exit_unix = None;
             if let Some(s) = snap.structures.get_mut(&structure_id) {
                 s.hull_hp = profile.hull_hp;
             }
@@ -999,18 +1090,24 @@ pub fn apply_structure_damage(ctx: &ServerContext, snap: &mut WorldStateSnapshot
     let hour = reinforce_hour(snap, &st);
     let cycle_whole = cycle.ceil() as u64;
     let life = ext.lifecycle.entry(structure_id).or_default();
-    if life.repair_until_unix.is_none() {
+    if life.fight_started_unix.is_none() {
         life.fight_started_unix = Some(now);
     }
-    let fight_start = life.fight_started_unix.unwrap_or(now);
-    let jitter_offset = life.reinforce_jitter_secs;
-    let repair_len = if layer == "hull" { REPAIR_HULL_SECS } else { REPAIR_SHIELD_ARMOR_SECS };
-    // Damage starts the repair timer; damage at/above the pause threshold freezes it for the cycle.
-    let mut repair_until = life.repair_until_unix.unwrap_or(now + repair_len);
-    if qualifying {
-        repair_until = now + cycle_whole + repair_until.saturating_sub(now);
+    if layer == "shield" && life.shield_fight_started_unix.is_none() {
+        life.shield_fight_started_unix = Some(now);
     }
-    life.repair_until_unix = Some(repair_until);
+    let fight_start = life.fight_started_unix.unwrap_or(now);
+    let is_deploying = matches!(st.state.as_str(), STATE_ANCHOR_VULNERABLE | STATE_ONLINING);
+    if is_deploying {
+        life.repair_until_unix = None;
+    } else {
+        let repair_len = if layer == "hull" { REPAIR_HULL_SECS } else { REPAIR_SHIELD_ARMOR_SECS };
+        let mut repair_until = life.repair_until_unix.unwrap_or(now + repair_len);
+        if qualifying {
+            repair_until = now + cycle_whole + repair_until.saturating_sub(now);
+        }
+        life.repair_until_unix = Some(repair_until);
+    }
     let mut destruction = None;
     {
         let s = snap.structures.get_mut(&structure_id).ok_or_else(|| BridgeRpcError { code: "StructureNotFound".into(), message: "structure vanished".into() })?;
@@ -1023,13 +1120,27 @@ pub fn apply_structure_damage(ctx: &ServerContext, snap: &mut WorldStateSnapshot
             "shield" => {
                 s.shield_hp = (s.shield_hp - applied).max(0.0);
                 if s.shield_hp <= 0.0 {
+                    let shield_anchor = life.shield_fight_started_unix.unwrap_or(fight_start);
                     match armor_reinforcement_secs(profile.hull_class, space, power) {
                         Some(secs) => {
                             s.state = STATE_ARMOR_REINFORCED.into();
-                            let base_exit = next_reinforce_exit(fight_start + secs, hour);
-                            s.reinforced_until_unix = apply_reinforce_jitter(base_exit, jitter_offset, reinforce_jitter_window_secs(profile.hull_class, true));
+                            life.armor_reinforce_secs_applied = Some(secs);
+                            let max_j = reinforce_jitter_window_secs(profile.hull_class, true);
+                            let j = if max_j > 0 {
+                                let roll = ctx.mechanic_rng.try_unit_f64().unwrap_or(0.5);
+                                ((roll * 2.0 - 1.0) * (max_j as f64)).round() as i64
+                            } else { 0 };
+                            life.reinforce_jitter_secs = j;
+                            let base_exit = next_reinforce_exit((shield_anchor + secs).max(now), hour);
+                            life.unjittered_reinforce_exit_unix = Some(base_exit);
+                            s.reinforced_until_unix = apply_reinforce_jitter(base_exit, j, max_j).max(now + 60);
                         }
-                        None => s.state = STATE_ARMOR_VULNERABLE.into(),
+                        None => {
+                            s.state = STATE_ARMOR_VULNERABLE.into();
+                            life.armor_reinforce_secs_applied = None;
+                            life.unjittered_reinforce_exit_unix = None;
+                            life.fight_started_unix = Some(now);
+                        }
                     }
                     life.repair_until_unix = if s.state == STATE_ARMOR_VULNERABLE { Some(now + REPAIR_SHIELD_ARMOR_SECS) } else { None };
                 }
@@ -1040,16 +1151,26 @@ pub fn apply_structure_damage(ctx: &ServerContext, snap: &mut WorldStateSnapshot
                     match hull_reinforcement_secs(profile.hull_class, space, power) {
                         Some(secs) => {
                             s.state = STATE_HULL_REINFORCED.into();
-                            let base_exit = if profile.hull_class == HullClass::Flex {
-                                fight_start + secs
+                            let max_j = reinforce_jitter_window_secs(profile.hull_class, false);
+                            let j = if max_j > 0 {
+                                let roll = ctx.mechanic_rng.try_unit_f64().unwrap_or(0.5);
+                                ((roll * 2.0 - 1.0) * (max_j as f64)).round() as i64
+                            } else { 0 };
+                            life.reinforce_jitter_secs = j;
+                            let earliest_hull = if let Some(armor_secs) = life.armor_reinforce_secs_applied {
+                                let t_shield = life.shield_fight_started_unix.unwrap_or(fight_start);
+                                (t_shield + armor_secs + secs).max(now)
                             } else {
-                                next_reinforce_exit(fight_start + secs, hour)
+                                fight_start.max(now) + secs
                             };
-                            s.reinforced_until_unix = apply_reinforce_jitter(base_exit, jitter_offset, reinforce_jitter_window_secs(profile.hull_class, false));
+                            let base_exit = next_reinforce_exit(earliest_hull, hour);
+                            life.unjittered_reinforce_exit_unix = Some(base_exit);
+                            s.reinforced_until_unix = apply_reinforce_jitter(base_exit, j, max_j).max(now + 60);
                             life.repair_until_unix = None;
                         }
                         None => {
                             s.state = STATE_HULL_VULNERABLE.into();
+                            life.unjittered_reinforce_exit_unix = None;
                             life.repair_until_unix = Some(now + REPAIR_HULL_SECS);
                         }
                     }
@@ -1072,6 +1193,57 @@ pub fn apply_structure_damage(ctx: &ServerContext, snap: &mut WorldStateSnapshot
     }
     let s = snap.structures.get(&structure_id).cloned().unwrap_or(st);
     Ok(DamageOutcome { applied_damage: applied, layer, repair_paused: qualifying, state: s.state, reinforced_until_unix: s.reinforced_until_unix, shield_hp: s.shield_hp, armor_hp: s.armor_hp, hull_hp: s.hull_hp, destruction })
+}
+
+/// Applies a typed 4-channel weapon cycle (`em`, `thermal`, `kinetic`, `explosive`) after SDE layer
+/// resonance reduction (`feat:structures.repair-timer-pause-threshold`).
+#[allow(clippy::too_many_arguments)]
+pub fn apply_structure_damage_typed(
+    ctx: &ServerContext,
+    snap: &mut WorldStateSnapshot,
+    ext: &mut StructureExtendedState,
+    structure_id: i64,
+    em: f64,
+    thermal: f64,
+    kinetic: f64,
+    explosive: f64,
+    cycle_secs: f64,
+    attacker_char_id: i64,
+    now: u64,
+) -> Result<DamageOutcome, BridgeRpcError> {
+    let st = snap.structures.get(&structure_id).ok_or_else(|| BridgeRpcError { code: "StructureNotFound".into(), message: format!("Structure {structure_id} does not exist") })?;
+    let attrs = ctx.sde.types.get(&st.type_id).map(|t| &t.default_attributes);
+    let (em_a, th_a, ki_a, ex_a) = match st.state.as_str() {
+        STATE_SHIELD_VULNERABLE => (271u16, 274u16, 273u16, 272u16),
+        STATE_ARMOR_VULNERABLE => (267, 270, 269, 268),
+        _ => (113, 110, 109, 111),
+    };
+    let res = |aid: u16| attrs.and_then(|m| m.get(&aid).copied()).unwrap_or(1.0);
+    let post_resist = em.max(0.0) * res(em_a) + thermal.max(0.0) * res(th_a) + kinetic.max(0.0) * res(ki_a) + explosive.max(0.0) * res(ex_a);
+    apply_structure_damage(ctx, snap, ext, structure_id, post_resist, cycle_secs, attacker_char_id, now)
+}
+
+/// Records that `char_id` completed a Data Analyzer hack on `structure_id` (`feat:structures.reinforce-hour-hack-reveal`).
+pub fn record_structure_hack_reveal(ctx: &ServerContext, char_id: i64, structure_id: i64) -> Option<(u8, u8, Option<(u8, u8, u64)>)> {
+    let info = ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.structures.get(&structure_id)?.clone();
+        let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+        if caller_corp != 0 && caller_corp == st.owner_corp_id {
+            return None;
+        }
+        let mut ext = load_ext_state(snap);
+        ext.hacked_reinforce_reveals.entry(structure_id).or_default().insert(char_id);
+        let pending = ext.pending_reinforce_schedule.get(&structure_id).copied();
+        save_ext_state(snap, &ext);
+        let (h, d) = snap.structure_vulnerability_windows.get(&structure_id).copied().unwrap_or((18, 5));
+        Some((st.solar_system_id, h as u8, d as u8, pending))
+    })?;
+    let hack_tuple = match info.3 {
+        Some((nh, nd, at)) => eve_proto::PyRep::Tuple(vec![eve_proto::PyRep::Integer(info.2 as i64), eve_proto::PyRep::Integer(info.1 as i64), eve_proto::PyRep::Integer(nd as i64), eve_proto::PyRep::Integer(nh as i64), eve_proto::PyRep::Integer(at as i64)]),
+        None => eve_proto::PyRep::Tuple(vec![eve_proto::PyRep::Integer(info.2 as i64), eve_proto::PyRep::Integer(info.1 as i64), eve_proto::PyRep::None, eve_proto::PyRep::None, eve_proto::PyRep::None]),
+    };
+    ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnStructureHacked", "charid", vec![eve_proto::PyRep::Integer(structure_id), hack_tuple]);
+    Some((info.1, info.2, info.3))
 }
 
 /// Anchoring position rules: Pochven restriction, Palatine Keepstar cluster limit,
@@ -1118,8 +1290,28 @@ pub fn check_anchor_position(ctx: &ServerContext, snap: &WorldStateSnapshot, pro
 pub fn online_service_type_ids(ctx: &ServerContext, snap: &WorldStateSnapshot, structure_id: i64) -> Vec<u32> {
     online_service_modules(ctx, snap, structure_id)
         .into_iter()
-        .filter_map(|(iid, _, _, _)| snap.items.get(&iid).map(|it| it.type_id))
+        .map(|(_, tid, _, _, _)| tid)
         .collect()
+}
+
+/// Validates that `structure_id` can be set as `char_id`'s home station (`feat:structures.service-clone-bay`).
+pub fn validate_home_station_structure(ctx: &ServerContext, snap: &WorldStateSnapshot, char_id: i64, structure_id: i64) -> Result<(), BridgeRpcError> {
+    let st = snap.structures.get(&structure_id).filter(|s| s.state != STATE_DESTROYED).ok_or_else(|| BridgeRpcError {
+        code: "StationNotFound".into(),
+        message: format!("Station or structure {structure_id} does not exist"),
+    })?;
+    if ctx.sde.solar_systems.get(&st.solar_system_id).map(|s| s.region_id) == Some(POCHVEN_REGION_ID) {
+        return Err(BridgeRpcError { code: "CannotSetMedicalCloneInPochven".into(), message: "A medical clone cannot be set in Pochven".into() });
+    }
+    if !super::structure_upwell_ops::evaluate_character_structure_access(ctx, snap, structure_id, char_id) {
+        return Err(BridgeRpcError { code: "CloneBayAccessDenied".into(), message: format!("Character {char_id} lacks access to structure {structure_id}") });
+    }
+    if !super::structure_upwell_ops::is_structure_service_online(ctx, snap, structure_id, 2)
+        && !super::structure_upwell_ops::is_structure_service_online(ctx, snap, structure_id, 9)
+    {
+        return Err(BridgeRpcError { code: "CloneBayServiceOffline".into(), message: format!("Structure {structure_id} does not have an online Clone Bay service") });
+    }
+    Ok(())
 }
 
 /// Validates that `structure_id` can be refitted right now (`feat:structures.structure-fitting`,

@@ -147,9 +147,8 @@ pub async fn step_engaged_drones(ctx: &ServerContext, now_unix: u64) {
                 kinetic: d.damage_vector.kinetic * hit_mult,
                 explosive: d.damage_vector.explosive * hit_mult,
             };
-            if let Ok(Some((app, _, _))) = sys_handle
-                .apply_damage_with_attacker(target_id, scaled_dmg, Some(d.owner_char_id))
-                .await
+            let cyc_s = d.cycle_duration_secs(ctx).max(1) as f64;
+            if let Ok(Some((app, _, _))) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys_handle, d.solar_system_id, d.owner_char_id, target_id, scaled_dmg, cyc_s, now_unix).await
             {
                 record_killmail_assist_action(
                     ctx,
@@ -397,7 +396,8 @@ pub async fn step_drone_auto_aggression_and_assist(
                     .await;
             }
             if d.damage_vector.total() > 0.0 {
-                let _ = sys_handle.apply_damage_with_attacker(tid, d.damage_vector, Some(d.owner_char_id)).await;
+                let cyc_s = d.cycle_duration_secs(ctx).max(1) as f64;
+                let _ = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys_handle, d.solar_system_id, d.owner_char_id, tid, d.damage_vector, cyc_s, ctx.now_unix()).await;
             }
             engaged_drone_balls.push(d.ball_id);
             with_mut_combat_runtime(ctx, |rt| {
@@ -1007,7 +1007,8 @@ pub async fn handle_npcs_drones(
                             kinetic: d.damage_vector.kinetic * hit_mult,
                             explosive: d.damage_vector.explosive * hit_mult,
                         };
-                        if let Ok(Some((app, _, _))) = sys_handle.apply_damage_with_attacker(target_id, scaled_dmg, Some(char_id)).await {
+                        let cyc_s = d.cycle_duration_secs(ctx).max(1) as f64;
+                        if let Ok(Some((app, _, _))) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys_handle, d.solar_system_id, char_id, target_id, scaled_dmg, cyc_s, now_unix).await {
                             total_dmg_dealt += app;
                             if app > 0.0 {
                                 super::combat_npc_ai::record_npc_threat_event(ctx, target_id, d.ball_id, app, false, false);

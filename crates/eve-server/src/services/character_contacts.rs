@@ -1213,17 +1213,19 @@ pub fn handle_contacts(
 
         ("charMgr", "SetHomeStation") | ("home_station", "set_home_station") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let Some(new_home_id) = args.first().and_then(|a| a.as_i64()).or(session.station_id) else {
+            let Some(new_home_id) = args.first().and_then(|a| a.as_i64()).or(session.station_id).or(session.structure_id) else {
                 return Some(Err(BridgeRpcError { code: "MustBeDockedAtTargetStation".into(), message: "set_home_station requires a target station ID".into() }));
             };
-            if !ctx.sde.solar_systems.values().any(|s| s.stations.iter().any(|st| st.station_id == new_home_id)) {
-                return Some(Err(BridgeRpcError { code: "StationNotFound".into(), message: format!("Station {new_home_id} does not exist in SDE") }));
-            }
-            if ctx.sde.solar_systems.values().any(|s| s.region_id == 10_000_070 && s.stations.iter().any(|st| st.station_id == new_home_id)) {
+            let is_sde_station = ctx.sde.solar_systems.values().any(|s| s.stations.iter().any(|st| st.station_id == new_home_id));
+            if !is_sde_station {
+                if let Err(e) = ctx.db.with_snapshot(|snap| crate::services::station_structure::structure_lifecycle::validate_home_station_structure(ctx, snap, char_id, new_home_id)) {
+                    return Some(Err(e));
+                }
+            } else if ctx.sde.solar_systems.values().any(|s| s.region_id == 10_000_070 && s.stations.iter().any(|st| st.station_id == new_home_id)) {
                 return Some(Err(BridgeRpcError { code: "CannotSetMedicalCloneInPochven".into(), message: "A medical clone cannot be set in Pochven".into() }));
             }
             let now_unix = ctx.now_unix_secs();
-            let is_local_docked = session.station_id == Some(new_home_id);
+            let is_local_docked = session.station_id == Some(new_home_id) || session.structure_id == Some(new_home_id);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(ch) = snap.characters.get(&char_id) else {
                     return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found") });
@@ -1241,20 +1243,14 @@ pub fn handle_contacts(
                         return Err(BridgeRpcError { code: "HomeStationRemoteCooldownActive".into(), message: format!("Remote home station change on cooldown until {next_allowed}") });
                     }
                     let next_time = now_unix + 365 * 86_400;
-                    snap.owner_notes.insert(cd_key, eve_db::OwnerNoteRecord {
-                        note_id: cd_key, character_id: -char_id, item_id: new_home_id,
-                        label: "home_station_remote_cooldown".into(), note: next_time.to_string(), timestamp_unix: next_time,
-                    });
+                    snap.owner_notes.insert(cd_key, eve_db::OwnerNoteRecord { note_id: cd_key, character_id: -char_id, item_id: new_home_id, label: "home_station_remote_cooldown".into(), note: next_time.to_string(), timestamp_unix: next_time });
                 }
                 let ch = snap.characters.get_mut(&char_id).unwrap();
                 ch.home_station_id = new_home_id;
                 Ok(ch.home_station_id)
             });
             match res {
-                Ok(hid) => {
-                    ctx.notify(NotificationTarget::Character(char_id), "OnHomeStationChanged", "charid", vec![PyRep::Integer(hid)]);
-                    Some(Ok(PyRep::Integer(hid)))
-                }
+                Ok(hid) => { ctx.notify(NotificationTarget::Character(char_id), "OnHomeStationChanged", "charid", vec![PyRep::Integer(hid)]); Some(Ok(PyRep::Integer(hid))) }
                 Err(e) => Some(Err(e)),
             }
         }
@@ -1312,10 +1308,11 @@ pub fn handle_contacts(
             if !is_capsule {
                 return Some(Err(BridgeRpcError::user_error("SelfDestructOnlyInCapsule")));
             }
+            crate::services::station_structure::structure_lifecycle::prepare_home_station_respawn(ctx, char_id);
             match ctx.db.respawn_character_at_home_station(char_id, ship_id, &ctx.sde) {
                 Ok((ch, capsule)) => {
-                    session.station_id = Some(ch.home_station_id);
-                    session.structure_id = None;
+                    session.station_id = ch.station_id;
+                    session.structure_id = ch.structure_id;
                     session.solar_system_id = Some(ch.solar_system_id);
                     session.constellation_id = Some(ch.constellation_id);
                     session.region_id = Some(ch.region_id);

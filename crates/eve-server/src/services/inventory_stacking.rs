@@ -409,7 +409,10 @@ pub(crate) async fn handle_multi_add(
             }
         }
     }
-    let is_ship_hold = matches!(flag_u16, 5 | 87 | 158 | 133..=151 | 179 | 181 | 182 | 185);
+    let dest_is_struct_fuel = flag == InventoryFlag::SpecializedFuelBay
+        && ctx.db.with_snapshot(|s| s.structures.contains_key(&new_loc));
+    let is_ship_hold = !dest_is_struct_fuel
+        && matches!(flag_u16, 5 | 87 | 158 | 133..=151 | 179 | 181 | 182 | 185);
     let eval_cargo_cap = if flag_u16 == 5 {
         ctx.get_or_rebuild_ship_fitting(char_id, new_loc)
             .ok()
@@ -418,6 +421,9 @@ pub(crate) async fn handle_multi_add(
     } else {
         None
     };
+    let pre_balls = crate::services::structure_acl_defense_rules::snapshot_system_balls_for_inventory(
+        ctx, session, char_id,
+    );
     let mut fitted_unfit_ids: Vec<(i64, i64, u16)> = Vec::new();
     ctx.db.with_snapshot(|snap| {
         let ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
@@ -437,6 +443,7 @@ pub(crate) async fn handle_multi_add(
         } else {
             session.solar_system_id.map(|s| s as i64).unwrap_or(0)
         };
+        let caller_ship_id = session.ship_id.filter(|&id| id > 0).unwrap_or(ch.active_ship_id);
         let is_loc_colocated = |start_loc: i64| -> bool {
             let mut cur = start_loc;
             for _ in 0..4 {
@@ -456,30 +463,17 @@ pub(crate) async fn handle_multi_add(
                         return false;
                     };
                     if node.location_id == ch_sys {
-                        let caller_ship_id = session
-                            .ship_id
-                            .filter(|&id| id > 0)
-                            .unwrap_or(ch.active_ship_id);
                         if cur == ch.active_ship_id || cur == caller_ship_id {
                             return true;
                         }
-                        let sys_handle = ctx.systems.get_or_spawn(ch_sys as u32);
-                        let caller_pos = sys_handle
-                            .get_ball_position_sync(caller_ship_id)
-                            .or_else(|| {
-                                snap.item_positions
-                                    .get(&caller_ship_id)
-                                    .copied()
-                                    .map(glam::DVec3::from)
-                            });
-                        let target_pos = sys_handle
-                            .get_ball_position_sync(cur)
-                            .or_else(|| {
-                                snap.item_positions
-                                    .get(&cur)
-                                    .copied()
-                                    .map(glam::DVec3::from)
-                            });
+                        let caller_pos = pre_balls
+                            .get(&caller_ship_id)
+                            .map(|p| p.0)
+                            .or_else(|| snap.item_positions.get(&caller_ship_id).copied().map(glam::DVec3::from));
+                        let target_pos = pre_balls
+                            .get(&cur)
+                            .map(|p| p.0)
+                            .or_else(|| snap.item_positions.get(&cur).copied().map(glam::DVec3::from));
                         return match (caller_pos, target_pos) {
                             (Some(s), Some(t)) => s.distance(t) <= 5_000.0,
                             _ => true,
@@ -497,19 +491,39 @@ pub(crate) async fn handle_multi_add(
         let dest_item_opt = snap.items.get(&new_loc);
         let dest_type_opt = dest_item_opt.and_then(|d| ctx.sde.types.get(&d.type_id));
 
-        let dst_reachable = is_loc_colocated(new_loc)
-            && (ch_dock == new_loc
-                || dest_item_opt.is_some_and(|d| {
-                    d.owner_id == char_id
-                        || d.owner_id == 0
-                        || d.type_id == 23
-                        || (ch.corporation_id > 0 && d.owner_id == ch.corporation_id)
-                }));
-        if !dst_reachable {
-            return Err(BridgeRpcError {
-                code: "DestinationAccessDenied".into(),
-                message: format!("Destination {new_loc} not reachable"),
-            });
+        if !dest_is_struct_fuel {
+            if let Some(st) = snap.structures.get(&new_loc) {
+                if st.state == "Destroyed" {
+                    return Err(BridgeRpcError {
+                        code: "StructureDestroyed".into(),
+                        message: format!("Structure {new_loc} is destroyed"),
+                    });
+                }
+                if st.owner_corp_id != ch.corporation_id
+                    && !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
+                        snap, new_loc, char_id,
+                    )
+                {
+                    return Err(BridgeRpcError {
+                        code: "DestinationAccessDenied".into(),
+                        message: format!("Character {char_id} lacks structure access at {new_loc}"),
+                    });
+                }
+            }
+            let dst_reachable = is_loc_colocated(new_loc)
+                && (ch_dock == new_loc
+                    || dest_item_opt.is_some_and(|d| {
+                        d.owner_id == char_id
+                            || d.owner_id == 0
+                            || d.type_id == 23
+                            || (ch.corporation_id > 0 && d.owner_id == ch.corporation_id)
+                    }));
+            if !dst_reachable {
+                return Err(BridgeRpcError {
+                    code: "DestinationAccessDenied".into(),
+                    message: format!("Destination {new_loc} not reachable"),
+                });
+            }
         }
 
         let mut batch_vol = 0.0;
@@ -520,6 +534,18 @@ pub(crate) async fn handle_multi_add(
                     message: format!("Item {item_id} not found"),
                 });
             };
+            let src_is_struct_fuel = item.flag == InventoryFlag::SpecializedFuelBay
+                && snap.structures.contains_key(&item.location_id);
+            if src_is_struct_fuel {
+                crate::services::structure_acl_defense_rules::validate_structure_fuel_bay_transfer(
+                    ctx, snap, session, char_id, item.location_id, item.type_id, false, ch_dock, ch_sys, caller_ship_id, &pre_balls,
+                )?;
+            }
+            if dest_is_struct_fuel {
+                crate::services::structure_acl_defense_rules::validate_structure_fuel_bay_transfer(
+                    ctx, snap, session, char_id, new_loc, item.type_id, true, ch_dock, ch_sys, caller_ship_id, &pre_balls,
+                )?;
+            }
             let is_corp_item = ch.corporation_id > 0 && item.owner_id == ch.corporation_id;
             if is_corp_item && (116..=122).contains(&(item.flag as i64)) {
                 let (is_ceo, roles) = get_effective_corp_roles_at_location(
@@ -537,7 +563,7 @@ pub(crate) async fn handle_multi_add(
                     });
                 }
             }
-            if item.owner_id != char_id && !is_corp_item && !looted_from_space_ids.contains(&item_id) {
+            if !src_is_struct_fuel && item.owner_id != char_id && !is_corp_item && !looted_from_space_ids.contains(&item_id) {
                 return Err(BridgeRpcError {
                     code: "ItemOwnershipViolation".into(),
                     message: format!("Character {char_id} is not authorized to move item {item_id}"),
@@ -568,8 +594,23 @@ pub(crate) async fn handle_multi_add(
                     message: "Fitted rigs cannot be moved via MultiAdd".into(),
                 });
             }
-            if matches!(item.flag as u16, 11..=34 | 125..=132) {
-                fitted_unfit_ids.push((item.location_id, item_id, item.flag as u16));
+            if snap.structures.contains_key(&item.location_id)
+                && matches!(item.flag as u16, 11..=34 | 164..=171)
+            {
+                return Err(BridgeRpcError {
+                    code: "InvalidLocation".into(),
+                    message: "Structure modules must be unfitted individually".into(),
+                });
+            }
+            if matches!(item.flag as u16, 11..=34 | 125..=132) || matches!(flag_u16, 11..=34 | 125..=132) {
+                if ch_dock > 0 {
+                    crate::services::structure_acl_defense_rules::validate_docked_ship_fitting_facility_in_snap(
+                        ctx, snap, ch_dock,
+                    )?;
+                }
+                if matches!(item.flag as u16, 11..=34 | 125..=132) {
+                    fitted_unfit_ids.push((item.location_id, item_id, item.flag as u16));
+                }
             }
             let is_courier = snap
                 .item_custom_names
@@ -581,8 +622,7 @@ pub(crate) async fn handle_multi_add(
                     message: "Courier cargo cannot be moved into corporation hangar divisions or foreign containers/ships".into(),
                 });
             }
-            let src_reachable = is_loc_colocated(item.location_id);
-            if !src_reachable {
+            if !src_is_struct_fuel && !is_loc_colocated(item.location_id) {
                 return Err(BridgeRpcError {
                     code: "ItemOwnershipViolation".into(),
                     message: format!("Item {item_id} location not reachable"),
@@ -800,7 +840,8 @@ pub(crate) async fn handle_multi_add(
                 code: "ItemNotFound".into(),
                 message: format!("Item {item_id} not found"),
             })?;
-            let old_flag_u16 = it.flag as u16;
+            let old_flag = it.flag;
+            let old_flag_u16 = old_flag as u16;
             let old_loc = it.location_id;
             let it_tid = it.type_id;
             let it_qty = it.quantity;
@@ -822,7 +863,10 @@ pub(crate) async fn handle_multi_add(
             snap.module_online_states.remove(&item_id);
             snap.module_active_states.remove(&item_id);
             snap.module_active_charges.remove(&item_id);
-            moved.push((item_id, it_tid, it_qty));
+            let (fin_opt, _) = crate::services::structure_acl_defense_rules::finalize_fuel_bay_move_in_snap(
+                ctx, snap, item_id, old_loc, old_flag, new_loc, flag, char_id, caller_corp_id,
+            );
+            moved.push((fin_opt.map(|r| r.item_id).unwrap_or(item_id), it_tid, it_qty));
         }
         Ok((moved, old_containers))
     })?;

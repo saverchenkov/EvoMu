@@ -601,6 +601,12 @@ pub async fn handle_fighters(
                 available
             };
 
+            if let Ok(Some(mut ship_cs)) = sys_handle.get_combat_state(ship_id).await {
+                if ship_cs.is_tethered {
+                    ship_cs.is_tethered = false;
+                    let _ = sys_handle.set_combat_state(ship_id, ship_cs).await;
+                }
+            }
             let mut launched_ball_ids = Vec::new();
             for tube_idx in tubes_to_launch {
                 let fighter_item_id = {
