@@ -1072,3 +1072,82 @@ pub(crate) async fn evaluate_module_cycle_aggression_or_assistance(
         Ok(())
     }
 }
+
+pub(crate) async fn try_handle_mercden_remote_shield_repair(
+    ctx: &ServerContext,
+    sys: &SystemHandle,
+    sys_id: u32,
+    _char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+    m: &eve_dogma::FittedModule,
+    mod_type: &InvType,
+    fit: &eve_dogma::ShipFittingEngine,
+    method: &str,
+    target_id: i64,
+) -> Result<Option<PyRep>, BridgeRpcError> {
+    // 1. Target lock check
+    let locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
+    if !locks.iter().any(|l| l.target_id == target_id && l.locked) {
+        return Err(BridgeRpcError {
+            code: "TargetNotLocked".into(),
+            message: format!("Target {target_id} is not locked"),
+        });
+    }
+
+    // 2. Cloak / tether check
+    if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
+        if cs.is_cloaked {
+            return Err(BridgeRpcError {
+                code: "Cloaked".into(),
+                message: "Cannot activate module while cloaked".into(),
+            });
+        }
+        if cs.is_tethered {
+            return Err(BridgeRpcError {
+                code: "Tethered".into(),
+                message: "Cannot activate remote assistance module while tethered".into(),
+            });
+        }
+    }
+
+    // 3. Distance check (maxRange + falloff)
+    let is_overloaded = method == "Overload" || m.state == eve_dogma::ModuleState::Overloaded;
+    let mod_state = fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde);
+    let opt_range = mod_state.get_attribute(attr_ids::MAX_RANGE, &ctx.sde);
+    let falloff = eve_dogma::get_module_falloff(&mod_state, &ctx.sde);
+    let max_range = if opt_range > 0.0 { opt_range + falloff.max(0.0) } else { 40_000.0 };
+    let attacker_pos = sys.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position);
+    let target_pos = ctx.db.with_snapshot(|s| s.structures.get(&target_id).map(|st| DVec3::from_array(st.position)));
+    if let (Some(apos), Some(tpos)) = (attacker_pos, target_pos) {
+        if apos.distance(tpos) > max_range {
+            return Err(BridgeRpcError {
+                code: "TargetOutOfRange".into(),
+                message: format!("Target {target_id} is out of module range"),
+            });
+        }
+    }
+
+    // 4. Capacitor deduction check
+    let cap_need = mod_state.get_attribute(attr_ids::CAPACITOR_NEED, &ctx.sde);
+    if cap_need > 0.0 {
+        let cs = sys.get_combat_state(ship_id).await.ok().flatten();
+        let cur_cap = cs.as_ref().map(|c| c.capacitor).unwrap_or(0.0);
+        if cur_cap < cap_need {
+            return Err(BridgeRpcError {
+                code: "NotEnoughCapacitor".into(),
+                message: "Not enough capacitor to activate module".into(),
+            });
+        }
+        let _ = sys.set_capacitor(ship_id, cur_cap - cap_need).await;
+    }
+
+    let rep_hp = mod_type.default_attributes.get(&68).copied().unwrap_or(1_500.0);
+    let (pct, enabled) = crate::services::sov_gameplay::apply_mercenary_den_shield_repair(ctx, sys_id, ship_id, target_id, rep_hp).await?;
+    Ok(Some(PyRep::keyval([
+        ("moduleID", PyRep::Integer(module_id)),
+        ("targetID", PyRep::Integer(target_id)),
+        ("shieldPct", PyRep::Integer(pct as i64)),
+        ("denEnabled", PyRep::Bool(enabled)),
+    ])))
+}

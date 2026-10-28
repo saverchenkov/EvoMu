@@ -272,13 +272,12 @@ pub fn validate_upwell_structure_attack_precheck(
             ));
         }
         if st.type_id == crate::services::sov_gameplay::TYPE_MERCENARY_DEN {
-            let (reinf, vuln_end, _) = snap.sov_runtime.mercenary_den_reinforcement.get(&target_ball_id).copied().unwrap_or((0, 0, 100));
+            let (reinf, _vuln_end, _) = snap.sov_runtime.mercenary_den_reinforcement.get(&target_ball_id).copied().unwrap_or((0, 0, 100));
             if reinf > 0 && now_unix < reinf {
                 return Err(err("MercenaryDenReinforced", format!("Mercenary Den {target_ball_id} is reinforced until {reinf}")));
             }
-            if vuln_end > 0 && now_unix >= vuln_end {
-                return Err(err("MercenaryDenOutsideVulnerabilityWindow", format!("Mercenary Den {target_ball_id} 6h vulnerability window expired at {vuln_end}")));
-            }
+            // If now_unix >= vuln_end, the 6h vulnerability window expired without den destruction;
+            // weapon attacks are permitted and cycle the den back to ShieldVulnerable in apply_mercenary_den_weapon_damage.
             return Ok(true);
         }
         if st.type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK {

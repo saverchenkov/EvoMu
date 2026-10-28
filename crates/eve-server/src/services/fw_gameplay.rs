@@ -607,7 +607,7 @@ pub async fn apply_fw_or_insurgency_structure_damage(
                 }
             }
             if st.hull_hp > 0.0 {
-                return Ok((false, st.shield_hp, st.armor_hp, st.hull_hp, pos, att_fac, 0, 0));
+                return Ok((false, st.shield_hp, st.armor_hp, st.hull_hp, pos, att_fac, 0, Vec::new()));
             }
             st.state = "Destroyed".into();
             snap.fw_runtime.supply_sites.remove(&structure_id);
@@ -641,9 +641,23 @@ pub async fn apply_fw_or_insurgency_structure_damage(
                     ..Default::default()
                 },
             );
-            Ok((true, 0.0, 0.0, 0.0, pos, att_fac, can_id, loot_id))
+            snap.next_entity_id += 1;
+            let supply_item_id = snap.next_entity_id;
+            snap.items.insert(
+                supply_item_id,
+                InventoryItemRecord {
+                    item_id: supply_item_id,
+                    type_id: 88_103,
+                    owner_id: attacker_char_id,
+                    location_id: can_id,
+                    flag: InventoryFlag::Cargo,
+                    quantity: if is_depot { 10 } else { 5 },
+                    ..Default::default()
+                },
+            );
+            Ok((true, 0.0, 0.0, 0.0, pos, att_fac, can_id, vec![loot_id, supply_item_id]))
         })?;
-        let (destroyed, s_hp, a_hp, h_hp, pos, _att_fac, can_id, loot_id) = outcome;
+        let (destroyed, s_hp, a_hp, h_hp, pos, _att_fac, can_id, dropped_ids) = outcome;
         if destroyed {
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let _ = sys_handle.remove_ball(structure_id).await;
@@ -668,11 +682,12 @@ pub async fn apply_fw_or_insurgency_structure_damage(
                 _ => 2.0,
             };
             let (friendly_adv, enemy_adv) = update_system_advantage(ctx, sys_id, adv_delta, 0.0);
+            let dropped_reps: Vec<PyRep> = dropped_ids.into_iter().map(PyRep::Integer).collect();
             return Ok(PyRep::keyval([
                 ("structureID", PyRep::Integer(structure_id)),
                 ("state", PyRep::String("Destroyed".into())),
                 ("lootContainerID", PyRep::Integer(can_id)),
-                ("droppedItemIDs", PyRep::List(vec![PyRep::Integer(loot_id)])),
+                ("droppedItemIDs", PyRep::List(dropped_reps)),
                 ("friendlyAdvantage", PyRep::Real(friendly_adv)),
                 ("enemyAdvantage", PyRep::Real(enemy_adv)),
             ]));
@@ -853,6 +868,44 @@ pub async fn on_space_entity_destroyed(
     }
 }
 
+/// Defends a friendly Supply Cache or Supply Depot in an FW warzone system,
+/// shifting system Advantage and emitting `OnSolarsystemAdvantageStateUpdated_Local`.
+pub fn resolve_friendly_supply_site_defense(
+    ctx: &ServerContext,
+    char_id: i64,
+    structure_id: i64,
+) -> Result<PyRep, BridgeRpcError> {
+    let (sys_id, site_kind, site_fac) = ctx
+        .db
+        .with_snapshot(|s| s.fw_runtime.supply_sites.get(&structure_id).cloned())
+        .ok_or_else(|| BridgeRpcError { code: "StructureNotFound".into(), message: format!("Supply site {structure_id} not found") })?;
+    let char_fac = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&char_id).and_then(|c| c.war_faction_id))
+        .ok_or_else(|| BridgeRpcError { code: "NotEnlistedInMilitia".into(), message: "Only militia-enlisted pilots can defend friendly Supply Caches/Depots".into() })?;
+    if char_fac != site_fac {
+        return Err(BridgeRpcError { code: "CannotDefendEnemyStructure".into(), message: "Cannot defend an enemy militia Supply Cache/Depot".into() });
+    }
+    let is_depot = site_kind == "SupplyDepot";
+    let adv_delta = if is_depot { 5.0 } else { 2.0 };
+    let (friendly_adv, enemy_adv) = update_system_advantage(ctx, sys_id, adv_delta, 0.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&structure_id) {
+            let max_hp = if is_depot { 3_000.0 } else { 1_500.0 };
+            st.shield_hp = max_hp;
+            st.armor_hp = max_hp;
+            st.hull_hp = max_hp;
+        }
+    });
+    Ok(PyRep::keyval([
+        ("structureID", PyRep::Integer(structure_id)),
+        ("defended", PyRep::Bool(true)),
+        ("siteKind", PyRep::String(site_kind)),
+        ("friendlyAdvantage", PyRep::Real(friendly_adv)),
+        ("enemyAdvantage", PyRep::Real(enemy_adv)),
+    ]))
+}
+
 /// Regenerates an unattacked vulnerable FW I-Hub after 2 hours, lowering system contested % back to `80%`.
 pub fn regenerate_unattacked_fw_ihub(ctx: &ServerContext, sys_id: u32) -> f64 {
     ctx.db.with_mut_snapshot(|snap| {
@@ -1025,6 +1078,54 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
         }
     }
 
+    // 2b. Step live FW Supply Cache / Depot friendly defense resolution
+    let active_supply_sites: Vec<(i64, u32, String, i64)> = ctx.db.with_snapshot(|snap| {
+        snap.fw_runtime.supply_sites.iter().filter_map(|(&sid, (sys, kind, fac))| {
+            if snap.structures.get(&sid).map(|st| st.state.as_str()) != Some("Destroyed") {
+                Some((sid, *sys, kind.clone(), *fac))
+            } else {
+                None
+            }
+        }).collect()
+    });
+    for (sid, sys_id, site_kind, site_fac) in active_supply_sites {
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        let site_pos = ctx.db.with_snapshot(|s| s.structures.get(&sid).map(|st| DVec3::from_array(st.position)));
+        let Some(pos) = site_pos else { continue; };
+        let balls = sys_handle.list_balls().await.unwrap_or_default();
+        let (friendly, enemy) = ctx.db.with_snapshot(|snap| {
+            let mut f_cnt = 0;
+            let mut e_cnt = 0;
+            for b in &balls {
+                if b.position.distance(pos) <= 30_000.0 {
+                    if let Some(f) = snap.characters.values().find(|c| c.active_ship_id == b.id).and_then(|c| c.war_faction_id) {
+                        if f == site_fac { f_cnt += 1; } else if matches!(f, 500_001..=500_004) { e_cnt += 1; }
+                    }
+                }
+            }
+            (f_cnt, e_cnt)
+        });
+        if friendly > 0 && enemy == 0 {
+            let should_reward = ctx.db.with_mut_snapshot(|snap| {
+                let Some(st) = snap.structures.get_mut(&sid) else { return false; };
+                if st.last_damage_unix > 0 && now_unix >= st.last_damage_unix + 30 {
+                    st.last_damage_unix = 0;
+                    let max_hp = if site_kind == "SupplyDepot" { 3_000.0 } else { 1_500.0 };
+                    st.shield_hp = max_hp;
+                    st.armor_hp = max_hp;
+                    st.hull_hp = max_hp;
+                    true
+                } else {
+                    false
+                }
+            });
+            if should_reward {
+                let adv_delta = if site_kind == "SupplyDepot" { 5.0 } else { 2.0 };
+                update_system_advantage(ctx, sys_id, adv_delta, 0.0);
+            }
+        }
+    }
+
     // 3. Step live Frontline Battlefield 3-zone capture from real militia ship balls in space.
     let active_bfs: Vec<(i64, u32, i64)> = ctx.db.with_snapshot(|snap| {
         snap.fw_runtime
@@ -1049,17 +1150,26 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
         let sys_zones = battlefield_zone_centers_for_system(ctx, sys_id);
         let bf_center = DVec3::from_array(sys_zones[1]);
-        // Spawn real NPC wave combat balls into ballpark if not present
+        // Spawn real friendly and enemy NPC wave combat balls at capture zones during site progression
         let wave_id = ctx.db.with_snapshot(|snap| snap.fw_runtime.battlefield_waves.get(&bf_id).copied().unwrap_or(1));
         let npcs_to_spawn = ctx.db.with_mut_snapshot(|snap| {
             let wave_npcs = snap.fw_runtime.battlefield_npc_waves.entry(bf_id).or_default();
-            if wave_npcs.is_empty() {
-                let n1 = bf_id + 1_000_000 + (wave_id as i64) * 10 + 1;
-                let n2 = bf_id + 1_000_000 + (wave_id as i64) * 10 + 2;
-                wave_npcs.push(n1);
-                wave_npcs.push(n2);
-                vec![(n1, 37_453, bf_center + DVec3::new(2_000.0, 0.0, 0.0)),
-                     (n2, 37_453, bf_center + DVec3::new(-2_000.0, 0.0, 0.0))]
+            if wave_npcs.len() < 6 {
+                let mut spawns = Vec::new();
+                for zi in 0..3 {
+                    let zpos = DVec3::from_array(sys_zones[zi]);
+                    let fnid = bf_id + 1_000_000 + (wave_id as i64) * 100 + (zi as i64) * 2 + 1;
+                    let enid = bf_id + 1_000_000 + (wave_id as i64) * 100 + (zi as i64) * 2 + 2;
+                    if !wave_npcs.contains(&fnid) {
+                        wave_npcs.push(fnid);
+                        spawns.push((fnid, 37_453, zpos + DVec3::new(1_500.0, 0.0, 0.0)));
+                    }
+                    if !wave_npcs.contains(&enid) {
+                        wave_npcs.push(enid);
+                        spawns.push((enid, 37_453, zpos + DVec3::new(-1_500.0, 0.0, 0.0)));
+                    }
+                }
+                spawns
             } else {
                 Vec::new()
             }
@@ -1174,7 +1284,7 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
             };
             let lp_corp = militia_lp_corp_id(&ctx.sde, bf_fac);
             let cleanup_npcs = ctx.db.with_mut_snapshot(|snap| {
-                for &cid in &pilots_on_grid {
+                for &cid in pilots_on_grid.iter().take(BATTLEFIELD_MAX_FULL_PAYOUT_PILOTS) {
                     if let Some(ch) = snap.characters.get_mut(&cid) {
                         *ch.loyalty_points.entry(lp_corp).or_insert(0) += per_pilot_lp;
                         let cur_st = ch.standings.get(&bf_fac).copied().unwrap_or(0.0);

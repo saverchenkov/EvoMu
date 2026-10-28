@@ -586,12 +586,6 @@ pub async fn apply_mercenary_den_weapon_damage(
                 message: format!("Mercenary Den {den_id} is reinforced until {reinf_until}"),
             });
         }
-        if vuln_end > 0 && now >= vuln_end {
-            return Err(BridgeRpcError {
-                code: "MercenaryDenOutsideVulnerabilityWindow".into(),
-                message: format!("Mercenary Den {den_id} 6h vulnerability window expired at {vuln_end}"),
-            });
-        }
         let st = snap.structures.get_mut(&den_id).ok_or_else(|| BridgeRpcError {
             code: "MercenaryDenNotFound".into(),
             message: format!("Mercenary Den {den_id} not found"),
@@ -601,6 +595,14 @@ pub async fn apply_mercenary_den_weapon_damage(
                 code: "StructureDestroyed".into(),
                 message: format!("Mercenary Den {den_id} is already destroyed"),
             });
+        }
+        if vuln_end > 0 && now >= vuln_end {
+            reinf_until = 0;
+            vuln_end = 0;
+            st.state = "ShieldVulnerable".into();
+            st.shield_hp = MERC_DEN_BASE_HP;
+            st.reinforced_until_unix = 0;
+            snap.sov_runtime.mercenary_den_reinforcement.insert(den_id, (0, 0, 100));
         }
         st.last_damage_unix = now;
         let sys_id = st.solar_system_id;
@@ -1006,6 +1008,7 @@ pub fn try_handle_sov_hub_data_hack(
     char_id: i64,
     target_id: i64,
     module_id: i64,
+    mod_type: &eve_sde::InvType,
     base_coherence: f64,
     base_strength: f64,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
@@ -1016,13 +1019,26 @@ pub fn try_handle_sov_hub_data_hack(
         }
         let caller_char = snap.characters.get(&char_id)?;
         let caller_corp = caller_char.corporation_id;
-        let caller_aid = snap.corporations.get(&caller_corp).and_then(|c| c.alliance_id);
+        let caller_aid = snap.corporations.get(&caller_corp).and_then(|c| c.alliance_id).unwrap_or(0);
         let hub_corp = st.owner_corp_id;
-        let hub_aid = snap.corporations.get(&hub_corp).and_then(|c| c.alliance_id);
-        let is_friendly = caller_corp == hub_corp || (caller_aid.is_some() && caller_aid == hub_aid);
-        Some((st.solar_system_id, is_friendly))
+        let hub_aid = snap.corporations.get(&hub_corp).and_then(|c| c.alliance_id).unwrap_or(0);
+        let is_friendly = caller_corp == hub_corp || (caller_aid != 0 && caller_aid == hub_aid);
+        let is_destroyed = st.state == "Destroyed";
+        Some((st.solar_system_id, is_friendly, is_destroyed))
     });
-    let (hub_sys, is_friendly) = sov_hub_opt?;
+    let (_hub_sys, is_friendly, is_destroyed) = sov_hub_opt?;
+    if mod_type.name.contains("Relic") || matches!(mod_type.type_id, 22177 | 22178) {
+        return Some(Err(BridgeRpcError {
+            code: "DataAnalyzerRequired".into(),
+            message: "Hacking a Sovereignty Hub requires a Data Analyzer".into(),
+        }));
+    }
+    if is_destroyed {
+        return Some(Err(BridgeRpcError {
+            code: "TargetDestroyed".into(),
+            message: "Cannot hack destroyed Sovereignty Hub".into(),
+        }));
+    }
     if is_friendly {
         return Some(Err(BridgeRpcError {
             code: "CannotHackFriendlySovHub".into(),
@@ -1039,22 +1055,61 @@ pub fn try_handle_sov_hub_data_hack(
     }
     let coherence = base_coherence + 10.0 * (hack_lvl as f64);
     let strength = base_strength + 2.0 * (hack_lvl as f64);
+
+    {
+        let mut st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        st.active_hacking_target_by_char.insert(char_id, target_id);
+        st.hacking_states.insert(
+            target_id,
+            crate::services::inventory_fitting::fitting_scanners_superweapons::HackingSessionState {
+                container_id: target_id,
+                analyzer_module_id: module_id,
+                virus_coherence: coherence,
+                virus_strength: strength,
+                core_hp_remaining: 40.0,
+                unlocked: false,
+            },
+        );
+    }
+
+    let start_event_data = PyRep::Dict(vec![
+        (
+            PyRep::String("moduleTypeID".into()),
+            PyRep::Integer(mod_type.type_id as i64),
+        ),
+        (PyRep::String("moduleID".into()), PyRep::Integer(module_id)),
+        (PyRep::String("containerID".into()), PyRep::Integer(target_id)),
+        (PyRep::String("targetID".into()), PyRep::Integer(target_id)),
+    ]);
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
         "OnHackingStart",
         "charid",
-        vec![PyRep::keyval([
-            ("moduleID", PyRep::Integer(module_id)),
-            ("containerID", PyRep::Integer(target_id)),
-        ])],
+        vec![start_event_data],
     );
-    crate::services::sov_services::record_hub_hack(ctx, hub_sys, target_id, 3_600);
+    let virus_data = PyRep::keyval([
+        ("containerID", PyRep::Integer(target_id)),
+        ("coherence", PyRep::Real(coherence)),
+        ("strength", PyRep::Real(strength)),
+    ]);
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnHackingVirusChanged",
+        "charid",
+        vec![virus_data, PyRep::Integer(1)],
+    );
+
     Some(Ok(PyRep::keyval([
-        ("hubID", PyRep::Integer(target_id)),
-        ("hacked", PyRep::Bool(true)),
+        ("moduleID", PyRep::Integer(module_id)),
+        ("targetID", PyRep::Integer(target_id)),
         ("virusCoherence", PyRep::Real(coherence)),
         ("virusStrength", PyRep::Real(strength)),
-        ("disabledDurationSeconds", PyRep::Integer(3_600)),
+        ("coreRestored", PyRep::Bool(true)),
+        ("containerUnlocked", PyRep::Bool(false)),
+        ("hubID", PyRep::Integer(target_id)),
+        ("hacked", PyRep::Bool(false)),
     ])))
 }
 

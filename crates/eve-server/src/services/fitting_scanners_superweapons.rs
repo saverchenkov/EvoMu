@@ -50,7 +50,7 @@ pub(crate) fn active_hacking_target_for_char(char_id: i64) -> Option<i64> {
         .copied()
 }
 
-pub(crate) fn mark_hacking_container_unlocked(ctx: &ServerContext, char_id: i64, target_id: i64) {
+pub fn mark_hacking_container_unlocked(ctx: &ServerContext, char_id: i64, target_id: i64) {
     {
         let mut st = scanners_superweapons_state()
             .write()
@@ -419,7 +419,7 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
             let base_coherence = mod_state.get_attribute(1909, &ctx.sde).max(mod_type.default_attributes.get(&1909).copied().unwrap_or(40.0));
             let base_strength = mod_state.get_attribute(1910, &ctx.sde).max(mod_type.default_attributes.get(&1910).copied().unwrap_or(20.0));
             if let Some(res) = crate::services::sov_gameplay::try_handle_sov_hub_data_hack(
-                ctx, char_id, target_id, module_id, base_coherence, base_strength,
+                ctx, char_id, target_id, module_id, mod_type, base_coherence, base_strength,
             ) {
                 return Some(res);
             }

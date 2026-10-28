@@ -367,6 +367,7 @@ pub fn evaluate_and_resolve_insurgency_campaign(
         let _ = spawn_pirate_stronghold(ctx, campaign_id);
     }
 
+    let mut updated_balances: Vec<(i64, f64)> = Vec::new();
     ctx.db.with_mut_snapshot(|snap| {
         for &(cid, fid, lp_award) in &payouts {
             if lp_award > 0 {
@@ -374,14 +375,28 @@ pub fn evaluate_and_resolve_insurgency_campaign(
                 let isk_award = lp_award.saturating_mul(1_000);
                 if let Some(ch) = snap.characters.get_mut(&cid) {
                     *ch.loyalty_points.entry(lp_corp).or_insert(0) += lp_award;
+                    let isk_cents = eve_db::IskCents::from_isk(isk_award);
                     ch.balance = ch
                         .balance
-                        .checked_add(eve_db::IskCents::from_isk(isk_award))
+                        .checked_add(isk_cents)
                         .unwrap_or(ch.balance);
+                    let new_bal = ch.balance;
+                    snap.append_journal(
+                        cid,
+                        "InsurgencyContributionPayout",
+                        isk_cents,
+                        new_bal,
+                        format!("Insurgency campaign {campaign_id} contribution reward"),
+                    );
+                    updated_balances.push((cid, new_bal.to_wire_f64()));
                 }
             }
         }
     });
+
+    for (cid, new_bal) in updated_balances {
+        let _ = ctx.notify_account_change(cid, "cash", cid, new_bal);
+    }
 
     for sys in sys_list {
         emit_campaign_updated(ctx, sys, campaign_id, 5);

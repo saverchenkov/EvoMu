@@ -208,7 +208,9 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
     let _ = drain_notif_events(&ctx, PILOT);
     let hack_rep = rpc_call(&ctx, &mut s_hacker, "dogmaIM", "Activate", &[PyRep::Integer(995_100), PyRep::String("dataHacking".into()), PyRep::Integer(hub_a)])
         .await.expect("hack Sov Hub via Data Analyzer I");
-    assert_eq!(hack_rep.dict_get("hacked"), Some(&PyRep::Bool(true)));
+    assert_eq!(hack_rep.dict_get("containerUnlocked"), Some(&PyRep::Bool(false)));
+    assert!(!is_hub_hacked(&ctx, hub_a));
+    eve_server::services::inventory_fitting::fitting_scanners_superweapons::mark_hacking_container_unlocked(&ctx, hacker_cid, hub_a);
     assert!(is_hub_hacked(&ctx, hub_a));
     assert!(drain_notif_events(&ctx, PILOT).iter().any(|e| e == "OnSovHubHacked"));
     assert_eq!(
