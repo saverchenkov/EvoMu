@@ -404,14 +404,14 @@ EvoMu's Dogma implementation is validated against golden test fixtures extracted
 
 ### Concrete Integration Tests
 
-| Test Function | Source File | Validated Mechanics |
-| :--- | :--- | :--- |
-| [`test_dg1_all_domain_modifier_functions_and_isolation`](../../../crates/eve-server/tests/it/dogma_modifier_engine.rs#L33) | [`dogma_modifier_engine.rs`](../../../crates/eve-server/tests/it/dogma_modifier_engine.rs) | Verifies `ItemModifier`, `LocationGroupModifier`, and skill modifiers against live SDE. |
-| [`test_dg6_heat_rack_thermodynamics_nanite_repair_and_crystal_volatility`](../../../crates/eve-server/tests/it/dogma_capital_heat_crystals.rs#L789) | [`dogma_capital_heat_crystals.rs`](../../../crates/eve-server/tests/it/dogma_capital_heat_crystals.rs) | Tests overload heat buildup, thermodynamic skill reduction, and nanite repair paste in space. |
-| [`test_fitting_slots_cpu_pwg_hardpoints_rigs_saved_multifit_ghost_inspace_weapons_ammo`](../../../crates/eve-server/tests/it/inventory_ships_fitting_complete_part2.rs#L337) | [`inventory_ships_fitting_complete_part2.rs`](../../../crates/eve-server/tests/it/inventory_ships_fitting_complete_part2.rs) | Validates slot layouts, turret/launcher hardpoint caps, DNA fitting strings, and simulation info. |
-| [`test_stacking_penalty_coefficients`](../../../crates/eve-dogma/src/tests.rs#L25) | [`eve-dogma/src/tests.rs`](../../../crates/eve-dogma/src/tests.rs) | Exact precision unit test for stacking multipliers $S(0)$ through $S(5)$. |
-| [`test_nanofiber_and_overdrive_stacking_evaluation`](../../../crates/eve-dogma/src/tests.rs#L355) | [`eve-dogma/src/tests.rs`](../../../crates/eve-dogma/src/tests.rs) | Multi-module fitting test verifying speed and agility stacking penalties on a Rifter hull. |
-| [`test_dogma_differential_golden_fits`](../../../crates/eve-dogma/tests/t12_dogma_differential.rs) | [`t12_dogma_differential.rs`](../../../crates/eve-dogma/tests/t12_dogma_differential.rs) | Golden fit regression sweep matching CCP V24.01 client attribute outputs across thousands of fits. |
+| Test & Source Location | Validated Mechanics |
+| :--- | :--- |
+| [`test_dg1_all_domain_modifier_functions_and_isolation`](../../../crates/eve-server/tests/it/dogma_modifier_engine.rs#L33)<br/>📁 [`dogma_modifier_engine.rs`](../../../crates/eve-server/tests/it/dogma_modifier_engine.rs) | Verifies `ItemModifier`, `LocationGroupModifier`, and skill modifiers against live SDE. |
+| [`test_dg6_heat_rack_thermodynamics_nanite_repair_and_crystal_volatility`](../../../crates/eve-server/tests/it/dogma_capital_heat_crystals.rs#L789)<br/>📁 [`dogma_capital_heat_crystals.rs`](../../../crates/eve-server/tests/it/dogma_capital_heat_crystals.rs) | Tests overload heat buildup, thermodynamic skill reduction, and nanite repair paste in space. |
+| [`test_fitting_slots_cpu_pwg_hardpoints_rigs_saved_multifit_ghost_inspace_weapons_ammo`](../../../crates/eve-server/tests/it/inventory_ships_fitting_complete_part2.rs#L337)<br/>📁 [`inventory_ships_fitting_complete_part2.rs`](../../../crates/eve-server/tests/it/inventory_ships_fitting_complete_part2.rs) | Validates slot layouts, turret/launcher hardpoint caps, DNA fitting strings, and simulation info. |
+| [`test_stacking_penalty_coefficients`](../../../crates/eve-dogma/src/tests.rs#L25)<br/>📁 [`eve-dogma/src/tests.rs`](../../../crates/eve-dogma/src/tests.rs) | Exact precision unit test for stacking multipliers $S(0)$ through $S(5)$. |
+| [`test_nanofiber_and_overdrive_stacking_evaluation`](../../../crates/eve-dogma/src/tests.rs#L355)<br/>📁 [`eve-dogma/src/tests.rs`](../../../crates/eve-dogma/src/tests.rs) | Multi-module fitting test verifying speed and agility stacking penalties on a Rifter hull. |
+| [`test_dogma_differential_golden_fits`](../../../crates/eve-dogma/tests/t12_dogma_differential.rs)<br/>📁 [`t12_dogma_differential.rs`](../../../crates/eve-dogma/tests/t12_dogma_differential.rs) | Golden fit regression sweep matching CCP V24.01 client attribute outputs across thousands of fits. |
 
 ---
 

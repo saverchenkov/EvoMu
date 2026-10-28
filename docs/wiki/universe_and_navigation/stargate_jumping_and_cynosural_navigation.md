@@ -324,14 +324,14 @@ EvoMu's stargate transitions, cynosural mechanics, and jump fatigue systems are 
 
 ### 5.2 Test Implementations
 
-| Test Function | Source File | Focus & Assertions |
-| :--- | :--- | :--- |
-| [`test_cyno_field_beacon_duration_ozone_and_immobilization`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs#L246) | [`modules_cyno_portal.rs`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs) | Verifies high-sec cyno block, 5-minute Force Recon beacon duration, Liquid Ozone consumption, and ship immobilization. |
-| [`test_industrial_cyno_only_jump_freighters_and_rorquals`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs#L316) | [`modules_cyno_portal.rs`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs) | Verifies that Dreadnoughts, Titans, and Supercarriers are rejected by industrial cynos, while JFs and Rorquals jump successfully. |
-| [`test_covert_cyno_black_ops_jump_and_covert_portal`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs#L372) | [`modules_cyno_portal.rs`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs) | Tests Covert Cyno deployment, Black Ops jump portal bridging, Stealth Bomber passenger transit, and capital exclusion. |
-| [`test_titan_jump_portal_fleet_bridge_fuel_and_range`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs#L430) | [`modules_cyno_portal.rs`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs) | Asserts range limits (> 15 LY rejected), Strontium activation burn, mass-scaled isotope billing for bridged battleships, and capital passenger rejection. |
-| [`test_cyno_jammer_blocks_non_covert_cynos_and_reports_state`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs#L503) | [`modules_cyno_portal.rs`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs) | Asserts that online Tenebrex jammers reject standard cynos without consuming ozone, while covert cynos light successfully. |
-| [`test_crimewatch_highsec_criminal_movement_and_wormhole_exemption`](../../../crates/eve-server/tests/it/plan_c7_crimewatch_closure_part2.rs#L202) | [`plan_c7_crimewatch_closure_part2.rs`](../../../crates/eve-server/tests/it/plan_c7_crimewatch_closure_part2.rs) | Confirms that active Weapons Timers and High-Sec Criminal status block stargate jumps, cyno jumps, and portal transits. |
+| Test & Source Location | Focus & Assertions |
+| :--- | :--- |
+| [`test_cyno_field_beacon_duration_ozone_and_immobilization`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs#L246)<br/>📁 [`modules_cyno_portal.rs`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs) | Verifies high-sec cyno block, 5-minute Force Recon beacon duration, Liquid Ozone consumption, and ship immobilization. |
+| [`test_industrial_cyno_only_jump_freighters_and_rorquals`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs#L316)<br/>📁 [`modules_cyno_portal.rs`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs) | Verifies that Dreadnoughts, Titans, and Supercarriers are rejected by industrial cynos, while JFs and Rorquals jump successfully. |
+| [`test_covert_cyno_black_ops_jump_and_covert_portal`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs#L372)<br/>📁 [`modules_cyno_portal.rs`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs) | Tests Covert Cyno deployment, Black Ops jump portal bridging, Stealth Bomber passenger transit, and capital exclusion. |
+| [`test_titan_jump_portal_fleet_bridge_fuel_and_range`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs#L430)<br/>📁 [`modules_cyno_portal.rs`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs) | Asserts range limits (> 15 LY rejected), Strontium activation burn, mass-scaled isotope billing for bridged battleships, and capital passenger rejection. |
+| [`test_cyno_jammer_blocks_non_covert_cynos_and_reports_state`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs#L503)<br/>📁 [`modules_cyno_portal.rs`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs) | Asserts that online Tenebrex jammers reject standard cynos without consuming ozone, while covert cynos light successfully. |
+| [`test_crimewatch_highsec_criminal_movement_and_wormhole_exemption`](../../../crates/eve-server/tests/it/plan_c7_crimewatch_closure_part2.rs#L202)<br/>📁 [`plan_c7_crimewatch_closure_part2.rs`](../../../crates/eve-server/tests/it/plan_c7_crimewatch_closure_part2.rs) | Confirms that active Weapons Timers and High-Sec Criminal status block stargate jumps, cyno jumps, and portal transits. |
 
 ---
 

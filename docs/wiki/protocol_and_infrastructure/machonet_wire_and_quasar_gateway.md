@@ -488,14 +488,14 @@ All incoming `CryptoChallengePacket` envelopes carrying `user_sso_token` are val
 ### 3. Automated Test Suites & Integration Coverage
 EvoMu verifies protocol fidelity through rigorous unit and integration tests:
 
-| Test Function | Source File | Verified Mechanics |
-| :--- | :--- | :--- |
-| [`test_marshal_roundtrip_composite_and_bytes`](../../../crates/eve-proto/src/tests.rs#L6) | [`tests.rs`](../../../crates/eve-proto/src/tests.rs) | Opcode roundtrips, nested structures, inverted dict ordering, size-ex bounds. |
-| [`test_p1_packed_row_rle_booleans_nulls_and_trailing_strings`](../../../crates/eve-proto/src/tests.rs#L135) | [`tests.rs`](../../../crates/eve-proto/src/tests.rs) | Column bitfield packing, RLE compression, typed CRowset generation. |
-| [`test_t4_golden_wire_marshal_destiny_quasar_and_python_bridge_roundtrip`](../../../crates/eve-proto/tests/golden_wire.rs#L1148) | [`golden_wire.rs`](../../../crates/eve-proto/tests/golden_wire.rs) | Golden client capture wire format matching, LEB128 varints, envelope wrapping. |
-| [`test_version_exchange_and_address_marshal_roundtrip`](../../../crates/eve-machonet/src/lib.rs#L1061) | [`lib.rs`](../../../crates/eve-machonet/src/lib.rs) | CRC-CCITT hash calculation, VersionExchange validation, challenge response. |
-| [`test_session_starts_unauthenticated_and_computes_diffs`](../../../crates/eve-machonet/src/lib.rs#L1114) | [`lib.rs`](../../../crates/eve-machonet/src/lib.rs) | Session state lifecycle, diff masking, unauthenticated rejection. |
-| [`test_marshal_and_gateway_wire_edge_cases_and_bounds`](../../../crates/eve-proto/tests/proptest_roundtrip.rs#L636) | [`proptest_roundtrip.rs`](../../../crates/eve-proto/tests/proptest_roundtrip.rs) | Property-based fuzzing of recursion depth limits and malformed varint rejection. |
+| Test & Source Location | Verified Mechanics |
+| :--- | :--- |
+| [`test_marshal_roundtrip_composite_and_bytes`](../../../crates/eve-proto/src/tests.rs#L6)<br/>📁 [`tests.rs`](../../../crates/eve-proto/src/tests.rs) | Opcode roundtrips, nested structures, inverted dict ordering, size-ex bounds. |
+| [`test_p1_packed_row_rle_booleans_nulls_and_trailing_strings`](../../../crates/eve-proto/src/tests.rs#L135)<br/>📁 [`tests.rs`](../../../crates/eve-proto/src/tests.rs) | Column bitfield packing, RLE compression, typed CRowset generation. |
+| [`test_t4_golden_wire_marshal_destiny_quasar_and_python_bridge_roundtrip`](../../../crates/eve-proto/tests/golden_wire.rs#L1148)<br/>📁 [`golden_wire.rs`](../../../crates/eve-proto/tests/golden_wire.rs) | Golden client capture wire format matching, LEB128 varints, envelope wrapping. |
+| [`test_version_exchange_and_address_marshal_roundtrip`](../../../crates/eve-machonet/src/lib.rs#L1061)<br/>📁 [`lib.rs`](../../../crates/eve-machonet/src/lib.rs) | CRC-CCITT hash calculation, VersionExchange validation, challenge response. |
+| [`test_session_starts_unauthenticated_and_computes_diffs`](../../../crates/eve-machonet/src/lib.rs#L1114)<br/>📁 [`lib.rs`](../../../crates/eve-machonet/src/lib.rs) | Session state lifecycle, diff masking, unauthenticated rejection. |
+| [`test_marshal_and_gateway_wire_edge_cases_and_bounds`](../../../crates/eve-proto/tests/proptest_roundtrip.rs#L636)<br/>📁 [`proptest_roundtrip.rs`](../../../crates/eve-proto/tests/proptest_roundtrip.rs) | Property-based fuzzing of recursion depth limits and malformed varint rejection. |
 
 ---
 

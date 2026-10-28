@@ -399,14 +399,14 @@ EvoMu's skill progression, cloning, and implant systems are validated by targete
 
 ### Concrete Integration Tests
 
-| Test Function | Source File | Validated Behaviors |
-| :--- | :--- | :--- |
-| [`test_ch1_skill_training_engine_and_caps`](../../../crates/eve-server/tests/it/character_skills_clones.rs#L19) | [`character_skills_clones.rs`](../../../crates/eve-server/tests/it/character_skills_clones.rs) | Verifies skill queue training rate, rank math, and 5M SP Alpha training caps. |
-| [`test_clone_jump_preconditions_fees_and_same_location_swap`](../../../crates/eve-server/tests/it/clone_jump_features_complete.rs#L80) | [`clone_jump_features_complete.rs`](../../../crates/eve-server/tests/it/clone_jump_features_complete.rs) | Tests 24h jump clone cooldown, Infomorph Sync reductions, and 0s same-station swaps. |
-| [`test_clone_jump_space_restrictions_and_alpha_access`](../../../crates/eve-server/tests/it/clone_jump_features_complete.rs#L222) | [`clone_jump_features_complete.rs`](../../../crates/eve-server/tests/it/clone_jump_features_complete.rs) | Confirms ban on jumping into Wormholes/Pochven and Alpha installation restrictions. |
-| [`test_implant_plug_and_remove_destroys_implant`](../../../crates/eve-server/tests/it/character_clones_skills_complete.rs#L401) | [`character_clones_skills_complete.rs`](../../../crates/eve-server/tests/it/character_clones_skills_complete.rs) | Tests implant injection, attribute boost application, and destruction on removal. |
-| [`test_booster_consume_and_side_effects_neurotoxin_skills`](../../../crates/eve-server/tests/it/character_clones_skills_complete.rs#L521) | [`character_clones_skills_complete.rs`](../../../crates/eve-server/tests/it/character_clones_skills_complete.rs) | Tests combat booster stat bonuses, Biology duration scaling, and side-effect rolls. |
-| [`test_skills_nondiminishing_injector`](../../../crates/eve-server/tests/it/character_skill_features_t12.rs#L289) | [`character_skill_features_t12.rs`](../../../crates/eve-server/tests/it/character_skill_features_t12.rs) | Validates non-diminishing injectors (Daily Alpha Injector) and 24h cooldown tracking. |
+| Test & Source Location | Validated Behaviors |
+| :--- | :--- |
+| [`test_ch1_skill_training_engine_and_caps`](../../../crates/eve-server/tests/it/character_skills_clones.rs#L19)<br/>📁 [`character_skills_clones.rs`](../../../crates/eve-server/tests/it/character_skills_clones.rs) | Verifies skill queue training rate, rank math, and 5M SP Alpha training caps. |
+| [`test_clone_jump_preconditions_fees_and_same_location_swap`](../../../crates/eve-server/tests/it/clone_jump_features_complete.rs#L80)<br/>📁 [`clone_jump_features_complete.rs`](../../../crates/eve-server/tests/it/clone_jump_features_complete.rs) | Tests 24h jump clone cooldown, Infomorph Sync reductions, and 0s same-station swaps. |
+| [`test_clone_jump_space_restrictions_and_alpha_access`](../../../crates/eve-server/tests/it/clone_jump_features_complete.rs#L222)<br/>📁 [`clone_jump_features_complete.rs`](../../../crates/eve-server/tests/it/clone_jump_features_complete.rs) | Confirms ban on jumping into Wormholes/Pochven and Alpha installation restrictions. |
+| [`test_implant_plug_and_remove_destroys_implant`](../../../crates/eve-server/tests/it/character_clones_skills_complete.rs#L401)<br/>📁 [`character_clones_skills_complete.rs`](../../../crates/eve-server/tests/it/character_clones_skills_complete.rs) | Tests implant injection, attribute boost application, and destruction on removal. |
+| [`test_booster_consume_and_side_effects_neurotoxin_skills`](../../../crates/eve-server/tests/it/character_clones_skills_complete.rs#L521)<br/>📁 [`character_clones_skills_complete.rs`](../../../crates/eve-server/tests/it/character_clones_skills_complete.rs) | Tests combat booster stat bonuses, Biology duration scaling, and side-effect rolls. |
+| [`test_skills_nondiminishing_injector`](../../../crates/eve-server/tests/it/character_skill_features_t12.rs#L289)<br/>📁 [`character_skill_features_t12.rs`](../../../crates/eve-server/tests/it/character_skill_features_t12.rs) | Validates non-diminishing injectors (Daily Alpha Injector) and 24h cooldown tracking. |
 
 ---
 

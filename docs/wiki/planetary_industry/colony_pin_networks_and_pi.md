@@ -402,13 +402,13 @@ EvoMu's planetary simulation and customs infrastructure are verified through aut
 
 ### 2. Concrete Integration Tests
 
-| Test Function | Source File | Validated Behaviors |
-| :--- | :--- | :--- |
-| [`test_pi_resources_heatmap_extractor_schematics_routes_simulation_transfer_launch_poco_and_skyhook`](../../../crates/eve-server/tests/it/industry_pi_complete_part2.rs#L100) | [`industry_pi_complete_part2.rs`](../../../crates/eve-server/tests/it/industry_pi_complete_part2.rs) | Validates end-to-end colony lifecycle: resource heatmaps, extractor programs, schematic routes, offline catch-up simulation, expedited transfer, POCO export, and Skyhook integration. |
-| [`test_pi_planet_mgr_rpc`](../../../crates/eve-server/tests/it/pi_planet_mgr_rpc.rs#L99) | [`pi_planet_mgr_rpc.rs`](../../../crates/eve-server/tests/it/pi_planet_mgr_rpc.rs) | Tests `planetMgr` RPC endpoints: `GetColony`, `GetFullNetworkForOwner`, `GetCommandPinsForPlanet`, `GetExtractorsForPlanet`, and `UserUpdateNetwork`. |
-| [`test_planet_mgr_launches_commodities_and_lifecycle`](../../../crates/eve-server/tests/it/rpc_planet_mgr_orbitals.rs#L118) | [`rpc_planet_mgr_orbitals.rs`](../../../crates/eve-server/tests/it/rpc_planet_mgr_orbitals.rs) | Tests orbital operations: Command center launches into orbit, spaceport transfers to Customs Offices, POCO tax deductions, and corporate wallet tax deposits. |
-| [`test_e5_planetary_interaction_lifecycle`](../../../crates/eve-server/tests/it/economy_industry_pi.rs#L232) | [`economy_industry_pi.rs`](../../../crates/eve-server/tests/it/economy_industry_pi.rs) | Validates the complete P0 $\to$ P1 $\to$ P2 $\to$ P3 $\to$ P4 production chain, volumetric calculations, and specialized Epithal commodity cargo holds. |
-| [`test_planetary_interaction_expedited_transfer`](../../../crates/eve-server/tests/it/planetary_interaction_complete.rs#L75) | [`planetary_interaction_complete.rs`](../../../crates/eve-server/tests/it/planetary_interaction_complete.rs) | Tests pin-to-pin expedited commodity transfer routing, volume validation, and link bandwidth utilization. |
+| Test & Source Location | Validated Behaviors |
+| :--- | :--- |
+| [`test_pi_resources_heatmap_extractor_`<br/>`schematics_routes_simulation_transfer_launch_poco_and_skyhook`](../../../crates/eve-server/tests/it/industry_pi_complete_part2.rs#L100)<br/>📁 [`industry_pi_complete_part2.rs`](../../../crates/eve-server/tests/it/industry_pi_complete_part2.rs) | Validates end-to-end colony lifecycle: resource heatmaps, extractor programs, schematic routes, offline catch-up simulation, expedited transfer, POCO export, and Skyhook integration. |
+| [`test_pi_planet_mgr_rpc`](../../../crates/eve-server/tests/it/pi_planet_mgr_rpc.rs#L99)<br/>📁 [`pi_planet_mgr_rpc.rs`](../../../crates/eve-server/tests/it/pi_planet_mgr_rpc.rs) | Tests `planetMgr` RPC endpoints: `GetColony`, `GetFullNetworkForOwner`, `GetCommandPinsForPlanet`, `GetExtractorsForPlanet`, and `UserUpdateNetwork`. |
+| [`test_planet_mgr_launches_commodities_and_lifecycle`](../../../crates/eve-server/tests/it/rpc_planet_mgr_orbitals.rs#L118)<br/>📁 [`rpc_planet_mgr_orbitals.rs`](../../../crates/eve-server/tests/it/rpc_planet_mgr_orbitals.rs) | Tests orbital operations: Command center launches into orbit, spaceport transfers to Customs Offices, POCO tax deductions, and corporate wallet tax deposits. |
+| [`test_e5_planetary_interaction_lifecycle`](../../../crates/eve-server/tests/it/economy_industry_pi.rs#L232)<br/>📁 [`economy_industry_pi.rs`](../../../crates/eve-server/tests/it/economy_industry_pi.rs) | Validates the complete P0 $\to$ P1 $\to$ P2 $\to$ P3 $\to$ P4 production chain, volumetric calculations, and specialized Epithal commodity cargo holds. |
+| [`test_planetary_interaction_expedited_transfer`](../../../crates/eve-server/tests/it/planetary_interaction_complete.rs#L75)<br/>📁 [`planetary_interaction_complete.rs`](../../../crates/eve-server/tests/it/planetary_interaction_complete.rs) | Tests pin-to-pin expedited commodity transfer routing, volume validation, and link bandwidth utilization. |
 
 ---
 

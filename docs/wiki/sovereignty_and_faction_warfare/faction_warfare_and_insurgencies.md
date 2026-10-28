@@ -360,15 +360,15 @@ EvoMu's Faction Warfare, Insurgency, and ESS implementations are validated throu
 
 ### Concrete Integration Tests
 
-| Test Function | Source File | Validated Behaviors |
-| :--- | :--- | :--- |
-| [`test_fw_warzones_victory_points_and_system_capture`](../../../crates/eve-server/tests/it/fw_parity_complete.rs#L19) | [`fw_parity_complete.rs`](../../../crates/eve-server/tests/it/fw_parity_complete.rs) | Full frontline topology derivation, victory point thresholds, and bunker siege transition. |
-| [`test_fw_advantage_ranks_and_war_targets`](../../../crates/eve-server/tests/it/fw_parity_complete.rs#L214) | [`fw_parity_complete.rs`](../../../crates/eve-server/tests/it/fw_parity_complete.rs) | Militia ranks, LP gain scaling, system advantage accumulation, and war target validity. |
-| [`test_fw_warzone_solarsystem_states_and_queries`](../../../crates/eve-server/tests/it/rpc_sov_fw_warzone.rs#L346) | [`rpc_sov_fw_warzone.rs`](../../../crates/eve-server/tests/it/rpc_sov_fw_warzone.rs) | `fwWarzoneSolarsystem` RPC wire inspection, occupation state backfills, and HQ endpoints. |
-| [`test_fw_insurgency_and_security_mgr`](../../../crates/eve-server/tests/it/rpc_fw_insurgency_crimewatch.rs#L27) | [`rpc_fw_insurgency_crimewatch.rs`](../../../crates/eve-server/tests/it/rpc_fw_insurgency_crimewatch.rs) | Insurgency FOB snapshots, campaign stages, and Corruption 5 modified security (0.0). |
-| [`test_ess_mgr_telemetry_links_and_thefts`](../../../crates/eve-server/tests/it/rpc_ess_mgr.rs#L158) | [`rpc_ess_mgr.rs`](../../../crates/eve-server/tests/it/rpc_ess_mgr.rs) | `essMgr` Main/Reserve link RPCs, 2500m range, Safety Green checks, and Suspect timer flags. |
-| [`test_ess_concurrent_main_and_reserve_links`](../../../crates/eve-server/tests/it/ess_reserve_main_concurrency.rs#L39) | [`ess_reserve_main_concurrency.rs`](../../../crates/eve-server/tests/it/ess_reserve_main_concurrency.rs) | Concurrent Reserve/Main link lockouts, key consumption, and pulse drain math. |
-| [`test_r5_218_219_220_221_223_224_mining_moon_drill_asset_safety_fw_insurgency`](../../../crates/eve-server/tests/it/mining_structures_sov_r5_regressions.rs#L472) | [`mining_structures_sov_r5_regressions.rs`](../../../crates/eve-server/tests/it/mining_structures_sov_r5_regressions.rs) | De-plexing regression tests, cloaked ship non-advancement, and contested grid freezes. |
+| Test & Source Location | Validated Behaviors |
+| :--- | :--- |
+| [`test_fw_warzones_victory_points_and_system_capture`](../../../crates/eve-server/tests/it/fw_parity_complete.rs#L19)<br/>📁 [`fw_parity_complete.rs`](../../../crates/eve-server/tests/it/fw_parity_complete.rs) | Full frontline topology derivation, victory point thresholds, and bunker siege transition. |
+| [`test_fw_advantage_ranks_and_war_targets`](../../../crates/eve-server/tests/it/fw_parity_complete.rs#L214)<br/>📁 [`fw_parity_complete.rs`](../../../crates/eve-server/tests/it/fw_parity_complete.rs) | Militia ranks, LP gain scaling, system advantage accumulation, and war target validity. |
+| [`test_fw_warzone_solarsystem_states_and_queries`](../../../crates/eve-server/tests/it/rpc_sov_fw_warzone.rs#L346)<br/>📁 [`rpc_sov_fw_warzone.rs`](../../../crates/eve-server/tests/it/rpc_sov_fw_warzone.rs) | `fwWarzoneSolarsystem` RPC wire inspection, occupation state backfills, and HQ endpoints. |
+| [`test_fw_insurgency_and_security_mgr`](../../../crates/eve-server/tests/it/rpc_fw_insurgency_crimewatch.rs#L27)<br/>📁 [`rpc_fw_insurgency_crimewatch.rs`](../../../crates/eve-server/tests/it/rpc_fw_insurgency_crimewatch.rs) | Insurgency FOB snapshots, campaign stages, and Corruption 5 modified security (0.0). |
+| [`test_ess_mgr_telemetry_links_and_thefts`](../../../crates/eve-server/tests/it/rpc_ess_mgr.rs#L158)<br/>📁 [`rpc_ess_mgr.rs`](../../../crates/eve-server/tests/it/rpc_ess_mgr.rs) | `essMgr` Main/Reserve link RPCs, 2500m range, Safety Green checks, and Suspect timer flags. |
+| [`test_ess_concurrent_main_and_reserve_links`](../../../crates/eve-server/tests/it/ess_reserve_main_concurrency.rs#L39)<br/>📁 [`ess_reserve_main_concurrency.rs`](../../../crates/eve-server/tests/it/ess_reserve_main_concurrency.rs) | Concurrent Reserve/Main link lockouts, key consumption, and pulse drain math. |
+| [`test_r5_218_219_220_221_223_224_mining_moon_drill_asset_safety_fw_insurgency`](../../../crates/eve-server/tests/it/mining_structures_sov_r5_regressions.rs#L472)<br/>📁 [`mining_structures_sov_r5_regressions.rs`](../../../crates/eve-server/tests/it/mining_structures_sov_r5_regressions.rs) | De-plexing regression tests, cloaked ship non-advancement, and contested grid freezes. |
 
 ### Verification Matrix & Command
 

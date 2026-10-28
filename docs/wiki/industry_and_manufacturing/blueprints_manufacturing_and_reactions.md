@@ -326,11 +326,11 @@ The industry engine complies with the official parity ledger:
 
 ### 2. Concrete Integration Tests
 
-| Test Function | Source File | Validated Behaviors |
-| :--- | :--- | :--- |
-| [`test_industry_jobs_me_te_copy_invention_decryptors_t3_reactions_remote_and_corp`](../../../crates/eve-server/tests/it/industry_pi_complete.rs#L363) | [`industry_pi_complete.rs`](../../../crates/eve-server/tests/it/industry_pi_complete.rs) | Tests invention with Accelerant Decryptors (`34201`), T3 Ancient Relic invention, early job completion rejection (`JobNotYetComplete`), remote range check failure (`FacilityOutOfRemoteRange`), high-sec reaction rejection (`ReactionsForbiddenInHighSec`), low-sec Tatara reaction installation, corporate ME research, multi-job batch delivery (`CompleteManyJobs`), and Alpha clone tax surcharges. |
-| [`test_industry_blueprint_data_owner_limits_facilities_taxes_and_sci`](../../../crates/eve-server/tests/it/industry_pi_complete.rs#L115) | [`industry_pi_complete.rs`](../../../crates/eve-server/tests/it/industry_pi_complete.rs) | Validates System Cost Index (SCI) scaling, facility tax rate application, and blueprint owner permission boundaries. |
-| [`test_industry_manager_and_monitor_rpc_tags`](../../../crates/eve-server/tests/it/industry_pi_complete.rs#L352) | [`industry_pi_complete.rs`](../../../crates/eve-server/tests/it/industry_pi_complete.rs) | Verifies MachoNet RPC dispatch for industry jobs manager and real-time job state monitor events. |
+| Test & Source Location | Validated Behaviors |
+| :--- | :--- |
+| [`test_industry_jobs_me_te_copy_invention_`<br/>`decryptors_t3_reactions_remote_and_corp`](../../../crates/eve-server/tests/it/industry_pi_complete.rs#L363)<br/>📁 [`industry_pi_complete.rs`](../../../crates/eve-server/tests/it/industry_pi_complete.rs) | Tests invention with Accelerant Decryptors (`34201`), T3 Ancient Relic invention, early job completion rejection (`JobNotYetComplete`), remote range check failure (`FacilityOutOfRemoteRange`), high-sec reaction rejection (`ReactionsForbiddenInHighSec`), low-sec Tatara reaction installation, corporate ME research, multi-job batch delivery (`CompleteManyJobs`), and Alpha clone tax surcharges. |
+| [`test_industry_blueprint_data_owner_limits_facilities_taxes_and_sci`](../../../crates/eve-server/tests/it/industry_pi_complete.rs#L115)<br/>📁 [`industry_pi_complete.rs`](../../../crates/eve-server/tests/it/industry_pi_complete.rs) | Validates System Cost Index (SCI) scaling, facility tax rate application, and blueprint owner permission boundaries. |
+| [`test_industry_manager_and_monitor_rpc_tags`](../../../crates/eve-server/tests/it/industry_pi_complete.rs#L352)<br/>📁 [`industry_pi_complete.rs`](../../../crates/eve-server/tests/it/industry_pi_complete.rs) | Verifies MachoNet RPC dispatch for industry jobs manager and real-time job state monitor events. |
 
 ---
 

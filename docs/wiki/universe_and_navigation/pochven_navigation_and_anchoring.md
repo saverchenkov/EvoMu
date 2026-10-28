@@ -302,11 +302,11 @@ The Pochven implementation complies with the official parity ledger:
 
 ### 2. Concrete Integration Tests
 
-| Test Function | Source File | Validated Behaviors |
-| :--- | :--- | :--- |
-| [`test_filaments_and_pochven_navigation_mechanics`](../../../crates/eve-server/tests/it/pochven_zarzakh_filaments_suite.rs#L15) | [`pochven_zarzakh_filaments_suite.rs`](../../../crates/eve-server/tests/it/pochven_zarzakh_filaments_suite.rs) | Verifies low standing rejection on Home filaments (`SystemCheck_JumpFailed_StandingsTooLow`), Krai filament home-system exclusion, successful Home jump with $+7.0$ standing, Border conduit jump permissions, 30 km wormhole ball offset, cyno jammer verification, and capital ship gate bans. |
-| [`test_upwell_anchoring_quantum_core_pochven_and_palatine`](../../../crates/eve-server/tests/it/plan_upwell_structures_closure_part3.rs#L137) | [`plan_upwell_structures_closure_part3.rs`](../../../crates/eve-server/tests/it/plan_upwell_structures_closure_part3.rs) | Verifies Upwell Citadel anchoring rejection in Pochven (`AnchoringDisallowedInPochven`), legacy POS tower rejection, Mobile Depot allowance, and Orbital Gantry POCO gating behind $\ge +1.5$ Triglavian standing. |
-| [`test_cyno_jammer_blocks_non_covert_cynos_and_reports_state`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs#L503) | [`modules_cyno_portal.rs`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs) | Confirms region-wide cynosural jamming across all 27 Pochven solar systems and jump drive pathing exclusions. |
+| Test & Source Location | Validated Behaviors |
+| :--- | :--- |
+| [`test_filaments_and_pochven_navigation_mechanics`](../../../crates/eve-server/tests/it/pochven_zarzakh_filaments_suite.rs#L15)<br/>📁 [`pochven_zarzakh_filaments_suite.rs`](../../../crates/eve-server/tests/it/pochven_zarzakh_filaments_suite.rs) | Verifies low standing rejection on Home filaments (`SystemCheck_JumpFailed_StandingsTooLow`), Krai filament home-system exclusion, successful Home jump with $+7.0$ standing, Border conduit jump permissions, 30 km wormhole ball offset, cyno jammer verification, and capital ship gate bans. |
+| [`test_upwell_anchoring_quantum_core_pochven_and_palatine`](../../../crates/eve-server/tests/it/plan_upwell_structures_closure_part3.rs#L137)<br/>📁 [`plan_upwell_structures_closure_part3.rs`](../../../crates/eve-server/tests/it/plan_upwell_structures_closure_part3.rs) | Verifies Upwell Citadel anchoring rejection in Pochven (`AnchoringDisallowedInPochven`), legacy POS tower rejection, Mobile Depot allowance, and Orbital Gantry POCO gating behind $\ge +1.5$ Triglavian standing. |
+| [`test_cyno_jammer_blocks_non_covert_cynos_and_reports_state`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs#L503)<br/>📁 [`modules_cyno_portal.rs`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs) | Confirms region-wide cynosural jamming across all 27 Pochven solar systems and jump drive pathing exclusions. |
 
 ---
 
