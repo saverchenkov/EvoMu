@@ -554,11 +554,20 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 sys_rx = ctx.systems.get_or_spawn(new_sys).subscribe();
                             }
                         }
-                        if method == "UpdateStateRequest"
+                        if (method == "UpdateStateRequest"
+                            || (service == "beyonce" && method == "MachoBindObject"))
                             && session.station_id.is_none()
                             && session.structure_id.is_none()
                         {
                             ballpark_ready = true;
+                            if service == "beyonce" && method == "MachoBindObject" {
+                                let _ = crate::services::space_destiny::handle_update_state_request(
+                                    &ctx,
+                                    &session,
+                                    None,
+                                )
+                                .await;
+                            }
                         }
 
                         let rsp_pkt = match rpc_res {
@@ -606,9 +615,11 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             break;
                         }
 
+                        let mut sess_change_sent = false;
                         if let Some(sess_change_payload) = prev_session
                             .to_session_change_pyrep(&session, vec![MACHO_PROXY_NODE_ID as i64])
                         {
+                            sess_change_sent = true;
                             let mut named_payload = HashMap::new();
                             named_payload
                                 .insert("channel".into(), PyRep::ascii_bytes("sessionchange"));
@@ -682,6 +693,9 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         }
                         let mut notif_write_failed = false;
                         for notif in pre_rpc_notifs {
+                            if sess_change_sent && notif.event == "OnSessionChanged" {
+                                continue;
+                            }
                             let notif_pkt = MachoPacket::new_broadcast_notification(
                                 MACHO_PROXY_NODE_ID,
                                 client_id,
@@ -699,6 +713,9 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         }
                         if !notif_write_failed {
                             for (event, args) in session.drain_notifications() {
+                                if sess_change_sent && event == "OnSessionChanged" {
+                                    continue;
+                                }
                                 let notif_pkt = MachoPacket::new_broadcast_notification(
                                     MACHO_PROXY_NODE_ID,
                                     client_id,

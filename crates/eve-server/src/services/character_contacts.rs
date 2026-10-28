@@ -1200,13 +1200,53 @@ pub fn handle_contacts(
             Some(Ok(PyRep::rowset(vec!["contactID", "online"], rows)))
         }
 
-        ("charMgr", "GetHomeStation") | ("home_station", "get_home_station") => {
+        ("charMgr", "GetHomeStation") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             match ctx.db.get_character(char_id) {
                 Ok(ch) => Some(Ok(PyRep::Integer(ch.home_station_id))),
+                Err(e) => Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: e.to_string() })),
+            }
+        }
+
+        ("home_station", "get_home_station") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            match ctx.db.get_character(char_id) {
+                Ok(ch) => {
+                    let sde_info = ctx.sde.solar_systems.values().find_map(|sys| {
+                        sys.stations
+                            .iter()
+                            .find(|st| st.station_id == ch.home_station_id)
+                            .map(|st| (st.station_type_id, sys.solar_system_id))
+                    });
+                    let (st_type_id, st_sys_id) = sde_info.unwrap_or_else(|| {
+                        ctx.db.with_snapshot(|snap| {
+                            snap.structures
+                                .get(&ch.home_station_id)
+                                .map(|st| (st.type_id, st.solar_system_id))
+                                .unwrap_or((1529, ch.solar_system_id))
+                        })
+                    });
+                    let school_st = ctx
+                        .sde
+                        .schools
+                        .get(&ch.school_id)
+                        .map(|s| s.station_id)
+                        .filter(|&id| id > 0);
+                    let is_fallback = Some(ch.home_station_id) == school_st;
+                    Some(Ok(PyRep::keyval([
+                        ("id", PyRep::Integer(ch.home_station_id)),
+                        ("station_id", PyRep::Integer(ch.home_station_id)),
+                        ("type_id", PyRep::Integer(st_type_id as i64)),
+                        ("solar_system_id", PyRep::Integer(st_sys_id as i64)),
+                        ("is_fallback", PyRep::Bool(is_fallback)),
+                    ])))
+                }
                 Err(e) => Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: e.to_string() })),
             }
         }

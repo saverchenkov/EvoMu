@@ -889,8 +889,13 @@ async fn native_client_undock_and_space_entry_delivers_set_state_and_destiny_upd
     write_framed_pyrep(&mut s, &formations_pkt.to_pyrep())
         .await
         .unwrap();
-    let formations_rsp =
-        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    let formations_rsp = loop {
+        let pkt =
+            MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+        if pkt.packet_type != MachoPacketType::Notification {
+            break pkt;
+        }
+    };
     assert_eq!(formations_rsp.packet_type, MachoPacketType::CallRsp);
     let PyRep::Tuple(f_outer) = &formations_rsp.payload else {
         panic!("CallRsp payload tuple");

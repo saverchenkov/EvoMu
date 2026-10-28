@@ -113,7 +113,7 @@ async fn test_home_station_and_jump_clones_parity() {
     let home_st = rpc(&ctx, &mut s1, "home_station", "get_home_station", &[])
         .await
         .expect("home_station.get_home_station");
-    assert_eq!(home_st, PyRep::Integer(STATION_JITA));
+    assert_eq!(home_st.dict_get("id"), Some(&PyRep::Integer(STATION_JITA)));
 
     let cands_rep = rpc(&ctx, &mut s1, "home_station", "get_home_station_candidates", &[])
         .await

@@ -461,11 +461,18 @@ pub async fn handle(
             session.station_id = None;
             session.structure_id = None;
             let sess_rep = PyRep::keyval([
+                ("userid", session.user_id.map(|u| PyRep::Integer(u as i64)).unwrap_or(PyRep::None)),
                 ("charid", PyRep::Integer(char_id)),
+                ("corpid", session.corporation_id.map(PyRep::Integer).unwrap_or(PyRep::Integer(ch.corporation_id))),
+                ("allianceid", session.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("shipid", session.ship_id.map(PyRep::Integer).unwrap_or(PyRep::Integer(ship.item_id))),
                 ("stationid", PyRep::None),
                 ("structureid", PyRep::None),
                 ("solarsystemid2", session.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None)),
                 ("solarsystemid", session.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None)),
+                ("locationid", session.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None)),
+                ("constellationid", session.constellation_id.map(|c| PyRep::Integer(c as i64)).unwrap_or(PyRep::None)),
+                ("regionid", session.region_id.map(|r| PyRep::Integer(r as i64)).unwrap_or(PyRep::None)),
             ]);
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
@@ -776,11 +783,18 @@ pub async fn handle(
                         ctx, char_id, now_unix, sys_id, 0, "dock",
                     );
                     let sess_rep = PyRep::keyval([
+                        ("userid", session.user_id.map(|u| PyRep::Integer(u as i64)).unwrap_or(PyRep::None)),
                         ("charid", PyRep::Integer(char_id)),
+                        ("corpid", session.corporation_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                        ("allianceid", session.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                        ("shipid", session.ship_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                         ("stationid", session.station_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                         ("structureid", session.structure_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                         ("solarsystemid2", session.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None)),
                         ("solarsystemid", PyRep::None),
+                        ("locationid", PyRep::Integer(dock_id)),
+                        ("constellationid", session.constellation_id.map(|c| PyRep::Integer(c as i64)).unwrap_or(PyRep::None)),
+                        ("regionid", session.region_id.map(|r| PyRep::Integer(r as i64)).unwrap_or(PyRep::None)),
                     ]);
                     ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),

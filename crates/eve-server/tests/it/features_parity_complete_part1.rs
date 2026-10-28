@@ -273,7 +273,7 @@ async fn test_character_creation_lifecycle_selection_home_station() {
     let home_st_rep = rpc(&ctx, &mut sess, "home_station", "get_home_station", vec![])
         .await
         .expect("get_home_station");
-    assert_eq!(home_st_rep, PyRep::Integer(orig_home_id));
+    assert_eq!(home_st_rep.dict_get("id"), Some(&PyRep::Integer(orig_home_id)));
 
     let candidates_rep = rpc(&ctx, &mut sess, "home_station", "get_home_station_candidates", vec![])
         .await
@@ -338,8 +338,9 @@ async fn test_character_creation_lifecycle_selection_home_station() {
     assert_eq!(
         rpc(&ctx, &mut sess, "home_station", "get_home_station", vec![])
             .await
-            .expect("get_home_station after local change"),
-        PyRep::Integer(alt_station_id)
+            .expect("get_home_station after local change")
+            .dict_get("id"),
+        Some(&PyRep::Integer(alt_station_id))
     );
     assert_eq!(
         rpc(&ctx, &mut sess, "home_station", "get_next_remote_change_time", vec![])
@@ -363,8 +364,9 @@ async fn test_character_creation_lifecycle_selection_home_station() {
     assert_eq!(
         rpc(&ctx, &mut sess, "home_station", "get_home_station", vec![])
             .await
-            .expect("get_home_station after remote change"),
-        PyRep::Integer(orig_home_id)
+            .expect("get_home_station after remote change")
+            .dict_get("id"),
+        Some(&PyRep::Integer(orig_home_id))
     );
     let expected_cooldown_until = now_before_remote as i64 + 365 * 86_400;
     assert_eq!(

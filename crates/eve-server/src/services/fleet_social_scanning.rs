@@ -78,13 +78,21 @@ pub(super) async fn handle_scanning_and_wormholes(
                 NotificationTarget::Character(char_id),
                 "OnSignalTrackerSignatureUpdate",
                 "charid",
-                vec![PyRep::Integer(sys_id as i64), PyRep::Integer(sigs.len() as i64)],
+                vec![
+                    PyRep::Integer(sys_id as i64),
+                    PyRep::Dict(Vec::new()),
+                    PyRep::List(Vec::new()),
+                ],
             );
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnSignalTrackerAnomalyUpdate",
                 "charid",
-                vec![PyRep::Integer(sys_id as i64), PyRep::Integer(anom_count as i64)],
+                vec![
+                    PyRep::Integer(sys_id as i64),
+                    PyRep::Dict(Vec::new()),
+                    PyRep::List(Vec::new()),
+                ],
             );
             ctx.notify(
                 NotificationTarget::Character(char_id),
@@ -92,7 +100,8 @@ pub(super) async fn handle_scanning_and_wormholes(
                 "charid",
                 vec![
                     PyRep::Integer(sys_id as i64),
-                    PyRep::Integer(struct_rows.len() as i64),
+                    PyRep::Dict(Vec::new()),
+                    PyRep::List(Vec::new()),
                 ],
             );
             Some(Ok(PyRep::keyval([
