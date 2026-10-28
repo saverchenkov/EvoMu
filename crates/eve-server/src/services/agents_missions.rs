@@ -590,7 +590,7 @@ pub async fn handle(
                         };
                         snap.active_missions.insert(
                             (char_id, mission_id),
-                            ActiveMissionRecord { mission_id, character_id: char_id, agent_id, solar_system_id: target_sys, state: "Offered".into(), current_room_id: 1, npcs_remaining, spawned_npc_ball_ids: Vec::new() },
+                            ActiveMissionRecord { mission_id, character_id: char_id, agent_id, solar_system_id: target_sys, state: "Offered".into(), current_room_id: 1, npcs_remaining, spawned_npc_ball_ids: Vec::new(), bookmark_id: None },
                         );
                         Ok((mission_id, title, briefing, objectives, dest_sid))
                     });
@@ -839,7 +839,11 @@ pub async fn handle(
                     let bookmark_id = ctx.db.with_mut_snapshot(|snap| {
                         snap.next_entity_id += 1;
                         let bmid = snap.next_entity_id;
-                        snap.bookmarks.insert(bmid, eve_db::BookmarkRecord { bookmark_id: bmid, owner_id: char_id, solar_system_id: sys_id, label: format!("Mission: {mission_title}"), x: 50_000.0, y: 0.0, z: 0.0, item_id: None, memo: "Mission Pocket Destination".into(), folder_id: None, is_shared: false });
+                        let b_sys = snap.active_missions.get(&(char_id, mission_id)).map(|m| m.solar_system_id).unwrap_or(sys_id);
+                        snap.bookmarks.insert(bmid, eve_db::BookmarkRecord { bookmark_id: bmid, owner_id: char_id, solar_system_id: b_sys, label: format!("Mission: {mission_title}"), x: 50_000.0, y: 0.0, z: 0.0, item_id: None, memo: "Mission Pocket Destination".into(), folder_id: None, is_shared: false });
+                        if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
+                            m.bookmark_id = Some(bmid);
+                        }
                         bmid
                     });
                     let dialogue = PyRep::List(vec![
@@ -1236,7 +1240,7 @@ pub async fn handle(
                                 );
                                 snap.active_missions
                                     .entry((char_id, storyline_mission_id))
-                                    .or_insert(ActiveMissionRecord { mission_id: storyline_mission_id, character_id: char_id, agent_id: storyline_agent_id, solar_system_id: sys_id, state: "Offered".into(), current_room_id: 1, npcs_remaining: sl_npcs, spawned_npc_ball_ids: Vec::new() });
+                                    .or_insert(ActiveMissionRecord { mission_id: storyline_mission_id, character_id: char_id, agent_id: storyline_agent_id, solar_system_id: sys_id, state: "Offered".into(), current_room_id: 1, npcs_remaining: sl_npcs, spawned_npc_ball_ids: Vec::new(), bookmark_id: None });
                             }
                         }
                         Ok((new_st, t, storyline, bonus_paid, st_changes))

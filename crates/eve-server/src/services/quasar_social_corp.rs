@@ -33,6 +33,10 @@ pub struct CorpSkillPlanRecord {
     pub milestones: Vec<(u64, String)>,
 }
 
+fn default_wallet_div_one() -> u8 {
+    1
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CorpGoalRecord {
     pub id: u64,
@@ -49,6 +53,8 @@ pub struct CorpGoalRecord {
     pub initial_escrow_isk: i64,
     #[serde(default)]
     pub reward_per_unit_isk: i64,
+    #[serde(default = "default_wallet_div_one")]
+    pub wallet_division: u8,
 }
 
 impl CorpGoalRecord {
@@ -133,9 +139,9 @@ impl QuasarCorpState {
         if escrow_isk < 0 || target_progress <= 0 {
             return Err((STATUS_BAD_REQUEST, "Invalid goal target or escrow amount".into()));
         }
+        let div = wallet_div.clamp(1, 7);
         if escrow_isk > 0 {
             let cost = eve_db::IskCents::from_isk(escrow_isk);
-            let div = wallet_div.clamp(1, 7);
             let mut debited = false;
             db.with_mut_snapshot(|snap| {
                 if let Some(corp) = snap.corporations.get_mut(&(corp_id as i64)) {
@@ -157,6 +163,7 @@ impl QuasarCorpState {
                 id, corp_id, name, description, target_progress, current_progress: 0,
                 active: true, contributors: HashMap::new(), escrow_isk,
                 initial_escrow_isk: escrow_isk, reward_per_unit_isk: 0,
+                wallet_division: div,
             });
         }
         self.sync_to_db();
@@ -170,23 +177,25 @@ impl QuasarCorpState {
             if remove {
                 if let Some(cg) = goals.remove(&goal_id) {
                     if cg.escrow_isk > 0 {
-                        refund = Some((cg.corp_id, cg.escrow_isk));
+                        refund = Some((cg.corp_id, cg.wallet_division.clamp(1, 7), cg.escrow_isk));
                     }
                 }
             } else if let Some(cg) = goals.get_mut(&goal_id) {
                 cg.active = false;
                 if cg.escrow_isk > 0 {
-                    refund = Some((cg.corp_id, cg.escrow_isk));
+                    refund = Some((cg.corp_id, cg.wallet_division.clamp(1, 7), cg.escrow_isk));
                     cg.escrow_isk = 0;
                 }
             }
         }
-        if let (Some(ref db), Some((corp_id, amount_isk))) = (&self.db, refund) {
+        if let (Some(ref db), Some((corp_id, div, amount_isk))) = (&self.db, refund) {
             let credit = eve_db::IskCents::from_isk(amount_isk);
             db.with_mut_snapshot(|snap| {
                 if let Some(corp) = snap.corporations.get_mut(&(corp_id as i64)) {
-                    let next = corp.master_wallet.checked_add(credit).unwrap_or(corp.master_wallet);
-                    corp.set_division_balance(1, next);
+                    corp.ensure_wallet_divisions();
+                    let cur = if div == 1 { corp.master_wallet } else { corp.division_balance(div) };
+                    let next = cur.checked_add(credit).unwrap_or(cur);
+                    corp.set_division_balance(div, next);
                 }
             });
         }

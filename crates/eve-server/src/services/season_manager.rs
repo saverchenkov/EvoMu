@@ -227,11 +227,10 @@ impl Default for SeasonConfig {
     }
 }
 
+/// DATA GAP: Seasonal challenge definitions and live season schedule are server-only and not present in V24 client FSD.
 /// Builds the default season catalog from `res:/staticdata/seasonselection.fsdbinary`,
 /// `res:/staticdata/community_track_templates.fsdbinary`, and
 /// `res:/staticdata/seasonalcampaignsloginrewards.fsdbinary` using the server's `SdeRegistry`.
-///
-/// DATA GAP: Seasonal challenge definitions and live season schedule are server-only and not present in V24 client FSD.
 pub fn default_fsd_seasons(
     sde: &eve_sde::SdeRegistry,
     init_start_ft: i64,
@@ -375,7 +374,7 @@ pub fn load_season_config(snap: &eve_db::WorldStateSnapshot) -> SeasonConfig {
 
 pub const SEASONAL_CHALLENGES_CONFIG_KEY: &str = "season_manager:challenge_definitions";
 
-// DATA GAP: Seasonal challenge definitions and live season schedule are server-only and not present in V24 client FSD.
+/// DATA GAP: Seasonal challenge definitions and live season schedule are server-only and not present in V24 client FSD.
 // SYNTHETIC: Fallback seasonal challenge definitions used when SEASONAL_CHALLENGES_CONFIG_KEY is not populated.
 pub fn default_seasonal_challenge_definitions() -> Vec<SeasonalChallengeDef> {
     vec![
@@ -691,47 +690,55 @@ pub fn handle_season_manager(
             });
             Some(Ok(PyRep::Integer(max_ch)))
         }
-        // DATA GAP: requires server-only season schedule and challenges (rpc:seasonManager.get_season_end_time)
         ("seasonManager", "get_season_end_time") => {
+            // DATA GAP: requires server-only season schedule and challenges (rpc:seasonManager.get_season_end_time)
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let end_ft = ctx.db.with_mut_snapshot(|snap| {
+            let end_ft_opt = ctx.db.with_mut_snapshot(|snap| {
                 let st = load_season_state_from_blobs(snap, char_id);
                 let now_ft = ctx.now_blueos_filetime_ticks();
                 let unseeded = !snap.service_state_blobs.contains_key(SEASONS_CATALOG_KEY);
                 let catalog = load_seasons_catalog(snap, &ctx.sde, now_ft);
-                let cfg = catalog
+                let cfg_opt = catalog
                     .get(&st.selected_season_id)
-                    .or_else(|| catalog.get(&1))
-                    .or_else(|| catalog.values().next())
-                    .cloned()
-                    .unwrap_or_default();
-                let out = cfg.end_time_ft;
+                    .or_else(|| catalog.values().find(|c| c.end_time_ft > now_ft))
+                    .cloned();
                 if unseeded {
                     if let Ok(json) = serde_json::to_string(&catalog) {
                         snap.service_state_blobs.insert(SEASONS_CATALOG_KEY.into(), json);
                     }
                 }
-                out
+                cfg_opt.and_then(|c| (c.end_time_ft > now_ft).then_some(c.end_time_ft))
             });
-            Some(Ok(PyRep::Integer(end_ft)))
+            Some(Ok(end_ft_opt.map(PyRep::Integer).unwrap_or(PyRep::None)))
         }
-        // DATA GAP: requires server-only season schedule and challenges (rpc:seasonManager.select_season)
         ("seasonManager", "select_season") => {
+            // DATA GAP: requires server-only season schedule and challenges (rpc:seasonManager.select_season)
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let season_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let Some(season_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSeasonId".into(),
+                    message: "select_season requires an integer season ID".into(),
+                }));
+            };
             let res = with_season_state(ctx, char_id, |st, snap| {
                 let now_ft = ctx.now_blueos_filetime_ticks();
                 let catalog = load_seasons_catalog(snap, &ctx.sde, now_ft);
-                if !catalog.contains_key(&season_id) {
+                let Some(active_cfg) = catalog.get(&season_id).cloned() else {
                     return Err(BridgeRpcError {
                         code: "InvalidSeasonId".into(),
                         message: format!("Unknown or inactive season ID {season_id}"),
+                    });
+                };
+                if active_cfg.end_time_ft <= now_ft {
+                    return Err(BridgeRpcError {
+                        code: "InvalidSeasonId".into(),
+                        message: format!("Season ID {season_id} has already ended"),
                     });
                 }
                 st.selected_season_id = season_id;
@@ -741,7 +748,6 @@ pub fn handle_season_manager(
                 snap.service_state_blobs
                     .insert(format!("active_season:{char_id}"), season_id.to_string());
 
-                let active_cfg = catalog.get(&season_id).cloned().unwrap_or_default();
                 let defs = load_challenge_definitions(snap);
                 let season_data_kv = season_config_to_keyval(&active_cfg, &defs);
                 let character_progress_kv = PyRep::keyval([
@@ -775,13 +781,19 @@ pub fn handle_season_manager(
                             character_progress_kv,
                         ],
                     );
+                    ctx.notify(
+                        NotificationTarget::Character(char_id),
+                        "OnSeasonSelectionUpdated",
+                        "charid",
+                        vec![],
+                    );
                     Some(Ok(PyRep::Bool(true)))
                 }
                 Err(e) => Some(Err(e)),
             }
         }
-        // DATA GAP: requires server-only season schedule and challenges (rpc:seasonManager.get_season_data_for_character)
         ("seasonManager", "get_season_data_for_character") => {
+            // DATA GAP: requires server-only season schedule and challenges (rpc:seasonManager.get_season_data_for_character)
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -797,18 +809,26 @@ pub fn handle_season_manager(
                     }
                 }
                 let defs = load_challenge_definitions(snap);
-                if st.selected_season_id == 0 && catalog.len() > 1 {
-                    let list: Vec<PyRep> = catalog
-                        .values()
+                let active: Vec<&SeasonConfig> = catalog
+                    .values()
+                    .filter(|cfg| cfg.end_time_ft > now_ft)
+                    .collect();
+                if active.is_empty() {
+                    PyRep::None
+                } else if st.selected_season_id == 0 && active.len() > 1 {
+                    let list: Vec<PyRep> = active
+                        .into_iter()
                         .map(|cfg| season_config_to_keyval(cfg, &defs))
                         .collect();
                     PyRep::List(list)
+                } else if let Some(cfg) = catalog
+                    .get(&st.selected_season_id)
+                    .filter(|c| c.end_time_ft > now_ft)
+                    .or_else(|| active.first().copied())
+                {
+                    season_config_to_keyval(cfg, &defs)
                 } else {
-                    let active_cfg = catalog
-                        .get(&st.selected_season_id)
-                        .cloned()
-                        .unwrap_or_default();
-                    season_config_to_keyval(&active_cfg, &defs)
+                    PyRep::None
                 }
             });
             Some(Ok(rep))

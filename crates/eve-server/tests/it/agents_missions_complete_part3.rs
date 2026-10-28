@@ -83,9 +83,10 @@ fn find_agent_by_level_and_type(
     level: u8,
     agent_type_id: u32,
 ) -> (i64, i64, Option<i64>) {
-    ctx.sde
-        .agents
-        .values()
+    let mut agents: Vec<_> = ctx.sde.agents.values().collect();
+    agents.sort_by_key(|a| a.agent_id);
+    agents
+        .into_iter()
         .find(|a| a.level == level && a.agent_type_id == agent_type_id && a.solar_system_id.is_some())
         .map(|a| (a.agent_id, a.corporation_id, a.station_id))
         .expect("SDE agent with requested level and type must exist")
@@ -93,14 +94,8 @@ fn find_agent_by_level_and_type(
 
 fn make_mission(char_id: i64, mission_id: u32, agent_id: i64, sys_id: u32, state: &str) -> ActiveMissionRecord {
     ActiveMissionRecord {
-        mission_id,
-        character_id: char_id,
-        agent_id,
-        solar_system_id: sys_id,
-        state: state.into(),
-        current_room_id: 1,
-        npcs_remaining: 0,
-        spawned_npc_ball_ids: Vec::new(),
+        mission_id, character_id: char_id, agent_id, solar_system_id: sys_id,
+        state: state.into(), current_room_id: 1, npcs_remaining: 0, spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
     }
 }
 

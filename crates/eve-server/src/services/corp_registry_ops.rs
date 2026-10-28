@@ -12,33 +12,13 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
 
 fn item_to_packed_cells(ctx: &ServerContext, i: &eve_db::InventoryItemRecord) -> Vec<PyRep> {
-    let (group_id, category_id) = ctx
-        .sde
-        .types
-        .get(&i.type_id)
-        .map(|t| (t.group_id as i64, t.category_id as i64))
-        .unwrap_or((0, 0));
-    let qty = if i.is_blueprint_copy {
-        -2
-    } else if i.singleton {
-        -1
-    } else {
-        i.quantity as i64
-    };
-    let custom_name = ctx
-        .db
-        .with_snapshot(|snap| snap.item_custom_names.get(&i.item_id).cloned())
-        .unwrap_or_default();
+    let (group_id, category_id) = ctx.sde.types.get(&i.type_id).map(|t| (t.group_id as i64, t.category_id as i64)).unwrap_or((0, 0));
+    let qty = if i.is_blueprint_copy { -2 } else if i.singleton { -1 } else { i.quantity as i64 };
+    let custom_name = ctx.db.with_snapshot(|snap| snap.item_custom_names.get(&i.item_id).cloned()).unwrap_or_default();
     vec![
-        PyRep::Integer(i.item_id),
-        PyRep::Integer(i.type_id as i64),
-        PyRep::Integer(i.owner_id),
-        PyRep::Integer(i.location_id),
-        PyRep::Integer(i.flag as i64),
-        PyRep::Integer(qty),
-        PyRep::Integer(group_id),
-        PyRep::Integer(category_id),
-        PyRep::String(custom_name),
+        PyRep::Integer(i.item_id), PyRep::Integer(i.type_id as i64), PyRep::Integer(i.owner_id),
+        PyRep::Integer(i.location_id), PyRep::Integer(i.flag as i64), PyRep::Integer(qty),
+        PyRep::Integer(group_id), PyRep::Integer(category_id), PyRep::String(custom_name),
     ]
 }
 
@@ -574,24 +554,18 @@ pub fn handle(
             crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
             let div_idx = (key - 1000) as u32;
             let can_use = ctx.db.with_snapshot(|snap| {
-                let Some(corp) = snap.corporations.get(&corp_id) else {
+                if !snap.corporations.contains_key(&corp_id) {
                     return key == 1000;
-                };
-                if corp.ceo_id == char_id {
-                    return true;
                 }
-                let role_mask = corp.member_roles.get(&char_id).copied().unwrap_or(0)
-                    | snap.corp_role_assignments.get(&(corp_id, char_id)).map(|r| r.roles).unwrap_or(0)
-                    | session.corp_role;
+                let (is_ceo, role_mask) = crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                    snap, corp_id, char_id, session.corp_role, now_unix,
+                );
                 let take_bit = 1u64 << (27 + div_idx);
                 let query_bit = 1u64 << (20 + div_idx);
-                role_mask == u64::MAX || (role_mask & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT | eve_db::corp_roles::ROLE_TRADER | take_bit | query_bit)) != 0
+                is_ceo || role_mask == u64::MAX || (role_mask & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT | eve_db::corp_roles::ROLE_TRADER | take_bit | query_bit)) != 0
             });
             if !can_use {
-                return Some(Err(BridgeRpcError {
-                    code: "CorpRoleDenied".into(),
-                    message: format!("Character {char_id} lacks wallet division access for account key {key}"),
-                }));
+                return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: format!("Character {char_id} lacks wallet division access for account key {key}") }));
             }
             let old_key = session.corp_account_key as i64;
             session.corp_account_key = key as i32;
@@ -603,13 +577,7 @@ pub fn handle(
                     crate::router::NotificationTarget::Character(char_id),
                     "OnSessionChanged",
                     "clientID",
-                    vec![
-                        PyRep::Bool(false),
-                        PyRep::Dict(vec![(
-                            PyRep::String("corpAccountKey".into()),
-                            PyRep::Tuple(vec![PyRep::Integer(old_key), PyRep::Integer(key)]),
-                        )]),
-                    ],
+                    vec![PyRep::Bool(false), PyRep::Dict(vec![(PyRep::String("corpAccountKey".into()), PyRep::Tuple(vec![PyRep::Integer(old_key), PyRep::Integer(key)]))])],
                 );
             }
             let sys_id = session.solar_system_id.unwrap_or(0);
@@ -685,7 +653,7 @@ pub fn handle(
                             });
                         }
                     }
-                    const HANGAR_DIV_MASK: u64 = ((1u64 << 14) - 1) << 13;
+                    const HANGAR_DIV_MASK: u64 = eve_db::corp_roles::CORP_DELAYED_DIVISION_ROLE_MASK;
                     let dec = |m: u64| -> Vec<String> {
                         crate::esi::corp_governance_routes::decode_corp_roles(m).into_iter().map(String::from).collect()
                     };
@@ -775,7 +743,23 @@ pub fn handle(
                                 "titleMask" | "titles" | "title" => {
                                     let state = snap.corp_governance.entry(corp_id).or_default();
                                     let cur_t = state.member_titles.get(&tid).copied().unwrap_or(0);
-                                    state.member_titles.insert(tid, apply_mask(cur_t));
+                                    let next_t = apply_mask(cur_t);
+                                    let prev_tp = state.pending_title_role_grants.get(&tid).filter(|&&(_, e)| now_unix < e).map_or(0, |&(b, _)| b & HANGAR_DIV_MASK);
+                                    let (mut old_td, mut new_td) = (0u64, 0u64);
+                                    for (&t_id, &(_, tr)) in &state.titles {
+                                        let bit = if (1..=64).contains(&t_id) { 1u64 << (t_id - 1) } else { 0 };
+                                        if (cur_t & bit) != 0 { old_td |= tr & HANGAR_DIV_MASK; }
+                                        if (next_t & bit) != 0 { new_td |= tr & HANGAR_DIV_MASK; }
+                                    }
+                                    let newly_td = new_td & !(old_td & !prev_tp) & !(old_role & HANGAR_DIV_MASK) & !prev_tp;
+                                    let still_td = newly_td | (new_td & prev_tp);
+                                    if still_td != 0 {
+                                        let r_at = if newly_td != 0 { now_unix + 86_400 } else { state.pending_title_role_grants.get(&tid).map_or(now_unix + 86_400, |&(_, e)| e) };
+                                        state.pending_title_role_grants.insert(tid, (still_td, r_at));
+                                    } else {
+                                        state.pending_title_role_grants.remove(&tid);
+                                    }
+                                    state.member_titles.insert(tid, next_t);
                                 }
                                 "accountKey" => {
                                     if (1000..=1006).contains(&val_i64) {
@@ -1180,25 +1164,15 @@ pub(crate) fn handle_get_member(
             .or_else(|| ch.map(|c| c.home_station_id));
         let (div_id, sq_id) = gov.and_then(|g| g.member_divisions.get(&target_char_id).copied()).unwrap_or((0, 0));
         Ok(PyRep::keyval([
-            ("characterID", PyRep::Integer(target_char_id)),
-            ("corporationID", PyRep::Integer(corp_id)),
-            ("name", PyRep::String(name)),
-            ("roles", PyRep::Integer(roles as i64)),
-            ("role", PyRep::Integer(roles as i64)),
-            ("grantableRoles", PyRep::Integer(ra.grantable_roles as i64)),
-            ("rolesAtHQ", PyRep::Integer(ra.roles_at_hq as i64)),
-            ("grantableRolesAtHQ", PyRep::Integer(ra.grantable_roles_at_hq as i64)),
-            ("rolesAtBase", PyRep::Integer(ra.roles_at_base as i64)),
-            ("grantableRolesAtBase", PyRep::Integer(ra.grantable_roles_at_base as i64)),
-            ("rolesAtOther", PyRep::Integer(ra.roles_at_other as i64)),
-            ("grantableRolesAtOther", PyRep::Integer(ra.grantable_roles_at_other as i64)),
-            ("titleMask", PyRep::Integer(tmask as i64)),
-            ("title", PyRep::String(title_str)),
-            ("baseID", base_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-            ("startDateTime", PyRep::Integer(start_dt as i64)),
-            ("accountKey", PyRep::Integer(acct_key)),
-            ("divisionID", PyRep::Integer(div_id)),
-            ("squadronID", PyRep::Integer(sq_id)),
+            ("characterID", PyRep::Integer(target_char_id)), ("corporationID", PyRep::Integer(corp_id)),
+            ("name", PyRep::String(name)), ("roles", PyRep::Integer(roles as i64)), ("role", PyRep::Integer(roles as i64)),
+            ("grantableRoles", PyRep::Integer(ra.grantable_roles as i64)), ("rolesAtHQ", PyRep::Integer(ra.roles_at_hq as i64)),
+            ("grantableRolesAtHQ", PyRep::Integer(ra.grantable_roles_at_hq as i64)), ("rolesAtBase", PyRep::Integer(ra.roles_at_base as i64)),
+            ("grantableRolesAtBase", PyRep::Integer(ra.grantable_roles_at_base as i64)), ("rolesAtOther", PyRep::Integer(ra.roles_at_other as i64)),
+            ("grantableRolesAtOther", PyRep::Integer(ra.grantable_roles_at_other as i64)), ("titleMask", PyRep::Integer(tmask as i64)),
+            ("title", PyRep::String(title_str)), ("baseID", base_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+            ("startDateTime", PyRep::Integer(start_dt as i64)), ("accountKey", PyRep::Integer(acct_key)),
+            ("divisionID", PyRep::Integer(div_id)), ("squadronID", PyRep::Integer(sq_id)),
         ]))
     });
     Some(res)
@@ -1210,60 +1184,36 @@ pub(crate) fn handle_get_member_tracking_info(
     method: &str,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let target_cid = args
-        .first()
-        .and_then(|a| a.as_i64())
-        .filter(|&id| id >= 98_000_000 || (1_000_000..2_000_000).contains(&id));
-    let filter_char_id = args
-        .first()
-        .and_then(|a| a.as_i64())
-        .filter(|&id| id > 0 && id < 98_000_000 && !(1_000_000..2_000_000).contains(&id));
-    let (corp_id, _viewer_id, has_director) =
-        match crate::services::fleet_social::fleet_social_corps::require_corp_caller(
-            ctx, session, target_cid,
-        ) {
-            Ok(v) => v,
-            Err(e) => return Some(Err(e)),
-        };
+    let target_cid = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || (1_000_000..2_000_000).contains(&id));
+    let filter_char_id = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0 && id < 98_000_000 && !(1_000_000..2_000_000).contains(&id));
+    let (corp_id, _viewer_id, has_director) = match crate::services::fleet_social::fleet_social_corps::require_corp_caller(ctx, session, target_cid) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
     if method == "GetMemberTrackingInfo" && !has_director {
-        return Some(Err(BridgeRpcError {
-            code: "CorpRoleDenied".into(),
-            message: "Director or Personnel Manager role required for full member tracking info".into(),
-        }));
+        return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Director or Personnel Manager role required for full member tracking info".into() }));
     }
     let now_unix = ctx.now_unix();
     crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
     let caller_char = session.character_id;
     let rows = ctx.db.with_snapshot(|snap| {
-        let Some(corp) = snap.corporations.get(&corp_id) else {
-            return Vec::new();
-        };
+        let Some(corp) = snap.corporations.get(&corp_id) else { return Vec::new(); };
         let gov = snap.corp_governance.get(&corp_id);
         let mut mids: Vec<i64> = corp.members.iter().copied().collect();
         mids.sort_unstable();
         mids.into_iter()
             .filter_map(|mid| {
-                if filter_char_id.is_some_and(|fid| fid != mid) {
-                    return None;
-                }
+                if filter_char_id.is_some_and(|fid| fid != mid) { return None; }
                 let ch = snap.characters.get(&mid)?;
                 let mut roles = corp.member_roles.get(&mid).copied().unwrap_or(0);
-                if let Some(g) = gov {
-                    if let Some(&(p_mask, eff)) = g.pending_role_grants.get(&mid) {
-                        if now_unix >= eff {
-                            roles |= p_mask;
-                        }
-                    }
+                if let Some(&(p_mask, eff)) = gov.and_then(|g| g.pending_role_grants.get(&mid)) {
+                    if now_unix >= eff { roles |= p_mask; }
                 }
                 let tmask = gov.and_then(|g| g.member_titles.get(&mid).copied()).unwrap_or(0);
                 let title = if mid == corp.ceo_id { "CEO".to_string() } else { "Member".to_string() };
                 let is_online = caller_char == Some(mid) || ctx.is_character_online(mid, ch.user_id);
                 let stats = snap.character_login_stats.get(&mid);
-                let logon_ts = stats
-                    .map(|s| s.last_login_unix)
-                    .filter(|&t| t > 0)
-                    .or_else(|| is_online.then_some(now_unix))
-                    .unwrap_or(0);
+                let logon_ts = stats.map(|s| s.last_login_unix).filter(|&t| t > 0).or_else(|| is_online.then_some(now_unix)).unwrap_or(0);
                 let logoff_ts = stats.map(|s| s.last_logout_unix).filter(|&t| t > 0);
                 let is_currently_online = is_online && logoff_ts.is_none_or(|off| logon_ts >= off);
                 let loc_id = ch.station_id.or(ch.structure_id).unwrap_or(ch.solar_system_id as i64);
@@ -1273,29 +1223,15 @@ pub(crate) fn handle_get_member_tracking_info(
                 } else {
                     (PyRep::Integer(loc_id), PyRep::Integer(ship_type_id))
                 };
-                let start_dt = snap
-                    .employment_history
-                    .get(&mid)
-                    .and_then(|h| h.iter().rev().find(|e| e.0 == corp_id).map(|e| e.1))
-                    .unwrap_or(ch.create_date_unix);
+                let start_dt = snap.employment_history.get(&mid).and_then(|h| h.iter().rev().find(|e| e.0 == corp_id).map(|e| e.1)).unwrap_or(ch.create_date_unix);
                 let grantable = snap.corp_role_assignments.get(&(corp_id, mid)).map(|r| r.grantable_roles).unwrap_or(0);
                 let base_id = gov.and_then(|g| g.member_bases.get(&mid).copied());
                 Some(vec![
-                    PyRep::Integer(mid),
-                    PyRep::String(ch.name.clone()),
-                    PyRep::Integer(roles as i64),
-                    PyRep::Integer(roles as i64),
-                    PyRep::String(title),
-                    PyRep::Integer(tmask as i64),
-                    PyRep::Integer(corp_id),
-                    loc_rep,
-                    ship_rep,
-                    PyRep::Integer(logon_ts as i64),
-                    logoff_ts.map(|t| PyRep::Integer(t as i64)).unwrap_or(PyRep::None),
-                    PyRep::Integer(start_dt as i64),
-                    base_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                    PyRep::Integer(grantable as i64),
-                    PyRep::Bool(is_currently_online),
+                    PyRep::Integer(mid), PyRep::String(ch.name.clone()), PyRep::Integer(roles as i64), PyRep::Integer(roles as i64),
+                    PyRep::String(title), PyRep::Integer(tmask as i64), PyRep::Integer(corp_id), loc_rep, ship_rep,
+                    PyRep::Integer(logon_ts as i64), logoff_ts.map(|t| PyRep::Integer(t as i64)).unwrap_or(PyRep::None),
+                    PyRep::Integer(start_dt as i64), base_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    PyRep::Integer(grantable as i64), PyRep::Bool(is_currently_online),
                 ])
             })
             .collect()

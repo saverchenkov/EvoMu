@@ -404,7 +404,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 .filter(|&id| id > 0)
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing or invalid offer ID".to_string()))?;
 
-            let cat = db_off_get.with_snapshot(read_store_catalog);
+            let (cat, offer_tags) = db_off_get.with_snapshot(|s| (read_store_catalog(s), read_store_offer_tags(s)));
             let offer = cat
                 .offers
                 .iter()
@@ -413,6 +413,11 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
 
             let mut attr = Vec::new();
             encode_string_field(1, &offer.name, &mut attr);
+            if let Some(tags) = offer_tags.get(&offer.id) {
+                for t in tags {
+                    encode_string_field(2, t, &mut attr);
+                }
+            }
             encode_varint_field(5, 1, &mut attr); // no_enddate = true
             encode_varint_field(7, 1, &mut attr); // can_purchase = true
             encode_varint_field(9, 1, &mut attr); // no_schedule = true

@@ -189,7 +189,7 @@ async fn test_agent_mgr_career_and_epic_arcs() {
                 state: "Completed".into(),
                 current_room_id: 0,
                 npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
+                spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
             },
         );
     });

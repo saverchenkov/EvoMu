@@ -657,16 +657,21 @@ pub(super) fn handle_corp_gov(
             let prev = ctx.db.with_mut_snapshot(|snap| {
                 let state = snap.corp_governance.entry(corp_id).or_default();
                 let prev = state.titles.insert(title_id, (title_name.to_string(), roles_mask));
-                if let Some((_, prev_rmask)) = prev {
-                    if (prev_rmask & !roles_mask) != 0 {
-                        let bit = if (1..=16).contains(&title_id) { 1u64 << ((title_id - 1) as u64) } else { 0 };
-                        let holders: Vec<i64> = state
-                            .member_titles
-                            .iter()
-                            .filter_map(|(&mid, &tmask)| ((tmask & bit) != 0 || tmask == title_id as u64).then_some(mid))
-                            .collect();
-                        for mid in holders {
-                            state.role_drop_timestamps.insert(mid, now_unix);
+                let prev_rmask = prev.as_ref().map_or(0, |&(_, r)| r);
+                let bit = if (1..=16).contains(&title_id) { 1u64 << ((title_id - 1) as u64) } else { 0 };
+                let newly_delayed = (roles_mask & !prev_rmask) & corp_roles::CORP_DELAYED_DIVISION_ROLE_MASK;
+                let dropped = (prev_rmask & !roles_mask) != 0;
+                if newly_delayed != 0 || dropped {
+                    let holders: Vec<i64> = state
+                        .member_titles
+                        .iter()
+                        .filter_map(|(&mid, &tmask)| ((tmask & bit) != 0).then_some(mid))
+                        .collect();
+                    for mid in holders {
+                        if dropped { state.role_drop_timestamps.insert(mid, now_unix); }
+                        if newly_delayed != 0 {
+                            let cur_p = state.pending_title_role_grants.get(&mid).filter(|&&(_, e)| now_unix < e).map_or(0, |&(b, _)| b);
+                            state.pending_title_role_grants.insert(mid, (cur_p | newly_delayed, now_unix + 86_400));
                         }
                     }
                 }
@@ -1292,28 +1297,13 @@ pub(super) fn handle_corp_gov(
                         .find(|(lid, _, _)| *lid == id)
                         .map(|(_, n, c)| (n.clone(), *c))
                         .unwrap_or_else(|| ("Allies".into(), 0x00FF00));
-                    let n = args
-                        .get(1)
-                        .and_then(|a| a.as_str())
-                        .unwrap_or(&existing.0)
-                        .to_string();
-                    let c = args
-                        .get(2)
-                        .and_then(|a| a.as_i64())
-                        .map(|v| v as u32)
-                        .unwrap_or(existing.1);
+                    let n = args.get(1).and_then(|a| a.as_str()).unwrap_or(&existing.0).to_string();
+                    let c = args.get(2).and_then(|a| a.as_i64()).map(|v| v as u32).unwrap_or(existing.1);
                     (id, n, c)
                 } else {
-                    let n = args
-                        .first()
-                        .and_then(|a| a.as_str())
-                        .unwrap_or("Allies")
-                        .to_string();
+                    let n = args.first().and_then(|a| a.as_str()).unwrap_or("Allies").to_string();
                     let c = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0x00FF00) as u32;
-                    let next_bit = (0..30)
-                        .map(|b| 1i64 << b)
-                        .find(|id| !labels.iter().any(|(lid, _, _)| lid == id))
-                        .unwrap_or(1);
+                    let next_bit = (0..30).map(|b| 1i64 << b).find(|id| !labels.iter().any(|(lid, _, _)| lid == id)).unwrap_or(1);
                     (next_bit, n, c)
                 };
                 labels.retain(|(id, _, _)| *id != lid);
@@ -1322,11 +1312,7 @@ pub(super) fn handle_corp_gov(
                 (lid, name, color)
             });
             sync_corp_contacts_esi(ctx, corp_id);
-            Some(Ok(PyRep::keyval([
-                ("labelID", PyRep::Integer(lid)),
-                ("name", PyRep::String(name)),
-                ("color", PyRep::Integer(color as i64)),
-            ])))
+            Some(Ok(PyRep::keyval([("labelID", PyRep::Integer(lid)), ("name", PyRep::String(name)), ("color", PyRep::Integer(color as i64))])))
         }
 
         ("corpRegistry", "GetLabels") => {

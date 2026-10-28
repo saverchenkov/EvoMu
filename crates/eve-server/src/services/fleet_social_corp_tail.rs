@@ -57,6 +57,7 @@ pub(crate) fn member_kick_blocker(
     }
     if let Some(g) = snap.corp_governance.get(&corp_id) {
         if g.pending_role_grants.contains_key(&target_id)
+            || g.pending_title_role_grants.contains_key(&target_id)
             || g.pending_scoped_role_grants.contains_key(&target_id)
         {
             return Some("MemberHasRoles");
@@ -166,7 +167,24 @@ pub(crate) fn handle_update_members(
     let parse_row_vec = |r: &[PyRep]| -> Option<MemberUpdateSpec> {
         let tid = r.first()?.as_i64()?;
         let mut neg = false;
-        if matches!(r.get(1), Some(PyRep::String(_))) {
+        if matches!(r.get(1), Some(PyRep::String(_))) && r.len() == 4 {
+            Some(MemberUpdateSpec {
+                target_char_id: tid,
+                division_id_opt: None,
+                squadron_id_opt: None,
+                new_roles_opt: mask_opt(r.get(2), &mut neg),
+                grantable_roles_opt: None,
+                roles_at_hq_opt: None,
+                grantable_roles_at_hq_opt: None,
+                roles_at_base_opt: None,
+                grantable_roles_at_base_opt: None,
+                roles_at_other_opt: None,
+                grantable_roles_at_other_opt: None,
+                base_id_opt: None,
+                title_mask_opt: mask_opt(r.get(3), &mut neg),
+                has_negative_mask: neg,
+            })
+        } else if matches!(r.get(1), Some(PyRep::String(_))) {
             Some(MemberUpdateSpec {
                 target_char_id: tid,
                 division_id_opt: r.get(2).and_then(|a| a.as_i64()),
@@ -311,7 +329,7 @@ pub(crate) fn handle_update_members(
                 .map(String::from)
                 .collect()
         };
-        const HANGAR_DIV_MASK: u64 = ((1u64 << 14) - 1) << 13;
+        const HANGAR_DIV_MASK: u64 = eve_db::corp_roles::CORP_DELAYED_DIVISION_ROLE_MASK;
         let split_hangar = |old_m: u64, prev_p: u64, opt_m: Option<u64>| -> (u64, u64, u64, u64) {
             let new_m = opt_m.unwrap_or(old_m | prev_p);
             let (held, desired) = (old_m & HANGAR_DIV_MASK, new_m & HANGAR_DIV_MASK);
@@ -417,21 +435,43 @@ pub(crate) fn handle_update_members(
             state
                 .role_audit_log
                 .push((target_char_id, char_id, old_roles, new_roles, now_unix));
+            let mut pending_title_delayed = state
+                .pending_title_role_grants
+                .get(&target_char_id)
+                .filter(|&&(_, eff)| now_unix < eff)
+                .map_or(0, |&(b, _)| b & HANGAR_DIV_MASK);
             if let Some(tm) = sp.title_mask_opt {
-                const TITLE_DELAY_MASK: u64 = ((1u64 << 21) - 1) << 13;
-                let mut new_title_hangar = 0u64;
+                let prev_title_entry = state.pending_title_role_grants.get(&target_char_id).copied();
+                let mut old_title_delayed = 0u64;
+                let mut desired_title_delayed = 0u64;
                 for (&tid, &(_, troles)) in &state.titles {
                     let bit = if (1..=64).contains(&tid) { 1u64 << (tid - 1) } else { 0 };
+                    if (old_title_mask & bit) != 0 {
+                        old_title_delayed |= troles & HANGAR_DIV_MASK;
+                    }
                     if (tm & bit) != 0 {
-                        new_title_hangar |= troles & TITLE_DELAY_MASK;
+                        desired_title_delayed |= troles & HANGAR_DIV_MASK;
                     }
                 }
-                let newly_title_hangar = new_title_hangar & !(old_roles & TITLE_DELAY_MASK);
-                if newly_title_hangar != 0 {
-                    state.pending_role_grants.insert(
-                        target_char_id,
-                        (effective_roles | pending_hangar | newly_title_hangar, now_unix + 86_400),
-                    );
+                let matured_old_title_delayed = old_title_delayed & !pending_title_delayed;
+                let newly_title_delayed = desired_title_delayed
+                    & !matured_old_title_delayed
+                    & !(old_roles & HANGAR_DIV_MASK)
+                    & !pending_title_delayed;
+                let still_pending_title =
+                    newly_title_delayed | (desired_title_delayed & pending_title_delayed);
+                pending_title_delayed = still_pending_title;
+                if still_pending_title != 0 {
+                    let ready_at = if newly_title_delayed != 0 {
+                        now_unix + 86_400
+                    } else {
+                        prev_title_entry.map_or(now_unix + 86_400, |(_, eff)| eff)
+                    };
+                    state
+                        .pending_title_role_grants
+                        .insert(target_char_id, (still_pending_title, ready_at));
+                } else {
+                    state.pending_title_role_grants.remove(&target_char_id);
                 }
                 state.member_titles.insert(target_char_id, tm);
                 let mut tids: Vec<i64> = (0..16u64)
@@ -507,7 +547,8 @@ pub(crate) fn handle_update_members(
                     new_roles: dec(new_roles),
                 },
             );
-            let delayed = (pending_hangar | pend_hq | pend_base | pend_other) != 0 || new_roles > old_roles;
+            let delayed = (pending_hangar | pending_title_delayed | pend_hq | pend_base | pend_other) != 0
+                || new_roles > old_roles;
             results.push((target_char_id, old_roles, new_roles, effective_roles, delayed));
         }
         Ok(results)
@@ -573,6 +614,7 @@ fn remove_member_to_bloodline_npc_in_snap(
     }
     if let Some(g) = snap.corp_governance.get_mut(&corp_id) {
         g.pending_role_grants.remove(&tid);
+        g.pending_title_role_grants.remove(&tid);
         g.pending_scoped_role_grants.remove(&tid);
         g.pending_auto_kicks.remove(&tid);
         g.member_titles.remove(&tid);

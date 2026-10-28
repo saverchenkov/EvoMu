@@ -182,6 +182,7 @@ fn test_durable_snapshot_persistence_and_domain_mutations() {
                 current_room_id: 1,
                 npcs_remaining: 3,
                 spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
             },
         );
         snap.committed_idempotency_keys
@@ -555,6 +556,7 @@ fn test_d3_sqlite_relational_world_db_and_concurrent_sessions() {
                 current_room_id: 0,
                 npcs_remaining: 2,
                 spawned_npc_ball_ids: vec![],
+                bookmark_id: None,
             },
         );
         snap.standing_transactions.insert(

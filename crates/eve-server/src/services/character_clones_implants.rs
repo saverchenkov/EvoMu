@@ -805,10 +805,21 @@ pub fn handle_clones_and_sheet(
                                 format!("portrait:bloodline:{}", c.bloodline_id),
                             )
                         });
-                    (c.gender, c.bloodline_id, doll, portrait)
+                    let mut worn: Vec<u32> = snap
+                        .items
+                        .values()
+                        .filter(|i| {
+                            i.owner_id == char_id
+                                && i.flag == InventoryFlag::Pilot
+                                && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 30)
+                        })
+                        .map(|i| i.type_id)
+                        .collect();
+                    worn.sort_unstable();
+                    (c.gender, c.bloodline_id, doll, portrait, worn)
                 })
             });
-            let Some((gender, bloodline_id, doll_dna, portrait_info)) = res else {
+            let Some((gender, bloodline_id, doll_dna, portrait_info, worn_apparel)) = res else {
                 return Some(Err(BridgeRpcError {
                     code: "CharacterNotFound".into(),
                     message: format!("Character {char_id} not found"),
@@ -822,6 +833,7 @@ pub fn handle_clones_and_sheet(
                 ("portraitInfo", PyRep::String(portrait_info)),
                 ("gender", PyRep::Integer(gender as i64)),
                 ("bloodlineID", PyRep::Integer(bloodline_id as i64)),
+                ("wornApparel", PyRep::List(worn_apparel.into_iter().map(|t| PyRep::Integer(i64::from(t))).collect())),
             ])))
         }
 
@@ -909,6 +921,17 @@ pub fn handle_clones_and_sheet(
                                     format!("portrait:bloodline:{}", c.bloodline_id),
                                 )
                             });
+                        let mut worn: Vec<u32> = snap
+                            .items
+                            .values()
+                            .filter(|i| {
+                                i.owner_id == cid
+                                    && i.flag == InventoryFlag::Pilot
+                                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 30)
+                            })
+                            .map(|i| i.type_id)
+                            .collect();
+                        worn.sort_unstable();
                         out.push((
                             PyRep::Integer(cid),
                             PyRep::keyval([
@@ -918,6 +941,7 @@ pub fn handle_clones_and_sheet(
                                 ("portraitInfo", PyRep::String(portrait)),
                                 ("gender", PyRep::Integer(c.gender as i64)),
                                 ("bloodlineID", PyRep::Integer(c.bloodline_id as i64)),
+                                ("wornApparel", PyRep::List(worn.into_iter().map(|t| PyRep::Integer(i64::from(t))).collect())),
                             ]),
                         ));
                     }

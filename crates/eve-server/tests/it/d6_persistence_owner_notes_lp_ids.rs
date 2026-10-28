@@ -532,6 +532,7 @@ async fn test_d6_ids_monotonic_and_durable_notifications_across_sqlite_restart()
                 escrow_isk: 500_000,
                 initial_escrow_isk: 500_000,
                 reward_per_unit_isk: 0,
+                wallet_division: 3,
             },
         );
         quasar_corp.sync_to_db();

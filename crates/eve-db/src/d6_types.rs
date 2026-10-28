@@ -69,6 +69,8 @@ pub struct CorpGovState {
     #[serde(default)]
     pub pending_role_grants: HashMap<i64, (u64, u64)>,
     #[serde(default)]
+    pub pending_title_role_grants: HashMap<i64, (u64, u64)>,
+    #[serde(default)]
     pub pending_scoped_role_grants: HashMap<i64, (u64, u64, u64, u64)>,
     #[serde(default)]
     pub pending_auto_kicks: HashMap<i64, u64>,

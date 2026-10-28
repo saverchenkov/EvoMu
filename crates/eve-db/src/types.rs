@@ -14,10 +14,7 @@ pub enum DbError {
     #[error("Account suspended until {until_unix}: {reason}")]
     AccountSuspended { until_unix: u64, reason: String },
     #[error("Account {user_id} already has an active online session ({active_session_id})")]
-    AlreadyLoggedIn {
-        user_id: u64,
-        active_session_id: u64,
-    },
+    AlreadyLoggedIn { user_id: u64, active_session_id: u64 },
     #[error("Character {0} not found")]
     CharacterNotFound(i64),
     #[error("Character {0} is already undocked in space")]
@@ -793,6 +790,8 @@ pub struct ActiveMissionRecord {
     pub npcs_remaining: u32,
     #[serde(default)]
     pub spawned_npc_ball_ids: Vec<i64>,
+    #[serde(default)]
+    pub bookmark_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -990,15 +989,10 @@ pub mod corp_roles {
     /// `corpRoleProjectManager` (Corporation freelance & projects management).
     pub const ROLE_PROJECT_MANAGER: u64 = 1 << 6;
     /// `corpRoleAccountCanTake1..7` (V24 client `appConst`): withdraw from wallet division 1..7.
-    pub const ROLE_ACCOUNT_CAN_TAKE: [u64; 7] = [
-        1 << 27,
-        1 << 28,
-        1 << 29,
-        1 << 30,
-        1 << 31,
-        1 << 32,
-        1 << 33,
-    ];
+    pub const ROLE_ACCOUNT_CAN_TAKE: [u64; 7] = [1 << 27, 1 << 28, 1 << 29, 1 << 30, 1 << 31, 1 << 32, 1 << 33];
+    /// Hangar division access/take (bits `13..=26`) + wallet division take (`ROLE_ACCOUNT_CAN_TAKE`, bits `27..=33`)
+    /// subject to the 24-hour corporation role maturation delay.
+    pub const CORP_DELAYED_DIVISION_ROLE_MASK: u64 = ((1u64 << 21) - 1) << 13;
 
     pub fn has_role(role_mask: u64, required: u64) -> bool {
         role_mask == u64::MAX || (role_mask & ROLE_DIRECTOR) != 0 || (role_mask & required) == required

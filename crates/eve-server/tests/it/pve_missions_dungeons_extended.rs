@@ -466,7 +466,7 @@ async fn test_mission_offer_expiry_no_penalty() {
                 state: "Expired".into(),
                 current_room_id: 1,
                 npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
+                spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
             },
         );
     });

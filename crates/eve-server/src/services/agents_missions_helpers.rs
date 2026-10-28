@@ -471,6 +471,7 @@ pub async fn abandon_or_decline_mission(
             let was_accepted;
             let m_sys_id;
             let m_agent_id;
+            let m_bmid;
             let ball_ids;
             let new_state: String;
             {
@@ -494,6 +495,7 @@ pub async fn abandon_or_decline_mission(
                 was_accepted = m.state == "Accepted";
                 m_sys_id = m.solar_system_id;
                 m_agent_id = m.agent_id;
+                m_bmid = m.bookmark_id;
                 new_state = if was_accepted {
                     "Quit".into()
                 } else {
@@ -558,11 +560,15 @@ pub async fn abandon_or_decline_mission(
                     }
                     standing_penalty_applied = true;
                 }
-                snap.bookmarks.retain(|_, b| {
-                    !(b.owner_id == char_id
-                        && b.solar_system_id == m_sys_id
-                        && b.memo.contains("Mission Pocket"))
-                });
+                if let Some(bmid) = m_bmid {
+                    snap.bookmarks.remove(&bmid);
+                } else {
+                    snap.bookmarks.retain(|_, b| {
+                        !(b.owner_id == char_id
+                            && b.solar_system_id == m_sys_id
+                            && b.memo == "Mission Pocket Destination")
+                    });
+                }
             } else if !is_rnd {
                 // R&D agent mission decline has no standing penalty and does not stop research
                 let last_decline = snap

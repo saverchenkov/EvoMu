@@ -196,16 +196,32 @@ async fn test_r7_p0_02_title_bitmask_shift_24h_role_delay_edit_project_and_goal_
         };
         corp.ensure_wallet_divisions();
         corp.set_division_balance(1, IskCents::from_isk(15_000_000));
+        corp.set_division_balance(2, IskCents::from_isk(3_000_000));
+        corp.set_division_balance(3, IskCents::from_isk(4_000_000));
         snap.corporations.insert(corp_id, corp);
-
-        let gov = snap.corp_governance.entry(corp_id).or_default();
-        gov.member_account_keys.insert(pilot_id, 1000);
-        gov.titles.insert(1, ("Recruit".into(), 0));
-        gov.titles.insert(3, ("Treasurer PM".into(), corp_roles::ROLE_PROJECT_MANAGER | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]));
-        gov.member_titles.insert(pilot_id, 1); // Only Title 1 (`1 << 0`)
     });
 
     let mut sess_ceo = make_session(70201, 1, ceo_id, corp_id, 0, u64::MAX);
+    for (tid, name, rmask) in [
+        (1_i64, "Recruit", 0_u64),
+        (2_i64, "Div2 Bursar", corp_roles::ROLE_PROJECT_MANAGER | corp_roles::ROLE_ACCOUNT_CAN_TAKE[1]),
+        (3_i64, "Treasurer PM", corp_roles::ROLE_PROJECT_MANAGER | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]),
+        (4_i64, "Div3 Bursar", corp_roles::ROLE_PROJECT_MANAGER | corp_roles::ROLE_ACCOUNT_CAN_TAKE[2]),
+    ] {
+        ctx.dispatch_rpc(&mut sess_ceo, "corpRegistry", None, "UpdateTitle", &[PyRep::Integer(tid), PyRep::String(name.into()), PyRep::Integer(rmask as i64)], &kw, None)
+            .await
+            .expect("UpdateTitle");
+    }
+    let upd_member_15 = |roles: u64, tmask: u64| {
+        vec![
+            PyRep::Integer(pilot_id), PyRep::String("Member".into()), PyRep::Integer(0), PyRep::Integer(0),
+            PyRep::Integer(roles as i64), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0),
+            PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0),
+            PyRep::Integer(60_003_760), PyRep::Integer(tmask as i64), PyRep::Integer(0),
+        ]
+    };
+    ctx.dispatch_rpc(&mut sess_ceo, "corpRegistry", None, "UpdateMember", &upd_member_15(0, 1), &kw, None).await.expect("Assign Title 1");
+
     let init_args = [
         PyRep::String("Initial Project".into()),
         PyRep::Integer(10),
@@ -222,6 +238,10 @@ async fn test_r7_p0_02_title_bitmask_shift_24h_role_delay_edit_project_and_goal_
 
     // 1. Pilot with Title 1 (`tmask = 1`) + stale `session.corp_role = ROLE_DIRECTOR` does NOT inherit Title 3 or stale session role
     let mut sess_p = make_session(70202, 2, pilot_id, corp_id, 0, corp_roles::ROLE_DIRECTOR);
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess_p, "corpRegistry", None, "SetAccountKey", &[PyRep::Integer(1001)], &kw, None).await.unwrap_err().code,
+        "CorpRoleDenied"
+    );
     let goal_args = [
         PyRep::String("Title1 Exploit".into()),
         PyRep::Integer(5),
@@ -245,12 +265,8 @@ async fn test_r7_p0_02_title_bitmask_shift_24h_role_delay_edit_project_and_goal_
     let q_escrow = encode_goal_create_with_escrow("Title1 Quasar", 5, 50_000, 0);
     assert_eq!(q_call(&ctx, &sess_p, "eve_public.goal.api.CreateRequest", q_escrow.clone(), now).status_code, STATUS_FORBIDDEN);
 
-    // 2. Grant Title 3 (`1 << 2 = 4`) WITH unmatured 24h `pending_role_grants`: `handle_edit_project` works, escrow drain blocked until +86,401s
-    ctx.db.with_mut_snapshot(|snap| {
-        let gov = snap.corp_governance.entry(corp_id).or_default();
-        gov.member_titles.insert(pilot_id, 1 | (1 << 2));
-        gov.pending_role_grants.insert(pilot_id, (corp_roles::ROLE_ACCOUNT_CAN_TAKE[0], now + 86_400));
-    });
+    // 2. Grant Title 2 via live 15-arg `UpdateMember(roles=0, titleMask=1|(1<<1))`: `EditProject` works immediately, Div 2 escrow delayed 24h
+    ctx.dispatch_rpc(&mut sess_ceo, "corpRegistry", None, "UpdateMember", &upd_member_15(0, 1 | (1 << 1)), &kw, None).await.unwrap();
     sess_p.corp_role = 0;
     eve_server::services::social_corp_fleet::social_corp_projects::handle_edit_project(
         &ctx,
@@ -258,23 +274,121 @@ async fn test_r7_p0_02_title_bitmask_shift_24h_role_delay_edit_project_and_goal_
         &[PyRep::Integer(pid), PyRep::String("PM Edited".into())],
     )
     .unwrap()
-    .expect("Title 3 PM should edit project");
-    assert_eq!(ctx.dispatch_rpc(&mut sess_p, "corporationSvc", None, "CreateGoalSubmit", &goal_args, &kw, None).await.unwrap_err().code, "CorpRoleDenied");
-    assert_eq!(q_call(&ctx, &sess_p, "eve_public.goal.api.CreateRequest", q_escrow.clone(), now).status_code, STATUS_FORBIDDEN);
+    .expect("Title 2 PM should edit project immediately");
+    ctx.advance_secs(11);
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess_p, "corpRegistry", None, "SetAccountKey", &[PyRep::Integer(1001)], &kw, None).await.unwrap_err().code,
+        "CorpRoleDenied"
+    );
 
+    // Mature Title 2 (+86,401s), then grant Title 3 via 15-arg `UpdateMember(roles=0, titleMask=1|(1<<1)|(1<<2))` AND direct `ROLE_ACCOUNT_CAN_TAKE[2]` via `UpdateMembers`:
+    // - `roles=0` must NOT clobber Title 3's 24h delay (Div 1 rejected at t+0s)
+    // - Matured Title 2 must NOT be stripped by Title 3's pending delay (Div 2 succeeds at t+0s)
+    // - Direct `ROLE_ACCOUNT_CAN_TAKE[2]` via `UpdateMembers` is ALSO delayed 24h (Div 3 rejected at t+0s)
+    ctx.advance_secs(86_401);
+    ctx.dispatch_rpc(&mut sess_ceo, "corpRegistry", None, "UpdateMember", &upd_member_15(0, 1 | (1 << 1) | (1 << 2)), &kw, None).await.unwrap();
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess_p, "corpRegistry", None, "SetAccountKey", &[PyRep::Integer(1000)], &kw, None).await.unwrap_err().code,
+        "CorpRoleDenied"
+    );
+    let t1 = ctx.now_unix();
+    assert_eq!(ctx.dispatch_rpc(&mut sess_p, "corporationSvc", None, "CreateGoalSubmit", &goal_args, &kw, None).await.unwrap_err().code, "CorpRoleDenied");
+    assert_eq!(q_call(&ctx, &sess_p, "eve_public.goal.api.CreateRequest", q_escrow.clone(), t1).status_code, STATUS_FORBIDDEN);
+
+    ctx.advance_secs(11);
+    ctx.dispatch_rpc(&mut sess_p, "corpRegistry", None, "SetAccountKey", &[PyRep::Integer(1001)], &kw, None).await.unwrap();
+    let t1b = ctx.now_unix();
+    let div2_ok = q_call(&ctx, &sess_p, "eve_public.goal.api.CreateRequest", q_escrow.clone(), t1b);
+    assert_eq!(div2_ok.status_code, STATUS_OK, "already-matured Title 2 must stay active while Title 3 matures");
+    assert_eq!(q_call(&ctx, &sess_p, "eve_public.goal.api.DeleteRequest", div2_ok.payload.unwrap().value, t1b).status_code, STATUS_OK);
+    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].division_balance(2)), IskCents::from_isk(3_000_000));
+
+    // Batch `UpdateMembers`: grant Title 4 (`1 << 3`, Div 3) alongside `new_roles_opt = ROLE_PROJECT_MANAGER` — must NOT clobber Title 4's 24h delay
+    let bulk_title_row = PyRep::List(vec![PyRep::Tuple(vec![
+        PyRep::Integer(pilot_id),
+        PyRep::Integer(corp_roles::ROLE_PROJECT_MANAGER as i64),
+        PyRep::Integer((1 | (1 << 1) | (1 << 2) | (1 << 3)) as i64),
+    ])]);
+    ctx.dispatch_rpc(&mut sess_ceo, "corpRegistry", None, "UpdateMembers", &[bulk_title_row], &kw, None).await.unwrap();
+    ctx.advance_secs(11);
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess_p, "corpRegistry", None, "SetAccountKey", &[PyRep::Integer(1002)], &kw, None).await.unwrap_err().code,
+        "CorpRoleDenied"
+    );
+
+    // Also grant direct `ROLE_ACCOUNT_CAN_TAKE[2]` via both batch `UpdateMembers` and single `UpdateMember` — still delayed 24h
+    let bulk_row = PyRep::List(vec![PyRep::Tuple(vec![
+        PyRep::Integer(pilot_id),
+        PyRep::Integer((corp_roles::ROLE_PROJECT_MANAGER | corp_roles::ROLE_ACCOUNT_CAN_TAKE[2]) as i64),
+        PyRep::Integer((1 | (1 << 1) | (1 << 2)) as i64),
+    ])]);
+    ctx.dispatch_rpc(&mut sess_ceo, "corpRegistry", None, "UpdateMembers", &[bulk_row], &kw, None).await.unwrap();
+    ctx.dispatch_rpc(
+        &mut sess_ceo,
+        "corpRegistry",
+        None,
+        "UpdateMember",
+        &upd_member_15(corp_roles::ROLE_PROJECT_MANAGER | corp_roles::ROLE_ACCOUNT_CAN_TAKE[2], 1 | (1 << 1) | (1 << 2)),
+        &kw,
+        None,
+    )
+    .await
+    .unwrap();
+    ctx.advance_secs(11);
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess_p, "corpRegistry", None, "SetAccountKey", &[PyRep::Integer(1002)], &kw, None).await.unwrap_err().code,
+        "CorpRoleDenied"
+    );
+
+    // 3. Mature Title 3 + direct Div 3 (+86,401s); verify promotion does NOT bake Title 3 into `member_roles` upon title removal
     ctx.advance_secs(86_401);
     let now_matured = ctx.now_unix();
-    let create_ok = q_call(&ctx, &sess_p, "eve_public.goal.api.CreateRequest", q_escrow, now_matured);
-    assert_eq!(create_ok.status_code, STATUS_OK, "{}", create_ok.status_message);
-    let goal_id_wire = create_ok.payload.unwrap().value;
+    ctx.dispatch_rpc(&mut sess_p, "corpRegistry", None, "SetAccountKey", &[PyRep::Integer(1000)], &kw, None).await.unwrap();
+    let div1_ok = q_call(&ctx, &sess_p, "eve_public.goal.api.CreateRequest", q_escrow.clone(), now_matured);
+    assert_eq!(div1_ok.status_code, STATUS_OK, "{}", div1_ok.status_message);
+    assert_eq!(q_call(&ctx, &sess_p, "eve_public.goal.api.DeleteRequest", div1_ok.payload.unwrap().value, now_matured).status_code, STATUS_OK);
 
-    let close_rsp = q_call(&ctx, &sess_p, "eve_public.goal.api.CloseRequest", goal_id_wire.clone(), now_matured);
+    // Revoke Title 3 via `UpdateMember`: Div 1 escrow permission must disappear immediately (not baked into `member_roles`)
+    ctx.dispatch_rpc(
+        &mut sess_ceo,
+        "corpRegistry",
+        None,
+        "UpdateMember",
+        &upd_member_15(corp_roles::ROLE_PROJECT_MANAGER | corp_roles::ROLE_ACCOUNT_CAN_TAKE[2], 1 | (1 << 1)),
+        &kw,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(q_call(&ctx, &sess_p, "eve_public.goal.api.CreateRequest", q_escrow, now_matured).status_code, STATUS_FORBIDDEN);
+
+    // 4. Division 3 escrow create + CloseRequest/DeleteRequest refund conservation (`R8-P1-02`)
+    ctx.advance_secs(11);
+    let now_div3 = ctx.now_unix();
+    ctx.dispatch_rpc(&mut sess_p, "corpRegistry", None, "SetAccountKey", &[PyRep::Integer(1002)], &kw, None).await.unwrap();
+    let g1 = q_call(&ctx, &sess_p, "eve_public.goal.api.CreateRequest", encode_goal_create_with_escrow("Div3 Close Goal", 10, 600_000, 0), now_div3);
+    let g2 = q_call(&ctx, &sess_p, "eve_public.goal.api.CreateRequest", encode_goal_create_with_escrow("Div3 Delete Goal", 10, 900_000, 0), now_div3);
+    assert_eq!(g1.status_code, STATUS_OK);
+    assert_eq!(g2.status_code, STATUS_OK);
+    let (g1_wire, g2_wire) = (g1.payload.unwrap().value, g2.payload.unwrap().value);
+    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].division_balance(3)), IskCents::from_isk(2_500_000));
+    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet), IskCents::from_isk(14_990_000));
+
+    let close_rsp = q_call(&ctx, &sess_p, "eve_public.goal.api.CloseRequest", g1_wire.clone(), now_matured);
     assert_eq!(close_rsp.status_code, STATUS_OK);
     assert_eq!(close_rsp.payload.unwrap().type_url, "type.googleapis.com/eve_public.goal.api.CloseResponse");
+    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].division_balance(3)), IskCents::from_isk(3_100_000));
+    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet), IskCents::from_isk(14_990_000));
 
-    let del_rsp = q_call(&ctx, &sess_p, "eve_public.goal.api.DeleteRequest", goal_id_wire, now_matured);
+    let del_closed = q_call(&ctx, &sess_p, "eve_public.goal.api.DeleteRequest", g1_wire, now_matured);
+    assert_eq!(del_closed.status_code, STATUS_OK);
+    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].division_balance(3)), IskCents::from_isk(3_100_000));
+
+    let del_rsp = q_call(&ctx, &sess_p, "eve_public.goal.api.DeleteRequest", g2_wire, now_matured);
     assert_eq!(del_rsp.status_code, STATUS_OK);
     assert_eq!(del_rsp.payload.unwrap().type_url, "type.googleapis.com/eve_public.goal.api.DeleteResponse");
+    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].division_balance(3)), IskCents::from_isk(4_000_000));
+    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet), IskCents::from_isk(14_990_000));
 }
 
 #[tokio::test]

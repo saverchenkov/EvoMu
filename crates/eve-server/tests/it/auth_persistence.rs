@@ -365,7 +365,7 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
                 state: "Accepted".into(),
                 current_room_id: 1,
                 npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
+                spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
             },
         );
     });

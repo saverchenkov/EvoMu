@@ -163,10 +163,16 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         let Some(skin_type) = ctx.sde.types.get(&requested_skin_id) else {
             return Some(Err(err("InvalidSkinLicenseType", format!("Type {requested_skin_id} not found in SDE"))));
         };
+        let opt_ship_tid = args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0).and_then(|id| u32::try_from(id).ok());
+        if skin_type.category_id == 2118 {
+            return Some(crate::services::quasar_cosmetics_live::activate_ship_emblem_license(
+                ctx, session, char_id, requested_skin_id, opt_ship_tid,
+            ));
+        }
         if skin_type.category_id != 91 {
             return Some(Err(err(
                 "InvalidSkinLicenseType",
-                format!("Type {requested_skin_id} (category {}) is not a Permanent SKIN license (category 91)", skin_type.category_id),
+                format!("Type {requested_skin_id} (category {}) is not a Permanent SKIN or Ship Cosmetic license (category 91/2118)", skin_type.category_id),
             )));
         }
         let Some(lic_info) = ctx.sde.skin_licenses.get(&requested_skin_id) else {
@@ -238,14 +244,53 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
             Ok(v) => v,
             Err(e) => return Some(Err(e)),
         };
-        let Some(raw_ship_type) = args.first().and_then(|a| a.as_i64()) else {
-            return Some(Err(err("InvalidShipTypeForSkin", "ApplySkinToShip requires shipTypeID")));
+        let Some(raw_ship_arg) = args.first().and_then(|a| a.as_i64()) else {
+            return Some(Err(err("InvalidShipTypeForSkin", "ApplySkinToShip requires shipID or shipTypeID")));
         };
-        let Ok(ship_type_id) = u32::try_from(raw_ship_type) else {
-            return Some(Err(err("InvalidShipTypeForSkin", format!("Invalid ship typeID {raw_ship_type}"))));
+        let (explicit_ship_id, ship_type_id) = if let Some(tid) = u32::try_from(raw_ship_arg).ok().filter(|t| ctx.sde.types.get(t).is_some_and(|ty| ty.category_id == 6)) {
+            (None, tid)
+        } else if let Some((owner, tid)) = ctx.db.with_snapshot(|s| s.items.get(&raw_ship_arg).map(|i| (i.owner_id, i.type_id))) {
+            if !ctx.sde.types.get(&tid).is_some_and(|ty| ty.category_id == 6) {
+                return Some(Err(err("InvalidShipTypeForSkin", format!("Item {raw_ship_arg} (type {tid}) is not a valid ship"))));
+            }
+            if owner != char_id {
+                return Some(Err(err("OwnershipViolation", format!("Ship {raw_ship_arg} is not owned by character {char_id}"))));
+            }
+            (Some(raw_ship_arg), tid)
+        } else {
+            return Some(Err(err("InvalidShipTypeForSkin", format!("Invalid ship or ship typeID {raw_ship_arg}"))));
         };
-        if !ctx.sde.types.get(&ship_type_id).map(|t| t.category_id == 6).unwrap_or(false) {
-            return Some(Err(err("InvalidShipTypeForSkin", format!("Type {ship_type_id} is not a valid ship type in SDE"))));
+        let now_unix = ctx.now_unix();
+        if matches!(args.get(1), Some(PyRep::None) | Some(PyRep::Integer(0))) {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let expired = purge_expired_skins_for_char(snap, char_id, now_unix);
+                let target_ship = explicit_ship_id.unwrap_or_else(|| snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0));
+                let ship_item = snap.items.get(&target_ship).ok_or_else(|| err("ShipNotFound", format!("Ship {target_ship} not found")))?;
+                if ship_item.owner_id != char_id {
+                    return Err(err("OwnershipViolation", format!("Ship {target_ship} is not owned by character {char_id}")));
+                }
+                if ship_item.type_id != ship_type_id {
+                    return Err(err("ShipTypeMismatch", format!("Ship {target_ship} has type {}, expected {ship_type_id}", ship_item.type_id)));
+                }
+                let prev = snap.applied_ship_skins.remove(&target_ship);
+                Ok((target_ship, prev, expired))
+            });
+            return match res {
+                Ok((target_ship, prev_skin, expired)) => {
+                    notify_skins_removed(session, &expired);
+                    session.push_notification("OnCurrentShipSkinChange", vec![PyRep::Integer(target_ship), PyRep::None]);
+                    crate::services::quasar_cosmetics_live::broadcast_ship_skin_cosmetic_change(ctx, char_id, target_ship, ship_type_id, prev_skin, None).await;
+                    crate::services::quasar_cosmetics_live::publish_ship_skin_set(&ctx.quasar_gateway, &ctx.db, &ctx.sde, target_ship, now_unix);
+                    Some(Ok(PyRep::keyval([
+                        ("shipID", PyRep::Integer(target_ship)),
+                        ("shipTypeID", PyRep::Integer(ship_type_id as i64)),
+                        ("skinID", PyRep::None),
+                        ("designName", PyRep::None),
+                        ("sequenced", PyRep::Bool(false)),
+                    ])))
+                }
+                Err(e) => Some(Err(e)),
+            };
         }
         let (target_skin_id, resolved_skin_id, design_name) = match args.get(1) {
             Some(PyRep::Integer(id)) => {
@@ -282,10 +327,9 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
                 format!("SKIN '{}' (id {resolved_skin_id}) cannot be applied to ship type {ship_type_id}", skin_info.internal_name),
             )));
         }
-        let now_unix = ctx.now_unix();
         let res = ctx.db.try_with_mut_snapshot(|snap| {
             let expired = purge_expired_skins_for_char(snap, char_id, now_unix);
-            let active_ship = snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0);
+            let active_ship = explicit_ship_id.unwrap_or_else(|| snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0));
             let ship_item = snap.items.get(&active_ship).ok_or_else(|| err("ShipNotFound", format!("Active ship {active_ship} not found")))?;
             if ship_item.owner_id != char_id {
                 return Err(err("OwnershipViolation", format!("Ship {active_ship} is not owned by character {char_id}")));
@@ -297,13 +341,14 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
             if !is_licensed {
                 return Err(err("SkinNotLicensed", format!("Character {char_id} has not activated a license for SKIN '{design_name}' ({target_skin_id})")));
             }
-            snap.applied_ship_skins.insert(active_ship, target_skin_id);
-            Ok((active_ship, target_skin_id, expired))
+            let prev = snap.applied_ship_skins.insert(active_ship, target_skin_id);
+            Ok((active_ship, target_skin_id, prev, expired))
         });
         return match res {
-            Ok((active_ship, skin_id, expired)) => {
+            Ok((active_ship, skin_id, prev_skin, expired)) => {
                 notify_skins_removed(session, &expired);
                 session.push_notification("OnCurrentShipSkinChange", vec![PyRep::Integer(active_ship), PyRep::Integer(skin_id as i64)]);
+                crate::services::quasar_cosmetics_live::broadcast_ship_skin_cosmetic_change(ctx, char_id, active_ship, ship_type_id, prev_skin, Some(skin_id)).await;
                 // Quasar ship SKIN state (`eve_public.cosmetic.ship.api.SetNotice`) for observers.
                 crate::services::quasar_cosmetics_live::publish_ship_skin_set(&ctx.quasar_gateway, &ctx.db, &ctx.sde, active_ship, now_unix);
                 Some(Ok(PyRep::keyval([
@@ -371,17 +416,13 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
                 Err(e) => return Some(Err(e)),
             };
             let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
-            let entries = ctx.db.with_snapshot(|snap| {
-                snap.quasar_state_blobs
-                    .get("quasar_cosmetics_live")
-                    .and_then(|s| serde_json::from_str::<crate::services::quasar_cosmetics_live::CosmeticsLiveData>(s).ok())
-                    .and_then(|d| d.ship_logos.get(&(ship_id.max(0) as u64)).cloned())
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|(slot, kind)| (PyRep::Integer(slot as i64), PyRep::Integer(kind as i64)))
-                    .collect::<Vec<_>>()
+            let dict = ctx.db.with_snapshot(|snap| {
+                crate::services::quasar_cosmetics_live::enabled_cosmetics_dict_from_snapshot(
+                    snap,
+                    ship_id.max(0) as u64,
+                )
             });
-            Some(Ok(PyRep::Dict(entries)))
+            Some(Ok(dict))
         }
         // parity: feat:ui.overview-presets
         ("overviewPresetMgr", "StoreLinkAndGetID") => Some(handle_store_link(ctx, session, args, LinkKind::OverviewPreset)),

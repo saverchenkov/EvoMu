@@ -232,14 +232,32 @@ pub fn save_store_catalog(snap: &mut eve_db::WorldStateSnapshot, catalog: &Store
     }
 }
 
-/// Read persisted New Eden Store catalog from `WorldStateSnapshot.service_state_blobs["nes_store_catalog"]`.
-///
 /// DATA GAP: NES store catalog (categories, products, offers) is live Quasar backend data not present in V24 client FSD.
+/// Read persisted New Eden Store catalog from `WorldStateSnapshot.service_state_blobs["nes_store_catalog"]`.
 pub fn read_store_catalog(snap: &eve_db::WorldStateSnapshot) -> StoreCatalog {
     snap.service_state_blobs
         .get("nes_store_catalog")
         .and_then(|json| serde_json::from_str(json).ok())
         .unwrap_or_default()
+}
+
+pub fn read_store_offer_tags(
+    snap: &eve_db::WorldStateSnapshot,
+) -> std::collections::HashMap<u32, Vec<String>> {
+    snap.service_state_blobs
+        .get("nes_store_offer_tags")
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_store_offer_tags(
+    snap: &mut eve_db::WorldStateSnapshot,
+    tags: &std::collections::HashMap<u32, Vec<String>>,
+) {
+    if let Ok(serialized) = serde_json::to_string(tags) {
+        snap.service_state_blobs
+            .insert("nes_store_offer_tags".to_string(), serialized);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -542,6 +560,278 @@ pub fn register_plex_vault_extra_handlers(router: &PublicGatewayRouter, db: Arc<
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.plex.vault.transaction.invoice.api.admin.RecordInvoiceResponse"),
                 value: Vec::new(),
             })
+        }),
+    );
+
+    // 4. eve_public.store.offer.api.GetAllByTagRequest -> GetAllByTagResponse
+    let db_tag_all = Arc::clone(&db);
+    router.register_handler(
+        "eve_public.store.offer.api.GetAllByTagRequest",
+        Arc::new(move |_ctx, _any, dyn_msg| {
+            let tag = match dyn_msg.get(2) {
+                Some(DynamicValue::String(s)) => s.trim().to_string(),
+                _ => String::new(),
+            };
+            if tag.is_empty() {
+                return Err((STATUS_BAD_REQUEST, "Store offer tag is required".into()));
+            }
+            let matching_ids = db_tag_all.with_snapshot(|snap| {
+                let cat = read_store_catalog(snap);
+                let tags_map = read_store_offer_tags(snap);
+                cat.offers
+                    .into_iter()
+                    .filter(|o| {
+                        !o.targeted
+                            && tags_map
+                                .get(&o.id)
+                                .is_some_and(|ts| ts.iter().any(|t| t.eq_ignore_ascii_case(&tag)))
+                    })
+                    .map(|o| o.id)
+                    .collect::<Vec<_>>()
+            });
+            let mut out = Vec::new();
+            for oid in matching_ids {
+                let mut off_bytes = Vec::new();
+                encode_string_field(1, &oid.to_string(), &mut off_bytes);
+                encode_bytes_field(1, &off_bytes, &mut out);
+            }
+            Ok(GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.store.offer.api.GetAllByTagResponse"
+                ),
+                value: out,
+            })
+        }),
+    );
+
+    // 5. eve.store.admin.api.{CreateCategoryRequest,CreateProductRequest,CreateOfferRequest}
+    let db_adm_cat = Arc::clone(&db);
+    router.register_handler(
+        "eve.store.admin.api.CreateCategoryRequest",
+        Arc::new(move |ctx, _any, dyn_msg| {
+            require_admin_role(ctx)?;
+            let attrs = match dyn_msg.get(1) {
+                Some(DynamicValue::Message(m)) => m,
+                _ => return Err((STATUS_BAD_REQUEST, "Missing category attributes".into())),
+            };
+            let name = match attrs.get(1) {
+                Some(DynamicValue::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
+                _ => return Err((STATUS_BAD_REQUEST, "Category name is required".into())),
+            };
+            let cat_enum = match attrs.get(6) {
+                Some(DynamicValue::Int32(v)) if *v > 0 => *v as u64,
+                Some(DynamicValue::Uint32(v)) if *v > 0 => *v as u64,
+                _ => 1,
+            };
+            let id = db_adm_cat.with_mut_snapshot(|snap| {
+                let mut catalog = read_store_catalog(snap);
+                let next_id = catalog.categories.iter().map(|c| c.id).max().unwrap_or(0) + 1;
+                catalog.categories.push(StoreCategory {
+                    id: next_id,
+                    name: name.clone(),
+                    description: name,
+                });
+                save_store_catalog(snap, &catalog);
+                next_id
+            });
+            let mut cid_b = Vec::new();
+            encode_varint_field(1, u64::from(id), &mut cid_b);
+            encode_varint_field(2, cat_enum, &mut cid_b);
+            let mut out = Vec::new();
+            encode_bytes_field(1, &cid_b, &mut out);
+            Ok(GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve.store.admin.api.CreateCategoryResponse"
+                ),
+                value: out,
+            })
+        }),
+    );
+
+    let db_adm_prod = Arc::clone(&db);
+    router.register_handler(
+        "eve.store.admin.api.CreateProductRequest",
+        Arc::new(move |ctx, _any, dyn_msg| {
+            require_admin_role(ctx)?;
+            let cat_enum = match dyn_msg.get(1) {
+                Some(DynamicValue::Int32(v)) if *v > 0 => *v as u64,
+                Some(DynamicValue::Uint32(v)) if *v > 0 => *v as u64,
+                _ => 1,
+            };
+            let attrs = match dyn_msg.get(2) {
+                Some(DynamicValue::Message(m)) => m,
+                _ => return Err((STATUS_BAD_REQUEST, "Missing product attributes".into())),
+            };
+            let name = match attrs.get(1) {
+                Some(DynamicValue::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
+                _ => return Err((STATUS_BAD_REQUEST, "Product name is required".into())),
+            };
+            let type_id = match attrs.get(2) {
+                Some(DynamicValue::Message(item)) => match item.get(1) {
+                    Some(DynamicValue::Message(tid)) => match tid.get(1) {
+                        Some(DynamicValue::Uint32(v)) => *v,
+                        Some(DynamicValue::Uint64(v)) => *v as u32,
+                        Some(DynamicValue::Int32(v)) if *v > 0 => *v as u32,
+                        Some(DynamicValue::Int64(v)) if *v > 0 => *v as u32,
+                        _ => 0,
+                    },
+                    _ => 0,
+                },
+                _ => 0,
+            };
+            let id = db_adm_prod.with_mut_snapshot(|snap| {
+                let mut catalog = read_store_catalog(snap);
+                let next_id = catalog.products.iter().map(|p| p.id).max().unwrap_or(100) + 1;
+                catalog.products.push(StoreProduct {
+                    id: next_id,
+                    name: name.clone(),
+                    description: name,
+                    type_id,
+                    quantity: 1,
+                });
+                save_store_catalog(snap, &catalog);
+                next_id
+            });
+            let mut pid_b = Vec::new();
+            encode_varint_field(1, u64::from(id), &mut pid_b);
+            encode_varint_field(2, cat_enum, &mut pid_b);
+            let mut out = Vec::new();
+            encode_bytes_field(1, &pid_b, &mut out);
+            Ok(GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve.store.admin.api.CreateProductResponse"
+                ),
+                value: out,
+            })
+        }),
+    );
+
+    let db_adm_off = Arc::clone(&db);
+    let pending_adm_off = Arc::clone(&router.pending_notices);
+    router.register_handler(
+        "eve.store.admin.api.CreateOfferRequest",
+        Arc::new(move |ctx, _any, dyn_msg| {
+            require_admin_role(ctx)?;
+            let attrs = match dyn_msg.get(1) {
+                Some(DynamicValue::Message(m)) => m,
+                _ => return Err((STATUS_BAD_REQUEST, "Missing offer attributes".into())),
+            };
+            let name = match attrs.get(1) {
+                Some(DynamicValue::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
+                _ => return Err((STATUS_BAD_REQUEST, "Offer name is required".into())),
+            };
+            let price_plex = match attrs.get(5) {
+                Some(DynamicValue::Message(pp)) => match pp.get(1) {
+                    Some(DynamicValue::Int64(c)) => *c / 100,
+                    Some(DynamicValue::Uint64(c)) => (*c as i64) / 100,
+                    Some(DynamicValue::Int32(c)) => (*c as i64) / 100,
+                    Some(DynamicValue::Uint32(c)) => (*c as i64) / 100,
+                    _ => 0,
+                },
+                _ => 0,
+            };
+            let targeted = matches!(attrs.get(7), Some(DynamicValue::Bool(true)) | Some(DynamicValue::Uint64(1)));
+            let tags: Vec<String> = match attrs.get(16) {
+                Some(DynamicValue::Repeated(list)) => list
+                    .iter()
+                    .filter_map(|v| match v {
+                        DynamicValue::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let category_id = match attrs.get(17) {
+                Some(DynamicValue::Repeated(list)) => list
+                    .first()
+                    .and_then(|v| match v {
+                        DynamicValue::Message(m) => match m.get(1) {
+                            Some(DynamicValue::Uint32(u)) => Some(*u),
+                            Some(DynamicValue::Uint64(u)) => Some(*u as u32),
+                            Some(DynamicValue::Int32(i)) if *i > 0 => Some(*i as u32),
+                            _ => None,
+                        },
+                        _ => None,
+                    })
+                    .unwrap_or(1),
+                _ => 1,
+            };
+            let product_ids: Vec<u32> = match attrs.get(18) {
+                Some(DynamicValue::Repeated(list)) => list
+                    .iter()
+                    .filter_map(|v| match v {
+                        DynamicValue::Message(pm) => match pm.get(1) {
+                            Some(DynamicValue::Message(pid)) => match pid.get(1) {
+                                Some(DynamicValue::Uint32(u)) => Some(*u),
+                                Some(DynamicValue::Uint64(u)) => Some(*u as u32),
+                                Some(DynamicValue::Int32(i)) if *i > 0 => Some(*i as u32),
+                                _ => None,
+                            },
+                            _ => None,
+                        },
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let id = db_adm_off.with_mut_snapshot(|snap| {
+                let mut catalog = read_store_catalog(snap);
+                let next_id = catalog.offers.iter().map(|o| o.id).max().unwrap_or(1000) + 1;
+                catalog.offers.push(StoreOffer {
+                    id: next_id,
+                    name: name.clone(),
+                    description: name,
+                    category_id,
+                    price_plex,
+                    product_ids,
+                    targeted,
+                });
+                save_store_catalog(snap, &catalog);
+                if !tags.is_empty() {
+                    let mut tags_map = read_store_offer_tags(snap);
+                    tags_map.insert(next_id, tags);
+                    save_store_offer_tags(snap, &tags_map);
+                }
+                next_id
+            });
+            if targeted {
+                let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+                let (mut u_b, mut c_b, mut oid_b, mut nb) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+                encode_varint_field(1, uid, &mut u_b);
+                encode_string_field(1, &id.to_string(), &mut c_b);
+                encode_bytes_field(1, &u_b, &mut oid_b);
+                encode_bytes_field(2, &c_b, &mut oid_b);
+                encode_bytes_field(1, &oid_b, &mut nb);
+                pending_adm_off.write().unwrap_or_else(|e| e.into_inner()).push((
+                    NoticeScope::Broadcast,
+                    GoogleAny {
+                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.store.targetaudience.offer.api.PromotedNotice"),
+                        value: nb,
+                    },
+                ));
+            }
+            let mut off_b = Vec::new();
+            encode_string_field(1, &id.to_string(), &mut off_b);
+            let mut out = Vec::new();
+            encode_bytes_field(1, &off_b, &mut out);
+            Ok(GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve.store.admin.api.CreateOfferResponse"
+                ),
+                value: out,
+            })
+        }),
+    );
+
+    // 6. eve.payment.purchase.api.CreditCardRequest -> fail-closed (real-money backend disabled)
+    router.register_handler(
+        "eve.payment.purchase.api.CreditCardRequest",
+        Arc::new(move |_ctx, _any, _dyn_msg| {
+            // DATA GAP: feat:quasar.payment acceptance: (real-money backend; stub as disabled)
+            Err((
+                STATUS_FORBIDDEN,
+                "Real-money payment backend is disabled".into(),
+            ))
         }),
     );
 }

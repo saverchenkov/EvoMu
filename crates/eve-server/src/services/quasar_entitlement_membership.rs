@@ -160,6 +160,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     ] {
         let db_logo = Arc::clone(&db);
         let pending_logo = Arc::clone(&router.pending_notices);
+        let sink_logo = Arc::clone(&router.macho_notify_sink);
         router.register_handler(
             req_name,
             Arc::new(move |ctx, _any, dyn_msg| {
@@ -181,6 +182,15 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                         ships.retain(|&s| s != ship_type_id);
                     }
                 });
+                if !is_grant {
+                    super::quasar_cosmetics_live::prune_revoked_logo_entitlement(
+                        &db_logo,
+                        &sink_logo,
+                        target_cid,
+                        ship_type_id as u32,
+                        is_alliance,
+                    );
+                }
                 let ident = encode_logo_identifier(target_cid, ship_type_id);
                 let pkg = if is_alliance {
                     "eve_public.entitlement.character.ship.alliancelogo"

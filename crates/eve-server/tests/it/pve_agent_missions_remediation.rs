@@ -333,7 +333,7 @@ async fn test_pve_trade_mission_commodity_delivery_and_consumption() {
                     state: "Accepted".into(),
                     current_room_id: 1,
                     npcs_remaining: 0,
-                    spawned_npc_ball_ids: Vec::new(),
+                    spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
                 },
             );
         });

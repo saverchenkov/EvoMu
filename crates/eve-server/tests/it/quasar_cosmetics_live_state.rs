@@ -255,6 +255,12 @@ async fn ship_logos_and_skin_state_follow_owned_ships() {
         }
         out
     };
+    assert_eq!(quasar_rpc(&ctx, &mut a_q, "eve_public.cosmetic.ship.logo.DisplayRequest", logo(ship_a, 0, Some(2))).await.status_code, 403, "corporation logo requires hull emblem entitlement");
+    let mut gm_ent = build_sess(62_099, 90_000_001, CORP);
+    gm_ent.user_id = Some(62_099);
+    let logo_ent = eve_server::services::quasar_entitlement_membership::encode_logo_identifier(90_000_001, u64::from(ship_type));
+    assert_eq!(quasar_rpc(&ctx, &mut gm_ent, "eve_public.entitlement.character.ship.admin.corplogo.GrantRequest", wrap(1, &logo_ent)).await.status_code, STATUS_OK);
+    let _ = drain(&mut rx_a, "eve_public.entitlement");
     assert_eq!(quasar_rpc(&ctx, &mut a_q, "eve_public.cosmetic.ship.logo.DisplayRequest", logo(ship_a, 0, Some(2))).await.status_code, STATUS_OK);
     assert_eq!(quasar_rpc(&ctx, &mut a_q, "eve_public.cosmetic.ship.logo.DisplayRequest", logo(ship_a, 1, Some(1))).await.status_code, 403);
     assert_eq!(quasar_rpc(&ctx, &mut b, "eve_public.cosmetic.ship.logo.DisplayRequest", logo(ship_a, 0, Some(2))).await.status_code, 403);

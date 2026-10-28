@@ -21,15 +21,16 @@
 #![forbid(unsafe_code)]
 
 use super::quasar_space_services::{
-    effective_roles, encode_domain_message, get_int_field, set_domain_attributes, set_domain_field,
+    effective_roles, encode_domain_message, get_identifier_or_int, get_int_field,
+    set_domain_attributes, set_domain_field,
 };
 use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_FORBIDDEN,
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, GoogleAny, GoogleEmpty, QuasarMessage,
-    TYPE_GOOGLEAPIS_PREFIX,
+    encode_bytes_field, encode_varint_field, DynamicValue, GoogleAny,
+    QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, RwLock};
@@ -239,19 +240,6 @@ pub fn register_handlers(
         );
     }
 
-    // 11. App telemetry lifecycle events acknowledgment
-    router.register_handler(
-        "eve_public.app.launcher.distribution.api.LauncherDistributionClientStartRequest",
-        Arc::new(|_ctx, _any, _dyn_msg| Ok(GoogleEmpty.to_any())),
-    );
-    router.register_handler(
-        "eve_public.app.launcher.eve_client.GameClientStartRequest",
-        Arc::new(|_ctx, _any, _dyn_msg| Ok(GoogleEmpty.to_any())),
-    );
-    router.register_handler(
-        "eve_public.app.launcher.eve_client.GameClientStopRequest",
-        Arc::new(|_ctx, _any, _dyn_msg| Ok(GoogleEmpty.to_any())),
-    );
 
     // 12. Public eve_public.cosmetic.* request packages (market, SKINR, licenses, sequencing, palette)
     for (req_name, rsp_name) in [
@@ -367,7 +355,11 @@ pub fn register_handlers(
     // 13. State-backed ship logo / ship SKIN state / palette / structure paintwork handlers.
     super::quasar_cosmetics_live::register(
         router,
-        super::quasar_cosmetics_live::CosmeticsLiveState::load(Arc::clone(&db), Arc::clone(&sde)),
+        super::quasar_cosmetics_live::CosmeticsLiveState::load_with_sink(
+            Arc::clone(&db),
+            Arc::clone(&sde),
+            Arc::clone(&router.macho_notify_sink),
+        ),
         Arc::clone(&skinr_state),
     );
 
@@ -411,4 +403,116 @@ pub fn publish_cosmetic_market_transaction_notice(
         value: payload,
     };
     gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix).map(|(_, n)| n)
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AppTelemetryStore {
+    pub agency_bookmarks_by_char: HashMap<i64, Vec<u64>>,
+    pub agency_actions_by_char: HashMap<i64, Vec<(u64, u64)>>,
+    pub activity_nodes_by_char: HashMap<i64, Vec<u64>>,
+    pub map_settings_by_char: HashMap<i64, HashMap<String, Vec<u32>>>,
+    pub feature_previews_by_char: HashMap<i64, HashMap<String, bool>>,
+    pub helper_pointers_by_char: HashMap<i64, Vec<String>>,
+    pub launcher_events_by_user: HashMap<u64, Vec<(String, u64)>>,
+}
+
+/// Decodes and persists `eve_public.app.*` client UI, agency, settings, and launcher domain events.
+pub fn handle_app_domain_event(
+    db: &WorldRepository,
+    descriptors: &QuasarDescriptorRegistry,
+    session: &eve_machonet::SessionState,
+    payload: &GoogleAny,
+    now_unix: u64,
+) {
+    let norm = QuasarDescriptorRegistry::normalize_type_name(&payload.type_url);
+    if !norm.starts_with("eve_public.app.") {
+        return;
+    }
+    let Ok(msg) = descriptors.decode_dynamic(norm, &payload.value) else {
+        return;
+    };
+    let cid = session.character_id.unwrap_or(0);
+    let uid_opt = session.user_id;
+    db.with_mut_snapshot(|snap| {
+        let mut st: AppTelemetryStore = snap
+            .quasar_state_blobs
+            .get("quasar_app_telemetry")
+            .and_then(|j| serde_json::from_str(j).ok())
+            .unwrap_or_default();
+        match norm {
+            "eve_public.app.eveonline.agency.ui.bookmark.Added" if cid > 0 => {
+                if let Some(gid) = get_identifier_or_int(&msg, 1).filter(|v| *v >= 0) {
+                    let gid = gid as u64;
+                    let list = st.agency_bookmarks_by_char.entry(cid).or_default();
+                    if !list.contains(&gid) && list.len() < 128 {
+                        list.push(gid);
+                    }
+                }
+            }
+            "eve_public.app.eveonline.agency.ui.action.Taken" if cid > 0 => {
+                let act = get_identifier_or_int(&msg, 1).unwrap_or(0).max(0) as u64;
+                let cnt = get_identifier_or_int(&msg, 2).unwrap_or(0).max(0) as u64;
+                let list = st.agency_actions_by_char.entry(cid).or_default();
+                if list.len() >= 128 {
+                    list.remove(0);
+                }
+                list.push((act, cnt));
+            }
+            "eve_public.app.eveonline.activitytracker.ui.node.Selected" if cid > 0 => {
+                if let Some(nid) = get_identifier_or_int(&msg, 1).filter(|v| *v >= 0) {
+                    let list = st.activity_nodes_by_char.entry(cid).or_default();
+                    if list.len() >= 128 {
+                        list.remove(0);
+                    }
+                    list.push(nid as u64);
+                }
+            }
+            "eve_public.app.eveonline.map.settings.api.Changed" if cid > 0 => {
+                if let Some(DynamicValue::String(k)) = msg.get(1) {
+                    let vals = match msg.get(2) {
+                        Some(DynamicValue::Repeated(items)) => items
+                            .iter()
+                            .filter_map(|v| match v {
+                                DynamicValue::Uint32(u) => Some(*u),
+                                DynamicValue::Uint64(u) => Some(*u as u32),
+                                DynamicValue::Int32(i) if *i >= 0 => Some(*i as u32),
+                                DynamicValue::Int64(i) if *i >= 0 => Some(*i as u32),
+                                _ => None,
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    st.map_settings_by_char.entry(cid).or_default().insert(k.clone(), vals);
+                }
+            }
+            "eve_public.app.eveonline.settings.featurepreview.Toggled" if cid > 0 => {
+                if let Some(DynamicValue::String(fname)) = msg.get(1) {
+                    let on = matches!(msg.get(2), Some(DynamicValue::Bool(true)) | Some(DynamicValue::Uint64(1)));
+                    st.feature_previews_by_char.entry(cid).or_default().insert(fname.clone(), on);
+                }
+            }
+            "eve_public.app.eveonline.helperpointer.ui.link.Clicked" if cid > 0 => {
+                if let Some(DynamicValue::String(ptr)) = msg.get(1) {
+                    let list = st.helper_pointers_by_char.entry(cid).or_default();
+                    if list.len() >= 128 {
+                        list.remove(0);
+                    }
+                    list.push(ptr.clone());
+                }
+            }
+            _ if norm.starts_with("eve_public.app.launcher.") => {
+                if let Some(uid) = uid_opt {
+                    let list = st.launcher_events_by_user.entry(uid).or_default();
+                    if list.len() >= 128 {
+                        list.remove(0);
+                    }
+                    list.push((norm.to_string(), now_unix));
+                }
+            }
+            _ => {}
+        }
+        if let Ok(j) = serde_json::to_string(&st) {
+            snap.quasar_state_blobs.insert("quasar_app_telemetry".into(), j);
+        }
+    });
 }

@@ -168,37 +168,11 @@ pub(crate) fn get_effective_corp_roles(
 ) -> (bool, u64) {
     fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
     let now_unix = ctx.now_unix();
-    let (is_ceo, role_mask) = ctx.db.with_snapshot(|snap| {
-        let (is_ceo, mut role_mask) = snap
-            .corporations
-            .get(&corp_id)
-            .map(|c| {
-                (
-                    c.ceo_id == char_id,
-                    c.member_roles.get(&char_id).copied().unwrap_or(0),
-                )
-            })
-            .unwrap_or((false, 0));
-        if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
-            role_mask |= ra.roles;
-        }
-        if let Some(g) = snap.corp_governance.get(&corp_id) {
-            if let Some(&(pending_mask, eff_unix)) = g.pending_role_grants.get(&char_id) {
-                if now_unix >= eff_unix {
-                    role_mask |= pending_mask;
-                }
-            }
-            if let Some(&tmask) = g.member_titles.get(&char_id) {
-                for (&tid, &(_, troles)) in &g.titles {
-                    if (tmask & (1u64 << (tid.rem_euclid(16)))) != 0 {
-                        role_mask |= troles;
-                    }
-                }
-            }
-        }
-        (is_ceo, role_mask)
-    });
-    (is_ceo, role_mask)
+    ctx.db.with_snapshot(|snap| {
+        crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+            snap, corp_id, char_id, 0, now_unix,
+        )
+    })
 }
 
 pub(super) fn parse_dest_id(args: &[PyRep], kwargs: &HashMap<String, PyRep>) -> Option<i64> {

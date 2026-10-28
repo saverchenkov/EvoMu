@@ -353,7 +353,7 @@ async fn test_epic_arc_status_and_delayed_rewards() {
                 state: "Accepted".into(),
                 current_room_id: 0,
                 npcs_remaining: 0,
-                spawned_npc_ball_ids: vec![],
+                spawned_npc_ball_ids: vec![], bookmark_id: None,
             },
         );
     });

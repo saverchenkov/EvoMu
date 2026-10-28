@@ -31,12 +31,7 @@ async fn rpc_call(ctx: &ServerContext, sess: &mut SessionState, service: &str, m
     ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None).await
 }
 
-fn colocate_with_agent(
-    ctx: &ServerContext,
-    sess: &mut SessionState,
-    char_id: i64,
-    agent_id: i64,
-) -> (u32, i64) {
+fn colocate_with_agent(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, agent_id: i64) -> (u32, i64) {
     let agent = ctx.sde.agents.get(&agent_id).expect("agent in SDE");
     let sta_id = agent.station_id.unwrap_or(JITA_STATION_ID);
     let st_info = ctx.sde.stations.get(&sta_id);
@@ -61,7 +56,7 @@ fn colocate_with_agent(
 fn make_mission(char_id: i64, mission_id: u32, agent_id: i64, sys_id: u32, state: &str) -> ActiveMissionRecord {
     ActiveMissionRecord {
         mission_id, character_id: char_id, agent_id, solar_system_id: sys_id,
-        state: state.into(), current_room_id: 1, npcs_remaining: 0, spawned_npc_ball_ids: Vec::new(),
+        state: state.into(), current_room_id: 1, npcs_remaining: 0, spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
     }
 }
 

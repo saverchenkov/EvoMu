@@ -83,7 +83,7 @@ async fn test_mission_tracker_and_standing_mgr_rpcs() {
                 state: "Accepted".into(),
                 current_room_id: 1,
                 npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
+                spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
             },
         );
         // Setup standing in snapshot for PILOT_1

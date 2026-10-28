@@ -89,9 +89,10 @@ fn find_agent_by_level_and_type(
     level: u8,
     agent_type_id: u32,
 ) -> (i64, i64, Option<i64>) {
-    ctx.sde
-        .agents
-        .values()
+    let mut agents: Vec<_> = ctx.sde.agents.values().collect();
+    agents.sort_by_key(|a| a.agent_id);
+    agents
+        .into_iter()
         .find(|a| a.level == level && a.agent_type_id == agent_type_id && a.solar_system_id.is_some())
         .map(|a| (a.agent_id, a.corporation_id, a.station_id))
         .expect("SDE agent with requested level and type must exist")
@@ -107,6 +108,7 @@ fn make_mission(char_id: i64, mission_id: u32, agent_id: i64, sys_id: u32, state
         current_room_id: 1,
         npcs_remaining: 0,
         spawned_npc_ball_ids: Vec::new(),
+        bookmark_id: None,
     }
 }
 
@@ -265,6 +267,22 @@ async fn test_mission_lifecycle_offer_accept_complete_decline_abandon_and_expira
     assert!(bm3_id > 0);
     assert!(ctx.db.with_snapshot(|snap| snap.bookmarks.contains_key(&bm3_id)));
 
+    // R-P0-01 negative regression: insert pilot's personal bookmark in same system & another mission pocket bookmark
+    let (personal_bm_id, other_bm_id) = ctx.db.with_mut_snapshot(|snap| {
+        let m_sys = snap.active_missions[&(char_id, mission_id_3)].solar_system_id;
+        let p_id = 991_001i64;
+        let o_id = 991_002i64;
+        snap.bookmarks.insert(p_id, eve_db::BookmarkRecord {
+            bookmark_id: p_id, owner_id: char_id, solar_system_id: m_sys, label: "Personal Spot".into(),
+            x: 100.0, y: 200.0, z: 300.0, item_id: None, memo: "Safe Spot".into(), folder_id: None, is_shared: false,
+        });
+        snap.bookmarks.insert(o_id, eve_db::BookmarkRecord {
+            bookmark_id: o_id, owner_id: char_id, solar_system_id: m_sys, label: "Other Pocket".into(),
+            x: 50_000.0, y: 0.0, z: 0.0, item_id: None, memo: "Mission Pocket Destination".into(), folder_id: None, is_shared: false,
+        });
+        (p_id, o_id)
+    });
+
     let st_before_quit = ctx.db.with_snapshot(|snap| {
         snap.characters[&char_id].standings.get(&corp_id).copied().unwrap_or(0.0)
     });
@@ -281,6 +299,8 @@ async fn test_mission_lifecycle_offer_accept_complete_decline_abandon_and_expira
     assert_eq!(abandon_3.dict_get("standingPenaltyApplied").and_then(|v| v.as_bool()), Some(true));
     assert_eq!(abandon_3.dict_get("dungeonCleaned").and_then(|v| v.as_bool()), Some(true));
     assert!(!ctx.db.with_snapshot(|snap| snap.bookmarks.contains_key(&bm3_id)));
+    assert!(ctx.db.with_snapshot(|snap| snap.bookmarks.contains_key(&personal_bm_id)), "personal bookmark in same system must survive mission abandon (R-P0-01)");
+    assert!(ctx.db.with_snapshot(|snap| snap.bookmarks.contains_key(&other_bm_id)), "other mission pocket bookmark must survive mission abandon (R-P0-01)");
     let st_after_quit = ctx.db.with_snapshot(|snap| {
         snap.characters[&char_id].standings.get(&corp_id).copied().unwrap_or(0.0)
     });

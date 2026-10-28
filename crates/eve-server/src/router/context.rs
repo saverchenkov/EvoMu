@@ -359,6 +359,7 @@ impl ServerContext {
         });
         crate::services::fleet_social::hydrate_social_state_from_db(&ctx);
         crate::sp6_lifecycle::seed_persisted_abandoned_drones(&ctx);
+        crate::services::quasar_cosmetics_live::install_macho_notify_sink(&ctx);
         ctx.wire_module_deactivation_hook();
         ctx
     }

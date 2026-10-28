@@ -29,6 +29,7 @@ pub(crate) fn promote_due_pending_corp_grants(ctx: &ServerContext, corp_id: i64)
     let has_due = ctx.db.with_snapshot(|snap| {
         snap.corp_governance.get(&corp_id).is_some_and(|g| {
             g.pending_role_grants.values().any(|&(_, eff)| now_unix >= eff)
+                || g.pending_title_role_grants.values().any(|&(_, eff)| now_unix >= eff)
                 || g.pending_scoped_role_grants.values().any(|&(_, _, _, eff)| now_unix >= eff)
                 || g.pending_friendly_fire.is_some_and(|(_, eff)| now_unix >= eff)
         })
@@ -48,6 +49,7 @@ pub(crate) fn promote_due_pending_corp_grants(ctx: &ServerContext, corp_id: i64)
                 if due { promoted.push((mid, p_mask)); }
                 !due
             });
+            g.pending_title_role_grants.retain(|_, &mut (_, eff)| now_unix < eff);
             g.pending_scoped_role_grants.retain(|&mid, &mut (hq, base, other, eff)| {
                 let due = now_unix >= eff;
                 if due { promoted_scoped.push((mid, hq, base, other)); }
@@ -141,6 +143,7 @@ pub(super) fn record_corp_join_in_snap(
     if old_corp_id > 0 && old_corp_id != corp_id {
         if let Some(g) = snap.corp_governance.get_mut(&old_corp_id) {
             g.pending_role_grants.remove(&char_id);
+            g.pending_title_role_grants.remove(&char_id);
             g.pending_scoped_role_grants.remove(&char_id);
             g.pending_auto_kicks.remove(&char_id);
             g.member_titles.remove(&char_id);
@@ -221,9 +224,16 @@ fn get_corp_member_snapshot(
                     if let Some(&(p_mask, eff)) = g.pending_role_grants.get(&mid) {
                         if now_unix >= eff { role_mask |= p_mask; }
                     }
+                    let unmatured_t = g
+                        .pending_title_role_grants
+                        .get(&mid)
+                        .filter(|&&(_, eff)| now_unix < eff)
+                        .map_or(0, |&(b, _)| b & corp_roles::CORP_DELAYED_DIVISION_ROLE_MASK);
                     if let Some(&tmask) = g.member_titles.get(&mid) {
                         for (&tid, &(_, troles)) in &g.titles {
-                            if (tmask & (1u64 << (tid.rem_euclid(16)))) != 0 { role_mask |= troles; }
+                            if (1..=64).contains(&tid) && (tmask & (1u64 << (tid - 1))) != 0 {
+                                role_mask |= troles & !unmatured_t;
+                            }
                         }
                     }
                 }

@@ -27,11 +27,11 @@ pub const SERVER_TRACKED_MATCHERS: &[&str] = &[
 ];
 
 /// Delayed 24h division access/take role bits: hangar divisions (`13..=26`) + `ROLE_ACCOUNT_CAN_TAKE` (`27..=33`).
-pub(crate) const HANGAR_DIV_MASK: u64 = ((1u64 << 21) - 1) << 13;
+pub(crate) const HANGAR_DIV_MASK: u64 = eve_db::corp_roles::CORP_DELAYED_DIVISION_ROLE_MASK;
 
 /// Computes `(is_ceo, effective_roles)` for `char_id` in `corp_id` from DB corporation state
 /// (`corp.member_roles`, `corp_role_assignments`, and 1-based title bitmasks `1 << (tid - 1)`),
-/// masking unmatured 24h `pending_role_grants` on `HANGAR_DIV_MASK` (`ROLE_ACCOUNT_CAN_TAKE` / hangar take).
+/// masking unmatured 24h `pending_role_grants` and `pending_title_role_grants` on `HANGAR_DIV_MASK`.
 pub(crate) fn effective_corp_member_roles(
     snap: &eve_db::WorldStateSnapshot,
     corp_id: i64,
@@ -48,24 +48,20 @@ pub(crate) fn effective_corp_member_roles(
         roles |= ra.roles;
     }
     if let Some(gov) = snap.corp_governance.get(&corp_id) {
-        let already_matured_div = roles & HANGAR_DIV_MASK;
-        let mut has_unmatured_grant = false;
         if let Some(&(p_mask, matured_at)) = gov.pending_role_grants.get(&char_id) {
             if now_unix >= matured_at {
                 roles |= p_mask;
-            } else {
-                has_unmatured_grant = true;
-                roles &= !HANGAR_DIV_MASK | already_matured_div;
             }
         }
+        let unmatured_title_bits = gov
+            .pending_title_role_grants
+            .get(&char_id)
+            .filter(|&&(_, matured_at)| now_unix < matured_at)
+            .map_or(0, |&(bits, _)| bits & HANGAR_DIV_MASK);
         if let Some(&tmask) = gov.member_titles.get(&char_id) {
             for (&tid, &(_, troles)) in &gov.titles {
                 if (1..=64).contains(&tid) && (tmask & (1u64 << (tid - 1))) != 0 {
-                    roles |= if has_unmatured_grant {
-                        troles & (!HANGAR_DIV_MASK | already_matured_div)
-                    } else {
-                        troles
-                    };
+                    roles |= troles & !unmatured_title_bits;
                 }
             }
         }

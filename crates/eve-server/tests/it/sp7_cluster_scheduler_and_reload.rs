@@ -622,7 +622,7 @@ async fn test_sp7_downtime_cleans_npc_wrecks_and_respawns_accepted_mission_waves
                 state: "Accepted".into(),
                 current_room_id: 1,
                 npcs_remaining: 1,
-                spawned_npc_ball_ids: vec![pre_dt_npc_id],
+                spawned_npc_ball_ids: vec![pre_dt_npc_id], bookmark_id: None,
             },
         );
     });

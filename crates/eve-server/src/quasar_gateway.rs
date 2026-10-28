@@ -328,9 +328,12 @@ pub type QuasarHandlerFn = Arc<
         + Send
         + Sync,
 >;
+pub type MachoNotifySink =
+    Arc<dyn Fn(crate::router::NotificationTarget, &str, &str, Vec<PyRep>) + Send + Sync>;
 
 pub struct PublicGatewayRouter {
     pub descriptors: Arc<QuasarDescriptorRegistry>,
+    pub db: Arc<WorldRepository>,
     pub sde: Arc<eve_sde::SdeRegistry>,
     pub gateway_instance_uuid: Vec<u8>,
     pub tenant: String,
@@ -339,10 +342,11 @@ pub struct PublicGatewayRouter {
     pub subscribers: Arc<RwLock<HashMap<u64, GatewaySubscriber>>>,
     pub stream_receivers: RwLock<HashMap<u64, mpsc::Receiver<EvePublicNotice>>>,
     pub routing_cache: RwLock<NoticeRoutingCache>,
-    pub published_events: RwLock<VecDeque<EvePublicEvent>>,
+    pub published_events: Arc<RwLock<VecDeque<EvePublicEvent>>>,
     pub server_hijack_state: RwLock<QuasarHijackState>,
     pub next_notice_seq: AtomicU64,
     pub pending_notices: Arc<RwLock<Vec<(NoticeScope, GoogleAny)>>>,
+    pub macho_notify_sink: Arc<RwLock<Option<MachoNotifySink>>>,
     pub progression: Arc<crate::services::quasar_progression::ProgressionManagers>,
     pub chat_moderation: Arc<crate::services::quasar_social_chat::ChatModerationState>,
 }
@@ -357,6 +361,7 @@ impl PublicGatewayRouter {
         let chat_moderation = Arc::new(crate::services::quasar_social_chat::ChatModerationState::new(&db));
         let router = Self {
             descriptors,
+            db: Arc::clone(&db),
             sde: Arc::clone(&sde),
             progression: Arc::clone(&progression),
             chat_moderation,
@@ -367,10 +372,11 @@ impl PublicGatewayRouter {
             subscribers: Arc::new(RwLock::new(HashMap::new())),
             stream_receivers: RwLock::new(HashMap::new()),
             routing_cache: RwLock::new(NoticeRoutingCache::new(NOTICE_CACHE_MAX_SIZE_BYTES)),
-            published_events: RwLock::new(VecDeque::new()),
+            published_events: Arc::new(RwLock::new(VecDeque::new())),
             server_hijack_state: RwLock::new(QuasarHijackState::default()),
             next_notice_seq: AtomicU64::new(1),
             pending_notices: Arc::new(RwLock::new(Vec::new())),
+            macho_notify_sink: Arc::new(RwLock::new(None)),
         };
         router.register_builtin_core_handlers(Arc::clone(&db), Arc::clone(&sde));
         crate::services::quasar_social::register_social_services(&router, Arc::clone(&db));
@@ -591,28 +597,16 @@ impl PublicGatewayRouter {
     }
 
     pub fn has_subscriber(&self, session_id: u64) -> bool {
-        self.subscribers
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains_key(&session_id)
+        self.subscribers.read().unwrap_or_else(|e| e.into_inner()).contains_key(&session_id)
     }
 
     pub fn take_stream_receiver(&self, session_id: u64) -> Option<mpsc::Receiver<EvePublicNotice>> {
-        self.stream_receivers
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&session_id)
+        self.stream_receivers.write().unwrap_or_else(|e| e.into_inner()).remove(&session_id)
     }
 
     pub fn unsubscribe_session(&self, session_id: u64) {
-        self.subscribers
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&session_id);
-        self.stream_receivers
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&session_id);
+        self.subscribers.write().unwrap_or_else(|e| e.into_inner()).remove(&session_id);
+        self.stream_receivers.write().unwrap_or_else(|e| e.into_inner()).remove(&session_id);
     }
 
     /// Updates a subscriber's session tenancy attributes (`charid`, `corpid`, `allianceid`, `solarsystemid2`, `fleetid`)
@@ -1067,6 +1061,13 @@ impl PublicGatewayRouter {
         if let Some(ref payload) = event.payload {
             crate::services::quasar_progression_extra::handle_opportunity_event(
                 &self.progression,
+                &self.descriptors,
+                session,
+                payload,
+                now_unix,
+            );
+            crate::services::quasar_cosmetics_services::handle_app_domain_event(
+                &self.db,
                 &self.descriptors,
                 session,
                 payload,
