@@ -416,24 +416,21 @@ flowchart TD
 
 The Destiny physics engine is backed by comprehensive unit and integration test suites:
 
-### Primary Test Suites
+### Concrete Integration Tests
 
-1. [`crates/eve-destiny/src/tests.rs`](../../../crates/eve-destiny/src/tests.rs):
-   - `test_rifter_align_time_and_exponential_acceleration`: Validates Rifter align time formula ($5.103\text{ s}$ against canonical attributes: mass $1\,067\,000\text{ kg}$, inertia $3.45$, max velocity $365\text{ m/s}$), reaching $> 75\%$ velocity in 6 ticks.
-   - `test_short_and_long_warp_exit_without_overshoot`: Validates short warp trajectory without overshooting the $2\,500\text{ m}$ arrival bubble.
-   - `test_turret_wrecking_shot_missile_and_proximity_decloak`: Tests $2\,000\text{ m}$ surface proximity decloaking and $3.0\times$ wrecking shots.
-   - `test_spatial_bubbles_10000km_isolation_and_warp_transitions`: Verifies grid bubble isolation at $10\,000\text{ km}$, observer update filtering, and non-overlapping grid wall expansion.
-   - `test_destiny_collision_bounce_physics_and_gate_cloak`: Verifies mass-weighted elastic bump physics (restitution $0.8$) against static asteroids and confirms gate cloak bump immunity.
-   - `test_interdiction_bubbles_trapping_nullifier_and_micro_jump`: Validates mobile warp disruptor bubbles, heavy interdiction spheres, drag/stop bubble perimeter trapping, and Interdiction Nullifier bypasses.
-   - `test_issue_69_no_aligning_teleport_or_mid_flight_yank_on_late_bubble`: Confirms that ships in warp cruise cannot be yanked mid-flight by late bubbles.
-
-2. [`crates/eve-server/tests/it/destiny_events_emission.rs`](../../../crates/eve-server/tests/it/destiny_events_emission.rs):
-   - `test_set_state_emitted_on_update_state_request`: Verifies `SetState` binary stream generation, ego identification, and marshal round-trip consistency.
-   - `test_warp_to_and_warp_special_fx_emitted_on_warp`: Verifies `WarpTo` coordinate encoding, `effects.Warping` `OnSpecialFX` emission, and landing termination.
-   - `test_goto_point_emitted_by_cmd_goto_point`: Validates `CmdGotoPoint` translation and network update dispatch.
-
-3. [`crates/eve-server/tests/it/destiny_binary_stream.rs`](../../../crates/eve-server/tests/it/destiny_binary_stream.rs):
-   - Full binary serialization and deserialization round-trip tests for all 13 `DSTBALL_*` modes, ensuring 100% wire parity with canonical client packet parsers.
+| Test Function | Source File | Validated Behaviors |
+| :--- | :--- | :--- |
+| [`test_rifter_align_time_and_exponential_acceleration`](../../../crates/eve-destiny/src/tests.rs#L6) | [`tests.rs`](../../../crates/eve-destiny/src/tests.rs) | Validates Rifter align time formula ($5.103\text{ s}$ against mass $1\,067\,000\text{ kg}$, inertia $3.45$, max velocity $365\text{ m/s}$), reaching $> 75\%$ velocity in 6 ticks. |
+| [`test_short_and_long_warp_exit_without_overshoot`](../../../crates/eve-destiny/src/tests.rs#L36) | [`tests.rs`](../../../crates/eve-destiny/src/tests.rs) | Validates short warp trajectory without overshooting the $2\,500\text{ m}$ arrival bubble. |
+| [`test_turret_wrecking_shot_missile_and_proximity_decloak`](../../../crates/eve-destiny/src/tests.rs#L78) | [`tests.rs`](../../../crates/eve-destiny/src/tests.rs) | Tests $2\,000\text{ m}$ surface proximity decloaking and $3.0\times$ wrecking shots. |
+| [`test_spatial_bubbles_10000km_isolation_and_warp_transitions`](../../../crates/eve-destiny/src/tests.rs#L126) | [`tests.rs`](../../../crates/eve-destiny/src/tests.rs) | Verifies grid bubble isolation at $10\,000\text{ km}$, observer update filtering, and non-overlapping grid wall expansion. |
+| [`test_destiny_collision_bounce_physics_and_gate_cloak`](../../../crates/eve-destiny/src/tests.rs#L333) | [`tests.rs`](../../../crates/eve-destiny/src/tests.rs) | Verifies mass-weighted elastic bump physics (restitution $0.8$) against static asteroids and confirms gate cloak bump immunity. |
+| [`test_interdiction_bubbles_trapping_nullifier_and_micro_jump`](../../../crates/eve-destiny/src/tests.rs#L394) | [`tests.rs`](../../../crates/eve-destiny/src/tests.rs) | Validates mobile warp disruptor bubbles, heavy interdiction spheres, drag/stop bubble perimeter trapping, and Interdiction Nullifier bypasses. |
+| [`test_issue_69_no_aligning_teleport_or_mid_flight_yank_on_late_bubble`](../../../crates/eve-destiny/src/tests.rs#L560) | [`tests.rs`](../../../crates/eve-destiny/src/tests.rs) | Confirms that ships in warp cruise cannot be yanked mid-flight by late bubbles. |
+| [`test_set_state_emitted_on_update_state_request`](../../../crates/eve-server/tests/it/destiny_events_emission.rs#L93) | [`destiny_events_emission.rs`](../../../crates/eve-server/tests/it/destiny_events_emission.rs) | Verifies `SetState` binary stream generation, ego identification, and marshal round-trip consistency. |
+| [`test_warp_to_and_warp_special_fx_emitted_on_warp`](../../../crates/eve-server/tests/it/destiny_events_emission.rs#L129) | [`destiny_events_emission.rs`](../../../crates/eve-server/tests/it/destiny_events_emission.rs) | Verifies `WarpTo` coordinate encoding, `effects.Warping` `OnSpecialFX` emission, and landing termination. |
+| [`test_goto_point_emitted_by_cmd_goto_point`](../../../crates/eve-server/tests/it/destiny_events_emission.rs#L189) | [`destiny_events_emission.rs`](../../../crates/eve-server/tests/it/destiny_events_emission.rs) | Validates `CmdGotoPoint` translation and network update dispatch. |
+| [`test_destiny_binary_mode_missile_mushroom_troll_formation`](../../../crates/eve-server/tests/it/destiny_binary_stream.rs#L39) | [`destiny_binary_stream.rs`](../../../crates/eve-server/tests/it/destiny_binary_stream.rs) | Full binary serialization and deserialization round-trip tests for all 13 `DSTBALL_*` modes, ensuring 100% wire parity. |
 
 ### Parity Audit Tag Matrix
 

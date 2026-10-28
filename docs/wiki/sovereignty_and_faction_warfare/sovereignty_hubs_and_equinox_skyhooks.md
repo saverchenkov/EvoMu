@@ -370,20 +370,16 @@ Each planetary body in a solar system can host at most one Orbital Skyhook. Anch
 
 The Sovereignty Hub, Skyhook, and Entosis frameworks are verified through comprehensive test suites:
 
-### Primary Test Suites
+### Concrete Integration Tests
 
-1. [`crates/eve-server/tests/it/quasar_sov_equinox_hub.rs`](../../../crates/eve-server/tests/it/quasar_sov_equinox_hub.rs):
-   - `test_equinox_hub_resources_fuel_and_upgrades_state_backed`: Validates system power and workforce computations against SDE planetary tables, fuel delivery, upgrade installation and budget allocation, hourly fuel burn ($5\text{ units/h}$), transition to `POWER_STATE_LOW` on fuel exhaustion, and workforce transfers across stargate jumps.
-
-2. [`crates/eve-server/tests/it/sov_fw_complete.rs`](../../../crates/eve-server/tests/it/sov_fw_complete.rs):
-   - `test_skyhook_reagents_and_theft`: Tests Skyhook reagent generation (Magmatic Gas), theft status broadcasting (`OnSkyhookCanBeHacked`), role-based destruction authorization, and structure removal.
-   - `test_sovereignty_claim_and_notifications`: Validates `claim_system_sovereignty`, `OnSovereigntyChanged` broadcasts, and destiny event emissions.
-
-3. [`crates/eve-server/tests/it/quasar_sov_pirate_remediation.rs`](../../../crates/eve-server/tests/it/quasar_sov_pirate_remediation.rs):
-   - Tests Mercenary Den activation, infomorph production schedules, anarchy level progression, and mercenary tactical operations.
-
-4. [`crates/eve-server/tests/it/mining_structures_sov_r5_regressions.rs`](../../../crates/eve-server/tests/it/mining_structures_sov_r5_regressions.rs):
-   - Tests structure proximity rules, anchoring validations, and system defense index modifications.
+| Test Function | Source File | Validated Behaviors |
+| :--- | :--- | :--- |
+| [`test_equinox_hub_resources_fuel_and_upgrades_state_backed`](../../../crates/eve-server/tests/it/quasar_sov_equinox_hub.rs#L167) | [`quasar_sov_equinox_hub.rs`](../../../crates/eve-server/tests/it/quasar_sov_equinox_hub.rs) | Validates system power and workforce computations against SDE planetary tables, fuel delivery, upgrade installation and budget allocation, hourly fuel burn, transition to `POWER_STATE_LOW` on fuel exhaustion, and workforce transfers across stargate jumps. |
+| [`test_equinox_hub_workforce_transfer_network_state_backed`](../../../crates/eve-server/tests/it/quasar_sov_equinox_hub.rs#L297) | [`quasar_sov_equinox_hub.rs`](../../../crates/eve-server/tests/it/quasar_sov_equinox_hub.rs) | Tests 5-jump workforce transfer network routing, capacity constraints, transit times, and import/export balances. |
+| [`test_sov_skyhooks_and_structures_audit`](../../../crates/eve-server/tests/it/v24_remediations_audit_part1.rs#L62) | [`v24_remediations_audit_part1.rs`](../../../crates/eve-server/tests/it/v24_remediations_audit_part1.rs) | Tests Skyhook reagent generation (Magmatic Gas), theft status broadcasting (`OnSkyhookCanBeHacked`), role-based destruction authorization, and structure removal. |
+| [`test_mercenary_den_activities_and_evolution_state_backed`](../../../crates/eve-server/tests/it/quasar_sov_pirate_remediation.rs#L390) | [`quasar_sov_pirate_remediation.rs`](../../../crates/eve-server/tests/it/quasar_sov_pirate_remediation.rs) | Tests Mercenary Den activation, infomorph production schedules, anarchy level progression, and mercenary tactical operations. |
+| [`test_skyhook_admin_auth_window_and_star_resources`](../../../crates/eve-server/tests/it/quasar_sov_pirate_remediation.rs#L474) | [`quasar_sov_pirate_remediation.rs`](../../../crates/eve-server/tests/it/quasar_sov_pirate_remediation.rs) | Validates Skyhook admin vulnerability window scheduling, star resource yields, and role authorization checks. |
+| [`test_r5_218_219_220_221_223_224_mining_moon_drill_asset_safety_fw_insurgency`](../../../crates/eve-server/tests/it/mining_structures_sov_r5_regressions.rs#L472) | [`mining_structures_sov_r5_regressions.rs`](../../../crates/eve-server/tests/it/mining_structures_sov_r5_regressions.rs) | Tests structure proximity rules, anchoring validations, and system defense index modifications. |
 
 ---
 

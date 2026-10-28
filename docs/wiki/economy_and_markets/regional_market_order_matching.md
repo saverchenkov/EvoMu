@@ -454,30 +454,21 @@ When singletons (BPCs, mutated Abyssal modules) are escrowed in Item Exchange co
 
 The regional market engine and contracts system are rigorously validated by extensive integration tests:
 
-### Primary Test Suites
+### Concrete Integration Tests
 
-1. [`crates/eve-server/tests/it/economy_market.rs`](../../../crates/eve-server/tests/it/economy_market.rs):
-   - `test_e1_broker_fee_and_sales_tax_skill_discounts`: Validates broker fee discounts from *Broker Relations* and corp/faction standings, sales tax reductions from *Accounting*, and minimum fee floors.
-   - `test_e2_market_order_matching_queries_and_cancellation`: Tests full order lifecycle: placing limit orders, immediate order matching, partial fills, order cancellation, and escrow refunds.
-
-2. [`crates/eve-server/tests/it/economy_market_part2.rs`](../../../crates/eve-server/tests/it/economy_market_part2.rs):
-   - `test_market_instant_matching`: Verifies maker-taker price execution, price improvement refunds for buyers, and sales tax deduction from seller gross proceeds.
-
-3. [`crates/eve-server/tests/it/economy_market_part3.rs`](../../../crates/eve-server/tests/it/economy_market_part3.rs):
-   - `test_market_modify_relist_tick_size_corp_remote_expiry_sleeper_and_plex`: Validates 4-significant-figure tick rejection, relisting fees (*Advanced Broker Relations*), corporate division accounting, remote order range limits (*Procurement*, *Visibility*), Sleeper blue loot buy orders, and PLEX Vault settlement.
-
-4. [`crates/eve-server/tests/it/market_orders_complete.rs`](../../../crates/eve-server/tests/it/market_orders_complete.rs):
-   - `test_tick_size_relist_fee_broker_minimum_scc_surcharge_and_durations`: Tests Upwell structure broker fee splits ($50\%$ SCC / $50\%$ owner), order durations, and relisting fee formulas.
-   - `test_ranged_buy_orders_corp_divisions_multisell_multibuy_expiry_and_history`: Tests multi-sell orders (`PlaceMultiSellOrder`), multi-buy executions (`BuyMultipleItems`), and ranged buy order matching across stargate jumps.
-
-5. [`crates/eve-server/tests/it/economy_contracts.rs`](../../../crates/eve-server/tests/it/economy_contracts.rs):
-   - `test_e3_contracts_lifecycle_item_exchange_courier_auction`: Comprehensive end-to-end verification of Item Exchange, Courier, and Auction lifecycles.
-   - `test_contracts_item_exchange_and_request`: Tests one-way sales, want-to-buy requests, and two-way item barter.
-   - `test_contracts_auction_and_courier`: Tests auction bidding increments, outbid escrow refunds, buyout completion, and courier transport settlement.
-   - `test_contracts_visibility_search_fees_limits_reject_blueprints_and_gm_expire`: Validates contract slot caps (*Contracting*), private contract rejection, `BreakPlasticWrap` courier failure, BPC attribute preservation, and GM contract expiry.
-
-6. [`crates/eve-server/tests/it/market_price_history_remediation.rs`](../../../crates/eve-server/tests/it/market_price_history_remediation.rs):
-   - `test_market_price_history_remediation`: Validates daily OHLCV aggregations, Windows FileTime formatting, and `GetOldPriceHistory` / `GetNewPriceHistory` responses.
+| Test Function | Source File | Validated Behaviors |
+| :--- | :--- | :--- |
+| [`test_e1_broker_fee_and_sales_tax_skill_discounts`](../../../crates/eve-server/tests/it/economy_market.rs#L65) | [`economy_market.rs`](../../../crates/eve-server/tests/it/economy_market.rs) | Validates broker fee discounts from *Broker Relations* and corp/faction standings, sales tax reductions from *Accounting*, and minimum fee floors. |
+| [`test_e2_market_order_matching_queries_and_cancellation`](../../../crates/eve-server/tests/it/economy_market.rs#L249) | [`economy_market.rs`](../../../crates/eve-server/tests/it/economy_market.rs) | Tests full order lifecycle: placing limit orders, immediate order matching, partial fills, order cancellation, and escrow refunds. |
+| [`test_market_instant_matching`](../../../crates/eve-server/tests/it/economy_market_part2.rs#L62) | [`economy_market_part2.rs`](../../../crates/eve-server/tests/it/economy_market_part2.rs) | Verifies maker-taker price execution, price improvement refunds for buyers, and sales tax deduction from seller gross proceeds. |
+| [`test_market_modify_relist_tick_size_corp_remote_expiry_sleeper_and_plex`](../../../crates/eve-server/tests/it/economy_market_part3.rs#L66) | [`economy_market_part3.rs`](../../../crates/eve-server/tests/it/economy_market_part3.rs) | Validates 4-significant-figure tick rejection, relisting fees (*Advanced Broker Relations*), corporate division accounting, remote order range limits, Sleeper blue loot buy orders, and PLEX Vault settlement. |
+| [`test_tick_size_relist_fee_broker_minimum_scc_surcharge_and_durations`](../../../crates/eve-server/tests/it/market_orders_complete.rs#L59) | [`market_orders_complete.rs`](../../../crates/eve-server/tests/it/market_orders_complete.rs) | Tests Upwell structure broker fee splits ($50\%$ SCC / $50\%$ owner), order durations, and relisting fee formulas. |
+| [`test_ranged_buy_orders_corp_divisions_multisell_multibuy_expiry_and_history`](../../../crates/eve-server/tests/it/market_orders_complete.rs#L587) | [`market_orders_complete.rs`](../../../crates/eve-server/tests/it/market_orders_complete.rs) | Tests multi-sell orders (`PlaceMultiSellOrder`), multi-buy executions (`BuyMultipleItems`), and ranged buy order matching across stargate jumps. |
+| [`test_e3_contracts_lifecycle_item_exchange_courier_auction`](../../../crates/eve-server/tests/it/economy_contracts.rs#L55) | [`economy_contracts.rs`](../../../crates/eve-server/tests/it/economy_contracts.rs) | Comprehensive end-to-end verification of Item Exchange, Courier, and Auction lifecycles. |
+| [`test_contracts_item_exchange_and_request`](../../../crates/eve-server/tests/it/economy_contracts.rs#L364) | [`economy_contracts.rs`](../../../crates/eve-server/tests/it/economy_contracts.rs) | Tests one-way sales, want-to-buy requests, and two-way item barter. |
+| [`test_contracts_auction_and_courier`](../../../crates/eve-server/tests/it/economy_contracts.rs#L538) | [`economy_contracts.rs`](../../../crates/eve-server/tests/it/economy_contracts.rs) | Tests auction bidding increments, outbid escrow refunds, buyout completion, and courier transport settlement. |
+| [`test_contracts_visibility_search_fees_limits_reject_blueprints_and_gm_expire`](../../../crates/eve-server/tests/it/economy_contracts.rs#L968) | [`economy_contracts.rs`](../../../crates/eve-server/tests/it/economy_contracts.rs) | Validates contract slot caps (*Contracting*), private contract rejection, `BreakPlasticWrap` courier failure, BPC attribute preservation, and GM contract expiry. |
+| [`test_market_price_history_authentic_aggregates_and_empty_untraded`](../../../crates/eve-server/tests/it/market_price_history_remediation.rs#L59) | [`market_price_history_remediation.rs`](../../../crates/eve-server/tests/it/market_price_history_remediation.rs) | Validates daily OHLCV aggregations, Windows FileTime formatting, and `GetOldPriceHistory` / `GetNewPriceHistory` responses. |
 
 ---
 

@@ -576,25 +576,20 @@ flowchart TD
 
 The mining and harvesting subsystems are verified by an extensive automated test suite covering unit mechanics, integration workflows, and edge-case regression scenarios:
 
-### Key Test Suites
+### Concrete Integration Tests
 
-1. [`mining_cycle_engine.rs`](../../../crates/eve-server/tests/it/mining_cycle_engine.rs):
-   - `test_mn04_venture_miner_i_cycles_deliver_exact_sde_yield_until_hold_full_or_depleted`: Verifies exact Venture yield formulas ($10 \times 1.25 \times 1.25 \times 2 = 31.25\text{ m}^3$), 15-second cycle timing, critical yield bonuses ($+200\%$), short-cycling (6s delivering 125 units), hold-full clamping, and asteroid ball removal upon depletion.
-   - `test_mn04_activation_requirements_and_cycle_interruptions`: Validates requirement rejections (`TargetNotLocked`, `TargetOutOfRange`, `TargetNotMinable`, `NotEnoughCapacitor`, `CannotActivateWhileCloaked`, `ModuleOffline`) and mid-cycle interruptions.
-   - `test_mn04_retriever_strip_miner_yield_matches_wiki_with_barge_and_upgrade_bonuses`: Verifies Retriever Strip Miner I yield ($150 \times 1.25 \times 1.25 \times 1.15 \times 1.10 \times 1.09 \times 1.09 = 352.2531\text{ m}^3$) with unpenalized MLU II stacking.
-   - `test_mn04_deactivate_requires_the_cycle_owner`: Confirms multi-pilot security invariant; foreign pilots cannot stop or steal short-cycle yields.
-
-2. [`action_plan_mining.rs`](../../../crates/eve-server/tests/it/action_plan_mining.rs):
-   - `test_action_plan_c5_mn01_to_mn07_mining_data_belts_lasers_holds_crystals_bonuses`: Comprehensive acceptance test for Phase 5M. Verifies SDE portion sizes, belt population, T2 Modulated Strip Miner II with Type B I crystals, residue generation, crystal volatility damage, and shattering at 0 HP.
-   - `test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_reprocessing`: Validates ice harvesting, gas harvesting, survey scanners, in-space compression, structure compression, and reprocessing taxes.
-
-3. [`mining_moon_ledgers_part2.rs`](../../../crates/eve-server/tests/it/mining_moon_ledgers_part2.rs):
-   - `test_mn13_moon_survey_probes_launch_alignment_and_resources`: Verifies moon survey probe launch alignment rules, flight times, and security-band ore generation.
-   - `test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger`: Verifies moon extraction initiation (6d to 56d), cancellation, early fracture rejection, 10-day chunk volume ($7\,200\,000\text{ m}^3$), 15% jackpot fracture roll, 48-hour natural field decay, Metenox automated drill, and corporate observer ledgers.
-
-4. [`pve_mining_sites.rs`](../../../crates/eve-server/tests/it/pve_mining_sites.rs):
-   - `test_mn17_npc_mining_ops_and_interaction`: Validates autonomous NPC mining fleets, defense response frigates, and mineral transport haulers.
-   - `test_mn18_mining_missions_market_and_goals`: Verifies mining agent mission flows and AIR Career Program extraction goal progression.
+| Test Function | Source File | Validated Behaviors |
+| :--- | :--- | :--- |
+| [`test_mn04_venture_miner_i_cycles_deliver_exact_sde_yield_until_hold_full_or_depleted`](../../../crates/eve-server/tests/it/mining_cycle_engine.rs#L276) | [`mining_cycle_engine.rs`](../../../crates/eve-server/tests/it/mining_cycle_engine.rs) | Verifies exact Venture yield formulas ($10 \times 1.25 \times 1.25 \times 2 = 31.25\text{ m}^3$), 15-second cycle timing, critical yield bonuses ($+200\%$), short-cycling, hold-full clamping, and asteroid ball removal upon depletion. |
+| [`test_mn04_activation_requirements_and_cycle_interruptions`](../../../crates/eve-server/tests/it/mining_cycle_engine.rs#L387) | [`mining_cycle_engine.rs`](../../../crates/eve-server/tests/it/mining_cycle_engine.rs) | Validates requirement rejections (`TargetNotLocked`, `TargetOutOfRange`, `TargetNotMinable`, `NotEnoughCapacitor`, `CannotActivateWhileCloaked`, `ModuleOffline`) and mid-cycle interruptions. |
+| [`test_mn04_retriever_strip_miner_yield_matches_wiki_with_barge_and_upgrade_bonuses`](../../../crates/eve-server/tests/it/mining_cycle_engine.rs#L473) | [`mining_cycle_engine.rs`](../../../crates/eve-server/tests/it/mining_cycle_engine.rs) | Verifies Retriever Strip Miner I yield ($150 \times 1.25 \times 1.25 \times 1.15 \times 1.10 \times 1.09 \times 1.09 = 352.2531\text{ m}^3$) with unpenalized MLU II stacking. |
+| [`test_mn04_deactivate_requires_the_cycle_owner`](../../../crates/eve-server/tests/it/mining_cycle_engine.rs#L515) | [`mining_cycle_engine.rs`](../../../crates/eve-server/tests/it/mining_cycle_engine.rs) | Confirms multi-pilot security invariant; foreign pilots cannot stop or steal short-cycle yields. |
+| [`test_action_plan_c5_mn01_to_mn07_mining_data_belts_lasers_holds_crystals_bonuses`](../../../crates/eve-server/tests/it/action_plan_mining.rs#L57) | [`action_plan_mining.rs`](../../../crates/eve-server/tests/it/action_plan_mining.rs) | Comprehensive acceptance test verifying SDE portion sizes, belt population, T2 Modulated Strip Miner II with Type B I crystals, residue generation, crystal volatility damage, and shattering at 0 HP. |
+| [`test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_reprocessing`](../../../crates/eve-server/tests/it/action_plan_mining.rs#L381) | [`action_plan_mining.rs`](../../../crates/eve-server/tests/it/action_plan_mining.rs) | Validates ice harvesting, gas harvesting, survey scanners, in-space compression, structure compression, and reprocessing taxes. |
+| [`test_mn13_moon_survey_probes_launch_alignment_and_resources`](../../../crates/eve-server/tests/it/mining_moon_ledgers_part2.rs#L16) | [`mining_moon_ledgers_part2.rs`](../../../crates/eve-server/tests/it/mining_moon_ledgers_part2.rs) | Verifies moon survey probe launch alignment rules, flight times, and security-band ore generation. |
+| [`test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger`](../../../crates/eve-server/tests/it/mining_moon_ledgers_part2.rs#L198) | [`mining_moon_ledgers_part2.rs`](../../../crates/eve-server/tests/it/mining_moon_ledgers_part2.rs) | Verifies moon extraction initiation (6d to 56d), cancellation, early fracture rejection, 10-day chunk volume, 15% jackpot fracture roll, 48-hour natural field decay, Metenox automated drill, and corporate observer ledgers. |
+| [`test_mn17_npc_mining_ops_and_interaction`](../../../crates/eve-server/tests/it/pve_mining_sites.rs#L706) | [`pve_mining_sites.rs`](../../../crates/eve-server/tests/it/pve_mining_sites.rs) | Validates autonomous NPC mining fleets, defense response frigates, and mineral transport haulers. |
+| [`test_mn18_mining_missions_market_and_goals`](../../../crates/eve-server/tests/it/pve_mining_sites.rs#L867) | [`pve_mining_sites.rs`](../../../crates/eve-server/tests/it/pve_mining_sites.rs) | Verifies mining agent mission flows and AIR Career Program extraction goal progression. |
 
 ### Parity Tag Matrix
 

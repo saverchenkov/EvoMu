@@ -505,14 +505,16 @@ The implementation certifies compliance with the following official parity ledge
 
 ---
 
-### 2. Integration Test Suites
+### 2. Concrete Integration Tests
 
-| Test Suite File | Key Verified Assertions |
-| :--- | :--- |
-| [`plan_upwell_structures_closure_part3.rs`](../../../crates/eve-server/tests/it/plan_upwell_structures_closure_part3.rs) | Verifies 1,000 km separation rule, 4-phase deployment, live weapon damage pauses during anchoring, Quantum Core Deed Bay insertion, docked ship refitting locks, Pochven citadel rejection, Triglavian +1.5 standing POCO gate, High-Sec alliance war warmup, and Palatine Keepstar cluster uniqueness. |
-| [`rpc_structures_pos_dogma_part2.rs`](../../../crates/eve-server/tests/it/rpc_structures_pos_dogma_part2.rs) | Verifies `structureGuests.GetGuests`, `structureHangarViewMgr.GetMyHangarViewState`, structure descriptions, Station Manager role enforcement, Ansiblex jump bridge links (`GetJumpBridgesWithMyAccess`), and legacy POS starbase anchoring rejection (`StarbaseRemoved`). |
-| [`plan_upwell_structures_closure.rs`](../../../crates/eve-server/tests/it/plan_upwell_structures_closure.rs) | Tests Asset Safety wrap creation, 5-day delivery delay, 0.5% same-system fee, 20-day lazy auto-delivery to nearest NPC station triggered via ESI `/v5/characters/{id}/assets/`, 15% recovery fee, wormhole 100% space loot drops, 7-day low power Abandoned transition, and multi-timer Fortizar 30m hull repair window. |
-| [`structure_acl_and_features_complete.rs`](../../../crates/eve-server/tests/it/structure_acl_and_features_complete.rs) | Tests Access Control Lists (Blocked, Member, Admin, Manager), docking ACL evaluation, gunner console boarding/eject, defense settings, structure EWAR immunity, and 1,000 km anchoring validation. |
+| Test Function | Source File | Validated Behaviors |
+| :--- | :--- | :--- |
+| [`test_upwell_anchoring_quantum_core_pochven_and_palatine`](../../../crates/eve-server/tests/it/plan_upwell_structures_closure_part3.rs#L137) | [`plan_upwell_structures_closure_part3.rs`](../../../crates/eve-server/tests/it/plan_upwell_structures_closure_part3.rs) | Verifies 1,000 km separation rule, 4-phase deployment, live weapon damage pauses during anchoring, Quantum Core Deed Bay insertion, docked ship refitting locks, Pochven citadel rejection, Triglavian +1.5 standing POCO gate, and Palatine Keepstar cluster uniqueness. |
+| [`test_upwell_tethering_eligibility_restrictions_and_docking_lock`](../../../crates/eve-server/tests/it/plan_upwell_structures_closure_part3.rs#L388) | [`plan_upwell_structures_closure_part3.rs`](../../../crates/eve-server/tests/it/plan_upwell_structures_closure_part3.rs) | Validates structure tethering eligibility, weapons timer docking locks, and emergency tether breaks on aggression. |
+| [`test_upwell_lifecycle_asset_safety_abandoned_and_leave_space`](../../../crates/eve-server/tests/it/plan_upwell_structures_closure.rs#L118) | [`plan_upwell_structures_closure.rs`](../../../crates/eve-server/tests/it/plan_upwell_structures_closure.rs) | Tests Asset Safety wrap creation, 5-day delivery delay, 0.5% same-system fee, 20-day lazy auto-delivery to nearest NPC station, 15% recovery fee, wormhole 100% space loot drops, and 7-day low power Abandoned transition. |
+| [`test_upwell_reinforcement_durations_exit_hack_and_repair`](../../../crates/eve-server/tests/it/plan_upwell_structures_closure.rs#L338) | [`plan_upwell_structures_closure.rs`](../../../crates/eve-server/tests/it/plan_upwell_structures_closure.rs) | Evaluates multi-timer Fortizar 30m hull repair window, reinforcement exit calculations, and damage caps. |
+| [`test_structure_access_lists_and_docking_acl`](../../../crates/eve-server/tests/it/structure_acl_and_features_complete.rs#L112) | [`structure_acl_and_features_complete.rs`](../../../crates/eve-server/tests/it/structure_acl_and_features_complete.rs) | Tests Access Control Lists (Blocked, Member, Admin, Manager), docking ACL evaluation, and profile inheritance. |
+| [`test_structure_guests_hangar_view_and_directory_parity`](../../../crates/eve-server/tests/it/rpc_structures_pos_dogma_part2.rs#L132) | [`rpc_structures_pos_dogma_part2.rs`](../../../crates/eve-server/tests/it/rpc_structures_pos_dogma_part2.rs) | Verifies `structureGuests.GetGuests`, `structureHangarViewMgr.GetMyHangarViewState`, Station Manager role enforcement, and Ansiblex jump bridge access. |
 
 ---
 

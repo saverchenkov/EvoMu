@@ -14,20 +14,27 @@ In EvoMu, these systems form the core of contested space gameplay. They weave to
 
 ## 1. Overview & Lore Context
 
-```
-                         CONTESTED SPACE TYPOLOGY
-  ========================================================================
-  [ Low-Sec Empire Warzones ]     [ Pirate Insurgencies ]      [ Null-Sec Sovereignty ]
-  +-------------------------+     +---------------------+      +----------------------+
-  | Amarr vs. Minmatar      |     | Guristas Pirates    |      | Secure Commerce      |
-  | Caldari vs. Gallente    |     | Angel Cartel        |      | Commission (SCC)     |
-  |                         |     |                     |      |                      |
-  | * Frontline Stargate    |     | * Zarzakh Expansion |      | * Encounter          |
-  |   Topology (Tiers 1-3)  |     | * Corruption 1-5    |      |   Surveillance (ESS) |
-  | * Complex Beacons       |     | * Suppression 1-5   |      | * Dynamic Bounty     |
-  | * System Advantage Race |     | * Gate Gun Nullify  |      |   System (DBS)       |
-  | * I-Hub / Bunker Siege  |     | * Low-Sec Bubbles   |      | * 75km Zero-Warp     |
-  +-------------------------+     +---------------------+      +----------------------+
+```mermaid
+flowchart TD
+    subgraph Contested["CONTESTED SPACE TYPOLOGY"]
+        subgraph FW["Low-Sec Empire Warzones"]
+            FW1["Amarr vs. Minmatar<br/>Caldari vs. Gallente"]
+            FW2["• Frontline Stargate Topology (Tiers 1-3)<br/>• Complex Beacons<br/>• System Advantage Race<br/>• I-Hub / Bunker Siege"]
+            FW1 --- FW2
+        end
+
+        subgraph Insurgency["Pirate Insurgencies"]
+            IN1["Guristas Pirates<br/>Angel Cartel"]
+            IN2["• Zarzakh Expansion<br/>• Corruption 1-5 & Suppression 1-5<br/>• Gate Gun Nullification<br/>• Low-Sec Interdiction Bubbles"]
+            IN1 --- IN2
+        end
+
+        subgraph Sov["Null-Sec Sovereignty"]
+            SV1["Secure Commerce Commission (SCC)"]
+            SV2["• Encounter Surveillance (ESS)<br/>• Dynamic Bounty System (DBS)<br/>• 75km Zero-Warp ESS Bubble"]
+            SV1 --- SV2
+        end
+    end
 ```
 
 ### The Empire Warzones (Faction Warfare)
@@ -56,34 +63,14 @@ Governed by the **Secure Commerce Commission (SCC)**, the Encounter Surveillance
 
 ## 2. Canonical Mechanics & Precise Formulas
 
-```
-+-----------------------------------------------------------------------------------------+
-|                                 CANONICAL MECHANICS SUMMARY                             |
-+--------------------------+------------------------------+-------------------------------+
-| System                   | Primary Drivers              | Key Thresholds & Payouts      |
-+--------------------------+------------------------------+-------------------------------+
-| FW Frontline Graph       | Stargate jump adjacency      | Frontline: 1.5x LP            |
-|                          |                              | Command: 1.0x LP              |
-|                          |                              | Rearguard: 0.75x LP           |
-+--------------------------+------------------------------+-------------------------------+
-| FW Advantage & Complex   | Friendly/Enemy Advantage     | Mcapture in [0.5, 2.0]        |
-|                          | Contested % (VP / Threshold) | 100% VP -> Bunker Vulnerable  |
-+--------------------------+------------------------------+-------------------------------+
-| Insurgency Stages        | 1000 Points total            | 200 pts/stage (Stages 1-5)    |
-|                          | Corruption vs. Suppression   | C3: Gate Guns Offline         |
-|                          |                              | C5: Low-Sec Bubbles Enabled   |
-+--------------------------+------------------------------+-------------------------------+
-| Dynamic Bounty (DBS)     | Ratting ISK vs. PvP Losses   | DBS mult in [0.35, 2.00]      |
-|                          | 1.35 equilibrium drift       | Ratting decays; PvP boosts    |
-+--------------------------+------------------------------+-------------------------------+
-| ESS Bounty Split         | DBS gross bounty             | 60% Direct (minus Corp Tax)   |
-|                          |                              | 30% ESS Main Bank             |
-|                          |                              | 10% ESS Reserve Bank          |
-+--------------------------+------------------------------+-------------------------------+
-| ESS Thefts & Keys        | 2500m Beacon Link            | Main: Full pot + 15m Suspect  |
-|                          | Quadrant Keys (Group 4102)   | Reserve: 60s pulses over dur  |
-+--------------------------+------------------------------+-------------------------------+
-```
+| System | Primary Drivers | Key Thresholds & Payouts |
+| :--- | :--- | :--- |
+| **FW Frontline Graph** | Stargate jump adjacency | Frontline: $1.5\times$ LP<br/>Command: $1.0\times$ LP<br/>Rearguard: $0.75\times$ LP |
+| **FW Advantage & Complex** | Friendly/Enemy Advantage<br/>Contested % (VP / Threshold) | $M_{\text{capture}} \in [0.5, 2.0]$<br/>$100\%$ VP $\rightarrow$ Bunker Vulnerable |
+| **Insurgency Stages** | 1,000 Points total<br/>Corruption vs. Suppression | $200\text{ pts/stage}$ (Stages 1–5)<br/>C3: Gate Guns Offline<br/>C5: Low-Sec Bubbles Enabled |
+| **Dynamic Bounty (DBS)** | Ratting ISK vs. PvP Losses<br/>$1.35$ equilibrium drift | DBS mult $\in [0.35, 2.00]$<br/>Ratting decays; PvP boosts |
+| **ESS Bounty Split** | DBS gross bounty | $60\%$ Direct (minus Corp Tax)<br/>$30\%$ ESS Main Bank<br/>$10\%$ ESS Reserve Bank |
+| **ESS Thefts & Keys** | $2\,500\text{ m}$ Beacon Link<br/>Quadrant Keys (Group 4102) | Main: Full pot + $15\text{ min}$ Suspect flag<br/>Reserve: $60\text{ s}$ pulses over key duration |
 
 ### Stargate Graph Topology & Frontline Classification
 Let the warzone stargate network be represented as an undirected graph $G = (V, E)$, where $V_{\text{WZ}} \subset V$ represents the set of recognized warzone solar systems. Each system $s \in V_{\text{WZ}}$ has an occupier faction $\mathcal{F}(s) \in \{\text{Amarr}, \text{Minmatar}, \text{Caldari}, \text{Gallente}\}$.
@@ -151,13 +138,13 @@ Each insurgency solar system tracks integer points $P \in [0, 1000]$ for both Co
 
 $$\text{Stage}(P) = \begin{cases} 0, & \text{if } P = 0 \\ \text{clamp}\left(\left\lceil \frac{P}{200} \right\rceil, \; 1, \; 5\right), & \text{if } P > 0 \end{cases}$$
 
-```
-  CORRUPTION & SUPPRESSION POINT PROGRESSION
-  [0 pts]      [200 pts]     [400 pts]     [600 pts]     [800 pts]     [1000 pts]
-  ---|-------------|-------------|-------------|-------------|------------|
-  Stage 0       Stage 1       Stage 2       Stage 3       Stage 4      Stage 5
-  (Dormant)                                (Gate Guns     (Lawless)   (Bubbles in
-                                            Offline)                   Low-Sec!)
+```mermaid
+flowchart LR
+    S0["Stage 0<br/>(0 pts)<br/>Dormant"] -->|200 pts| S1["Stage 1<br/>(200 pts)"]
+    S1 -->|200 pts| S2["Stage 2<br/>(400 pts)"]
+    S2 -->|200 pts| S3["Stage 3<br/>(600 pts)<br/>Gate Guns Offline"]
+    S3 -->|200 pts| S4["Stage 4<br/>(800 pts)<br/>Lawless Zone"]
+    S4 -->|200 pts| S5["Stage 5<br/>(1,000 pts)<br/>Low-Sec Bubbles Active"]
 ```
 
 #### Havoc Stage Modifiers
@@ -176,32 +163,15 @@ Where equilibrium drift $\Delta_{\text{drift}}$ pulls toward baseline if no dest
 
 $$\Delta_{\text{drift}} = (1.35 - M_{\text{DBS}}) \times 0.05$$
 
-```
-       DBS ESCROW & REVENUE SPLIT PIPELINE
-       +------------------------------------+
-       |  Base NPC Pirate Bounty (ISK)      |
-       +-----------------+------------------+
-                         |
-                         v
-       +-----------------+------------------+
-       |   Gross Bounty = Base * M_DBS      |
-       +-----------------+------------------+
-                         |
-        +----------------+----------------+
-        | (60%)                           | (40% Escrow)
-        v                                 v
-+-------+---------------+        +--------+--------+
-| Gross Direct Payout   |        | ESS Escrow Bank |
-+-------+---------------+        +--------+--------+
-        |                                 |
-   +----+----+                            +--------+---------+
-   |         |                                     |         |
-   v         v                                     v         v
-[Corp Tax] [Pilot Wallet]                  [Main Bank] [Reserve Bank]
- (r_tax)   (Direct - Tax)                     (30%)         (10%)
-                                                |             |
-                                            3-Hr Auto     SCC Keys &
-                                             Payout        Pulses
+```mermaid
+flowchart TD
+    Base["Base NPC Pirate Bounty (ISK)"] --> Gross["Gross Bounty = Base × clamp(M_DBS, 0.35, 2.00)"]
+    Gross -->|60% Direct| Direct["Gross Direct Payout"]
+    Gross -->|40% Escrow| Escrow["ESS Escrow Bank"]
+    Direct --> CorpTax["Corp Tax (r_tax)"]
+    Direct --> PilotWallet["Pilot Wallet (Direct - Tax)"]
+    Escrow -->|30% Gross| MainBank["Main Bank<br/>(3-Hour Auto Payout / 2500m Hack)"]
+    Escrow -->|10% Gross| ReserveBank["Reserve Bank<br/>(SCC Keys & Timed Pulses)"]
 ```
 
 When an NPC pirate is destroyed in a K-space null-sec system (`sys_sec <= 0.0` and `sys_id < 31_000_000`):
@@ -256,40 +226,20 @@ Upon invoking `essMgr.AttemptLinkToReserveBank`:
 
 EvoMu manages territorial conflict across specialized domain services, integrating the Destiny physics engine, CrimeWatch flag monitors, and transactional SQLite snapshot storage.
 
-```
-                      EVOMU DOMAIN ARCHITECTURE
-  ===================================================================
-  [ Client MachoNet RPCs ]           [ ESI & Quasar Gateways ]
-             |                                    |
-             v                                    v
-  +-----------------------------------------------------------------+
-  |                      Router & Dispatcher                        |
-  +-----------------------------------------------------------------+
-         |                          |                           |
-         v                          v                           v
-  [`fw_services.rs`]      [`insurgency_services.rs`]    [`encounter_surveillance_system.rs`]
-  - compute_all_frontlines - build_campaign_snapshot     - handle_ess_link
-  - add_victory_points     - step_insurgency_complexes   - select_ess_reserve_key
-  - award_fw_kill_lp       - stage modifiers             - pulse cooldowns
-         |                          |                           |
-         +--------------------------+---------------------------+
-                                    |
-                                    v
-  +-----------------------------------------------------------------+
-  |               Database Snapshot & Systems Runtime               |
-  |  * `snap.system_states` (DBS mult, ESS banks, FW capture ticks) |
-  |  * `snap.fw_system_occupations` (VP, occupier, threshold)      |
-  |  * `snap.fw_runtime` (system advantage, dynamic VP)             |
-  |  * `snap.insurgency_runtime` (active campaigns, FOB systems)   |
-  +-----------------------------------------------------------------+
-                                    |
-                                    v
-  +-----------------------------------------------------------------+
-  |                  `eve-destiny` Spatial Engine                   |
-  |  * 2500m ESS Link Proximity Check                               |
-  |  * 75km Zero-Warp ESS Bubble Inhibitor                          |
-  |  * 30km Complex Capture Beacon Tracking                         |
-  +-----------------------------------------------------------------+
+```mermaid
+flowchart TD
+    Macho["Client MachoNet RPCs"] --> Router["Router & Dispatcher"]
+    ESI["ESI & Quasar Gateways"] --> Router
+
+    Router --> FW["fw_services.rs<br/>• compute_all_frontlines<br/>• add_victory_points<br/>• award_fw_kill_lp"]
+    Router --> Insurgency["insurgency_services.rs<br/>• build_campaign_snapshot<br/>• step_insurgency_complexes<br/>• stage modifiers"]
+    Router --> ESS["encounter_surveillance_system.rs<br/>• handle_ess_link<br/>• select_ess_reserve_key<br/>• pulse cooldowns"]
+
+    FW --> DB["Database Snapshot & Systems Runtime<br/>• snap.system_states (DBS mult, ESS banks, FW capture ticks)<br/>• snap.fw_system_occupations (VP, occupier, threshold)<br/>• snap.fw_runtime (system advantage, dynamic VP)<br/>• snap.insurgency_runtime (active campaigns, FOB systems)"]
+    Insurgency --> DB
+    ESS --> DB
+
+    DB --> Destiny["eve-destiny Spatial Engine<br/>• 2500m ESS Link Proximity Check<br/>• 75km Zero-Warp ESS Bubble Inhibitor<br/>• 30km Complex Capture Beacon Tracking"]
 ```
 
 ### Core Source Files & Responsibilities
@@ -301,7 +251,7 @@ EvoMu manages territorial conflict across specialized domain services, integrati
 | [`crates/eve-server/src/services/encounter_surveillance_system.rs`](../../../crates/eve-server/src/services/encounter_surveillance_system.rs) | `essMgr` MachoNet handlers, 2500m proximity checks, Safety green restrictions, SCC key validation, and Reserve Bank pulses. |
 | [`crates/eve-server/src/services/combat_legacy_ess.rs`](../../../crates/eve-server/src/services/combat_legacy_ess.rs) | Legacy combat dispatch, DBS multiplier tick evolution, and 60/30/10 bounty splitting during NPC pirate kills. |
 | [`crates/eve-server/src/services/crimewatch_timers.rs`](../../../crates/eve-server/src/services/crimewatch_timers.rs) | CrimeWatch Suspect flag issuance, Corruption 3 gate gun deactivation, and Corruption 5 lawless security overrides. |
-| [`crates/eve-server/src/formulas.rs`](../../../crates/eve-server/src/formulas.rs) | Pure KaTeX-aligned mathematical functions: `compute_dbs_and_ess_bounty_split` and capture rate equations. |
+| [`crates/eve-server/src/formulas.rs`](../../../crates/eve-server/src/formulas.rs) | Pure KaTeX-aligned mathematical functions: [`compute_dbs_and_ess_bounty_split`](../../../crates/eve-server/src/formulas.rs#L636) and capture rate equations. |
 
 ### Data Structures & State Representation
 
@@ -363,30 +313,14 @@ pub struct PersistedInsurgencyCampaign {
 
 ## 4. Invariants, Security & Edge Cases
 
-```
-+-----------------------------------------------------------------------------------------+
-|                               SECURITY & INTEGRITY INVARIANTS                           |
-+--------------------------+------------------------------+-------------------------------+
-| Invariant                | Enforcement Location         | Failure Behavior              |
-+--------------------------+------------------------------+-------------------------------+
-| Green Safety ESS Guard   | `handle_ess_link`            | Rejects with                  |
-|                          |                              | `SafetyLevelRestricted`       |
-+--------------------------+------------------------------+-------------------------------+
-| Docked Capsuleer Ban     | FW & ESS RPC handlers        | Rejects with `ShipDocked`     |
-+--------------------------+------------------------------+-------------------------------+
-| K-Space Null-Sec Bound   | `combat_legacy_ess.rs`       | Rejects ESS link outside      |
-|                          |                              | sec <= 0.0 or sys >= 31M      |
-+--------------------------+------------------------------+-------------------------------+
-| SCC Key Quadrant Lock    | `select_ess_reserve_key`     | Rejects wrong quadrant keys;  |
-|                          |                              | never consumes invalid items  |
-+--------------------------+------------------------------+-------------------------------+
-| Single-Linker Mutex      | `handle_ess_link`            | Rejects simultaneous robbery  |
-|                          |                              | via `EssAlreadyLinked`        |
-+--------------------------+------------------------------+-------------------------------+
-| Contested Plex Freezing  | `insurgency_services.rs`     | Halts timer advancement if    |
-|                          |                              | opposing factions on grid     |
-+--------------------------+------------------------------+-------------------------------+
-```
+| Invariant | Enforcement Location | Failure Behavior |
+| :--- | :--- | :--- |
+| **Green Safety ESS Guard** | [`handle_ess_link`](../../../crates/eve-server/src/services/encounter_surveillance_system.rs#L213) | Rejects with `SafetyLevelRestricted` |
+| **Docked Capsuleer Ban** | FW & ESS RPC handlers | Rejects with `ShipDocked` |
+| **K-Space Null-Sec Bound** | [`combat_legacy_ess.rs`](../../../crates/eve-server/src/services/combat_legacy_ess.rs) | Rejects ESS link outside $\text{sec} \le 0.0$ or $\text{sys} \ge 31\text{M}$ |
+| **SCC Key Quadrant Lock** | [`select_ess_reserve_key_in_cargo`](../../../crates/eve-server/src/services/encounter_surveillance_system.rs#L64) | Rejects wrong quadrant keys; never consumes invalid items |
+| **Single-Linker Mutex** | [`handle_ess_link`](../../../crates/eve-server/src/services/encounter_surveillance_system.rs#L213) | Rejects simultaneous robbery via `EssAlreadyLinked` |
+| **Contested Plex Freezing** | [`insurgency_services.rs`](../../../crates/eve-server/src/services/insurgency_services.rs) | Halts timer advancement if opposing factions on grid |
 
 ### Invariant 1: Safety Green Protection Against Suspect Flags
 Hacking an ESS Main or Reserve Bank issues a 15-minute Suspect flag. Capsuleers operating with Safety Level set to **Green** are strictly prevented from initiating this action:
@@ -424,53 +358,17 @@ Inside FW and Insurgency capture complexes:
 
 EvoMu's Faction Warfare, Insurgency, and ESS implementations are validated through rigorous integration and parity tests verifying math, wire RPCs, and edge cases.
 
-### Key Integration Tests
+### Concrete Integration Tests
 
-```
-+-----------------------------------------------------------------------------------------+
-|                                    INTEGRATION TEST SUITE                               |
-+-----------------------------------------+-----------------------------------------------+
-| Test File                               | Covered Behaviors                             |
-+-----------------------------------------+-----------------------------------------------+
-| [`fw_parity_complete.rs`]               | Full frontline topology, advantage scaling,   |
-|                                         | victory point thresholds, and bunker siege.   |
-+-----------------------------------------+-----------------------------------------------+
-| [`rpc_sov_fw_warzone.rs`]               | `fwWarzoneSolarsystem` RPC wire inspection,   |
-|                                         | occupation state backfills, and HQ endpoints. |
-+-----------------------------------------+-----------------------------------------------+
-| [`rpc_fw_insurgency_crimewatch.rs`]     | Insurgency FOB snapshots, campaign stages,    |
-|                                         | and Corruption 5 modified security (0.0).     |
-+-----------------------------------------+-----------------------------------------------+
-| [`rpc_ess_mgr.rs`]                      | `essMgr` Main/Reserve link RPCs, 2500m range,  |
-|                                         | Safety Green checks, and Suspect timer flags. |
-+-----------------------------------------+-----------------------------------------------+
-| [`ess_reserve_main_concurrency.rs`]     | Concurrent Reserve/Main link lockouts, key    |
-|                                         | consumption, and pulse drain math.            |
-+-----------------------------------------+-----------------------------------------------+
-| [`mining_structures_sov_r5_regressions`]| De-plexing regression tests, cloaked ship     |
-|                                         | non-advancement, and contested grid freezes.  |
-+-----------------------------------------+-----------------------------------------------+
-```
-
-* [`crates/eve-server/tests/it/fw_parity_complete.rs`](../../../crates/eve-server/tests/it/fw_parity_complete.rs):
-  - Validates `compute_all_frontline_statuses` against live stargate jump graphs.
-  - Tests `add_victory_points` boundary handling, threshold clamping, and bunker vulnerability transition at $100\%$.
-* [`crates/eve-server/tests/it/rpc_sov_fw_warzone.rs`](../../../crates/eve-server/tests/it/rpc_sov_fw_warzone.rs):
-  - Validates MachoNet RPCs: `GetHQSystemIDs`, `GetAllWarzones`, `GetAllWarzonesOccupationStates`.
-  - Verifies that uninitialized occupation records automatically backfill from SDE static defaults.
-* [`crates/eve-server/tests/it/rpc_fw_insurgency_crimewatch.rs`](../../../crates/eve-server/tests/it/rpc_fw_insurgency_crimewatch.rs):
-  - Validates `securityMgr.get_modified_systems` returning `0.0` for systems at Corruption Stage 5.
-  - Verifies campaign snapshot generation (`build_campaign_snapshot_for_system`) for client UI consumption.
-* [`crates/eve-server/tests/it/rpc_ess_mgr.rs`](../../../crates/eve-server/tests/it/rpc_ess_mgr.rs):
-  - Validates distance checks ($\le 2500\text{ m}$) from ESS beacon.
-  - Verifies Safety Green rejection (`SafetyLevelRestricted`).
-  - Verifies Suspect flag creation and 15-minute countdown emission upon intrusion link.
-* [`crates/eve-server/tests/it/ess_reserve_main_concurrency.rs`](../../../crates/eve-server/tests/it/ess_reserve_main_concurrency.rs):
-  - Verifies Reserve Bank pulse cooldown enforcement ($60\text{ s}$).
-  - Verifies single-linker exclusivity locks when multiple pilots attempt simultaneous links.
-* [`crates/eve-server/tests/it/mining_structures_sov_r5_regressions.rs`](../../../crates/eve-server/tests/it/mining_structures_sov_r5_regressions.rs#L640-L685):
-  - Tests complex capture pausing when opposing pilots contest the grid.
-  - Tests lone defender de-plexing toward 0% and attacker advancement toward 100%.
+| Test Function | Source File | Validated Behaviors |
+| :--- | :--- | :--- |
+| [`test_fw_warzones_victory_points_and_system_capture`](../../../crates/eve-server/tests/it/fw_parity_complete.rs#L19) | [`fw_parity_complete.rs`](../../../crates/eve-server/tests/it/fw_parity_complete.rs) | Full frontline topology derivation, victory point thresholds, and bunker siege transition. |
+| [`test_fw_advantage_ranks_and_war_targets`](../../../crates/eve-server/tests/it/fw_parity_complete.rs#L214) | [`fw_parity_complete.rs`](../../../crates/eve-server/tests/it/fw_parity_complete.rs) | Militia ranks, LP gain scaling, system advantage accumulation, and war target validity. |
+| [`test_fw_warzone_solarsystem_states_and_queries`](../../../crates/eve-server/tests/it/rpc_sov_fw_warzone.rs#L346) | [`rpc_sov_fw_warzone.rs`](../../../crates/eve-server/tests/it/rpc_sov_fw_warzone.rs) | `fwWarzoneSolarsystem` RPC wire inspection, occupation state backfills, and HQ endpoints. |
+| [`test_fw_insurgency_and_security_mgr`](../../../crates/eve-server/tests/it/rpc_fw_insurgency_crimewatch.rs#L27) | [`rpc_fw_insurgency_crimewatch.rs`](../../../crates/eve-server/tests/it/rpc_fw_insurgency_crimewatch.rs) | Insurgency FOB snapshots, campaign stages, and Corruption 5 modified security (0.0). |
+| [`test_ess_mgr_telemetry_links_and_thefts`](../../../crates/eve-server/tests/it/rpc_ess_mgr.rs#L158) | [`rpc_ess_mgr.rs`](../../../crates/eve-server/tests/it/rpc_ess_mgr.rs) | `essMgr` Main/Reserve link RPCs, 2500m range, Safety Green checks, and Suspect timer flags. |
+| [`test_ess_concurrent_main_and_reserve_links`](../../../crates/eve-server/tests/it/ess_reserve_main_concurrency.rs#L39) | [`ess_reserve_main_concurrency.rs`](../../../crates/eve-server/tests/it/ess_reserve_main_concurrency.rs) | Concurrent Reserve/Main link lockouts, key consumption, and pulse drain math. |
+| [`test_r5_218_219_220_221_223_224_mining_moon_drill_asset_safety_fw_insurgency`](../../../crates/eve-server/tests/it/mining_structures_sov_r5_regressions.rs#L472) | [`mining_structures_sov_r5_regressions.rs`](../../../crates/eve-server/tests/it/mining_structures_sov_r5_regressions.rs) | De-plexing regression tests, cloaked ship non-advancement, and contested grid freezes. |
 
 ### Verification Matrix & Command
 

@@ -467,24 +467,17 @@ EvoMu's exploration, scanning, and hacking systems are continuously verified usi
 
 ---
 
-### 2. Concrete Integration Test Suites
+### 2. Concrete Integration Tests
 
-The implementation is verified across extensive integration test suites in [`crates/eve-server/tests/it/`](../../../crates/eve-server/tests/it/):
-
-#### [`crates/eve-server/tests/it/scanning_exploration_wormholes_closure.rs`](../../../crates/eve-server/tests/it/scanning_exploration_wormholes_closure.rs)
-- [`test_probe_scanning_ranges_deviation_expiry_classes_thresholds_and_levels`](../../../crates/eve-server/tests/it/scanning_exploration_wormholes_closure.rs#L78): Validates probe launching, 8 range steps ($0.25\text{ AU}$ to $32\text{ AU}$), deviation reduction via *Astrometric Pinpointing*, probe flight-time expiration into cargo, and signature reveal thresholds.
-- [`test_exploration_hacking_grid_coherence_strength_and_second_fail_explosion`](../../../crates/eve-server/tests/it/scanning_exploration_wormholes_closure.rs#L329): Tests complete hacking minigame mechanics: analyzer module stats, axial hex distance navigation, firewall combat exchanges, failure tracking, and container AoE explosive self-destruction upon a second failure.
-
-#### [`crates/eve-server/tests/it/pve_exploration_complete_part2.rs`](../../../crates/eve-server/tests/it/pve_exploration_complete_part2.rs)
-- [`test_pve_data_relic_hacking_minigame_and_loot_spew`](../../../crates/eve-server/tests/it/pve_exploration_complete_part2.rs#L173): Validates procedural grid generation, utility card drops (Self-Repair, Kernel Rot, Shield, Secondary Vector), loot can spew physics, and can scooping.
-- [`test_pve_ghost_sites_sleeper_caches_and_wormhole_sites`](../../../crates/eve-server/tests/it/pve_exploration_complete_part2.rs#L343): Exercises Ghost Site hidden timers, detonation mechanics, and Sleeper Cache puzzle progression.
-
-#### [`crates/eve-server/tests/it/pve_exploration_remediation.rs`](../../../crates/eve-server/tests/it/pve_exploration_remediation.rs)
-- [`test_pve_ghost_site_timer_and_detonation_mechanics`](../../../crates/eve-server/tests/it/pve_exploration_remediation.rs#L264): Verifies the $90\text{ s}$ Ghost Site detonation window, explosive hull damage application, and pirate ambush spawns.
-- [`test_pve_sleeper_cache_tiers_hazards_and_rift_passage`](../../../crates/eve-server/tests/it/pve_exploration_remediation.rs#L378): Confirms Sleeper Cache hazard mitigation upon successful puzzle resolution.
-
-#### [`crates/eve-server/tests/it/pve_data_relic_ded_wormhole_remediated.rs`](../../../crates/eve-server/tests/it/pve_data_relic_ded_wormhole_remediated.rs)
-- [`test_pve_data_relic_loot_tables_container_inventory_and_combat_signatures`](../../../crates/eve-server/tests/it/pve_data_relic_ded_wormhole_remediated.rs#L176): Verifies SDE loot table seeding into hackable containers across data and relic sites.
+| Test Function | Source File | Validated Behaviors |
+| :--- | :--- | :--- |
+| [`test_probe_scanning_ranges_deviation_expiry_classes_thresholds_and_levels`](../../../crates/eve-server/tests/it/scanning_exploration_wormholes_closure.rs#L78) | [`scanning_exploration_wormholes_closure.rs`](../../../crates/eve-server/tests/it/scanning_exploration_wormholes_closure.rs) | Validates probe launching, 8 range steps ($0.25\text{ AU}$ to $32\text{ AU}$), deviation reduction via *Astrometric Pinpointing*, probe flight-time expiration into cargo, and signature reveal thresholds. |
+| [`test_exploration_hacking_grid_coherence_strength_and_second_fail_explosion`](../../../crates/eve-server/tests/it/scanning_exploration_wormholes_closure.rs#L329) | [`scanning_exploration_wormholes_closure.rs`](../../../crates/eve-server/tests/it/scanning_exploration_wormholes_closure.rs) | Tests complete hacking minigame mechanics: analyzer module stats, axial hex distance navigation, firewall combat exchanges, failure tracking, and container AoE explosive self-destruction upon a second failure. |
+| [`test_pve_data_relic_hacking_minigame_and_loot_spew`](../../../crates/eve-server/tests/it/pve_exploration_complete_part2.rs#L173) | [`pve_exploration_complete_part2.rs`](../../../crates/eve-server/tests/it/pve_exploration_complete_part2.rs) | Validates procedural grid generation, utility card drops (Self-Repair, Kernel Rot, Shield, Secondary Vector), loot can spew physics, and can scooping. |
+| [`test_pve_ghost_sites_sleeper_caches_and_wormhole_sites`](../../../crates/eve-server/tests/it/pve_exploration_complete_part2.rs#L343) | [`pve_exploration_complete_part2.rs`](../../../crates/eve-server/tests/it/pve_exploration_complete_part2.rs) | Exercises Ghost Site hidden timers, detonation mechanics, and Sleeper Cache puzzle progression. |
+| [`test_pve_ghost_site_timer_and_detonation_mechanics`](../../../crates/eve-server/tests/it/pve_exploration_remediation.rs#L264) | [`pve_exploration_remediation.rs`](../../../crates/eve-server/tests/it/pve_exploration_remediation.rs) | Verifies the $90\text{ s}$ Ghost Site detonation window, explosive hull damage application, and pirate ambush spawns. |
+| [`test_pve_sleeper_cache_tiers_hazards_and_rift_passage`](../../../crates/eve-server/tests/it/pve_exploration_remediation.rs#L378) | [`pve_exploration_remediation.rs`](../../../crates/eve-server/tests/it/pve_exploration_remediation.rs) | Confirms Sleeper Cache hazard mitigation upon successful puzzle resolution. |
+| [`test_pve_data_relic_loot_tables_container_inventory_and_combat_signatures`](../../../crates/eve-server/tests/it/pve_data_relic_ded_wormhole_remediated.rs#L176) | [`pve_data_relic_ded_wormhole_remediated.rs`](../../../crates/eve-server/tests/it/pve_data_relic_ded_wormhole_remediated.rs) | Verifies SDE loot table seeding into hackable containers across data and relic sites. |
 
 ---
 

@@ -48,12 +48,10 @@ All MachoNet communications take place over bidirectional TCP stream connections
 
 $$L_{\text{frame}} = \sum_{i=0}^{3} b_i \cdot 256^i = \text{u32::from-le-bytes}([b_0, b_1, b_2, b_3])$$
 
-```
-+-----------------------------------+---------------------------------------------------+
-| 4-Byte Little-Endian Length Prefix| Serialized eveMarshal / PyRep Payload             |
-| (u32: 0x00000000 - 0x00400000)    | (L bytes, starts with magic header byte 0x7E)     |
-+-----------------------------------+---------------------------------------------------+
-```
+| Field | Type & Size | Description |
+| :--- | :--- | :--- |
+| **Length Prefix** | `u32` (4 bytes, Little-Endian) | Frame payload byte length ($0\text{x}00000000$ to $0\text{x}00400000$, $\le 4\text{ MiB}$) |
+| **Payload** | Byte stream ($L_{\text{frame}}$ bytes) | Serialized eveMarshal / `PyRep` payload (starts with magic header byte `0x7E`) |
 
 #### Framing Constraints & Operational Limits
 - **Maximum Frame Length (`MAX_MACHO_FRAME_LEN`):** $4{,}194{,}304\text{ bytes}$ ($4\text{ MiB}$), matching [`eve_proto::marshal::MAX_FRAME_SIZE`](../../../crates/eve-proto/src/marshal.rs#L19-L20). Any connection advertising $L_{\text{frame}} > 4\text{ MiB}$ or $L_{\text{frame}} == 0$ is rejected immediately with connection termination to guard against memory exhaustion attacks.
@@ -490,15 +488,14 @@ All incoming `CryptoChallengePacket` envelopes carrying `user_sso_token` are val
 ### 3. Automated Test Suites & Integration Coverage
 EvoMu verifies protocol fidelity through rigorous unit and integration tests:
 
-| Test Target | Test Source Path | Verified Mechanics |
+| Test Function | Source File | Verified Mechanics |
 | :--- | :--- | :--- |
-| **Marshal Codec** | [`crates/eve-proto/src/marshal.rs`](../../../crates/eve-proto/src/marshal.rs) | Opcode roundtrips, nested structures, inverted dict ordering, size-ex bounds. |
-| **DBRow Packing** | [`crates/eve-proto/src/dbrow.rs`](../../../crates/eve-proto/src/dbrow.rs) | Column bitfield packing, RLE compression, typed CRowset generation. |
-| **Quasar Protobuf** | [`crates/eve-proto/src/quasar_wire.rs`](../../../crates/eve-proto/src/quasar_wire.rs) | LEB128 varint encoding, field decoding, envelope wrapping/unwrapping. |
-| **GPS Handshake** | [`crates/eve-machonet/src/handshake.rs`](../../../crates/eve-machonet/src/handshake.rs) | CRC-CCITT hash calculation, VersionExchange validation, challenge response. |
-| **TCP Listener** | [`crates/eve-server/src/macho_listener.rs`](../../../crates/eve-server/src/macho_listener.rs) | Socket accept, 4-byte framing, idle timeouts, session state transitions. |
-| **RPC Dispatch** | [`crates/eve-server/src/router/tests/dispatch_and_rpc.rs`](../../../crates/eve-server/src/router/tests/dispatch_and_rpc.rs) | Domain service routing, method resolution, error response wrapping. |
-| **ESI Gateway** | [`crates/eve-server/src/esi/router.rs`](../../../crates/eve-server/src/esi/router.rs) | OpenAPI spec routing, JWT verification, 100/60s rate limit window, ETags. |
+| [`test_marshal_roundtrip_composite_and_bytes`](../../../crates/eve-proto/src/tests.rs#L6) | [`tests.rs`](../../../crates/eve-proto/src/tests.rs) | Opcode roundtrips, nested structures, inverted dict ordering, size-ex bounds. |
+| [`test_p1_packed_row_rle_booleans_nulls_and_trailing_strings`](../../../crates/eve-proto/src/tests.rs#L135) | [`tests.rs`](../../../crates/eve-proto/src/tests.rs) | Column bitfield packing, RLE compression, typed CRowset generation. |
+| [`test_t4_golden_wire_marshal_destiny_quasar_and_python_bridge_roundtrip`](../../../crates/eve-proto/tests/golden_wire.rs#L1148) | [`golden_wire.rs`](../../../crates/eve-proto/tests/golden_wire.rs) | Golden client capture wire format matching, LEB128 varints, envelope wrapping. |
+| [`test_version_exchange_and_address_marshal_roundtrip`](../../../crates/eve-machonet/src/lib.rs#L1061) | [`lib.rs`](../../../crates/eve-machonet/src/lib.rs) | CRC-CCITT hash calculation, VersionExchange validation, challenge response. |
+| [`test_session_starts_unauthenticated_and_computes_diffs`](../../../crates/eve-machonet/src/lib.rs#L1114) | [`lib.rs`](../../../crates/eve-machonet/src/lib.rs) | Session state lifecycle, diff masking, unauthenticated rejection. |
+| [`test_marshal_and_gateway_wire_edge_cases_and_bounds`](../../../crates/eve-proto/tests/proptest_roundtrip.rs#L636) | [`proptest_roundtrip.rs`](../../../crates/eve-proto/tests/proptest_roundtrip.rs) | Property-based fuzzing of recursion depth limits and malformed varint rejection. |
 
 ---
 

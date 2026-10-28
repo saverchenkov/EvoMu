@@ -552,29 +552,22 @@ The agent and mission implementation satisfies the following engineering parity 
 
 ---
 
-### 2. Concrete Integration Test Suites
+### 2. Concrete Integration Tests
 
-The mission architecture is covered by automated integration test suites executed in [`crates/eve-server/tests/it/`](../../../crates/eve-server/tests/it/):
-
-#### [`crates/eve-server/tests/it/agents_missions_complete_part2.rs`](../../../crates/eve-server/tests/it/agents_missions_complete_part2.rs)
-- [`test_mission_lifecycle_offer_accept_complete_decline_abandon_and_expiration`](../../../crates/eve-server/tests/it/agents_missions_complete_part2.rs#L114): Exercises the complete state machine: requesting an offer, verifying 7-day expiration with zero penalty, accepting, validating the bonus countdown, completing for full payouts, testing the 4-hour free decline window, and verifying standing penalties on rapid successive declines.
-- [`test_standings_formulas_derived_effective_corp_standing_data_and_transactions`](../../../crates/eve-server/tests/it/agents_missions_complete_part2.rs#L345): Rigorously validates Connections, Diplomacy, and Criminal Connections formulas against expected mathematical values, confirms standing transaction logging (`StandingTransactionRecord`), and asserts derived faction standing propagation.
-- [`test_agent_dialogue_and_access_standings`](../../../crates/eve-server/tests/it/agents_missions_complete_part2.rs#L477): Validates agent dialogue retrieval, co-location requirements, and Level 1–5 standing threshold gates.
-
-#### [`crates/eve-server/tests/it/pve_agent_missions_remediation.rs`](../../../crates/eve-server/tests/it/pve_agent_missions_remediation.rs)
-- [`test_pve_courier_mission_distribution_lifecycle_and_destination_transport`](../../../crates/eve-server/tests/it/pve_agent_missions_remediation.rs#L123): Tests courier cargo creation, destination station arrival verification, and delivery completion.
-- [`test_pve_trade_mission_commodity_delivery_and_consumption`](../../../crates/eve-server/tests/it/pve_agent_missions_remediation.rs#L263): Validates acquisition and delivery of trade goods to agent hangars.
-- [`test_pve_security_mission_multi_npc_wave_and_elimination`](../../../crates/eve-server/tests/it/pve_agent_missions_remediation.rs#L372): Verifies NPC wave spawning in Destiny ballparks, destruction tracking, and objective completion triggers.
-- [`test_pve_mining_mission_asteroid_spawn_and_ore_delivery`](../../../crates/eve-server/tests/it/pve_agent_missions_remediation.rs#L474): Tests dynamic in-space mission asteroid spawning, ore extraction, and hangar delivery.
-
-#### [`crates/eve-server/tests/it/agents_missions_complete.rs`](../../../crates/eve-server/tests/it/agents_missions_complete.rs)
-- [`test_courier_mission_accept_quit_reclaims_cargo_regression`](../../../crates/eve-server/tests/it/agents_missions_complete.rs#L273): Verifies that quitting an accepted courier mission immediately scrubs all granted courier cargo from player inventory.
-- [`test_non_courier_offers_decline_and_expiry_preserve_player_inventory_regression`](../../../crates/eve-server/tests/it/agents_missions_complete.rs#L430): Confirms player inventory items are untouched when declining non-courier offers.
-- [`test_courier_cargo_anti_stacking_in_invbroker_add_regression`](../../../crates/eve-server/tests/it/agents_missions_complete.rs#L509): Ensures custom-tagged courier cargo cannot be merged into generic cargo stacks.
-
-#### [`crates/eve-server/tests/it/agents_missions_complete_part3.rs`](../../../crates/eve-server/tests/it/agents_missions_complete_part3.rs)
-- [`test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and_locator`](../../../crates/eve-server/tests/it/agents_missions_complete_part3.rs#L133): Exhaustive test of Storylines (16-mission trigger), Epic Arcs (90-day cooldown, no penalty quit), R&D (research start, RP gain, datacore buy), and Locator agents (cooldowns, fees, range checks, J-space blocking).
-- [`test_lp_store_offers_exchange_rates_and_purchase_validation`](../../../crates/eve-server/tests/it/agents_missions_complete_part3.rs#L464): Validates LP store purchase flows, input item requirements, anti-exploit item rejections, and CONCORD LP conversion logic.
+| Test Function | Source File | Validated Behaviors |
+| :--- | :--- | :--- |
+| [`test_mission_lifecycle_offer_accept_complete_decline_abandon_and_expiration`](../../../crates/eve-server/tests/it/agents_missions_complete_part2.rs#L114) | [`agents_missions_complete_part2.rs`](../../../crates/eve-server/tests/it/agents_missions_complete_part2.rs) | Exercises the complete state machine: requesting an offer, 7-day expiration with zero penalty, accepting, bonus countdown, completing for full payouts, 4-hour free decline window, and standing penalties on rapid successive declines. |
+| [`test_standings_formulas_derived_effective_corp_standing_data_and_transactions`](../../../crates/eve-server/tests/it/agents_missions_complete_part2.rs#L345) | [`agents_missions_complete_part2.rs`](../../../crates/eve-server/tests/it/agents_missions_complete_part2.rs) | Validates Connections, Diplomacy, and Criminal Connections formulas, confirms standing transaction logging (`StandingTransactionRecord`), and asserts derived faction standing propagation. |
+| [`test_agent_dialogue_and_access_standings`](../../../crates/eve-server/tests/it/agents_missions_complete_part2.rs#L477) | [`agents_missions_complete_part2.rs`](../../../crates/eve-server/tests/it/agents_missions_complete_part2.rs) | Validates agent dialogue retrieval, co-location requirements, and Level 1–5 standing threshold gates. |
+| [`test_pve_courier_mission_distribution_lifecycle_and_destination_transport`](../../../crates/eve-server/tests/it/pve_agent_missions_remediation.rs#L123) | [`pve_agent_missions_remediation.rs`](../../../crates/eve-server/tests/it/pve_agent_missions_remediation.rs) | Tests courier cargo creation, destination station arrival verification, and delivery completion. |
+| [`test_pve_trade_mission_commodity_delivery_and_consumption`](../../../crates/eve-server/tests/it/pve_agent_missions_remediation.rs#L263) | [`pve_agent_missions_remediation.rs`](../../../crates/eve-server/tests/it/pve_agent_missions_remediation.rs) | Validates acquisition and delivery of trade goods to agent hangars. |
+| [`test_pve_security_mission_multi_npc_wave_and_elimination`](../../../crates/eve-server/tests/it/pve_agent_missions_remediation.rs#L372) | [`pve_agent_missions_remediation.rs`](../../../crates/eve-server/tests/it/pve_agent_missions_remediation.rs) | Verifies NPC wave spawning in Destiny ballparks, destruction tracking, and objective completion triggers. |
+| [`test_pve_mining_mission_asteroid_spawn_and_ore_delivery`](../../../crates/eve-server/tests/it/pve_agent_missions_remediation.rs#L474) | [`pve_agent_missions_remediation.rs`](../../../crates/eve-server/tests/it/pve_agent_missions_remediation.rs) | Tests dynamic in-space mission asteroid spawning, ore extraction, and hangar delivery. |
+| [`test_courier_mission_accept_quit_reclaims_cargo_regression`](../../../crates/eve-server/tests/it/agents_missions_complete.rs#L273) | [`agents_missions_complete.rs`](../../../crates/eve-server/tests/it/agents_missions_complete.rs) | Verifies that quitting an accepted courier mission immediately scrubs all granted courier cargo from player inventory. |
+| [`test_non_courier_offers_decline_and_expiry_preserve_player_inventory_regression`](../../../crates/eve-server/tests/it/agents_missions_complete.rs#L430) | [`agents_missions_complete.rs`](../../../crates/eve-server/tests/it/agents_missions_complete.rs) | Confirms player inventory items are untouched when declining non-courier offers. |
+| [`test_courier_cargo_anti_stacking_in_invbroker_add_regression`](../../../crates/eve-server/tests/it/agents_missions_complete.rs#L509) | [`agents_missions_complete.rs`](../../../crates/eve-server/tests/it/agents_missions_complete.rs) | Ensures custom-tagged courier cargo cannot be merged into generic cargo stacks. |
+| [`test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and_locator`](../../../crates/eve-server/tests/it/agents_missions_complete_part3.rs#L133) | [`agents_missions_complete_part3.rs`](../../../crates/eve-server/tests/it/agents_missions_complete_part3.rs) | Exhaustive test of Storylines (16-mission trigger), Epic Arcs (90-day cooldown, no penalty quit), R&D (research start, RP gain, datacore buy), and Locator agents (cooldowns, fees, range checks, J-space blocking). |
+| [`test_lp_store_offers_exchange_rates_and_purchase_validation`](../../../crates/eve-server/tests/it/agents_missions_complete_part3.rs#L464) | [`agents_missions_complete_part3.rs`](../../../crates/eve-server/tests/it/agents_missions_complete_part3.rs) | Validates LP store purchase flows, input item requirements, anti-exploit item rejections, and CONCORD LP conversion logic. |
 
 ---
 
