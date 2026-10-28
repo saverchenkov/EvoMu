@@ -572,11 +572,17 @@ pub fn ensure_character_challenges(
     now_ft: i64,
 ) {
     for def in defs {
-        st.challenges.entry(def.challenge_id).or_insert_with(|| {
+        if let Some(existing) = st.challenges.get_mut(&def.challenge_id) {
+            if existing.expiration_date > 0 && now_ft >= existing.expiration_date {
+                let mut fresh = def.to_character_challenge(st.selected_season_id, now_ft);
+                fresh.baseline_progress = get_current_activity_count(&def.event_type, snap, char_id);
+                *existing = fresh;
+            }
+        } else {
             let mut ch = def.to_character_challenge(st.selected_season_id, now_ft);
             ch.baseline_progress = get_current_activity_count(&def.event_type, snap, char_id);
-            ch
-        });
+            st.challenges.insert(def.challenge_id, ch);
+        }
     }
 }
 

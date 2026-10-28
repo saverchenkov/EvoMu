@@ -267,6 +267,8 @@ pub fn format_unix_utc(unix: u64) -> String {
     )
 }
 
+// DATA GAP: requires server-only login campaign schedule (feat:pve.seasonal-login, feat:pve.login-campaign)
+// SYNTHETIC: Fallback seasonal login campaign schedules
 pub const SEASONAL_LOGIN_SCHEDULES: &[SeasonalLoginSchedule] = &[
     SeasonalLoginSchedule {
         campaign_id: DEFAULT_SEASONAL_CAMPAIGN_ID,
@@ -300,6 +302,7 @@ pub fn get_schedule_for_campaign(campaign_id: i64, now_unix: u64) -> SeasonalLog
         s.campaign_id = campaign_id;
         return s;
     }
+    // SYNTHETIC: Fallback schedule window for unconfigured seasonal login campaign
     SeasonalLoginSchedule {
         campaign_id,
         name: "Seasonal Login Campaign",
