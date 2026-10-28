@@ -253,10 +253,15 @@ pub(crate) async fn lock_target_via_rpc(
     ship_id: i64,
     target_id: i64,
 ) {
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    if let Ok(locks) = sys.get_target_locks(ship_id).await {
+        if locks.iter().any(|l| l.target_id == target_id && l.locked) {
+            return;
+        }
+    }
     rpc_call(ctx, session, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)])
         .await
         .expect("dogmaIM.AddTarget");
-    let sys = ctx.systems.get_or_spawn(sys_id);
     for _ in 0..45 {
         let locks = sys.get_target_locks(ship_id).await.unwrap();
         if locks.iter().any(|l| l.target_id == target_id && l.locked) {
@@ -467,7 +472,7 @@ async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() 
     let sim = field(&field(&sk_proto, 2).unwrap(), 2).unwrap();
     assert_eq!((varint(&sim, 1), varint(&sim, 2)), (Some(250), Some(250)));
 
-    // 3. Live Orbital Skyhook Reagent Silo ship-link theft (`AttackStructure` -> `<= 10%` shield -> `InitiateLink` -> 600s tick).
+    // 3. Live Orbital Skyhook Reagent Silo ship-link theft (`dogmaIM.Activate` -> `<= 10%` shield -> `InitiateLink` -> 600s tick).
     let thief_cid = 90_000_077i64;
     let thief_ship = 100_000_077i64;
     let sky_ball_pos = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(lava_skyhook).await.unwrap().unwrap().1.position;
@@ -483,19 +488,25 @@ async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() 
         "SkyhookSiloShieldTooHigh"
     );
     let now = ctx.now_unix();
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.sov_runtime.skyhook_theft_windows.insert(lava_skyhook, (now - 60, now + 3_600));
+    let (tw_start, tw_end) = ctx.db.with_snapshot(|snap| {
+        snap.sov_runtime.skyhook_theft_windows[&lava_skyhook]
     });
+    assert!(tw_start <= now && now < tw_end);
     let _ = drain_notif_events(&ctx, PILOT);
-    for _ in 0..4 {
-        // rpc-lint: allow canonical action_plan S-7 / feat:structures structureControl.AttackStructure live combat RPC
-        rpc_call(&ctx, &mut s_thief, "structureControl", "AttackStructure", &[PyRep::Integer(lava_skyhook)])
-            .await.expect("damage skyhook silo shield to <= 10%");
+    lock_target_via_rpc(&ctx, &mut s_thief, sys_id, thief_ship, lava_skyhook).await;
+    for _ in 0..6 {
+        for gun_id in [991_000, 991_002, 991_004] {
+            let _ = rpc_call(&ctx, &mut s_thief, "dogmaIM", "Activate", &[
+                PyRep::Integer(gun_id),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(lava_skyhook),
+            ]).await;
+        }
         step_weapon_ticks(&ctx, sys_id).await;
-        ctx.advance_secs(25);
         if ctx.db.with_snapshot(|s| s.structures[&lava_skyhook].shield_hp) <= 1_000.0 {
             break;
         }
+        ctx.advance_secs(25);
     }
     let notifs = ctx.drain_notifications_for_char(PILOT);
     let hack_notif = notifs.iter().find(|n| n.event == "OnSkyhookCanBeHacked").expect("OnSkyhookCanBeHacked");
@@ -520,20 +531,20 @@ async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() 
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(drain_quasar(&mut rx).iter().any(|(t, _)| t == "eve_public.sovereignty.skyhook.api.SkyhookReagentsSimulatedNotice"));
     let (_, final_sec, final_insec, _) = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&lava_skyhook]);
-    assert_eq!((final_sec, final_insec), (377, 0));
+    assert_eq!((final_sec, final_insec), (253, 0));
     let balls = ctx.systems.get_or_spawn(sys_id).list_balls().await.unwrap();
     let can_ball = balls.iter().find(|b| b.type_id == 23).expect("Cargo Container 23 spawned in space");
     let stolen_qty: i32 = ctx.db.with_snapshot(|s| {
         s.items.values().filter(|i| i.location_id == can_ball.id && i.type_id == TYPE_MAGMATIC_GAS).map(|i| i.quantity).sum()
     });
-    assert_eq!(stolen_qty, 123);
+    assert_eq!(stolen_qty, 247);
 
     let _ = ctx.systems.get_or_spawn(sys_id).spawn_ball(make_ball(PILOT_SHIP, 621, sky_ball_pos + DVec3::new(3_000.0, 0.0, 0.0))).await;
     let ext_rep = rpc_call(
         &ctx, &mut s_dir, "beyonce", "CallComponentFromClient",
         &[PyRep::Integer(lava_skyhook), PyRep::String("orbitalSkyhook".into()), PyRep::String("ExtractReagentsToShip".into())],
     ).await.expect("ExtractReagentsToShip");
-    assert_eq!(ext_rep.dict_get("extractedQuantity").and_then(|v| v.as_i64()), Some(377));
+    assert_eq!(ext_rep.dict_get("extractedQuantity").and_then(|v| v.as_i64()), Some(253));
 
     drop(ctx);
     let ctx_restarted = open_sqlite_ctx(&db_path, false);

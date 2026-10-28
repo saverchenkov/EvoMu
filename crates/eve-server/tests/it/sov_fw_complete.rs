@@ -9,9 +9,7 @@ use eve_db::{CorporationRecord, IskCents, UpwellStructureRecord};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::fw_services::{self, HQ_SYSTEM_AMO, HQ_SYSTEM_INTAKI, HQ_SYSTEM_MEHATOOR, HQ_SYSTEM_ONNAMON};
-use eve_server::services::insurgency_services;
-use eve_server::services::sov_services::{self, TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB, TYPE_TENEBREX_CYNO_JAMMER};
+use eve_server::services::sov_services::{self, TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB};
 use eve_server::services::station_structure::structure_lifecycle as life;
 use std::collections::{HashMap, HashSet};
 
@@ -46,14 +44,6 @@ async fn sov_call(
     args: &[PyRep],
 ) -> Result<PyRep, eve_proto::BridgeRpcError> {
     ctx.dispatch_rpc(sess, svc, None, method, args, &HashMap::new(), None).await
-}
-
-/// `(solarsystemID, occupationState)` as unpacked by `FwWarzoneSvc.GetLocalOccupationState`.
-fn local_occupation_state(rep: &PyRep, sys_id: u32) -> &PyRep {
-    let PyRep::Tuple(t) = rep else { panic!("GetLocalOccupationState must return a 2-tuple, got {rep:?}") };
-    assert_eq!(t.len(), 2);
-    assert_eq!(t[0], PyRep::Integer(i64::from(sys_id)));
-    &t[1]
 }
 
 fn enlistment(rep: &PyRep) -> Option<i64> {
@@ -538,5 +528,3 @@ async fn sov_info_adm_scaling_dev_indices_and_map_data() {
         panic!("expected list from map.GetCurrentSovData");
     }
 }
-
-#[tokio::test]

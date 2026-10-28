@@ -371,8 +371,13 @@ pub fn evaluate_and_resolve_insurgency_campaign(
         for &(cid, fid, lp_award) in &payouts {
             if lp_award > 0 {
                 let lp_corp = militia_lp_corp_id(&ctx.sde, fid);
+                let isk_award = lp_award.saturating_mul(1_000);
                 if let Some(ch) = snap.characters.get_mut(&cid) {
                     *ch.loyalty_points.entry(lp_corp).or_insert(0) += lp_award;
+                    ch.balance = ch
+                        .balance
+                        .checked_add(eve_db::IskCents::from_isk(isk_award))
+                        .unwrap_or(ch.balance);
                 }
             }
         }
@@ -395,7 +400,7 @@ pub fn evaluate_and_resolve_insurgency_campaign(
     Ok((outcome, new_p_mod, new_e_mod, payouts))
 }
 
-/// Applies live weapon damage (`structureControl.AttackStructure`) to a Pirate FOB (`79172` / `78260`):
+/// Applies live weapon damage (`dogmaIM.Activate`) to a Pirate FOB (`79172` / `78260`):
 /// - Invulnerable during `Forecasting` / `WindDown` (`FobInvulnerableInPhase`).
 /// - Invulnerable until the Empire side reaches its Ambition-scaled Suppression Stage-5 goal (`SuppressionGoalNotReached`).
 /// - Depleting shield+armor triggers a single `3h ± 1h` `ArmorReinforced` timer (`fob_armor_reinforced_until`).

@@ -4,8 +4,8 @@
 
 use crate::fw_warzone_insurgency_closure::setup_warzone_chain;
 use crate::sovereignty_equinox_gameplay_closure::{
-    drain_notif_events, fit_siege_artillery, make_ball, open_sqlite_ctx, register_online_pilot,
-    rpc_call, temp_sqlite_path,
+    drain_notif_events, fit_siege_artillery, lock_target_via_rpc, make_ball, open_sqlite_ctx, register_online_pilot,
+    rpc_call, step_weapon_ticks, temp_sqlite_path,
 };
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
@@ -86,7 +86,7 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
     //    - Pirate Ambition modifier rises `0 -> 1` (requiring `6` Stage-5 systems next campaign!)
     //    - Winner (`pir_cid`, 100% >= 45% share) gets `1,500,000 LP` with Guristas (`1000434`/`militia_lp_corp_id`) + ISK
     //    - Loser (`emp_cid`, 100% >= 45% share) gets `0.4x` (`600,000 LP`) with State Protectorate (`1000180`) + ISK
-    //    - Surrendered FOB system's FW I-Hub unlocks after `25h` (`90,000s`) for live `structureControl.AttackStructure`!
+    //    - Surrendered FOB system's FW I-Hub unlocks after `25h` (`90,000s`) for live `dogmaIM.Activate` weapon attack!
     fast_forward_secs(&ctx, FORECASTING_DURATION_SECS + 10);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
@@ -101,6 +101,8 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
 
     let emp_lp0 = ctx.db.with_snapshot(|s| s.characters[&emp_cid].loyalty_points.get(&1_000_180).copied().unwrap_or(0));
     let pir_lp0: i64 = ctx.db.with_snapshot(|s| s.characters[&pir_cid].loyalty_points.values().sum());
+    let emp_isk0 = ctx.db.with_snapshot(|s| s.characters[&emp_cid].balance.to_wire_f64());
+    let pir_isk0 = ctx.db.with_snapshot(|s| s.characters[&pir_cid].balance.to_wire_f64());
 
     ctx.db.with_mut_snapshot(|s| {
         let c = s.insurgency_runtime.campaigns.get_mut(&camp1).unwrap();
@@ -146,6 +148,10 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
     let emp_lp_gain = ctx.db.with_snapshot(|s| s.characters[&emp_cid].loyalty_points[&1_000_180]) - emp_lp0;
     assert_eq!(pir_lp_total, INSURGENCY_MAX_PAYOUT_LP, "winner at >=45% share receives max 1,500,000 LP");
     assert_eq!(emp_lp_gain, 600_000, "loser at >=45% share receives 0.4x (600,000 LP)");
+    let pir_isk_gain = ctx.db.with_snapshot(|s| s.characters[&pir_cid].balance.to_wire_f64()) - pir_isk0;
+    let emp_isk_gain = ctx.db.with_snapshot(|s| s.characters[&emp_cid].balance.to_wire_f64()) - emp_isk0;
+    assert_eq!(pir_isk_gain, (INSURGENCY_MAX_PAYOUT_LP * 1_000) as f64, "winner received contribution-scaled ISK");
+    assert_eq!(emp_isk_gain, (600_000 * 1_000) as f64, "loser received contribution-scaled ISK");
 
     // Surrendered `front_sys` FW I-Hub is still invulnerable at +24h, then unlocks at +25h (`SURRENDER_IHUB_VULNERABILITY_DELAY_SECS`)!
     let ihub_id = ctx.db.with_snapshot(|s| {
@@ -160,15 +166,22 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
 
     fast_forward_secs(&ctx, 24 * 3_600);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    lock_target_via_rpc(&ctx, &mut s_gal, front_sys, 100_000_044, ihub_id).await;
     assert_eq!(
-        // rpc-lint: allow canonical action_plan S-7 / feat:structures structureControl.AttackStructure live combat RPC
-        rpc_call(&ctx, &mut s_gal, "structureControl", "AttackStructure", &[PyRep::Integer(ihub_id)]).await.unwrap_err().code,
+        rpc_call(&ctx, &mut s_gal, "dogmaIM", "Activate", &[
+            PyRep::Integer(999_400),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(ihub_id),
+        ]).await.unwrap_err().code,
         "IHubInvulnerable"
     );
     fast_forward_secs(&ctx, SURRENDER_IHUB_VULNERABILITY_DELAY_SECS - 24 * 3_600 + 10);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    // rpc-lint: allow canonical action_plan S-7 / feat:structures structureControl.AttackStructure live combat RPC
-    assert!(rpc_call(&ctx, &mut s_gal, "structureControl", "AttackStructure", &[PyRep::Integer(ihub_id)]).await.is_ok());
+    assert!(rpc_call(&ctx, &mut s_gal, "dogmaIM", "Activate", &[
+        PyRep::Integer(999_400),
+        PyRep::String("targetAttack".into()),
+        PyRep::Integer(ihub_id),
+    ]).await.is_ok());
 
     // Finish Campaign 1 WindDown -> emits `OnInsurgencyCampaignEndingForLocation` and auto-seeds Campaign 2!
     s_pir.solar_system_id = Some(front_sys);
@@ -182,9 +195,9 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
 
     // 3. Campaign 2 Empire Underdog Win via Pirate FOB Siege:
     //    - Auto-seed Campaign 2, advance past 48h Forecasting
-    //    - `AttackStructure` on FOB rejected with `SuppressionGoalNotReached` before 5 Stage-5 suppressed systems
-    //    - Suppress 5 systems to Stage 5 via live Empire pulses -> `AttackStructure` depletes shield+armor into `3h ± 1h` `ArmorReinforced`
-    //    - `AttackStructure` during timer rejected with `FobArmorReinforced`; after timer elapses, hull kill destroys FOB,
+    //    - Live attack on FOB rejected with `SuppressionGoalNotReached` before 5 Stage-5 suppressed systems
+    //    - Suppress 5 systems to Stage 5 via live Empire pulses -> weapon fire depletes shield+armor into `3h ± 1h` `ArmorReinforced`
+    //    - Weapon attack during timer rejected with `FobArmorReinforced`; after timer elapses, hull kill destroys FOB,
     //      raises Suppression `+1` across campaign systems, and reduces Pirate Ambition modifier `1 -> 0`!
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let camp2 = ctx.db.with_snapshot(|s| *s.insurgency_runtime.campaigns.keys().next().unwrap());
@@ -210,9 +223,13 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
 
     fit_siege_artillery(&ctx, emp_cid, emp_ship, 999_500);
     let _ = ctx.systems.get_or_spawn(front_sys).spawn_ball(make_ball(emp_ship, 639, fob_pos + DVec3::new(1_000.0, 0.0, 0.0))).await;
+    lock_target_via_rpc(&ctx, &mut s_emp, front_sys, emp_ship, fob2).await;
     assert_eq!(
-        // rpc-lint: allow canonical action_plan S-7 / feat:structures structureControl.AttackStructure live combat RPC
-        rpc_call(&ctx, &mut s_emp, "structureControl", "AttackStructure", &[PyRep::Integer(fob2)]).await.unwrap_err().code,
+        rpc_call(&ctx, &mut s_emp, "dogmaIM", "Activate", &[
+            PyRep::Integer(999_500),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(fob2),
+        ]).await.unwrap_err().code,
         "SuppressionGoalNotReached"
     );
 
@@ -254,6 +271,14 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
     });
     s_emp.solar_system_id = Some(front_sys);
     let _ = ctx.systems.get_or_spawn(front_sys).spawn_ball(make_ball(emp_ship, 639, fob_pos + DVec3::new(1_000.0, 0.0, 0.0))).await;
+    lock_target_via_rpc(&ctx, &mut s_emp, front_sys, emp_ship, fob2).await;
+
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(st) = s.structures.get_mut(&fob2) {
+            st.shield_hp = 0.0;
+            st.armor_hp = 50.0;
+        }
+    });
 
     let mut reinf_until = 0u64;
     for _ in 0..8 {
@@ -262,13 +287,17 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
                 st.last_damage_tick = 0;
             }
         });
-        // rpc-lint: allow canonical action_plan S-7 / feat:structures structureControl.AttackStructure live combat RPC
-        let r = rpc_call(&ctx, &mut s_emp, "structureControl", "AttackStructure", &[PyRep::Integer(fob2)]).await.unwrap();
-        fast_forward_secs(&ctx, 25);
-        if r.dict_get("state").and_then(|v| v.as_str()) == Some("ArmorReinforced") {
-            reinf_until = r.dict_get("reinforcedUntilUnix").and_then(|v| v.as_i64()).unwrap() as u64;
+        let _ = rpc_call(&ctx, &mut s_emp, "dogmaIM", "Activate", &[
+            PyRep::Integer(999_500),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(fob2),
+        ]).await;
+        step_weapon_ticks(&ctx, front_sys).await;
+        if ctx.db.with_snapshot(|s| s.structures[&fob2].state == "ArmorReinforced") {
+            reinf_until = ctx.db.with_snapshot(|s| s.structures[&fob2].reinforced_until_unix);
             break;
         }
+        fast_forward_secs(&ctx, 25);
     }
     let timer_len = reinf_until.saturating_sub(ctx.now_unix() - 25);
     assert!((7_200..=14_400).contains(&timer_len), "FOB armor reinforcement is 3h ± 1h (got {timer_len}s)");
@@ -277,9 +306,13 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
             st.last_damage_tick = 0;
         }
     });
+    lock_target_via_rpc(&ctx, &mut s_emp, front_sys, emp_ship, fob2).await;
     assert_eq!(
-        // rpc-lint: allow canonical action_plan S-7 / feat:structures structureControl.AttackStructure live combat RPC
-        rpc_call(&ctx, &mut s_emp, "structureControl", "AttackStructure", &[PyRep::Integer(fob2)]).await.unwrap_err().code,
+        rpc_call(&ctx, &mut s_emp, "dogmaIM", "Activate", &[
+            PyRep::Integer(999_500),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(fob2),
+        ]).await.unwrap_err().code,
         "FobArmorReinforced"
     );
 
@@ -289,18 +322,23 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
             st.hull_hp = 50.0;
         }
     });
+    lock_target_via_rpc(&ctx, &mut s_emp, front_sys, emp_ship, fob2).await;
     for _ in 0..8 {
         ctx.db.with_mut_snapshot(|s| {
             if let Some(st) = s.structures.get_mut(&fob2) {
                 st.last_damage_tick = 0;
             }
         });
-        // rpc-lint: allow canonical action_plan S-7 / feat:structures structureControl.AttackStructure live combat RPC
-        let r = rpc_call(&ctx, &mut s_emp, "structureControl", "AttackStructure", &[PyRep::Integer(fob2)]).await.unwrap();
-        let st_name = r.dict_get("state").and_then(|v| v.as_str());
-        if st_name == Some("Destroyed") {
+        let _ = rpc_call(&ctx, &mut s_emp, "dogmaIM", "Activate", &[
+            PyRep::Integer(999_500),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(fob2),
+        ]).await;
+        step_weapon_ticks(&ctx, front_sys).await;
+        if ctx.db.with_snapshot(|s| s.structures[&fob2].state == "Destroyed") {
             break;
         }
+        fast_forward_secs(&ctx, 25);
     }
     assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp2].suppression_points[&sixth_sys]), 800);
     assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.pirate_ambition_modifier[&500_010]), 0, "Empire underdog win reduces Pirate Ambition 1 -> 0");

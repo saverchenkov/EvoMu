@@ -1323,6 +1323,12 @@ pub async fn handle_weapons(
             }
             ctx.store_ship_fitting(ship_id, fit);
 
+            let st_state = if is_upwell_target {
+                ctx.db.with_snapshot(|snap| snap.structures.get(&target_ball_id).map(|s| s.state.clone()))
+            } else {
+                None
+            };
+
             Some(Ok(PyRep::keyval([
                 ("moduleID", PyRep::Integer(module_id)),
                 ("targetID", PyRep::Integer(target_ball_id)),
@@ -1335,6 +1341,7 @@ pub async fn handle_weapons(
                 ("destroyed", PyRep::Bool(destroyed)), ("killID", PyRep::Integer(generated_kill_id)),
                 ("killmailHash", PyRep::String(generated_km_hash)), ("wreckItemID", PyRep::Integer(generated_wreck_id)),
                 ("corpseItemID", PyRep::Integer(generated_corpse_id)),
+                ("state", st_state.map(PyRep::String).unwrap_or(PyRep::None)),
             ])))
         }
 

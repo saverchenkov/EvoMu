@@ -100,7 +100,10 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
             .await.unwrap_err().code,
         "MercenaryDenTooFarFromSkyhook"
     );
-    assert!(drain_notif_events(&ctx, PILOT).iter().any(|e| e == "OnMercenaryDenRegistrationInvalid"));
+    let notifs_inv = ctx.drain_notifications_for_char(PILOT);
+    let inv_ev = notifs_inv.iter().find(|n| n.event == "OnMercenaryDenRegistrationInvalid").expect("OnMercenaryDenRegistrationInvalid");
+    assert_eq!(inv_ev.args.first().and_then(|a| a.as_str()), Some("MercenaryDenTooFarFromSkyhook"));
+    assert_eq!(inv_ev.args.get(1).and_then(|a| a.dict_get("itemID")).and_then(|v| v.as_i64()), Some(skyhook_id));
 
     let _ = ctx.systems.get_or_spawn(null_sys).spawn_ball(make_ball(PILOT_SHIP, 639, sh_pos + DVec3::new(3_000.0, 0.0, 0.0))).await;
     ctx.db.with_mut_snapshot(|snap| {
@@ -122,7 +125,10 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
         &[PyRep::Integer(TYPE_MERCENARY_DEN as i64), PyRep::Integer(skyhook_id), PyRep::Integer(temp_planet)],
     ).await.expect("anchor Mercenary Den at Temperate Skyhook <=10km");
     let den_id = den_rep.dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
-    assert!(drain_notif_events(&ctx, PILOT).iter().any(|e| e == "OnMercenaryDenRegistrationSuccess"));
+    let notifs_succ = ctx.drain_notifications_for_char(PILOT);
+    let succ_ev = notifs_succ.iter().find(|n| n.event == "OnMercenaryDenRegistrationSuccess").expect("OnMercenaryDenRegistrationSuccess");
+    assert_eq!(succ_ev.args.first().and_then(|a| a.as_str()), Some("MercenaryDenRegistered"));
+    assert_eq!(succ_ev.args.get(1).and_then(|a| a.dict_get("itemID")).and_then(|v| v.as_i64()), Some(den_id));
     let anchor_q = drain_quasar(&mut rx);
     assert!(anchor_q.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.api.DefinitionsUpdatedNotice"));
     assert!(anchor_q.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.AddedNotice"));
@@ -210,7 +216,7 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
     let tax_share = ext_rep.dict_get("taxShare").and_then(|v| v.as_i64()).unwrap();
     assert!(owner_share > 0 && tax_share > 0 && tax_share * 4 == owner_share);
 
-    // 5. Hostile `AttackStructure` reinforces Den (24h + 6h window), Remote Shield Booster repairs <50% then >=50%, second kill drops ~50% stacks!
+    // 5. Hostile live combat weapon fire reinforces Den (24h + 6h window), Remote Shield Booster repairs <50% then >=50%, second kill drops ~50% stacks!
     let atk_cid = 90_000_088i64;
     let atk_ship = 100_000_088i64;
     let mut s_atk = register_online_pilot(
@@ -218,19 +224,24 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
         null_sys, atk_ship, 639, den_pos + DVec3::new(3_000.0, 0.0, 0.0), 0,
     ).await;
     fit_siege_artillery(&ctx, atk_cid, atk_ship, 993_000);
-    // rpc-lint: allow canonical action_plan S-7 / feat:structures structureControl.AttackStructure live combat RPC
-    rpc_call(&ctx, &mut s_atk, "structureControl", "AttackStructure", &[PyRep::Integer(den_id)]).await.expect("hit 1");
-    step_weapon_ticks(&ctx, null_sys).await;
-    ctx.advance_secs(25);
-    // rpc-lint: allow canonical action_plan S-7 / feat:structures structureControl.AttackStructure live combat RPC
-    let r1 = rpc_call(&ctx, &mut s_atk, "structureControl", "AttackStructure", &[PyRep::Integer(den_id)]).await.expect("reinforce Mercenary Den");
-    assert_eq!(r1.dict_get("state").and_then(|v| v.as_str()), Some("HullReinforced"));
-    assert_eq!(r1.dict_get("reinforcedUntil").and_then(|v| v.as_i64()).unwrap() as u64 - ctx.now_unix(), MERC_DEN_REINFORCEMENT_SECS);
-    assert_eq!(
-        r1.dict_get("vulnerabilityEnds").and_then(|v| v.as_i64()).unwrap() as u64
-            - r1.dict_get("reinforcedUntil").and_then(|v| v.as_i64()).unwrap() as u64,
-        MERC_DEN_VULNERABILITY_WINDOW_SECS
-    );
+    lock_target_via_rpc(&ctx, &mut s_atk, null_sys, atk_ship, den_id).await;
+    for _ in 0..6 {
+        for gun_id in [993_000, 993_002, 993_004] {
+            let _ = rpc_call(&ctx, &mut s_atk, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::String("targetAttack".into()), PyRep::Integer(den_id)]).await;
+        }
+        step_weapon_ticks(&ctx, null_sys).await;
+        if ctx.db.with_snapshot(|s| s.structures[&den_id].state == "HullReinforced") {
+            break;
+        }
+        ctx.advance_secs(25);
+    }
+    assert_eq!(ctx.db.with_snapshot(|s| s.structures[&den_id].state.clone()), "HullReinforced");
+    let (reinf_until, vuln_ends) = ctx.db.with_snapshot(|snap| {
+        let (r, v, _) = snap.sov_runtime.mercenary_den_reinforcement[&den_id];
+        (r, v)
+    });
+    assert_eq!(reinf_until - ctx.now_unix(), MERC_DEN_REINFORCEMENT_SECS);
+    assert_eq!(vuln_ends - reinf_until, MERC_DEN_VULNERABILITY_WINDOW_SECS);
     assert_eq!(rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64)).await.status_code, STATUS_CONFLICT);
 
     ctx.advance_secs(MERC_DEN_REINFORCEMENT_SECS + 60);
@@ -264,19 +275,38 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
         }
     });
     step_weapon_ticks(&ctx, null_sys).await;
-    // rpc-lint: allow canonical action_plan S-7 / feat:structures structureControl.AttackStructure live combat RPC
-    rpc_call(&ctx, &mut s_atk, "structureControl", "AttackStructure", &[PyRep::Integer(den_id)]).await.expect("second shield reinforcement");
+    lock_target_via_rpc(&ctx, &mut s_atk, null_sys, atk_ship, den_id).await;
+    for _ in 0..6 {
+        for gun_id in [993_000, 993_002, 993_004] {
+            let _ = rpc_call(&ctx, &mut s_atk, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::String("targetAttack".into()), PyRep::Integer(den_id)]).await;
+        }
+        step_weapon_ticks(&ctx, null_sys).await;
+        if ctx.db.with_snapshot(|s| s.structures[&den_id].state == "HullReinforced") {
+            break;
+        }
+        ctx.advance_secs(25);
+    }
+    assert_eq!(ctx.db.with_snapshot(|s| s.structures[&den_id].state.clone()), "HullReinforced");
     ctx.advance_secs(MERC_DEN_REINFORCEMENT_SECS + 120);
-    step_weapon_ticks(&ctx, null_sys).await;
     let _ = drain_notif_events(&ctx, PILOT);
-    // rpc-lint: allow canonical action_plan S-7 / feat:structures structureControl.AttackStructure live combat RPC
-    rpc_call(&ctx, &mut s_atk, "structureControl", "AttackStructure", &[PyRep::Integer(den_id)]).await.expect("hull volley 1");
-    step_weapon_ticks(&ctx, null_sys).await;
-    ctx.advance_secs(25);
-    // rpc-lint: allow canonical action_plan S-7 / feat:structures structureControl.AttackStructure live combat RPC
-    let kill_rep = rpc_call(&ctx, &mut s_atk, "structureControl", "AttackStructure", &[PyRep::Integer(den_id)]).await.expect("destroy Mercenary Den");
-    assert_eq!(kill_rep.dict_get("state").and_then(|v| v.as_str()), Some("Destroyed"));
-    assert!(drain_notif_events(&ctx, PILOT).iter().any(|e| e == "OnMyMercenaryDenRemoved"));
-    let dropped_stacks = kill_rep.dict_get("droppedStacks").and_then(|v| v.as_i64()).unwrap();
+    lock_target_via_rpc(&ctx, &mut s_atk, null_sys, atk_ship, den_id).await;
+    for _ in 0..6 {
+        for gun_id in [993_000, 993_002, 993_004] {
+            let _ = rpc_call(&ctx, &mut s_atk, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::String("targetAttack".into()), PyRep::Integer(den_id)]).await;
+        }
+        step_weapon_ticks(&ctx, null_sys).await;
+        if ctx.db.with_snapshot(|s| s.structures[&den_id].state == "Destroyed") {
+            break;
+        }
+        ctx.advance_secs(25);
+    }
+    assert_eq!(ctx.db.with_snapshot(|s| s.structures[&den_id].state.clone()), "Destroyed");
+    let notifs_rem = ctx.drain_notifications_for_char(PILOT);
+    let rem_ev = notifs_rem.iter().find(|n| n.event == "OnMyMercenaryDenRemoved").expect("OnMyMercenaryDenRemoved");
+    assert_eq!(rem_ev.args.first().and_then(|a| a.as_str()), Some("MercenaryDenRemoved"));
+    assert_eq!(rem_ev.args.get(1).and_then(|a| a.dict_get("itemID")).and_then(|v| v.as_i64()), Some(den_id));
+    let dropped_stacks = ctx.db.with_snapshot(|snap| {
+        snap.items.values().filter(|i| i.type_id == TYPE_INFOMORPH_DECRYPTION_KEY && i.quantity > 0 && i.location_id != den_id).count()
+    });
     assert!((1..=7).contains(&dropped_stacks));
 }

@@ -240,13 +240,14 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
         );
     }
 
-    ctx.db.with_mut_snapshot(|snap| {
-        for u in &mut snap.sov_runtime.sov_hubs.get_mut(&hub_a).unwrap().upgrades {
-            if [UPGRADE_ADVANCED_LOGISTICS_NETWORK, UPGRADE_CYNOSURAL_NAVIGATION, UPGRADE_CYNOSURAL_SUPPRESSION].contains(&u.type_id) {
-                u.online = u.type_id == UPGRADE_CYNOSURAL_SUPPRESSION;
-            }
-        }
-    });
+    // Online Cynosural Suppression upgrade via authentic Quasar ProcessConfigurationRequest
+    let mut on_proc = Vec::new();
+    let mut cfg = Vec::new();
+    encode_bytes_field(1, &idm(UPGRADE_CYNOSURAL_SUPPRESSION as u64), &mut cfg);
+    encode_varint_field(2, 1, &mut cfg);
+    encode_bytes_field(2, &cfg, &mut on_proc);
+    encode_bytes_field(3, &idm(hub_a as u64), &mut on_proc);
+    assert_eq!(rpc(&ctx, &mut s_dir, "eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationRequest", on_proc).await.status_code, STATUS_OK);
 
     // 5. Tenebrex Cyno Jammer (`37534`): 5m spool-up, `OnCynoJammerChanged`, `CynoJammed`, & immediate jam stop on reinforcement!
     let deep_space = DVec3::new(50_000_000.0, 50_000_000.0, 50_000_000.0);
@@ -254,17 +255,17 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
     let tenebrex_rep = rpc_call(&ctx, &mut s_dir, "structureDeployment", "Anchor", &[PyRep::Integer(995_022), PyRep::String("Tenebrex Jammer".into())])
         .await.expect("anchor Tenebrex");
     let tenebrex_id = tenebrex_rep.dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
-    let online_now = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(st) = snap.structures.get_mut(&tenebrex_id) {
-            st.state = "ShieldVulnerable".into();
             st.fuel_blocks = 500;
-            st.shield_hp = 5_000.0;
-            st.armor_hp = 50_000.0;
-            st.hull_hp = 50_000.0;
-            st.reinforced_until_unix = 0;
         }
-        snap.sov_runtime.tenebrex_spool_ready_unix.insert(tenebrex_id, online_now + TENEBREX_SPOOL_UP_SECS);
+    });
+    // Advance through anchoring (15m) + anchoring timer (24h) + onlining (15m) naturally:
+    ctx.advance_secs(15 * 60 + 24 * 3_600 + 15 * 60 + 10);
+    eve_server::services::station_structure::structure_lifecycle::sync_all_structures(&ctx);
+    assert_eq!(ctx.db.with_snapshot(|s| s.structures[&tenebrex_id].state.clone()), "ShieldVulnerable");
+    assert!(ctx.db.with_snapshot(|s| s.sov_runtime.tenebrex_spool_ready_unix.contains_key(&tenebrex_id)));
+    ctx.db.with_mut_snapshot(|snap| {
         let sk = snap.skills.entry(PILOT).or_default();
         for sid in [21_603u32, 3_335, 12_092, 22_761] {
             sk.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
@@ -313,15 +314,24 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
         "CynoJammed"
     );
 
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(st) = s.structures.get_mut(&tenebrex_id) {
+            st.shield_hp = 1_500.0;
+        }
+    });
     fit_siege_artillery(&ctx, hacker_cid, hacker_ship, 995_300);
     let t_pos = ctx.db.with_snapshot(|s| DVec3::from_array(s.structures[&tenebrex_id].position));
     let _ = ctx.systems.get_or_spawn(null_sys).spawn_ball(make_ball(hacker_ship, 19_722, t_pos + DVec3::new(2_500.0, 0.0, 0.0))).await;
-    for _ in 0..3 {
-        // rpc-lint: allow canonical action_plan S-7 / feat:structures structureControl.AttackStructure live combat RPC
-        let r = rpc_call(&ctx, &mut s_hacker, "structureControl", "AttackStructure", &[PyRep::Integer(tenebrex_id)]).await.expect("reinforce Tenebrex");
+    lock_target_via_rpc(&ctx, &mut s_hacker, null_sys, hacker_ship, tenebrex_id).await;
+    for _ in 0..4 {
+        rpc_call(&ctx, &mut s_hacker, "dogmaIM", "Activate", &[
+            PyRep::Integer(995_300),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(tenebrex_id),
+        ]).await.expect("attack Tenebrex");
         step_weapon_ticks(&ctx, null_sys).await;
         ctx.advance_secs(25);
-        if r.dict_get("state").and_then(|v| v.as_str()) == Some("ArmorReinforced") {
+        if ctx.db.with_snapshot(|s| s.structures[&tenebrex_id].state != "ShieldVulnerable") {
             break;
         }
     }

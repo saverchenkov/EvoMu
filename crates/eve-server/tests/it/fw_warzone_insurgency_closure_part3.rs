@@ -56,7 +56,10 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
         .await.expect("enlist Guristas");
     let _ = drain_notif_events(&ctx, pir_cid);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    assert!(drain_notif_events(&ctx, pir_cid).iter().any(|e| e == "OnInsurgencyCampaignStartedForLocation"));
+    let notifs_start = ctx.drain_notifications_for_char(pir_cid);
+    let start_ev = notifs_start.iter().find(|n| n.event == "OnInsurgencyCampaignStartedForLocation").expect("OnInsurgencyCampaignStartedForLocation");
+    assert_eq!(start_ev.args.len(), 1, "OnInsurgencyCampaignStartedForLocation arity 1");
+    assert!(start_ev.args[0].dict_get("coveredSolarsystemIDs").is_some(), "snapshot must contain coveredSolarsystemIDs");
 
     let (camp_id, start_systems) = ctx.db.with_snapshot(|s| {
         let c = s.insurgency_runtime.campaigns.values().next().expect("auto-seeded campaign");
@@ -85,9 +88,13 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
     rpc_call(&ctx, &mut s_emp, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(500_001)])
         .await.expect("enlist Caldari");
     fit_siege_artillery(&ctx, emp_cid, emp_ship, 999_000);
+    lock_target_via_rpc(&ctx, &mut s_emp, front_sys, emp_ship, fob_id).await;
     assert_eq!(
-        // rpc-lint: allow canonical action_plan S-7 / feat:structures structureControl.AttackStructure live combat RPC
-        rpc_call(&ctx, &mut s_emp, "structureControl", "AttackStructure", &[PyRep::Integer(fob_id)]).await.unwrap_err().code,
+        rpc_call(&ctx, &mut s_emp, "dogmaIM", "Activate", &[
+            PyRep::Integer(999_000),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(fob_id),
+        ]).await.unwrap_err().code,
         "FobInvulnerableInPhase"
     );
 

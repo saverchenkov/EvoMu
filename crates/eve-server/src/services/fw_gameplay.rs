@@ -5,7 +5,7 @@
 //!   `JoinFactionAsAlliance`, `LeaveFactionAsAlliance`), militia lookup (`GetCorporationWarFactionID`,
 //!   `GetFactionMilitiaCorporation`), I-Hub LP donations (`DonateLPsToSolarSystem`), and leaderboards (`GetStats_TopAndAllKillsAndVPs`).
 //! - `keeper.ActivateAccelerationGate` live space-ball, `<= 2,500 m` range, and FW hull-class gating (`activate_fw_complex_gate_in_space`).
-//! - `structureControl.AttackStructure` & space combat destruction for FW Supply Caches/Depots, FW I-Hubs, and Pirate FOBs
+//! - Live `dogmaIM.Activate` combat weapon cycles & space combat destruction for FW Supply Caches/Depots, FW I-Hubs, and Pirate FOBs
 //!   (`apply_fw_or_insurgency_structure_damage`, `on_space_entity_destroyed`, `on_player_ship_destroyed_in_combat`).
 //! - 1 Hz `tick_fw_gameplay` complex/battlefield capture, 4h Battlefield respawn cooldown, 2h unattacked I-Hub regeneration,
 //!   and Pirate Insurgency campaign progression (`fw_gameplay_insurgency`).
@@ -545,7 +545,7 @@ fn supply_loot_type(faction_id: i64) -> u32 {
     }
 }
 
-/// Applies live weapon damage (`structureControl.AttackStructure`) to an FW Supply Cache/Depot,
+/// Applies live weapon damage (`dogmaIM.Activate`) to an FW Supply Cache/Depot,
 /// FW Infrastructure Hub (`32226`), or Pirate FOB (`79172` / `78260`).
 pub async fn apply_fw_or_insurgency_structure_damage(
     ctx: &ServerContext,

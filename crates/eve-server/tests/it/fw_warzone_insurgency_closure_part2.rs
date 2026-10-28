@@ -170,9 +170,13 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
         s.structures.values().find(|st| st.solar_system_id == front_sys && st.type_id == TYPE_FW_IHUB).unwrap().structure_id
     });
     fit_siege_artillery(&ctx, gal_cid, gal_ship, 998_000);
+    lock_target_via_rpc(&ctx, &mut s_gal, front_sys, gal_ship, ihub_id).await;
     assert_eq!(
-        // rpc-lint: allow canonical action_plan S-7 / feat:structures structureControl.AttackStructure live combat RPC
-        rpc_call(&ctx, &mut s_gal, "structureControl", "AttackStructure", &[PyRep::Integer(ihub_id)]).await.unwrap_err().code,
+        rpc_call(&ctx, &mut s_gal, "dogmaIM", "Activate", &[
+            PyRep::Integer(998_000),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(ihub_id),
+        ]).await.unwrap_err().code,
         "IHubInvulnerable"
     );
 
@@ -192,7 +196,7 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
         "unattacked 100%-contested FW I-Hub regenerates back to 80% after 2 hours"
     );
 
-    // Re-contest to 100% and destroy FW I-Hub via `structureControl.AttackStructure`: flips occupancy, emits `OnWarzoneOccupationStateUpdated`, and updates `cmd_sys` to Frontline!
+    // Re-contest to 100% and destroy FW I-Hub via `dogmaIM.Activate`: flips occupancy, emits `OnWarzoneOccupationStateUpdated`, and updates `cmd_sys` to Frontline!
     let attack_ts = ctx.now_unix();
     ctx.db.with_mut_snapshot(|s| {
         s.fw_system_occupations.get_mut(&front_sys).unwrap().victory_points = 3_000;
@@ -200,16 +204,25 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
         s.fw_runtime.ihub_vulnerable.insert(front_sys, true);
         s.fw_runtime.last_ihub_attacked_unix.insert(front_sys, attack_ts);
         s.system_states.entry(front_sys).or_default().fw_contested_pct = 100.0;
+        if let Some(st) = s.structures.get_mut(&ihub_id) {
+            st.shield_hp = 0.0;
+            st.armor_hp = 0.0;
+            st.hull_hp = 50.0;
+        }
     });
+    lock_target_via_rpc(&ctx, &mut s_gal, front_sys, gal_ship, ihub_id).await;
     let _ = drain_notif_events(&ctx, gal_cid);
     for _ in 0..8 {
-        // rpc-lint: allow canonical action_plan S-7 / feat:structures structureControl.AttackStructure live combat RPC
-        let r = rpc_call(&ctx, &mut s_gal, "structureControl", "AttackStructure", &[PyRep::Integer(ihub_id)]).await.unwrap();
+        let _ = rpc_call(&ctx, &mut s_gal, "dogmaIM", "Activate", &[
+            PyRep::Integer(998_000),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(ihub_id),
+        ]).await;
         step_weapon_ticks(&ctx, front_sys).await;
-        ctx.advance_secs(25);
-        if r.dict_get("state").and_then(|v| v.as_str()) == Some("Captured") {
+        if ctx.db.with_snapshot(|s| s.fw_system_occupations[&front_sys].occupier_faction_id == 500_004) {
             break;
         }
+        ctx.advance_secs(25);
     }
     assert_eq!(ctx.db.with_snapshot(|s| s.fw_system_occupations[&front_sys].occupier_faction_id), 500_004);
     assert!(drain_notif_events(&ctx, gal_cid).iter().any(|e| e == "OnWarzoneOccupationStateUpdated"));

@@ -376,6 +376,14 @@ pub async fn handle_anchor_skyhook_rpc(
                 .insert(id, (reagent_type, 0, 0, now));
             snap.sov_runtime.skyhook_maturity_rem.insert(id, (0, 0));
         }
+        let chosen_hour_offset = snap
+            .corp_governance
+            .get(&corp_id)
+            .map(|g| u64::from(g.reinforce_hour) * 3_600)
+            .unwrap_or(22 * 3_600);
+        snap.sov_runtime
+            .skyhook_theft_windows
+            .insert(id, (now + chosen_hour_offset, now + chosen_hour_offset + 7_200));
         Ok(id)
     })?;
 
@@ -412,7 +420,7 @@ pub async fn handle_anchor_skyhook_rpc(
     ]))
 }
 
-/// Applies live weapon damage (`structureControl.AttackStructure`) to an Orbital Skyhook's shield/silo,
+/// Applies live weapon damage (`dogmaIM.Activate`) to an Orbital Skyhook's shield/silo,
 /// emitting `OnSkyhookSiloDamageUpdated` and exposing it for ship-link theft once shield drops `<= 10%`
 /// inside an open theft vulnerability window.
 pub fn apply_skyhook_weapon_damage(
@@ -746,15 +754,27 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
         let mut opened = Vec::new();
         for id in skyhook_ids {
             let _ = advance_skyhook_reagents_in_snap(snap, id, now_unix);
-            if let Some(&(start, end)) = snap.sov_runtime.skyhook_theft_windows.get(&id) {
-                let open_now = start <= now_unix && now_unix < end;
-                let was_open = snap.sov_runtime.skyhook_hackable.get(&id).copied().unwrap_or(false);
-                if open_now != was_open {
-                    snap.sov_runtime.skyhook_hackable.insert(id, open_now);
-                    if open_now {
-                        if let Some(st) = snap.structures.get(&id) {
-                            opened.push((st.solar_system_id, id));
-                        }
+            let window = snap
+                .sov_runtime
+                .skyhook_theft_windows
+                .entry(id)
+                .or_insert_with(|| (now_unix, now_unix + 7_200));
+            if now_unix >= window.1 {
+                let interval = 302_400; // ~3.5 days offset
+                let mut start = window.0 + interval;
+                while start + 7_200 <= now_unix {
+                    start += interval;
+                }
+                *window = (start, start + 7_200);
+            }
+            let (start, end) = *window;
+            let open_now = start <= now_unix && now_unix < end;
+            let was_open = snap.sov_runtime.skyhook_hackable.get(&id).copied().unwrap_or(false);
+            if open_now != was_open {
+                snap.sov_runtime.skyhook_hackable.insert(id, open_now);
+                if open_now {
+                    if let Some(st) = snap.structures.get(&id) {
+                        opened.push((st.solar_system_id, id));
                     }
                 }
             }
@@ -825,8 +845,8 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
             continue;
         }
 
-        // 10-minute link completed: drop 50% of insecure bay into an in-space Cargo Container ball,
-        // move the remaining 50% into the secure bay, and restore ship max velocity.
+        // 10-minute link completed: drop 100% of insecure surplus bay into an in-space Cargo Container ball,
+        // leaving secure bay untouched, and restore ship max velocity.
         let drop_res = ctx.db.with_mut_snapshot(|snap| {
             snap.sov_runtime.skyhook_silo_links.remove(&skyhook_id);
             let _ = advance_skyhook_reagents_in_snap(snap, skyhook_id, now_unix);
@@ -835,9 +855,7 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
                 return None;
             }
             let r_type = entry.0;
-            let stolen = (entry.2 / 2).max(1);
-            let to_secure = entry.2.saturating_sub(stolen);
-            entry.1 = entry.1.saturating_add(to_secure);
+            let stolen = entry.2;
             entry.2 = 0;
             entry.3 = now_unix;
             let final_sec = entry.1;

@@ -142,7 +142,6 @@ pub mod space_navigation_advanced;
 pub mod station_structure;
 pub mod station_structure_handlers;
 pub mod structure_acl_defense_rules;
-pub mod structure_combat_attack;
 pub mod tactical_modules;
 pub mod tactical_modules_probes;
 pub mod tourney_service;

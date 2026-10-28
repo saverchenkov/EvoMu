@@ -144,13 +144,20 @@ pub fn record_hub_hack(ctx: &ServerContext, sys_id: u32, hub_id: i64, disruption
             },
         );
     });
+    let upg_reps: Vec<PyRep> = ctx.db.with_snapshot(|snap| {
+        snap.sov_runtime
+            .sov_hubs
+            .get(&hub_id)
+            .map(|h| h.upgrades.iter().map(|u| PyRep::Integer(u.type_id as i64)).collect())
+            .unwrap_or_default()
+    });
     ctx.notify(
         NotificationTarget::SolarSystem(sys_id),
         "OnSovHubHacked",
         "solarsystemid",
         vec![
-            PyRep::Integer(i64::from(sys_id)),
             PyRep::Integer(hub_id),
+            PyRep::List(upg_reps),
         ],
     );
 }

@@ -15,6 +15,8 @@ use std::collections::HashMap;
 pub mod structure_upwell_ops;
 #[path = "structure_lifecycle.rs"]
 pub mod structure_lifecycle;
+#[path = "structure_ansiblex_navigation.rs"]
+pub mod structure_ansiblex_navigation;
 #[path = "structure_lifecycle_rpc.rs"]
 pub mod structure_lifecycle_rpc;
 

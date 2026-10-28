@@ -3,7 +3,7 @@
 //! Exposes ONLY live server protocol, combat, module, and cluster-tick entrypoints:
 //! - Orbital Skyhook anchoring, 1 Hz linear reagent maturity & ship-link silo theft (`sov_gameplay_skyhook`).
 //! - Mercenary Den `structureDeployment.Anchor` (`handle_anchor_mercenary_den_rpc`), `beyonce.CallComponentFromClient`
-//!   (`handle_mercden_component_call`), `structureControl.AttackStructure` (`apply_mercenary_den_weapon_damage`),
+//!   (`handle_mercden_component_call`), live `dogmaIM.Activate` target attack (`apply_mercenary_den_weapon_damage`),
 //!   Remote Shield Booster repair (`apply_mercenary_den_shield_repair`), and MTO combat completion (`on_space_entity_destroyed`).
 //! - ADM-scaled vulnerability windows (`apply_adm_scaled_vulnerability_window_in_snap`), live Entosis Link activation
 //!   validation (`precheck_entosis_activation`, `register_entosis_capture_target`), and elapsed-time ADM-scaled
@@ -140,7 +140,10 @@ pub async fn handle_anchor_mercenary_den_rpc(
             NotificationTarget::Character(char_id),
             "OnMercenaryDenRegistrationInvalid",
             "charid",
-            vec![PyRep::Integer(explicit_skyhook_id.unwrap_or(0)), PyRep::String("SkyhookNotFound".into())],
+            vec![
+                PyRep::String("SkyhookNotFound".into()),
+                PyRep::keyval([("itemID", PyRep::Integer(explicit_skyhook_id.unwrap_or(0)))]),
+            ],
         );
         return Err(BridgeRpcError {
             code: "SkyhookNotFound".into(),
@@ -168,7 +171,10 @@ pub async fn handle_anchor_mercenary_den_rpc(
             NotificationTarget::Character(char_id),
             "OnMercenaryDenRegistrationInvalid",
             "charid",
-            vec![PyRep::Integer(skyhook_id), PyRep::String("MercenaryDenTooFarFromSkyhook".into())],
+            vec![
+                PyRep::String("MercenaryDenTooFarFromSkyhook".into()),
+                PyRep::keyval([("itemID", PyRep::Integer(skyhook_id))]),
+            ],
         );
         return Err(BridgeRpcError {
             code: "MercenaryDenTooFarFromSkyhook".into(),
@@ -184,7 +190,10 @@ pub async fn handle_anchor_mercenary_den_rpc(
                 NotificationTarget::Character(char_id),
                 "OnMercenaryDenRegistrationInvalid",
                 "charid",
-                vec![PyRep::Integer(skyhook_id), PyRep::String("DenPlanetMismatch".into())],
+                vec![
+                    PyRep::String("DenPlanetMismatch".into()),
+                    PyRep::keyval([("itemID", PyRep::Integer(skyhook_id))]),
+                ],
             );
             return Err(BridgeRpcError {
                 code: "DenPlanetMismatch".into(),
@@ -210,7 +219,10 @@ pub async fn handle_anchor_mercenary_den_rpc(
             NotificationTarget::Character(char_id),
             "OnMercenaryDenRegistrationInvalid",
             "charid",
-            vec![PyRep::Integer(skyhook_id), PyRep::String("PlanetNotTemperate".into())],
+            vec![
+                PyRep::String("PlanetNotTemperate".into()),
+                PyRep::keyval([("itemID", PyRep::Integer(skyhook_id))]),
+            ],
         );
         return Err(BridgeRpcError {
             code: "PlanetNotTemperate".into(),
@@ -333,7 +345,10 @@ pub async fn handle_anchor_mercenary_den_rpc(
                     NotificationTarget::Character(char_id),
                     "OnMercenaryDenRegistrationInvalid",
                     "charid",
-                    vec![PyRep::Integer(skyhook_id), PyRep::String(err.code.clone())],
+                    vec![
+                        PyRep::String(err.code.clone()),
+                        PyRep::keyval([("itemID", PyRep::Integer(skyhook_id))]),
+                    ],
                 );
             }
             return Err(err);
@@ -359,7 +374,10 @@ pub async fn handle_anchor_mercenary_den_rpc(
         NotificationTarget::Character(char_id),
         "OnMercenaryDenRegistrationSuccess",
         "charid",
-        vec![PyRep::Integer(den_id), PyRep::Integer(skyhook_id)],
+        vec![
+            PyRep::String("MercenaryDenRegistered".into()),
+            PyRep::keyval([("itemID", PyRep::Integer(den_id))]),
+        ],
     );
     emit_sov_structures_updated(ctx, sys_id, vec![PyRep::Integer(den_id)]);
     Ok(PyRep::keyval([
@@ -540,7 +558,7 @@ pub async fn handle_mercden_component_call(
     ]))
 }
 
-/// Applies live weapon damage (`structureControl.AttackStructure`) to a Mercenary Den:
+/// Applies live weapon damage (`dogmaIM.Activate`) to a Mercenary Den:
 /// - Depleting shield puts the den into a 24h reinforcement with a 6h vulnerability window and disables it.
 /// - Attacks during the 24h reinforcement or outside the 6h window are rejected.
 /// - Depleting hull inside the 6h vulnerability window destroys the den and rolls a 50% drop per stored stack.
@@ -734,7 +752,10 @@ pub async fn apply_mercenary_den_weapon_damage(
                     NotificationTarget::Character(owner_cid),
                     "OnMyMercenaryDenRemoved",
                     "charid",
-                    vec![PyRep::Integer(den_id)],
+                    vec![
+                        PyRep::String("MercenaryDenRemoved".into()),
+                        PyRep::keyval([("itemID", PyRep::Integer(den_id))]),
+                    ],
                 );
             }
             emit_sov_structures_updated(ctx, sys_id, vec![PyRep::Integer(den_id)]);

@@ -676,6 +676,18 @@ fn process_configuration(
             u.low_power = false;
         }
     }
+    let is_hacked = snap.sov_runtime.hacked_hubs.get(&hub_id).copied().is_some_and(|until| now < until);
+    if !is_hacked {
+        for u in &mut hub.upgrades {
+            if u.online && u.low_power {
+                if let Some(d) = upgrade_definition(sde, u.type_id) {
+                    if hub.fuel.get(&d.fuel_type).copied().unwrap_or(0) >= d.fuel_per_hour {
+                        u.low_power = false;
+                    }
+                }
+            }
+        }
+    }
     hub.fuel.retain(|_, v| *v > 0);
     // Keep the partial-hour remainder of the fuel-burn clock (`simulate_fuel`); only start it.
     if hub.last_updated_unix == 0 {

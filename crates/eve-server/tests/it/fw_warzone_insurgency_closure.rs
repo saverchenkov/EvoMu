@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use crate::sovereignty_equinox_gameplay_closure::{
-    drain_notif_events, fit_siege_artillery, make_ball, open_sqlite_ctx, register_online_pilot,
+    drain_notif_events, fit_siege_artillery, lock_target_via_rpc, make_ball, open_sqlite_ctx, register_online_pilot,
     rpc_call, set_pilot_location, step_weapon_ticks, temp_sqlite_path,
 };
 use eve_db::snapshot_ext::FwSystemOccupationRecord;
@@ -28,28 +28,25 @@ pub(crate) fn setup_warzone_chain(ctx: &ServerContext) -> (u32, u32, u32, u32) {
         .map(|s| s.solar_system_id)
         .collect();
     lowsec.sort_unstable();
-    let neighbors = |sys: u32| -> Vec<u32> {
-        let mut v: Vec<u32> = ctx
-            .sde
-            .jumps
-            .values()
-            .filter(|j| j.from_solar_system_id == sys)
-            .map(|j| j.to_solar_system_id)
-            .filter(|t| lowsec.binary_search(t).is_ok())
-            .collect();
-        v.sort_unstable();
-        v.dedup();
-        v
+    let lowsec_set: std::collections::HashSet<u32> = lowsec.iter().copied().collect();
+    let mut adj: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    for j in ctx.sde.jumps.values() {
+        if lowsec_set.contains(&j.from_solar_system_id) && lowsec_set.contains(&j.to_solar_system_id) {
+            adj.entry(j.from_solar_system_id).or_default().push(j.to_solar_system_id);
+        }
+    }
+    let neighbors = |sys: u32| -> &[u32] {
+        adj.get(&sys).map(|v| v.as_slice()).unwrap_or(&[])
     };
     let mut chosen = None;
     'outer: for &front in &lowsec {
         let fnbs = neighbors(front);
-        for &enemy in &fnbs {
-            for &cmd in &fnbs {
+        for &enemy in fnbs {
+            for &cmd in fnbs {
                 if cmd == enemy || neighbors(cmd).contains(&enemy) {
                     continue;
                 }
-                for &rear in &neighbors(cmd) {
+                for &rear in neighbors(cmd) {
                     if rear != front && rear != enemy && !neighbors(rear).contains(&enemy) && !neighbors(rear).contains(&front) {
                         chosen = Some((enemy, front, cmd, rear));
                         break 'outer;
@@ -63,7 +60,7 @@ pub(crate) fn setup_warzone_chain(ctx: &ServerContext) -> (u32, u32, u32, u32) {
         snap.fw_system_occupations.clear();
         let mut caldari_set = vec![front, cmd, rear];
         for base in [cmd, rear] {
-            for nb in neighbors(base) {
+            for &nb in neighbors(base) {
                 if nb != enemy && !caldari_set.contains(&nb) {
                     caldari_set.push(nb);
                 }
@@ -261,7 +258,7 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     // Clear occupancy on `open_gate` before testing Novice capture.
     ctx.db.with_mut_snapshot(|s| { s.fw_runtime.complex_occupants.clear(); });
 
-    // 3. Live `structureControl.AttackStructure` on FW Supply Cache/Depot/ListeningPost/Propaganda:
+    // 3. Live `dogmaIM.Activate` combat weapon fire on FW Supply Cache/Depot/ListeningPost/Propaganda:
     //    raises attacker Advantage (`OnSolarsystemAdvantageStateUpdated_Local`), drops Cargo Container (`23`) loot, and speeds up complex capture!
     fit_siege_artillery(&ctx, gal_cid, gal_ship, 997_000);
     let supply_sites: Vec<(i64, DVec3)> = ctx.db.with_snapshot(|s| {
@@ -274,14 +271,18 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     let _ = drain_notif_events(&ctx, gal_cid);
     for &(sid, spos) in supply_sites.iter().take(2) {
         set_hull(&ctx, gal_ship, 19_722, spos + DVec3::new(2_000.0, 0.0, 0.0)).await;
+        lock_target_via_rpc(&ctx, &mut s_gal, front_sys, gal_ship, sid).await;
         for _ in 0..5 {
-            // rpc-lint: allow canonical action_plan S-7 / feat:structures structureControl.AttackStructure live combat RPC
-            let r = rpc_call(&ctx, &mut s_gal, "structureControl", "AttackStructure", &[PyRep::Integer(sid)]).await.unwrap();
+            let _ = rpc_call(&ctx, &mut s_gal, "dogmaIM", "Activate", &[
+                PyRep::Integer(997_000),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(sid),
+            ]).await;
             step_weapon_ticks(&ctx, front_sys).await;
-            ctx.advance_secs(25);
-            if r.dict_get("state").and_then(|v| v.as_str()) == Some("Destroyed") {
+            if ctx.db.with_snapshot(|s| !s.fw_runtime.supply_sites.contains_key(&sid) || s.structures.get(&sid).map(|st| st.state.as_str()) == Some("Destroyed")) {
                 break;
             }
+            ctx.advance_secs(25);
         }
     }
     assert!(drain_notif_events(&ctx, gal_cid).iter().any(|e| e == "OnSolarsystemAdvantageStateUpdated_Local"));

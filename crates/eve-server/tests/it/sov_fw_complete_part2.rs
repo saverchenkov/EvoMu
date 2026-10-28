@@ -9,21 +9,51 @@ use eve_server::router::ServerContext;
 use eve_server::services::fw_services::{self, HQ_SYSTEM_AMO, HQ_SYSTEM_INTAKI, HQ_SYSTEM_MEHATOOR, HQ_SYSTEM_ONNAMON};
 use eve_server::services::insurgency_services;
 use eve_server::services::sov_services::{self, TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB, TYPE_TENEBREX_CYNO_JAMMER};
-use eve_server::services::station_structure::structure_lifecycle as life;
 use std::collections::{HashMap, HashSet};
 
 const PILOT: i64 = 90_000_001;
 const OTHER: i64 = 90_000_002;
 const CALDARI: i64 = 500_001;
-const MINMATAR: i64 = 500_002;
-const JOVE_NO_MILITIA: i64 = 500_005;
-const DAY: u64 = 86_400;
 
 async fn select(ctx: &ServerContext, sess: &mut SessionState, user: &str, pass: &str, cid: i64) {
     common::login_pilot(ctx, sess, user, pass).await;
-    ctx.dispatch_rpc(sess, 'charUnboundMgr', None, 'SelectCharacterID', &[PyRep::Integer(cid)], &HashMap::new(), None)
+    ctx.dispatch_rpc(sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(cid)], &HashMap::new(), None)
         .await
-        .expect('SelectCharacterID');
+        .expect("SelectCharacterID");
+}
+
+fn make_system_dynamic_state(sys_id: u32) -> eve_db::SystemDynamicState {
+    eve_db::SystemDynamicState {
+        solar_system_id: sys_id,
+        dbs_multiplier: 1.0,
+        ess_main_bank: eve_db::IskCents(0),
+        ess_reserve_bank: eve_db::IskCents(0),
+        ess_linked_character_id: None,
+        ess_link_started_tick: None,
+        sov_alliance_id: None,
+        military_index: 0,
+        industrial_index: 0,
+        strategic_index: 0,
+        fw_contested_pct: 0.0,
+        insurgency_corruption_stage: 1,
+        insurgency_suppression_stage: 0,
+        wormhole_remaining_mass_kg: 0.0,
+        wormhole_destination_system_id: None,
+        signature_position: None,
+        fw_complex_position: None,
+        fw_capture_seconds_elapsed: 0,
+        fw_capture_duration_seconds: 0,
+        last_fw_capture_tick: 0,
+        last_sov_claim_tick: 0,
+    }
+}
+
+/// `(solarsystemID, occupationState)` as unpacked by `FwWarzoneSvc.GetLocalOccupationState`.
+fn local_occupation_state(rep: &PyRep, sys_id: u32) -> &PyRep {
+    let PyRep::Tuple(t) = rep else { panic!("GetLocalOccupationState must return a 2-tuple, got {rep:?}") };
+    assert_eq!(t.len(), 2);
+    assert_eq!(t[0], PyRep::Integer(i64::from(sys_id)));
+    &t[1]
 }
 
 async fn sov_call(
@@ -212,8 +242,8 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
 
     let notifs = ctx.drain_notifications_for_char(PILOT);
     let hacked_notif = notifs.iter().find(|n| n.event == "OnSovHubHacked").expect("OnSovHubHacked");
-    assert_eq!(hacked_notif.args.first().and_then(|a| a.as_i64()), Some(sys_id as i64));
-    assert_eq!(hacked_notif.args.get(1).and_then(|a| a.as_i64()), Some(hub_id));
+    assert_eq!(hacked_notif.args.first().and_then(|a| a.as_i64()), Some(hub_id));
+    assert!(matches!(hacked_notif.args.get(1), Some(PyRep::List(_))));
 
     ctx.advance_virtual_clock(3601);
     assert!(!sov_services::is_hub_hacked(&ctx, hub_id));
