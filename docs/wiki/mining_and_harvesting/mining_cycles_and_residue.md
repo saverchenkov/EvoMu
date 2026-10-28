@@ -141,7 +141,7 @@ flowchart TD
 
 The comprehensive cycle volume yield equation in EvoMu is formulated as:
 
-$$Y_{\text{cycle}} = Y_{\text{base}} \times \left(1 + \sum_{s \in \text{Skills}} B_{s} \times L_{s}\right) \times \left(1 + B_{\text{hull\_skill}} \times L_{\text{hull}}\right) \times M_{\text{role}} \times \prod_{u \in \text{MLU}} (1 + B_{u}) \times \prod_{i \in \text{Implants}} (1 + B_{i}) \times M_{\text{crystal}}$$
+$$Y_{\text{cycle}} = Y_{\text{base}} \times \left(1 + \sum_{s \in \text{Skills}} B_{s} \times L_{s}\right) \times \left(1 + B_{\text{hull-skill}} \times L_{\text{hull}}\right) \times M_{\text{role}} \times \prod_{u \in \text{MLU}} (1 + B_{u}) \times \prod_{i \in \text{Implants}} (1 + B_{i}) \times M_{\text{crystal}}$$
 
 Where:
 - $Y_{\text{base}}$: Base module yield attribute `miningAmount` (`77`) in cubic meters ($\text{m}^3$).
@@ -160,7 +160,7 @@ $$R_{\text{yield}} = \frac{Y_{\text{cycle}}}{T_{\text{cycle}}}$$
 
 Where effective cycle duration $T_{\text{cycle}}$ is scaled by hull bonuses and fleet boosts:
 
-$$T_{\text{cycle}} = T_{\text{base}} \times \prod (1 - B_{\text{duration\_reduction}})$$
+$$T_{\text{cycle}} = T_{\text{base}} \times \prod (1 - B_{\text{duration-reduction}})$$
 
 For example, a pilot under a *Mining Foreman Burst II* with *Mining Laser Optimization* charges experiences a duration reduction of:
 $$1 - (0.15 \times 1.25 \times 1.50) = 1 - 0.28125 = 0.71875 \quad (-28.125\% \text{ duration})$$
@@ -170,7 +170,7 @@ In canonical V24 mechanics, mining modules possess an innate **Critical Yield** 
 - **Crit Chance:** Dogma attribute `miningCritChance` (`5967`), typically $0.01$ ($1\%$).
 - **Crit Bonus Multiplier:** Dogma attribute `miningCritBonusYield` (`5969`), typically $2.0$ ($+200\%$).
 - When a critical success is rolled via the server RNG:
-  $$U_{\text{bonus\_crit}} = \left\lfloor U_{\text{mined}} \times M_{\text{crit\_bonus}} \right\rfloor$$
+  $$U_{\text{bonus-crit}} = \left\lfloor U_{\text{mined}} \times M_{\text{crit-bonus}} \right\rfloor$$
 - **Invariance Rule:** *Critical bonus ore is generated directly into the player's hold from thin air; it is never subtracted from the asteroid's remaining volume.*
 
 ---
@@ -271,7 +271,7 @@ The residue mechanic evaluates two primary Dogma attributes on the harvesting mo
 2. `miningWastedVolumeMultiplier` (`3153`): The ratio of residue units destroyed relative to the units mined.
 
 When the mechanic RNG rolls a residue success:
-$$U_{\text{residue}} = \min\left( \left\lfloor U_{\text{mined}} \times M_{\text{waste\_mult}} \right\rfloor, Q_{\text{asteroid}} - U_{\text{mined}} \right)$$
+$$U_{\text{residue}} = \min\left( \left\lfloor U_{\text{mined}} \times M_{\text{waste-mult}} \right\rfloor, Q_{\text{asteroid}} - U_{\text{mined}} \right)$$
 
 The asteroid's physical quantity is decremented by the combined sum:
 $$\Delta Q_{\text{asteroid}} = U_{\text{mined}} + U_{\text{residue}}$$
@@ -356,7 +356,7 @@ stateDiagram-v2
 - **Refinery Requirements:** Moon extractions can only be initiated on an Upwell *Athanor* (`35835`) or *Tatara* (`35836`) refinery that is operational, online, equipped with a Quantum Core, fueled with fuel blocks, and fitted with an online *Standup Moon Drill I* (`35894`) service module.
 - **Duration Limits:** Extractions must be scheduled between **6 days ($518\,400\text{ s}$)** and **56 days ($4\,838\,400\text{ s}$)**.
 - **Chunk Volume Formula:** Moon chunks expand at an exact linear rate of $30\,000\text{ m}^3$ per hour:
-  $$V_{\text{chunk}} = \left(\frac{t_{\text{duration\_secs}}}{3600}\right) \times 30\,000\text{ m}^3$$
+  $$V_{\text{chunk}} = \left(\frac{t_{\text{duration-secs}}}{3600}\right) \times 30\,000\text{ m}^3$$
   *(A 10-day extraction generates exactly $7\,200\,000\text{ m}^3$ of raw moon rock).*
 
 #### Moon Ore Tiers & Security Distribution
@@ -400,7 +400,7 @@ Uncompressed ore and gas occupy vast volumes of cargo space, rendering long-dist
 #### Structure Compression & Gas Decompression
 - **Refinery Services:** Available at Upwell structures equipped with an online *Standup Reprocessing Plant* service module (`group 1322`).
 - **Gas Decompression Efficiency Formula:** Compressed gas cannot be directly injected into manufacturing reactions; it must first be decompressed at an Upwell refinery. Decompression efficiency ($\text{Eff}_{\text{gas}}$) is calculated from SDE attributes:
-  $$\text{Eff}_{\text{gas}} = \text{Eff}_{\text{base}} (0.80) + B_{\text{structure}} + L_{\text{skill}} \times \left(\frac{B_{\text{skill\_pct}}}{100}\right)$$
+  $$\text{Eff}_{\text{gas}} = \text{Eff}_{\text{base}} (0.80) + B_{\text{structure}} + L_{\text{skill}} \times \left(\frac{B_{\text{skill-pct}}}{100}\right)$$
   Where:
   - $\text{Eff}_{\text{base}}$ = $0.80$ ($80\%$, Dogma attribute `3262`).
   - $B_{\text{structure}}$ = Structure bonus (`attr 3261`): $+0.04$ ($+4\%$) on an Athanor (`35835`), $+0.10$ ($+10\%$) on a Tatara (`35836`).

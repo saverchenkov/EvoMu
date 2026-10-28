@@ -14,32 +14,21 @@ In EvoMu, interstellar navigation is simulated across [`eve-server`](../../../cr
 
 ## 1. Overview & Lore Context
 
-```
-                                  ┌────────────────────────────────────────────────────────┐
-                                  │             Interstellar Transit Modalities            │
-                                  └──────────────────────────┬─────────────────────────────┘
-                                                             │
-                      ┌──────────────────────────────────────┴──────────────────────────────────────┐
-                      ▼                                                                             ▼
-        ┌───────────────────────────┐                                                 ┌───────────────────────────┐
-        │   Stargate Network (Sub)  │                                                 │  Cynosural Jump Drives    │
-        │   Macroscopic Gate Pairs  │                                                 │  Point-to-Point Tunnels   │
-        └─────────────┬─────────────┘                                                 └─────────────┬─────────────┘
-                      │                                                                             │
-     ┌────────────────┼────────────────┐                                             ┌──────────────┼──────────────┐
-     ▼                ▼                ▼                                             ▼              ▼              ▼
-┌──────────────┐ ┌──────────────┐ ┌──────────────┐                           ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-│  Empire Gate │ │ Pirate / FW  │ │ Zarzakh Gate │                           │Standard Cyno │ │ Covert Cyno  │ │Industrial Cyn│
-│  (Border/Reg)│ │ (Smuggler)   │ │ (Ancient Jov)│                           │(Recon / HIC) │ │(Bomber / BLOP│ │(Transport/Ind│
-└──────────────┘ └──────────────┘ └──────────────┘                           └──────────────┘ └──────────────┘ └──────────────┘
-     │                │                │                                             │              │              │
-     └────────────────┼────────────────┘                                             └──────────────┼──────────────┘
-                      ▼                                                                             ▼
-        ┌───────────────────────────┐                                                 ┌───────────────────────────┐
-        │  Session Change (10s lock)│                                                 │  Jump Range Calibration   │
-        │  Gate Cloak (60s invuln)  │                                                 │  Isotope Fuel Consumption │
-        │  Destiny Spatial Transfer │                                                 │  Jump Fatigue & Cooldown  │
-        └───────────────────────────┘                                                 └───────────────────────────┘
+```mermaid
+flowchart TD
+    Transit["Interstellar Transit Modalities"] --> Stargates["Stargate Network (Macroscopic Gate Pairs)"]
+    Transit --> Cyno["Cynosural Jump Drives (Point-to-Point Tunnels)"]
+
+    Stargates --> SG1["Empire Gates (Border/Regional)"]
+    Stargates --> SG2["Pirate / FW Smuggler Gates"]
+    Stargates --> SG3["Zarzakh Gates (Ancient Jovian)"]
+
+    Cyno --> C1["Standard Cyno (Recon / HIC)"]
+    Cyno --> C2["Covert Cyno (Bomber / BLOPs)"]
+    Cyno --> C3["Industrial Cyno (Transport / Rorqual)"]
+
+    SG1 & SG2 & SG3 --> SGMechanics["Stargate Mechanics<br/>• 10s Session Change Lock<br/>• 60s Gate Cloak Invulnerability<br/>• Destiny Spatial Transfer"]
+    C1 & C2 & C3 --> CynoMechanics["Cynosural Mechanics<br/>• Jump Range Calibration<br/>• Isotope Fuel Consumption<br/>• Jump Fatigue & Phoebe Cooldowns"]
 ```
 
 ### The Stargate Network
@@ -91,14 +80,14 @@ Where $R_{\text{gate}}$ is the collision radius of the stargate model (attribute
 #### 2. Session Change Guard (10-Second Transition Lock)
 Session changes in EVE (jumping gates, docking, undocking, switching ships) place an immutable 10-second lock on the character session:
 
-$$t_{\text{remaining}} = \max\left(0, \; 10 - (t_{\text{now}} - t_{\text{last\_session\_change}})\right)$$
+$$t_{\text{remaining}} = \max\left(0, \; 10 - (t_{\text{now}} - t_{\text{last-session-change}})\right)$$
 
 Any attempt to jump a stargate or activate a jump drive while $t_{\text{remaining}} > 0$ fails with `SessionChangeInProgress`. This invariant prevents race conditions, ghost duplication, and database snapshot synchronization deadlocks.
 
 #### 3. Spatial Displacement & Gate Cloak
 Upon arrival in the destination solar system, the ship ball is instantiated with specific kinematic properties:
 * **Position Offset:** Placed at the destination stargate coordinates with a displacement offset:
-  $$\vec{x}_{\text{arrival}} = \vec{x}_{\text{dest\_gate}} + (R_{\text{gate}} + 1\,500\text{ m}) \cdot \hat{u}$$
+  $$\vec{x}_{\text{arrival}} = \vec{x}_{\text{dest-gate}} + (R_{\text{gate}} + 1\,500\text{ m}) \cdot \hat{u}$$
 * **Velocity Reset:** Velocity is set to zero ($\vec{v} = \vec{0}$), speed fraction to $0.0$, and mode to `MovementMode::Stop`.
 * **Gate Cloak Invulnerability:** The ship receives an automatic **Gate Cloak** lasting $60\text{ seconds}$ ($60\text{ physics ticks}$):
   $$\text{GateCloakTicks} = 60$$
@@ -135,7 +124,7 @@ A capital ship or Black Ops battleship with an operational jump drive can execut
 #### 1. Maximum Jump Range
 Operational jump range is governed by the ship's base jump range and the pilot's **Jump Drive Calibration (JDC)** skill:
 
-$$d_{\max} = d_{\text{base}} \times \left(1 + 0.20 \times \text{JDC\_Level}\right) \quad [\text{Light-Years}]$$
+$$d_{\max} = d_{\text{base}} \times \left(1 + 0.20 \times \text{JDC-Level}\right) \quad [\text{Light-Years}]$$
 
 * At JDC Level 5, the ship's operational jump envelope is doubled ($+100\%$).
 * Standard capital hulls (Dreadnoughts, Carriers, Titans) typically have $d_{\text{base}} = 5.0\text{ LY}$, giving maximum range $d_{\max} = 10.0\text{ LY}$.
@@ -161,12 +150,12 @@ Jump drives burn empire-specific racial isotopes (attribute `jumpDriveConsumptio
 
 Fuel consumption scales linearly with jump distance and is mitigated by the **Jump Fuel Conservation (JFC)** skill and hull bonuses:
 
-$$\text{Fuel}_{\text{isotopes}} = \left\lceil \text{baseNeed} \times d_{\text{LY}} \times (1 - 0.10 \times \text{JFC\_Level}) \times (1 - 0.05 \times \text{JF\_Level}) \right\rceil$$
+$$\text{Fuel}_{\text{isotopes}} = \left\lceil \text{baseNeed} \times d_{\text{LY}} \times (1 - 0.10 \times \text{JFC-Level}) \times (1 - 0.05 \times \text{JF-Level}) \right\rceil$$
 
 Where:
 * $\text{baseNeed}$ is the hull's `jumpDriveConsumptionAmount` (attribute `868`).
-* $\text{JFC\_Level} \in [0, 5]$ provides a $-10\%$ reduction per level (up to $-50\%$).
-* $\text{JF\_Level} \in [0, 5]$ provides an additional $-5\%$ reduction per level for Jump Freighters.
+* $\text{JFC-Level} \in [0, 5]$ provides a $-10\%$ reduction per level (up to $-50\%$).
+* $\text{JF-Level} \in [0, 5]$ provides an additional $-5\%$ reduction per level for Jump Freighters.
 
 ---
 
@@ -174,29 +163,16 @@ Where:
 
 Titans and Black Ops battleships can fit **Jump Portal Generators** to transport subcapital fleet members across space.
 
-```
-                  ┌────────────────────────────────────────────────────────┐
-                  │                 Fleet Transit Portals                  │
-                  └──────────────────────────┬─────────────────────────────┘
-                                             │
-             ┌───────────────────────────────┴───────────────────────────────┐
-             ▼                                                               ▼
-┌─────────────────────────┐                                     ┌─────────────────────────┐
-│     Titan Bridge        │                                     │     Conduit Jump        │
-│  (Jump Portal Gen I)    │                                     │  (Black Ops Battleship) │
-└────────────┬────────────┘                                     └────────────┬────────────┘
-             │                                                               │
-             ├─ Opens temporary spatial bridge                               ├─ Black Ops jumps itself
-             ├─ Titan remains in origin system                               ├─ Drags fleet passengers with it
-             ├─ Stront consumed on activation                                ├─ Fleet members within 10 km
-             ├─ Isotopes paid per passenger mass                             └─ Subcaps only (Non-capitals)
-             └─ Subcaps jump individually through bridge
+```mermaid
+flowchart TD
+    Portals["Fleet Transit Portals"] --> Bridge["Titan Bridge (Jump Portal Gen I)<br/>• Titan remains in origin system<br/>• Consumes Strontium on portal open<br/>• Isotopes paid per passenger ship mass<br/>• Subcaps jump individually across bridge"]
+    Portals --> Conduit["Conduit Jump (Black Ops Battleship)<br/>• Black Ops jumps itself directly<br/>• Drags up to 30 fleet passengers within 10 km<br/>• Single mass group activation<br/>• Subcapitals only (no capital ships)"]
 ```
 
 #### 1. Titan Jump Portal Bridging (`Jump Portal Generator I`)
 * **Activation:** Consumes **Strontium Clathrates** (`attribute 713`, type `16275`) to open a portal to a distant fleet cyno for $\sim 60\text{ seconds}$.
 * **Passenger Fuel Cost:** Each bridged subcapital ship consumes fuel from the Titan's fuel bay proportional to the passenger's physical mass and jump distance:
-  $$\text{Fuel}_{\text{bridge}} = \left\lceil \text{TitanConsumption} \times \text{MassFactor} \times M_{\text{ship}} \times d_{\text{LY}} \times (1 - 0.10 \times \text{JFC\_Level}) \right\rceil$$
+  $$\text{Fuel}_{\text{bridge}} = \left\lceil \text{TitanConsumption} \times \text{MassFactor} \times M_{\text{ship}} \times d_{\text{LY}} \times (1 - 0.10 \times \text{JFC-Level}) \right\rceil$$
   Where $\text{MassFactor}$ is the portal's `jumpPortalConsumptionMassFactor` (attribute `1001`).
 * **Hull Restriction:** Capitals cannot jump through Titan portals (`JumpBridgeRestrictedShip`).
 
@@ -215,19 +191,11 @@ Titans and Black Ops battleships can fit **Jump Portal Generators** to transport
 
 Introduced in the Phoebe release and refined in subsequent updates, Jump Fatigue prevents the instantaneous consolidation of supercapital projection across New Eden. Every jump drive activation or portal transit updates two interrelated counters: **Jump Activation Cooldown** and **Jump Fatigue Accumulation**.
 
-```
-Jump Executed
-     │
-     ├─► 1. Calculate Effective Distance:
-     │      d_eff = d_LY * (1 - HullFatigueReduction)
-     │
-     ├─► 2. Update Jump Activation Cooldown (T_cooldown):
-     │      T_cooldown = max(1.0 + d_eff, T_fatigue_curr / 10.0) [minutes]
-     │      (Minimum wait before next jump drive activation)
-     │
-     └─► 3. Accumulate Jump Fatigue (T_fatigue):
-            T_fatigue_new = min(300.0, max(T_fatigue_curr, 10.0) * (1.0 + d_eff)) [minutes]
-            (Decays linearly in real-time until reaching 0)
+```mermaid
+flowchart TD
+    Jump["Jump Drive / Portal Executed"] --> Step1["1. Calculate Effective Distance<br/>d_eff = d_LY · (1 - HullFatigueReduction)"]
+    Step1 --> Step2["2. Jump Activation Cooldown<br/>T_cooldown = max(1.0 + d_eff, T_fatigue_curr / 10.0) [min]<br/>• Minimum wait before next jump activation"]
+    Step1 --> Step3["3. Accumulate Jump Fatigue<br/>T_fatigue_new = min(300.0, max(T_fatigue_curr, 10.0) · (1.0 + d_eff)) [min]<br/>• Maximum 5-hour hard ceiling; decays linearly in real time"]
 ```
 
 #### The Precise Mathematical Formulation
@@ -241,11 +209,11 @@ Jump Executed
 
 2. **Jump Activation Cooldown ($T_{\text{cooldown}}$):**
    The minimum wait time (in minutes) before the pilot may activate a jump drive or bridge again:
-   $$T_{\text{cooldown}} = \max\left(1.0 + d_{\text{eff}}, \; \frac{T_{\text{fatigue\_current}}}{10.0}\right) \quad [\text{minutes}]$$
+   $$T_{\text{cooldown}} = \max\left(1.0 + d_{\text{eff}}, \; \frac{T_{\text{fatigue-current}}}{10.0}\right) \quad [\text{minutes}]$$
 
 3. **Jump Fatigue Accumulation ($T_{\text{fatigue}}$):**
    The total fatigue timer (in minutes) stored on the character record:
-   $$T_{\text{fatigue\_new}} = \min\left(300.0, \; \max(T_{\text{fatigue\_current}}, \; 10.0) \times (1.0 + d_{\text{eff}})\right) \quad [\text{minutes}]$$
+   $$T_{\text{fatigue-new}} = \min\left(300.0, \; \max(T_{\text{fatigue-current}}, \; 10.0) \times (1.0 + d_{\text{eff}})\right) \quad [\text{minutes}]$$
    * **The 10-Minute Minimum Floor:** If the character currently has 0 fatigue, the calculation treats current fatigue as $10.0\text{ minutes}$. Thus, even a first jump of $5\text{ LY}$ produces:
      $$T_{\text{fatigue}} = 10.0 \times (1.0 + 5.0) = 60.0\text{ minutes (1 hour)}$$
      $$T_{\text{cooldown}} = \max\left(1.0 + 5.0, \; \frac{60.0}{10.0}\right) = 6.0\text{ minutes}$$
@@ -253,7 +221,7 @@ Jump Executed
 
 4. **Real-Time Fatigue Relaxation:**
    Fatigue decays linearly with real wall-clock time:
-   $$T_{\text{fatigue}}(t) = \max\left(0, \; \frac{t_{\text{expiry\_unix}} - t_{\text{now\_unix}}}{60.0}\right)$$
+   $$T_{\text{fatigue}}(t) = \max\left(0, \; \frac{t_{\text{expiry-unix}} - t_{\text{now-unix}}}{60.0}\right)$$
 
 ---
 
@@ -261,31 +229,27 @@ Jump Executed
 
 EvoMu organizes stargate and cynosural transit across clean-room Rust modules:
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                              eve-server                                │
-│                                                                        │
-│   ┌───────────────────────────┐      ┌───────────────────────────────┐ │
-│   │   space_warp_jump.rs      │      │   fitting_cyno_portal.rs      │ │
-│   │   Stargate Jump & Cloak   │      │   Cyno Beacons, Jump & Bridge │ │
-│   └─────────────┬─────────────┘      └───────────────┬───────────────┘ │
-│                 │                                    │                 │
-│                 ▼                                    ▼                 │
-│   ┌───────────────────────────┐      ┌───────────────────────────────┐ │
-│   │       formulas.rs         │      │      space_destiny.rs         │ │
-│   │   Fuel & Fatigue Math     │      │   Session Timers & Invuln     │ │
-│   └─────────────┬─────────────┘      └───────────────┬───────────────┘ │
-└─────────────────┼────────────────────────────────────┼─────────────────┘
-                  │                                    │
-                  ▼                                    ▼
-┌───────────────────────────────────┐  ┌─────────────────────────────────┐
-│            eve-destiny            │  │             eve-db              │
-│                                   │  │                                 │
-│   SystemHandle / Ballpark         │  │   WorldStateSnapshot            │
-│   remove_ball / spawn_ball        │  │   characters (fatigue_minutes)  │
-│   gate_cloak_remaining_ticks = 60 │  │   items & cargos (isotopes)     │
-│   is_ball_scrambled               │  │   zarzakh_gate_locks            │
-└───────────────────────────────────┘  └─────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph Server["eve-server"]
+        WJ["space_warp_jump.rs<br/>• Stargate Jump & Cloak Logic<br/>• Session Change Timer"]
+        CP["fitting_cyno_portal.rs<br/>• Cyno Beacons, Jump & Bridge<br/>• Black Ops Conduits & Jammers"]
+        F["formulas.rs<br/>• Jump Fuel & Phoebe Fatigue Math"]
+        SD["space_destiny.rs<br/>• Session Timers & Invulnerability"]
+        WJ --> F
+        CP --> F
+    end
+
+    subgraph Destiny["eve-destiny"]
+        D["SystemHandle / Ballpark<br/>• remove_ball / spawn_ball<br/>• gate_cloak_remaining_ticks = 60<br/>• is_ball_scrambled"]
+    end
+
+    subgraph DB["eve-db"]
+        S["WorldStateSnapshot<br/>• characters (fatigue_minutes)<br/>• items & cargos (isotopes)<br/>• zarzakh_gate_locks"]
+    end
+
+    F --> Destiny
+    CP --> DB
 ```
 
 ### 3.1 Crate & Source Module Breakdown
@@ -375,30 +339,11 @@ EvoMu's stargate transitions, cynosural mechanics, and jump fatigue systems are 
 
 Stargates and cynosural jump drives form the dual circulatory system of New Eden:
 
-```
-┌─────────────────────────────────┐
-│     Spatial Proximity Check     │  ◄── Stargate <= 2500m / Cyno In-Range
-│  (Distance, Timers, Scrambles)  │
-└────────────────┬────────────────┘
-                 │
-                 ▼
-┌─────────────────────────────────┐
-│      Session Migration Lock     │  ◄── 10-Second Transition Guard
-│  (DB Snapshot System Update)    │
-└────────────────┬────────────────┘
-                 │
-                 ▼
-┌─────────────────────────────────┐
-│      Ballpark Materialization   │  ◄── Destiny 1 Hz Kinematics
-│  - Stargates: 60s Gate Cloak    │  ◄── Untargetable Invulnerability
-│  - Cynos: 2500m Offset Arrival  │  ◄── Spatial Scatter
-└────────────────┬────────────────┘
-                 │
-                 ▼
-┌─────────────────────────────────┐
-│    Fatigue & Cooldown Ledger    │  ◄── Phoebe Equation: Max 5h Ceiling
-│  (Linear Wall-Clock Relaxation) │  ◄── Activation Cooldown Enforcement
-└─────────────────────────────────┘
+```mermaid
+flowchart TD
+    Spatial["Spatial Proximity Check<br/>• Stargate ≤ 2,500m / Cyno In-Range<br/>• Scramble & Combat Timer Gates"] --> Lock["Session Migration Lock<br/>• 10-Second Transition Guard<br/>• DB Snapshot Solar System Update"]
+    Lock --> Spawn["Ballpark Materialization (Destiny 1 Hz)<br/>• Stargates: 60s Gate Cloak Invulnerability<br/>• Cynos: 2,500m Offset Scatter Arrival"]
+    Spawn --> Fatigue["Fatigue & Cooldown Ledger<br/>• Phoebe Equation: Max 5h Ceiling<br/>• Linear Wall-Clock Decay & Activation Cooldown"]
 ```
 
 By enforcing strict session change idempotency, mathematical fuel consumption, and post-Phoebe fatigue decay, EvoMu maintains full parity with canonical EVE Online navigation dynamics within a modern, memory-safe Rust architecture.

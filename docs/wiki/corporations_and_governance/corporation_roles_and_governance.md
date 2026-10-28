@@ -12,36 +12,21 @@ In the sprawling expanse of New Eden, the **Corporation** serves as the foundati
 
 From the state-sanctioned megacorporations of the Caldari Megacorporate Council to the fiercely independent capsuleer syndicates of null-security space, corporations operate as chartered sovereign institutions. A corporation possesses an autonomous legal identity, sovereign assets, divisional accounting vaults, automated manufacturing arrays, and collective military standings.
 
-```
-                              ┌───────────────────────────────────────────────┐
-                              │           Chief Executive Officer (CEO)       │
-                              │           u64::MAX Full Root Sovereignty      │
-                              └───────────────────────┬───────────────────────┘
-                                                      │
-                         ┌────────────────────────────┴────────────────────────────┐
-                         ▼                                                         ▼
-         ┌───────────────────────────────┐                         ┌───────────────────────────────┐
-         │       Board of Directors      │                         │       Corporate Shareholder   │
-         │     ROLE_DIRECTOR (1 << 0)    │                         │       Democracy & Voting      │
-         └───────────────┬───────────────┘                         └───────────────┬───────────────┘
-                         │                                                         │
-       ┌─────────────────┼─────────────────┐                                       │
-       ▼                 ▼                 ▼                                       ▼
-┌──────────────┐  ┌──────────────┐  ┌──────────────┐                       ┌──────────────┐
-│  Personnel   │  │  Accountant  │  │   Station    │                       │ CEO Removal  │
-│   Manager    │  │ (Div 1-7 ISK)│  │   Manager    │                       │  & Sanction  │
-└──────────────┘  └──────────────┘  └──────────────┘                       └──────────────┘
-       │                 │                 │
-       ▼                 ▼                 ▼
-┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│ Recruitment  │  │  7 Divisional│  │  7 Divisional│
-│  & Medals    │  │   Wallets    │  │   Hangars    │
-└──────────────┘  └──────────────┘  └──────────────┘
+```mermaid
+flowchart TD
+    CEO["Chief Executive Officer (CEO)<br/>u64::MAX Full Root Sovereignty"] --> Directors["Board of Directors<br/>ROLE_DIRECTOR (1 &lt;&lt; 0)"]
+    CEO --> Shareholders["Corporate Shareholders<br/>Democracy & Voting"]
+
+    Directors --> Personnel["Personnel Manager<br/>Recruitment & Medals"]
+    Directors --> Accountant["Accountant<br/>7 Divisional Wallets"]
+    Directors --> Station["Station Manager<br/>7 Divisional Hangars"]
+
+    Shareholders --> Sanction["CEO Removal & Sanction Proposals"]
 ```
 
 However, corporate power within New Eden is perpetually contested. Betrayal, corporate espionage, and unauthorized asset liquidation represent existential threats to any capsuleer organization. To maintain order, the corporate governance framework balances centralized executive dictatorship with shareholder democracy, protected by hard real-time cryptographic delays on high-privilege access promotions.
 
-In [`EvoMu`](../../), the corporation system is implemented with clean-room precision across the [`eve-server`](../../../crates/eve-server), [`eve-db`](../../../crates/eve-db), and [`eve-proto`](../../../crates/eve-proto) crates. The architecture accurately simulates the entire lifecycle of corporate existence: dynamic genesis fees, 64-bit permission role bitmasks, 7-division inventory and wallet compartmentalization, shareholder voting and CEO replacement protocols, automated player project bounties, and diplomatic alliance standings.
+In [`EvoMu`](../../../), the corporation system is implemented with clean-room precision across the [`eve-server`](../../../crates/eve-server), [`eve-db`](../../../crates/eve-db), and [`eve-proto`](../../../crates/eve-proto) crates. The architecture accurately simulates the entire lifecycle of corporate existence: dynamic genesis fees, 64-bit permission role bitmasks, 7-division inventory and wallet compartmentalization, shareholder voting and CEO replacement protocols, automated player project bounties, and diplomatic alliance standings.
 
 ---
 
@@ -95,13 +80,19 @@ The deducted `Tax Amount` is immediately transferred to the corporation's **Mast
 
 Authority within a corporation is encoded via a 64-bit unsigned bitmask (`u64`). Roles are checked using bitwise operations:
 
-$$\text{Authorized}(R_{\text{member}}, R_{\text{required}}) \iff (R_{\text{member}} = 2^{64}-1) \lor (R_{\text{member}} \ \& \ R_{\text{DIRECTOR}} \neq 0) \lor (R_{\text{member}} \ \& \ R_{\text{required}} = R_{\text{required}})$$
+$$\text{Authorized}(R_{\text{member}}, R_{\text{required}}) \iff (R_{\text{member}} = 2^{64}-1) \lor (R_{\text{member}} \land R_{\text{DIRECTOR}} \neq 0) \lor (R_{\text{member}} \land R_{\text{required}} = R_{\text{required}})$$
 
-```
- 63                                                  33 32               20 19      13 12       0
-┌───┬───────────────────────────────────────────────┬─────┬────────────────┬──────────┬──────────┐
-│...│ Contract Mgr / Starbase Config / Jr Account   │W.Tk7│... W.Tk1 / Trd │H.Tk7..Tk1│ Director │
-└───┴───────────────────────────────────────────────┴─────┴────────────────┴──────────┴──────────┘
+```mermaid
+flowchart LR
+    subgraph Bitmask["Corporate u64 Role Bitmask Partitioning"]
+        direction LR
+        B0["Bit 0<br/>Director<br/>(Full Root)"]
+        B1["Bits 1..=12<br/>Officers<br/>(Personnel, Acct, Sec)"]
+        B2["Bits 13..=19<br/>Hangar Take<br/>(Divisions 1..=7)"]
+        B3["Bits 20..=32<br/>Market & Query<br/>(Divisions 1..=7)"]
+        B4["Bits 33..=39<br/>Wallet Take<br/>(Divisions 1..=7)"]
+        B5["Bits 40..=63<br/>Infrastructure<br/>(Citadels, POS, Industry)"]
+    end
 ```
 
 The canonical role bit definitions are mapped as follows:
@@ -145,26 +136,16 @@ When the CEO or a Director grants high-privilege roles—specifically **Director
 
 $$t_{\text{effective}} = t_{\text{grant}} + 86,400\text{ seconds} \quad (24\text{ hours})$$
 
-```
-Pilot State: Ordinary Member
-     │
-     │ [Director issues promotion: +ROLE_DIRECTOR]
-     ▼
-Pilot State: Pending Promotion
-     ├─ pending_role_grants: (p_mask, t_now + 86,400)
-     ├─ Effective Roles: Old Roles (Privileges MASKED)
-     │
-     ├─ (Within 24h Window): CEO/Director can CANCEL grant or KICK pilot
-     │
-     ▼ (t >= t_grant + 86,400s)
-promote_due_pending_corp_grants()
-     ▼
-Pilot State: Promoted Director (Full Privilege Unlocked)
+```mermaid
+flowchart TD
+    Init["Ordinary Corporate Member"] -->|Director issues high-privilege grant| Pending["Pending Role Promotion<br/>• pending_role_grants: (p_mask, t_now + 86,400)<br/>• Privileges Strictly MASKED: R_effective = R_curr ∧ ¬R_pending<br/>• 24h Window: Leadership can Cancel Grant or Kick Pilot"]
+    Pending -->|Elapsed t ≥ t_grant + 86,400s| Promote["promote_due_pending_corp_grants()<br/>Promotion Matures & Merges Bitmask"]
+    Promote --> Active["Full Privileges Unlocked"]
 ```
 
 1. **Pending Holding State:** The role bitmask is appended to `pending_role_grants` (or `pending_scoped_role_grants`), recording the exact maturation timestamp $t_{\text{effective}}$.
 2. **Masked Effective Privilege:** During the 24-hour interval, server-side permission evaluations strictly mask out pending bits:
-   $$R_{\text{effective}} = R_{\text{current}} \ \& \ \neg R_{\text{pending}}$$
+   $$R_{\text{effective}} = R_{\text{current}} \land \neg R_{\text{pending}}$$
 3. **Audit Window:** The corporation's leadership has 24 hours to observe the pending promotion in corporate audit logs. If an unauthorized promotion was initiated by a compromised account, the CEO can revoke the pending grant or expel the member before the roles mature.
 4. **Immediate Revocation Invariant:** Role **removals** take effect **instantaneously** ($0\text{ seconds}$ delay) and log a timestamp to prevent race conditions.
 5. **Friendly Fire Toggle:** Changing a corporation's Friendly Fire legal policy also requires an identical 24-hour delay before the legal flag flips.
@@ -204,28 +185,19 @@ Corporate liquid capital is segregated across 7 wallet accounts:
 
 Corporations in New Eden are joint-stock entities. Governance, leadership succession, and capital restructuring are executed through shareholder democracy:
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        Corporate Share Allocation                      │
-│                                                                        │
-│   ┌───────────────────────────┐      ┌───────────────────────────┐     │
-│   │     Company Treasury      │      │     Private Shareholders  │     │
-│   │    (Company Shares)       │      │   (Characters / Corps)    │     │
-│   │         1,000             │      │         Shares: N         │     │
-│   └─────────────┬─────────────┘      └─────────────┬─────────────┘     │
-└─────────────────┼──────────────────────────────────┼───────────────────┘
-                  │                                  │
-                  ▼                                  ▼
-         MoveCompanyShares                  MovePrivateShares
-                  │                                  │
-                  └─────────────────┬────────────────┘
-                                    ▼
-                         Shareholder Vote Cases
-              ┌─────────────────────┼─────────────────────┐
-              ▼                                           ▼
-       Vote Type 0: CEO Election           Vote Type 5: Share Creation
-       Duration: 86,400s (24h)             Duration: 86,400s (24h)
-       Weight: Exact Share Balance         Weight: Exact Share Balance
+```mermaid
+flowchart TD
+    subgraph Allocation["Corporate Share Allocation"]
+        Treasury["Company Treasury<br/>(1,000 Initial Shares)<br/>• Non-voting"]
+        Private["Private Shareholders<br/>(Characters & Corps)<br/>• Voting power = Shares held"]
+    end
+
+    Treasury -->|MoveCompanyShares| Private
+    Private -->|MovePrivateShares| Private
+
+    Private --> Votes["Shareholder Vote Cases (voteManager)"]
+    Votes --> V0["Type 0: CEO Election / Replacement<br/>• Duration: 86,400s (24h)<br/>• Majority overthrow transfers u64::MAX"]
+    Votes --> V5["Type 5: Share Creation<br/>• Duration: 86,400s (24h)<br/>• Dilution of corporate equity"]
 ```
 
 #### Share Structure & Transfers
@@ -261,7 +233,7 @@ Any shareholder holding corporate shares may initiate a formal corporate proposa
      $$\text{Passed} \iff \sum W_{\text{yes}} > \sum W_{\text{no}} \quad \text{and} \quad \sum W_{\text{yes}} > 0$$
    * For multi-option elections (CEO succession):
      $$\text{Winner} = \arg\max_{o \in \text{Options}} \sum W_o \quad \text{subject to} \quad W_{\text{winner}} > W_{\text{runner-up}}$$
-4. **Action Activation (`ActivateSanctionedAction`):** Once $t \ge \text{end\_ts}$, any Director can activate the passed proposal. For CEO elections, activation transfers the CEO mantle immediately, stripping the deposed CEO of root permissions.
+4. **Action Activation (`ActivateSanctionedAction`):** Once $t \ge \text{end-ts}$, any Director can activate the passed proposal. For CEO elections, activation transfers the CEO mantle immediately, stripping the deposed CEO of root permissions.
 
 ---
 
@@ -271,36 +243,17 @@ Corporation Projects allow leadership to configure decentralized, automated ince
 
 $$\text{Escrow Budget} = Q_{\text{target}} \times \text{Payout}_{\text{unit}}$$
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        Corporation Project Engine                      │
-│                                                                        │
-│   Project Configuration:                                               │
-│   - Target Quantity: Q_target                                          │
-│   - Unit Reward: ISK_unit                                              │
-│   - Escrow Pool: Deducted from Wallet Division 1 (Master)              │
-│                                                                        │
-│   Server-Side Matchers:                                                │
-│   ┌──────────────────────────────────────────────────────────────┐     │
-│   │ DamageNPCShips       │ DestroyCapsuleerShips │ MineMaterials │     │
-│   │ ManufactureItems     │ RemoteRepairShield    │ ScanSignatures│     │
-│   │ SalvageWrecks        │ CaptureFWComplexes    │ ...           │     │
-│   └──────────────────────────────────────────────────────────────┘     │
-│                                   │                                    │
-│                                   ▼                                    │
-│                   Pilot completes in-space action                      │
-│                                   │                                    │
-│                                   ▼                                    │
-│   record_server_project_activity_in_snap()                             │
-│   ├─ Check System / Type / Station Filters                             │
-│   ├─ Accepted = min(Qty, Q_rem, MaxPerPilot - Previous)                │
-│   ├─ Disburse ISK: Accepted * ISK_unit directly to Pilot Wallet        │
-│   └─ Decrement Escrow Pool                                             │
-│                                                                        │
-│   Project Lifecycle:                                                   │
-│   ├─ Completed: Q_current >= Q_target                                  │
-│   └─ Expired: t >= t_exp -> Refund Escrow to Corporate Wallet          │
-└────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph Config["Project Configuration"]
+        Budget["Escrow Budget = Q_target × Unit Reward<br/>(Deducted from Master Wallet Div 1)"]
+    end
+
+    Config --> Matchers["Server-Side Activity Matchers<br/>• DamageNPCShips / DestroyCapsuleerShips<br/>• MineMaterials / SalvageWrecks<br/>• ManufactureItems / ScanSignatures / FW Complexes"]
+
+    Matchers --> Action["Pilot Completes Matching In-Space Action"]
+    Action --> Record["record_server_project_activity_in_snap()<br/>1. Filter Solar System / Item Type / Location<br/>2. Accepted = min(Qty, Q_rem, MaxPerPilot - Previous)<br/>3. Disburse ISK directly to Pilot Wallet<br/>4. Decrement Project Escrow Balance"]
+    Record --> Lifecycle["Project Lifecycle<br/>• Completed: Q_current ≥ Q_target<br/>• Expired: Refund remaining escrow to Corp Wallet"]
 ```
 
 * **13 Tracked Contribution Archetypes:**
@@ -338,34 +291,28 @@ $$\text{Effective Standing} = \text{FirstNonNull}\big(\text{Personal Standing}, 
 
 EvoMu implements corporate governance via a clean-room Rust architecture spanning domain crates, MachoNet RPC dispatchers, transactional snapshots, and ESI OpenAPI endpoints.
 
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                                   eve-proto                                     │
-│            PyRep Wire Marshalling / Unmarshalling, DBRowSet Descriptors         │
-└────────────────────────────────────────┬────────────────────────────────────────┘
-                                         │
-┌────────────────────────────────────────▼────────────────────────────────────────┐
-│                                  eve-server                                     │
-│  MachoNet Services:                                                             │
-│  ├─ corpRegistry & corpmgr:        fleet_social_corps.rs & corp_gov.rs          │
-│  ├─ invbroker (Corp Hangars):      corp_registry_ops.rs                         │
-│  ├─ voteManager:                   fleet_social_corp_gov.rs & corp_tail.rs     │
-│  ├─ corporationSvc / corpStation:  fleet_social_corps.rs                        │
-│  └─ Corporation Projects:          social_corp_projects.rs                      │
-│                                                                                 │
-│  ESI REST API Routes:                                                           │
-│  └─ dispatch_corp_governance_route(): corp_governance_routes.rs                 │
-└────────────────────────────────────────┬────────────────────────────────────────┘
-                                         │
-┌────────────────────────────────────────▼────────────────────────────────────────┐
-│                                    eve-db                                       │
-│  Transactional Snapshot WorldStateSnapshot:                                     │
-│  ├─ snap.corporations:             CorporationRecord (Wallets, Roles, Members)  │
-│  ├─ snap.corp_governance:          CorpGovState (Pending Grants, Titles, Shares)│
-│  ├─ snap.corp_vote_cases:          CorpVoteCaseRecord                           │
-│  ├─ snap.corp_vote_ballots:        CorpVoteBallotRecord                         │
-│  └─ snap.corp_projects:            CorpProjectRecord & PersistedProjectDetails  │
-└─────────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph Proto["eve-proto"]
+        P["PyRep Wire Marshalling / Unmarshalling<br/>DBRowSet Descriptors"]
+    end
+
+    subgraph Server["eve-server Services & ESI"]
+        S1["fleet_social_corps.rs & corp_gov.rs<br/>• corpRegistry, corpmgr, voteManager"]
+        S2["corp_registry_ops.rs<br/>• invbroker (Corp Hangars & Take Roles)"]
+        S3["social_corp_projects.rs<br/>• Corporation Projects & Activity Matching"]
+        S4["corp_governance_routes.rs<br/>• ESI REST API Endpoints"]
+    end
+
+    subgraph DB["eve-db WorldStateSnapshot"]
+        D1["snap.corporations: CorporationRecord"]
+        D2["snap.corp_governance: CorpGovState"]
+        D3["snap.corp_vote_cases: CorpVoteCaseRecord"]
+        D4["snap.corp_projects: CorpProjectRecord"]
+    end
+
+    Proto --> Server
+    Server -->|Transactional Snapshot Mutations| DB
 ```
 
 ### 1. Crates Involved

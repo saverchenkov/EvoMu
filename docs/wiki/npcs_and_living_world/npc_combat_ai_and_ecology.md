@@ -85,8 +85,8 @@ stateDiagram-v2
 #### FSM State Transitions:
 - **`Idle`:** No hostile vessels detected within scanning range ($50\text{ km}$). The ship halts motion (`MovementMode::Stop`) or resumes routine patrol drift.
 - **`Chase`:** A hostile target is identified within $50\text{ km}$. The NPC engages sub-warp propulsion and pursues the target using `MovementMode::Follow { target_id, range: orbit_range }`.
-- **`Orbit`:** As distance closes within orbit envelope ($\le \text{orbit\_range} \times 1.4$), the NPC shifts kinematics to `MovementMode::Orbit { target_id, range: orbit_range }`, establishing an angular velocity vector designed to minimize incoming turret tracking.
-- **`Attack`:** When the target is within optimal weapon projection ($\le \text{optimal\_range} \times 1.25$), weapon cycles discharge damage vectors according to faction damage profiles. If internal HP pools suffer damage, self-repair or remote-logistics modules activate.
+- **`Orbit`:** As distance closes within orbit envelope ($\le \text{orbit-range} \times 1.4$), the NPC shifts kinematics to `MovementMode::Orbit { target_id, range: orbit_range }`, establishing an angular velocity vector designed to minimize incoming turret tracking.
+- **`Attack`:** When the target is within optimal weapon projection ($\le \text{optimal-range} \times 1.25$), weapon cycles discharge damage vectors according to faction damage profiles. If internal HP pools suffer damage, self-repair or remote-logistics modules activate.
 
 #### Threat Calculation & Weighting Formulas:
 Target selection is governed by a dynamic threat score calculated for every potential on-grid target. Baseline threat scales with the target's signature radius relative to a standard $40\text{ m}$ frigate baseline:

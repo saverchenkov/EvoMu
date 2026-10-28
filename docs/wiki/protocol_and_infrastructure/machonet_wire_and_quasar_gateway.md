@@ -46,7 +46,7 @@ The **EvoMu** project implements the complete wire-level protocol stack in pure 
 
 All MachoNet communications take place over bidirectional TCP stream connections. Because TCP provides a continuous stream of bytes without message boundaries, MachoNet frames every discrete packet using a **4-byte Little-Endian unsigned integer prefix** indicating the exact length of the payload in bytes:
 
-$$L_{\text{frame}} = \sum_{i=0}^{3} b_i \cdot 256^i = \text{u32::from\_le\_bytes}([b_0, b_1, b_2, b_3])$$
+$$L_{\text{frame}} = \sum_{i=0}^{3} b_i \cdot 256^i = \text{u32::from-le-bytes}([b_0, b_1, b_2, b_3])$$
 
 ```
 +-----------------------------------+---------------------------------------------------+
@@ -146,7 +146,7 @@ sequenceDiagram
 
 #### The CRC-CCITT Placebo Hash Algorithm
 In canonical `placebo` mode, EVE computes:
-$$\text{challenge\_responsehash} = \text{str}(\text{binascii.crc\_hqx}(\text{blue.marshal.Save}((\text{challenge},)), 0))$$
+$$\text{challenge-responsehash} = \text{str}(\text{binascii.crc-hqx}(\text{blue.marshal.Save}((\text{challenge},)), 0))$$
 
 The polynomial used is CRC-CCITT ($0\text{x}1021$):
 $$P(x) = x^{16} + x^{12} + x^5 + 1$$

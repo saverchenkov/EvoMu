@@ -70,7 +70,7 @@ Upwell structures can **only** be legally owned by player corporations (`owner_c
 
 #### Corporate Roles
 Initiating anchoring, unanchoring, renaming, profile changes, and defense settings requires explicit corporate management authority:
-$$\text{Authorized} \iff \text{Caller} \in \{\text{CEO}\} \lor \left(\text{corp\_role} \ \& \ (\text{ROLE\_DIRECTOR} \mid \text{ROLE\_STATION\_MANAGER}) \neq 0\right)$$
+$$\text{Authorized} \iff \text{Caller} \in \{\text{CEO}\} \lor \left((\text{corp-role} \land (\text{ROLE-DIRECTOR} \lor \text{ROLE-STATION-MANAGER})) \neq 0\right)$$
 This check is codified in [`has_structure_manager_role`](../../../crates/eve-server/src/services/structure_lifecycle_rpc.rs#L17-L34) and [`require_corp_profile_manager`](../../../crates/eve-server/src/services/structure_upwell_ops.rs#L822-L830).
 
 #### Unanchoring Lifecycle
@@ -192,14 +192,14 @@ Governed by [`armor_reinforcement_secs`](../../../crates/eve-server/src/services
 
 #### Multi-Timer Anchor Invariant
 For multi-timer structures (Large and Extra-Large hulls in Full Power), the hull reinforcement timer does **not** anchor to the conclusion of the armor timer; it anchors back to the initial start of the siege:
-$$T_{\text{earliest\_hull}} = \max\left(t_{\text{shield\_fight\_start}} + T_{\text{armor}} + T_{\text{hull}}, \ \text{now}\right)$$
+$$T_{\text{earliest-hull}} = \max\left(t_{\text{shield-fight-start}} + T_{\text{armor}} + T_{\text{hull}}, \ \text{now}\right)$$
 This ensures that the final hull timer falls strictly on the planned defensive day rather than drifting forward arbitrarily due to siege durations.
 
 #### UTC Hour Target Calculation
 Structures calculate the next occurrence of the corporation's designated vulnerability hour $H \in [0, 23]$:
-$$t_{\text{day\_start}} = t_{\text{earliest}} - (t_{\text{earliest}} \pmod{86{,}400})$$
-$$t_{\text{candidate}} = t_{\text{day\_start}} + (H \pmod{24}) \times 3{,}600$$
-$$t_{\text{base\_exit}} = \begin{cases} t_{\text{candidate}} & \text{if } t_{\text{candidate}} \ge t_{\text{earliest}} \\ t_{\text{candidate}} + 86{,}400 & \text{otherwise} \end{cases}$$
+$$t_{\text{day-start}} = t_{\text{earliest}} - (t_{\text{earliest}} \pmod{86{,}400})$$
+$$t_{\text{candidate}} = t_{\text{day-start}} + (H \pmod{24}) \times 3{,}600$$
+$$t_{\text{base-exit}} = \begin{cases} t_{\text{candidate}} & \text{if } t_{\text{candidate}} \ge t_{\text{earliest}} \\ t_{\text{candidate}} + 86{,}400 & \text{otherwise} \end{cases}$$
 
 #### Deterministic Jitter Mathematics & Same-Day Clamping
 To prevent exact fleet coordination across entire coalitions, an exit jitter window $J_{\max}$ is applied:
@@ -210,8 +210,8 @@ To prevent exact fleet coordination across entire coalitions, an exit jitter win
 Given a uniform random roll $U \in [0, 1)$, the jitter offset is:
 $$\Delta t_{\text{jitter}} = \text{round}\left((2U - 1) \cdot J_{\max}\right)$$
 To ensure that jitter **never rolls the timer across midnight into another UTC day**, EvoMu clamps the exit time to the target UTC day boundary:
-$$t_{\text{shifted}} = \max(0, \ t_{\text{base\_exit}} + \text{clamp}(\Delta t_{\text{jitter}}, -J_{\max}, J_{\max}))$$
-$$t_{\text{final\_exit}} = \text{clamp}(t_{\text{shifted}}, \ t_{\text{day\_start}}, \ t_{\text{day\_start}} + 86{,}399)$$
+$$t_{\text{shifted}} = \max(0, \ t_{\text{base-exit}} + \text{clamp}(\Delta t_{\text{jitter}}, -J_{\max}, J_{\max}))$$
+$$t_{\text{final-exit}} = \text{clamp}(t_{\text{shifted}}, \ t_{\text{day-start}}, \ t_{\text{day-start}} + 86{,}399)$$
 Implemented in [`apply_reinforce_jitter`](../../../crates/eve-server/src/services/structure_lifecycle.rs#L328-L338).
 
 ---
@@ -322,12 +322,12 @@ graph TD
 #### Asset Safety Formulas & Rules
 1. **Creation:** Items in personal hangars and corporate divisions are grouped per owner into an `AssetSafetyWrapRecord`.
 2. **5-Day Same-System Window:** Wraps become deliverable 5 days ($5 \times 86{,}400\text{ s}$) after creation (`ASSET_SAFETY_DELIVERY_DELAY_SECS`). If delivered to an accessible structure or station within the same solar system, a nominal recovery fee of **0.5%** of the estimated market value is assessed:
-   $$\text{Fee}_{\text{same\_system}} = 0.005 \times \text{Value}_{\text{estimated}}$$
+   $$\text{Fee}_{\text{same-system}} = 0.005 \times \text{Value}_{\text{estimated}}$$
 3. **20-Day Auto-Delivery:** If unclaimed after 20 days ($20 \times 86{,}400\text{ s}$), the wrap is automatically delivered to the **nearest NPC station** by Euclidean galactic distance within the same security band:
    - High-Sec origin ($\ge 0.45$) $\longrightarrow$ Nearest High-Sec station ($\ge 0.45$).
    - Low/Null-Sec origin ($< 0.45$) $\longrightarrow$ Nearest Low-Sec station ($0.0 < \text{sec} < 0.45$).
    - Retrieving the wrap from an NPC station requires a **15.0%** recovery fee:
-     $$\text{Fee}_{\text{npc\_recovery}} = 0.15 \times \text{Value}_{\text{estimated}}$$
+     $$\text{Fee}_{\text{npc-recovery}} = 0.15 \times \text{Value}_{\text{estimated}}$$
 4. **Wormhole Space Invariant:** J-space systems (solar system IDs $\ge 31{,}000{,}000$) **do not possess Asset Safety**. Manual triggers fail with `AssetSafetyUnavailableInWormhole`. Upon destruction, 100% of all personal and corporate hangar items drop into space as floating containers ([`plan_upwell_structures_closure.rs#L197-L205`](../../../crates/eve-server/tests/it/plan_upwell_structures_closure.rs#L197-L205)).
 
 ---
@@ -473,12 +473,12 @@ In High-Security space ($\text{sec} \ge 0.45$), attacking a player citadel requi
 ### 3. Tenant Personal Hangar Asset Protection on `DestroyFitting`
 A critical security invariant protects pilots docked in public citadels:
 - When calling `dogmaIM.DestroyFitting`, the server strictly validates:
-  $$\text{item.owner\_id} == \text{char\_id}$$
+  $$\text{item.owner-id} == \text{char-id}$$
   If a structure gunner or Station Manager attempts to pass an item ID belonging to a tenant pilot, the call is completely discarded ([`fitting_dogma_im.rs#L373-L375`](../../../crates/eve-server/src/services/fitting_dogma_im.rs#L373-L375)), preventing malicious citadel owners from stripping or destroying visitor modules.
 
 ### 4. Reinforcement Hour Negative-Jitter Clamping
 If an attacker triggers reinforcement shortly before the chosen `reinforce_hour`, applying a negative jitter offset could mathematically result in an exit timestamp in the past ($t_{\text{exit}} \le \text{now}$). EvoMu enforces a safety clamp:
-$$t_{\text{final\_exit}} = \max\left(\text{apply\_reinforce\_jitter}(t_{\text{base\_exit}}, \Delta t_{\text{jitter}}, J_{\max}), \ \text{now} + 60\right)$$
+$$t_{\text{final-exit}} = \max\left(\text{apply-reinforce-jitter}(t_{\text{base-exit}}, \Delta t_{\text{jitter}}, J_{\max}), \ \text{now} + 60\right)$$
 ensuring defenders always receive at least a minimum defensive response window.
 
 ---

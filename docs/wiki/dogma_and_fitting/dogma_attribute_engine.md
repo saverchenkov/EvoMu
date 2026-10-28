@@ -10,41 +10,19 @@
 
 In the architecture of EVE Online, **Dogma** is the fundamental mathematical simulation engine governing all physical interactions, starship performance, module behaviors, and character progression. While the Static Data Export (SDE) defines the immutable base templates for types, items, and attributes, no ship in New Eden flies on static data alone. Every aspect of a vessel—from its maximum velocity and effective hit points to its capacitor recharge rate, weapon tracking, and sensor resolution—is the dynamic output of an interconnected **Attribute Modifier Graph**.
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                              THE DOGMA GRAPH                                 │
-│                                                                              │
-│    Character Skills          Cybernetic Implants          Combat Boosters    │
-│    (e.g., Gunnery V)         (e.g., +5% Med. Hybrid)     (e.g., Drop Booster)│
-│           │                           │                           │          │
-│           └───────────────────┐       │       ┌───────────────────┘          │
-│                               ▼       ▼       ▼                              │
-│                       ┌───────────────────────────────┐                      │
-│                       │      Character Attributes     │                      │
-│                       └───────────────┬───────────────┘                      │
-│                                       │ LocationRequiredSkillModifier        │
-│                                       ▼                                      │
-│                       ┌───────────────────────────────┐                      │
-│                       │        Ship Hull Dogma        │                      │
-│                       │   (Base PG, CPU, Agility,     │                      │
-│                       │    Shield, Armor, Structure)  │                      │
-│                       └───────┬───────────────▲───────┘                      │
-│                               │               │                              │
-│       LocationGroupModifier   │               │ ItemModifier                 │
-│      (Ship Bonus per Level)   │               │ (Magnetic Field Stab., etc.) │
-│                               ▼               │                              │
-│                       ┌───────────────────────┴───────┐                      │
-│                       │     Fitted Active/Passive     │                      │
-│                       │     Modules & Rig Hardware    │                      │
-│                       └───────────────────────────────┘                      │
-│                                       │                                      │
-│                                       ▼                                      │
-│                       ┌───────────────────────────────┐                      │
-│                       │       Tactical Execution      │                      │
-│                       │   (Damage, Tracking, Range,   │                      │
-│                       │    Capacitor, Heat, Kinematics)                      │
-│                       └───────────────────────────────┘                      │
-└──────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph Char["Pilot Modifiers"]
+        Skills["Character Skills<br/>(e.g., Gunnery V)"]
+        Implants["Cybernetic Implants<br/>(e.g., +5% Med. Hybrid)"]
+        Boosters["Combat Boosters<br/>(e.g., Drop Booster)"]
+    end
+
+    Skills & Implants & Boosters --> CharAttr["Character Attributes"]
+    CharAttr -->|LocationRequiredSkillModifier| Hull["Ship Hull Dogma<br/>(Base PG, CPU, Agility, Tank)"]
+    Hull -->|LocationGroupModifier<br/>(Ship Bonus per Level)| Modules["Fitted Active/Passive Modules & Rigs"]
+    Modules -->|ItemModifier<br/>(Damage, Resist Modifiers)| Hull
+    Modules --> Execution["Tactical Execution<br/>(Damage, Tracking, Range, Capacitor, Heat, Kinematics)"]
 ```
 
 Within the lore of New Eden, Dogma represents the standard operating firmware mandated by CONCORD and the Empires. When a capsuleer plugs into the Capsule interface via cranial cybernetics, their neural impulses bridge with the starship's central mainframe. The Dogma engine runs as a deterministic virtual machine aboard the vessel, calculating energy distribution, quantum magnetic fields, and thermodynamics thousands of times per minute.
@@ -62,17 +40,17 @@ Every entity in Dogma (character, ship, module, drone, charge, structure) posses
 #### The 9 Evaluation Stages & Operator Precedence
 EVE Dogma evaluates modifiers in a strict ascending order of precedence. The operator precedence sequence is defined as follows:
 
-```
-Stage 0: PreAssign           (SDE Op -1)  ── Hard pre-assignment override
-Stage 1: PreMul              (SDE Op  0)  ── Direct base multiplier
-Stage 2: PreDiv              (SDE Op  1)  ── Direct base divisor
-Stage 3: ModAdd              (SDE Op  2)  ── Flat scalar addition
-Stage 4: ModSub              (SDE Op  3)  ── Flat scalar subtraction
-Stage 5: PostMul / PostDiv   (SDE Op 4/5) ── Multiplicative scaling after additions
-Stage 6: PostPercent         (SDE Op  6)  ── Percentage modifier (subject to stacking penalty)
-Stage 7: PostPercentUnNerfed (SDE Op  8)  ── Percentage modifier (exempt from stacking penalty)
-Stage 8: PostAssign          (SDE Op  7)  ── Final hard post-assignment clamp
-```
+| Evaluation Stage | SDE Opcode | Operator Type | Semantic Behavior |
+| :---: | :---: | :--- | :--- |
+| **Stage 0** | `-1` | `PreAssign` | Hard pre-assignment override |
+| **Stage 1** | `0` | `PreMul` | Direct base multiplier |
+| **Stage 2** | `1` | `PreDiv` | Direct base divisor |
+| **Stage 3** | `2` | `ModAdd` | Flat scalar addition |
+| **Stage 4** | `3` | `ModSub` | Flat scalar subtraction |
+| **Stage 5** | `4 / 5` | `PostMul / PostDiv` | Multiplicative scaling after additions |
+| **Stage 6** | `6` | `PostPercent` | Percentage modifier (subject to stacking penalties) |
+| **Stage 7** | `8` | `PostPercentUnNerfed` | Percentage modifier (exempt from stacking penalties) |
+| **Stage 8** | `7` | `PostAssign` | Final hard post-assignment clamp |
 
 Mathematically, the effective value $V_{\text{final}}$ of an attribute with base value $V_0$ is resolved across these stages:
 
@@ -114,20 +92,13 @@ $$S(i) = e^{-\left(\frac{i-1}{2.67}\right)^2} = e^{-\frac{(i-1)^2}{7.1289}}$$
 In 0-indexed form ($n = i - 1$):
 $$S(n) = e^{-\frac{n^2}{7.1289}}$$
 
-```
-Effectiveness (%)
-100% ────┐
-         │ (100.00%)
- 80% ────┴───┐
-             │ (86.91%)
- 60% ────────┴───────┐
-                     │ (57.10%)
- 40% ────────────────┴───────┐
-                             │ (28.29%)
- 20% ────────────────────────┴───────┐
-                                     │ (10.60%)
-  0% ────────────────────────────────┴───────┬───────────┐
-    Module 1       Module 2       Module 3   Module 4   Module 5   Module 6 (2.99%)
+```mermaid
+flowchart LR
+    M1["1st Module<br/>100.00% Efficiency"] --> M2["2nd Module<br/>86.91% Efficiency"]
+    M2 --> M3["3rd Module<br/>57.10% Efficiency"]
+    M3 --> M4["4th Module<br/>28.29% Efficiency"]
+    M4 --> M5["5th Module<br/>10.60% Efficiency"]
+    M5 --> M6["6th Module<br/>2.99% Efficiency"]
 ```
 
 #### Exact Numerical Decay Table
@@ -168,23 +139,13 @@ Stacking penalties are strictly determined by the attribute's schema definition 
 
 Ship fitting is the discipline of equipping hardware into restricted physical and electrical constraints on the hull:
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                          SHIP FITTING SLOTS                            │
-│                                                                        │
-│   HIGH SLOTS (Flags 27..34)   ── Weapons, Cloaks, Cynos, Neuts         │
-│   ├── Turret Hardpoints       ── Max Turrets Left (attr 102)           │
-│   └── Launcher Hardpoints     ── Max Launchers Left (attr 101)         │
-│                                                                        │
-│   MEDIUM SLOTS (Flags 19..26) ── Propulsion, Shields, EWAR, Tackles    │
-│                                                                        │
-│   LOW SLOTS (Flags 11..18)    ── Armor, Hull, Weapon Upgrades, Agility │
-│                                                                        │
-│   RIG SLOTS (Flags 92..94)    ── Permanent Optimization Rigs           │
-│   └── Calibration Budget      ── 400 pts (Rig Size: Small/Med/Lg/Cap)  │
-│                                                                        │
-│   SUBSYSTEMS (Flags 125..132) ── Tech III Modular Subsystem Slots      │
-└────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    Hull["Ship Hull Constraints"] --> High["High Slots (Flags 27..=34)<br/>• Turret Hardpoints (attr 102)<br/>• Launcher Hardpoints (attr 101)<br/>• Weapons, Cloaks, Cynos, Neuts"]
+    Hull --> Med["Medium Slots (Flags 19..=26)<br/>• Propulsion & Shields<br/>• Tackle, EWAR & Capacitor"]
+    Hull --> Low["Low Slots (Flags 11..=18)<br/>• Armor Plates & Repairers<br/>• Weapon Enhancers & Hull Buffer"]
+    Hull --> Rigs["Rig Slots (Flags 92..=94)<br/>• Permanent Rig Hardware<br/>• Bound by Calibration Budget (e.g. 400 pts)"]
+    Hull --> Subsystems["Subsystem Slots (Flags 125..=132)<br/>• Tech III Strategic Cruiser Modules"]
 ```
 
 #### Slot Layouts & Hardpoints
@@ -225,15 +186,11 @@ $$\frac{dC}{dt} = \frac{10 \cdot C_{\max}}{\tau_{\text{cap}}} \cdot \left(\sqrt{
 Let $r = \frac{C(t)}{C_{\max}}$ represent the capacitor ratio ($0 \le r \le 1$). The recharge rate as a function of ratio is:
 $$\frac{dC}{dt}(r) = \frac{10 \cdot C_{\max}}{\tau_{\text{cap}}} \cdot \left(\sqrt{r} - r\right)$$
 
-```
-Recharge Rate (GJ/s)
- Peak Rate ─────────────────────────┐ (r = 0.25)
-                                  ╱   ╲
-                                ╱       ╲
-                              ╱           ╲
-                            ╱               ╲
- 0 GJ/s ───────────────────┴─────────────────┴───────
-                         0.00     0.25      0.50    1.00  Capacitor Ratio (r)
+```mermaid
+flowchart LR
+    R0["r = 0.00 (Empty)<br/>Recharge: 0 GJ/s"] -->|Recharge Accelerates| R25["r = 0.25 (PEAK RECHARGE)<br/>Recharge: 2.5 · C_max / τ_cap"]
+    R25 -->|Gradual Tapering| R50["r = 0.50 (Half Tank)<br/>Recharge: 2.07 · C_max / τ_cap"]
+    R50 -->|Recharge Tapers to Zero| R100["r = 1.00 (Full Tank)<br/>Recharge: 0 GJ/s"]
 ```
 
 #### Peak Recharge Rate
@@ -262,27 +219,20 @@ This formula ensures numerical precision without accumulating Euler-integration 
 
 Capsuleers trained in **Thermodynamics** can push modules past factory specifications ("Overheating"). Overheating increases module performance (e.g. $+15\%$ weapon rate of fire, $+20\%$ shield boost amount, $+30\%$ propulsion speed) at the cost of generating destructive thermal energy across the module rack.
 
+```mermaid
+flowchart TD
+    subgraph Rack["Module Rack Layout"]
+        M1["Module 1 (Overheated)*"]
+        M2["Module 2 (Overheated)*"]
+        M3["Module 3 (Standard)"]
+        M4["Module 4 (Standard)"]
+    end
+
+    M1 & M2 -->|Thermal Generation| Accumulation["Rack Heat Accumulation (H in [0.0, 1.0])"]
+    Accumulation --> Direct["Active Module Direct Damage<br/>D = D_base · (1.0 - 0.05 · L_Thermodynamics)"]
+    Accumulation --> Spillover["Adjacent Spillover Damage<br/>P(d) = min(1.0, H · e^(-d_slots · f_attenuation))"]
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        THERMODYNAMIC RACK HEAT                         │
-│                                                                        │
-│   HIGH RACK:   [Laser 1]* ─── [Laser 2]* ─── [Laser 3] ─── [Neut 1]    │
-│                      │              │                                  │
-│                      ▼              ▼                                  │
-│                 Generating     Generating                              │
-│                 Heat Cycle     Heat Cycle                              │
-│                      │              │                                  │
-│                      └──────┬───────┘                                  │
-│                             ▼                                          │
-│                   Rack Heat Accumulation H                             │
-│                             │                                          │
-│         ┌───────────────────┴───────────────────┐                      │
-│         ▼                                       ▼                      │
-│   Active Module Damage                   Adjacent Spillover Damage     │
-│   D = D_base * (1 - 0.05 * L_thermo)     P(d) = H * e^(-d * f_atten)   │
-└────────────────────────────────────────────────────────────────────────┘
-* = Overheated Module
-```
+*\* Overheated module generating thermal energy.*
 
 #### Heat Accumulation & Dissipation
 Each module rack (High, Medium, Low) maintains an independent heat level $H \in [0.0, 1.0]$. The heat level changes according to exponential approach curves:
@@ -317,24 +267,21 @@ Each activation cycle of an overloaded module applies heat damage to itself and 
 
 EvoMu implements Dogma through a modular, decoupled engine architecture separating attribute evaluation, AST expression parsing, fitting state validation, and MachoNet network dispatch.
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                                 eve-dogma                                   │
-│                                                                             │
-│   src/lib.rs            ── ModifierOperator, DogmaVmOpcode, ExpressionNode  │
-│   src/context.rs        ── DogmaEffectContext, DogmaItemState, Evaluation   │
-│   src/fitting.rs        ── ShipFittingEngine, FittedModule, Thermodynamics  │
-│   src/combat_eval.rs    ── Stacking calculations, EWAR, Nosferatu formulas  │
-└──────────────────────────────────────┬──────────────────────────────────────┘
-                                       │
-┌──────────────────────────────────────▼──────────────────────────────────────┐
-│                                 eve-server                                  │
-│                                                                             │
-│   router/context.rs     ── get_or_rebuild_ship_fitting(), Fitting Cache     │
-│   services/fitting_dogma_im.rs  ── dogmaIM MachoNet RPC Dispatcher          │
-│   services/fitting_dogma_ops.rs ── Targeting, Module Repair, Online Batched │
-│   services/inventory_fitting.rs ── Inventory move, Tenant Asset Isolation   │
-└─────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph Dogma["eve-dogma (Computational Core)"]
+        D1["context.rs<br/>• DogmaItemState & Evaluation Stages<br/>• Stacking Penalties & Passive Recharge"]
+        D2["fitting.rs<br/>• ShipFittingEngine & Constraints<br/>• Recalculate Stats & Thermodynamics"]
+        D3["combat_eval.rs<br/>• EWAR & Nosferatu Hull Overrides"]
+    end
+
+    subgraph Server["eve-server (Simulation Runtime)"]
+        S1["router/context.rs<br/>• get_or_rebuild_ship_fitting()<br/>• Fitting Cache"]
+        S2["services/fitting_dogma_im.rs<br/>• dogmaIM MachoNet RPC Dispatcher<br/>• Online/Offline Module State"]
+        S3["services/fitting_dogma_ops.rs<br/>• Targeting & Module Repair"]
+    end
+
+    Server -->|Evaluates Modifiers & Fits| Dogma
 ```
 
 ### 1. Crates Involved

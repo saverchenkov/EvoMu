@@ -16,32 +16,21 @@ In EvoMu, combat resolution is simulated with absolute fidelity to the canonical
 
 In the lore of EVE Online, starship weaponry represents the pinnacle of empire, pirate, and precursor military engineering. Each weapon family embodies a distinct combat philosophy:
 
-```
-                                 ┌────────────────────────────────────────────────────────┐
-                                 │                Combat Weapon Systems                   │
-                                 └──────────────────────────┬─────────────────────────────┘
-                                                            │
-                     ┌──────────────────────────────────────┴──────────────────────────────────────┐
-                     ▼                                                                            ▼
-       ┌───────────────────────────┐                                                ┌───────────────────────────┐
-       │   Instantaneous Turrets   │                                                │    In-Flight Ordnance     │
-       │    & Directed Energy      │                                                │    & Physical Missiles    │
-       └─────────────┬─────────────┘                                                └─────────────┬─────────────┘
-                     │                                                                            │
-    ┌────────────────┼────────────────┐                                            ┌──────────────┼──────────────┐
-    ▼                ▼                ▼                                            ▼              ▼              ▼
-┌──────────────┐ ┌──────────────┐ ┌──────────────┐                          ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-│  Projectile  │ │ Energy Laser │ │    Hybrid    │                          │   Rockets    │ │    Light/    │ │  Torpedoes/  │
-│  Autocannon  │ │ Beam / Pulse │ │ Rail / Blaster│                         │  & Missiles  │ │ Heavy Missile│ │  Cruise/XL   │
-└──────────────┘ └──────────────┘ └──────────────┘                          └──────────────┘ └──────────────┘ └──────────────┘
-    │                │                │                                            │              │              │
-    └────────────────┬────────────────┘                                            └──────────────┬──────────────┘
-                     ▼                                                                            ▼
-       ┌───────────────────────────┐                                                ┌───────────────────────────┐
-       │  Angular Velocity (ω)     │                                                │  Closing Velocity & Time  │
-       │  Signature Resolution     │                                                │  Explosion Radius (Er)    │
-       │  Optimal & Falloff Curves │                                                │  Explosion Velocity (Ev)  │
-       └───────────────────────────┘                                                └───────────────────────────┘
+```mermaid
+flowchart TD
+    Weapons["Combat Weapon Systems"] --> Turrets["Instantaneous Turrets & Directed Energy"]
+    Weapons --> Missiles["In-Flight Ordnance & Physical Missiles"]
+
+    Turrets --> T1["Projectile<br/>(Autocannon / Artillery)"]
+    Turrets --> T2["Energy Laser<br/>(Beam / Pulse)"]
+    Turrets --> T3["Hybrid<br/>(Rail / Blaster)"]
+
+    Missiles --> M1["Rockets & Light Missiles"]
+    Missiles --> M2["Heavy & Heavy Assault Missiles"]
+    Missiles --> M3["Torpedoes & Cruise / XL"]
+
+    T1 & T2 & T3 --> TParams["Kinematic Parameters<br/>• Angular Velocity (ω)<br/>• Signature Resolution<br/>• Optimal & Falloff Ranges"]
+    M1 & M2 & M3 --> MParams["Kinematic Parameters<br/>• Closing Velocity & Time<br/>• Explosion Radius (Er)<br/>• Explosion Velocity (Ev) & DRF"]
 ```
 
 * **Energy Turrets (Amarr Empire):** Beam and Pulse lasers focus coherent gamma-ray and microwave beams through synthetic crystals. They consume heavy capacitor reserves but fire instantaneously without loading physical ammunition, utilizing infinite-durability T1 frequency crystals or volatile Advanced T2 crystals.
@@ -61,7 +50,7 @@ Every ship hull is defended by three concentric defensive layers: **Shields**, *
 
 Before any targeted weapon can discharge, the attacking ship must acquire a targeting solution via its sensor suite. Canonical lock time is an inverse function of the ship's scan resolution and the target's signature radius:
 
-$$t_{\text{lock}} = \frac{40\,000}{R_{\text{scan}} \cdot \operatorname{arsinh}^2(\sigma_{\text{target}})}$$
+$$t_{\text{lock}} = \frac{40\,000}{R_{\text{scan}} \cdot \text{arsinh}^2(\sigma_{\text{target}})}$$
 
 Where:
 * $R_{\text{scan}}$ is the attacker's Scan Resolution in millimeters (attribute `564`).
@@ -74,18 +63,11 @@ Where:
 
 Turrets traverse along motorized azimuth and elevation gimbals. If a target moves across the attacker's viewport faster than the turret can track, or if the target sits outside the turret's optical focusing array, shots will glance or miss entirely.
 
-```
-                           Target Ship (v_target)
-                                 *
-                                /|
-                               / |
-                              /  |
-          Line of Sight (d)  /   | Transversal Velocity (v_trans)
-                            /    |
-                           /     |
-                          /  θ   |
-                         *───────┘
-                   Attacker Ship (v_attacker)
+```mermaid
+flowchart LR
+    Attacker["Attacker Ship<br/>(v_attacker)"] -->|"Line of Sight (d)"| Target["Target Ship<br/>(v_target)"]
+    Target -->|"Perpendicular Component"| Transversal["Transversal Velocity: v_trans = ||d × Δv|| / d"]
+    Transversal --> Angular["Angular Velocity: ω = v_trans / d [rad/s]"]
 ```
 
 #### Relative Spatial Kinematics
@@ -125,12 +107,12 @@ Where:
 
 When a turret cycle completes, the server draws a deterministic uniform pseudorandom float $u \in [0.0, 1.0)$ using the solar system RNG generator [`next_invention_roll`](../../../crates/eve-server/src/services/combat_weapons.rs#L903-L906). The shot is resolved through the canonical EVE damage quality bands:
 
-```
-0.00    0.01                                       P_hit             1.00
- ├───────┼───────────────────────────────────────────┼─────────────────┤
- │Wreck! │          Normal Hit (Quality Q)           │      Miss       │
- │(3.0x) │       Q = 0.49 + u in [0.50, 1.49)        │    (0.0x dmg)   │
- └───────┴───────────────────────────────────────────┴─────────────────┘
+```mermaid
+flowchart LR
+    Roll["Pseudorandom Roll u in [0.0, 1.0)"] --> Decision{"Compare against Hit Chance"}
+    Decision -->|"u < 0.01 (1% Critical)"| Wreck["Wrecking Shot (3.0× Damage)<br/>'barely scratches... Wrecking Shot!'"]
+    Decision -->|"0.01 ≤ u < P_hit"| Hit["Normal Hit (Q × Damage)<br/>Q = 0.49 + u in [0.50, 1.49)"]
+    Decision -->|"u ≥ P_hit"| Miss["Miss (0.0× Damage)<br/>'misses completely'"]
 ```
 
 1. **Miss ($u \ge P_{\text{hit}}$):** The shot fails to connect. Applied damage is $0.0\times$.
@@ -188,26 +170,14 @@ $$\text{drf} = \begin{cases} \text{DRF} & \text{if } \text{DRF} \le 1.0 \\ \frac
 
 $$\vec{D}_{\text{applied}} = f_{\text{dmg}} \cdot \vec{D}_{\text{base}}$$
 
-```
-                      ┌─────────────────────────────────────────┐
-                      │    Target Signature / Explosion Radius   │
-                      │               (σ_t / E_r)               │
-                      └────────────────────┬────────────────────┘
-                                           │
-             ┌─────────────────────────────┴─────────────────────────────┐
-             ▼                                                           ▼
-     If σ_t >= E_r                                               If σ_t < E_r
-┌─────────────────────────┐                                 ┌─────────────────────────┐
-│ Target is larger than   │                                 │ Target is smaller than  │
-│ explosion blast radius  │                                 │ explosion blast radius  │
-└────────────┬────────────┘                                 └────────────┬────────────┘
-             │                                                           │
-             ▼                                                           ▼
-┌─────────────────────────┐                                 ┌─────────────────────────┐
-│ Check Target Speed:     │                                 │ Partial damage applied: │
-│ v_t <= E_v: 100% Damage │                                 │ f_dmg = min(σ_t / E_r,  │
-│ v_t > E_v: DRF Scaling  │                                 │   (σ_t/E_r * E_v/v_t)^e)│
-└─────────────────────────┘                                 └─────────────────────────┘
+```mermaid
+flowchart TD
+    SigComp{"Signature Ratio Check<br/>Target Radius (σ_t) vs Explosion Radius (E_r)"}
+    SigComp -->|"σ_t ≥ E_r<br/>(Target ≥ Blast Radius)"| SpeedCheck{"Target Speed Check<br/>v_t vs E_v"}
+    SigComp -->|"σ_t < E_r<br/>(Target < Blast Radius)"| Partial["Partial Damage Applied<br/>f_dmg = min(1.0, σ_t / E_r, (σ_t/E_r · E_v/v_t)^drf)"]
+
+    SpeedCheck -->|"v_t ≤ E_v (Slow Target)"| Full["100% Full Damage Alpha<br/>f_dmg = 1.0"]
+    SpeedCheck -->|"v_t > E_v (Fast Target)"| Partial
 ```
 
 * **Large, Stationary Targets:** When $\sigma_t \ge E_r$ and $v_t \le E_v$, full damage applies:
@@ -244,31 +214,12 @@ Vorton Projectors discharge a high-voltage primary arc that branches across spac
 
 Damage is resolved sequentially across three defensive layers: **Shield $\rightarrow$ Armor $\rightarrow$ Structure**.
 
-```
-    Incoming Damage Vector [EM, Thermal, Kinetic, Explosive]
-                            │
-                            ▼
-               ┌─────────────────────────┐
-               │       SHIELD HP         │  ◄──  Passive Recharge (Peaks at 25%)
-               │  (Active Shield Boost)  │
-               └────────────┬────────────┘
-                            │ (Bleedthrough when Shield = 0)
-                            ▼
-               ┌─────────────────────────┐
-               │        ARMOR HP         │
-               │  (Active Armor Repair)  │
-               └────────────┬────────────┘
-                            │ (Bleedthrough when Armor = 0)
-                            ▼
-               ┌─────────────────────────┐
-               │       STRUCTURE HP      │
-               │  (Hull Integrity Pool)  │
-               └────────────┬────────────┘
-                            │ (HP <= 0)
-                            ▼
-               ┌─────────────────────────┐
-               │     DEATH PIPELINE      │
-               └─────────────────────────┘
+```mermaid
+flowchart TD
+    Incoming["Incoming Damage Vector<br/>[EM, Thermal, Kinetic, Explosive]"] --> Shield["SHIELD HP LAYER<br/>• Passive Non-Linear Recharge (Peaks at 25%)<br/>• Active Shield Boosters"]
+    Shield -->|Bleedthrough when Shield = 0| Armor["ARMOR HP LAYER<br/>• Active Armor Repairers<br/>• Plate Buffers"]
+    Armor -->|Bleedthrough when Armor = 0| Structure["STRUCTURE HP LAYER<br/>• Hull Integrity Pool"]
+    Structure -->|Structure HP ≤ 0| Death["DEATH PIPELINE"]
 ```
 
 #### Layer Damage Calculation
@@ -296,32 +247,21 @@ $$C(t + \Delta t) = C_{\max} \left(1 + \left(\sqrt{\frac{C(t)}{C_{\max}}} - 1\ri
 
 When a ship's Structure HP drops to $\le 0.0$, the server invokes the **Death Pipeline** ([`execute_death_pipeline_sync_inner`](../../../crates/eve-server/src/combat/death_pipeline.rs#L48-L588)) inside an atomic database snapshot:
 
-```
-Ship Structure <= 0
-       │
-       ├─► 1. Frigate Escape Bay Check (flag 179)
-       │      ├─ Frigate Fitted: Eject pilot directly into space in Frigate (survives)
-       │      └─ Empty Bay: Eject Capsule (type 670) at ship coordinates
-       │
-       ├─► 2. Insurance Payout Execution
-       │      └─ Credit 100% Platinum / quoted ISK to pilot or corp master wallet
-       │
-       ├─► 3. Wreck Creation & Loot Drop Roll
-       │      ├─ Standard Space: 50% drop threshold (roll < 0.50)
-       │      ├─ Pochven Space: 60% drop threshold (roll < 0.60)
-       │      ├─ Rigs (flags 92-94) & Subsystems (125-132): 100% Destroyed
-       │      └─ Surviving items transferred to Wreck container (type 26557)
-       │
-       └─► 4. Cryptographic Killmail Record
-              ├─ Compile 15-minute assist log damage contributions
-              ├─ Generate ESI-compatible SHA-256 hash digest
-              └─ Store DetailedKillmail & broadcast to solar system
+```mermaid
+flowchart TD
+    Destruction["Ship Structure HP ≤ 0.0"] --> BayCheck{"Frigate Escape Bay Check<br/>(Flag 179)"}
+    BayCheck -->|"Frigate Fitted"| EjectFrigate["Eject Pilot in Frigate<br/>(Frigate Survives in Space)"]
+    BayCheck -->|"Empty Bay"| EjectCapsule["Eject Capsule (typeID: 670)<br/>at Ship Coordinates"]
+
+    Destruction --> Insurance["Insurance Payout Execution<br/>Credit Platinum / Quoted ISK to Wallet"]
+    Destruction --> LootRoll["Wreck Creation & Loot Drop Roll<br/>• Standard: 50% Drop Threshold<br/>• Pochven: 60% Drop Threshold<br/>• Rigs & Subsystems: 100% Destroyed<br/>• Transfer Surviving Items to Wreck (typeID: 26557)"]
+    Destruction --> Killmail["Cryptographic Killmail Record<br/>• Compile 15-Minute Assist Damage Logs<br/>• Compute ESI-Compatible SHA-256 Hash<br/>• Store DetailedKM & Broadcast to Solar System"]
 ```
 
 #### Deterministic Loot Drop Roll
 For every fitted module and cargo item $i$, a pseudorandom roll is evaluated:
 
-$$\text{roll} = \frac{\left((\text{rng\_seed} \oplus \text{item\_id}) \cdot 6364136223846793005\right) \gg 32}{2^{32}}$$
+$$\text{roll} = \frac{\left((\text{seed}_{\text{rng}} \oplus \text{id}_{\text{item}}) \cdot 6364136223846793005\right) \gg 32}{2^{32}}$$
 
 * **Standard Systems:** Item drops into wreck if $\text{roll} < 0.50$ (50% drop rate); destroyed if $\ge 0.50$.
 * **Pochven Systems (Region `10000070`):** Item drops into wreck if $\text{roll} < 0.60$ (60% drop rate).
@@ -331,7 +271,7 @@ $$\text{roll} = \frac{\left((\text{rng\_seed} \oplus \text{item\_id}) \cdot 6364
 #### Cryptographic Killmail Hash
 Killmails are authenticated using a SHA-256 hash digest conforming to the ESI standard:
 
-$$\text{Hash} = \operatorname{SHA-256}\left(\text{victim\_id} \,\|\, \text{attacker\_id} \,\|\, \text{ship\_type\_id} \,\|\, \text{kill\_time\_unix}\right)$$
+$$\text{Hash} = \text{SHA-256}\left(\text{victim-id} \,\|\, \text{attacker-id} \,\|\, \text{ship-type-id} \,\|\, \text{kill-time-unix}\right)$$
 
 ---
 
@@ -339,32 +279,27 @@ $$\text{Hash} = \operatorname{SHA-256}\left(\text{victim\_id} \,\|\, \text{attac
 
 EvoMu decouples spatial physics from high-level game logic across four dedicated crates:
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                              eve-server                                │
-│                                                                        │
-│   ┌───────────────────────────┐      ┌───────────────────────────────┐ │
-│   │   combat_weapons.rs       │      │   combat_missiles_aoe.rs      │ │
-│   │   Turret Cycle & Hit Roll │      │   In-Flight Step & Smartbombs │ │
-│   └─────────────┬─────────────┘      └───────────────┬───────────────┘ │
-│                 │                                    │                 │
-│                 ▼                                    ▼                 │
-│   ┌───────────────────────────┐      ┌───────────────────────────────┐ │
-│   │       formulas.rs         │      │      death_pipeline.rs        │ │
-│   │   Combat Bridge Wrappers  │      │   Wrecks, Loot & Killmails    │ │
-│   └─────────────┬─────────────┘      └───────────────┬───────────────┘ │
-└─────────────────┼────────────────────────────────────┼─────────────────┘
-                  │                                    │
-                  ▼                                    ▼
-┌───────────────────────────────────┐  ┌─────────────────────────────────┐
-│            eve-destiny            │  │             eve-db              │
-│                                   │  │                                 │
-│   physics.rs                      │  │   WorldStateSnapshot            │
-│   compute_angular_velocity        │  │   KillmailRecord & DetailedKM   │
-│   compute_turret_chance_to_hit    │  │   InventoryItemRecord           │
-│   compute_missile_damage_factor   │  │   Item location & flag updates  │
-│   compute_passive_recharge        │  │                                 │
-└───────────────────────────────────┘  └─────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph Server["eve-server"]
+        CW["combat_weapons.rs<br/>• Turret Cycle & Hit Roll<br/>• Crystal Degradation & Spooling"]
+        CM["combat_missiles_aoe.rs<br/>• In-Flight Step & Smartbombs<br/>• Defender Interception & Breachers"]
+        CF["formulas.rs<br/>• Combat Bridge Wrappers"]
+        DP["death_pipeline.rs<br/>• Wrecks, Loot Rolls & Killmails"]
+        CW --> CF
+        CM --> CF
+    end
+
+    subgraph Destiny["eve-destiny"]
+        P["physics.rs<br/>• compute_angular_velocity<br/>• compute_turret_chance_to_hit<br/>• compute_missile_damage_factor<br/>• compute_passive_recharge"]
+    end
+
+    subgraph DB["eve-db"]
+        WSS["WorldStateSnapshot<br/>• KillmailRecord & DetailedKM<br/>• InventoryItemRecord & Flag Updates"]
+    end
+
+    CF --> Destiny
+    DP --> DB
 ```
 
 ### 3.1 Crate & Module Breakdown
@@ -373,9 +308,9 @@ EvoMu decouples spatial physics from high-level game logic across four dedicated
 | :--- | :--- | :--- |
 | [`crates/eve-destiny/src/physics.rs`](../../../crates/eve-destiny/src/physics.rs) | Pure deterministic 1 Hz physics, angular velocity, turret chance-to-hit, missile DRF, and analytical passive recharge. | [`compute_angular_velocity`](../../../crates/eve-destiny/src/physics.rs#L910-L923), [`compute_turret_chance_to_hit_with_res`](../../../crates/eve-destiny/src/physics.rs#L945-L966), [`resolve_turret_shot`](../../../crates/eve-destiny/src/physics.rs#L993-L1006), [`compute_missile_damage_factor`](../../../crates/eve-destiny/src/physics.rs#L1011-L1027), [`compute_passive_recharge`](../../../crates/eve-destiny/src/physics.rs#L928-L941), [`step_missile_ball`](../../../crates/eve-destiny/src/physics.rs#L1184-L1194). |
 | [`crates/eve-server/src/formulas.rs`](../../../crates/eve-server/src/formulas.rs) | Bridge wrappers exposing verified combat formulas to server RPC services. | [`turret_angular_velocity`](../../../crates/eve-server/src/formulas.rs#L300-L307), [`turret_chance_to_hit`](../../../crates/eve-server/src/formulas.rs#L309-L318), [`turret_shot_damage`](../../../crates/eve-server/src/formulas.rs#L340-L346), [`missile_damage_factor`](../../../crates/eve-server/src/formulas.rs#L349-L363), [`vorton_chain_targets`](../../../crates/eve-server/src/formulas.rs#L371-L378), [`compute_ecm_jam_chance`](../../../crates/eve-server/src/formulas.rs#L415-L430). |
-| [`crates/eve-server/src/services/combat_weapons.rs`](../../../crates/eve-server/src/services/combat_weapons.rs) | Module activation handlers for turrets, ammunition consumption, crystal degradation, entropic spooling, and vorton branching. | `dispatch_weapon_activation`, `evaluate_turret_cycle`, `combat_weapons_spool`. |
-| [`crates/eve-server/src/services/combat_missiles_aoe.rs`](../../../crates/eve-server/src/services/combat_missiles_aoe.rs) | In-flight missile state machine, closing distance integration, smartbomb EMP waves, defender missile interception, and Breacher Pod DoT. | [`step_missiles_and_breachers`](../../../crates/eve-server/src/services/combat_missiles_aoe.rs#L152-L343), [`step_combat_system`](../../../crates/eve-server/src/services/combat_missiles_aoe.rs#L143-L150), `ActiveBreacherDot`, `InFlightMissileState`. |
-| [`crates/eve-server/src/combat/death_pipeline.rs`](../../../crates/eve-server/src/combat/death_pipeline.rs) | Atomic hull destruction pipeline: insurance liquidation, wreck container generation, 50%/60% loot drop rolls, and killmail generation. | [`execute_death_pipeline_sync_inner`](../../../crates/eve-server/src/combat/death_pipeline.rs#L48-L588), `DeathPipelineResult`. |
+| [`crates/eve-server/src/services/combat_weapons.rs`](../../../crates/eve-server/src/services/combat_weapons.rs) | Module activation handlers for turrets, ammunition consumption, crystal degradation, entropic spooling, and vorton branching. | [`handle_weapons`](../../../crates/eve-server/src/services/combat_weapons.rs#L7), [`combat_weapons_spool`](../../../crates/eve-server/src/services/combat_weapons_spool.rs), [`turret_shot_damage`](../../../crates/eve-server/src/formulas.rs#L340). |
+| [`crates/eve-server/src/services/combat_missiles_aoe.rs`](../../../crates/eve-server/src/services/combat_missiles_aoe.rs) | In-flight missile state machine, closing distance integration, smartbomb EMP waves, defender missile interception, and Breacher Pod DoT. | [`step_missiles_and_breachers`](../../../crates/eve-server/src/services/combat_missiles_aoe.rs#L152-L343), [`step_combat_system`](../../../crates/eve-server/src/services/combat_missiles_aoe.rs#L143-L150), [`ActiveBreacherDot`](../../../crates/eve-server/src/services/combat_missiles_aoe.rs#L40), [`InFlightMissileState`](../../../crates/eve-server/src/services/combat_crimewatch.rs#L248). |
+| [`crates/eve-server/src/combat/death_pipeline.rs`](../../../crates/eve-server/src/combat/death_pipeline.rs) | Atomic hull destruction pipeline: insurance liquidation, wreck container generation, 50%/60% loot drop rolls, and killmail generation. | [`execute_death_pipeline_sync_inner`](../../../crates/eve-server/src/combat/death_pipeline.rs#L48-L588), [`DeathPipelineResult`](../../../crates/eve-server/src/combat/death_pipeline.rs#L20). |
 
 ---
 
@@ -448,7 +383,7 @@ pub struct InFlightMissileState {
 3. **Physical Missile Interception & Smartbomb Timing:** In-flight missiles are not abstract timers; they exist as balls registered in the solar system Ballpark. A pilot activating a Smartbomb ([`group_id == 72`](../../../crates/eve-server/src/services/combat_missiles_aoe.rs#L573-L640)) or Defender Launcher ([`group_id == 512`](../../../crates/eve-server/src/services/combat_missiles_aoe.rs#L1093-L1156)) deals physical damage to all in-flight missile balls within range. If missile $\text{HP} \le 0$, the missile is marked `destroyed = true`, removed from the ballpark, and its applied damage is zeroed before it can impact the target.
 4. **Frigate Escape Bay Atomicity:** Battleships equipped with a Frigate Escape Bay (`attribute 3020 > 0.0`) must transfer the pilot directly into the docked frigate without generating an intermediate capsule ball. In [`execute_death_pipeline_sync_inner`](../../../crates/eve-server/src/combat/death_pipeline.rs#L446-L460), the escape frigate is detached from the victim ship, re-parented to the solar system, set as the character's `active_ship_id`, and marked on the killmail as survived (`qty_dropped: 0, qty_destroyed: 0, flag: 179`).
 5. **Item Conservation in Wrecks:** Every item in the victim ship's inventory must be strictly accounted for during destruction. For every child item:
-   $$\text{Dropped} \cup \text{Destroyed} = \text{Total Fitted \& Cargo}$$
+   $$\text{Dropped} \cup \text{Destroyed} = \text{Total Fitted and Cargo}$$
    No item may be duplicated or silently lost. Destroyed items are deleted from `snap.items` and logged to the killmail's `destroyed_items` list; dropped items are transferred to the newly spawned wreck container (`wreck_id`) with flag `InventoryFlag::Cargo`.
 6. **Crimewatch Arc Safety Interlocks:** Vorton Projector arc chaining cannot be exploited to circumvent high-sec safety interlocks. When evaluating candidate secondary targets in [`combat_weapons.rs`](../../../crates/eve-server/src/services/combat_weapons.rs#L972-L1016), the engine checks whether hitting the secondary pilot would generate a suspect or criminal flag. If the attacker's safety is set to `Green` or `Yellow`, the arc skips that target and continues chaining to legitimate combatants.
 
@@ -469,14 +404,14 @@ EvoMu's combat implementation is validated across a rigorous suite of unit, prop
 
 ### 5.2 Test Implementations
 
-| Test Name | File Path | Focus & Assertions |
+| Test Function | Source File | Focus & Assertions |
 | :--- | :--- | :--- |
-| `test_turret_wrecking_shot_missile_and_proximity_decloak` | [`crates/eve-destiny/src/tests.rs`](../../../crates/eve-destiny/src/tests.rs#L77-L110) | Asserts $P_{\text{hit}} = 1.0$ at zero transversal within optimal range; asserts roll $u = 0.005$ triggers Wrecking Shot ($3.0\times$ multiplier). |
-| `test_c1_turret_families_hit_formula_wrecking_shots_and_crystal_degradation` | [`crates/eve-server/tests/it/combat_weapons_wrecks.rs`](../../../crates/eve-server/tests/it/combat_weapons_wrecks.rs#L19-L250) | Validates Hybrid, Projectile, and Laser turret firing cycles, tracking speed against high-speed targets, and crystal wear. |
-| `test_c2_missiles_drf_smartbombs_bombs_breacher_pods_damage_layers_and_shield_recharge` | [`crates/eve-server/tests/it/combat_weapons_wrecks.rs`](../../../crates/eve-server/tests/it/combat_weapons_wrecks.rs#L252-L564) | Evaluates missile DRF damage mitigation against fast frigates vs battleships, smartbomb interception of in-flight missiles, and Breacher Pod DoT. |
-| `test_c1_triglavian_entropic_spool_and_edencom_vorton_arc_and_sig_radius` | [`crates/eve-server/tests/it/combat_weapons_wrecks_part2.rs`](../../../crates/eve-server/tests/it/combat_weapons_wrecks_part2.rs#L141-L260) | Validates Entropic Disintegrator consecutive cycle spooling and Vorton Projector arc branching up to 9 secondary targets. |
-| `test_combat_repairs_ancillary_smartbomb_and_salvage_legality_closure` | [`crates/eve-server/tests/it/combat_repairs_smartbomb_closure.rs`](../../../crates/eve-server/tests/it/combat_repairs_smartbomb_closure.rs#L76-L185) | Verifies the analytical passive shield recharge peak at exactly $25\%$ capacity ($2.5 \cdot C_{\max} / \tau$). |
-| `test_c3_death_pipeline_ship_and_pod_destruction_medical_respawn_and_implants_lost` | [`crates/eve-server/tests/it/combat_death_crimewatch.rs`](../../../crates/eve-server/tests/it/combat_death_crimewatch.rs#L27-L220) | Tests complete ship destruction, 50% loot drop roll, wreck creation, capsule ejection, pod death, implant loss, and killmail recording. |
+| [`test_turret_wrecking_shot_missile_and_proximity_decloak`](../../../crates/eve-destiny/src/tests.rs#L77-L110) | [`tests.rs`](../../../crates/eve-destiny/src/tests.rs) | Asserts $P_{\text{hit}} = 1.0$ at zero transversal within optimal range; asserts roll $u = 0.005$ triggers Wrecking Shot ($3.0\times$ multiplier). |
+| [`test_c1_turret_families_hit_formula_wrecking_shots_and_crystal_degradation`](../../../crates/eve-server/tests/it/combat_weapons_wrecks.rs#L19-L250) | [`combat_weapons_wrecks.rs`](../../../crates/eve-server/tests/it/combat_weapons_wrecks.rs) | Validates Hybrid, Projectile, and Laser turret firing cycles, tracking speed against high-speed targets, and crystal wear. |
+| [`test_c2_missiles_drf_smartbombs_bombs_breacher_pods_damage_layers_and_shield_recharge`](../../../crates/eve-server/tests/it/combat_weapons_wrecks.rs#L252-L564) | [`combat_weapons_wrecks.rs`](../../../crates/eve-server/tests/it/combat_weapons_wrecks.rs) | Evaluates missile DRF damage mitigation against fast frigates vs battleships, smartbomb interception of in-flight missiles, and Breacher Pod DoT. |
+| [`test_c1_triglavian_entropic_spool_and_edencom_vorton_arc_and_sig_radius`](../../../crates/eve-server/tests/it/combat_weapons_wrecks_part2.rs#L141-L260) | [`combat_weapons_wrecks_part2.rs`](../../../crates/eve-server/tests/it/combat_weapons_wrecks_part2.rs) | Validates Entropic Disintegrator consecutive cycle spooling and Vorton Projector arc branching up to 9 secondary targets. |
+| [`test_combat_repairs_ancillary_smartbomb_and_salvage_legality_closure`](../../../crates/eve-server/tests/it/combat_repairs_smartbomb_closure.rs#L76-L185) | [`combat_repairs_smartbomb_closure.rs`](../../../crates/eve-server/tests/it/combat_repairs_smartbomb_closure.rs) | Verifies the analytical passive shield recharge peak at exactly $25\%$ capacity ($2.5 \cdot C_{\max} / \tau$). |
+| [`test_c3_death_pipeline_ship_and_pod_destruction_medical_respawn_and_implants_lost`](../../../crates/eve-server/tests/it/combat_death_crimewatch.rs#L27-L220) | [`combat_death_crimewatch.rs`](../../../crates/eve-server/tests/it/combat_death_crimewatch.rs) | Tests complete ship destruction, 50% loot drop roll, wreck creation, capsule ejection, pod death, implant loss, and killmail recording. |
 
 ---
 
@@ -484,34 +419,11 @@ EvoMu's combat implementation is validated across a rigorous suite of unit, prop
 
 Gunnery tracking, missile kinematics, and the death pipeline bind together New Eden's tactical spacetime:
 
-```
-┌─────────────────────────────────┐
-│     Space Kinematics Engine     │  ◄── Destiny 1 Hz Simulation
-│  (Positions, Velocities, DVec3) │
-└────────────────┬────────────────┘
-                 │
-                 ▼
-┌─────────────────────────────────┐
-│     Combat Resolution Loop      │
-│  - Turrets: Angular Tracking    │  ◄── Formulas & Hit Quality Bands
-│  - Missiles: In-Flight & DRF    │  ◄── Smartbombs & Defender Interception
-│  - Exotic: Spool & Vorton Arcs  │  ◄── Crimewatch Safety Gate
-└────────────────┬────────────────┘
-                 │
-                 ▼
-┌─────────────────────────────────┐
-│       Defense Degradation       │
-│  - Shield (25% Passive Peak)    │  ◄── Analytical Differential Solution
-│  - Armor & Structure Pools      │  ◄── 4 Damage Types & Resist Matrices
-└────────────────┬────────────────┘
-                 │
-                 ▼
-┌─────────────────────────────────┐
-│     Ship Destruction Flow       │
-│  - Frigate Escape Bay / Capsule │  ◄── Pilot Survival Pipeline
-│  - 50% / 60% Loot Drop RNG      │  ◄── Deterministic Wreck Item Transfer
-│  - SHA-256 ESI Killmail Digest  │  ◄── Permanent Combat Ledger
-└─────────────────────────────────┘
+```mermaid
+flowchart TD
+    Kinematics["Space Kinematics Engine (eve-destiny)<br/>• 1 Hz Simulation, Positions, Velocities (DVec3)"] --> Resolution["Combat Resolution Loop (eve-server)<br/>• Turrets: Angular Tracking & Hit Quality Bands<br/>• Missiles: In-Flight Kinematics & DRF<br/>• Exotic: Entropic Spool & Vorton Arcs (Safety Gate)"]
+    Resolution --> Defense["Defense Degradation<br/>• Shield (25% Passive Peak Analytical Solution)<br/>• Armor & Structure Pools (Resist Matrices)"]
+    Defense --> Destruction["Ship Destruction Flow<br/>• Frigate Escape Bay / Capsule Ejection<br/>• 50% / 60% Deterministic Wreck Loot RNG<br/>• SHA-256 ESI Killmail Digest Ledger"]
 ```
 
 The resulting implementation delivers an uncompromisingly faithful, high-performance simulation of EVE Online fleet combat, pairing mathematical rigor with the memory safety and concurrency of clean-room Rust.

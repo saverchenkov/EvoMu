@@ -10,39 +10,19 @@
 
 In the lore of New Eden, the **Capsuleer** represents the pinnacle of transhuman evolution—an immortal demigod commanding starships of unfathomable power through a direct neural interface. While ordinary baseline humans age, weaken, and die, a capsuleer's consciousness transcends physical biology through Jovian neuro-mapping technology, high-bandwidth brain scanning, and quantum clone synthesis.
 
-```
-                     ┌───────────────────────────────────────────────┐
-                     │          Capsule Hydrostatic Fluid            │
-                     │          Direct Neural Cybernetics            │
-                     └───────────────────────┬───────────────────────┘
-                                             │
-                                  [Pod Destruction Event]
-                                             │
-                                             ▼
-                     ┌───────────────────────────────────────────────┐
-                     │       Cranial Neural Transceiver Laser        │
-                     │       Destructive 100% Synaptic Scan          │
-                     └───────────────────────┬───────────────────────┘
-                                             │
-                                             ▼  Quantum Entanglement Burst
-                     ┌───────────────────────────────────────────────┐
-                     │            Medical Clone Facility             │
-                     │       (Designated Home Station/Citadel)       │
-                     └───────────────────────┬───────────────────────┘
-                                             │
-                         ┌───────────────────┴───────────────────┐
-                         ▼                                       ▼
-         ┌───────────────────────────────┐       ┌───────────────────────────────┐
-         │     Clean Biological Clone    │       │     Awakened Consciousness    │
-         │   (Implants Lost on Death)    │       │     All Skill Points Intact   │
-         └───────────────────────────────┘       └───────────────────────────────┘
+```mermaid
+flowchart TD
+    Capsule["Capsule Hydrostatic Fluid<br/>Direct Neural Cybernetics"] -->|Pod Destruction Event| Laser["Cranial Neural Transceiver Laser<br/>Destructive 100% Synaptic Scan"]
+    Laser -->|Subspace Quantum Entanglement Burst| Facility["Medical Clone Facility<br/>(Designated Home Station / Citadel)"]
+    Facility --> Body["Clean Biological Clone<br/>(Implants Lost on Death)"]
+    Facility --> Mind["Awakened Consciousness<br/>(All Skill Points Intact)"]
 ```
 
 When a capsuleer's protective capsule is breached in space, survival protocols trigger an instantaneous cranial laser scan. In a fraction of a millisecond, the pilot's complete synaptic connectome is mapped and transmitted via faster-than-light subspace transceiver to their designated **Medical Clone** facility, where a blank biological body is imprinted with their memories, skills, and consciousness.
 
 Alongside this medical resurrection pipeline, capsuleers master new capabilities through **Neural Skill Injections**. Rather than spending decades in traditional academies, capsuleers download encoded procedural knowledge and technical reflexes directly into their cerebral cortex. This skill acquisition rate is governed by five cognitive attributes (Intelligence, Perception, Charisma, Willpower, Memory) and enhanced via cybernetic implants. Furthermore, capsuleers utilize **Jump Clones** to project their minds across the cluster, stepping into specialized physical bodies outfitted for combat, hauling, or cognitive research.
 
-In [`EvoMu`](../../), the skill training and cloning infrastructure is implemented across [`eve-server`](../../../crates/eve-server), [`eve-db`](../../../crates/eve-db), and [`eve-sde`](../../../crates/eve-sde). The architecture faithfully replicates the non-linear skill point curves, unallocated free SP mechanics, 500,000 SP extraction chunks, diminishing return injector curves, 24-hour jump clone cooldown timers, and the medical clone respawn pipeline.
+In [`EvoMu`](../../../), the skill training and cloning infrastructure is implemented across [`eve-server`](../../../crates/eve-server), [`eve-db`](../../../crates/eve-db), and [`eve-sde`](../../../crates/eve-sde). The architecture faithfully replicates the non-linear skill point curves, unallocated free SP mechanics, 500,000 SP extraction chunks, diminishing return injector curves, 24-hour jump clone cooldown timers, and the medical clone respawn pipeline.
 
 ---
 
@@ -73,21 +53,18 @@ The time $T$ (in seconds) required to train from $SP_{\text{current}}$ to $SP_{\
 
 $$T = \frac{SP_{\text{target}} - SP_{\text{current}}}{\text{SP / min}} \times 60$$
 
-```
-Base Attributes (20 Base)
-     │
-     ├─ Neural Remap (+Attributes, -Attributes)
-     │
-     └─ Cybernetic Implants (Slots 1..=5: +1 to +5)
-             │
-             ▼
-   Effective Attributes: A_primary, A_secondary
-             │
-             ▼
-   Training Speed: (A_primary + A_secondary / 2) * M_clone
-             │
-             ▼
-   Time to Target Level = (SP_target - SP_current) / (SP / min) * 60s
+```mermaid
+flowchart TD
+    subgraph Inputs["Attribute Sources"]
+        Base["Base Attributes<br/>(20 Base per Attribute)"]
+        Remap["Neural Remap<br/>(+Attributes, -Attributes)"]
+        Implants["Cybernetic Implants<br/>(Slots 1..=5: +1 to +5)"]
+    end
+    Base --> Effective
+    Remap --> Effective
+    Implants --> Effective
+    Effective["Effective Attributes<br/>A_primary, A_secondary"] --> Rate["Training Speed Calculation<br/>SP/min = (A_primary + A_secondary / 2) × M_clone"]
+    Rate --> Time["Time to Target Level<br/>T = (SP_target - SP_current) / (SP/min) × 60s"]
 ```
 
 #### Skill Level Point Requirements & Rank Multipliers
@@ -138,31 +115,21 @@ The server validates published status, deducts the statutory cost including the 
 
 Skill trading permits capsuleers to reconfigure their neural development by extracting trained skill points into portable trade goods:
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        SKILL TRADING ENGINE                            │
-│                                                                        │
-│   Character Requirements:                                              │
-│   - Must be Omega Clone                                                │
-│   - Docked in Station or Structure                                     │
-│   - Total SP >= 5,500,000 SP                                           │
-│                                                                        │
-│   [Skill Extractor (type 40519)]                                       │
-│          │                                                             │
-│          ▼                                                             │
-│   Extract exactly 500,000 SP from eligible skills                      │
-│   (Infomorph, Cybernetics, PI Command skills CANNOT be extracted)      │
-│          │                                                             │
-│          ▼                                                             │
-│   [Large Skill Injector (type 40520)]                                  │
-│          │                                                             │
-│          ▼                                                             │
-│   Target Pilot Injects SP (Diminishing Returns Curve):                 │
-│   ├─ < 5M SP:    500,000 SP (100% efficiency)                          │
-│   ├─ 5M - 50M:   400,000 SP ( 80% efficiency)                          │
-│   ├─ 50M - 80M:  300,000 SP ( 60% efficiency)                          │
-│   └─ >= 80M SP:  150,000 SP ( 30% efficiency)                          │
-└────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph Req["Pilot Requirements"]
+        R1["Omega Clone Status"]
+        R2["Docked in Station or Structure"]
+        R3["Total SP ≥ 5,500,000 SP"]
+    end
+    Req --> Extractor["Skill Extractor<br/>(TypeID: 40519)"]
+    Extractor --> Extract["Extract Exactly 500,000 SP<br/>(Infomorph, Cybernetics, PI Command Excluded)"]
+    Extract --> Injector["Large Skill Injector<br/>(TypeID: 40520)"]
+    Injector --> Target["Target Pilot Uses Injector (Diminishing Returns)"]
+    Target --> Tier1["&lt; 5M SP Pool: 500,000 SP (100% yield)"]
+    Target --> Tier2["5M - 50M SP Pool: 400,000 SP (80% yield)"]
+    Target --> Tier3["50M - 80M SP Pool: 300,000 SP (60% yield)"]
+    Target --> Tier4["≥ 80M SP Pool: 150,000 SP (30% yield)"]
 ```
 
 #### Skill Extraction Requirements
@@ -213,24 +180,11 @@ When a capsuleer's pod structure drops to $0\text{ HP}$, an immediate death sequ
 
 Jump Clones allow capsuleers to maintain multiple specialized physical bodies across the universe and switch between them remotely:
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                          JUMP CLONE MECHANICS                          │
-│                                                                        │
-│   Installation Capacity:                                               │
-│   Max Clones = Infomorph Psychology (lvl 1..5)                         │
-│              + Advanced Infomorph Psychology (lvl 1..5)                │
-│                                                                        │
-│   Transfer Modes:                                                      │
-│   ├── Remote Jump:                                                     │
-│   │   Cooldown = (24 - Infomorph Synchronizing lvl) hours              │
-│   │   NPC Station Leave-Behind Fee: 900,000 ISK                        │
-│   │   Banned: Jumping into/out of Wormholes or Pochven                 │
-│   │                                                                    │
-│   └── Same-Location Swap (Same Station or Structure):                  │
-│       Zero Cooldown (0 seconds)                                        │
-│       Enables rapid swapping between Combat and Learning Clones        │
-└────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    Capacity["Clone Capacity = Infomorph Psychology (1..5)<br/>+ Advanced Infomorph Psychology (1..5)"] --> Mode{"Transfer Mode"}
+    Mode -->|Remote Jump| Remote["Remote Clone Jump<br/>• Cooldown: (24 - Infomorph Sync) hours<br/>• NPC Station Fee: 900,000 ISK<br/>• Restrictions: No Wormhole / Pochven Target"]
+    Mode -->|Same Location| Local["Same-Location Clone Swap<br/>(Same Station or Citadel)<br/>• 0s Cooldown (Instantaneous)<br/>• Swap between Learning and Combat Clones"]
 ```
 
 #### Cooldown Mathematics
@@ -292,28 +246,27 @@ Combat boosters are ingestible performance-enhancing compounds:
 
 EvoMu implements character progression and cloning across asynchronous Rust services, transactional snapshot state stores, and mathematical formula libraries:
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                                 eve-server                                  │
-│                                                                             │
-│   services/character_skills.rs        ── Skill Queue, SP Catch-Up           │
-│   services/character_skill_ops.rs     ── Direct Purchase, Obsolete Cleanup  │
-│   services/character_clones_implants.rs── Implant Injection, Unplugging     │
-│   services/character_clone_jump_rules.rs── Preconditions, Cooldowns, Fees   │
-│   services/character_contacts.rs      ── SetHomeStation, Medical Clone Reg  │
-│   services/implant_plugging.rs        ── Injector Yields, Daily Alpha Caps  │
-└──────────────────────────────────────┬──────────────────────────────────────┘
-                                       │
-┌──────────────────────────────────────▼──────────────────────────────────────┐
-│                                   eve-db                                    │
-│                                                                             │
-│   snap.characters        ── CharacterRecord (SP, Home Station, Clones)      │
-│   snap.skills            ── HashMap<i64, HashMap<TypeId, TrainedSkillRecord>>│
-│   snap.skill_queues      ── HashMap<i64, Vec<SkillQueueEntry>>              │
-│   snap.jump_clones       ── HashMap<i64, Vec<JumpCloneRecord>>              │
-│   snap.active_implants   ── HashMap<i64, Vec<TypeId>>                       │
-│   snap.active_boosters   ── HashMap<i64, Vec<ActiveBoosterRecord>>          │
-└─────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph Server["eve-server Services"]
+        CS["character_skills.rs<br/>• Skill Queue Ticker & Catch-Up<br/>• Alpha 5M SP Cap Enforcement"]
+        CSO["character_skill_ops.rs<br/>• Direct Purchase (30% markup)<br/>• Obsolete Skill SP Refunds"]
+        CCI["character_clones_implants.rs<br/>• Implant Injection & Unplugging<br/>• Destruction on Slot Replacement"]
+        CJR["character_clone_jump_rules.rs<br/>• 24h Cooldowns & Station Fees<br/>• Same-Station 0s Instant Swap"]
+        CC["character_contacts.rs<br/>• SetHomeStation & Clone Reg<br/>• Remote 365-Day Cooldown"]
+        IP["implant_plugging.rs<br/>• Injector Yield Calculations<br/>• Daily Alpha Injector Caps"]
+    end
+
+    subgraph DB["eve-db WorldStateSnapshot"]
+        D1["snap.characters: HashMap&lt;i64, CharacterRecord&gt;"]
+        D2["snap.skills: HashMap&lt;i64, HashMap&lt;TypeId, TrainedSkillRecord&gt;&gt;"]
+        D3["snap.skill_queues: HashMap&lt;i64, Vec&lt;SkillQueueEntry&gt;&gt;"]
+        D4["snap.jump_clones: HashMap&lt;i64, Vec&lt;JumpCloneRecord&gt;&gt;"]
+        D5["snap.active_implants: HashMap&lt;i64, Vec&lt;TypeId&gt;&gt;"]
+        D6["snap.active_boosters: HashMap&lt;i64, Vec&lt;ActiveBoosterRecord&gt;&gt;"]
+    end
+
+    Server -->|Transactional Snapshot Reads & Mutations| DB
 ```
 
 ### 1. Crates Involved
@@ -327,10 +280,10 @@ EvoMu implements character progression and cloning across asynchronous Rust serv
 ### 2. Primary Handlers & Services
 
 #### Skill Training & Queue Management: [`crates/eve-server/src/services/character_skills.rs`](../../../crates/eve-server/src/services/character_skills.rs)
-* [`catch_up_skill_queue`](../../../crates/eve-server/src/services/character_skills.rs#L39): Evaluates elapsed time since `started_at_unix`. Computes points gained using [`effective_character_attributes`](../../../crates/eve-server/src/services/jump_clone_names.rs), completes finished skill levels in sequence, enforces Alpha clone 5M SP caps, and emits `OnSkillQueueRefreshed` and `OnSkillTrained`.
+* [`catch_up_skill_queue`](../../../crates/eve-server/src/services/character_skills.rs#L39): Evaluates elapsed time since `started_at_unix`. Computes points gained using [`effective_character_attributes`](../../../crates/eve-server/src/services/jump_clone_names.rs#L833), completes finished skill levels in sequence, enforces Alpha clone 5M SP caps, and emits `OnSkillQueueRefreshed` and `OnSkillTrained`.
 * [`handle_skills`](../../../crates/eve-server/src/services/character_skills.rs#L450): Dispatches MachoNet RPC calls:
   * `"skillMgr2.SaveSkillQueue"`: Validates skill prerequisites, computes training durations via [`skill_training_time_seconds`](../../../crates/eve-server/src/formulas.rs#L36), and saves the queue.
-  * `"skillMgr2.ApplyFreeSkillPoints"`: Transfers unallocated SP into a specified skill, immediately upgrading levels if thresholds are crossed.
+  * `"skillMgr2.ApplyFreeSkillPoints"`: Transfers unallocated SP into a specified skill via [`apply_skill_points`](../../../crates/eve-server/src/services/character_skills.rs#L686), immediately upgrading levels if thresholds are crossed.
 
 #### Skill Trading & Obsolete Cleanup: [`crates/eve-server/src/services/character_skill_ops.rs`](../../../crates/eve-server/src/services/character_skill_ops.rs)
 * [`migrate_obsolete_skills_for_character`](../../../crates/eve-server/src/services/character_skill_ops.rs#L16): Scans for deprecated skills, removes them, and refunds $100\%$ of SP into `free_skill_points`.
@@ -349,7 +302,15 @@ EvoMu implements character progression and cloning across asynchronous Rust serv
 
 ---
 
-### 3. Core Database Schemas
+### 3. Core Database Schemas: [`crates/eve-db/src/types.rs`](../../../crates/eve-db/src/types.rs)
+
+The core data structures underlying progression and cloning are defined in [`crates/eve-db/src/types.rs`](../../../crates/eve-db/src/types.rs):
+
+* [`TrainedSkillRecord`](../../../crates/eve-db/src/types.rs#L574): Stores a character's trained skill type, level ($0$ to $5$), and accumulated skill points.
+* [`SkillQueueEntry`](../../../crates/eve-db/src/types.rs#L581): Defines an in-flight training task with target level, start/end SP thresholds, duration, and start timestamp.
+* [`JumpCloneRecord`](../../../crates/eve-db/src/types.rs#L592): Represents an installed jump clone body located at a specific station or citadel, retaining its fitted implant set.
+* [`NeuralAttributes`](../../../crates/eve-db/src/types.rs#L467): Represents cognitive attributes (Charisma, Intelligence, Memory, Perception, Willpower) and annual/bonus remap cooldowns.
+* [`CharacterRecord`](../../../crates/eve-db/src/types.rs#L509): Central character record tracking clone grade (Alpha/Omega), medical home station, total trained SP, unallocated free SP, and jump cooldown timestamps.
 
 ```rust
 // Defined in crates/eve-db/src/types.rs

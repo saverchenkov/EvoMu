@@ -151,7 +151,7 @@ sequenceDiagram
    - If an incoming **Buy order** bids $100\text{ ISK}$ and crosses a resting **Sell order** asking $80\text{ ISK}$, the trade executes at $80\text{ ISK}$. The buyer experiences a **price improvement**, and the $20\text{ ISK}$ per unit difference is refunded from escrow to the buyer's wallet.
    - If an incoming **Sell order** asks $80\text{ ISK}$ and crosses a resting **Buy order** bidding $100\text{ ISK}$, the trade executes at $100\text{ ISK}$. The seller receives the full $100\text{ ISK}$ gross proceeds (minus sales tax).
 3. **Partial Fills:**
-   $$\Delta Q = \min\left(Q_{\text{taker\_remaining}}, Q_{\text{maker\_remaining}}\right)$$
+   $$\Delta Q = \min\left(Q_{\text{taker-remaining}}, Q_{\text{maker-remaining}}\right)$$
    The maker's `vol_remaining` is decremented by $\Delta Q$. If `vol_remaining == 0`, the maker order transitions to `order_state = 2 (Closed)` and is removed from the active order book.
 
 ---
@@ -171,7 +171,7 @@ Where:
 
 #### Player Upwell Structure Broker Fees & SCC Surcharge
 In player-owned Upwell Citadels and Engineering Complexes (`feat:market.upwell-orders`), the broker fee is governed by the structure's market tax profile plus a mandatory Secure Commerce Commission (SCC) surcharge:
-$$\text{Fee}_{\text{structure}} = \text{SCC\_Surcharge} (0.5\%) + \text{ProfileTaxRate}$$
+$$\text{Fee}_{\text{structure}} = \text{SCC-Surcharge} (0.5\%) + \text{ProfileTaxRate}$$
 The collected broker fee is split $50\% / 50\%$ between the SCC sink and the structure owner corporation's master wallet.
 
 #### Sales Tax Calculation
@@ -254,7 +254,7 @@ stateDiagram-v2
 - Bidders must place bids strictly higher than the current bid plus minimum bid increments:
   $$\text{MinNextBid} = \max\left(\text{CurrentBid} + 100\text{ ISK}, \text{CurrentBid} \times 1.01\right)$$
 - **Instant Outbid Refunds:** When a pilot is outbid, their full bid escrow is immediately refunded to their wallet with an accompanying wallet journal notification (`ContractAuctionBidRefund`).
-- If a bidder offers $\ge \text{buyout\_price}$, the auction concludes instantly as `Completed`, delivering the items to the winner and the buyout funds to the issuer.
+- If a bidder offers $\ge \text{buyout-price}$, the auction concludes instantly as `Completed`, delivering the items to the winner and the buyout funds to the issuer.
 
 #### 3. Courier Logistics Contracts
 Courier contracts enable the physical transport of heavy goods across dangerous star systems.

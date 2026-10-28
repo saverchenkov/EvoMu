@@ -92,7 +92,7 @@ classDiagram
 
 #### Blueprint Copying Jobs (Activity 5)
 Copying consumes time and ISK to produce one or more BPCs with run counts up to the blueprint's SDE max runs per copy (`maxProductionLimit`). The copying duration scales linearly with total runs:
-$$T_{\text{copy}} = \text{runs\_per\_copy} \times \text{copies} \times \text{BaseCopyTime} \times (1 - \text{FacilityTE})$$
+$$T_{\text{copy}} = \text{runs-per-copy} \times \text{copies} \times \text{BaseCopyTime} \times (1 - \text{FacilityTE})$$
 
 ---
 
@@ -136,9 +136,9 @@ graph LR
 
 #### Estimated Item Value (EIV)
 The Estimated Item Value ($\text{EIV}$) represents the economic baseline of the product, computed from the sum of SDE adjusted base prices of its standard manufacturing Bill of Materials:
-$$\text{EIV}_{\text{per\_run}} = \sum_{m \in \text{BOM}} \text{Qty}_m \times \text{AdjustedPrice}_m$$
+$$\text{EIV}_{\text{per-run}} = \sum_{m \in \text{BOM}} \text{Qty}_m \times \text{AdjustedPrice}_m$$
 For non-manufacturing jobs (Research ME, Research TE, Copying, Invention), an activity weighting factor of $2\%$ ($0.02$) is applied:
-$$\text{TotalEIV} = \text{EIV}_{\text{per\_run}} \times \text{runs} \times \begin{cases} 0.02 & \text{if Activity} \in \{3, 4, 5, 8\} \\ 1.0 & \text{if Activity} \in \{1, 9\} \end{cases}$$
+$$\text{TotalEIV} = \text{EIV}_{\text{per-run}} \times \text{runs} \times \begin{cases} 0.02 & \text{if Activity} \in \{3, 4, 5, 8\} \\ 1.0 & \text{if Activity} \in \{1, 9\} \end{cases}$$
 
 #### System Cost Index (SCI)
 The System Cost Index represents localized industrial congestion in solar system $S$:

@@ -15,17 +15,11 @@ However, CONCORD recognizes the sovereign right of corporations to resolve exist
 * Capsuleers belonging to the opposing factions may engage in lethal ship-to-ship combat anywhere in High-Security space without triggering criminal flags or security status penalties.
 * Sentry guns, gate turrets, and automated orbital defenses stand down, treating belligerents as legal combatants.
 
-```
-       CONCORD High-Sec Aggression Rules
-                    │
-         Is Combat Sanctioned?
-          ┌─────────┴─────────┐
-         YES                  NO
-          │                    │
-   [Formal War Active]   [Criminal Aggression]
-          │                    │
-   CONCORD Stands Down   CONCORD Response Fleet
-   Legal High-Sec PvP     Lethal Neutralization
+```mermaid
+flowchart TD
+    Rules["CONCORD High-Sec Aggression Rules"] --> Check{"Is Combat Sanctioned?"}
+    Check -->|YES: Formal War Active| StandDown["CONCORD Stands Down<br/>Legal High-Sec PvP"]
+    Check -->|NO: Criminal Aggression| Concord["CONCORD Response Fleet<br/>Lethal Neutralization"]
 ```
 
 ### The War HQ Paradigm
@@ -57,26 +51,19 @@ To register a new alliance, the founding corporation CEO must satisfy technical 
   $$\text{Balance}_{\text{new}} = \text{Balance}_{\text{initial}} - 1\,000\,000\,000\text{ ISK}$$
 * **Nomenclature:** The alliance name (up to 50 characters) and short ticker (3 to 5 alphanumeric characters) must be globally unique across all active and historical entities in New Eden.
 
-```
-       [ Founding CEO ]
-              │ (Pays 1,000,000,000 ISK & Validates Empire Control)
-              ▼
-    ┌───────────────────┐
-    │  Alliance Entity  │ ◄─── Global Entity ID Allocated
-    └─────────┬─────────┘
-              │
-    ┌─────────┴─────────┐
-    │ Executor Corp     │ ◄─── Founding Corp Becomes First Executor
-    └───────────────────┘
+```mermaid
+flowchart TD
+    CEO["Founding CEO<br/>(Pays 1,000,000,000 ISK & Validates Control)"] --> Alliance["Alliance Entity<br/>(Global Entity ID Allocated)"]
+    Alliance --> Executor["Executor Corp<br/>(Founding Corp Becomes First Executor)"]
 ```
 
 #### The Executor Corporation & Governance
 The **Executor Corporation** holds administrative sovereignty over the alliance:
 * **Alliance Applications:** Corporations submit membership applications via `corpRegistry.ApplyToJoinAlliance`. Only the CEO or Directors of the Executor Corporation can approve or reject these applications (`allianceRegistry.UpdateApplication`).
 * **Maturation Delay:** Upon acceptance, a joining corporation undergoes a mandatory $24\text{-hour}$ ($86\,400\text{ seconds}$) integration delay before officially joining the alliance:
-  $$T_{\text{join\_effective}} = T_{\text{acceptance}} + 86\,400\text{ s}$$
+  $$T_{\text{join-effective}} = T_{\text{acceptance}} + 86\,400\text{ s}$$
 * **Executive Election:** Member corporations hold democratic oversight. Any member corporation CEO/Director can cast a vote supporting a candidate member corporation for executor (`allianceRegistry.DeclareExecutorSupport`). An election succeeds when a candidate achieves an absolute majority of member corporate votes:
-  $$\text{Votes}_{\text{required}} = \left\lfloor \frac{N_{\text{member\_corps}}}{2} \right\rfloor + 1$$
+  $$\text{Votes}_{\text{required}} = \left\lfloor \frac{N_{\text{member-corps}}}{2} \right\rfloor + 1$$
 * **Expulsion & Withdrawal:** 
   * The Executor Corporation can kick any member corporation immediately (`allianceRegistry.KickMember`).
   * A member corporation can voluntarily withdraw (`allianceRegistry.DeleteMember`), subject to a $24\text{-hour}$ spool-off timer ($T_{\text{effective}} = T_{\text{request}} + 86\,400\text{ s}$).
@@ -91,7 +78,7 @@ The Executor Corporation controls global alliance contact standings (ranging fro
 
 A corporation or alliance is classified as **war-eligible** if and only if it owns at least one non-destroyed Upwell structure anchored in High-Security space:
 
-$$\text{Eligible}(E) \iff \exists s \in \text{Structures}(E) \text{ such that } s.\text{sec\_level} \ge 0.5 \land s.\text{state} \neq \text{"Destroyed"}$$
+$$\text{Eligible}(E) \iff \exists s \in \text{Structures}(E) \text{ such that } s.\text{sec-level} \ge 0.5 \land s.\text{state} \neq \text{"Destroyed"}$$
 
 * **Immunity Rule:** If corporation $D$ anchors zero structures in High-Sec, any war declaration targeting $D$ is rejected by CONCORD with error `DefenderNotWarEligible`.
 * **Dynamic Loss of Eligibility:** If the defender loses its last anchored High-Sec structure during an ongoing war (via destruction or unanchoring), the war terminates automatically during the next synchronization tick.
@@ -109,27 +96,24 @@ To declare a formal war against a target entity ($D$):
 5. **CONCORD War Fee:** A flat fee of $100\,000\,000\text{ ISK}$ (one hundred million ISK) is debited from the attacking corporation's master wallet:
    $$\text{Fee}_{\text{declaration}} = 100\,000\,000\text{ ISK}$$
 
-```
-              War Declaration Pipeline
-                         │
-      [Attacker Master Wallet >= 100M ISK?]
-                         │ YES
-      [Defender Has Anchored High-Sec Structure?]
-                         │ YES
-      [Attacker Owns Anchored High-Sec War HQ?]
-                         │ YES
-      [Active 14-Day Peace Treaty in Place?]
-                         │ NO
-                         ▼
-        War Declared: Status = "Pending"
-         Spool-Up Timer: T_start = Now + 24h
+```mermaid
+flowchart TD
+    Start["War Declaration Request"] --> Check1{"Attacker Master Wallet<br/>≥ 100M ISK?"}
+    Check1 -->|YES| Check2{"Defender Owns Anchored<br/>High-Sec Structure?"}
+    Check1 -->|NO| Fail1["Rejected: Insufficient Funds"]
+    Check2 -->|YES| Check3{"Attacker Designates<br/>High-Sec War HQ?"}
+    Check2 -->|NO| Fail2["Rejected: Defender Ineligible"]
+    Check3 -->|YES| Check4{"Active 14-Day<br/>Peace Treaty?"}
+    Check3 -->|NO| Fail3["Rejected: No Valid War HQ"]
+    Check4 -->|NO| Success["War Declared: Status = 'Pending'<br/>24h Spool-Up: T_start = Now + 86,400s"]
+    Check4 -->|YES| Fail4["Rejected: Peace Treaty Active"]
 ```
 
 #### Timers & Spool-Up Progression
 Once validated, the war enters the **Pending** spool-up state:
 
 $$T_{\text{declared}} = t_0$$
-$$T_{\text{combat\_start}} = t_0 + T_{\text{spool}} = t_0 + 86\,400\text{ seconds (24 Hours)}$$
+$$T_{\text{combat-start}} = t_0 + T_{\text{spool}} = t_0 + 86\,400\text{ seconds (24 Hours)}$$
 
 During the 24-hour spool-up window:
 * Belligerents receive broadcast notifications (`OnWarChanged`).
@@ -195,7 +179,7 @@ At any point during an active war, either the aggressor or the defender can init
      $$\Delta \text{Balance}_{\text{offerer}} = -\text{Tribute}_{\text{ISK}}, \quad \Delta \text{Balance}_{\text{acceptor}} = +\text{Tribute}_{\text{ISK}}$$
   2. The war enters a $24\text{-hour}$ wind-down phase ($T_{\text{end}} = t_{\text{accept}} + 86\,400\text{ s}$).
   3. A mandatory **14-day Peace Treaty** is created:
-     $$T_{\text{peace\_expiry}} = T_{\text{finish}} + (14 \times 86\,400\text{ s}) = t_{\text{accept}} + 1\,296\,000\text{ seconds}$$
+     $$T_{\text{peace-expiry}} = T_{\text{finish}} + (14 \times 86\,400\text{ s}) = t_{\text{accept}} + 1\,296\,000\text{ seconds}$$
 
 #### The 14-Day Peace Treaty
 During the 14-day Peace Treaty window, the CONCORD War Registry refuses any war declaration between the two corporate/alliance entities:
@@ -222,26 +206,12 @@ Two corporations or alliances can engage in honorable combat without CONCORD war
 
 EvoMu coordinates warfare and alliance systems through an event-driven, transactional architecture split cleanly across the database engine, MachoNet RPC services, and RESTful ESI routes.
 
-```
-                    ┌─────────────────────────┐
-                    │      Client / ESI       │
-                    └────────────┬────────────┘
-                                 │
-           ┌─────────────────────┼─────────────────────┐
-           │                     │                     │
-           ▼                     ▼                     ▼
-┌────────────────────┐ ┌────────────────────┐ ┌────────────────────┐
-│    social_wars     │ │ social_corp_fleet  │ │ combat_crimewatch  │
-│  War Registry & HQ │ │ Alliance Lifecycle │ │ Legality & Sentry  │
-└──────────┬─────────┘ └─────────┬──────────┘ └─────────┬──────────┘
-           │                     │                     │
-           └─────────────────────┼─────────────────────┘
-                                 │
-                                 ▼
-                    ┌─────────────────────────┐
-                    │   WorldStateSnapshot    │
-                    │   (Atomic Transactions) │
-                    └─────────────────────────┘
+```mermaid
+flowchart TD
+    Client["Client / ESI"] --> W["social_wars.rs<br/>• War Registry & HQ Management"]
+    Client --> A["social_corp_fleet.rs<br/>• Alliance Lifecycle & Voting"]
+    Client --> C["combat_crimewatch.rs<br/>• Combat Legality & Sentry Rules"]
+    W & A & C --> Snapshot["WorldStateSnapshot (eve-db)<br/>• Atomic Snapshot Transactions"]
 ```
 
 ### 1. Crates & Responsibilities
