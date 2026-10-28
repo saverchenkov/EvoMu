@@ -136,6 +136,14 @@ pub fn record_hub_hack(ctx: &ServerContext, sys_id: u32, hub_id: i64, disruption
                 }
             }
         }
+        if let Some(st) = snap.structures.get_mut(&hub_id) {
+            if st.state == "ShieldVulnerable" {
+                st.state = "ArmorReinforced".into();
+            }
+            if st.reinforced_until_unix == 0 {
+                st.reinforced_until_unix = until;
+            }
+        }
         snap.sov_campaign_scores.entry(hub_id).or_insert(
             eve_db::snapshot_ext::SovCampaignScoreRecord {
                 structure_id: hub_id,
