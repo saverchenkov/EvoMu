@@ -873,14 +873,30 @@ pub(super) async fn handle_finder_and_tactical(
                 let Some(caller_m) = f.member_details.get(&char_id) else {
                     return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
                 };
-                if f.boss_id != char_id && role_to_i64(caller_m.role) > 3 {
-                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Boss or a Commander can accept join requests".into() });
+                if f.boss_id != char_id && (role_to_i64(caller_m.role) > 3 || role_to_i64(caller_m.role) >= role_to_i64(role)) {
+                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Boss or a higher-ranking Commander can accept join requests to this role".into() });
                 }
                 if f.members.len() >= max_size as usize {
                     return Err(BridgeRpcError { code: "FleetFull".into(), message: "Fleet is full".into() });
                 }
                 let wid = wing_opt.unwrap_or_else(|| f.wings.first().copied().unwrap_or(1));
                 let sid = squad_opt.or(auto_squad).or_else(|| f.wing_details.get(&wid).and_then(|w| w.squad_ids.first().copied())).or_else(|| f.squads.first().copied()).unwrap_or(1);
+                let pos_occupied = match role {
+                    FleetRole::FleetCommander => f.member_details.values().any(|m| m.role == FleetRole::FleetCommander),
+                    FleetRole::WingCommander => f.wing_details.get(&wid).and_then(|w| w.commander_id).is_some()
+                        || f.member_details.values().any(|m| m.role == FleetRole::WingCommander && m.wing_id == Some(wid)),
+                    FleetRole::SquadCommander => f.squad_details.get(&sid).and_then(|s| s.commander_id).is_some()
+                        || f.member_details.values().any(|m| m.role == FleetRole::SquadCommander && m.squad_id == Some(sid)),
+                    FleetRole::SquadMember => false,
+                };
+                if pos_occupied {
+                    return Err(BridgeRpcError { code: "PositionOccupied".into(), message: "The requested fleet commander position is already occupied".into() });
+                }
+                if role == FleetRole::WingCommander {
+                    if let Some(wing) = f.wing_details.get_mut(&wid) { wing.commander_id = Some(applicant_id); }
+                } else if role == FleetRole::SquadCommander {
+                    if let Some(sq) = f.squad_details.get_mut(&sid) { sq.commander_id = Some(applicant_id); }
+                }
                 if !f.members.contains(&applicant_id) { f.members.push(applicant_id); }
                 f.invites.remove(&applicant_id);
                 f.member_details.insert(

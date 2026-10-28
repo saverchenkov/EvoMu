@@ -652,8 +652,8 @@ pub(super) fn handle_corp_gov(
             if !has_director { return deny_role("Updating corporation titles requires CEO or Director role"); }
             let title_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1).clamp(1, 16);
             let title_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Squad Leader");
-            let roles_mask = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0) as u64;
-            let grantable_mask = args.get(3).and_then(|a| a.as_i64()).unwrap_or(0) as u64;
+            let roles_mask = (args.get(2).and_then(|a| a.as_i64()).unwrap_or(0) as u64) & !corp_roles::ROLE_DIRECTOR;
+            let grantable_mask = (args.get(3).and_then(|a| a.as_i64()).unwrap_or(0) as u64) & !corp_roles::ROLE_DIRECTOR;
             let prev = ctx.db.with_mut_snapshot(|snap| {
                 let state = snap.corp_governance.entry(corp_id).or_default();
                 let prev = state.titles.insert(title_id, (title_name.to_string(), roles_mask));
@@ -1020,18 +1020,13 @@ pub(super) fn handle_corp_gov(
 
         ("corpRecProxy", "CreateRecruitmentAd") | ("corpRecProxy", "UpdateRecruitmentAd") => {
             let has_role = ctx.db.with_snapshot(|snap| {
-                snap.corporations.get(&corp_id).is_none_or(|c| {
+                snap.corporations.get(&corp_id).is_some_and(|c| {
                     let r = c.member_roles.get(&char_id).copied().unwrap_or(0);
-                    char_id == c.ceo_id
-                        || corp_roles::has_role(r, corp_roles::ROLE_PERSONNEL_MANAGER)
+                    char_id == c.ceo_id || (r & (corp_roles::ROLE_PERSONNEL_MANAGER | corp_roles::ROLE_DIRECTOR)) != 0
                 })
             });
             if !has_role {
-                return Some(Err(BridgeRpcError {
-                    code: "CorpRoleDenied".into(),
-                    message: "Managing recruitment ads requires Personnel Manager or Director role"
-                        .into(),
-                }));
+                return deny_role("Managing recruitment ads requires Personnel Manager or Director role");
             }
             if method == "CreateRecruitmentAd" {
                 let ad_fee = IskCents::from_isk(250_000);
@@ -1069,12 +1064,13 @@ pub(super) fn handle_corp_gov(
             let mut ads = load_corp_rec_ads(ctx);
             let ad_id = if method == "UpdateRecruitmentAd" {
                 let id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-                if let Some(ad) = ads.iter_mut().find(|a| a.ad_id == id) {
-                    ad.title = title.clone();
-                    ad.description = desc.clone();
-                    ad.type_mask = type_mask;
-                    if lang_mask != 0 { ad.lang_mask = lang_mask; }
-                }
+                let Some(ad) = ads.iter_mut().find(|a| a.ad_id == id && a.corp_id == corp_id) else {
+                    return Some(Err(BridgeRpcError { code: "RecruitmentAdNotFound".into(), message: format!("Recruitment ad {id} not found") }));
+                };
+                ad.title = title.clone();
+                ad.description = desc.clone();
+                ad.type_mask = type_mask;
+                if lang_mask != 0 { ad.lang_mask = lang_mask; }
                 with_corp_gov(ctx, |g| {
                     if let Some(state) = g.get_mut(&corp_id) {
                         if let Some(ad) = state.recruitment_ads.iter_mut().find(|a| a.0 == id) {
@@ -1195,9 +1191,9 @@ pub(super) fn handle_corp_gov(
 
         ("corpRecProxy", "DeleteRecruitmentAd") => {
             let has_role = ctx.db.with_snapshot(|snap| {
-                snap.corporations.get(&corp_id).is_none_or(|c| {
+                snap.corporations.get(&corp_id).is_some_and(|c| {
                     let r = c.member_roles.get(&char_id).copied().unwrap_or(0);
-                    char_id == c.ceo_id || corp_roles::has_role(r, corp_roles::ROLE_PERSONNEL_MANAGER)
+                    char_id == c.ceo_id || (r & (corp_roles::ROLE_PERSONNEL_MANAGER | corp_roles::ROLE_DIRECTOR)) != 0
                 })
             });
             if !has_role {
@@ -1205,7 +1201,11 @@ pub(super) fn handle_corp_gov(
             }
             let ad_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
             let mut ads = load_corp_rec_ads(ctx);
+            let before = ads.len();
             ads.retain(|a| a.ad_id != ad_id || a.corp_id != corp_id);
+            if ads.len() == before {
+                return Some(Err(BridgeRpcError { code: "RecruitmentAdNotFound".into(), message: format!("Recruitment ad {ad_id} not found") }));
+            }
             save_corp_rec_ads(ctx, &ads);
             with_corp_gov(ctx, |g| {
                 if let Some(s) = g.get_mut(&corp_id) {

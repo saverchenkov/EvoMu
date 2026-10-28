@@ -371,14 +371,10 @@ pub async fn handle_fit_ships(
                 let flag_u16 = flag as u16;
                 if matches!(flag_u16, 11..=34 | 92..=94 | 125..=132) {
                     let Some(m_type) = ctx.sde.types.get(&tid) else { continue; };
-                    let type_limit = m_type.default_attributes.get(&2431)
-                        .or_else(|| {
-                            if m_type.default_attributes.contains_key(&1548) {
-                                m_type.default_attributes.get(&1544)
-                            } else {
-                                None
-                            }
-                        })
+                    let type_limit = m_type
+                        .default_attributes
+                        .get(&2431)
+                        .or_else(|| m_type.default_attributes.get(&1544))
                         .copied();
                     if let Some(limit_f) = type_limit {
                         let limit = limit_f as usize;
@@ -395,8 +391,10 @@ pub async fn handle_fit_ships(
                             });
                         }
                     }
-                    let group_limit = m_type.default_attributes.get(&1548)
-                        .or_else(|| m_type.default_attributes.get(&1544))
+                    let group_limit = m_type
+                        .default_attributes
+                        .get(&763)
+                        .or_else(|| m_type.default_attributes.get(&1548))
                         .copied();
                     if let Some(limit_f) = group_limit {
                         let limit = limit_f as usize;
@@ -653,6 +651,7 @@ pub async fn handle_fit_ships(
     let mut missing: HashMap<TypeId, i64> = HashMap::new();
     let mut moved_items: Vec<eve_db::InventoryItemRecord> = Vec::new();
     let char_skills = ctx.character_skill_levels(char_id);
+    let alsc_locked = crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state(ctx).alsc_locked_items;
     ctx.db.with_mut_snapshot(|snap| {
         for &ship_id in &target_ship_ids {
             let ship_type_id = snap.items.get(&ship_id).map(|s| s.type_id).unwrap_or(0);
@@ -694,7 +693,9 @@ pub async fn handle_fit_ships(
                             && i.location_id == station_id
                             && i.flag == InventoryFlag::Hangar
                             && i.type_id == tid
+                            && i.type_id != 60
                             && i.quantity > 0
+                            && !alsc_locked.contains(&i.item_id)
                             && !snap.is_item_locked_in_contract_or_job(i.item_id)
                     })
                     .map(|i| (i.item_id, i.quantity))
@@ -707,11 +708,10 @@ pub async fn handle_fit_ships(
                 let mut online = true;
                 if is_mod {
                     if let Some(m_type) = ctx.sde.types.get(&tid) {
-                        for (sk_attr, lv_attr) in [
-                            (eve_sde::attr_ids::REQUIRED_SKILL_1, eve_sde::attr_ids::REQUIRED_SKILL_1_LEVEL),
-                            (eve_sde::attr_ids::REQUIRED_SKILL_2, eve_sde::attr_ids::REQUIRED_SKILL_2_LEVEL),
-                            (eve_sde::attr_ids::REQUIRED_SKILL_3, eve_sde::attr_ids::REQUIRED_SKILL_3_LEVEL),
-                        ] {
+                        for (sk_attr, lv_attr) in eve_dogma::REQUIRED_SKILL_ATTR_IDS
+                            .into_iter()
+                            .zip(eve_dogma::REQUIRED_SKILL_LEVEL_ATTR_IDS)
+                        {
                             if let Some(&sk_f) = m_type.default_attributes.get(&sk_attr) {
                                 let sk_id = sk_f as u32;
                                 if sk_id > 0 {

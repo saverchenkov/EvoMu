@@ -318,3 +318,4 @@ mod crimewatch_drones_closure;
 mod ships_modules_closure;
 mod ess_reserve_main_concurrency;
 mod mining_structures_sov_r5_regressions;
+mod skills_fitting_corp_r5_regressions;

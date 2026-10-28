@@ -173,8 +173,8 @@ pub fn record_server_project_activity_in_snap(
             {
                 return None;
             }
-            if let (Some(req_f), Some(actual_f)) = (det.filter_id.filter(|&f| f > 0), filter_opt) {
-                if req_f != actual_f {
+            if let Some(req_f) = det.filter_id.filter(|&f| f > 0) {
+                if filter_opt != Some(req_f) {
                     return None;
                 }
             }
@@ -781,14 +781,17 @@ fn handle_create_project(
                     .get(&char_id)
                     .copied()
                     .unwrap_or(session.corp_role);
+                let take_bit = 1u64 << (20 + (wallet_div.clamp(1, 7) - 1));
+                let has_explicit_div_roles = (caller_roles & (0x7Fu64 << 20)) != 0 || wallet_div > 1;
                 if corp.ceo_id != char_id
                     && !corp_roles::has_role(caller_roles, corp_roles::ROLE_DIRECTOR)
                     && !corp_roles::has_role(caller_roles, corp_roles::ROLE_ACCOUNTANT)
-                    && !corp_roles::has_role(caller_roles, corp_roles::ROLE_PROJECT_MANAGER)
+                    && (!corp_roles::has_role(caller_roles, corp_roles::ROLE_PROJECT_MANAGER)
+                        || (escrow.raw_cents() > 0 && has_explicit_div_roles && !corp_roles::has_role(caller_roles, take_bit)))
                 {
                     return Err(BridgeRpcError {
                         code: "CorpRoleDenied".into(),
-                        message: "Creating corporation projects requires Project Manager, Accountant, or Director role".into(),
+                        message: "Creating corporation projects with escrow requires Project Manager + wallet division take access, Accountant, or Director role".into(),
                     });
                 }
             }
@@ -1012,7 +1015,17 @@ fn handle_contribute_project(
             });
         }
         if matcher_type == "DeliverItem" {
-            let current_dock = session.station_id.or(session.structure_id);
+            let current_dock = snap
+                .characters
+                .get(&char_id)
+                .and_then(|c| c.station_id.or(c.structure_id))
+                .or(session.station_id.or(session.structure_id));
+            if current_dock.is_none() {
+                return Err(BridgeRpcError {
+                    code: "MustBeDocked".into(),
+                    message: "Delivering items to a corporation project requires being docked at a station or structure".into(),
+                });
+            }
             let current_ship = session.ship_id;
             let req_type = det_snapshot.filter_id.filter(|&v| v > 0).map(|v| v as u32);
             let contrib_item_id = snap

@@ -307,6 +307,12 @@ pub(super) async fn handle_fleet_ops(
                     message: "Caller ship is not in space".into(),
                 }));
             };
+            if caller_ball.max_velocity <= 0.0 || sys.is_ball_scrambled(caller_ship_id).await.unwrap_or(false) {
+                return Some(Err(BridgeRpcError {
+                    code: "WarpScrambled".into(),
+                    message: "Cannot warp to fleet member while warp scrambled or immobilized".into(),
+                }));
+            }
             let dist = caller_ball.position.distance(target_ball.position);
             if dist < WARP_MIN_DISTANCE_M {
                 return Some(Err(BridgeRpcError {
@@ -1049,39 +1055,90 @@ pub(super) async fn handle_fleet_ops(
         ("fleetMgr", "ConduitJump") | ("fleetObjectHandler", "ConduitJump") => {
             // parity: feat:fleet.member-movement-optins
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let Some(fleet_id) = session.fleet_id else {
+            let Some(fleet_id) = session.fleet_id.or_else(|| {
+                ctx.db.with_snapshot(|snap| {
+                    snap.fleets.values().find(|f| f.members.contains(&char_id) || f.member_details.contains_key(&char_id)).map(|f| f.fleet_id)
+                })
+            }) else {
                 return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
             };
-            let dest_sys = args.first().and_then(|a| a.as_i64()).unwrap_or(30_000_142) as u32;
+            let dest_raw = if args.len() >= 2 { args.get(1) } else { args.first() };
+            let dest_sys = dest_raw.and_then(|a| a.as_i64()).unwrap_or(30_000_142) as u32;
             let caller_sys = session.solar_system_id.unwrap_or(30_000_142);
+            if dest_sys == caller_sys || !ctx.sde.solar_systems.contains_key(&dest_sys) || (31_000_000..=31_002_605).contains(&dest_sys) {
+                return Some(Err(BridgeRpcError { code: "InvalidConduitDestination".into(), message: format!("Invalid Conduit Jump destination system {dest_sys}") }));
+            }
+            let caller_ship_id = session.ship_id.unwrap_or(0);
+            let sys_handle = ctx.systems.get_or_spawn(caller_sys);
+            if sys_handle.is_ball_scrambled(caller_ship_id).await.unwrap_or(false) {
+                return Some(Err(BridgeRpcError { code: "WarpScrambled".into(), message: "Cannot initiate Conduit Jump while warp scrambled".into() }));
+            }
+            let member_ships: Vec<(i64, i64)> = ctx.db.with_snapshot(|snap| {
+                let Some(fleet) = snap.fleets.get(&fleet_id) else { return Vec::new(); };
+                let mut ids: Vec<i64> = fleet.member_details.keys().copied().collect();
+                for &mid in &fleet.members { if !ids.contains(&mid) { ids.push(mid); } }
+                ids.into_iter().filter_map(|mid| {
+                    let ch = snap.characters.get(&mid)?;
+                    (ch.solar_system_id == caller_sys && ch.station_id.is_none() && ch.structure_id.is_none() && ch.active_ship_id > 0).then_some((mid, ch.active_ship_id))
+                }).collect()
+            });
+            let mut scrambled_members = std::collections::HashSet::new();
+            for (mid, sid) in member_ships {
+                if sys_handle.is_ball_scrambled(sid).await.unwrap_or(false) {
+                    scrambled_members.insert(mid);
+                }
+            }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(fleet) = snap.fleets.get(&fleet_id) else {
                     return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
                 };
-                let Some(caller_m) = fleet.member_details.get(&char_id) else {
-                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller not in fleet".into() });
-                };
-                if fleet.boss_id != char_id && role_to_i64(caller_m.role) > 3 {
+                let caller_role = fleet.member_details.get(&char_id).map(|m| role_to_i64(m.role))
+                    .unwrap_or(if fleet.boss_id == char_id { 1 } else { 4 });
+                if fleet.boss_id != char_id && caller_role > 3 {
                     return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Commanders can initiate Conduit Jump".into() });
                 }
+                let caller_undocked = snap.characters.get(&char_id).is_some_and(|ch| ch.solar_system_id == caller_sys && ch.station_id.is_none() && ch.structure_id.is_none());
+                if !caller_undocked {
+                    return Err(BridgeRpcError { code: "ShipNotInSpace".into(), message: "Caller must be undocked in space to initiate Conduit Jump".into() });
+                }
                 let mut jumped = Vec::new();
+                let mut jumped_ships = Vec::new();
                 let mut skipped = Vec::new();
-                let member_list: Vec<FleetMemberRecord> = fleet.member_details.values().cloned().collect();
-                for m in member_list {
-                    if m.character_id != char_id && !m.accepts_conduit_jumps {
-                        skipped.push(m.character_id);
+                let mut all_mids: Vec<i64> = fleet.member_details.keys().copied().collect();
+                for &mid in &fleet.members { if !all_mids.contains(&mid) { all_mids.push(mid); } }
+                for mid in all_mids {
+                    let accepts = fleet.member_details.get(&mid).map(|m| m.accepts_conduit_jumps).unwrap_or(true);
+                    if (mid != char_id && !accepts) || scrambled_members.contains(&mid) {
+                        skipped.push(mid);
                         continue;
                     }
-                    if let Some(ch) = snap.characters.get_mut(&m.character_id) {
-                        if ch.solar_system_id == caller_sys && ch.station_id.is_none() && ch.structure_id.is_none() {
+                    let ship_id_opt = snap.characters.get(&mid).and_then(|ch| {
+                        (ch.solar_system_id == caller_sys && ch.station_id.is_none() && ch.structure_id.is_none() && ch.active_ship_id > 0).then_some(ch.active_ship_id)
+                    });
+                    if let Some(sid) = ship_id_opt {
+                        if let Some(ch) = snap.characters.get_mut(&mid) {
                             ch.solar_system_id = dest_sys;
-                            jumped.push(m.character_id);
                         }
+                        if let Some(ship_it) = snap.items.get_mut(&sid) {
+                            ship_it.location_id = dest_sys as i64;
+                            ship_it.version += 1;
+                        }
+                        jumped.push(mid);
+                        jumped_ships.push(sid);
                     }
                 }
-                Ok((jumped, skipped))
+                Ok((jumped, jumped_ships, skipped))
             });
-            let (jumped, skipped) = match res { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let (jumped, jumped_ships, skipped) = match res { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let dst_handle = ctx.systems.get_or_spawn(dest_sys);
+            for sid in jumped_ships {
+                if let Ok(Some((_, mut b))) = sys_handle.get_ball_snapshot(sid).await {
+                    let _ = sys_handle.remove_ball(sid).await;
+                    b.mode = MovementMode::Stop;
+                    b.velocity = DVec3::ZERO;
+                    let _ = dst_handle.spawn_ball(b).await;
+                }
+            }
             if jumped.contains(&char_id) { session.solar_system_id = Some(dest_sys); }
             for &jid in &jumped {
                 ctx.notify(
