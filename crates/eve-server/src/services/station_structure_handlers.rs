@@ -1,6 +1,7 @@
 //! `station_structure_handlers` — Helper routines for orbital and station structure operations.
 
 use crate::router::ServerContext;
+use crate::services::station_structure::structure_lifecycle;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 
@@ -196,5 +197,182 @@ pub fn handle_upgrade_gantry(
         ("planetID", PyRep::Integer(pid)),
         ("typeID", PyRep::Integer(i64::from(tid))),
         ("state", PyRep::String("ShieldVulnerable".into())),
+    ]))
+}
+
+pub fn handle_anchor_orbital(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let Some(sys_id) = session.solar_system_id else {
+        return Err(BridgeRpcError {
+            code: "NoSolarSystem".into(),
+            message: "Session has no active solarSystemID".into(),
+        });
+    };
+    let (_, is_thera, is_shattered, _) =
+        crate::services::space_destiny::system_wormhole_profile(sys_id);
+    if is_thera || is_shattered {
+        return Err(BridgeRpcError {
+            code: "AnchoringDisallowedInTheraOrShattered".into(),
+            message: format!(
+                "Anchoring starbases or orbitals is disallowed in Thera or shattered wormhole system {sys_id}"
+            ),
+        });
+    }
+    let region_id = ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id).unwrap_or(0);
+    if region_id == structure_lifecycle::POCHVEN_REGION_ID {
+        if session.station_id.is_some() || session.structure_id.is_some() {
+            return Err(BridgeRpcError {
+                code: "NotInSpace".into(),
+                message: "Must be in space to anchor an orbital structure".into(),
+            });
+        }
+        let trig_standing = ctx.db.with_snapshot(|snap| {
+            snap.characters
+                .get(&char_id)
+                .and_then(|c| c.standings.get(&500_026).copied())
+                .unwrap_or(0.0)
+        });
+        if trig_standing < 1.5 {
+            return Err(BridgeRpcError {
+                code: "InsufficientTriglavianStanding".into(),
+                message: format!(
+                    "Anchoring orbitals in Pochven requires at least 1.5 standing with the Triglavian Collective (500026); pilot has {trig_standing:.2}"
+                ),
+            });
+        }
+    }
+    let item_id = args.first().and_then(|a| a.as_i64()).ok_or_else(|| BridgeRpcError {
+        code: "MissingArgument".into(),
+        message: "AnchorOrbital requires an orbital itemID".into(),
+    })?;
+
+    let is_gantry = ctx.db.with_snapshot(|snap| {
+        snap.items.get(&item_id).is_some_and(|it| {
+            it.type_id == 3962
+                || ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1106)
+        })
+    });
+    if !is_gantry {
+        return Err(BridgeRpcError {
+            code: "StarbaseRemoved".into(),
+            message: "Legacy POS starbases and control towers are superseded by Upwell structures in V24.01".into(),
+        });
+    }
+
+    let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0);
+    if sys_sec >= 0.45 && sys_id < 31_000_000 {
+        return Err(BridgeRpcError {
+            code: "CannotAnchorOrbitalInHighSec".into(),
+            message: format!("Customs Office Gantry cannot be anchored in high-sec system {sys_id}"),
+        });
+    }
+
+    let ship_pos = session.ship_id.and_then(|sid| ctx.systems.get_ball_position_sync(sys_id, sid));
+    let nearest_planet = ship_pos.and_then(|sp| {
+        ctx.sde.celestials_in_system(sys_id).into_iter().filter(|c| c.group_id == 7).min_by(|a, b| {
+            (a.position - sp).length_squared().partial_cmp(&(b.position - sp).length_squared()).unwrap_or(std::cmp::Ordering::Equal)
+        })
+    });
+    let planet_id = args.get(1).and_then(|a| a.as_i64())
+        .or_else(|| nearest_planet.as_ref().map(|p| p.celestial_id))
+        .or_else(|| ctx.sde.solar_systems.get(&sys_id).and_then(|s| s.planet_ids.first().copied()))
+        .unwrap_or(40_000_001);
+    if let (Some(sp), Some(np)) = (ship_pos, nearest_planet) {
+        if args.get(1).is_none() || args.get(1).and_then(|a| a.as_i64()) == Some(np.celestial_id) {
+            let dist = (sp - np.position).length();
+            let max_dist = np.radius + 100_000_000.0;
+            if dist > max_dist {
+                return Err(BridgeRpcError {
+                    code: "OrbitalOutOfRange".into(),
+                    message: format!("Ship is {dist:.0}m from planet {} (must be within {max_dist:.0}m to anchor orbital)", np.celestial_id),
+                });
+            }
+        }
+    }
+
+    let (tid, pid) = ctx.db.try_with_mut_snapshot(|snap| {
+        if snap.structures.contains_key(&item_id) {
+            return Err(BridgeRpcError {
+                code: "AlreadyAnchored".into(),
+                message: format!("Orbital structure {item_id} is already anchored in space"),
+            });
+        }
+        let tag = format!("Orbital:{planet_id}");
+        if snap.structures.values().any(|st| {
+            st.solar_system_id == sys_id
+                && st.state != "Destroyed"
+                && st.name == tag
+        }) {
+            return Err(BridgeRpcError {
+                code: "PlanetAlreadyHasOrbital".into(),
+                message: format!("Planet {planet_id} already has an anchored orbital"),
+            });
+        }
+        let char_corp = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.corporation_id)
+            .unwrap_or(98_000_001);
+        let it = snap.items.get_mut(&item_id).ok_or_else(|| BridgeRpcError {
+            code: "ItemNotFound".into(),
+            message: format!("Gantry item {item_id} not found"),
+        })?;
+        if it.owner_id != char_id && it.owner_id != char_corp {
+            return Err(BridgeRpcError {
+                code: "NotItemOwner".into(),
+                message: format!("Character {char_id} does not own item {item_id}"),
+            });
+        }
+        if let Some(active_ship) = session.ship_id {
+            if it.location_id != active_ship || it.flag != eve_db::InventoryFlag::Cargo {
+                return Err(BridgeRpcError {
+                    code: "ItemNotInCargo".into(),
+                    message: format!("Gantry item {item_id} must be in the cargo hold of active ship {active_ship}"),
+                });
+            }
+        }
+        let tid = it.type_id;
+        it.location_id = planet_id;
+        it.flag = eve_db::InventoryFlag::None;
+        it.singleton = true;
+        snap.structures.insert(
+            item_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: item_id,
+                type_id: tid,
+                owner_corp_id: char_corp,
+                solar_system_id: sys_id,
+                name: tag,
+                position: ctx
+                    .systems
+                    .get_ball_position_sync(sys_id, session.ship_id.unwrap_or(0))
+                    .map(|p| p.to_array())
+                    .unwrap_or([200_000.0, 0.0, 0.0]),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 1_000,
+                shield_hp: 500_000.0,
+                armor_hp: 500_000.0,
+                hull_hp: 300_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        Ok((tid, planet_id))
+    })?;
+
+    Ok(PyRep::keyval([
+        ("itemID", PyRep::Integer(item_id)),
+        ("orbitalID", PyRep::Integer(item_id)),
+        ("planetID", PyRep::Integer(pid)),
+        ("typeID", PyRep::Integer(i64::from(tid))),
+        ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+        ("state", PyRep::String("Anchored".into())),
     ]))
 }

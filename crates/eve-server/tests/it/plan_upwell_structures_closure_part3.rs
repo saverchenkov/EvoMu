@@ -340,15 +340,17 @@ async fn test_upwell_anchoring_quantum_core_pochven_and_palatine() {
     sess.solar_system_id = Some(KINO_POCHVEN);
     ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&OWNER).unwrap().solar_system_id = KINO_POCHVEN);
     let poch_ship = sess.ship_id.unwrap();
-    let _ = ctx.systems.get_or_spawn(KINO_POCHVEN).spawn_ball(Ball { id: poch_ship, type_id: 606, position: DVec3::new(3.0e9, 0.0, 0.0), velocity: DVec3::ZERO, radius: 40.0, mass: 1_000_000.0, mode: MovementMode::Stop, speed_fraction: 0.0, max_velocity: 300.0, inertia: 1.0 }).await;
+    let planet_pos = DVec3::new(27660817438.0, -327544042.0, 66850617032.0);
+    let ship_pos = planet_pos + DVec3::new(10_000_000.0, 0.0, 0.0);
+    let _ = ctx.systems.get_or_spawn(KINO_POCHVEN).spawn_ball(Ball { id: poch_ship, type_id: 606, position: ship_pos, velocity: DVec3::ZERO, radius: 40.0, mass: 1_000_000.0, mode: MovementMode::Stop, speed_fraction: 0.0, max_velocity: 300.0, inertia: 1.0 }).await;
     assert!(matches!(anchor(&ctx, &mut sess, 35832, "Pochven Citadel").await.expect_err("pochven upwell").code.as_str(), "AnchoringDisallowedInPochven" | "CannotAnchorInPochven"));
 
     let pos_tower = grant(&ctx, OWNER, poch_ship, 12235, InventoryFlag::Cargo, 1);
-    let pos_err = rpc(&ctx, &mut sess, "posMgr", "AnchorStructure", &[PyRep::Integer(pos_tower), PyRep::Tuple(vec![PyRep::Real(3.0e9), PyRep::Real(0.0), PyRep::Real(0.0)])]).await.expect_err("pochven pos");
+    let pos_err = rpc(&ctx, &mut sess, "posMgr", "AnchorStructure", &[PyRep::Integer(pos_tower), PyRep::Tuple(vec![PyRep::Real(ship_pos.x), PyRep::Real(ship_pos.y), PyRep::Real(ship_pos.z)])]).await.expect_err("pochven pos");
     assert!(matches!(pos_err.code.as_str(), "AnchoringRestrictedInPochven" | "StarbaseRemoved"));
 
     let mobile_depot = grant(&ctx, OWNER, poch_ship, 33474, InventoryFlag::Cargo, 1);
-    assert_eq!(kv_str(&rpc(&ctx, &mut sess, "posMgr", "AnchorStructure", &[PyRep::Integer(mobile_depot), PyRep::Tuple(vec![PyRep::Real(3.0e9), PyRep::Real(0.0), PyRep::Real(0.0)])]).await.expect("pochven depot"), "state"), "Anchoring");
+    assert_eq!(kv_str(&rpc(&ctx, &mut sess, "posMgr", "AnchorStructure", &[PyRep::Integer(mobile_depot), PyRep::Tuple(vec![PyRep::Real(ship_pos.x), PyRep::Real(ship_pos.y), PyRep::Real(ship_pos.z)])]).await.expect("pochven depot"), "state"), "Anchoring");
 
     let gantry_item = grant(&ctx, OWNER, poch_ship, 3962, InventoryFlag::Cargo, 1);
     assert_eq!(rpc(&ctx, &mut sess, "posMgr", "AnchorOrbital", &[PyRep::Integer(gantry_item)]).await.expect_err("low trig standing").code, "InsufficientTriglavianStanding");

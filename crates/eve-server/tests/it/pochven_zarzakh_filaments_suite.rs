@@ -379,9 +379,20 @@ async fn test_filaments_and_pochven_navigation_mechanics() {
     assert_eq!(anchor_err.code, "AnchoringDisallowedInPochven");
 
     ctx.db.with_mut_snapshot(|snap| { snap.characters.get_mut(&char_id).unwrap().standings.insert(500026, 0.5); });
-    let customs_err = ctx.dispatch_rpc(&mut sess, "structureDeployment", None, "Anchor", &[PyRep::Integer(2233)], &kw, None)
-        .await.expect_err("Anchoring Customs Office with < 1.5 standing");
-    assert_eq!(customs_err.code, "TriglavianStandingTooLowForCustomsOffice");
+    let upwell_block_err = ctx.dispatch_rpc(&mut sess, "structureDeployment", None, "Anchor", &[PyRep::Integer(2233)], &kw, None)
+        .await.expect_err("Anchoring structure via structureDeployment in Pochven is disallowed");
+    assert_eq!(upwell_block_err.code, "AnchoringDisallowedInPochven");
+
+    let gantry_id = 700_000_901_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(gantry_id, eve_db::InventoryItemRecord {
+            item_id: gantry_id, type_id: 3962, owner_id: char_id, location_id: ship_id,
+            flag: eve_db::InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default()
+        });
+    });
+    let customs_err = ctx.dispatch_rpc(&mut sess, "posMgr", None, "AnchorOrbital", &[PyRep::Integer(gantry_id)], &kw, None)
+        .await.expect_err("Anchoring Customs Office Gantry with < 1.5 standing");
+    assert_eq!(customs_err.code, "InsufficientTriglavianStanding");
 }
 
 #[tokio::test]
