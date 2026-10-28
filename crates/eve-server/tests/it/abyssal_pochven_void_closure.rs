@@ -1,7 +1,7 @@
 //! Integration tests for Void Space and Pochven Travel mechanics.
 //!
-//! Covers:
-//! - `feat:navigation.filament-void`: `voidSpaceMgr.VoidSpacePlayerJump enters void space content.`
+//! Note: Void space content (pockets, nebulas, transfer gates) is server-side live event content.
+//! Corresponding parity row `feat:navigation.filament-void` remains open as a DATA GAP.
 
 #![forbid(unsafe_code)]
 
@@ -21,7 +21,6 @@ const TRIGLAVIAN_FACTION_ID: i64 = 500_026;
 
 #[tokio::test]
 async fn test_void_space_player_jump_and_gate_activation() {
-    // parity: feat:navigation.filament-void
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001_i64;

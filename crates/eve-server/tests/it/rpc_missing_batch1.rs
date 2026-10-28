@@ -517,7 +517,12 @@ async fn search_i2_jump_clone_reset_warp_vector_and_dev_indices() {
     let vec_res = call_rpc(&ctx, &mut sess, "warpVectorMgr", "UseVector", &[PyRep::Integer(vector_id)]).await.expect("warpVectorMgr.UseVector");
     assert_eq!(dict_get(&vec_res, "shipID"), Some(&PyRep::Integer(ship_id)));
     let (_, after_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
-    assert!(after_ball.position.x > 50_000.0, "ship ball must warp along vector (+X)");
+    match after_ball.mode {
+        eve_destiny::MovementMode::Warp { destination, .. } => {
+            assert!(destination.x > 50_000.0, "ship ball must warp along vector (+X)");
+        }
+        ref other => panic!("ship ball must enter warp along vector (+X), got {other:?}"),
+    }
 
     // 5. devIndexManager.GetDevelopmentIndicesForSystem returns 1583, 1584, 1615
     let dev_res = call_rpc(&ctx, &mut sess, "devIndexManager", "GetDevelopmentIndicesForSystem", &[PyRep::Integer(30_000_142)])
