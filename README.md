@@ -4,8 +4,9 @@
 
 [![Language: Rust](https://img.shields.io/badge/language-Rust_2021-orange.svg)](https://www.rust-lang.org/)
 [![Unsafe: forbidden](https://img.shields.io/badge/unsafe-forbidden-brightgreen.svg)](#architecture)
-[![Ledger: 74.7% closed](https://img.shields.io/badge/parity_ledger-74.7%25_closed-yellow.svg)](./docs/ACTION_PLAN_STATUS.md)
-[![Real-client journeys: 0/29](https://img.shields.io/badge/real--client_journeys-0%2F29-red.svg)](#gap-1-the-real-client-end-to-end)
+[![Ledger: 87.0% closed](https://img.shields.io/badge/parity_ledger-87.0%25_closed-brightgreen.svg)](./docs/ACTION_PLAN_STATUS.md)
+[![Automated tests: 1,225 passed](https://img.shields.io/badge/automated_tests-1%2C225_passed-brightgreen.svg)](#at-a-glance)
+[![Wiki: 16 domains](https://img.shields.io/badge/wiki-16_domains-blue.svg)](./docs/wiki/README.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 
 The goal: run your own server, point the **unmodified** EVE Online client at it, and play everything the official server offers. That includes the classic game services, the newer "Quasar" backend and the public ESI web API.
@@ -13,7 +14,7 @@ The goal: run your own server, point the **unmodified** EVE Online client at it,
 > [!IMPORTANT]
 > **Not playable yet.** Most of the server exists and passes its own tests, but almost none of it is proven through the real game client yet. In manual runs, a locally reconfigured client logs in, selects a character, loads the station and undocks. None of the 29 scripted real-client journeys passes in the automated harness. The project counts as done only when all of them do.
 
-*All numbers below come from a pre-flight run on `main` at `75fcf0ed` (2026-10-22). Live numbers: [`docs/ACTION_PLAN_STATUS.md`](./docs/ACTION_PLAN_STATUS.md).*
+*Live metrics: [`docs/ACTION_PLAN_STATUS.md`](./docs/ACTION_PLAN_STATUS.md) & [Game Systems Wiki](./docs/wiki/README.md).*
 
 ---
 
@@ -21,10 +22,11 @@ The goal: run your own server, point the **unmodified** EVE Online client at it,
 
 | | |
 |---|---|
-| **Parity ledger** | **4,742 of 6,348 rows closed (74.7%)**: 2,493 done, 2,249 not applicable, 1,606 open |
-| **Automated tests** | 784 passing, 0 failing |
+| **Parity ledger** | **5,526 of 6,351 rows closed (87.01%)**: 3,267 done, 2,259 not applicable, 825 open |
+| **Automated tests** | 1,225 passing, 0 failing (100% green across workspace) |
+| **Technical Wiki** | [Comprehensive Game Systems & Technical Wiki](./docs/wiki/README.md) (16 domains) |
 | **Real-client journeys** | 0 of 29 passing |
-| **Action-plan tasks** | 37 of 114 done |
+| **Action-plan tasks** | 85 of 117 done |
 | **Static data** | Full game database built from the client: 53,288 item types, 8,490 solar systems, 5,210 stations, 2,892 missions |
 
 ### What the ledger is
@@ -37,6 +39,25 @@ The goal: run your own server, point the **unmodified** EVE Online client at it,
 A large share of the closed rows are N/A, so the headline percentage overstates how much has been built. The tables below separate the two.
 
 ---
+
+## Game Systems & Technical Wiki
+
+EvoMu includes an exhaustive, dual-perspective **[Technical & Game Systems Wiki](./docs/wiki/README.md)** documenting both canonical EVE Online (V24.01) mechanics and their clean-room Rust implementation architecture:
+
+* 🏛️ **[Upwell Structures & Starbases](./docs/wiki/upwell_and_structures/)**: Citadels, complexes, anchoring constraints (1,000 km rule, Keepstar/Palatine limits), 15m/30m reinforcement timers, power states, Quantum Cores, ACLs, asset safety, and Pochven restrictions.
+* 🛸 **[Living World & NPC AI Systems](./docs/wiki/npcs_and_living_world/)**: 3-tier LOD simulation, 1 Hz combat AI state machine (Idle $\rightarrow$ Chase $\rightarrow$ Orbit $\rightarrow$ Attack), regional belt rats, CONCORD response, Faction Police, and autonomous hauler convoys.
+* 📋 **[Missions & Agent Divisions](./docs/wiki/missions_and_agents/)**: Security, Mining, and Distribution agents; mission lifecycle; decline penalties; 16-mission storyline tally; LP stores; standing math.
+* ⛏️ **[Mining & Resource Harvesting](./docs/wiki/mining_and_harvesting/)**: Mining laser cycle engine, yield formulas, crystal volatility, waste/residue probabilities, specialized holds, ice/gas harvesting, moon chunk fracturing, and compression.
+* 🏢 **[Corporations & Governance](./docs/wiki/corporations_and_governance/)**: Corp creation, 24-hour role grant delay security invariant, 7 hangars/wallets, shareholder voting, projects, and war declarations.
+* 🌌 **[Universe & Navigation](./docs/wiki/universe_and_navigation/)**: Space topology, stargate jumps, align time math, cynosural navigation, filaments, wormholes, and Pochven rules.
+* ⚙️ **[Ballpark Simulation & Destiny Physics](./docs/wiki/ballpark_and_physics/)**: Deterministic 1 Hz physics tick, sub-warp kinematics, collision, and interdiction bubble drag geometry.
+* 🛠️ **[Dogma Attribute Engine & Fitting](./docs/wiki/dogma_and_fitting/)**: Modifier graphs, operator stacking, slot layouts, capacitor simulation, Nosferatu relative %, and module overheating.
+* ⚔️ **[Combat Resolution & Crimewatch](./docs/wiki/combat_and_crimewatch/)**: Turret tracking equations, missile kinematics, damage resistance profiles, death pipeline, and engagement timers.
+* 🏭 **[Industry, Manufacturing & PI](./docs/wiki/industry_and_manufacturing/)**: Blueprints (BPO/BPC), ME/TE math, reactions, System Cost Index (SCI), and [Planetary Industry](./docs/wiki/planetary_industry/).
+* 💰 **[Economy, Markets & Contracts](./docs/wiki/economy_and_markets/)**: Regional order matching, escrow locks, broker fees, item exchange, and courier contracts.
+* 🚩 **[Sovereignty & Faction Warfare](./docs/wiki/sovereignty_and_faction_warfare/)**: FW warzones, insurgencies, sov hubs, Equinox orbital Skyhooks, and Encounter Surveillance System (ESS).
+* 🧬 **[Character Progression & Clones](./docs/wiki/character_and_progression/)**: Skill training rates ($SP/\text{min}$), medical clone respawn, jump clones, attribute implants, and combat boosters.
+* 🔌 **[Protocol & Infrastructure](./docs/wiki/protocol_and_infrastructure/)**: MachoNet wire codec, PyRep marshal, Quasar protobuf gateway, and ESI OpenAPI routes.
 
 ## Progress by surface
 
