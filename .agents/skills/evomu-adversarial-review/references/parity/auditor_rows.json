@@ -5762,7 +5762,7 @@
       "why_missing": "feat:structures.asset-safety-auto is coarse; the 20-day timer, the 0.5% same-system fee, and the 15% remote fee are not testable in any existing row."
     },
     {
-      "acceptance": "When an Upwell structure enters an armor or hull vulnerability window, an uninterrupted 15-minute repair timer begins; if attackers fail to apply damage exceeding the damage cap threshold to pause the timer, the repair timer counts down to 0, repairing all shields and armor back to 100% and returning the structure to Shield Vulnerable status.",
+      "acceptance": "When an Upwell structure enters an armor or hull vulnerability window, an uninterrupted 15-minute (armor) or 30-minute (hull) repair timer begins; if attackers fail to apply damage exceeding the damage cap threshold to pause the timer, the repair timer counts down to 0, repairing all hull, armor, and shields back to 100% and returning the structure to Shield Vulnerable status.",
       "added_by_audit": "20261020-230707",
       "attest_ok": false,
       "category": "feat",
@@ -5774,8 +5774,8 @@
         "wiki:Vulnerability",
         "wiki:Upwell_structure"
       ],
-      "title": "Upwell structure 15-minute vulnerability repair window",
-      "why_missing": "feat:structures.repair-timer mentions repair vaguely; the damage pause threshold, the 15-minute countdown, and the full shield/armor restoration are not specified."
+      "title": "Upwell structure 15m/30m vulnerability repair window",
+      "why_missing": "feat:structures.repair-timer mentions repair vaguely; the damage pause threshold, the 15-minute armor / 30-minute hull countdown, and the full hull/armor/shield restoration are not specified."
     },
     {
       "acceptance": "Energy Vampire (Nosferatu) modules transfer capacitor from target to host ship only if the target's absolute capacitor energy (in GJ) is higher than the activating ship's current capacitor energy, unless the activating ship has a Blood Raider hull bonus (Cruor, Ashimmu, Bhaalgorn) which overrides this limitation and drains target capacitor down to 0 GJ; transfer occurs at the end of the module cycle.",
