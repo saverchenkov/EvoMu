@@ -128,6 +128,7 @@ pub fn populate_persisted_space_objects(
             .collect();
 
         // 2. Persisted space items: wrecks, jetcans, corpses, anchored deployables, Mobile Warp Disruptors, abandoned drones
+        let deployable_state = crate::services::mobile_deployables::read_deployable_state_snap(snap);
         for item in snap.items.values() {
             if item.location_id != solar_system_id as i64 {
                 continue;
@@ -226,6 +227,11 @@ pub fn populate_persisted_space_objects(
                         expired_item_ids.push(item.item_id);
                         continue;
                     }
+                }
+            } else if let Some(rec) = deployable_state.deployables.get(&item.item_id) {
+                if now_unix >= rec.expires_at_unix {
+                    expired_item_ids.push(item.item_id);
+                    continue;
                 }
             }
 

@@ -137,43 +137,68 @@ pub(crate) fn effective_item_unit_volume(
     t.volume
 }
 
-/// Checks if `ship_id` in `sys_id` is within 3,000m of a Mobile Depot (`group_id == 1246`)
-/// or another ship providing a Ship Maintenance Bay fitting service (`attr 907` / `908` > 0).
+/// Checks if `ship_id` in `sys_id` is within refitting range of an active Mobile Depot (`group_id == 1246`, 2,500m, owner-only, anchored)
+/// or another ship providing a Ship Maintenance Bay fitting service (`attr 907` / `908` > 0, 3,000m).
 pub async fn is_near_in_space_fitting_service(
     ctx: &ServerContext,
     sys_id: u32,
     ship_id: i64,
 ) -> bool {
-    let provider_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
+    let char_id = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).map(|s| s.owner_id)).unwrap_or(0);
+    let now_unix = ctx.now_unix();
+    let deployables_state = crate::services::mobile_deployables::read_deployable_state(ctx);
+
+    let providers: Vec<(i64, bool)> = ctx.db.with_snapshot(|snap| {
         snap.items
             .values()
-            .filter(|i| {
-                i.item_id != ship_id
-                    && i.location_id == sys_id as i64
-                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| {
-                        t.group_id == 1246
-                            || t.default_attributes.get(&907).copied().unwrap_or(0.0) > 0.0
-                            || t.default_attributes.get(&908).copied().unwrap_or(0.0) > 0.0
-                    })
+            .filter_map(|i| {
+                if i.item_id == ship_id || i.location_id != sys_id as i64 {
+                    return None;
+                }
+                let t = ctx.sde.types.get(&i.type_id)?;
+                let is_depot = t.group_id == 1246;
+                let is_ship_fitting = t.default_attributes.get(&907).copied().unwrap_or(0.0) > 0.0
+                    || t.default_attributes.get(&908).copied().unwrap_or(0.0) > 0.0;
+                if is_depot {
+                    // Mobile depot is usable ONLY by its owner (`feat:structures.mobile-depot`)
+                    if char_id != 0 && i.owner_id != char_id {
+                        return None;
+                    }
+                    // Cannot refit while anchoring (`feat:structures.mobile-depot`)
+                    if let Some(rec) = deployables_state.deployables.get(&i.item_id) {
+                        let is_anchored = rec.anchor_completed || now_unix >= rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs);
+                        if !is_anchored {
+                            return None;
+                        }
+                    }
+                    Some((i.item_id, true))
+                } else if is_ship_fitting {
+                    Some((i.item_id, false))
+                } else {
+                    None
+                }
             })
-            .map(|i| i.item_id)
             .collect()
     });
-    if provider_ids.is_empty() {
+    if providers.is_empty() {
         return false;
     }
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let Ok(Some((_, ship_ball))) = sys_handle.get_ball_snapshot(ship_id).await else {
         return true;
     };
-    for pid in provider_ids {
+    for (pid, is_depot) in providers {
         let p_pos = if let Ok(Some((_, p_ball))) = sys_handle.get_ball_snapshot(pid).await {
             Some(p_ball.position)
         } else {
             ctx.db.with_snapshot(|snap| snap.item_positions.get(&pid).map(|p| glam::DVec3::from_array(*p)))
         };
         if let Some(pos) = p_pos {
-            if (ship_ball.position - pos).length() <= 3_000.0 {
+            let max_range = if is_depot { 2_500.0 } else { 3_000.0 };
+            if (ship_ball.position - pos).length() <= max_range {
+                if is_depot {
+                    crate::services::mobile_deployables::touch_mobile_depot_interaction(ctx, pid);
+                }
                 return true;
             }
         }

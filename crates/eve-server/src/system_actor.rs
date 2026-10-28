@@ -894,7 +894,9 @@ impl SystemRegistry {
                                     .as_ref()
                                     .map(|db| crate::services::insurgency_services::is_stronghold_invulnerable_in_db(db, solar_system_id, ball_id))
                                     .unwrap_or(false);
-                                let now_unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                                let now_unix = db_opt.as_ref().map(|db| db.clock().now_unix_secs()).unwrap_or_else(|| {
+                                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+                                });
                                 if is_invuln_stronghold {
                                     if let Some(b) = ballpark.balls.get(&ball_id).cloned() {
                                         let _ = reply.send(Some((0.0, false, b)));
@@ -955,6 +957,19 @@ impl SystemRegistry {
                                     db_opt.as_ref(),
                                     solar_system_id,
                                 );
+                                {
+                                    let step_now_unix = db_opt.as_ref().map(|db| db.clock().now_unix_secs()).unwrap_or_else(|| {
+                                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+                                    });
+                                    crate::services::mobile_deployables::step_mobile_deployables_in_actor(
+                                        &mut ballpark,
+                                        sde_opt.as_deref(),
+                                        db_opt.as_ref(),
+                                        solar_system_id,
+                                        dt,
+                                        step_now_unix,
+                                    );
+                                }
                                 if let Some(db) = &db_opt {
                                     for (&bid, cs) in &ballpark.combat_states {
                                         if !ballpark.is_static_ball(bid) && bid < 700_000_000 {

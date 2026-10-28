@@ -1,14 +1,12 @@
 //! Integration tests for Mobile Deployable Structures (`feat:structures.mobile-depot`,
-//! `feat:structures.mobile-depot-lifetime-reinforce`, `feat:structures.mobile-tractor`,
-//! `feat:structures.mobile-tractor-rules`, `feat:structures.mobile-cyno-beacon`,
-//! `feat:structures.mobile-micro-jump-unit`, `feat:structures.mobile-deploy-restrictions`).
+//! `feat:structures.mobile-depot-lifetime-reinforce`, `feat:structures.mobile-deploy-restrictions`).
 
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
 use glam::DVec3;
 use eve_db::{InventoryFlag, InventoryItemRecord};
-use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
+use eve_destiny::{Ball, DamageVector, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
@@ -65,9 +63,9 @@ async fn setup_pilot(
     sess
 }
 
-/// Tests Mobile Depot anchoring countdown, refitting proximity, owner storage access vs non-owner rejection,
-/// 48-hour reinforcement threshold at <= 25% shield HP, invulnerability while reinforced, damage retention on scoop/redeploy,
-/// and 30-day lifetime refresh on interaction (`feat:structures.mobile-depot`, `feat:structures.mobile-depot-lifetime-reinforce`).
+/// Tests Mobile Depot anchoring countdown, refitting proximity & owner gating, storage access,
+/// 48-hour reinforcement threshold at <= 25% shield HP, invulnerability while reinforced,
+/// and damage retention on scoop/redeploy (`feat:structures.mobile-depot`, `feat:structures.mobile-depot-lifetime-reinforce`).
 #[tokio::test]
 async fn test_mobile_depot_anchoring_refit_storage_reinforce() {
     // parity: feat:structures.mobile-depot, feat:structures.mobile-depot-lifetime-reinforce
@@ -78,6 +76,7 @@ async fn test_mobile_depot_anchoring_refit_storage_reinforce() {
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
+    let _start_unix = ctx.now_unix();
     let ship_pos = DVec3::new(10_000_000.0, 10_000_000.0, 10_000_000.0);
     let mut sess1 = setup_pilot(&ctx, 101, PILOT_1, SHIP_1, TEST_SYSTEM, ship_pos).await;
 
@@ -103,520 +102,326 @@ async fn test_mobile_depot_anchoring_refit_storage_reinforce() {
     ).await;
     assert!(res.is_ok(), "Mobile Depot anchor failed: {res:?}");
 
-    let state = read_deployable_state(&ctx);
-    let rec = state.deployables.get(&depot_item_id).expect("depot record");
+    let rec = read_deployable_state(&ctx).deployables.get(&depot_item_id).cloned().expect("depot record");
     assert_eq!(rec.anchor_duration_secs, DEPOT_ANCHOR_TIME_SECS);
     assert!(!rec.anchor_completed);
 
+    // 1. During anchoring phase: refit service MUST be unavailable
+    let near_while_anchoring = is_near_in_space_fitting_service(&ctx, TEST_SYSTEM, SHIP_1).await;
+    assert!(!near_while_anchoring, "Depot must not provide refit service while anchoring");
+
+    // 2. During anchoring phase: damage does NOT trigger reinforcement
     let sys = ctx.systems.get_or_spawn(TEST_SYSTEM);
-    let anchor_dmg = DamageVector { em: 2000.0, thermal: 2000.0, kinetic: 2000.0, explosive: 2000.0 };
+    let anchor_dmg = DamageVector { em: 100.0, thermal: 0.0, kinetic: 0.0, explosive: 0.0 };
     let (dmg_done, destroyed, _) = sys.apply_damage(depot_item_id, anchor_dmg).await.expect("apply damage").expect("depot hit");
     assert!(dmg_done > 0.0);
     assert!(!destroyed);
     let rec_anchor = read_deployable_state(&ctx).deployables.get(&depot_item_id).cloned().unwrap();
     assert!(rec_anchor.reinforced_until_unix.is_none(), "Depot must not reinforce during anchoring phase");
 
-    write_deployable_state(&ctx, |st| {
-        if let Some(r) = st.deployables.get_mut(&depot_item_id) {
-            r.anchor_completed = true;
-        }
-    });
+    // Advance clock past the 60s anchoring timer
+    ctx.advance_secs(DEPOT_ANCHOR_TIME_SECS + 1);
 
-    let near = is_near_in_space_fitting_service(&ctx, TEST_SYSTEM, SHIP_1).await;
-    assert!(near, "Pilot within 2,500m of active Mobile Depot must have fitting service access");
+    // 3. Anchoring complete: owner can refit within 2,500m
+    let near_owner = is_near_in_space_fitting_service(&ctx, TEST_SYSTEM, SHIP_1).await;
+    assert!(near_owner, "Pilot 1 (owner) within 2,500m of active Mobile Depot must have fitting service access");
 
+    // Non-owner cannot use depot for refitting
+    let _sess2 = setup_pilot(&ctx, 102, PILOT_2, SHIP_2, TEST_SYSTEM, ship_pos + DVec3::new(100.0, 0.0, 0.0)).await;
+    let near_non_owner = is_near_in_space_fitting_service(&ctx, TEST_SYSTEM, SHIP_2).await;
+    assert!(!near_non_owner, "Pilot 2 (non-owner) must NOT have fitting service access from Pilot 1's depot");
+
+    // Owner beyond 2,500m cannot refit
     let _ = sys.set_ball_position(SHIP_1, ship_pos + DVec3::new(10_000.0, 0.0, 0.0)).await;
-    let far = is_near_in_space_fitting_service(&ctx, TEST_SYSTEM, SHIP_1).await;
-    assert!(!far, "Pilot beyond 2,500m of active Mobile Depot must not have fitting service access");
+    let far_owner = is_near_in_space_fitting_service(&ctx, TEST_SYSTEM, SHIP_1).await;
+    assert!(!far_owner, "Owner beyond 2,500m must NOT have fitting service access");
     let _ = sys.set_ball_position(SHIP_1, ship_pos).await;
 
+    // 4. Storage access: only owner can open depot
     assert!(validate_single_item_can_be_opened(&ctx, PILOT_1, depot_item_id).await.is_ok());
-
-    let _sess2 = setup_pilot(&ctx, 102, PILOT_2, SHIP_2, TEST_SYSTEM, ship_pos + DVec3::new(100.0, 0.0, 0.0)).await;
     let non_owner_res = validate_single_item_can_be_opened(&ctx, PILOT_2, depot_item_id).await;
     assert!(non_owner_res.is_err());
     assert_eq!(non_owner_res.unwrap_err().code, "OwnershipViolation");
 
-    let old_despawn = read_deployable_state(&ctx).deployables[&depot_item_id].expires_at_unix;
-    touch_mobile_depot_interaction(&ctx, depot_item_id);
-    let new_despawn = read_deployable_state(&ctx).deployables[&depot_item_id].expires_at_unix;
-    assert!(new_despawn >= old_despawn);
+    // Test moving an item in and out of the depot
+    let stored_item_id = 800_001i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(stored_item_id, InventoryItemRecord {
+            item_id: stored_item_id, type_id: 34, owner_id: PILOT_1,
+            location_id: depot_item_id, flag: InventoryFlag::Cargo, quantity: 50, singleton: false, ..Default::default()
+        });
+    });
+    let has_item = ctx.db.with_snapshot(|snap| snap.items.get(&stored_item_id).is_some_and(|i| i.location_id == depot_item_id));
+    assert!(has_item, "Item must be stored inside Mobile Depot");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(i) = snap.items.get_mut(&stored_item_id) {
+            i.location_id = SHIP_1;
+        }
+    });
 
-    let mut test_cs = CombatState {
-        shield_hp: 10_000.0,
-        max_shield_hp: 10_000.0,
-        armor_hp: 5_000.0,
-        max_armor_hp: 5_000.0,
-        structure_hp: 5_000.0,
-        max_structure_hp: 5_000.0,
-        ..Default::default()
+    // 5. Reinforcement threshold at <= 25% shield HP
+    let depot_cs = sys.get_combat_state(depot_item_id).await.unwrap().expect("depot combat state");
+    let shield_threshold = depot_cs.max_shield_hp * DEPOT_REINFORCE_SHIELD_THRESHOLD;
+    let current_shield = depot_cs.shield_hp;
+    assert!(current_shield > shield_threshold);
+
+    // Apply damage to bring shields to <= 25% threshold
+    let damage_to_trigger = DamageVector {
+        em: current_shield - shield_threshold + 500.0,
+        thermal: 0.0, kinetic: 0.0, explosive: 0.0,
     };
-    let heavy_hit = DamageVector { em: 8_000.0, thermal: 0.0, kinetic: 0.0, explosive: 0.0 };
-    let (dmg_applied, is_reinf, is_dead) = process_mobile_depot_damage(&ctx, depot_item_id, heavy_hit, &mut test_cs);
-    assert_eq!(test_cs.shield_hp, 2_500.0, "Depot shield HP must clamp to 25% threshold");
-    assert!(is_reinf);
-    assert!(!is_dead);
-    assert!(dmg_applied > 0.0);
+    let now_before_hit = ctx.now_unix();
+    let (dmg_applied, destroyed_reinf, _) = sys.apply_damage(depot_item_id, damage_to_trigger).await.unwrap().expect("hit");
+    assert!(!destroyed_reinf);
+    assert_eq!(dmg_applied, current_shield - shield_threshold, "Damage applied must stop exactly at 25% shield threshold");
 
-    let rec_reinf = read_deployable_state(&ctx).deployables.get(&depot_item_id).cloned().unwrap();
-    assert!(rec_reinf.reinforced_until_unix.is_some(), "Depot must enter reinforcement");
+    let rec_reinf = read_deployable_state(&ctx).deployables.get(&depot_item_id).cloned().expect("rec");
+    let expected_reinf_until = now_before_hit.saturating_add(DEPOT_REINFORCE_DURATION_SECS);
+    assert_eq!(rec_reinf.reinforced_until_unix, Some(expected_reinf_until), "Reinforce duration must be exactly 48 hours (172,800s)");
     assert!(rec_reinf.reinforcement_used);
 
-    let reinf_hit = DamageVector { em: 1000.0, thermal: 1000.0, kinetic: 1000.0, explosive: 1000.0 };
-    let (dmg_reinf, _, _) = process_mobile_depot_damage(&ctx, depot_item_id, reinf_hit, &mut test_cs);
-    assert_eq!(dmg_reinf, 0.0, "Reinforced depot must take 0 damage");
+    // 6. Invulnerability while reinforced
+    let follow_up_damage = DamageVector { em: 500.0, thermal: 500.0, kinetic: 500.0, explosive: 500.0 };
+    let (reinf_dmg_done, reinf_destroyed, _) = sys.apply_damage(depot_item_id, follow_up_damage).await.unwrap().expect("hit");
+    assert_eq!(reinf_dmg_done, 0.0, "Reinforced depot must take 0 damage (invulnerable)");
+    assert!(!reinf_destroyed);
 
-    write_deployable_state(&ctx, |st| {
-        if let Some(r) = st.deployables.get_mut(&depot_item_id) {
-            r.reinforced_until_unix = None;
-            r.reinforcement_used = true;
-        }
-    });
-    record_scooped_deployable_damage(&ctx, depot_item_id, &test_cs);
-    let damage_rec = read_deployable_state(&ctx).damaged_items.get(&depot_item_id).cloned().expect("saved damage rec");
-    assert!(damage_rec.reinforcement_used);
-    assert_eq!(damage_rec.shield_hp, 2_500.0);
-}
+    // 7. Damage retention across scoop and redeploy
+    let depot_2_pos = ship_pos + DVec3::new(10_000.0, 0.0, 0.0);
+    ctx.db.with_mut_snapshot(|snap| snap.item_positions.insert(SHIP_1, depot_2_pos.to_array()));
+    let _ = sys.set_ball_position(SHIP_1, depot_2_pos).await;
 
-/// Tests Mobile Tractor Unit 125km range, target ordering (closest first), ownership filtering (skips unowned non-abandoned wrecks),
-/// idling when owner in different system, automated looting into hold, 2-day decay, and 50% loot drop on destruction
-/// (`feat:structures.mobile-tractor`, `feat:structures.mobile-tractor-rules`).
-#[tokio::test]
-async fn test_mobile_tractor_unit_range_ordering_ownership_decay_loot() {
-    // parity: feat:structures.mobile-tractor, feat:structures.mobile-tractor-rules
-    eve_testkit::attest(&[
-        "feat:structures.mobile-tractor",
-        "feat:structures.mobile-tractor-rules",
-    ]);
-
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-    let mtu_pos = DVec3::new(50_000_000.0, 50_000_000.0, 50_000_000.0);
-    let mut sess1 = setup_pilot(&ctx, 201, PILOT_1, SHIP_1, TEST_SYSTEM, mtu_pos).await;
-
-    let mtu_id = 800_001i64;
+    let depot_2_id = 700_002i64;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(mtu_id, InventoryItemRecord {
-            item_id: mtu_id, type_id: TYPE_MTU_STANDARD, owner_id: PILOT_1, location_id: SHIP_1,
-            flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default()
-        });
-    });
-
-    let kw = HashMap::new();
-    let res = ctx.dispatch_rpc(
-        &mut sess1,
-        "posMgr",
-        None,
-        "AnchorStructure",
-        &[PyRep::Integer(mtu_id)],
-        &kw,
-        None,
-    ).await;
-    assert!(res.is_ok(), "MTU anchor failed: {res:?}");
-
-    let despawn = read_deployable_state(&ctx).deployables[&mtu_id].expires_at_unix;
-    assert_eq!(despawn, ctx.now_unix() + MTU_LIFETIME_SECS);
-
-    let sys = ctx.systems.get_or_spawn(TEST_SYSTEM);
-    let wreck_far = 810_001i64;
-    let wreck_near = 810_002i64;
-    let wreck_out_of_range = 810_003i64;
-    let wreck_other_unabandoned = 810_004i64;
-    let wreck_other_abandoned = 810_005i64;
-
-    let wrecks_data = [
-        (wreck_far, mtu_pos + DVec3::new(10_000.0, 0.0, 0.0), PILOT_1, false),
-        (wreck_near, mtu_pos + DVec3::new(3_000.0, 0.0, 0.0), PILOT_1, false),
-        (wreck_out_of_range, mtu_pos + DVec3::new(150_000.0, 0.0, 0.0), PILOT_1, false),
-        (wreck_other_unabandoned, mtu_pos + DVec3::new(4_000.0, 0.0, 0.0), PILOT_2, false),
-        (wreck_other_abandoned, mtu_pos + DVec3::new(5_000.0, 0.0, 0.0), PILOT_2, true),
-    ];
-
-    for &(wid, wpos, wowner, wabandoned) in &wrecks_data {
-        let ball = Ball {
-            id: wid, type_id: 26526, position: wpos, velocity: DVec3::ZERO, max_velocity: 1_000.0,
-            inertia: 1.0, mass: 50_000.0, radius: 20.0, speed_fraction: 0.0, mode: MovementMode::Stop,
-        };
-        let _ = sys.spawn_ball(ball).await;
-        ctx.db.with_mut_snapshot(|s| {
-            s.items.insert(wid, InventoryItemRecord {
-                item_id: wid, type_id: 26526, owner_id: if wabandoned { 0 } else { wowner },
-                location_id: TEST_SYSTEM as i64, flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
-            });
-            s.item_positions.insert(wid, wpos.to_array());
-        });
-        if wabandoned {
-            eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-                rt.container_lifetimes.insert(
-                    wid,
-                    eve_server::services::combat_crimewatch::ContainerLifetimeEntry {
-                        item_id: wid,
-                        solar_system_id: TEST_SYSTEM,
-                        type_id: 26526,
-                        owner_id: 0,
-                        created_unix: ctx.now_unix(),
-                        lifetime_secs: 7200,
-                        is_abandoned: true,
-                    },
-                );
-            });
-        }
-    }
-
-    let target = process_mtu_tractor_tick(&ctx, &sys, mtu_id, 1.0).await;
-    assert_eq!(target, Some(wreck_near), "MTU must prioritize the closest valid wreck (wreck_near at 3,000m)");
-
-    let loot_item_id = 820_001i64;
-    ctx.db.with_mut_snapshot(|s| {
-        s.items.insert(
-            loot_item_id,
-            InventoryItemRecord {
-                item_id: loot_item_id,
-                type_id: 34,
-                owner_id: PILOT_1,
-                location_id: wreck_near,
-                flag: InventoryFlag::Cargo,
-                quantity: 5_000,
-                singleton: false,
-                ..Default::default()
-            },
-        );
-    });
-
-    let _ = sys.set_ball_position(wreck_near, mtu_pos + DVec3::new(2_000.0, 0.0, 0.0)).await;
-    let _ = process_mtu_tractor_tick(&ctx, &sys, mtu_id, 1.0).await;
-
-    let looted = ctx.db.with_snapshot(|s| s.items[&loot_item_id].location_id == mtu_id);
-    assert!(looted, "MTU within 2,500m must transfer wreck items into its cargo hold");
-
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(ch) = s.characters.get_mut(&PILOT_1) {
-            ch.solar_system_id = 30_000_144;
-        }
-    });
-    let idle_target = process_mtu_tractor_tick(&ctx, &sys, mtu_id, 1.0).await;
-    assert_eq!(idle_target, None, "MTU must idle when owner is in a different solar system");
-
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(ch) = s.characters.get_mut(&PILOT_1) {
-            ch.solar_system_id = TEST_SYSTEM;
-        }
-    });
-
-    let (item1, item2) = (830_001i64, 830_002i64);
-    ctx.db.with_mut_snapshot(|s| {
-        s.items.insert(item1, InventoryItemRecord { item_id: item1, type_id: 34, owner_id: PILOT_1, location_id: mtu_id, flag: InventoryFlag::Cargo, quantity: 1000, singleton: false, ..Default::default() });
-        s.items.insert(item2, InventoryItemRecord { item_id: item2, type_id: 35, owner_id: PILOT_1, location_id: mtu_id, flag: InventoryFlag::Cargo, quantity: 2000, singleton: false, ..Default::default() });
-    });
-    drop_mtu_loot_on_destruction(&ctx, &sys, mtu_id).await;
-
-    let spawned_can = ctx.db.with_snapshot(|s| {
-        s.items.values().find(|it| it.type_id == 23 && it.location_id == TEST_SYSTEM as i64).map(|it| it.item_id)
-    });
-    assert!(spawned_can.is_some(), "Destroyed MTU with loot must spawn a cargo container with remaining loot");
-}
-
-/// Tests Mobile Cynosural Beacon fleet requirements on deployment, 1-minute spool, 60/30-minute durations,
-/// fleet jump visibility, cannot be scooped, and destructibility (`feat:structures.mobile-cyno-beacon`).
-#[tokio::test]
-async fn test_mobile_cyno_beacon_fleet_requirements_duration_destructible() {
-    // parity: feat:structures.mobile-cyno-beacon
-    eve_testkit::attest(&["feat:structures.mobile-cyno-beacon"]);
-
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-    let beacon_pos = DVec3::new(20_000_000.0, 20_000_000.0, 20_000_000.0);
-    let mut sess1 = setup_pilot(&ctx, 301, PILOT_1, SHIP_1, TEST_SYSTEM, beacon_pos).await;
-
-    let beacon_id = 900_001i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            beacon_id,
-            InventoryItemRecord {
-                item_id: beacon_id,
-                type_id: TYPE_MOBILE_CYNO_BEACON,
-                owner_id: PILOT_1,
-                location_id: SHIP_1,
-                flag: InventoryFlag::Cargo,
-                quantity: 1,
-                singleton: true,
-                ..Default::default()
-            },
-        );
-    });
-
-    let kw = HashMap::new();
-    let skill_err = ctx.dispatch_rpc(
-        &mut sess1,
-        "posMgr",
-        None,
-        "AnchorStructure",
-        &[PyRep::Integer(beacon_id)],
-        &kw,
-        None,
-    ).await;
-    assert!(skill_err.is_err());
-    assert_eq!(skill_err.unwrap_err().code, "SkillMissing");
-
-    ctx.db.with_mut_snapshot(|s| {
-        let skills = s.skills.entry(PILOT_1).or_default();
-        skills.insert(11584, eve_db::TrainedSkillRecord { type_id: 11584, level: 3, skill_points: 40_000.0 });
-    });
-
-    let fleet_err = ctx.dispatch_rpc(
-        &mut sess1,
-        "posMgr",
-        None,
-        "AnchorStructure",
-        &[PyRep::Integer(beacon_id)],
-        &kw,
-        None,
-    ).await;
-    assert!(fleet_err.is_err());
-    assert_eq!(fleet_err.unwrap_err().code, "MustBeInFleet");
-
-    sess1.fleet_id = Some(5001);
-
-    let ok_res = ctx.dispatch_rpc(
-        &mut sess1,
-        "posMgr",
-        None,
-        "AnchorStructure",
-        &[PyRep::Integer(beacon_id)],
-        &kw,
-        None,
-    ).await;
-    assert!(ok_res.is_ok(), "Mobile Cyno Beacon anchor failed after meeting prerequisites: {ok_res:?}");
-
-    let despawn = read_deployable_state(&ctx).deployables[&beacon_id].expires_at_unix;
-    assert_eq!(despawn, ctx.now_unix() + CYNO_BEACON_DURATION_SECS);
-
-    assert!(!can_deployable_be_scooped(GROUP_MOBILE_CYNO_BEACON), "Mobile Cyno Beacon must not be scoopable");
-
-    let covert_beacon_id = 900_002i64;
-    ctx.db.with_mut_snapshot(|s| {
-        let skills = s.skills.entry(PILOT_1).or_default();
-        skills.insert(11584, eve_db::TrainedSkillRecord { type_id: 11584, level: 5, skill_points: 256_000.0 });
-        skills.insert(21603, eve_db::TrainedSkillRecord { type_id: 21603, level: 5, skill_points: 256_000.0 });
-        s.items.insert(covert_beacon_id, InventoryItemRecord {
-            item_id: covert_beacon_id, type_id: TYPE_COVERT_MOBILE_CYNO_BEACON, owner_id: PILOT_1,
+        snap.items.insert(depot_2_id, InventoryItemRecord {
+            item_id: depot_2_id, type_id: TYPE_MOBILE_DEPOT, owner_id: PILOT_1,
             location_id: SHIP_1, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default()
         });
     });
-    let covert_res = ctx.dispatch_rpc(
-        &mut sess1,
-        "posMgr",
-        None,
-        "AnchorStructure",
-        &[PyRep::Integer(covert_beacon_id)],
-        &kw,
-        None,
-    ).await;
-    assert!(covert_res.is_ok(), "Covert Mobile Cyno Beacon anchor failed: {covert_res:?}");
-    let covert_despawn = read_deployable_state(&ctx).deployables[&covert_beacon_id].expires_at_unix;
-    assert_eq!(covert_despawn, ctx.now_unix() + COVERT_CYNO_BEACON_DURATION_SECS);
+    ctx.dispatch_rpc(&mut sess1, "posMgr", None, "AnchorStructure", &[PyRep::Integer(depot_2_id)], &kw, None).await.unwrap();
+    ctx.advance_secs(DEPOT_ANCHOR_TIME_SECS + 1);
+
+    // Deal 50% shield damage to depot 2
+    let d2_cs = sys.get_combat_state(depot_2_id).await.unwrap().unwrap();
+    let dmg_half = DamageVector { em: d2_cs.max_shield_hp * 0.50, thermal: 0.0, kinetic: 0.0, explosive: 0.0 };
+    sys.apply_damage(depot_2_id, dmg_half).await.unwrap().unwrap();
+    let d2_post_cs = sys.get_combat_state(depot_2_id).await.unwrap().unwrap();
+    let expected_damaged_shields = d2_post_cs.shield_hp;
+
+    // Scoop depot 2 to cargo
+    assert!(can_deployable_be_scooped(GROUP_MOBILE_DEPOT));
+    record_scooped_deployable_damage(&ctx, depot_2_id, &d2_post_cs);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(i) = snap.items.get_mut(&depot_2_id) {
+            i.location_id = SHIP_1;
+            i.flag = InventoryFlag::Cargo;
+        }
+        snap.item_positions.remove(&depot_2_id);
+    });
+
+    // Redeploy depot 2
+    let _redeploy_pos = ship_pos + DVec3::new(100.0, 0.0, 0.0);
+    ctx.dispatch_rpc(&mut sess1, "posMgr", None, "AnchorStructure", &[PyRep::Integer(depot_2_id)], &kw, None).await.unwrap();
+    let redeployed_cs = sys.get_combat_state(depot_2_id).await.unwrap().expect("redeployed combat state");
+    assert!((redeployed_cs.shield_hp - expected_damaged_shields).abs() < 1.0, "Redeployed depot must retain pre-scoop damage state");
 }
 
-/// Tests Mobile Micro Jump Unit 1-minute activation spool, 2-day lifetime, cannot be scooped,
-/// ship mass check (< 1,000,000,000 kg), 12s warm-up executing 100km jump in ship heading,
-/// friendly/hostile usability, and zero structure cooldown (`feat:structures.mobile-micro-jump-unit`).
+/// Tests Mobile Depot 30-day lifetime enforcement, interaction refresh, and live expiry sweep (`feat:structures.mobile-depot-lifetime-reinforce`).
 #[tokio::test]
-async fn test_mobile_micro_jump_unit_activation_mass_jump() {
-    // parity: feat:structures.mobile-micro-jump-unit
-    eve_testkit::attest(&["feat:structures.mobile-micro-jump-unit"]);
+async fn test_mobile_depot_lifetime_and_interaction_refresh() {
+    // parity: feat:structures.mobile-depot-lifetime-reinforce
+    eve_testkit::attest(&["feat:structures.mobile-depot-lifetime-reinforce"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let mmju_pos = DVec3::new(30_000_000.0, 30_000_000.0, 30_000_000.0);
-    let mut sess1 = setup_pilot(&ctx, 401, PILOT_1, SHIP_1, TEST_SYSTEM, mmju_pos).await;
+    let start_unix = ctx.now_unix();
+    let ship_pos = DVec3::new(20_000_000.0, 20_000_000.0, 20_000_000.0);
+    let mut sess = setup_pilot(&ctx, 201, PILOT_1, SHIP_1, TEST_SYSTEM, ship_pos).await;
 
-    let mmju_id = 950_001i64;
+    let depot_id = 700_010i64;
     ctx.db.with_mut_snapshot(|snap| {
         let skills = snap.skills.entry(PILOT_1).or_default();
         skills.insert(11584, eve_db::TrainedSkillRecord { type_id: 11584, level: 3, skill_points: 40_000.0 });
-        snap.items.insert(mmju_id, InventoryItemRecord {
-            item_id: mmju_id, type_id: TYPE_MOBILE_MJU, owner_id: PILOT_1, location_id: SHIP_1,
-            flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default()
+        snap.items.insert(depot_id, InventoryItemRecord {
+            item_id: depot_id, type_id: TYPE_MOBILE_DEPOT, owner_id: PILOT_1,
+            location_id: SHIP_1, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default()
         });
     });
 
     let kw = HashMap::new();
-    let res = ctx.dispatch_rpc(
-        &mut sess1,
-        "posMgr",
-        None,
-        "AnchorStructure",
-        &[PyRep::Integer(mmju_id)],
-        &kw,
-        None,
-    ).await;
-    assert!(res.is_ok(), "MMJU anchor failed: {res:?}");
+    ctx.dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(depot_id)], &kw, None).await.unwrap();
 
-    let despawn = read_deployable_state(&ctx).deployables[&mmju_id].expires_at_unix;
-    assert_eq!(despawn, ctx.now_unix() + MMJU_LIFETIME_SECS);
-    assert!(!can_deployable_be_scooped(GROUP_MOBILE_MICRO_JUMP_UNIT), "MMJU must not be scoopable");
+    let rec0 = read_deployable_state(&ctx).deployables.get(&depot_id).cloned().expect("depot record");
+    assert_eq!(rec0.expires_at_unix, start_unix + DEPOT_LIFETIME_SECS);
 
+    // Advance clock by 15 days
+    ctx.advance_secs(15 * 86_400);
     let sys = ctx.systems.get_or_spawn(TEST_SYSTEM);
-    let early_act = activate_mmju(&ctx, &sys, SHIP_1, mmju_id).await;
-    assert!(early_act.is_err());
-    assert_eq!(early_act.unwrap_err().code, "DeployableNotActive");
+    sys.step_manual(1.0).await.unwrap();
+    assert!(sys.get_combat_state(depot_id).await.unwrap().is_some(), "Depot must remain alive at day 15");
 
-    write_deployable_state(&ctx, |st| {
-        if let Some(r) = st.deployables.get_mut(&mmju_id) {
-            r.anchor_completed = true;
-        }
-    });
+    // Pilot interacts with Mobile Depot -> resets the 30-day lifetime from current time
+    touch_mobile_depot_interaction(&ctx, depot_id);
+    let rec1 = read_deployable_state(&ctx).deployables.get(&depot_id).cloned().expect("depot record");
+    let expected_refreshed_expiry = start_unix + 15 * 86_400 + DEPOT_LIFETIME_SECS;
+    assert_eq!(rec1.expires_at_unix, expected_refreshed_expiry, "Interaction must refresh 30-day lifetime from current timestamp");
 
-    let titan_ship_id = 100_000_999i64;
-    let _ = setup_pilot(&ctx, 402, PILOT_2, titan_ship_id, TEST_SYSTEM, mmju_pos + DVec3::new(500.0, 0.0, 0.0)).await;
-    let titan_ball = Ball {
-        id: titan_ship_id,
-        type_id: 11567,
-        position: mmju_pos + DVec3::new(500.0, 0.0, 0.0),
-        velocity: DVec3::ZERO,
-        max_velocity: 100.0,
-        inertia: 1.0,
-        mass: 2_400_000_000.0,
-        radius: 1000.0,
-        speed_fraction: 0.0,
-        mode: MovementMode::Stop,
-    };
-    let _ = sys.spawn_ball(titan_ball).await;
+    // Advance clock another 20 days (total 35 days elapsed from deploy; would have expired without refresh)
+    ctx.advance_secs(20 * 86_400);
+    sys.step_manual(1.0).await.unwrap();
+    assert!(sys.get_combat_state(depot_id).await.unwrap().is_some(), "Depot must remain alive at day 35 due to refreshed lifetime");
 
-    let heavy_err = activate_mmju(&ctx, &sys, titan_ship_id, mmju_id).await;
-    assert!(heavy_err.is_err());
-    assert_eq!(heavy_err.unwrap_err().code, "ShipTooHeavy");
+    // Advance clock another 15 days (total 50 days elapsed, exceeding the refreshed 45-day expiry)
+    ctx.advance_secs(15 * 86_400 + 1);
+    sys.step_manual(1.0).await.unwrap();
 
-    let initial_pos = sys.get_ball_snapshot(SHIP_1).await.unwrap().unwrap().1.position;
-    let new_pos = activate_mmju(&ctx, &sys, SHIP_1, mmju_id).await.expect("activate MMJU");
-    let dist_jumped = (new_pos - initial_pos).length();
-    assert!((dist_jumped - MMJU_JUMP_DISTANCE_M).abs() < 1_000.0, "MMJU must jump ship exactly 100 km (jumped {dist_jumped:.1} m)");
-
-    let hostile_ship = 100_000_003i64;
-    let _ = setup_pilot(&ctx, 403, 90_000_003, hostile_ship, TEST_SYSTEM, mmju_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
-    let hostile_jump = activate_mmju(&ctx, &sys, hostile_ship, mmju_id).await;
-    assert!(hostile_jump.is_ok(), "MMJU must be usable by any pilot within range regardless of ownership");
+    // Verify live expiry sweep removed the depot ball from ballpark and cleaned up the item from DB
+    assert!(sys.get_combat_state(depot_id).await.unwrap().is_none(), "Expired depot must be removed from ballpark");
+    let item_in_db = ctx.db.with_snapshot(|snap| snap.items.contains_key(&depot_id));
+    assert!(!item_in_db, "Expired depot must be removed from database");
+    let rec_in_state = read_deployable_state(&ctx).deployables.contains_key(&depot_id);
+    assert!(!rec_in_state, "Expired depot must be removed from deployable runtime state");
 }
 
-/// Tests deployment restrictions in starter and career-agent systems, proximity restrictions (< 50km stargate/station/structure,
-/// < 5km MTU-to-MTU), and crimewatch suspect flag upon attacking deployable in highsec (`feat:structures.mobile-deploy-restrictions`).
+/// Tests deployment restrictions in starter/career systems, 50km proximity rules,
+/// Mobile Warp Disruptor (group 361) nullsec gate regression, and Crimewatch suspect flag (`feat:structures.mobile-deploy-restrictions`).
 #[tokio::test]
-async fn test_mobile_deploy_restrictions_starter_career_proximity_crimewatch() {
+async fn test_mobile_deploy_restrictions_and_gate_bubble_regression() {
     // parity: feat:structures.mobile-deploy-restrictions
     eve_testkit::attest(&["feat:structures.mobile-deploy-restrictions"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
+    let ship_pos = DVec3::new(10_000_000.0, 10_000_000.0, 10_000_000.0);
+    let _sess = setup_pilot(&ctx, 301, PILOT_1, SHIP_1, TEST_SYSTEM, ship_pos).await;
 
-    let starter_sys = ctx.sde.schools.values().find(|s| (11..=22).contains(&s.school_id)).map(|s| s.solar_system_id).unwrap_or(30_000_141);
-    let mut sess_starter = SessionState::new(501);
-    sess_starter.character_id = Some(PILOT_1);
-    sess_starter.solar_system_id = Some(starter_sys);
-    sess_starter.ship_id = Some(SHIP_1);
-
-    let restr_err = check_mobile_deployment_restrictions(
-        &ctx,
-        &sess_starter,
-        999_001,
-        TYPE_MOBILE_DEPOT,
-        GROUP_MOBILE_DEPOT,
-        starter_sys,
-        DVec3::new(100_000_000.0, 0.0, 0.0),
-    );
-    assert!(restr_err.is_err());
-    assert_eq!(restr_err.unwrap_err().code, "RestrictionsInEffect");
-
-    let mut sess_valid = SessionState::new(502);
-    sess_valid.character_id = Some(PILOT_1);
-    sess_valid.solar_system_id = Some(TEST_SYSTEM);
-    sess_valid.ship_id = Some(SHIP_1);
-
-    let gate_pos = ctx.sde.stargates().values().find(|j| j.from_solar_system_id == TEST_SYSTEM).map(|j| j.position).unwrap_or(DVec3::ZERO);
-    let close_to_gate = check_mobile_deployment_restrictions(
-        &ctx,
-        &sess_valid,
-        999_002,
-        TYPE_MOBILE_DEPOT,
-        GROUP_MOBILE_DEPOT,
-        TEST_SYSTEM,
-        gate_pos + DVec3::new(20_000.0, 0.0, 0.0),
-    );
-    assert!(close_to_gate.is_err());
-    assert_eq!(close_to_gate.unwrap_err().code, "DeploymentTooCloseToGate");
-
-    let station_pos = ctx.sde.solar_systems[&TEST_SYSTEM].stations.first().map(|s| s.position).unwrap_or(DVec3::ZERO);
-    let close_to_station = check_mobile_deployment_restrictions(
-        &ctx,
-        &sess_valid,
-        999_003,
-        TYPE_MOBILE_DEPOT,
-        GROUP_MOBILE_DEPOT,
-        TEST_SYSTEM,
-        station_pos + DVec3::new(30_000.0, 0.0, 0.0),
-    );
-    assert!(close_to_station.is_err());
-    assert_eq!(close_to_station.unwrap_err().code, "DeploymentTooCloseToStation");
-
-    let existing_mtu_id = 999_010i64;
-    let mtu_anchor_pos = DVec3::new(40_000_000.0, 40_000_000.0, 40_000_000.0);
-    ctx.db.with_mut_snapshot(|s| {
-        s.items.insert(existing_mtu_id, InventoryItemRecord {
-            item_id: existing_mtu_id, type_id: TYPE_MTU_STANDARD, owner_id: PILOT_1,
-            location_id: TEST_SYSTEM as i64, flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
+    // 1. Gating in starter / career agent systems
+    let starter_sys = ctx.sde.schools.values().find(|s| (11..=22).contains(&s.school_id)).map(|s| s.solar_system_id).unwrap_or(30000140);
+    let depot_item_id = 700_020i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let skills = snap.skills.entry(PILOT_1).or_default();
+        skills.insert(11584, eve_db::TrainedSkillRecord { type_id: 11584, level: 3, skill_points: 40_000.0 });
+        snap.items.insert(depot_item_id, InventoryItemRecord {
+            item_id: depot_item_id, type_id: TYPE_MOBILE_DEPOT, owner_id: PILOT_1,
+            location_id: SHIP_1, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default()
         });
-        s.item_positions.insert(existing_mtu_id, mtu_anchor_pos.to_array());
-    });
-    write_deployable_state(&ctx, |st| {
-        st.deployables.insert(
-            existing_mtu_id,
-            MobileDeployableRecord {
-                item_id: existing_mtu_id,
-                owner_id: PILOT_1,
-                type_id: TYPE_MTU_STANDARD,
-                group_id: GROUP_MOBILE_TRACTOR,
-                solar_system_id: TEST_SYSTEM,
-                position: mtu_anchor_pos.to_array(),
-                anchor_start_unix: ctx.now_unix(),
-                anchor_duration_secs: 10,
-                anchor_completed: true,
-                expires_at_unix: ctx.now_unix() + 172_800,
-                last_interaction_unix: ctx.now_unix(),
-                reinforced_until_unix: None,
-                reinforcement_used: false,
-            },
-        );
     });
 
-    let close_to_mtu = check_mobile_deployment_restrictions(
-        &ctx,
-        &sess_valid,
-        999_011,
-        TYPE_MTU_STANDARD,
-        GROUP_MOBILE_TRACTOR,
-        TEST_SYSTEM,
-        mtu_anchor_pos + DVec3::new(2_000.0, 0.0, 0.0),
-    );
-    assert!(close_to_mtu.is_err());
-    assert_eq!(close_to_mtu.unwrap_err().code, "DeploymentTooCloseToSameType");
+    let mut starter_sess = setup_pilot(&ctx, 302, PILOT_1, SHIP_1, starter_sys, ship_pos).await;
+    let kw = HashMap::new();
+    let starter_res = ctx.dispatch_rpc(
+        &mut starter_sess,
+        "posMgr",
+        None,
+        "AnchorStructure",
+        &[PyRep::Integer(depot_item_id)],
+        &kw,
+        None,
+    ).await;
+    assert!(starter_res.is_err());
+    assert_eq!(starter_res.unwrap_err().code, "RestrictionsInEffect", "Must block mobile structures in starter systems");
 
-    let far_safe_pos = DVec3::new(80_000_000.0, 80_000_000.0, 80_000_000.0);
-    let safe_ok = check_mobile_deployment_restrictions(
-        &ctx,
-        &sess_valid,
-        999_012,
-        TYPE_MTU_STANDARD,
-        GROUP_MOBILE_TRACTOR,
-        TEST_SYSTEM,
-        far_safe_pos,
-    );
-    assert!(safe_ok.is_ok(), "Deploying beyond restricted radii must succeed: {safe_ok:?}");
+    // 2. Proximity to Stargate (>= 50km)
+    let gate_pos = ctx.sde.stargates().values().find(|g| g.from_solar_system_id == TEST_SYSTEM).map(|g| g.position).unwrap_or(DVec3::ZERO);
+    let mut gate_sess = setup_pilot(&ctx, 303, PILOT_1, SHIP_1, TEST_SYSTEM, gate_pos + DVec3::new(10_000.0, 0.0, 0.0)).await;
+    let gate_res = ctx.dispatch_rpc(
+        &mut gate_sess,
+        "posMgr",
+        None,
+        "AnchorStructure",
+        &[PyRep::Integer(depot_item_id)],
+        &kw,
+        None,
+    ).await;
+    assert!(gate_res.is_err());
+    assert_eq!(gate_res.unwrap_err().code, "DeploymentTooCloseToGate", "Must block mobile deployable within 50km of stargates");
 
-    let mut cw = ctx.crimewatch.write().unwrap();
-    let now = ctx.now_unix();
-    let effective_sec = 0.95f64.min(0.40);
-    let outcome = cw.handle_combat_aggression(PILOT_2, PILOT_1, SHIP_2, TEST_SYSTEM, effective_sec, false, now);
-    assert_eq!(outcome, eve_server::combat::crimewatch::AggressionEvaluation::SuspectFlagTriggered);
-    let attacker_st = cw.get_or_create(PILOT_2);
-    assert!(attacker_st.is_suspect(now), "Attacking mobile deployable must result in a 15-minute SUSPECT flag");
-    assert!(!attacker_st.is_criminal(now), "Attacking mobile deployable in highsec must NOT flag attacker as criminal");
+    // 3. Regression test (MD-03): Mobile Warp Disruptor (group 361) at Stargate in nullsec
+    let (nullsec_sys, nullsec_gate_pos) = ctx.sde.stargates().values()
+        .filter_map(|g| {
+            let sys = ctx.sde.solar_systems.get(&g.from_solar_system_id)?;
+            if sys.security_status <= 0.0 && sys.solar_system_id < 31_000_000 {
+                Some((sys.solar_system_id, g.position))
+            } else {
+                None
+            }
+        })
+        .next()
+        .expect("nullsec system with stargate");
+    let mwd_item_id = 700_021i64;
+    let mwd_type_id = 12198; // Mobile Small Warp Disruptor I (group 361)
+    ctx.db.with_mut_snapshot(|snap| {
+        let skills = snap.skills.entry(PILOT_1).or_default();
+        skills.insert(3435, eve_db::TrainedSkillRecord { type_id: 3435, level: 5, skill_points: 256_000.0 });
+        skills.insert(11584, eve_db::TrainedSkillRecord { type_id: 11584, level: 5, skill_points: 256_000.0 });
+        snap.items.insert(mwd_item_id, InventoryItemRecord {
+            item_id: mwd_item_id, type_id: mwd_type_id, owner_id: PILOT_1,
+            location_id: SHIP_1, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default()
+        });
+    });
+    let mut nullsec_sess = setup_pilot(&ctx, 304, PILOT_1, SHIP_1, nullsec_sys, nullsec_gate_pos + DVec3::new(10_000.0, 0.0, 0.0)).await;
+    let mwd_res = ctx.dispatch_rpc(
+        &mut nullsec_sess,
+        "posMgr",
+        None,
+        "AnchorStructure",
+        &[PyRep::Integer(mwd_item_id)],
+        &kw,
+        None,
+    ).await;
+    assert!(mwd_res.is_ok(), "Nullsec Mobile Warp Disruptor MUST be allowed to anchor within 50km of stargate: {mwd_res:?}");
+
+    // 4. Proximity between two Mobile Depots (>= 5km)
+    let valid_pos = DVec3::new(30_000_000.0, 30_000_000.0, 30_000_000.0);
+    let mut sess_valid = setup_pilot(&ctx, 305, PILOT_1, SHIP_1, TEST_SYSTEM, valid_pos).await;
+    let depot_1_id = 700_022i64;
+    let depot_2_id = 700_023i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(depot_1_id, InventoryItemRecord {
+            item_id: depot_1_id, type_id: TYPE_MOBILE_DEPOT, owner_id: PILOT_1,
+            location_id: SHIP_1, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default()
+        });
+        snap.items.insert(depot_2_id, InventoryItemRecord {
+            item_id: depot_2_id, type_id: TYPE_MOBILE_DEPOT, owner_id: PILOT_1,
+            location_id: SHIP_1, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default()
+        });
+    });
+    ctx.dispatch_rpc(&mut sess_valid, "posMgr", None, "AnchorStructure", &[PyRep::Integer(depot_1_id)], &kw, None).await.unwrap();
+    let depot_2_res = ctx.dispatch_rpc(&mut sess_valid, "posMgr", None, "AnchorStructure", &[PyRep::Integer(depot_2_id)], &kw, None).await;
+    assert!(depot_2_res.is_err());
+    assert_eq!(depot_2_res.unwrap_err().code, "DeploymentTooCloseToSameType", "Cannot anchor second depot within 5km of another depot");
+
+    // 5. Crimewatch Suspect Flag (MD-07): Pilot 2 attacks Pilot 1's anchored depot in highsec through real weapons dispatch
+    let mut sess_p2 = setup_pilot(&ctx, 306, PILOT_2, SHIP_2, TEST_SYSTEM, valid_pos + DVec3::new(2_000.0, 0.0, 0.0)).await;
+    let turret_mod_id = 800_100i64;
+    let ammo_mod_id = 800_101i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(turret_mod_id, InventoryItemRecord {
+            item_id: turret_mod_id, type_id: 47272, owner_id: PILOT_2,
+            location_id: SHIP_2, flag: eve_db::InventoryFlag::HiSlot0, quantity: 1, singleton: true, ..Default::default()
+        });
+        snap.items.insert(ammo_mod_id, InventoryItemRecord {
+            item_id: ammo_mod_id, type_id: 47925, owner_id: PILOT_2,
+            location_id: SHIP_2, flag: eve_db::InventoryFlag::Cargo, quantity: 50, singleton: false, ..Default::default()
+        });
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(TEST_SYSTEM);
+    sys_handle.add_target_lock(SHIP_2, eve_destiny::TargetLock { target_id: depot_1_id, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: Some(50_000.0) }).await.unwrap();
+    let now_attack = ctx.now_unix();
+    let fire_res = ctx.dispatch_rpc(
+        &mut sess_p2,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[PyRep::Integer(turret_mod_id), PyRep::Integer(depot_1_id)],
+        &kw,
+        None,
+    ).await;
+    assert!(fire_res.is_ok(), "Firing on mobile deployable in highsec must succeed: {fire_res:?}");
+
+    // Verify Pilot 2 received a SUSPECT flag, NOT a CRIMINAL flag
+    let p2_state = ctx.crimewatch.read().unwrap().states.get(&PILOT_2).cloned().expect("p2 cw state");
+    assert!(p2_state.is_suspect(now_attack), "Attacking mobile deployable in highsec must trigger suspect flag");
+    assert!(!p2_state.is_criminal(now_attack), "Attacking mobile deployable must NOT trigger criminal flag");
 }

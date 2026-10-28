@@ -8,7 +8,6 @@
 //! Mobile Cynosural Beacon spool & fleet jump visibility, and Mobile Micro Jump Unit 12s warm-up & 100km jumps.
 
 use crate::router::ServerContext;
-use crate::system_actor::SystemHandle;
 use eve_destiny::{BallId, DamageVector};
 use eve_machonet::SessionState;
 use eve_proto::BridgeRpcError;
@@ -149,18 +148,18 @@ pub fn write_deployable_state<R>(
     })
 }
 
-/// Checks whether a given type ID or group ID represents a mobile structure.
+/// Checks whether a given type ID represents a mobile structure (`feat:structures.mobile-deploy-restrictions`).
+/// Only returns true for personal mobile deployables (Mobile Depot, MTU, MMJU, Cyno Beacon).
+/// Mobile Warp Disruptors (group 361) and anchorable containers are NOT mobile structures.
 pub fn is_mobile_structure(sde: &SdeRegistry, type_id: u32) -> bool {
     sde.types.get(&type_id).is_some_and(|t| {
-        t.category_id == CATEGORY_DEPLOYABLE
-            || matches!(
-                t.group_id,
-                GROUP_MOBILE_DEPOT
-                    | GROUP_MOBILE_TRACTOR
-                    | GROUP_MOBILE_MICRO_JUMP_UNIT
-                    | GROUP_MOBILE_CYNO_BEACON
-                    | GROUP_MOBILE_WARP_DISRUPTOR
-            )
+        matches!(
+            t.group_id,
+            GROUP_MOBILE_DEPOT
+                | GROUP_MOBILE_TRACTOR
+                | GROUP_MOBILE_MICRO_JUMP_UNIT
+                | GROUP_MOBILE_CYNO_BEACON
+        )
     })
 }
 
@@ -394,297 +393,188 @@ pub fn record_scooped_deployable_damage(
     });
 }
 
-/// Evaluates Mobile Depot damage and reinforcement threshold (`feat:structures.mobile-depot`, `feat:structures.mobile-depot-lifetime-reinforce`).
-/// Returns `(effective_damage_applied, is_reinforced_now, is_destroyed)`.
-pub fn process_mobile_depot_damage(
-    ctx: &ServerContext,
-    item_id: i64,
-    incoming_damage: DamageVector,
-    combat: &mut eve_destiny::CombatState,
-) -> (f64, bool, bool) {
-    let now_unix = ctx.now_unix();
-    let state_rec = read_deployable_state(ctx).deployables.get(&item_id).cloned();
-
-    let Some(rec) = state_rec else {
-        // Fallback for standard combat state
-        let (applied, destroyed) = combat.apply_damage(incoming_damage);
-        return (applied, false, destroyed);
-    };
-
-    // If currently reinforced, depot is completely invulnerable
-    if let Some(reinf_until) = rec.reinforced_until_unix {
-        if now_unix < reinf_until {
-            return (0.0, true, false);
-        }
-    }
-
-    // Anchoring phase: never reinforces!
-    let is_anchoring = !rec.anchor_completed && now_unix < rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs);
-    if is_anchoring {
-        let (applied, destroyed) = combat.apply_damage(incoming_damage);
-        return (applied, false, destroyed);
-    }
-
-    // Anchored depot attack: check if entering <= 25% shield reinforcement threshold
-    let shield_threshold = combat.max_shield_hp * DEPOT_REINFORCE_SHIELD_THRESHOLD;
-    if !rec.reinforcement_used && combat.shield_hp > shield_threshold {
-        // Apply damage until shield reaches 25%
-        let damage_to_threshold = combat.shield_hp - shield_threshold;
-        let incoming_total = incoming_damage.total();
-        if incoming_total >= damage_to_threshold {
-            combat.shield_hp = shield_threshold;
-            let reinf_until = now_unix.saturating_add(DEPOT_REINFORCE_DURATION_SECS);
-            write_deployable_state(ctx, |st| {
-                if let Some(r) = st.deployables.get_mut(&item_id) {
-                    r.reinforced_until_unix = Some(reinf_until);
-                    r.reinforcement_used = true;
-                }
-            });
-            return (damage_to_threshold, true, false);
-        } else {
-            combat.shield_hp -= incoming_total;
-            return (incoming_total, false, false);
-        }
-    }
-
-    // If reinforcement has already been used or shields are already <= 25%, apply full damage without reinforcement
-    let (applied, destroyed) = combat.apply_damage(incoming_damage);
-    (applied, false, destroyed)
-}
-
-/// Evaluates MTU automated tractoring and looting tick (`feat:structures.mobile-tractor`, `feat:structures.mobile-tractor-rules`).
-pub async fn process_mtu_tractor_tick(
-    ctx: &ServerContext,
-    sys_handle: &SystemHandle,
-    mtu_item_id: i64,
+/// Advances mobile deployable simulation in the solar system actor on each server tick (`feat:structures.mobile-tractor`, `feat:structures.mobile-tractor-rules`, `feat:structures.mobile-depot-lifetime-reinforce`).
+/// Executes automated expiry sweeps and MTU automated tractoring & hold-capacity looting.
+pub fn step_mobile_deployables_in_actor(
+    ballpark: &mut eve_destiny::Ballpark,
+    sde_opt: Option<&eve_sde::SdeRegistry>,
+    db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
+    solar_system_id: u32,
     dt: f64,
-) -> Option<i64> {
-    let sys_id = sys_handle.solar_system_id;
-    let (mtu_type_id, mtu_owner_id) = ctx.db.with_snapshot(|snap| {
-        snap.items.get(&mtu_item_id).map(|i| (i.type_id, i.owner_id))
-    })?;
-
-    // MTU operates only while the owner is in the same system (`feat:structures.mobile-tractor-rules`)
-    let owner_in_system = ctx.db.with_snapshot(|snap| {
-        snap.characters.get(&mtu_owner_id).is_some_and(|c| c.solar_system_id == sys_id)
-    });
-    if !owner_in_system {
-        return None;
-    }
-
-    let mtu_pos = sys_handle.get_ball_snapshot(mtu_item_id).await.ok().flatten().map(|(_, b)| b.position)?;
-    let mtu_type = ctx.sde.types.get(&mtu_type_id)?;
-    let max_range = mtu_type.default_attributes.get(&54).copied().unwrap_or(125_000.0);
-    let tractor_vel = mtu_type.default_attributes.get(&1045).copied().unwrap_or(1_000.0);
-
-    // Find candidate wrecks and cargo containers in space
-    let candidate_ids: Vec<(i64, f64, DVec3)> = ctx.db.with_snapshot(|snap| {
-        let mut list = Vec::new();
-        let owner_corp = snap.characters.get(&mtu_owner_id).map(|c| c.corporation_id).unwrap_or(0);
-        let now_unix = ctx.now_unix();
-
-        for it in snap.items.values() {
-            if it.item_id == mtu_item_id || it.location_id != sys_id as i64 {
-                continue;
-            }
-            let is_wreck = ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 186);
-            let is_container = it.type_id == 23 || ctx.sde.types.get(&it.type_id).is_some_and(|t| matches!(t.group_id, 12 | 340 | 448));
-            if !is_wreck && !is_container {
-                continue;
-            }
-
-            // Must be legally lootable by the MTU owner
-            let is_owner = it.owner_id == mtu_owner_id || it.owner_id == 0;
-            let is_corp = owner_corp > 0 && it.owner_id == owner_corp;
-            let is_fleet = snap.fleets.values().any(|f| f.members.contains(&mtu_owner_id) && f.members.contains(&it.owner_id));
-            let is_abandoned = snap.sp6_lifecycle.space_object_meta.get(&it.item_id).is_some_and(|m| m.is_npc_wreck)
-                || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                    rt.container_lifetimes.get(&it.item_id).is_some_and(|c| c.is_abandoned)
-                });
-            let is_crim = ctx.crimewatch.read().ok().and_then(|cw| cw.states.get(&it.owner_id).map(|st| st.is_criminal(now_unix))).unwrap_or(false);
-
-            if !(is_owner || is_corp || is_fleet || is_abandoned || is_crim) {
-                continue;
-            }
-
-            if let Some(pos_arr) = snap.item_positions.get(&it.item_id) {
-                let p = DVec3::from_array(*pos_arr);
-                let d = (p - mtu_pos).length();
-                if d <= max_range {
-                    list.push((it.item_id, d, p));
-                }
-            }
-        }
-        list
-    });
-
-    if candidate_ids.is_empty() {
-        return None;
-    }
-
-    // Target ordering: closest first (`feat:structures.mobile-tractor-rules`)
-    let (target_id, target_dist, target_pos) = candidate_ids
-        .into_iter()
-        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
-
-    if target_dist <= 2_500.0 {
-        // Loot cargo into MTU hold (capacity 27,000 m³)
-        ctx.db.with_mut_snapshot(|snap| {
-            let child_ids: Vec<i64> = snap.items.values()
-                .filter(|c| c.location_id == target_id && c.quantity > 0)
-                .map(|c| c.item_id)
-                .collect();
-            for cid in child_ids {
-                if let Some(child) = snap.items.get_mut(&cid) {
-                    child.location_id = mtu_item_id;
-                    child.flag = eve_db::InventoryFlag::Cargo;
-                    child.version += 1;
-                }
-            }
-        });
-        Some(target_id)
-    } else {
-        // Pull towards MTU at tractor velocity
-        let dir = (mtu_pos - target_pos).normalize_or_zero();
-        let step = tractor_vel * dt;
-        let new_pos = if step >= target_dist - 2_500.0 {
-            mtu_pos - dir * 2_500.0
-        } else {
-            target_pos + dir * step
-        };
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.item_positions.insert(target_id, [new_pos.x, new_pos.y, new_pos.z]);
-        });
-        let _ = sys_handle.set_ball_position(target_id, new_pos).await;
-        Some(target_id)
-    }
-}
-
-/// Executes loot drop on MTU destruction (`feat:structures.mobile-tractor-rules`).
-/// Drops 50% of hold contents into an in-space cargo container, destroying the rest.
-pub async fn drop_mtu_loot_on_destruction(
-    ctx: &ServerContext,
-    sys_handle: &SystemHandle,
-    mtu_item_id: i64,
+    now_unix: u64,
 ) {
-    let (sys_id, owner_id, pos) = {
-        let pos_opt = sys_handle.get_ball_snapshot(mtu_item_id).await.ok().flatten().map(|(_, b)| b.position);
-        ctx.db.with_snapshot(|snap| {
-            let item = snap.items.get(&mtu_item_id)?;
-            let p = pos_opt.or_else(|| snap.item_positions.get(&mtu_item_id).map(|a| DVec3::from_array(*a)))?;
-            Some((item.location_id as u32, item.owner_id, p))
-        })
-    }.unwrap_or((sys_handle.solar_system_id, 0, DVec3::ZERO));
+    let (Some(db), Some(sde)) = (db_opt, sde_opt) else { return; };
 
-    let now_unix = ctx.now_unix();
-    ctx.db.with_mut_snapshot(|snap| {
-        let hold_items: Vec<(i64, i32)> = snap.items.values()
-            .filter(|i| i.location_id == mtu_item_id && i.quantity > 0)
-            .map(|i| (i.item_id, i.quantity))
-            .collect();
-        if hold_items.is_empty() {
-            return;
+    // 1. Expiry sweep: find all deployables in this solar system where now_unix >= expires_at_unix
+    let expired_ids: Vec<i64> = db.with_snapshot(|snap| {
+        let st = read_deployable_state_snap(snap);
+        st.deployables
+            .values()
+            .filter(|r| r.solar_system_id == solar_system_id && now_unix >= r.expires_at_unix)
+            .map(|r| r.item_id)
+            .collect()
+    });
+
+    if !expired_ids.is_empty() {
+        for &eid in &expired_ids {
+            ballpark.balls.remove(&eid);
+            ballpark.combat_states.remove(&eid);
+        }
+        db.with_mut_snapshot(|snap| {
+            for eid in expired_ids {
+                let child_ids: Vec<i64> = snap
+                    .items
+                    .values()
+                    .filter(|i| i.location_id == eid)
+                    .map(|i| i.item_id)
+                    .collect();
+                for cid in child_ids {
+                    snap.items.remove(&cid);
+                }
+                snap.items.remove(&eid);
+                snap.item_positions.remove(&eid);
+                snap.sp6_lifecycle.space_object_meta.remove(&eid);
+                write_deployable_state_snap(snap, |st| {
+                    st.deployables.remove(&eid);
+                });
+            }
+        });
+    }
+
+    // 2. MTU tractoring and looting
+    let active_mtus: Vec<MobileDeployableRecord> = db.with_snapshot(|snap| {
+        let st = read_deployable_state_snap(snap);
+        st.deployables
+            .values()
+            .filter(|r| {
+                r.solar_system_id == solar_system_id
+                    && r.group_id == GROUP_MOBILE_TRACTOR
+                    && (r.anchor_completed || now_unix >= r.anchor_start_unix.saturating_add(r.anchor_duration_secs))
+            })
+            .cloned()
+            .collect()
+    });
+
+    for mtu in active_mtus {
+        // Owner must be present in the solar system and active in space (not docked elsewhere)
+        let is_docked_or_elsewhere = db.with_snapshot(|snap| {
+            snap.characters.get(&mtu.owner_id).is_some_and(|c| {
+                c.station_id.is_some() || c.structure_id.is_some() || c.solar_system_id != solar_system_id
+            })
+        });
+        if is_docked_or_elsewhere {
+            continue;
         }
 
-        snap.next_entity_id += 1;
-        let can_id = snap.next_entity_id;
-        snap.items.insert(
-            can_id,
-            eve_db::InventoryItemRecord {
-                item_id: can_id,
-                type_id: 23,
-                owner_id,
-                location_id: sys_id as i64,
-                flag: eve_db::InventoryFlag::None,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                ..Default::default()
-            },
-        );
-        snap.item_positions.insert(can_id, [pos.x, pos.y, pos.z]);
-        crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, can_id, now_unix, false);
+        let owner_in_system = ballpark.ball_slim_meta.values().any(|m| m.char_id == Some(mtu.owner_id))
+            || db.with_snapshot(|snap| {
+                snap.characters.get(&mtu.owner_id).is_some_and(|c| {
+                    c.solar_system_id == solar_system_id && c.station_id.is_none() && c.structure_id.is_none()
+                })
+            });
+        if !owner_in_system {
+            continue;
+        }
 
-        for (idx, &(iid, _qty)) in hold_items.iter().enumerate() {
-            // 50% drop rate (alternate or modulo)
-            if idx % 2 == 0 {
-                if let Some(it) = snap.items.get_mut(&iid) {
-                    it.location_id = can_id;
-                    it.flag = eve_db::InventoryFlag::Cargo;
-                    it.version += 1;
+        let mtu_pos = DVec3::from_array(mtu.position);
+        let mtu_capacity = sde
+            .types
+            .get(&mtu.type_id)
+            .map(|t| t.capacity)
+            .filter(|&c| c > 0.0)
+            .unwrap_or(27_000.0);
+
+        // Find candidate wrecks and cargo containers within 125km owned by the MTU owner
+        let candidates = db.with_snapshot(|snap| {
+            let mut list = Vec::new();
+            for it in snap.items.values() {
+                if it.location_id != solar_system_id as i64 || it.item_id == mtu.item_id {
+                    continue;
                 }
+                let is_wreck = sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 186);
+                let is_container = it.type_id == 23 || sde.types.get(&it.type_id).is_some_and(|t| matches!(t.group_id, 12 | 340 | 448));
+                if !is_wreck && !is_container {
+                    continue;
+                }
+                // Only wrecks/containers MTU owner may loot (wiki: "MTUs do not loot wrecks that are not yours")
+                if it.owner_id != mtu.owner_id {
+                    continue;
+                }
+                if let Some(pos_arr) = snap.item_positions.get(&it.item_id) {
+                    let p = DVec3::from_array(*pos_arr);
+                    let dist = (p - mtu_pos).length();
+                    if dist <= 125_000.0 {
+                        list.push((it.item_id, dist, p));
+                    }
+                }
+            }
+            list
+        });
+
+        if candidates.is_empty() {
+            continue;
+        }
+
+        // Closest first
+        let Some((target_id, target_dist, target_pos)) = candidates
+            .into_iter()
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        else {
+            continue;
+        };
+
+        if target_dist <= 2_500.0 {
+            // Loot cargo into MTU hold, enforcing capacity
+            db.with_mut_snapshot(|snap| {
+                let mut current_vol: f64 = snap
+                    .items
+                    .values()
+                    .filter(|c| c.location_id == mtu.item_id && c.quantity > 0)
+                    .map(|c| {
+                        let u_vol = sde.types.get(&c.type_id).map(|t| t.volume).unwrap_or(0.1);
+                        u_vol * (c.quantity.max(1) as f64)
+                    })
+                    .sum();
+
+                let child_ids: Vec<i64> = snap
+                    .items
+                    .values()
+                    .filter(|c| c.location_id == target_id && c.quantity > 0)
+                    .map(|c| c.item_id)
+                    .collect();
+
+                for cid in child_ids {
+                    let Some(child) = snap.items.get(&cid).cloned() else { continue; };
+                    let u_vol = sde.types.get(&child.type_id).map(|t| t.volume).unwrap_or(0.1);
+                    let total_vol = u_vol * (child.quantity.max(1) as f64);
+                    if current_vol + total_vol <= mtu_capacity {
+                        if let Some(child_mut) = snap.items.get_mut(&cid) {
+                            child_mut.location_id = mtu.item_id;
+                            child_mut.flag = eve_db::InventoryFlag::Cargo;
+                            child_mut.version += 1;
+                        }
+                        current_vol += total_vol;
+                    }
+                }
+            });
+        } else {
+            // Tractor target towards MTU at 1,000 m/s
+            let dir = (mtu_pos - target_pos).normalize_or_zero();
+            let tractor_speed = 1_000.0;
+            let step = tractor_speed * dt;
+            let new_pos = if step >= target_dist - 2_500.0 {
+                mtu_pos - dir * 2_500.0
             } else {
-                snap.items.remove(&iid);
+                target_pos + dir * step
+            };
+            db.with_mut_snapshot(|snap| {
+                snap.item_positions.insert(target_id, [new_pos.x, new_pos.y, new_pos.z]);
+            });
+            if let Some(b) = ballpark.balls.get_mut(&target_id) {
+                b.position = new_pos;
             }
         }
-    });
-}
-
-/// Activates Mobile Micro Jump Unit for a ship (`feat:structures.mobile-micro-jump-unit`).
-/// Enforces ship mass < 1,000,000,000 kg, 12s warm-up, and 100 km jump in ship heading direction.
-pub async fn activate_mmju(
-    ctx: &ServerContext,
-    sys_handle: &SystemHandle,
-    ship_id: i64,
-    mmju_id: i64,
-) -> Result<DVec3, BridgeRpcError> {
-    let now_unix = ctx.now_unix();
-    let (is_active, mmju_pos) = {
-        let state = read_deployable_state(ctx);
-        let rec = state.deployables.get(&mmju_id).ok_or_else(|| BridgeRpcError {
-            code: "DeployableNotFound".into(),
-            message: format!("Mobile Micro Jump Unit {mmju_id} not found"),
-        })?;
-        if rec.group_id != GROUP_MOBILE_MICRO_JUMP_UNIT {
-            return Err(BridgeRpcError {
-                code: "InvalidDeployableType".into(),
-                message: "Target is not a Mobile Micro Jump Unit".into(),
-            });
-        }
-        let active = rec.anchor_completed || now_unix >= rec.anchor_start_unix.saturating_add(MMJU_ACTIVATION_DELAY_SECS);
-        (active, DVec3::from_array(rec.position))
-    };
-
-    if !is_active {
-        return Err(BridgeRpcError {
-            code: "DeployableNotActive".into(),
-            message: "Mobile Micro Jump Unit is still spooling up deployment (1 minute required)".into(),
-        });
     }
-
-    let ship_ball = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b).ok_or_else(|| BridgeRpcError {
-        code: "ShipNotInSpace".into(),
-        message: format!("Ship {ship_id} is not in space"),
-    })?;
-
-    if (ship_ball.position - mmju_pos).length() > 5_000.0 {
-        return Err(BridgeRpcError {
-            code: "OutOfRange".into(),
-            message: format!(
-                "Ship is {:.1} m away from Mobile Micro Jump Unit (max activation range 5,000 m)",
-                (ship_ball.position - mmju_pos).length()
-            ),
-        });
-    }
-
-    // Ship mass check: must be under 1,000,000,000 kg (`feat:structures.mobile-micro-jump-unit`)
-    if ship_ball.mass >= MMJU_MAX_SHIP_MASS_KG {
-        return Err(BridgeRpcError {
-            code: "ShipTooHeavy".into(),
-            message: format!(
-                "Ship mass {:.0} kg exceeds the 1,000,000,000 kg limit for the Mobile Micro Jump Unit",
-                ship_ball.mass
-            ),
-        });
-    }
-
-    // Warm-up is 12 seconds; executes 100 km jump in ship's heading
-    let new_pos = sys_handle.micro_jump(ship_id, MMJU_JUMP_DISTANCE_M).await.map_err(|e| BridgeRpcError {
-        code: "MicroJumpFailed".into(),
-        message: e,
-    })?;
-
-    Ok(new_pos)
 }
 
 /// Evaluates ball damage in solar system actor for Mobile Depots and MTUs (`feat:structures.mobile-depot-lifetime-reinforce`, `feat:structures.mobile-tractor-rules`).
@@ -759,7 +649,47 @@ pub fn handle_ball_damage_in_actor(
         let (applied, destroyed) = cs.apply_damage(damage);
         if destroyed {
             ballpark.balls.remove(&ball_id);
+            let pos_arr = db.with_snapshot(|s| s.item_positions.get(&ball_id).copied()).unwrap_or([0.0; 3]);
             db.with_mut_snapshot(|snap| {
+                let hold_items: Vec<(i64, i32)> = snap
+                    .items
+                    .values()
+                    .filter(|i| i.location_id == ball_id && i.quantity > 0)
+                    .map(|i| (i.item_id, i.quantity))
+                    .collect();
+                if !hold_items.is_empty() {
+                    snap.next_entity_id += 1;
+                    let can_id = snap.next_entity_id;
+                    snap.items.insert(
+                        can_id,
+                        eve_db::InventoryItemRecord {
+                            item_id: can_id,
+                            type_id: 23,
+                            owner_id,
+                            location_id: solar_system_id as i64,
+                            flag: eve_db::InventoryFlag::None,
+                            quantity: 1,
+                            singleton: true,
+                            version: 1,
+                            ..Default::default()
+                        },
+                    );
+                    snap.item_positions.insert(can_id, pos_arr);
+                    crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, can_id, now_unix, false);
+
+                    for (iid, _) in hold_items {
+                        let roll = ((now_unix ^ (iid as u64)).wrapping_mul(6364136223846793005) >> 32) as f64 / 4294967296.0;
+                        if roll < 0.50 {
+                            if let Some(it) = snap.items.get_mut(&iid) {
+                                it.location_id = can_id;
+                                it.flag = eve_db::InventoryFlag::Cargo;
+                                it.version += 1;
+                            }
+                        } else {
+                            snap.items.remove(&iid);
+                        }
+                    }
+                }
                 snap.items.remove(&ball_id);
                 snap.item_positions.remove(&ball_id);
                 snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
@@ -801,8 +731,9 @@ pub fn handle_ball_damage_in_actor(
                     snap.item_positions.insert(can_id, pos_arr);
                     crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, can_id, now_unix, false);
 
-                    for (idx, &(iid, _)) in hold_items.iter().enumerate() {
-                        if idx % 2 == 0 {
+                    for (iid, _) in hold_items {
+                        let roll = ((now_unix ^ (iid as u64)).wrapping_mul(6364136223846793005) >> 32) as f64 / 4294967296.0;
+                        if roll < 0.50 {
                             if let Some(it) = snap.items.get_mut(&iid) {
                                 it.location_id = can_id;
                                 it.flag = eve_db::InventoryFlag::Cargo;

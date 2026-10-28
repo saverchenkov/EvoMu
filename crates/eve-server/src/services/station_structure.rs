@@ -1028,16 +1028,19 @@ pub async fn handle(
                 _ => ship_ball.position + DVec3::new(250.0, 0.0, 0.0),
             };
 
-            if let Err(e) = crate::services::mobile_deployables::check_mobile_deployment_restrictions(
-                ctx,
-                session,
-                item_id,
-                item.type_id,
-                item_type.group_id,
-                sys_id,
-                anchor_pos,
-            ) {
-                return Some(Err(e));
+            let is_mobile = crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, item.type_id);
+            if is_mobile {
+                if let Err(e) = crate::services::mobile_deployables::check_mobile_deployment_restrictions(
+                    ctx,
+                    session,
+                    item_id,
+                    item.type_id,
+                    item_type.group_id,
+                    sys_id,
+                    anchor_pos,
+                ) {
+                    return Some(Err(e));
+                }
             }
 
             let is_warp_disruptor = item_type.group_id == 361;
@@ -1055,7 +1058,13 @@ pub async fn handle(
                 .default_attributes
                 .get(&556)
                 .copied()
-                .unwrap_or(60_000.0)
+                .unwrap_or_else(|| {
+                    if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_TRACTOR {
+                        10_000.0
+                    } else {
+                        60_000.0
+                    }
+                })
                 / 1_000.0)
                 .max(1.0);
             let now_unix = ctx.now_unix();
@@ -1106,16 +1115,20 @@ pub async fn handle(
                     }));
                 }
             } else {
-                let preserved_damage = crate::services::mobile_deployables::register_mobile_deployable(
-                    ctx,
-                    item_id,
-                    item.type_id,
-                    item_type.group_id,
-                    char_id,
-                    sys_id,
-                    anchoring_delay_s.ceil() as u64,
-                    anchor_pos,
-                );
+                let preserved_damage = if is_mobile {
+                    crate::services::mobile_deployables::register_mobile_deployable(
+                        ctx,
+                        item_id,
+                        item.type_id,
+                        item_type.group_id,
+                        char_id,
+                        sys_id,
+                        anchoring_delay_s.ceil() as u64,
+                        anchor_pos,
+                    )
+                } else {
+                    None
+                };
                 let mut combat_state = ctx.build_type_combat_state(item.type_id);
                 if let Some(dmg) = preserved_damage {
                     combat_state.shield_hp = dmg.shield_hp;
