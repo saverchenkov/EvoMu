@@ -738,7 +738,7 @@ pub(super) async fn handle_scanning_and_wormholes(
         // =====================================================================
         ("keeper", "ActivateAccelerationGate")
         | ("beyonce", "ActivateAccelerationGate") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let (_, _char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
@@ -793,43 +793,6 @@ pub(super) async fn handle_scanning_and_wormholes(
             }
 
             let gate_check = ctx.db.try_with_mut_snapshot(|snap| {
-                let req_standing = snap
-                    .items
-                    .get(&gate_id)
-                    .and_then(|g| g.dynamic_attributes.get(&1004).copied());
-                if let Some(min_standing) = req_standing {
-                    let faction_id = snap
-                        .items
-                        .get(&gate_id)
-                        .and_then(|g| g.dynamic_attributes.get(&1005).copied())
-                        .map(|v| v as i64)
-                        .unwrap_or(500_026);
-                    let standing = snap
-                        .characters
-                        .get(&char_id)
-                        .and_then(|c| c.standings.get(&faction_id).copied())
-                        .unwrap_or(0.0);
-                    if standing < min_standing {
-                        return Err(BridgeRpcError::user_error("SystemCheck_JumpFailed_StandingsTooLow"));
-                    }
-                }
-                let is_pochven = ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id) == Some(10_000_070);
-                if is_pochven {
-                    let is_trig_gate = snap.items.get(&gate_id).is_some_and(|g| {
-                        g.type_id == 47_685 || g.type_id == 47_686 || g.type_id == 35_841 || g.type_id == 56_693
-                    });
-                    if is_trig_gate && req_standing.is_none() {
-                        let standing = snap
-                            .characters
-                            .get(&char_id)
-                            .and_then(|c| c.standings.get(&500_026).copied())
-                            .unwrap_or(0.0);
-                        if standing < 1.0 {
-                            return Err(BridgeRpcError::user_error("SystemCheck_JumpFailed_StandingsTooLow"));
-                        }
-                    }
-                }
-
                 let (dungeon_id_opt, req_key_opt, consume_key) = snap
                     .items
                     .get(&gate_id)

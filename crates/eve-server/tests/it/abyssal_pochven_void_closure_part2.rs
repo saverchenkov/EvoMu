@@ -1,7 +1,4 @@
-//! Integration tests for Warp Vector mechanics and navigation closure (Part 2).
-//!
-//! Covers:
-//! - `feat:navigation.warp-vector`: `warpVectorMgr.UseVector warp-to-vector mechanic.`
+//! Integration tests for Warp Vector mechanics (Part 2).
 
 #![forbid(unsafe_code)]
 
@@ -17,13 +14,13 @@ const JITA_SYS_ID: u32 = 30_000_142; // Jita (Empire K-space)
 
 #[tokio::test]
 async fn test_warp_vector_mechanics_and_celestial_bookmark_targets() {
-    // parity: feat:navigation.warp-vector
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001_i64;
     let ship_id = 100_000_604_i64;
-    let bookmark_id = 300_000_101_i64;
     let vector_beacon_id = 700_000_801_i64;
+    let other_ship_id = 700_000_802_i64;
+    let far_beacon_id = 700_000_803_i64;
 
     let mut sess = SessionState::new(886_003);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -124,52 +121,49 @@ async fn test_warp_vector_mechanics_and_celestial_bookmark_targets() {
         .expect_err("Non-existent vector entity must fail");
     assert_eq!(missing_err.code, "VectorItemNotFound");
 
-    // 6. Target saved bookmark: initiates warp to bookmark coordinates
-    let bm_coords = DVec3::new(500_000_000.0, 100_000_000.0, -200_000_000.0);
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.bookmarks.insert(
-            bookmark_id,
-            eve_db::BookmarkRecord {
-                bookmark_id,
-                owner_id: char_id,
-                label: "Safe Spot".into(),
-                solar_system_id: JITA_SYS_ID,
-                item_id: None,
-                x: bm_coords.x,
-                y: bm_coords.y,
-                z: bm_coords.z,
-                memo: "Safe Spot Vector".into(),
-                folder_id: None,
-                is_shared: false,
-            },
-        );
-    });
-
-    let bm_res = ctx
-        .dispatch_rpc(&mut sess, "warpVectorMgr", None, "UseVector", &[PyRep::Integer(bookmark_id)], &kw, None)
+    // 6. Target ship rejected (category 6 is not allowed as warp vector celestial)
+    let _ = jita_handle
+        .spawn_ball(Ball {
+            id: other_ship_id,
+            type_id: 587, // Rifter (category 6)
+            position: DVec3::new(5_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            radius: 30.0,
+            mass: 1_000_000.0,
+            mode: MovementMode::Stop,
+            speed_fraction: 0.0,
+            max_velocity: 300.0,
+            inertia: 1.0,
+        })
+        .await;
+    let ship_err = ctx
+        .dispatch_rpc(&mut sess, "warpVectorMgr", None, "UseVector", &[PyRep::Integer(other_ship_id)], &kw, None)
         .await
-        .expect("UseVector targeting saved bookmark");
+        .expect_err("Targeting a ship must fail");
+    assert_eq!(ship_err.code, "InvalidVectorTarget");
 
-    assert_eq!(bm_res.dict_get("shipID"), Some(&PyRep::Integer(ship_id)));
-    assert_eq!(bm_res.dict_get("vectorItemID"), Some(&PyRep::Integer(bookmark_id)));
-
-    // Verify ship ball entered authentic warp movement mode
-    let (_, ball_after_bm) = jita_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
-    assert!(
-        matches!(ball_after_bm.mode, MovementMode::Warp { .. }),
-        "Ship ball must be in Warp movement mode"
-    );
-    assert_eq!(ball_after_bm.position, bm_coords);
-
-    // 7. Target celestial entity (Jita IV - Moon 4 celestial 40000002 or stargate)
-    let stargate_id = 50_001_248_i64; // Jita -> Perimeter stargate
-    let gate_res = ctx
-        .dispatch_rpc(&mut sess, "warpVectorMgr", None, "UseVector", &[PyRep::Integer(stargate_id)], &kw, None)
+    // 7. Target out of range (> 100 km) rejected
+    let _ = jita_handle
+        .spawn_ball(Ball {
+            id: far_beacon_id,
+            type_id: 23,
+            position: DVec3::new(150_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            radius: 50.0,
+            mass: 1_000.0,
+            mode: MovementMode::Rigid,
+            speed_fraction: 0.0,
+            max_velocity: 0.0,
+            inertia: 1.0,
+        })
+        .await;
+    let far_err = ctx
+        .dispatch_rpc(&mut sess, "warpVectorMgr", None, "UseVector", &[PyRep::Integer(far_beacon_id)], &kw, None)
         .await
-        .expect("UseVector targeting stargate celestial");
-    assert_eq!(gate_res.dict_get("vectorItemID"), Some(&PyRep::Integer(stargate_id)));
+        .expect_err("Target out of 100km range must fail");
+    assert_eq!(far_err.code, "TargetNotInRange");
 
-    // 8. Local vector beacon entity (spawned within 10 km)
+    // 8. Local vector beacon entity within 100 km (at 10 km)
     let _ = jita_handle
         .spawn_ball(Ball {
             id: vector_beacon_id,
@@ -185,21 +179,39 @@ async fn test_warp_vector_mechanics_and_celestial_bookmark_targets() {
         })
         .await;
 
-    // Reset ship near beacon
-    let _ = jita_handle.set_ball_position(ship_id, DVec3::ZERO).await;
+    let _ = ctx.drain_notifications_for_char(char_id);
     let beacon_res = ctx
         .dispatch_rpc(&mut sess, "warpVectorMgr", None, "UseVector", &[PyRep::Integer(vector_beacon_id)], &kw, None)
         .await
         .expect("UseVector targeting local vector beacon");
     assert_eq!(beacon_res.dict_get("vectorItemID"), Some(&PyRep::Integer(vector_beacon_id)));
+    assert_eq!(beacon_res.dict_get("shipID"), Some(&PyRep::Integer(ship_id)));
 
+    // Verify ship ball entered authentic warp movement mode without instant teleport
     let (_, ball_after_beacon) = jita_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
-    assert!(
-        ball_after_beacon.position.x > 50_000.0,
-        "Ship must warp along vector direction (+X)"
+    assert_eq!(
+        ball_after_beacon.position,
+        DVec3::ZERO,
+        "Ship must not instantly teleport to destination"
     );
-    assert!(
-        matches!(ball_after_beacon.mode, MovementMode::Warp { .. }),
-        "Ship ball must be in Warp movement mode after beacon use"
+    match ball_after_beacon.mode {
+        MovementMode::Warp { destination, .. } => {
+            assert!(
+                destination.x > 50_000.0,
+                "Ship warp destination must be along vector direction (+X)"
+            );
+        }
+        ref other => panic!("Ship ball must be in Warp movement mode, got: {other:?}"),
+    }
+
+    // Verify OnWarpStarted notification was emitted with 2 args [ship_id, type_id]
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    let warp_notif = notifs
+        .iter()
+        .find(|n| n.event == "OnWarpStarted")
+        .expect("OnWarpStarted notification must be emitted");
+    assert_eq!(
+        warp_notif.args,
+        vec![PyRep::Integer(ship_id), PyRep::Integer(587)]
     );
 }

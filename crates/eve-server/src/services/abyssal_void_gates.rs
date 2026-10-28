@@ -25,7 +25,6 @@ fn is_actual_filament_type(ctx: &ServerContext, type_id: u32) -> bool {
             .get(&type_id)
             .map(|t| {
                 matches!(t.group_id, 1979 | 4041 | 4087 | 4145 | 4743)
-                    || t.name.to_lowercase().contains("filament")
             })
             .unwrap_or(false)
 }
@@ -590,6 +589,7 @@ pub(crate) async fn handle_void_space_player_jump(
     crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, cur_sys)?;
 
     let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+    let content_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
     if target_id <= 0 {
         return Err(BridgeRpcError {
             code: "MissingRequiredArgument".into(),
@@ -747,11 +747,30 @@ pub(crate) async fn handle_void_space_player_jump(
     session.solar_system_id = Some(VOID_SPACE_SYSTEM_ID);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, VOID_SPACE_SYSTEM_ID);
 
+    let effective_content_id = if content_id > 0 { content_id } else { target_id };
+    let client_data = PyRep::Dict(vec![
+        (
+            PyRep::String("content_id".into()),
+            PyRep::Integer(effective_content_id),
+        ),
+        (
+            PyRep::String("nebula_graphic_id".into()),
+            PyRep::Integer(200_001),
+        ),
+    ]);
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnVoidSpaceEntered",
+        "charid",
+        vec![client_data],
+    );
+
     Ok(PyRep::keyval([
         ("solarSystemID", PyRep::Integer(VOID_SPACE_SYSTEM_ID as i64)),
         ("originSolarSystemID", PyRep::Integer(cur_sys as i64)),
         ("voidSpaceJump", PyRep::Bool(true)),
         ("siteID", PyRep::Integer(target_id)),
+        ("contentID", PyRep::Integer(effective_content_id)),
     ]))
 }
 

@@ -674,70 +674,42 @@ pub async fn handle_use_warp_vector(
             message: format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
         })?;
 
-    let target_ball_opt = sys_handle
+    let (_, target_ball) = sys_handle
         .get_ball_snapshot(target_id)
         .await
         .map_err(|e| BridgeRpcError {
             code: "DestinyQueryFailed".into(),
             message: e,
         })?
-        .map(|(_, b)| b);
+        .ok_or_else(|| BridgeRpcError {
+            code: "VectorItemNotFound".into(),
+            message: format!("Warp vector entity {target_id} is not in space in solar system {sys_id}"),
+        })?;
 
-    let (target_pos, is_local_ball) = if let Some(ref target_ball) = target_ball_opt {
-        if ctx
-            .sde
-            .types
-            .get(&target_ball.type_id)
-            .is_some_and(|t| t.category_id == 6)
-        {
-            return Err(BridgeRpcError {
-                code: "InvalidVectorTarget".into(),
-                message: format!("Entity {target_id} is a ship, not a valid warp vector celestial"),
-            });
-        }
-        (target_ball.position, true)
-    } else {
-        // Resolve saved bookmark or celestial coordinates
-        let bm_pos = ctx.db.with_snapshot(|snap| {
-            let b = snap.bookmarks.get(&target_id)?;
-            if b.solar_system_id != sys_id {
-                return None;
-            }
-            let can_use = b.owner_id == char_id
-                || b.folder_id.is_some_and(|fid| {
-                    snap.bookmark_folders.get(&fid).is_some_and(|f| {
-                        crate::services::fleet_social::fleet_social_access_group_bookmarks::folder_access_level(
-                            snap, session, char_id, f,
-                        ) >= crate::services::fleet_social::fleet_social_access_group_bookmarks::AccessLevel::Use
-                    })
-                });
-            if can_use {
-                Some(glam::DVec3::new(b.x, b.y, b.z))
-            } else {
-                None
-            }
+    if ctx
+        .sde
+        .types
+        .get(&target_ball.type_id)
+        .is_some_and(|t| t.category_id == 6)
+    {
+        return Err(BridgeRpcError {
+            code: "InvalidVectorTarget".into(),
+            message: format!("Entity {target_id} is a ship, not a valid warp vector celestial"),
         });
-        let cel_pos = ctx
-            .sde
-            .celestials_in_system(sys_id)
-            .into_iter()
-            .find(|c| c.celestial_id == target_id)
-            .map(|c| c.position);
+    }
 
-        if let Some(pos) = bm_pos.or(cel_pos) {
-            (pos, false)
-        } else {
-            return Err(BridgeRpcError {
-                code: "VectorItemNotFound".into(),
-                message: format!("Warp vector entity {target_id} is not in space in solar system {sys_id}"),
-            });
-        }
-    };
-
-    let dist = (target_pos - ship_ball.position).length();
+    let dist = (target_ball.position - ship_ball.position).length();
     const MAX_VECTOR_PROXIMITY_M: f64 = 100_000.0;
-    const MAX_VECTOR_DISPLACEMENT_M: f64 = 100_000.0;
+    if dist > MAX_VECTOR_PROXIMITY_M {
+        return Err(BridgeRpcError {
+            code: "TargetNotInRange".into(),
+            message: format!(
+                "Warp vector entity {target_id} is out of activation range ({dist:.1} m > {MAX_VECTOR_PROXIMITY_M:.1} m)"
+            ),
+        });
+    }
 
+    const MAX_VECTOR_DISPLACEMENT_M: f64 = 100_000.0;
     let explicit_vec = match args.get(1) {
         Some(PyRep::Tuple(seq) | PyRep::List(seq)) if seq.len() >= 3 => {
             let v = glam::DVec3::new(
@@ -756,49 +728,26 @@ pub async fn handle_use_warp_vector(
         _ => None,
     };
 
-    let is_celestial = !is_local_ball
-        || target_ball_opt.as_ref().is_some_and(|b| {
-            ctx.sde.types.get(&b.type_id).is_some_and(|t| {
-                matches!(
-                    t.group_id,
-                    6 | 7 | 8 | 9 | 10 | 15 | 318 | 380 | 988 | 995 | 1404 | 4430 | 4930 | 4935
-                ) || matches!(t.category_id, 3 | 65)
-            })
-        });
-
-    let dest_pos = if !is_celestial {
-        if dist > MAX_VECTOR_PROXIMITY_M {
-            return Err(BridgeRpcError {
-                code: "TargetNotInRange".into(),
-                message: format!(
-                    "Warp vector entity {target_id} is out of activation range ({dist:.1} m > {MAX_VECTOR_PROXIMITY_M:.1} m)"
-                ),
-            });
-        }
-        if let Some(v) = explicit_vec.filter(|v| v.length() > 1e-6) {
-            if v.length() > MAX_VECTOR_DISPLACEMENT_M {
-                ship_ball.position + v.normalize() * MAX_VECTOR_DISPLACEMENT_M
-            } else if v.length() >= 1_000.0 {
-                ship_ball.position + v
-            } else {
-                ship_ball.position + v.normalize() * MAX_VECTOR_DISPLACEMENT_M
-            }
+    let dest_pos = if let Some(v) = explicit_vec.filter(|v| v.length() > 1e-6) {
+        if v.length() > MAX_VECTOR_DISPLACEMENT_M {
+            ship_ball.position + v.normalize() * MAX_VECTOR_DISPLACEMENT_M
+        } else if v.length() >= 1_000.0 {
+            ship_ball.position + v
         } else {
-            let delta = target_pos - ship_ball.position;
-            if delta.length() > 1.0 {
-                target_pos + delta.normalize() * MAX_VECTOR_DISPLACEMENT_M
-            } else {
-                target_pos + glam::DVec3::new(MAX_VECTOR_DISPLACEMENT_M, 0.0, 0.0)
-            }
+            ship_ball.position + v.normalize() * MAX_VECTOR_DISPLACEMENT_M
         }
     } else {
-        target_pos
+        let delta = target_ball.position - ship_ball.position;
+        if delta.length() > 1.0 {
+            target_ball.position + delta.normalize() * MAX_VECTOR_DISPLACEMENT_M
+        } else {
+            target_ball.position + glam::DVec3::new(MAX_VECTOR_DISPLACEMENT_M, 0.0, 0.0)
+        }
     };
 
     let warp_speed = crate::services::space_destiny::compute_ship_warp_speed_au_s(ctx, ship_ball.type_id);
     let warp_mode = eve_destiny::MovementMode::new_warp(ship_ball.position, dest_pos, warp_speed);
     let _ = sys_handle.set_movement_mode(ship_id, warp_mode).await;
-    let _ = sys_handle.set_ball_position(ship_id, dest_pos).await;
 
     ctx.active_warps
         .lock()
@@ -810,10 +759,7 @@ pub async fn handle_use_warp_vector(
         "charid",
         vec![
             PyRep::Integer(ship_id),
-            PyRep::Real(dest_pos.x),
-            PyRep::Real(dest_pos.y),
-            PyRep::Real(dest_pos.z),
-            PyRep::Real(warp_speed),
+            PyRep::Integer(ship_ball.type_id as i64),
         ],
     );
 

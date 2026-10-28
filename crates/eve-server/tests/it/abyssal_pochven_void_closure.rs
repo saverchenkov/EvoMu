@@ -2,7 +2,6 @@
 //!
 //! Covers:
 //! - `feat:navigation.filament-void`: `voidSpaceMgr.VoidSpacePlayerJump enters void space content.`
-//! - `feat:navigation.pochven-travel`: `Pochven conduits/filaments and internal gates follow rules.`
 
 #![forbid(unsafe_code)]
 
@@ -153,13 +152,14 @@ async fn test_void_space_player_jump_and_gate_activation() {
         );
     });
 
+    let _ = ctx.drain_notifications_for_char(char_id);
     let jump_rep = ctx
         .dispatch_rpc(
             &mut sess,
             "voidSpaceMgr",
             None,
             "VoidSpacePlayerJump",
-            &[PyRep::Integer(filament_item_id)],
+            &[PyRep::Integer(filament_item_id), PyRep::Integer(5001)],
             &kw,
             None,
         )
@@ -177,6 +177,26 @@ async fn test_void_space_player_jump_and_gate_activation() {
     assert_eq!(
         jump_rep.dict_get("voidSpaceJump"),
         Some(&PyRep::Bool(true))
+    );
+    assert_eq!(
+        jump_rep.dict_get("contentID"),
+        Some(&PyRep::Integer(5001))
+    );
+
+    // Verify OnVoidSpaceEntered notification
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    let entered_notif = notifs
+        .iter()
+        .find(|n| n.event == "OnVoidSpaceEntered")
+        .expect("OnVoidSpaceEntered notification must be emitted");
+    assert_eq!(entered_notif.args.len(), 1);
+    assert_eq!(
+        entered_notif.args[0].dict_get("content_id"),
+        Some(&PyRep::Integer(5001))
+    );
+    assert_eq!(
+        entered_notif.args[0].dict_get("nebula_graphic_id"),
+        Some(&PyRep::Integer(200_001))
     );
 
     // Verify filament consumed from cargo
@@ -228,7 +248,6 @@ async fn test_void_space_player_jump_and_gate_activation() {
 
 #[tokio::test]
 async fn test_pochven_travel_conduits_filaments_and_gates() {
-    // parity: feat:navigation.pochven-travel
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001_i64;
@@ -443,94 +462,16 @@ async fn test_pochven_travel_conduits_filaments_and_gates() {
         Some(KINO_SYS_ID as i64)
     );
 
-    // 4. Triglavian acceleration gate standing check
-    let trig_gate_id = 700_000_701_i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut g = eve_db::InventoryItemRecord {
-            item_id: trig_gate_id,
-            type_id: 47_685, // Triglavian Space Portal / Acceleration Gate
-            owner_id: 1,
-            location_id: POCHVEN_SYS_ID as i64,
-            flag: eve_db::InventoryFlag::None,
-            quantity: 1,
-            singleton: true,
-            ..Default::default()
-        };
-        g.dynamic_attributes.insert(1004, 3.0); // min standing 3.0
-        g.dynamic_attributes.insert(1005, TRIGLAVIAN_FACTION_ID as f64);
-        snap.items.insert(trig_gate_id, g);
-        snap.characters.get_mut(&char_id).unwrap().standings.insert(TRIGLAVIAN_FACTION_ID, 1.5); // 1.5 < 3.0
-    });
+    // 4. Pochven filament rules: exit filament from Pochven to Empire
+    let exit_fil_id = 200_000_602_i64;
+    let fleet_id = 888_002_i64;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = POCHVEN_SYS_ID;
         }
-    });
-    sess.solar_system_id = Some(POCHVEN_SYS_ID);
-    let _ = poch_handle
-        .spawn_ball(Ball {
-            id: trig_gate_id,
-            type_id: 47_685,
-            position: DVec3::ZERO,
-            velocity: DVec3::ZERO,
-            radius: 100.0,
-            mass: 10_000_000.0,
-            mode: MovementMode::Rigid,
-            speed_fraction: 0.0,
-            max_velocity: 0.0,
-            inertia: 1.0,
-        })
-        .await;
-    let _ = poch_handle
-        .spawn_ball(Ball {
-            id: ship_id,
-            type_id: 621,
-            position: DVec3::new(100.0, 0.0, 0.0),
-            velocity: DVec3::ZERO,
-            radius: 50.0,
-            mass: 1_000_000.0,
-            mode: MovementMode::Stop,
-            speed_fraction: 0.0,
-            max_velocity: 250.0,
-            inertia: 0.5,
-        })
-        .await;
-
-    let gate_low_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "keeper",
-            None,
-            "ActivateAccelerationGate",
-            &[PyRep::Integer(trig_gate_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("Triglavian gate with standing < 3.0 must fail");
-    assert_eq!(gate_low_err.code, "SystemCheck_JumpFailed_StandingsTooLow");
-
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&char_id).unwrap().standings.insert(TRIGLAVIAN_FACTION_ID, 4.0); // 4.0 >= 3.0
-    });
-    let gate_pass = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "keeper",
-            None,
-            "ActivateAccelerationGate",
-            &[PyRep::Integer(trig_gate_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Triglavian gate with standing >= 3.0 must succeed");
-    assert_eq!(gate_pass.dict_get("success"), Some(&PyRep::Bool(true)));
-
-    // 5. Pochven filament rules: exit filament from Pochven to Empire
-    let exit_fil_id = 200_000_602_i64;
-    let fleet_id = 888_002_i64;
-    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.location_id = POCHVEN_SYS_ID as i64;
+        }
         snap.fleets.insert(
             fleet_id,
             eve_db::FleetRecord {
@@ -554,6 +495,21 @@ async fn test_pochven_travel_conduits_filaments_and_gates() {
             },
         );
     });
+    sess.solar_system_id = Some(POCHVEN_SYS_ID);
+    let _ = poch_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 621,
+            position: DVec3::new(50_000_000.0, 50_000_000.0, 50_000_000.0),
+            velocity: DVec3::ZERO,
+            radius: 50.0,
+            mass: 1_000_000.0,
+            mode: MovementMode::Stop,
+            speed_fraction: 0.0,
+            max_velocity: 250.0,
+            inertia: 0.5,
+        })
+        .await;
     let _ = poch_handle.set_movement_mode(ship_id, MovementMode::Stop).await;
     let _ = poch_handle
         .set_ball_position(ship_id, DVec3::new(50_000_000.0, 50_000_000.0, 50_000_000.0))
