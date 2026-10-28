@@ -916,6 +916,15 @@ async fn handle_request_scans(
                 ("massStabilityDescription", PyRep::String(buckets.mass_stability_description.into())),
                 ("collapsed", PyRep::Bool(is_collapsed)),
             ]);
+            if sig.sig_group == "Wormhole" && super::super::is_pochven_wormhole(&ctx.sde, &sig) {
+                let (wh_pos, guard_ids) = super::super::open_pochven_wormhole_and_spawn_guards(ctx, sys_id, &sig, wh_item_id).await;
+                kv.extend([
+                    ("isDeadspace", PyRep::Bool(false)),
+                    ("wormholeOffsetMeters", PyRep::Real(30_000.0)),
+                    ("wormholePosition", PyRep::Tuple(vec![PyRep::Real(wh_pos.x), PyRep::Real(wh_pos.y), PyRep::Real(wh_pos.z)])),
+                    ("guardNpcBallIDs", PyRep::List(guard_ids.into_iter().map(PyRep::Integer).collect())),
+                ]);
+            }
         }
         rows.push(PyRep::keyval(kv));
     }
@@ -952,6 +961,8 @@ async fn handle_request_scans(
                 "Ship"
             } else if matches!(category_id, 18 | 87) {
                 "Drone"
+            } else if matches!(ball.type_id, 47_458 | 47_833 | 47_834) || group_id == 1991 {
+                "AbyssalTrace"
             } else if matches!(category_id, 65 | 23 | 22) || ctx.db.with_snapshot(|s| s.structures.contains_key(&ball.id)) {
                 "Structure"
             } else {
@@ -1295,12 +1306,7 @@ async fn handle_destroy_probe(
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     for p in &destroyed_probes {
         let _ = sys_handle.remove_ball(p.probe_id).await;
-        let _ = ctx.notify(
-            crate::router::NotificationTarget::Character(char_id),
-            "OnRemoveProbe",
-            "charid",
-            vec![PyRep::Integer(p.probe_id)],
-        );
+        let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnRemoveProbe", "charid", vec![PyRep::Integer(p.probe_id)]);
     }
 
     Some(Ok(PyRep::keyval([
@@ -1309,3 +1315,4 @@ async fn handle_destroy_probe(
         ("destroyed", PyRep::Bool(!destroyed_probes.is_empty())),
     ])))
 }
+

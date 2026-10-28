@@ -660,14 +660,14 @@ impl SystemHandle {
         self.cmd_tx.send(SystemCommand::StepManual { dt, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
         let (broadcast, destroyed_balls) = rx.await.map_err(|_| "Solar system reply dropped".to_string())?;
         let hook = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
-        for (target_ball_id, owner_char_id) in destroyed_balls {
+        for &(target_ball_id, owner_char_id) in &destroyed_balls {
             if let Some(fut) = super::on_ball_destroyed_by_damage(self.solar_system_id, target_ball_id, owner_char_id, hook.as_ref()) {
                 fut.await;
             }
         }
         let step_hook = self.system_step_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
         if let Some(hook) = step_hook {
-            hook(self.solar_system_id, dt).await;
+            hook(self.solar_system_id, dt, destroyed_balls).await;
         }
         Ok(broadcast)
     }

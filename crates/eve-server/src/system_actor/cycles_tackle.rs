@@ -178,7 +178,8 @@ pub(crate) fn handle_add_module_cycle(
     }
     if cycle.shield_boost_amount > 0.0 {
         if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
-            cs.shield_hp = (cs.shield_hp + cycle.shield_boost_amount)
+            let boost_mult = if cs.shield_boost_multiplier > 0.0 { cs.shield_boost_multiplier } else { 1.0 };
+            cs.shield_hp = (cs.shield_hp + cycle.shield_boost_amount * boost_mult)
                 .min(cs.max_shield_hp);
         }
     }

@@ -392,7 +392,7 @@ async fn handle_random_jump_filament(
     }
 
     let caller_ship_group = ctx.sde.types.get(&current_ball.type_id).map(|t| t.group_id).unwrap_or(0);
-    if matches!(caller_ship_group, 30 | 485 | 547 | 659 | 883 | 1538 | 4594) {
+    if matches!(caller_ship_group, 30 | 485 | 513 | 547 | 659 | 883 | 902 | 1538 | 4594) {
         return Err(BridgeRpcError { code: "ShipCapitalRestricted".into(), message: "Random jump filaments cannot be activated on capital ships".into() });
     }
 
@@ -418,13 +418,14 @@ async fn handle_random_jump_filament(
     }
 
     const GROUP_JUMP_FILAMENTS: u32 = 4041;
+    const GROUP_POCHVEN_FILAMENTS: u32 = 4087;
     let fil_item_id = if let Some(id) = args.first().and_then(|a| a.as_i64()) {
         id
     } else {
         ctx.db.with_snapshot(|snap| {
             snap.items.values().find(|i| {
                 i.owner_id == char_id && i.location_id == ship_id && i.flag == eve_db::InventoryFlag::Cargo && i.quantity >= 1
-                    && ctx.sde.types.get(&i.type_id).map(|t| t.group_id).unwrap_or(0) == GROUP_JUMP_FILAMENTS
+                    && matches!(ctx.sde.types.get(&i.type_id).map(|t| t.group_id).unwrap_or(0), GROUP_JUMP_FILAMENTS | GROUP_POCHVEN_FILAMENTS)
             }).map(|i| i.item_id)
         }).ok_or_else(|| BridgeRpcError {
             code: "InvalidArguments".into(),
@@ -432,33 +433,87 @@ async fn handle_random_jump_filament(
         })?
     };
 
-    let (max_capacity, is_signal) = ctx.db.with_snapshot(|snap| {
+    let (fil_type_id, max_capacity, is_signal, is_pochven_filament) = ctx.db.with_snapshot(|snap| {
         let fil = snap.items.get(&fil_item_id).filter(|i| {
             i.owner_id == char_id && i.location_id == ship_id && i.flag == eve_db::InventoryFlag::Cargo && i.quantity >= 1
         }).ok_or_else(|| BridgeRpcError {
             code: "FilamentNotInCargo".into(),
             message: format!("Filament {fil_item_id} not found in active ship Cargo"),
         })?;
-        let sde_type = ctx.sde.types.get(&fil.type_id).filter(|t| t.group_id == GROUP_JUMP_FILAMENTS).ok_or_else(|| {
-            BridgeRpcError { code: "InvalidItemType".into(), message: "Item is not a jump filament".into() }
+        let sde_type = ctx.sde.types.get(&fil.type_id).filter(|t| matches!(t.group_id, GROUP_JUMP_FILAMENTS | GROUP_POCHVEN_FILAMENTS)).ok_or_else(|| {
+            BridgeRpcError { code: "InvalidItemType".into(), message: "Item is not a jump or Pochven filament".into() }
         })?;
+        if sde_type.group_id == GROUP_POCHVEN_FILAMENTS || (56_065..=56_081).contains(&fil.type_id) {
+            let cap = sde_type.default_attributes.get(&2832).copied().map(|v| v as usize).unwrap_or_else(|| {
+                if fil.type_id == 56_065 { 1 } else if matches!(fil.type_id, 56_067 | 56_069 | 56_071 | 56_073 | 56_075 | 56_077 | 56_079 | 56_081) { 15 } else { 5 }
+            });
+            return Ok((fil.type_id, cap, false, true));
+        }
         let attr_3025 = sde_type.default_attributes.get(&3025).copied().ok_or_else(|| BridgeRpcError {
             code: "UnimplementedRPC".into(),
             message: format!("Filament type {} does not support needlejack random jump", fil.type_id),
         })?;
         let cap = sde_type.default_attributes.get(&2832).copied().unwrap_or(5.0) as usize;
-        Ok((cap, attr_3025 >= 0.5))
+        Ok((fil.type_id, cap, attr_3025 >= 0.5, false))
     })?;
 
-    let nullsec_systems: Vec<u32> = ctx.sde.solar_systems.iter().filter(|(&sid, s)| {
-        sid != old_sys && s.security_status < 0.0 && sid < 31_000_000
-            && !matches!(s.region_id, 10000070 | 10000004 | 10000017 | 10000019 | 10001000)
-    }).map(|(&sid, _)| sid).collect();
-    if nullsec_systems.is_empty() {
-        return Err(BridgeRpcError { code: "NoNullsecSystemInSde".into(), message: "No destination nullsec solar system found in SDE".into() });
+    let old_reg = ctx.sde.solar_systems.get(&old_sys).map(|s| s.region_id).unwrap_or(0);
+    let candidate_systems: Vec<u32> = if is_pochven_filament {
+        let is_exit = (56_065..=56_069).contains(&fil_type_id);
+        if is_exit && old_reg != 10_000_070 {
+            return Err(BridgeRpcError::user_error("PochvenExitFilamentRequiresPochvenOrigin"));
+        }
+        if !is_exit && (old_reg == 10_000_070 || old_sys == 30_100_000 || old_sys >= 31_000_000) {
+            return Err(BridgeRpcError::user_error("PochvenEntryFilamentDisallowedOrigin"));
+        }
+        // DERIVED: Pochven filament destination pools and K-space exit destinations (feat:navigation.pochven-filaments)
+        let mut candidates = match fil_type_id {
+            // DERIVED: Empire K-space exit destinations from Devana / Proving filaments
+            56_065..=56_067 => vec![30_000_142, 30_002_187, 30_002_510, 30_002_659, 30_000_144, 30_002_768],
+            56_068..=56_069 => vec![30_000_144, 30_001_363, 30_002_187, 30_002_768, 30_003_494, 30_005_004],
+            // DERIVED: Pochven Border systems pool
+            56_070..=56_071 => vec![30_000_157, 30_000_192, 30_001_372, 30_001_445, 30_002_079, 30_002_737, 30_005_005, 30_010_141, 30_031_392],
+            // DERIVED: Pochven Internal systems pool
+            56_072..=56_073 => vec![30_000_206, 30_001_381, 30_002_652, 30_002_702, 30_002_797, 30_003_046, 30_005_029, 30_020_141, 30_045_329],
+            // DERIVED: Pochven Clade systems pool
+            56_074..=56_075 => vec![30_000_021, 30_001_413, 30_002_225, 30_002_411, 30_002_770, 30_003_495, 30_003_504, 30_040_141, 30_045_328],
+            // DERIVED: Pochven Clade Extraction pool
+            56_076..=56_077 => vec![30_000_192, 30_010_141, 30_040_141, 30_045_328, 30_001_381, 30_020_141],
+            // DERIVED: Pochven General systems pool
+            56_078..=56_079 => vec![
+                30_000_157, 30_001_445, 30_002_079, 30_002_737, 30_005_005, 30_031_392,
+                30_000_021, 30_001_413, 30_002_225, 30_002_411, 30_002_770, 30_003_495,
+                30_000_206, 30_002_652, 30_002_797, 30_003_046, 30_005_029, 30_045_329,
+            ],
+            // DERIVED: Pochven Clade Home systems pool (Kino 30001372, Archee 30003504, Niarja 30002702)
+            56_080..=56_081 => vec![30_001_372, 30_003_504, 30_002_702],
+            _ => vec![30_000_192],
+        };
+        let trig_standing = ctx.db.with_snapshot(|s| s.characters.get(&char_id).and_then(|c| c.standings.get(&500_026).copied()).unwrap_or(0.0));
+        // DERIVED: Pochven Triglavian Clade Home Systems in region 10000070
+        let is_home = |sid: u32| {
+            ctx.sde.solar_systems.get(&sid).is_some_and(|sys| {
+                sys.region_id == 10_000_070 && matches!(sys.name.as_str(), "Kino" | "Niarja" | "Archee")
+            })
+        };
+        if trig_standing < 6.0 {
+            if matches!(fil_type_id, 56_080..=56_081) {
+                return Err(BridgeRpcError::user_error("SystemCheck_JumpFailed_StandingsTooLow"));
+            }
+            candidates.retain(|&s| !is_home(s));
+        }
+        candidates
+    } else {
+        ctx.sde.solar_systems.iter().filter(|(&sid, s)| {
+            sid != old_sys && s.security_status < 0.0 && sid < 31_000_000
+                && !matches!(s.region_id, 10000070 | 10000004 | 10000017 | 10000019 | 10001000)
+        }).map(|(&sid, _)| sid).collect()
+    };
+    if candidate_systems.is_empty() {
+        return Err(BridgeRpcError { code: "NoNullsecSystemInSde".into(), message: "No destination solar system found in SDE".into() });
     }
-    let idx = ((char_id as usize) ^ (old_sys as usize) ^ (now_unix as usize) ^ if is_signal { 0x5160 } else { 0 }) % nullsec_systems.len();
-    let dest_sys_id = nullsec_systems[idx];
+    let idx = ((char_id as usize) ^ (old_sys as usize) ^ (now_unix as usize) ^ if is_signal { 0x5160 } else { 0 }) % candidate_systems.len();
+    let dest_sys_id = candidate_systems[idx];
     let dest_sys = ctx.sde.solar_systems.get(&dest_sys_id).ok_or_else(|| {
         BridgeRpcError { code: "NoNullsecSystemInSde".into(), message: "Destination nullsec solar system not found in SDE".into() }
     })?;
@@ -494,6 +549,10 @@ async fn handle_random_jump_filament(
         let Some((m_ship_id, m_type_id)) = mate_ship_info else { continue; };
         let m_grp = ctx.sde.types.get(&m_type_id).map(|t| t.group_id).unwrap_or(0);
         if matches!(m_grp, 30 | 485 | 547 | 659 | 883 | 1538 | 4594) { continue; }
+        if matches!(dest_sys_id, 30_001_372 | 30_003_504 | 30_002_702) {
+            let m_trig = ctx.db.with_snapshot(|snap| snap.characters.get(&mate_id).and_then(|c| c.standings.get(&500_026).copied()).unwrap_or(0.0));
+            if m_trig < 6.0 { continue; }
+        }
         if crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, mate_id, m_ship_id, old_sys).is_err() { continue; }
         if crate::services::space_destiny::check_session_change_timer_active(ctx, mate_id, now_unix, Some((old_sys, cur_tick))).is_some() { continue; }
         if old_handle.is_ball_scrambled(m_ship_id).await.unwrap_or(false) { continue; }
@@ -950,6 +1009,9 @@ async fn handle_cone_scan(
             message: "Session has no active solarSystemID".into(),
         }));
     };
+    if sys_id == 30_100_000 {
+        return Some(Err(BridgeRpcError::user_error("CannotDscanInThisSystem")));
+    }
     let scan_angle = args
         .first()
         .and_then(|a| a.as_f64())
@@ -1093,103 +1155,52 @@ async fn handle_cone_scan(
                     continue;
                 }
             }
-            let group_id = ctx
-                .sde
-                .types
-                .get(&c.ship_type_id)
-                .map(|t| t.group_id)
-                .unwrap_or(0);
-            if group_id == 906 {
-                continue;
-            }
+            let group_id = ctx.sde.types.get(&c.ship_type_id).map(|t| t.group_id).unwrap_or(0);
+            if group_id == 906 { continue; }
             matches.push(PyRep::keyval([
-                ("id", PyRep::Integer(c.convoy_id)),
-                ("itemID", PyRep::Integer(c.convoy_id)),
-                ("ballID", PyRep::Integer(c.convoy_id)),
-                ("typeID", PyRep::Integer(c.ship_type_id as i64)),
-                ("groupID", PyRep::Integer(group_id as i64)),
-                ("distance", PyRep::Real(dist)),
-                ("x", PyRep::Real(convoy_pos.x)),
-                ("y", PyRep::Real(convoy_pos.y)),
-                ("z", PyRep::Real(convoy_pos.z)),
+                ("id", PyRep::Integer(c.convoy_id)), ("itemID", PyRep::Integer(c.convoy_id)), ("ballID", PyRep::Integer(c.convoy_id)),
+                ("typeID", PyRep::Integer(c.ship_type_id as i64)), ("groupID", PyRep::Integer(group_id as i64)), ("distance", PyRep::Real(dist)),
+                ("x", PyRep::Real(convoy_pos.x)), ("y", PyRep::Real(convoy_pos.y)), ("z", PyRep::Real(convoy_pos.z)),
             ]));
         }
     }
     Some(Ok(PyRep::List(matches)))
 }
 
-fn handle_get_mining_ledger(
-    ctx: &ServerContext,
-    session: &SessionState,
-) -> Result<PyRep, BridgeRpcError> {
+fn handle_get_mining_ledger(ctx: &ServerContext, session: &SessionState) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let records = ctx.db.get_mining_ledger(char_id);
-    let items: Vec<PyRep> = records
-        .into_iter()
-        .map(|r| {
-            PyRep::keyval([
-                ("date", PyRep::String(r.date)),
-                ("solarSystemID", PyRep::Integer(r.solar_system_id as i64)),
-                ("typeID", PyRep::Integer(r.type_id as i64)),
-                ("quantity", PyRep::Integer(r.quantity as i64)),
-            ])
-        })
-        .collect();
+    let items: Vec<PyRep> = ctx.db.get_mining_ledger(char_id).into_iter().map(|r| {
+        PyRep::keyval([
+            ("date", PyRep::String(r.date)), ("solarSystemID", PyRep::Integer(r.solar_system_id as i64)),
+            ("typeID", PyRep::Integer(r.type_id as i64)), ("quantity", PyRep::Integer(r.quantity as i64)),
+        ])
+    }).collect();
     Ok(PyRep::List(items))
 }
 
-async fn handle_cmd_beacon_jump_fleet(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
+async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError {
-        code: "NoActiveShip".into(),
-        message: "Session has no active ship".into(),
-    })?;
+    let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into() })?;
     if session.station_id.is_some() || session.structure_id.is_some() {
-        return Err(BridgeRpcError {
-            code: "ShipDocked".into(),
-            message: "Cannot jump while docked".into(),
-        });
+        return Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot jump while docked".into() });
     }
-    let cur_sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError {
-        code: "NoSolarSystem".into(),
-        message: "Session has no active solarSystemID".into(),
-    })?;
+    let cur_sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solarSystemID".into() })?;
 
     let cur_sys_handle = ctx.systems.get_or_spawn(cur_sys_id);
-    let (_, current_ball) = cur_sys_handle
-        .get_ball_snapshot(ship_id)
-        .await
-        .map_err(|e| BridgeRpcError {
-            code: "DestinyCommandFailed".into(),
-            message: e,
-        })?
-        .ok_or_else(|| BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship is not spawned in space".into(),
-        })?;
+    let (_, current_ball) = cur_sys_handle.get_ball_snapshot(ship_id).await
+        .map_err(|e| BridgeRpcError { code: "DestinyCommandFailed".into(), message: e })?
+        .ok_or_else(|| BridgeRpcError { code: "ShipNotInSpace".into(), message: "Active ship is not spawned in space".into() })?;
 
     if matches!(current_ball.mode, MovementMode::Warp { .. }) {
-        return Err(BridgeRpcError {
-            code: "ShipInWarp".into(),
-            message: "Cannot jump while in warp".into(),
-        });
+        return Err(BridgeRpcError { code: "ShipInWarp".into(), message: "Cannot jump while in warp".into() });
     }
     if cur_sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
-        return Err(BridgeRpcError {
-            code: "WarpScrambled".into(),
-            message: "Cannot jump while warp scrambled".into(),
-        });
+        return Err(BridgeRpcError { code: "WarpScrambled".into(), message: "Cannot jump while warp scrambled".into() });
     }
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
     crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "jump")?;
     let now_check = ctx.now_unix();
-    crate::services::combat_crimewatch::check_crimewatch_action_restriction(
-        ctx, char_id, ship_id, cur_sys_id, "jump_drive", now_check,
-    )?;
+    crate::services::combat_crimewatch::check_crimewatch_action_restriction(ctx, char_id, ship_id, cur_sys_id, "jump_drive", now_check)?;
 
     let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
     let _target_ship_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
@@ -1201,39 +1212,18 @@ async fn handle_cmd_beacon_jump_fleet(
         f_a.is_some() && f_a == f_b
     });
     if !same_fleet {
-        return Err(BridgeRpcError {
-            code: "FleetNotInFleet".into(),
-            message: format!("Target character {target_char_id} is not in caller's fleet"),
-        });
+        return Err(BridgeRpcError { code: "FleetNotInFleet".into(), message: format!("Target character {target_char_id} is not in caller's fleet") });
     }
-
-    if (31_000_000..32_000_000).contains(&cur_sys_id)
-        || (31_000_000..32_000_000).contains(&target_sys_id)
-    {
-        return Err(BridgeRpcError {
-            code: "JumpDriveForbiddenInWormholeSpace".into(),
-            message: "Jump drive operations are prohibited in wormhole space".into(),
-        });
+    if (31_000_000..32_000_000).contains(&cur_sys_id) || (31_000_000..32_000_000).contains(&target_sys_id) {
+        return Err(BridgeRpcError { code: "JumpDriveForbiddenInWormholeSpace".into(), message: "Jump drive operations are prohibited in wormhole space".into() });
     }
-
     let target_sec = ctx.sde.solar_systems.get(&target_sys_id).map(|s| s.security_status).unwrap_or(0.0);
     if target_sec >= 0.45 {
-        return Err(BridgeRpcError {
-            code: "CannotJumpToHighSecBeacon".into(),
-            message: format!("Cynosural beacon cannot operate in high-security system {target_sys_id}"),
-        });
+        return Err(BridgeRpcError { code: "CannotJumpToHighSecBeacon".into(), message: format!("Cynosural beacon cannot operate in high-security system {target_sys_id}") });
     }
 
-    let beacon_res = crate::services::inventory_fitting::fitting_cyno_portal::live_beacon(
-        ctx,
-        target_char_id,
-        0,
-        target_sys_id,
-    );
-    let beacon = beacon_res.map_err(|e| BridgeRpcError {
-        code: "NoActiveBeacon".into(),
-        message: e.message,
-    })?;
+    let beacon = crate::services::inventory_fitting::fitting_cyno_portal::live_beacon(ctx, target_char_id, 0, target_sys_id)
+        .map_err(|e| BridgeRpcError { code: "NoActiveBeacon".into(), message: e.message })?;
 
     use super::space_nav_travel as nav;
     let db_type_id = ctx.db.get_item(ship_id).map(|i| i.type_id).unwrap_or(current_ball.type_id);
@@ -1241,36 +1231,23 @@ async fn handle_cmd_beacon_jump_fleet(
 
     let now_unix = ctx.now_unix();
     if let Some(_active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
-        return Err(BridgeRpcError {
-            code: "SessionChangeTimerActive".into(),
-            message: "Session change timer is active".into(),
-        });
+        return Err(BridgeRpcError { code: "SessionChangeTimerActive".into(), message: "Session change timer is active".into() });
     }
 
     nav::check_jump_activation(ctx, char_id)?;
     nav::consume_jump_fuel(ctx, ship_id, &plan)?;
     let dist_ly = plan.distance_ly;
     let (cd_min, fat_min) = nav::apply_jump_fatigue(ctx, char_id, plan.distance_ly * plan.fatigue_multiplier);
-    let (dest_const_id, dest_reg_id) = ctx
-        .sde
-        .solar_systems
-        .get(&target_sys_id)
-        .map(|s| (s.constellation_id, s.region_id))
-        .unwrap_or((0, 0));
+    let (dest_const_id, dest_reg_id) = ctx.sde.solar_systems.get(&target_sys_id).map(|s| (s.constellation_id, s.region_id)).unwrap_or((0, 0));
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = target_sys_id;
-            if dest_const_id != 0 {
-                ch.constellation_id = dest_const_id;
-                ch.region_id = dest_reg_id;
-            }
+            if dest_const_id != 0 { ch.constellation_id = dest_const_id; ch.region_id = dest_reg_id; }
             ch.station_id = None;
             ch.structure_id = None;
         }
-        if let Some(sh) = snap.items.get_mut(&ship_id) {
-            sh.location_id = target_sys_id as i64;
-        }
+        if let Some(sh) = snap.items.get_mut(&ship_id) { sh.location_id = target_sys_id as i64; }
     });
 
     let prev_cs = cur_sys_handle.get_combat_state(ship_id).await.ok().flatten();
@@ -1280,16 +1257,9 @@ async fn handle_cmd_beacon_jump_fleet(
     let target_pos = beacon.position + DVec3::new(2_500.0, 0.0, 0.0);
     let dest_handle = ctx.systems.get_or_spawn(target_sys_id);
     let ball = Ball {
-        id: ship_id,
-        type_id: current_ball.type_id,
-        position: target_pos,
-        velocity: DVec3::ZERO,
-        max_velocity: current_ball.max_velocity,
-        inertia: current_ball.inertia,
-        mass: current_ball.mass,
-        radius: current_ball.radius,
-        speed_fraction: 0.0,
-        mode: MovementMode::Stop,
+        id: ship_id, type_id: current_ball.type_id, position: target_pos, velocity: DVec3::ZERO,
+        max_velocity: current_ball.max_velocity, inertia: current_ball.inertia, mass: current_ball.mass,
+        radius: current_ball.radius, speed_fraction: 0.0, mode: MovementMode::Stop,
     };
     let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, current_ball.type_id);
     if let Some(pcs) = prev_cs {
@@ -1306,28 +1276,19 @@ async fn handle_cmd_beacon_jump_fleet(
     slim_meta.is_cloaked = true;
     let dest_tick = dest_handle.spawn_ball_with_meta(ball, combat_state, slim_meta).await.unwrap_or(0);
     let now_unix = ctx.now_unix();
-    crate::services::space_destiny::record_session_change_timer(
-        ctx, char_id, now_unix, target_sys_id, dest_tick, "jump_drive",
-    );
+    crate::services::space_destiny::record_session_change_timer(ctx, char_id, now_unix, target_sys_id, dest_tick, "jump_drive");
     ctx.sync_character_local_chat(char_id, Some(cur_sys_id), target_sys_id);
     session.solar_system_id = Some(target_sys_id);
-    if dest_const_id != 0 {
-        session.constellation_id = Some(dest_const_id);
-        session.region_id = Some(dest_reg_id);
-    }
+    if dest_const_id != 0 { session.constellation_id = Some(dest_const_id); session.region_id = Some(dest_reg_id); }
     session.station_id = None;
     session.structure_id = None;
     crate::services::map_service::record_solar_system_visit(ctx, char_id, target_sys_id);
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, target_sys_id as i64)?;
 
     Ok(PyRep::keyval([
-        ("solarSystemID", PyRep::Integer(target_sys_id as i64)),
-        ("beaconID", PyRep::Integer(beacon.beacon_id)),
-        ("beyonceBoundID", PyRep::Integer(new_beyonce_id as i64)),
-        ("jumpFatigueMinutes", PyRep::Real(fat_min)),
-        ("jumpCooldownMinutes", PyRep::Real(cd_min)),
-        ("distanceLY", PyRep::Real(dist_ly)),
-        ("fuelConsumed", PyRep::Integer(plan.fuel_units as i64)),
-        ("fuelTypeID", PyRep::Integer(plan.fuel_type_id as i64)),
+        ("solarSystemID", PyRep::Integer(target_sys_id as i64)), ("beaconID", PyRep::Integer(beacon.beacon_id)),
+        ("beyonceBoundID", PyRep::Integer(new_beyonce_id as i64)), ("jumpFatigueMinutes", PyRep::Real(fat_min)),
+        ("jumpCooldownMinutes", PyRep::Real(cd_min)), ("distanceLY", PyRep::Real(dist_ly)),
+        ("fuelConsumed", PyRep::Integer(plan.fuel_units as i64)), ("fuelTypeID", PyRep::Integer(plan.fuel_type_id as i64)),
     ]))
 }

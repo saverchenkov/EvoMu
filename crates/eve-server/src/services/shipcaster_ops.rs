@@ -134,11 +134,21 @@ pub(crate) async fn execute_shipcaster_jump(
         .set_character_solar_system(char_id, dest_sys, &ctx.sde)
         .map_err(|e| rpc_err("SystemTransitionFailed", e.to_string()))?;
 
-    ctx.db.with_mut_snapshot(|snap| {
+    let cleared_zarzakh_gate = ctx.db.with_mut_snapshot(|snap| {
         if let Some(ship) = snap.items.get_mut(&ship_id) {
             ship.location_id = dest_sys as i64;
         }
+        snap.zarzakh_gate_locks.remove(&char_id).map(|(gid, _)| gid)
     });
+    if let Some(locked_gate_id) = cleared_zarzakh_gate {
+        crate::services::quasar_sov_services::publish_stargate_lock_deactivated_notice(
+            &ctx.quasar_gateway,
+            char_id,
+            30_100_000,
+            locked_gate_id,
+            now_unix,
+        );
+    }
 
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, origin_sys);
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
@@ -201,7 +211,13 @@ pub async fn handle(
         // shipCasterLandingPadMgr: Faction Warfare Landing Pad Registry
         // --------------------------------------------------------------------
         ("shipCasterLandingPadMgr", "GetAllLandingPads") => {
-            let pads = with_misc_state(ctx, |st| st.landing_pads.clone());
+            let pads = with_misc_state(ctx, |st| {
+                st.landing_pads
+                    .iter()
+                    .filter(|p| matches!(p.faction_id, 500001..=500004))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            });
             Some(Ok(PyRep::List(pads.iter().map(|p| p.to_keyval()).collect())))
         }
 
@@ -227,7 +243,9 @@ pub async fn handle(
             let factions = with_misc_state(ctx, |st| {
                 let mut set = std::collections::BTreeSet::new();
                 for l in &st.launchers {
-                    set.insert(l.faction_id);
+                    if matches!(l.faction_id, 500001..=500004) {
+                        set.insert(l.faction_id);
+                    }
                 }
                 set.into_iter().map(|f| PyRep::Integer(f as i64)).collect::<Vec<_>>()
             });
@@ -395,15 +413,53 @@ pub async fn handle(
 
             let ship_type_id = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0);
             let ship_group_id = ctx.sde.types.get(&ship_type_id).map(|t| t.group_id).unwrap_or(0);
-            if matches!(ship_group_id, 30 | 485 | 547 | 659 | 883 | 1538 | 4594) {
+            if matches!(ship_group_id, 30 | 485 | 513 | 547 | 659 | 883 | 902 | 1538 | 4594) {
                 return Some(Err(rpc_err("CapitalShipCannotJumpShipcaster", "Capital ships cannot jump through an interstellar shipcaster")));
             }
             let char_war_faction = ctx.db.with_snapshot(|s| s.characters.get(&char_id).and_then(|c| c.war_faction_id));
-            if launcher.faction_id > 0 && char_war_faction != Some(launcher.faction_id as i64) {
+            if launcher.solar_system_id == 30_100_000 {
+                // Deathless Shipcaster in Zarzakh to pirate FOB (`feat:navigation.deathless-shipcaster-fob`)
+                if !matches!(char_war_faction, Some(500010 | 500011)) {
+                    return Some(Err(rpc_err(
+                        "NonPirateRefused",
+                        "The Deathless Shipcaster in Zarzakh refuses non-pirate characters",
+                    )));
+                }
+                if pad.faction_id > 0 && char_war_faction != Some(pad.faction_id as i64) {
+                    return Some(Err(rpc_err(
+                        "FobFactionMismatch",
+                        "Cannot jump to another pirate faction's Forward Operating Base",
+                    )));
+                }
+            } else if launcher.faction_id > 0 && char_war_faction != Some(launcher.faction_id as i64) {
                 return Some(Err(rpc_err(
                     "FactionShipcasterAccessDenied",
                     "Character militia faction does not match shipcaster faction",
                 )));
+            }
+
+            // Horizon Siege gating (`feat:navigation.zarzakh-local-horizon-siege`, `feat:navigation.deathless-shipcaster-zarzakh`)
+            if (launcher.solar_system_id == 30_100_000 || to_system_id == 30_100_000)
+                && crate::services::cluster_macho_misc_services::is_zarzakh_horizon_siege_active(ctx)
+            {
+                return Some(Err(rpc_err(
+                    "HorizonSiegeActive",
+                    "Shipcaster travel to/from Zarzakh is disabled during active Horizon Siege",
+                )));
+            }
+
+            // Per-target charge and cooldown (`feat:navigation.deathless-shipcaster-fob`)
+            if matches!(pad.faction_id, 500010 | 500011) {
+                let on_cooldown = crate::services::cluster_macho_misc_services::with_misc_state(ctx, |st| {
+                    let now = ctx.now_unix();
+                    st.target_cooldowns.get(&pad.item_id).copied().unwrap_or(0) > now
+                });
+                if on_cooldown {
+                    return Some(Err(rpc_err(
+                        "ShipcasterTargetOnCooldown",
+                        format!("Shipcaster target {} is currently on cooldown", pad.item_id),
+                    )));
+                }
             }
             if launcher.solar_system_id != sys_id {
                 return Some(Err(rpc_err(
@@ -447,6 +503,14 @@ pub async fn handle(
             let arrival_pos = pad.position + glam::DVec3::new(2_500.0, 0.0, 0.0);
             if let Err(e) = execute_shipcaster_jump(ctx, session, char_id, ship_id, sys_id, to_system_id, arrival_pos).await {
                 return Some(Err(e));
+            }
+
+            if matches!(pad.faction_id, 500010 | 500011) {
+                let _ = crate::services::cluster_macho_misc_services::check_and_apply_shipcaster_target_cooldown(
+                    ctx,
+                    pad.item_id,
+                    120,
+                );
             }
 
             Some(Ok(PyRep::None))

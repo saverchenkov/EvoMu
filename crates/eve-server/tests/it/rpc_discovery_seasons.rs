@@ -513,51 +513,42 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     assert!(matches!(err_docked, Err(ref e) if e.code == "MustBeInSpace"));
 
     // Undock pilots and move filaments into active ship cargo
-    let ship1 = 99_001_101;
-    let ship2 = 99_001_102;
+    let (p3_id, p4_id) = (90_000_003_i64, 90_000_004_i64);
+    let (ship1, ship2, ship3, ship4) = (99_001_101, 99_001_102, 99_001_103, 99_001_104);
+    let (f3, f4) = (99_001_003, 99_001_004);
     p1.station_id = None; p1.structure_id = None; p1.ship_id = Some(ship1);
     p2.station_id = None; p2.structure_id = None; p2.ship_id = Some(ship2);
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(c) = snap.characters.get_mut(&P1) { c.station_id = None; c.structure_id = None; c.active_ship_id = ship1; }
-        if let Some(c) = snap.characters.get_mut(&P2) { c.station_id = None; c.structure_id = None; c.active_ship_id = ship2; }
-        snap.items.insert(ship1, eve_db::InventoryItemRecord { item_id: ship1, type_id: 606, owner_id: P1, location_id: 30000142, flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, ..Default::default() });
-        snap.items.insert(ship2, eve_db::InventoryItemRecord { item_id: ship2, type_id: 606, owner_id: P2, location_id: 30000142, flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, ..Default::default() });
+        let tmpl = snap.characters.get(&P1).unwrap().clone();
+        for (cid, sid) in [(P1, ship1), (P2, ship2), (p3_id, ship3), (p4_id, ship4)] {
+            let c = snap.characters.entry(cid).or_insert_with(|| { let mut r = tmpl.clone(); r.character_id = cid; r });
+            c.station_id = None; c.structure_id = None; c.active_ship_id = sid; c.solar_system_id = 30000142;
+            snap.items.insert(sid, eve_db::InventoryItemRecord { item_id: sid, type_id: 638, owner_id: cid, location_id: 30000142, flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, ..Default::default() });
+        }
+        snap.items.get_mut(&ship1).unwrap().type_id = 606; // Start P1 in non-battleship for negative hull test
         if let Some(it) = snap.items.get_mut(&f1) { it.location_id = ship1; it.flag = eve_db::InventoryFlag::Cargo; }
         if let Some(it) = snap.items.get_mut(&f2) { it.location_id = ship2; it.flag = eve_db::InventoryFlag::Cargo; }
-        snap.items.insert(99_001_009, eve_db::InventoryItemRecord {
-            item_id: 99_001_009, type_id: 47765, owner_id: P1, location_id: ship1,
-            flag: eve_db::InventoryFlag::Cargo, quantity: 1, singleton: false, ..Default::default()
-        });
+        for (fid, cid, sid) in [(f3, p3_id, ship3), (f4, p4_id, ship4)] {
+            snap.items.insert(fid, eve_db::InventoryItemRecord { item_id: fid, type_id: 72984, owner_id: cid, location_id: sid, flag: eve_db::InventoryFlag::Cargo, quantity: 1, singleton: false, ..Default::default() });
+        }
+        snap.items.insert(99_001_009, eve_db::InventoryItemRecord { item_id: 99_001_009, type_id: 47765, owner_id: P1, location_id: ship1, flag: eve_db::InventoryFlag::Cargo, quantity: 1, singleton: false, ..Default::default() });
     });
 
-    // Reject Abyssal PvE filament (group 1979) on JoinPVPQueue
-    let err_abyssal = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(99_001_009), PyRep::Integer(47765)]).await;
-    assert_eq!(err_abyssal.unwrap_err().code, "InvalidFilamentType");
+    // Reject Abyssal PvE filament (group 1979) and disallowed hull class (606 Corvette for 72984 2v2 Battleships)
+    assert_eq!(rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(99_001_009), PyRep::Integer(47765)]).await.unwrap_err().code, "InvalidFilamentType");
+    assert_eq!(rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(72984)]).await.unwrap_err().code, "InvalidShipForFilament");
+    ctx.db.with_mut_snapshot(|snap| snap.items.get_mut(&ship1).unwrap().type_id = 638);
+    assert_eq!(rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(72984)]).await.expect("JoinPVPQueue"), PyRep::Integer(30));
 
-    let res = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(72984)]).await.expect("JoinPVPQueue");
-    assert_eq!(res, PyRep::Integer(30));
+    // BF-1 check: resolution fails if only one pilot is queued; duplicate join and wrong LeavePVPQueue item fail
+    assert_eq!(eve_server::services::pvp_filament_mgr::record_proving_grounds_combat_result(&ctx, P1, P2, 1500.0).unwrap_err().code, "NotInPvpQueue");
+    assert!(matches!(rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(72984)]).await, Err(ref e) if e.code == "AlreadyInPvpQueue"));
+    assert!(rpc(&ctx, &mut p1, "pvpFilamentMgr", "LeavePVPQueue", &[PyRep::Integer(999_999)]).await.is_err());
 
-    // BF-1 check: resolution fails if only one pilot is queued
-    let err_single = eve_server::services::pvp_filament_mgr::record_proving_grounds_combat_result(&ctx, P1, P2, 1500.0);
-    assert_eq!(err_single.unwrap_err().code, "NotInPvpQueue");
-
-    // Duplicate join returns AlreadyInPvpQueue
-    let res2 = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(72984)]).await;
-    assert!(matches!(res2, Err(ref e) if e.code == "AlreadyInPvpQueue"));
-
-    // LeavePVPQueue with wrong filament item fails
-    let err_leave = rpc(&ctx, &mut p1, "pvpFilamentMgr", "LeavePVPQueue", &[PyRep::Integer(999_999)]).await;
-    assert!(err_leave.is_err());
-
-    // LeavePVPQueue with valid filament stack ID leaves queue and returns PyRep::None
-    let leave_res = rpc(&ctx, &mut p1, "pvpFilamentMgr", "LeavePVPQueue", &[PyRep::Integer(f1)]).await.expect("LeavePVPQueue");
-    assert_eq!(leave_res, PyRep::None);
-    let is_queued = ctx.db.with_snapshot(|s| eve_server::services::pvp_filament_mgr::load_pvp_store(s).queue.contains_key(&P1));
-    assert!(!is_queued);
-
-    // Re-join PVP queue
-    let res_rejoin = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(72984)]).await.expect("Re-join");
-    assert_eq!(res_rejoin, PyRep::Integer(30));
+    // LeavePVPQueue with valid filament stack ID leaves queue and returns PyRep::None, then re-join
+    assert_eq!(rpc(&ctx, &mut p1, "pvpFilamentMgr", "LeavePVPQueue", &[PyRep::Integer(f1)]).await.expect("LeavePVPQueue"), PyRep::None);
+    assert!(!ctx.db.with_snapshot(|s| eve_server::services::pvp_filament_mgr::load_pvp_store(s).queue.contains_key(&P1)));
+    assert_eq!(rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(72984)]).await.expect("Re-join"), PyRep::Integer(30));
 
     // Event queries inspecting SDE-backed pvpfilamenteventdates / pvpfilamentmatchtypes records
     let active = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetActiveEvents", &[]).await.expect("GetActiveEvents");
@@ -584,20 +575,28 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     // Gate activation fails outside arena (p1 is still in origin system 30000142)
     assert_eq!(rpc(&ctx, &mut p1, "pvpFilamentMgr", "AbyssalPVPEndGateActivation", &[PyRep::Integer(70001)]).await.unwrap_err().code, "NotInArena");
 
-    // Second pilot joins and forms a 1v1 match instance (dynamic wait time 5s)
+    // Queue p3 and p4 first (2v2 requires 4 pilots; 2 or 3 queued pilots stay in queue with status 30)
+    let mut p3 = p1.clone(); p3.session_id = 61_007; p3.user_id = Some(1003); p3.character_id = Some(p3_id); p3.solar_system_id = Some(30000142); p3.ship_id = Some(ship3);
+    let mut p4 = p1.clone(); p4.session_id = 61_008; p4.user_id = Some(1004); p4.character_id = Some(p4_id); p4.solar_system_id = Some(30000142); p4.ship_id = Some(ship4);
+    assert_eq!(rpc(&ctx, &mut p3, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f3), PyRep::Integer(72984)]).await.expect("P3 Join"), PyRep::Integer(30));
+    assert_eq!(rpc(&ctx, &mut p4, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f4), PyRep::Integer(72984)]).await.expect("P4 Join"), PyRep::Integer(30));
+
+    // Fourth pilot (P2) joins and forms a 2v2 match instance (dynamic wait time 5s)
     let res_p2 = rpc(&ctx, &mut p2, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f2), PyRep::Integer(72984)]).await.expect("P2 Join");
     assert_eq!(res_p2, PyRep::Integer(5));
     assert_eq!(p2.solar_system_id, Some(32000001));
     ctx.sync_session(&mut p1);
     assert_eq!(p1.solar_system_id, Some(32000001));
-    let has_match = ctx.db.with_snapshot(|s| eve_server::services::pvp_filament_mgr::load_pvp_store(s).active_matches.values().any(|m| m.active && m.team_a.contains(&P1) && m.team_b.contains(&P2) && m.arena_solar_system_id == 32000001));
+    let has_match = ctx.db.with_snapshot(|s| eve_server::services::pvp_filament_mgr::load_pvp_store(s).active_matches.values().any(|m| m.active && m.team_a.len() == 2 && m.team_b.len() == 2 && m.team_a.contains(&P1) && m.team_b.contains(&P2) && m.arena_solar_system_id == 32000001));
     assert!(has_match);
 
     // In arena, gate activation fails before match conclusion
     assert_eq!(rpc(&ctx, &mut p1, "pvpFilamentMgr", "AbyssalPVPEndGateActivation", &[PyRep::Integer(70001)]).await.unwrap_err().code, "MatchNotConcluded");
 
-    // Resolve via the destruction-pipeline hook (real weapon kill covered in combat_entropic_pvp_atomicity.rs)
+    // Resolve via the destruction-pipeline hook: first kill leaves p4_id alive, second kill eliminates team_b
     eve_server::services::pvp_filament_mgr::record_proving_grounds_combat_result_if_queued(&ctx, P1, P2, 32000001, 1500.0);
+    assert_eq!(rpc(&ctx, &mut p1, "pvpFilamentMgr", "AbyssalPVPEndGateActivation", &[PyRep::Integer(70001)]).await.unwrap_err().code, "MatchNotConcluded");
+    eve_server::services::pvp_filament_mgr::record_proving_grounds_combat_result_if_queued(&ctx, p3_id, p4_id, 32000001, 500.0);
 
     // After conclusion, gate activation fails when target gate is invalid or beyond 50km
     assert_eq!(rpc(&ctx, &mut p1, "pvpFilamentMgr", "AbyssalPVPEndGateActivation", &[PyRep::Integer(99999)]).await.unwrap_err().code, "TooFarFromGate");
@@ -622,12 +621,12 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     });
     assert!(!q1 && !q2 && !match_active);
 
-    // Leaderboard reflects post-match stats sorted descending by score with sequential ranks 1 and 2
+    // Leaderboard reflects all 4 2v2 participants sorted descending by score
     let lb = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetLeaderboard", &[PyRep::Integer(170), PyRep::Integer(0)]).await.expect("GetLeaderboard");
     let PyRep::List(lb_rows) = lb else { panic!("expected List") };
-    assert_eq!(lb_rows.len(), 2);
+    assert_eq!(lb_rows.len(), 4);
     assert_eq!((lb_rows[0].dict_get("characterID").and_then(|v| v.as_i64()), lb_rows[0].dict_get("rank").and_then(|v| v.as_i64()), lb_rows[0].dict_get("score").and_then(|v| v.as_i64())), (Some(P1), Some(1), Some(100)));
-    assert_eq!((lb_rows[1].dict_get("characterID").and_then(|v| v.as_i64()), lb_rows[1].dict_get("rank").and_then(|v| v.as_i64()), lb_rows[1].dict_get("score").and_then(|v| v.as_i64())), (Some(P2), Some(2), Some(25)));
+    assert_eq!((lb_rows[2].dict_get("characterID").and_then(|v| v.as_i64()), lb_rows[2].dict_get("rank").and_then(|v| v.as_i64()), lb_rows[2].dict_get("score").and_then(|v| v.as_i64())), (Some(P2), Some(3), Some(25)));
 
     // Stats reflect match outcome and rank (scoped by eventID and characterID)
     let s1 = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetCharacterStatistics", &[PyRep::Integer(170), PyRep::Integer(P1)]).await.expect("P1 stats");
@@ -636,7 +635,7 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
 
     let s2 = rpc(&ctx, &mut p2, "pvpFilamentMgr", "GetCharacterStatistics", &[PyRep::Integer(170), PyRep::Integer(P2)]).await.expect("P2 stats");
     let PyRep::KeyVal(kv2) = s2 else { panic!("expected KeyVal") };
-    assert_eq!((kv2.get("rank").and_then(|v| v.as_i64()), kv2.get("losses").and_then(|v| v.as_i64()), kv2.get("score").and_then(|v| v.as_i64())), (Some(2), Some(1), Some(25)));
+    assert_eq!((kv2.get("rank").and_then(|v| v.as_i64()), kv2.get("losses").and_then(|v| v.as_i64()), kv2.get("score").and_then(|v| v.as_i64())), (Some(3), Some(1), Some(25)));
 
     // After the final SDE schedule window (event 171 ends 2023-01-16), GetMostRecentEvent is 171 and GetNextEventDate is None
     ctx.advance_time_seconds(86400 * 30);

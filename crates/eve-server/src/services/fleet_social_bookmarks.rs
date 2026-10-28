@@ -77,6 +77,9 @@ pub(super) async fn handle_bookmarks(
                     message: "Session has no active solar system".into(),
                 }));
             };
+            if sys_id == 30_100_000 {
+                return Some(Err(BridgeRpcError::user_error("CantbookmarkEveSystem")));
+            }
 
             let (explicit_entity_id, memo, folder_id) = if args.first().and_then(|a| a.as_i64()).is_some() {
                 (
@@ -1223,6 +1226,9 @@ pub(super) async fn handle_bookmarks(
                 return Some(Err(BridgeRpcError { code: "NotInSpace".into(), message: "Must be in space to bookmark scans".into() }));
             }
             let sys_id = session.solar_system_id.unwrap();
+            if sys_id == 30_100_000 {
+                return Some(Err(BridgeRpcError::user_error("CantbookmarkEveSystem")));
+            }
             let (sig_id, label, folder_id) = if let Some(s) = args.first().and_then(|a| a.as_str()) {
                 (s, args.get(1).and_then(|a| a.as_str()).unwrap_or(s), args.get(2).and_then(|a| a.as_i64()))
             } else if let Some(s) = args.get(3).and_then(|a| a.as_str()) {

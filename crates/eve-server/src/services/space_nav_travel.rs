@@ -241,7 +241,7 @@ pub(crate) async fn handle_cmd_goto_point(
 
 /// Jump-drive plan for one jump (`feat:navigation.jump-drive`).
 #[derive(Debug, Clone)]
-pub(crate) struct JumpDrivePlan {
+pub struct JumpDrivePlan {
     pub distance_ly: f64,
     pub fuel_type_id: u32,
     pub fuel_units: i32,
@@ -285,7 +285,7 @@ pub fn distance_ly(ctx: &ServerContext, a: u32, b: u32) -> f64 {
 /// Range = `jumpDriveRange` x (1 + 20% x Jump Drive Calibration); fuel = `jumpDriveConsumptionAmount`
 /// x LY x (1 - 10% x Jump Fuel Conservation), rounded up, of type `jumpDriveConsumptionType`
 /// (EVE wiki `Jump_drives.md:44-47`). Ships with `disallowInHighSec` cannot jump into high-sec.
-pub(crate) fn plan_jump_drive(
+pub fn plan_jump_drive(
     ctx: &ServerContext,
     char_id: i64,
     ship_type_id: u32,
@@ -296,6 +296,18 @@ pub(crate) fn plan_jump_drive(
         return Err(err(
             "JumpDriveForbiddenInWormholeSpace",
             format!("Jump drives cannot operate in or into wormhole space ({cur_sys} -> {tgt_sys})"),
+        ));
+    }
+    if cur_sys == 30_100_000 || tgt_sys == 30_100_000 {
+        return Err(err(
+            "JumpDriveForbiddenInZarzakh",
+            format!("Jump drives cannot operate in or into Zarzakh ({cur_sys} -> {tgt_sys})"),
+        ));
+    }
+    if ctx.sde.solar_systems.get(&tgt_sys).map(|s| s.region_id) == Some(10_000_070) {
+        return Err(err(
+            "CannotJumpToPochven",
+            format!("Region-wide cyno jammer prevents jump drives from entering Pochven system {tgt_sys}"),
         ));
     }
     if type_attr(ctx, ship_type_id, "canJump").unwrap_or(0.0) == 0.0 {
@@ -802,6 +814,9 @@ pub(crate) async fn handle_cmd_align_to(
         });
     };
     let target_pos_opt = if let Some(bm_id) = bookmark_id {
+        if sys_id == 30_100_000 {
+            return Err(BridgeRpcError::user_error("DunBlacklistCannotWarp"));
+        }
         ctx.db.with_snapshot(|snap| {
             snap.bookmarks
                 .get(&bm_id)

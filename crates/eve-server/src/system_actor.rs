@@ -941,6 +941,19 @@ impl SystemRegistry {
                                     &base_scramble_strengths, &base_core_strengths, &sde_opt, &db_opt,
                                     tactical_state, pending_cycle_actions, dt, deact_guard.as_ref(),
                                 );
+                                if let Some(db) = db_opt.as_ref() {
+                                    for &(target_ball_id, _) in &destroyed_balls {
+                                        crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark(
+                                            &mut ballpark, db, solar_system_id, target_ball_id,
+                                        );
+                                    }
+                                }
+                                crate::services::pve_special_sites_abyssal::step_abyssal_hazards_and_pylons_in_ballpark(
+                                    &mut ballpark,
+                                    sde_opt.as_deref(),
+                                    db_opt.as_ref(),
+                                    solar_system_id,
+                                );
                                 if let Some(db) = &db_opt {
                                     for (&bid, cs) in &ballpark.combat_states {
                                         if !ballpark.is_static_ball(bid) && bid < 700_000_000 {

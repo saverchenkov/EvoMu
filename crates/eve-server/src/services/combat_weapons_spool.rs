@@ -552,6 +552,18 @@ pub async fn handle_ship_or_npc_destruction(
                 sys_id,
                 applied_dmg.max(1000.0), // DERIVED: final-blow damage floor for PG damageDealt stats
             );
+            let cleared_zarzakh_gate = ctx.db.with_mut_snapshot(|snap| {
+                snap.zarzakh_gate_locks.remove(&vcid).map(|(gid, _)| gid)
+            });
+            if let Some(locked_gate_id) = cleared_zarzakh_gate {
+                crate::services::quasar_sov_services::publish_stargate_lock_deactivated_notice(
+                    &ctx.quasar_gateway,
+                    vcid,
+                    30_100_000,
+                    locked_gate_id,
+                    now_unix,
+                );
+            }
             let _ = ctx
                 .db
                 .respawn_character_at_home_station(vcid, vship_id, &ctx.sde);
@@ -687,6 +699,15 @@ pub async fn handle_ship_or_npc_destruction(
             "ship_loss",
         );
     } else {
+        if (32_000_000..33_000_000).contains(&sys_id) {
+            crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_core(
+                &ctx.systems,
+                &ctx.db,
+                sys_id,
+                target_ball_id,
+            )
+            .await;
+        }
         let bounty = ctx
             .sde
             .types

@@ -248,6 +248,19 @@ fn handle_office_manager(
             }
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                if station_id == 60_015_187 {
+                    let is_pirate = snap
+                        .characters
+                        .get(&char_id)
+                        .and_then(|c| c.war_faction_id)
+                        .is_some_and(|fid| matches!(fid, 500_010 | 500_011));
+                    if !is_pirate {
+                        return Err(BridgeRpcError {
+                            code: "FulcrumOfficeRequiresPirateEnlistment".into(),
+                            message: "Renting an office at The Fulcrum requires pirate insurgency enlistment".into(),
+                        });
+                    }
+                }
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
                     return Err(BridgeRpcError {
                         code: "CorporationNotFound".into(),

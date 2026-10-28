@@ -260,18 +260,20 @@ pub struct CombatState {
     /// True when a Capital Micro Jump Field Generator (`83485`) is active on a Capital ship.
     #[serde(default)]
     pub is_capital_mjfg: bool,
+    /// Active turret tracking speed multiplier (e.g., Abyssal Multibody Tracking Pylon `1.8`).
+    #[serde(default = "default_one_f64")]
+    pub tracking_speed_multiplier: f64,
+    /// Active local shield boost amount multiplier (e.g., Abyssal Filament Cloud `0.6`).
+    #[serde(default = "default_one_f64")]
+    pub shield_boost_multiplier: f64,
     /// Per-entity deterministic PRNG state (`OF-31`).
     #[serde(default = "default_combat_rng_state")]
     pub rng_state: u64,
 }
 
-fn default_recharge_time_ms() -> f64 {
-    120_000.0
-}
-
-fn default_combat_rng_state() -> u64 {
-    0x9E37_79B9_7F4A_7C15
-}
+fn default_recharge_time_ms() -> f64 { 120_000.0 }
+fn default_one_f64() -> f64 { 1.0 }
+fn default_combat_rng_state() -> u64 { 0x9E37_79B9_7F4A_7C15 }
 
 impl Default for CombatState {
     fn default() -> Self {
@@ -314,6 +316,8 @@ impl Default for CombatState {
             mjfg_original_sig_radius: None,
             last_step_capacitor: None,
             is_capital_mjfg: false,
+            tracking_speed_multiplier: 1.0,
+            shield_boost_multiplier: 1.0,
             rng_state: default_combat_rng_state(),
         }
     }

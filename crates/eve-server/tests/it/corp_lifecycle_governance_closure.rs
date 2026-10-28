@@ -518,3 +518,76 @@ async fn test_corp_governance_divisions_ceo_placement_tax() {
     let tax_rec = tax_entry.unwrap();
     assert_eq!(tax_rec.amount.raw_cents(), -148_500_00, "11% of 1.35M modified bounty is 148,500 ISK");
 }
+
+#[tokio::test]
+async fn test_corp_authorization_negative_checks_r_nav_01() {
+    let ctx = ServerContext::new();
+    let corp_id = 2_000_100;
+    let member_no_roles = PILOT_2;
+    let other_ceo = PILOT_1;
+
+    // Case 1: Corp with no CEO (ceo_id == 0) — non-director member must be refused
+    ctx.db.with_mut_snapshot(|s| {
+        s.corporations.insert(
+            corp_id,
+            eve_db::CorporationRecord {
+                corporation_id: corp_id,
+                name: "Leaderless Corp".into(),
+                ticker: "NOCEO".into(),
+                ceo_id: 0,
+                tax_rate: 0.0,
+                members: [member_no_roles, PILOT_3].into_iter().collect(),
+                member_roles: HashMap::new(),
+                ..Default::default()
+            },
+        );
+        if let Some(ch) = s.characters.get_mut(&member_no_roles) {
+            ch.corporation_id = corp_id;
+        }
+    });
+
+    let mut sess = select_pilot(&ctx, 88_100, "other", "other-secret", member_no_roles).await;
+    sess.corporation_id = Some(corp_id);
+    let err_no_ceo = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "MoveCompanyShares",
+        &[PyRep::Integer(corp_id), PyRep::Integer(member_no_roles), PyRep::Integer(10)],
+    )
+    .await
+    .expect_err("Member of corp with ceo_id == 0 must be refused director RPCs");
+    assert_eq!(err_no_ceo.code, "CorpRoleDenied");
+
+    // Case 2: Non-CEO sole member (members.len() <= 1, but ceo_id != member) — must be refused
+    let sole_corp_id = 2_000_101;
+    ctx.db.with_mut_snapshot(|s| {
+        s.corporations.insert(
+            sole_corp_id,
+            eve_db::CorporationRecord {
+                corporation_id: sole_corp_id,
+                name: "Sole Member Non-CEO Corp".into(),
+                ticker: "SOLNC".into(),
+                ceo_id: other_ceo,
+                tax_rate: 0.0,
+                members: [member_no_roles].into_iter().collect(),
+                member_roles: HashMap::new(),
+                ..Default::default()
+            },
+        );
+        if let Some(ch) = s.characters.get_mut(&member_no_roles) {
+            ch.corporation_id = sole_corp_id;
+        }
+    });
+    sess.corporation_id = Some(sole_corp_id);
+    let err_sole_non_ceo = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "MoveCompanyShares",
+        &[PyRep::Integer(sole_corp_id), PyRep::Integer(member_no_roles), PyRep::Integer(10)],
+    )
+    .await
+    .expect_err("Non-CEO sole member must be refused director RPCs");
+    assert_eq!(err_sole_non_ceo.code, "CorpRoleDenied");
+}

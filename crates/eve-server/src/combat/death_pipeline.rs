@@ -660,6 +660,20 @@ pub fn execute_death_pipeline_sync_inner(
     });
 
     if is_pod {
+        let cleared_zarzakh_gate = ctx.db.with_mut_snapshot(|snap| {
+            snap.zarzakh_gate_locks
+                .remove(&victim_char_id)
+                .map(|(gid, _)| gid)
+        });
+        if let Some(locked_gate_id) = cleared_zarzakh_gate {
+            crate::services::quasar_sov_services::publish_stargate_lock_deactivated_notice(
+                &ctx.quasar_gateway,
+                victim_char_id,
+                30_100_000,
+                locked_gate_id,
+                now_unix,
+            );
+        }
         let _ = ctx
             .db
             .respawn_character_at_home_station(victim_char_id, victim_ship_id, &ctx.sde);

@@ -1140,7 +1140,10 @@ fn is_delayed_local_channel(chan_id: &str) -> bool {
     let Some(sys_id) = parse_channel_system_id(chan_id) else {
         return false;
     };
-    sys_id >= 31_000_000 || (30_000_140..=30_000_141).contains(&sys_id) || sys_id == 30_002_086
+    sys_id >= 31_000_000
+        || (30_000_140..=30_000_141).contains(&sys_id)
+        || sys_id == 30_002_086
+        || sys_id == 30_100_000
 }
 
 fn parse_channel_system_id(chan_id: &str) -> Option<u32> {

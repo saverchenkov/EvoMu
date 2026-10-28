@@ -554,14 +554,14 @@ async fn test_pve_abyssal_deadspace_pocket_gates_weather_and_tiers() {
                 owner_id: 90_000_001,
                 location_id: ship_id,
                 flag: InventoryFlag::Cargo,
-                quantity: 2,
+                quantity: 4,
                 singleton: false,
                 ..Default::default()
             },
         );
     });
 
-    // 2. Verify abyssalMgr deployment succeeds and gate activation methods return UnimplementedRPC
+    // 2. Verify abyssalMgr deployment consumes 3 filaments for a Frigate and gate RPCs outside abyss return NotInAbyssalSpace
     const ERR_UNIMPLEMENTED: &str = concat!("Unimplemented", "RPC");
     let _deploy_res = ctx
         .dispatch_rpc(
@@ -588,8 +588,8 @@ async fn test_pve_abyssal_deadspace_pocket_gates_weather_and_tiers() {
             None,
         )
         .await
-        .expect_err("AbyssalGateActivation returns unimplemented");
-    assert_eq!(gate_err.code, ERR_UNIMPLEMENTED);
+        .expect_err("AbyssalGateActivation outside abyss");
+    assert_eq!(gate_err.code, "NotInAbyssalSpace");
 
     let end_gate_err = ctx
         .dispatch_rpc(
@@ -602,8 +602,8 @@ async fn test_pve_abyssal_deadspace_pocket_gates_weather_and_tiers() {
             None,
         )
         .await
-        .expect_err("AbyssalEndGateActivation returns unimplemented");
-    assert_eq!(end_gate_err.code, ERR_UNIMPLEMENTED);
+        .expect_err("AbyssalEndGateActivation outside abyss");
+    assert_eq!(end_gate_err.code, "NotInAbyssalSpace");
 
     let content_err = ctx
         .dispatch_rpc(

@@ -302,6 +302,9 @@ pub async fn handle(
                     message: "Session has no active solar system".into(),
                 }));
             };
+            if sys_id == 30_100_000 {
+                return Some(Err(BridgeRpcError::user_error("DunBlacklistCannotWarp")));
+            }
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),

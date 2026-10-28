@@ -1,54 +1,93 @@
-//! `pve_special_sites_abyssal` — Abyssal Deadspace filaments, pockets, weather, and lifecycle.
+//! `pve_special_sites_abyssal` — Abyssal Deadspace filaments, pockets, room spawning,
+//! proactive conduit unlock on NPC clear, and 20-minute collapse lifecycle.
 
 #![forbid(unsafe_code)]
+
+pub use crate::services::pve_abyssal_hazards::*;
 
 use crate::router::ServerContext;
 use crate::services::pve_incursion_sites::make_site_npc_ball;
 use crate::services::pve_special_sites::{
-    next_spec_seq, spec_now_sec, with_pve_special_reg,
+    next_spec_seq, spec_now_sec, with_pve_special_reg, with_pve_special_reg_db,
 };
-use glam::DVec3;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{AttributeId, SolarSystemId, TypeId};
+use glam::DVec3;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 type CharacterId = i64;
 type ItemId = i64;
 
 fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
-    BridgeRpcError { code: code.into(), message: message.into() }
+    BridgeRpcError {
+        code: code.into(),
+        message: message.into(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AbyssalWeatherKind { Electrical, Dark, Exotic, Firestorm, Gamma }
+pub enum AbyssalWeatherKind {
+    Electrical,
+    Dark,
+    Exotic,
+    Firestorm,
+    Gamma,
+}
 
 impl AbyssalWeatherKind {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Electrical => "Electrical", Self::Dark => "Dark", Self::Exotic => "Exotic",
-            Self::Firestorm => "Firestorm", Self::Gamma => "Gamma",
+            Self::Electrical => "Electrical",
+            Self::Dark => "Dark",
+            Self::Exotic => "Exotic",
+            Self::Firestorm => "Firestorm",
+            Self::Gamma => "Gamma",
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AbyssalRoomRecord {
-    pub room_index: u8, pub dungeon_id: u32, pub dungeon_name: String,
-    pub npc_ball_ids: Vec<i64>, pub cache_item_id: ItemId, pub cleared: bool,
+    pub room_index: u8,
+    pub dungeon_id: u32,
+    pub dungeon_name: String,
+    pub npc_ball_ids: Vec<i64>,
+    pub cache_item_id: ItemId,
+    pub cleared: bool,
+    #[serde(default)]
+    pub gate_unlocked_at_sec: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AbyssalPocketSession {
-    pub pocket_id: i64, pub character_id: CharacterId, pub ship_id: ItemId,
-    pub origin_solar_system_id: SolarSystemId, pub abyssal_solar_system_id: SolarSystemId,
-    #[serde(default)] pub origin_position: [f64; 3],
-    pub filament_type_id: TypeId, pub tier: u8, pub weather: AbyssalWeatherKind,
-    pub weather_penalty_pct: f64, pub weather_bonus_pct: f64, pub npc_difficulty_mult: f64,
-    pub current_room: u8, pub rooms: [AbyssalRoomRecord; 3], pub started_at_sec: u64,
-    pub collapse_at_sec: u64, pub saved_ship_attrs: HashMap<AttributeId, f64>,
-    pub completed: bool, pub collapsed_destroyed: bool,
+    pub pocket_id: i64,
+    pub character_id: CharacterId,
+    pub ship_id: ItemId,
+    pub origin_solar_system_id: SolarSystemId,
+    pub abyssal_solar_system_id: SolarSystemId,
+    #[serde(default)]
+    pub origin_position: [f64; 3],
+    #[serde(default)]
+    pub grid_offset: [f64; 3],
+    pub filament_type_id: TypeId,
+    pub tier: u8,
+    pub weather: AbyssalWeatherKind,
+    pub weather_penalty_pct: f64,
+    pub weather_bonus_pct: f64,
+    pub npc_difficulty_mult: f64,
+    pub current_room: u8,
+    pub rooms: [AbyssalRoomRecord; 3],
+    pub started_at_sec: u64,
+    pub collapse_at_sec: u64,
+    pub saved_ship_attrs: HashMap<AttributeId, f64>,
+    pub completed: bool,
+    pub collapsed_destroyed: bool,
+    #[serde(default)]
+    pub trace_ball_id: i64,
+    #[serde(default)]
+    pub fleet_ship_ids: Vec<ItemId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +100,12 @@ pub struct AbyssalTraceRecord {
     pub created_unix: u64,
     #[serde(default)]
     pub expires_at_sec: u64,
+    #[serde(default)]
+    pub max_ships: u8,
+    #[serde(default)]
+    pub entered_char_ids: Vec<CharacterId>,
+    #[serde(default)]
+    pub pocket_id: Option<i64>,
 }
 
 pub fn classify_abyssal_filament(type_id: TypeId) -> Option<(u8, AbyssalWeatherKind)> {
@@ -104,12 +149,30 @@ pub fn classify_abyssal_filament(type_id: TypeId) -> Option<(u8, AbyssalWeatherK
     }
 }
 
+pub fn pocket_grid_offset(ctx: &ServerContext, pocket_id: i64) -> [f64; 3] {
+    with_pve_special_reg(ctx, |reg| {
+        reg.abyssal_pockets
+            .values()
+            .find(|p| p.pocket_id == pocket_id)
+            .map(|p| p.grid_offset)
+            .unwrap_or([0.0, 0.0, 0.0])
+    })
+}
+
 pub async fn ensure_abyssal_room_balls_for_ctx(ctx: &ServerContext, char_id: CharacterId) {
     let info = with_pve_special_reg(ctx, |reg| {
         let p = reg.abyssal_pockets.get(&char_id)?;
-        if p.completed || p.collapsed_destroyed { return None; }
+        if p.completed || p.collapsed_destroyed {
+            return None;
+        }
         let r_idx = (p.current_room.saturating_sub(1) as usize).min(2);
-        Some((p.abyssal_solar_system_id, p.pocket_id, p.current_room, p.rooms[r_idx].clone(), (p.tier, p.filament_type_id, p.npc_difficulty_mult)))
+        Some((
+            p.abyssal_solar_system_id,
+            p.pocket_id,
+            p.current_room,
+            p.rooms[r_idx].clone(),
+            (p.tier, p.filament_type_id, p.npc_difficulty_mult),
+        ))
     });
     if let Some((sys_id, pid, room_num, room, (tier, filament, diff))) = info {
         let marker_id = 1_895_000_000 + pid * 10 + (room_num as i64);
@@ -117,24 +180,46 @@ pub async fn ensure_abyssal_room_balls_for_ctx(ctx: &ServerContext, char_id: Cha
         if matches!(sys_handle.get_ball_snapshot(marker_id).await, Ok(None)) {
             let z = (room_num as f64 - 1.0) * 50_000.0;
             let npcs: &[i64] = if room.cleared { &[] } else { &room.npc_ball_ids };
-            spawn_abyssal_room_contents(ctx, &sys_handle, pid, room_num, npcs, room.cache_item_id, tier, filament, diff, z).await;
+            spawn_abyssal_room_contents(
+                ctx,
+                &sys_handle,
+                pid,
+                room_num,
+                npcs,
+                room.cache_item_id,
+                tier,
+                filament,
+                diff,
+                z,
+            )
+            .await;
         }
     }
 }
 
-/// Abyssal Spaceship Entities (SDE group 1982): Starving Damavik, Anchoring Damavik, Striking Damavik,
-/// Starving Vedmak, Starving Leshak. DERIVED: per-room roster rotation through this list (no CCP spawn table).
 pub const ABYSSAL_ROOM_NPC_TYPES: [TypeId; 5] = [48090, 48089, 48092, 48087, 48125];
-/// `Triglavian Bioadaptive Cache` (SDE type 47951, group 2009).
 pub const BIOADAPTIVE_CACHE_TYPE_ID: TypeId = 47951;
-/// `Triglavian Survey Database` (SDE type 48121).
+pub const EXTRACTION_SUBNODE_TYPE_ID: TypeId = 49662;
 pub const TRIGLAVIAN_SURVEY_DATABASE_TYPE_ID: TypeId = 48121;
-/// `Transfer Conduit (Triglavian)` (47685) for rooms 1-2, `Origin Conduit (Triglavian)` (47686) for room 3.
-pub fn abyssal_room_gate_type(room: u8) -> TypeId { if room >= 3 { 47686 } else { 47685 } }
+pub const ZERO_POINT_CONDENSATE_TYPE_ID: TypeId = 48112;
+pub const BIOADAPTIVE_CACHE_WRECK_TYPE_ID: TypeId = 48120;
 
-/// Spawns one Abyssal room: its exit conduit marker, the room NPCs with their real SDE type and
-/// `CombatState` (so they are destroyable through the damage pipeline), and a Triglavian Bioadaptive
-/// Cache in space whose loot is persisted in `snap.items` (cache item + contained loot stacks).
+pub fn abyssal_mutaplasmid_for_tier(tier: u8) -> TypeId {
+    match tier {
+        0..=2 => 47_699,
+        3..=4 => 47_701,
+        _ => 47_700,
+    }
+}
+
+pub fn abyssal_room_gate_type(room: u8) -> TypeId {
+    if room >= 3 {
+        47686
+    } else {
+        47685
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn spawn_abyssal_room_contents(
     ctx: &ServerContext,
@@ -148,75 +233,365 @@ pub async fn spawn_abyssal_room_contents(
     difficulty_mult: f64,
     z: f64,
 ) {
+    let base = DVec3::from_array(pocket_grid_offset(ctx, pocket_id));
     let marker_id = 1_895_000_000 + pocket_id * 10 + (room as i64);
-    let _ = sys_handle.spawn_ball(make_site_npc_ball(marker_id, abyssal_room_gate_type(room), DVec3::new(0.0, 0.0, z))).await;
+    let mut conduit_cs = ctx.build_type_combat_state(abyssal_room_gate_type(room));
+    conduit_cs.undock_invulnerable_remaining_ticks = 999_999;
+    let _ = sys_handle
+        .spawn_ball_with_combat(
+            make_site_npc_ball(
+                marker_id,
+                abyssal_room_gate_type(room),
+                base + DVec3::new(0.0, 0.0, z),
+            ),
+            conduit_cs,
+        )
+        .await;
+    let _ = sys_handle
+        .emit_destiny_event(
+            marker_id,
+            eve_destiny::DestinyEvent::SetBallInteractive {
+                ball_id: marker_id,
+                is_interactive: npc_ids.is_empty(),
+            },
+        )
+        .await;
+
+    let weather = classify_abyssal_filament(filament_type_id)
+        .map(|(_, w)| w)
+        .unwrap_or(AbyssalWeatherKind::Electrical);
+    let penalty_pct = match tier {
+        0 | 1 => 30.0,
+        2 | 3 => 50.0,
+        _ => 70.0,
+    };
+    let bonus_pct = 50.0;
     let mult = difficulty_mult.max(1.0);
     for (idx, &bid) in npc_ids.iter().enumerate() {
         let tid = ABYSSAL_ROOM_NPC_TYPES[(room as usize - 1 + idx) % ABYSSAL_ROOM_NPC_TYPES.len()];
-        let pos = DVec3::new((idx as f64) * 3_000.0, 5_000.0, z);
-        // Pocket tier difficulty (`AbyssalPocketSession::npc_difficulty_mult`) scales SDE hit points.
+        let pos = base + DVec3::new((idx as f64) * 3_000.0, 5_000.0, z);
         let mut cs = ctx.build_type_combat_state(tid);
-        (cs.max_shield_hp, cs.max_armor_hp, cs.max_structure_hp) = (cs.max_shield_hp * mult, cs.max_armor_hp * mult, cs.max_structure_hp * mult);
-        (cs.shield_hp, cs.armor_hp, cs.structure_hp) = (cs.max_shield_hp, cs.max_armor_hp, cs.max_structure_hp);
-        let _ = sys_handle.spawn_ball_with_combat(make_site_npc_ball(bid, tid, pos), cs).await;
-        register_abyssal_room_npc(ctx, bid, tid, sys_handle.solar_system_id, pocket_id, pos, mult);
+        (cs.max_shield_hp, cs.max_armor_hp, cs.max_structure_hp) = (
+            cs.max_shield_hp * mult,
+            cs.max_armor_hp * mult,
+            cs.max_structure_hp * mult,
+        );
+        (cs.shield_hp, cs.armor_hp, cs.structure_hp) =
+            (cs.max_shield_hp, cs.max_armor_hp, cs.max_structure_hp);
+        let mut ball = make_site_npc_ball(bid, tid, pos);
+        let mut opt_range = ctx
+            .sde
+            .types
+            .get(&tid)
+            .and_then(|t| t.default_attributes.get(&54).copied())
+            .filter(|&r| r > 0.0)
+            .unwrap_or(15_000.0)
+            .max(5_000.0);
+        apply_abyssal_weather_to_combat_and_nav(
+            weather,
+            penalty_pct,
+            bonus_pct,
+            &mut cs,
+            &mut ball.max_velocity,
+            &mut opt_range,
+        );
+        let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
+        register_abyssal_room_npc(
+            ctx,
+            bid,
+            tid,
+            sys_handle.solar_system_id,
+            pocket_id,
+            pos,
+            mult,
+            opt_range,
+        );
     }
-    let cache_pos = DVec3::new(0.0, -5_000.0, z);
+
+    let cloud_base = 1_898_000_000 + pocket_id * 100 + (room as i64) * 10;
+    for (offset_id, cloud_tid, cpos) in [
+        (1_i64, TACHYON_CLOUD_TYPE_ID, base + DVec3::new(15_000.0, 0.0, z)),
+        (2_i64, BIOLUMINESCENT_CLOUD_TYPE_ID, base + DVec3::new(-15_000.0, 0.0, z)),
+        (3_i64, FILAMENT_CLOUD_TYPE_ID, base + DVec3::new(0.0, 15_000.0, z)),
+    ] {
+        let mut cball = make_site_npc_ball(cloud_base + offset_id, cloud_tid, cpos);
+        cball.radius = ctx
+            .sde
+            .types
+            .get(&cloud_tid)
+            .and_then(|t| t.default_attributes.get(&54).copied())
+            .filter(|&r| r > 0.0)
+            .unwrap_or(SPATIAL_CLOUD_RADIUS_M);
+        let _ = sys_handle.spawn_ball(cball).await;
+    }
+
+    let pylon_base = 1_899_000_000 + pocket_id * 100 + (room as i64) * 10;
+    for (offset_id, pylon_tid, def_range, ppos) in [
+        (1_i64, AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID, 15_000.0, base + DVec3::new(20_000.0, 20_000.0, z)),
+        (2_i64, AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID, 40_000.0, base + DVec3::new(-20_000.0, 20_000.0, z)),
+        (3_i64, AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID, 40_000.0, base + DVec3::new(20_000.0, -20_000.0, z)),
+        (4_i64, MULTIBODY_TRACKING_PYLON_TYPE_ID, 15_000.0, base + DVec3::new(-20_000.0, -20_000.0, z)),
+    ] {
+        let mut pball = make_site_npc_ball(pylon_base + offset_id, pylon_tid, ppos);
+        pball.radius = ctx
+            .sde
+            .types
+            .get(&pylon_tid)
+            .and_then(|t| t.default_attributes.get(&54).copied())
+            .filter(|&r| r > 0.0)
+            .unwrap_or(def_range);
+        let _ = sys_handle
+            .spawn_ball_with_combat(pball, ctx.build_type_combat_state(pylon_tid))
+            .await;
+    }
+
+    let cache_pos = base + DVec3::new(0.0, -5_000.0, z);
     let cache_ball = make_site_npc_ball(cache_item_id, BIOADAPTIVE_CACHE_TYPE_ID, cache_pos);
-    let _ = sys_handle.spawn_ball_with_combat(cache_ball, ctx.build_type_combat_state(BIOADAPTIVE_CACHE_TYPE_ID)).await;
+    let mut cache_cs = ctx.build_type_combat_state(BIOADAPTIVE_CACHE_TYPE_ID);
+    let cache_hull_hp = match tier {
+        0..=2 => 1_500.0 * (1.0 + tier as f64),
+        3..=4 => 8_000.0 * (tier as f64 - 1.0),
+        _ => 45_000.0 * (tier as f64 - 3.0),
+    };
+    cache_cs.max_structure_hp = cache_hull_hp;
+    cache_cs.structure_hp = cache_hull_hp;
+    let _ = sys_handle.spawn_ball_with_combat(cache_ball, cache_cs.clone()).await;
+
+    let subnode_id = cache_item_id + 500_000;
+    let subnode_pos = base + DVec3::new(5_000.0, -5_000.0, z);
+    let subnode_ball = make_site_npc_ball(subnode_id, EXTRACTION_SUBNODE_TYPE_ID, subnode_pos);
+    let _ = sys_handle.spawn_ball_with_combat(subnode_ball, cache_cs).await;
+
     let sys_id = sys_handle.solar_system_id as i64;
+    let mutaplasmid_tid = abyssal_mutaplasmid_for_tier(tier);
+    let condensate_qty = 5 + (tier as i32) * 5;
     ctx.db.with_mut_snapshot(|snap| {
         if snap.items.contains_key(&cache_item_id) {
             return;
         }
         let rec = |item_id, type_id, location_id, quantity, singleton| eve_db::InventoryItemRecord {
-            item_id, type_id, owner_id: 500_026, location_id, flag: eve_db::InventoryFlag::None,
-            quantity, singleton, version: 1, ..Default::default()
+            item_id,
+            type_id,
+            owner_id: 500_026,
+            location_id,
+            flag: eve_db::InventoryFlag::None,
+            quantity,
+            singleton,
+            version: 1,
+            ..Default::default()
         };
         snap.items.insert(cache_item_id, rec(cache_item_id, BIOADAPTIVE_CACHE_TYPE_ID, sys_id, 1, true));
         snap.item_positions.insert(cache_item_id, [cache_pos.x, cache_pos.y, cache_pos.z]);
-        // DERIVED: loot table — (1 + tier) Survey Databases and one filament of the activated type per cache.
-        for (type_id, qty) in [(TRIGLAVIAN_SURVEY_DATABASE_TYPE_ID, 1 + tier as i32), (filament_type_id, 1)] {
+        for (type_id, qty) in [
+            (TRIGLAVIAN_SURVEY_DATABASE_TYPE_ID, 1 + tier as i32),
+            (filament_type_id, 1),
+            (mutaplasmid_tid, 1),
+            (ZERO_POINT_CONDENSATE_TYPE_ID, condensate_qty),
+        ] {
             snap.next_entity_id += 1;
             let loot_id = snap.next_entity_id;
             snap.items.insert(loot_id, rec(loot_id, type_id, cache_item_id, qty, false));
         }
+
+        snap.items.insert(subnode_id, rec(subnode_id, EXTRACTION_SUBNODE_TYPE_ID, sys_id, 1, true));
+        snap.item_positions.insert(subnode_id, [subnode_pos.x, subnode_pos.y, subnode_pos.z]);
+        for (type_id, qty) in [
+            (TRIGLAVIAN_SURVEY_DATABASE_TYPE_ID, 1 + tier as i32),
+            (mutaplasmid_tid, 1),
+            (ZERO_POINT_CONDENSATE_TYPE_ID, condensate_qty),
+        ] {
+            snap.next_entity_id += 1;
+            let loot_id = snap.next_entity_id;
+            snap.items.insert(loot_id, rec(loot_id, type_id, subnode_id, qty, false));
+        }
     });
 }
 
-/// Registers an Abyssal room NPC with the NPC AI runtime (`rt.npc_entities`) as a Triglavian Collective
-/// (`500_026`) combatant so `step_extended_npc_ai_sync` acquires and attacks pilots in the pocket.
-fn register_abyssal_room_npc(ctx: &ServerContext, bid: i64, tid: TypeId, sys_id: SolarSystemId, pocket_id: i64, pos: DVec3, mult: f64) {
+#[allow(clippy::too_many_arguments)]
+fn register_abyssal_room_npc(
+    ctx: &ServerContext,
+    bid: i64,
+    tid: TypeId,
+    sys_id: SolarSystemId,
+    pocket_id: i64,
+    pos: DVec3,
+    mult: f64,
+    optimal_range: f64,
+) {
     let attr = |aid: u16| ctx.sde.types.get(&tid).and_then(|t| t.default_attributes.get(&aid).copied());
     let dmg_mult = attr(64).unwrap_or(1.0).max(1.0) * mult;
-    let (em, ex, ki, th) = (attr(114).unwrap_or(0.0), attr(116).unwrap_or(0.0), attr(117).unwrap_or(0.0), attr(118).unwrap_or(0.0));
+    let (em, ex, ki, th) = (
+        attr(114).unwrap_or(0.0),
+        attr(116).unwrap_or(0.0),
+        attr(117).unwrap_or(0.0),
+        attr(118).unwrap_or(0.0),
+    );
     let damage_vector = if em + ex + ki + th > 0.0 {
-        eve_destiny::DamageVector { em: em * dmg_mult, explosive: ex * dmg_mult, kinetic: ki * dmg_mult, thermal: th * dmg_mult }
+        eve_destiny::DamageVector {
+            em: em * dmg_mult,
+            explosive: ex * dmg_mult,
+            kinetic: ki * dmg_mult,
+            thermal: th * dmg_mult,
+        }
     } else {
-        // DERIVED: Triglavian exotic-plasma style thermal/explosive profile when the SDE type has no damage attrs.
-        eve_destiny::DamageVector { em: 0.0, explosive: 75.0, kinetic: 0.0, thermal: 75.0 }
+        eve_destiny::DamageVector {
+            em: 0.0,
+            explosive: 75.0,
+            kinetic: 0.0,
+            thermal: 75.0,
+        }
     };
-    let optimal_range = attr(54).unwrap_or(15_000.0).max(5_000.0);
     let entity = crate::services::combat_crimewatch::ExtendedNpcEntity {
-        ball_id: bid, type_id: tid, faction_id: 500_026, archetype: "Triglavian".into(), solar_system_id: sys_id,
-        spawn_group_id: pocket_id as u32, target_id: None, aggression_threat: HashMap::new(), threat_table: HashMap::new(),
-        bounty_isk: attr(481).unwrap_or(0.0), optimal_range, orbit_range: (optimal_range * 0.6).clamp(2_500.0, 20_000.0),
-        damage_vector, entropic_cycles: 0, drifter_overshield_hp: 0.0, drifter_doomsday_fired: false,
-        web_speed_factor: attr(20).unwrap_or(0.0), web_range: attr(580).unwrap_or(0.0),
-        scram_strength: attr(105).unwrap_or(0.0), scram_range: attr(582).unwrap_or(0.0), neut_amount: attr(97).unwrap_or(0.0),
-        ecm_jammed: false, remote_shield_rep: 0.0, remote_armor_rep: 0.0, remote_rep_range: 0.0, tag_drop_type_id: None,
-        spawn_position: pos, sleeper_wh_class: 0, custom_cargo_loot: None,
+        ball_id: bid,
+        type_id: tid,
+        faction_id: 500_026,
+        archetype: "Triglavian".into(),
+        solar_system_id: sys_id,
+        spawn_group_id: pocket_id as u32,
+        target_id: None,
+        aggression_threat: HashMap::new(),
+        threat_table: HashMap::new(),
+        bounty_isk: attr(481).unwrap_or(0.0),
+        optimal_range,
+        orbit_range: (optimal_range * 0.6).clamp(2_500.0, 20_000.0),
+        damage_vector,
+        entropic_cycles: 0,
+        drifter_overshield_hp: 0.0,
+        drifter_doomsday_fired: false,
+        web_speed_factor: attr(20).unwrap_or(0.0),
+        web_range: attr(580).unwrap_or(0.0),
+        scram_strength: attr(105).unwrap_or(0.0),
+        scram_range: attr(582).unwrap_or(0.0),
+        neut_amount: attr(97).unwrap_or(0.0),
+        ecm_jammed: false,
+        remote_shield_rep: 0.0,
+        remote_armor_rep: 0.0,
+        remote_rep_range: 0.0,
+        tag_drop_type_id: None,
+        spawn_position: pos,
+        sleeper_wh_class: 0,
+        custom_cargo_loot: None,
     };
     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
         rt.npc_entities.insert(bid, entity);
     });
 }
 
-/// `Triglavian Bioadaptive Cache Wreck` (SDE type 48120).
-pub const BIOADAPTIVE_CACHE_WRECK_TYPE_ID: TypeId = 48120;
+/// Proactively unlocks the Abyssal room conduit immediately when the final room NPC is destroyed on a ballpark tick.
+pub fn on_abyssal_room_npc_destroyed_in_ballpark(
+    ballpark: &mut eve_destiny::Ballpark,
+    db: &std::sync::Arc<eve_db::WorldRepository>,
+    solar_system_id: SolarSystemId,
+    npc_ball_id: i64,
+) -> bool {
+    if !(32_000_000..=32_999_999).contains(&solar_system_id) {
+        return false;
+    }
+    let now_sec = db.clock().now_unix_secs();
+    let unlocked = with_pve_special_reg_db(db, now_sec, |reg| {
+        let mut target: Option<(i64, usize)> = None;
+        for p in reg.abyssal_pockets.values().filter(|p| !p.completed && !p.collapsed_destroyed) {
+            for (r_idx, r) in p.rooms.iter().enumerate() {
+                if !r.cleared && r.npc_ball_ids.contains(&npc_ball_id) {
+                    let all_gone = r
+                        .npc_ball_ids
+                        .iter()
+                        .all(|&bid| bid == npc_ball_id || !ballpark.balls.contains_key(&bid));
+                    if all_gone {
+                        target = Some((p.pocket_id, r_idx));
+                        break;
+                    }
+                }
+            }
+            if target.is_some() {
+                break;
+            }
+        }
+        let Some((pid, r_idx)) = target else {
+            return None;
+        };
+        for p in reg.abyssal_pockets.values_mut().filter(|p| p.pocket_id == pid) {
+            p.rooms[r_idx].cleared = true;
+            p.rooms[r_idx].gate_unlocked_at_sec = Some(now_sec);
+        }
+        Some(1_895_000_000 + pid * 10 + (r_idx as i64 + 1))
+    });
+    if let Some(gate_id) = unlocked {
+        ballpark.set_ball_interactive(gate_id, true);
+        ballpark.emit_client_controller_event(gate_id, None, "GateActivate", 1, None);
+        return true;
+    }
+    false
+}
 
-/// Death-hook handler: when an Abyssal room's Bioadaptive Cache is destroyed, spawn its wreck in space and
-/// move the cache's persisted loot (`location_id == cache_id`) into the wreck so the pilot can loot it.
+/// Proactively unlocks the Abyssal room conduit immediately when the final room NPC is destroyed via async damage/death hooks.
+pub async fn on_abyssal_room_npc_destroyed_core(
+    systems: &std::sync::Arc<crate::system_actor::SystemRegistry>,
+    db: &std::sync::Arc<eve_db::WorldRepository>,
+    solar_system_id: SolarSystemId,
+    npc_ball_id: i64,
+) -> bool {
+    if !(32_000_000..=32_999_999).contains(&solar_system_id) {
+        return false;
+    }
+    let now_sec = db.clock().now_unix_secs();
+    let cand = with_pve_special_reg_db(db, now_sec, |reg| {
+        for p in reg.abyssal_pockets.values().filter(|p| !p.completed && !p.collapsed_destroyed) {
+            for (r_idx, r) in p.rooms.iter().enumerate() {
+                if !r.cleared && r.npc_ball_ids.contains(&npc_ball_id) {
+                    return Some((p.pocket_id, r_idx, r.npc_ball_ids.clone()));
+                }
+            }
+        }
+        None
+    });
+    let Some((pid, r_idx, npc_ids)) = cand else {
+        return false;
+    };
+    let sys_handle = systems.get_or_spawn(solar_system_id);
+    for &bid in &npc_ids {
+        if bid != npc_ball_id && sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_some() {
+            return false;
+        }
+    }
+    let newly_unlocked = with_pve_special_reg_db(db, now_sec, |reg| {
+        let mut changed = false;
+        for p in reg.abyssal_pockets.values_mut().filter(|p| p.pocket_id == pid) {
+            if !p.rooms[r_idx].cleared {
+                p.rooms[r_idx].cleared = true;
+                p.rooms[r_idx].gate_unlocked_at_sec = Some(now_sec);
+                changed = true;
+            }
+        }
+        changed
+    });
+    if newly_unlocked {
+        let gate_id = 1_895_000_000 + pid * 10 + (r_idx as i64 + 1);
+        let _ = sys_handle
+            .emit_destiny_event(
+                gate_id,
+                eve_destiny::DestinyEvent::SetBallInteractive {
+                    ball_id: gate_id,
+                    is_interactive: true,
+                },
+            )
+            .await;
+        let _ = sys_handle
+            .emit_destiny_event(
+                gate_id,
+                eve_destiny::DestinyEvent::OnClientControllerEvent {
+                    ball_id: gate_id,
+                    target_id: None,
+                    event_name: "GateActivate".into(),
+                    value: 1,
+                    delay: None,
+                },
+            )
+            .await;
+    }
+    newly_unlocked
+}
+
 pub async fn on_abyssal_cache_destroyed_core(
     systems: &std::sync::Arc<crate::system_actor::SystemRegistry>,
     db: &std::sync::Arc<eve_db::WorldRepository>,
@@ -225,7 +600,10 @@ pub async fn on_abyssal_cache_destroyed_core(
     killer_char_id: Option<CharacterId>,
 ) {
     let is_cache = db.with_snapshot(|snap| {
-        snap.items.get(&ball_id).is_some_and(|i| i.type_id == BIOADAPTIVE_CACHE_TYPE_ID && i.location_id == solar_system_id as i64)
+        snap.items.get(&ball_id).is_some_and(|i| {
+            matches!(i.type_id, BIOADAPTIVE_CACHE_TYPE_ID | EXTRACTION_SUBNODE_TYPE_ID)
+                && i.location_id == solar_system_id as i64
+        })
     });
     if !is_cache {
         return;
@@ -235,11 +613,20 @@ pub async fn on_abyssal_cache_destroyed_core(
         snap.items.remove(&ball_id);
         snap.next_entity_id += 1;
         let wreck_id = snap.next_entity_id;
-        snap.items.insert(wreck_id, eve_db::InventoryItemRecord {
-            item_id: wreck_id, type_id: BIOADAPTIVE_CACHE_WRECK_TYPE_ID, owner_id: killer_char_id.unwrap_or(500_026),
-            location_id: solar_system_id as i64, flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true,
-            version: 1, ..Default::default()
-        });
+        snap.items.insert(
+            wreck_id,
+            eve_db::InventoryItemRecord {
+                item_id: wreck_id,
+                type_id: BIOADAPTIVE_CACHE_WRECK_TYPE_ID,
+                owner_id: killer_char_id.unwrap_or(500_026),
+                location_id: solar_system_id as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
         snap.item_positions.insert(wreck_id, pos);
         for it in snap.items.values_mut().filter(|i| i.location_id == ball_id) {
             it.location_id = wreck_id;
@@ -249,28 +636,14 @@ pub async fn on_abyssal_cache_destroyed_core(
     });
     let _ = systems
         .get_or_spawn(solar_system_id)
-        .spawn_ball(make_site_npc_ball(wreck_id, BIOADAPTIVE_CACHE_WRECK_TYPE_ID, DVec3::new(pos[0], pos[1], pos[2])))
+        .spawn_ball(make_site_npc_ball(
+            wreck_id,
+            BIOADAPTIVE_CACHE_WRECK_TYPE_ID,
+            DVec3::new(pos[0], pos[1], pos[2]),
+        ))
         .await;
 }
 
-pub fn restore_abyssal_weather_dogma_modifiers(
-    ctx: &ServerContext,
-    ship_id: ItemId,
-    saved_attrs: &HashMap<AttributeId, f64>,
-) {
-    if saved_attrs.is_empty() {
-        return;
-    }
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ship) = snap.items.get_mut(&ship_id) {
-            for (&attr_id, &val) in saved_attrs {
-                ship.dynamic_attributes.insert(attr_id, val);
-            }
-        }
-    });
-}
-
-/// Enters an Abyssal Deadspace pocket for `char_id` on filament activation (`feat:lifecycle.abyssal-restart`).
 pub async fn enter_abyssal_pocket_for_character(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -283,9 +656,20 @@ pub async fn enter_abyssal_pocket_for_character(
     let weather = classify_abyssal_filament(filament_type_id)
         .map(|(_, w)| w)
         .unwrap_or(AbyssalWeatherKind::Electrical);
-    let penalty_pct = match tier { 0 | 1 => 30.0, 2 | 3 => 50.0, _ => 70.0 };
+    let penalty_pct = match tier {
+        0 | 1 => 30.0,
+        2 | 3 => 50.0,
+        _ => 70.0,
+    };
     let bonus_pct = 50.0;
     let diff_mult = 1.0 + (tier as f64) * 1.25;
+    let saved_attrs = apply_abyssal_weather_dogma_modifiers_to_ship(
+        ctx,
+        ship_id,
+        weather,
+        penalty_pct,
+        bonus_pct,
+    );
     let origin_pos = ctx.db.with_snapshot(|snap| {
         snap.item_positions
             .get(&ship_id)
@@ -294,41 +678,170 @@ pub async fn enter_abyssal_pocket_for_character(
     });
     let abyssal_sys_id: SolarSystemId = 32_000_001;
     let sys_handle = ctx.systems.get_or_spawn(abyssal_sys_id);
-    let (pocket_id, room1_npcs, r1_cache) = with_pve_special_reg(ctx, |reg| {
-        let pid = 600_000 + next_spec_seq(reg);
-        let now = spec_now_sec(reg);
-        let collapse = now + 1_200;
-        let mut rooms_vec = Vec::with_capacity(3);
-        for (r_idx, did, r_name) in [(1_u8, 5810_u32, "Canyon"), (2, 6047, "Rise"), (3, 6048, "Forest Opening")] {
-            let npc_count = (2 + (tier as usize / 2)).clamp(2, 5);
-            let npc_ids: Vec<i64> = (0..npc_count).map(|n| pid * 100 + (r_idx as i64) * 10 + (n as i64) + 1).collect();
-            rooms_vec.push(AbyssalRoomRecord {
-                room_index: r_idx, dungeon_id: did, dungeon_name: r_name.into(),
-                npc_ball_ids: npc_ids, cache_item_id: 1_896_000_000 + pid * 10 + (r_idx as i64), cleared: false,
-            });
+    let (pocket_id, room1_npcs, r1_cache, already_spawned, started_at, collapse_at, grid_offset) =
+        with_pve_special_reg(ctx, |reg| {
+            if let Some(existing) = reg
+                .abyssal_traces
+                .values()
+                .find(|t| t.entered_char_ids.contains(&char_id))
+                .and_then(|t| t.pocket_id)
+                .and_then(|pid| {
+                    reg.abyssal_pockets
+                        .values()
+                        .find(|p| p.pocket_id == pid && !p.completed && !p.collapsed_destroyed)
+                        .cloned()
+                })
+            {
+                let pid = existing.pocket_id;
+                let r1_npcs = existing.rooms[0].npc_ball_ids.clone();
+                let r1_cache = existing.rooms[0].cache_item_id;
+                let started = existing.started_at_sec;
+                let collapse = existing.collapse_at_sec;
+                let goffset = existing.grid_offset;
+                let mut joined = existing;
+                joined.character_id = char_id;
+                joined.ship_id = ship_id;
+                joined.current_room = 1;
+                joined.origin_position = origin_pos;
+                joined.saved_ship_attrs = saved_attrs.clone();
+                if !joined.fleet_ship_ids.contains(&ship_id) {
+                    joined.fleet_ship_ids.push(ship_id);
+                }
+                for p in reg.abyssal_pockets.values_mut().filter(|p| p.pocket_id == pid) {
+                    if !p.fleet_ship_ids.contains(&ship_id) {
+                        p.fleet_ship_ids.push(ship_id);
+                    }
+                }
+                reg.abyssal_pockets.insert(char_id, joined);
+                return (pid, r1_npcs, r1_cache, true, started, collapse, goffset);
+            }
+
+            let mut used_slots: HashSet<i64> = HashSet::new();
+            for active_p in reg
+                .abyssal_pockets
+                .values()
+                .filter(|p| !p.completed && !p.collapsed_destroyed)
+            {
+                let slot = (active_p.grid_offset[1] / 10_000_000.0).round() as i64;
+                used_slots.insert(slot);
+            }
+            let slot = (0_i64..10_000).find(|s| !used_slots.contains(s)).unwrap_or(0);
+            let goffset = [0.0, (slot as f64) * 10_000_000.0, 0.0];
+
+            let pid = 600_000 + next_spec_seq(reg);
+            let now = ctx.now_unix();
+            let collapse = now + 1_200;
+            let mut rooms_vec = Vec::with_capacity(3);
+            for (r_idx, did, r_name) in [
+                (1_u8, 5810_u32, "Canyon"),
+                (2, 6047, "Rise"),
+                (3, 6048, "Forest Opening"),
+            ] {
+                let npc_count = (2 + (tier as usize / 2)).clamp(2, 5);
+                let npc_ids: Vec<i64> = (0..npc_count)
+                    .map(|n| pid * 100 + (r_idx as i64) * 10 + (n as i64) + 1)
+                    .collect();
+                rooms_vec.push(AbyssalRoomRecord {
+                    room_index: r_idx,
+                    dungeon_id: did,
+                    dungeon_name: r_name.into(),
+                    npc_ball_ids: npc_ids,
+                    cache_item_id: 1_896_000_000 + pid * 10 + (r_idx as i64),
+                    cleared: false,
+                    gate_unlocked_at_sec: None,
+                });
+            }
+            let rooms: [AbyssalRoomRecord; 3] = rooms_vec.try_into().unwrap();
+            let r1_npcs = rooms[0].npc_ball_ids.clone();
+            let r1_cache = rooms[0].cache_item_id;
+            let trace_id = reg
+                .abyssal_traces
+                .values_mut()
+                .filter(|t| t.pocket_id.is_none() && t.entered_char_ids.contains(&char_id))
+                .max_by_key(|t| t.trace_ball_id)
+                .map(|t| {
+                    t.pocket_id = Some(pid);
+                    t.expires_at_sec = collapse;
+                    t.trace_ball_id
+                })
+                .unwrap_or(0);
+            reg.abyssal_pockets.insert(
+                char_id,
+                AbyssalPocketSession {
+                    pocket_id: pid,
+                    character_id: char_id,
+                    ship_id,
+                    origin_solar_system_id: origin_sys,
+                    origin_position: origin_pos,
+                    grid_offset: goffset,
+                    abyssal_solar_system_id: abyssal_sys_id,
+                    filament_type_id,
+                    tier,
+                    weather,
+                    weather_penalty_pct: penalty_pct,
+                    weather_bonus_pct: bonus_pct,
+                    npc_difficulty_mult: diff_mult,
+                    current_room: 1,
+                    rooms,
+                    started_at_sec: now,
+                    collapse_at_sec: collapse,
+                    saved_ship_attrs: saved_attrs,
+                    completed: false,
+                    collapsed_destroyed: false,
+                    trace_ball_id: trace_id,
+                    fleet_ship_ids: vec![ship_id],
+                },
+            );
+            (pid, r1_npcs, r1_cache, false, now, collapse, goffset)
+        });
+    crate::sp6_lifecycle::register_abyssal_session(
+        ctx,
+        char_id,
+        ship_id,
+        abyssal_sys_id,
+        origin_sys,
+        started_at,
+        collapse_at,
+    );
+    if !already_spawned {
+        spawn_abyssal_room_contents(
+            ctx,
+            &sys_handle,
+            pocket_id,
+            1,
+            &room1_npcs,
+            r1_cache,
+            tier,
+            filament_type_id,
+            diff_mult,
+            0.0,
+        )
+        .await;
+    } else {
+        let r1_gate = 1_895_000_000 + pocket_id * 10 + 1;
+        if sys_handle.get_ball_snapshot(r1_gate).await.ok().flatten().is_none() {
+            let mut conduit_cs = ctx.build_type_combat_state(abyssal_room_gate_type(1));
+            conduit_cs.undock_invulnerable_remaining_ticks = 999_999;
+            let _ = sys_handle
+                .spawn_ball_with_combat(
+                    make_site_npc_ball(
+                        r1_gate,
+                        abyssal_room_gate_type(1),
+                        DVec3::from_array(grid_offset),
+                    ),
+                    conduit_cs,
+                )
+                .await;
         }
-        let rooms: [AbyssalRoomRecord; 3] = rooms_vec.try_into().unwrap();
-        let r1_npcs = rooms[0].npc_ball_ids.clone();
-        let r1_cache = rooms[0].cache_item_id;
-        reg.abyssal_pockets.insert(
-            char_id,
-            AbyssalPocketSession {
-                pocket_id: pid, character_id: char_id, ship_id,
-                origin_solar_system_id: origin_sys, origin_position: origin_pos,
-                abyssal_solar_system_id: abyssal_sys_id,
-                filament_type_id, tier, weather,
-                weather_penalty_pct: penalty_pct, weather_bonus_pct: bonus_pct,
-                npc_difficulty_mult: diff_mult, current_room: 1, rooms,
-                started_at_sec: now, collapse_at_sec: collapse,
-                saved_ship_attrs: HashMap::new(), completed: false, collapsed_destroyed: false,
-            },
-        );
-        (pid, r1_npcs, r1_cache)
-    });
-    spawn_abyssal_room_contents(ctx, &sys_handle, pocket_id, 1, &room1_npcs, r1_cache, tier, filament_type_id, diff_mult, 0.0).await;
+    }
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) { ch.solar_system_id = abyssal_sys_id; ch.active_ship_id = ship_id; }
-        if let Some(it) = snap.items.get_mut(&ship_id) { it.location_id = abyssal_sys_id as i64; }
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = abyssal_sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        if let Some(it) = snap.items.get_mut(&ship_id) {
+            it.location_id = abyssal_sys_id as i64;
+        }
     });
     session.solar_system_id = Some(abyssal_sys_id);
     (pocket_id, room1_npcs)
@@ -347,10 +860,6 @@ fn random_offset_around_trace_origin(ctx: &ServerContext, origin_pos: [f64; 3]) 
     ]
 }
 
-/// Destroys the character's ship, fitted/cargo items, and active implants on Abyssal pocket 20-minute
-/// collapse, cleans up the pocket's Bioadaptive Caches, markers, and NPCs, records both ship and
-/// capsule (`670`) killmails, and respawns the character in a starter corvette (`606`) at their home
-/// station (`feat:pve.abyssal-pocket`, `feat:lifecycle.abyssal-disconnect`, `feat:lifecycle.abyssal-restart`).
 pub fn collapse_abyssal_pocket_and_pod_pilot(
     ctx: &ServerContext,
     char_id: CharacterId,
@@ -367,13 +876,44 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
     abyssal_sys: SolarSystemId,
     now_unix: u64,
 ) -> SolarSystemId {
-    // 1. Collect pocket ball/cache/NPC IDs inside `with_pve_special_reg` without calling `ctx.systems`
-    //    while holding the DB snapshot lock (`Systems -> Ballpark -> Database Snapshot`).
     let pocket_cleanup = with_pve_special_reg(ctx, |reg| {
-        let p = reg.abyssal_pockets.get_mut(&char_id)?;
-        p.collapsed_destroyed = true;
-        p.completed = true;
-        let pid = p.pocket_id;
+        let (pid, pocket_sys, origin_sys, bound_tid, npcs) = {
+            let p = reg.abyssal_pockets.get_mut(&char_id)?;
+            p.collapsed_destroyed = true;
+            p.completed = true;
+            let npcs: Vec<i64> = p
+                .rooms
+                .iter()
+                .flat_map(|r| r.npc_ball_ids.iter().copied())
+                .collect();
+            (
+                p.pocket_id,
+                p.abyssal_solar_system_id,
+                p.origin_solar_system_id,
+                p.trace_ball_id,
+                npcs,
+            )
+        };
+        let any_other_alive = reg
+            .abyssal_pockets
+            .values()
+            .any(|other| other.pocket_id == pid && !other.completed && !other.collapsed_destroyed);
+        let mut trace_ids = Vec::new();
+        if !any_other_alive {
+            if bound_tid > 0 {
+                trace_ids.push(bound_tid);
+            }
+            reg.abyssal_traces.retain(|&tid, t| {
+                if t.pocket_id == Some(pid) || (bound_tid > 0 && tid == bound_tid) {
+                    if !trace_ids.contains(&tid) {
+                        trace_ids.push(tid);
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+        }
         let markers = [
             1_895_000_000 + pid * 10 + 1,
             1_895_000_000 + pid * 10 + 2,
@@ -383,165 +923,212 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
             1_896_000_000 + pid * 10 + 1,
             1_896_000_000 + pid * 10 + 2,
             1_896_000_000 + pid * 10 + 3,
+            1_896_500_000 + pid * 10 + 1,
+            1_896_500_000 + pid * 10 + 2,
+            1_896_500_000 + pid * 10 + 3,
         ];
-        let npcs: Vec<i64> = p
-            .rooms
-            .iter()
-            .flat_map(|r| r.npc_ball_ids.iter().copied())
-            .collect();
-        Some((p.abyssal_solar_system_id, markers, caches, npcs))
+        let mut env_balls = Vec::new();
+        for r in 1..=3_i64 {
+            for c in 1..=3_i64 {
+                env_balls.push(1_898_000_000 + pid * 100 + r * 10 + c);
+            }
+            for py in 1..=4_i64 {
+                env_balls.push(1_899_000_000 + pid * 100 + r * 10 + py);
+            }
+        }
+        Some((
+            pocket_sys,
+            origin_sys,
+            any_other_alive,
+            trace_ids,
+            markers,
+            caches,
+            env_balls,
+            npcs,
+        ))
     });
 
-    // 2. Despawn ship, room markers, Bioadaptive Caches, and NPCs outside any DB snapshot lock.
     let eff_pocket_sys = pocket_cleanup.as_ref().map(|c| c.0).unwrap_or(abyssal_sys);
     let handle = ctx.systems.get_or_spawn(eff_pocket_sys);
     handle.try_remove_ball(ship_id);
-    if let Some((_, ref markers, ref caches, ref npcs)) = pocket_cleanup {
-        for &mid in markers {
-            handle.try_remove_ball(mid);
+    if let Some((_, origin_sys, any_other_alive, ref trace_ids, ref markers, ref caches, ref env_balls, ref npcs)) =
+        pocket_cleanup
+    {
+        let origin_handle = ctx.systems.get_or_spawn(origin_sys);
+        for &tid in trace_ids {
+            origin_handle.try_remove_ball(tid);
         }
-        for &cid in caches {
-            handle.try_remove_ball(cid);
-        }
-        for &nid in npcs {
-            handle.try_remove_ball(nid);
-        }
-        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-            for nid in npcs {
-                rt.npc_entities.remove(nid);
+        if !any_other_alive {
+            for &mid in markers {
+                handle.try_remove_ball(mid);
             }
-        });
+            for &cid in caches {
+                handle.try_remove_ball(cid);
+            }
+            for &eid in env_balls {
+                handle.try_remove_ball(eid);
+            }
+            for &nid in npcs {
+                handle.try_remove_ball(nid);
+            }
+            crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                for nid in npcs {
+                    rt.npc_entities.remove(nid);
+                }
+            });
+        }
     }
     ctx.invalidate_ship_fitting(ship_id);
+    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        rt.insurance_contracts.remove(&ship_id);
+    });
+    crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(ctx, |st| {
+        st.insurance_contracts.remove(&ship_id);
+    });
 
-    // 3. Remove Bioadaptive Cache items + child loot, destroy ship + modules/cargo + active implants,
-    //    record ship & capsule (670) killmails, and respawn pilot in a starter corvette (606) at home station.
-    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, snap| {
-        st.abyssal_sessions.remove(&char_id);
-        if let Some((_, _, ref caches, _)) = pocket_cleanup {
-            for &cid in caches {
-                snap.items.remove(&cid);
-                snap.item_positions.remove(&cid);
+    let (home_sys_id, _home_station_id, _corvette_id, cleared_zarzakh_gate) =
+        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, snap| {
+            st.abyssal_sessions.remove(&char_id);
+            if let Some((_, _, false, _, _, ref caches, _, _)) = pocket_cleanup {
+                for &cid in caches {
+                    snap.items.remove(&cid);
+                    snap.item_positions.remove(&cid);
+                }
+                snap.items.retain(|_, item| !caches.contains(&item.location_id));
             }
-            snap.items.retain(|_, item| !caches.contains(&item.location_id));
-        }
 
-        let ship_type_id = snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(606);
-        let base_price = ctx
-            .sde
-            .types
-            .get(&ship_type_id)
-            .map(|t| t.base_price)
-            .unwrap_or(250_000.0);
+            let ship_type_id = snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(606);
+            let base_price = ctx
+                .sde
+                .types
+                .get(&ship_type_id)
+                .map(|t| t.base_price)
+                .unwrap_or(250_000.0);
 
-        snap.items.remove(&ship_id);
-        snap.item_positions.remove(&ship_id);
-        snap.module_online_states.remove(&ship_id);
-        st.ship_combat_hp.remove(&ship_id);
-        snap.items.retain(|_, item| {
-            item.location_id != ship_id
-                && !(item.owner_id == char_id && item.flag == eve_db::InventoryFlag::Implant)
+            snap.items.remove(&ship_id);
+            snap.item_positions.remove(&ship_id);
+            snap.module_online_states.remove(&ship_id);
+            st.ship_combat_hp.remove(&ship_id);
+            snap.items.retain(|_, item| {
+                item.location_id != ship_id
+                    && !(item.owner_id == char_id && item.flag == eve_db::InventoryFlag::Implant)
+            });
+            snap.active_implants.remove(&char_id);
+            let cleared_lock = snap.zarzakh_gate_locks.remove(&char_id).map(|(gid, _)| gid);
+
+            let (home_station_id, home_sys_id, const_id, reg_id) =
+                resolve_character_home_station_and_system(snap, &ctx.sde, char_id);
+
+            snap.next_entity_id += 1;
+            let corvette_id = snap.next_entity_id;
+            snap.items.insert(
+                corvette_id,
+                eve_db::InventoryItemRecord {
+                    item_id: corvette_id,
+                    type_id: 606,
+                    owner_id: char_id,
+                    location_id: home_station_id,
+                    flag: eve_db::InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.active_ship_id = corvette_id;
+                ch.station_id = Some(home_station_id);
+                ch.structure_id = None;
+                ch.solar_system_id = home_sys_id;
+                ch.constellation_id = const_id;
+                ch.region_id = reg_id;
+                ch.version += 1;
+                ch.system_epoch += 1;
+            }
+
+            snap.next_entity_id += 1;
+            let ship_kid = snap.next_entity_id;
+            snap.record_killmail(
+                eve_db::KillmailRecord {
+                    kill_id: ship_kid,
+                    victim_character_id: char_id,
+                    attacker_character_id: 0,
+                    attacker_corp_id: 1_000_298,
+                    solar_system_id: eff_pocket_sys,
+                    ship_type_id,
+                    total_value_isk: base_price,
+                    ..Default::default()
+                },
+                now_unix,
+            );
+            snap.next_entity_id += 1;
+            let pod_kid = snap.next_entity_id;
+            snap.record_killmail(
+                eve_db::KillmailRecord {
+                    kill_id: pod_kid,
+                    victim_character_id: char_id,
+                    attacker_character_id: 0,
+                    attacker_corp_id: 1_000_298,
+                    solar_system_id: eff_pocket_sys,
+                    ship_type_id: 670,
+                    total_value_isk: 1_000.0,
+                    ..Default::default()
+                },
+                now_unix,
+            );
+            (home_sys_id, home_station_id, corvette_id, cleared_lock)
         });
-        snap.active_implants.remove(&char_id);
 
-        let home_station_id = snap
-            .characters
-            .get(&char_id)
-            .map(|c| c.home_station_id)
-            .unwrap_or(60_003_760);
-        let home_sys_id = ctx
-            .sde
-            .stations
-            .get(&home_station_id)
-            .map(|s| s.solar_system_id)
-            .unwrap_or(30_000_142);
-        let (const_id, reg_id) = ctx
-            .sde
-            .solar_systems
-            .get(&home_sys_id)
-            .map(|s| (s.constellation_id, s.region_id))
-            .unwrap_or((20_000_020, 10_000_002));
-
-        snap.next_entity_id += 1;
-        let corvette_id = snap.next_entity_id;
-        snap.items.insert(
-            corvette_id,
-            eve_db::InventoryItemRecord {
-                item_id: corvette_id,
-                type_id: 606, // Velator rookie corvette
-                owner_id: char_id,
-                location_id: home_station_id,
-                flag: eve_db::InventoryFlag::Hangar,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                ..Default::default()
-            },
-        );
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.active_ship_id = corvette_id;
-            ch.station_id = Some(home_station_id);
-            ch.structure_id = None;
-            ch.solar_system_id = home_sys_id;
-            ch.constellation_id = const_id;
-            ch.region_id = reg_id;
-            ch.version += 1;
-            ch.system_epoch += 1;
-        }
-
-        snap.next_entity_id += 1;
-        let ship_kid = snap.next_entity_id;
-        snap.record_killmail(
-            eve_db::KillmailRecord {
-                kill_id: ship_kid,
-                victim_character_id: char_id,
-                attacker_character_id: 0,
-                attacker_corp_id: 1_000_298,
-                solar_system_id: eff_pocket_sys,
-                ship_type_id,
-                total_value_isk: base_price,
-                ..Default::default()
-            },
+    if let Some(locked_gate_id) = cleared_zarzakh_gate {
+        crate::services::quasar_sov_services::publish_stargate_lock_deactivated_notice(
+            &ctx.quasar_gateway,
+            char_id,
+            30_100_000,
+            locked_gate_id,
             now_unix,
         );
-        snap.next_entity_id += 1;
-        let pod_kid = snap.next_entity_id;
-        snap.record_killmail(
-            eve_db::KillmailRecord {
-                kill_id: pod_kid,
-                victim_character_id: char_id,
-                attacker_character_id: 0,
-                attacker_corp_id: 1_000_298,
-                solar_system_id: eff_pocket_sys,
-                ship_type_id: 670, // Capsule
-                total_value_isk: 1_000.0,
-                ..Default::default()
-            },
-            now_unix,
-        );
-        home_sys_id
-    })
+    }
+    crate::services::space_destiny::record_session_change_timer(
+        ctx,
+        char_id,
+        now_unix,
+        home_sys_id,
+        0,
+        "podding",
+    );
+    crate::services::map_service::record_solar_system_visit(ctx, char_id, home_sys_id);
+    home_sys_id
 }
 
-/// Evacuates active Abyssal pockets on daily downtime (`feat:lifecycle.abyssal-restart`), returning ships and pilots to their filament origin system at a random point near the trace origin.
 pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
-    let evacuated: Vec<(CharacterId, ItemId, SolarSystemId, [f64; 3], HashMap<AttributeId, f64>)> = with_pve_special_reg(ctx, |reg| {
-        let mut out = Vec::new();
-        for p in reg.abyssal_pockets.values_mut() {
-            if !p.completed && !p.collapsed_destroyed {
-                p.completed = true;
-                out.push((p.character_id, p.ship_id, p.origin_solar_system_id, p.origin_position, p.saved_ship_attrs.clone()));
+    let evacuated: Vec<(CharacterId, ItemId, SolarSystemId, [f64; 3], HashMap<AttributeId, f64>)> =
+        with_pve_special_reg(ctx, |reg| {
+            let mut out = Vec::new();
+            for p in reg.abyssal_pockets.values_mut() {
+                if !p.completed && !p.collapsed_destroyed {
+                    p.completed = true;
+                    out.push((
+                        p.character_id,
+                        p.ship_id,
+                        p.origin_solar_system_id,
+                        p.origin_position,
+                        p.saved_ship_attrs.clone(),
+                    ));
+                }
             }
-        }
-        out
-    });
+            out
+        });
     for (cid, sid, origin_sys, origin_pos, saved_attrs) in &evacuated {
         restore_abyssal_weather_dogma_modifiers(ctx, *sid, saved_attrs);
         crate::sp6_lifecycle::clear_abyssal_session(ctx, *cid);
         let evacuated_pos = random_offset_around_trace_origin(ctx, *origin_pos);
         ctx.db.with_mut_snapshot(|snap| {
-            if let Some(ch) = snap.characters.get_mut(cid) { ch.solar_system_id = *origin_sys; }
-            if let Some(sh) = snap.items.get_mut(sid) { sh.location_id = *origin_sys as i64; }
+            if let Some(ch) = snap.characters.get_mut(cid) {
+                ch.solar_system_id = *origin_sys;
+            }
+            if let Some(sh) = snap.items.get_mut(sid) {
+                sh.location_id = *origin_sys as i64;
+            }
             snap.item_positions.insert(*sid, evacuated_pos);
         });
     }
@@ -551,16 +1138,30 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
 pub enum AbyssalLoginAction {
     Active(SolarSystemId),
     CollapsedDestroy { ship_id: ItemId, abyssal_sys: SolarSystemId },
-    Evacuated { origin_sys: SolarSystemId, origin_pos: [f64; 3], saved_attrs: HashMap<AttributeId, f64> },
+    Evacuated {
+        origin_sys: SolarSystemId,
+        origin_pos: [f64; 3],
+        saved_attrs: HashMap<AttributeId, f64>,
+    },
 }
 
-/// Ensures a character logging in inside Abyssal space (`32_000_000..33_000_000`) either resumes their intact pocket,
-/// has their ship+pod destroyed if the 20-minute timer expired, or returns to the filament origin system (`feat:lifecycle.abyssal-restart`).
-pub fn reconcile_abyssal_login(ctx: &ServerContext, char_id: CharacterId, cur_sys: SolarSystemId, ship_id: ItemId) -> SolarSystemId {
-    if !(32_000_000..33_000_000).contains(&cur_sys) { return cur_sys; }
+pub fn reconcile_abyssal_login(
+    ctx: &ServerContext,
+    char_id: CharacterId,
+    cur_sys: SolarSystemId,
+    ship_id: ItemId,
+) -> SolarSystemId {
+    if !(32_000_000..33_000_000).contains(&cur_sys) {
+        return cur_sys;
+    }
     let has_sp6_only = with_pve_special_reg(ctx, |reg| !reg.abyssal_pockets.contains_key(&char_id))
         && crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.abyssal_sessions.contains_key(&char_id));
-    if has_sp6_only { return cur_sys; }
+    if has_sp6_only {
+        return cur_sys;
+    }
+    let fallback_sys = ctx.db.with_snapshot(|snap| {
+        resolve_character_home_station_and_system(snap, &ctx.sde, char_id).1
+    });
     let action = with_pve_special_reg(ctx, |reg| {
         let now = spec_now_sec(reg);
         if let Some(p) = reg.abyssal_pockets.get_mut(&char_id) {
@@ -570,22 +1171,45 @@ pub fn reconcile_abyssal_login(ctx: &ServerContext, char_id: CharacterId, cur_sy
             if !p.completed && (p.collapsed_destroyed || now >= p.collapse_at_sec) {
                 p.collapsed_destroyed = true;
                 p.completed = true;
-                return AbyssalLoginAction::CollapsedDestroy { ship_id: p.ship_id, abyssal_sys: p.abyssal_solar_system_id };
+                return AbyssalLoginAction::CollapsedDestroy {
+                    ship_id: p.ship_id,
+                    abyssal_sys: p.abyssal_solar_system_id,
+                };
             }
-            return AbyssalLoginAction::Evacuated { origin_sys: p.origin_solar_system_id, origin_pos: p.origin_position, saved_attrs: p.saved_ship_attrs.clone() };
+            return AbyssalLoginAction::Evacuated {
+                origin_sys: p.origin_solar_system_id,
+                origin_pos: p.origin_position,
+                saved_attrs: p.saved_ship_attrs.clone(),
+            };
         }
-        AbyssalLoginAction::Evacuated { origin_sys: 30_000_142, origin_pos: [145_000.0, -75_000.0, 42_000.0], saved_attrs: HashMap::new() }
+        AbyssalLoginAction::Evacuated {
+            origin_sys: fallback_sys,
+            origin_pos: [145_000.0, -75_000.0, 42_000.0],
+            saved_attrs: HashMap::new(),
+        }
     });
     match action {
         AbyssalLoginAction::Active(abyssal_sys) => abyssal_sys,
-        AbyssalLoginAction::CollapsedDestroy { ship_id: sid, abyssal_sys } => collapse_abyssal_pocket_and_pod_pilot(ctx, char_id, sid, abyssal_sys),
-        AbyssalLoginAction::Evacuated { origin_sys, origin_pos, saved_attrs } => {
-            if !saved_attrs.is_empty() { restore_abyssal_weather_dogma_modifiers(ctx, ship_id, &saved_attrs); }
+        AbyssalLoginAction::CollapsedDestroy { ship_id: sid, abyssal_sys } => {
+            collapse_abyssal_pocket_and_pod_pilot(ctx, char_id, sid, abyssal_sys)
+        }
+        AbyssalLoginAction::Evacuated {
+            origin_sys,
+            origin_pos,
+            saved_attrs,
+        } => {
+            if !saved_attrs.is_empty() {
+                restore_abyssal_weather_dogma_modifiers(ctx, ship_id, &saved_attrs);
+            }
             let rand_pos = random_offset_around_trace_origin(ctx, origin_pos);
             ctx.db.with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&char_id) { ch.solar_system_id = origin_sys; }
+                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    ch.solar_system_id = origin_sys;
+                }
                 if let Some(sh) = snap.items.get_mut(&ship_id) {
-                    if sh.location_id == cur_sys as i64 { sh.location_id = origin_sys as i64; }
+                    if sh.location_id == cur_sys as i64 {
+                        sh.location_id = origin_sys as i64;
+                    }
                 }
                 snap.item_positions.entry(ship_id).or_insert(rand_pos);
             });
@@ -604,62 +1228,15 @@ pub async fn handle_abyssal_entrance_deployment(
         return Err(rpc_err("ShipDocked", "Cannot deploy Abyssal filament while docked"));
     }
     let ship_id = session.ship_id.ok_or_else(|| rpc_err("NoActiveShip", "No active ship"))?;
-    let cur_sys = session.solar_system_id.ok_or_else(|| rpc_err("NoSolarSystem", "Session has no active solar system"))?;
+    let cur_sys = session
+        .solar_system_id
+        .ok_or_else(|| rpc_err("NoSolarSystem", "Session has no active solar system"))?;
     let filament_arg = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
 
-    // Validate hull: Allowed are Cruisers, Frigates, Destroyers. Disallowed: Battleships, Capitals, Battlecruisers, Industrials.
-    let (ship_type_id, ship_group_id) = ctx.db.with_snapshot(|snap| {
-        let it = snap.items.get(&ship_id);
-        let tid = it.map(|i| i.type_id).unwrap_or(0);
-        let gid = ctx.sde.types.get(&tid).map(|t| t.group_id).unwrap_or(0);
-        (tid, gid)
-    });
-    let is_allowed_hull = matches!(
-        ship_group_id,
-        25 | 26 | 324 | 358 | 420 | 830 | 831 | 832 | 833 | 834 | 893 | 894 | 906 | 963 | 1305
-    );
-    if !is_allowed_hull {
-        return Err(rpc_err("DisallowedShipType", format!("Ship type {ship_type_id} (group {ship_group_id}) is not permitted to enter Abyssal Deadspace")));
-    }
-
-    crate::sp6_lifecycle::require_no_pvp_timer_for_filament(ctx, char_id)?;
+    let (_iid, filament_type_id, tier, max_ships, _origin_sec, ship_pos) =
+        validate_and_consume_abyssal_filaments(ctx, char_id, ship_id, cur_sys, filament_arg).await?;
 
     let now_unix = ctx.now_unix();
-    let (_filament_item_id, filament_type_id, tier, origin_sec) = ctx.db.try_with_mut_snapshot(|snap| {
-        let found = snap.items.values()
-            .find(|i| {
-                i.owner_id == char_id
-                    && i.location_id == ship_id
-                    && (i.item_id == filament_arg || i.type_id as i64 == filament_arg)
-                    && i.quantity >= 1
-            })
-            .map(|i| (i.item_id, i.type_id));
-        let Some((iid, tid)) = found else {
-            return Err(rpc_err("ItemNotFound", format!("Abyssal filament {filament_arg} not found in ship cargo")));
-        };
-        let Some((tier, _)) = classify_abyssal_filament(tid) else {
-            return Err(rpc_err("InvalidAbyssalFilament", format!("Type {tid} is not a valid Abyssal Deadspace filament")));
-        };
-        let origin_sec = ctx.sde.solar_systems.get(&cur_sys).map(|s| s.security_status).unwrap_or(0.9);
-        if tier >= 4 && origin_sec >= 0.75 {
-            return Err(rpc_err("FilamentDisallowedInHighSec", "Activating high-tier (T4-T6) Abyssal filaments is blocked in 0.8 - 1.0 high-security systems"));
-        }
-        if let Some(item) = snap.items.get_mut(&iid) {
-            if item.quantity > 1 { item.quantity -= 1; item.version += 1; } else { snap.items.remove(&iid); }
-        }
-        Ok((iid, tid, tier, origin_sec))
-    })?;
-
-    if tier >= 4 && (0.45..0.75).contains(&origin_sec) {
-        ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).trigger_suspect_flag(char_id, now_unix);
-    }
-
-    let sys_handle = ctx.systems.get_or_spawn(cur_sys);
-    let ship_pos = if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
-        ball.position
-    } else {
-        DVec3::ZERO
-    };
     let trace_pos = ship_pos + DVec3::new(500.0, 0.0, 0.0);
     let trace_ball_id = with_pve_special_reg(ctx, |reg| {
         let tid = 1_897_000_000 + next_spec_seq(reg);
@@ -673,17 +1250,28 @@ pub async fn handle_abyssal_entrance_deployment(
                 position: [trace_pos.x, trace_pos.y, trace_pos.z],
                 created_unix: now_unix,
                 expires_at_sec: now_unix + 1_200,
+                max_ships,
+                entered_char_ids: Vec::new(),
+                pocket_id: None,
             },
         );
         tid
     });
 
-    let _ = sys_handle.spawn_ball(make_site_npc_ball(trace_ball_id, 47_956, trace_pos)).await;
+    let sys_handle = ctx.systems.get_or_spawn(cur_sys);
+    let _ = sys_handle
+        .spawn_ball(make_site_npc_ball(
+            trace_ball_id,
+            ABYSSAL_TRACE_TYPE_ID,
+            trace_pos,
+        ))
+        .await;
 
     Ok(PyRep::keyval([
         ("traceBallID", PyRep::Integer(trace_ball_id)),
         ("solarSystemID", PyRep::Integer(cur_sys as i64)),
         ("filamentTypeID", PyRep::Integer(filament_type_id as i64)),
         ("tier", PyRep::Integer(tier as i64)),
+        ("maxShips", PyRep::Integer(max_ships as i64)),
     ]))
 }

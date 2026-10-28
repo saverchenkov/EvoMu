@@ -564,7 +564,7 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
             None,
         )
         .await;
-    assert_eq!(abyss_res.unwrap_err().code, "UnimplementedRPC");
+    assert_eq!(abyss_res.unwrap_err().code, "MissingRequiredArgument");
 
     // E2E-16: Non-V24 air_npe.AdvanceNode and seasonManager.claim_goal_reward return UnimplementedRPC
     let npe_res = ctx

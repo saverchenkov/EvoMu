@@ -92,12 +92,13 @@ async fn test_fighters_left_in_space_abandon_persist_and_scoop() {
     let jita_ly = ctx.sde.solar_systems[&sys_id].galactic_pos_ly;
     let dest_sys = *ctx.sde.solar_systems.iter()
         .find(|(&sid, s)| {
-            sid != sys_id && s.security_status < 0.45 && sid < 31_000_000
-                && ((s.galactic_pos_ly[0] - jita_ly[0]).powi(2) + (s.galactic_pos_ly[1] - jita_ly[1]).powi(2) + (s.galactic_pos_ly[2] - jita_ly[2]).powi(2)).sqrt() < 3.4
+            sid != sys_id && s.security_status < 0.45 && sid < 31_000_000 && s.region_id != 10_000_070 && sid != 30_100_000
+                && ((s.galactic_pos_ly[0] - jita_ly[0]).powi(2) + (s.galactic_pos_ly[1] - jita_ly[1]).powi(2) + (s.galactic_pos_ly[2] - jita_ly[2]).powi(2)).sqrt() < 6.9
         })
         .unwrap().0;
     let beacon_id = 86_100_320i64;
     ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(21611, eve_db::TrainedSkillRecord { type_id: 21611, level: 5, skill_points: 256_000.0 });
         snap.items.insert(beacon_id, item_rec(beacon_id, 56099, char_id, dest_sys as i64, InventoryFlag::None, 1, true));
         snap.items.insert(86_100_321, item_rec(86_100_321, 16274, char_id, carrier_id, InventoryFlag::Cargo, 50_000, false));
     });

@@ -534,87 +534,50 @@ async fn test_mn02_ice_harvesting_and_gas_harvesting_cycles() {
     // 1. Ice harvesting cycle: Clear Icicle (type 16262, group 465, unit volume 1000.0 m3)
     ctx.db.with_mut_snapshot(|snap| {
         let sk = snap.skills.entry(90_000_001).or_default();
-        for sid in [3386u32, 16281, 25544] {
+        for sid in [3386u32, 3410, 17940, 16281, 25544] {
             sk.insert(sid, eve_db::TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
         }
-        if let Some(sh) = snap.items.get_mut(&ship_id) {
-            sh.type_id = 22548; // Mackinaw (Exhumer group 543, 31,500 m3 Mining Hold)
-            sh.dynamic_attributes.extend([(14, 2.0), (102, 2.0), (11, 500.0), (48, 500.0)]);
-        }
-        snap.items.retain(|_, it| {
-            !(it.location_id == ship_id
-                && matches!(it.flag, InventoryFlag::HiSlot0 | InventoryFlag::HiSlot1))
+        if let Some(sh) = snap.items.get_mut(&ship_id) { sh.type_id = 17478; }
+        snap.items.retain(|_, item| item.location_id != ship_id);
+        snap.items.insert(750_000_460, eve_db::InventoryItemRecord {
+            item_id: 750_000_460, type_id: 16278, owner_id: 90_000_001, location_id: ship_id,
+            flag: InventoryFlag::HiSlot0, quantity: 1, singleton: true, ..Default::default()
         });
-        for (iid, tid, flag) in [
-            (750_000_901i64, 16278u32, InventoryFlag::HiSlot0),
-            (750_000_902i64, 25266u32, InventoryFlag::HiSlot1),
-        ] {
-            snap.items.insert(
-                iid,
-                eve_db::InventoryItemRecord {
-                    item_id: iid,
-                    type_id: tid,
-                    owner_id: 90_000_001,
-                    location_id: ship_id,
-                    flag,
-                    quantity: 1,
-                    singleton: true,
-                    version: 1,
-                    dynamic_attributes: HashMap::new(),
-                    source_mutaplasmid_id: None,
-                    insured_payout_isk: 0.0,
-                    is_blueprint_copy: false,
-                    blueprint_runs_remaining: None,
-                },
-            );
-        }
+        snap.module_online_states.insert(750_000_460, true);
+        snap.items.insert(750_000_462, eve_db::InventoryItemRecord {
+            item_id: 750_000_462, type_id: 1230, owner_id: 90_000_001, location_id: ship_id,
+            flag: InventoryFlag::SpecializedOreHold, quantity: 270_000, singleton: false, ..Default::default()
+        });
     });
     ctx.invalidate_ship_fitting(ship_id);
     let ice_ast_id = 750_000_465i64;
     jita.spawn_asteroid(
         AsteroidState {
-            asteroid_id: ice_ast_id,
-            belt_id: 40_000_001,
-            type_id: 16262,
-            initial_units: 50,
-            remaining_units: 50,
-            unit_volume: 1000.0,
-            depleted: false,
-            respawn_at_tick: None,
+            asteroid_id: ice_ast_id, belt_id: 40_000_001, type_id: 16262,
+            initial_units: 50, remaining_units: 50, unit_volume: 1000.0, depleted: false, respawn_at_tick: None,
         },
         Ball {
-            id: ice_ast_id,
-            type_id: 16262,
-            position: ship_ball.position + DVec3::new(1_000.0, 0.0, 0.0),
-            velocity: DVec3::ZERO,
-            max_velocity: 0.0,
-            inertia: 0.0,
-            mass: 1.0e10,
-            radius: 80.0,
-            speed_fraction: 0.0,
-            mode: MovementMode::Stop,
+            id: ice_ast_id, type_id: 16262, position: ship_ball.position + DVec3::new(1_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 0.0, mass: 1.0e10, radius: 80.0, speed_fraction: 0.0, mode: MovementMode::Stop,
         },
-    )
-    .await
-    .unwrap();
+    ).await.unwrap();
 
-    let ice_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "beyonce",
-            Some(beyonce_id),
-            "CmdMineRepeatedly",
-            &[PyRep::Integer(ice_ast_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("CmdMine on Ice");
+    // R-NAV-P1-01 negative test: mining into an insufficient hold returns CargoFull
+    let full_err = ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_id), "CmdMineRepeatedly", &[PyRep::Integer(ice_ast_id)], &kw, None).await.expect_err("Mining into full hold must return CargoFull");
+    assert_eq!(full_err.code, "CargoFull");
+    ctx.db.with_mut_snapshot(|snap| { snap.items.remove(&750_000_462); });
+
+    let ice_res = ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_id), "CmdMineRepeatedly", &[PyRep::Integer(ice_ast_id)], &kw, None).await.expect("CmdMine on Ice");
     let PyRep::KeyVal(ice_kv) = &ice_res else { panic!("Expected KeyVal") };
     assert_eq!(ice_kv["typeID"].as_i64(), Some(16262));
     assert!(ice_kv["minedUnits"].as_i64().unwrap() >= 1);
 
     // 2. Gas harvesting cycle: Fullerite-C50 (type 30370, group 711, unit volume 1.0 m3)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&ship_id) { sh.type_id = 32880; }
+        if let Some(m) = snap.items.get_mut(&750_000_460) { m.type_id = 25542; }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
     let gas_ast_id = 750_000_711i64;
     jita.spawn_asteroid(
         AsteroidState {

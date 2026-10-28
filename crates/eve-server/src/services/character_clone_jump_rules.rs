@@ -413,6 +413,15 @@ pub fn handle_clone_jump(
                     message: "Clone bays in Pochven allow local clone swaps only".into(),
                 });
             }
+            if dest_loc_id == 60_015_187 {
+                let war_fac = snap.characters.get(&char_id).and_then(|c| c.war_faction_id);
+                if !matches!(war_fac, Some(500_010 | 500_011)) {
+                    return Err(BridgeRpcError {
+                        code: "FulcrumCloneRequiresPirateEnlistment".into(),
+                        message: "Clone jump to The Fulcrum requires pirate militia enlistment".into(),
+                    });
+                }
+            }
         }
 
         // feat:clones.clone-jump-preconditions-and-fees:
@@ -538,6 +547,11 @@ pub fn handle_clone_jump(
             ch.version += 1;
             ch.system_epoch += 1;
         }
+        let cleared_zarzakh_gate = if !same_structure_swap {
+            snap.zarzakh_gate_locks.remove(&char_id).map(|(gid, _)| gid)
+        } else {
+            None
+        };
         Ok((
             target_jc_id,
             dest_loc_id,
@@ -547,6 +561,7 @@ pub fn handle_clone_jump(
             capsule_id,
             effective_cooldown,
             active_implants,
+            cleared_zarzakh_gate,
         ))
     });
 
@@ -560,7 +575,17 @@ pub fn handle_clone_jump(
             capsule_id,
             cooldown_sec,
             active_implants,
+            cleared_zarzakh_gate,
         )) => {
+            if let Some(locked_gate_id) = cleared_zarzakh_gate {
+                crate::services::quasar_sov_services::publish_stargate_lock_deactivated_notice(
+                    &ctx.quasar_gateway,
+                    char_id,
+                    30_100_000,
+                    locked_gate_id,
+                    now_unix,
+                );
+            }
             if dest_loc_id >= 1_000_000_000_000 {
                 session.structure_id = Some(dest_loc_id);
                 session.station_id = None;

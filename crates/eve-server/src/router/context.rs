@@ -206,6 +206,8 @@ impl ServerContext {
                         crate::services::pve_incursion_sites::publish_incursion_tale_stopped_if_ended(&gw, &db, r);
                     }
                     let acct_changes = crate::services::pve_special_sites::on_special_site_npc_destroyed_core(&sys, &db, &sde, sys_id, npc_id, killer_opt).await;
+                    let _ = crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_core(&sys, &db, sys_id, npc_id).await;
+                    crate::services::pve_special_sites_abyssal::on_abyssal_cache_destroyed_core(&sys, &db, sys_id, npc_id, killer_opt).await;
                     if let Some(pws) = pw.upgrade() {
                         crate::services::pve_special_sites::notify_special_site_account_changes(&db, &pws, &tx, &acct_changes);
                     }
@@ -238,7 +240,7 @@ impl ServerContext {
         );
         let module_reactivation_cooldowns = Arc::new(RwLock::new(HashMap::new()));
         let step_cd_w = Arc::downgrade(&module_reactivation_cooldowns);
-        systems.set_system_step_hook(Arc::new(move |sys_id, dt| {
+        systems.set_system_step_hook(Arc::new(move |sys_id, dt, destroyed_balls| {
             let (sw, dw, sdw, rw, fit_w, pend_w, ntx, cew, gww, inw, cdw) = (
                 step_sys_w.clone(), step_db_w.clone(), step_sde_w.clone(), step_rng_w.clone(),
                 step_fit_w.clone(), step_pend_w.clone(), step_ntx.clone(), step_ce_w.clone(), step_gw_w.clone(), step_inv_w.clone(), step_cd_w.clone(),
@@ -248,6 +250,19 @@ impl ServerContext {
                     sw.upgrade(), dw.upgrade(), sdw.upgrade(), rw.upgrade(), fit_w.upgrade(), pend_w.upgrade(), cew.upgrade(), gww.upgrade(), inw.upgrade(), cdw.upgrade(),
                 ) {
                     let ctx = ServerContext::from_step_components(sys, db, sde, rng, fit, pend, ntx, ce, gw, inv_roll, cd_map);
+                    for (tid, killer_opt) in destroyed_balls {
+                        if let Some((vcid, acid, pos)) = ctx.db.with_snapshot(|s| {
+                            let vc = s.characters.values().find(|c| c.active_ship_id == tid)?;
+                            let acid = killer_opt.and_then(|kid| {
+                                s.characters.get(&kid).map(|c| c.character_id)
+                                    .or_else(|| s.characters.values().find(|c| c.active_ship_id == kid).map(|c| c.character_id))
+                            }).unwrap_or(0);
+                            let pos = s.item_positions.get(&tid).copied().unwrap_or([0.0; 3]);
+                            Some((vc.character_id, acid, pos))
+                        }) {
+                            let _ = crate::combat::death_pipeline::execute_death_pipeline_sync(&ctx, sys_id, vcid, tid, acid, glam::DVec3::from_array(pos), ctx.now_unix());
+                        }
+                    }
                     crate::services::combat_weapons_spool::step_system_entropic_spools(&ctx, sys_id, dt).await;
                     crate::services::inventory_fitting::execute_pending_cycle_actions(&ctx, sys_id).await;
                 }

@@ -363,6 +363,9 @@ pub fn handle_industry_jobs(
                             });
                         }
                     } else if matches!(prod_grp, 485 | 4594 | 547 | 5120 | 1538 | 883 | 902 | 513) {
+                        if ctx.sde.solar_systems.get(&fac_sys_id).map(|s| s.region_id) == Some(10_000_070) {
+                            return Err(BridgeRpcError::user_error("CapitalConstructionForbiddenInPochven"));
+                        }
                         if fac_sec >= 0.45 && fac_sys_id < 31_000_000 {
                             return Err(BridgeRpcError {
                                 code: "CapitalConstructionForbiddenInHighSec".into(),

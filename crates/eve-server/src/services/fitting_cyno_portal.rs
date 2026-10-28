@@ -185,8 +185,14 @@ fn beacon_type_for_module(ctx: &ServerContext, mod_type: &eve_sde::InvType) -> O
 
 /// Returns `Some(filetime)` when a cyno jammer is active in `sys_id`: either an in-space item whose
 /// type has `isCynoJammer`, or an online, fuelled Upwell structure whose type is fittable by a
-/// service module carrying `cynoJammerActivationDelay` (e.g. Standup Cynosural System Jammer).
-pub(crate) fn active_cyno_jammer(ctx: &ServerContext, sys_id: u32) -> Option<i64> {
+/// service module carrying `cynoJammerActivationDelay` (e.g. Standup Cynosural System Jammer),
+/// or the region-wide cyno jammer in Pochven (`10_000_070`) or Zarzakh (`30_100_000`).
+pub fn active_cyno_jammer(ctx: &ServerContext, sys_id: u32) -> Option<i64> {
+    if sys_id == 30_100_000
+        || ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id) == Some(10_000_070)
+    {
+        return Some(ctx.now_blueos_filetime_ticks());
+    }
     if let Some(effects) = crate::services::pve_special_sites::get_incursion_effects_for_system(ctx, sys_id) {
         if effects.cyno_jammed {
             return Some(ctx.now_blueos_filetime_ticks());
@@ -357,6 +363,12 @@ async fn light_cyno(
     let ship_type = ctx.sde.types.get(&ship_type_id).ok_or_else(|| err("ShipNotFound", "Active ship type unknown"))?;
     if !hull_allowed(ctx, mod_type, ship_type) {
         return Err(err("CannotLightCynoInSystem", format!("{} cannot be operated from {}", mod_type.name, ship_type.name)));
+    }
+    if sys_id == 30_100_000 {
+        return Err(err("CynoDisallowedInZarzakh", "Cynosural fields cannot be lit in Zarzakh"));
+    }
+    if ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id) == Some(10_000_070) {
+        return Err(err("CynoJammedInPochven", format!("A region-wide Triglavian cyno jammer blocks all cynosural fields in Pochven system {sys_id}")));
     }
     let sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.0);
     if sec >= 0.45 {
@@ -753,6 +765,12 @@ async fn jump_to_fleet_beacon(
         return Err(err("JumpDriveForbiddenInWormholeSpace", format!("Jump drives cannot target wormhole system {target_sys}")));
     }
     let (char_id, ship_id, sys_id, _) = caller_in_space(ctx, session).await?;
+    if sys_id == 30_100_000 || target_sys == 30_100_000 {
+        return Err(err("JumpDriveForbiddenInZarzakh", "Jump drives cannot operate in or into Zarzakh"));
+    }
+    if ctx.sde.solar_systems.get(&target_sys).map(|s| s.region_id) == Some(10_000_070) {
+        return Err(err("CannotJumpToPochven", format!("Region-wide cyno jammer prevents jump drives from entering Pochven system {target_sys}")));
+    }
     if target_sys != 0 {
         let (vals, _) = evaluated_attrs(
             ctx,
@@ -769,6 +787,12 @@ async fn jump_to_fleet_beacon(
     let beacon = resolve_fleet_beacon(ctx, char_id, cyno_char, beacon_id, target_sys, is_deployable).await?;
     if (31_000_000..32_000_000).contains(&beacon.solar_system_id) {
         return Err(err("JumpDriveForbiddenInWormholeSpace", format!("Jump drives cannot target wormhole system {}", beacon.solar_system_id)));
+    }
+    if beacon.solar_system_id == 30_100_000 {
+        return Err(err("JumpDriveForbiddenInZarzakh", "Jump drives cannot target Zarzakh"));
+    }
+    if ctx.sde.solar_systems.get(&beacon.solar_system_id).map(|s| s.region_id) == Some(10_000_070) {
+        return Err(err("CannotJumpToPochven", format!("Region-wide cyno jammer prevents jump drives from entering Pochven system {}", beacon.solar_system_id)));
     }
     let ship_type_id = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0);
     let ship_type = ctx.sde.types.get(&ship_type_id).ok_or_else(|| err("ShipNotFound", "Ship type unknown"))?;
@@ -827,6 +851,12 @@ async fn bridge_to_fleet_beacon(
         return Err(err("JumpDriveForbiddenInWormholeSpace", format!("Jump drives cannot target wormhole system {target_sys}")));
     }
     let (char_id, ship_id, sys_id, _) = caller_in_space(ctx, session).await?;
+    if sys_id == 30_100_000 || target_sys == 30_100_000 {
+        return Err(err("JumpDriveForbiddenInZarzakh", "Jump portals cannot operate in or into Zarzakh"));
+    }
+    if ctx.sde.solar_systems.get(&target_sys).map(|s| s.region_id) == Some(10_000_070) {
+        return Err(err("CannotJumpToPochven", format!("Region-wide cyno jammer prevents bridging into Pochven system {target_sys}")));
+    }
     if target_sys != 0 {
         let (vals, _) = evaluated_attrs(
             ctx,
@@ -843,6 +873,12 @@ async fn bridge_to_fleet_beacon(
     let beacon = resolve_fleet_beacon(ctx, char_id, cyno_char, beacon_id, target_sys, is_deployable).await?;
     if (31_000_000..32_000_000).contains(&beacon.solar_system_id) {
         return Err(err("JumpDriveForbiddenInWormholeSpace", format!("Jump drives cannot target wormhole system {}", beacon.solar_system_id)));
+    }
+    if beacon.solar_system_id == 30_100_000 {
+        return Err(err("JumpDriveForbiddenInZarzakh", "Jump portals cannot target Zarzakh"));
+    }
+    if ctx.sde.solar_systems.get(&beacon.solar_system_id).map(|s| s.region_id) == Some(10_000_070) {
+        return Err(err("CannotJumpToPochven", format!("Region-wide cyno jammer prevents bridging into Pochven system {}", beacon.solar_system_id)));
     }
     let (ship_type_id, portal) = ctx.db.with_snapshot(|s| {
         let st = s.items.get(&ship_id).map(|i| i.type_id).unwrap_or(0);
@@ -951,6 +987,12 @@ async fn group_jump_to_fleet_beacon(
         return Err(err("InvalidJumpDestination", format!("Invalid jump destination solar system {target_sys}")));
     }
     let (char_id, ship_id, sys_id, caller_ball) = caller_in_space(ctx, session).await?;
+    if sys_id == 30_100_000 || target_sys == 30_100_000 {
+        return Err(err("JumpDriveForbiddenInZarzakh", "Conduit jumps cannot operate in or into Zarzakh"));
+    }
+    if ctx.sde.solar_systems.get(&target_sys).map(|s| s.region_id) == Some(10_000_070) {
+        return Err(err("CannotJumpToPochven", format!("Region-wide cyno jammer prevents conduit jumps into Pochven system {target_sys}")));
+    }
     if target_sys != 0 {
         let (vals, _) = evaluated_attrs(
             ctx,
@@ -967,6 +1009,12 @@ async fn group_jump_to_fleet_beacon(
     let beacon = resolve_fleet_beacon(ctx, char_id, cyno_char, beacon_id, target_sys, is_deployable).await?;
     if (31_000_000..32_000_000).contains(&beacon.solar_system_id) {
         return Err(err("JumpDriveForbiddenInWormholeSpace", format!("Jump drives cannot target wormhole system {}", beacon.solar_system_id)));
+    }
+    if beacon.solar_system_id == 30_100_000 {
+        return Err(err("JumpDriveForbiddenInZarzakh", "Conduit jumps cannot target Zarzakh"));
+    }
+    if ctx.sde.solar_systems.get(&beacon.solar_system_id).map(|s| s.region_id) == Some(10_000_070) {
+        return Err(err("CannotJumpToPochven", format!("Region-wide cyno jammer prevents conduit jumps into Pochven system {}", beacon.solar_system_id)));
     }
     let ship_type_id = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0);
     let ship_type = ctx.sde.types.get(&ship_type_id).ok_or_else(|| err("ShipNotFound", "Ship type unknown"))?;

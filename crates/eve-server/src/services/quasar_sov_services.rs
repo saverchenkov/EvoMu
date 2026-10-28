@@ -462,10 +462,20 @@ pub fn register_handlers(
     // 7. eve.factionwarfare handlers
     {
         let d = Arc::clone(&desc);
+        let db_fw = Arc::clone(&db);
         router.register_handler(
             "eve.factionwarfare.systems.GetRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
-                let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u64;
+            Arc::new(move |ctx, _any, dyn_msg| {
+                let sys_id = get_int_field(dyn_msg, 1)
+                    .map(|v| v as u64)
+                    .or_else(|| {
+                        let cid = ctx.effective_character_id()? as i64;
+                        db_fw.with_snapshot(|s| s.characters.get(&cid).map(|c| c.solar_system_id as u64))
+                    })
+                    .or_else(|| {
+                        db_fw.with_snapshot(|s| s.fw_system_occupations.keys().next().map(|&k| k as u64))
+                    })
+                    .unwrap_or(0);
                 encode_domain_message(&d, "eve.factionwarfare.systems.GetResponse", |reg, resp| {
                     set_domain_attributes(reg, resp, sys_id, 500_001, "FWSystemStatus");
                 })
@@ -697,10 +707,11 @@ fn encode_id_field(field_num: u32, id: u64, out: &mut Vec<u8>) {
     encode_bytes_field(field_num, &id_buf, out);
 }
 
-/// Publishes `eve_public.stargate.lock.api.ActivatedNotice` for a Zarzakh gate lock created by
-/// `CmdStargateJump` (`space_warp_jump`), after the jumping session has entered `solar_system_id`.
+/// Publishes character-scoped `eve_public.stargate.lock.api.ActivatedNotice` for a Zarzakh gate
+/// lock created by `CmdStargateJump` (`space_warp_jump`).
 pub(crate) fn publish_stargate_lock_activated_notice(
     gateway: &PublicGatewayRouter,
+    char_id: i64,
     solar_system_id: u32,
     gate_id: u64,
     expiry_unix: u64,
@@ -718,5 +729,27 @@ pub(crate) fn publish_stargate_lock_activated_notice(
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.stargate.lock.api.ActivatedNotice"),
         value: payload,
     };
-    gateway.publish_notice(NoticeScope::SolarSystem(solar_system_id), any, now_unix).map(|(_, n)| n)
+    gateway
+        .publish_notice(NoticeScope::Character(char_id as u32), any, now_unix)
+        .map(|(_, n)| n)
+}
+
+/// Publishes character-scoped `eve_public.stargate.lock.api.DeactivatedNotice` when a Zarzakh
+/// gate lock expires or is cleared on pod death, clone jump, or shipcaster jump.
+pub(crate) fn publish_stargate_lock_deactivated_notice(
+    gateway: &PublicGatewayRouter,
+    char_id: i64,
+    solar_system_id: u32,
+    gate_id: i64,
+    now_unix: u64,
+) {
+    let mut payload = Vec::new();
+    encode_id_field(1, solar_system_id as u64, &mut payload);
+    encode_id_field(2, gate_id as u64, &mut payload);
+
+    let any = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.stargate.lock.api.DeactivatedNotice"),
+        value: payload,
+    };
+    let _ = gateway.publish_notice(NoticeScope::Character(char_id as u32), any, now_unix);
 }

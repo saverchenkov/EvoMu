@@ -843,11 +843,19 @@ pub async fn handle_weapons(
                     mod_type.default_attributes.get(&160).copied().unwrap_or(100.0)
                 }
             };
-            let tracking_speed = if has_charge_mod(160) {
+            let attacker_pylon_mult = sys_handle
+                .get_combat_state(ship_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|cs| cs.tracking_speed_multiplier)
+                .filter(|&m| m > 0.0)
+                .unwrap_or(1.0);
+            let tracking_speed = (if has_charge_mod(160) {
                 base_tracking
             } else {
                 base_tracking * tracking_mult
-            };
+            }) * attacker_pylon_mult;
             let turret_sig_res = mod_type
                 .default_attributes
                 .get(&620)

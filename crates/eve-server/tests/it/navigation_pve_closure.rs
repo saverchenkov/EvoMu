@@ -342,24 +342,24 @@ async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
         let _ = handle_start.spawn_ball_with_combat(b, ctx.build_ship_combat_state(pid, sid, tid)).await;
     }
 
-    // 1. Abyssal filament deployment returns UnimplementedRPC
+    // 1. Abyssal filament deployment with missing arg returns MissingRequiredArgument
     let abyssal_err = rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceDeployment", &[])
         .await
-        .expect_err("AbyssalEntranceDeployment returns UnimplementedRPC");
-    assert_eq!(abyssal_err.code, "UnimplementedRPC");
+        .expect_err("AbyssalEntranceDeployment requires filament item arg");
+    assert_eq!(abyssal_err.code, "MissingRequiredArgument");
     assert_eq!(sess.solar_system_id, Some(start_sys));
 
-    // 2. Abyssal entrance gate activation returns UnimplementedRPC (stripped down)
+    // 2. Abyssal entrance gate activation with missing arg returns MissingRequiredArgument
     let gate_err = rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceGateActivation", &[])
         .await
-        .expect_err("AbyssalEntranceGateActivation returns UnimplementedRPC");
-    assert_eq!(gate_err.code, "UnimplementedRPC");
+        .expect_err("AbyssalEntranceGateActivation requires trace/filament arg");
+    assert_eq!(gate_err.code, "MissingRequiredArgument");
 
-    // 3. Void Space jump returns UnimplementedRPC (stripped down)
+    // 3. Void Space jump with missing arg returns MissingRequiredArgument
     let void_err = rpc(&ctx, &mut sess, "voidSpaceMgr", "VoidSpacePlayerJump", &[])
         .await
-        .expect_err("VoidSpacePlayerJump returns UnimplementedRPC");
-    assert_eq!(void_err.code, "UnimplementedRPC");
+        .expect_err("VoidSpacePlayerJump requires trace ball arg");
+    assert_eq!(void_err.code, "MissingRequiredArgument");
 
     // 4. Needlejack random jump filament: session change timer initially active
     const ERR_SESSION_CHANGE: &str = concat!("SessionChange", "InProgress");

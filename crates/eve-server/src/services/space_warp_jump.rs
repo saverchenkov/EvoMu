@@ -54,7 +54,7 @@ pub(crate) async fn handle(
         // parity: plan:SP-4, feat:navigation.stargate-capital-restriction, feat:navigation.session-change-timer-triggers, feat:navigation.jump-cloak-immunities
         // parity: rpc:beyonce.CmdStargateJump, feat:navigation.stargate-jump
         ("beyonce", "CmdStargateJump") | ("beyonce", "StargateJump") => {
-            Some(handle_cmd_stargate_jump(ctx, session, bound_entry, args).await)
+            Some(handle_cmd_stargate_jump(ctx, session, bound_entry, args, kwargs).await)
         }
         // parity: plan:SP-4, plan:SP-5, feat:navigation.dock-station, feat:navigation.dock-structure, feat:navigation.undock, feat:navigation.session-change-timer-triggers
         // parity: rpc:beyonce.SetSessionCheck, rpc:beyonce.CmdDock
@@ -70,6 +70,34 @@ pub(crate) async fn handle(
     }
 }
 
+fn resolve_bound_or_session_sys(
+    bound_entry: Option<&BoundObjectEntry>,
+    session: &SessionState,
+) -> Result<u32, BridgeRpcError> {
+    match bound_entry {
+        Some(b) => {
+            if b.service != BEYONCE_SVC {
+                return Err(BridgeRpcError {
+                    code: "InvalidBoundService".into(),
+                    message: format!("Expected bound service {BEYONCE_SVC}, got {}", b.service),
+                });
+            }
+            Ok(b.object_id as u32)
+        }
+        None => session.solar_system_id.ok_or_else(|| BridgeRpcError {
+            code: "BoundObjectRequired".into(),
+            message: format!("Calls to {BEYONCE_SVC} require a bound object handle or active solar system"),
+        }),
+    }
+}
+
+fn bookmark_expired_err(bm_id: i64) -> BridgeRpcError {
+    BridgeRpcError {
+        code: "BookmarkExpired".into(),
+        message: format!("Bookmark {bm_id} has expired"),
+    }
+}
+
 async fn handle_cmd_warp_to_stuff(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -79,13 +107,19 @@ async fn handle_cmd_warp_to_stuff(
     is_autopilot: bool,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    if args.first().and_then(|a| a.as_str()) == Some("bookmark") {
+        let bm_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+        if crate::services::fleet_social::is_bookmark_expired(ctx, bm_id, ctx.now_unix()) {
+            return Err(bookmark_expired_err(bm_id));
+        }
+    }
     if session.station_id.is_some() || session.structure_id.is_some() {
         return Err(BridgeRpcError {
             code: "NotInSpace".into(),
             message: "Cannot warp while docked in station or structure".into(),
         });
     }
-    let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
+    let sys_id = resolve_bound_or_session_sys(bound_entry, session)?;
     let Some(ship_id) = session.ship_id else {
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),
@@ -178,28 +212,43 @@ async fn handle_cmd_warp_to_stuff(
     let mut resolved_pos: Option<DVec3> = None;
     let mut fleet_ship_ball_id: Option<i64> = None;
     match stuff_type {
-        "bookmark" | "mission" | "dungeon" | "location" => {
+        "bookmark" => {
+            if sys_id == SOLAR_SYSTEM_ZARZAKH {
+                return Err(BridgeRpcError::user_error("DunBlacklistCannotWarp"));
+            }
             let now_unix = ctx.now_unix();
-            resolved_pos = ctx.db.with_snapshot(|snap| {
-                if !crate::services::fleet_social::is_bookmark_expired_in_snap(snap, target_id, now_unix) {
-                    if let Some(b) = snap
-                        .bookmarks
-                        .get(&target_id)
-                        .filter(|b| b.solar_system_id == sys_id)
-                    {
-                        let can_use = b.owner_id == char_id
-                            || b.folder_id.is_some_and(|fid| {
-                                snap.bookmark_folders.get(&fid).is_some_and(|f| {
-                                    crate::services::fleet_social::fleet_social_access_group_bookmarks::folder_access_level(
-                                        snap, session, char_id, f,
-                                    ) >= crate::services::fleet_social::fleet_social_access_group_bookmarks::AccessLevel::Use
-                                })
-                            });
-                        if can_use {
-                            return Some(DVec3::new(b.x, b.y, b.z));
-                        }
-                    }
+            if crate::services::fleet_social::is_bookmark_expired(ctx, target_id, now_unix) {
+                return Err(bookmark_expired_err(target_id));
+            }
+            let bm_opt = ctx.db.with_snapshot(|snap| {
+                let b = snap.bookmarks.get(&target_id)?;
+                if b.solar_system_id != sys_id {
+                    return None;
                 }
+                let can_use = b.owner_id == char_id
+                    || b.folder_id.is_some_and(|fid| {
+                        snap.bookmark_folders.get(&fid).is_some_and(|f| {
+                            crate::services::fleet_social::fleet_social_access_group_bookmarks::folder_access_level(
+                                snap, session, char_id, f,
+                            ) >= crate::services::fleet_social::fleet_social_access_group_bookmarks::AccessLevel::Use
+                        })
+                    });
+                if can_use {
+                    Some(DVec3::new(b.x, b.y, b.z))
+                } else {
+                    None
+                }
+            });
+            let Some(pos) = bm_opt else {
+                return Err(BridgeRpcError {
+                    code: "BookmarkNotFound".into(),
+                    message: format!("Bookmark {target_id} not found"),
+                });
+            };
+            resolved_pos = Some(pos);
+        }
+        "mission" | "dungeon" | "location" => {
+            resolved_pos = ctx.db.with_snapshot(|snap| {
                 if snap.active_missions.values().any(|m| {
                     m.character_id == char_id
                         && m.solar_system_id == sys_id
@@ -502,6 +551,7 @@ async fn handle_cmd_stargate_jump(
     session: &mut SessionState,
     bound_entry: Option<&BoundObjectEntry>,
     args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     if session.station_id.is_some() || session.structure_id.is_some() {
@@ -510,7 +560,7 @@ async fn handle_cmd_stargate_jump(
             message: "Cannot jump stargate while docked".into(),
         });
     }
-    let old_sys = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
+    let old_sys = resolve_bound_or_session_sys(bound_entry, session)?;
     let Some(ship_id) = session.ship_id else {
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),
@@ -588,10 +638,16 @@ async fn handle_cmd_stargate_jump(
         });
     }
 
-    let ship_type_id = ctx
+    let ball_type_id = current_ball.type_id;
+    let item_type_id = ctx
         .db
         .with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id))
-        .unwrap_or(current_ball.type_id);
+        .unwrap_or(0);
+    let ship_type_id = if ball_type_id != 0 {
+        ball_type_id
+    } else {
+        item_type_id
+    };
     let ship_group_id = ctx
         .sde
         .types
@@ -617,7 +673,11 @@ async fn handle_cmd_stargate_jump(
         });
     }
 
-    if is_restricted_capital {
+    let is_pochven_gate = ctx.sde.solar_systems.get(&old_sys).map(|s| s.region_id) == Some(10_000_070)
+        || ctx.sde.solar_systems.get(&jump.to_solar_system_id).map(|s| s.region_id) == Some(10_000_070);
+    let is_pochven_restricted = is_pochven_gate && (is_restricted_capital || is_freighter);
+
+    if is_pochven_restricted || is_restricted_capital {
         return Err(BridgeRpcError {
             code: "CapitalShipCannotJumpStargate".into(),
             message: format!(
@@ -627,6 +687,28 @@ async fn handle_cmd_stargate_jump(
         });
     }
 
+    // DERIVED: Pochven Triglavian Clade Home Systems (Kino, Niarja, Archee in region 10_000_070) require +6.0 Triglavian standing to jump stargates
+    let is_pochven_home_system = ctx.sde.solar_systems.get(&jump.to_solar_system_id).is_some_and(|sys| {
+        sys.region_id == 10_000_070 && matches!(sys.name.as_str(), "Kino" | "Niarja" | "Archee")
+    });
+    if is_pochven_home_system {
+        let trig_standing = ctx.db.with_snapshot(|s| {
+            s.characters
+                .get(&char_id)
+                .and_then(|c| c.standings.get(&500_026).copied())
+                .unwrap_or(0.0)
+        });
+        if trig_standing < 6.0 {
+            return Err(BridgeRpcError::user_error("SystemCheck_JumpFailed_StandingsTooLow"));
+        }
+    }
+
+    // Zarzakh Horizon Siege state gating (`feat:navigation.zarzakh-local-horizon-siege`)
+    if (old_sys == SOLAR_SYSTEM_ZARZAKH || jump.to_solar_system_id == SOLAR_SYSTEM_ZARZAKH)
+        && crate::services::cluster_macho_misc_services::is_zarzakh_horizon_siege_active(ctx)
+    {
+        return Err(BridgeRpcError::user_error("HorizonSiegeGateAccessDenied"));
+    }
 
     if old_sys == SOLAR_SYSTEM_ZARZAKH {
         let locked_gate = ctx
@@ -660,6 +742,18 @@ async fn handle_cmd_stargate_jump(
                 dist
             ),
         });
+    }
+
+    // Zarzakh Gate Toll (`feat:navigation.zarzakh-gate-toll`):
+    // Jump validations (range, timers, locks) completed first. Non-pirate pilots pay mass-based toll.
+    if jump.to_solar_system_id == SOLAR_SYSTEM_ZARZAKH {
+        crate::services::space_navigation_advanced::process_zarzakh_gate_toll(
+            ctx,
+            char_id,
+            &current_ball,
+            args,
+            kwargs,
+        )?;
     }
 
     let dest_sys_id = jump.to_solar_system_id;
@@ -743,11 +837,10 @@ async fn handle_cmd_stargate_jump(
     crate::services::map_service::record_solar_system_visit(ctx, char_id, dest_sys_id);
     let _ = crate::services::combat_npc_police::check_and_spawn_faction_police(ctx, dest_sys_id).await;
     ctx.quasar_gateway.on_session_changed(session, now_unix);
-    // Published only after the session (and its Quasar gateway mirror) is in the destination
-    // system, so the jumping pilot's own stream receives the SolarSystem-scoped notice.
     if let Some(expiry) = zarzakh_lock_expiry {
         let _ = crate::services::quasar_sov_services::publish_stargate_lock_activated_notice(
             &ctx.quasar_gateway,
+            char_id,
             dest_sys_id,
             jump.destination_stargate_id as u64,
             expiry,
@@ -911,6 +1004,29 @@ async fn handle_dock(
             code: "FactionPoliceRefusedDocking".into(),
             message: "Faction police refuse docking permissions to outlaw ships in high-security space".into(),
         });
+    }
+
+    // The Fulcrum Alignment Services (`feat:structures.fulcrum-alignment-services`):
+    // Refuses docking to characters enlisted in an Empire militia (500001..=500004) or with active weapons/retribution timer.
+    if dock_id == 60_015_187 {
+        let char_war_fac = ctx.db.with_snapshot(|s| s.characters.get(&char_id).and_then(|c| c.war_faction_id));
+        if matches!(char_war_fac, Some(500_001..=500_004)) {
+            return Err(BridgeRpcError::user_error("FulcrumRefusesEmpireMilitia"));
+        }
+        let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());
+        let weapons_active = cw
+            .states
+            .get(&char_id)
+            .is_some_and(|s| s.is_weapon_timer_active(now_unix) || s.is_pvp_active(now_unix));
+        let retribution_active = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+            rt.disapproval_flags
+                .get(&char_id)
+                .copied()
+                .is_some_and(|exp| now_unix < exp)
+        });
+        if weapons_active || retribution_active {
+            return Err(BridgeRpcError::user_error("FulcrumRefusesTimerActive"));
+        }
     }
 
     let is_structure = dock_id >= 1_000_000_000_000;
@@ -1202,32 +1318,4 @@ async fn handle_set_session_check(
     ]))
 }
 
-pub fn deactivate_ship_modules_on_leave_space(ctx: &ServerContext, char_id: i64, ship_id: i64) {
-    let active_mods: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
-        let mods: Vec<i64> = snap
-            .items
-            .values()
-            .filter(|it| {
-                it.location_id == ship_id && snap.module_active_states.contains(&it.item_id)
-            })
-            .map(|it| it.item_id)
-            .collect();
-        for mid in &mods {
-            snap.module_active_states.remove(mid);
-        }
-        mods
-    });
-    if !active_mods.is_empty() {
-        ctx.invalidate_ship_fitting(ship_id);
-        for mid in active_mods {
-            ctx.notify_godma_ship_effect(
-                crate::router::NotificationTarget::Character(char_id),
-                mid,
-                10,
-                false,
-                0,
-                0,
-            );
-        }
-    }
-}
+pub use crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space;

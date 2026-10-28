@@ -120,19 +120,19 @@ async fn test_abyssal_deadspace_lifecycle_and_gate_progression() {
         .dispatch_rpc(&mut sess, "abyssalMgr", None, "ClientIsReady", &[], &kw, None)
         .await
         .expect_err("ClientIsReady outside abyss");
-    assert_eq!(ready_outside.code, "UnimplementedRPC");
+    assert_eq!(ready_outside.code, "NotInAbyssalSpace");
 
     let gate_outside = ctx
         .dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalGateActivation", &[], &kw, None)
         .await
         .expect_err("AbyssalGateActivation outside abyss");
-    assert_eq!(gate_outside.code, "UnimplementedRPC");
+    assert_eq!(gate_outside.code, "NotInAbyssalSpace");
 
     let end_outside = ctx
         .dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEndGateActivation", &[], &kw, None)
         .await
         .expect_err("AbyssalEndGateActivation outside abyss");
-    assert_eq!(end_outside.code, "UnimplementedRPC");
+    assert_eq!(end_outside.code, "NotInAbyssalSpace");
 
     // 1. Deploy filament in Jita -> spawns entrance trace ball
     let deploy_rep = ctx
@@ -468,7 +468,7 @@ async fn test_void_space_jump_lifecycle_and_gate_activation() {
         .dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[], &kw, None)
         .await
         .expect_err("VoidSpacePlayerJump with empty args");
-    assert_eq!(empty_err.code, "UnimplementedRPC");
+    assert_eq!(empty_err.code, "MissingRequiredArgument");
 
     let invalid_target = ctx
         .dispatch_rpc(
@@ -492,6 +492,12 @@ async fn test_void_space_jump_lifecycle_and_gate_activation() {
     let r_ball = ctx.dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(700_002)], &kw, None).await.unwrap_err();
     assert_eq!(r_ball.code, "InvalidTarget");
     ctx.systems.get_or_spawn(SYS_JITA).try_remove_ball(700_002);
+    // R-VOID-P1-03: Regular stargate (type 16) within 5km is rejected
+    let norm_gate = eve_destiny::Ball { id: 700_003, type_id: 16, position: glam::DVec3::new(10_200.0, 0.0, 0.0), velocity: glam::DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1e7, radius: 100.0, speed_fraction: 0.0, mode: MovementMode::Stop };
+    let _ = ctx.systems.get_or_spawn(SYS_JITA).spawn_ball(norm_gate).await;
+    let r_gate = ctx.dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(700_003)], &kw, None).await.unwrap_err();
+    assert_eq!(r_gate.code, "InvalidTarget");
+    ctx.systems.get_or_spawn(SYS_JITA).try_remove_ball(700_003);
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(1_300_000_999, eve_db::InventoryItemRecord { item_id: 1_300_000_999, type_id: 621, owner_id: PILOT_ID, location_id: SHIP_ID, flag: InventoryFlag::Cargo, quantity: 1, ..Default::default() });
         snap.items.insert(1_300_000_998, eve_db::InventoryItemRecord { item_id: 1_300_000_998, type_id: FILAMENT_TYPE, owner_id: PILOT_ID, location_id: SHIP_ID, flag: InventoryFlag::Hangar, quantity: 1, ..Default::default() });

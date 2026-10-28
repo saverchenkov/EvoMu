@@ -569,11 +569,17 @@ pub(crate) fn collapse_stranded_abyssal_if_needed_sync(
         if (32_000_000..=32_999_999).contains(&ch.solar_system_id) {
             st.disconnected_ships.remove(&char_id);
             st.safe_logoffs.remove(&char_id);
+            let origin_sys = crate::services::pve_special_sites_abyssal::resolve_character_home_station_and_system(
+                snap,
+                &ctx.sde,
+                char_id,
+            )
+            .1;
             return Some(AbyssalPersistedSession {
                 char_id,
                 ship_id: ch.active_ship_id,
                 pocket_system_id: ch.solar_system_id,
-                origin_system_id: 30_000_142,
+                origin_system_id: origin_sys,
                 entered_unix: now_unix.saturating_sub(1_200),
                 collapse_at_unix: now_unix,
             });
@@ -923,6 +929,45 @@ pub fn on_advance_secs(ctx: &ServerContext, _prev_unix: u64, secs: u64) {
             st.safe_logoffs.remove(&ab.char_id);
         });
         execute_due_abyssal_collapse_sync(ctx, &ab, now_unix);
+    }
+
+    // 6b. Despawn expired un-entered Abyssal trace balls and clear expired Zarzakh gate locks.
+    let expired_traces: Vec<(u32, i64)> =
+        crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+            let mut out = Vec::new();
+            reg.abyssal_traces.retain(|&tid, t| {
+                if t.expires_at_sec > 0 && now_unix >= t.expires_at_sec {
+                    out.push((t.origin_solar_system_id, tid));
+                    false
+                } else {
+                    true
+                }
+            });
+            out
+        });
+    for (origin_sys, tid) in expired_traces {
+        ctx.systems.get_or_spawn(origin_sys).try_remove_ball(tid);
+    }
+    let expired_zarzakh_locks: Vec<(i64, i64)> = ctx.db.with_mut_snapshot(|snap| {
+        let mut out = Vec::new();
+        snap.zarzakh_gate_locks.retain(|&cid, &mut (gate_id, exp)| {
+            if now_unix >= exp {
+                out.push((cid, gate_id));
+                false
+            } else {
+                true
+            }
+        });
+        out
+    });
+    for (cid, gate_id) in expired_zarzakh_locks {
+        crate::services::quasar_sov_services::publish_stargate_lock_deactivated_notice(
+            &ctx.quasar_gateway,
+            cid,
+            30_100_000,
+            gate_id,
+            now_unix,
+        );
     }
 
     // 7. Decay expired wrecks (2h = 7200s), corpses (2h = 7200s), jetcans (1h = 3600s),

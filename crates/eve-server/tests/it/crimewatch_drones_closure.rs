@@ -202,8 +202,8 @@ async fn test_crimewatch_concord_response_scaling_and_invulnerable_enforcement()
 
 #[tokio::test]
 async fn test_crimewatch_safety_setting_block_duel_and_suspect_looting_ess() {
-
     let ctx = new_ctx();
+    crate::common::pin_clock(&ctx);
     let c1 = 90_000_001;
     let c2 = 90_000_002;
     let ship1 = 920_001;

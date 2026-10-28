@@ -361,7 +361,12 @@ pub(super) async fn handle_fleet_ops(
                     }))
                 }
             };
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
 
             let (dest_id, explicit_dest, min_range) = if args.len() >= 3
                 && args.first().and_then(|a| a.as_f64()).is_some()
@@ -482,6 +487,9 @@ pub(super) async fn handle_fleet_ops(
                 b.position
             } else if let Some(bm_res) = ctx.db.with_snapshot(|snap| {
                 let bm = snap.bookmarks.get(&dest_id)?;
+                if sys_id == 30_100_000 || bm.solar_system_id == 30_100_000 {
+                    return Some(Err(BridgeRpcError::user_error("DunBlacklistCannotWarp")));
+                }
                 if super::is_bookmark_expired_in_snap(snap, dest_id, now_unix)
                     || bm.solar_system_id != sys_id
                 {
@@ -1012,7 +1020,12 @@ pub(super) async fn handle_fleet_ops(
             let Some(fleet_id) = session.fleet_id else {
                 return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
             };
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
             let caller_ship_id = session.ship_id.unwrap_or(0);
             let res = ctx.db.with_snapshot(|snap| {
                 let Some(fleet) = snap.fleets.get(&fleet_id) else {

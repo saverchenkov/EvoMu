@@ -153,6 +153,9 @@ pub(crate) async fn handle_bookmark_static_location(
             message: "Session has no active solar system".into(),
         });
     };
+    if sys_id == 30_100_000 {
+        return Err(BridgeRpcError::user_error("CantbookmarkEveSystem"));
+    }
 
     let (explicit_entity_id, folder_id, label_str, memo_str, expiry_hours, subfolder_id) =
         if args.first().and_then(|a| a.as_str()).is_some() {

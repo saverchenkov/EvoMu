@@ -305,6 +305,15 @@ pub fn handle_clones_and_sheet(
                 station_owner_faction_id = station.owner_faction_id;
             }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                if station_id == 60_015_187 {
+                    let war_fac = snap.characters.get(&char_id).and_then(|c| c.war_faction_id);
+                    if !matches!(war_fac, Some(500_010 | 500_011)) {
+                        return Err(BridgeRpcError {
+                            code: "FulcrumCloneRequiresPirateEnlistment".into(),
+                            message: "Clone installation at The Fulcrum requires pirate militia enlistment".into(),
+                        });
+                    }
+                }
                 // Enforce NPC station owner standing check (`feat:clones.jump-clone-install`)
                 crate::services::character_clone_jump_rules::check_alpha_clone_install_capacity(snap, char_id)?;
                 if is_structure {

@@ -52,6 +52,9 @@ async fn setup_pilot_in_space(
             ch.station_id = None;
             ch.structure_id = None;
         }
+        if let Some(it) = snap.items.get_mut(&SHIP_ID) {
+            it.type_id = 621; // Cruiser for 1-filament solo deployment
+        }
         // Seed filament into cargo
         snap.items.insert(
             1_300_000_001,
@@ -77,7 +80,7 @@ async fn setup_pilot_in_space(
     let sys_handle = ctx.systems.get_or_spawn(SYS_JITA);
     let ball = eve_destiny::Ball {
         id: SHIP_ID,
-        type_id: 601,
+        type_id: 621,
         position: glam::DVec3::new(10_000.0, 0.0, 0.0),
         velocity: glam::DVec3::ZERO,
         max_velocity: 250.0,
@@ -87,7 +90,7 @@ async fn setup_pilot_in_space(
         speed_fraction: 0.0,
         mode: eve_destiny::MovementMode::Stop,
     };
-    let cs = ctx.build_ship_combat_state(char_id, SHIP_ID, 601);
+    let cs = ctx.build_ship_combat_state(char_id, SHIP_ID, 621);
     let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
 
     sess
@@ -119,7 +122,7 @@ async fn test_abyssal_mgr_lifecycle_and_gate_activations() {
     });
     assert_eq!(fil_qty_after, 4, "One filament consumed when deployment succeeds");
 
-    // 2. AbyssalEntranceGateActivation returns UnimplementedRPC
+    // 2. AbyssalEntranceGateActivation with missing arg returns MissingRequiredArgument
     let enter_err = ctx
         .dispatch_rpc(
             &mut sess,
@@ -131,10 +134,10 @@ async fn test_abyssal_mgr_lifecycle_and_gate_activations() {
             None,
         )
         .await
-        .expect_err("AbyssalEntranceGateActivation returns UnimplementedRPC");
-    assert_eq!(enter_err.code, ERR_UNIMPLEMENTED);
+        .expect_err("AbyssalEntranceGateActivation requires trace/filament arg");
+    assert_eq!(enter_err.code, "MissingRequiredArgument");
 
-    // 3. ClientIsReady returns UnimplementedRPC
+    // 3. ClientIsReady outside abyss returns NotInAbyssalSpace
     let ready_err = ctx
         .dispatch_rpc(
             &mut sess,
@@ -146,10 +149,10 @@ async fn test_abyssal_mgr_lifecycle_and_gate_activations() {
             None,
         )
         .await
-        .expect_err("ClientIsReady returns UnimplementedRPC");
-    assert_eq!(ready_err.code, ERR_UNIMPLEMENTED);
+        .expect_err("ClientIsReady outside abyss");
+    assert_eq!(ready_err.code, "NotInAbyssalSpace");
 
-    // 4. AbyssalGateActivation returns UnimplementedRPC
+    // 4. AbyssalGateActivation outside abyss returns NotInAbyssalSpace
     let gate1_err = ctx
         .dispatch_rpc(
             &mut sess,
@@ -161,10 +164,10 @@ async fn test_abyssal_mgr_lifecycle_and_gate_activations() {
             None,
         )
         .await
-        .expect_err("AbyssalGateActivation returns UnimplementedRPC");
-    assert_eq!(gate1_err.code, ERR_UNIMPLEMENTED);
+        .expect_err("AbyssalGateActivation outside abyss");
+    assert_eq!(gate1_err.code, "NotInAbyssalSpace");
 
-    // 5. AbyssalEndGateActivation returns UnimplementedRPC
+    // 5. AbyssalEndGateActivation outside abyss returns NotInAbyssalSpace
     let exit_err = ctx
         .dispatch_rpc(
             &mut sess,
@@ -176,8 +179,8 @@ async fn test_abyssal_mgr_lifecycle_and_gate_activations() {
             None,
         )
         .await
-        .expect_err("AbyssalEndGateActivation returns UnimplementedRPC");
-    assert_eq!(exit_err.code, ERR_UNIMPLEMENTED);
+        .expect_err("AbyssalEndGateActivation outside abyss");
+    assert_eq!(exit_err.code, "NotInAbyssalSpace");
 }
 
 #[tokio::test]
@@ -284,6 +287,9 @@ async fn test_abyssal_deployment_from_non_jita_origin_system() {
                 ..Default::default()
             },
         );
+        if let Some(it) = snap.items.get_mut(&SHIP_ID) {
+            it.type_id = 621;
+        }
     });
 
     sess.solar_system_id = Some(NON_JITA_SYS);
@@ -296,7 +302,7 @@ async fn test_abyssal_deployment_from_non_jita_origin_system() {
         .spawn_ball_with_combat(
             Ball {
                 id: SHIP_ID,
-                type_id: 601,
+                type_id: 621,
                 position: glam::DVec3::new(75_000.0, 0.0, 0.0),
                 velocity: glam::DVec3::ZERO,
                 max_velocity: 1000.0,
@@ -306,7 +312,7 @@ async fn test_abyssal_deployment_from_non_jita_origin_system() {
                 speed_fraction: 0.0,
                 mode: MovementMode::Stop,
             },
-            ctx.build_ship_combat_state(PILOT1, SHIP_ID, 601),
+            ctx.build_ship_combat_state(PILOT1, SHIP_ID, 621),
         )
         .await;
 
@@ -344,7 +350,7 @@ async fn test_abyssal_deployment_from_non_jita_origin_system() {
         "Ship ball remains in origin system destiny engine"
     );
 
-    // 2. AbyssalEntranceGateActivation returns UnimplementedRPC
+    // 2. AbyssalEntranceGateActivation with missing arg returns MissingRequiredArgument
     let enter_err = ctx
         .dispatch_rpc(
             &mut sess,
@@ -356,17 +362,17 @@ async fn test_abyssal_deployment_from_non_jita_origin_system() {
             None,
         )
         .await
-        .expect_err("AbyssalEntranceGateActivation returns UnimplementedRPC");
-    assert_eq!(enter_err.code, ERR_UNIMPLEMENTED);
+        .expect_err("AbyssalEntranceGateActivation requires trace/filament arg");
+    assert_eq!(enter_err.code, "MissingRequiredArgument");
 
-    // 3. ClientIsReady returns UnimplementedRPC
+    // 3. ClientIsReady outside abyss returns NotInAbyssalSpace
     let ready_err = ctx
         .dispatch_rpc(&mut sess, "abyssalMgr", None, "ClientIsReady", &[], &kw, None)
         .await
-        .expect_err("ClientIsReady returns UnimplementedRPC");
-    assert_eq!(ready_err.code, ERR_UNIMPLEMENTED);
+        .expect_err("ClientIsReady outside abyss");
+    assert_eq!(ready_err.code, "NotInAbyssalSpace");
 
-    // 4. AbyssalGateActivation returns UnimplementedRPC
+    // 4. AbyssalGateActivation outside abyss returns NotInAbyssalSpace
     let gate_err = ctx
         .dispatch_rpc(
             &mut sess,
@@ -378,10 +384,10 @@ async fn test_abyssal_deployment_from_non_jita_origin_system() {
             None,
         )
         .await
-        .expect_err("Gate R1->R2 returns UnimplementedRPC");
-    assert_eq!(gate_err.code, ERR_UNIMPLEMENTED);
+        .expect_err("Gate R1->R2 outside abyss");
+    assert_eq!(gate_err.code, "NotInAbyssalSpace");
 
-    // 5. AbyssalEndGateActivation returns UnimplementedRPC
+    // 5. AbyssalEndGateActivation outside abyss returns NotInAbyssalSpace
     let exit_err = ctx
         .dispatch_rpc(
             &mut sess,
@@ -393,6 +399,6 @@ async fn test_abyssal_deployment_from_non_jita_origin_system() {
             None,
         )
         .await
-        .expect_err("AbyssalEndGateActivation returns UnimplementedRPC");
-    assert_eq!(exit_err.code, ERR_UNIMPLEMENTED);
+        .expect_err("AbyssalEndGateActivation outside abyss");
+    assert_eq!(exit_err.code, "NotInAbyssalSpace");
 }

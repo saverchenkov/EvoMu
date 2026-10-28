@@ -463,4 +463,5 @@ pub type NpcDeathFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()>
 pub type NpcDeathHook = Arc<dyn Fn(SolarSystemId, BallId, Option<CharacterId>) -> NpcDeathFuture + Send + Sync>;
 pub type ModuleDeactivationHook = Arc<dyn Fn(CharacterId, &ActiveModuleCycle) + Send + Sync>;
 pub type SystemStepFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
-pub type SystemStepHook = Arc<dyn Fn(SolarSystemId, f64) -> SystemStepFuture + Send + Sync>;
+pub type SystemStepHook =
+    Arc<dyn Fn(SolarSystemId, f64, Vec<(BallId, Option<CharacterId>)>) -> SystemStepFuture + Send + Sync>;

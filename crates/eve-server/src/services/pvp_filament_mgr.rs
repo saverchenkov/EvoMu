@@ -1,19 +1,26 @@
 //! `pvp_filament_mgr` — Proving Grounds / Abyssal PvP Filament manager (`pvpFilamentMgr`).
 //!
 //! Handles matchmaking queue registration, active/scheduled Proving Grounds events,
-//! leaderboards, character statistics, and Abyssal end-gate extraction.
+//! leaderboards, character statistics, and delegates multi-team combat resolution
+//! and Abyssal end-gate extraction to `pvp_filament_arena`.
 
 #![forbid(unsafe_code)]
 
 use std::collections::{HashMap, HashSet};
-use glam::DVec3;
 use serde::{Deserialize, Serialize};
 
-use crate::router::cache_notifications::NotificationTarget;
 use crate::router::ServerContext;
-use eve_destiny::{Ball, MovementMode};
+use crate::services::pve_abyssal_hazards::{
+    check_filament_1000km_proximity, resolve_character_home_station_and_system,
+};
+use crate::services::pvp_filament_arena::{
+    are_opposing_in_match, handle_pvp_end_gate_activation, match_contains_char,
+    notify_pvp_stats_for_pilots, record_proving_grounds_combat_result_in_snap,
+    spawn_matched_arena_instance,
+};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
+use glam::DVec3;
 
 pub const PVP_FILAMENT_STORE_KEY: i64 = -990_050;
 
@@ -60,21 +67,22 @@ pub struct PvpArenaMatchInstance {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PvpFilamentStore {
-    /// Queued pilots: characterID -> PvpQueueCharacterEntry
     pub queue: HashMap<i64, PvpQueueCharacterEntry>,
-    /// Match statistics: characterID -> (wins, losses, score, kills, damage)
     pub stats: HashMap<i64, (i64, i64, i64, i64, f64)>,
-    /// Match statistics scoped by event: event_id -> characterID -> (wins, losses, score, kills, damage)
     #[serde(default)]
     pub event_stats: HashMap<i64, HashMap<i64, (i64, i64, i64, i64, f64)>>,
-    /// Scheduled and historical Proving Grounds events
     #[serde(default)]
     pub events: Vec<PvpEventSchedule>,
     #[serde(default)]
     pub seeded_default_events: bool,
-    /// Active arena match instances: match_id -> PvpArenaMatchInstance
     #[serde(default)]
     pub active_matches: HashMap<i64, PvpArenaMatchInstance>,
+    #[serde(default)]
+    pub match_teams: HashMap<i64, Vec<Vec<i64>>>,
+    #[serde(default)]
+    pub match_eliminated: HashMap<i64, HashSet<i64>>,
+    #[serde(default)]
+    pub match_arena_offsets: HashMap<i64, [f64; 3]>,
     #[serde(default)]
     pub origin_positions: HashMap<i64, [f64; 3]>,
     #[serde(default)]
@@ -108,7 +116,8 @@ fn load_sde_pvp_events(sde: &eve_sde::SdeRegistry) -> Vec<PvpEventSchedule> {
     static SDE_PVP_EVENTS: std::sync::OnceLock<Vec<PvpEventSchedule>> = std::sync::OnceLock::new();
     SDE_PVP_EVENTS
         .get_or_init(|| {
-            let Ok(dates) = sde.load_cfsd_table("res:/staticdata/pvpfilamenteventdates.fsdbinary") else {
+            let Ok(dates) = sde.load_cfsd_table("res:/staticdata/pvpfilamenteventdates.fsdbinary")
+            else {
                 return Vec::new();
             };
             let match_types = sde
@@ -129,7 +138,11 @@ fn load_sde_pvp_events(sde: &eve_sde::SdeRegistry) -> Vec<PvpEventSchedule> {
                     .and_then(|v| v.get("filamentTypeID"))
                     .and_then(|v| v.as_i64())
                     .unwrap_or(0);
-                let type_ids = if filament_type_id > 0 { vec![filament_type_id] } else { Vec::new() };
+                let type_ids = if filament_type_id > 0 {
+                    vec![filament_type_id]
+                } else {
+                    Vec::new()
+                };
                 let (event_name, description) = u32::try_from(filament_type_id)
                     .ok()
                     .and_then(|tid| sde.types.get(&tid))
@@ -151,12 +164,122 @@ fn load_sde_pvp_events(sde: &eve_sde::SdeRegistry) -> Vec<PvpEventSchedule> {
         .clone()
 }
 
-/// Seeds the Proving Grounds event schedule from `pvpfilamenteventdates.fsdbinary`
-/// and `pvpfilamentmatchtypes.fsdbinary` when no events exist in the store.
 pub fn ensure_events_from_sde(sde: &eve_sde::SdeRegistry, store: &mut PvpFilamentStore) {
     if !store.seeded_default_events && store.events.is_empty() {
         store.seeded_default_events = true;
         store.events = load_sde_pvp_events(sde);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PvpFilamentMatchSpec {
+    fleet_size: usize,
+    number_of_fleets: usize,
+    ship_restrictions_list_id: Option<u32>,
+}
+
+fn get_pvp_filament_match_spec(
+    sde: &eve_sde::SdeRegistry,
+    filament_type_id: u32,
+) -> PvpFilamentMatchSpec {
+    static SDE_PVP_MATCH_SPECS: std::sync::OnceLock<HashMap<u32, PvpFilamentMatchSpec>> =
+        std::sync::OnceLock::new();
+    let specs = SDE_PVP_MATCH_SPECS.get_or_init(|| {
+        let match_types = sde
+            .load_cfsd_nested("res:/staticdata/pvpfilamentmatchtypes.fsdbinary")
+            .unwrap_or_default();
+        let mut map = HashMap::new();
+        for (_mt_id, val) in match_types {
+            let fid = val.get("filamentTypeID").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            if fid == 0 {
+                continue;
+            }
+            let fleet_size = val.get("fleetSize").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
+            let number_of_fleets = val
+                .get("numberOfFleets")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(2)
+                .max(2) as usize;
+            let ship_restrictions_list_id = val
+                .get("shipRestrictions")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32)
+                .filter(|&v| v > 0);
+            map.insert(
+                fid,
+                PvpFilamentMatchSpec {
+                    fleet_size,
+                    number_of_fleets,
+                    ship_restrictions_list_id,
+                },
+            );
+        }
+        map
+    });
+    if let Some(&spec) = specs.get(&filament_type_id) {
+        return spec;
+    }
+    let name = sde
+        .types
+        .get(&filament_type_id)
+        .map(|t| t.name.as_str())
+        .unwrap_or("");
+    let (fleet_size, number_of_fleets) = if name.contains("3v3") {
+        (3, 2)
+    } else if name.contains("2v2") {
+        (2, 2)
+    } else if name.contains("FFA") || name.contains("1v1v1v1") {
+        (1, 4)
+    } else {
+        (1, 2)
+    };
+    PvpFilamentMatchSpec {
+        fleet_size,
+        number_of_fleets,
+        ship_restrictions_list_id: None,
+    }
+}
+
+fn is_ship_allowed_for_pvp_filament(
+    sde: &eve_sde::SdeRegistry,
+    filament_type_id: u32,
+    ship_type_id: u32,
+) -> bool {
+    let Some(ship_ty) = sde.types.get(&ship_type_id) else {
+        return false;
+    };
+    let ship_grp = ship_ty.group_id;
+    if ship_type_id == 670
+        || matches!(
+            ship_grp,
+            29 | 30 | 485 | 513 | 547 | 659 | 883 | 902 | 941 | 1538
+        )
+    {
+        return false;
+    }
+    let spec = get_pvp_filament_match_spec(sde, filament_type_id);
+    if let Some(list_id) = spec.ship_restrictions_list_id {
+        if let Some(type_list) = sde.type_lists.get(&list_id) {
+            return type_list.contains(ship_ty);
+        }
+    }
+    let fil_name = sde
+        .types
+        .get(&filament_type_id)
+        .map(|t| t.name.as_str())
+        .unwrap_or("");
+    if fil_name.contains("Battleship") {
+        matches!(ship_grp, 27 | 898 | 900)
+    } else if fil_name.contains("Battlecruiser") {
+        matches!(ship_grp, 419 | 540 | 1201)
+    } else if fil_name.contains("Cruiser") {
+        matches!(ship_grp, 26 | 358 | 832 | 833 | 894 | 906 | 963 | 1972)
+    } else if fil_name.contains("Destroyer") {
+        matches!(ship_grp, 420 | 541 | 1305 | 1534)
+    } else if fil_name.contains("Frigate") {
+        matches!(ship_grp, 25 | 324 | 830 | 831 | 834 | 893 | 1283 | 1527)
+    } else {
+        true
     }
 }
 
@@ -169,7 +292,10 @@ fn event_to_keyval(e: &PvpEventSchedule) -> PyRep {
         ("scheduleID", PyRep::Integer(e.schedule_id)),
         ("startDate", PyRep::Integer(unix_to_filetime(e.start_unix))),
         ("endDate", PyRep::Integer(unix_to_filetime(e.end_unix))),
-        ("typeIDs", PyRep::List(e.type_ids.iter().copied().map(PyRep::Integer).collect())),
+        (
+            "typeIDs",
+            PyRep::List(e.type_ids.iter().copied().map(PyRep::Integer).collect()),
+        ),
     ])
 }
 
@@ -181,7 +307,6 @@ where
         let store = load_pvp_store(snap);
         !store.seeded_default_events && store.events.is_empty()
     });
-
     if needs_seed {
         ctx.db.with_mut_snapshot(|snap| {
             let mut store = load_pvp_store(snap);
@@ -189,7 +314,6 @@ where
             save_pvp_store(snap, &store);
         });
     }
-
     ctx.db.with_snapshot(|snap| {
         let store = load_pvp_store(snap);
         f(&store)
@@ -206,12 +330,17 @@ pub fn load_pvp_store(snap: &eve_db::WorldStateSnapshot) -> PvpFilamentStore {
 
 pub fn save_pvp_store(snap: &mut eve_db::WorldStateSnapshot, store: &PvpFilamentStore) {
     if let Ok(json) = serde_json::to_string(store) {
-        snap.service_state_blobs.insert("pvp_filament_store".into(), json.clone());
-        snap.service_state_blobs.insert("pvp_filament:global".into(), json);
+        snap.service_state_blobs
+            .insert("pvp_filament_store".into(), json.clone());
+        snap.service_state_blobs
+            .insert("pvp_filament:global".into(), json);
     }
 }
 
-fn get_stats_source(store: &PvpFilamentStore, event_id: i64) -> &HashMap<i64, (i64, i64, i64, i64, f64)> {
+fn get_stats_source(
+    store: &PvpFilamentStore,
+    event_id: i64,
+) -> &HashMap<i64, (i64, i64, i64, i64, f64)> {
     if event_id > 0 {
         if let Some(es) = store.event_stats.get(&event_id) {
             if !es.is_empty() {
@@ -230,7 +359,7 @@ pub fn build_leaderboard_rows_for_event(store: &PvpFilamentStore, event_id: i64)
     let stats_map = get_stats_source(store, event_id);
     let mut rows: Vec<(i64, (i64, i64, i64, i64, f64))> = stats_map
         .iter()
-        .filter_map(|(&cid, &st)| (st.0 > 0 || st.1 > 0 || st.2 > 0).then_some((cid, st)))
+        .filter_map(|(&cid, &st)| (st.0 > 0 || st.1 > 0 || st.2 > 0 || st.3 > 0).then_some((cid, st)))
         .collect();
     rows.sort_by(|(cid_a, a), (cid_b, b)| {
         b.2.cmp(&a.2)
@@ -258,12 +387,16 @@ pub fn build_character_statistics(store: &PvpFilamentStore, char_id: i64) -> PyR
     build_character_statistics_for_event(store, 0, char_id)
 }
 
-pub fn build_character_statistics_for_event(store: &PvpFilamentStore, event_id: i64, char_id: i64) -> PyRep {
+pub fn build_character_statistics_for_event(
+    store: &PvpFilamentStore,
+    event_id: i64,
+    char_id: i64,
+) -> PyRep {
     let stats_map = get_stats_source(store, event_id);
     let (w, l, s, k, d) = stats_map.get(&char_id).copied().unwrap_or((0, 0, 0, 0, 0.0));
     let mut rows: Vec<(i64, (i64, i64, i64, i64, f64))> = stats_map
         .iter()
-        .filter_map(|(&cid, &st)| (st.0 > 0 || st.1 > 0 || st.2 > 0).then_some((cid, st)))
+        .filter_map(|(&cid, &st)| (st.0 > 0 || st.1 > 0 || st.2 > 0 || st.3 > 0).then_some((cid, st)))
         .collect();
     rows.sort_by(|(cid_a, a), (cid_b, b)| {
         b.2.cmp(&a.2)
@@ -288,129 +421,19 @@ pub fn build_character_statistics_for_event(store: &PvpFilamentStore, event_id: 
     ])
 }
 
-/// Authoritative server-side combat resolution hook for Proving Grounds events.
 pub fn record_proving_grounds_combat_result(
     ctx: &ServerContext,
     winner_char_id: i64,
     loser_char_id: i64,
     damage_done: f64,
 ) -> Result<(), BridgeRpcError> {
-    if winner_char_id == loser_char_id {
-        return Err(BridgeRpcError {
-            code: "InvalidArgument".into(),
-            message: "Winner and loser must be distinct characters".into(),
-        });
-    }
-    let (event_id, winner_stats, loser_stats, leaderboard) = ctx.db.try_with_mut_snapshot(|snap| {
-        let mut store = load_pvp_store(snap);
-        let has_active_match = store.active_matches.values().any(|m| {
-            m.active
-                && ((m.team_a.contains(&winner_char_id) && m.team_b.contains(&loser_char_id))
-                    || (m.team_b.contains(&winner_char_id) && m.team_a.contains(&loser_char_id)))
-        });
-        let both_queued = store.queue.contains_key(&winner_char_id) && store.queue.contains_key(&loser_char_id);
-
-        if !has_active_match && !both_queued {
-            return Err(BridgeRpcError {
-                code: "NotInPvpQueue".into(),
-                message: "Both combatants must be queued in Proving Grounds or in an active match".into(),
-            });
-        }
-
-        // Dequeue both combatants
-        store.queue.remove(&winner_char_id);
-        store.queue.remove(&loser_char_id);
-
-        let mut matched_event_id = store.events.last().map(|e| e.event_id).unwrap_or(171);
-        for m in store.active_matches.values_mut() {
-            if m.active
-                && ((m.team_a.contains(&winner_char_id) && m.team_b.contains(&loser_char_id))
-                    || (m.team_b.contains(&winner_char_id) && m.team_a.contains(&loser_char_id)))
-            {
-                m.active = false;
-                m.winner_char_id = Some(winner_char_id);
-                matched_event_id = m.event_id;
-            }
-        }
-
-        let w = store.stats.entry(winner_char_id).or_insert((0, 0, 0, 0, 0.0));
-        w.0 += 1;
-        w.2 += 100;
-        w.3 += 1;
-        w.4 += damage_done;
-
-        let l = store.stats.entry(loser_char_id).or_insert((0, 0, 0, 0, 0.0));
-        l.1 += 1;
-        l.2 += 25;
-
-        let ev_stats = store.event_stats.entry(matched_event_id).or_default();
-        let ew = ev_stats.entry(winner_char_id).or_insert((0, 0, 0, 0, 0.0));
-        ew.0 += 1;
-        ew.2 += 100;
-        ew.3 += 1;
-        ew.4 += damage_done;
-        let el = ev_stats.entry(loser_char_id).or_insert((0, 0, 0, 0, 0.0));
-        el.1 += 1;
-        el.2 += 25;
-
-        save_pvp_store(snap, &store);
-
-        let w_stats = build_character_statistics_for_event(&store, matched_event_id, winner_char_id);
-        let l_stats = build_character_statistics_for_event(&store, matched_event_id, loser_char_id);
-        let lb_rows = build_leaderboard_rows_for_event(&store, matched_event_id);
-
-        Ok((matched_event_id, w_stats, l_stats, lb_rows))
+    let (event_id, affected_pilots) = ctx.db.try_with_mut_snapshot(|snap| {
+        record_proving_grounds_combat_result_in_snap(snap, winner_char_id, loser_char_id, damage_done)
     })?;
-
-    // MachoNet client notifications: OnPVPFilamentsCharacterStatistics and OnPVPFilamentsLeaderboard
-    let w_stat_notif = PyRep::keyval([
-        ("eventID", PyRep::Integer(event_id)),
-        ("event_id", PyRep::Integer(event_id)),
-        ("statistics", winner_stats),
-    ]);
-    let l_stat_notif = PyRep::keyval([
-        ("eventID", PyRep::Integer(event_id)),
-        ("event_id", PyRep::Integer(event_id)),
-        ("statistics", loser_stats),
-    ]);
-    let lb_notif = PyRep::keyval([
-        ("eventID", PyRep::Integer(event_id)),
-        ("event_id", PyRep::Integer(event_id)),
-        ("entries", PyRep::List(leaderboard)),
-    ]);
-
-    ctx.notify(
-        NotificationTarget::Character(winner_char_id),
-        "OnPVPFilamentsCharacterStatistics",
-        "charid",
-        vec![w_stat_notif],
-    );
-    ctx.notify(
-        NotificationTarget::Character(loser_char_id),
-        "OnPVPFilamentsCharacterStatistics",
-        "charid",
-        vec![l_stat_notif],
-    );
-    ctx.notify(
-        NotificationTarget::Character(winner_char_id),
-        "OnPVPFilamentsLeaderboard",
-        "charid",
-        vec![lb_notif.clone()],
-    );
-    ctx.notify(
-        NotificationTarget::Character(loser_char_id),
-        "OnPVPFilamentsLeaderboard",
-        "charid",
-        vec![lb_notif],
-    );
-
+    notify_pvp_stats_for_pilots(ctx, event_id, &affected_pilots);
     Ok(())
 }
 
-/// Kill-pipeline hook (`P1-PG-RESULT-OUTSIDE-ARENA`): records a Proving Grounds win/loss ONLY when
-/// the kill happened in the arena system of an active (not yet concluded) match that has the attacker
-/// and victim on opposite teams. Pilots who are merely queued (still in their origin systems) never
-/// produce a result from a normal-space kill.
 pub fn record_proving_grounds_combat_result_if_queued(
     ctx: &ServerContext,
     attacker_char_id: i64,
@@ -422,11 +445,11 @@ pub fn record_proving_grounds_combat_result_if_queued(
         return;
     }
     let in_arena_match = ctx.db.with_snapshot(|snap| {
-        load_pvp_store(snap).active_matches.values().any(|m| {
+        let store = load_pvp_store(snap);
+        store.active_matches.values().any(|m| {
             m.active
                 && m.arena_solar_system_id == kill_solar_system_id
-                && ((m.team_a.contains(&attacker_char_id) && m.team_b.contains(&victim_char_id))
-                    || (m.team_b.contains(&attacker_char_id) && m.team_a.contains(&victim_char_id)))
+                && are_opposing_in_match(&store, m, attacker_char_id, victim_char_id)
         })
     });
     if in_arena_match {
@@ -449,7 +472,6 @@ pub async fn handle(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-
     let now_unix = ctx.now_unix();
 
     match (service, method) {
@@ -460,7 +482,9 @@ pub async fn handle(
                     message: "Cannot activate filament while docked in a station or structure".into(),
                 }));
             }
-            let cur_sys_for_check = session.solar_system_id.unwrap_or(30_000_142);
+            let Some(cur_sys_for_check) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError::user_error("NoSolarSystem")));
+            };
             let cur_ship_for_check = session.ship_id.unwrap_or(0);
             if let Err(e) = crate::sp6_lifecycle::require_ship_ready_for_filament_jump(
                 ctx,
@@ -482,12 +506,55 @@ pub async fn handle(
                 .unwrap_or([0.0, 0.0, 0.0]);
             let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let type_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-
             if item_id <= 0 {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "Valid filament itemID is required to join queue".into(),
                 }));
+            }
+
+            // Pre-check item ownership/cargo BEFORE proximity so invalid item/cargo errors stay prioritized
+            let pre_err = ctx.db.with_snapshot(|snap| -> Option<BridgeRpcError> {
+                let Some(active_ship_id) = session.ship_id else {
+                    return Some(BridgeRpcError::user_error("MustBeInSpace"));
+                };
+                if let Some(ship_it) = snap.items.get(&active_ship_id) {
+                    let ship_grp = ctx.sde.types.get(&ship_it.type_id).map(|t| t.group_id).unwrap_or(0);
+                    if ship_it.type_id == 670 || matches!(ship_grp, 29 | 30 | 485 | 513 | 547 | 659 | 883 | 902 | 941 | 1538) {
+                        return Some(BridgeRpcError {
+                            code: "InvalidShipForFilament".into(),
+                            message: "Capsules and capital/freighter hulls cannot enter Proving Grounds arenas".into(),
+                        });
+                    }
+                }
+                let Some(it) = snap.items.get(&item_id) else {
+                    return Some(BridgeRpcError {
+                        code: "ItemNotFound".into(),
+                        message: "Filament item not found in inventory".into(),
+                    });
+                };
+                if it.owner_id != char_id {
+                    return Some(BridgeRpcError {
+                        code: "ItemNotOwned".into(),
+                        message: "Filament item is not owned by pilot".into(),
+                    });
+                }
+                if it.location_id != active_ship_id || it.flag != eve_db::InventoryFlag::Cargo {
+                    return Some(BridgeRpcError::user_error("ItemNotInCargo"));
+                }
+                None
+            });
+            if let Some(e) = pre_err {
+                return Some(Err(e));
+            }
+            if let Err(e) = check_filament_1000km_proximity(
+                ctx,
+                cur_sys_for_check,
+                DVec3::from_array(caller_origin_pos),
+            )
+            .await
+            {
+                return Some(Err(e));
             }
 
             let queued_candidates: Vec<(i64, i64, u32)> = ctx.db.with_snapshot(|snap| {
@@ -515,7 +582,7 @@ pub async fn handle(
                     })
                     .collect()
             });
-            let ready_opponents: std::collections::HashSet<i64> = queued_candidates
+            let ready_opponents: HashSet<i64> = queued_candidates
                 .into_iter()
                 .filter(|&(cid, ship_id, sys_id)| {
                     crate::sp6_lifecycle::require_ship_ready_for_filament_jump(
@@ -534,10 +601,10 @@ pub async fn handle(
                         message: "Character is already queued for a PvP filament event".into(),
                     });
                 }
-                if cur_sys_for_check == 32000001
+                if cur_sys_for_check == 32_000_001
                     || store.active_matches.values().any(|m| {
                         m.active
-                            && (m.team_a.contains(&char_id) || m.team_b.contains(&char_id))
+                            && match_contains_char(&store, m, char_id)
                             && !m.exited_pilots.contains(&char_id)
                     })
                 {
@@ -546,10 +613,22 @@ pub async fn handle(
                         message: "Character is already inside an active Proving Grounds arena".into(),
                     });
                 }
-                let active_ship_id = session.ship_id.ok_or_else(|| BridgeRpcError::user_error("MustBeInSpace"))?;
-                if let Some(ship_it) = snap.items.get(&active_ship_id) {
-                    let ship_grp = ctx.sde.types.get(&ship_it.type_id).map(|t| t.group_id).unwrap_or(0);
-                    if ship_it.type_id == 670
+                let active_ship_id = session
+                    .ship_id
+                    .ok_or_else(|| BridgeRpcError::user_error("MustBeInSpace"))?;
+                let caller_ship_type_id = snap
+                    .items
+                    .get(&active_ship_id)
+                    .map(|i| i.type_id)
+                    .unwrap_or(0);
+                if caller_ship_type_id > 0 {
+                    let ship_grp = ctx
+                        .sde
+                        .types
+                        .get(&caller_ship_type_id)
+                        .map(|t| t.group_id)
+                        .unwrap_or(0);
+                    if caller_ship_type_id == 670
                         || matches!(
                             ship_grp,
                             29 | 30 | 485 | 513 | 547 | 659 | 883 | 902 | 941 | 1538
@@ -561,38 +640,29 @@ pub async fn handle(
                         });
                     }
                 }
-                let Some(it) = snap.items.get_mut(&item_id) else {
+                let Some(it) = snap.items.get(&item_id) else {
                     return Err(BridgeRpcError {
                         code: "ItemNotFound".into(),
                         message: "Filament item not found in inventory".into(),
                     });
                 };
-                if it.owner_id != char_id {
-                    return Err(BridgeRpcError {
-                        code: "ItemNotOwned".into(),
-                        message: "Filament item is not owned by pilot".into(),
-                    });
-                }
-                if session.station_id.is_some() || session.structure_id.is_some() {
-                    return Err(BridgeRpcError::user_error("MustBeInSpace"));
-                }
-                if it.location_id != active_ship_id || it.flag != eve_db::InventoryFlag::Cargo {
-                    return Err(BridgeRpcError::user_error("ItemNotInCargo"));
-                }
                 if type_id > 0 && it.type_id != type_id as u32 {
                     return Err(BridgeRpcError {
                         code: "InvalidFilamentType".into(),
                         message: "Item type mismatch".into(),
                     });
                 }
-                // Proving Grounds / Abyssal Battlefield filaments (SDE groups 4050 and 4743)
-                // or active event-scheduled PvP filament types; Abyssal PvE (1979) and Jump (4041) filaments are rejected.
+                let it_type_id = it.type_id;
+                let it_location_id = it.location_id;
+                let it_flag = it.flag as u16;
+
                 let now_i64 = now_unix as i64;
                 ensure_events_from_sde(&ctx.sde, &mut store);
-                let active_event = store
-                    .events
-                    .iter()
-                    .find(|ev| ev.start_unix <= now_i64 && now_i64 <= ev.end_unix && ev.type_ids.contains(&i64::from(it.type_id)));
+                let active_event = store.events.iter().find(|ev| {
+                    ev.start_unix <= now_i64
+                        && now_i64 <= ev.end_unix
+                        && ev.type_ids.contains(&i64::from(it_type_id))
+                });
                 let in_active_event = active_event.is_some();
                 let any_event_currently_active = store
                     .events
@@ -604,111 +674,178 @@ pub async fn handle(
                         store
                             .events
                             .iter()
-                            .filter(|ev| ev.type_ids.contains(&i64::from(it.type_id)))
+                            .filter(|ev| ev.type_ids.contains(&i64::from(it_type_id)))
                             .max_by_key(|ev| (ev.end_unix, ev.event_id))
                             .map(|ev| ev.event_id)
                     })
                     .unwrap_or(171);
 
                 let in_inactive_only = any_event_currently_active
-                    && store
-                        .events
-                        .iter()
-                        .any(|ev| (ev.end_unix < now_i64 || ev.start_unix > now_i64) && ev.type_ids.contains(&i64::from(it.type_id)))
+                    && store.events.iter().any(|ev| {
+                        (ev.end_unix < now_i64 || ev.start_unix > now_i64)
+                            && ev.type_ids.contains(&i64::from(it_type_id))
+                    })
                     && !in_active_event;
                 let is_sde_pvp_filament = ctx
                     .sde
                     .types
-                    .get(&it.type_id)
+                    .get(&it_type_id)
                     .map(|t| (t.group_id == 4050 || t.group_id == 4743) && !t.name.starts_with("Expired"))
                     .unwrap_or(false);
                 if !is_sde_pvp_filament {
                     return Err(BridgeRpcError {
                         code: "InvalidFilamentType".into(),
-                        message: format!("Item type {} is not a valid PvP filament", it.type_id),
+                        message: format!("Item type {it_type_id} is not a valid PvP filament"),
                     });
                 }
                 if in_inactive_only {
                     return Err(BridgeRpcError {
                         code: "EventNotActive".into(),
-                        message: format!("Proving Grounds event for filament type {} is not currently active", it.type_id),
+                        message: format!(
+                            "Proving Grounds event for filament type {it_type_id} is not currently active"
+                        ),
                     });
                 }
-                let it_type_id = it.type_id;
-                let it_location_id = it.location_id;
-                let it_flag = it.flag as u16;
+                if caller_ship_type_id == 0
+                    || !is_ship_allowed_for_pvp_filament(&ctx.sde, it_type_id, caller_ship_type_id)
+                {
+                    return Err(BridgeRpcError {
+                        code: "InvalidShipForFilament".into(),
+                        message: format!(
+                            "Ship type {caller_ship_type_id} is not permitted by Proving Grounds filament {it_type_id}"
+                        ),
+                    });
+                }
+                let match_spec = get_pvp_filament_match_spec(&ctx.sde, it_type_id);
+                let total_required_pilots = (match_spec.fleet_size * match_spec.number_of_fleets).max(2);
+                let needed_others = total_required_pilots - 1;
 
-                if it.quantity > 1 {
-                    it.quantity -= 1;
-                } else {
-                    snap.items.remove(&item_id);
+                if let Some(it) = snap.items.get_mut(&item_id) {
+                    if it.quantity > 1 {
+                        it.quantity -= 1;
+                    } else {
+                        snap.items.remove(&item_id);
+                    }
                 }
 
-                // Matchmaking: check if another pilot is already queued in space for this filament type
-                let matched_opponent = store
+                let mut matched_opponents: Vec<(i64, u32, i64, u64)> = store
                     .queue
                     .iter()
-                    .find(|(&cid, qe)| {
+                    .filter_map(|(&cid, qe)| {
                         if cid == char_id || qe.type_id != it_type_id {
-                            return false;
+                            return None;
                         }
-                        let Some(opp_ch) = snap.characters.get(&cid) else {
-                            return false;
-                        };
+                        let opp_ch = snap.characters.get(&cid)?;
                         if opp_ch.station_id.is_some()
                             || opp_ch.structure_id.is_some()
                             || opp_ch.active_ship_id <= 0
                         {
-                            return false;
+                            return None;
                         }
-                        ready_opponents.contains(&cid)
+                        let opp_ship_ty = snap
+                            .items
+                            .get(&opp_ch.active_ship_id)
+                            .map(|i| i.type_id)
+                            .unwrap_or(0);
+                        if !is_ship_allowed_for_pvp_filament(&ctx.sde, it_type_id, opp_ship_ty) {
+                            return None;
+                        }
+                        if !ready_opponents.contains(&cid) {
+                            return None;
+                        }
+                        Some((cid, qe.solar_system_id, qe.location_id, qe.joined_unix))
                     })
-                    .map(|(&cid, qe)| (cid, qe.solar_system_id, qe.location_id));
+                    .collect();
+                matched_opponents.sort_by_key(|&(cid, _, _, joined)| (joined, cid));
 
                 store.origin_positions.insert(char_id, caller_origin_pos);
-                let match_data = if let Some((opp_id, opp_sys, opp_loc)) = matched_opponent {
-                    store.queue.remove(&opp_id);
+                let match_data = if matched_opponents.len() >= needed_others {
+                    matched_opponents.truncate(needed_others);
+                    for &(opp_id, _, _, _) in &matched_opponents {
+                        store.queue.remove(&opp_id);
+                    }
                     store.next_match_id += 1;
                     let mid = store.next_match_id;
-                    let cur_sys = session.solar_system_id.unwrap_or(30000142);
-                    let opp_origin_sys = if opp_sys > 0 { opp_sys } else { 30000142 };
+                    let end_gate_id = 70_000 + mid;
+
+                    let used_slots: HashSet<i64> = store
+                        .match_arena_offsets
+                        .values()
+                        .map(|off| ((off[0] - 50_000_000.0) / 5_000_000.0).round() as i64)
+                        .collect();
+                    let slot = (0_i64..10_000).find(|s| !used_slots.contains(s)).unwrap_or(0);
+                    let arena_offset = [50_000_000.0 + (slot as f64) * 5_000_000.0, 0.0, 0.0];
+
                     let mut origin_systems = HashMap::new();
-                    origin_systems.insert(opp_id, opp_origin_sys);
-                    origin_systems.insert(char_id, cur_sys);
+                    let mut participants: Vec<(i64, i64, u32)> =
+                        Vec::with_capacity(total_required_pilots);
+                    for &(opp_id, opp_sys, opp_loc, _) in &matched_opponents {
+                        let opp_origin_sys = if opp_sys > 0 {
+                            opp_sys
+                        } else {
+                            resolve_character_home_station_and_system(snap, &ctx.sde, opp_id).1
+                        };
+                        origin_systems.insert(opp_id, opp_origin_sys);
+                        let opp_ship_id = snap
+                            .characters
+                            .get(&opp_id)
+                            .map(|c| c.active_ship_id)
+                            .filter(|&s| s > 0)
+                            .unwrap_or(opp_loc);
+                        participants.push((opp_id, opp_ship_id, opp_origin_sys));
+                    }
+                    origin_systems.insert(char_id, cur_sys_for_check);
+                    participants.push((char_id, active_ship_id, cur_sys_for_check));
+
+                    let teams: Vec<Vec<i64>> = participants
+                        .chunks(match_spec.fleet_size.max(1))
+                        .map(|chunk| chunk.iter().map(|p| p.0).collect())
+                        .collect();
+                    let team_a = teams.first().cloned().unwrap_or_default();
+                    let team_b: Vec<i64> = teams.iter().skip(1).flatten().copied().collect();
 
                     let match_inst = PvpArenaMatchInstance {
                         match_id: mid,
                         event_id: active_event_id,
-                        arena_solar_system_id: 32000001,
-                        team_a: vec![opp_id],
-                        team_b: vec![char_id],
+                        arena_solar_system_id: 32_000_001,
+                        team_a,
+                        team_b,
                         origin_systems,
                         started_unix: now_unix,
                         active: true,
                         winner_char_id: None,
                         exited_pilots: HashSet::new(),
-                        end_gate_id: 70001,
+                        end_gate_id,
                     };
                     store.active_matches.insert(mid, match_inst);
+                    store.match_teams.insert(mid, teams.clone());
+                    store.match_eliminated.insert(mid, HashSet::new());
+                    store.match_arena_offsets.insert(mid, arena_offset);
 
-                    let opp_ship_id = snap.characters.get(&opp_id).map(|c| c.active_ship_id).filter(|&s| s > 0).unwrap_or(opp_loc);
-                    if let Some(c) = snap.characters.get_mut(&opp_id) {
-                        c.solar_system_id = 32000001;
-                    }
-                    if let Some(c) = snap.characters.get_mut(&char_id) {
-                        c.solar_system_id = 32000001;
+                    for &(pid, p_ship_id, _) in &participants {
+                        if let Some(c) = snap.characters.get_mut(&pid) {
+                            c.solar_system_id = 32_000_001;
+                            c.station_id = None;
+                            c.structure_id = None;
+                        }
+                        if let Some(sh) = snap.items.get_mut(&p_ship_id) {
+                            sh.location_id = 32_000_001;
+                        }
                     }
 
-                    Some((opp_id, opp_ship_id, opp_origin_sys, cur_sys, active_ship_id))
+                    Some((mid, end_gate_id, arena_offset, teams, participants))
                 } else {
-                    store.queue.insert(char_id, PvpQueueCharacterEntry {
-                        item_id,
-                        type_id: it_type_id,
-                        location_id: it_location_id,
-                        flag: it_flag,
-                        solar_system_id: session.solar_system_id.unwrap_or(30000142),
-                        joined_unix: now_unix,
-                    });
+                    store.queue.insert(
+                        char_id,
+                        PvpQueueCharacterEntry {
+                            item_id,
+                            type_id: it_type_id,
+                            location_id: it_location_id,
+                            flag: it_flag,
+                            solar_system_id: cur_sys_for_check,
+                            joined_unix: now_unix,
+                        },
+                    );
                     None
                 };
 
@@ -718,126 +855,17 @@ pub async fn handle(
             });
 
             match res {
-                Ok(Some((opp_id, opp_ship_id, opp_sys, cur_sys, cur_ship_id))) => {
-                    session.solar_system_id = Some(32000001);
-                    crate::services::map_service::record_solar_system_visit(ctx, char_id, 32000001);
-                    crate::services::map_service::record_solar_system_visit(ctx, opp_id, 32000001);
-
-                    // Update opponent session & emit OnSessionChanged for both pilots
-                    let sess_rep_opp = PyRep::keyval([
-                        ("charid", PyRep::Integer(opp_id)),
-                        ("solarsystemid2", PyRep::Integer(32000001)),
-                        ("solarsystemid", PyRep::Integer(32000001)),
-                    ]);
-                    ctx.notify(
-                        crate::router::NotificationTarget::Character(opp_id),
-                        "OnSessionChanged",
-                        "charid",
-                        vec![
-                            PyRep::Bool(false),
-                            sess_rep_opp,
-                            PyRep::Dict(vec![(
-                                PyRep::String("solarsystemid".into()),
-                                PyRep::Tuple(vec![PyRep::Integer(opp_sys as i64), PyRep::Integer(32000001)]),
-                            )]),
-                        ],
-                    );
-
-                    let sess_rep_cur = PyRep::keyval([
-                        ("charid", PyRep::Integer(char_id)),
-                        ("solarsystemid2", PyRep::Integer(32000001)),
-                        ("solarsystemid", PyRep::Integer(32000001)),
-                    ]);
-                    ctx.notify(
-                        crate::router::NotificationTarget::Character(char_id),
-                        "OnSessionChanged",
-                        "charid",
-                        vec![
-                            PyRep::Bool(false),
-                            sess_rep_cur,
-                            PyRep::Dict(vec![(
-                                PyRep::String("solarsystemid".into()),
-                                PyRep::Tuple(vec![PyRep::Integer(cur_sys as i64), PyRep::Integer(32000001)]),
-                            )]),
-                        ],
-                    );
-
-                    // Transition out of origin systems and abandon active drones/fighters
-                    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
+                Ok(Some((mid, end_gate_id, arena_offset, teams, participants))) => {
+                    spawn_matched_arena_instance(
                         ctx,
-                        opp_id,
-                        opp_ship_id,
-                        opp_sys,
-                    );
-                    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
-                        ctx,
-                        char_id,
-                        cur_ship_id,
-                        cur_sys,
-                    );
-                    ctx.systems.get_or_spawn(opp_sys).try_remove_ball(opp_ship_id);
-                    ctx.systems.get_or_spawn(cur_sys).try_remove_ball(cur_ship_id);
-
-                    // Spawn into arena Ballpark (32000001 AD001) with SDE physics
-                    let arena = ctx.systems.get_or_spawn(32000001);
-                    if arena.get_ball_snapshot(70001).await.ok().flatten().is_none() {
-                        let gate_ball = Ball {
-                            id: 70001,
-                            type_id: 47459,
-                            position: DVec3::ZERO,
-                            velocity: DVec3::ZERO,
-                            max_velocity: 0.0,
-                            inertia: 1.0,
-                            mass: 10_000_000.0,
-                            radius: 500.0,
-                            speed_fraction: 0.0,
-                            mode: MovementMode::Stop,
-                        };
-                        let _ = arena.spawn_ball_with_combat(gate_ball, Default::default()).await;
-                    }
-                    let opp_ship_type = ctx.db.with_snapshot(|s| s.items.get(&opp_ship_id).map(|i| i.type_id).unwrap_or(621));
-                    let cur_ship_type = ctx.db.with_snapshot(|s| s.items.get(&cur_ship_id).map(|i| i.type_id).unwrap_or(621));
-
-                    let get_ball_physics = |ship_type_id: u32| -> (f64, f64, f64, f64) {
-                        ctx.sde.types.get(&ship_type_id).map(|st| {
-                            let mv = st.default_attributes.get(&eve_sde::attr_ids::MAX_VELOCITY).copied().unwrap_or(250.0);
-                            let ag = st.default_attributes.get(&eve_sde::attr_ids::AGILITY).copied().unwrap_or(0.5);
-                            (st.mass, st.radius, ag, mv)
-                        }).unwrap_or((1_000_000.0, 50.0, 0.5, 250.0))
-                    };
-
-                    let (opp_mass, opp_radius, opp_inertia, opp_max_vel) = get_ball_physics(opp_ship_type);
-                    let cs_opp = ctx.build_ship_combat_state(opp_id, opp_ship_id, opp_ship_type);
-                    let ball_opp = Ball {
-                        id: opp_ship_id,
-                        type_id: opp_ship_type,
-                        position: DVec3::new(-10_000.0, 0.0, 0.0),
-                        velocity: DVec3::ZERO,
-                        max_velocity: opp_max_vel,
-                        inertia: opp_inertia,
-                        mass: opp_mass,
-                        radius: opp_radius,
-                        speed_fraction: 0.0,
-                        mode: MovementMode::Stop,
-                    };
-                    let _ = arena.spawn_ball_with_combat(ball_opp, cs_opp).await;
-
-                    let (cur_mass, cur_radius, cur_inertia, cur_max_vel) = get_ball_physics(cur_ship_type);
-                    let cs_cur = ctx.build_ship_combat_state(char_id, cur_ship_id, cur_ship_type);
-                    let ball_cur = Ball {
-                        id: cur_ship_id,
-                        type_id: cur_ship_type,
-                        position: DVec3::new(10_000.0, 0.0, 0.0),
-                        velocity: DVec3::ZERO,
-                        max_velocity: cur_max_vel,
-                        inertia: cur_inertia,
-                        mass: cur_mass,
-                        radius: cur_radius,
-                        speed_fraction: 0.0,
-                        mode: MovementMode::Stop,
-                    };
-                    let _ = arena.spawn_ball_with_combat(ball_cur, cs_cur).await;
-
+                        session,
+                        mid,
+                        end_gate_id,
+                        arena_offset,
+                        teams,
+                        participants,
+                    )
+                    .await;
                     Some(Ok(PyRep::Integer(5)))
                 }
                 Ok(None) => Some(Ok(PyRep::Integer(30))),
@@ -863,12 +891,6 @@ pub async fn handle(
                             code: "FilamentNotFound".into(),
                             message: "Filament item does not match queued filament".into(),
                         });
-                    }
-                }
-                // Cancel active arena match if formed
-                for m in store.active_matches.values_mut() {
-                    if m.active && (m.team_a.contains(&char_id) || m.team_b.contains(&char_id)) {
-                        m.active = false;
                     }
                 }
                 if let Some(it) = snap
@@ -905,7 +927,11 @@ pub async fn handle(
 
         ("pvpFilamentMgr", "GetAllEvents") => {
             let events_rep = with_pvp_store_events(ctx, |store| {
-                let dict = store.events.iter().map(|e| (PyRep::Integer(e.event_id), event_to_keyval(e))).collect();
+                let dict = store
+                    .events
+                    .iter()
+                    .map(|e| (PyRep::Integer(e.event_id), event_to_keyval(e)))
+                    .collect();
                 PyRep::Dict(dict)
             });
             Some(Ok(events_rep))
@@ -979,7 +1005,11 @@ pub async fn handle(
 
         ("pvpFilamentMgr", "GetCharacterStatistics") => {
             let event_id = args.first().and_then(|a| a.as_i64()).filter(|&e| e > 0).unwrap_or(171);
-            let target_cid = args.get(1).and_then(|a| a.as_i64()).filter(|&c| c > 0).unwrap_or(char_id);
+            let target_cid = args
+                .get(1)
+                .and_then(|a| a.as_i64())
+                .filter(|&c| c > 0)
+                .unwrap_or(char_id);
             let stats = ctx.db.with_snapshot(|snap| {
                 let store = load_pvp_store(snap);
                 build_character_statistics_for_event(&store, event_id, target_cid)
@@ -999,164 +1029,7 @@ pub async fn handle(
         }
 
         ("pvpFilamentMgr", "AbyssalPVPEndGateActivation") => {
-            let gate_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-
-            let (is_in_arena, active_ship_id) = ctx.db.with_snapshot(|snap| {
-                let c = snap.characters.get(&char_id);
-                let sys = session.solar_system_id.or_else(|| c.map(|c| c.solar_system_id)).unwrap_or(0);
-                let ship = session.ship_id.or_else(|| c.map(|c| c.active_ship_id)).filter(|&s| s > 0);
-                (sys == 32000001, ship)
-            });
-
-            if !is_in_arena {
-                return Some(Err(BridgeRpcError::user_error("NotInArena")));
-            }
-
-            let match_precheck = ctx.db.with_snapshot(|snap| {
-                let store = load_pvp_store(snap);
-                for m in store.active_matches.values() {
-                    if m.arena_solar_system_id == 32000001
-                        && (m.team_a.contains(&char_id) || m.team_b.contains(&char_id))
-                        && !m.exited_pilots.contains(&char_id)
-                    {
-                        return Some((
-                            m.match_id,
-                            m.end_gate_id,
-                            m.winner_char_id,
-                            m.active,
-                            m.started_unix,
-                        ));
-                    }
-                }
-                None
-            });
-
-            let Some((mid, end_gate_id, winner_char_id, m_active, m_started_unix)) = match_precheck
-            else {
-                return Some(Err(BridgeRpcError::user_error("NoActiveMatch")));
-            };
-
-            let match_timed_out = now_unix >= m_started_unix.saturating_add(900);
-            if winner_char_id.is_none() && m_active && !match_timed_out {
-                return Some(Err(BridgeRpcError::user_error("MatchNotConcluded")));
-            }
-
-            let target_gate_id = if end_gate_id > 0 { end_gate_id } else { 70001 };
-            if gate_id > 0 && gate_id != target_gate_id {
-                return Some(Err(BridgeRpcError::user_error("TooFarFromGate")));
-            }
-
-            let arena = ctx.systems.get_or_spawn(32000001);
-            let Some((_, gb)) = arena.get_ball_snapshot(target_gate_id).await.ok().flatten() else {
-                return Some(Err(BridgeRpcError::user_error("TooFarFromGate")));
-            };
-            let Some(sid) = active_ship_id else {
-                return Some(Err(BridgeRpcError::user_error("TooFarFromGate")));
-            };
-            let Some((_, sb)) = arena.get_ball_snapshot(sid).await.ok().flatten() else {
-                return Some(Err(BridgeRpcError::user_error("TooFarFromGate")));
-            };
-            if sb.position.distance(gb.position) > 50_000.0 {
-                return Some(Err(BridgeRpcError::user_error("TooFarFromGate")));
-            }
-
-            let match_info = ctx.db.with_mut_snapshot(|snap| {
-                let mut store = load_pvp_store(snap);
-                store.queue.remove(&char_id);
-                let mut matched_entry = None;
-                let opos = store
-                    .origin_positions
-                    .get(&char_id)
-                    .copied()
-                    .unwrap_or([0.0, 0.0, 0.0]);
-                for m in store.active_matches.values_mut() {
-                    if m.match_id == mid && !m.exited_pilots.contains(&char_id) {
-                        let osys = m.origin_systems.get(&char_id).copied().unwrap_or(30000142);
-                        m.exited_pilots.insert(char_id);
-                        let all_exited = m.team_a.iter().chain(m.team_b.iter()).all(|cid| m.exited_pilots.contains(cid));
-                        if all_exited {
-                            m.active = false;
-                        }
-                        matched_entry = Some((m.match_id, osys, opos));
-                        break;
-                    }
-                }
-                let Some((mid, osys, opos)) = matched_entry else {
-                    save_pvp_store(snap, &store);
-                    return None;
-                };
-                let active_ship_id = snap.characters.get(&char_id).map(|c| c.active_ship_id).filter(|&s| s > 0);
-                if let Some(c) = snap.characters.get_mut(&char_id) {
-                    c.solar_system_id = osys;
-                }
-                if let Some(sid) = active_ship_id {
-                    snap.item_positions.insert(sid, opos);
-                }
-                save_pvp_store(snap, &store);
-                Some((mid, osys, opos, active_ship_id))
-            });
-
-            let Some((_mid, osys, opos, active_ship_id)) = match_info else {
-                return Some(Err(BridgeRpcError::user_error("NoActiveMatch")));
-            };
-
-            session.solar_system_id = Some(osys);
-            crate::services::map_service::record_solar_system_visit(ctx, char_id, osys);
-            let cur_ship = active_ship_id.or(session.ship_id).unwrap_or(char_id);
-            crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
-                ctx,
-                char_id,
-                cur_ship,
-                32000001,
-            );
-            ctx.systems.get_or_spawn(32000001).try_remove_ball(cur_ship);
-
-            let origin_sys_handle = ctx.systems.get_or_spawn(osys);
-            let ship_type = ctx.db.with_snapshot(|s| s.items.get(&cur_ship).map(|i| i.type_id).unwrap_or(621));
-            let (mass, radius, inertia, max_vel) = ctx.sde.types.get(&ship_type).map(|st| {
-                let mv = st.default_attributes.get(&eve_sde::attr_ids::MAX_VELOCITY).copied().unwrap_or(250.0);
-                let ag = st.default_attributes.get(&eve_sde::attr_ids::AGILITY).copied().unwrap_or(0.5);
-                (st.mass, st.radius, ag, mv)
-            }).unwrap_or((1_000_000.0, 50.0, 0.5, 250.0));
-            let cs = ctx.build_ship_combat_state(char_id, cur_ship, ship_type);
-            let ball = Ball {
-                id: cur_ship,
-                type_id: ship_type,
-                position: DVec3::from_array(opos),
-                velocity: DVec3::ZERO,
-                max_velocity: max_vel,
-                inertia,
-                mass,
-                radius,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            };
-            let _ = origin_sys_handle.spawn_ball_with_combat(ball, cs).await;
-
-            let sess_rep = PyRep::keyval([
-                ("charid", PyRep::Integer(char_id)),
-                ("solarsystemid2", PyRep::Integer(osys as i64)),
-                ("solarsystemid", PyRep::Integer(osys as i64)),
-            ]);
-            ctx.notify(
-                crate::router::NotificationTarget::Character(char_id),
-                "OnSessionChanged",
-                "charid",
-                vec![
-                    PyRep::Bool(false),
-                    sess_rep,
-                    PyRep::Dict(vec![(
-                        PyRep::String("solarsystemid".into()),
-                        PyRep::Tuple(vec![PyRep::Integer(32000001), PyRep::Integer(osys as i64)]),
-                    )]),
-                ],
-            );
-
-            Some(Ok(PyRep::keyval([
-                ("gateID", PyRep::Integer(target_gate_id)),
-                ("activated", PyRep::Bool(true)),
-                ("originSystemID", PyRep::Integer(osys as i64)),
-            ])))
+            Some(handle_pvp_end_gate_activation(ctx, session, char_id, args, now_unix).await)
         }
 
         _ => None,

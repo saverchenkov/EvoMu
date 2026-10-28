@@ -303,7 +303,7 @@ pub fn system_wormhole_profile(sys_id: SolarSystemId) -> (u8, bool, bool, &'stat
 }
 
 #[allow(clippy::too_many_arguments)]
-fn make_wh_sig(
+pub(crate) fn make_wh_sig(
     signature_id: String,
     solar_system_id: SolarSystemId,
     type_name: String,
@@ -405,6 +405,8 @@ fn pick_destination_system_for_target_class(
     }
 }
 
+pub use super::space_pochven_wormholes::{is_pochven_wormhole, pochven_wormhole_ball_position};
+
 // DERIVED: Per-system static wormhole tables are not in the client FSD SDE (`evomu_sde.sqlite`);
 // only the 132 wormhole types (`sde_wormhole_types`) and system `wormhole_class_id` are present.
 pub(crate) fn static_wormhole_template(
@@ -413,6 +415,9 @@ pub(crate) fn static_wormhole_template(
     now_unix: u64,
     seq: u32,
 ) -> Vec<CosmicSignatureRecord> {
+    if ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id) == Some(10_000_070) {
+        return super::space_pochven_wormholes::pochven_static_wormholes(sys_id, seq, now_unix);
+    }
     if sys_id == 31_000_005 {
         let hs_tid = lookup_wormhole_type_for_target_class(&ctx.sde, 7);
         let ls_tid = lookup_wormhole_type_for_target_class(&ctx.sde, 8);
@@ -707,10 +712,12 @@ pub async fn ensure_system_signatures_and_anomalies(
         let _ = h.remove_ball(b_id).await;
     }
 
+    let is_pochven_sys = ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id) == Some(10_000_070);
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     for sig in &sigs {
         if sig.sig_group == "Wormhole" && !sig.collapsed {
             let wh_item_id = wormhole_item_id_for_signature(sys_id, &sig.signature_id);
+            let ball_pos = pochven_wormhole_ball_position(&ctx.sde, sig);
             if sys_handle
                 .get_ball_snapshot(wh_item_id)
                 .await
@@ -722,7 +729,7 @@ pub async fn ensure_system_signatures_and_anomalies(
                     .spawn_ball(Ball {
                         id: wh_item_id,
                         type_id: sig.wormhole_type_id.unwrap_or(26272),
-                        position: DVec3::from_array(sig.position),
+                        position: ball_pos,
                         velocity: DVec3::ZERO,
                         max_velocity: 0.0,
                         inertia: 1.0,
@@ -733,7 +740,11 @@ pub async fn ensure_system_signatures_and_anomalies(
                     })
                     .await;
             }
-            if let Some(dest_sys) = sig.destination_system_id {
+            // Pochven-origin wormholes only open their K162 exit when scanned from the Pochven side (`feat:navigation.pochven-wormholes`).
+            let delay_k162_until_scanned = is_pochven_sys
+                && is_pochven_wormhole(&ctx.sde, sig)
+                && sig.signal_strength < 1.0;
+            if let Some(dest_sys) = sig.destination_system_id.filter(|_| !delay_k162_until_scanned) {
                 let exit_id = wormhole_exit_item_id_for_signature(dest_sys, &sig.signature_id);
                 let dest_handle = ctx.systems.get_or_spawn(dest_sys);
                 if dest_handle
@@ -1045,9 +1056,9 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
         }
 
         let wh_pos = if is_reverse_exit_jump {
-            exit_ball_pos_opt.unwrap_or_else(|| DVec3::from_array(sigs[wh_idx].position))
+            exit_ball_pos_opt.unwrap_or_else(|| pochven_wormhole_ball_position(&ctx.sde, &sigs[wh_idx]))
         } else {
-            DVec3::from_array(sigs[wh_idx].position)
+            pochven_wormhole_ball_position(&ctx.sde, &sigs[wh_idx])
         };
         let dist = current_ball.position.distance(wh_pos);
         if dist > 2_500.0 {

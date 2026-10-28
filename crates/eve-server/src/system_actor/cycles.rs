@@ -963,8 +963,8 @@ pub(crate) fn step_cycles_and_capacitor(
                     // Apply start-of-next-cycle (`t = 0`) effects: active shield boost, energy neutralizer drain, remote shield/cap
                     if cycle.shield_boost_amount > 0.0 {
                         if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
-                            cs.shield_hp =
-                                (cs.shield_hp + cycle.shield_boost_amount).min(cs.max_shield_hp);
+                            let boost_mult = if cs.shield_boost_multiplier > 0.0 { cs.shield_boost_multiplier } else { 1.0 };
+                            cs.shield_hp = (cs.shield_hp + cycle.shield_boost_amount * boost_mult).min(cs.max_shield_hp);
                         }
                     }
                     if let Some(target_id) = cycle.target_id {
@@ -1230,6 +1230,12 @@ impl SystemHandle {
         respawn_due_asteroids(&mut bp, asteroids, asteroid_templates, sde_opt, db_opt);
         sync_player_slim_items(&mut bp, db_opt);
         let events = bp.step(dt);
+        crate::services::pve_special_sites_abyssal::step_abyssal_hazards_and_pylons_in_ballpark(
+            &mut bp,
+            sde_opt.as_deref(),
+            db_opt.as_ref(),
+            self.solar_system_id,
+        );
         let hook_guard = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
         let deact_hook_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
         let destroyed = step_cycles_and_capacitor(
@@ -1237,7 +1243,15 @@ impl SystemHandle {
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
             sde_opt, db_opt, tactical_state, pending_cycle_actions, dt, deact_hook_guard.as_ref(),
         );
-        for (target_ball_id, owner_char_id) in destroyed {
+        for &(target_ball_id, owner_char_id) in &destroyed {
+            if let Some(db) = db_opt.as_ref() {
+                crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark(
+                    &mut bp,
+                    db,
+                    self.solar_system_id,
+                    target_ball_id,
+                );
+            }
             if let Some(fut) = on_ball_destroyed_by_damage(self.solar_system_id, target_ball_id, owner_char_id, hook_guard.as_ref()) {
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                     let _ = handle.spawn(fut);
@@ -1246,7 +1260,7 @@ impl SystemHandle {
         }
         let step_hook_guard = self.system_step_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
         if let Some(hook) = step_hook_guard {
-            let fut = hook(self.solar_system_id, dt);
+            let fut = hook(self.solar_system_id, dt, destroyed);
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 let _ = handle.spawn(fut);
             }

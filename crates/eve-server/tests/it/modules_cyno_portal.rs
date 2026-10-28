@@ -204,7 +204,7 @@ fn pick_systems(ctx: &ServerContext) -> (u32, u32, u32) {
         .sde
         .solar_systems
         .values()
-        .filter(|s| s.security_status < 0.45 && s.solar_system_id < 31_000_000 && s.galactic_pos_ly != [0.0; 3])
+        .filter(|s| s.security_status < 0.45 && s.region_id != 10_000_070 && s.solar_system_id < 31_000_000 && s.galactic_pos_ly != [0.0; 3])
         .map(|s| s.solar_system_id)
         .collect();
     sys.sort_unstable();

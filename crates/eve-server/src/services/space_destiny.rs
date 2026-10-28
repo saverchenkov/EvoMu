@@ -50,6 +50,10 @@ pub mod space_cyno_filaments;
 pub mod space_docking_cloaking;
 pub use space_docking_cloaking::*;
 
+#[path = "space_pochven_wormholes.rs"]
+pub mod space_pochven_wormholes;
+pub use space_pochven_wormholes::*;
+
 #[path = "space_nav_travel.rs"]
 pub mod space_nav_travel;
 

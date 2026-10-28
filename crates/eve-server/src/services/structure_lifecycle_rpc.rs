@@ -71,6 +71,21 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
     if is_thera || is_shattered {
         return Err(err("AnchoringDisallowedInTheraOrShattered", format!("Anchoring structures or starbases is disallowed in Thera or shattered wormhole system {sys_id}")));
     }
+    if sys_id == 30_100_000 {
+        return Err(err("AnchoringDisallowedInZarzakh", "Capsuleer structure anchoring is prohibited in Zarzakh"));
+    }
+    if ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id) == Some(10_000_070) {
+        let is_customs_office = matches!(type_id, 2233 | 28351 | 28352);
+        if !is_customs_office {
+            return Err(err("AnchoringDisallowedInPochven", "Upwell structures cannot be anchored in Pochven"));
+        }
+        let trig_standing = ctx.db.with_snapshot(|s| {
+            s.characters.get(&char_id).and_then(|c| c.standings.get(&500_026).copied()).unwrap_or(0.0)
+        });
+        if trig_standing < 1.5 {
+            return Err(err("TriglavianStandingTooLowForCustomsOffice", "Anchoring a customs office in Pochven requires at least 1.5 Triglavian standing"));
+        }
+    }
     let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0);
     if type_id == 35840 && sys_sec >= 0.45 {
         return Err(err("CannotAnchorCynoBeaconInHighSec", format!("Pharolux Cyno Beacon (35840) cannot be anchored in high-security solar system {sys_id} (security {sys_sec:.2} >= 0.45)")));

@@ -387,7 +387,7 @@ async fn test_sp3_warp_to_disrupted_capacitor_cost_and_exit_invulnerability() {
         )
         .await
         .unwrap_err();
-    assert_eq!(abyss_unimpl.code, "UnimplementedRPC");
+    assert_eq!(abyss_unimpl.code, "MissingRequiredArgument");
 
     ctx.dispatch_rpc(
         &mut sess,

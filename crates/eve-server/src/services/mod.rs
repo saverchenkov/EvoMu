@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod account_services;
+pub mod abyssal_void_gates;
 pub mod abyssal_void_mgr;
 pub mod agents_missions;
 pub mod auth_cache;
@@ -74,8 +75,10 @@ pub mod pve_homefront_sites;
 pub mod pve_incursion_sites;
 pub mod pve_metaliminal_storms;
 pub mod pve_sleeper_caches;
+pub mod pve_abyssal_hazards;
 pub mod pve_special_sites;
 pub mod pve_special_sites_abyssal;
+pub mod pvp_filament_arena;
 pub mod pvp_filament_mgr;
 pub mod quasar_achievements;
 pub mod quasar_achievements_ops;

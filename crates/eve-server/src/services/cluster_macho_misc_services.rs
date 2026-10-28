@@ -128,6 +128,7 @@ pub struct ClusterMiscRuntimeState {
     pub offered_load_slots: HashMap<i64, OfferedLoadSlot>,
     pub system_population_caps: HashMap<u32, usize>,
     pub char_energy: HashMap<i64, crate::services::character_energy::CharacterEnergyState>,
+    pub target_cooldowns: HashMap<i64, u64>,
 }
 
 /// DERIVED: Canonical Empire Landing Pads (Shipcaster Beacons) in Faction Warfare warzones.
@@ -173,6 +174,27 @@ pub fn derived_landing_pads() -> Vec<LandingPadRecord> {
             is_disrupted: false,
             position: glam::DVec3::new(100_000.0, 0.0, 0.0),
         },
+        // Insurgency Forward Operating Base Landing Pads
+        LandingPadRecord {
+            item_id: 104_000_020,
+            type_id: 78260, // Angel Cartel FOB (group 4644)
+            solar_system_id: 30002056, // Angel Cartel Insurgency FOB
+            faction_id: 500010,
+            is_built: true,
+            link_timestamp: 1_700_000_000,
+            is_disrupted: false,
+            position: glam::DVec3::new(120_000.0, 0.0, 0.0),
+        },
+        LandingPadRecord {
+            item_id: 104_000_021,
+            type_id: 79172, // Guristas Pirates FOB (group 4644)
+            solar_system_id: 30002811, // Guristas Insurgency FOB
+            faction_id: 500011,
+            is_built: true,
+            link_timestamp: 1_700_000_000,
+            is_disrupted: false,
+            position: glam::DVec3::new(120_000.0, 0.0, 0.0),
+        },
     ]
 }
 
@@ -210,6 +232,15 @@ pub fn derived_launchers() -> Vec<LauncherRecord> {
             faction_id: 500004,
             linked_pad_ids: vec![104_000_004],
             position: glam::DVec3::new(200_000.0, 0.0, 0.0),
+        },
+        // [DERIVED] Deathless Shipcaster in Zarzakh (links to Angel and Guristas pirate FOBs)
+        LauncherRecord {
+            item_id: 105_000_010,
+            type_id: 79018, // Deathless Interstellar Shipcaster
+            solar_system_id: 30100000, // Zarzakh Deathless Shipcaster
+            faction_id: 0,
+            linked_pad_ids: vec![104_000_020, 104_000_021],
+            position: glam::DVec3::new(250_000.0, 0.0, 0.0),
         },
     ]
 }
@@ -263,6 +294,7 @@ impl ClusterMiscRuntimeState {
             offered_load_slots: HashMap::new(),
             system_population_caps: HashMap::new(),
             char_energy: HashMap::new(),
+            target_cooldowns: HashMap::new(),
         };
         let persisted: Option<PersistedClusterMiscState> = db.with_snapshot(|snap| {
             snap.service_state_blobs
@@ -539,3 +571,40 @@ pub async fn handle(
         _ => crate::services::shipcaster_ops::handle(ctx, session, service, method, args, _kwargs).await,
     }
 }
+
+pub fn check_and_apply_shipcaster_target_cooldown(
+    ctx: &ServerContext,
+    pad_id: i64,
+    cooldown_secs: u64,
+) -> Result<(), BridgeRpcError> {
+    let now = ctx.now_unix();
+    with_misc_state(ctx, |st| {
+        if let Some(&expires) = st.target_cooldowns.get(&pad_id) {
+            if now < expires {
+                return Err(BridgeRpcError {
+                    code: "ShipcasterTargetOnCooldown".into(),
+                    message: format!("Shipcaster destination pad {pad_id} is on cooldown for {} more seconds", expires - now),
+                });
+            }
+        }
+        st.target_cooldowns.insert(pad_id, now + cooldown_secs);
+        Ok(())
+    })
+}
+
+pub fn is_zarzakh_horizon_siege_active(ctx: &ServerContext) -> bool {
+    ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
+            .get("zarzakh_horizon_siege_active")
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(false)
+    })
+}
+
+pub fn set_zarzakh_horizon_siege_active(ctx: &ServerContext, active: bool) {
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs
+            .insert("zarzakh_horizon_siege_active".into(), active.to_string());
+    });
+}
+
