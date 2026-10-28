@@ -299,6 +299,7 @@ mod pi_planet_mgr_rpc_part2;
 mod pi_planet_mgr_rpc_part3;
 mod rpc_shipcaster_complete;
 mod rpc_lp_store_mgr_complete;
+mod lp_store_closure;
 mod rpc_utility_services_batch;
 mod rpc_mail_mgr_complete;
 mod rpc_mailing_lists_complete;

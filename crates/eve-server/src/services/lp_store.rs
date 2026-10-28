@@ -14,8 +14,8 @@
 // parity: feat:lifecycle.lp-durable
 // parity: rpc:LPStoreMgr.GetAvailableOffersFromCorp
 // parity: rpc:LPStoreMgr.TakeOfferForCharacter, rpc:LPStoreMgr.TakeOfferForCorporation
+// parity: feat:lp.lp-store-offers
 // parity: feat:lp.lp-store-buy
-// DATA GAP: requires SDE/live store catalog import (feat:lp.lp-store-offers)
 
 #![forbid(unsafe_code)]
 
@@ -43,6 +43,8 @@ pub struct LPOffer {
     pub req_items: Vec<(TypeId, i32)>,
     #[serde(default)]
     pub ak_cost: i64,
+    #[serde(default)]
+    pub min_standing: Option<f64>,
 }
 
 /// Load persisted LP store offers from `WorldStateSnapshot.service_state_blobs["lp_store_offers"]`.
@@ -80,6 +82,7 @@ pub fn get_corp_lp_offers(snap: &eve_db::WorldStateSnapshot, corp_id: i64) -> Ve
                         .iter()
                         .map(|ri| (ri.type_id as eve_sde::TypeId, ri.quantity as i32))
                         .collect(),
+                    min_standing: None,
                 });
             }
         }
@@ -234,7 +237,7 @@ fn offer_to_pyrep(o: &LPOffer) -> PyRep {
             ])
         })
         .collect();
-    PyRep::keyval([
+    let mut fields = vec![
         ("offerID", PyRep::Integer(o.offer_id)),
         ("corpID", PyRep::Integer(o.corp_id)),
         ("typeID", PyRep::Integer(o.type_id as i64)),
@@ -243,7 +246,11 @@ fn offer_to_pyrep(o: &LPOffer) -> PyRep {
         ("iskCost", PyRep::Real(o.isk_cost.to_wire_f64())),
         ("akCost", PyRep::Integer(o.ak_cost.max(0))),
         ("reqItems", PyRep::List(req_items_rep)),
-    ])
+    ];
+    if let Some(min_st) = o.min_standing {
+        fields.push(("minStanding", PyRep::Real(min_st)));
+    }
+    PyRep::keyval(fields)
 }
 
 fn check_corp_lp_role(
@@ -291,7 +298,7 @@ fn take_offer(
         Err(e) => return Some(Err(e)),
     };
 
-    let (target_corp_id, target_offer_id, qty) = if args.len() >= 3 {
+    let (explicit_corp_id, target_offer_id, qty) = if args.len() >= 3 {
         let cid = args[0].as_i64();
         let oid = args[1].as_i64().unwrap_or(0);
         let q = args[2].as_i64().unwrap_or(1);
@@ -319,13 +326,25 @@ fn take_offer(
         }));
     };
 
+    let station_corp_id = session
+        .station_id
+        .and_then(|sid| ctx.sde.stations.get(&sid).map(|st| st.owner_corporation_id));
+    let target_corp_id = explicit_corp_id.or(station_corp_id);
+
     let all_offers = ctx.db.with_snapshot(|snap| match target_corp_id {
-        Some(cid) => get_corp_lp_offers(snap, cid),
+        Some(cid) => {
+            let corp_offers = get_corp_lp_offers(snap, cid);
+            if corp_offers.is_empty() && explicit_corp_id.is_none() {
+                load_lp_store_offers(snap)
+            } else {
+                corp_offers
+            }
+        }
         None => load_lp_store_offers(snap),
     });
     let offer = match all_offers.into_iter().find(|o| {
         o.offer_id == target_offer_id
-            && target_corp_id.map(|cid| o.corp_id == cid).unwrap_or(true)
+            && (explicit_corp_id.is_none() || explicit_corp_id == Some(o.corp_id))
     }) {
         Some(o) => o,
         None => {
@@ -396,6 +415,18 @@ fn take_offer(
                 });
             }
         }
+        if let Some(min_st) = offer.min_standing {
+            let cur_st = ch.standings.get(&offer.corp_id).copied().unwrap_or(0.0);
+            if cur_st < min_st {
+                return Err(BridgeRpcError {
+                    code: "InsufficientStanding".into(),
+                    message: format!(
+                        "LP store offer {} requires at least {:.2} standing with corporation {} (have {:.2})",
+                        offer.offer_id, min_st, offer.corp_id, cur_st
+                    ),
+                });
+            }
+        }
 
         // Verify required trade-in items (`req_items`) in hangar/cargo at `delivery_loc_id`
         let active_ship_id = session
@@ -438,21 +469,28 @@ fn take_offer(
                 } else {
                     it.owner_id == char_id
                 };
-                let flag_matches = if is_corp_take {
-                    matches!(
-                        it.flag,
-                        InventoryFlag::Hangar
-                            | InventoryFlag::CorpDeliveries
-                            | InventoryFlag::CorpSAG1
-                            | InventoryFlag::CorpSAG2
-                            | InventoryFlag::CorpSAG3
-                            | InventoryFlag::CorpSAG4
-                            | InventoryFlag::CorpSAG5
-                            | InventoryFlag::CorpSAG6
-                            | InventoryFlag::CorpSAG7
-                    )
+                let loc_and_flag_matches = if is_corp_take {
+                    it.location_id == delivery_loc_id
+                        && matches!(
+                            it.flag,
+                            InventoryFlag::Hangar
+                                | InventoryFlag::CorpDeliveries
+                                | InventoryFlag::CorpSAG1
+                                | InventoryFlag::CorpSAG2
+                                | InventoryFlag::CorpSAG3
+                                | InventoryFlag::CorpSAG4
+                                | InventoryFlag::CorpSAG5
+                                | InventoryFlag::CorpSAG6
+                                | InventoryFlag::CorpSAG7
+                        )
                 } else {
-                    it.flag == delivery_flag
+                    let ship_at_loc = active_ship_id.is_some_and(|aid| {
+                        snap.items.get(&aid).map(|s| s.location_id == delivery_loc_id).unwrap_or(false)
+                    });
+                    (it.location_id == delivery_loc_id && it.flag == delivery_flag)
+                        || (ship_at_loc
+                            && active_ship_id.is_some_and(|aid| it.location_id == aid)
+                            && it.flag == InventoryFlag::Cargo)
                 };
                 let is_active_ship =
                     Some(it.item_id) == active_ship_id || it.item_id == ch.active_ship_id;
@@ -466,8 +504,7 @@ fn take_offer(
                     .get(&it.item_id)
                     .is_some_and(|name| name.starts_with("courier_cargo:"));
                 if owner_matches
-                    && it.location_id == delivery_loc_id
-                    && flag_matches
+                    && loc_and_flag_matches
                     && it.flag != InventoryFlag::Locked
                     && !it.is_blueprint_copy
                     && it.dynamic_attributes.get(&3).copied().unwrap_or(0.0) <= 0.0
@@ -922,13 +959,14 @@ pub fn handle(
                     }));
                 }
             }
+            let station_corp = session
+                .station_id
+                .and_then(|sid| ctx.sde.stations.get(&sid).map(|st| st.owner_corporation_id));
             let corp_id_arg = args.first().and_then(|a| a.as_i64());
             let default_corp = 1_000_035; // Caldari Navy
+            let target_corp = corp_id_arg.or(station_corp).unwrap_or(default_corp);
 
-            let matching = ctx.db.with_snapshot(|snap| match corp_id_arg {
-                Some(cid) => get_corp_lp_offers(snap, cid),
-                None => get_corp_lp_offers(snap, default_corp),
-            });
+            let matching = ctx.db.with_snapshot(|snap| get_corp_lp_offers(snap, target_corp));
 
             let list = matching.iter().map(offer_to_pyrep).collect::<Vec<_>>();
             Some(Ok(PyRep::List(list)))

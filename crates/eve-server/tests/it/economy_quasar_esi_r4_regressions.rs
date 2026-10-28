@@ -841,6 +841,7 @@ async fn test_r4_194_take_offer_for_corporation_deducts_analysis_kredits() {
             isk_cost: IskCents(0),
             req_items: vec![],
             ak_cost: 500, // Requires 500 Analysis Kredits
+            min_standing: None,
         }];
         snap.service_state_blobs.insert(
             "lp_store_offers".into(),

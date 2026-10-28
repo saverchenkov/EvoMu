@@ -332,6 +332,7 @@ async fn test_fulcrum_docking_and_alignment_services() {
             isk_cost: eve_db::IskCents::from_isk(50_000_000),
             req_items: vec![],
             ak_cost: 0,
+            min_standing: None,
         });
         eve_server::services::lp_store::register_lp_store_offer(snap, eve_server::services::lp_store::LPOffer {
             offer_id: 8002,
@@ -342,6 +343,7 @@ async fn test_fulcrum_docking_and_alignment_services() {
             isk_cost: eve_db::IskCents::from_isk(50_000_000),
             req_items: vec![],
             ak_cost: 0,
+            min_standing: None,
         });
     });
 

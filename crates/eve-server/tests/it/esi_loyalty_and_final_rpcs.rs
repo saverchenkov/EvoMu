@@ -79,6 +79,7 @@ async fn test_esi_loyalty_store_offers_route() {
                 isk_cost: eve_db::IskCents::from_isk(20_000_000),
                 req_items: vec![(621, 1)],
                 ak_cost: 100,
+                min_standing: None,
             }],
         );
     });
@@ -121,6 +122,7 @@ async fn test_esi_loyalty_store_offers_route() {
                 isk_cost: eve_db::IskCents(10_000_000),
                 req_items: vec![(603, 1)],
                 ak_cost: 0,
+                min_standing: None,
             }],
         );
     });

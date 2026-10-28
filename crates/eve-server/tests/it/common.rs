@@ -194,6 +194,7 @@ pub fn seed_test_lp_store_offers(ctx: &ServerContext) {
                     isk_cost: IskCents::from_isk(isk),
                     req_items,
                     ak_cost,
+                    min_standing: None,
                 },
             );
         }
