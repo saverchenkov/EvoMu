@@ -1,5 +1,11 @@
 # Crimewatch, Aggression Rules & Engagement Timers
 
+> **Navigation**: [EvoMu Technical Wiki](../README.md) • [Related Systems](#related-systems--cross-references)
+>
+> [← Back to Wiki Table of Contents](../README.md)
+
+---
+
 ## Overview & Lore Context
 
 In the anarchic frontier of space, where immortal capsuleers command devastating weapons capable of vaporizing entire cities, civilization requires strict, mathematically unambiguous rules of engagement. In YC114, following decades of escalating asymmetric conflict, suicide ganking cartels, and confusing territorial edicts, the **Consolidated Cooperation and Relations Command (CONCORD)** enacted the landmark **Crimewatch 2.0** treaty (introduced in the *Retribution* expansion).
@@ -267,44 +273,44 @@ flowchart LR
 ```
 
 ### 1. Crates Involved
-- [`eve-server`](file:///Users/sergeya/ai/EvoMu/crates/eve-server): Master gameplay coordinator, MachoNet RPC dispatchers, Crimewatch director, and death pipelines.
-- [`eve-destiny`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny): 1 Hz spatial physics engine, movement modes, warp scrambling tracking, and ballpark damage application.
-- [`eve-db`](file:///Users/sergeya/ai/EvoMu/crates/eve-db): Transactional WAL snapshot store (`WorldStateSnapshot`) holding persisted crimewatch states, aggression records, and kill rights.
-- [`eve-proto`](file:///Users/sergeya/ai/EvoMu/crates/eve-proto): Binary marshal/unmarshal codec and PyRep wire representations for MachoNet notifications.
+- [`eve-server`](../../../crates/eve-server): Master gameplay coordinator, MachoNet RPC dispatchers, Crimewatch director, and death pipelines.
+- [`eve-destiny`](../../../crates/eve-destiny): 1 Hz spatial physics engine, movement modes, warp scrambling tracking, and ballpark damage application.
+- [`eve-db`](../../../crates/eve-db): Transactional WAL snapshot store (`WorldStateSnapshot`) holding persisted crimewatch states, aggression records, and kill rights.
+- [`eve-proto`](../../../crates/eve-proto): Binary marshal/unmarshal codec and PyRep wire representations for MachoNet notifications.
 
 ---
 
 ### 2. Primary Handlers & Services
 
 #### Crimewatch Director & Core Logic:
-- [`crates/eve-server/src/combat/crimewatch.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/combat/crimewatch.rs)
-  - [`CrimeWatchDirector`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/combat/crimewatch.rs#L78-L83): System-wide director holding active character timer states and aggression records.
-  - [`CrimeWatchLock`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/combat/crimewatch.rs#L85-L190): Transactional, thread-safe wrapper ensuring mutations persist atomically into `WorldStateSnapshot`.
-  - [`CrimeWatchDirector::handle_combat_aggression`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/combat/crimewatch.rs#L267-L320): Evaluates attack legality, assigns Weapons/PvP/Suspect/Criminal timers, and schedules CONCORD arrival.
-  - [`CrimeWatchDirector::step_concord`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/combat/crimewatch.rs#L328-L430): 1 Hz background check executing due CONCORD responses, spawning invulnerable police battleships, applying tackle, and running the canonical death pipeline.
-  - [`compute_sec_status_loss`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/combat/crimewatch.rs#L17-L25): Implements the exact canonical security status loss formula.
+- [`crates/eve-server/src/combat/crimewatch.rs`](../../../crates/eve-server/src/combat/crimewatch.rs)
+  - [`CrimeWatchDirector`](../../../crates/eve-server/src/combat/crimewatch.rs#L78-L83): System-wide director holding active character timer states and aggression records.
+  - [`CrimeWatchLock`](../../../crates/eve-server/src/combat/crimewatch.rs#L85-L190): Transactional, thread-safe wrapper ensuring mutations persist atomically into `WorldStateSnapshot`.
+  - [`CrimeWatchDirector::handle_combat_aggression`](../../../crates/eve-server/src/combat/crimewatch.rs#L267-L320): Evaluates attack legality, assigns Weapons/PvP/Suspect/Criminal timers, and schedules CONCORD arrival.
+  - [`CrimeWatchDirector::step_concord`](../../../crates/eve-server/src/combat/crimewatch.rs#L328-L430): 1 Hz background check executing due CONCORD responses, spawning invulnerable police battleships, applying tackle, and running the canonical death pipeline.
+  - [`compute_sec_status_loss`](../../../crates/eve-server/src/combat/crimewatch.rs#L17-L25): Implements the exact canonical security status loss formula.
 
 #### Crimewatch Timers & Action Interlocks:
-- [`crates/eve-server/src/services/crimewatch_timers.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/crimewatch_timers.rs)
-  - [`check_crimewatch_action_restriction`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/crimewatch_timers.rs#L193-L301): Evaluates whether active Weapons, PvP, or Criminal timers prohibit actions (docking, jumping, tethering, refitting, ejecting, warping, or activating filaments).
-  - [`evaluate_remote_assistance_legality`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/crimewatch_timers.rs#L76-L144): Determines legality of remote shield, armor, and capacitor repair, enforcing logi flag inheritance.
-  - [`emit_crimewatch_timer_notifications`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/crimewatch_timers.rs#L148-L186): Pushes client notifications (`OnWeaponsTimerUpdate`, `OnPvpTimerUpdate`, `OnNpcTimerUpdate`, `OnCriminalTimerUpdate`) with Windows FILETIME timestamps.
-  - [`step_sentry_gun_grid_aggression`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/crimewatch_timers.rs#L306-L383): Drives gate and station sentry gun aggression, applying omni damage within 500 km optimal range.
-  - [`handle_crimewatch`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/crimewatch_timers.rs#L417-L1059): MachoNet RPC dispatcher handling `SetSafetyLevel`, `GetClientStates`, `StartDuelChallenge`, `RespondToDuelChallenge`, `ApplyTagsForSecStatus`, and `killRightMgr` activations.
+- [`crates/eve-server/src/services/crimewatch_timers.rs`](../../../crates/eve-server/src/services/crimewatch_timers.rs)
+  - [`check_crimewatch_action_restriction`](../../../crates/eve-server/src/services/crimewatch_timers.rs#L193-L301): Evaluates whether active Weapons, PvP, or Criminal timers prohibit actions (docking, jumping, tethering, refitting, ejecting, warping, or activating filaments).
+  - [`evaluate_remote_assistance_legality`](../../../crates/eve-server/src/services/crimewatch_timers.rs#L76-L144): Determines legality of remote shield, armor, and capacitor repair, enforcing logi flag inheritance.
+  - [`emit_crimewatch_timer_notifications`](../../../crates/eve-server/src/services/crimewatch_timers.rs#L148-L186): Pushes client notifications (`OnWeaponsTimerUpdate`, `OnPvpTimerUpdate`, `OnNpcTimerUpdate`, `OnCriminalTimerUpdate`) with Windows FILETIME timestamps.
+  - [`step_sentry_gun_grid_aggression`](../../../crates/eve-server/src/services/crimewatch_timers.rs#L306-L383): Drives gate and station sentry gun aggression, applying omni damage within 500 km optimal range.
+  - [`handle_crimewatch`](../../../crates/eve-server/src/services/crimewatch_timers.rs#L417-L1059): MachoNet RPC dispatcher handling `SetSafetyLevel`, `GetClientStates`, `StartDuelChallenge`, `RespondToDuelChallenge`, `ApplyTagsForSecStatus`, and `killRightMgr` activations.
 
 #### Kill Rights & Bounties:
-- [`crates/eve-server/src/services/crimewatch_bounty.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/crimewatch_bounty.rs)
-  - [`handle_bounty_proxy`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/crimewatch_bounty.rs#L16-L200): Dispatches MachoNet RPCs for `bountyProxy.SellKillRight`, `CancelSellKillRight`, `GetMyKillRights`, and `GetKillRightsOnCharacters`.
+- [`crates/eve-server/src/services/crimewatch_bounty.rs`](../../../crates/eve-server/src/services/crimewatch_bounty.rs)
+  - [`handle_bounty_proxy`](../../../crates/eve-server/src/services/crimewatch_bounty.rs#L16-L200): Dispatches MachoNet RPCs for `bountyProxy.SellKillRight`, `CancelSellKillRight`, `GetMyKillRights`, and `GetKillRightsOnCharacters`.
 
 #### Faction Police & Customs:
-- [`crates/eve-server/src/services/combat_npc_police.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/combat_npc_police.rs)
-  - [`check_and_spawn_faction_police`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/combat_npc_police.rs#L61-L196): Spawns authentic empire police battleships on grid targeting outlaws.
-  - [`is_outlaw_ship_docking_refused`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/combat_npc_police.rs#L31-L58): Enforces high-sec station docking refusal for outlaw ships while allowing capsule docking.
-  - [`scan_and_enforce_highsec_contraband`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/combat_npc_police.rs#L205-L372): Performs customs cargo inspections, confiscating contraband and assessing standing penalties and fines.
+- [`crates/eve-server/src/services/combat_npc_police.rs`](../../../crates/eve-server/src/services/combat_npc_police.rs)
+  - [`check_and_spawn_faction_police`](../../../crates/eve-server/src/services/combat_npc_police.rs#L61-L196): Spawns authentic empire police battleships on grid targeting outlaws.
+  - [`is_outlaw_ship_docking_refused`](../../../crates/eve-server/src/services/combat_npc_police.rs#L31-L58): Enforces high-sec station docking refusal for outlaw ships while allowing capsule docking.
+  - [`scan_and_enforce_highsec_contraband`](../../../crates/eve-server/src/services/combat_npc_police.rs#L205-L372): Performs customs cargo inspections, confiscating contraband and assessing standing penalties and fines.
 
 #### Combat Disconnect & Safe Logoff:
-- [`crates/eve-server/src/sp6_lifecycle.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/sp6_lifecycle.rs)
-  - [`handle_character_logoff_or_disconnect`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/sp6_lifecycle.rs#L701-L840): Preserves disconnected capsuleer ships in space for 15 minutes during PvP combat, calculates emergency warp vectors (~1,000,000 km), and blocks emergency warp if tackled.
+- [`crates/eve-server/src/sp6_lifecycle.rs`](../../../crates/eve-server/src/sp6_lifecycle.rs)
+  - [`handle_character_logoff_or_disconnect`](../../../crates/eve-server/src/sp6_lifecycle.rs#L701-L840): Preserves disconnected capsuleer ships in space for 15 minutes during PvP combat, calculates emergency warp vectors (~1,000,000 km), and blocks emergency warp if tackled.
 
 ---
 
@@ -410,13 +416,26 @@ The Crimewatch implementation validates the following canonical tags from the pa
 
 The mechanics and mathematical equations in this article are verified by automated end-to-end integration tests in the EvoMu test suite:
 
-1. **[`crates/eve-server/tests/it/combat_npc_crimewatch.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/combat_npc_crimewatch.rs):**
-   - [`test_c8_crimewatch_safety_timers_restrictions_and_lowsec_pod`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/combat_npc_crimewatch.rs#L349-L480): Tests Safety Green blocking low-sec ship attack (`SafetyLevelRestricted`); tests Safety Yellow permitting low-sec ship attack (Suspect `302`); verifies 60s weapons timer blocking docking/jumping/tethering/filaments; verifies wormhole jump exemption; verifies Safety Red low-sec pod attack triggering Criminal flag (`301`); verifies high-sec criminal warp restriction.
-   - [`test_c8_crimewatch_npc_timers_duels_logi_assistance_and_outlaw`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/combat_npc_crimewatch.rs#L483-L594): Tests 5-minute NPC aggression timers; tests mutual duel creation and acceptance; verifies third-party remote assistance laundering (repairing a criminal flags the logi as criminal; repairing in high-sec limited engagement flags logi as criminal; repairing an outlaw in high-sec flags logi as suspect).
-2. **[`crates/eve-server/tests/it/d6_persistence_corp_crimewatch_warfare.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/d6_persistence_corp_crimewatch_warfare.rs):**
-   - [`test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and_rollback`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/d6_persistence_corp_crimewatch_warfare.rs#L85-L210): Verifies transactional database persistence of character crimewatch states, aggression records, and Kill Rights across server reboots.
-3. **[`crates/eve-server/tests/it/crimewatch_drones_closure.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/crimewatch_drones_closure.rs):**
-   - [`test_crimewatch_concord_response_scaling_and_invulnerable_enforcement`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/crimewatch_drones_closure.rs#L124-L188): Validates CONCORD response arrival delay scaling across security ratings ($6.0\text{s}$ in $1.0$ down to $19.0\text{s}$ in $0.5$); confirms Police Commander invulnerability (`[0.0; 4]` resonances); verifies 100% web, 100 scram, full capacitor wipe, and canonical death pipeline execution.
-   - [`test_crimewatch_safety_setting_block_duel_and_suspect_looting_ess`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/crimewatch_drones_closure.rs#L191-L260): Validates Safety Green blocking stealing from ESS banks and yellow cans; verifies suspect flag issuance upon yellow container access.
-4. **[`crates/eve-server/tests/it/sp6_logoff_and_server_tick.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/sp6_logoff_and_server_tick.rs):**
-   - [`test_sp6_safe_logoff_refusals_aborts_and_30s_completion`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/sp6_logoff_and_server_tick.rs#L102-L330): Tests safe logoff 30s countdown, aborts on movement/target lock, clean ship despawning on completion, and 15-minute persistent space ball retention on PvP combat disconnect.
+1. **[`crates/eve-server/tests/it/combat_npc_crimewatch.rs`](../../../crates/eve-server/tests/it/combat_npc_crimewatch.rs):**
+   - [`test_c8_crimewatch_safety_timers_restrictions_and_lowsec_pod`](../../../crates/eve-server/tests/it/combat_npc_crimewatch.rs#L349-L480): Tests Safety Green blocking low-sec ship attack (`SafetyLevelRestricted`); tests Safety Yellow permitting low-sec ship attack (Suspect `302`); verifies 60s weapons timer blocking docking/jumping/tethering/filaments; verifies wormhole jump exemption; verifies Safety Red low-sec pod attack triggering Criminal flag (`301`); verifies high-sec criminal warp restriction.
+   - [`test_c8_crimewatch_npc_timers_duels_logi_assistance_and_outlaw`](../../../crates/eve-server/tests/it/combat_npc_crimewatch.rs#L483-L594): Tests 5-minute NPC aggression timers; tests mutual duel creation and acceptance; verifies third-party remote assistance laundering (repairing a criminal flags the logi as criminal; repairing in high-sec limited engagement flags logi as criminal; repairing an outlaw in high-sec flags logi as suspect).
+2. **[`crates/eve-server/tests/it/d6_persistence_corp_crimewatch_warfare.rs`](../../../crates/eve-server/tests/it/d6_persistence_corp_crimewatch_warfare.rs):**
+   - [`test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and_rollback`](../../../crates/eve-server/tests/it/d6_persistence_corp_crimewatch_warfare.rs#L85-L210): Verifies transactional database persistence of character crimewatch states, aggression records, and Kill Rights across server reboots.
+3. **[`crates/eve-server/tests/it/crimewatch_drones_closure.rs`](../../../crates/eve-server/tests/it/crimewatch_drones_closure.rs):**
+   - [`test_crimewatch_concord_response_scaling_and_invulnerable_enforcement`](../../../crates/eve-server/tests/it/crimewatch_drones_closure.rs#L124-L188): Validates CONCORD response arrival delay scaling across security ratings ($6.0\text{s}$ in $1.0$ down to $19.0\text{s}$ in $0.5$); confirms Police Commander invulnerability (`[0.0; 4]` resonances); verifies 100% web, 100 scram, full capacitor wipe, and canonical death pipeline execution.
+   - [`test_crimewatch_safety_setting_block_duel_and_suspect_looting_ess`](../../../crates/eve-server/tests/it/crimewatch_drones_closure.rs#L191-L260): Validates Safety Green blocking stealing from ESS banks and yellow cans; verifies suspect flag issuance upon yellow container access.
+4. **[`crates/eve-server/tests/it/sp6_logoff_and_server_tick.rs`](../../../crates/eve-server/tests/it/sp6_logoff_and_server_tick.rs):**
+   - [`test_sp6_safe_logoff_refusals_aborts_and_30s_completion`](../../../crates/eve-server/tests/it/sp6_logoff_and_server_tick.rs#L102-L330): Tests safe logoff 30s countdown, aborts on movement/target lock, clean ship despawning on completion, and 15-minute persistent space ball retention on PvP combat disconnect.
+
+---
+
+## Related Systems & Cross-References
+
+- [**Gunnery Tracking & Missile Kinematics**](./gunnery_tracking_and_missile_kinematics.md): Combat engagement resolution, damage tracking, and authentic killmail generation.
+- [**NPC Combat AI & Living World Ecology**](../npcs_and_living_world/npc_combat_ai_and_ecology.md): CONCORD emergency intervention, faction navy police pursuit, and sentry gun priority queues.
+- [**Alliances, War Declarations & War HQ Mechanics**](../corporations_and_governance/alliances_and_formal_wars.md): Formal corporation and alliance wars granting legal aggression in high-security space.
+- [**Stargate Jumps & Cynosural Navigation**](../universe_and_navigation/stargate_jumping_and_cynosural_navigation.md): Gate jump blocking under weapons timers and 60-second gate cloak protection.
+
+---
+
+[← Back to Wiki Table of Contents](../README.md)

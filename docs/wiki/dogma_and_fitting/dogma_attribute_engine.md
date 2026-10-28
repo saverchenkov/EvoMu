@@ -1,5 +1,11 @@
 # Dogma Attribute Engine, Modifier Graphs & Fitting
 
+> **Navigation**: [EvoMu Technical Wiki](../README.md) • [Related Systems](#related-systems--cross-references)
+>
+> [← Back to Wiki Table of Contents](../README.md)
+
+---
+
 ## Overview & Lore Context
 
 In the architecture of EVE Online, **Dogma** is the fundamental mathematical simulation engine governing all physical interactions, starship performance, module behaviors, and character progression. While the Static Data Export (SDE) defines the immutable base templates for types, items, and attributes, no ship in New Eden flies on static data alone. Every aspect of a vessel—from its maximum velocity and effective hit points to its capacitor recharge rate, weapon tracking, and sensor resolution—is the dynamic output of an interconnected **Attribute Modifier Graph**.
@@ -43,7 +49,7 @@ In the architecture of EVE Online, **Dogma** is the fundamental mathematical sim
 
 Within the lore of New Eden, Dogma represents the standard operating firmware mandated by CONCORD and the Empires. When a capsuleer plugs into the Capsule interface via cranial cybernetics, their neural impulses bridge with the starship's central mainframe. The Dogma engine runs as a deterministic virtual machine aboard the vessel, calculating energy distribution, quantum magnetic fields, and thermodynamics thousands of times per minute.
 
-In [`EvoMu`](file:///Users/sergeya/ai/EvoMu/), the Dogma engine is implemented in the clean-room, memory-safe crate [`eve-dogma`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma), supported by [`eve-sde`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde) for static schemas and [`eve-server`](file:///Users/sergeya/ai/EvoMu/crates/eve-server) for live space simulation and client synchronization via the MachoNet `dogmaIM` service. The system implements the 4-operator calculation tree, 9 evaluation stages, analytical passive recharge differential curves, non-linear stacking penalty decay, hard fitting budgets (Powergrid, CPU, Calibration), and thermodynamics with rack heat propagation.
+In [`EvoMu`](../../), the Dogma engine is implemented in the clean-room, memory-safe crate [`eve-dogma`](../../../crates/eve-dogma), supported by [`eve-sde`](../../../crates/eve-sde) for static schemas and [`eve-server`](../../../crates/eve-server) for live space simulation and client synchronization via the MachoNet `dogmaIM` service. The system implements the 4-operator calculation tree, 9 evaluation stages, analytical passive recharge differential curves, non-linear stacking penalty decay, hard fitting budgets (Powergrid, CPU, Calibration), and thermodynamics with rack heat propagation.
 
 ---
 
@@ -301,7 +307,7 @@ Each activation cycle of an overloaded module applies heat damage to itself and 
 
 #### Module Burnout & Nanite Repair
 * **Burnout:** When a module's accumulated damage equals its maximum hit points ($D \ge \text{HP}_{\max}$), it enters the `BurnedOut` state. It is immediately forced into `ModuleState::Offline` and cannot be brought online until repaired.
-* **In-Space Repair:** Damaged modules can be repaired in space using **Nanite Repair Paste** ([`typeID: 28668`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde/)):
+* **In-Space Repair:** Damaged modules can be repaired in space using **Nanite Repair Paste** ([`typeID: 28668`](../../../crates/eve-sde/)):
   $$N_{\text{paste}} = \left\lceil D_{\text{damaged}} \times \text{PastePerHP} \right\rceil$$
   The skill **Nanite Operation** reduces paste consumption by $5\%$ per level, while **Nanite Interfacing** accelerates repair cycle speed by $20\%$ per level.
 
@@ -333,32 +339,32 @@ EvoMu implements Dogma through a modular, decoupled engine architecture separati
 
 ### 1. Crates Involved
 
-* [`eve-dogma`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma): Pure computational library containing the Dogma VM, expression evaluator, fitting engine, and stacking penalty logic. Has zero network or database dependencies.
-* [`eve-sde`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde): Supplies static attribute definitions (`AttributeId`), type defaults, and Dogma effect blueprints (`EffectModifierSpec`).
-* [`eve-server`](file:///Users/sergeya/ai/EvoMu/crates/eve-server): Master simulation runtime managing live player sessions, module cycle ticks, and client notifications.
+* [`eve-dogma`](../../../crates/eve-dogma): Pure computational library containing the Dogma VM, expression evaluator, fitting engine, and stacking penalty logic. Has zero network or database dependencies.
+* [`eve-sde`](../../../crates/eve-sde): Supplies static attribute definitions (`AttributeId`), type defaults, and Dogma effect blueprints (`EffectModifierSpec`).
+* [`eve-server`](../../../crates/eve-server): Master simulation runtime managing live player sessions, module cycle ticks, and client notifications.
 
 ---
 
 ### 2. Primary Handlers & Services
 
-#### Engine Core & Operator Execution: [`crates/eve-dogma/src/context.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma/src/context.rs)
-* [`DogmaItemState::get_attribute`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma/src/context.rs#L624): Evaluates an attribute by sorting modifiers into operator stages, executing PreAssign, PreMul, ModAdd, ModSub, PostMul, PostPercent (with stacking penalties), and PostAssign.
-* [`stacking_penalty_factor`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma/src/context.rs#L455): Implements $S(n) = e^{-n^2 / 7.1289}$.
-* [`compute_passive_recharge`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma/src/context.rs#L463): Closed-form capacitor and shield regeneration solution.
+#### Engine Core & Operator Execution: [`crates/eve-dogma/src/context.rs`](../../../crates/eve-dogma/src/context.rs)
+* [`DogmaItemState::get_attribute`](../../../crates/eve-dogma/src/context.rs#L624): Evaluates an attribute by sorting modifiers into operator stages, executing PreAssign, PreMul, ModAdd, ModSub, PostMul, PostPercent (with stacking penalties), and PostAssign.
+* [`stacking_penalty_factor`](../../../crates/eve-dogma/src/context.rs#L455): Implements $S(n) = e^{-n^2 / 7.1289}$.
+* [`compute_passive_recharge`](../../../crates/eve-dogma/src/context.rs#L463): Closed-form capacitor and shield regeneration solution.
 
-#### Fitting Engine & Slot Constraints: [`crates/eve-dogma/src/fitting.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma/src/fitting.rs)
-* [`ShipFittingEngine::fit_module_with_state_and_overrides`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma/src/fitting.rs#L27): Validates slot flags, hull slot capacities, turret/launcher hardpoint limits, group limits (`maxGroupFitted`), rig size compatibility, required character skills, and Calibration capacity.
-* [`ShipFittingEngine::recalculate_stats`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma/src/fitting.rs#L446): Rebuilds the entire Dogma graph, recomputes CPU Load vs. Output and Powergrid Load vs. Output, and rolls back with an error if limits are breached.
-* [`thermodynamics::step_rack_heat`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma/src/fitting.rs#L992): Advances rack heat levels during overload cycles.
-* [`thermodynamics::heat_damage_probability`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma/src/fitting.rs#L1009): Calculates spatial heat propagation to neighboring modules.
+#### Fitting Engine & Slot Constraints: [`crates/eve-dogma/src/fitting.rs`](../../../crates/eve-dogma/src/fitting.rs)
+* [`ShipFittingEngine::fit_module_with_state_and_overrides`](../../../crates/eve-dogma/src/fitting.rs#L27): Validates slot flags, hull slot capacities, turret/launcher hardpoint limits, group limits (`maxGroupFitted`), rig size compatibility, required character skills, and Calibration capacity.
+* [`ShipFittingEngine::recalculate_stats`](../../../crates/eve-dogma/src/fitting.rs#L446): Rebuilds the entire Dogma graph, recomputes CPU Load vs. Output and Powergrid Load vs. Output, and rolls back with an error if limits are breached.
+* [`thermodynamics::step_rack_heat`](../../../crates/eve-dogma/src/fitting.rs#L992): Advances rack heat levels during overload cycles.
+* [`thermodynamics::heat_damage_probability`](../../../crates/eve-dogma/src/fitting.rs#L1009): Calculates spatial heat propagation to neighboring modules.
 
-#### EWAR & Energy Warfare: [`crates/eve-dogma/src/combat_eval.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma/src/combat_eval.rs)
-* [`eval_energy_nosferatu_with_hull`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma/src/combat_eval.rs#L237): Enforces the target capacitor percentage check with Blood Raider hull overrides.
-* [`eval_stasis_webifier_stacking`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma/src/combat_eval.rs#L300): Stacking-penalized speed reduction.
-* [`eval_target_painter_stacking`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma/src/combat_eval.rs#L325): Stacking-penalized signature bloom.
+#### EWAR & Energy Warfare: [`crates/eve-dogma/src/combat_eval.rs`](../../../crates/eve-dogma/src/combat_eval.rs)
+* [`eval_energy_nosferatu_with_hull`](../../../crates/eve-dogma/src/combat_eval.rs#L237): Enforces the target capacitor percentage check with Blood Raider hull overrides.
+* [`eval_stasis_webifier_stacking`](../../../crates/eve-dogma/src/combat_eval.rs#L300): Stacking-penalized speed reduction.
+* [`eval_target_painter_stacking`](../../../crates/eve-dogma/src/combat_eval.rs#L325): Stacking-penalized signature bloom.
 
-#### MachoNet Service Dispatch: [`crates/eve-server/src/services/fitting_dogma_im.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/fitting_dogma_im.rs)
-* [`handle_dogma_im`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/fitting_dogma_im.rs#L7): Handles client RPC methods `GetAllInfo`, `GetShipAttributes`, `SetModuleOnline`, and `TakeModuleOffline`.
+#### MachoNet Service Dispatch: [`crates/eve-server/src/services/fitting_dogma_im.rs`](../../../crates/eve-server/src/services/fitting_dogma_im.rs)
+* [`handle_dogma_im`](../../../crates/eve-server/src/services/fitting_dogma_im.rs#L7): Handles client RPC methods `GetAllInfo`, `GetShipAttributes`, `SetModuleOnline`, and `TakeModuleOffline`.
 * Enforces the $75\%$ capacitor gate for onlining modules while in space.
 
 ---
@@ -421,19 +427,19 @@ pub struct ShipFittingEngine {
 
 ### 1. Invariant: Atomic Fitting Budget Enforcement & Rollback
 * **Vulnerability:** Concurrently onlining multiple high-draw modules could permit a ship to exceed 100% CPU or Powergrid capacity.
-* **Mitigation:** In [`ShipFittingEngine::fit_module_with_state_and_overrides`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma/src/fitting.rs#L454), onlining evaluates total CPU/PG load against output. If load exceeds capacity ($L > O + 10^{-6}$), the new module is popped from `self.modules`, the previous configuration is restored, and stats are recalculated before returning an error.
+* **Mitigation:** In [`ShipFittingEngine::fit_module_with_state_and_overrides`](../../../crates/eve-dogma/src/fitting.rs#L454), onlining evaluates total CPU/PG load against output. If load exceeds capacity ($L > O + 10^{-6}$), the new module is popped from `self.modules`, the previous configuration is restored, and stats are recalculated before returning an error.
 
 ### 2. Invariant: Elimination of Ghost Fitting
 * **Vulnerability:** In legacy EVE server emulators, offlining a module or losing a ship while module modifiers were active could fail to purge modifiers from the hull, permanently inflating attributes ("ghost fitting").
-* **Mitigation:** In EvoMu, the fitting engine does not store cumulative delta floats on the hull. Instead, [`recalculate_stats`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma/src/fitting.rs#L421) clears all modifiers and rebuilds the active modifier graph from scratch whenever module states change. When a module goes offline, its modifier registration is completely eliminated.
+* **Mitigation:** In EvoMu, the fitting engine does not store cumulative delta floats on the hull. Instead, [`recalculate_stats`](../../../crates/eve-dogma/src/fitting.rs#L421) clears all modifiers and rebuilds the active modifier graph from scratch whenever module states change. When a module goes offline, its modifier registration is completely eliminated.
 
 ### 3. Invariant: Tenant Fitting Isolation in Upwell Structures
 * **Vulnerability:** Station Directors abusing structure privileges to unseat or repackage tenant ships docked in corporate citadels.
-* **Mitigation:** In [`inventory_fitting.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/inventory_fitting.rs#L752), item movements verify `item.owner_id == char_id`. Even players holding `ROLE_DIRECTOR` cannot move, modify, or strip modules from ships owned by other pilots docked in the same structure.
+* **Mitigation:** In [`inventory_fitting.rs`](../../../crates/eve-server/src/services/inventory_fitting.rs#L752), item movements verify `item.owner_id == char_id`. Even players holding `ROLE_DIRECTOR` cannot move, modify, or strip modules from ships owned by other pilots docked in the same structure.
 
 ### 4. Edge Case: Bastion / Siege Resistance Normalization
 * **Problem:** Bastion and Siege modules apply extreme resistance modifiers (e.g. Bastion sets remote repair impedance to $10^{-6}$ or $-99.9999\%$). Floating-point imprecision can result in tiny non-zero values (e.g. $0.0000001$).
-* **Mitigation:** [`get_attribute`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma/src/context.rs#L744) specifically normalizes EWAR and remote assistance resistance attributes (`2045`, `2112..=2116`, etc.) to exact `0.0` when within $10^{-4}$ of zero.
+* **Mitigation:** [`get_attribute`](../../../crates/eve-dogma/src/context.rs#L744) specifically normalizes EWAR and remote assistance resistance attributes (`2045`, `2112..=2116`, etc.) to exact `0.0` when within $10^{-4}$ of zero.
 
 ---
 
@@ -453,9 +459,22 @@ EvoMu's Dogma implementation is validated against golden test fixtures extracted
 
 | Test Function | Source File | Validated Mechanics |
 | :--- | :--- | :--- |
-| [`test_dg1_all_domain_modifier_functions_and_isolation`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/dogma_modifier_engine.rs#L33) | [`dogma_modifier_engine.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/dogma_modifier_engine.rs) | Verifies `ItemModifier`, `LocationGroupModifier`, and skill modifiers against live SDE. |
-| [`test_dg6_heat_rack_thermodynamics_nanite_repair_and_crystal_volatility`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/dogma_capital_heat_crystals.rs#L789) | [`dogma_capital_heat_crystals.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/dogma_capital_heat_crystals.rs) | Tests overload heat buildup, thermodynamic skill reduction, and nanite repair paste in space. |
-| [`test_fitting_slots_cpu_pwg_hardpoints_rigs_saved_multifit_ghost_inspace_weapons_ammo`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/inventory_ships_fitting_complete_part2.rs#L337) | [`inventory_ships_fitting_complete_part2.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/inventory_ships_fitting_complete_part2.rs) | Validates slot layouts, turret/launcher hardpoint caps, DNA fitting strings, and simulation info. |
-| [`test_stacking_penalty_coefficients`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma/src/tests.rs#L25) | [`eve-dogma/src/tests.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma/src/tests.rs) | Exact precision unit test for stacking multipliers $S(0)$ through $S(5)$. |
-| [`test_nanofiber_and_overdrive_stacking_evaluation`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma/src/tests.rs#L355) | [`eve-dogma/src/tests.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma/src/tests.rs) | Multi-module fitting test verifying speed and agility stacking penalties on a Rifter hull. |
-| [`test_dogma_differential_golden_fits`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma/tests/t12_dogma_differential.rs) | [`t12_dogma_differential.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma/tests/t12_dogma_differential.rs) | Golden fit regression sweep matching CCP V24.01 client attribute outputs across thousands of fits. |
+| [`test_dg1_all_domain_modifier_functions_and_isolation`](../../../crates/eve-server/tests/it/dogma_modifier_engine.rs#L33) | [`dogma_modifier_engine.rs`](../../../crates/eve-server/tests/it/dogma_modifier_engine.rs) | Verifies `ItemModifier`, `LocationGroupModifier`, and skill modifiers against live SDE. |
+| [`test_dg6_heat_rack_thermodynamics_nanite_repair_and_crystal_volatility`](../../../crates/eve-server/tests/it/dogma_capital_heat_crystals.rs#L789) | [`dogma_capital_heat_crystals.rs`](../../../crates/eve-server/tests/it/dogma_capital_heat_crystals.rs) | Tests overload heat buildup, thermodynamic skill reduction, and nanite repair paste in space. |
+| [`test_fitting_slots_cpu_pwg_hardpoints_rigs_saved_multifit_ghost_inspace_weapons_ammo`](../../../crates/eve-server/tests/it/inventory_ships_fitting_complete_part2.rs#L337) | [`inventory_ships_fitting_complete_part2.rs`](../../../crates/eve-server/tests/it/inventory_ships_fitting_complete_part2.rs) | Validates slot layouts, turret/launcher hardpoint caps, DNA fitting strings, and simulation info. |
+| [`test_stacking_penalty_coefficients`](../../../crates/eve-dogma/src/tests.rs#L25) | [`eve-dogma/src/tests.rs`](../../../crates/eve-dogma/src/tests.rs) | Exact precision unit test for stacking multipliers $S(0)$ through $S(5)$. |
+| [`test_nanofiber_and_overdrive_stacking_evaluation`](../../../crates/eve-dogma/src/tests.rs#L355) | [`eve-dogma/src/tests.rs`](../../../crates/eve-dogma/src/tests.rs) | Multi-module fitting test verifying speed and agility stacking penalties on a Rifter hull. |
+| [`test_dogma_differential_golden_fits`](../../../crates/eve-dogma/tests/t12_dogma_differential.rs) | [`t12_dogma_differential.rs`](../../../crates/eve-dogma/tests/t12_dogma_differential.rs) | Golden fit regression sweep matching CCP V24.01 client attribute outputs across thousands of fits. |
+
+---
+
+## Related Systems & Cross-References
+
+- [**Gunnery Tracking & Missile Kinematics**](../combat_and_crimewatch/gunnery_tracking_and_missile_kinematics.md): Evaluation of weapon tracking speed, damage modifiers, missile velocity, and explosion radius.
+- [**Mining Cycles & Extraction**](../mining_and_harvesting/mining_cycles_and_residue.md): Laser cycle times, capacitor drain, yield bonuses, and crystal volatility stacking.
+- [**Character Progression & Skill Training**](../character_and_progression/skill_training_and_medical_clones.md): Character skill levels and cybernetic implants injecting dogma modifiers into active ship fits.
+- [**Upwell Structures Overview & Lifecycle**](../upwell_and_structures/upwell_structures_overview.md): Structure module power grids, service module cycle timers, and defense platform fitting.
+
+---
+
+[← Back to Wiki Table of Contents](../README.md)

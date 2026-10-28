@@ -1,5 +1,11 @@
 # Planetary Industry (PI), Colony Pin Networks & Customs Offices
 
+> **Navigation**: [EvoMu Technical Wiki](../README.md) • [Related Systems](#related-systems--cross-references)
+>
+> [← Back to Wiki Table of Contents](../README.md)
+
+---
+
 ## Overview & Lore Context
 
 Beneath the endless void of New Eden drift trillions of cubic kilometers of untapped material wealth bound within the planetary bodies of the cluster. From the scorched basalt plains of **Lava** worlds and the violent tectonic rifts of **Plasma** spheres, to the methane hurricanes of **Gas** giants and the fertile biosystems of **Temperate** and **Oceanic** planets, every world presents a complex industrial supply chain. Through **Planetary Industry (PI)**, capsuleers deploy permanent surface installations, extraction drill heads, refining plants, and orbital launch complexes to extract raw resources and refine them into advanced technological commodities.
@@ -240,43 +246,43 @@ flowchart TD
 
 ### 1. Crates Involved
 
-* [`eve-server`](file:///Users/sergeya/ai/EvoMu/crates/eve-server): Hosts the master `planetMgr` and `posMgr` RPC dispatchers, colony offline progression simulators, and tax accounting.
-* [`eve-db`](file:///Users/sergeya/ai/EvoMu/crates/eve-db): Transactional world state store tracking colonies ([`PlanetaryColonyRecord`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/types.rs#L773)), pin layouts, link topologies, and customs office records.
-* [`eve-sde`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde): Static Data Export engine providing celestial topologies, planet type IDs, P0-P4 commodity definitions, and dogma attributes.
-* [`eve-destiny`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny): Physics engine managing in-space orbital POCO balls and physical planetary launch containers.
+* [`eve-server`](../../../crates/eve-server): Hosts the master `planetMgr` and `posMgr` RPC dispatchers, colony offline progression simulators, and tax accounting.
+* [`eve-db`](../../../crates/eve-db): Transactional world state store tracking colonies ([`PlanetaryColonyRecord`](../../../crates/eve-db/src/types.rs#L773)), pin layouts, link topologies, and customs office records.
+* [`eve-sde`](../../../crates/eve-sde): Static Data Export engine providing celestial topologies, planet type IDs, P0-P4 commodity definitions, and dogma attributes.
+* [`eve-destiny`](../../../crates/eve-destiny): Physics engine managing in-space orbital POCO balls and physical planetary launch containers.
 
 ---
 
 ### 2. Primary Handlers & Services
 
-* [`crates/eve-server/src/services/pi_colonies.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/pi_colonies.rs):
+* [`crates/eve-server/src/services/pi_colonies.rs`](../../../crates/eve-server/src/services/pi_colonies.rs):
   - `planetMgr::GetColony`: Loads active colony state, evaluates elapsed offline time, runs colony catch-up simulation, and returns CPU/PG usage.
   - `planetMgr::GetFullNetworkForOwner`: Returns full pin, link, and route networks for client rendering.
   - `planetMgr::UserUpdateNetwork`: Commits atomic pin placement, deletions, link routing, and extractor head modifications.
   - `planetMgr::UserAbandonPlanet`: Decommissions a colony, recycling Command Center infrastructure.
-* [`crates/eve-server/src/services/pi_orbitals.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/pi_orbitals.rs):
+* [`crates/eve-server/src/services/pi_orbitals.rs`](../../../crates/eve-server/src/services/pi_orbitals.rs):
   - `planetMgr::UserLaunchCommodities`: Executes atomic orbital export and import transactions.
   - `planetMgr::UpgradeCommandCenter`: Upgrades Command Center tier, deducting ISK and validating new CPU/PG ceilings.
-  - [`pi_commodity_tier_base_cost`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/pi_orbitals.rs#L27): Evaluates the official taxable base price of any P0–P4 commodity.
-* [`crates/eve-server/src/services/pi_helpers.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/pi_helpers.rs):
-  - [`cc_level_info`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/pi_helpers.rs#L80): Provides exact CPU, PG, and cumulative ISK upgrade thresholds.
-  - [`resolve_character_orbital_access_and_tax`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/pi_helpers.rs#L919): Evaluates standing brackets and calculates applicable POCO tax rates.
-* [`crates/eve-server/src/services/pi_resource_helpers.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/pi_resource_helpers.rs):
-  - [`evaluate_spherical_harmonic_basis`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/pi_resource_helpers.rs#L87): Computes real spherical harmonic basis polynomials for planetary resource heatmaps.
+  - [`pi_commodity_tier_base_cost`](../../../crates/eve-server/src/services/pi_orbitals.rs#L27): Evaluates the official taxable base price of any P0–P4 commodity.
+* [`crates/eve-server/src/services/pi_helpers.rs`](../../../crates/eve-server/src/services/pi_helpers.rs):
+  - [`cc_level_info`](../../../crates/eve-server/src/services/pi_helpers.rs#L80): Provides exact CPU, PG, and cumulative ISK upgrade thresholds.
+  - [`resolve_character_orbital_access_and_tax`](../../../crates/eve-server/src/services/pi_helpers.rs#L919): Evaluates standing brackets and calculates applicable POCO tax rates.
+* [`crates/eve-server/src/services/pi_resource_helpers.rs`](../../../crates/eve-server/src/services/pi_resource_helpers.rs):
+  - [`evaluate_spherical_harmonic_basis`](../../../crates/eve-server/src/services/pi_resource_helpers.rs#L87): Computes real spherical harmonic basis polynomials for planetary resource heatmaps.
   - `load_planet_depletion` & `save_planet_depletion`: Persists localized surface resource depletion spots.
-* [`crates/eve-server/src/services/industry_pi.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/industry_pi.rs):
-  - [`list_sde_planet_p0_resources`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/industry_pi.rs#L270): Queries SDE to determine harvestable raw commodities for any given planet type.
-* [`crates/eve-server/src/formulas.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/formulas.rs):
-  - [`compute_pi_link_cost`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/formulas.rs#L569): Pure link length CPU and PG cost formula.
-  - [`compute_poco_export_tax`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/formulas.rs#L577): Pure POCO export tax calculation.
+* [`crates/eve-server/src/services/industry_pi.rs`](../../../crates/eve-server/src/services/industry_pi.rs):
+  - [`list_sde_planet_p0_resources`](../../../crates/eve-server/src/services/industry_pi.rs#L270): Queries SDE to determine harvestable raw commodities for any given planet type.
+* [`crates/eve-server/src/formulas.rs`](../../../crates/eve-server/src/formulas.rs):
+  - [`compute_pi_link_cost`](../../../crates/eve-server/src/formulas.rs#L569): Pure link length CPU and PG cost formula.
+  - [`compute_poco_export_tax`](../../../crates/eve-server/src/formulas.rs#L577): Pure POCO export tax calculation.
 
 ---
 
 ### 3. Core Database Schemas
 
-The planetary state is stored transactionally in [`WorldStateSnapshot`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/snapshot_ext.rs#L560):
+The planetary state is stored transactionally in [`WorldStateSnapshot`](../../../crates/eve-db/src/snapshot_ext.rs#L560):
 
-#### 1. [`PlanetaryColonyRecord`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/types.rs#L773)
+#### 1. [`PlanetaryColonyRecord`](../../../crates/eve-db/src/types.rs#L773)
 ```rust
 pub struct PlanetaryColonyRecord {
     pub planet_id: i64,
@@ -289,7 +295,7 @@ pub struct PlanetaryColonyRecord {
 }
 ```
 
-#### 2. [`PlanetaryPinRecord`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/snapshot_ext.rs#L440)
+#### 2. [`PlanetaryPinRecord`](../../../crates/eve-db/src/snapshot_ext.rs#L440)
 ```rust
 pub struct PlanetaryPinRecord {
     pub pin_id: i64,
@@ -304,7 +310,7 @@ pub struct PlanetaryPinRecord {
 }
 ```
 
-#### 3. [`PlanetaryLinkRecord`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/snapshot_ext.rs#L458) & [`PlanetaryRouteRecord`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/snapshot_ext.rs#L465)
+#### 3. [`PlanetaryLinkRecord`](../../../crates/eve-db/src/snapshot_ext.rs#L458) & [`PlanetaryRouteRecord`](../../../crates/eve-db/src/snapshot_ext.rs#L465)
 ```rust
 pub struct PlanetaryLinkRecord {
     pub source_pin_id: i64,
@@ -322,7 +328,7 @@ pub struct PlanetaryRouteRecord {
 }
 ```
 
-#### 4. [`CustomsOfficeRecord`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/snapshot_ext.rs#L483)
+#### 4. [`CustomsOfficeRecord`](../../../crates/eve-db/src/snapshot_ext.rs#L483)
 ```rust
 pub struct CustomsOfficeRecord {
     pub office_id: i64,
@@ -394,16 +400,29 @@ EvoMu's planetary simulation and customs infrastructure are verified through aut
 
 ### 2. Concrete Integration Test Suites
 
-The implementation is verified across integration tests in [`crates/eve-server/tests/it/`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/):
+The implementation is verified across integration tests in [`crates/eve-server/tests/it/`](../../../crates/eve-server/tests/it/):
 
-#### [`crates/eve-server/tests/it/planetary_interaction_complete.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/planetary_interaction_complete.rs)
+#### [`crates/eve-server/tests/it/planetary_interaction_complete.rs`](../../../crates/eve-server/tests/it/planetary_interaction_complete.rs)
 - Validates end-to-end colony lifecycle: deploying a command center, upgrading through levels 1–5, placing extractors, basic/advanced processors, storage facilities, configuring extractor survey programs, routing commodities, and verifying offline catch-up simulation.
 
-#### [`crates/eve-server/tests/it/pi_planet_mgr_rpc.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/pi_planet_mgr_rpc.rs)
+#### [`crates/eve-server/tests/it/pi_planet_mgr_rpc.rs`](../../../crates/eve-server/tests/it/pi_planet_mgr_rpc.rs)
 - Tests `planetMgr` RPC endpoints: `GetColony`, `GetFullNetworkForOwner`, `GetCommandPinsForPlanet`, `GetExtractorsForPlanet`, and `UserUpdateNetwork`.
 
-#### [`crates/eve-server/tests/it/rpc_planet_mgr_orbitals.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/rpc_planet_mgr_orbitals.rs)
+#### [`crates/eve-server/tests/it/rpc_planet_mgr_orbitals.rs`](../../../crates/eve-server/tests/it/rpc_planet_mgr_orbitals.rs)
 - Tests orbital operations: Command center launches into orbit, spaceport transfers to Customs Offices, POCO tax deductions, and corporate wallet tax deposits.
 
-#### [`crates/eve-server/tests/it/economy_industry_pi.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/economy_industry_pi.rs)
+#### [`crates/eve-server/tests/it/economy_industry_pi.rs`](../../../crates/eve-server/tests/it/economy_industry_pi.rs)
 - Validates the complete P0 $\to$ P1 $\to$ P2 $\to$ P3 $\to$ P4 production chain, volumetric calculations, and specialized Epithal commodity cargo holds.
+
+---
+
+## Related Systems & Cross-References
+
+- [**Blueprints, Manufacturing & Reactions**](../industry_and_manufacturing/blueprints_manufacturing_and_reactions.md): Integration of refined planetary commodities into Tech II production and fuel block manufacture.
+- [**Upwell Structures Overview & Lifecycle**](../upwell_and_structures/upwell_structures_overview.md): Player-Owned Customs Offices (POCOs), launch canisters, and export/import taxation ACLs.
+- [**Pochven Navigation & Anchoring Restrictions**](../universe_and_navigation/pochven_navigation_and_anchoring.md): Pochven planetary industry rules and Triglavian standing requirements for POCO anchoring.
+- [**Corporation Roles & Governance**](../corporations_and_governance/corporation_roles_and_governance.md): Corporate customs office ownership, tax revenue routing to corporate wallets, and access configuration.
+
+---
+
+[← Back to Wiki Table of Contents](../README.md)

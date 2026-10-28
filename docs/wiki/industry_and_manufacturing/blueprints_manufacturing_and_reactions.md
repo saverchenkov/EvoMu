@@ -1,5 +1,11 @@
 # Blueprints, Manufacturing, Science & Reactions
 
+> **Navigation**: [EvoMu Technical Wiki](../README.md) • [Related Systems](#related-systems--cross-references)
+>
+> [← Back to Wiki Table of Contents](../README.md)
+
+---
+
 ## Overview & Lore Context
 
 In the player-driven ecosystem of New Eden, virtually every starship, weapon system, ammunition cartridge, planetary infrastructure component, and orbital citadel originates not from divine decree, but from the industrial machinery of capsuleer enterprise. Raw asteroid ores mined from gravitational rings, volatile gases extracted from cosmic clouds, exotic moon minerals harvested by orbital fracture drills, and refined planetary commodities are channeled through industrial arrays to form the backbone of interstellar warfare and commerce.
@@ -44,7 +50,7 @@ The industrial pipeline is structured around three core pillars:
 2. **Science & Research Laboratories:** Research facilities where capsuleers invest time and ISK to optimize blueprints—reducing material waste (Material Efficiency), accelerating cycle times (Time Efficiency), producing licensed run-limited copies, or performing experimental reverse-engineering (Invention) to produce advanced Tech II and Tech III designs.
 3. **Reaction Arrays:** High-energy chemical and molecular synthesis processes executed exclusively in Upwell Refineries (Athanor and Tatara) anchored in low-security, null-security, or wormhole space. Reactions transform unrefined moon materials and atmospheric gases into composite intermediate components, combat boosters, and Tech III hybrid polymers.
 
-In **EvoMu V24.01**, the entire industrial pipeline is implemented with mathematical precision across [`eve-server`](file:///Users/sergeya/ai/EvoMu/crates/eve-server), [`eve-sde`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde), and [`eve-db`](file:///Users/sergeya/ai/EvoMu/crates/eve-db), supporting full Bill of Materials (BOM) validation, escrow locks, dynamic System Cost Indices (SCI), structure rig security scaling, and multi-job batch deliveries.
+In **EvoMu V24.01**, the entire industrial pipeline is implemented with mathematical precision across [`eve-server`](../../../crates/eve-server), [`eve-sde`](../../../crates/eve-sde), and [`eve-db`](../../../crates/eve-db), supporting full Bill of Materials (BOM) validation, escrow locks, dynamic System Cost Indices (SCI), structure rig security scaling, and multi-job batch deliveries.
 
 ---
 
@@ -77,7 +83,7 @@ classDiagram
     BlueprintOriginal --> BlueprintCopy : "Copying Job (Activity 5)"
 ```
 
-- **Blueprint Original (BPO):** Sold seeded by NPC corporations or distributed via rare faction LP stores. BPOs feature infinite manufacturing runs (`blueprint_runs_remaining = None`, [`types.rs#L406`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/types.rs#L406)), can be researched for higher efficiency, and serve as the source master for copying jobs.
+- **Blueprint Original (BPO):** Sold seeded by NPC corporations or distributed via rare faction LP stores. BPOs feature infinite manufacturing runs (`blueprint_runs_remaining = None`, [`types.rs#L406`](../../../crates/eve-db/src/types.rs#L406)), can be researched for higher efficiency, and serve as the source master for copying jobs.
 - **Blueprint Copy (BPC):** Possesses a finite, decremented number of licensed production runs (`is_blueprint_copy = true`). BPCs cannot be researched or copied further, but serve as the vital input substrate for Tech II invention and manufacturing in high-risk war zones.
 
 #### Material Efficiency (ME) & Time Efficiency (TE)
@@ -95,7 +101,7 @@ $$T_{\text{copy}} = \text{runs\_per\_copy} \times \text{copies} \times \text{Bas
 #### Material Requirement Formula
 For a manufacturing job consisting of $\text{runs} \ge 1$ using a blueprint with base required quantity $M_{\text{base}}$:
 $$M_{\text{req}} = \begin{cases} \text{runs} & \text{if } M_{\text{base}} = 1 \\ \max\left(\text{runs}, \ \left\lceil \text{runs} \cdot M_{\text{base}} \cdot \left(1 - \frac{\text{ME}}{100}\right) \cdot \left(1 - \frac{\text{FacilityME}}{100}\right) \cdot \left(1 - \frac{\text{RigME}}{100}\right) \right\rceil\right) & \text{if } M_{\text{base}} > 1 \end{cases}$$
-Implemented in [`compute_manufacturing_material_qty`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/formulas.rs#L501-L516).
+Implemented in [`compute_manufacturing_material_qty`](../../../crates/eve-server/src/formulas.rs#L501-L516).
 
 > [!NOTE]
 > Single-item inputs (e.g. ship hulls, datacores, or reaction substrates with base quantity $1$) **cannot be reduced** below 1 per run by ME or facility bonuses.
@@ -103,13 +109,13 @@ Implemented in [`compute_manufacturing_material_qty`](file:///Users/sergeya/ai/E
 #### Production Job Duration Formula
 The production duration is governed by blueprint base cycle time $T_{\text{base}}$, blueprint $\text{TE}$, pilot character skills, and facility speed multipliers:
 $$T = \left\lceil \text{runs} \cdot T_{\text{base}} \cdot \left(1 - \frac{\text{TE}}{100}\right) \cdot (1 - 0.04 \cdot \text{Skill}_{\text{Industry}}) \cdot (1 - 0.03 \cdot \text{Skill}_{\text{AdvIndustry}}) \cdot \left(1 - \frac{\text{FacilityTimeBonus}}{100}\right) \right\rceil$$
-Implemented in [`compute_manufacturing_time_seconds`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/formulas.rs#L518-L533).
+Implemented in [`compute_manufacturing_time_seconds`](../../../crates/eve-server/src/formulas.rs#L518-L533).
 
 ---
 
 ### 3. System Cost Index (SCI) & Job Installation Fees
 
-Installing an industry job requires paying a non-refundable gross installation fee to the SCC and facility owner ([`industry_facilities_bps.rs#L410-L477`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/industry_facilities_bps.rs#L410-L477)):
+Installing an industry job requires paying a non-refundable gross installation fee to the SCC and facility owner ([`industry_facilities_bps.rs#L410-L477`](../../../crates/eve-server/src/services/industry_facilities_bps.rs#L410-L477)):
 
 ```mermaid
 graph LR
@@ -165,7 +171,7 @@ graph TD
 #### Invention Probability Formula
 The probability of a successful invention job is:
 $$P_{\text{inv}} = \min\left(1.0, \ P_{\text{base}} \cdot \left(1 + \frac{L_{\text{science1}} + L_{\text{science2}}}{30} + \frac{L_{\text{encryption}}}{40}\right) \cdot M_{\text{decryptor}}\right)$$
-Implemented in [`compute_invention_probability`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/formulas.rs#L537-L548).
+Implemented in [`compute_invention_probability`](../../../crates/eve-server/src/formulas.rs#L537-L548).
 - $P_{\text{base}}$: Base item invention probability (e.g. $0.30$ for battlecruisers/battleships, $0.40$ for cruisers, $0.50$ for frigates).
 - $L_{\text{science1}}, L_{\text{science2}}$: Relevant racial and engineering science skill levels ($0$ to $5$).
 - $L_{\text{encryption}}$: Racial encryption method skill level ($0$ to $5$).
@@ -187,7 +193,7 @@ Decryptors allow industrial capsuleers to fine-tune the resulting Tech II BPC:
 
 ### 5. Reactions (Composite, Biochemical, Hybrid)
 
-Reactions (Activity `9`) represent large-scale molecular synthesis. Unlike manufacturing, reactions have unique operational rules ([`industry_jobs.rs#L207-L230`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/industry_jobs.rs#L207-L230)):
+Reactions (Activity `9`) represent large-scale molecular synthesis. Unlike manufacturing, reactions have unique operational rules ([`industry_jobs.rs#L207-L230`](../../../crates/eve-server/src/services/industry_jobs.rs#L207-L230)):
 
 ```mermaid
 graph TD
@@ -236,12 +242,12 @@ graph TD
 
 ### 1. Primary Handlers & Source Dispatch
 
-- [`industry_jobs::handle_industry_jobs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/industry_jobs.rs#L31-L1300):
+- [`industry_jobs::handle_industry_jobs`](../../../crates/eve-server/src/services/industry_jobs.rs#L31-L1300):
   - `industryManager.InstallJob`: Validates player docking state, resolves blueprint items, validates player/corporate wallet balances, locks input BOM materials, checks job slots, and enters job into database.
   - `industryManager.CompleteJob` & `CompleteManyJobs`: Validates completion timestamp (`now >= start_unix + duration_seconds`), rolls invention probabilities, updates BPO ME/TE attributes, spawns manufactured items or BPCs, and unlocks blueprints.
   - `industryManager.CancelJob`: Cancels an active job, refunding locked blueprint and restoring inventory flags.
-- [`industry_facilities_bps::compute_industry_job_costs_for_char`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/industry_facilities_bps.rs#L410-L477): Computes the dynamic EIV, System Cost Index, structure cost multipliers, facility tax, SCC surcharge, and alpha clone fees.
-- [`industry_rigs::resolve_structure_rig_bonuses_full`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/industry_rigs.rs#L12-L60): Applies Standup structure rig modifiers, scaling material and time reductions according to solar system security:
+- [`industry_facilities_bps::compute_industry_job_costs_for_char`](../../../crates/eve-server/src/services/industry_facilities_bps.rs#L410-L477): Computes the dynamic EIV, System Cost Index, structure cost multipliers, facility tax, SCC surcharge, and alpha clone fees.
+- [`industry_rigs::resolve_structure_rig_bonuses_full`](../../../crates/eve-server/src/services/industry_rigs.rs#L12-L60): Applies Standup structure rig modifiers, scaling material and time reductions according to solar system security:
   - **High-Sec:** $1.0\times$ multiplier.
   - **Low-Sec:** $1.9\times$ multiplier ($1.0\times$ for reactions).
   - **Null-Sec / Wormhole:** $2.1\times$ multiplier ($1.1\times$ for reactions).
@@ -250,7 +256,7 @@ graph TD
 
 ### 2. State Store Schemas
 
-#### Core Database Record: [`IndustryJobRecord`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/types.rs#L756-L770)
+#### Core Database Record: [`IndustryJobRecord`](../../../crates/eve-db/src/types.rs#L756-L770)
 ```rust
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndustryJobRecord {
@@ -269,7 +275,7 @@ pub struct IndustryJobRecord {
 ```
 
 #### Inventory Blueprint Item Attributes
-Blueprints are tracked in [`InventoryItemRecord`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/types.rs):
+Blueprints are tracked in [`InventoryItemRecord`](../../../crates/eve-db/src/types.rs):
 - `is_blueprint_copy: bool`: Distinguishes BPO (`false`) from BPC (`true`).
 - `blueprint_runs_remaining: Option<i32>`: Tracks remaining runs on BPCs.
 - `dynamic_attributes.get(&ATTR_BLUEPRINT_ME)`: Current Material Efficiency level ($0$ to $10$).
@@ -283,7 +289,7 @@ Blueprints are tracked in [`InventoryItemRecord`](file:///Users/sergeya/ai/EvoMu
 ### 1. Input Item Escrow & Atomic Lockout
 When an industry job is installed via `industryManager.InstallJob`:
 - All required BOM input minerals, components, datacores, and decryptors are **immediately removed or decremented from inventory**.
-- If any material is missing, the entire transaction rolls back atomically with `InsufficientMaterials`, `InsufficientDatacores`, or `InsufficientReactionMaterials` ([`industry_jobs.rs#L780-L812`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/industry_jobs.rs#L780-L812)).
+- If any material is missing, the entire transaction rolls back atomically with `InsufficientMaterials`, `InsufficientDatacores`, or `InsufficientReactionMaterials` ([`industry_jobs.rs#L780-L812`](../../../crates/eve-server/src/services/industry_jobs.rs#L780-L812)).
 - The blueprint itself has its flag shifted to an in-use state (`InventoryFlag::Locked`), preventing pilots from trading, contracting, or repackaging blueprints while an industrial job is in flight.
 
 ### 2. High-Sec Reaction Prohibition Invariant
@@ -294,7 +300,7 @@ This server-side invariant cannot be circumvented via remote job installation or
 ### 3. Service Offline Job Pausing
 If an Upwell Engineering Complex or Refinery runs out of fuel blocks or has its service module offlined:
 - All running jobs transition dynamically from `"Active"` to `"Paused"`.
-- Paused jobs do not progress in duration until the service module is refueled and restored online ([`industry_jobs.rs#L420-L425`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/industry_jobs.rs#L420-L425)).
+- Paused jobs do not progress in duration until the service module is refueled and restored online ([`industry_jobs.rs#L420-L425`](../../../crates/eve-server/src/services/industry_jobs.rs#L420-L425)).
 
 ### 4. Output Delivery Collision & Division Isolation
 When delivering completed jobs:
@@ -322,8 +328,8 @@ The industry engine complies with the official parity ledger:
 
 | Test Suite | File Location | Key Validations |
 | :--- | :--- | :--- |
-| **Comprehensive Industry & PI Suite** | [`industry_pi_complete.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/industry_pi_complete.rs#L363-L574) | Tests invention with Accelerant Decryptors (`34201`), T3 Ancient Relic invention, early job completion rejection (`JobNotYetComplete`), remote range check failure (`FacilityOutOfRemoteRange`), high-sec reaction rejection (`ReactionsForbiddenInHighSec`), low-sec Tatara reaction installation, corporate ME research, multi-job batch delivery (`CompleteManyJobs`), and Alpha clone tax surcharges. |
-| **Blueprint Data & Cost Indices** | [`industry_pi_complete.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/industry_pi_complete.rs#L115-L350) | Validates System Cost Index (SCI) scaling, facility tax rate application, and blueprint owner permission boundaries. |
+| **Comprehensive Industry & PI Suite** | [`industry_pi_complete.rs`](../../../crates/eve-server/tests/it/industry_pi_complete.rs#L363-L574) | Tests invention with Accelerant Decryptors (`34201`), T3 Ancient Relic invention, early job completion rejection (`JobNotYetComplete`), remote range check failure (`FacilityOutOfRemoteRange`), high-sec reaction rejection (`ReactionsForbiddenInHighSec`), low-sec Tatara reaction installation, corporate ME research, multi-job batch delivery (`CompleteManyJobs`), and Alpha clone tax surcharges. |
+| **Blueprint Data & Cost Indices** | [`industry_pi_complete.rs`](../../../crates/eve-server/tests/it/industry_pi_complete.rs#L115-L350) | Validates System Cost Index (SCI) scaling, facility tax rate application, and blueprint owner permission boundaries. |
 
 ---
 
@@ -338,3 +344,16 @@ cargo test --test it -- test_industry_jobs_me_te_copy_invention_decryptors_t3_re
 # Run blueprint data, owner limits, facilities, taxes, and SCI tests:
 cargo test --test it -- test_industry_blueprint_data_owner_limits_facilities_taxes_and_sci --nocapture
 ```
+
+---
+
+## Related Systems & Cross-References
+
+- [**Mining Cycles & Extraction**](../mining_and_harvesting/mining_cycles_and_residue.md): Sourcing raw ore, ice, and moon minerals for manufacturing inputs.
+- [**Planetary Industry (PI)**](../planetary_industry/colony_pin_networks_and_pi.md): Planetary commodities (P1–P4) required for advanced structures, fuel blocks, and Tech II production.
+- [**Regional Market Order Matching**](../economy_and_markets/regional_market_order_matching.md): Blueprint market transactions, System Cost Index (SCI) economics, and escrow matching.
+- [**Upwell Structures Overview & Lifecycle**](../upwell_and_structures/upwell_structures_overview.md): Engineering Complexes (Raitaru, Azbel, Sotiyo) and structure rig bonuses on manufacturing and reaction times.
+
+---
+
+[← Back to Wiki Table of Contents](../README.md)

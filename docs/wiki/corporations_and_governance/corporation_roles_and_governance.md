@@ -1,5 +1,11 @@
 # Corporation Roles, Governance & Asset Management
 
+> **Navigation**: [EvoMu Technical Wiki](../README.md) • [Related Systems](#related-systems--cross-references)
+>
+> [← Back to Wiki Table of Contents](../README.md)
+
+---
+
 ## Overview & Lore Context
 
 In the sprawling expanse of New Eden, the **Corporation** serves as the foundational collective and legal entity governing capsuleer life. While lone capsuleers possess godlike authority over their personal vessels, the grand endeavors of New Eden—such as claiming territorial sovereignty, anchoring planetary-scale Upwell citadels, fueling industrial assembly lines, and waging interstellar fleet campaigns—require collective organization, shared capital, and hierarchical authority.
@@ -35,7 +41,7 @@ From the state-sanctioned megacorporations of the Caldari Megacorporate Council 
 
 However, corporate power within New Eden is perpetually contested. Betrayal, corporate espionage, and unauthorized asset liquidation represent existential threats to any capsuleer organization. To maintain order, the corporate governance framework balances centralized executive dictatorship with shareholder democracy, protected by hard real-time cryptographic delays on high-privilege access promotions.
 
-In [`EvoMu`](file:///Users/sergeya/ai/EvoMu/), the corporation system is implemented with clean-room precision across the [`eve-server`](file:///Users/sergeya/ai/EvoMu/crates/eve-server), [`eve-db`](file:///Users/sergeya/ai/EvoMu/crates/eve-db), and [`eve-proto`](file:///Users/sergeya/ai/EvoMu/crates/eve-proto) crates. The architecture accurately simulates the entire lifecycle of corporate existence: dynamic genesis fees, 64-bit permission role bitmasks, 7-division inventory and wallet compartmentalization, shareholder voting and CEO replacement protocols, automated player project bounties, and diplomatic alliance standings.
+In [`EvoMu`](../../), the corporation system is implemented with clean-room precision across the [`eve-server`](../../../crates/eve-server), [`eve-db`](../../../crates/eve-db), and [`eve-proto`](../../../crates/eve-proto) crates. The architecture accurately simulates the entire lifecycle of corporate existence: dynamic genesis fees, 64-bit permission role bitmasks, 7-division inventory and wallet compartmentalization, shareholder voting and CEO replacement protocols, automated player project bounties, and diplomatic alliance standings.
 
 ---
 
@@ -47,7 +53,7 @@ Founding a capsuleer corporation requires statutory capital, formal charter cred
 
 * **Charter Registration Fee:** Founding a corporation requires an upfront cash payment deducted directly from the founder's personal wallet balance:
   $$\text{Fee}_{\text{genesis}} = 1,599,800 \text{ ISK} \quad (\approx 1.6\text{M ISK})$$
-* **Skill Prerequisites:** The founder must have trained the skill **Corporation Management** ([`typeID: 3363`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde/)) to at least Level 1.
+* **Skill Prerequisites:** The founder must have trained the skill **Corporation Management** ([`typeID: 3363`](../../../crates/eve-sde/)) to at least Level 1.
 * **Corporate Identity Validation:**
   * **Corporation Name:** Must be unique across all existing NPC and player corporations (case-insensitive string match), between 4 and 50 characters, and pass sanitization against reserved faction keywords.
   * **Corporate Ticker:** A unique 3 to 5 alphanumeric character abbreviation (e.g., `[EVOMU]`). Once registered, no other corporate entity may adopt the same ticker.
@@ -364,49 +370,49 @@ EvoMu implements corporate governance via a clean-room Rust architecture spannin
 
 ### 1. Crates Involved
 
-* [`eve-server`](file:///Users/sergeya/ai/EvoMu/crates/eve-server): Houses the service routers, RPC dispatchers, role verification engines, in-space project trackers, and ESI HTTP endpoints.
-* [`eve-db`](file:///Users/sergeya/ai/EvoMu/crates/eve-db): Defines durable database entities, transactional snapshot state (`WorldStateSnapshot`), wallet journals, and SQLite storage routines.
-* [`eve-proto`](file:///Users/sergeya/ai/EvoMu/crates/eve-proto): Provides binary marshal and unmarshal codecs for Python representations (`PyRep`), rowset encodings, and MachoNet RPC transport envelopes.
-* [`eve-sde`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde): Static Data Export parser supplying dogma attribute definitions (attribute `191` member bonuses) and default NPC corporation profiles.
+* [`eve-server`](../../../crates/eve-server): Houses the service routers, RPC dispatchers, role verification engines, in-space project trackers, and ESI HTTP endpoints.
+* [`eve-db`](../../../crates/eve-db): Defines durable database entities, transactional snapshot state (`WorldStateSnapshot`), wallet journals, and SQLite storage routines.
+* [`eve-proto`](../../../crates/eve-proto): Provides binary marshal and unmarshal codecs for Python representations (`PyRep`), rowset encodings, and MachoNet RPC transport envelopes.
+* [`eve-sde`](../../../crates/eve-sde): Static Data Export parser supplying dogma attribute definitions (attribute `191` member bonuses) and default NPC corporation profiles.
 
 ---
 
 ### 2. Primary Handlers & Services
 
-#### Core Services Dispatch: [`fleet_social_corps.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/fleet_social_corps.rs)
+#### Core Services Dispatch: [`fleet_social_corps.rs`](../../../crates/eve-server/src/services/fleet_social_corps.rs)
 Intercepts MachoNet RPC calls addressed to corporate services:
-* [`handle_corps`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/fleet_social_corps.rs#L251): Routes methods for `corpRegistry`, `corpmgr`, `corporationSvc`, `corpStationMgr`, `allianceRegistry`, and `voteManager`.
-* [`promote_due_pending_corp_grants`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/fleet_social_corps.rs#L24): Invoked on corporate state access. Scans `pending_role_grants` and `pending_scoped_role_grants`. If `ctx.now_unix() >= eff`, it removes the pending record, merges the bitmask into `corp.member_roles` and `corp_role_assignments`, decodes roles into human-readable strings, and stores them in `snap.char_scoped_roles`.
-* [`compute_corp_member_limit`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/fleet_social_corps.rs#L106): Evaluates CEO skill levels against SDE attribute `191` to enforce recruitment limits.
+* [`handle_corps`](../../../crates/eve-server/src/services/fleet_social_corps.rs#L251): Routes methods for `corpRegistry`, `corpmgr`, `corporationSvc`, `corpStationMgr`, `allianceRegistry`, and `voteManager`.
+* [`promote_due_pending_corp_grants`](../../../crates/eve-server/src/services/fleet_social_corps.rs#L24): Invoked on corporate state access. Scans `pending_role_grants` and `pending_scoped_role_grants`. If `ctx.now_unix() >= eff`, it removes the pending record, merges the bitmask into `corp.member_roles` and `corp_role_assignments`, decodes roles into human-readable strings, and stores them in `snap.char_scoped_roles`.
+* [`compute_corp_member_limit`](../../../crates/eve-server/src/services/fleet_social_corps.rs#L106): Evaluates CEO skill levels against SDE attribute `191` to enforce recruitment limits.
 
-#### Governance & Shares: [`fleet_social_corp_gov.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/fleet_social_corp_gov.rs)
-* [`handle_add_corporation`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/fleet_social_corp_gov.rs#L64): Executes corporation founding. Validates name/ticker uniqueness, deducts the $1,599,800\text{ ISK}$ registration fee, creates 7 wallet divisions, mints 1,000 initial shares, instantiates the corporate chat channel, and emits `OnCorporationChanged`.
-* [`handle_corp_gov`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/fleet_social_corp_gov.rs#L305):
+#### Governance & Shares: [`fleet_social_corp_gov.rs`](../../../crates/eve-server/src/services/fleet_social_corp_gov.rs)
+* [`handle_add_corporation`](../../../crates/eve-server/src/services/fleet_social_corp_gov.rs#L64): Executes corporation founding. Validates name/ticker uniqueness, deducts the $1,599,800\text{ ISK}$ registration fee, creates 7 wallet divisions, mints 1,000 initial shares, instantiates the corporate chat channel, and emits `OnCorporationChanged`.
+* [`handle_corp_gov`](../../../crates/eve-server/src/services/fleet_social_corp_gov.rs#L305):
   * `"MoveCompanyShares"` & `"MovePrivateShares"`: Validates transfer quantity and share ownership, executes share balance deltas, and dispatches `OnShareChange` notifications.
   * `"PayoutDividend"`: Computes pro-rata share distributions or equal member splits, verifies division balance sufficiency, and generates `WalletJournalEntry` audit records.
   * `"UpdateTitle"` & `"DeleteTitle"`: Configures 1-based corporate titles and drops roles instantaneously upon deletion.
   * `"ResignFromCEO"`: Replaces CEO and assigns $2^{64}-1$ (`u64::MAX`) roles to the designated successor.
   * `"ActivateSanctionedAction"`: Evaluates voting outcomes via `eval_vote_case_winner` and applies passed proposals.
 
-#### Hangar Access Interceptor: [`corp_registry_ops.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/corp_registry_ops.rs)
-* [`handle_corp_hangar_invbroker`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/corp_registry_ops.rs#L48): Intercepts `invbroker.List` and `invbroker.Add` targeting flags `116..=122`. Enforces division query and take roles, respecting 24-hour maturation delays.
+#### Hangar Access Interceptor: [`corp_registry_ops.rs`](../../../crates/eve-server/src/services/corp_registry_ops.rs)
+* [`handle_corp_hangar_invbroker`](../../../crates/eve-server/src/services/corp_registry_ops.rs#L48): Intercepts `invbroker.List` and `invbroker.Add` targeting flags `116..=122`. Enforces division query and take roles, respecting 24-hour maturation delays.
 
-#### Voting Cases & Options: [`fleet_social_corp_tail.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/fleet_social_corp_tail.rs)
-* [`handle_insert_vote_case`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/fleet_social_corp_tail.rs#L941): Validates proposal parameters, verifies member or shareholder standing, constructs ballot options, and inserts `CorpVoteCaseRecord` with `end_ts = now + 86_400`.
+#### Voting Cases & Options: [`fleet_social_corp_tail.rs`](../../../crates/eve-server/src/services/fleet_social_corp_tail.rs)
+* [`handle_insert_vote_case`](../../../crates/eve-server/src/services/fleet_social_corp_tail.rs#L941): Validates proposal parameters, verifies member or shareholder standing, constructs ballot options, and inserts `CorpVoteCaseRecord` with `end_ts = now + 86_400`.
 
-#### Corporation Projects Engine: [`social_corp_projects.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/social_corp_projects.rs)
-* [`effective_corp_member_roles`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/social_corp_projects.rs#L27): Core role resolution function. Merges direct roles, assignments, and titles, while masking out unmatured grants matching `HANGAR_DIV_MASK`.
-* [`record_server_project_activity_in_snap`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/social_corp_projects.rs#L178): Invoked across combat, mining, manufacturing, and exploration events. Increments project progress, transfers reward ISK to the pilot, decrements escrow, and marks completed goals.
-* [`sweep_expired_corp_projects`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/social_corp_projects.rs#L163): Identifies expired projects, returns escrow to the originating division, and emits `OnGoalDeleted`.
+#### Corporation Projects Engine: [`social_corp_projects.rs`](../../../crates/eve-server/src/services/social_corp_projects.rs)
+* [`effective_corp_member_roles`](../../../crates/eve-server/src/services/social_corp_projects.rs#L27): Core role resolution function. Merges direct roles, assignments, and titles, while masking out unmatured grants matching `HANGAR_DIV_MASK`.
+* [`record_server_project_activity_in_snap`](../../../crates/eve-server/src/services/social_corp_projects.rs#L178): Invoked across combat, mining, manufacturing, and exploration events. Increments project progress, transfers reward ISK to the pilot, decrements escrow, and marks completed goals.
+* [`sweep_expired_corp_projects`](../../../crates/eve-server/src/services/social_corp_projects.rs#L163): Identifies expired projects, returns escrow to the originating division, and emits `OnGoalDeleted`.
 
-#### Medals & Bulletins: [`corp_medals_bulletins.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/corp_medals_bulletins.rs)
-* [`handle_corp_medals`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/corp_medals_bulletins.rs#L10): Handles `CreateMedal` (deducting the $5,000,000\text{ ISK}$ medal creation fee) and `GiveMedalToCharacters`.
+#### Medals & Bulletins: [`corp_medals_bulletins.rs`](../../../crates/eve-server/src/services/corp_medals_bulletins.rs)
+* [`handle_corp_medals`](../../../crates/eve-server/src/services/corp_medals_bulletins.rs#L10): Handles `CreateMedal` (deducting the $5,000,000\text{ ISK}$ medal creation fee) and `GiveMedalToCharacters`.
 
-#### ESI REST API: [`corp_governance_routes.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/esi/corp_governance_routes.rs)
-* [`dispatch_corp_governance_route`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/esi/corp_governance_routes.rs#L54): Implements OpenAPI endpoints:
+#### ESI REST API: [`corp_governance_routes.rs`](../../../crates/eve-server/src/esi/corp_governance_routes.rs)
+* [`dispatch_corp_governance_route`](../../../crates/eve-server/src/esi/corp_governance_routes.rs#L54): Implements OpenAPI endpoints:
   * `GET /corporations/{corporation_id}/divisions`: Returns 7 hangar and wallet division names.
   * `GET /corporations/{corporation_id}/members/limit`: Computes member limits via dogma attribute 191.
-  * `GET /corporations/{corporation_id}/roles`: Returns member role assignments decoded via [`decode_corp_roles`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/esi/corp_governance_routes.rs#L24).
+  * `GET /corporations/{corporation_id}/roles`: Returns member role assignments decoded via [`decode_corp_roles`](../../../crates/eve-server/src/esi/corp_governance_routes.rs#L24).
   * `GET /corporations/{corporation_id}/roles/history`: Historical audit log of role assignments and revocations.
   * `GET /corporations/{corporation_id}/shareholders`: Shareholder balances and entity classifications.
   * `GET /corporations/{corporation_id}/projects`: Live projects, progress counters, and contributors.
@@ -415,7 +421,7 @@ Intercepts MachoNet RPC calls addressed to corporate services:
 
 ### 3. Database Schemas & Snapshot Data Structures
 
-All persistent corporate state is managed inside [`eve_db::WorldStateSnapshot`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/snapshot_ext.rs):
+All persistent corporate state is managed inside [`eve_db::WorldStateSnapshot`](../../../crates/eve-db/src/snapshot_ext.rs):
 
 ```rust
 // Defined in crates/eve-db/src/types.rs
@@ -504,7 +510,7 @@ pub struct CorpProjectRecord {
 
 ### 4. Edge Case: CEO Resignation in Multi-Member Corps
 * **Problem:** A CEO attempting to resign without naming a successor could leave a multi-member corporation leaderless.
-* **Mitigation:** In [`ResignFromCEO`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/fleet_social_corp_gov.rs#L748), if `corp.members.len() > 1` and the designated successor is 0 or not a member, the RPC returns `InvalidNewCEO`. A CEO may only resign without a successor if they are the sole remaining member of the corporation.
+* **Mitigation:** In [`ResignFromCEO`](../../../crates/eve-server/src/services/fleet_social_corp_gov.rs#L748), if `corp.members.len() > 1` and the designated successor is 0 or not a member, the RPC returns `InvalidNewCEO`. A CEO may only resign without a successor if they are the sole remaining member of the corporation.
 
 ### 5. Edge Case: Blueprint Locking & Job Cancellation
 * **Mitigation:** Blueprints marked with `InventoryFlag::Locked` inside corporate hangars are protected against standard repackaging, trashing, or moving. While an industry job can consume the blueprint for manufacturing runs, canceling or completing the job returns the item to its locked state in its original divisional flag (`116..=122`).
@@ -528,14 +534,27 @@ EvoMu's corporate governance and role mechanics are verified through integration
 
 | Test Function | Source File | Validated Behaviors |
 | :--- | :--- | :--- |
-| [`test_corp_lifecycle_kick_join_invite_quit`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/corp_lifecycle_governance_closure.rs#L83) | [`corp_lifecycle_governance_closure.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/corp_lifecycle_governance_closure.rs) | Member application approval, invitations, leave/join transitions, and member limits. |
-| [`test_corp_governance_divisions_ceo_placement_tax`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/corp_lifecycle_governance_closure.rs#L347) | [`corp_lifecycle_governance_closure.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/corp_lifecycle_governance_closure.rs) | Division naming, CEO resignation, NPC tax rates, and office rental. |
-| [`test_corp_shares_dividends_and_ceo_transition`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/rpc_corp_registry_gov.rs#L84) | [`rpc_corp_registry_gov.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/rpc_corp_registry_gov.rs) | `MoveCompanyShares`, `PayoutDividend`, share dilution, and CEO replacement proposals. |
-| [`test_corp_titles_and_bulletins`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/rpc_corp_registry_gov.rs#L346) | [`rpc_corp_registry_gov.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/rpc_corp_registry_gov.rs) | Corporate title creation, role bundle assignment, immediate title deletion role drops. |
-| [`test_corp_projects_goals_freelance_and_plan_closure`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/corp_projects_welcome_alliance_closure.rs#L343) | [`corp_projects_welcome_alliance_closure.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/corp_projects_welcome_alliance_closure.rs) | Escrow reservation, in-space progress matching, reward disbursement, and expiry refunds. |
-| [`test_corp_registry_monikers_introspection_and_actions`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/rpc_corp_registry_ops.rs#L71) | [`rpc_corp_registry_ops.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/rpc_corp_registry_ops.rs) | 24-hour role grant delay enforcement in `ExecuteActions` and pending grant clearance upon maturity. |
-| [`test_d6_corp_governance_and_employment_history_persist_and_rollback`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/d6_persistence_corp_crimewatch_warfare.rs#L89) | [`d6_persistence_corp_crimewatch_warfare.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/d6_persistence_corp_crimewatch_warfare.rs) | Durability of `CorpGovState`, SQLite serialization, and transactional rollback. |
-| [`test_esi5_alliance_info_history_divisions_and_shareholders`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/esi_corp_governance.rs#L135) | [`esi_corp_governance.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/esi_corp_governance.rs) | ESI OpenAPI response validation for division names, alliance history, and shareholders. |
-| [`test_esi5_corporation_medals_container_logs_and_projects`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/esi_corp_governance.rs#L396) | [`esi_corp_governance.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/esi_corp_governance.rs) | ESI route verification for corporate medals, container access logs, and live projects. |
-| [`test_esi4_contacts_corp_and_alliance`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/character_esi_social_mail.rs#L1003) | [`character_esi_social_mail.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/character_esi_social_mail.rs) | Diplomatic standings CRUD, contact labels, and alliance contact propagation. |
-| [`test_alliance_and_war_notifications`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/notify_corp_emission_alliances.rs#L50) | [`notify_corp_emission_alliances.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/notify_corp_emission_alliances.rs) | Real-time MachoNet client broadcasts (`OnCorporationChanged`, `OnShareChange`, `OnVoteCaseChanged`). |
+| [`test_corp_lifecycle_kick_join_invite_quit`](../../../crates/eve-server/tests/it/corp_lifecycle_governance_closure.rs#L83) | [`corp_lifecycle_governance_closure.rs`](../../../crates/eve-server/tests/it/corp_lifecycle_governance_closure.rs) | Member application approval, invitations, leave/join transitions, and member limits. |
+| [`test_corp_governance_divisions_ceo_placement_tax`](../../../crates/eve-server/tests/it/corp_lifecycle_governance_closure.rs#L347) | [`corp_lifecycle_governance_closure.rs`](../../../crates/eve-server/tests/it/corp_lifecycle_governance_closure.rs) | Division naming, CEO resignation, NPC tax rates, and office rental. |
+| [`test_corp_shares_dividends_and_ceo_transition`](../../../crates/eve-server/tests/it/rpc_corp_registry_gov.rs#L84) | [`rpc_corp_registry_gov.rs`](../../../crates/eve-server/tests/it/rpc_corp_registry_gov.rs) | `MoveCompanyShares`, `PayoutDividend`, share dilution, and CEO replacement proposals. |
+| [`test_corp_titles_and_bulletins`](../../../crates/eve-server/tests/it/rpc_corp_registry_gov.rs#L346) | [`rpc_corp_registry_gov.rs`](../../../crates/eve-server/tests/it/rpc_corp_registry_gov.rs) | Corporate title creation, role bundle assignment, immediate title deletion role drops. |
+| [`test_corp_projects_goals_freelance_and_plan_closure`](../../../crates/eve-server/tests/it/corp_projects_welcome_alliance_closure.rs#L343) | [`corp_projects_welcome_alliance_closure.rs`](../../../crates/eve-server/tests/it/corp_projects_welcome_alliance_closure.rs) | Escrow reservation, in-space progress matching, reward disbursement, and expiry refunds. |
+| [`test_corp_registry_monikers_introspection_and_actions`](../../../crates/eve-server/tests/it/rpc_corp_registry_ops.rs#L71) | [`rpc_corp_registry_ops.rs`](../../../crates/eve-server/tests/it/rpc_corp_registry_ops.rs) | 24-hour role grant delay enforcement in `ExecuteActions` and pending grant clearance upon maturity. |
+| [`test_d6_corp_governance_and_employment_history_persist_and_rollback`](../../../crates/eve-server/tests/it/d6_persistence_corp_crimewatch_warfare.rs#L89) | [`d6_persistence_corp_crimewatch_warfare.rs`](../../../crates/eve-server/tests/it/d6_persistence_corp_crimewatch_warfare.rs) | Durability of `CorpGovState`, SQLite serialization, and transactional rollback. |
+| [`test_esi5_alliance_info_history_divisions_and_shareholders`](../../../crates/eve-server/tests/it/esi_corp_governance.rs#L135) | [`esi_corp_governance.rs`](../../../crates/eve-server/tests/it/esi_corp_governance.rs) | ESI OpenAPI response validation for division names, alliance history, and shareholders. |
+| [`test_esi5_corporation_medals_container_logs_and_projects`](../../../crates/eve-server/tests/it/esi_corp_governance.rs#L396) | [`esi_corp_governance.rs`](../../../crates/eve-server/tests/it/esi_corp_governance.rs) | ESI route verification for corporate medals, container access logs, and live projects. |
+| [`test_esi4_contacts_corp_and_alliance`](../../../crates/eve-server/tests/it/character_esi_social_mail.rs#L1003) | [`character_esi_social_mail.rs`](../../../crates/eve-server/tests/it/character_esi_social_mail.rs) | Diplomatic standings CRUD, contact labels, and alliance contact propagation. |
+| [`test_alliance_and_war_notifications`](../../../crates/eve-server/tests/it/notify_corp_emission_alliances.rs#L50) | [`notify_corp_emission_alliances.rs`](../../../crates/eve-server/tests/it/notify_corp_emission_alliances.rs) | Real-time MachoNet client broadcasts (`OnCorporationChanged`, `OnShareChange`, `OnVoteCaseChanged`). |
+
+---
+
+## Related Systems & Cross-References
+
+- [**Alliances, War Declarations & War HQ Mechanics**](./alliances_and_formal_wars.md): Alliance charters, war declarations, mutual defense treaties, and shared structure access.
+- [**Upwell Structures Overview & Lifecycle**](../upwell_and_structures/upwell_structures_overview.md): Corporate structure ownership, Access Control Lists (ACLs), and 24-hour role grant delay security invariant.
+- [**Regional Market Order Matching**](../economy_and_markets/regional_market_order_matching.md): Corporate divisions (7 hangars, 7 wallets), accountant withdrawal limits, and broker fee discounts.
+- [**Sovereignty Hubs & Equinox Skyhooks**](../sovereignty_and_faction_warfare/sovereignty_hubs_and_equinox_skyhooks.md): Claiming territorial sovereignty and installing infrastructure upgrades as a corporation/alliance.
+
+---
+
+[← Back to Wiki Table of Contents](../README.md)

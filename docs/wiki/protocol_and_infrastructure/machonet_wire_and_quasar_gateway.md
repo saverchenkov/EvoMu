@@ -1,5 +1,11 @@
 # MachoNet Protocol, Quasar Services & Wire Infrastructure
 
+> **Navigation**: [EvoMu Technical Wiki](../README.md) • [Related Systems](#related-systems--cross-references)
+>
+> [← Back to Wiki Table of Contents](../README.md)
+
+---
+
 ## Overview & Lore Context
 
 In the cosmic expanse of New Eden, every capsuleer neural command—from weapon fire synchronization and warp vector alignment to market transactions and planetary extraction telemetry—transits an invisible, omnipresent communication matrix. Within the technical architecture of EVE Online, this matrix is realized through two distinct historical epochs of network engineering:
@@ -50,7 +56,7 @@ $$L_{\text{frame}} = \sum_{i=0}^{3} b_i \cdot 256^i = \text{u32::from\_le\_bytes
 ```
 
 #### Framing Constraints & Operational Limits
-- **Maximum Frame Length (`MAX_MACHO_FRAME_LEN`):** $4{,}194{,}304\text{ bytes}$ ($4\text{ MiB}$), matching [`eve_proto::marshal::MAX_FRAME_SIZE`](file:///Users/sergeya/ai/EvoMu/crates/eve-proto/src/marshal.rs#L19-L20). Any connection advertising $L_{\text{frame}} > 4\text{ MiB}$ or $L_{\text{frame}} == 0$ is rejected immediately with connection termination to guard against memory exhaustion attacks.
+- **Maximum Frame Length (`MAX_MACHO_FRAME_LEN`):** $4{,}194{,}304\text{ bytes}$ ($4\text{ MiB}$), matching [`eve_proto::marshal::MAX_FRAME_SIZE`](../../../crates/eve-proto/src/marshal.rs#L19-L20). Any connection advertising $L_{\text{frame}} > 4\text{ MiB}$ or $L_{\text{frame}} == 0$ is rejected immediately with connection termination to guard against memory exhaustion attacks.
 - **Idle Header Timeout (`IDLE_READ_TIMEOUT_SECS`):** $300\text{ seconds}$ ($5\text{ minutes}$) waiting for an incoming 4-byte header on an established connection.
 - **Body Completion Timeout (`FRAME_BODY_TIMEOUT_SECS`):** $30\text{ seconds}$ to read the full $L_{\text{frame}}$ bytes into the socket buffer once the 4-byte header has been received, neutralizing Slowloris and TCP stream fragmentation attacks.
 
@@ -82,7 +88,7 @@ MachoNet defines standard packet codes identified by integer discriminants (`mac
 | `21` | `PingRsp` | `machoNetPacket.PingRsp` | Response acknowledging ping with timestamp reflection. |
 
 #### MachoNet Addressing Matrix (`MachoAddress`)
-Endpoints in the MachoNet network topology are addressed via `carbon.common.script.net.machoNetAddress.MachoAddress`. EvoMu models these canonical addressing modes in [`eve_machonet::MachoAddress`](file:///Users/sergeya/ai/EvoMu/crates/eve-machonet/src/lib.rs#L95-L125):
+Endpoints in the MachoNet network topology are addressed via `carbon.common.script.net.machoNetAddress.MachoAddress`. EvoMu models these canonical addressing modes in [`eve_machonet::MachoAddress`](../../../crates/eve-machonet/src/lib.rs#L95-L125):
 
 1. **Node (`ADDRESS_TYPE_NODE = 1`):** Specific cluster proxy or solarsystem worker node (`node_id`, optional `service`, `call_id`). Formatted on wire as `("N", node_id, service, call_id)`.
 2. **Client (`ADDRESS_TYPE_CLIENT = 2`):** Connected player client instance (`client_id`, `call_id`). Formatted on wire as `("C", client_id, call_id)`.
@@ -145,7 +151,7 @@ $$\text{challenge\_responsehash} = \text{str}(\text{binascii.crc\_hqx}(\text{blu
 The polynomial used is CRC-CCITT ($0\text{x}1021$):
 $$P(x) = x^{16} + x^{12} + x^5 + 1$$
 
-Implemented in [`eve_machonet::handshake::crc_hqx`](file:///Users/sergeya/ai/EvoMu/crates/eve-machonet/src/handshake.rs#L24-L37):
+Implemented in [`eve_machonet::handshake::crc_hqx`](../../../crates/eve-machonet/src/handshake.rs#L24-L37):
 ```rust
 pub fn crc_hqx(data: &[u8], mut crc: u16) -> u16 {
     for &b in data {
@@ -172,7 +178,7 @@ $$\text{Buffer} = [0\text{x}7\text{E}, 0, 0, 0, 0, 0\text{x}25, 0\text{x}13, 0\t
 
 ### 4. PyRep Marshal Codec & Byte-Level Serialization
 
-The core serialization engine of MachoNet is `blue.marshal`, implemented in [`eve-proto::marshal`](file:///Users/sergeya/ai/EvoMu/crates/eve-proto/src/marshal.rs). Every marshaled byte stream begins with a 5-byte header:
+The core serialization engine of MachoNet is `blue.marshal`, implemented in [`eve-proto::marshal`](../../../crates/eve-proto/src/marshal.rs). Every marshaled byte stream begins with a 5-byte header:
 1. **Magic Header Byte:** $0\text{x}7\text{E}$ (`MARSHAL_HEADER_BYTE`).
 2. **Save Count / Memoization Table Size:** 4-byte Little-Endian unsigned integer ($u32$). When encoding static packets without back-references, this is set to $0$. When decoding, it indicates the number of memoized objects that can be referenced via back-indexes.
 
@@ -222,7 +228,7 @@ Lengths and collection counts in `blue.marshal` are encoded using an optimized v
 Database query results, inventory manifests, market orders, and celestial attributes are transmitted using high-density tabular containers: `blue.DBRow`, `dbutil.CRowset`, and `eve.common.script.sys.rowset.Rowset`.
 
 #### Column Type Codes (`DbColumnType`)
-Defined in [`eve_proto::dbrow::DbColumnType`](file:///Users/sergeya/ai/EvoMu/crates/eve-proto/src/dbrow.rs#L16-L35):
+Defined in [`eve_proto::dbrow::DbColumnType`](../../../crates/eve-proto/src/dbrow.rs#L16-L35):
 
 | DBTYPE Code | Name | Bit Width | Rust Equivalent | Wire Representation |
 | :---: | :--- | :---: | :--- | :--- |
@@ -274,7 +280,7 @@ pub fn write_varint(mut val: u64, out: &mut Vec<u8>) {
 ```
 
 #### Quasar Gateway Envelope Structure
-Defined in [`eve_proto::quasar_wire::QuasarGatewayEnvelope`](file:///Users/sergeya/ai/EvoMu/crates/eve-proto/src/quasar_wire.rs#L15-L20):
+Defined in [`eve_proto::quasar_wire::QuasarGatewayEnvelope`](../../../crates/eve-proto/src/quasar_wire.rs#L15-L20):
 
 ```protobuf
 message QuasarGatewayEnvelope {
@@ -295,7 +301,7 @@ message QuasarGatewayEnvelope {
 
 ### 7. ESI OpenAPI Gateway Mechanics
 
-The EVE Swagger Interface (ESI) exposes New Eden's universe and market state over standard HTTP/1.1 and HTTP/2 interfaces, implemented in [`eve_server::esi::router`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/esi/router.rs).
+The EVE Swagger Interface (ESI) exposes New Eden's universe and market state over standard HTTP/1.1 and HTTP/2 interfaces, implemented in [`eve_server::esi::router`](../../../crates/eve-server/src/esi/router.rs).
 
 #### HTTP Wire Architecture
 - **Base Endpoint:** `http://localhost:8080/v1/` or `https://esi.evomu.space/latest/`.
@@ -318,7 +324,7 @@ The EVE Swagger Interface (ESI) exposes New Eden's universe and market state ove
 
 Static universe geometry, dogmatic item attributes, ship traits, market categories, and blueprint formulas originate in CCP's proprietary Fast Serialization Database (FSD) binary archives (`.fsdbinary`) and SQLite containers (`.static`).
 
-EvoMu's [`eve-sde`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde) crate ingests these resources during startup:
+EvoMu's [`eve-sde`](../../../crates/eve-sde) crate ingests these resources during startup:
 - **`sqlite_loader.rs`:** Attaches to `data/evomu_sde.sqlite` in read-only immutable mode (`file:path?immutable=1`) without locking the filesystem.
 - **In-Memory Spatial Indexing:** Celestial objects, star systems, and jump gate links are loaded into spatial k-d trees and direct hash maps, enabling $O(1)$ coordinate resolution during Destiny physics simulation.
 
@@ -343,22 +349,22 @@ flowchart LR
 ```
 
 ### 1. Crates Involved
-- [`eve-proto`](file:///Users/sergeya/ai/EvoMu/crates/eve-proto): Core data representation and byte codecs:
-  - [`marshal.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-proto/src/marshal.rs): Pure Rust implementation of `blue.marshal` encoder/decoder.
-  - [`dbrow.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-proto/src/dbrow.rs): `DBRowDescriptor`, `CRowset`, and RLE column compressors.
-  - [`quasar_wire.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-proto/src/quasar_wire.rs): Wire-level Protobuf varint and envelope encoder/decoder.
-  - [`quasar/`](file:///Users/sergeya/ai/EvoMu/crates/eve-proto/src/quasar/): Generated and dynamic message descriptors for Quasar services.
-- [`eve-machonet`](file:///Users/sergeya/ai/EvoMu/crates/eve-machonet): MachoNet framing and session primitives:
-  - [`lib.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-machonet/src/lib.rs): `MachoPacket`, `MachoPacketType`, `MachoAddress`, and error wrappers.
-  - [`handshake.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-machonet/src/handshake.rs): Multi-step `GPSTransport` state machine and CRC-CCITT placebo hashing.
-- [`eve-sde`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde): Static universe registry:
-  - [`lib.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde/src/lib.rs): Type definitions, attribute IDs, and spatial data types.
-  - [`sqlite_loader.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde/src/sqlite_loader.rs): Process-wide cached SQLite SDE reader.
-- [`eve-server`](file:///Users/sergeya/ai/EvoMu/crates/eve-server): Cluster host runtime:
-  - [`macho_listener.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/macho_listener.rs): Async TCP accept loop, length framing, and handshake executor.
-  - [`quasar_gateway.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/quasar_gateway.rs): Public and internal Quasar gateway router and event bus.
-  - [`router/dispatch.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/router/dispatch.rs): Modular RPC routing across domain services.
-  - [`esi/router.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/esi/router.rs): OpenAPI HTTP routing, Bearer authentication, and ETag caching.
+- [`eve-proto`](../../../crates/eve-proto): Core data representation and byte codecs:
+  - [`marshal.rs`](../../../crates/eve-proto/src/marshal.rs): Pure Rust implementation of `blue.marshal` encoder/decoder.
+  - [`dbrow.rs`](../../../crates/eve-proto/src/dbrow.rs): `DBRowDescriptor`, `CRowset`, and RLE column compressors.
+  - [`quasar_wire.rs`](../../../crates/eve-proto/src/quasar_wire.rs): Wire-level Protobuf varint and envelope encoder/decoder.
+  - [`quasar/`](../../../crates/eve-proto/src/quasar/): Generated and dynamic message descriptors for Quasar services.
+- [`eve-machonet`](../../../crates/eve-machonet): MachoNet framing and session primitives:
+  - [`lib.rs`](../../../crates/eve-machonet/src/lib.rs): `MachoPacket`, `MachoPacketType`, `MachoAddress`, and error wrappers.
+  - [`handshake.rs`](../../../crates/eve-machonet/src/handshake.rs): Multi-step `GPSTransport` state machine and CRC-CCITT placebo hashing.
+- [`eve-sde`](../../../crates/eve-sde): Static universe registry:
+  - [`lib.rs`](../../../crates/eve-sde/src/lib.rs): Type definitions, attribute IDs, and spatial data types.
+  - [`sqlite_loader.rs`](../../../crates/eve-sde/src/sqlite_loader.rs): Process-wide cached SQLite SDE reader.
+- [`eve-server`](../../../crates/eve-server): Cluster host runtime:
+  - [`macho_listener.rs`](../../../crates/eve-server/src/macho_listener.rs): Async TCP accept loop, length framing, and handshake executor.
+  - [`quasar_gateway.rs`](../../../crates/eve-server/src/quasar_gateway.rs): Public and internal Quasar gateway router and event bus.
+  - [`router/dispatch.rs`](../../../crates/eve-server/src/router/dispatch.rs): Modular RPC routing across domain services.
+  - [`esi/router.rs`](../../../crates/eve-server/src/esi/router.rs): OpenAPI HTTP routing, Bearer authentication, and ETag caching.
 
 ---
 
@@ -394,7 +400,7 @@ flowchart TD
 ```
 
 #### Specialized Service Handlers:
-- **`publicGatewaySvc`:** Decodes inner Quasar protobuf envelopes and delegates to [`quasar_gateway::handle_client_public_gateway_rpc`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/quasar_gateway.rs#L1234-L1250). Handles `SendRequest`, `CallQuasar`, `Send`, `PublishEvent`, and `ConsumeNotices`.
+- **`publicGatewaySvc`:** Decodes inner Quasar protobuf envelopes and delegates to [`quasar_gateway::handle_client_public_gateway_rpc`](../../../crates/eve-server/src/quasar_gateway.rs#L1234-L1250). Handles `SendRequest`, `CallQuasar`, `Send`, `PublishEvent`, and `ConsumeNotices`.
 - **`charUnboundMgr` & `charMgr`:** Manages character selection, doll creation, attribute point remapping, and skill queue training.
 - **`dogmaIM`:** Dispatches Dogma module activation, ship fitting modifications, and real-time attribute evaluations.
 - **`alert`:** Client diagnostic and telemetry logging service.
@@ -404,7 +410,7 @@ flowchart TD
 
 ### 3. State Store & Session Representation
 
-A capsuleer's live network session is maintained in [`eve_machonet::SessionState`](file:///Users/sergeya/ai/EvoMu/crates/eve-machonet/src/lib.rs):
+A capsuleer's live network session is maintained in [`eve_machonet::SessionState`](../../../crates/eve-machonet/src/lib.rs):
 
 ```rust
 pub struct SessionState {
@@ -429,7 +435,7 @@ Whenever a player undocks, docks, or executes a stargate jump, the server mutate
 ### 4. Tick & Lifecycle Integration
 
 The wire infrastructure interfaces with three distinct execution loops:
-1. **Network IO Select Loop:** An asynchronous Tokio select loop in [`macho_listener::handle_macho_client`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/macho_listener.rs#L78-L100) concurrently processing incoming TCP frames, outgoing multicast notification channels (`mpsc::UnboundedReceiver`), and shutdown signals.
+1. **Network IO Select Loop:** An asynchronous Tokio select loop in [`macho_listener::handle_macho_client`](../../../crates/eve-server/src/macho_listener.rs#L78-L100) concurrently processing incoming TCP frames, outgoing multicast notification channels (`mpsc::UnboundedReceiver`), and shutdown signals.
 2. **Destiny Physics Tick (1 Hz / 1000 ms):** The core space simulation loop. At each tick boundary, solarsystem state changes are aggregated into high-density `Notification` packets (Type `12`) and broadcast across all clients in the system bubble.
 3. **Idempotency & Notice Expiry Ticks:**
    - Quasar notice routing cache expires entries older than $10\text{ seconds}$ (`NOTICE_CACHE_EXPIRY_DELAY_SECS`).
@@ -486,10 +492,23 @@ EvoMu verifies protocol fidelity through rigorous unit and integration tests:
 
 | Test Target | Test Source Path | Verified Mechanics |
 | :--- | :--- | :--- |
-| **Marshal Codec** | [`crates/eve-proto/src/marshal.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-proto/src/marshal.rs) | Opcode roundtrips, nested structures, inverted dict ordering, size-ex bounds. |
-| **DBRow Packing** | [`crates/eve-proto/src/dbrow.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-proto/src/dbrow.rs) | Column bitfield packing, RLE compression, typed CRowset generation. |
-| **Quasar Protobuf** | [`crates/eve-proto/src/quasar_wire.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-proto/src/quasar_wire.rs) | LEB128 varint encoding, field decoding, envelope wrapping/unwrapping. |
-| **GPS Handshake** | [`crates/eve-machonet/src/handshake.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-machonet/src/handshake.rs) | CRC-CCITT hash calculation, VersionExchange validation, challenge response. |
-| **TCP Listener** | [`crates/eve-server/src/macho_listener.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/macho_listener.rs) | Socket accept, 4-byte framing, idle timeouts, session state transitions. |
-| **RPC Dispatch** | [`crates/eve-server/src/router/tests/dispatch_and_rpc.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/router/tests/dispatch_and_rpc.rs) | Domain service routing, method resolution, error response wrapping. |
-| **ESI Gateway** | [`crates/eve-server/src/esi/router.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/esi/router.rs) | OpenAPI spec routing, JWT verification, 100/60s rate limit window, ETags. |
+| **Marshal Codec** | [`crates/eve-proto/src/marshal.rs`](../../../crates/eve-proto/src/marshal.rs) | Opcode roundtrips, nested structures, inverted dict ordering, size-ex bounds. |
+| **DBRow Packing** | [`crates/eve-proto/src/dbrow.rs`](../../../crates/eve-proto/src/dbrow.rs) | Column bitfield packing, RLE compression, typed CRowset generation. |
+| **Quasar Protobuf** | [`crates/eve-proto/src/quasar_wire.rs`](../../../crates/eve-proto/src/quasar_wire.rs) | LEB128 varint encoding, field decoding, envelope wrapping/unwrapping. |
+| **GPS Handshake** | [`crates/eve-machonet/src/handshake.rs`](../../../crates/eve-machonet/src/handshake.rs) | CRC-CCITT hash calculation, VersionExchange validation, challenge response. |
+| **TCP Listener** | [`crates/eve-server/src/macho_listener.rs`](../../../crates/eve-server/src/macho_listener.rs) | Socket accept, 4-byte framing, idle timeouts, session state transitions. |
+| **RPC Dispatch** | [`crates/eve-server/src/router/tests/dispatch_and_rpc.rs`](../../../crates/eve-server/src/router/tests/dispatch_and_rpc.rs) | Domain service routing, method resolution, error response wrapping. |
+| **ESI Gateway** | [`crates/eve-server/src/esi/router.rs`](../../../crates/eve-server/src/esi/router.rs) | OpenAPI spec routing, JWT verification, 100/60s rate limit window, ETags. |
+
+---
+
+## Related Systems & Cross-References
+
+- [**Destiny Simulation Loop**](../ballpark_and_physics/destiny_simulation_loop.md): Spatial ballpark state synchronization, interpolation frames, and MachoNet packet dispatch.
+- [**Regional Market Order Matching**](../economy_and_markets/regional_market_order_matching.md): MachoNet `marketProxy` RPCs, Quasar order streaming, and client database caching.
+- [**Character Progression & Skill Training**](../character_and_progression/skill_training_and_medical_clones.md): Character sheet serialization, skill queue synchronization, and clone state payloads.
+- [**Upwell Structures Overview & Lifecycle**](../upwell_and_structures/upwell_structures_overview.md): Structure docking session handshakes, service module state broadcasts, and asset safety RPCs.
+
+---
+
+[← Back to Wiki Table of Contents](../README.md)

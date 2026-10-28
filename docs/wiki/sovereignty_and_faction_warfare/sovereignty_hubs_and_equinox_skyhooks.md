@@ -1,5 +1,11 @@
 # Sovereignty Hubs, Equinox Orbital Skyhooks & Entosis Mechanics
 
+> **Navigation**: [EvoMu Technical Wiki](../README.md) • [Related Systems](#related-systems--cross-references)
+>
+> [← Back to Wiki Table of Contents](../README.md)
+
+---
+
 ## Overview & Lore Context
 
 In the geopolitical sandbox of New Eden, the claim to territory in Null-Security space represents the pinnacle of capsuleer collective achievement. Over two decades of interstellar warfare, the mechanisms governing territorial control have undergone three distinct evolutionary epochs: the **Dominion POS Era**, the **Aegis FozzieSov Era**, and the modern **Equinox Era (YC126)**.
@@ -184,7 +190,7 @@ An **Orbital Skyhook** is an Upwell space elevator anchored in geosynchronous or
 
 #### Workforce Transfer Networks (Inter-System Logistics)
 When a system lacks native workforce (e.g., an industrial dead-end with only Gas and Lava planets), workforce can be imported from neighboring systems:
-- Modeled by [`PersistedWorkforceMode`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/d6_types.rs#L282-L289): `Inactive`, `Import { sources }`, `Export { destination, amount }`, or `Transit`.
+- Modeled by [`PersistedWorkforceMode`](../../../crates/eve-db/src/d6_types.rs#L282-L289): `Inactive`, `Import { sources }`, `Export { destination, amount }`, or `Transit`.
 - **Maximum Stargate Range:** Workforce links are physically constrained to **5 stargate jumps** or fewer:
   $$\text{JumpDistance}(\text{Hub}_A, \text{Hub}_B) \le 5$$
 - **Alliance Tethering:** Both endpoints must belong to the same owning corporation or alliance (`linked_owners`).
@@ -203,7 +209,7 @@ In low-security and null-sec insurgencies, pirate capsuleers deploy **Mercenary 
 
 ## EvoMu Implementation Architecture
 
-The Sovereignty and Equinox systems are distributed across [`crates/eve-server`](file:///Users/sergeya/ai/EvoMu/crates/eve-server), [`crates/eve-db`](file:///Users/sergeya/ai/EvoMu/crates/eve-db), and [`crates/eve-sde`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde).
+The Sovereignty and Equinox systems are distributed across [`crates/eve-server`](../../../crates/eve-server), [`crates/eve-db`](../../../crates/eve-db), and [`crates/eve-sde`](../../../crates/eve-sde).
 
 ```mermaid
 flowchart TD
@@ -245,34 +251,34 @@ flowchart TD
 ### 1. Primary Handlers & Source Mapping
 
 #### Quasar Equinox Services
-- [`crates/eve-server/src/services/quasar_sov_hub.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/quasar_sov_hub.rs):
+- [`crates/eve-server/src/services/quasar_sov_hub.rs`](../../../crates/eve-server/src/services/quasar_sov_hub.rs):
   - `GetResourcesRequest`: Computes system power and workforce from stars and planets via `system_yield`.
   - `ProcessConfigurationRequest`: Installs and onlines upgrades, allocating power and workforce budgets.
   - `AddRequest` (`eve_public.sovereignty.hub.fuel.api`): Deposits Magmatic Gas or Superionic Ice into the hub fuel bay.
   - `simulate_hub`: Advances the hourly fuel-burn clock, transitioning starved upgrades to `POWER_STATE_LOW`.
-- [`crates/eve-server/src/services/quasar_sov_skyhook.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/quasar_sov_skyhook.rs):
+- [`crates/eve-server/src/services/quasar_sov_skyhook.rs`](../../../crates/eve-server/src/services/quasar_sov_skyhook.rs):
   - `GetRequest`: Returns real-time skyhook state, reagent stocks, and active theft vulnerability status.
   - `GetAllLocalRequest` & `GetAllByCorporationRequest`: Queries all skyhooks in a solar system or corporation.
   - `GetSolarSystemsWithTheftVulnerableSkyhooksRequest`: Surfaces systems currently raid-vulnerable.
-- [`crates/eve-server/src/services/quasar_sov_workforce.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/quasar_sov_workforce.rs):
+- [`crates/eve-server/src/services/quasar_sov_workforce.rs`](../../../crates/eve-server/src/services/quasar_sov_workforce.rs):
   - `ConfigureRequest`: Configures import/export modes.
   - Stargate Jump Constraint: Validates $\le 5$ jumps via `WORKFORCE_TRANSFER_MAX_JUMPS = 5`.
   - Emits `ConfiguredNotice`, `StateChangedNotice`, and `ResourcesSimulatedNotice`.
-- [`crates/eve-server/src/services/quasar_sov_resources.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/quasar_sov_resources.rs):
+- [`crates/eve-server/src/services/quasar_sov_resources.rs`](../../../crates/eve-server/src/services/quasar_sov_resources.rs):
   - `GetAllDefinitionsRequest`: Exports client planet resource yield definitions from `PLANET_RESOURCE_TABLE`.
   - `SetTheftVulnerabilityWindowRequest`: Permits directors to schedule theft windows (up to $86\,400\text{ s}$).
-- [`crates/eve-server/src/services/quasar_sov_mercden.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/quasar_sov_mercden.rs):
+- [`crates/eve-server/src/services/quasar_sov_mercden.rs`](../../../crates/eve-server/src/services/quasar_sov_mercden.rs):
   - Manages Pirate Mercenary Dens, infomorph generation, evolution stages (1..5), and tactical operations.
-- [`crates/eve-server/src/services/quasar_sov_services.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/quasar_sov_services.rs):
+- [`crates/eve-server/src/services/quasar_sov_services.rs`](../../../crates/eve-server/src/services/quasar_sov_services.rs):
   - `ActivateRequest` & `DeactivateRequest`: Toggles orbital skyhook operational states with director role validation (`authorize_skyhook`).
 
 #### MachoNet Sovereignty & Tactical Handlers
-- [`crates/eve-server/src/services/sov_services.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/sov_services.rs):
+- [`crates/eve-server/src/services/sov_services.rs`](../../../crates/eve-server/src/services/sov_services.rs):
   - `calculate_adm(mil, ind, strat)`: Computes exact ADM multipliers ($1.0 \dots 6.0$).
   - `scale_entosis_capture_seconds(base, adm)`: Calculates scaled capture durations.
   - `emit_sovereignty_changed`: Dispatches notifications and broadcasts `OnSovereigntyChanged` destiny events.
   - `set_skyhook_hackable` & `record_hub_hack`: Manages skyhook and hub contestation states.
-- [`crates/eve-server/src/services/tactical_modules.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/tactical_modules.rs):
+- [`crates/eve-server/src/services/tactical_modules.rs`](../../../crates/eve-server/src/services/tactical_modules.rs):
   - `handle_entosis_link_activation`: Evaluates target locks, fuel consumption (Strontium Clathrates), warmup cycle tracking, and interceptor bans.
   - `clear_entosis_warmup_on_unlock`: Resets warmup state immediately upon target unlock or range breach.
 
@@ -280,10 +286,10 @@ flowchart TD
 
 ### 2. State Schemas & Data Structures
 
-Equinox sovereignty state is persisted in [`WorldStateSnapshot.sov_runtime`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/d6_types.rs#L341-L366):
+Equinox sovereignty state is persisted in [`WorldStateSnapshot.sov_runtime`](../../../crates/eve-db/src/d6_types.rs#L341-L366):
 
 #### PersistedSovHubData
-Defined in [`crates/eve-db/src/d6_types.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/d6_types.rs#L291-L305):
+Defined in [`crates/eve-db/src/d6_types.rs`](../../../crates/eve-db/src/d6_types.rs#L291-L305):
 ```rust
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedSovHubData {
@@ -297,7 +303,7 @@ pub struct PersistedSovHubData {
 ```
 
 #### PersistedHubUpgrade & Workforce Mode
-Defined in [`crates/eve-db/src/d6_types.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/d6_types.rs#L270-L289):
+Defined in [`crates/eve-db/src/d6_types.rs`](../../../crates/eve-db/src/d6_types.rs#L270-L289):
 ```rust
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedHubUpgrade {
@@ -317,7 +323,7 @@ pub enum PersistedWorkforceMode {
 ```
 
 #### PersistedSovState Runtime
-Defined in [`crates/eve-db/src/d6_types.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/d6_types.rs#L341-L366):
+Defined in [`crates/eve-db/src/d6_types.rs`](../../../crates/eve-db/src/d6_types.rs#L341-L366):
 ```rust
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedSovState {
@@ -366,17 +372,17 @@ The Sovereignty Hub, Skyhook, and Entosis frameworks are verified through compre
 
 ### Primary Test Suites
 
-1. [`crates/eve-server/tests/it/quasar_sov_equinox_hub.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/quasar_sov_equinox_hub.rs):
+1. [`crates/eve-server/tests/it/quasar_sov_equinox_hub.rs`](../../../crates/eve-server/tests/it/quasar_sov_equinox_hub.rs):
    - `test_equinox_hub_resources_fuel_and_upgrades_state_backed`: Validates system power and workforce computations against SDE planetary tables, fuel delivery, upgrade installation and budget allocation, hourly fuel burn ($5\text{ units/h}$), transition to `POWER_STATE_LOW` on fuel exhaustion, and workforce transfers across stargate jumps.
 
-2. [`crates/eve-server/tests/it/sov_fw_complete.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/sov_fw_complete.rs):
+2. [`crates/eve-server/tests/it/sov_fw_complete.rs`](../../../crates/eve-server/tests/it/sov_fw_complete.rs):
    - `test_skyhook_reagents_and_theft`: Tests Skyhook reagent generation (Magmatic Gas), theft status broadcasting (`OnSkyhookCanBeHacked`), role-based destruction authorization, and structure removal.
    - `test_sovereignty_claim_and_notifications`: Validates `claim_system_sovereignty`, `OnSovereigntyChanged` broadcasts, and destiny event emissions.
 
-3. [`crates/eve-server/tests/it/quasar_sov_pirate_remediation.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/quasar_sov_pirate_remediation.rs):
+3. [`crates/eve-server/tests/it/quasar_sov_pirate_remediation.rs`](../../../crates/eve-server/tests/it/quasar_sov_pirate_remediation.rs):
    - Tests Mercenary Den activation, infomorph production schedules, anarchy level progression, and mercenary tactical operations.
 
-4. [`crates/eve-server/tests/it/mining_structures_sov_r5_regressions.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/mining_structures_sov_r5_regressions.rs):
+4. [`crates/eve-server/tests/it/mining_structures_sov_r5_regressions.rs`](../../../crates/eve-server/tests/it/mining_structures_sov_r5_regressions.rs):
    - Tests structure proximity rules, anchoring validations, and system defense index modifications.
 
 ---
@@ -385,15 +391,28 @@ The Sovereignty Hub, Skyhook, and Entosis frameworks are verified through compre
 
 | Parity / Feature Tag | Target System | Authoritative Implementation |
 | :--- | :--- | :--- |
-| `feat:sov.hub` | Equinox Sovereignty Hub Management | [`quasar_sov_hub.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/quasar_sov_hub.rs#L85-L270) |
-| `feat:sov.skyhook` | Orbital Skyhook Infrastructure & Reagents | [`quasar_sov_skyhook.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/quasar_sov_skyhook.rs#L30-L100) |
-| `feat:sov.skyhook-theft` | Siphon Bay Intrusion & Vulnerability | [`sov_services.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/sov_services.rs#L100-L125) |
-| `feat:sov.workforce-transfer` | 5-Jump Workforce Transfer Network | [`quasar_sov_workforce.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/quasar_sov_workforce.rs#L25-L85) |
-| `feat:sov.adm` | Activity Defense Multiplier Scaling | [`sov_services.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/sov_services.rs#L32-L47) |
-| `feat:sov.entosis` | Entosis Link Warmup & Node Contestation | [`tactical_modules.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/tactical_modules.rs#L879-L975) |
-| `feat:fitting.interceptor-entosis-prohibition` | Interceptor Entosis Ban | [`tactical_modules.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/tactical_modules.rs#L906-L910) |
-| `feat:sov.mercden` | Mercenary Dens & Infomorph Evolution | [`quasar_sov_mercden.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/quasar_sov_mercden.rs#L30-L100) |
-| `rpc:sovMgr.AcquireSkyhooks` | Corporation Skyhook Query | [`sov_services.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/sov_services.rs#L200-L240) |
-| `rpc:colonyResourcesMgr.GetMyCorporationSkyhooks` | Colony Skyhooks List | [`sov_services.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/sov_services.rs#L250-L290) |
-| `quasar:eve_public.sovereignty.hub.api` | Quasar Hub APIs & Simulated Notices | [`quasar_sov_hub.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/quasar_sov_hub.rs#L1-L45) |
-| `quasar:eve_public.sovereignty.skyhook.api` | Quasar Skyhook APIs & Vulnerability | [`quasar_sov_skyhook.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/quasar_sov_skyhook.rs#L1-L35) |
+| `feat:sov.hub` | Equinox Sovereignty Hub Management | [`quasar_sov_hub.rs`](../../../crates/eve-server/src/services/quasar_sov_hub.rs#L85-L270) |
+| `feat:sov.skyhook` | Orbital Skyhook Infrastructure & Reagents | [`quasar_sov_skyhook.rs`](../../../crates/eve-server/src/services/quasar_sov_skyhook.rs#L30-L100) |
+| `feat:sov.skyhook-theft` | Siphon Bay Intrusion & Vulnerability | [`sov_services.rs`](../../../crates/eve-server/src/services/sov_services.rs#L100-L125) |
+| `feat:sov.workforce-transfer` | 5-Jump Workforce Transfer Network | [`quasar_sov_workforce.rs`](../../../crates/eve-server/src/services/quasar_sov_workforce.rs#L25-L85) |
+| `feat:sov.adm` | Activity Defense Multiplier Scaling | [`sov_services.rs`](../../../crates/eve-server/src/services/sov_services.rs#L32-L47) |
+| `feat:sov.entosis` | Entosis Link Warmup & Node Contestation | [`tactical_modules.rs`](../../../crates/eve-server/src/services/tactical_modules.rs#L879-L975) |
+| `feat:fitting.interceptor-entosis-prohibition` | Interceptor Entosis Ban | [`tactical_modules.rs`](../../../crates/eve-server/src/services/tactical_modules.rs#L906-L910) |
+| `feat:sov.mercden` | Mercenary Dens & Infomorph Evolution | [`quasar_sov_mercden.rs`](../../../crates/eve-server/src/services/quasar_sov_mercden.rs#L30-L100) |
+| `rpc:sovMgr.AcquireSkyhooks` | Corporation Skyhook Query | [`sov_services.rs`](../../../crates/eve-server/src/services/sov_services.rs#L200-L240) |
+| `rpc:colonyResourcesMgr.GetMyCorporationSkyhooks` | Colony Skyhooks List | [`sov_services.rs`](../../../crates/eve-server/src/services/sov_services.rs#L250-L290) |
+| `quasar:eve_public.sovereignty.hub.api` | Quasar Hub APIs & Simulated Notices | [`quasar_sov_hub.rs`](../../../crates/eve-server/src/services/quasar_sov_hub.rs#L1-L45) |
+| `quasar:eve_public.sovereignty.skyhook.api` | Quasar Skyhook APIs & Vulnerability | [`quasar_sov_skyhook.rs`](../../../crates/eve-server/src/services/quasar_sov_skyhook.rs#L1-L35) |
+
+---
+
+## Related Systems & Cross-References
+
+- [**Faction Warfare & Pirate Insurgencies**](./faction_warfare_and_insurgencies.md): Territorial conquest, occupancy metrics, and strategic system upgrades.
+- [**Upwell Structures Overview & Lifecycle**](../upwell_and_structures/upwell_structures_overview.md): Upwell infrastructure hubs, Quantum Cores, and null-sec asset safety rules.
+- [**Corporation Roles & Governance**](../corporations_and_governance/corporation_roles_and_governance.md): Alliance executor corporations, starbase manager roles, and Sov Hub administrative control.
+- [**Planetary Industry (PI)**](../planetary_industry/colony_pin_networks_and_pi.md): Orbital Skyhook harvesting of planetary Power, Workforce, and Reagents.
+
+---
+
+[← Back to Wiki Table of Contents](../README.md)

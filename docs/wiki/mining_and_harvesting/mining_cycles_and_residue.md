@@ -1,5 +1,11 @@
 # Mining Cycles, Residue & Resource Extraction Systems
 
+> **Navigation**: [EvoMu Technical Wiki](../README.md) • [Related Systems](#related-systems--cross-references)
+>
+> [← Back to Wiki Table of Contents](../README.md)
+
+---
+
 ## Overview & Lore Context
 
 In the cosmic economy of New Eden, industrial resource extraction forms the bedrock of all capsuleer civilization. From the smallest Tech I frigate assembled in an empire high-sec station to the colossal Keepstar citadels and Titan flagships that anchor null-sec sovereignty, every hull, module, ammunition cartridge, and jump fuel cell traces its provenance back to an extraction beam focused on a celestial deposit.
@@ -49,7 +55,7 @@ Resource extraction spans several distinct technological echelons:
 4. **Upwell Moon Mining & Chunk Fracturing:** Developed by the Upwell Consortium following the obsolescence of legacy starbase POS siphon drills, modern moon mining relies on Medium (*Athanor*) and Large (*Tatara*) refineries equipped with Standup Moon Drills. These structures deploy high-energy graviton beams to rip massive multimillion-ton chunks of planetary rock directly from a moon's crust over weeks-long drilling cycles. Upon arriving at the structure, the chunk is pulverized by high-yield laser batteries into an artificial asteroid belt containing valuable Moon Ores categorized from R4 (ubiquitous hydrocarbons) up to R64 (Promethium, Dysprosium, and Neodymium). For autonomous, low-intensity extraction, the *Metenox Moon Drill* provides automated harvesting at the cost of reduced efficiency and substantial fuel logistics.
 
 ### The EvoMu Extraction Philosophy
-The **EvoMu Mining & Harvesting Subsystem** implements a complete, clean-room simulation of EVE Online's extraction mechanics. Every parameter—from laser cycle duration and capacitor draw down to residue probability distributions, crystal shatter rolls, and structural moon chunk trajectories—is evaluated dynamically through the Dogma modifier engine ([`eve-dogma`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma)) and static data export ([`eve-sde`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde)). The system is driven deterministically by the 1 Hz server world clock, ensuring exact parity with canonical server behavior, audit ledgers, and economic flows.
+The **EvoMu Mining & Harvesting Subsystem** implements a complete, clean-room simulation of EVE Online's extraction mechanics. Every parameter—from laser cycle duration and capacitor draw down to residue probability distributions, crystal shatter rolls, and structural moon chunk trajectories—is evaluated dynamically through the Dogma modifier engine ([`eve-dogma`](../../../crates/eve-dogma)) and static data export ([`eve-sde`](../../../crates/eve-sde)). The system is driven deterministically by the 1 Hz server world clock, ensuring exact parity with canonical server behavior, audit ledgers, and economic flows.
 
 ---
 
@@ -235,7 +241,7 @@ Unlike laser lenses that fire ammunition charges indefinitely, mining crystals s
 3. If $D_{\text{total}} \ge \text{HP}_{\text{crystal}}$ (attribute `9`), the crystal **shatters**:
    - If stacked ($Q > 1$), quantity is decremented by 1 and damage resets to 0.
    - If single ($Q = 1$), the item is permanently deleted from the ship's module slot.
-   - The ship fitting cache is invalidated immediately via [`invalidate_ship_fitting`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/router/mod.rs).
+   - The ship fitting cache is invalidated immediately via [`invalidate_ship_fitting`](../../../crates/eve-server/src/router/mod.rs).
 
 ---
 
@@ -312,7 +318,7 @@ $$U_{\text{free}} = \left\lfloor \frac{V_{\text{free}}}{V_{\text{unit}}} \right\
 
 If the cycle's target yield exceeds available space ($U_{\text{target}} > U_{\text{free}}$):
 1. The delivered units are clamped to exactly $U_{\text{free}}$.
-2. The module deactivates immediately with [`MiningStopReason::HoldFull`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_cycle.rs#L66).
+2. The module deactivates immediately with [`MiningStopReason::HoldFull`](../../../crates/eve-server/src/services/mining_cycle.rs#L66).
 3. The client receives notification that the hold has reached capacity.
 
 ---
@@ -322,7 +328,7 @@ If the cycle's target yield exceeds available space ($U_{\text{target}} > U_{\te
 #### Ice Harvesting
 Unlike standard mineral asteroids, ice deposits consist of massive, monolithic blocks.
 - **Harvester Mechanics:** Ice Harvesters (e.g. *Ice Harvester I* `16278`, *Ice Harvester II*) operate on long cycle times (e.g. $300\text{ s}$ base) and harvest an indivisible volume of $1\,000\text{ m}^3$ per cycle (1 ice block).
-- **Respawn Timers:** Static regional ice belts spawn as cosmic anomalies. When every ice block in a designated system is completely mined out, the anomaly despawns, signature probes collapse, and a **4-hour (14,400-second)** server respawn countdown begins ([`ICE_BELT_RESPAWN_DELAY_SECS`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/space_mining_harvest.rs#L171)). Once 14,400 seconds elapse, the system automatically regenerates the ice field at its celestial coordinates.
+- **Respawn Timers:** Static regional ice belts spawn as cosmic anomalies. When every ice block in a designated system is completely mined out, the anomaly despawns, signature probes collapse, and a **4-hour (14,400-second)** server respawn countdown begins ([`ICE_BELT_RESPAWN_DELAY_SECS`](../../../crates/eve-server/src/services/space_mining_harvest.rs#L171)). Once 14,400 seconds elapse, the system automatically regenerates the ice field at its celestial coordinates.
 
 #### Gas Cloud Harvesting
 Gas clouds represent harvestable atmospheric nebulae (`categoryID != 25`, `groupID == 711` *Harvestable Cloud*).
@@ -423,11 +429,11 @@ Upwell refineries equipped with Standup Moon Drills act as celestial observers, 
 ## EvoMu Implementation Architecture
 
 EvoMu organizes its mining infrastructure across dedicated, modular crates:
-- [`eve-server`](file:///Users/sergeya/ai/EvoMu/crates/eve-server): Dispatches MachoNet RPCs, runs the 1 Hz mining cycle clock, executes compression algorithms, and coordinates moon extraction life cycles.
-- [`eve-dogma`](file:///Users/sergeya/ai/EvoMu/crates/eve-dogma): Calculates ship and module effective attributes, evaluates modifiers, and maintains module activation state machines.
-- [`eve-sde`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde): Supplies static data definitions for all types, portion sizes, default effects, and specialization lists.
-- [`eve-db`](file:///Users/sergeya/ai/EvoMu/crates/eve-db): Maintains ACID in-memory snapshot state ([`WorldStateSnapshot`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/lib.rs)) for asteroids, inventories, extractions, and ledgers.
-- [`eve-destiny`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny): Coordinates 3D spatial ballparks, asteroid collision meshes, and surface distance checks.
+- [`eve-server`](../../../crates/eve-server): Dispatches MachoNet RPCs, runs the 1 Hz mining cycle clock, executes compression algorithms, and coordinates moon extraction life cycles.
+- [`eve-dogma`](../../../crates/eve-dogma): Calculates ship and module effective attributes, evaluates modifiers, and maintains module activation state machines.
+- [`eve-sde`](../../../crates/eve-sde): Supplies static data definitions for all types, portion sizes, default effects, and specialization lists.
+- [`eve-db`](../../../crates/eve-db): Maintains ACID in-memory snapshot state ([`WorldStateSnapshot`](../../../crates/eve-db/src/lib.rs)) for asteroids, inventories, extractions, and ledgers.
+- [`eve-destiny`](../../../crates/eve-destiny): Coordinates 3D spatial ballparks, asteroid collision meshes, and surface distance checks.
 
 ```mermaid
 flowchart TD
@@ -456,32 +462,32 @@ flowchart TD
 
 ### Key Services & Source Code Mappings
 
-1. [`mining_cycle.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_cycle.rs):
-   - [`ActiveMiningCycle`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_cycle.rs#L97-L109): In-memory tracking record representing an active harvesting laser cycle. Captures `char_id`, `ship_id`, `module_id`, `target_id`, `solar_system_id`, `cycle_start_ms`, and `duration_ms`.
-   - [`MiningCycleOutcome`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_cycle.rs#L113-L140): Detailed result structure for a completed or short-cycled extraction. Encapsulates `units_removed`, `residue_units`, `bonus_crit_units`, `units_delivered`, `crystal_damage`, and optional [`MiningStopReason`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_cycle.rs#L65-L93).
-   - [`process_mining_cycles`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_cycle.rs#L751-L797): Executed every second by the server world tick. Iterates all active cycles, validates physical requirements, resolves elapsed cycles, and automatically initializes consecutive cycles while deducting capacitor.
-   - [`activate`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_cycle.rs#L646-L715): RPC entry point for `dogmaIM.Activate` on mining modules.
-   - [`deactivate`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_cycle.rs#L721-L746): RPC entry point for `dogmaIM.Deactivate`, computing fractional short-cycle delivery.
+1. [`mining_cycle.rs`](../../../crates/eve-server/src/services/mining_cycle.rs):
+   - [`ActiveMiningCycle`](../../../crates/eve-server/src/services/mining_cycle.rs#L97-L109): In-memory tracking record representing an active harvesting laser cycle. Captures `char_id`, `ship_id`, `module_id`, `target_id`, `solar_system_id`, `cycle_start_ms`, and `duration_ms`.
+   - [`MiningCycleOutcome`](../../../crates/eve-server/src/services/mining_cycle.rs#L113-L140): Detailed result structure for a completed or short-cycled extraction. Encapsulates `units_removed`, `residue_units`, `bonus_crit_units`, `units_delivered`, `crystal_damage`, and optional [`MiningStopReason`](../../../crates/eve-server/src/services/mining_cycle.rs#L65-L93).
+   - [`process_mining_cycles`](../../../crates/eve-server/src/services/mining_cycle.rs#L751-L797): Executed every second by the server world tick. Iterates all active cycles, validates physical requirements, resolves elapsed cycles, and automatically initializes consecutive cycles while deducting capacitor.
+   - [`activate`](../../../crates/eve-server/src/services/mining_cycle.rs#L646-L715): RPC entry point for `dogmaIM.Activate` on mining modules.
+   - [`deactivate`](../../../crates/eve-server/src/services/mining_cycle.rs#L721-L746): RPC entry point for `dogmaIM.Deactivate`, computing fractional short-cycle delivery.
 
-2. [`fitting_mining_lasers.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/fitting_mining_lasers.rs):
-   - [`handle_mining_and_deactivate`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/fitting_mining_lasers.rs#L7-L160): Intercepts `dogmaIM.Deactivate` requests, dispatches to `mining_cycle::deactivate`, updates module active states, and emits `OnGodmaShipEffect(active=false)`.
+2. [`fitting_mining_lasers.rs`](../../../crates/eve-server/src/services/fitting_mining_lasers.rs):
+   - [`handle_mining_and_deactivate`](../../../crates/eve-server/src/services/fitting_mining_lasers.rs#L7-L160): Intercepts `dogmaIM.Deactivate` requests, dispatches to `mining_cycle::deactivate`, updates module active states, and emits `OnGodmaShipEffect(active=false)`.
 
-3. [`mining_compression.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_compression.rs):
-   - [`handle_in_space_compression_mgr`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_compression.rs#L242-L457): Validates fleet compressor proximity, industrial core activation, and performs 1:1 item type replacement.
-   - [`handle_structure_compression_mgr`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_compression.rs#L461-L892): Validates Upwell reprocessing service online states, handles docked ore compression, and calculates gas decompression efficiency.
-   - [`compute_gas_decompression_efficiency`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_compression.rs#L28-L60): Evaluates SDE base attributes, structure bonuses, and character decompression skills.
-   - [`handle_compression`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_compression.rs#L895-L1120): Dispatches corporate and character ledger requests (`corpMiningLedger.*`, `characterMiningLedger.*`).
+3. [`mining_compression.rs`](../../../crates/eve-server/src/services/mining_compression.rs):
+   - [`handle_in_space_compression_mgr`](../../../crates/eve-server/src/services/mining_compression.rs#L242-L457): Validates fleet compressor proximity, industrial core activation, and performs 1:1 item type replacement.
+   - [`handle_structure_compression_mgr`](../../../crates/eve-server/src/services/mining_compression.rs#L461-L892): Validates Upwell reprocessing service online states, handles docked ore compression, and calculates gas decompression efficiency.
+   - [`compute_gas_decompression_efficiency`](../../../crates/eve-server/src/services/mining_compression.rs#L28-L60): Evaluates SDE base attributes, structure bonuses, and character decompression skills.
+   - [`handle_compression`](../../../crates/eve-server/src/services/mining_compression.rs#L895-L1120): Dispatches corporate and character ledger requests (`corpMiningLedger.*`, `characterMiningLedger.*`).
 
-4. [`mining_advanced.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_advanced.rs):
-   - [`handle`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_advanced.rs#L391-L1211): Handles `moonExtractions.StartNewExtraction`, `CancelExtraction`, and `FractureChunkWithStructure`.
-   - [`tick_all_moon_extractions`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_advanced.rs#L286-L384): Background cluster tick enforcing the 3-hour auto-fracture window and the 48-hour natural field decay timer.
-   - [`tick_all_metenox_moon_drills`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_advanced.rs#L1236-L1352): Hourly production tick for automated moon drills. Deducts fuel and magmatic gas, calculates 40% yield, and deposits into output holds.
-   - [`build_moon_chunk_asteroids`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_advanced.rs#L145-L201): Spawns physical moon asteroid balls into the Ballpark with 15% jackpot probability weighting.
+4. [`mining_advanced.rs`](../../../crates/eve-server/src/services/mining_advanced.rs):
+   - [`handle`](../../../crates/eve-server/src/services/mining_advanced.rs#L391-L1211): Handles `moonExtractions.StartNewExtraction`, `CancelExtraction`, and `FractureChunkWithStructure`.
+   - [`tick_all_moon_extractions`](../../../crates/eve-server/src/services/mining_advanced.rs#L286-L384): Background cluster tick enforcing the 3-hour auto-fracture window and the 48-hour natural field decay timer.
+   - [`tick_all_metenox_moon_drills`](../../../crates/eve-server/src/services/mining_advanced.rs#L1236-L1352): Hourly production tick for automated moon drills. Deducts fuel and magmatic gas, calculates 40% yield, and deposits into output holds.
+   - [`build_moon_chunk_asteroids`](../../../crates/eve-server/src/services/mining_advanced.rs#L145-L201): Spawns physical moon asteroid balls into the Ballpark with 15% jackpot probability weighting.
 
-5. [`space_mining_harvest.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/space_mining_harvest.rs):
-   - [`deposit_mined_ore_and_record_ledger_with_waste`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/space_mining_harvest.rs#L76-L123): Persists mined quantities and residue units into `snap.mining_ledger` and `snap.observer_mining_ledger`.
-   - [`dispatch_mining_gameplay_events`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/space_mining_harvest.rs#L20-L53): Emits Quasar campaign progress events and AIR Career Program goals.
-   - [`tick_ice_belt_respawn_sync`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/space_mining_harvest.rs#L127-L347): Monitors regional ice belts and respawns them exactly 14,400 seconds after total depletion.
+5. [`space_mining_harvest.rs`](../../../crates/eve-server/src/services/space_mining_harvest.rs):
+   - [`deposit_mined_ore_and_record_ledger_with_waste`](../../../crates/eve-server/src/services/space_mining_harvest.rs#L76-L123): Persists mined quantities and residue units into `snap.mining_ledger` and `snap.observer_mining_ledger`.
+   - [`dispatch_mining_gameplay_events`](../../../crates/eve-server/src/services/space_mining_harvest.rs#L20-L53): Emits Quasar campaign progress events and AIR Career Program goals.
+   - [`tick_ice_belt_respawn_sync`](../../../crates/eve-server/src/services/space_mining_harvest.rs#L127-L347): Monitors regional ice belts and respawns them exactly 14,400 seconds after total depletion.
 
 ---
 
@@ -529,7 +535,7 @@ flowchart TD
 - For ice harvesting (where 1 unit is $1\,000.0\text{ m}^3$), any fractional cycle resulting in $< 1\,000\text{ m}^3$ results in $U = 0$. The elapsed cycle time and capacitor are consumed without ore delivery.
 
 ### 2. Multi-Pilot Concurrency & Deactivation Ownership
-- To prevent denial-of-service or griefing attacks where a third party sends spoofed `dogmaIM.Deactivate` RPC packets to interrupt another player's mining operations, [`deactivate`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_cycle.rs#L721-L746) enforces a strict identity invariant:
+- To prevent denial-of-service or griefing attacks where a third party sends spoofed `dogmaIM.Deactivate` RPC packets to interrupt another player's mining operations, [`deactivate`](../../../crates/eve-server/src/services/mining_cycle.rs#L721-L746) enforces a strict identity invariant:
   ```rust
   if cycle.char_id != char_id || Some(cycle.ship_id) != ship_id {
       return Some(Err(BridgeRpcError {
@@ -544,7 +550,7 @@ flowchart TD
 - EVE Online overview distances and module range limits are strictly evaluated between physical surfaces, not center-of-mass points.
 - If a large asteroid has a radius of $100\text{ m}$ and an industrial barge has a radius of $150\text{ m}$, two objects whose centers are $10\,200\text{ m}$ apart have a surface distance of:
   $$10\,200 - 100 - 150 = 9\,950\text{ m}$$
-- Because $9\,950\text{ m} \le 10\,000\text{ m}$, the laser remains validly in range. If the ship drifts to a surface distance of $10\,001\text{ m}$, the world tick immediately terminates the cycle with [`MiningStopReason::OutOfRange`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_cycle.rs#L69).
+- Because $9\,950\text{ m} \le 10\,000\text{ m}$, the laser remains validly in range. If the ship drifts to a surface distance of $10\,001\text{ m}$, the world tick immediately terminates the cycle with [`MiningStopReason::OutOfRange`](../../../crates/eve-server/src/services/mining_cycle.rs#L69).
 
 ### 4. Mid-Cycle Interruptions & Zero-Yield Drops
 - If an interruption occurs mid-cycle—such as losing target lock (`TargetLost`), entering warp (`Warping`), activating a cloaking device (`Cloaked`), or the asteroid being depleted by another pilot (`AsteroidDepleted`)—the cycle terminates with **zero ore delivered**.
@@ -554,12 +560,12 @@ flowchart TD
 - At the moment of cycle completion, if the asteroid still has ore and the hold has free space, the engine attempts to initiate the next consecutive cycle.
 - If the ship's capacitor has been drained below `capacitorNeed` by energy neutralizers or active propulsion modules:
   - The completed cycle delivers its harvested ore.
-  - The consecutive cycle fails activation with [`MiningStopReason::CapacitorEmpty`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_cycle.rs#L73).
+  - The consecutive cycle fails activation with [`MiningStopReason::CapacitorEmpty`](../../../crates/eve-server/src/services/mining_cycle.rs#L73).
   - The module deactivates and notifies the client.
 
 ### 6. Cosmic Anomaly Site Depletion & Signature Collapse
 - When an asteroid inside a cosmic anomaly or cosmic signature reaches $0$ units, it is despawned from the Ballpark and purged from the database.
-- The engine triggers [`clear_emptied_sites`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_cycle.rs#L583-L624):
+- The engine triggers [`clear_emptied_sites`](../../../crates/eve-server/src/services/mining_cycle.rs#L583-L624):
   - Searches all asteroids within a $50\,000\text{ m}$ radius of the depleted rock.
   - If no uncleared asteroids remain in the site, the cosmic anomaly is marked `cleared = true`.
   - The matching cosmic signature is set to `collapsed = true` with `signal_strength = 0.0`, preventing other exploration pilots from scanning the empty site.
@@ -572,21 +578,21 @@ The mining and harvesting subsystems are verified by an extensive automated test
 
 ### Key Test Suites
 
-1. [`mining_cycle_engine.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/mining_cycle_engine.rs):
+1. [`mining_cycle_engine.rs`](../../../crates/eve-server/tests/it/mining_cycle_engine.rs):
    - `test_mn04_venture_miner_i_cycles_deliver_exact_sde_yield_until_hold_full_or_depleted`: Verifies exact Venture yield formulas ($10 \times 1.25 \times 1.25 \times 2 = 31.25\text{ m}^3$), 15-second cycle timing, critical yield bonuses ($+200\%$), short-cycling (6s delivering 125 units), hold-full clamping, and asteroid ball removal upon depletion.
    - `test_mn04_activation_requirements_and_cycle_interruptions`: Validates requirement rejections (`TargetNotLocked`, `TargetOutOfRange`, `TargetNotMinable`, `NotEnoughCapacitor`, `CannotActivateWhileCloaked`, `ModuleOffline`) and mid-cycle interruptions.
    - `test_mn04_retriever_strip_miner_yield_matches_wiki_with_barge_and_upgrade_bonuses`: Verifies Retriever Strip Miner I yield ($150 \times 1.25 \times 1.25 \times 1.15 \times 1.10 \times 1.09 \times 1.09 = 352.2531\text{ m}^3$) with unpenalized MLU II stacking.
    - `test_mn04_deactivate_requires_the_cycle_owner`: Confirms multi-pilot security invariant; foreign pilots cannot stop or steal short-cycle yields.
 
-2. [`action_plan_mining.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/action_plan_mining.rs):
+2. [`action_plan_mining.rs`](../../../crates/eve-server/tests/it/action_plan_mining.rs):
    - `test_action_plan_c5_mn01_to_mn07_mining_data_belts_lasers_holds_crystals_bonuses`: Comprehensive acceptance test for Phase 5M. Verifies SDE portion sizes, belt population, T2 Modulated Strip Miner II with Type B I crystals, residue generation, crystal volatility damage, and shattering at 0 HP.
    - `test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_reprocessing`: Validates ice harvesting, gas harvesting, survey scanners, in-space compression, structure compression, and reprocessing taxes.
 
-3. [`mining_moon_ledgers_part2.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/mining_moon_ledgers_part2.rs):
+3. [`mining_moon_ledgers_part2.rs`](../../../crates/eve-server/tests/it/mining_moon_ledgers_part2.rs):
    - `test_mn13_moon_survey_probes_launch_alignment_and_resources`: Verifies moon survey probe launch alignment rules, flight times, and security-band ore generation.
    - `test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger`: Verifies moon extraction initiation (6d to 56d), cancellation, early fracture rejection, 10-day chunk volume ($7\,200\,000\text{ m}^3$), 15% jackpot fracture roll, 48-hour natural field decay, Metenox automated drill, and corporate observer ledgers.
 
-4. [`pve_mining_sites.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/pve_mining_sites.rs):
+4. [`pve_mining_sites.rs`](../../../crates/eve-server/tests/it/pve_mining_sites.rs):
    - `test_mn17_npc_mining_ops_and_interaction`: Validates autonomous NPC mining fleets, defense response frigates, and mineral transport haulers.
    - `test_mn18_mining_missions_market_and_goals`: Verifies mining agent mission flows and AIR Career Program extraction goal progression.
 
@@ -594,17 +600,30 @@ The mining and harvesting subsystems are verified by an extensive automated test
 
 | Parity / Feature Tag | Target System | Authoritative Implementation |
 | :--- | :--- | :--- |
-| `feat:mining.mining-laser-cycle` | Laser Cycle Engine | [`mining_cycle.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_cycle.rs#L751-L797) |
-| `feat:mining.mining-crits` | Critical Yield Roll | [`mining_cycle.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_cycle.rs#L445-L447) |
-| `feat:mining.strip-miner` | Strip Miner Mechanics | [`mining_cycle.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_cycle.rs#L646-L715) |
-| `feat:mining.mining-crystals` | Crystal Volatility & Degradation | [`mining_cycle.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_cycle.rs#L375-L412) |
-| `feat:mining.residue` | Waste Probability & Multipliers | [`mining_cycle.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_cycle.rs#L453-L459) |
-| `feat:mining.moon-extraction` | Moon Extraction Lifecycle | [`mining_advanced.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_advanced.rs#L403-L643) |
-| `feat:mining.moon-fracture` | Laser Chunk Detonation | [`mining_advanced.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_advanced.rs#L714-L843) |
-| `feat:mining.moon-jackpot` | 15% Jackpot Probability Roll | [`mining_advanced.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_advanced.rs#L729-L837) |
-| `feat:mining.metenox` | Metenox Auto Moon Drill | [`mining_advanced.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_advanced.rs#L1236-L1352) |
-| `feat:mining.compression-space` | In-Space Fleet Compression | [`mining_compression.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_compression.rs#L242-L457) |
-| `feat:mining.compression-structure`| Structure Compression & Gas Decomp | [`mining_compression.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_compression.rs#L461-L892) |
-| `feat:mining.corp-ledger` | Observer Corporation Ledgers | [`mining_compression.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_compression.rs#L910-L1070) |
-| `feat:mining.character-ledger` | Personal Character Mining Ledger | [`mining_compression.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/mining_compression.rs#L1072-L1119) |
-| `feat:mining.ice-belt-respawn` | 4-Hour Regional Ice Respawn | [`space_mining_harvest.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/space_mining_harvest.rs#L127-L347) |
+| `feat:mining.mining-laser-cycle` | Laser Cycle Engine | [`mining_cycle.rs`](../../../crates/eve-server/src/services/mining_cycle.rs#L751-L797) |
+| `feat:mining.mining-crits` | Critical Yield Roll | [`mining_cycle.rs`](../../../crates/eve-server/src/services/mining_cycle.rs#L445-L447) |
+| `feat:mining.strip-miner` | Strip Miner Mechanics | [`mining_cycle.rs`](../../../crates/eve-server/src/services/mining_cycle.rs#L646-L715) |
+| `feat:mining.mining-crystals` | Crystal Volatility & Degradation | [`mining_cycle.rs`](../../../crates/eve-server/src/services/mining_cycle.rs#L375-L412) |
+| `feat:mining.residue` | Waste Probability & Multipliers | [`mining_cycle.rs`](../../../crates/eve-server/src/services/mining_cycle.rs#L453-L459) |
+| `feat:mining.moon-extraction` | Moon Extraction Lifecycle | [`mining_advanced.rs`](../../../crates/eve-server/src/services/mining_advanced.rs#L403-L643) |
+| `feat:mining.moon-fracture` | Laser Chunk Detonation | [`mining_advanced.rs`](../../../crates/eve-server/src/services/mining_advanced.rs#L714-L843) |
+| `feat:mining.moon-jackpot` | 15% Jackpot Probability Roll | [`mining_advanced.rs`](../../../crates/eve-server/src/services/mining_advanced.rs#L729-L837) |
+| `feat:mining.metenox` | Metenox Auto Moon Drill | [`mining_advanced.rs`](../../../crates/eve-server/src/services/mining_advanced.rs#L1236-L1352) |
+| `feat:mining.compression-space` | In-Space Fleet Compression | [`mining_compression.rs`](../../../crates/eve-server/src/services/mining_compression.rs#L242-L457) |
+| `feat:mining.compression-structure`| Structure Compression & Gas Decomp | [`mining_compression.rs`](../../../crates/eve-server/src/services/mining_compression.rs#L461-L892) |
+| `feat:mining.corp-ledger` | Observer Corporation Ledgers | [`mining_compression.rs`](../../../crates/eve-server/src/services/mining_compression.rs#L910-L1070) |
+| `feat:mining.character-ledger` | Personal Character Mining Ledger | [`mining_compression.rs`](../../../crates/eve-server/src/services/mining_compression.rs#L1072-L1119) |
+| `feat:mining.ice-belt-respawn` | 4-Hour Regional Ice Respawn | [`space_mining_harvest.rs`](../../../crates/eve-server/src/services/space_mining_harvest.rs#L127-L347) |
+
+---
+
+## Related Systems & Cross-References
+
+- [**Upwell Structures Overview & Lifecycle**](../upwell_and_structures/upwell_structures_overview.md): Athanor/Tatara moon fracturing operations, automated Metenox drilling, and structure ore compression.
+- [**Blueprints, Manufacturing & Reactions**](../industry_and_manufacturing/blueprints_manufacturing_and_reactions.md): Mineral and raw material feedstocks for blueprint manufacturing and composite reactions.
+- [**Regional Market Order Matching**](../economy_and_markets/regional_market_order_matching.md): Raw ore and compressed mineral market orders, price indexes, and corporate mining ledgers.
+- [**Dogma Attribute Engine**](../dogma_and_fitting/dogma_attribute_engine.md): Harvesting laser cycle equations, crystal volatility decay modifiers, and specialized mining ship bonuses.
+
+---
+
+[← Back to Wiki Table of Contents](../README.md)

@@ -1,5 +1,11 @@
 # NPC Combat AI, Ecology & Living World Simulation
 
+> **Navigation**: [EvoMu Technical Wiki](../README.md) • [Related Systems](#related-systems--cross-references)
+>
+> [← Back to Wiki Table of Contents](../README.md)
+
+---
+
 ## Overview & Lore Context
 
 In the vast expanse of New Eden, space is never truly empty or static. Beyond the capsuleer pilots who claim sovereignty and build empires, the cluster is populated by a dense, interconnected tapestry of non-capsuleer life: regional pirate cartels guarding asteroid belts, wandering nomadic clans, disciplined empire navy patrols, vigilant customs inspectors, autonomous industrial haulers shuttling raw materials between trade hubs, ancient Sleeper sentinels defending shattered J-space complexes, and radical extra-cluster invaders such as the Triglavian Collective and the Drifter hives.
@@ -50,12 +56,12 @@ flowchart TD
    - Generates background production deficits that schedule commercial shipping contracts and NPC mining operations.
    - Computes market arbitrage triggers that govern long-term commodity flow.
 2. **LOD 1 — Route-Level Stargate Transit:**
-   - Convoys and roaming gangs exist as lightweight route tracking records ([`LivingWorldConvoy`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/living_world.rs#L32-L44)).
+   - Convoys and roaming gangs exist as lightweight route tracking records ([`LivingWorldConvoy`](../../../crates/eve-server/src/living_world.rs#L32-L44)).
    - Convoys step across system boundaries via stargate connections on cluster ticks without allocating full spatial physics objects or memory overhead in idle systems.
    - Tracks intermediate waypoints, cargo manifests, and destination station docking coordinates.
 3. **LOD 2 — Tactical Grid Materialization:**
    - When a capsuleer enters a grid containing an LOD 1 entity (or explicitly scans/intercepts a convoy), the entity is promoted to LOD 2.
-   - Real physical entities ([`Ball`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/lib.rs#L508)) are materialized into the solar system's [`Ballpark`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/lib.rs#L943) with authentic collision meshes, sub-warp kinematics, and [`CombatState`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/lib.rs#L183-L235).
+   - Real physical entities ([`Ball`](../../../crates/eve-destiny/src/lib.rs#L508)) are materialized into the solar system's [`Ballpark`](../../../crates/eve-destiny/src/lib.rs#L943) with authentic collision meshes, sub-warp kinematics, and [`CombatState`](../../../crates/eve-destiny/src/lib.rs#L183-L235).
    - Once materialized at LOD 2, the entity can be targeted, tackled, and destroyed. If destroyed, physical wrecks (`type_id: 26557`) drop actual cargo items, and a $+15\%$ supply shock price spike is applied to destination station ask orders.
 
 ---
@@ -300,52 +306,52 @@ flowchart LR
 ```
 
 ### 1. Crates Involved
-- [`eve-server`](file:///Users/sergeya/ai/EvoMu/crates/eve-server): Master simulation runtime, living world director, AI services, and Crimewatch directors.
-- [`eve-destiny`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny): Deterministic 1 Hz spatial physics engine, movement modes, and combat states.
-- [`eve-sde`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde): Static Data Export registry, spawn groups, item attributes, and celestial positions.
-- [`eve-db`](file:///Users/sergeya/ai/EvoMu/crates/eve-db): Transactional `WorldStateSnapshot` store, inventory items, market orders, and killmails.
+- [`eve-server`](../../../crates/eve-server): Master simulation runtime, living world director, AI services, and Crimewatch directors.
+- [`eve-destiny`](../../../crates/eve-destiny): Deterministic 1 Hz spatial physics engine, movement modes, and combat states.
+- [`eve-sde`](../../../crates/eve-sde): Static Data Export registry, spawn groups, item attributes, and celestial positions.
+- [`eve-db`](../../../crates/eve-db): Transactional `WorldStateSnapshot` store, inventory items, market orders, and killmails.
 
 ---
 
 ### 2. Primary Handlers & Services
 
 #### Living World Director:
-- [`crates/eve-server/src/living_world.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/living_world.rs)
-  - [`LivingWorldDirector::step_all_hauler_convoys`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/living_world.rs#L636-L669): Steps active hauler convoys across stargates on living world ticks.
-  - [`LivingWorldDirector::step_hauler_convoy`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/living_world.rs#L494-L633): Advances an individual convoy along its multi-system stargate route, managing gate jumps and LOD 2 spatial promotion/demotion.
-  - [`LivingWorldDirector::step_npc_mining_op`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/living_world.rs#L346-L458): Executes laser cycle asteroid depletion and market supply replenishment.
-  - [`LivingWorldDirector::interdict_convoy`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/living_world.rs#L251-L340): Drops physical wreck item `26557`, deposits cargo, and spikes destination ask prices by $+15\%$.
-  - [`LivingWorldDirector::materialize_system_lod2`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/living_world.rs#L157-L222): Promotes convoys in a system to full physical ballpark balls.
+- [`crates/eve-server/src/living_world.rs`](../../../crates/eve-server/src/living_world.rs)
+  - [`LivingWorldDirector::step_all_hauler_convoys`](../../../crates/eve-server/src/living_world.rs#L636-L669): Steps active hauler convoys across stargates on living world ticks.
+  - [`LivingWorldDirector::step_hauler_convoy`](../../../crates/eve-server/src/living_world.rs#L494-L633): Advances an individual convoy along its multi-system stargate route, managing gate jumps and LOD 2 spatial promotion/demotion.
+  - [`LivingWorldDirector::step_npc_mining_op`](../../../crates/eve-server/src/living_world.rs#L346-L458): Executes laser cycle asteroid depletion and market supply replenishment.
+  - [`LivingWorldDirector::interdict_convoy`](../../../crates/eve-server/src/living_world.rs#L251-L340): Drops physical wreck item `26557`, deposits cargo, and spikes destination ask prices by $+15\%$.
+  - [`LivingWorldDirector::materialize_system_lod2`](../../../crates/eve-server/src/living_world.rs#L157-L222): Promotes convoys in a system to full physical ballpark balls.
 
 #### Core Belt Rat & Spawn AI:
-- [`crates/eve-server/src/combat/npc_ai.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/combat/npc_ai.rs)
-  - [`NpcSpawnManager::spawn_belt_rats_for_system`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/combat/npc_ai.rs#L286-L429): Checks belt and gate positions in a solar system and spawns SDE pirate groups matching regional lore.
-  - [`NpcSpawnManager::step_ai_sync`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/combat/npc_ai.rs#L436-L615): Evaluates `Idle` $\rightarrow$ `Chase` $\rightarrow$ `Orbit` $\rightarrow$ `Attack` FSM transitions and synchronizes movement and damage to the ballpark.
-  - [`NpcSpawnManager::handle_npc_destroyed`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/combat/npc_ai.rs#L629-L786): Awards dynamic bounties, raises pilot security status, writes wallet journals, and generates killmails.
-  - [`faction_damage_vector`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/combat/npc_ai.rs#L21-L44): Maps faction ID to canonical four-tier damage distribution.
-  - [`regional_pirate_faction_id`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/combat/npc_ai.rs#L50-L84): Resolves territorial pirate faction from constellation/region SDE metadata.
+- [`crates/eve-server/src/combat/npc_ai.rs`](../../../crates/eve-server/src/combat/npc_ai.rs)
+  - [`NpcSpawnManager::spawn_belt_rats_for_system`](../../../crates/eve-server/src/combat/npc_ai.rs#L286-L429): Checks belt and gate positions in a solar system and spawns SDE pirate groups matching regional lore.
+  - [`NpcSpawnManager::step_ai_sync`](../../../crates/eve-server/src/combat/npc_ai.rs#L436-L615): Evaluates `Idle` $\rightarrow$ `Chase` $\rightarrow$ `Orbit` $\rightarrow$ `Attack` FSM transitions and synchronizes movement and damage to the ballpark.
+  - [`NpcSpawnManager::handle_npc_destroyed`](../../../crates/eve-server/src/combat/npc_ai.rs#L629-L786): Awards dynamic bounties, raises pilot security status, writes wallet journals, and generates killmails.
+  - [`faction_damage_vector`](../../../crates/eve-server/src/combat/npc_ai.rs#L21-L44): Maps faction ID to canonical four-tier damage distribution.
+  - [`regional_pirate_faction_id`](../../../crates/eve-server/src/combat/npc_ai.rs#L50-L84): Resolves territorial pirate faction from constellation/region SDE metadata.
 
 #### Extended AI & Archetype Services:
-- [`crates/eve-server/src/services/combat_npc_ai.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/combat_npc_ai.rs)
-  - [`derive_npc_archetype`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/combat_npc_ai.rs#L21-L143): Dynamically derives behavioral archetypes (`Triglavian`, `Sleeper`, `Drifter`, `EDENCOM`, `CloneSoldier`, `Officer`, `IncursionSansha`, `RogueDrone`, `Navy`, `Hauler`) from SDE type and group metadata.
-  - [`spawn_specialized_npc_entity`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/combat_npc_ai.rs#L159-L350): Instantiates an extended NPC with custom combat states, overshields, web/scram profiles, and remote-repair amounts.
-  - [`step_extended_npc_ai_sync`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/combat_npc_ai.rs#L439-L844): Stepping loop for remote repairs, standings aggression checks, drone threat tracking, Triglavian spooling, Drifter doomsdays, and EDENCOM lightning arcs.
-  - [`destroy_specialized_npc_and_queue_bounty`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/combat_npc_ai.rs#L883-L1263): Manages specialized loot generation (Security Tags, Officer modules, blue loot, minerals) and batches bounties into 20-minute payout queues.
-  - [`record_npc_threat_event`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/combat_npc_ai.rs#L849-L875): Adds damage, EWAR, and logistics delta to an NPC's threat table.
+- [`crates/eve-server/src/services/combat_npc_ai.rs`](../../../crates/eve-server/src/services/combat_npc_ai.rs)
+  - [`derive_npc_archetype`](../../../crates/eve-server/src/services/combat_npc_ai.rs#L21-L143): Dynamically derives behavioral archetypes (`Triglavian`, `Sleeper`, `Drifter`, `EDENCOM`, `CloneSoldier`, `Officer`, `IncursionSansha`, `RogueDrone`, `Navy`, `Hauler`) from SDE type and group metadata.
+  - [`spawn_specialized_npc_entity`](../../../crates/eve-server/src/services/combat_npc_ai.rs#L159-L350): Instantiates an extended NPC with custom combat states, overshields, web/scram profiles, and remote-repair amounts.
+  - [`step_extended_npc_ai_sync`](../../../crates/eve-server/src/services/combat_npc_ai.rs#L439-L844): Stepping loop for remote repairs, standings aggression checks, drone threat tracking, Triglavian spooling, Drifter doomsdays, and EDENCOM lightning arcs.
+  - [`destroy_specialized_npc_and_queue_bounty`](../../../crates/eve-server/src/services/combat_npc_ai.rs#L883-L1263): Manages specialized loot generation (Security Tags, Officer modules, blue loot, minerals) and batches bounties into 20-minute payout queues.
+  - [`record_npc_threat_event`](../../../crates/eve-server/src/services/combat_npc_ai.rs#L849-L875): Adds damage, EWAR, and logistics delta to an NPC's threat table.
 
 #### Law Enforcement & Police:
-- [`crates/eve-server/src/services/combat_npc_police.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/combat_npc_police.rs)
-  - [`check_and_spawn_faction_police`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/combat_npc_police.rs#L61-L196): Spawns authentic faction police battleships targeting outlaws on high-sec grids.
-  - [`is_outlaw_ship_docking_refused`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/combat_npc_police.rs#L31-L58): Evaluates docking permissions, barring outlaw ships while granting pod exemptions.
-  - [`scan_and_enforce_highsec_contraband`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/combat_npc_police.rs#L205-L372): Performs customs contraband scans on cargo, confiscating illicit boosters/goods and deducting fines.
+- [`crates/eve-server/src/services/combat_npc_police.rs`](../../../crates/eve-server/src/services/combat_npc_police.rs)
+  - [`check_and_spawn_faction_police`](../../../crates/eve-server/src/services/combat_npc_police.rs#L61-L196): Spawns authentic faction police battleships targeting outlaws on high-sec grids.
+  - [`is_outlaw_ship_docking_refused`](../../../crates/eve-server/src/services/combat_npc_police.rs#L31-L58): Evaluates docking permissions, barring outlaw ships while granting pod exemptions.
+  - [`scan_and_enforce_highsec_contraband`](../../../crates/eve-server/src/services/combat_npc_police.rs#L205-L372): Performs customs contraband scans on cargo, confiscating illicit boosters/goods and deducting fines.
 
 #### Crimewatch & CONCORD:
-- [`crates/eve-server/src/combat/crimewatch.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/combat/crimewatch.rs)
-  - [`CrimeWatchDirector::step_concord`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/combat/crimewatch.rs#L328-L430): Advances CONCORD response arrivals, materializing invulnerable Police Commanders and executing criminal ships.
+- [`crates/eve-server/src/combat/crimewatch.rs`](../../../crates/eve-server/src/combat/crimewatch.rs)
+  - [`CrimeWatchDirector::step_concord`](../../../crates/eve-server/src/combat/crimewatch.rs#L328-L430): Advances CONCORD response arrivals, materializing invulnerable Police Commanders and executing criminal ships.
 
 #### Background Cluster Lifecycle:
-- [`crates/eve-server/src/sp6_lifecycle/cluster_tick.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/sp6_lifecycle/cluster_tick.rs)
-  - [`tick_background_cluster`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/sp6_lifecycle/cluster_tick.rs#L1102-L1213): Central 1 Hz tick loop driving hauler convoys, police checks, CONCORD timers, belt rat respawns, and unobserved system AI.
+- [`crates/eve-server/src/sp6_lifecycle/cluster_tick.rs`](../../../crates/eve-server/src/sp6_lifecycle/cluster_tick.rs)
+  - [`tick_background_cluster`](../../../crates/eve-server/src/sp6_lifecycle/cluster_tick.rs#L1102-L1213): Central 1 Hz tick loop driving hauler convoys, police checks, CONCORD timers, belt rat respawns, and unobserved system AI.
 
 ---
 
@@ -406,9 +412,9 @@ pub struct ExtendedNpcEntity {
 ```
 
 #### Destiny Kinematics & Combat State:
-- [`Ball`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/lib.rs#L508): Tracks `position`, `velocity`, `max_velocity`, `mass`, `radius`, `speed_fraction`, and `mode` (`MovementMode::Follow`, `MovementMode::Orbit`, `MovementMode::Stop`).
-- [`CombatState`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/lib.rs#L183-L235): Stores `shield_hp`, `armor_hp`, `structure_hp`, resonances `[f64; 4]`, `warp_scramble_strength`, `is_mwd_mjd_disabled`, and `ecm_jammed_remaining_s`.
-- [`DamageVector`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/lib.rs#L140-L179): Encapsulates `{ em, thermal, kinetic, explosive }` floating-point damage packages.
+- [`Ball`](../../../crates/eve-destiny/src/lib.rs#L508): Tracks `position`, `velocity`, `max_velocity`, `mass`, `radius`, `speed_fraction`, and `mode` (`MovementMode::Follow`, `MovementMode::Orbit`, `MovementMode::Stop`).
+- [`CombatState`](../../../crates/eve-destiny/src/lib.rs#L183-L235): Stores `shield_hp`, `armor_hp`, `structure_hp`, resonances `[f64; 4]`, `warp_scramble_strength`, `is_mwd_mjd_disabled`, and `ecm_jammed_remaining_s`.
+- [`DamageVector`](../../../crates/eve-destiny/src/lib.rs#L140-L179): Encapsulates `{ em, thermal, kinetic, explosive }` floating-point damage packages.
 
 ---
 
@@ -472,13 +478,27 @@ The living world and NPC AI systems validate the following parity tags from the 
 
 The mechanics documented in this article are verified by automated end-to-end integration tests in the EvoMu test suite:
 
-1. **[`crates/eve-server/tests/it/combat_drones_npcs.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/combat_drones_npcs.rs):**
-   - [`test_c4_npc_archetypes_triglavian_drifter_sleeper_edencom_clone_soldiers_and_ewar_rep`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/combat_drones_npcs.rs#L954-L1220): Verifies Triglavian spooling across ticks and spool reset upon target change; verifies Drifter overshield collapse and Doomsday discharge; confirms Sleeper peer remote repair and 0 ISK bounty blue loot drops; tests Clone Soldier Negotiator 24 km warp scrambler and Tag `33141` drop; tests Officer Cormack Vaaja module drop `14254`.
-   - [`test_c4_bounty_tick_dbs_ess_split_encounter_waves_and_sentry_guns`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/combat_drones_npcs.rs#L1223-L1357): Validates multi-wave encounter triggering upon wave-boss destruction; tests 20-minute batched bounty flushing with DBS multiplier and ESS Main/Reserve bank allocation; verifies gate sentry gun engagement within $500\text{ km}$ and de-aggression when warping off-grid.
-2. **[`crates/eve-server/tests/it/combat_sleepers_pochven_zarzakh.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/combat_sleepers_pochven_zarzakh.rs):**
-   - [`test_sleeper_mechanics_infinite_capacitor_spawn_leash_and_ewar_by_class`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/combat_sleepers_pochven_zarzakh.rs#L101-L266): Tests Sleeper neutralizer immunity and Nosferatu energy transfer; tests $200\text{ km}$ spawn leash teleportation; verifies C3 wormhole warp scramble enforcement; verifies anti-capital $2.5\times$ damage bonus against dreadnoughts.
-   - [`test_zarzakh_gate_guns_and_deathless_patrols`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/combat_sleepers_pochven_zarzakh.rs#L269-L328): Tests Zarzakh missile sentry guns applying ECM jam and lock breaking on pilots with retribution timers.
-   - [`test_pochven_hypnosian_sleepers_and_60pct_loot_drop`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/combat_sleepers_pochven_zarzakh.rs#L329-L405): Validates Pochven Hypnosian Sleeper dedicated shield layers and *Interstellar Navigation Logs* (`56708`) drops.
-3. **[`crates/eve-server/tests/it/npc_archetypes_and_ess_cache.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/npc_archetypes_and_ess_cache.rs):**
-   - [`test_npc_archetypes_dynamically_derived_from_sde`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/npc_archetypes_and_ess_cache.rs#L132-L265): Verifies dynamic SDE archetype derivation for Rogue Drones, Sleepers, EDENCOM, and Officers; tests EDENCOM Vorton chain-lightning arc hostility filtering.
-   - [`test_npc_standings_aggression_player_drones_and_navy_police`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/npc_archetypes_and_ess_cache.rs#L444-L633): Validates standings aggression checks, confirming friendly pilots ($+8.0$) and their deployed combat drones are not aggroed, while hostile ($-6.0$) and outlaw pilots ($\le -3.5$) and their drones are engaged.
+1. **[`crates/eve-server/tests/it/combat_drones_npcs.rs`](../../../crates/eve-server/tests/it/combat_drones_npcs.rs):**
+   - [`test_c4_npc_archetypes_triglavian_drifter_sleeper_edencom_clone_soldiers_and_ewar_rep`](../../../crates/eve-server/tests/it/combat_drones_npcs.rs#L954-L1220): Verifies Triglavian spooling across ticks and spool reset upon target change; verifies Drifter overshield collapse and Doomsday discharge; confirms Sleeper peer remote repair and 0 ISK bounty blue loot drops; tests Clone Soldier Negotiator 24 km warp scrambler and Tag `33141` drop; tests Officer Cormack Vaaja module drop `14254`.
+   - [`test_c4_bounty_tick_dbs_ess_split_encounter_waves_and_sentry_guns`](../../../crates/eve-server/tests/it/combat_drones_npcs.rs#L1223-L1357): Validates multi-wave encounter triggering upon wave-boss destruction; tests 20-minute batched bounty flushing with DBS multiplier and ESS Main/Reserve bank allocation; verifies gate sentry gun engagement within $500\text{ km}$ and de-aggression when warping off-grid.
+2. **[`crates/eve-server/tests/it/combat_sleepers_pochven_zarzakh.rs`](../../../crates/eve-server/tests/it/combat_sleepers_pochven_zarzakh.rs):**
+   - [`test_sleeper_mechanics_infinite_capacitor_spawn_leash_and_ewar_by_class`](../../../crates/eve-server/tests/it/combat_sleepers_pochven_zarzakh.rs#L101-L266): Tests Sleeper neutralizer immunity and Nosferatu energy transfer; tests $200\text{ km}$ spawn leash teleportation; verifies C3 wormhole warp scramble enforcement; verifies anti-capital $2.5\times$ damage bonus against dreadnoughts.
+   - [`test_zarzakh_gate_guns_and_deathless_patrols`](../../../crates/eve-server/tests/it/combat_sleepers_pochven_zarzakh.rs#L269-L328): Tests Zarzakh missile sentry guns applying ECM jam and lock breaking on pilots with retribution timers.
+   - [`test_pochven_hypnosian_sleepers_and_60pct_loot_drop`](../../../crates/eve-server/tests/it/combat_sleepers_pochven_zarzakh.rs#L329-L405): Validates Pochven Hypnosian Sleeper dedicated shield layers and *Interstellar Navigation Logs* (`56708`) drops.
+3. **[`crates/eve-server/tests/it/npc_archetypes_and_ess_cache.rs`](../../../crates/eve-server/tests/it/npc_archetypes_and_ess_cache.rs):**
+   - [`test_npc_archetypes_dynamically_derived_from_sde`](../../../crates/eve-server/tests/it/npc_archetypes_and_ess_cache.rs#L132-L265): Verifies dynamic SDE archetype derivation for Rogue Drones, Sleepers, EDENCOM, and Officers; tests EDENCOM Vorton chain-lightning arc hostility filtering.
+   - [`test_npc_standings_aggression_player_drones_and_navy_police`](../../../crates/eve-server/tests/it/npc_archetypes_and_ess_cache.rs#L444-L633): Validates standings aggression checks, confirming friendly pilots ($+8.0$) and their deployed combat drones are not aggroed, while hostile ($-6.0$) and outlaw pilots ($\le -3.5$) and their drones are engaged.
+
+---
+
+## Related Systems & Cross-References
+
+- [**Gunnery Tracking & Missile Kinematics**](../combat_and_crimewatch/gunnery_tracking_and_missile_kinematics.md): Damage calculation algorithms, angular tracking, and missile kinematic curves used by NPC turrets and launchers.
+- [**Crimewatch & Engagement Timers**](../combat_and_crimewatch/crimewatch_and_engagement_timers.md): CONCORD rapid-response death pipeline, faction police outlaw pursuit, and sentry gun aggression queues.
+- [**Agent Dialogue & Missions**](../missions_and_agents/agent_dialogue_and_missions.md): Mission dungeon NPC waves, trigger conditions, and commander reward scaling.
+- [**Destiny Simulation Loop**](../ballpark_and_physics/destiny_simulation_loop.md): 1 Hz LOD simulation ticks, dynamic orbit calculations, and velocity vector integration.
+- [**Regional Market Order Matching**](../economy_and_markets/regional_market_order_matching.md): Autonomous hauler supply convoys and simulated economic trade route disruptions.
+
+---
+
+[← Back to Wiki Table of Contents](../README.md)

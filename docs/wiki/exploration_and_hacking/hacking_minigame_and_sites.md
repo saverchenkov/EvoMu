@@ -1,5 +1,11 @@
 # Exploration Scanning, Directional Scanner (D-Scan) & Hacking Minigame
 
+> **Navigation**: [EvoMu Technical Wiki](../README.md) • [Related Systems](#related-systems--cross-references)
+>
+> [← Back to Wiki Table of Contents](../README.md)
+
+---
+
 ## Overview & Lore Context
 
 In the vast expanse of New Eden, the star charts provided by CONCORD and the empires encompass only a fraction of the celestial phenomena drifting through space. Beyond established stations and orbital beacons lies an untamed frontier of uncharted cosmic anomalies and hidden cosmic signatures. These signatures are scattered across Known Space (K-space empires and lawless nullsec), Anoikis (J-space wormholes), and the disrupted domains of Pochven.
@@ -109,7 +115,7 @@ Scanner probes possess a finite operational flight time:
 - **Standard Probes:** $4,000\text{ seconds}$ ($66\text{ minutes}, 40\text{ seconds}$).
 - **RSS Core Scanner Probes (`type_id: 32246`):** $1,000\text{ seconds}$ ($16\text{ minutes}, 40\text{ seconds}$).
 
-When flight time expires, the server executes [`expire_overdue_probes_for_char`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/space_probe_scanning.rs#L111):
+When flight time expires, the server executes [`expire_overdue_probes_for_char`](../../../crates/eve-server/src/services/space_probe_scanning.rs#L111):
 - If the pilot's active ship has sufficient cargo volume, probes automatically recall into the ship's hold (`InventoryFlag::Cargo`).
 - If cargo volume is insufficient, probes are permanently abandoned and destroyed in space.
 
@@ -286,39 +292,39 @@ flowchart TD
 
 ### 1. Crates Involved
 
-* [`eve-server`](file:///Users/sergeya/ai/EvoMu/crates/eve-server): Hosts scanning RPC routers, probe movement integration, D-scan geometry calculations, and the hacking minigame state machine.
-* [`eve-sde`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde): Static Data Export providing probe attributes, module dogma statistics (`virusCoherence`, `virusStrength`), signature definitions, and dungeon difficulty ratings.
-* [`eve-destiny`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny): Real-time physics engine managing spatial ball positions, probe balls in flight, AoE damage application, and container loot can physics.
-* [`eve-db`](file:///Users/sergeya/ai/EvoMu/crates/eve-db): Transactional world state store tracking cosmic signature records ([`CosmicSignatureRecord`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/types.rs)), container inventories, and player item locations.
+* [`eve-server`](../../../crates/eve-server): Hosts scanning RPC routers, probe movement integration, D-scan geometry calculations, and the hacking minigame state machine.
+* [`eve-sde`](../../../crates/eve-sde): Static Data Export providing probe attributes, module dogma statistics (`virusCoherence`, `virusStrength`), signature definitions, and dungeon difficulty ratings.
+* [`eve-destiny`](../../../crates/eve-destiny): Real-time physics engine managing spatial ball positions, probe balls in flight, AoE damage application, and container loot can physics.
+* [`eve-db`](../../../crates/eve-db): Transactional world state store tracking cosmic signature records ([`CosmicSignatureRecord`](../../../crates/eve-db/src/types.rs)), container inventories, and player item locations.
 
 ---
 
 ### 2. Primary Handlers & Services
 
-* [`crates/eve-server/src/services/space_probe_scanning.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/space_probe_scanning.rs):
+* [`crates/eve-server/src/services/space_probe_scanning.rs`](../../../crates/eve-server/src/services/space_probe_scanning.rs):
   - `scanMgr::GetSystemScanMgr`: Binds the character to the system scanner manager.
   - `scanMgr::RequestScans`: Primary probe scan handler; updates probe coordinates, calculates sensor overlap, applies trilateration caps, and returns signature strengths.
   - `scanMgr::RecoverProbes`: Recalls active probes from space into ship cargo.
   - `scanMgr::ReconnectToLostProbes`: Re-establishes control of active probes after system reconnect.
-  - [`expire_overdue_probes_for_char`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/space_probe_scanning.rs#L111): Cleans up expired probes, returning them to cargo or recording losses.
-* [`crates/eve-server/src/services/space_cyno_filaments.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/space_cyno_filaments.rs):
+  - [`expire_overdue_probes_for_char`](../../../crates/eve-server/src/services/space_probe_scanning.rs#L111): Cleans up expired probes, returning them to cargo or recording losses.
+* [`crates/eve-server/src/services/space_cyno_filaments.rs`](../../../crates/eve-server/src/services/space_cyno_filaments.rs):
   - `scanMgr::ConeScan` / `DirectionalScan`: Computes directional scan cone intersections against all active balls in the solar system, filtering cloaked vessels and probes.
-* [`crates/eve-server/src/services/pve_hacking_sites.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/pve_hacking_sites.rs):
+* [`crates/eve-server/src/services/pve_hacking_sites.rs`](../../../crates/eve-server/src/services/pve_hacking_sites.rs):
   - `hackingMgr::StartNewGameInstance`: Verifies distance, module requirements, and mutual exclusion locks; generates procedural board.
   - `hackingMgr::ClickedOnTile`: Executes hex path validation, applies combat exchanges, triggers healer/suppressor subroutines, and resolves win/loss states.
   - `hackingMgr::UsedUtilityElementOnVirus` / `UsedUtilityElement`: Executes utility card activations (Self-Repair, Kernel Rot, Shield, Secondary Vector).
   - `hackingMgr::values`: Serializes revealed board states to the client with strict server-side fog-of-war redaction.
-  - [`handle_second_hack_failure_explosion`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/pve_hacking_sites.rs#L217): Handles container self-destruction, loot wiping, and AoE blast damage.
-  - [`detonate_ghost_site`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/pve_hacking_sites.rs#L301): Handles Ghost Site emergency detonation and pirate ambush spawns.
-  - [`spawn_loot_spew_for_container`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/pve_hacking_sites.rs#L354): Seeds physical spewed loot cans in space upon container unlock.
-* [`crates/eve-server/src/services/pve_exploration.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/pve_exploration.rs):
-  - Maintains [`PveExplorationRegistry`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/pve_exploration.rs#L159), holding active hacking sessions, container failure counts, and spewed cans.
+  - [`handle_second_hack_failure_explosion`](../../../crates/eve-server/src/services/pve_hacking_sites.rs#L217): Handles container self-destruction, loot wiping, and AoE blast damage.
+  - [`detonate_ghost_site`](../../../crates/eve-server/src/services/pve_hacking_sites.rs#L301): Handles Ghost Site emergency detonation and pirate ambush spawns.
+  - [`spawn_loot_spew_for_container`](../../../crates/eve-server/src/services/pve_hacking_sites.rs#L354): Seeds physical spewed loot cans in space upon container unlock.
+* [`crates/eve-server/src/services/pve_exploration.rs`](../../../crates/eve-server/src/services/pve_exploration.rs):
+  - Maintains [`PveExplorationRegistry`](../../../crates/eve-server/src/services/pve_exploration.rs#L159), holding active hacking sessions, container failure counts, and spewed cans.
 
 ---
 
 ### 3. Core Data Structures
 
-#### 1. [`HackingGameSession`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/pve_exploration.rs#L126)
+#### 1. [`HackingGameSession`](../../../crates/eve-server/src/services/pve_exploration.rs#L126)
 ```rust
 pub struct HackingGameSession {
     pub game_id: i64,
@@ -340,7 +346,7 @@ pub struct HackingGameSession {
 }
 ```
 
-#### 2. [`HackingTileState`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/pve_exploration.rs#L115)
+#### 2. [`HackingTileState`](../../../crates/eve-server/src/services/pve_exploration.rs#L115)
 ```rust
 pub struct HackingTileState {
     pub tile_index: u32,
@@ -353,7 +359,7 @@ pub struct HackingTileState {
 }
 ```
 
-#### 3. [`PveSiteInstance`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/pve_exploration.rs#L40)
+#### 3. [`PveSiteInstance`](../../../crates/eve-server/src/services/pve_exploration.rs#L40)
 ```rust
 pub struct PveSiteInstance {
     pub site_id: String,
@@ -456,19 +462,32 @@ EvoMu's exploration, scanning, and hacking systems are continuously verified usi
 
 ### 2. Concrete Integration Test Suites
 
-The implementation is verified across extensive integration test suites in [`crates/eve-server/tests/it/`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/):
+The implementation is verified across extensive integration test suites in [`crates/eve-server/tests/it/`](../../../crates/eve-server/tests/it/):
 
-#### [`crates/eve-server/tests/it/scanning_exploration_wormholes_closure.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/scanning_exploration_wormholes_closure.rs)
-- [`test_probe_scanning_ranges_deviation_expiry_classes_thresholds_and_levels`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/scanning_exploration_wormholes_closure.rs#L78): Validates probe launching, 8 range steps ($0.25\text{ AU}$ to $32\text{ AU}$), deviation reduction via *Astrometric Pinpointing*, probe flight-time expiration into cargo, and signature reveal thresholds.
-- [`test_exploration_hacking_grid_coherence_strength_and_second_fail_explosion`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/scanning_exploration_wormholes_closure.rs#L329): Tests complete hacking minigame mechanics: analyzer module stats, axial hex distance navigation, firewall combat exchanges, failure tracking, and container AoE explosive self-destruction upon a second failure.
+#### [`crates/eve-server/tests/it/scanning_exploration_wormholes_closure.rs`](../../../crates/eve-server/tests/it/scanning_exploration_wormholes_closure.rs)
+- [`test_probe_scanning_ranges_deviation_expiry_classes_thresholds_and_levels`](../../../crates/eve-server/tests/it/scanning_exploration_wormholes_closure.rs#L78): Validates probe launching, 8 range steps ($0.25\text{ AU}$ to $32\text{ AU}$), deviation reduction via *Astrometric Pinpointing*, probe flight-time expiration into cargo, and signature reveal thresholds.
+- [`test_exploration_hacking_grid_coherence_strength_and_second_fail_explosion`](../../../crates/eve-server/tests/it/scanning_exploration_wormholes_closure.rs#L329): Tests complete hacking minigame mechanics: analyzer module stats, axial hex distance navigation, firewall combat exchanges, failure tracking, and container AoE explosive self-destruction upon a second failure.
 
-#### [`crates/eve-server/tests/it/pve_exploration_complete_part2.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/pve_exploration_complete_part2.rs)
-- [`test_pve_data_relic_hacking_minigame_and_loot_spew`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/pve_exploration_complete_part2.rs#L173): Validates procedural grid generation, utility card drops (Self-Repair, Kernel Rot, Shield, Secondary Vector), loot can spew physics, and can scooping.
-- [`test_pve_ghost_sites_sleeper_caches_and_wormhole_sites`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/pve_exploration_complete_part2.rs#L343): Exercises Ghost Site hidden timers, detonation mechanics, and Sleeper Cache puzzle progression.
+#### [`crates/eve-server/tests/it/pve_exploration_complete_part2.rs`](../../../crates/eve-server/tests/it/pve_exploration_complete_part2.rs)
+- [`test_pve_data_relic_hacking_minigame_and_loot_spew`](../../../crates/eve-server/tests/it/pve_exploration_complete_part2.rs#L173): Validates procedural grid generation, utility card drops (Self-Repair, Kernel Rot, Shield, Secondary Vector), loot can spew physics, and can scooping.
+- [`test_pve_ghost_sites_sleeper_caches_and_wormhole_sites`](../../../crates/eve-server/tests/it/pve_exploration_complete_part2.rs#L343): Exercises Ghost Site hidden timers, detonation mechanics, and Sleeper Cache puzzle progression.
 
-#### [`crates/eve-server/tests/it/pve_exploration_remediation.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/pve_exploration_remediation.rs)
-- [`test_pve_ghost_site_timer_and_detonation_mechanics`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/pve_exploration_remediation.rs#L264): Verifies the $90\text{ s}$ Ghost Site detonation window, explosive hull damage application, and pirate ambush spawns.
-- [`test_pve_sleeper_cache_tiers_hazards_and_rift_passage`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/pve_exploration_remediation.rs#L378): Confirms Sleeper Cache hazard mitigation upon successful puzzle resolution.
+#### [`crates/eve-server/tests/it/pve_exploration_remediation.rs`](../../../crates/eve-server/tests/it/pve_exploration_remediation.rs)
+- [`test_pve_ghost_site_timer_and_detonation_mechanics`](../../../crates/eve-server/tests/it/pve_exploration_remediation.rs#L264): Verifies the $90\text{ s}$ Ghost Site detonation window, explosive hull damage application, and pirate ambush spawns.
+- [`test_pve_sleeper_cache_tiers_hazards_and_rift_passage`](../../../crates/eve-server/tests/it/pve_exploration_remediation.rs#L378): Confirms Sleeper Cache hazard mitigation upon successful puzzle resolution.
 
-#### [`crates/eve-server/tests/it/pve_data_relic_ded_wormhole_remediated.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/pve_data_relic_ded_wormhole_remediated.rs)
-- [`test_pve_data_relic_loot_tables_container_inventory_and_combat_signatures`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/pve_data_relic_ded_wormhole_remediated.rs#L176): Verifies SDE loot table seeding into hackable containers across data and relic sites.
+#### [`crates/eve-server/tests/it/pve_data_relic_ded_wormhole_remediated.rs`](../../../crates/eve-server/tests/it/pve_data_relic_ded_wormhole_remediated.rs)
+- [`test_pve_data_relic_loot_tables_container_inventory_and_combat_signatures`](../../../crates/eve-server/tests/it/pve_data_relic_ded_wormhole_remediated.rs#L176): Verifies SDE loot table seeding into hackable containers across data and relic sites.
+
+---
+
+## Related Systems & Cross-References
+
+- [**Destiny Simulation Loop**](../ballpark_and_physics/destiny_simulation_loop.md): Scanner probe formation geometries, spherical sensor sweeps, and cosmic signature coordinates.
+- [**Regional Market Order Matching**](../economy_and_markets/regional_market_order_matching.md): Trading relics, decryptors, datashards, and ancient technology commodities.
+- [**Blueprints, Manufacturing & Reactions**](../industry_and_manufacturing/blueprints_manufacturing_and_reactions.md): Utilization of hacked decryptors and datacores in Tech II invention jobs.
+- [**Pochven Navigation & Anchoring Restrictions**](../universe_and_navigation/pochven_navigation_and_anchoring.md): Probing wormhole entrance signatures and navigating Pochven anomaly sites.
+
+---
+
+[← Back to Wiki Table of Contents](../README.md)

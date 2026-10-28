@@ -1,5 +1,11 @@
 # Alliances, War Declarations & War HQ Mechanics
 
+> **Navigation**: [EvoMu Technical Wiki](../README.md) • [Related Systems](#related-systems--cross-references)
+>
+> [← Back to Wiki Table of Contents](../README.md)
+
+---
+
 ## Overview & Lore Context
 
 In the complex geopolitical tapestry of New Eden, corporate competition frequently breaches the boundaries of market competition and covert operations, erupting into open military conflict. To maintain commercial stability across the core empires (Amarr Empire, Caldari State, Gallente Federation, and Minmatar Republic), the **Consolidated Cooperation and Relations Command (CONCORD)** enforces the **Yulai Convention**. Under interstellar law, unsanctioned aggression in High-Security space ($0.5$ to $1.0$) is met with swift, lethal intervention by CONCORD's automated police fleet.
@@ -33,7 +39,7 @@ To restore strategic equilibrium and impose physical stakes, CONCORD ratified th
 ### Alliances: Coalitions of Sovereignty
 When corporate interests scale beyond individual charters, corporations unite into **Alliances**. An Alliance represents a federated coalition of member corporations bound by a unified executive command, a mutual defense pact, shared standings, and shared sovereignty eligibility in Null-Security space. In the theater of formal warfare, all member corporations of an alliance share the alliance's state of war: an attack on the alliance or any member corporation is legally an attack on the entire coalition.
 
-In the **EvoMu** server architecture, alliances, formal wars, War HQ enforcement, mercenary defender allies, and peace treaties are modeled with transactional integrity across the [`eve-server`](file:///Users/sergeya/ai/EvoMu/crates/eve-server) and [`eve-db`](file:///Users/sergeya/ai/EvoMu/crates/eve-db) crates, preserving complete parity with the EVE Online Tranquility network.
+In the **EvoMu** server architecture, alliances, formal wars, War HQ enforcement, mercenary defender allies, and peace treaties are modeled with transactional integrity across the [`eve-server`](../../../crates/eve-server) and [`eve-db`](../../../crates/eve-db) crates, preserving complete parity with the EVE Online Tranquility network.
 
 ---
 
@@ -139,7 +145,7 @@ The designated War HQ represents the attacker's vital center of gravity:
 
 ### 4. High-Sec Combat Legality & Crimewatch Integration
 
-When an active war passes its 24-hour spool-up timer ($t \ge T_{\text{combat\_start}}$), the combat legality engine in [`combat_crimewatch.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/combat_crimewatch.rs#L797) authorizes direct lethal engagements between opposing pilots:
+When an active war passes its 24-hour spool-up timer ($t \ge T_{\text{combat\_start}}$), the combat legality engine in [`combat_crimewatch.rs`](../../../crates/eve-server/src/services/combat_crimewatch.rs#L797) authorizes direct lethal engagements between opposing pilots:
 
 $$\text{LegalCombat}(P_{\text{att}}, P_{\text{vic}}) \iff \exists w \in \text{ActiveWars} \text{ such that } \begin{cases} t \ge w.\text{started} + 86\,400 \lor w.\text{mutual} \\ t < w.\text{finished} \\ \text{OppositeSides}(P_{\text{att}}, P_{\text{vic}}, w) \end{cases}$$
 
@@ -240,14 +246,14 @@ EvoMu coordinates warfare and alliance systems through an event-driven, transact
 
 ### 1. Crates & Responsibilities
 
-* [`eve-server`](file:///Users/sergeya/ai/EvoMu/crates/eve-server): Houses the MachoNet service dispatchers, lazy war synchronization tick, notification triggers, and combat legality evaluators.
-* [`eve-db`](file:///Users/sergeya/ai/EvoMu/crates/eve-db): Houses persistent relational schemas, snapshot structures, transactional mutate primitives (`try_with_mut_snapshot`), and wallet arithmetic.
-* [`eve-sde`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde): Provides static Dogma attributes (e.g. `baseDefenderAllyCost` `1820`, `diplomaticRelationsAllyCostBonus` `1821`, and skill type definitions).
+* [`eve-server`](../../../crates/eve-server): Houses the MachoNet service dispatchers, lazy war synchronization tick, notification triggers, and combat legality evaluators.
+* [`eve-db`](../../../crates/eve-db): Houses persistent relational schemas, snapshot structures, transactional mutate primitives (`try_with_mut_snapshot`), and wallet arithmetic.
+* [`eve-sde`](../../../crates/eve-sde): Provides static Dogma attributes (e.g. `baseDefenderAllyCost` `1820`, `diplomaticRelationsAllyCostBonus` `1821`, and skill type definitions).
 
 ### 2. Primary Handlers & Dispatch Services
 
-#### War Services: [`social_wars.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/social_wars.rs)
-War management is unified under [`handle_wars`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/social_wars.rs#L270), dispatching the following MachoNet services:
+#### War Services: [`social_wars.rs`](../../../crates/eve-server/src/services/social_wars.rs)
+War management is unified under [`handle_wars`](../../../crates/eve-server/src/services/social_wars.rs#L270), dispatching the following MachoNet services:
 * `corpRegistry.DeclareWarAgainst` / `warRegistry.DeclareWarAgainst`: Validates eligibility, War HQ ownership, peace treaties, debits the 100M ISK fee, and schedules the 24-hour spool-up.
 * `warsInfoMgr`:
   * `GetWarsByOwnerID`, `GetWarsByOwners`, `GetTop50`, `GetPublicWarInfo`, `GetWarsForStructure`.
@@ -259,7 +265,7 @@ War management is unified under [`handle_wars`](file:///Users/sergeya/ai/EvoMu/c
 * `warStatisticMgr`: Aggregates kill counts, ship loss breakdowns by group ID, and ISK value destroyed between warring factions.
 
 #### Lazy War Synchronization: `sync_wars`
-War finish timers, War HQ structural status, and defender eligibility are evaluated dynamically via [`sync_wars`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/social_wars.rs#L58) at the invocation of every war RPC:
+War finish timers, War HQ structural status, and defender eligibility are evaluated dynamically via [`sync_wars`](../../../crates/eve-server/src/services/social_wars.rs#L58) at the invocation of every war RPC:
 
 ```rust
 // File: crates/eve-server/src/services/social_wars.rs
@@ -284,14 +290,14 @@ fn sync_wars(ctx: &ServerContext) {
 }
 ```
 
-#### Alliance Services: [`social_corp_fleet.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/social_corp_fleet.rs)
-Alliance administration is handled within [`social_corp_fleet.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/social_corp_fleet.rs#L310):
+#### Alliance Services: [`social_corp_fleet.rs`](../../../crates/eve-server/src/services/social_corp_fleet.rs)
+Alliance administration is handled within [`social_corp_fleet.rs`](../../../crates/eve-server/src/services/social_corp_fleet.rs#L310):
 * `corpRegistry.CreateAlliance`: Checks unique name/ticker, validates `Empire Control` skill, debits $1\,000\,000\,000\text{ ISK}$, creates `AllianceRecord`, assigns executor, and notifies pilots.
 * `corpRegistry.ApplyToJoinAlliance` & `allianceRegistry.UpdateApplication`: Manages corporation application lifecycle and 24-hour spool-up.
 * `allianceRegistry.DeclareExecutorSupport`: Tallies votes and automatically transfers the executor role upon achieving an absolute majority.
 * `allianceRegistry.DeleteMember` & `allianceRegistry.KickMember`: Handles voluntary departure or executive expulsion, with strict enforcement of the active war lock.
 
-#### ESI REST Routes: [`corp_alliance_routes.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/esi/corp_alliance_routes.rs) & [`sample_routes.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/esi/sample_routes.rs)
+#### ESI REST Routes: [`corp_alliance_routes.rs`](../../../crates/eve-server/src/esi/corp_alliance_routes.rs) & [`sample_routes.rs`](../../../crates/eve-server/src/esi/sample_routes.rs)
 * `GET /alliances/{alliance_id}/corporations`: Returns list of member corporation IDs.
 * `GET /alliances/{alliance_id}/icons`: CDN URLs for alliance logos.
 * `GET /wars`: Paginated list of all public war IDs.
@@ -302,7 +308,7 @@ Alliance administration is handled within [`social_corp_fleet.rs`](file:///Users
 
 ### 3. State Storage Schemas
 
-Persistent warfare and alliance records reside in [`eve-db`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/types.rs):
+Persistent warfare and alliance records reside in [`eve-db`](../../../crates/eve-db/src/types.rs):
 
 ```rust
 // File: crates/eve-db/src/types.rs
@@ -326,7 +332,7 @@ pub struct AllianceRecord {
 }
 ```
 
-Extended lifecycle state and negotiations are tracked in `snap.war_state` and [`snapshot_ext.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/snapshot_ext.rs):
+Extended lifecycle state and negotiations are tracked in `snap.war_state` and [`snapshot_ext.rs`](../../../crates/eve-db/src/snapshot_ext.rs):
 
 ```rust
 // File: crates/eve-db/src/snapshot_ext.rs
@@ -371,15 +377,15 @@ pub struct PersistedWarNegotiation {
 
 ### 1. Invariant: Atomic War HQ Destruction & Immediate Combat De-escalation
 * **The Vulnerability:** If a War HQ is destroyed, a race condition could allow an aggressor fleet to continue destroying defender ships legally in High-Sec before the war record is updated, resulting in catastrophic loss of ships without legal recourse.
-* **The Mitigation:** In [`combat_crimewatch.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/combat_crimewatch.rs#L797), every incoming weapon activation checks whether the war is still active, whether the finish timer has elapsed, and whether the War HQ still exists. If the structure state transitions to `"Destroyed"`, `sync_wars` immediately sets `w.active = false` and writes `finish_at_unix = now`. Any subsequent shot fired in High-Sec triggers instant CONCORD intervention against the aggressor.
+* **The Mitigation:** In [`combat_crimewatch.rs`](../../../crates/eve-server/src/services/combat_crimewatch.rs#L797), every incoming weapon activation checks whether the war is still active, whether the finish timer has elapsed, and whether the War HQ still exists. If the structure state transitions to `"Destroyed"`, `sync_wars` immediately sets `w.active = false` and writes `finish_at_unix = now`. Any subsequent shot fired in High-Sec triggers instant CONCORD intervention against the aggressor.
 
 ### 2. Invariant: Solvency Isolation & Atomic Wallet Debiting
 * **The Vulnerability:** An attacking entity attempts to declare war with insufficient funds or exploits floating-point rounding to evade the 100M ISK declaration fee.
-* **The Mitigation:** Wallet deductions in [`debit_corp`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/social_wars.rs#L34) utilize integer-based `IskCents` with checked subtraction (`checked_sub`). If Division 1 cannot cover the exact fee, the entire snapshot mutation aborts with `InsufficientFunds`, preventing partial state persistence.
+* **The Mitigation:** Wallet deductions in [`debit_corp`](../../../crates/eve-server/src/services/social_wars.rs#L34) utilize integer-based `IskCents` with checked subtraction (`checked_sub`). If Division 1 cannot cover the exact fee, the entire snapshot mutation aborts with `InsufficientFunds`, preventing partial state persistence.
 
 ### 3. Invariant: Active War Corporate Lock-In (`CannotLeaveAllianceDuringWar`)
 * **The Vulnerability:** A corporation under heavy war pressure attempts to drop out of its alliance to escape fleet engagements, or an executor attempts to kick a targeted corporation to avoid losing coalition structures.
-* **The Mitigation:** In [`social_corp_fleet.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/social_corp_fleet.rs#L765), both `KickMember` and `DeleteMember` inspect `snap.wars`:
+* **The Mitigation:** In [`social_corp_fleet.rs`](../../../crates/eve-server/src/services/social_corp_fleet.rs#L765), both `KickMember` and `DeleteMember` inspect `snap.wars`:
   ```rust
   if has_active_war {
       return Some(Err(BridgeRpcError {
@@ -422,8 +428,21 @@ EvoMu's alliance and warfare systems are validated by extensive end-to-end integ
 
 | Test Function | Source File | Validated Behaviors |
 | :--- | :--- | :--- |
-| [`test_wars_declaration_hq_eligibility_mutual_peace_allies_and_stats`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/social_alliances_wars_complete.rs#L272) | [`social_alliances_wars_complete.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/social_alliances_wars_complete.rs) | Comprehensive validation of the entire war lifecycle: War HQ requirement, defender eligibility checks, 100M fee, 24h spool-up, mercenary allies with Diplomatic Relations discounts, killmail stats tracking, surrender negotiations, 14-day peace treaty, and War HQ destruction termination. |
-| [`test_alliances_lifecycle_governance_contacts_bulletins_and_rankings`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/social_alliances_wars_complete.rs#L10) | [`social_alliances_wars_complete.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/social_alliances_wars_complete.rs) | Alliance creation with 1B fee, ticker uniqueness, membership application maturation, executor democratic elections, shared contacts/bulletins, and active war departure lock (`CannotLeaveAllianceDuringWar`). |
-| [`test_d6_warfare_fw_sov_and_insurgency_persist_and_rollback`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/d6_persistence_corp_crimewatch_warfare.rs#L507) | [`d6_persistence_corp_crimewatch_warfare.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/d6_persistence_corp_crimewatch_warfare.rs) | Verifies persistence of war records across SQLite storage transactions, lazy timer evaluation, and rollback durability. |
-| [`rpc_declare_war_against_pipeline`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/rpc_corp_registry_gov_alliances.rs#L543) | [`rpc_corp_registry_gov_alliances.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/rpc_corp_registry_gov_alliances.rs) | Tests MachoNet RPC dispatch for `corpRegistry.DeclareWarAgainst` and role enforcement (CEO/Director). |
-| [`rpc_war_registry_bills_and_invites`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/rpc_wars_bills_invites.rs#L208) | [`rpc_wars_bills_invites.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/rpc_wars_bills_invites.rs) | Tests `warRegistry.DeclareWarAgainst`, mutual war invitations, and corporate wallet journal accounting. |
+| [`test_wars_declaration_hq_eligibility_mutual_peace_allies_and_stats`](../../../crates/eve-server/tests/it/social_alliances_wars_complete.rs#L272) | [`social_alliances_wars_complete.rs`](../../../crates/eve-server/tests/it/social_alliances_wars_complete.rs) | Comprehensive validation of the entire war lifecycle: War HQ requirement, defender eligibility checks, 100M fee, 24h spool-up, mercenary allies with Diplomatic Relations discounts, killmail stats tracking, surrender negotiations, 14-day peace treaty, and War HQ destruction termination. |
+| [`test_alliances_lifecycle_governance_contacts_bulletins_and_rankings`](../../../crates/eve-server/tests/it/social_alliances_wars_complete.rs#L10) | [`social_alliances_wars_complete.rs`](../../../crates/eve-server/tests/it/social_alliances_wars_complete.rs) | Alliance creation with 1B fee, ticker uniqueness, membership application maturation, executor democratic elections, shared contacts/bulletins, and active war departure lock (`CannotLeaveAllianceDuringWar`). |
+| [`test_d6_warfare_fw_sov_and_insurgency_persist_and_rollback`](../../../crates/eve-server/tests/it/d6_persistence_corp_crimewatch_warfare.rs#L507) | [`d6_persistence_corp_crimewatch_warfare.rs`](../../../crates/eve-server/tests/it/d6_persistence_corp_crimewatch_warfare.rs) | Verifies persistence of war records across SQLite storage transactions, lazy timer evaluation, and rollback durability. |
+| [`rpc_declare_war_against_pipeline`](../../../crates/eve-server/tests/it/rpc_corp_registry_gov_alliances.rs#L543) | [`rpc_corp_registry_gov_alliances.rs`](../../../crates/eve-server/tests/it/rpc_corp_registry_gov_alliances.rs) | Tests MachoNet RPC dispatch for `corpRegistry.DeclareWarAgainst` and role enforcement (CEO/Director). |
+| [`rpc_war_registry_bills_and_invites`](../../../crates/eve-server/tests/it/rpc_wars_bills_invites.rs#L208) | [`rpc_wars_bills_invites.rs`](../../../crates/eve-server/tests/it/rpc_wars_bills_invites.rs) | Tests `warRegistry.DeclareWarAgainst`, mutual war invitations, and corporate wallet journal accounting. |
+
+---
+
+## Related Systems & Cross-References
+
+- [**Corporation Roles & Governance**](./corporation_roles_and_governance.md): Corporate governance, executive corporation role delegation, and shareholder voting.
+- [**Upwell Structures Overview & Lifecycle**](../upwell_and_structures/upwell_structures_overview.md): High-sec War HQ physical structure vulnerability, reinforcement cycles, and destruction war termination.
+- [**Crimewatch & Engagement Timers**](../combat_and_crimewatch/crimewatch_and_engagement_timers.md): Legal wartime aggression without CONCORD intervention or security status penalties.
+- [**Sovereignty Hubs & Equinox Skyhooks**](../sovereignty_and_faction_warfare/sovereignty_hubs_and_equinox_skyhooks.md): Alliance sovereignty claims and ADM defensive multipliers in null-sec.
+
+---
+
+[← Back to Wiki Table of Contents](../README.md)

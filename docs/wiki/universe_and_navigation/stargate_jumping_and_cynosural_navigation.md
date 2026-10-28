@@ -1,8 +1,14 @@
 # Stargate Jumps, Cynosural Navigation & Jump Fatigue
 
+> **Navigation**: [EvoMu Technical Wiki](../README.md) • [Related Systems](#related-systems--cross-references)
+>
+> [← Back to Wiki Table of Contents](../README.md)
+
+---
+
 The interstellar transit network of New Eden represents the backbone of empire civilization, alliance logistics, and fleet power projection. Interstellar travel operates across two primary paradigms: **permanent macroscopic stargates** connecting adjacent solar systems through stabilized artificial Einstein-Rosen bridges, and **point-to-point capital jump drives** that tunnel across light-years by locking onto artificial quantum gravitational beacons known as **cynosural fields**.
 
-In EvoMu, interstellar navigation is simulated across [`eve-server`](file:///Users/sergeya/ai/EvoMu/crates/eve-server), [`eve-destiny`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny), [`eve-sde`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde), and [`eve-db`](file:///Users/sergeya/ai/EvoMu/crates/eve-db). The simulation models real-time session migration across solar systems, 10-second session change transition guards, 60-second gate cloaks, cynosural beacon lifecycles, fuel consumption matrices, Titan and Black Ops bridge portals, and the post-Phoebe jump fatigue and cooldown relaxation equations.
+In EvoMu, interstellar navigation is simulated across [`eve-server`](../../../crates/eve-server), [`eve-destiny`](../../../crates/eve-destiny), [`eve-sde`](../../../crates/eve-sde), and [`eve-db`](../../../crates/eve-db). The simulation models real-time session migration across solar systems, 10-second session change transition guards, 60-second gate cloaks, cynosural beacon lifecycles, fuel consumption matrices, Titan and Black Ops bridge portals, and the post-Phoebe jump fatigue and cooldown relaxation equations.
 
 ---
 
@@ -286,17 +292,17 @@ EvoMu organizes stargate and cynosural transit across clean-room Rust modules:
 
 | Crate & File | Architectural Role | Key Functions & Types |
 | :--- | :--- | :--- |
-| [`crates/eve-server/src/services/space_warp_jump.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/space_warp_jump.rs) | Handles stargate jump RPCs, distance checks, session migration, gate cloak application, and Zarzakh gate locks. | [`handle_jump_stargate`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/space_warp_jump.rs#L600-L878), `check_session_change_timer_active`, `record_session_change_timer`. |
-| [`crates/eve-server/src/services/fitting_cyno_portal.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/fitting_cyno_portal.rs) | Coordinates cyno activation, beacon registry, jump drive relocations, Titan bridging, Black Ops conduits, and cyno jammers. | [`light_cyno`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/fitting_cyno_portal.rs#L353-L460), [`jump_to_fleet_beacon`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/fitting_cyno_portal.rs#L754-L837), [`bridge_to_fleet_beacon`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/fitting_cyno_portal.rs#L841-L938), [`conduit_jump_to_fleet_beacon`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/fitting_cyno_portal.rs#L979-L1130), [`active_cyno_jammer`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/fitting_cyno_portal.rs#L190-L198). |
-| [`crates/eve-server/src/formulas.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/formulas.rs) | Pure mathematical calculation engine for jump fuel consumption, fatigue accumulation, and activation cooldowns. | [`compute_jump_fatigue_and_cooldown_minutes`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/formulas.rs#L188-L198), [`compute_jump_fuel_isotopes`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/formulas.rs#L175-L184). |
-| [`crates/eve-server/src/services/space_destiny.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/space_destiny.rs) | Session change tracking and location change invulnerability lifecycle. | `check_session_change_timer_active`, `clear_session_change_timer`, `is_location_change_invulnerable`. |
+| [`crates/eve-server/src/services/space_warp_jump.rs`](../../../crates/eve-server/src/services/space_warp_jump.rs) | Handles stargate jump RPCs, distance checks, session migration, gate cloak application, and Zarzakh gate locks. | [`handle_jump_stargate`](../../../crates/eve-server/src/services/space_warp_jump.rs#L600-L878), `check_session_change_timer_active`, `record_session_change_timer`. |
+| [`crates/eve-server/src/services/fitting_cyno_portal.rs`](../../../crates/eve-server/src/services/fitting_cyno_portal.rs) | Coordinates cyno activation, beacon registry, jump drive relocations, Titan bridging, Black Ops conduits, and cyno jammers. | [`light_cyno`](../../../crates/eve-server/src/services/fitting_cyno_portal.rs#L353-L460), [`jump_to_fleet_beacon`](../../../crates/eve-server/src/services/fitting_cyno_portal.rs#L754-L837), [`bridge_to_fleet_beacon`](../../../crates/eve-server/src/services/fitting_cyno_portal.rs#L841-L938), [`conduit_jump_to_fleet_beacon`](../../../crates/eve-server/src/services/fitting_cyno_portal.rs#L979-L1130), [`active_cyno_jammer`](../../../crates/eve-server/src/services/fitting_cyno_portal.rs#L190-L198). |
+| [`crates/eve-server/src/formulas.rs`](../../../crates/eve-server/src/formulas.rs) | Pure mathematical calculation engine for jump fuel consumption, fatigue accumulation, and activation cooldowns. | [`compute_jump_fatigue_and_cooldown_minutes`](../../../crates/eve-server/src/formulas.rs#L188-L198), [`compute_jump_fuel_isotopes`](../../../crates/eve-server/src/formulas.rs#L175-L184). |
+| [`crates/eve-server/src/services/space_destiny.rs`](../../../crates/eve-server/src/services/space_destiny.rs) | Session change tracking and location change invulnerability lifecycle. | `check_session_change_timer_active`, `clear_session_change_timer`, `is_location_change_invulnerable`. |
 
 ---
 
 ### 3.2 Core State Schemas
 
 #### Fleet Module Beacon Record (`FleetModuleBeacon`)
-Defined in [`fitting_cyno_portal.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/fitting_cyno_portal.rs):
+Defined in [`fitting_cyno_portal.rs`](../../../crates/eve-server/src/services/fitting_cyno_portal.rs):
 ```rust
 #[derive(Debug, Clone)]
 pub(crate) struct FleetModuleBeacon {
@@ -356,12 +362,12 @@ EvoMu's stargate transitions, cynosural mechanics, and jump fatigue systems are 
 
 | Test Name | File Path | Focus & Assertions |
 | :--- | :--- | :--- |
-| `test_cyno_field_beacon_duration_ozone_and_immobilization` | [`crates/eve-server/tests/it/modules_cyno_portal.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/modules_cyno_portal.rs#L245-L315) | Verifies high-sec cyno block, 5-minute Force Recon beacon duration, Liquid Ozone consumption, and ship immobilization. |
-| `test_industrial_cyno_only_jump_freighters_and_rorquals` | [`crates/eve-server/tests/it/modules_cyno_portal.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/modules_cyno_portal.rs#L316-L370) | Verifies that Dreadnoughts, Titans, and Supercarriers are rejected by industrial cynos, while JFs and Rorquals jump successfully. |
-| `test_covert_cyno_black_ops_jump_and_covert_portal` | [`crates/eve-server/tests/it/modules_cyno_portal.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/modules_cyno_portal.rs#L372-L428) | Tests Covert Cyno deployment, Black Ops jump portal bridging, Stealth Bomber passenger transit, and capital exclusion. |
-| `test_titan_jump_portal_fleet_bridge_fuel_and_range` | [`crates/eve-server/tests/it/modules_cyno_portal.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/modules_cyno_portal.rs#L430-L501) | Asserts range limits (> 15 LY rejected), Strontium activation burn, mass-scaled isotope billing for bridged battleships, and capital passenger rejection. |
-| `test_cyno_jammer_blocks_non_covert_cynos_and_reports_state` | [`crates/eve-server/tests/it/modules_cyno_portal.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/modules_cyno_portal.rs#L503-L555) | Asserts that online Tenebrex jammers reject standard cynos without consuming ozone, while covert cynos light successfully. |
-| `test_plan_c7_crimewatch_closure_part2` | [`crates/eve-server/tests/it/plan_c7_crimewatch_closure_part2.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/plan_c7_crimewatch_closure_part2.rs#L254-L320) | Confirms that active Weapons Timers and High-Sec Criminal status block stargate jumps, cyno jumps, and portal transits. |
+| `test_cyno_field_beacon_duration_ozone_and_immobilization` | [`crates/eve-server/tests/it/modules_cyno_portal.rs`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs#L245-L315) | Verifies high-sec cyno block, 5-minute Force Recon beacon duration, Liquid Ozone consumption, and ship immobilization. |
+| `test_industrial_cyno_only_jump_freighters_and_rorquals` | [`crates/eve-server/tests/it/modules_cyno_portal.rs`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs#L316-L370) | Verifies that Dreadnoughts, Titans, and Supercarriers are rejected by industrial cynos, while JFs and Rorquals jump successfully. |
+| `test_covert_cyno_black_ops_jump_and_covert_portal` | [`crates/eve-server/tests/it/modules_cyno_portal.rs`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs#L372-L428) | Tests Covert Cyno deployment, Black Ops jump portal bridging, Stealth Bomber passenger transit, and capital exclusion. |
+| `test_titan_jump_portal_fleet_bridge_fuel_and_range` | [`crates/eve-server/tests/it/modules_cyno_portal.rs`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs#L430-L501) | Asserts range limits (> 15 LY rejected), Strontium activation burn, mass-scaled isotope billing for bridged battleships, and capital passenger rejection. |
+| `test_cyno_jammer_blocks_non_covert_cynos_and_reports_state` | [`crates/eve-server/tests/it/modules_cyno_portal.rs`](../../../crates/eve-server/tests/it/modules_cyno_portal.rs#L503-L555) | Asserts that online Tenebrex jammers reject standard cynos without consuming ozone, while covert cynos light successfully. |
+| `test_plan_c7_crimewatch_closure_part2` | [`crates/eve-server/tests/it/plan_c7_crimewatch_closure_part2.rs`](../../../crates/eve-server/tests/it/plan_c7_crimewatch_closure_part2.rs#L254-L320) | Confirms that active Weapons Timers and High-Sec Criminal status block stargate jumps, cyno jumps, and portal transits. |
 
 ---
 
@@ -396,3 +402,16 @@ Stargates and cynosural jump drives form the dual circulatory system of New Eden
 ```
 
 By enforcing strict session change idempotency, mathematical fuel consumption, and post-Phoebe fatigue decay, EvoMu maintains full parity with canonical EVE Online navigation dynamics within a modern, memory-safe Rust architecture.
+
+---
+
+## Related Systems & Cross-References
+
+- [**Pochven Navigation, Filaments & Anchoring**](./pochven_navigation_and_anchoring.md): Pochven conduit networks, Home system standing requirements, and filament jump mechanics.
+- [**Destiny Simulation Loop**](../ballpark_and_physics/destiny_simulation_loop.md): 5-phase warp engine, sub-warp align physics, bubble drag geometry, and session change state transitions.
+- [**Dogma Attribute Engine**](../dogma_and_fitting/dogma_attribute_engine.md): Jump drive capacitor usage, fuel consumption per light-year, and ship agility modifiers.
+- [**Crimewatch & Engagement Timers**](../combat_and_crimewatch/crimewatch_and_engagement_timers.md): 60-second gate cloak immunity, weapons timer jump blocks, and PvP combat logout locks.
+
+---
+
+[← Back to Wiki Table of Contents](../README.md)

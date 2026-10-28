@@ -1,5 +1,11 @@
 # Agent Dialogue, Missions, Standings & LP Stores
 
+> **Navigation**: [EvoMu Technical Wiki](../README.md) • [Related Systems](#related-systems--cross-references)
+>
+> [← Back to Wiki Table of Contents](../README.md)
+
+---
+
 ## Overview & Lore Context
 
 In the sprawling geopolitics of New Eden, capsuleers rarely operate in a vacuum. Beyond the anarchy of nullsec and the isolation of wormhole space, the four core empire factions—the **Amarr Empire**, the **Caldari State**, the **Gallente Federation**, and the **Minmatar Republic**—alongside independent organizations like the **Sisters of EVE**, **CONCORD**, **ORE**, and pirate syndicates (**Guristas Pirates**, **Blood Raider Covenant**, **Angel Cartel**, **Serpentis Corporation**), orchestrate an enormous network of non-capsuleer agents. These NPC agents represent corporate departments, intelligence agencies, military commands, and logistics bureaus embedded across thousands of orbital stations and space complexes.
@@ -275,7 +281,7 @@ Epic Arcs are multi-chapter epic questlines featuring branching dialogue, choice
 
 #### AIR Career Program
 For new recruits, the AIR Career Program introduces core gameplay pillars: **Enforcer**, **Industrialist**, **Explorer**, and **Soldier of Fortune**.
-- Tracked via node graph `473` in [`NpeProgressRecord`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/types.rs#L799).
+- Tracked via node graph `473` in [`NpeProgressRecord`](../../../crates/eve-db/src/types.rs#L799).
 - Milestones award unallocated Free Skill Points (SP) upon completion.
 - Industrial milestones hook directly into the character's mining ledger (`snap.mining_ledger`), verifying harvested ore volumes before unlocking rewards.
 
@@ -333,53 +339,53 @@ flowchart TD
 
 ### 1. Crates Involved
 
-* [`eve-server`](file:///Users/sergeya/ai/EvoMu/crates/eve-server): Master simulation server, hosting RPC routing, mission state transitions, and living world hooks.
-* [`eve-db`](file:///Users/sergeya/ai/EvoMu/crates/eve-db): Transactional world state snapshots (`WorldStateSnapshot`), entity IDs, and persistence models.
-* [`eve-sde`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde): Static Data Export engine providing static agent records, station coordinates, and mission content templates.
-* [`eve-proto`](file:///Users/sergeya/ai/EvoMu/crates/eve-proto): MachoNet PyRep binary codec marshaling PyVal dialogues and keyval dictionaries.
-* [`eve-destiny`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny): Deterministic 1 Hz physics engine managing in-space combat balls, mission gates, and harvestable mission asteroids.
+* [`eve-server`](../../../crates/eve-server): Master simulation server, hosting RPC routing, mission state transitions, and living world hooks.
+* [`eve-db`](../../../crates/eve-db): Transactional world state snapshots (`WorldStateSnapshot`), entity IDs, and persistence models.
+* [`eve-sde`](../../../crates/eve-sde): Static Data Export engine providing static agent records, station coordinates, and mission content templates.
+* [`eve-proto`](../../../crates/eve-proto): MachoNet PyRep binary codec marshaling PyVal dialogues and keyval dictionaries.
+* [`eve-destiny`](../../../crates/eve-destiny): Deterministic 1 Hz physics engine managing in-space combat balls, mission gates, and harvestable mission asteroids.
 
 ---
 
 ### 2. Primary Handlers & Dispatch
 
-* [`crates/eve-server/src/services/agents_missions.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/agents_missions.rs):
+* [`crates/eve-server/src/services/agents_missions.rs`](../../../crates/eve-server/src/services/agents_missions.rs):
   - `agentMgr::GetAgents`: Dispatches filtered agent directories based on character standings.
   - `agentMgr::GetOffer`: Generates an offer for the co-located or selected agent.
   - `agentMgr::DoAction`: Master mission state machine handler (Actions `1` through `11`).
   - `agentMgr::RemoveOfferFromJournal`: Safely dismisses expired or unaccepted offers.
-* [`crates/eve-server/src/services/agents_missions_helpers.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/agents_missions_helpers.rs):
-  - [`compute_character_mission_rewards`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/agents_missions_helpers.rs#L248): Calculates true-sec scaled LP, ISK, and time bonus rewards.
-  - [`abandon_or_decline_mission`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/agents_missions_helpers.rs#L463): Executes state rollback, scoped bookmark pruning, ball despawns, and standing penalties.
-  - [`reclaim_courier_cargo`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/agents_missions_helpers.rs#L442): Anti-minting routine scrubbing courier cargo on mission failure or abandonment.
-  - [`resolve_security_mission_encounter`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/agents_missions_helpers.rs#L1040): Assembles NPC combat waves based on mission archetype and agent system.
-  - [`resolve_mining_mission_details`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/agents_missions_helpers.rs#L985): Seeds asteroid quantities and ore delivery requirements.
-* [`crates/eve-server/src/services/agents_standings_arcs.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/agents_standings_arcs.rs):
+* [`crates/eve-server/src/services/agents_missions_helpers.rs`](../../../crates/eve-server/src/services/agents_missions_helpers.rs):
+  - [`compute_character_mission_rewards`](../../../crates/eve-server/src/services/agents_missions_helpers.rs#L248): Calculates true-sec scaled LP, ISK, and time bonus rewards.
+  - [`abandon_or_decline_mission`](../../../crates/eve-server/src/services/agents_missions_helpers.rs#L463): Executes state rollback, scoped bookmark pruning, ball despawns, and standing penalties.
+  - [`reclaim_courier_cargo`](../../../crates/eve-server/src/services/agents_missions_helpers.rs#L442): Anti-minting routine scrubbing courier cargo on mission failure or abandonment.
+  - [`resolve_security_mission_encounter`](../../../crates/eve-server/src/services/agents_missions_helpers.rs#L1040): Assembles NPC combat waves based on mission archetype and agent system.
+  - [`resolve_mining_mission_details`](../../../crates/eve-server/src/services/agents_missions_helpers.rs#L985): Seeds asteroid quantities and ore delivery requirements.
+* [`crates/eve-server/src/services/agents_standings_arcs.rs`](../../../crates/eve-server/src/services/agents_standings_arcs.rs):
   - `handle_extended`: Handles `standingMgr`, `missionTrackerMgr`, and `air_npe` RPC calls.
   - `handle_special_dialogue_action`: Dispatches R&D research actions (`12`–`14`) and Locator services (`15`–`17`).
-  - [`compute_effective_standing_breakdown`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/agents_standings_arcs.rs#L232): Computes Connections, Diplomacy, and Criminal Connections bonuses.
-  - [`compute_effective_agent_standing`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/agents_standings_arcs.rs#L273): Evaluates the $-2.0$ floor and max standing resolution.
-  - [`apply_mission_completion_standings`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/agents_standings_arcs.rs#L374): Applies Social-modified standing gains and derived faction standing cascades.
-* [`crates/eve-server/src/services/lp_store.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/lp_store.rs):
+  - [`compute_effective_standing_breakdown`](../../../crates/eve-server/src/services/agents_standings_arcs.rs#L232): Computes Connections, Diplomacy, and Criminal Connections bonuses.
+  - [`compute_effective_agent_standing`](../../../crates/eve-server/src/services/agents_standings_arcs.rs#L273): Evaluates the $-2.0$ floor and max standing resolution.
+  - [`apply_mission_completion_standings`](../../../crates/eve-server/src/services/agents_standings_arcs.rs#L374): Applies Social-modified standing gains and derived faction standing cascades.
+* [`crates/eve-server/src/services/lp_store.rs`](../../../crates/eve-server/src/services/lp_store.rs):
   - `LPStoreMgr::GetAvailableOffersFromCorp`: Serializes corporation LP catalog offerings.
   - `LPStoreMgr::TakeOfferForCharacter` / `TakeOfferForCorporation`: Validates LP/ISK balances, parses required item sacrifices, and dispenses items.
   - `LPStoreMgr::ExchangeConcordLP` / `LPSvc::ExchangeConcordLP`: Handles CONCORD LP conversion ratios.
   - `LPSvc::GetAllMyCharacterWalletLPBalances`: Returns all player LP holdings.
   - `LPSvc::TransferLPFromMyWalletToOtherCorp`: Donates LP to corporation reserves.
-* [`crates/eve-server/src/formulas.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/formulas.rs):
-  - [`apply_standing_increase`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/formulas.rs#L70): Evaluates asymptotic gain law.
-  - [`apply_standing_decrease`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/formulas.rs#L76): Evaluates asymptotic penalty law.
-  - [`compute_effective_standing`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/formulas.rs#L82): Pure skill modifier math.
+* [`crates/eve-server/src/formulas.rs`](../../../crates/eve-server/src/formulas.rs):
+  - [`apply_standing_increase`](../../../crates/eve-server/src/formulas.rs#L70): Evaluates asymptotic gain law.
+  - [`apply_standing_decrease`](../../../crates/eve-server/src/formulas.rs#L76): Evaluates asymptotic penalty law.
+  - [`compute_effective_standing`](../../../crates/eve-server/src/formulas.rs#L82): Pure skill modifier math.
 
 ---
 
 ### 3. Database Schema & State Store
 
-The snapshot engine stores state in memory and flushes to SQLite via [`WorldStateSnapshot`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/snapshot_ext.rs#L560):
+The snapshot engine stores state in memory and flushes to SQLite via [`WorldStateSnapshot`](../../../crates/eve-db/src/snapshot_ext.rs#L560):
 
 #### Key Database Structs:
 
-1. **[`ActiveMissionRecord`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/types.rs#L785)** (Stored in `snap.active_missions: HashMap<(i64, u32), ActiveMissionRecord>`):
+1. **[`ActiveMissionRecord`](../../../crates/eve-db/src/types.rs#L785)** (Stored in `snap.active_missions: HashMap<(i64, u32), ActiveMissionRecord>`):
    ```rust
    pub struct ActiveMissionRecord {
        pub mission_id: u32,
@@ -393,7 +399,7 @@ The snapshot engine stores state in memory and flushes to SQLite via [`WorldStat
    }
    ```
 
-2. **[`MissionTimingAndCargoMeta`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/agents_standings_arcs.rs#L31)** (Persisted in `snap.owner_notes` under deterministic note keys):
+2. **[`MissionTimingAndCargoMeta`](../../../crates/eve-server/src/services/agents_standings_arcs.rs#L31)** (Persisted in `snap.owner_notes` under deterministic note keys):
    ```rust
    pub struct MissionTimingAndCargoMeta {
        pub mission_id: u32,
@@ -415,7 +421,7 @@ The snapshot engine stores state in memory and flushes to SQLite via [`WorldStat
    }
    ```
 
-3. **[`StandingTransactionRecord`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/types.rs#L1315)** (Stored in `snap.standing_transactions: HashMap<i64, Vec<StandingTransactionRecord>>`):
+3. **[`StandingTransactionRecord`](../../../crates/eve-db/src/types.rs#L1315)** (Stored in `snap.standing_transactions: HashMap<i64, Vec<StandingTransactionRecord>>`):
    ```rust
    pub struct StandingTransactionRecord {
        pub event_id: i64,
@@ -426,7 +432,7 @@ The snapshot engine stores state in memory and flushes to SQLite via [`WorldStat
    }
    ```
 
-4. **[`WalletJournalEntry`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/types.rs#L671)** (Stored in `snap.wallet_journal: Vec<WalletJournalEntry>`):
+4. **[`WalletJournalEntry`](../../../crates/eve-db/src/types.rs#L671)** (Stored in `snap.wallet_journal: Vec<WalletJournalEntry>`):
    ```rust
    pub struct WalletJournalEntry {
        pub entry_id: i64,
@@ -438,7 +444,7 @@ The snapshot engine stores state in memory and flushes to SQLite via [`WorldStat
    }
    ```
 
-5. **[`LPOffer`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/lp_store.rs#L36)** (Stored in `snap.service_state_blobs["lp_store_offers"]`):
+5. **[`LPOffer`](../../../crates/eve-server/src/services/lp_store.rs#L36)** (Stored in `snap.service_state_blobs["lp_store_offers"]`):
    ```rust
    pub struct LPOffer {
        pub offer_id: i64,
@@ -482,7 +488,7 @@ Only bookmarks owned by the character, situated in the mission solar system, and
 A classic exploit in virtual MMO economies involves accepting courier missions that seed expensive trade goods, quitting the mission, and keeping the cargo to sell on regional markets. EvoMu mitigates this via strict **cargo tracking**:
 - Upon mission acceptance, generated courier items are branded in `snap.item_custom_names` with the immutable key:
   `courier_cargo:<character_id>:<mission_id>`
-- On decline, quit, or expiration, [`reclaim_courier_cargo`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/agents_missions_helpers.rs#L442) searches all station hangars, ship cargo holds, and containers owned by the pilot, instantly removing any item bearing this tag.
+- On decline, quit, or expiration, [`reclaim_courier_cargo`](../../../crates/eve-server/src/services/agents_missions_helpers.rs#L442) searches all station hangars, ship cargo holds, and containers owned by the pilot, instantly removing any item bearing this tag.
 - In `invBroker`, tagged courier cargo cannot be merged into standard item stacks, preventing custom-name scrubbing.
 
 ### 3. Anti-Exploit Trade-In Verification (LP Store)
@@ -544,24 +550,37 @@ The agent and mission implementation satisfies the following engineering parity 
 
 ### 2. Concrete Integration Test Suites
 
-The mission architecture is covered by automated integration test suites executed in [`crates/eve-server/tests/it/`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/):
+The mission architecture is covered by automated integration test suites executed in [`crates/eve-server/tests/it/`](../../../crates/eve-server/tests/it/):
 
-#### [`crates/eve-server/tests/it/agents_missions_complete_part2.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/agents_missions_complete_part2.rs)
-- [`test_mission_lifecycle_offer_accept_complete_decline_abandon_and_expiration`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/agents_missions_complete_part2.rs#L114): Exercises the complete state machine: requesting an offer, verifying 7-day expiration with zero penalty, accepting, validating the bonus countdown, completing for full payouts, testing the 4-hour free decline window, and verifying standing penalties on rapid successive declines.
-- [`test_standings_formulas_derived_effective_corp_standing_data_and_transactions`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/agents_missions_complete_part2.rs#L345): Rigorously validates Connections, Diplomacy, and Criminal Connections formulas against expected mathematical values, confirms standing transaction logging (`StandingTransactionRecord`), and asserts derived faction standing propagation.
-- [`test_agent_dialogue_and_access_standings`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/agents_missions_complete_part2.rs#L477): Validates agent dialogue retrieval, co-location requirements, and Level 1–5 standing threshold gates.
+#### [`crates/eve-server/tests/it/agents_missions_complete_part2.rs`](../../../crates/eve-server/tests/it/agents_missions_complete_part2.rs)
+- [`test_mission_lifecycle_offer_accept_complete_decline_abandon_and_expiration`](../../../crates/eve-server/tests/it/agents_missions_complete_part2.rs#L114): Exercises the complete state machine: requesting an offer, verifying 7-day expiration with zero penalty, accepting, validating the bonus countdown, completing for full payouts, testing the 4-hour free decline window, and verifying standing penalties on rapid successive declines.
+- [`test_standings_formulas_derived_effective_corp_standing_data_and_transactions`](../../../crates/eve-server/tests/it/agents_missions_complete_part2.rs#L345): Rigorously validates Connections, Diplomacy, and Criminal Connections formulas against expected mathematical values, confirms standing transaction logging (`StandingTransactionRecord`), and asserts derived faction standing propagation.
+- [`test_agent_dialogue_and_access_standings`](../../../crates/eve-server/tests/it/agents_missions_complete_part2.rs#L477): Validates agent dialogue retrieval, co-location requirements, and Level 1–5 standing threshold gates.
 
-#### [`crates/eve-server/tests/it/pve_agent_missions_remediation.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/pve_agent_missions_remediation.rs)
-- [`test_pve_courier_mission_distribution_lifecycle_and_destination_transport`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/pve_agent_missions_remediation.rs#L123): Tests courier cargo creation, destination station arrival verification, and delivery completion.
-- [`test_pve_trade_mission_commodity_delivery_and_consumption`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/pve_agent_missions_remediation.rs#L263): Validates acquisition and delivery of trade goods to agent hangars.
-- [`test_pve_security_mission_multi_npc_wave_and_elimination`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/pve_agent_missions_remediation.rs#L372): Verifies NPC wave spawning in Destiny ballparks, destruction tracking, and objective completion triggers.
-- [`test_pve_mining_mission_asteroid_spawn_and_ore_delivery`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/pve_agent_missions_remediation.rs#L474): Tests dynamic in-space mission asteroid spawning, ore extraction, and hangar delivery.
+#### [`crates/eve-server/tests/it/pve_agent_missions_remediation.rs`](../../../crates/eve-server/tests/it/pve_agent_missions_remediation.rs)
+- [`test_pve_courier_mission_distribution_lifecycle_and_destination_transport`](../../../crates/eve-server/tests/it/pve_agent_missions_remediation.rs#L123): Tests courier cargo creation, destination station arrival verification, and delivery completion.
+- [`test_pve_trade_mission_commodity_delivery_and_consumption`](../../../crates/eve-server/tests/it/pve_agent_missions_remediation.rs#L263): Validates acquisition and delivery of trade goods to agent hangars.
+- [`test_pve_security_mission_multi_npc_wave_and_elimination`](../../../crates/eve-server/tests/it/pve_agent_missions_remediation.rs#L372): Verifies NPC wave spawning in Destiny ballparks, destruction tracking, and objective completion triggers.
+- [`test_pve_mining_mission_asteroid_spawn_and_ore_delivery`](../../../crates/eve-server/tests/it/pve_agent_missions_remediation.rs#L474): Tests dynamic in-space mission asteroid spawning, ore extraction, and hangar delivery.
 
-#### [`crates/eve-server/tests/it/agents_missions_complete.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/agents_missions_complete.rs)
-- [`test_courier_mission_accept_quit_reclaims_cargo_regression`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/agents_missions_complete.rs#L273): Verifies that quitting an accepted courier mission immediately scrubs all granted courier cargo from player inventory.
-- [`test_non_courier_offers_decline_and_expiry_preserve_player_inventory_regression`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/agents_missions_complete.rs#L430): Confirms player inventory items are untouched when declining non-courier offers.
-- [`test_courier_cargo_anti_stacking_in_invbroker_add_regression`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/agents_missions_complete.rs#L509): Ensures custom-tagged courier cargo cannot be merged into generic cargo stacks.
+#### [`crates/eve-server/tests/it/agents_missions_complete.rs`](../../../crates/eve-server/tests/it/agents_missions_complete.rs)
+- [`test_courier_mission_accept_quit_reclaims_cargo_regression`](../../../crates/eve-server/tests/it/agents_missions_complete.rs#L273): Verifies that quitting an accepted courier mission immediately scrubs all granted courier cargo from player inventory.
+- [`test_non_courier_offers_decline_and_expiry_preserve_player_inventory_regression`](../../../crates/eve-server/tests/it/agents_missions_complete.rs#L430): Confirms player inventory items are untouched when declining non-courier offers.
+- [`test_courier_cargo_anti_stacking_in_invbroker_add_regression`](../../../crates/eve-server/tests/it/agents_missions_complete.rs#L509): Ensures custom-tagged courier cargo cannot be merged into generic cargo stacks.
 
-#### [`crates/eve-server/tests/it/agents_missions_complete_part3.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/agents_missions_complete_part3.rs)
-- [`test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and_locator`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/agents_missions_complete_part3.rs#L133): Exhaustive test of Storylines (16-mission trigger), Epic Arcs (90-day cooldown, no penalty quit), R&D (research start, RP gain, datacore buy), and Locator agents (cooldowns, fees, range checks, J-space blocking).
-- [`test_lp_store_offers_exchange_rates_and_purchase_validation`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/agents_missions_complete_part3.rs#L464): Validates LP store purchase flows, input item requirements, anti-exploit item rejections, and CONCORD LP conversion logic.
+#### [`crates/eve-server/tests/it/agents_missions_complete_part3.rs`](../../../crates/eve-server/tests/it/agents_missions_complete_part3.rs)
+- [`test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and_locator`](../../../crates/eve-server/tests/it/agents_missions_complete_part3.rs#L133): Exhaustive test of Storylines (16-mission trigger), Epic Arcs (90-day cooldown, no penalty quit), R&D (research start, RP gain, datacore buy), and Locator agents (cooldowns, fees, range checks, J-space blocking).
+- [`test_lp_store_offers_exchange_rates_and_purchase_validation`](../../../crates/eve-server/tests/it/agents_missions_complete_part3.rs#L464): Validates LP store purchase flows, input item requirements, anti-exploit item rejections, and CONCORD LP conversion logic.
+
+---
+
+## Related Systems & Cross-References
+
+- [**NPC Combat AI & Living World Ecology**](../npcs_and_living_world/npc_combat_ai_and_ecology.md): Encounter pocket AI archetypes, trigger spawning, and threat priority matrices.
+- [**Regional Market Order Matching**](../economy_and_markets/regional_market_order_matching.md): Loyalty Point (LP) store exchanges, item requirements, and market liquidation of mission rewards.
+- [**Corporation Roles & Governance**](../corporations_and_governance/corporation_roles_and_governance.md): Corporate standings requirements, division access, and mission reward tax shares.
+- [**Character Progression & Skill Training**](../character_and_progression/skill_training_and_medical_clones.md): Social skill tree multipliers (Connections, Negotiation, Diplomacy) on reward and standing yields.
+
+---
+
+[← Back to Wiki Table of Contents](../README.md)

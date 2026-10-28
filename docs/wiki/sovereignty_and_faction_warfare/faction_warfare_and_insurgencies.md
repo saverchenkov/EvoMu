@@ -1,5 +1,11 @@
 # Faction Warfare, Pirate Insurgencies & Encounter Surveillance System (ESS)
 
+> **Navigation**: [EvoMu Technical Wiki](../README.md) • [Related Systems](#related-systems--cross-references)
+>
+> [← Back to Wiki Table of Contents](../README.md)
+
+---
+
 The territorial struggles of New Eden span across three distinct yet deeply interconnected asymmetric warfare paradigms: the border clashes of the four empire militias (**Faction Warfare**), the lawless shadow campaigns of pirate factions (**Insurgencies**), and the high-stakes robotic banking and bounty defense network of null-sec space (**Encounter Surveillance System & Dynamic Bounty System**).
 
 In EvoMu, these systems form the core of contested space gameplay. They weave together graph-theoretic stargate topology, sub-second space physics grids, deterministic multi-character contest loops, dynamic macroeconomic yield curves, and strict CrimeWatch 2.0 flags.
@@ -286,17 +292,17 @@ EvoMu manages territorial conflict across specialized domain services, integrati
 
 | File Path | Primary Responsibilities |
 | :--- | :--- |
-| [`crates/eve-server/src/services/fw_services.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/fw_services.rs) | Warzone frontline topology derivation, victory points, advantage updates, militia ranks, and LP calculations. |
-| [`crates/eve-server/src/services/insurgency_services.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/insurgency_services.rs) | Havoc pirate campaigns, Corruption/Suppression point ticks, FOB lifecycles, and complex capture tick processing. |
-| [`crates/eve-server/src/services/encounter_surveillance_system.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/encounter_surveillance_system.rs) | `essMgr` MachoNet handlers, 2500m proximity checks, Safety green restrictions, SCC key validation, and Reserve Bank pulses. |
-| [`crates/eve-server/src/services/combat_legacy_ess.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/combat_legacy_ess.rs) | Legacy combat dispatch, DBS multiplier tick evolution, and 60/30/10 bounty splitting during NPC pirate kills. |
-| [`crates/eve-server/src/services/crimewatch_timers.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/crimewatch_timers.rs) | CrimeWatch Suspect flag issuance, Corruption 3 gate gun deactivation, and Corruption 5 lawless security overrides. |
-| [`crates/eve-server/src/formulas.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/formulas.rs) | Pure KaTeX-aligned mathematical functions: `compute_dbs_and_ess_bounty_split` and capture rate equations. |
+| [`crates/eve-server/src/services/fw_services.rs`](../../../crates/eve-server/src/services/fw_services.rs) | Warzone frontline topology derivation, victory points, advantage updates, militia ranks, and LP calculations. |
+| [`crates/eve-server/src/services/insurgency_services.rs`](../../../crates/eve-server/src/services/insurgency_services.rs) | Havoc pirate campaigns, Corruption/Suppression point ticks, FOB lifecycles, and complex capture tick processing. |
+| [`crates/eve-server/src/services/encounter_surveillance_system.rs`](../../../crates/eve-server/src/services/encounter_surveillance_system.rs) | `essMgr` MachoNet handlers, 2500m proximity checks, Safety green restrictions, SCC key validation, and Reserve Bank pulses. |
+| [`crates/eve-server/src/services/combat_legacy_ess.rs`](../../../crates/eve-server/src/services/combat_legacy_ess.rs) | Legacy combat dispatch, DBS multiplier tick evolution, and 60/30/10 bounty splitting during NPC pirate kills. |
+| [`crates/eve-server/src/services/crimewatch_timers.rs`](../../../crates/eve-server/src/services/crimewatch_timers.rs) | CrimeWatch Suspect flag issuance, Corruption 3 gate gun deactivation, and Corruption 5 lawless security overrides. |
+| [`crates/eve-server/src/formulas.rs`](../../../crates/eve-server/src/formulas.rs) | Pure KaTeX-aligned mathematical functions: `compute_dbs_and_ess_bounty_split` and capture rate equations. |
 
 ### Data Structures & State Representation
 
 #### 1. System Dynamic State (`eve-db`)
-Dynamic territorial states are persisted within each solar system's record in [`crates/eve-db/src/types.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/types.rs#L1280-L1310):
+Dynamic territorial states are persisted within each solar system's record in [`crates/eve-db/src/types.rs`](../../../crates/eve-db/src/types.rs#L1280-L1310):
 
 ```rust
 pub struct SystemDynamicState {
@@ -380,7 +386,7 @@ pub struct PersistedInsurgencyCampaign {
 
 ### Invariant 1: Safety Green Protection Against Suspect Flags
 Hacking an ESS Main or Reserve Bank issues a 15-minute Suspect flag. Capsuleers operating with Safety Level set to **Green** are strictly prevented from initiating this action:
-* **Enforcement:** [`crates/eve-server/src/services/encounter_surveillance_system.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/encounter_surveillance_system.rs#L253-L264).
+* **Enforcement:** [`crates/eve-server/src/services/encounter_surveillance_system.rs`](../../../crates/eve-server/src/services/encounter_surveillance_system.rs#L253-L264).
 * If `safety == SafetyLevel::Green`, the RPC immediately aborts with `SafetyLevelRestricted` before touching any bank state or consuming cargo keys.
 
 ### Invariant 2: Docked State & Capsule Immunity
@@ -442,23 +448,23 @@ EvoMu's Faction Warfare, Insurgency, and ESS implementations are validated throu
 +-----------------------------------------+-----------------------------------------------+
 ```
 
-* [`crates/eve-server/tests/it/fw_parity_complete.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/fw_parity_complete.rs):
+* [`crates/eve-server/tests/it/fw_parity_complete.rs`](../../../crates/eve-server/tests/it/fw_parity_complete.rs):
   - Validates `compute_all_frontline_statuses` against live stargate jump graphs.
   - Tests `add_victory_points` boundary handling, threshold clamping, and bunker vulnerability transition at $100\%$.
-* [`crates/eve-server/tests/it/rpc_sov_fw_warzone.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/rpc_sov_fw_warzone.rs):
+* [`crates/eve-server/tests/it/rpc_sov_fw_warzone.rs`](../../../crates/eve-server/tests/it/rpc_sov_fw_warzone.rs):
   - Validates MachoNet RPCs: `GetHQSystemIDs`, `GetAllWarzones`, `GetAllWarzonesOccupationStates`.
   - Verifies that uninitialized occupation records automatically backfill from SDE static defaults.
-* [`crates/eve-server/tests/it/rpc_fw_insurgency_crimewatch.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/rpc_fw_insurgency_crimewatch.rs):
+* [`crates/eve-server/tests/it/rpc_fw_insurgency_crimewatch.rs`](../../../crates/eve-server/tests/it/rpc_fw_insurgency_crimewatch.rs):
   - Validates `securityMgr.get_modified_systems` returning `0.0` for systems at Corruption Stage 5.
   - Verifies campaign snapshot generation (`build_campaign_snapshot_for_system`) for client UI consumption.
-* [`crates/eve-server/tests/it/rpc_ess_mgr.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/rpc_ess_mgr.rs):
+* [`crates/eve-server/tests/it/rpc_ess_mgr.rs`](../../../crates/eve-server/tests/it/rpc_ess_mgr.rs):
   - Validates distance checks ($\le 2500\text{ m}$) from ESS beacon.
   - Verifies Safety Green rejection (`SafetyLevelRestricted`).
   - Verifies Suspect flag creation and 15-minute countdown emission upon intrusion link.
-* [`crates/eve-server/tests/it/ess_reserve_main_concurrency.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/ess_reserve_main_concurrency.rs):
+* [`crates/eve-server/tests/it/ess_reserve_main_concurrency.rs`](../../../crates/eve-server/tests/it/ess_reserve_main_concurrency.rs):
   - Verifies Reserve Bank pulse cooldown enforcement ($60\text{ s}$).
   - Verifies single-linker exclusivity locks when multiple pilots attempt simultaneous links.
-* [`crates/eve-server/tests/it/mining_structures_sov_r5_regressions.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/mining_structures_sov_r5_regressions.rs#L640-L685):
+* [`crates/eve-server/tests/it/mining_structures_sov_r5_regressions.rs`](../../../crates/eve-server/tests/it/mining_structures_sov_r5_regressions.rs#L640-L685):
   - Tests complex capture pausing when opposing pilots contest the grid.
   - Tests lone defender de-plexing toward 0% and attacker advancement toward 100%.
 
@@ -470,3 +476,16 @@ cargo test --test it fw_parity_complete rpc_sov_fw_warzone rpc_fw_insurgency_cri
 ```
 
 All 6 test suites execute with 0 failures, ensuring complete functional and mathematical parity with canonical EVE Online server mechanics.
+
+---
+
+## Related Systems & Cross-References
+
+- [**Sovereignty Hubs & Equinox Skyhooks**](./sovereignty_hubs_and_equinox_skyhooks.md): Comparison of low-sec Faction Warfare capture mechanics with null-sec territorial sovereignty.
+- [**Crimewatch & Engagement Timers**](../combat_and_crimewatch/crimewatch_and_engagement_timers.md): Militia combat legality, suspect flags in contested systems, and pirate corruption stage changes.
+- [**NPC Combat AI & Living World Ecology**](../npcs_and_living_world/npc_combat_ai_and_ecology.md): Complex capture guard AI, insurgent pirate raids, and faction navy behavior.
+- [**Agent Dialogue & Missions**](../missions_and_agents/agent_dialogue_and_missions.md): Militia agent missions, frontline LP payout multipliers, and faction standing changes.
+
+---
+
+[← Back to Wiki Table of Contents](../README.md)

@@ -1,5 +1,11 @@
 # Destiny Physics Simulation Loop & Kinematics
 
+> **Navigation**: [EvoMu Technical Wiki](../README.md) • [Related Systems](#related-systems--cross-references)
+>
+> [← Back to Wiki Table of Contents](../README.md)
+
+---
+
 ## Overview & Lore Context
 
 In the universe of New Eden, celestial navigation and vessel kinematics are governed by the **Destiny Physics Engine**. Unlike conventional Newtonian orbital mechanics—where an object in vacuum accelerates indefinitely under constant thrust and preserves momentum without dissipation—space dynamics in EVE Online operate under an artificial, lore-grounded framework often colloquially termed **"submarine physics in space."**
@@ -34,7 +40,7 @@ In New Eden lore, a starship does not travel through empty Newtonian spacetime. 
 3. **Align Time ($t_{\text{align}}$):** To enter the faster-than-light (FTL) warp tunnel, a ship must align its spatial orientation to within $5^\circ$ of its destination vector and achieve at least $75\%$ of its terminal sub-warp velocity. The time required depends on hull mass and the hull agility factor.
 
 ### The Spatial Role of Ballparks
-To simulate hundreds of thousands of celestial objects, starbases, stations, and active vessels without incurring global $O(N^2)$ collision and targeting overhead, New Eden partitions space into discrete, authoritative simulation domains known as **Ballparks** ([`Ballpark`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/lib.rs#L943)). Each solar system runs an independent Ballpark instance that advances on a strict $1\text{ Hz}$ server tick. Within a Ballpark, space is further partitioned into dynamic **Grid Bubbles** (typically with an $8\,000\text{ km}$ radius) that isolate network update broadcasts, ensuring client viewports receive high-fidelity state synchronizations only for relevant on-grid observers.
+To simulate hundreds of thousands of celestial objects, starbases, stations, and active vessels without incurring global $O(N^2)$ collision and targeting overhead, New Eden partitions space into discrete, authoritative simulation domains known as **Ballparks** ([`Ballpark`](../../../crates/eve-destiny/src/lib.rs#L943)). Each solar system runs an independent Ballpark instance that advances on a strict $1\text{ Hz}$ server tick. Within a Ballpark, space is further partitioned into dynamic **Grid Bubbles** (typically with an $8\,000\text{ km}$ radius) that isolate network update broadcasts, ensuring client viewports receive high-fidelity state synchronizations only for relevant on-grid observers.
 
 ---
 
@@ -64,7 +70,7 @@ sequenceDiagram
 ```
 
 #### Kinematic State Vector
-Every physical entity within a Ballpark is modeled as a spherical rigid body termed a **Ball** ([`Ball`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/lib.rs#L508)), possessing the following state attributes:
+Every physical entity within a Ballpark is modeled as a spherical rigid body termed a **Ball** ([`Ball`](../../../crates/eve-destiny/src/lib.rs#L508)), possessing the following state attributes:
 - Position vector: $\vec{P} = (x, y, z) \in \mathbb{R}^3$ (meters).
 - Velocity vector: $\vec{V} = (v_x, v_y, v_z) \in \mathbb{R}^3$ (meters per second).
 - Maximum terminal speed: $v_{\max} \in \mathbb{R}^+$ ($\text{m/s}$).
@@ -171,7 +177,7 @@ When orbiting a target at distance $R_{\text{orbit}} = r_{\text{ship}} + r_{\tex
 
 ### 4. The 5-Phase Warp Pipeline
 
-Warp travel is a multi-phase faster-than-light transit state machine executed by [`step_warp_ball`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/physics.rs#L1211-L1342):
+Warp travel is a multi-phase faster-than-light transit state machine executed by [`step_warp_ball`](../../../crates/eve-destiny/src/physics.rs#L1211-L1342):
 
 ```mermaid
 flowchart LR
@@ -235,7 +241,7 @@ flowchart TD
 ```
 
 #### The Ray-Sphere Interception Algorithm
-Every active warp bubble in [`WarpBubbleMgr`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/lib.rs#L891) is tested against the linear warp vector between $\vec{P}_{\text{origin}}$ and $\vec{P}_{\text{dest}}$:
+Every active warp bubble in [`WarpBubbleMgr`](../../../crates/eve-destiny/src/lib.rs#L891) is tested against the linear warp vector between $\vec{P}_{\text{origin}}$ and $\vec{P}_{\text{dest}}$:
 1. Direction vector: $\vec{D} = \vec{P}_{\text{dest}} - \vec{P}_{\text{origin}}$, unit direction $\hat{D} = \frac{\vec{D}}{\|\vec{D}\|}$, total distance $d = \|\vec{D}\|$.
 2. Vector to bubble center: $\vec{C}_{\text{rel}} = \vec{P}_{\text{bubble}} - \vec{P}_{\text{origin}}$.
 3. Projection distance along ray: $t_{\text{proj}} = \vec{C}_{\text{rel}} \cdot \hat{D}$.
@@ -291,35 +297,35 @@ flowchart TD
 
 ### Source Code Mappings & Primary Types
 
-1. [`crates/eve-destiny/src/lib.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/lib.rs):
-   - [`Ball`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/lib.rs#L508-L534): Core kinematic entity struct storing position, velocity, mass, agility, radius, and movement mode. Includes helper functions `time_constant()` and `align_time_seconds()`.
-   - [`Ballpark`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/lib.rs#L943-L980): The solar system simulation world containing `balls`, `combat_states`, `grids`, and `target_locks`.
-   - [`MovementMode`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/lib.rs#L56-L101): Complete enum covering all 13 canonical motion modes.
-   - [`WarpPhase`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/lib.rs#L42-L52): State machine enum for `Aligning`, `Accelerating`, `Cruising`, and `Decelerating`.
-   - [`CombatState`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/lib.rs#L182-L324): Shield/Armor/Structure HP pools, resonances, signature radius, warp scramble strengths, gate cloak, and post-warp invulnerability.
-   - [`WarpBubbleMgr`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/lib.rs#L891-L931): Maintains active mobile warp disruptors and interdiction spheres, evaluating scramble presence and ray-sphere warp intercepts.
-   - [`DestinyEvent`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/lib.rs#L537-L612): High-level state synchronization event enum emitted per tick.
+1. [`crates/eve-destiny/src/lib.rs`](../../../crates/eve-destiny/src/lib.rs):
+   - [`Ball`](../../../crates/eve-destiny/src/lib.rs#L508-L534): Core kinematic entity struct storing position, velocity, mass, agility, radius, and movement mode. Includes helper functions `time_constant()` and `align_time_seconds()`.
+   - [`Ballpark`](../../../crates/eve-destiny/src/lib.rs#L943-L980): The solar system simulation world containing `balls`, `combat_states`, `grids`, and `target_locks`.
+   - [`MovementMode`](../../../crates/eve-destiny/src/lib.rs#L56-L101): Complete enum covering all 13 canonical motion modes.
+   - [`WarpPhase`](../../../crates/eve-destiny/src/lib.rs#L42-L52): State machine enum for `Aligning`, `Accelerating`, `Cruising`, and `Decelerating`.
+   - [`CombatState`](../../../crates/eve-destiny/src/lib.rs#L182-L324): Shield/Armor/Structure HP pools, resonances, signature radius, warp scramble strengths, gate cloak, and post-warp invulnerability.
+   - [`WarpBubbleMgr`](../../../crates/eve-destiny/src/lib.rs#L891-L931): Maintains active mobile warp disruptors and interdiction spheres, evaluating scramble presence and ray-sphere warp intercepts.
+   - [`DestinyEvent`](../../../crates/eve-destiny/src/lib.rs#L537-L612): High-level state synchronization event enum emitted per tick.
 
-2. [`crates/eve-destiny/src/physics.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/physics.rs):
-   - [`Ballpark::step`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/physics.rs#L13-L895): Advances the solar system simulation by $dt$ seconds. Steps sub-warp motions, warp trajectories, collision bounces, proximity decloaking, tether healing, and target lock progressions.
-   - [`integrate_subwarp`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/physics.rs#L1198-L1209): Analytical exponential decay integrator updating position and velocity.
-   - [`step_warp_ball`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/physics.rs#L1211-L1342): Continuous 5-phase FTL warp pipeline implementation.
-   - [`compute_subwarp_goal_velocity`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/physics.rs#L1057-L1139): Evaluates directional steering, approach deceleration envelopes, and centripetal orbit trajectories.
-   - [`combat`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/physics.rs#L898-L1055): Mathematical implementations for lock time (`compute_lock_time_seconds`), angular velocity (`compute_angular_velocity`), turret chance-to-hit (`compute_turret_chance_to_hit`), and passive capacitor/shield recharge curves (`compute_passive_recharge`).
+2. [`crates/eve-destiny/src/physics.rs`](../../../crates/eve-destiny/src/physics.rs):
+   - [`Ballpark::step`](../../../crates/eve-destiny/src/physics.rs#L13-L895): Advances the solar system simulation by $dt$ seconds. Steps sub-warp motions, warp trajectories, collision bounces, proximity decloaking, tether healing, and target lock progressions.
+   - [`integrate_subwarp`](../../../crates/eve-destiny/src/physics.rs#L1198-L1209): Analytical exponential decay integrator updating position and velocity.
+   - [`step_warp_ball`](../../../crates/eve-destiny/src/physics.rs#L1211-L1342): Continuous 5-phase FTL warp pipeline implementation.
+   - [`compute_subwarp_goal_velocity`](../../../crates/eve-destiny/src/physics.rs#L1057-L1139): Evaluates directional steering, approach deceleration envelopes, and centripetal orbit trajectories.
+   - [`combat`](../../../crates/eve-destiny/src/physics.rs#L898-L1055): Mathematical implementations for lock time (`compute_lock_time_seconds`), angular velocity (`compute_angular_velocity`), turret chance-to-hit (`compute_turret_chance_to_hit`), and passive capacitor/shield recharge curves (`compute_passive_recharge`).
 
-3. [`crates/eve-destiny/src/ballpark.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/ballpark.rs):
-   - [`find_or_create_grid_for_position`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/ballpark.rs#L140-L190): Manages spatial grid bubble boundaries, enforcing non-overlapping clamped grid walls.
-   - [`add_static_ball`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/ballpark.rs#L55-L68): Inserts system-wide immobile celestial objects without triggering dynamic `AddBall` network notifications.
+3. [`crates/eve-destiny/src/ballpark.rs`](../../../crates/eve-destiny/src/ballpark.rs):
+   - [`find_or_create_grid_for_position`](../../../crates/eve-destiny/src/ballpark.rs#L140-L190): Manages spatial grid bubble boundaries, enforcing non-overlapping clamped grid walls.
+   - [`add_static_ball`](../../../crates/eve-destiny/src/ballpark.rs#L55-L68): Inserts system-wide immobile celestial objects without triggering dynamic `AddBall` network notifications.
 
-4. [`crates/eve-destiny/src/wire.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/wire.rs):
-   - [`encode_add_balls`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/wire.rs#L78-L100): Serializes balls into canonical binary `AddBalls` / `SetState` state buffers.
-   - [`decode_add_balls`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/wire.rs#L309-L450): Binary decoder unpacking `MassSector` and `FreeSector` ball attributes.
-   - [`encode_destiny_updates`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/wire.rs#L990-L1050): Marshals queued `DestinyEvent` records into `DoDestinyUpdate` tuples matching the Python client bytecode layout.
+4. [`crates/eve-destiny/src/wire.rs`](../../../crates/eve-destiny/src/wire.rs):
+   - [`encode_add_balls`](../../../crates/eve-destiny/src/wire.rs#L78-L100): Serializes balls into canonical binary `AddBalls` / `SetState` state buffers.
+   - [`decode_add_balls`](../../../crates/eve-destiny/src/wire.rs#L309-L450): Binary decoder unpacking `MassSector` and `FreeSector` ball attributes.
+   - [`encode_destiny_updates`](../../../crates/eve-destiny/src/wire.rs#L990-L1050): Marshals queued `DestinyEvent` records into `DoDestinyUpdate` tuples matching the Python client bytecode layout.
 
-5. [`crates/eve-server/src/services/space_destiny.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/space_destiny.rs):
+5. [`crates/eve-server/src/services/space_destiny.rs`](../../../crates/eve-server/src/services/space_destiny.rs):
    - Intercepts MachoNet calls targeting the `beyonce` service (`CmdGotoDirection`, `CmdOrbit`, `CmdFollowBall`, `CmdStop`, `CmdWarpToStuff`), translating client commands into actor commands.
 
-6. [`crates/eve-server/src/system_actor.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/system_actor.rs):
+6. [`crates/eve-server/src/system_actor.rs`](../../../crates/eve-server/src/system_actor.rs):
    - Coordinates the per-system actor mailbox loop, dispatches `SystemCommand::StepManual`, executes module cycle progressions, and broadcasts tick updates to connected client sessions.
 
 ---
@@ -371,7 +377,7 @@ The Destiny physics engine is backed by comprehensive unit and integration test 
 
 ### Primary Test Suites
 
-1. [`crates/eve-destiny/src/tests.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/tests.rs):
+1. [`crates/eve-destiny/src/tests.rs`](../../../crates/eve-destiny/src/tests.rs):
    - `test_rifter_align_time_and_exponential_acceleration`: Validates Rifter align time formula ($5.103\text{ s}$ against canonical attributes: mass $1\,067\,000\text{ kg}$, inertia $3.45$, max velocity $365\text{ m/s}$), reaching $> 75\%$ velocity in 6 ticks.
    - `test_short_and_long_warp_exit_without_overshoot`: Validates short warp trajectory without overshooting the $2\,500\text{ m}$ arrival bubble.
    - `test_turret_wrecking_shot_missile_and_proximity_decloak`: Tests $2\,000\text{ m}$ surface proximity decloaking and $3.0\times$ wrecking shots.
@@ -380,28 +386,41 @@ The Destiny physics engine is backed by comprehensive unit and integration test 
    - `test_interdiction_bubbles_trapping_nullifier_and_micro_jump`: Validates mobile warp disruptor bubbles, heavy interdiction spheres, drag/stop bubble perimeter trapping, and Interdiction Nullifier bypasses.
    - `test_issue_69_no_aligning_teleport_or_mid_flight_yank_on_late_bubble`: Confirms that ships in warp cruise cannot be yanked mid-flight by late bubbles.
 
-2. [`crates/eve-server/tests/it/destiny_events_emission.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/destiny_events_emission.rs):
+2. [`crates/eve-server/tests/it/destiny_events_emission.rs`](../../../crates/eve-server/tests/it/destiny_events_emission.rs):
    - `test_set_state_emitted_on_update_state_request`: Verifies `SetState` binary stream generation, ego identification, and marshal round-trip consistency.
    - `test_warp_to_and_warp_special_fx_emitted_on_warp`: Verifies `WarpTo` coordinate encoding, `effects.Warping` `OnSpecialFX` emission, and landing termination.
    - `test_goto_point_emitted_by_cmd_goto_point`: Validates `CmdGotoPoint` translation and network update dispatch.
 
-3. [`crates/eve-server/tests/it/destiny_binary_stream.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/destiny_binary_stream.rs):
+3. [`crates/eve-server/tests/it/destiny_binary_stream.rs`](../../../crates/eve-server/tests/it/destiny_binary_stream.rs):
    - Full binary serialization and deserialization round-trip tests for all 13 `DSTBALL_*` modes, ensuring 100% wire parity with canonical client packet parsers.
 
 ### Parity Audit Tag Matrix
 
 | Parity / Feature Tag | Target System | Authoritative Implementation |
 | :--- | :--- | :--- |
-| `feat:navigation.destiny-updates` | Network Destiny Updates | [`wire.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/wire.rs#L990-L1050) |
-| `feat:navigation.bubbles-grid` | 8,000 km Spatial Grids | [`ballpark.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/ballpark.rs#L140-L190) |
-| `feat:navigation.celestials-balls` | Immobile Static Celestials | [`ballpark.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/ballpark.rs#L55-L68) |
-| `feat:navigation.warp-pipeline` | 5-Phase FTL Warp Engine | [`physics.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/physics.rs#L1211-L1342) |
-| `feat:navigation.warp-bubbles` | Interdiction Drag & Stop Geometry | [`lib.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/lib.rs#L833-L887) |
-| `feat:navigation.collision-bounce` | Elastic Collision Deflection | [`physics.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/physics.rs#L217-L352) |
-| `feat:navigation.proximity-decloak`| 2,000m Proximity Decloak | [`physics.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/physics.rs#L503-L532) |
-| `feat:navigation.orbit` | Centripetal Orbit Kinematics | [`physics.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/physics.rs#L1097-L1126) |
-| `feat:navigation.approach` | Deceleration Envelope Approach | [`physics.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/physics.rs#L1066-L1096) |
-| `feat:navigation.stop-ship` | Inertial Velocity Damping | [`physics.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/physics.rs#L1198-L1209) |
-| `destiny:SetState` | Full Viewport State Sync | [`wire.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/wire.rs#L680-L770) |
-| `destiny:AddBalls2` | Dynamic Entity Grid Entry | [`wire.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/wire.rs#L849-L863) |
-| `destiny:WarpTo` | FTL Vector Broadcast | [`wire.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-destiny/src/wire.rs#L942-L956) |
+| `feat:navigation.destiny-updates` | Network Destiny Updates | [`wire.rs`](../../../crates/eve-destiny/src/wire.rs#L990-L1050) |
+| `feat:navigation.bubbles-grid` | 8,000 km Spatial Grids | [`ballpark.rs`](../../../crates/eve-destiny/src/ballpark.rs#L140-L190) |
+| `feat:navigation.celestials-balls` | Immobile Static Celestials | [`ballpark.rs`](../../../crates/eve-destiny/src/ballpark.rs#L55-L68) |
+| `feat:navigation.warp-pipeline` | 5-Phase FTL Warp Engine | [`physics.rs`](../../../crates/eve-destiny/src/physics.rs#L1211-L1342) |
+| `feat:navigation.warp-bubbles` | Interdiction Drag & Stop Geometry | [`lib.rs`](../../../crates/eve-destiny/src/lib.rs#L833-L887) |
+| `feat:navigation.collision-bounce` | Elastic Collision Deflection | [`physics.rs`](../../../crates/eve-destiny/src/physics.rs#L217-L352) |
+| `feat:navigation.proximity-decloak`| 2,000m Proximity Decloak | [`physics.rs`](../../../crates/eve-destiny/src/physics.rs#L503-L532) |
+| `feat:navigation.orbit` | Centripetal Orbit Kinematics | [`physics.rs`](../../../crates/eve-destiny/src/physics.rs#L1097-L1126) |
+| `feat:navigation.approach` | Deceleration Envelope Approach | [`physics.rs`](../../../crates/eve-destiny/src/physics.rs#L1066-L1096) |
+| `feat:navigation.stop-ship` | Inertial Velocity Damping | [`physics.rs`](../../../crates/eve-destiny/src/physics.rs#L1198-L1209) |
+| `destiny:SetState` | Full Viewport State Sync | [`wire.rs`](../../../crates/eve-destiny/src/wire.rs#L680-L770) |
+| `destiny:AddBalls2` | Dynamic Entity Grid Entry | [`wire.rs`](../../../crates/eve-destiny/src/wire.rs#L849-L863) |
+| `destiny:WarpTo` | FTL Vector Broadcast | [`wire.rs`](../../../crates/eve-destiny/src/wire.rs#L942-L956) |
+
+---
+
+## Related Systems & Cross-References
+
+- [**Gunnery Tracking & Missile Kinematics**](../combat_and_crimewatch/gunnery_tracking_and_missile_kinematics.md): Angular velocity, transversal calculations, and missile kinematic propagation across 1 Hz ticks.
+- [**Stargate Jumps & Cynosural Navigation**](../universe_and_navigation/stargate_jumping_and_cynosural_navigation.md): Sub-warp kinematics, warp bubble entrapment, and gate transition pipelines.
+- [**NPC Combat AI & Living World Ecology**](../npcs_and_living_world/npc_combat_ai_and_ecology.md): Living world entity movement, dynamic orbit paths, and LOD physics tiering.
+- [**Upwell Structures Overview & Lifecycle**](../upwell_and_structures/upwell_structures_overview.md): 1,000 km spatial exclusion grids, docking bays, and tethering range verification.
+
+---
+
+[← Back to Wiki Table of Contents](../README.md)

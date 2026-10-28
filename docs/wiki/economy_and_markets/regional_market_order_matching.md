@@ -1,5 +1,11 @@
 # Regional Market Engine, Order Matching & Contracts
 
+> **Navigation**: [EvoMu Technical Wiki](../README.md) • [Related Systems](#related-systems--cross-references)
+>
+> [← Back to Wiki Table of Contents](../README.md)
+
+---
+
 ## Overview & Lore Context
 
 In the boundless expanse of New Eden, economic might is as decisive as fleet firepower. The lifeblood of capsuleer civilization flows not through interstellar warp gates alone, but through the continuous, decentralized movement of commodities, warships, and high-technology modules. This galactic trade is organized under two distinct yet complementary commercial frameworks: the **Regional Market Engine** and the **Contracts System**.
@@ -273,7 +279,7 @@ Courier contracts enable the physical transport of heavy goods across dangerous 
 
 ## EvoMu Implementation Architecture
 
-The market and contracts engine is implemented primarily across [`crates/eve-server`](file:///Users/sergeya/ai/EvoMu/crates/eve-server), [`crates/eve-db`](file:///Users/sergeya/ai/EvoMu/crates/eve-db), and [`crates/eve-sde`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde).
+The market and contracts engine is implemented primarily across [`crates/eve-server`](../../../crates/eve-server), [`crates/eve-db`](../../../crates/eve-db), and [`crates/eve-sde`](../../../crates/eve-sde).
 
 ```mermaid
 flowchart LR
@@ -312,30 +318,30 @@ flowchart LR
 ### 1. Primary Handlers & Source Mapping
 
 #### Regional Market Services
-- [`crates/eve-server/src/services/market_trading.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/market_trading.rs):
+- [`crates/eve-server/src/services/market_trading.rs`](../../../crates/eve-server/src/services/market_trading.rs):
   Handles incoming `marketProxy` calls:
   - `PlaceBuyOrder(stationID, typeID, price, quantity, orderRange, minVolume, duration, ...)`: Immediate sweep of matching asks followed by resting order placement.
   - `PlaceMultiSellOrder(itemList, useCorp, duration, expectedBrokersFee)`: Bulk sell order creation with multi-item inventory locking.
   - `CancelCharOrder(orderID)`: Cancels active order, refunds unspent escrow, or returns unsold items to hangar/deliveries.
   - `GetOrders(regionID, typeID)`: Retrieves active buy and sell orders for a specific commodity within a region.
   - `GetStationAsks(stationID)` & `GetRegionBest(regionID)`: High-efficiency order book views for UI clients.
-- [`crates/eve-server/src/services/market_orders_escrow.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/market_orders_escrow.rs):
+- [`crates/eve-server/src/services/market_orders_escrow.rs`](../../../crates/eve-server/src/services/market_orders_escrow.rs):
   - `handle_orders_escrow`: Orchestrates multi-sell execution and upfront broker fee validation.
   - `BuyMultipleItems`: Atomic execution of multi-item shopping lists sweeping lowest asks across stations.
   - Upwell structure tax routing: splits broker fees $50\% / 50\%$ between SCC and structure owner (`structure_owner_broker_share`).
-- [`crates/eve-server/src/services/market_price_history.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/market_price_history.rs):
+- [`crates/eve-server/src/services/market_price_history.rs`](../../../crates/eve-server/src/services/market_price_history.rs):
   - `execute_crossed_order_fills_on_modify`: Handles price improvement, margin shortfalls, and crossed order fills when modifying existing orders.
   - `build_price_history_rows`: Converts daily price history from `snap.market_history` into Windows FileTime rowsets for `GetOldPriceHistory` and `GetNewPriceHistory`.
-- [`crates/eve-server/src/services/market_contracts.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/market_contracts.rs):
+- [`crates/eve-server/src/services/market_contracts.rs`](../../../crates/eve-server/src/services/market_contracts.rs):
   - `ModifyCharOrder(orderID, newPrice, ...)`: Re-validates 4-sig-fig price ticks, computes relist fees, and executes crossed order sweeps.
   - `sweep_expired_orders`: Sweeps expired non-NPC orders across cluster ticks (`feat:market.order-expiry`).
   - Sleeper Blue Loot NPC orders (`feat:market.npc-buy-orders-sleeper-loot`): Seeds permanent buy orders for Sleeper salvage at canonical values (e.g., *Neural Network Analyzer* at $200\,000\text{ ISK}$, *Sleeper Drone AI Nexus* at $5\,000\,000\text{ ISK}$).
   - PLEX Vault Integration: Settlements for PLEX (Type ID `44992`) route directly into the account-wide PLEX Vault rather than station hangars.
-- [`crates/eve-server/src/services/quasar_market.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/quasar_market.rs):
+- [`crates/eve-server/src/services/quasar_market.rs`](../../../crates/eve-server/src/services/quasar_market.rs):
   Quasar Protobuf gateway implementing `eve.market.orders.*` endpoints and streaming `NewEntryNotice` broadcasts.
 
 #### Contracts Services
-- [`crates/eve-server/src/services/contracts_service.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/contracts_service.rs):
+- [`crates/eve-server/src/services/contracts_service.rs`](../../../crates/eve-server/src/services/contracts_service.rs):
   Handles `contractProxy` and `contractMgr` calls:
   - `CreateContract`: Validates item availability, packaging rules, requested items, and slot limits (*Contracting* skill).
   - `AcceptContract`: Debits collateral/reward escrow, wraps goods into Plastic Wrap (`3468`) for couriers, or executes atomic item swap for exchanges.
@@ -349,10 +355,10 @@ flowchart LR
 
 ### 2. State Models & Schema Definitions
 
-The market and contracts state is persisted inside [`WorldStateSnapshot`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/snapshot_ext.rs):
+The market and contracts state is persisted inside [`WorldStateSnapshot`](../../../crates/eve-db/src/snapshot_ext.rs):
 
 #### MarketOrderRecord
-Defined in [`crates/eve-db/src/types.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/types.rs#L654-L668):
+Defined in [`crates/eve-db/src/types.rs`](../../../crates/eve-db/src/types.rs#L654-L668):
 ```rust
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MarketOrderRecord {
@@ -372,7 +378,7 @@ pub struct MarketOrderRecord {
 ```
 
 #### ContractRecord
-Defined in [`crates/eve-db/src/types.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/types.rs#L681-L719):
+Defined in [`crates/eve-db/src/types.rs`](../../../crates/eve-db/src/types.rs#L681-L719):
 ```rust
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContractRecord {
@@ -404,7 +410,7 @@ pub struct ContractRecord {
 ```
 
 #### Periodic Cluster Tick Integration
-Order expiration is evaluated during cluster lifecycle ticks in [`crates/eve-server/src/sp6_lifecycle/cluster_tick.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/sp6_lifecycle/cluster_tick.rs#L616-L621):
+Order expiration is evaluated during cluster lifecycle ticks in [`crates/eve-server/src/sp6_lifecycle/cluster_tick.rs`](../../../crates/eve-server/src/sp6_lifecycle/cluster_tick.rs#L616-L621):
 ```rust
 // Sweep expired market orders across cluster ticks (feat:market.order-expiry)
 let swept = ctx.db.with_mut_snapshot(|s| crate::services::market_contracts::sweep_expired_orders(s, now_unix));
@@ -425,7 +431,7 @@ Every transaction (market fill, broker fee, sales tax, contract payout, or escro
   $$\Delta \text{Balance}_{\text{buyer}} + \Delta \text{Balance}_{\text{seller}} + \text{SalesTax} + \Delta \text{Escrow} = 0$$
 
 ### 2. Fixed-Point Arithmetic & Checked Math (`IskCents`)
-All currency fields utilize the [`IskCents`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/types.rs) newtype, representing currency as an exact 64-bit signed integer of cents ($1\text{ ISK} = 100\text{ cents}$).
+All currency fields utilize the [`IskCents`](../../../crates/eve-db/src/types.rs) newtype, representing currency as an exact 64-bit signed integer of cents ($1\text{ ISK} = 100\text{ cents}$).
 - Every addition, subtraction, or quantity multiplication utilizes checked operations (`checked_add`, `checked_sub`, `checked_mul_qty`).
 - If an operation would cause numeric overflow, the transaction immediately aborts with `MarketOrderOverflow` or `InsufficientFunds`, preventing infinite ISK exploits.
 
@@ -439,7 +445,7 @@ Courier items are encapsulated in a single `Plastic Wrap` item (`type_id = 3468`
 
 ### 5. Non-Fungible Item Attribute Preservation
 When singletons (BPCs, mutated Abyssal modules) are escrowed in Item Exchange contracts:
-- Dynamic attributes (`damage`, `materialEfficiency`, `timeEfficiency`, `runsRemaining`, `sourceMutaplasmidID`) are preserved verbatim in [`ContractRecord`](file:///Users/sergeya/ai/EvoMu/crates/eve-db/src/types.rs#L681).
+- Dynamic attributes (`damage`, `materialEfficiency`, `timeEfficiency`, `runsRemaining`, `sourceMutaplasmidID`) are preserved verbatim in [`ContractRecord`](../../../crates/eve-db/src/types.rs#L681).
 - Singletons cannot be merged into standard commodity stacks, preventing loss of research or Abyssal rolls.
 
 ---
@@ -450,27 +456,27 @@ The regional market engine and contracts system are rigorously validated by exte
 
 ### Primary Test Suites
 
-1. [`crates/eve-server/tests/it/economy_market.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/economy_market.rs):
+1. [`crates/eve-server/tests/it/economy_market.rs`](../../../crates/eve-server/tests/it/economy_market.rs):
    - `test_e1_broker_fee_and_sales_tax_skill_discounts`: Validates broker fee discounts from *Broker Relations* and corp/faction standings, sales tax reductions from *Accounting*, and minimum fee floors.
    - `test_e2_market_order_matching_queries_and_cancellation`: Tests full order lifecycle: placing limit orders, immediate order matching, partial fills, order cancellation, and escrow refunds.
 
-2. [`crates/eve-server/tests/it/economy_market_part2.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/economy_market_part2.rs):
+2. [`crates/eve-server/tests/it/economy_market_part2.rs`](../../../crates/eve-server/tests/it/economy_market_part2.rs):
    - `test_market_instant_matching`: Verifies maker-taker price execution, price improvement refunds for buyers, and sales tax deduction from seller gross proceeds.
 
-3. [`crates/eve-server/tests/it/economy_market_part3.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/economy_market_part3.rs):
+3. [`crates/eve-server/tests/it/economy_market_part3.rs`](../../../crates/eve-server/tests/it/economy_market_part3.rs):
    - `test_market_modify_relist_tick_size_corp_remote_expiry_sleeper_and_plex`: Validates 4-significant-figure tick rejection, relisting fees (*Advanced Broker Relations*), corporate division accounting, remote order range limits (*Procurement*, *Visibility*), Sleeper blue loot buy orders, and PLEX Vault settlement.
 
-4. [`crates/eve-server/tests/it/market_orders_complete.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/market_orders_complete.rs):
+4. [`crates/eve-server/tests/it/market_orders_complete.rs`](../../../crates/eve-server/tests/it/market_orders_complete.rs):
    - `test_tick_size_relist_fee_broker_minimum_scc_surcharge_and_durations`: Tests Upwell structure broker fee splits ($50\%$ SCC / $50\%$ owner), order durations, and relisting fee formulas.
    - `test_ranged_buy_orders_corp_divisions_multisell_multibuy_expiry_and_history`: Tests multi-sell orders (`PlaceMultiSellOrder`), multi-buy executions (`BuyMultipleItems`), and ranged buy order matching across stargate jumps.
 
-5. [`crates/eve-server/tests/it/economy_contracts.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/economy_contracts.rs):
+5. [`crates/eve-server/tests/it/economy_contracts.rs`](../../../crates/eve-server/tests/it/economy_contracts.rs):
    - `test_e3_contracts_lifecycle_item_exchange_courier_auction`: Comprehensive end-to-end verification of Item Exchange, Courier, and Auction lifecycles.
    - `test_contracts_item_exchange_and_request`: Tests one-way sales, want-to-buy requests, and two-way item barter.
    - `test_contracts_auction_and_courier`: Tests auction bidding increments, outbid escrow refunds, buyout completion, and courier transport settlement.
    - `test_contracts_visibility_search_fees_limits_reject_blueprints_and_gm_expire`: Validates contract slot caps (*Contracting*), private contract rejection, `BreakPlasticWrap` courier failure, BPC attribute preservation, and GM contract expiry.
 
-6. [`crates/eve-server/tests/it/market_price_history_remediation.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/market_price_history_remediation.rs):
+6. [`crates/eve-server/tests/it/market_price_history_remediation.rs`](../../../crates/eve-server/tests/it/market_price_history_remediation.rs):
    - `test_market_price_history_remediation`: Validates daily OHLCV aggregations, Windows FileTime formatting, and `GetOldPriceHistory` / `GetNewPriceHistory` responses.
 
 ---
@@ -479,20 +485,33 @@ The regional market engine and contracts system are rigorously validated by exte
 
 | Parity / Feature Tag | Target System | Authoritative Implementation |
 | :--- | :--- | :--- |
-| `feat:market.broker-fee` | Broker Fee Formula & Standing Modifiers | [`formulas.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/formulas.rs#L449-L459) |
-| `feat:market.sales-tax` | Sales Tax Formula & Accounting Discount | [`formulas.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/formulas.rs#L461-L463) |
-| `feat:market.tick-size-four-significant-digits` | 4-Significant-Figure Price Rule | [`market_contracts.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/market_contracts.rs#L58-L69) |
-| `feat:market.order-modify-relist-fee` | Order Relist Fee & Advanced Broker Relations | [`market_contracts.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/market_contracts.rs#L87-L105) |
-| `feat:market.order-expiry` | Cluster Tick Expired Order Sweep | [`cluster_tick.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/sp6_lifecycle/cluster_tick.rs#L616-L621) |
-| `feat:market.upwell-orders` | Citadel Broker Fee & 50% SCC Surcharge Split | [`market_orders_escrow.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/market_orders_escrow.rs#L230-L260) |
-| `feat:market.npc-buy-orders-sleeper-loot` | Permanent NPC Blue Loot Buy Orders | [`market_contracts.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/market_contracts.rs#L26-L32) |
-| `feat:market.price-history` | Regional OHLCV Rowsets & FileTime Encoding | [`market_price_history.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/market_price_history.rs#L394-L454) |
-| `feat:contracts.item-exchange` | Item Exchange Lifecycle & Barter | [`contracts_service.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/contracts_service.rs#L520-L600) |
-| `feat:contracts.courier` | Courier Logistics & Plastic Wrap Delivery | [`contracts_service.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/contracts_service.rs#L860-L930) |
-| `feat:contracts.courier-plastic-wrap-break` | Tamper Penalty & Collateral Forfeiture | [`contracts_service.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/contracts_service.rs#L935-L985) |
-| `feat:contracts.auction` | Public Auctions, Bids & Outbid Refunds | [`contracts_service.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/contracts_service.rs#L690-L800) |
-| `feat:contracts.blueprint-singleton-preservation` | BPC Runs, ME/TE & Mutaplasmid Preservation | [`contracts_service.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/contracts_service.rs#L65-L84) |
-| `rpc:marketProxy.PlaceBuyOrder` | MachoNet Buy Order Placement | [`market_trading.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/market_trading.rs#L670-L885) |
-| `rpc:marketProxy.PlaceMultiSellOrder` | MachoNet Multi-Sell Order Placement | [`market_orders_escrow.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/market_orders_escrow.rs#L30-L100) |
-| `rpc:marketProxy.CancelCharOrder` | MachoNet Order Cancellation | [`market_trading.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/market_trading.rs#L530-L590) |
-| `rpc:contractProxy.CreateContract` | Contract Creation & Escrow Lock | [`contracts_service.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/contracts_service.rs#L140-L450) |
+| `feat:market.broker-fee` | Broker Fee Formula & Standing Modifiers | [`formulas.rs`](../../../crates/eve-server/src/formulas.rs#L449-L459) |
+| `feat:market.sales-tax` | Sales Tax Formula & Accounting Discount | [`formulas.rs`](../../../crates/eve-server/src/formulas.rs#L461-L463) |
+| `feat:market.tick-size-four-significant-digits` | 4-Significant-Figure Price Rule | [`market_contracts.rs`](../../../crates/eve-server/src/services/market_contracts.rs#L58-L69) |
+| `feat:market.order-modify-relist-fee` | Order Relist Fee & Advanced Broker Relations | [`market_contracts.rs`](../../../crates/eve-server/src/services/market_contracts.rs#L87-L105) |
+| `feat:market.order-expiry` | Cluster Tick Expired Order Sweep | [`cluster_tick.rs`](../../../crates/eve-server/src/sp6_lifecycle/cluster_tick.rs#L616-L621) |
+| `feat:market.upwell-orders` | Citadel Broker Fee & 50% SCC Surcharge Split | [`market_orders_escrow.rs`](../../../crates/eve-server/src/services/market_orders_escrow.rs#L230-L260) |
+| `feat:market.npc-buy-orders-sleeper-loot` | Permanent NPC Blue Loot Buy Orders | [`market_contracts.rs`](../../../crates/eve-server/src/services/market_contracts.rs#L26-L32) |
+| `feat:market.price-history` | Regional OHLCV Rowsets & FileTime Encoding | [`market_price_history.rs`](../../../crates/eve-server/src/services/market_price_history.rs#L394-L454) |
+| `feat:contracts.item-exchange` | Item Exchange Lifecycle & Barter | [`contracts_service.rs`](../../../crates/eve-server/src/services/contracts_service.rs#L520-L600) |
+| `feat:contracts.courier` | Courier Logistics & Plastic Wrap Delivery | [`contracts_service.rs`](../../../crates/eve-server/src/services/contracts_service.rs#L860-L930) |
+| `feat:contracts.courier-plastic-wrap-break` | Tamper Penalty & Collateral Forfeiture | [`contracts_service.rs`](../../../crates/eve-server/src/services/contracts_service.rs#L935-L985) |
+| `feat:contracts.auction` | Public Auctions, Bids & Outbid Refunds | [`contracts_service.rs`](../../../crates/eve-server/src/services/contracts_service.rs#L690-L800) |
+| `feat:contracts.blueprint-singleton-preservation` | BPC Runs, ME/TE & Mutaplasmid Preservation | [`contracts_service.rs`](../../../crates/eve-server/src/services/contracts_service.rs#L65-L84) |
+| `rpc:marketProxy.PlaceBuyOrder` | MachoNet Buy Order Placement | [`market_trading.rs`](../../../crates/eve-server/src/services/market_trading.rs#L670-L885) |
+| `rpc:marketProxy.PlaceMultiSellOrder` | MachoNet Multi-Sell Order Placement | [`market_orders_escrow.rs`](../../../crates/eve-server/src/services/market_orders_escrow.rs#L30-L100) |
+| `rpc:marketProxy.CancelCharOrder` | MachoNet Order Cancellation | [`market_trading.rs`](../../../crates/eve-server/src/services/market_trading.rs#L530-L590) |
+| `rpc:contractProxy.CreateContract` | Contract Creation & Escrow Lock | [`contracts_service.rs`](../../../crates/eve-server/src/services/contracts_service.rs#L140-L450) |
+
+---
+
+## Related Systems & Cross-References
+
+- [**Corporation Roles & Governance**](../corporations_and_governance/corporation_roles_and_governance.md): Corporate wallet divisions, accountant roles, and corporate order placement.
+- [**Blueprints, Manufacturing & Reactions**](../industry_and_manufacturing/blueprints_manufacturing_and_reactions.md): Material purchasing, finished good listing, and dynamic System Cost Indexes.
+- [**Agent Dialogue & Missions**](../missions_and_agents/agent_dialogue_and_missions.md): Loyalty Point (LP) store exchanges, buy orders, and market liquidity for faction gear.
+- [**Character Progression & Skill Training**](../character_and_progression/skill_training_and_medical_clones.md): Trade skills (Accounting, Broker Relations, Margin Trading) reducing tax rates and fees.
+
+---
+
+[← Back to Wiki Table of Contents](../README.md)

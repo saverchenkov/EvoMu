@@ -1,5 +1,11 @@
 # Character Progression, Skill Training & Medical Clones
 
+> **Navigation**: [EvoMu Technical Wiki](../README.md) • [Related Systems](#related-systems--cross-references)
+>
+> [← Back to Wiki Table of Contents](../README.md)
+
+---
+
 ## Overview & Lore Context
 
 In the lore of New Eden, the **Capsuleer** represents the pinnacle of transhuman evolution—an immortal demigod commanding starships of unfathomable power through a direct neural interface. While ordinary baseline humans age, weaken, and die, a capsuleer's consciousness transcends physical biology through Jovian neuro-mapping technology, high-bandwidth brain scanning, and quantum clone synthesis.
@@ -36,7 +42,7 @@ When a capsuleer's protective capsule is breached in space, survival protocols t
 
 Alongside this medical resurrection pipeline, capsuleers master new capabilities through **Neural Skill Injections**. Rather than spending decades in traditional academies, capsuleers download encoded procedural knowledge and technical reflexes directly into their cerebral cortex. This skill acquisition rate is governed by five cognitive attributes (Intelligence, Perception, Charisma, Willpower, Memory) and enhanced via cybernetic implants. Furthermore, capsuleers utilize **Jump Clones** to project their minds across the cluster, stepping into specialized physical bodies outfitted for combat, hauling, or cognitive research.
 
-In [`EvoMu`](file:///Users/sergeya/ai/EvoMu/), the skill training and cloning infrastructure is implemented across [`eve-server`](file:///Users/sergeya/ai/EvoMu/crates/eve-server), [`eve-db`](file:///Users/sergeya/ai/EvoMu/crates/eve-db), and [`eve-sde`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde). The architecture faithfully replicates the non-linear skill point curves, unallocated free SP mechanics, 500,000 SP extraction chunks, diminishing return injector curves, 24-hour jump clone cooldown timers, and the medical clone respawn pipeline.
+In [`EvoMu`](../../), the skill training and cloning infrastructure is implemented across [`eve-server`](../../../crates/eve-server), [`eve-db`](../../../crates/eve-db), and [`eve-sde`](../../../crates/eve-sde). The architecture faithfully replicates the non-linear skill point curves, unallocated free SP mechanics, 500,000 SP extraction chunks, diminishing return injector curves, 24-hour jump clone cooldown timers, and the medical clone respawn pipeline.
 
 ---
 
@@ -162,7 +168,7 @@ Skill trading permits capsuleers to reconfigure their neural development by extr
 #### Skill Extraction Requirements
 1. **Omega Clone Account:** Only active Omega accounts can extract skills.
 2. **5.5M SP Minimum Baseline:** A character must retain at least $5,000,000\text{ SP}$ after extraction, requiring a minimum of $5,500,000\text{ SP}$ prior to extraction.
-3. **Chunk Size:** Extractions must total exactly **$500,000\text{ SP}$** per **Skill Extractor** ([`typeID: 40519`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde/)).
+3. **Chunk Size:** Extractions must total exactly **$500,000\text{ SP}$** per **Skill Extractor** ([`typeID: 40519`](../../../crates/eve-sde/)).
 4. **Non-Extractable Skills:** Exactly five fundamental skills cannot be extracted to prevent character bricking:
    * *Infomorph Psychology* (`typeID: 24242`)
    * *Advanced Infomorph Psychology* (`typeID: 33407`)
@@ -171,7 +177,7 @@ Skill trading permits capsuleers to reconfigure their neural development by extr
    * *Interplanetary Consolidation* (`typeID: 2495`)
 
 #### Injector Diminishing Returns
-When applying a **Large Skill Injector** ([`typeID: 40520`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde/)) or **Small Skill Injector** ([`typeID: 45635`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde/)), diminishing returns apply based on the recipient's total skill points ($SP_{\text{total}} = SP_{\text{trained}} + SP_{\text{unallocated}}$):
+When applying a **Large Skill Injector** ([`typeID: 40520`](../../../crates/eve-sde/)) or **Small Skill Injector** ([`typeID: 45635`](../../../crates/eve-sde/)), diminishing returns apply based on the recipient's total skill points ($SP_{\text{total}} = SP_{\text{trained}} + SP_{\text{unallocated}}$):
 
 | Character Total SP Pool | Large Injector Yield ($Y_{\text{large}}$) | Small Injector Yield ($Y_{\text{small}} = Y_{\text{large}} / 5$) | Effective Efficiency |
 | :--- | :---: | :---: | :---: |
@@ -309,34 +315,34 @@ EvoMu implements character progression and cloning across asynchronous Rust serv
 
 ### 1. Crates Involved
 
-* [`eve-server`](file:///Users/sergeya/ai/EvoMu/crates/eve-server): Houses the skill queue ticker, clone jump dispatchers, MachoNet service endpoints (`skillMgr2`, `jumpCloneSvc`, `dogmaIM`), and client notification broadcasting.
-* [`eve-db`](file:///Users/sergeya/ai/EvoMu/crates/eve-db): Manages transactional world state snapshots (`WorldStateSnapshot`), persistence schemas, and SQLite database storage.
-* [`eve-sde`](file:///Users/sergeya/ai/EvoMu/crates/eve-sde): Parses static type data, attribute mappings, prerequisite skill trees, and booster duration parameters.
+* [`eve-server`](../../../crates/eve-server): Houses the skill queue ticker, clone jump dispatchers, MachoNet service endpoints (`skillMgr2`, `jumpCloneSvc`, `dogmaIM`), and client notification broadcasting.
+* [`eve-db`](../../../crates/eve-db): Manages transactional world state snapshots (`WorldStateSnapshot`), persistence schemas, and SQLite database storage.
+* [`eve-sde`](../../../crates/eve-sde): Parses static type data, attribute mappings, prerequisite skill trees, and booster duration parameters.
 
 ---
 
 ### 2. Primary Handlers & Services
 
-#### Skill Training & Queue Management: [`crates/eve-server/src/services/character_skills.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/character_skills.rs)
-* [`catch_up_skill_queue`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/character_skills.rs#L39): Evaluates elapsed time since `started_at_unix`. Computes points gained using [`effective_character_attributes`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/jump_clone_names.rs), completes finished skill levels in sequence, enforces Alpha clone 5M SP caps, and emits `OnSkillQueueRefreshed` and `OnSkillTrained`.
-* [`handle_skills`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/character_skills.rs#L450): Dispatches MachoNet RPC calls:
-  * `"skillMgr2.SaveSkillQueue"`: Validates skill prerequisites, computes training durations via [`skill_training_time_seconds`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/formulas.rs#L36), and saves the queue.
+#### Skill Training & Queue Management: [`crates/eve-server/src/services/character_skills.rs`](../../../crates/eve-server/src/services/character_skills.rs)
+* [`catch_up_skill_queue`](../../../crates/eve-server/src/services/character_skills.rs#L39): Evaluates elapsed time since `started_at_unix`. Computes points gained using [`effective_character_attributes`](../../../crates/eve-server/src/services/jump_clone_names.rs), completes finished skill levels in sequence, enforces Alpha clone 5M SP caps, and emits `OnSkillQueueRefreshed` and `OnSkillTrained`.
+* [`handle_skills`](../../../crates/eve-server/src/services/character_skills.rs#L450): Dispatches MachoNet RPC calls:
+  * `"skillMgr2.SaveSkillQueue"`: Validates skill prerequisites, computes training durations via [`skill_training_time_seconds`](../../../crates/eve-server/src/formulas.rs#L36), and saves the queue.
   * `"skillMgr2.ApplyFreeSkillPoints"`: Transfers unallocated SP into a specified skill, immediately upgrading levels if thresholds are crossed.
 
-#### Skill Trading & Obsolete Cleanup: [`crates/eve-server/src/services/character_skill_ops.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/character_skill_ops.rs)
-* [`migrate_obsolete_skills_for_character`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/character_skill_ops.rs#L16): Scans for deprecated skills, removes them, and refunds $100\%$ of SP into `free_skill_points`.
-* [`purchase_skills_direct_for_char`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/character_skill_ops.rs#L127): Injects skills with the $30\%$ convenience markup.
+#### Skill Trading & Obsolete Cleanup: [`crates/eve-server/src/services/character_skill_ops.rs`](../../../crates/eve-server/src/services/character_skill_ops.rs)
+* [`migrate_obsolete_skills_for_character`](../../../crates/eve-server/src/services/character_skill_ops.rs#L16): Scans for deprecated skills, removes them, and refunds $100\%$ of SP into `free_skill_points`.
+* [`purchase_skills_direct_for_char`](../../../crates/eve-server/src/services/character_skill_ops.rs#L127): Injects skills with the $30\%$ convenience markup.
 
-#### Clone Jumps & Precondition Enforcement: [`crates/eve-server/src/services/character_clone_jump_rules.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/character_clone_jump_rules.rs)
-* [`handle_clone_jump`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/character_clone_jump_rules.rs#L99): Validates caller location, verifies target clone existence, waives cooldowns on same-location swaps, enforces Wormhole and Pochven restrictions, charges station/citadel fees, swaps active and stored implant sets, and updates `last_clone_jump_unix`.
+#### Clone Jumps & Precondition Enforcement: [`crates/eve-server/src/services/character_clone_jump_rules.rs`](../../../crates/eve-server/src/services/character_clone_jump_rules.rs)
+* [`handle_clone_jump`](../../../crates/eve-server/src/services/character_clone_jump_rules.rs#L99): Validates caller location, verifies target clone existence, waives cooldowns on same-location swaps, enforces Wormhole and Pochven restrictions, charges station/citadel fees, swaps active and stored implant sets, and updates `last_clone_jump_unix`.
 
-#### Medical Clone Selection: [`crates/eve-server/src/services/character_contacts.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/character_contacts.rs)
-* [`SetHomeStation`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/character_contacts.rs#L1210): Enforces docking validation, Citadel clone bay online verification, remote 365-day cooldown checks, and Pochven exclusions.
+#### Medical Clone Selection: [`crates/eve-server/src/services/character_contacts.rs`](../../../crates/eve-server/src/services/character_contacts.rs)
+* [`SetHomeStation`](../../../crates/eve-server/src/services/character_contacts.rs#L1210): Enforces docking validation, Citadel clone bay online verification, remote 365-day cooldown checks, and Pochven exclusions.
 
-#### Implants & Boosters: [`crates/eve-server/src/services/implant_plugging.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/implant_plugging.rs)
-* [`handle_inject_implant`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/implant_plugging.rs#L180): Installs an implant into Slots 1–10. If a slot is occupied, the previous implant is permanently destroyed.
-* [`handle_use_booster`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/implant_plugging.rs#L420): Applies booster effects, calculates Biology duration scaling, and rolls side effects.
-* [`handle_consume_skill_injector`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/implant_plugging.rs#L960): Enforces diminishing returns curves via [`skill_injector_sp_yield`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/formulas.rs#L48).
+#### Implants & Boosters: [`crates/eve-server/src/services/implant_plugging.rs`](../../../crates/eve-server/src/services/implant_plugging.rs)
+* [`handle_inject_implant`](../../../crates/eve-server/src/services/implant_plugging.rs#L180): Installs an implant into Slots 1–10. If a slot is occupied, the previous implant is permanently destroyed.
+* [`handle_use_booster`](../../../crates/eve-server/src/services/implant_plugging.rs#L420): Applies booster effects, calculates Biology duration scaling, and rolls side effects.
+* [`handle_consume_skill_injector`](../../../crates/eve-server/src/services/implant_plugging.rs#L960): Enforces diminishing returns curves via [`skill_injector_sp_yield`](../../../crates/eve-server/src/formulas.rs#L48).
 
 ---
 
@@ -396,11 +402,11 @@ pub struct CharacterRecord {
 
 ### 1. Invariant: Monotonic Skill Point Progression
 * **Vulnerability:** Packet injection or floating-point truncation causing negative SP gains, skill level regressions, or integer overflow.
-* **Mitigation:** In [`catch_up_skill_queue`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/character_skills.rs#L39) and [`apply_skill_points`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/character_skills.rs#L686), SP additions use saturating addition. SP increments are verified against the SDE rank maximum ($256,000 \cdot R$), and skill levels are locked between $0$ and $5$.
+* **Mitigation:** In [`catch_up_skill_queue`](../../../crates/eve-server/src/services/character_skills.rs#L39) and [`apply_skill_points`](../../../crates/eve-server/src/services/character_skills.rs#L686), SP additions use saturating addition. SP increments are verified against the SDE rank maximum ($256,000 \cdot R$), and skill levels are locked between $0$ and $5$.
 
 ### 2. Invariant: Atomic Clone Swapping (Zero Duplication / Zero Loss)
 * **Vulnerability:** A race condition during jump clone activation could duplicate high-grade implant sets or erase left-behind bodies.
-* **Mitigation:** In [`handle_clone_jump`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/character_clone_jump_rules.rs#L99), the clone swap is executed inside an atomic snapshot transaction (`try_with_mut_snapshot`). The active implant list is moved into a newly created `JumpCloneRecord` at the departure station, while the target clone's implant list is atomically loaded into `snap.active_implants`.
+* **Mitigation:** In [`handle_clone_jump`](../../../crates/eve-server/src/services/character_clone_jump_rules.rs#L99), the clone swap is executed inside an atomic snapshot transaction (`try_with_mut_snapshot`). The active implant list is moved into a newly created `JumpCloneRecord` at the departure station, while the target clone's implant list is atomically loaded into `snap.active_implants`.
 
 ### 3. Invariant: Jump Clone Cooldown Durability Across Restarts
 * **Vulnerability:** Server restarts clearing in-memory timers, allowing pilots to jump clones repeatedly without cooldown.
@@ -408,7 +414,7 @@ pub struct CharacterRecord {
 
 ### 4. Edge Case: Upwell Citadel Destruction with Installed Clones
 * **Problem:** If a player citadel is destroyed or unanchored, installed jump clones and medical clone anchors could be orphaned.
-* **Mitigation:** In [`structure_upwell_ops.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/src/services/structure_upwell_ops.rs#L237), structure decommissioning scans `snap.characters`. Any character with `home_station_id == structure_id` is automatically failed over to their racial starter school station, and installed jump clones are destroyed in accordance with canonical structure mechanics.
+* **Mitigation:** In [`structure_upwell_ops.rs`](../../../crates/eve-server/src/services/structure_upwell_ops.rs#L237), structure decommissioning scans `snap.characters`. Any character with `home_station_id == structure_id` is automatically failed over to their racial starter school station, and installed jump clones are destroyed in accordance with canonical structure mechanics.
 
 ---
 
@@ -430,9 +436,22 @@ EvoMu's skill progression, cloning, and implant systems are validated by targete
 
 | Test Function | Source File | Validated Behaviors |
 | :--- | :--- | :--- |
-| [`test_ch1_skill_training_engine_and_caps`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/character_skills_clones.rs#L19) | [`character_skills_clones.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/character_skills_clones.rs) | Verifies skill queue training rate, rank math, and 5M SP Alpha training caps. |
-| [`test_clone_jump_preconditions_fees_and_same_location_swap`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/clone_jump_features_complete.rs#L80) | [`clone_jump_features_complete.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/clone_jump_features_complete.rs) | Tests 24h jump clone cooldown, Infomorph Sync reductions, and 0s same-station swaps. |
-| [`test_clone_jump_space_restrictions_and_alpha_access`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/clone_jump_features_complete.rs#L222) | [`clone_jump_features_complete.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/clone_jump_features_complete.rs) | Confirms ban on jumping into Wormholes/Pochven and Alpha installation restrictions. |
-| [`test_implant_plug_and_remove_destroys_implant`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/character_clones_skills_complete.rs#L401) | [`character_clones_skills_complete.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/character_clones_skills_complete.rs) | Tests implant injection, attribute boost application, and destruction on removal. |
-| [`test_booster_consume_and_side_effects_neurotoxin_skills`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/character_clones_skills_complete.rs#L521) | [`character_clones_skills_complete.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/character_clones_skills_complete.rs) | Tests combat booster stat bonuses, Biology duration scaling, and side-effect rolls. |
-| [`test_skills_nondiminishing_injector`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/character_skill_features_t12.rs#L289) | [`character_skill_features_t12.rs`](file:///Users/sergeya/ai/EvoMu/crates/eve-server/tests/it/character_skill_features_t12.rs) | Validates non-diminishing injectors (Daily Alpha Injector) and 24h cooldown tracking. |
+| [`test_ch1_skill_training_engine_and_caps`](../../../crates/eve-server/tests/it/character_skills_clones.rs#L19) | [`character_skills_clones.rs`](../../../crates/eve-server/tests/it/character_skills_clones.rs) | Verifies skill queue training rate, rank math, and 5M SP Alpha training caps. |
+| [`test_clone_jump_preconditions_fees_and_same_location_swap`](../../../crates/eve-server/tests/it/clone_jump_features_complete.rs#L80) | [`clone_jump_features_complete.rs`](../../../crates/eve-server/tests/it/clone_jump_features_complete.rs) | Tests 24h jump clone cooldown, Infomorph Sync reductions, and 0s same-station swaps. |
+| [`test_clone_jump_space_restrictions_and_alpha_access`](../../../crates/eve-server/tests/it/clone_jump_features_complete.rs#L222) | [`clone_jump_features_complete.rs`](../../../crates/eve-server/tests/it/clone_jump_features_complete.rs) | Confirms ban on jumping into Wormholes/Pochven and Alpha installation restrictions. |
+| [`test_implant_plug_and_remove_destroys_implant`](../../../crates/eve-server/tests/it/character_clones_skills_complete.rs#L401) | [`character_clones_skills_complete.rs`](../../../crates/eve-server/tests/it/character_clones_skills_complete.rs) | Tests implant injection, attribute boost application, and destruction on removal. |
+| [`test_booster_consume_and_side_effects_neurotoxin_skills`](../../../crates/eve-server/tests/it/character_clones_skills_complete.rs#L521) | [`character_clones_skills_complete.rs`](../../../crates/eve-server/tests/it/character_clones_skills_complete.rs) | Tests combat booster stat bonuses, Biology duration scaling, and side-effect rolls. |
+| [`test_skills_nondiminishing_injector`](../../../crates/eve-server/tests/it/character_skill_features_t12.rs#L289) | [`character_skill_features_t12.rs`](../../../crates/eve-server/tests/it/character_skill_features_t12.rs) | Validates non-diminishing injectors (Daily Alpha Injector) and 24h cooldown tracking. |
+
+---
+
+## Related Systems & Cross-References
+
+- [**Dogma Attribute Engine**](../dogma_and_fitting/dogma_attribute_engine.md): Skill level multipliers injecting attribute modifiers into active ship, module, and drone stats.
+- [**Crimewatch & Engagement Timers**](../combat_and_crimewatch/crimewatch_and_engagement_timers.md): Capsule destruction, pod killing rules, and medical clone resurrection mechanics.
+- [**Regional Market Order Matching**](../economy_and_markets/regional_market_order_matching.md): Trade skill effects on broker fees, sales taxes, and remote market order operations.
+- [**Agent Dialogue & Missions**](../missions_and_agents/agent_dialogue_and_missions.md): Social skills modifying agent quality, faction standings, and LP store conversion rates.
+
+---
+
+[← Back to Wiki Table of Contents](../README.md)
