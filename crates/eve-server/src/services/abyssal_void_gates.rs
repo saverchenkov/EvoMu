@@ -23,7 +23,10 @@ fn is_actual_filament_type(ctx: &ServerContext, type_id: u32) -> bool {
             .sde
             .types
             .get(&type_id)
-            .map(|t| matches!(t.group_id, 1979 | 4041 | 4145 | 4743))
+            .map(|t| {
+                matches!(t.group_id, 1979 | 4041 | 4087 | 4145 | 4743)
+                    || t.name.to_lowercase().contains("filament")
+            })
             .unwrap_or(false)
 }
 

@@ -363,3 +363,5 @@ mod plan_upwell_structures_closure_part2;
 mod plan_upwell_structures_closure_part3;
 mod pochven_anchoring_restrictions_suite;
 mod seasons_login_campaigns_closure;
+mod abyssal_pochven_void_closure;
+mod abyssal_pochven_void_closure_part2;
