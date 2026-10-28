@@ -249,19 +249,6 @@ pub(crate) fn step_cycles_and_capacitor(
                 .and_then(|sde| sde.types.get(&cycle.module_type_id))
                 .map(|t| t.group_id)
                 .unwrap_or(0);
-            if mod_grp == 1122 {
-                if let (Some(cid), Some(wid)) = (cycle.owner_char_id, cycle.target_id) {
-                    pending_cycle_actions.push(PendingCycleAction::SalvageEnd {
-                        char_id: cid,
-                        ship_id: cycle.ship_id,
-                        module_id: cycle.module_id,
-                        module_type_id: cycle.module_type_id,
-                        wreck_id: wid,
-                        repeat: cycle.repeat,
-                        effect_name: cycle.effect_name.clone(),
-                    });
-                }
-            }
             // 1. Local armor repair and hull repair healing at cycle completion (`t = duration_s`, `feat:combat.active-armor-repair-cycle-end`)
             //    (Shield boosters apply at cycle start `t = 0`, `feat:combat.active-shield-boost-cycle-start`)
             if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
@@ -438,7 +425,7 @@ pub(crate) fn step_cycles_and_capacitor(
                         if let Some((src_cap, src_max_cap)) = src_cap_info {
                             if is_sleeper_target
                                 || cycle.nosferatu_blood_raider_override
-                                || cs.capacitor > src_cap
+                                || (cs.capacitor > src_cap && cs.capacitor > 0.0)
                             {
                                 let transferred = effective_transfer
                                     .min(if is_sleeper_target {
@@ -485,7 +472,7 @@ pub(crate) fn step_cycles_and_capacitor(
             // 3. Thermodynamics & rack heat accumulation + slot-adjacency heat damage (`feat:dogma.heat-rack-thermodynamics`)
             // parity: feat:modules.emergency-hull-energizer
             let mut burned_out = false;
-            if matches!(cycle.module_type_id, 40714 | 40717) {
+            if cycle.ehe_hull_resists.is_some() || matches!(cycle.module_type_id, 40714..=40718) {
                 burned_out = true;
                 if let Some(db_ref) = db_opt {
                     db_ref.with_mut_snapshot(|snap| {
@@ -811,12 +798,14 @@ pub(crate) fn step_cycles_and_capacitor(
                 }
             }
 
-            if cycle.repeat == 0 || burned_out || crystal_shattered_empty {
+            let mut salvage_next_cap_deducted = false;
+            let mut salvage_deducted_cap_gj = 0.0;
+            let mut stop_cycle = cycle.repeat == 0 || burned_out || crystal_shattered_empty;
+            if stop_cycle {
                 finished_indices.push(idx);
             } else {
                 cycle.elapsed_s -= cycle.duration_s;
                 // Handle ASB, AAR, and Cap Booster charge consumption for the next cycle (`DG-4`)
-                let mut stop_cycle = false;
                 if cycle.is_asb {
                     let mut consumed_charge = false;
                     if let Some(db_ref) = db_opt {
@@ -939,7 +928,10 @@ pub(crate) fn step_cycles_and_capacitor(
                             has_cap = false;
                         }
                     }
-                    if !has_cap {
+                    if has_cap {
+                        salvage_next_cap_deducted = true;
+                        salvage_deducted_cap_gj = cycle.cap_need_per_cycle;
+                    } else {
                         stop_cycle = true;
                     }
                 }
@@ -1005,6 +997,21 @@ pub(crate) fn step_cycles_and_capacitor(
                             }
                         }
                     }
+                }
+            }
+            if mod_grp == 1122 {
+                if let (Some(cid), Some(wid)) = (cycle.owner_char_id, cycle.target_id) {
+                    pending_cycle_actions.push(PendingCycleAction::SalvageEnd {
+                        char_id: cid,
+                        ship_id: cycle.ship_id,
+                        module_id: cycle.module_id,
+                        module_type_id: cycle.module_type_id,
+                        wreck_id: wid,
+                        repeat: if stop_cycle { 0 } else { cycle.repeat },
+                        effect_name: cycle.effect_name.clone(),
+                        next_cycle_cap_deducted: salvage_next_cap_deducted,
+                        deducted_cap_gj: salvage_deducted_cap_gj,
+                    });
                 }
             }
         }

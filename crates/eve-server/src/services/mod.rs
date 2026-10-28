@@ -38,6 +38,7 @@ pub mod cosmetics_ui_ops;
 pub mod encounter_surveillance_system;
 pub mod fast_checkout_and_activity;
 pub mod fitting_saved_apply;
+pub mod fitting_cycles_overheat;
 pub mod fleet_social;
 pub mod fw_enlistment;
 pub mod fw_services;

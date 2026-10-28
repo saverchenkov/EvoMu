@@ -120,7 +120,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         message: "Assault Damage Control can only be fitted/activated on Assault Frigates (324) or Heavy Assault Cruisers (358)".into(),
                     }));
                 }
-                let is_cehe = matches!(m.type_id, 40714 | 40717) || mod_type.effect_ids.contains(&6484);
+                let is_cehe = matches!(m.type_id, 40714..=40718) || mod_type.effect_ids.contains(&6484);
                 if is_cehe && !matches!(ship_group_id, 547 | 1538 | 485 | 30 | 659 | 883 | 4594) {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidShipGroup".into(),
@@ -353,7 +353,10 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                     if max_range <= 0.0 {
                         max_range = mod_type.default_attributes.get(&54).copied().unwrap_or(20_000.0);
                     }
-                    if is_overloaded {
+                    let has_cat5_overload = mod_type.effect_ids.iter().any(|&eid| {
+                        ctx.sde.effects.get(&eid).is_some_and(|e| e.effect_category == 5)
+                    });
+                    if is_overloaded && !has_cat5_overload {
                         let ov_bonus = mod_type.default_attributes.get(&1208).copied().unwrap_or(20.0);
                         max_range *= 1.0 + ov_bonus / 100.0;
                     }
@@ -639,7 +642,10 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                             }));
                         }
                     }
-                    let ov_m = if is_overloaded { 1.20 } else { 1.0 };
+                    let has_cat5_overload = mod_type.effect_ids.iter().any(|&eid| {
+                        ctx.sde.effects.get(&eid).is_some_and(|e| e.effect_category == 5)
+                    });
+                    let ov_m = if is_overloaded && !has_cat5_overload { 1.20 } else { 1.0 };
                     let rr_imp_m = crate::services::tactical_modules::incoming_remote_repair_multiplier(ctx, target_id);
                     match mod_type.group_id {
                         41 | 1697 => {

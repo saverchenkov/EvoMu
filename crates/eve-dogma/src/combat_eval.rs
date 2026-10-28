@@ -186,7 +186,7 @@ pub fn eval_energy_nosferatu(
 /// In V24.01 SDE, `Burst Jammer I` (`580`) and `Burst Jammer II` (`2117`) store full-diameter span
 /// in base dogma attribute `142` (`ecmBurstRange` = `10,000.0` / `12,000.0` m) with no `maxRange` (`54`),
 /// yielding exact `5,000.0` m (`5 km` T1) and `6,000.0` m (`6 km` T2) radii without single-target ECM
-/// optimal-range skill/hull inflation.
+/// optimal-range skill/hull inflation, scaled by hull bonuses on ecmBurstRange (attr 142) such as Scorpion (+25%/lvl).
 pub fn compute_burst_jammer_radius_m(
     mod_type: &eve_sde::InvType,
     mod_state: &DogmaItemState,

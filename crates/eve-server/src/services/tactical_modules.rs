@@ -264,7 +264,7 @@ pub fn apply_tactical_module_ship_attributes(ctx: &ServerContext, ship_id: i64, 
 
     for &mod_tid in active_mod_tids.iter() {
         if let Some(m_type) = ctx.sde.types.get(&mod_tid) {
-            if m_type.effect_ids.contains(&6484) || matches!(mod_tid, 40714 | 40717) {
+            if m_type.effect_ids.contains(&6484) || matches!(mod_tid, 40714..=40718) {
                 if let Some(&em) = m_type.default_attributes.get(&974) {
                     attrs.insert(113, em);
                 }
@@ -632,7 +632,7 @@ pub async fn activate_superweapon_or_lance(
     ship_id: i64,
     sys_id: u32,
     module_id: i64,
-    is_slash: bool,
+    action_method: &str,
     target_id_opt: Option<i64>,
 ) -> Result<PyRep, BridgeRpcError> {
     if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
@@ -778,7 +778,10 @@ pub async fn activate_superweapon_or_lance(
 
     let all_balls = sys.list_balls().await.unwrap_or_default();
     let ship_pos = all_balls.iter().find(|b| b.id == ship_id).map(|b| b.position).unwrap_or(DVec3::ZERO);
-    let single_target_ball = if !is_slash {
+    let is_slash = action_method == "ActivateSlashModule";
+    let is_aoe = is_slash;
+
+    let single_target_ball = if !is_aoe {
         let Some(tid) = target_id_opt else {
             return Err(BridgeRpcError { code: "TargetRequired".into(), message: "Single-point Doomsday requires a targetID".into() });
         };
@@ -842,6 +845,7 @@ pub async fn activate_superweapon_or_lance(
 
     let mut hit_targets = Vec::new();
     if is_slash {
+        // Titan Lance Doomsday (`superWeaponMgr.ActivateSlashModule`)
         for b in all_balls {
             if b.id != ship_id && (is_combatant_ship_or_entity_ball(Some(&ctx.sde), Some(&ctx.db), b.id, b.type_id) || (b.id >= 1_895_000_000 && b.id < 1_900_000_000)) && (b.position - ship_pos).length() <= 100_000.0 {
                 let (app, destroyed) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys, sys_id, char_id, b.id, dmg_vec, 10.0, now_unix).await.ok().flatten().map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
@@ -850,6 +854,14 @@ pub async fn activate_superweapon_or_lance(
                     crate::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(ctx, sys_id, char_id, b.id, b.type_id, b.position, now_unix).await;
                 }
                 hit_targets.push(b.id);
+            }
+        }
+        let db_key = db_key_of(ctx);
+        {
+            let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
+            st.lance_caster_lock_until.insert((db_key, ship_id), now_unix + 300);
+            for &vid in &hit_targets {
+                st.lance_victim_debuff_until.insert((db_key, vid), now_unix + 300);
             }
         }
     } else if let Some(tb) = single_target_ball {
@@ -871,7 +883,9 @@ pub async fn activate_superweapon_or_lance(
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)), ("shipID", PyRep::Integer(ship_id)), ("slashMode", PyRep::Bool(is_slash)),
         ("totalDamageApplied", PyRep::Real(total_raw_damage)), ("fuelConsumed", PyRep::Integer(consumed_fuel as i64)),
+        ("warmupSeconds", PyRep::Real(if is_slash { 15.0 } else { 0.0 })),
         ("immobilizeSeconds", PyRep::Real(30.0)), ("jumpBlockSeconds", PyRep::Real(300.0)),
+        ("jumpWarpSuppressionSeconds", PyRep::Real(if is_slash { 300.0 } else { 0.0 })),
         ("hitTargetIDs", PyRep::List(hit_targets.into_iter().map(PyRep::Integer).collect())),
     ]))
 }

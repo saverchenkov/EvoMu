@@ -440,6 +440,21 @@ pub(crate) async fn handle_dogma_im(
                 return Some(Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by character {char_id}") }));
             }
 
+            let is_burned = ctx.db.with_snapshot(|s| {
+                let it = s.items.get(&module_id);
+                let dmg = it.and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied()).unwrap_or(0.0);
+                let hp = it.and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied())
+                    .or_else(|| it.and_then(|i| ctx.sde.types.get(&i.type_id)).and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied()))
+                    .unwrap_or(40.0);
+                dmg >= hp - 1e-6
+            });
+            if is_burned && session.station_id.is_none() && session.structure_id.is_none() {
+                return Some(Err(BridgeRpcError {
+                    code: "ModuleBurnedOut".into(),
+                    message: format!("Module {module_id} is burned out and cannot be onlined in space"),
+                }));
+            }
+
             if session.station_id.is_none() && session.structure_id.is_none() {
                 if let Some(sys_id) = session.solar_system_id {
                     let sys = ctx.systems.get_or_spawn(sys_id);
@@ -496,6 +511,21 @@ pub(crate) async fn handle_dogma_im(
             let owns_ship = ctx.db.with_snapshot(|s| s.items.get(&ship_id).is_some_and(|sh| sh.owner_id == char_id));
             if !owns_ship {
                 return Some(Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by character {char_id}") }));
+            }
+
+            let is_burned = ctx.db.with_snapshot(|s| {
+                let it = s.items.get(&module_id);
+                let dmg = it.and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied()).unwrap_or(0.0);
+                let hp = it.and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied())
+                    .or_else(|| it.and_then(|i| ctx.sde.types.get(&i.type_id)).and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied()))
+                    .unwrap_or(40.0);
+                dmg >= hp - 1e-6
+            });
+            if is_burned && session.station_id.is_none() && session.structure_id.is_none() {
+                return Some(Err(BridgeRpcError {
+                    code: "ModuleBurnedOut".into(),
+                    message: format!("Module {module_id} is burned out and cannot be offlined in space"),
+                }));
             }
 
             let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {

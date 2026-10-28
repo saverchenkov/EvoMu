@@ -11,7 +11,7 @@ use eve_dogma::is_blood_raider_nosferatu_hull;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{dispatch_combat_rpc, with_combat_runtime, with_mut_combat_runtime, DroneSpaceState};
+use eve_server::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, DroneSpaceState};
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -105,19 +105,29 @@ async fn test_blood_raider_sde_nosferatu_override_all_hulls_and_rpc_paths() {
         sys.set_combat_state(victim_id, v_cs).await.unwrap();
     };
     reset_caps().await;
-    let std_direct = dispatch_combat_rpc(
-        &ctx,
+    ctx.dispatch_rpc(
         &mut sess,
         "dogmaIM",
+        None,
         "Activate",
-        &[PyRep::Integer(nos_id), PyRep::Integer(victim_id)],
+        &[
+            PyRep::Integer(nos_id),
+            PyRep::String("energyNosferatuFalloff".into()),
+            PyRep::Integer(victim_id),
+            PyRep::Integer(0),
+        ],
         &kw,
+        None,
     )
     .await
-    .expect("direct nosferatu on Raven");
-    assert_eq!(std_direct.dict_get("capacitorDrained").and_then(|v| v.as_f64()), Some(0.0));
+    .expect("nosferatu on Raven");
+    for _ in 0..6 {
+        sys.tick().await.unwrap();
+    }
+    let v_after_std = sys.get_combat_state(victim_id).await.unwrap().unwrap().capacitor;
+    assert_eq!(v_after_std, 300.0, "Standard nosferatu must not drain when target cap % < self cap %");
 
-    // Every Blood Raider hull (Cruor 17926, Ashimmu 17922, Bhaalgorn 17920, Dagon 42242) drains on BOTH paths:
+    // Every Blood Raider hull (Cruor 17926, Ashimmu 17922, Bhaalgorn 17920, Dagon 42242) drains via cycle end (`t = duration_s`):
     for &br_tid in &[17926u32, 17922, 17920, 42242] {
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(ship_item) = snap.items.get_mut(&ship_id) {
@@ -126,22 +136,6 @@ async fn test_blood_raider_sde_nosferatu_override_all_hulls_and_rpc_paths() {
         });
         ctx.invalidate_ship_fitting(ship_id);
 
-        // Path 1: `combat_weapons::dispatch_combat_rpc`
-        reset_caps().await;
-        let br_direct = dispatch_combat_rpc(
-            &ctx,
-            &mut sess,
-            "dogmaIM",
-            "Activate",
-            &[PyRep::Integer(nos_id), PyRep::Integer(victim_id)],
-            &kw,
-        )
-        .await
-        .expect("direct nosferatu on Blood Raider hull");
-        let drained = br_direct.dict_get("capacitorDrained").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        assert!(drained > 0.0, "Hull {br_tid} must drain via dispatch_combat_rpc when target_cap < self_cap");
-
-        // Path 2: `fitting_module_cycles` + 1Hz `sys.tick()` cycle end (`t = duration_s`)
         reset_caps().await;
         ctx.dispatch_rpc(
             &mut sess,
@@ -191,11 +185,11 @@ async fn test_burst_jammer_t1_t2_radius_fitted_eccm_nonship_filter_multivictim_a
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.retain(|_, i| i.location_id != ship_id);
         if let Some(ship_item) = snap.items.get_mut(&ship_id) {
-            ship_item.type_id = 640;
+            ship_item.type_id = 638;
         }
     });
     ctx.invalidate_ship_fitting(ship_id);
-    grant_all_skills_for_types(&ctx, char_id, &[640, 580, 2117]);
+    grant_all_skills_for_types(&ctx, char_id, &[638, 580, 2117]);
 
     let burst_id = 100_926_001i64;
     seed_item(&ctx, burst_id, 580, char_id, ship_id, InventoryFlag::MedSlot0, 1);
@@ -440,7 +434,7 @@ async fn test_burst_jammer_t1_t2_radius_fitted_eccm_nonship_filter_multivictim_a
     let low_ship_id = 100_926_050i64;
     let low_burst_id = 100_926_051i64;
     let low_victim_id = 100_926_052i64;
-    seed_item(&ctx, low_ship_id, 640, char_id, lowsec_id as i64, InventoryFlag::None, 1);
+    seed_item(&ctx, low_ship_id, 638, char_id, lowsec_id as i64, InventoryFlag::None, 1);
     seed_item(&ctx, low_burst_id, 580, char_id, low_ship_id, InventoryFlag::MedSlot0, 1);
     seed_item(&ctx, low_victim_id, 587, v_char_a, lowsec_id as i64, InventoryFlag::None, 1);
     ctx.db.with_mut_snapshot(|snap| {
@@ -461,7 +455,7 @@ async fn test_burst_jammer_t1_t2_radius_fitted_eccm_nonship_filter_multivictim_a
         .spawn_ball_with_combat(
             Ball {
                 id: low_ship_id,
-                type_id: 640,
+                type_id: 638,
                 position: DVec3::ZERO,
                 velocity: DVec3::ZERO,
                 max_velocity: 200.0,

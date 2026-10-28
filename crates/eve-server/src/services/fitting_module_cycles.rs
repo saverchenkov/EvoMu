@@ -119,14 +119,37 @@ pub(crate) async fn handle_module_cycles(
             }
             let is_burned = m.damage_hp >= m.max_hp - 1e-6
                 || ctx.db.with_snapshot(|s| {
-                    s.items
-                        .get(&module_id)
-                        .and_then(|i| i.dynamic_attributes.get(&3).copied())
-                        .unwrap_or(0.0)
-                        >= 39.9
+                    let it = s.items.get(&module_id);
+                    let dmg = it.and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied()).unwrap_or(0.0);
+                    let hp = it.and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied())
+                        .or_else(|| ctx.sde.types.get(&m.type_id).and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied()))
+                        .unwrap_or(40.0);
+                    dmg >= hp - 1e-6
                 });
             if is_burned {
                 return Some(Err(BridgeRpcError { code: "ModuleBurnedOut".into(), message: format!("Module {module_id} is burned out and cannot be activated") }));
+            }
+            // Disables any module group / weapon bank it belongs to until repaired or ungrouped (`feat:modules.overheat-burnout-state`)
+            let group_burned = ctx.db.with_snapshot(|snap| {
+                if let Some(bank) = snap.weapon_banks.get(&ship_id).and_then(|b| b.get(&module_id)) {
+                    for &tid in bank {
+                        let it = snap.items.get(&tid);
+                        let dmg = it.and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied()).unwrap_or(0.0);
+                        let hp = it.and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied())
+                            .or_else(|| it.and_then(|i| ctx.sde.types.get(&i.type_id)).and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied()))
+                            .unwrap_or(40.0);
+                        if dmg >= hp - 1e-6 {
+                            return Some(tid);
+                        }
+                    }
+                }
+                None
+            });
+            if let Some(b_mod_id) = group_burned {
+                return Some(Err(BridgeRpcError {
+                    code: "ModuleBurnedOut".into(),
+                    message: format!("Module group contains burned-out module {b_mod_id} and is disabled until repaired or ungrouped"),
+                }));
             }
             if m.state == eve_dogma::ModuleState::Offline
                 || !ctx.db.with_snapshot(|s| s.module_online_states.get(&module_id).copied().unwrap_or(true))
@@ -200,7 +223,7 @@ pub(crate) async fn handle_module_cycles(
                 }
             }
             if mod_type.group_id == 588 {
-                return Some(crate::services::tactical_modules::activate_superweapon_or_lance(ctx, char_id, ship_id, sys_id, module_id, true, target_id_opt).await);
+                return Some(crate::services::tactical_modules::activate_superweapon_or_lance(ctx, char_id, ship_id, sys_id, module_id, "ActivateSlashModule", target_id_opt).await);
             }
             if mod_type.group_id == 1154 {
                 let mod_state = fit.build_effective_module_state(module_id, m.type_id, false, &ctx.sde);
@@ -593,24 +616,10 @@ pub(crate) async fn handle_module_cycles(
                                 291 | 208 | 379 | 65 | 1672 | 52 | 201 | 41 | 325 | 2018 | 585 | 67 | 74 | 55 | 53 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807
                             )))
                 {
-                    let _ = sys.update_module_overload(ship_id, module_id, true).await;
-                    if let Some(fm) = fit.modules.get_mut(&module_id) {
-                        fm.state = eve_dogma::ModuleState::Overloaded;
-                    }
-                    fit.recalculate_stats(&ctx.sde);
-                    let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
-                    ctx.store_ship_fitting(ship_id, fit);
-                    ctx.notify(
-                        crate::router::NotificationTarget::Character(char_id),
-                        "OnHeatAdded",
-                        "charid",
-                        vec![PyRep::Integer(module_id)],
-                    );
-                    return Some(Ok(PyRep::keyval([
-                        ("moduleID", PyRep::Integer(module_id)),
-                        ("overloaded", PyRep::Bool(true)),
-                        ("effectiveMaxVelocity", PyRep::Real(max_vel)),
-                    ])));
+                    let rep = crate::services::fitting_cycles_overheat::handle_active_overload_toggle(
+                        ctx, &sys, char_id, ship_id, module_id, fit,
+                    ).await;
+                    return Some(Ok(rep));
                 }
                 if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
                     return Some(Err(BridgeRpcError { code: "ModuleReactivationDelay".into(), message: format!("Module {module_id} cannot reactivate before delay expires") }));
@@ -773,9 +782,11 @@ pub(crate) async fn handle_module_cycles(
             let raw_shield = mod_state.get_attribute(68, &ctx.sde);
             let raw_armor = mod_state.get_attribute(84, &ctx.sde);
             let raw_hull = mod_state.get_attribute(83, &ctx.sde);
-            let overload_mult = if is_overloaded { 1.20 } else { 1.0 };
+            let overload_mult = crate::services::fitting_cycles_overheat::compute_overload_multiplier(
+                is_overloaded, mod_type, &ctx.sde,
+            );
             let shield_boost_amount = if matches!(mod_type.group_id, 41 | 1697) { 0.0 } else { raw_shield * overload_mult };
-            let mut armor_repair_amount = if matches!(mod_type.group_id, 325 | 2018 | 1698) { 0.0 } else { raw_armor * overload_mult };
+            let initial_armor_repair = if matches!(mod_type.group_id, 325 | 2018 | 1698) { 0.0 } else { raw_armor * overload_mult };
             let hull_repair_amount = if mod_type.group_id == 585 { 0.0 } else { raw_hull * overload_mult };
             let mut remote_armor_amount = if mod_type.group_id == 2018 && remote_armor_amount <= 0.0 {
                 mod_type.default_attributes.get(&84).copied().unwrap_or(0.0)
@@ -793,95 +804,31 @@ pub(crate) async fn handle_module_cycles(
                 mutadaptive_spool_max
             };
 
-            // Ancillary Shield Booster (`group_id == 1156`) & Ancillary Remote Shield Booster (`group_id == 1697`)
-            let is_asb = matches!(mod_type.group_id, 1156 | 1697);
-            let asb_fallback_cap_need = mod_type.default_attributes.get(&6).copied().unwrap_or(66.0);
-            if is_asb {
-                let mut consumed_charge = false;
-                ctx.db.with_mut_snapshot(|snap| {
-                    if let Some(cid) = snap
-                        .items
-                        .values()
-                        .find(|i| {
-                            i.location_id == ship_id
-                                && (i.flag as u16) == m.flag_id
-                                && i.item_id != module_id
-                                && i.quantity > 0
-                        })
-                        .map(|i| i.item_id)
-                    {
-                        consumed_charge = true;
-                        let mut rem = 0;
-                        if let Some(ci) = snap.items.get_mut(&cid) {
-                            ci.quantity = ci.quantity.saturating_sub(1);
-                            rem = ci.quantity;
-                        }
-                        if rem == 0 {
-                            snap.items.remove(&cid);
-                        }
-                    }
-                });
-                if consumed_charge {
-                    cap_need = 0.0;
-                } else {
-                    cap_need = asb_fallback_cap_need;
-                }
-            }
-
-            // Ancillary Armor Repairer (`group_id == 1199`) & Ancillary Remote Armor Repairer (`group_id == 1698`)
-            let is_aar = matches!(mod_type.group_id, 1199 | 1698);
-            let aar_paste_rate = mod_type
-                .default_attributes
-                .get(&56)
-                .copied()
-                .unwrap_or(4.0)
-                .round()
-                .max(1.0) as i32;
-            let aar_base_armor_repair = if mod_type.group_id == 1698 {
-                remote_armor_amount
-            } else {
-                mod_type.default_attributes.get(&84).copied().unwrap_or(52.0) * overload_mult
-            };
-            if is_aar {
-                let mut fueled = false;
-                ctx.db.with_mut_snapshot(|snap| {
-                    if let Some(cid) = snap
-                        .items
-                        .values()
-                        .find(|i| {
-                            i.location_id == ship_id
-                                && (i.flag as u16) == m.flag_id
-                                && i.item_id != module_id
-                                && i.type_id == 28668
-                                && i.quantity >= aar_paste_rate
-                        })
-                        .map(|i| i.item_id)
-                    {
-                        fueled = true;
-                        let mut rem = 0;
-                        if let Some(ci) = snap.items.get_mut(&cid) {
-                            ci.quantity -= aar_paste_rate;
-                            rem = ci.quantity;
-                        }
-                        if rem == 0 {
-                            snap.items.remove(&cid);
-                        }
-                    }
-                });
-                if mod_type.group_id == 1698 {
-                    remote_armor_amount = if fueled {
-                        aar_base_armor_repair * 3.0
-                    } else {
-                        aar_base_armor_repair
-                    };
-                } else {
-                    armor_repair_amount = if fueled {
-                        aar_base_armor_repair * 3.0
-                    } else {
-                        aar_base_armor_repair
-                    };
-                }
-            }
+            // Ancillary Shield Booster (`group_id == 1156 | 1697`) & Ancillary Armor Repairer (`group_id == 1199 | 1698`)
+            let crate::services::fitting_cycles_overheat::AncillaryRepairPrep {
+                is_asb,
+                asb_fallback_cap_need,
+                cap_need: anc_cap_need,
+                is_aar,
+                aar_paste_rate,
+                aar_base_armor_repair,
+                armor_repair_amount,
+                remote_armor_amount: anc_remote_armor,
+            } = crate::services::fitting_cycles_overheat::prepare_ancillary_module(
+                ctx,
+                ship_id,
+                module_id,
+                m.flag_id,
+                mod_type,
+                &fit,
+                is_overloaded,
+                cap_need,
+                initial_armor_repair,
+                remote_armor_amount,
+                overload_mult,
+            );
+            cap_need = anc_cap_need;
+            remote_armor_amount = anc_remote_armor;
 
             // Capacitor Booster (`group_id == 76`, `feat:modules.cap-booster`)
             let mut cap_booster_inject_amount = 0.0;
@@ -1067,7 +1014,7 @@ pub(crate) async fn handle_module_cycles(
                 };
             let nosferatu_blood_raider_override = fit.ship.get_attribute(1945, &ctx.sde) > 0.0
                 || eve_dogma::is_blood_raider_nosferatu_hull(fit.ship.type_id, &ctx.sde);
-            let is_cehe = matches!(m.type_id, 40714 | 40717) || mod_type.effect_ids.contains(&6484);
+            let is_cehe = matches!(m.type_id, 40714..=40718) || mod_type.effect_ids.contains(&6484);
             let ehe_hull_resists = if is_cehe {
                 let em = mod_type.default_attributes.get(&974).copied().unwrap_or(0.05);
                 let exp = mod_type.default_attributes.get(&975).copied().unwrap_or(0.05);
@@ -1370,6 +1317,7 @@ pub(crate) async fn handle_module_cycles(
                 Some(Ok(PyRep::keyval([
                     ("moduleID", PyRep::Integer(module_id)), ("active", PyRep::Bool(true)),
                     ("overloaded", PyRep::Bool(false)), ("effectiveMaxVelocity", PyRep::Real(max_vel)),
+                    ("duration", PyRep::Real(duration_s)),
                 ])))
             }
             }

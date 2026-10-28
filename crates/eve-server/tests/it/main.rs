@@ -114,6 +114,7 @@ mod mining_survey_scanner;
 mod modules_advanced_tactical;
 mod modules_cyno_portal;
 mod modules_scanners_mutaplasmids_dbuffs;
+mod modules_ships_overheat_closure;
 mod navigation_pve_closure;
 mod navigation_pve_closure_part2;
 mod notify_contacts_emission;

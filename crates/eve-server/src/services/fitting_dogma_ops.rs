@@ -555,7 +555,7 @@ pub(crate) async fn handle_dogma_ops(
                         let active = snap.module_active_states.contains(&module_id);
                         let m_opt = snap.items.get(&module_id);
                         let is_valid = m_opt.map_or(false, |it| {
-                            let is_ehe = matches!(it.type_id, 40714 | 40717)
+                            let is_ehe = matches!(it.type_id, 40714..=40718)
                                 || ctx
                                     .sde
                                     .types

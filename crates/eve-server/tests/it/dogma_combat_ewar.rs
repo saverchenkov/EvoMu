@@ -473,6 +473,7 @@ async fn test_dg5_web_grappler_neut_nos_burst_projector_and_targeters() {
     sys.set_combat_state(victim_id, victim_cs).await.unwrap();
     let mut ship_cs = sys.get_combat_state(ship_id).await.unwrap().unwrap();
     ship_cs.capacitor_recharge_time_ms = 0.0;
+    ship_cs.max_capacitor = 1000.0;
     sys.set_combat_state(ship_id, ship_cs).await.unwrap();
 
     sys.set_capacitor(victim_id, 200.0).await.unwrap();
@@ -571,6 +572,9 @@ async fn test_dg5_web_grappler_neut_nos_burst_projector_and_targeters() {
     );
 
     // 6. Verify Supercarrier Burst Projectors (40698 Stasis Webification, 40635 Energy Neutralization) (feat:modules.burst-projectors)
+    let mut ship_cs_cap = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    ship_cs_cap.max_capacitor = 60_000.0;
+    sys.set_combat_state(ship_id, ship_cs_cap).await.unwrap();
     sys.set_capacitor(ship_id, 50_000.0).await.unwrap();
     sys.set_capacitor(victim_id, 250.0).await.unwrap();
     sys.set_capacitor(far_id, 250.0).await.unwrap();

@@ -135,6 +135,9 @@ async fn test_sleeper_mechanics_infinite_capacitor_spawn_leash_and_ewar_by_class
     let neut_id = 203_901i64;
     let nos_id = 203_902i64;
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(it) = snap.items.get_mut(&ship_id) {
+            it.type_id = 640;
+        }
         snap.items.insert(
             neut_id,
             InventoryItemRecord {
@@ -177,8 +180,8 @@ async fn test_sleeper_mechanics_infinite_capacitor_spawn_leash_and_ewar_by_class
         )
         .await;
     let mut player_cs_before = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
-    player_cs_before.capacitor = (player_cs_before.max_capacitor - 200.0).max(10.0);
-    let cap_before_nos = player_cs_before.capacitor;
+    player_cs_before.max_capacitor = 5000.0;
+    player_cs_before.capacitor = 4000.0;
     let _ = sys_handle.set_combat_state(ship_id, player_cs_before).await;
 
     let mut sess = eve_machonet::SessionState::default();
@@ -207,12 +210,17 @@ async fn test_sleeper_mechanics_infinite_capacitor_spawn_leash_and_ewar_by_class
     )
     .await
     .expect("Activate Heavy Energy Nosferatu I on Sleeper");
+    let cap_before_nos = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().capacitor;
+    for _ in 0..15 {
+        let _ = sys_handle.tick().await;
+    }
 
     // Verify Sleeper capacitor was not depleted while player capacitor increased
     let sleeper_cs_after = sys_handle.get_combat_state(sleeper_ball_id).await.unwrap().unwrap();
     assert_eq!(sleeper_cs_after.capacitor, initial_cs.capacitor, "Player neutralizer/nosferatu must not drain Sleeper capacitor");
     let player_cs_after = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!(player_cs_after.capacitor > cap_before_nos, "Player Nosferatu must still transfer energy from Sleeper");
+    let _ = sys_handle.stop_non_warp_module_cycles(ship_id).await;
 
     // 2. Sleeper spawn leash: pull Sleeper > 200 km from spawn position
     let distant_pos = spawn_pos + DVec3::new(250_000.0, 0.0, 0.0);

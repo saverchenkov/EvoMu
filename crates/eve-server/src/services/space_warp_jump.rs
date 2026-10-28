@@ -744,33 +744,7 @@ async fn handle_cmd_stargate_jump(
         });
     }
 
-    // Zarzakh Gate Toll (`feat:navigation.zarzakh-gate-toll`):
-    // Jump validations (range, timers, locks) completed first. Non-pirate pilots pay mass-based toll.
-    if jump.to_solar_system_id == SOLAR_SYSTEM_ZARZAKH {
-        crate::services::space_navigation_advanced::process_zarzakh_gate_toll(
-            ctx,
-            char_id,
-            &current_ball,
-            args,
-            kwargs,
-        )?;
-    }
-
     let dest_sys_id = jump.to_solar_system_id;
-    let mut zarzakh_lock_expiry = None;
-    if dest_sys_id == SOLAR_SYSTEM_ZARZAKH {
-        let expiry = now_unix.saturating_add(ZARZAKH_GATE_LOCK_SECS);
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.zarzakh_gate_locks.insert(
-                char_id,
-                (
-                    jump.destination_stargate_id,
-                    expiry,
-                ),
-            );
-        });
-        zarzakh_lock_expiry = Some(expiry);
-    }
     let dest_gate_pos = ctx
         .sde
         .jumps
@@ -786,6 +760,33 @@ async fn handle_cmd_stargate_jump(
             code: "SystemTransitionFailed".into(),
             message: e.to_string(),
         })?;
+
+    // Zarzakh Gate Toll & Gate Lock (`feat:navigation.zarzakh-gate-toll`):
+    // Applied only after system transition succeeds; rolls back transition on toll failure.
+    let mut zarzakh_lock_expiry = None;
+    if dest_sys_id == SOLAR_SYSTEM_ZARZAKH {
+        if let Err(e) = crate::services::space_navigation_advanced::process_zarzakh_gate_toll(
+            ctx,
+            char_id,
+            &current_ball,
+            args,
+            kwargs,
+        ) {
+            let _ = ctx.db.set_character_solar_system(char_id, old_sys, &ctx.sde);
+            return Err(e);
+        }
+        let expiry = now_unix.saturating_add(ZARZAKH_GATE_LOCK_SECS);
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.zarzakh_gate_locks.insert(
+                char_id,
+                (
+                    jump.destination_stargate_id,
+                    expiry,
+                ),
+            );
+        });
+        zarzakh_lock_expiry = Some(expiry);
+    }
     let _ = old_handle
         .emit_destiny_event(
             ship_id,

@@ -230,11 +230,8 @@ pub async fn handle(
 
             if src_is_fitted_module && !is_fitting_slot {
                 if let Some(src_item) = &source_item_opt {
-                    if let Err(e) = validate_ship_module_unfit_auth(ctx, session, char_id, src_item, new_loc).await {
-                        return Some(Err(e));
-                    }
                     // parity: feat:modules.emergency-hull-energizer
-                    let is_ehe = matches!(src_item.type_id, 40714 | 40717)
+                    let is_ehe = matches!(src_item.type_id, 40714..=40718)
                         || ctx
                             .sde
                             .types
@@ -252,6 +249,25 @@ pub async fn handle(
                             message: "UserError: Damaged or burned-out Capital Emergency Hull Energizer cannot be refitted".into(),
                         }));
                     }
+                    if let Err(e) = validate_ship_module_unfit_auth(ctx, session, char_id, src_item, new_loc).await {
+                        return Some(Err(e));
+                    }
+                }
+                if session.station_id.is_none() && session.structure_id.is_none() {
+                    let now_unix = ctx.now_unix_secs();
+                    let has_weapons_timer = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner()).states.get(&char_id).is_some_and(|cw| cw.is_weapon_timer_active(now_unix));
+                    if has_weapons_timer {
+                        return Some(Err(BridgeRpcError { code: "CannotRefitWithWeaponsTimer".into(), message: "Cannot refit or unfit modules in space while weapons timer is active".into() }));
+                    }
+                    let mut near_fitting_service = false;
+                    if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
+                        near_fitting_service = is_near_in_space_fitting_service(ctx, sys_id, ship_id).await;
+                    }
+                    if !near_fitting_service {
+                        return Some(Err(BridgeRpcError { code: "CannotUnfitInSpace".into(), message: "Unfitting modules requires being docked at a station/structure or within range of a Mobile Depot or capital SMA".into() }));
+                    }
+                }
+                if let Some(src_item) = &source_item_opt {
                     if matches!(src_item.flag as u16, 125..=129) {
                         if let Ok(mut check_fit) = ctx.get_or_rebuild_ship_fitting(char_id, src_item.location_id) {
                             if let Err(msg) = check_fit.unfit_module(item_id, &ctx.sde) {
@@ -320,6 +336,18 @@ pub async fn handle(
                 }
                 if let Err(e) = check_fitting_dock(ctx, session, char_id) {
                     return Some(Err(e));
+                }
+                let is_ehe_damaged = ctx.db.with_snapshot(|s| {
+                    let it = s.items.get(&item_id);
+                    let is_ehe = it.is_some_and(|i| matches!(i.type_id, 40714..=40718) || ctx.sde.types.get(&i.type_id).is_some_and(|t| t.effect_ids.contains(&6484)));
+                    let dmg = it.and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied()).unwrap_or(0.0);
+                    is_ehe && dmg > 0.0
+                });
+                if is_ehe_damaged {
+                    return Some(Err(BridgeRpcError {
+                        code: "CannotRefitDamagedModule".into(),
+                        message: "UserError: Damaged or burned-out Capital Emergency Hull Energizer cannot be fitted".into(),
+                    }));
                 }
                 if session.station_id.is_none() && session.structure_id.is_none() {
                     let now_unix = ctx.now_unix_secs();
@@ -397,26 +425,7 @@ pub async fn handle(
                             message: format!("Target {new_loc} is not an owned ship"),
                         });
                     }
-                    // parity: feat:modules.emergency-hull-energizer, feat:modules.stasis-grappler-mechanics
-                    let is_ehe = matches!(item.type_id, 40714 | 40717)
-                        || ctx
-                            .sde
-                            .types
-                            .get(&item.type_id)
-                            .is_some_and(|t| t.effect_ids.contains(&6484));
-                    if is_ehe
-                        && item
-                            .dynamic_attributes
-                            .get(&eve_sde::attr_ids::DAMAGE)
-                            .copied()
-                            .unwrap_or(0.0)
-                            > 0.0
-                    {
-                        return Err(BridgeRpcError {
-                            code: "CannotRefitDamagedModule".into(),
-                            message: "UserError: Damaged or burned-out Capital Emergency Hull Energizer cannot be fitted".into(),
-                        });
-                    }
+                    // parity: feat:modules.stasis-grappler-mechanics
                     if let (Some(mod_t), Some(ship_t)) = (
                         ctx.sde.types.get(&item.type_id),
                         ctx.sde.types.get(&ship_item.type_id),

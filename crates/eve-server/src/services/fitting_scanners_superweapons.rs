@@ -715,13 +715,8 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                     message: "Superweapons can only be activated in space".into(),
                 }));
             };
-            let is_slash = method == "ActivateSlashModule";
             let module_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let target_id_opt = if is_slash {
-                None
-            } else {
-                args.get(1).and_then(|a| a.as_i64())
-            };
+            let target_id_opt = args.get(1).and_then(|a| a.as_i64());
             Some(
                 crate::services::tactical_modules::activate_superweapon_or_lance(
                     ctx,
@@ -729,7 +724,7 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                     ship_id,
                     sys_id,
                     module_id,
-                    is_slash,
+                    method,
                     target_id_opt,
                 )
                 .await,

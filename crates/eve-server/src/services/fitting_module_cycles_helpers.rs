@@ -915,6 +915,8 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
                 wreck_id,
                 repeat,
                 effect_name,
+                next_cycle_cap_deducted,
+                deducted_cap_gj,
             } => {
                 let res = crate::combat::drones_salvage_tractor::execute_wreck_salvage_cycle(
                     ctx,
@@ -948,12 +950,6 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
                             / 1000.0;
                         ctx.record_module_reactivation_delay(ship_id, module_id, dur_s);
                     } else {
-                        let cap_refund = ctx
-                            .sde
-                            .types
-                            .get(&module_type_id)
-                            .and_then(|t| t.default_attributes.get(&6).copied())
-                            .unwrap_or(0.0);
                         deactivate_repeating_cycle_after_action(
                             ctx,
                             &sys,
@@ -963,12 +959,12 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
                             &effect_name,
                         )
                         .await;
-                        if cap_refund > 0.0 {
+                        if next_cycle_cap_deducted && deducted_cap_gj > 0.0 {
                             if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
                                 let _ = sys
                                     .set_capacitor(
                                         ship_id,
-                                        (cs.capacitor + cap_refund).min(cs.max_capacitor),
+                                        (cs.capacitor + deducted_cap_gj).min(cs.max_capacitor),
                                     )
                                     .await;
                             }

@@ -139,7 +139,7 @@ pub(crate) fn effective_item_unit_volume(
 
 /// Checks if `ship_id` in `sys_id` is within 3,000m of a Mobile Depot (`group_id == 1246`)
 /// or another ship providing a Ship Maintenance Bay fitting service (`attr 907` / `908` > 0).
-pub(crate) async fn is_near_in_space_fitting_service(
+pub async fn is_near_in_space_fitting_service(
     ctx: &ServerContext,
     sys_id: u32,
     ship_id: i64,

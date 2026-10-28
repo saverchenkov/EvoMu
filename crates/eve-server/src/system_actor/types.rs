@@ -151,6 +151,8 @@ pub enum PendingCycleAction {
         wreck_id: BallId,
         repeat: i32,
         effect_name: String,
+        next_cycle_cap_deducted: bool,
+        deducted_cap_gj: f64,
     },
     RepeatCycleStart {
         char_id: CharacterId,

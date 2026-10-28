@@ -159,9 +159,9 @@ pub async fn handle_weapons(
             });
 
             // 1. EWAR / Tackle 0-damage modules (`feat:combat.killmail-assist-timeout-ewar`):
-            // Warp Disruptor (52), Stasis Webifier (65), Energy Nosferatu (68), Energy Neutralizer (71),
+            // Warp Disruptor (52), Stasis Webifier (65),
             // ECM (201), Sensor Dampener (208), Weapon Disruptor (291), Target Painter (379)
-            if matches!(mod_type.group_id, 52 | 65 | 68 | 71 | 201 | 208 | 291 | 379) {
+            if matches!(mod_type.group_id, 52 | 65 | 201 | 208 | 291 | 379) {
                 let Some(tid) = target_id_opt else {
                     return Some(Err(BridgeRpcError {
                         code: "TargetRequired".into(),
@@ -296,63 +296,7 @@ pub async fn handle_weapons(
                         let _ = sys_handle.set_combat_state(tid, t_cs).await;
                     }
                 }
-                // Energy Neutralizer (71) & Energy Nosferatu (68) (`feat:npc.sleeper-capacitor-immunity-and-leash`)
-                let mut actual_drained = 0.0;
-                if matches!(mod_type.group_id, 68 | 71) {
-                    let target_snap = sys_handle.get_ball_snapshot(tid).await.ok().flatten();
-                    let is_sleeper = with_combat_runtime(ctx, |rt| {
-                        rt.npc_entities.get(&tid).is_some_and(|n| n.archetype == "Sleeper")
-                    }) || target_snap
-                        .as_ref()
-                        .is_some_and(|(_, b)| matches!(b.type_id, 30185..=30500));
-                    let drain_amt = mod_type
-                        .default_attributes
-                        .get(&97)
-                        .or_else(|| mod_type.default_attributes.get(&90))
-                        .copied()
-                        .unwrap_or(120.0)
-                        .max(60.0);
-                    let ewar_dist = target_snap
-                        .as_ref()
-                        .map(|(_, tb)| {
-                            (attacker_ball.position.distance(tb.position) - attacker_ball.radius - tb.radius)
-                                .max(0.0)
-                        })
-                        .unwrap_or(0.0);
-                    if let Ok(Some(mut t_cs)) = sys_handle.get_combat_state(tid).await {
-                        if mod_type.group_id == 68 {
-                            let is_blood_raider = fit.ship.get_attribute(1945, &ctx.sde) > 0.0
-                                || eve_dogma::is_blood_raider_nosferatu_hull(fit.ship.type_id, &ctx.sde);
-                            if let Ok(Some(mut s_cs)) = sys_handle.get_combat_state(ship_id).await {
-                                if is_sleeper {
-                                    s_cs.capacitor = (s_cs.capacitor + drain_amt).min(s_cs.max_capacitor);
-                                    let _ = sys_handle.set_combat_state(ship_id, s_cs).await;
-                                } else {
-                                    let res = eve_dogma::eval_energy_nosferatu_with_hull(
-                                        &mod_state,
-                                        ewar_dist,
-                                        s_cs.capacitor,
-                                        s_cs.max_capacitor,
-                                        t_cs.capacitor,
-                                        is_blood_raider,
-                                        &ctx.sde,
-                                    );
-                                    actual_drained = res.actual_transferred;
-                                    if res.actual_transferred > 0.0 {
-                                        t_cs.capacitor = res.target_new_cap;
-                                        let _ = sys_handle.set_combat_state(tid, t_cs).await;
-                                        s_cs.capacitor = res.source_new_cap;
-                                        let _ = sys_handle.set_combat_state(ship_id, s_cs).await;
-                                    }
-                                }
-                            }
-                        } else if !is_sleeper {
-                            actual_drained = drain_amt.min(t_cs.capacitor);
-                            t_cs.capacitor = (t_cs.capacitor - actual_drained).max(0.0);
-                            let _ = sys_handle.set_combat_state(tid, t_cs).await;
-                        }
-                    }
-                }
+
                 ctx.crimewatch
                     .write()
                     .unwrap_or_else(|e| e.into_inner())
@@ -369,7 +313,7 @@ pub async fn handle_weapons(
                     ("targetID", PyRep::Integer(tid)),
                     ("ewarAssistRecorded", PyRep::Bool(true)),
                     ("damageDealt", PyRep::Real(0.0)),
-                    ("capacitorDrained", PyRep::Real(actual_drained)),
+                    ("capacitorDrained", PyRep::Real(0.0)),
                 ])));
             }
 
