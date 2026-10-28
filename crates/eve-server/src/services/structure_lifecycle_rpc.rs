@@ -881,7 +881,7 @@ pub async fn handle_jettison_structure_fuel(
                     if it.owner_id != st.owner_corp_id {
                         return Err(err("ItemOwnershipViolation", format!("Item {iid} is not owned by structure owner corp {}", st.owner_corp_id)));
                     }
-                    let in_fuel_bay = it.flag == InventoryFlag::SpecializedFuelBay || it.flag as u16 == 163;
+                    let in_fuel_bay = it.flag == InventoryFlag::SpecializedFuelBay || it.flag == InventoryFlag::StructureFuel || it.flag as u16 == 172 || it.flag as u16 == 163;
                     if !in_fuel_bay || !rules::is_valid_structure_fuel_bay_item(ctx, it.type_id) {
                         return Err(err("ItemNotFuel", format!("Item {iid} (type {}) is not structure fuel in fuel bay", it.type_id)));
                     }
@@ -898,7 +898,7 @@ pub async fn handle_jettison_structure_fuel(
                 }
             } else {
                 let default_tid = snap.items.values()
-                    .filter(|i| i.location_id == structure_id && i.flag == InventoryFlag::SpecializedFuelBay && i.quantity > 0 && rules::is_fuel_block_type(ctx, i.type_id))
+                    .filter(|i| i.location_id == structure_id && rules::is_structure_fuel_flag(i.flag) && i.quantity > 0 && rules::is_fuel_block_type(ctx, i.type_id))
                     .min_by_key(|i| i.item_id).map(|i| i64::from(i.type_id)).unwrap_or(4247);
                 let (fuel_tid, req_qty) = if args.len() >= 3 {
                     (args.get(1).and_then(|a| a.as_i64()).unwrap_or(default_tid), args.get(2).and_then(|a| a.as_i64()).unwrap_or(0))
@@ -913,14 +913,14 @@ pub async fn handle_jettison_structure_fuel(
                 }
                 let req_qty_u32 = u32::try_from(req_qty).map_err(|_| err("InvalidArgument", format!("Invalid fuel quantity {req_qty}")))?;
                 let mut bay_matching: Vec<i64> = snap.items.values()
-                    .filter(|i| i.location_id == structure_id && i.flag == InventoryFlag::SpecializedFuelBay && i.type_id == fuel_tid_u32 && i.quantity > 0)
+                    .filter(|i| i.location_id == structure_id && rules::is_structure_fuel_flag(i.flag) && i.type_id == fuel_tid_u32 && i.quantity > 0)
                     .map(|i| i.item_id).collect();
                 bay_matching.sort_unstable();
                 let matching_qty: u32 = bay_matching.iter().filter_map(|id| snap.items.get(id)).map(|i| i.quantity.max(0) as u32).fold(0, u32::saturating_add);
                 let is_block = rules::is_fuel_block_type(ctx, fuel_tid_u32);
                 let avail_for_tid = if is_block {
                     let backed_all: u32 = snap.items.values()
-                        .filter(|i| i.location_id == structure_id && i.flag == InventoryFlag::SpecializedFuelBay && i.quantity > 0 && rules::is_fuel_block_type(ctx, i.type_id))
+                        .filter(|i| i.location_id == structure_id && rules::is_structure_fuel_flag(i.flag) && i.quantity > 0 && rules::is_fuel_block_type(ctx, i.type_id))
                         .map(|i| i.quantity as u32).fold(0, u32::saturating_add);
                     matching_qty.saturating_add(st.fuel_blocks.saturating_sub(backed_all)).min(st.fuel_blocks)
                 } else {

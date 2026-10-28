@@ -813,7 +813,7 @@ fn installed_core_item(snap: &WorldStateSnapshot, st: &UpwellStructureRecord, co
     let mut ids: Vec<i64> = snap
         .items
         .values()
-        .filter(|i| i.location_id == st.structure_id && i.flag == InventoryFlag::StructureDeedBay && i.type_id == core_type && (i.owner_id == corp || snap.characters.get(&i.owner_id).map(|c| c.corporation_id == corp).unwrap_or(false)))
+        .filter(|i| i.location_id == st.structure_id && (i.flag == InventoryFlag::StructureDeedBay || i.flag as u16 == 172 || i.flag as u16 == 180) && i.type_id == core_type && (i.owner_id == corp || snap.characters.get(&i.owner_id).map(|c| c.corporation_id == corp).unwrap_or(false)))
         .map(|i| i.item_id)
         .collect();
     ids.sort_unstable();

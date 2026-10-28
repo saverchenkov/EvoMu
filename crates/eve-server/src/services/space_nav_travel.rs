@@ -95,6 +95,10 @@ pub async fn sync_tether(ctx: &ServerContext, char_id: i64, sys_id: u32, ship_id
             })
         })
         .unwrap_or_default();
+    let immobilizing_disallow = crate::services::space_navigation_advanced::check_immobilizing_module_active(
+        ctx, ship_id, "tether",
+    )
+    .is_err();
     let (anchors, disallow_active, is_piloted) = ctx.db.with_snapshot(|snap| {
         let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
         let piloted = char_id > 0
@@ -118,10 +122,7 @@ pub async fn sync_tether(ctx: &ServerContext, char_id: i64, sys_id: u32, ship_id
                 (range > 0.0).then(|| (DVec3::from_array(st.position), range))
             })
             .collect();
-        let disallow = crate::services::space_navigation_advanced::check_immobilizing_module_active(
-            ctx, ship_id, "tether",
-        )
-        .is_err()
+        let disallow = immobilizing_disallow
             || snap.items.values().any(|it| {
                 if it.location_id != ship_id
                     || (!snap.module_active_states.contains(&it.item_id) && !fit_active_ids.contains(&it.item_id))

@@ -409,7 +409,7 @@ pub(crate) async fn handle_multi_add(
             }
         }
     }
-    let dest_is_struct_fuel = flag == InventoryFlag::SpecializedFuelBay
+    let dest_is_struct_fuel = crate::services::structure_acl_defense_rules::is_structure_fuel_flag(flag)
         && ctx.db.with_snapshot(|s| s.structures.contains_key(&new_loc));
     let is_ship_hold = !dest_is_struct_fuel
         && matches!(flag_u16, 5 | 87 | 158 | 133..=151 | 179 | 181 | 182 | 185);
@@ -754,7 +754,7 @@ pub(crate) async fn handle_multi_add(
     let (moved, old_containers) = ctx.db.try_with_mut_snapshot(|snap| {
         let mut moved = Vec::with_capacity(item_ids.len());
         let mut old_containers = HashSet::new();
-        let dst_struct_corp = (flag_u16 == 133 || flag == InventoryFlag::SpecializedFuelBay)
+        let dst_struct_corp = crate::services::structure_acl_defense_rules::is_structure_fuel_flag(flag)
             .then(|| snap.structures.get(&new_loc).map(|st| st.owner_corp_id))
             .flatten()
             .unwrap_or(0);

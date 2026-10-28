@@ -860,6 +860,13 @@ pub fn is_fuel_block_type(ctx: &ServerContext, type_id: u32) -> bool {
         .is_some_and(|t| life::service_fuel_groups(ctx).contains(&t.group_id))
 }
 
+#[inline]
+pub fn is_structure_fuel_flag(flag: eve_db::InventoryFlag) -> bool {
+    flag == eve_db::InventoryFlag::SpecializedFuelBay
+        || flag == eve_db::InventoryFlag::StructureFuel
+        || flag as u16 == 172
+}
+
 pub fn is_valid_structure_fuel_bay_item(ctx: &ServerContext, type_id: u32) -> bool {
     is_fuel_block_type(ctx, type_id)
         || type_id == 16273
@@ -918,7 +925,7 @@ pub fn consume_structure_fuel_blocks(
         .values()
         .filter(|i| {
             i.location_id == structure_id
-                && i.flag == eve_db::InventoryFlag::SpecializedFuelBay
+                && is_structure_fuel_flag(i.flag)
                 && i.quantity > 0
                 && is_fuel_block_type(ctx, i.type_id)
         })
@@ -937,7 +944,7 @@ pub fn consume_structure_fuel_blocks(
         .values()
         .filter(|i| {
             i.location_id == structure_id
-                && i.flag == eve_db::InventoryFlag::SpecializedFuelBay
+                && is_structure_fuel_flag(i.flag)
                 && i.quantity > 0
                 && is_fuel_block_type(ctx, i.type_id)
         })
@@ -969,7 +976,7 @@ pub fn consume_structure_fuel_blocks(
                 .values()
                 .filter(|i| {
                     i.location_id == structure_id
-                        && i.flag == eve_db::InventoryFlag::SpecializedFuelBay
+                        && is_structure_fuel_flag(i.flag)
                         && i.quantity > 0
                         && is_fuel_block_type(ctx, i.type_id)
                 })
@@ -993,7 +1000,7 @@ pub fn materialize_structure_fuel_for_disposal(
         .values()
         .filter(|i| {
             i.location_id == structure_id
-                && i.flag == eve_db::InventoryFlag::SpecializedFuelBay
+                && is_structure_fuel_flag(i.flag)
                 && i.quantity > 0
                 && is_fuel_block_type(ctx, i.type_id)
         })
@@ -1149,9 +1156,9 @@ pub fn finalize_fuel_bay_move_in_snap(
     char_id: i64,
     caller_corp: i64,
 ) -> (Option<eve_db::InventoryItemRecord>, Option<u32>) {
-    let from_fuel = old_flag == eve_db::InventoryFlag::SpecializedFuelBay
+    let from_fuel = is_structure_fuel_flag(old_flag)
         && snap.structures.contains_key(&old_loc);
-    let to_fuel = new_flag == eve_db::InventoryFlag::SpecializedFuelBay
+    let to_fuel = is_structure_fuel_flag(new_flag)
         && snap.structures.contains_key(&new_loc);
     if !from_fuel && !to_fuel {
         return (snap.items.get(&moved_item_id).cloned(), None);
@@ -1196,7 +1203,7 @@ pub fn finalize_fuel_bay_move_in_snap(
                 .find(|i| {
                     i.item_id != moved_item_id
                         && i.location_id == new_loc
-                        && i.flag == eve_db::InventoryFlag::SpecializedFuelBay
+                        && is_structure_fuel_flag(i.flag)
                         && i.type_id == moving.type_id
                         && !i.singleton
                         && !i.is_blueprint_copy

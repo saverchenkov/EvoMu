@@ -634,8 +634,23 @@ pub(crate) fn validate_multiadd_structure_fuel_transfers(
     caller_ship_id: i64,
     pre_balls: &HashMap<i64, (glam::DVec3, f64)>,
 ) -> Result<bool, BridgeRpcError> {
-    let src_is_struct_fuel = item.flag == InventoryFlag::SpecializedFuelBay
-        && snap.structures.contains_key(&item.location_id);
+    let is_struct_loc = snap.structures.contains_key(&item.location_id);
+    let is_core_item = is_struct_loc && (
+        ctx.sde.types.get(&item.type_id).is_some_and(|t| t.group_id == 4086 || t.category_id == 66)
+            || snap.structures.get(&item.location_id)
+                .and_then(|st| crate::services::station_structure::structure_lifecycle::structure_profile(ctx, st.type_id))
+                .and_then(|p| p.core_type_id)
+                .is_some_and(|c| c == item.type_id)
+    );
+    if is_struct_loc && (item.flag == InventoryFlag::StructureDeedBay || item.flag as u16 == 180 || ((item.flag == InventoryFlag::StructureFuel || item.flag as u16 == 172) && is_core_item)) {
+        return Err(BridgeRpcError {
+            code: "ItemLocked".into(),
+            message: "Quantum core cannot be removed from structure deed bay".into(),
+        });
+    }
+    let src_is_struct_fuel = is_struct_loc
+        && !is_core_item
+        && crate::services::structure_acl_defense_rules::is_structure_fuel_flag(item.flag);
     if src_is_struct_fuel {
         crate::services::structure_acl_defense_rules::validate_structure_fuel_bay_transfer(
             ctx, snap, session, char_id, item.location_id, item.type_id, false, ch_dock, ch_sys, caller_ship_id, pre_balls,

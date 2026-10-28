@@ -131,12 +131,12 @@ pub async fn handle(
             };
             let raw_flag_opt = args.get(2).and_then(|a| a.as_i64()).or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()));
             if let Some(rf) = raw_flag_opt {
-                if !matches!(rf, 0 | 4 | 5 | 11..=34 | 87 | 90 | 92..=94 | 116..=122 | 125..=151 | 155 | 163..=172 | 179 | 181 | 182 | 185) {
+                if !matches!(rf, 0 | 4 | 5 | 11..=34 | 87 | 90 | 92..=94 | 116..=122 | 125..=151 | 155 | 164..=172 | 179..=182 | 185) {
                     return Some(Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: format!("Invalid or restricted inventory flag {rf}") }));
                 }
             }
             let flag_u16 = raw_flag_opt.map(|v| v as u16).unwrap_or(InventoryFlag::Cargo as u16);
-            let flag = match flag_u16 {
+            let mut flag = match flag_u16 {
                 90 => InventoryFlag::SpecializedShipHold,
                 155 => InventoryFlag::Cargo,
                 other => InventoryFlag::from_u16(other),
@@ -679,14 +679,29 @@ pub async fn handle(
                     }
                     false
                 };
-                let src_is_struct_fuel = moving.flag == InventoryFlag::SpecializedFuelBay && snap.structures.contains_key(&moving.location_id);
-                let src_ok = if src_is_struct_fuel {
+                let is_struct_loc = snap.structures.contains_key(&moving.location_id);
+                let is_core_item = is_struct_loc && (
+                    ctx.sde.types.get(&moving.type_id).is_some_and(|t| t.group_id == 4086 || t.category_id == 66)
+                        || snap.structures.get(&moving.location_id)
+                            .and_then(|st| crate::services::station_structure::structure_lifecycle::structure_profile(ctx, st.type_id))
+                            .and_then(|p| p.core_type_id)
+                            .is_some_and(|c| c == moving.type_id)
+                );
+                let is_deed_bay = is_struct_loc && (
+                    moving.flag == InventoryFlag::StructureDeedBay
+                        || moving.flag as u16 == 180
+                        || ((moving.flag == InventoryFlag::StructureFuel || moving.flag as u16 == 172) && is_core_item)
+                );
+                let src_is_struct_fuel = is_struct_loc
+                    && !is_core_item
+                    && crate::services::structure_acl_defense_rules::is_structure_fuel_flag(moving.flag);
+                let src_ok = if is_deed_bay {
+                    return Err(BridgeRpcError { code: "ItemLocked".into(), message: "Quantum core cannot be removed from structure deed bay".into() });
+                } else if src_is_struct_fuel {
                     crate::services::structure_acl_defense_rules::validate_structure_fuel_bay_transfer(
                         ctx, snap, session, char_id, moving.location_id, moving.type_id, false, ch_dock, ch_sys, caller_ship_id, &pre_balls,
                     )?;
                     true
-                } else if moving.flag == InventoryFlag::StructureDeedBay {
-                    return Err(BridgeRpcError { code: "ItemLocked".into(), message: "Quantum core cannot be removed from structure deed bay".into() });
                 } else if moving.owner_id == char_id || (corp_id > 0 && moving.owner_id == corp_id) {
                     if let Some(parent) = snap.items.get(&moving.location_id) {
                         let p_cat = ctx.sde.types.get(&parent.type_id).map(|t| t.category_id).unwrap_or(0);
@@ -822,13 +837,17 @@ pub async fn handle(
                 } else if (60_000_000..=69_999_999).contains(&new_loc) {
                     ch_dock == new_loc
                 } else if new_loc >= 1_000_000_000_000 || snap.structures.contains_key(&new_loc) {
-                    let is_fuel_flag = matches!(flag_u16, 133 | 163) || matches!(flag, InventoryFlag::StructureFuel | InventoryFlag::SpecializedFuelBay);
+                    let is_core_item = ctx.sde.types.get(&moving.type_id).is_some_and(|t| t.group_id == 4086 || t.category_id == 66);
+                    let is_deed_flag = flag_u16 == 180 || flag == InventoryFlag::StructureDeedBay || ((matches!(flag_u16, 172) || flag == InventoryFlag::StructureFuel) && is_core_item);
+                    let is_fuel_flag = matches!(flag_u16, 133)
+                        || flag == InventoryFlag::SpecializedFuelBay
+                        || ((matches!(flag_u16, 172) || flag == InventoryFlag::StructureFuel) && !is_core_item);
                     if is_fuel_flag {
                         crate::services::structure_acl_defense_rules::validate_structure_fuel_bay_transfer(
                             ctx, snap, session, char_id, new_loc, moving.type_id, true, ch_dock, ch_sys, caller_ship_id, &pre_balls,
                         )?;
                         true
-                    } else if flag_u16 == 172 || flag == InventoryFlag::StructureDeedBay {
+                    } else if is_deed_flag {
                         let st = snap.structures.get(&new_loc).ok_or_else(|| {
                             BridgeRpcError { code: "StructureNotFound".into(), message: format!("Structure {new_loc} not found") }
                         })?;
@@ -880,7 +899,19 @@ pub async fn handle(
                 return Some(Err(e));
             }
 
-            let dest_is_struct_fuel = flag == InventoryFlag::SpecializedFuelBay && ctx.db.with_snapshot(|s| s.structures.contains_key(&new_loc));
+            let is_quantum_core_deposit = (flag_u16 == 172 || flag_u16 == 180 || flag == InventoryFlag::StructureDeedBay)
+                && ctx.db.with_snapshot(|snap| {
+                    snap.structures.get(&new_loc).is_some_and(|st| {
+                        let profile = crate::services::station_structure::structure_lifecycle::structure_profile(ctx, st.type_id);
+                        let expected_core = profile.as_ref().and_then(|p| p.core_type_id);
+                        expected_core == source_item_opt.as_ref().map(|i| i.type_id)
+                    })
+                });
+            if is_quantum_core_deposit {
+                flag = InventoryFlag::StructureDeedBay;
+            }
+
+            let dest_is_struct_fuel = crate::services::structure_acl_defense_rules::is_structure_fuel_flag(flag) && ctx.db.with_snapshot(|s| s.structures.contains_key(&new_loc));
             let dest_is_ship_hold = !dest_is_struct_fuel && matches!(flag_u16, 5 | 87 | 158 | 133..=151 | 179 | 181 | 182 | 185);
             if dest_is_ship_hold {
                 let eval_cargo_cap = (flag_u16 == 5).then(|| {
@@ -970,8 +1001,8 @@ pub async fn handle(
                 let orig_id = item_id;
                 let split_owner = source_item_opt.as_ref().map(|i| i.owner_id).unwrap_or(char_id);
                 let corp_id = session.corporation_id.unwrap_or(0);
-                let struct_fuel_corp = (flag_u16 == 133).then(|| ctx.db.with_snapshot(|s| s.structures.get(&new_loc).map(|st| st.owner_corp_id))).flatten().unwrap_or(0);
-                let target_owner = if struct_fuel_corp > 0 { struct_fuel_corp } else if (116..=122).contains(&flag_u16) && corp_id > 0 { corp_id } else { char_id };
+                let struct_fuel_corp = (flag_u16 == 133 || flag_u16 == 172 || flag == InventoryFlag::StructureFuel).then(|| ctx.db.with_snapshot(|s| s.structures.get(&new_loc).map(|st| st.owner_corp_id))).flatten().unwrap_or(0);
+                let target_owner = if struct_fuel_corp > 0 { struct_fuel_corp } else if (116..=122).contains(&flag_u16) || flag_u16 == 180 || flag == InventoryFlag::StructureDeedBay { corp_id } else { char_id };
                 match ctx.db.split_stack(split_owner, item_id, split_qty) {
                     Ok((_orig, mut split_item)) => {
                         if split_item.owner_id != target_owner {
@@ -1097,8 +1128,8 @@ pub async fn handle(
             let old_loc_id = source_item_opt.as_ref().map(|i| i.location_id).unwrap_or(0);
             let old_flag_id = source_item_opt.as_ref().map(|i| i.flag as i64).unwrap_or(0);
             let corp_id_for_owner = session.corporation_id.unwrap_or(0);
-            let struct_fuel_owner = (flag_u16 == 133).then(|| ctx.db.with_snapshot(|s| s.structures.get(&new_loc).map(|st| st.owner_corp_id))).flatten().unwrap_or(0);
-            let dst_corp_owner = if struct_fuel_owner > 0 { struct_fuel_owner } else if (116..=122).contains(&flag_u16) || flag == InventoryFlag::StructureDeedBay { corp_id_for_owner } else { 0 };
+            let struct_fuel_owner = (flag_u16 == 133 || flag_u16 == 172 || flag == InventoryFlag::StructureFuel).then(|| ctx.db.with_snapshot(|s| s.structures.get(&new_loc).map(|st| st.owner_corp_id))).flatten().unwrap_or(0);
+            let dst_corp_owner = if struct_fuel_owner > 0 { struct_fuel_owner } else if (116..=122).contains(&flag_u16) || flag_u16 == 180 || flag == InventoryFlag::StructureDeedBay { corp_id_for_owner } else { 0 };
             let move_res: Result<eve_db::InventoryItemRecord, String> = ctx
                 .db
                 .move_item_transactional(char_id, item_id, new_loc, flag, expected_version, idem_key)
@@ -1145,7 +1176,7 @@ pub async fn handle(
                         }
                         fb
                     });
-                    if flag == InventoryFlag::StructureDeedBay {
+                    if flag_u16 == 180 || flag == InventoryFlag::StructureDeedBay {
                         crate::services::station_structure::structure_lifecycle::sync_all_structures(ctx);
                     }
                     if looted_from_space {

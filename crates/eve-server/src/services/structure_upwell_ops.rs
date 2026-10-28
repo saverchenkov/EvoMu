@@ -363,8 +363,8 @@ fn handle_move_assets_to_safety(ctx: &ServerContext, session: &mut SessionState,
         };
         let mut item_ids: Vec<i64> = snap.items.values().filter(|i| {
             i.owner_id == owner_id && i.location_id == structure_id && !all_active_ships.contains(&i.item_id)
-                && !matches!(i.flag as u16, 11..=34 | 87 | 92..=94 | 125..=132 | 163 | 164..=171)
-                && i.flag != InventoryFlag::SpecializedFuelBay && i.flag != InventoryFlag::Locked
+                && !matches!(i.flag as u16, 11..=34 | 87 | 92..=94 | 125..=132 | 163..=172 | 180)
+                && i.flag != InventoryFlag::SpecializedFuelBay && i.flag != InventoryFlag::StructureFuel && i.flag != InventoryFlag::StructureDeedBay && i.flag != InventoryFlag::Locked
                 && !snap.is_item_locked_in_contract_or_job(i.item_id)
                 && !has_locked_descendant(i.item_id)
         }).map(|i| i.item_id).collect();
