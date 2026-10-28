@@ -125,7 +125,9 @@ Committing criminal acts reduces character security status based on the system's
 $$\text{Loss} = \max\left( \text{BasePenalty} + (\text{SS}_{\text{curr}} - (-10.0)) \times 0.02 \times \left(\frac{\max(\text{SS}_{\text{sys}}, 0.0) + 1.0}{2.0}\right), \text{BasePenalty} \right)$$
 
 Where:
-$$\text{BasePenalty} = \begin{cases} 2.0 & \text{for pod destruction (capsule)} \\ 0.5 & \text{for unprovoked ship attack} \end{cases}$$
+$$
+\text{BasePenalty} = \begin{cases} 2.0 & \text{for pod destruction (capsule)} \\ 0.5 & \text{for unprovoked ship attack} \end{cases}
+$$
 
 If $\text{SS}_{\text{curr}} \le -10.0$, no further loss is recorded.
 
@@ -137,14 +139,16 @@ A pilot whose security status drops to $\le -5.0$ (or below specific high-sec th
 
 $$\text{Threshold}(\text{SS}_{\text{sys}}) = 1.0 - 2.0 \times \text{SS}_{\text{sys}}$$
 
-$$\begin{aligned}
+$$
+\begin{aligned}
 \text{SS}_{\text{sys}} \ge 1.0 &\implies \text{Engages if } \text{SS}_{\text{char}} \le -2.0 \\
 \text{SS}_{\text{sys}} \ge 0.9 &\implies \text{Engages if } \text{SS}_{\text{char}} \le -2.5 \\
 \text{SS}_{\text{sys}} \ge 0.8 &\implies \text{Engages if } \text{SS}_{\text{char}} \le -3.0 \\
 \text{SS}_{\text{sys}} \ge 0.7 &\implies \text{Engages if } \text{SS}_{\text{char}} \le -3.5 \\
 \text{SS}_{\text{sys}} \ge 0.6 &\implies \text{Engages if } \text{SS}_{\text{char}} \le -4.0 \\
 \text{SS}_{\text{sys}} \ge 0.5 &\implies \text{Engages if } \text{SS}_{\text{char}} \le -4.5
-\end{aligned}$$
+\end{aligned}
+$$
 
 - **High-Sec Docking Sanction:** Outlaw ships are refused docking permissions at all high-sec NPC stations.
 - **Capsule Exemption:** Outlaw capsules (`type_id: 670`) are *never* attacked by Faction Police and are permitted to dock in all stations.
@@ -221,14 +225,16 @@ When two pilots engage in legal combat that would otherwise be subject to high-s
 
 In high-security space, criminal acts provoke a response from CONCORD. CONCORD does not prevent crime; it guarantees retribution. The arrival delay depends strictly on solar system security status:
 
-$$T_{\text{delay}}(\text{SS}_{\text{sys}}) = \begin{cases} 
+$$
+T_{\text{delay}}(\text{SS}_{\text{sys}}) = \begin{cases} 
 6.0\text{ s} & \text{for } \text{SS}_{\text{sys}} \in [0.9, 1.0] \\
 7.0\text{ s} & \text{for } \text{SS}_{\text{sys}} = 0.8 \\
 10.0\text{ s} & \text{for } \text{SS}_{\text{sys}} = 0.7 \\
 14.0\text{ s} & \text{for } \text{SS}_{\text{sys}} = 0.6 \\
 19.0\text{ s} & \text{for } \text{SS}_{\text{sys}} = 0.5 \\
 \infty & \text{for } \text{SS}_{\text{sys}} < 0.45 \text{ (Low/Null/W-Space)}
-\end{cases}$$
+\end{cases}
+$$
 
 Upon arrival, CONCORD executes the canonical destruction pipeline:
 - Spawns an invulnerable *CONCORD Police Commander* (`type_id: 11957`) with damage resonance values set to `[0.0, 0.0, 0.0, 0.0]`.

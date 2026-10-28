@@ -158,7 +158,11 @@ Evaluating across agent levels:
 > 2. Character to Agent's **Corporation** ($S_{\text{corp}}$)
 > 3. Character to Agent's **Faction** ($S_{\text{faction}}$)
 >
-> If **ANY** of these three effective standings falls to $\le -2.0$, the agent will refuse all dialogue and missions, regardless of how high the other two standings may be. If all are $>-2.0$, access is unlocked using $\max(S_{\text{agent}}, S_{\text{corp}}, S_{\text{faction}})$.
+> If **ANY** of these three effective standings falls to $\le -2.0$, the agent will refuse all dialogue and missions, regardless of how high the other two standings may be. If all are $>-2.0$, access is unlocked using:
+
+$$
+\text{EffectiveStanding} = \max(S_{\text{agent}}, S_{\text{corp}}, S_{\text{faction}})
+$$
 
 #### Derived Faction Standing Inter-Relations
 Regular mission completion awards corporation and agent standing. Major storylines, Epic Arcs, and COSMOS encounters also award direct **Faction Standing**. When a pilot gains standing with faction $A$, allied and rival factions adjust their standing with the pilot based on static geopolitical affinity constants:

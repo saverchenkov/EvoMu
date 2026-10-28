@@ -72,7 +72,7 @@ flowchart LR
 ```
 
 #### Geometry, Range & Angle Constraints
-- **Maximum Range:** $14.33\text{ AU}$ ($14.3 \times \text{AU\_IN\_METERS} = 2,144,233,786,880\text{ meters}$).
+- **Maximum Range:** $14.33\text{ AU}$ ($14.3\text{ AU} \approx 2{,}144{,}233{,}786{,}880\text{ meters}$).
 - **Scan Cone Angle ($\theta$):** Adjustable continuously from a broad $360^\circ$ omnidirectional bubble down to a precision $5^\circ$ directional beam.
 - **Directional Vector Math:**
   Let $\vec{p}_{\text{ship}}$ be the scanning ship's position and $\vec{d}_{\text{cam}}$ be the unit direction vector of the player's camera (or ship heading). For any target ball at position $\vec{p}_{\text{target}}$:
@@ -127,9 +127,16 @@ Signal strength represents the ratio of delivered sensor power to the target sig
    $$\text{SkillMult} = \left(1.0 + 0.05 \times \text{Astrometrics}\right) \times \left(1.0 + 0.05 \times \text{Rangefinding}\right) \times \left(1.0 + \frac{\text{ScanModuleBonus\%}}{100}\right)$$
 
 2. **Probe Distance Falloff & Range Step Factor:**
-   For probe $i$ with scan radius $R_i = \text{BaseRange} \times 2^{\text{RangeStep}_i - 1}$ and distance $D_i = \|\vec{p}_{\text{probe}, i} - \vec{p}_{\text{sig}}\|$:
+   For probe $i$ with scan radius $R_i$ and distance $D_i$:
+   $$R_i = \text{BaseRange} \times 2^{\text{RangeStep}_i - 1}$$
+   $$D_i = \|\vec{p}_{\text{probe}, i} - \vec{p}_{\text{sig}}\|$$
+
    $$\text{StepFactor}_i = 0.5^{\text{RangeStep}_i - 1}$$
-   $$\text{DistFactor}_i = \begin{cases} 1.0 & \text{if } D_i \le 0.5 \times R_i \\ \exp\left(-\left(\frac{D_i - 0.5 \times R_i}{0.5 \times R_i}\right)^2\right) & \text{if } 0.5 \times R_i < D_i \le R_i \\ 0.0 & \text{if } D_i > R_i \end{cases}$$
+
+   $$
+   \text{DistFactor}_i = \begin{cases} 1.0 & \text{if } D_i \le 0.5 \times R_i \\ \exp\left(-\left(\frac{D_i - 0.5 \times R_i}{0.5 \times R_i}\right)^2\right) & \text{if } 0.5 \times R_i < D_i \le R_i \\ 0.0 & \text{if } D_i > R_i \end{cases}
+   $$
+
    $$\text{EffectiveSensor}_i = \text{BaseStrength} \times \text{SkillMult} \times \text{StepFactor}_i \times \text{DistFactor}_i$$
 
 3. **Formation Triangulation & Overlap:**

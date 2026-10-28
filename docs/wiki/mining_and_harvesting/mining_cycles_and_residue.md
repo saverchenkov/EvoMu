@@ -102,9 +102,9 @@ Before a mining cycle can initialize, the engine validates several strict spatia
 2. **Module Online State:** The module must be fitted to an appropriate slot and online (`ModuleState::Active` / `Online`).
 3. **Target Locking & Spatial Distance:** The target asteroid must be fully locked by the ship's targeting computer. The physical distance between the ship and the asteroid is measured as **surface-to-surface distance** ($d_{\text{surface}}$), accounting for the spherical collision radii of both entities:
    $$d_{\text{surface}} = \max\left(0, \|\vec{P}_{\text{ship}} - \vec{P}_{\text{asteroid}}\| - r_{\text{ship}} - r_{\text{asteroid}}\right)$$
-   Activation succeeds only if $d_{\text{surface}} \le R_{\text{max}}$, where $R_{\text{max}}$ is the module's effective `maxRange` (Dogma attribute `54`).
+   Activation succeeds only if surface distance does not exceed maximum range ($d \le R_{\max}$), where $R_{\text{max}}$ is the module's effective `maxRange` (Dogma attribute `54`).
 4. **Target Minability:** The asteroid must contain a positive quantity of resources ($Q > 0$). Furthermore, the module must possess the appropriate harvesting effect (`miningLaser` or `miningClouds`), and the asteroid's `requiredSkill1` (e.g. *Mining*, *Deep Core Mining*, or *Ice Harvesting*) must match the module's required skills.
-5. **Upfront Capacitor Cost:** The module's full effective `capacitorNeed` (attribute `6`) is deducted immediately upon activation. If the ship's current capacitor energy $C_{\text{current}} < C_{\text{need}}$, activation is rejected with `NotEnoughCapacitor`.
+5. **Upfront Capacitor Cost:** The module's full effective `capacitorNeed` (attribute `6`) is deducted immediately upon activation. If the ship's current capacitor energy $C < C_{\text{need}}$, activation is rejected with `NotEnoughCapacitor`.
 
 #### Short-Cycling Mechanics
 If a pilot manually deactivates a mining module before its full cycle duration $T_{\text{cycle}}$ has elapsed, the module enters a **short-cycle resolution**:
@@ -147,7 +147,7 @@ Where:
 - $Y_{\text{base}}$: Base module yield attribute `miningAmount` (`77`) in cubic meters ($\text{m}^3$).
 - $B_{s}$: Skill percentage bonus per level (e.g., *Mining* `attr 434` gives $+5\%$, *Astrogeology* `attr 434` gives $+5\%$).
 - $L_{s}$: Pilot's trained skill level ($0 \dots 5$).
-- $B_{\text{hull\_skill}}$: Ship skill bonus (e.g., *Mining Frigate* `attr 1842` gives $+5\%$ per level on the Venture; *Mining Barge* `attr 3181` gives $+3\%$ per level on the Retriever).
+- $B_{\text{hull}}$: Ship skill bonus (e.g., *Mining Frigate* `attr 1842` gives $+5\%$ per level on the Venture; *Mining Barge* `attr 3181` gives $+3\%$ per level on the Retriever).
 - $M_{\text{role}}$: Ship hull static role multiplier (e.g., Venture `attr 207` = $2.0$, representing a $+100\%$ bonus; Retriever `attr 3177` = $1.10$, representing a $+10\%$ bonus).
 - $B_{u}$: Mining Laser Upgrade bonus (`attr 434`). *Crucially, Mining Laser Upgrades are strictly exempted from Dogma stacking penalties; their modifiers multiply directly.*
 - $B_{i}$: Cybernetic implant yield bonus (e.g., *Highwall MX-1005* $= +5\%$, *Michi's Excavation Augmentor* $= +5\%$).
@@ -316,7 +316,7 @@ The server computes available capacity in the destination hold by summing the vo
 $$V_{\text{free}} = \max\left(0.0, V_{\text{capacity}} - \sum (Q_i \times V_i)\right)$$
 $$U_{\text{free}} = \left\lfloor \frac{V_{\text{free}}}{V_{\text{unit}}} \right\rfloor$$
 
-If the cycle's target yield exceeds available space ($U_{\text{target}} > U_{\text{free}}$):
+If the cycle's target yield exceeds available space ($U_{\text{target}} > U_{\text{cap}}$):
 1. The delivered units are clamped to exactly $U_{\text{free}}$.
 2. The module deactivates immediately with [`MiningStopReason::HoldFull`](../../../crates/eve-server/src/services/mining_cycle.rs#L66).
 3. The client receives notification that the hold has reached capacity.
@@ -405,7 +405,7 @@ Uncompressed ore and gas occupy vast volumes of cargo space, rendering long-dist
   - $\text{Eff}_{\text{base}}$ = $0.80$ ($80\%$, Dogma attribute `3262`).
   - $B_{\text{structure}}$ = Structure bonus (`attr 3261`): $+0.04$ ($+4\%$) on an Athanor (`35835`), $+0.10$ ($+10\%$) on a Tatara (`35836`).
   - $L_{\text{skill}}$ = Pilot's level in *Gas Decompression Efficiency* (`62452`, $0 \dots 5$).
-  - $B_{\text{skill\_pct}}$ = $+1\%$ per level (`attr 3260`).
+  - $B_{\text{skill}}$ = $+1\%$ per level (`attr 3260`).
   *(A max-skilled pilot at a Tatara achieves $0.80 + 0.10 + 0.05 = 0.95$ ($95\%$) decompression efficiency).*
 
 ---

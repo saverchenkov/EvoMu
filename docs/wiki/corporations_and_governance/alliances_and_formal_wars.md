@@ -79,7 +79,7 @@ The **Executor Corporation** holds administrative sovereignty over the alliance:
   $$\text{Votes}_{\text{required}} = \left\lfloor \frac{N_{\text{member\_corps}}}{2} \right\rfloor + 1$$
 * **Expulsion & Withdrawal:** 
   * The Executor Corporation can kick any member corporation immediately (`allianceRegistry.KickMember`).
-  * A member corporation can voluntarily withdraw (`allianceRegistry.DeleteMember`), subject to a $24\text{-hour}$ spool-off timer ($T_{\text{leave\_effective}} = T_{\text{request}} + 86\,400\text{ s}$).
+  * A member corporation can voluntarily withdraw (`allianceRegistry.DeleteMember`), subject to a $24\text{-hour}$ spool-off timer ($T_{\text{effective}} = T_{\text{request}} + 86\,400\text{ s}$).
   * **The War Lock Invariant:** A corporation **cannot leave or be kicked from an alliance while an active war exists** involving either the alliance or the corporation.
 
 #### Alliance Standings & Shared Bulletins
@@ -145,11 +145,11 @@ The designated War HQ represents the attacker's vital center of gravity:
 
 ### 4. High-Sec Combat Legality & Crimewatch Integration
 
-When an active war passes its 24-hour spool-up timer ($t \ge T_{\text{combat\_start}}$), the combat legality engine in [`combat_crimewatch.rs`](../../../crates/eve-server/src/services/combat_crimewatch.rs#L797) authorizes direct lethal engagements between opposing pilots:
+When an active war passes its 24-hour spool-up timer ($t \ge T_{\text{start}}$), the combat legality engine in [`combat_crimewatch.rs`](../../../crates/eve-server/src/services/combat_crimewatch.rs#L797) authorizes direct lethal engagements between opposing pilots:
 
 $$\text{LegalCombat}(P_{\text{att}}, P_{\text{vic}}) \iff \exists w \in \text{ActiveWars} \text{ such that } \begin{cases} t \ge w.\text{started} + 86\,400 \lor w.\text{mutual} \\ t < w.\text{finished} \\ \text{OppositeSides}(P_{\text{att}}, P_{\text{vic}}, w) \end{cases}$$
 
-Where $\text{OppositeSides}(P_{\text{att}}, P_{\text{vic}}, w)$ evaluates whether:
+Where $\text{OppositeSides}$ evaluates whether:
 1. $P_{\text{att}}$ belongs to the aggressor corporation/alliance, and $P_{\text{vic}}$ belongs to the defender corporation/alliance (or an accepted defender ally).
 2. Or vice versa ($P_{\text{att}}$ is defender/ally, $P_{\text{vic}}$ is aggressor).
 
@@ -193,7 +193,7 @@ At any point during an active war, either the aggressor or the defender can init
 * **Counterparty Acceptance:** If the receiving corporation accepts the terms via `warsInfoMgr.AcceptSurrender`:
   1. The offered ISK amount is atomically transferred from the offering party's master wallet to the accepting party's master wallet:
      $$\Delta \text{Balance}_{\text{offerer}} = -\text{Tribute}_{\text{ISK}}, \quad \Delta \text{Balance}_{\text{acceptor}} = +\text{Tribute}_{\text{ISK}}$$
-  2. The war enters a $24\text{-hour}$ wind-down phase ($T_{\text{finish}} = t_{\text{accept}} + 86\,400\text{ s}$).
+  2. The war enters a $24\text{-hour}$ wind-down phase ($T_{\text{end}} = t_{\text{accept}} + 86\,400\text{ s}$).
   3. A mandatory **14-day Peace Treaty** is created:
      $$T_{\text{peace\_expiry}} = T_{\text{finish}} + (14 \times 86\,400\text{ s}) = t_{\text{accept}} + 1\,296\,000\text{ seconds}$$
 

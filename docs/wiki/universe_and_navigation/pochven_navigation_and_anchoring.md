@@ -270,7 +270,7 @@ graph TD
 
 ### 1. Zero-Exploit Filament Evaporation
 A critical vulnerability in spatial combat engines involves capsuleers activating filaments to evade PvP combat:
-- **Tackle Invariant:** If the ship has positive warp scramble strength ($\text{warp\_scramble\_strength} > 0$), or the ballpark physics engine registers an active warp disruptor bubble or scrambler, activation is immediately refused with `WarpScrambled` ([`sp6_lifecycle.rs#L341-L364`](../../../crates/eve-server/src/sp6_lifecycle.rs#L341-L364)).
+- **Tackle Invariant:** If the ship has positive warp scramble strength (`warp_scramble_strength > 0`), or the ballpark physics engine registers an active warp disruptor bubble or scrambler, activation is immediately refused with `WarpScrambled` ([`sp6_lifecycle.rs#L341-L364`](../../../crates/eve-server/src/sp6_lifecycle.rs#L341-L364)).
 - **Weapons Timer Lockout:** If the ship has fired offensive weapons or activated electronic warfare in the last 60 seconds, activation fails with `WeaponsTimerActive`.
 - **Session-Change Timer Lockout:** A 10-second session change timer lock prevents rapid filament cycling or jump stacking (`SessionChangeInProgress`).
 

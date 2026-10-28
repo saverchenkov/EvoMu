@@ -498,7 +498,7 @@ pub struct CorpProjectRecord {
 
 ### 1. Invariant: 24-Hour Role Delay Persistence Across Restarts
 * **Vulnerability:** If role grant delays are tracked solely in ephemeral timers, an attacker could trigger a server restart or exploit node handoffs to cause pending roles to mature prematurely.
-* **Mitigation:** EvoMu persists `pending_role_grants` with explicit UNIX timestamps directly into `CorpGovState` in the durable world state snapshot. When the server restarts or a player logs in, `promote_due_pending_corp_grants` evaluates $t_{\text{now}} \ge t_{\text{effective}}$. If the timer has not elapsed, the grant remains strictly inert and masked.
+* **Mitigation:** EvoMu persists `pending_role_grants` with explicit UNIX timestamps directly into `CorpGovState` in the durable world state snapshot. When the server restarts or a player logs in, `promote_due_pending_corp_grants` evaluates `current_time >= effective_time`. If the timer has not elapsed, the grant remains strictly inert and masked.
 
 ### 2. Invariant: Divisional Wallet Overdraft Prevention
 * **Vulnerability:** Concurrently issuing multiple dividend payouts, market orders, or inter-division transfers could result in negative wallet balances.

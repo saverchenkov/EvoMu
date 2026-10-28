@@ -177,9 +177,12 @@ Skill trading permits capsuleers to reconfigure their neural development by extr
    * *Interplanetary Consolidation* (`typeID: 2495`)
 
 #### Injector Diminishing Returns
-When applying a **Large Skill Injector** ([`typeID: 40520`](../../../crates/eve-sde/)) or **Small Skill Injector** ([`typeID: 45635`](../../../crates/eve-sde/)), diminishing returns apply based on the recipient's total skill points ($SP_{\text{total}} = SP_{\text{trained}} + SP_{\text{unallocated}}$):
+When applying a **Large Skill Injector** ([`typeID: 40520`](../../../crates/eve-sde/)) or **Small Skill Injector** ([`typeID: 45635`](../../../crates/eve-sde/)), diminishing returns apply based on the recipient's total skill points $SP_{\text{total}}$:
 
-| Character Total SP Pool | Large Injector Yield ($Y_{\text{large}}$) | Small Injector Yield ($Y_{\text{small}} = Y_{\text{large}} / 5$) | Effective Efficiency |
+$$SP_{\text{total}} = SP_{\text{trained}} + SP_{\text{unallocated}}$$
+
+
+| Character Total SP Pool | Large Injector Yield ($Y_{\text{large}}$) | Small Injector Yield (20% of Large) | Effective Efficiency |
 | :--- | :---: | :---: | :---: |
 | **$< 5,000,000\text{ SP}$** | **$500,000\text{ SP}$** | $100,000\text{ SP}$ | $100\%$ |
 | **$5,000,000 - 50,000,000\text{ SP}$** | **$400,000\text{ SP}$** | $80,000\text{ SP}$ | $80\%$ |
@@ -410,7 +413,8 @@ pub struct CharacterRecord {
 
 ### 3. Invariant: Jump Clone Cooldown Durability Across Restarts
 * **Vulnerability:** Server restarts clearing in-memory timers, allowing pilots to jump clones repeatedly without cooldown.
-* **Mitigation:** The cooldown timestamp is stored as an absolute UNIX timestamp (`last_clone_jump_unix`) on the `CharacterRecord`. When jumping, the server compares $t_{\text{now}} - t_{\text{last}}$ against $\text{Cooldown}(L_{\text{InfomorphSync}})$.
+* **Mitigation:** The cooldown timestamp is stored as an absolute UNIX timestamp (`last_clone_jump_unix`) on the `CharacterRecord`. When jumping, the server compares elapsed time $\Delta t$ against the required cooldown:
+  $$\Delta t \ge \text{Cooldown}(L_{\text{InfomorphSync}})$$
 
 ### 4. Edge Case: Upwell Citadel Destruction with Installed Clones
 * **Problem:** If a player citadel is destroyed or unanchored, installed jump clones and medical clone anchors could be orphaned.

@@ -72,13 +72,14 @@ sequenceDiagram
 #### Kinematic State Vector
 Every physical entity within a Ballpark is modeled as a spherical rigid body termed a **Ball** ([`Ball`](../../../crates/eve-destiny/src/lib.rs#L508)), possessing the following state attributes:
 - Position vector: $\vec{P} = (x, y, z) \in \mathbb{R}^3$ (meters).
-- Velocity vector: $\vec{V} = (v_x, v_y, v_z) \in \mathbb{R}^3$ (meters per second).
+- Velocity vector:
+  $$\vec{V} = (v_x, v_y, v_z) \in \mathbb{R}^3 \quad (\text{m/s})$$
 - Maximum terminal speed: $v_{\max} \in \mathbb{R}^+$ ($\text{m/s}$).
 - Inertia modifier (Agility): $A \in \mathbb{R}^+$ (dimensionless).
 - Physical mass: $m \in \mathbb{R}^+$ ($\text{kg}$).
 - Collision radius: $r \in \mathbb{R}^+$ (meters).
 - Speed fraction throttle: $S_f \in [0.0, 1.0]$.
-- Movement mode: $\text{Mode} \in \text{MovementMode}$.
+- Movement mode: `Mode` $\in \text{MovementMode}$.
 
 ---
 
@@ -163,14 +164,29 @@ stateDiagram-v2
 | `12` | `Formation` | `DSTBALL_FORMATION` | Follows leader ball's local orthonormal basis $(right, up, forward)$ with quadratic arrival damping. |
 
 #### The Orbit Algorithm & Centripetal Steering
-When orbiting a target at distance $R_{\text{orbit}} = r_{\text{ship}} + r_{\text{target}} + \text{range}$, the ship maintains high tangential velocity while counteracting inertia to avoid drifting outward. EvoMu computes the steering vector dynamically:
-1. Radial vector: $\hat{r} = \frac{\vec{P}_{\text{target}} - \vec{P}_{\text{ship}}}{\|\vec{P}_{\text{target}} - \vec{P}_{\text{ship}}\|}$.
-2. Perpendicular velocity: $\vec{V}_{\perp} = \vec{V} - \hat{r} (\vec{V} \cdot \hat{r})$.
-3. Tangential vector $\hat{t} = \frac{\vec{V}_{\perp}}{\|\vec{V}_{\perp}\|}$ (falls back to a reference plane cross-product if stationary).
-4. Centripetal lead compensation:
+
+When orbiting a target at distance $R_{\text{orbit}}$:
+
+$$R_{\text{orbit}} = r_{\text{ship}} + r_{\text{target}} + \text{range}$$
+
+The ship maintains high tangential velocity while counteracting inertia to avoid drifting outward. EvoMu computes the steering vector dynamically:
+
+1. **Radial vector:**
+   $$\hat{r} = \frac{\vec{P}_{\text{target}} - \vec{P}_{\text{ship}}}{\|\vec{P}_{\text{target}} - \vec{P}_{\text{ship}}\|}$$
+
+2. **Perpendicular velocity:**
+   $$\vec{V}_{\perp} = \vec{V} - \hat{r} (\vec{V} \cdot \hat{r})$$
+
+3. **Tangential vector** (falls back to a reference plane cross-product if stationary):
+   $$\hat{t} = \frac{\vec{V}_{\perp}}{\|\vec{V}_{\perp}\|}$$
+
+4. **Centripetal lead compensation:**
    $$C_{\text{lead}} = \frac{\|\vec{V}\| \cdot (\tau + 0.5)}{R_{\text{orbit}}}$$
-5. Radial distance error: $E_r = \text{clamp}\left(\frac{\text{dist} - R_{\text{orbit}}}{250.0}, -3.0, 3.0\right)$.
-6. Composite goal velocity:
+
+5. **Radial distance error:**
+   $$E_r = \text{clamp}\left(\frac{\text{dist} - R_{\text{orbit}}}{250.0}, -3.0, 3.0\right)$$
+
+6. **Composite goal velocity:**
    $$\vec{V}_{\text{goal}} = \text{normalize}\left(\hat{t} + \hat{r} \cdot (E_r + C_{\text{lead}})\right) \cdot v_{\max} \cdot S_f$$
 
 ---
@@ -197,22 +213,30 @@ flowchart LR
 #### Detailed Phase Breakdown
 - **Minimum Warp Distance:** A vessel cannot enter warp to any object closer than **$150\text{ km}$ ($150\,000\text{ m}$)**. Attempts to warp within this distance are rejected with `DestinationTooClose`.
 - **Phase 1 — Sub-Warp Alignment (`WarpPhase::Aligning`):**
-  - Vessel accelerates along the warp heading vector $\hat{W} = \text{normalize}(\vec{P}_{\text{dest}} - \vec{P}_{\text{origin}})$.
-  - Checks for warp scrambler disruption. If scrambled ($W_{\text{scramble}} \ge W_{\text{core}}$), warp is aborted immediately.
+  - Vessel accelerates along the warp heading vector:
+    $$\hat{W} = \text{normalize}(\vec{P}_{\text{dest}} - \vec{P}_{\text{origin}})$$
+  - Checks for warp scrambler disruption. If scrambled where warp scrambler strength exceeds ship core strength ($W_{\text{scramble}} \ge W_{\text{core}}$), warp is aborted immediately.
 - **Phase 2 — Warp Acceleration (`WarpPhase::Accelerating`):**
-  - Acceleration coefficient: $k_a = k_{\text{warp}}$ (in $\text{s}^{-1}$, numerically equal to warp speed in $\text{AU/s}$).
-  - Exponential velocity growth: $v(t) = v_{\text{init}} \cdot e^{k_a \cdot t}$.
-  - Peak velocity: $v_{\text{peak}} = \min\left(v_{\text{cruise}}, \frac{D_{\text{total}}}{(1/k_a) + (1/k_d)}\right)$, where $v_{\text{cruise}} = k_a \cdot \text{AU}$.
+  - Acceleration coefficient:
+  $$k_a = k_{\text{warp}} \quad (\text{s}^{-1})$$
+  (numerically equal, numerically equal to warp speed in $\text{AU/s}$).
+  - Exponential velocity growth:
+    $$v(t) = v_{\text{init}} \cdot e^{k_a \cdot t}$$
+  - Peak velocity:
+    $$v_{\text{peak}} = \min\left(v_{\text{cruise}}, \frac{D_{\text{total}}}{(1/k_a) + (1/k_d)}\right) \quad \text{where } v_{\text{cruise}} = k_a \cdot \text{AU}$$
 - **Phase 3 — FTL Cruise (`WarpPhase::Cruising`):**
   - Traversed only on long warps where distance is sufficient to reach $v_{\text{cruise}}$. Ship cruises at constant velocity $v_{\text{peak}}$.
 - **Phase 4 — Warp Deceleration (`WarpPhase::Decelerating`):**
-  - Deceleration coefficient: $k_d = \text{clamp}(k_a / 3.0, 0.1, 2.0)\text{ s}^{-1}$.
-  - Remaining distance decays exponentially: $d_{\text{rem}}(t + \Delta t) = d_{\text{rem}}(t) \cdot e^{-k_d \cdot \Delta t}$.
-  - Velocity during braking: $v(t) = \max\left(d_{\text{rem}} \cdot k_d, v_{\text{drop}}\right)$.
+  - Deceleration coefficient:
+    $$k_d = \text{clamp}(k_a / 3.0, 0.1, 2.0)\text{ s}^{-1}$$
+  - Remaining distance decays exponentially:
+    $$d_{\text{rem}}(t + \Delta t) = d_{\text{rem}}(t) \cdot e^{-k_d \cdot \Delta t}$$
+  - Velocity during braking:
+    $$v(t) = \max\left(d_{\text{rem}} \cdot k_d, v_{\text{drop}}\right)$$
 - **Phase 5 — Grid Exit & Dropout:**
   - When $d_{\text{rem}} \le 2\,500\text{ m}$, the ship drops out of warp.
   - Position is clamped within $2\,500\text{ m}$ of the destination point.
-  - Speed drops to sub-warp exit velocity ($v_{\text{drop}} \approx 0.5 \cdot v_{\max}$). Mode resets to `MovementMode::Stop`.
+  - Speed drops to sub-warp exit velocity ($v_{\text{drop}} \approx 0.5 v_{\max}$). Mode resets to `MovementMode::Stop`.
   - Ship gains **10 seconds of post-warp exit invulnerability** (`warp_exit_invulnerable_remaining_ticks = 10`), breaking immediately if the pilot initiates an active movement or combat action.
 
 ---
@@ -242,12 +266,26 @@ flowchart TD
 
 #### The Ray-Sphere Interception Algorithm
 Every active warp bubble in [`WarpBubbleMgr`](../../../crates/eve-destiny/src/lib.rs#L891) is tested against the linear warp vector between $\vec{P}_{\text{origin}}$ and $\vec{P}_{\text{dest}}$:
-1. Direction vector: $\vec{D} = \vec{P}_{\text{dest}} - \vec{P}_{\text{origin}}$, unit direction $\hat{D} = \frac{\vec{D}}{\|\vec{D}\|}$, total distance $d = \|\vec{D}\|$.
-2. Vector to bubble center: $\vec{C}_{\text{rel}} = \vec{P}_{\text{bubble}} - \vec{P}_{\text{origin}}$.
-3. Projection distance along ray: $t_{\text{proj}} = \vec{C}_{\text{rel}} \cdot \hat{D}$.
-4. Perpendicular distance squared: $d_{\perp}^2 = \|\vec{C}_{\text{rel}}\|^2 - t_{\text{proj}}^2$.
-5. If $d_{\perp}^2 > R_{\text{bubble}}^2$, the ray misses the bubble entirely.
-6. If $d_{\perp}^2 \le R_{\text{bubble}}^2$, the ray penetrates the sphere:
+
+1. **Direction vector and total distance:**
+   $$\vec{D} = \vec{P}_{\text{dest}} - \vec{P}_{\text{origin}}, \quad \hat{D} = \frac{\vec{D}}{\|\vec{D}\|}, \quad d = \|\vec{D}\|$$
+
+2. **Vector to bubble center:**
+   $$\vec{C}_{\text{rel}} = \vec{P}_{\text{bubble}} - \vec{P}_{\text{origin}}$$
+
+3. **Projection distance along ray:**
+   $$t_{\text{proj}} = \vec{C}_{\text{rel}} \cdot \hat{D}$$
+
+4. **Perpendicular distance squared:**
+   $$d_{\perp}^2 = \|\vec{C}_{\text{rel}}\|^2 - t_{\text{proj}}^2$$
+
+5. **Miss Condition:**
+   $$\text{Miss if: } d_{\perp}^2 > R_{\text{bubble}}^2$$
+   The ray misses the bubble entirely.
+
+6. **Intersection Penetration:**
+   $$\text{Intersection if: } d_{\perp}^2 \le R_{\text{bubble}}^2$$
+   The ray penetrates the sphere:
    $$\Delta t = \sqrt{R_{\text{bubble}}^2 - d_{\perp}^2}$$
    $$t_0 = t_{\text{proj}} - \Delta t \quad (\text{Sphere Entry Point})$$
    $$t_1 = t_{\text{proj}} + \Delta t \quad (\text{Sphere Exit Point})$$
@@ -256,7 +294,7 @@ Every active warp bubble in [`WarpBubbleMgr`](../../../crates/eve-destiny/src/li
 - **Stop Bubble ($0 < t_0 \le d$):** The bubble intersects the warp path in front of the destination. The warp vector terminates prematurely at the entry perimeter:
   $$\vec{P}_{\text{intercept}} = \vec{P}_{\text{origin}} + \hat{D} \cdot t_0$$
 - **Drag Bubble ($d < t_0 \le d + 500\,000\text{ m}$):** The bubble is positioned behind the destination point directly along the warp vector line within **$500\text{ km}$ ($500\,000\text{ m}$)**. The FTL drive overshoots the intended destination and pulls the ship into the bubble's front perimeter at $t_0$.
-- **Off-Axis Immunity:** If a bubble is positioned $> 500\text{ km}$ behind the destination, or if $d_{\perp} > R_{\text{bubble}}$, the warp is unaffected.
+- **Off-Axis Immunity:** If a bubble is positioned $> 500\text{ km}$ behind the destination, or if $d_{\perp} > R$, the warp is unaffected.
 
 #### The Mid-Flight Tunnel Invariant
 A critical parity invariant enforced by EvoMu: **Warp bubble interception is evaluated strictly at the moment of warp entry (transition from `Aligning` to `Accelerating`).** Once a ship is inside the FTL warp tunnel (`Accelerating`, `Cruising`, or `Decelerating`), newly anchored bubbles deployed while the ship is in transit **cannot yank the ship out of warp mid-flight**.
@@ -346,13 +384,16 @@ flowchart TD
 - State integration uses double-precision floats (`glam::DVec3` / `f64`), ensuring identical trajectory outputs across simulated and recorded runs.
 
 ### 2. Sanity Clamping & Coordinate Protection
-- Velocity integration clamps speeds to $[0.0, v_{\max} \cdot S_f]$. If external modules or micro jump drives apply impulse, velocity decays exponentially back to terminal limits.
+- Velocity integration clamps speeds to $[0.0, \; v_{\max} S_f]$. If external modules or micro jump drives apply impulse, velocity decays exponentially back to terminal limits.
 - If position coordinates exceed solar system bounding limits, coordinates are safely clamped to prevent client camera detachment or floating-point overflow.
 
 ### 3. Collision Deflection Physics (Restitution $e = 0.8$)
-- When two physical balls overlap ($d < r_A + r_B$):
-  - Overlap vector: $\vec{N} = \frac{\vec{P}_A - \vec{P}_B}{\|\vec{P}_A - \vec{P}_B\|}$, overlap depth $\delta = (r_A + r_B) - d$.
-  - Relative velocity: $v_{\text{rel}} = (\vec{V}_A - \vec{V}_B) \cdot \vec{N}$.
+- When two physical balls overlap when distance between centers is less than the sum of radii:
+  $$d < r_A + r_B$$
+  - Normal unit vector and overlap depth:
+    $$\vec{N} = \frac{\vec{P}_A - \vec{P}_B}{\|\vec{P}_A - \vec{P}_B\|}, \quad \delta = (r_A + r_B) - d$$
+  - Relative velocity along collision normal:
+    $$v_{\text{rel}} = (\vec{V}_A - \vec{V}_B) \cdot \vec{N}$$
   - If closing in ($v_{\text{rel}} < 0$):
     $$J = -\frac{(1 + e) \cdot v_{\text{rel}}}{\frac{1}{m_A} + \frac{1}{m_B}}$$
     $$\vec{V}_A \leftarrow \vec{V}_A + \frac{J}{m_A} \hat{N}, \quad \vec{V}_B \leftarrow \vec{V}_B - \frac{J}{m_B} \hat{N}$$

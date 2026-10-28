@@ -104,7 +104,9 @@ The warzone status directly scales Loyalty Point rewards for all capture complex
 | **Rearguard** | `STATUS_REARGUARD = 3` | $0.75\times$ ($75\%$) | Suppressed reward |
 
 ### Advantage Multiplier & Complex Capture Loop
-Each warzone system maintains continuous friendly and enemy advantage percentages $A_{\text{friendly}}, A_{\text{enemy}} \in [0.0, 100.0]$.
+Each warzone system maintains continuous friendly and enemy advantage percentages:
+
+$$A_{\text{friendly}}, A_{\text{enemy}} \in [0.0, 100.0]$$
 
 The complex capture speed multiplier $M_{\text{capture}}$ modifies how rapidly the capture beacon counter advances per simulation tick:
 
@@ -117,7 +119,7 @@ During each space simulation tick ($\Delta t$ seconds):
 * **Attacker Advancing:** If enemy attacker ships hold the grid alone, the complex advances toward the capture threshold $T_{\text{cap}}$ (canonical baseline: $600\text{ s}$ to $1200\text{ s}$):
   $$\Delta t_{\text{elapsed}} = \min\left(T_{\text{cap}}, \; t_{\text{elapsed}} + \text{round}(\Delta t \times M_{\text{capture}})\right)$$
 
-When $t_{\text{elapsed}} \ge T_{\text{cap}}$, the complex is completed:
+When $t \ge T_{\text{cap}}$, the complex is completed:
 1. **LP Payout:** Total complex LP is awarded:
    $$\text{Total LP} = \text{round}\left(15{,}000 \times M_{\text{status}}\right)$$
    Divided equally among all $N_{\text{pilots}}$ qualifying fleet members within capture range:
@@ -170,7 +172,9 @@ The DBS equilibrium target is set to $1.35$ ($135\%$). During each simulation st
 
 $$\Delta M_{\text{DBS}} = -\left(\frac{\text{Ratting ISK Destroyed}}{50{,}000{,}000}\right) \times 0.10 + \left(\frac{\text{PvP ISK Destroyed}}{25{,}000{,}000}\right) \times 0.15 + \Delta_{\text{drift}}$$
 
-Where equilibrium drift $\Delta_{\text{drift}} = (1.35 - M_{\text{DBS}}) \times 0.05$ if no destruction occurs.
+Where equilibrium drift $\Delta_{\text{drift}}$ pulls toward baseline if no destruction occurs:
+
+$$\Delta_{\text{drift}} = (1.35 - M_{\text{DBS}}) \times 0.05$$
 
 ```
        DBS ESCROW & REVENUE SPLIT PIPELINE
@@ -200,7 +204,7 @@ Where equilibrium drift $\Delta_{\text{drift}} = (1.35 - M_{\text{DBS}}) \times 
                                              Payout        Pulses
 ```
 
-When an NPC pirate is destroyed in a K-space null-sec system ($sys\_sec \le 0.0 \land sys\_id < 31{,}000{,}000$):
+When an NPC pirate is destroyed in a K-space null-sec system (`sys_sec <= 0.0` and `sys_id < 31_000_000`):
 1. **Gross Bounty Calculation:**
    $$B_{\text{gross}} = B_{\text{base}} \times \text{clamp}(M_{\text{DBS}}, 0.35, 2.00)$$
 2. **Direct Payout (60%):**

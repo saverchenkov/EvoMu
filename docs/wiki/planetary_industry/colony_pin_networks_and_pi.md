@@ -357,7 +357,9 @@ Planetary Industry involves persistent offline simulations, multi-hop routing, a
 ### 1. Link Bandwidth & Network Topology Invariants
 When a player defines a route between pins in `UserUpdateNetwork`:
 - The server traverses all intermediate links along the path.
-- The total commodity volume transferred per hour ($\text{Volume}_{\text{unit}} \times \text{Units}_{\text{cycle}} \times \frac{3600}{\text{CycleSec}}$) is added to the link's active load.
+- The total commodity volume transferred per hour is added to the link's active load:
+
+  $$\text{Throughput} = \text{Volume}_{\text{unit}} \times \text{Units}_{\text{cycle}} \times \frac{3600}{\text{CycleSec}}$$
 - If total load exceeds the upgraded link bandwidth, the transaction is aborted with `LinkBandwidthExceeded`, preventing link oversubscription exploits.
 
 ### 2. Atomicity of Orbital Transfers & Tax Escrow

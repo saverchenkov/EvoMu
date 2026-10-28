@@ -138,16 +138,16 @@ Operational jump range is governed by the ship's base jump range and the pilot's
 $$d_{\max} = d_{\text{base}} \times \left(1 + 0.20 \times \text{JDC\_Level}\right) \quad [\text{Light-Years}]$$
 
 * At JDC Level 5, the ship's operational jump envelope is doubled ($+100\%$).
-* Standard capital hulls (Dreadnoughts, Carriers, Titans) typically have $d_{\text{base}} = 5.0\text{ LY} \implies d_{\max} = 10.0\text{ LY}$.
-* Black Ops battleships feature extended base ranges: $d_{\text{base}} = 6.0\text{ LY} \implies d_{\max} = 12.0\text{ LY}$ (with conduit ranges up to $8.0\text{ LY}$).
-* Jump Freighters have $d_{\text{base}} = 5.0\text{ LY} \implies d_{\max} = 10.0\text{ LY}$.
+* Standard capital hulls (Dreadnoughts, Carriers, Titans) typically have $d_{\text{base}} = 5.0\text{ LY}$, giving maximum range $d_{\max} = 10.0\text{ LY}$.
+* Black Ops battleships feature extended base ranges: $d_{\text{base}} = 6.0\text{ LY}$, giving maximum range $d_{\max} = 12.0\text{ LY}$ (with conduit ranges up to $8.0\text{ LY}$).
+* Jump Freighters have $d_{\text{base}} = 5.0\text{ LY}$, giving maximum range $d_{\max} = 10.0\text{ LY}$.
 
 #### 2. Jump Distance in 3D Space
 Distance between origin solar system $A$ and destination solar system $B$ is measured in light-years ($1\text{ LY} = 9.46073 \times 10^{15}\text{ m}$):
 
 $$d_{\text{LY}} = \frac{\sqrt{(x_B - x_A)^2 + (y_B - y_A)^2 + (z_B - z_A)^2}}{9.46073 \times 10^{15}}$$
 
-If $d_{\text{LY}} > d_{\max}$, the jump drive fails to spool with `JumpDistanceOutOfRange`.
+If jump distance exceeds maximum range ($d > d_{\max}$), the jump drive fails to spool with `JumpDistanceOutOfRange`.
 
 #### 3. Isotope Fuel Consumption
 Jump drives burn empire-specific racial isotopes (attribute `jumpDriveConsumptionType` `866`):

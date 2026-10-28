@@ -163,7 +163,11 @@ Once launched, a missile ball travels toward the target ball:
 
 $$\vec{x}_{\text{missile}}(t + \Delta t) = \vec{x}_{\text{missile}}(t) + \hat{d} \cdot v_{\text{missile}} \cdot \Delta t$$
 
-Where $\hat{d} = \frac{\vec{x}_{\text{target}} - \vec{x}_{\text{missile}}}{\|\vec{x}_{\text{target}} - \vec{x}_{\text{missile}}\|}$. Relative closing velocity accounts for target evasion:
+Where the unit direction vector $\hat{d}$ is:
+
+$$\hat{d} = \frac{\vec{x}_{\text{target}} - \vec{x}_{\text{missile}}}{\|\vec{x}_{\text{target}} - \vec{x}_{\text{missile}}\|}$$
+
+Relative closing velocity accounts for target evasion:
 
 $$v_{\text{closing}} = \max\left(0, \; v_{\text{missile}} - \max(0, \vec{v}_{\text{target}} \cdot \hat{d})\right)$$
 
@@ -206,8 +210,10 @@ $$\vec{D}_{\text{applied}} = f_{\text{dmg}} \cdot \vec{D}_{\text{base}}$$
 └─────────────────────────┘                                 └─────────────────────────┘
 ```
 
-* **Large, Stationary Targets:** $\sigma_t \ge E_r$ and $v_t \le E_v \implies f_{\text{dmg}} = 1.0$ (100% full alpha applied).
-* **Small, Fast Targets:** $\sigma_t \ll E_r$ and $v_t \gg E_v \implies$ damage is heavily mitigated by both geometric blast mismatch and kinetic wavefront dispersion.
+* **Large, Stationary Targets:** When $\sigma_t \ge E_r$ and $v_t \le E_v$, full damage applies:
+  $$f_{\text{dmg}} = 1.0$$
+  (100% full alpha applied).
+* **Small, Fast Targets:** When $\sigma_t \ll E_r$ and $v_t \gg E_v$, damage is heavily mitigated by both geometric blast mismatch and kinetic wavefront dispersion.
 
 ---
 
@@ -438,7 +444,7 @@ pub struct InFlightMissileState {
 ## 4. Invariants, Security & Edge Cases
 
 1. **Singularity Guard in Angular Velocity:** If an attacker and target occupy the identical spatial coordinates ($d^2 < 1.0\text{ m}^2$), the cross-product division by $d^2$ would produce IEEE 754 `NaN` or `+Infinity`. [`compute_angular_velocity`](../../../crates/eve-destiny/src/physics.rs#L918-L920) explicitly branches on `dist_sq < 1.0` and returns `0.0`, ensuring flawless zero-transversal head-on tracking.
-2. **Target Signature Clamping:** If an un-configured entity has zero signature radius, the denominator of the tracking term $(\omega_{\text{track}} \cdot \sigma_t)$ would collapse. EvoMu clamps signature radius to $\max(\sigma_t, 1.0)$ in all formula paths.
+2. **Target Signature Clamping:** If an un-configured entity has zero signature radius, the denominator of the tracking term angular term $\omega_{\text{track}} \cdot \sigma_t$ would collapse. EvoMu clamps signature radius to $\max(\sigma_t, 1.0)$ in all formula paths.
 3. **Physical Missile Interception & Smartbomb Timing:** In-flight missiles are not abstract timers; they exist as balls registered in the solar system Ballpark. A pilot activating a Smartbomb ([`group_id == 72`](../../../crates/eve-server/src/services/combat_missiles_aoe.rs#L573-L640)) or Defender Launcher ([`group_id == 512`](../../../crates/eve-server/src/services/combat_missiles_aoe.rs#L1093-L1156)) deals physical damage to all in-flight missile balls within range. If missile $\text{HP} \le 0$, the missile is marked `destroyed = true`, removed from the ballpark, and its applied damage is zeroed before it can impact the target.
 4. **Frigate Escape Bay Atomicity:** Battleships equipped with a Frigate Escape Bay (`attribute 3020 > 0.0`) must transfer the pilot directly into the docked frigate without generating an intermediate capsule ball. In [`execute_death_pipeline_sync_inner`](../../../crates/eve-server/src/combat/death_pipeline.rs#L446-L460), the escape frigate is detached from the victim ship, re-parented to the solar system, set as the character's `active_ship_id`, and marked on the killmail as survived (`qty_dropped: 0, qty_destroyed: 0, flag: 179`).
 5. **Item Conservation in Wrecks:** Every item in the victim ship's inventory must be strictly accounted for during destruction. For every child item:

@@ -98,7 +98,9 @@ Total threat $T$ incorporates tactical role multipliers for active electronic wa
 $$T = (100.0 + \text{SigWeight}) \times M_{\text{role}}$$
 
 Where the role multiplier $M_{\text{role}}$ is defined as:
-$$M_{\text{role}} = \begin{cases} 1.5 & \text{if target activates EWAR modules (webs, scrams, painters, damps, ECM)} \\ 1.3 & \text{if target activates remote logistics (shield/armor/hull reps)} \\ 1.0 & \text{standard combat vessel} \end{cases}$$
+$$
+M_{\text{role}} = \begin{cases} 1.5 & \text{if target activates EWAR modules (webs, scrams, painters, damps, ECM)} \\ 1.3 & \text{if target activates remote logistics (shield/armor/hull reps)} \\ 1.0 & \text{standard combat vessel} \end{cases}
+$$
 
 For player combat drones, proximity and drone DPS are prioritized to simulate intelligent anti-drone rat aggression:
 
@@ -216,14 +218,16 @@ sequenceDiagram
 #### CONCORD Response & Execution Pipeline:
 In high-security space, unprovoked hostile aggression against non-criminal pilots triggers CONCORD intervention. The arrival delay scales strictly with system security:
 
-$$T_{\text{delay}}(\text{SS}_{\text{sys}}) = \begin{cases} 
+$$
+T_{\text{delay}}(\text{SS}_{\text{sys}}) = \begin{cases} 
 6.0\text{ s} & \text{for } \text{SS}_{\text{sys}} \in [0.9, 1.0] \\
 7.0\text{ s} & \text{for } \text{SS}_{\text{sys}} = 0.8 \\
 10.0\text{ s} & \text{for } \text{SS}_{\text{sys}} = 0.7 \\
 14.0\text{ s} & \text{for } \text{SS}_{\text{sys}} = 0.6 \\
 19.0\text{ s} & \text{for } \text{SS}_{\text{sys}} = 0.5 \\
 \infty & \text{for } \text{SS}_{\text{sys}} < 0.45 \text{ (Low/Null/W-Space)}
-\end{cases}$$
+\end{cases}
+$$
 
 Upon timer expiry, CONCORD executes a guaranteed destruction pipeline:
 1. Spawns an invulnerable *CONCORD Police Commander* (`type_id: 11957`) with shield, armor, and structure resonances set to $0.0$ ($100\%$ omni damage resistance).

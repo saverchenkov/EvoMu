@@ -173,7 +173,7 @@ The probability of a successful invention job is:
 $$P_{\text{inv}} = \min\left(1.0, \ P_{\text{base}} \cdot \left(1 + \frac{L_{\text{science1}} + L_{\text{science2}}}{30} + \frac{L_{\text{encryption}}}{40}\right) \cdot M_{\text{decryptor}}\right)$$
 Implemented in [`compute_invention_probability`](../../../crates/eve-server/src/formulas.rs#L537-L548).
 - $P_{\text{base}}$: Base item invention probability (e.g. $0.30$ for battlecruisers/battleships, $0.40$ for cruisers, $0.50$ for frigates).
-- $L_{\text{science1}}, L_{\text{science2}}$: Relevant racial and engineering science skill levels ($0$ to $5$).
+- $L_1, L_2$: Relevant racial and engineering science skill levels ($0$ to $5$).
 - $L_{\text{encryption}}$: Racial encryption method skill level ($0$ to $5$).
 - $M_{\text{decryptor}}$: Probability modifier from installed decryptor ($0.6\times$ to $1.8\times$).
 
