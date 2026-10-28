@@ -1231,23 +1231,10 @@ pub async fn handle_weapons(
                     ctx.notify(NotificationTarget::Character(char_id), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(victim_char_id), PyRep::Integer(timeout_ft)]);
                     ctx.notify(NotificationTarget::Character(victim_char_id), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(char_id), PyRep::Integer(timeout_ft)]);
                 }
-                let corr_stage5 = ctx.db.with_snapshot(|snap| {
-                    snap.system_states
-                        .get(&sys_id)
-                        .is_some_and(|st| st.insurgency_corruption_stage >= 5)
-                });
+                let corr_stage5 = ctx.db.with_snapshot(|snap| snap.system_states.get(&sys_id).is_some_and(|st| st.insurgency_corruption_stage >= 5));
                 if !is_legal && sys_sec > 0.0 && !is_mobile_struct && !(corr_stage5 && sys_sec < 0.45) {
-                    let old_sec = ctx.db.with_snapshot(|snap| {
-                        snap.characters
-                            .get(&char_id)
-                            .map(|c| c.security_status)
-                            .unwrap_or(0.0)
-                    });
-                    let loss = crate::combat::crimewatch::compute_sec_status_loss(
-                        old_sec,
-                        is_pod_target,
-                        sys_sec,
-                    );
+                    let old_sec = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0));
+                    let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, is_pod_target, sys_sec);
                     let new_sec = (old_sec - loss).clamp(-10.0, 10.0);
                     ctx.db.with_mut_snapshot(|snap| {
                         if let Some(ch) = snap.characters.get_mut(&char_id) {
