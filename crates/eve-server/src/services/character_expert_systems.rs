@@ -424,9 +424,7 @@ pub fn handle(
     }
 }
 
-/// Starts a client node graph instance when an AIR operation is activated in space
-/// (`operationsManager.activate_operation_in_solar_system`), persisting its blackboard in
-/// `service_state_blobs` and emitting `OnStartClientNodeGraph`.
+/// Helper for AIR operation activation in space; under DATA GAP no guessed client node graphs are started.
 // DATA GAP: V24 operation node graph mappings are Tranquility server-only
 pub fn start_client_node_graph_for_operation(
     _ctx: &ServerContext,
@@ -439,16 +437,14 @@ pub fn start_client_node_graph_for_operation(
     // do not emit OnStartClientNodeGraph with guessed graph IDs.
 }
 
-/// Stops and removes any active operation client node graph matching `cat_id` when
-/// `operationsManager.complete_category_for_character` finishes the category.
+/// Helper for AIR category completion; under DATA GAP no guessed client node graphs are stopped.
 // DATA GAP: V24 operation node graph mappings are Tranquility server-only
 pub fn stop_active_operation_node_graph(_ctx: &ServerContext, _char_id: i64, _cat_id: i64) {
     // DATA GAP: V24 operation node graph mappings are Tranquility server-only;
     // no active operation node graphs are started.
 }
 
-/// Marks AIR NPE completed for `char_id`, removes any active NPE node-graph blackboard from
-/// `service_state_blobs`, and emits `OnStopClientNodeGraphById` on the active->completed transition.
+/// Marks AIR NPE completed for `char_id` and removes any active NPE node-graph blackboard from `service_state_blobs`.
 // DATA GAP: V24 AIR NPE client node graph ID is Tranquility server-only
 pub fn skip_air_npe_and_stop_graph(
     ctx: &ServerContext,

@@ -179,7 +179,7 @@ async fn test_void_space_player_jump_and_gate_activation() {
     );
     assert_eq!(
         jump_rep.dict_get("contentID"),
-        Some(&PyRep::Integer(5001))
+        Some(&PyRep::Integer(filament_item_id))
     );
 
     // Verify OnVoidSpaceEntered notification
@@ -191,7 +191,7 @@ async fn test_void_space_player_jump_and_gate_activation() {
     assert_eq!(entered_notif.args.len(), 1);
     assert_eq!(
         entered_notif.args[0].dict_get("content_id"),
-        Some(&PyRep::Integer(5001))
+        Some(&PyRep::Integer(filament_item_id))
     );
     assert_eq!(
         entered_notif.args[0].dict_get("nebula_graphic_id"),
