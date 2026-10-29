@@ -1,89 +1,73 @@
-//! Integration tests for Skill Parity features:
-//! - `feat:skills.alpha-skill-caps`
-//! - `feat:skills.skill-history`
-//! - `feat:skills.accelerators`
+//! Integration tests for Skill Parity features driven through live V24 client RPCs:
+//! `feat:skills.alpha-skill-caps`, `feat:skills.skill-history`, `feat:skills.skill-remove-obsolete`,
+//! `feat:skills.accelerators`, `feat:skills.certificates`, `feat:skills.skill-plans`.
 
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use eve_db::{NeuralAttributes, SkillHistoryEntry, TrainedSkillRecord};
+use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord, WorldRepository};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, EvePublicRequest, EvePublicResponse,
-    GoogleAny, GoogleTimestamp, QuasarMessage, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
+    encode_bytes_field, encode_string_field, encode_varint_field, EvePublicRequest,
+    EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarMessage, WireMessage,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
+use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
 
 use crate::common;
 
-async fn login_and_select(
-    ctx: &ServerContext,
-    sid: u64,
-    user: &str,
-    pass: &str,
-    char_id: i64,
-) -> SessionState {
+const JITA_SYS: u32 = 30_000_142;
+const JITA_STN: i64 = 60_003_760;
+
+async fn rpc(ctx: &ServerContext, sess: &mut SessionState, svc: &str, m: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    ctx.dispatch_rpc(sess, svc, None, m, args, &HashMap::new(), None).await
+}
+
+async fn login_and_select(ctx: &ServerContext, sid: u64, user: &str, pass: &str, char_id: i64) -> SessionState {
     let mut s = SessionState::new(sid);
     common::login_pilot(ctx, &mut s, user, pass).await;
-    ctx.dispatch_rpc(
-        &mut s,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &HashMap::new(),
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    rpc(ctx, &mut s, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)]).await.expect("SelectCharacterID");
     s
 }
 
-async fn rpc(
-    ctx: &ServerContext,
-    sess: &mut SessionState,
-    service: &str,
-    method: &str,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None)
-        .await
+async fn create_and_select_alpha_pilot(ctx: &ServerContext, sid: u64, user: &str, pass: &str, char_name: &str) -> (SessionState, i64) {
+    ctx.db.provision_player_account(user, pass);
+    let mut sess = SessionState::new(sid);
+    common::login_pilot(ctx, &mut sess, user, pass).await;
+    let doll = PyRep::keyval([("costume", PyRep::Integer(301)), ("gender", PyRep::Integer(1)), ("hair", PyRep::Integer(101)), ("skin", PyRep::Integer(201))]);
+    let portrait = PyRep::keyval([("background", PyRep::Integer(42)), ("camera", PyRep::Integer(1)), ("pose", PyRep::Integer(7))]);
+    let cid = rpc(
+        ctx, &mut sess, "charUnboundMgr", "CreateCharacterWithDoll",
+        &[PyRep::String(char_name.into()), PyRep::Integer(1), PyRep::Integer(1), PyRep::Integer(11), doll, portrait, PyRep::Integer(17), PyRep::None, PyRep::Integer(JITA_SYS as i64)],
+    ).await.expect("CreateCharacterWithDoll").as_i64().expect("char_id");
+    rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(cid)]).await.expect("SelectCharacterID");
+    (sess, cid)
 }
 
-fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
-    if let PyRep::KeyVal(entries) = rep {
-        for (k, v) in entries {
-            if k == "response_proto" {
-                if let PyRep::Bytes(b) = v {
-                    return EvePublicResponse::decode_proto(b)
-                        .expect("decode EvePublicResponse from response_proto");
-                }
-            }
-        }
-    }
-    panic!("Expected KeyVal containing response_proto, got {rep:?}");
+fn place_hangar_item(ctx: &ServerContext, item_id: i64, type_id: u32, owner_id: i64, qty: i32) {
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(item_id, InventoryItemRecord {
+            item_id, type_id, owner_id, location_id: JITA_STN, flag: InventoryFlag::Hangar,
+            quantity: qty, singleton: false, version: 1, ..Default::default()
+        });
+    });
 }
 
-async fn quasar_rpc(
-    ctx: &ServerContext,
-    sess: &mut SessionState,
-    type_url: &str,
-    payload_value: Vec<u8>,
-) -> EvePublicResponse {
+async fn upgrade_to_omega_via_nes(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, plex_item_id: i64) {
+    place_hangar_item(ctx, plex_item_id, 44_992, char_id, 500);
+    rpc(ctx, sess, "invbroker", "DepositPlexToVault", &[PyRep::Integer(JITA_STN), PyRep::Integer(plex_item_id), PyRep::Integer(500), PyRep::Integer(0)]).await.expect("DepositPlexToVault");
+    rpc(ctx, sess, "storeManager", "buy_offer", &[PyRep::Integer(1001)]).await.expect("buy_offer 1001 30d Omega");
+}
+
+async fn quasar_rpc(ctx: &ServerContext, sess: &mut SessionState, type_url: &str, payload_value: Vec<u8>) -> EvePublicResponse {
     let req = EvePublicRequest {
-        issued: Some(GoogleTimestamp {
-            seconds: ctx.now_unix() as i64,
-            nanos: 0,
-        }),
+        issued: Some(GoogleTimestamp { seconds: ctx.now_unix() as i64, nanos: 0 }),
         correlation_uuid: b"skillplan-test-1".to_vec(),
         payload: Some(GoogleAny {
-            type_url: if type_url.starts_with(TYPE_GOOGLEAPIS_PREFIX) {
-                type_url.to_string()
-            } else {
-                format!("{TYPE_GOOGLEAPIS_PREFIX}{type_url}")
-            },
+            type_url: if type_url.starts_with(TYPE_GOOGLEAPIS_PREFIX) { type_url.to_string() } else { format!("{TYPE_GOOGLEAPIS_PREFIX}{type_url}") },
             value: payload_value,
         }),
         external_origin: "eve-client".into(),
@@ -91,393 +75,297 @@ async fn quasar_rpc(
         authoritative_context: None,
         trace_context: None,
     };
-    let rep = ctx
-        .dispatch_rpc(
-            sess,
-            "publicGatewaySvc",
-            None,
-            "SendRequest",
-            &[PyRep::Bytes(req.encode_proto())],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect("SendRequest");
-    extract_response_proto(&rep)
+    let rep = rpc(ctx, sess, "publicGatewaySvc", "SendRequest", &[PyRep::Bytes(req.encode_proto())]).await.expect("SendRequest");
+    if let PyRep::KeyVal(entries) = &rep {
+        for (k, v) in entries {
+            if k == "response_proto" {
+                if let PyRep::Bytes(b) = v {
+                    return EvePublicResponse::decode_proto(b).expect("decode EvePublicResponse");
+                }
+            }
+        }
+    }
+    panic!("Expected response_proto, got {rep:?}");
 }
 
-/// Parity test: `feat:skills.alpha-skill-caps`
-/// Alpha characters cannot train above the alpha cap per skill; SP above cap is inactive.
 #[tokio::test]
 async fn test_feat_skills_alpha_skill_caps() {
     // parity: feat:skills.alpha-skill-caps
+    eve_testkit::attest(&["feat:skills.alpha-skill-caps"]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-    let mut sess = login_and_select(&ctx, 1001, "demo", "demo-secret", 90_000_001).await;
-    let char_id = 90_000_001;
+    common::seed_test_nes_store_catalog(&ctx);
 
-    // 1. Configure character as Alpha (clone_grade = 1)
-    // Skill 3402 (Science) has Alpha cap 4 in clonegrades.
-    ctx.db.with_mut_snapshot(|snap| {
-        let ch = snap.characters.get_mut(&char_id).unwrap();
-        ch.clone_grade = 1;
-        ch.skill_points = 100_000.0;
-        ch.free_skill_points = 1_000.0;
-        let skills = snap.skills.entry(char_id).or_default();
-        // Spaceship Command (3300) level 1 (250 SP)
-        skills.insert(3300, TrainedSkillRecord { type_id: 3300, level: 1, skill_points: 250.0 });
-        // Science (3402) level 1 (250 SP)
-        skills.insert(3402, TrainedSkillRecord { type_id: 3402, level: 1, skill_points: 250.0 });
-    });
+    let (mut sess, char_id) = create_and_select_alpha_pilot(&ctx, 1001, "alpha_cap_u", "alpha-pass", "Alpha Cap Pilot").await;
+    assert_eq!(ctx.db.get_character(char_id).unwrap().clone_grade, 1);
 
-    // 2. Queueing skill 3402 to level 5 must fail with AlphaCloneSkillLevelCapExceeded
-    let queue_over_cap = PyRep::List(vec![
-        PyRep::Tuple(vec![PyRep::Integer(3402), PyRep::Integer(5)]),
-    ]);
-    let err = rpc(&ctx, &mut sess, "skillMgr2", "SaveSkillQueue", &[queue_over_cap]).await.unwrap_err();
-    assert_eq!(err.code, "AlphaCloneSkillLevelCapExceeded");
+    // 1. Science (3402) has Alpha cap 4 in SDE clonegrades; queueing level 5 fails for Alpha
+    let queue_over_cap = PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3402), PyRep::Integer(5)])]);
+    assert_eq!(rpc(&ctx, &mut sess, "skillMgr2", "SaveSkillQueue", &[queue_over_cap]).await.unwrap_err().code, "AlphaCloneSkillLevelCapExceeded");
 
-    // Give Science (3402) level 5: while Alpha, effective level is clamped to cap 4 (SP above cap inactive)
-    ctx.db.with_mut_snapshot(|snap| {
-        let skills = snap.skills.entry(char_id).or_default();
-        skills.insert(3402, TrainedSkillRecord { type_id: 3402, level: 5, skill_points: 256_000.0 });
-    });
-    let effective = ctx.character_skill_levels(char_id);
-    assert_eq!(effective.get(&3402).copied(), Some(4), "Alpha clone SP above cap must be inactive");
+    // 2. Upgrade to 30d Omega via NES, inject SP, train Science V, then lapse back to Alpha after 31 days
+    upgrade_to_omega_via_nes(&ctx, &mut sess, char_id, 991_000_001).await;
+    assert_eq!(ctx.db.get_character(char_id).unwrap().clone_grade, 2);
 
-    // 3. Configure total SP at 5,000,000 limit -> SaveSkillQueue fails with AlphaCloneSpCapExceeded
-    ctx.db.with_mut_snapshot(|snap| {
-        let ch = snap.characters.get_mut(&char_id).unwrap();
-        ch.skill_points = 4_999_000.0;
-    });
-    let queue_arg = PyRep::List(vec![
-        PyRep::Tuple(vec![PyRep::Integer(3300), PyRep::Integer(2)]),
-    ]);
-    let err = rpc(&ctx, &mut sess, "skillMgr2", "SaveSkillQueue", &[queue_arg.clone()]).await.unwrap_err();
-    assert_eq!(err.code, "AlphaCloneSpCapExceeded");
+    place_hangar_item(&ctx, 991_000_002, 40_520, char_id, 11);
+    assert_eq!(rpc(&ctx, &mut sess, "skillMgr2", "InjectSkillpoints", &[PyRep::Integer(991_000_002)]).await.unwrap(), PyRep::Real(500_000.0));
+    rpc(&ctx, &mut sess, "skillMgr2", "ApplyFreeSkillPoints", &[PyRep::Integer(3402), PyRep::Integer(210_745)]).await.expect("Train Science V");
+    assert_eq!(ctx.character_skill_levels(char_id).get(&3402).copied(), Some(5));
 
-    // 4. Free SP can still be applied directly to known skills (up to Alpha skill caps)
-    let res = rpc(&ctx, &mut sess, "skillMgr2", "ApplyFreeSkillPoints", &[PyRep::Integer(3300), PyRep::Real(500.0)]).await;
-    assert!(res.is_ok(), "Applying free SP must succeed even when total SP >= 5M: {res:?}");
-    ctx.db.with_snapshot(|snap| {
-        let skill = snap.skills[&char_id].get(&3300).unwrap();
-        assert_eq!(skill.skill_points, 750.0);
-        let ch = &snap.characters[&char_id];
-        assert_eq!(ch.free_skill_points, 500.0);
-    });
+    ctx.advance_secs(31 * 86_400);
+    rpc(&ctx, &mut sess, "skillMgr2", "CheckAndSendNotifications", &[]).await.expect("CheckAndSendNotifications lapses Omega");
+    assert_eq!(ctx.db.get_character(char_id).unwrap().clone_grade, 1);
+    assert_eq!(ctx.character_skill_levels(char_id).get(&3402).copied(), Some(4), "Alpha clone SP above cap must be inactive");
+    assert_eq!(ctx.db.with_snapshot(|s| s.skills[&char_id][&3402].skill_points), 256_000.0);
 
-    // 5. Upgrade character to Omega (clone_grade = 2): full level 5 active and queueing succeeds
-    ctx.db.with_mut_snapshot(|snap| {
-        let ch = snap.characters.get_mut(&char_id).unwrap();
-        ch.clone_grade = 2;
-    });
-    let omega_effective = ctx.character_skill_levels(char_id);
-    assert_eq!(omega_effective.get(&3402).copied(), Some(5), "Omega clone restores full active skill level");
+    // 3. Inject past 5M total SP -> SaveSkillQueue rejected, but ApplyFreeSkillPoints still works up to Alpha caps
+    for _ in 0..10 {
+        rpc(&ctx, &mut sess, "skillMgr2", "InjectSkillpoints", &[PyRep::Integer(991_000_002)]).await.expect("InjectSkillpoints");
+    }
+    let ch_now = ctx.db.get_character(char_id).unwrap();
+    assert!(ch_now.skill_points + ch_now.free_skill_points > 5_000_000.0);
 
-    let ok = rpc(&ctx, &mut sess, "skillMgr2", "SaveSkillQueue", &[queue_arg]).await;
-    assert!(ok.is_ok(), "Omega accounts remove Alpha skill caps: {ok:?}");
+    let queue_sc4 = PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3327), PyRep::Integer(4)])]);
+    assert_eq!(rpc(&ctx, &mut sess, "skillMgr2", "SaveSkillQueue", &[queue_sc4]).await.unwrap_err().code, "AlphaCloneSpCapExceeded");
+    assert_eq!(rpc(&ctx, &mut sess, "skillMgr2", "ApplyFreeSkillPoints", &[PyRep::Integer(3327), PyRep::Integer(10_000)]).await.unwrap(), PyRep::Real(18_000.0));
+
+    // 4. Re-subscribe to Omega via NES: Science V active again and passive queue above 5M SP succeeds
+    upgrade_to_omega_via_nes(&ctx, &mut sess, char_id, 991_000_003).await;
+    assert_eq!(ctx.character_skill_levels(char_id).get(&3402).copied(), Some(5));
+    let omega_q = PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3327), PyRep::Integer(5)])]);
+    rpc(&ctx, &mut sess, "skillMgr2", "SaveSkillQueue", &[omega_q]).await.expect("Omega removes Alpha 5M SP queue cap");
 }
 
-/// Parity test: `feat:skills.skill-history`
-/// GetSkillHistory returns chronological entries for injection (36), completion (37), removal (38), extraction (39).
-/// Obsolete skills are automatically migrated and refunded during logon (SelectCharacterID).
 #[tokio::test]
 async fn test_feat_skills_history_events_and_obsolete_refund() {
-    // parity: feat:skills.skill-history
-    let ctx = ServerContext::new();
+    // parity: feat:skills.skill-history, feat:skills.skill-remove-obsolete
+    eve_testkit::attest(&["feat:skills.skill-history", "feat:skills.skill-remove-obsolete"]);
+    let db_path = std::env::temp_dir().join(format!("evomu_skill_hist_rem_{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&db_path);
+    let repo = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
+    let ctx = ServerContext::with_repository(repo);
+    let demo = WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
+    ctx.db.with_mut_snapshot(|snap| *snap = demo);
     common::pin_clock(&ctx);
-    let mut sess = login_and_select(&ctx, 1004, "demo", "demo-secret", 90_000_001).await;
-    let char_id = 90_000_001;
+    common::seed_test_nes_store_catalog(&ctx);
+    eve_server::world_seeder::seed_dual_anchor_markets(&ctx.db, &ctx.sde);
 
-    // 1. Seed skill history entries for all 4 types: injection (36), training (37), removal (38), extraction (39)
-    let t0 = 133_000_000_000_000_000_i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        let hist = snap.skill_history.entry(char_id).or_default();
-        hist.clear();
-        hist.push(SkillHistoryEntry { log_date_ft: t0 + 200, event_type_id: 37, skill_type_id: 3300, skill_level: 2, absolute_points: 1414.0 });
-        hist.push(SkillHistoryEntry { log_date_ft: t0 + 100, event_type_id: 36, skill_type_id: 3300, skill_level: 0, absolute_points: 0.0 });
-        hist.push(SkillHistoryEntry { log_date_ft: t0 + 400, event_type_id: 39, skill_type_id: 3300, skill_level: 1, absolute_points: 250.0 });
-        hist.push(SkillHistoryEntry { log_date_ft: t0 + 300, event_type_id: 38, skill_type_id: 3300, skill_level: 0, absolute_points: 0.0 });
-    });
+    let mut donor = login_and_select(&ctx, 1010, "demo", "demo-secret", 90_000_001).await;
+    let (mut sess, char_id) = create_and_select_alpha_pilot(&ctx, 1011, "hist_pilot_u", "hist-pass", "History Pilot").await;
+    rpc(&ctx, &mut donor, "account", "GiveCash", &[PyRep::Integer(char_id), PyRep::Real(5_000_000.0), PyRep::String("stipend".into())]).await.unwrap();
+    upgrade_to_omega_via_nes(&ctx, &mut sess, char_id, 991_000_101).await;
 
-    // Call GetSkillHistory: must return chronological order (by log_date)
-    let rep = rpc(&ctx, &mut sess, "skillMgr2", "GetSkillHistory", &[]).await.expect("GetSkillHistory");
-    let PyRep::Rowset { columns: _, rows } = rep else { panic!("Expected Rowset, got {rep:?}") };
-    assert_eq!(rows.len(), 4);
-    let event_ids: Vec<i64> = rows.iter().map(|cols| {
-        cols.get(1).and_then(|v| v.as_i64()).unwrap()
-    }).collect();
-    assert_eq!(event_ids, vec![36, 37, 38, 39], "GetSkillHistory must return rows in chronological order");
+    // 1. Event 36 (Skill Injection) via PurchaseSkills (Leadership 3348)
+    ctx.advance_secs(30);
+    rpc(&ctx, &mut sess, "skillMgr2", "PurchaseSkills", &[PyRep::List(vec![PyRep::Integer(3348)])]).await.expect("PurchaseSkills 3348");
 
-    // 2. Test obsolete skill migration on logon: pilot has obsolete skill 999_999 with 1,500 trained SP.
-    ctx.db.with_mut_snapshot(|snap| {
+    // 2. Event 37 (Skill Training Complete) via SaveSkillQueue + clock advance
+    ctx.advance_secs(30);
+    rpc(&ctx, &mut sess, "skillMgr2", "SaveSkillQueue", &[PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3348), PyRep::Integer(1)])])]).await.unwrap();
+    ctx.advance_secs(1_200);
+    rpc(&ctx, &mut sess, "skillMgr2", "CheckAndSendNotifications", &[]).await.unwrap();
+    assert_eq!(ctx.character_skill_levels(char_id).get(&3348).copied(), Some(1));
+
+    // 3. Event 39 (Skill Extraction) via real InjectSkillIntoBrain + InjectSkillpoints + ApplyFreeSkillPoints + ExtractSkills
+    ctx.advance_secs(30);
+    place_hangar_item(&ctx, 991_000_102, 40_520, char_id, 14);
+    for (tid, iid) in [(11_579u32, 991_000_103i64), (21_603, 991_000_104), (4_411, 991_000_105)] {
+        place_hangar_item(&ctx, iid, tid, char_id, 1);
+        rpc(&ctx, &mut sess, "skillMgr2", "InjectSkillIntoBrain", &[PyRep::List(vec![PyRep::Integer(iid)])]).await.unwrap();
+    }
+    for _ in 0..14 {
+        rpc(&ctx, &mut sess, "skillMgr2", "InjectSkillpoints", &[PyRep::Integer(991_000_102)]).await.unwrap();
+    }
+    for (tid, sp_needed) in [(3_426i64, 210_745i64), (25_739, 2_046_000), (11_579, 1_536_000), (21_603, 1_280_000), (4_411, 1_280_000)] {
+        rpc(&ctx, &mut sess, "skillMgr2", "ApplyFreeSkillPoints", &[PyRep::Integer(tid), PyRep::Integer(sp_needed)]).await.unwrap();
+    }
+    assert!(ctx.db.get_character(char_id).unwrap().skill_points >= 5_500_000.0);
+
+    place_hangar_item(&ctx, 991_000_106, 40_519, char_id, 1);
+    rpc(&ctx, &mut sess, "skillMgr2", "ExtractSkills", &[PyRep::Dict(vec![(PyRep::Integer(25_739), PyRep::Integer(500_000))]), PyRep::Integer(991_000_106)]).await.expect("ExtractSkills");
+
+    // 4. Event 38 (`feat:skills.skill-remove-obsolete`): legacy pre-V24 skill 999_999 migrated on SelectCharacterID after SQLite reopen
+    ctx.advance_secs(30);
+    let (sp_pre_obs, free_pre_obs) = ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get_mut(&char_id).unwrap();
-        ch.skill_points = 50_000.0;
-        ch.free_skill_points = 2_000.0;
-        let skills = snap.skills.entry(char_id).or_default();
-        skills.insert(999_999, TrainedSkillRecord { type_id: 999_999, level: 2, skill_points: 1_500.0 });
+        ch.skill_points += 1_500.0;
+        let pre = (ch.skill_points, ch.free_skill_points);
+        snap.skills.entry(char_id).or_default().insert(999_999, TrainedSkillRecord { type_id: 999_999, level: 2, skill_points: 1_500.0 });
+        pre
     });
 
-    // SelectCharacterID logon flow triggers obsolete skill migration
-    let sel_res = rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)]).await;
-    assert!(sel_res.is_ok(), "SelectCharacterID must succeed: {sel_res:?}");
+    drop(ctx);
+    let repo2 = Arc::new(WorldRepository::open_sqlite(&db_path).expect("reopen sqlite"));
+    let ctx2 = ServerContext::with_repository(repo2);
+    common::pin_clock(&ctx2);
+    ctx2.advance_secs(1_500);
+    let mut sess2 = login_and_select(&ctx2, 1012, "hist_pilot_u", "hist-pass", char_id).await;
 
-    // Skill removed from trained skills, SP deducted from total and credited to unallocated free_skill_points
-    ctx.db.with_snapshot(|snap| {
-        assert!(!snap.skills[&char_id].contains_key(&999_999));
-        let ch = &snap.characters[&char_id];
-        assert_eq!(ch.skill_points, 48_500.0);
-        assert_eq!(ch.free_skill_points, 3_500.0);
-        // History event 38 logged
-        let last_ev = snap.skill_history[&char_id].last().unwrap();
-        assert_eq!(last_ev.event_type_id, 38);
-        assert_eq!(last_ev.skill_type_id, 999_999);
-    });
+    let ch_post = ctx2.db.get_character(char_id).unwrap();
+    assert!(!ctx2.db.with_snapshot(|s| s.skills[&char_id].contains_key(&999_999)));
+    assert!((ch_post.skill_points - (sp_pre_obs - 1_500.0)).abs() < 1e-3);
+    assert!((ch_post.free_skill_points - (free_pre_obs + 1_500.0)).abs() < 1e-3);
+    let notifs = ctx2.drain_notifications_for_char(char_id);
+    assert!(notifs.iter().any(|n| n.event == "OnServerSkillsRemoved"));
+    assert!(notifs.iter().any(|n| n.event == "OnFreeSkillPointsChanged"));
+
+    let PyRep::Rowset { rows, .. } = rpc(&ctx2, &mut sess2, "skillMgr2", "GetSkillHistory", &[]).await.unwrap() else { panic!("Expected Rowset") };
+    assert!(rows.windows(2).all(|w| w[0][0].as_i64().unwrap() <= w[1][0].as_i64().unwrap()));
+    let ev_types: Vec<i64> = rows.iter().map(|r| r[1].as_i64().unwrap()).collect();
+    for expected_ev in [33, 36, 37, 38, 39] {
+        assert!(ev_types.contains(&expected_ev), "Missing skill history event {expected_ev} in {ev_types:?}");
+    }
+    let _ = std::fs::remove_file(&db_path);
 }
 
-/// Parity test: `feat:skills.accelerators`
-/// Also tests certificates and Quasar skill plans.
 #[tokio::test]
 async fn test_feat_skills_certificates_and_plans_and_accelerators() {
-    // parity: feat:skills.accelerators
-    let ctx = ServerContext::new();
+    // parity: feat:skills.accelerators, feat:skills.certificates, feat:skills.skill-plans
+    eve_testkit::attest(&["feat:skills.accelerators", "feat:skills.certificates", "feat:skills.skill-plans"]);
+    let db_path = std::env::temp_dir().join(format!("evomu_cert_plan_acc_{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&db_path);
+    let repo = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
+    let ctx = ServerContext::with_repository(repo);
+    let demo = WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
+    ctx.db.with_mut_snapshot(|snap| *snap = demo);
     common::pin_clock(&ctx);
-    let mut sess = login_and_select(&ctx, 1005, "demo", "demo-secret", 90_000_001).await;
-    let char_id = 90_000_001;
+    common::seed_test_nes_store_catalog(&ctx);
 
-    // --- Certificates (`feat:skills.certificates`) ---
-    // 1. GetCertificateCategories and GetCertificateClasses
+    let mut ceo_sess = login_and_select(&ctx, 1020, "demo", "demo-secret", 90_000_001).await;
+    let mut member_sess = login_and_select(&ctx, 1021, "other", "other-secret", 90_000_002).await;
+    ctx.db.clock().advance_secs(15);
+
+    // Found real player corporation via corpRegistry.AddCorporation and accept member 90_000_002 via InsertApplication + UpdateApplicationOffer
+    let created_corp = rpc(&ctx, &mut ceo_sess, "corpRegistry", "AddCorporation", &[PyRep::String("Skill Plan Corp".into()), PyRep::String("SPCP".into()), PyRep::Real(0.05)]).await.expect("AddCorporation");
+    let corp_id = created_corp.dict_get("corporationID").and_then(|v| v.as_i64()).expect("corporationID");
+    ctx.sync_session(&mut ceo_sess);
+    ctx.db.clock().advance_secs(15);
+    let app_rep = rpc(&ctx, &mut member_sess, "corpRegistry", "InsertApplication", &[PyRep::Integer(corp_id), PyRep::String("Join".into())]).await.expect("InsertApplication");
+    let app_id = app_rep.dict_get("applicationID").and_then(|v| v.as_i64()).expect("applicationID");
+    rpc(&ctx, &mut ceo_sess, "corpRegistry", "UpdateApplicationOffer", &[PyRep::Integer(app_id), PyRep::String("Accepted".into())]).await.expect("UpdateApplicationOffer");
+    ctx.sync_session(&mut member_sess);
+    assert_eq!(member_sess.corporation_id, Some(corp_id));
+
+    let (mut alpha_sess, char_id) = create_and_select_alpha_pilot(&ctx, 1022, "cert_acc_u", "cert-pass", "Cert Accel Pilot").await;
+    upgrade_to_omega_via_nes(&ctx, &mut alpha_sess, char_id, 991_000_201).await;
+
+    // --- 1. Certificates (`feat:skills.certificates`) ---
     // rpc-lint: allow crucible legacy service certificateMgr
-    let cat_rep = rpc(&ctx, &mut sess, "certificateMgr", "GetCertificateCategories", &[]).await.expect("GetCertificateCategories");
-    let PyRep::List(categories) = cat_rep else { panic!("expected List") };
-    assert!(!categories.is_empty(), "GetCertificateCategories must return categories");
-
+    let PyRep::List(cats) = rpc(&ctx, &mut alpha_sess, "certificateMgr", "GetCertificateCategories", &[]).await.unwrap() else { panic!("expected List") };
+    assert!(!cats.is_empty());
     // rpc-lint: allow crucible legacy service certificateMgr
-    let class_rep = rpc(&ctx, &mut sess, "certificateMgr", "GetCertificateClasses", &[]).await.expect("GetCertificateClasses");
-    let PyRep::List(classes) = class_rep else { panic!("expected List") };
-    assert!(!classes.is_empty(), "GetCertificateClasses must return classes");
-
-    // 1b. Certificate derivation from trained skills (feat:skills.certificates acceptance)
-    ctx.db.with_mut_snapshot(|snap| {
-        let skills = snap.skills.entry(char_id).or_default();
-        skills.insert(3300, TrainedSkillRecord { type_id: 3300, level: 4, skill_points: 45_255.0 });
-    });
+    let PyRep::List(classes) = rpc(&ctx, &mut alpha_sess, "certificateMgr", "GetCertificateClasses", &[]).await.unwrap() else { panic!("expected List") };
+    assert!(!classes.is_empty());
     // rpc-lint: allow crucible legacy service certificateMgr
-    let derived_certs = rpc(&ctx, &mut sess, "certificateMgr", "GetMyCertificates", &[]).await.expect("GetMyCertificates derived");
-    let PyRep::KeyVal(dm) = derived_certs else { panic!("expected KeyVal") };
-    let PyRep::Dict(d_list) = dm.get("certificates").unwrap() else { panic!("expected Dict") };
-    assert!(!d_list.is_empty(), "GetMyCertificates must report derived certificate levels for trained skills");
-    assert!(d_list.iter().any(|(_, lvl)| lvl.as_i64().unwrap_or(0) >= 2), "Certificate level must be derived from skill level");
+    let PyRep::KeyVal(recs) = rpc(&ctx, &mut alpha_sess, "certificateMgr", "GetAllShipCertificateRecommendations", &[]).await.unwrap() else { panic!("expected KeyVal") };
+    assert!(!recs.is_empty());
 
-    // 2. Grant individual certificate
+    // Certificate 196 requires Science (3402) [1..=5]: starter Science IV -> cert level 4; train V -> cert level 5!
     // rpc-lint: allow crucible legacy service certificateMgr
-    let grant_rep = rpc(&ctx, &mut sess, "certificateMgr", "GrantCertificate", &[
-        PyRep::Integer(char_id),
-        PyRep::Integer(101),
-        PyRep::Integer(3),
-    ]).await.expect("GrantCertificate");
-    assert_eq!(grant_rep.as_bool(), Some(true));
+    let c_before = rpc(&ctx, &mut alpha_sess, "certificateMgr", "GetMyCertificates", &[]).await.unwrap();
+    let PyRep::Dict(d_before) = c_before.dict_get("certificates").unwrap() else { panic!("expected Dict") };
+    assert_eq!(d_before.iter().find(|(k, _)| k.as_i64() == Some(196)).and_then(|(_, v)| v.as_i64()), Some(4));
 
-    // 3. BatchCertificateGrant: grants multiple certificates
+    place_hangar_item(&ctx, 991_000_202, 40_520, char_id, 1);
+    rpc(&ctx, &mut alpha_sess, "skillMgr2", "InjectSkillpoints", &[PyRep::Integer(991_000_202)]).await.unwrap();
+    rpc(&ctx, &mut alpha_sess, "skillMgr2", "ApplyFreeSkillPoints", &[PyRep::Integer(3402), PyRep::Integer(210_745)]).await.unwrap();
     // rpc-lint: allow crucible legacy service certificateMgr
-    let batch_grant = rpc(&ctx, &mut sess, "certificateMgr", "BatchCertificateGrant", &[
-        PyRep::List(vec![
-            PyRep::Tuple(vec![PyRep::Integer(201), PyRep::Integer(2)]),
-            PyRep::Tuple(vec![PyRep::Integer(202), PyRep::Integer(4)]),
-        ])
-    ]).await.expect("BatchCertificateGrant");
-    assert_eq!(batch_grant.as_bool(), Some(true));
-
-    // 4. UpdateCertificateFlags: updates flags
-    // rpc-lint: allow crucible legacy service certificateMgr
-    let flag_rep = rpc(&ctx, &mut sess, "certificateMgr", "UpdateCertificateFlags", &[
-        PyRep::Integer(201),
-        PyRep::Integer(7),
-    ]).await.expect("UpdateCertificateFlags");
-    assert_eq!(flag_rep.as_bool(), Some(true));
-
-    // 5. BatchCertificateUpdate: updates level and flags
-    // rpc-lint: allow crucible legacy service certificateMgr
-    let batch_upd = rpc(&ctx, &mut sess, "certificateMgr", "BatchCertificateUpdate", &[
-        PyRep::List(vec![
-            PyRep::Tuple(vec![PyRep::Integer(202), PyRep::Integer(5), PyRep::Integer(3)]),
-        ])
-    ]).await.expect("BatchCertificateUpdate");
-    assert_eq!(batch_upd.as_bool(), Some(true));
-
-    // 6. Verify stateful persistence in snap.service_state_blobs["character_certificates:{char_id}"]
-    ctx.db.with_snapshot(|snap| {
-        let blob_key = format!("character_certificates:{char_id}");
-        let blob = snap.service_state_blobs.get(&blob_key).expect("state blob must exist");
-        let parsed: serde_json::Value = serde_json::from_str(blob).expect("valid json blob");
-        assert_eq!(parsed["certificates"]["201"], 2);
-        assert_eq!(parsed["certificates"]["202"], 5);
-        assert_eq!(parsed["flags"]["201"], 7);
-        assert_eq!(parsed["flags"]["202"], 3);
-    });
-
-    // 7. GetMyCertificates: reports derived and explicitly granted levels and flags
-    // rpc-lint: allow crucible legacy service certificateMgr
-    let my_certs = rpc(&ctx, &mut sess, "certificateMgr", "GetMyCertificates", &[]).await.expect("GetMyCertificates");
-    let PyRep::KeyVal(m) = my_certs else { panic!("expected KeyVal") };
-    let PyRep::Dict(cert_list) = m.get("certificates").unwrap() else { panic!("expected Dict") };
-    let has_cert_101 = cert_list.iter().any(|(c, lvl)| c.as_i64() == Some(101) && lvl.as_i64() == Some(3));
-    let has_cert_202 = cert_list.iter().any(|(c, lvl)| c.as_i64() == Some(202) && lvl.as_i64() == Some(5));
-    assert!(has_cert_101 && has_cert_202, "GetMyCertificates must report all granted certificates");
-
-    let PyRep::Dict(flag_list) = m.get("certificateFlags").unwrap() else { panic!("expected Dict") };
-    let has_flag_201 = flag_list.iter().any(|(c, flg)| c.as_i64() == Some(201) && flg.as_i64() == Some(7));
-    assert!(has_flag_201, "GetMyCertificates must report certificate flags");
+    let c_after = rpc(&ctx, &mut alpha_sess, "certificateMgr", "GetMyCertificates", &[]).await.unwrap();
+    let PyRep::Dict(d_after) = c_after.dict_get("certificates").unwrap() else { panic!("expected Dict") };
+    assert_eq!(d_after.iter().find(|(k, _)| k.as_i64() == Some(196)).and_then(|(_, v)| v.as_i64()), Some(5));
 
     // rpc-lint: allow crucible legacy service certificateMgr
-    let recs = rpc(&ctx, &mut sess, "certificateMgr", "GetAllShipCertificateRecommendations", &[]).await.expect("GetAllShipCertificateRecommendations");
-    assert!(matches!(recs, PyRep::KeyVal(_)));
-
-    // 8. Auth gate: mutating another character's certificates without GM permissions is denied
-    let other_char_id = 90_000_002;
+    assert_eq!(rpc(&ctx, &mut alpha_sess, "certificateMgr", "GrantCertificate", &[PyRep::Integer(char_id), PyRep::Integer(101), PyRep::Integer(3)]).await.unwrap().as_bool(), Some(true));
     // rpc-lint: allow crucible legacy service certificateMgr
-    let err_unauth = rpc(&ctx, &mut sess, "certificateMgr", "GrantCertificate", &[
-        PyRep::Integer(other_char_id),
-        PyRep::Integer(101),
-        PyRep::Integer(5),
-    ]).await.unwrap_err();
-    assert_eq!(err_unauth.code, "AccessDenied");
-
-    // With GM permissions (ROLE_GML), mutating another character's certificates succeeds
-    sess.role |= eve_machonet::service_roles::ROLE_GML;
+    assert_eq!(rpc(&ctx, &mut alpha_sess, "certificateMgr", "UpdateCertificateFlags", &[PyRep::Integer(101), PyRep::Integer(7)]).await.unwrap().as_bool(), Some(true));
     // rpc-lint: allow crucible legacy service certificateMgr
-    let gm_grant = rpc(&ctx, &mut sess, "certificateMgr", "GrantCertificate", &[
-        PyRep::Integer(other_char_id),
-        PyRep::Integer(101),
-        PyRep::Integer(5),
-    ]).await.expect("GM GrantCertificate for other character");
-    assert_eq!(gm_grant.as_bool(), Some(true));
+    assert_eq!(rpc(&ctx, &mut alpha_sess, "certificateMgr", "GrantCertificate", &[PyRep::Integer(90_000_001), PyRep::Integer(101), PyRep::Integer(5)]).await.unwrap_err().code, "AccessDenied");
 
-    // --- Skill Plans (`feat:skills.skill-plans`) ---
-    // Skill plans in live V24 are managed through the public gateway via Quasar (quasar:skill)
-    let (mut sp_attr, mut sp_req) = (Vec::new(), Vec::new());
+    // --- 2. Skill Plans (`feat:skills.skill-plans`) ---
+    let (mut sp_attr, mut sp_req, mut req_entry, mut req_tid) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     encode_string_field(1, "Frigate Mastery", &mut sp_attr);
+    encode_varint_field(1, 3327, &mut req_tid);
+    encode_bytes_field(1, &req_tid, &mut req_entry);
+    encode_varint_field(2, 4, &mut req_entry);
+    encode_bytes_field(2, &req_entry, &mut sp_attr);
     encode_string_field(3, "Core combat frigate skills", &mut sp_attr);
     encode_bytes_field(1, &sp_attr, &mut sp_req);
-    let create_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.character.skill.plan.CreateRequest", sp_req).await;
+    let create_rsp = quasar_rpc(&ctx, &mut ceo_sess, "eve_public.character.skill.plan.CreateRequest", sp_req).await;
     assert_eq!(create_rsp.status_code, 200);
     let create_wm = WireMessage::decode(&create_rsp.payload.unwrap().value).unwrap();
     let id_wm = WireMessage::decode(create_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
     let plan_uuid: [u8; 16] = id_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap().try_into().unwrap();
 
-    let all_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.character.skill.plan.GetAllRequest", Vec::new()).await;
-    assert_eq!(all_rsp.status_code, 200);
-
-    // Track personal plan
-    let (mut f2_id, mut f2_req) = (Vec::new(), Vec::new());
+    let (mut f2_id, mut f2_req, mut sh_req) = (Vec::new(), Vec::new(), Vec::new());
     encode_bytes_field(1, &plan_uuid, &mut f2_id);
     encode_bytes_field(2, &f2_id, &mut f2_req);
-    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.character.skill.plan.SetActiveRequest", f2_req).await.status_code, 200);
-    let active_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.character.skill.plan.GetActiveRequest", Vec::new()).await;
-    assert_eq!(active_rsp.status_code, 200);
-    assert!(!active_rsp.payload.unwrap().value.is_empty(), "Active skill plan must be tracked");
+    encode_bytes_field(1, &f2_id, &mut sh_req);
+    assert_eq!(quasar_rpc(&ctx, &mut ceo_sess, "eve_public.character.skill.plan.SetActiveRequest", f2_req).await.status_code, 200);
+    let shared_rsp = quasar_rpc(&ctx, &mut member_sess, "eve_public.character.skill.plan.GetSharedRequest", sh_req).await;
+    assert_eq!(shared_rsp.status_code, 200);
+    assert!(!shared_rsp.payload.unwrap().value.is_empty());
 
-    // Corporation skill plans via Quasar publicGatewaySvc
-    let mut corp_attr = Vec::new();
+    // Corporation skill plans: unprivileged member gets 403 on CreateRequest, CEO creates (200), member reads via GetAllRequest (200)
+    let (mut corp_attr, mut corp_val) = (Vec::new(), Vec::new());
     encode_string_field(1, "Corp Doctrine", &mut corp_attr);
     encode_string_field(2, "Fleet doctrine plan", &mut corp_attr);
-    let mut corp_req_field = Vec::new();
-    let mut corp_tid = Vec::new();
-    encode_varint_field(1, 3300, &mut corp_tid);
-    encode_bytes_field(1, &corp_tid, &mut corp_req_field);
-    encode_varint_field(2, 4, &mut corp_req_field);
-    encode_bytes_field(3, &corp_req_field, &mut corp_attr);
-    let mut cat_id_b = Vec::new();
-    encode_bytes_field(1, &[1u8; 16], &mut cat_id_b);
-    encode_bytes_field(4, &cat_id_b, &mut corp_attr);
+    encode_bytes_field(1, &corp_attr, &mut corp_val);
+    assert_eq!(quasar_rpc(&ctx, &mut member_sess, "eve_public.corporation.skill.plan.CreateRequest", corp_val.clone()).await.status_code, 403);
+    assert_eq!(quasar_rpc(&ctx, &mut ceo_sess, "eve_public.corporation.skill.plan.CreateRequest", corp_val).await.status_code, 200);
+    let member_corp_all = quasar_rpc(&ctx, &mut member_sess, "eve_public.corporation.skill.plan.GetAllRequest", Vec::new()).await;
+    assert_eq!(member_corp_all.status_code, 200);
+    assert!(!member_corp_all.payload.unwrap().value.is_empty());
 
-    let mut corp_create_val = Vec::new();
-    encode_bytes_field(1, &corp_attr, &mut corp_create_val);
-    let corp_create_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.corporation.skill.plan.CreateRequest", corp_create_val).await;
-    assert_eq!(corp_create_rsp.status_code, 200);
-
-    let corp_all_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.corporation.skill.plan.GetAllRequest", Vec::new()).await;
-    assert_eq!(corp_all_rsp.status_code, 200);
-
-    // Certified doctrine skill plans loaded from SDE (res:/staticdata/skillplans.fsdbinary) alongside personal plans
-    let all_plans_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.skill.plan.GetAllRequest", Vec::new()).await;
+    // Certified doctrine skill plans from SDE (`skillplans.fsdbinary`)
+    let all_plans_rsp = quasar_rpc(&ctx, &mut ceo_sess, "eve_public.skill.plan.GetAllRequest", Vec::new()).await;
     assert_eq!(all_plans_rsp.status_code, 200);
     let all_wm = WireMessage::decode(&all_plans_rsp.payload.unwrap().value).unwrap();
-    let cert_field = all_wm.fields.iter().find(|f| {
-        let b = f.value.as_bytes().unwrap_or(&[]);
-        WireMessage::decode(b).ok().and_then(|id_wm| {
-            id_wm.fields.first().and_then(|id_f| id_f.value.as_bytes()).map(|u| u.starts_with(b"CERT"))
-        }).unwrap_or(false)
-    });
-    assert!(cert_field.is_some(), "SDE certified skill plans must be returned in GetAllRequest");
+    assert!(all_wm.fields.iter().any(|f| {
+        WireMessage::decode(f.value.as_bytes().unwrap_or(&[]))
+            .ok()
+            .and_then(|w| w.fields.first().and_then(|id_f| id_f.value.as_bytes()).map(|u| u.starts_with(b"CERT")))
+            .unwrap_or(false)
+    }));
 
-    let id_wm = WireMessage::decode(cert_field.unwrap().value.as_bytes().unwrap()).unwrap();
-    let cert_plan_uuid: [u8; 16] = id_wm.fields[0].value.as_bytes().unwrap().try_into().unwrap();
-    let (mut cert_get_id, mut cert_get_req) = (Vec::new(), Vec::new());
-    encode_bytes_field(1, &cert_plan_uuid, &mut cert_get_id);
-    encode_bytes_field(1, &cert_get_id, &mut cert_get_req);
-    let cert_get_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.skill.plan.GetRequest", cert_get_req).await;
-    assert_eq!(cert_get_rsp.status_code, 200, "Certified skill plan must be queryable via GetRequest");
+    // --- 3. Cerebral Accelerators (`feat:skills.accelerators`) via real `dogmaIM.UseBooster` + clock ---
+    rpc(&ctx, &mut alpha_sess, "skillMgr2", "SaveSkillQueue", &[PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Integer(25_739), PyRep::Integer(2)]),
+        PyRep::Tuple(vec![PyRep::Integer(25_739), PyRep::Integer(3)]),
+        PyRep::Tuple(vec![PyRep::Integer(25_739), PyRep::Integer(4)]),
+    ])]).await.expect("SaveSkillQueue 25739");
 
-    // --- Accelerators (`feat:skills.accelerators`) ---
-    // Compare training rate without accelerator vs with accelerator booster
-    let booster_item_id = 991_000_101_i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        let ch = snap.characters.get_mut(&char_id).unwrap();
-        ch.clone_grade = 2; // Omega
-        ch.neural = NeuralAttributes {
-            charisma: 20, intelligence: 20, memory: 20, perception: 20, willpower: 20,
-            bonus_remaps: 0, last_remap_unix: None, remap_cooldown_until_unix: None,
-        };
-        snap.skill_queues.insert(char_id, vec![
-            eve_db::SkillQueueEntry {
-                type_id: 3300, target_level: 2, start_sp: 0.0, end_sp: 10_000.0, duration_seconds: 20_000.0, started_at_unix: None,
-            }
-        ]);
-    });
+    ctx.advance_secs(60);
+    rpc(&ctx, &mut alpha_sess, "skillMgr2", "CheckAndSendNotifications", &[]).await.unwrap();
+    let sp_base = ctx.db.with_snapshot(|s| s.skills[&char_id][&25_739].skill_points);
+    assert!(((sp_base - 2_000.0) - 30.0).abs() < 1e-3, "Base 20/20 attributes must train 30 SP/min, got {}", sp_base - 2_000.0);
 
-    // Advance 60 seconds with base attributes (20 + 20/2 = 30 SP/min -> 30 SP)
-    ctx.advance_skill_queues(60.0);
-    let base_sp = ctx.db.with_snapshot(|snap| snap.skill_queues[&char_id][0].start_sp);
-    assert!((base_sp - 30.0).abs() < 1e-3, "Base attributes 20/20 should train at 30 SP/min, got {base_sp}");
+    place_hangar_item(&ctx, 991_000_203, 48_582, char_id, 1);
+    let use_rep = rpc(&ctx, &mut alpha_sess, "dogmaIM", "UseBooster", &[PyRep::Integer(991_000_203)]).await.expect("UseBooster 48582");
+    assert_eq!(use_rep.dict_get("durationSeconds"), Some(&PyRep::Integer(86_400)));
 
-    // Add cerebral accelerator booster: +10 all attributes (attributes 175..=179)
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut booster_attrs = HashMap::new();
-        for attr_id in 175..=179 {
-            booster_attrs.insert(attr_id, 10.0);
-        }
-        snap.items.insert(booster_item_id, eve_db::InventoryItemRecord {
-            item_id: booster_item_id,
-            type_id: 45998,
-            owner_id: char_id,
-            location_id: char_id,
-            flag: eve_db::InventoryFlag::Booster,
-            quantity: 1,
-            singleton: true,
-            version: 1,
-            dynamic_attributes: booster_attrs,
-            source_mutaplasmid_id: None,
-            insured_payout_isk: 0.0,
-            is_blueprint_copy: false,
-            blueprint_runs_remaining: None,
-        });
-    });
+    ctx.advance_secs(60);
+    rpc(&ctx, &mut alpha_sess, "skillMgr2", "CheckAndSendNotifications", &[]).await.unwrap();
+    let sp_boosted = ctx.db.with_snapshot(|s| s.skills[&char_id][&25_739].skill_points);
+    assert!(((sp_boosted - sp_base) - 45.0).abs() < 1e-3, "Active +10 Cerebral Accelerator must train 45 SP/min, got {}", sp_boosted - sp_base);
 
-    // Advance another 60 seconds with accelerator: (30 + 30/2 = 45 SP/min -> +45 SP)
-    ctx.advance_skill_queues(60.0);
-    let accel_sp = ctx.db.with_snapshot(|snap| snap.skill_queues[&char_id][0].start_sp);
-    let gained = accel_sp - base_sp;
-    assert!((gained - 45.0).abs() < 1e-3, "With +10 accelerator booster, SP/min should be 45 SP/min, got {gained}");
+    ctx.advance_secs(86_500);
+    let PyRep::Dict(active_boosters) = rpc(&ctx, &mut alpha_sess, "skillMgr2", "GetBoosters", &[]).await.unwrap() else { panic!("expected Dict") };
+    assert!(active_boosters.is_empty(), "Expired Cerebral Accelerator must be purged");
 
-    // Mark accelerator booster as expired (DYN_ATTR_BOOSTER_EXPIRY_UNIX = 1.0 < now)
-    ctx.db.with_mut_snapshot(|snap| {
-        let it = snap.items.get_mut(&booster_item_id).unwrap();
-        it.dynamic_attributes.insert(eve_server::services::implant_plugging::DYN_ATTR_BOOSTER_EXPIRY_UNIX, 1.0);
-    });
-    // Advance another 60 seconds with expired accelerator: back to base 30 SP/min -> +30 SP
-    ctx.advance_skill_queues(60.0);
-    let expired_sp = ctx.db.with_snapshot(|snap| snap.skill_queues[&char_id][0].start_sp);
-    let expired_gain = expired_sp - accel_sp;
-    assert!((expired_gain - 30.0).abs() < 1e-3, "Expired booster must not accelerate training (expected 30 SP, got {expired_gain})");
+    let sp_post_exp_0 = ctx.db.with_snapshot(|s| s.skills[&char_id][&25_739].skill_points);
+    ctx.advance_secs(60);
+    rpc(&ctx, &mut alpha_sess, "skillMgr2", "CheckAndSendNotifications", &[]).await.unwrap();
+    let sp_post_exp_1 = ctx.db.with_snapshot(|s| s.skills[&char_id][&25_739].skill_points);
+    assert!(((sp_post_exp_1 - sp_post_exp_0) - 30.0).abs() < 1e-3, "Expired accelerator must revert to 30 SP/min");
+
+    // Verify SQLite reload persistence of active personal & corporation skill plans
+    drop(ctx);
+    let repo2 = Arc::new(WorldRepository::open_sqlite(&db_path).expect("reopen sqlite"));
+    let ctx2 = ServerContext::with_repository(repo2);
+    common::pin_clock(&ctx2);
+    let mut ceo2 = login_and_select(&ctx2, 1025, "demo", "demo-secret", 90_000_001).await;
+    let active_reloaded = quasar_rpc(&ctx2, &mut ceo2, "eve_public.character.skill.plan.GetActiveRequest", Vec::new()).await;
+    assert_eq!(active_reloaded.status_code, 200);
+    assert!(!active_reloaded.payload.unwrap().value.is_empty());
+    let _ = std::fs::remove_file(&db_path);
 }

@@ -405,6 +405,12 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                                 format!("Skill {sk_id} is already injected"),
                             ));
                         }
+                        if st.base_price <= 0.0 {
+                            return Err((
+                                crate::quasar_gateway::STATUS_PRECONDITION_FAILED,
+                                format!("Skill {sk_id} is drop-only and not available for direct purchase"),
+                            ));
+                        }
                         let npc_price_cents = snap
                             .market_orders
                             .values()

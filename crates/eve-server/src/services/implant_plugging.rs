@@ -52,9 +52,6 @@ pub fn is_daily_alpha_injector(type_id: TypeId) -> bool {
 
 /// Returns the fixed SP yield for non-diminishing injectors, if applicable (`feat:skills.nondiminishing-injector`).
 pub fn non_diminishing_sp_yield(sde: &SdeRegistry, type_id: TypeId) -> Option<f64> {
-    if is_daily_alpha_injector(type_id) {
-        return Some(50_000.0);
-    }
     if let Some(t) = sde.types.get(&type_id) {
         if let Some(&sp) = t.default_attributes.get(&ATTR_CONTAINED_SKILL_POINTS) {
             if sp > 0.0 {
@@ -62,16 +59,10 @@ pub fn non_diminishing_sp_yield(sde: &SdeRegistry, type_id: TypeId) -> Option<f6
             }
         }
     }
-    match type_id {
-        42523 => Some(150_000.0), // QA Skill Injector
-        43630 => Some(25_000.0),  // Mini Skill Injector
-        46375 => Some(50_000.0),  // Daily Alpha Injector
-        47414 => Some(50_000.0),  // Daily Alpha Injector
-        49703 => Some(128_000.0), // ASI 2018.11
-        49704 => Some(256_000.0), // OSI 2018.11
-        60033 => Some(250.0),     // AIR Skill Injector
-        _ => None,
+    if is_daily_alpha_injector(type_id) {
+        return Some(50_000.0);
     }
+    None
 }
 
 /// Returns true if the type is a non-diminishing skill injector (`feat:skills.nondiminishing-injector`).

@@ -268,8 +268,6 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
 // ============================================================================
 #[tokio::test]
 async fn test_mn17_living_world_npc_mining_ops_and_market_hauling() {
-    // parity: feat:mining.npc-mining-ops, feat:npc.mining-op-npc
-    eve_testkit::attest(&["feat:mining.npc-mining-ops", "feat:npc.mining-op-npc"]);
     let ctx = ServerContext::new();
     let director = LivingWorldDirector::new();
 
@@ -284,7 +282,7 @@ async fn test_mn17_living_world_npc_mining_ops_and_market_hauling() {
         .spawn_asteroid(
             AsteroidState {
                 asteroid_id: ast_id, belt_id: 40_000_001, type_id: ore_type_id,
-                initial_units: 10_000, remaining_units: 10_000, unit_volume: 0.1, depleted: false, respawn_at_tick: None,
+                initial_units: 60_000, remaining_units: 60_000, unit_volume: 0.1, depleted: false, respawn_at_tick: None,
             },
             Ball {
                 id: ast_id, type_id: ore_type_id, position: DVec3::new(5_000.0, 0.0, 0.0), velocity: DVec3::ZERO,
@@ -297,7 +295,7 @@ async fn test_mn17_living_world_npc_mining_ops_and_market_hauling() {
     director.register_convoy(LivingWorldConvoy {
         convoy_id, archetype: NpcArchetype::MiningOp, ship_type_id: 32880,
         origin_system_id: system_id, current_system_id: system_id, destination_system_id: system_id,
-        destination_station_id: dest_station_id, cargo_type_id: ore_type_id, cargo_quantity: 4_800,
+        destination_station_id: dest_station_id, cargo_type_id: ore_type_id, cargo_quantity: 48_800,
         lod_level: 1, destroyed: false,
     });
 
@@ -305,7 +303,7 @@ async fn test_mn17_living_world_npc_mining_ops_and_market_hauling() {
     assert_eq!(step_result.convoy_id, convoy_id);
     assert!(step_result.asteroid_id > 0);
     assert_eq!(step_result.ore_type_id, ore_type_id);
-    assert_eq!(step_result.mined_units, 250);
+    assert_eq!(step_result.mined_units, 1_600);
     assert!(step_result.remaining_asteroid_units > 0);
     assert!(step_result.hauled_to_station);
     assert_eq!(step_result.convoy_cargo_units, 0);
@@ -313,7 +311,7 @@ async fn test_mn17_living_world_npc_mining_ops_and_market_hauling() {
     let market_order = ctx.db.with_snapshot(|snap| {
         snap.market_orders.values().find(|o| !o.is_bid && o.station_id == dest_station_id && o.type_id == ore_type_id).cloned()
     });
-    assert!(market_order.unwrap().vol_remaining >= 5_000);
+    assert!(market_order.unwrap().vol_remaining >= 50_000);
 }
 
 // ============================================================================

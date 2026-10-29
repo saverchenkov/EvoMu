@@ -558,6 +558,9 @@ pub async fn apply_damage_structure_or_ball(
     {
         return Ok(Some((app, dest, inv)));
     }
+    if crate::services::insurgency_services::is_insurgency_stronghold_invulnerable(ctx, sys_id, target_ball_id) {
+        return Ok(Some((0.0, false, false)));
+    }
     let att_opt = (attacker_char_id > 0).then_some(attacker_char_id);
     Ok(sys_handle
         .apply_damage_with_attacker(target_ball_id, dmg, att_opt)

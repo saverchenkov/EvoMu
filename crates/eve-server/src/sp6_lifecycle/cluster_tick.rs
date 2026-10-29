@@ -1198,12 +1198,55 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     let _ = crate::sp6_lifecycle::step_repeating_drone_mining(ctx, now_unix).await;
     let _ = crate::sp6_lifecycle::step_returning_drones(ctx).await;
     crate::services::combat_crimewatch::combat_npcs_drones::step_engaged_drones(ctx, now_unix).await;
+    let active_handles = ctx.systems.active_system_handles();
+    for &(sys_id, _) in &active_handles {
+        if (30_000_000..31_000_000).contains(&sys_id) {
+            let has_piloted_ship_in_space = ctx.db.with_snapshot(|s| {
+                s.characters.values().any(|c| {
+                    c.solar_system_id == sys_id
+                        && c.station_id.is_none()
+                        && c.structure_id.is_none()
+                        && c.active_ship_id > 0
+                })
+            });
+            if has_piloted_ship_in_space {
+                let has_belt = ctx
+                    .sde
+                    .celestials_in_system(sys_id)
+                    .iter()
+                    .any(|c| c.group_id == 9);
+                let has_station = ctx
+                    .sde
+                    .solar_systems
+                    .get(&sys_id)
+                    .is_some_and(|s| !s.stations.is_empty());
+                if has_belt && has_station {
+                    let _ = ctx.living_world.ensure_system_mining_op(sys_id, &ctx.sde);
+                }
+                if ctx
+                    .sde
+                    .stargates()
+                    .values()
+                    .any(|g| g.from_solar_system_id == sys_id)
+                {
+                    let _ = ctx.living_world.ensure_system_hauler_convoy(sys_id, &ctx.sde);
+                    let _ = ctx
+                        .living_world
+                        .materialize_system_lod2(sys_id, &ctx.systems, &ctx.sde)
+                        .await;
+                }
+            }
+        }
+    }
     let _ = ctx
         .living_world
         .step_all_hauler_convoys(&ctx.systems, &ctx.db, &ctx.sde)
         .await;
+    let _ = ctx
+        .living_world
+        .step_all_mining_ops(&ctx.systems, &ctx.db, &ctx.sde)
+        .await;
 
-    let active_handles = ctx.systems.active_system_handles();
     for (sys_id, handle) in active_handles {
         let _ = crate::services::combat_npc_police::check_and_spawn_faction_police(ctx, sys_id).await;
         {

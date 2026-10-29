@@ -70,6 +70,8 @@ pub struct CertificateEntry {
     pub name_id: u32,
     pub description_id: u32,
     pub group_id: GroupId,
+    pub skill_types: HashMap<TypeId, [u8; 5]>,
+    pub recommended_for: Vec<TypeId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -633,6 +635,34 @@ impl SdeRegistry {
         let cert_entries = fsd_dict_entries(&raw, c_pos, 12);
         let mut certificates = HashMap::with_capacity(cert_entries.len());
         for (cid, pos) in cert_entries {
+            let mask = u64_le(&raw, pos + 12);
+            let has_recommended = (mask & 1) != 0;
+            let var_cnt = if has_recommended { 2 } else { 1 };
+            let var_base = pos + 20 + 4 * var_cnt;
+            let st_pos = var_base + u32_le(&raw, pos + 20) as usize;
+            let st_entries = fsd_dict_entries(&raw, st_pos, 8);
+            let mut skill_types = HashMap::with_capacity(st_entries.len());
+            for (skill_type_id, sk_pos) in st_entries {
+                skill_types.insert(
+                    skill_type_id,
+                    [
+                        u32_le(&raw, sk_pos) as u8,
+                        u32_le(&raw, sk_pos + 4) as u8,
+                        u32_le(&raw, sk_pos + 8) as u8,
+                        u32_le(&raw, sk_pos + 12) as u8,
+                        u32_le(&raw, sk_pos + 16) as u8,
+                    ],
+                );
+            }
+            let recommended_for = if has_recommended {
+                let rec_pos = var_base + u32_le(&raw, pos + 24) as usize;
+                let rec_n = u32_le(&raw, rec_pos) as usize;
+                (0..rec_n)
+                    .map(|j| u32_le(&raw, rec_pos + 4 + 4 * j))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             certificates.insert(
                 cid,
                 CertificateEntry {
@@ -640,6 +670,8 @@ impl SdeRegistry {
                     name_id: u32_le(&raw, pos),
                     description_id: u32_le(&raw, pos + 4),
                     group_id: u32_le(&raw, pos + 8),
+                    skill_types,
+                    recommended_for,
                 },
             );
         }

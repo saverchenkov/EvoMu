@@ -1078,7 +1078,8 @@ pub async fn handle_weapons(
                     Err(e) => return Some(Err(e)),
                 }
             } else {
-                let (app, dest) = if final_dmg.total() > 0.0 {
+                let is_invuln = crate::services::insurgency_services::is_insurgency_stronghold_invulnerable(ctx, sys_id, target_ball_id);
+                let (app, dest) = if !is_invuln && final_dmg.total() > 0.0 {
                     sys_handle
                         .apply_damage_with_attacker(target_ball_id, final_dmg, session.character_id)
                         .await

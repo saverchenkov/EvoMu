@@ -558,6 +558,7 @@ pub fn register_skill_handlers(
     );
 
     // 11. eve.skilltype.GetRequest -> GetResponse
+    let sde_sk_type = Arc::clone(&router.sde);
     let skilltype_handler: QuasarHandlerFn = Arc::new(move |_ctx, _any, dyn_msg| {
         let tid = dyn_msg
             .get(1)
@@ -566,14 +567,25 @@ pub fn register_skill_handlers(
                 DynamicValue::Int32(i) => Some(*i as u32),
                 _ => None,
             })
-            .unwrap_or(3300); // Gunnery
+            .unwrap_or(3300);
+
+        let (rank, prim_attr, sec_attr) = sde_sk_type
+            .types
+            .get(&tid)
+            .map(|t| {
+                let r = t.default_attributes.get(&275).copied().unwrap_or(1.0).round() as u64;
+                let p = t.default_attributes.get(&180).copied().unwrap_or(167.0).round() as u64;
+                let s = t.default_attributes.get(&181).copied().unwrap_or(168.0).round() as u64;
+                (r.max(1), p, s)
+            })
+            .unwrap_or((1, 167, 168));
 
         let mut out = Vec::new();
         let mut attr_bytes = Vec::new();
-        encode_varint_field(1, tid as u64, &mut attr_bytes); // type_id
-        encode_varint_field(2, 1, &mut attr_bytes);          // rank = 1
-        encode_varint_field(3, 275, &mut attr_bytes);        // primary_attribute = perception
-        encode_varint_field(4, 276, &mut attr_bytes);        // secondary_attribute = willpower
+        encode_varint_field(1, tid as u64, &mut attr_bytes);
+        encode_varint_field(2, rank, &mut attr_bytes);
+        encode_varint_field(3, prim_attr, &mut attr_bytes);
+        encode_varint_field(4, sec_attr, &mut attr_bytes);
         encode_bytes_field(1, &attr_bytes, &mut out);
 
         Ok(GoogleAny {
@@ -585,21 +597,22 @@ pub fn register_skill_handlers(
     router.register_handler("eve_public.skilltype.GetRequest", skilltype_handler);
 
     // 12. eve.skillcategory.GetAllRequest -> GetAllResponse
+    let sde_sk_cat = Arc::clone(&router.sde);
     router.register_handler(
         "eve.skillcategory.GetAllRequest",
         Arc::new(move |_ctx, _any, _dyn| {
-            let categories = [
-                (255, "Gunnery"),
-                (256, "Missiles"),
-                (257, "Spaceship Command"),
-                (258, "Navigation"),
-                (266, "Engineering"),
-            ];
+            let mut groups: Vec<(u32, String)> = sde_sk_cat
+                .groups
+                .values()
+                .filter(|g| g.category_id == 16 && g.published)
+                .map(|g| (g.group_id, g.name.clone()))
+                .collect();
+            groups.sort_by_key(|(gid, _)| *gid);
             let mut out = Vec::new();
-            for (cat_id, name) in categories {
+            for (cat_id, name) in groups {
                 let mut cat_bytes = Vec::new();
                 encode_varint_field(1, cat_id as u64, &mut cat_bytes);
-                encode_string_field(2, name, &mut cat_bytes);
+                encode_string_field(2, &name, &mut cat_bytes);
                 encode_bytes_field(1, &cat_bytes, &mut out);
             }
             Ok(GoogleAny {

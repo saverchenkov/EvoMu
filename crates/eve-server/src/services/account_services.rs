@@ -189,7 +189,21 @@ pub fn on_logout(ctx: &ServerContext, uid: u64) {
 
 /// Reads the recorded Omega subscription expiry timestamp for `uid` from `snap`, if any.
 pub fn subscription_expiry_for_user(snap: &eve_db::WorldStateSnapshot, uid: u64) -> Option<u64> {
-    load_store(snap).subscription_expiry.get(&uid).copied()
+    let admin_exp = load_store(snap).subscription_expiry.get(&uid).copied();
+    let quasar_exp = snap
+        .owner_notes
+        .get(&-8_500_000_000_000_i64)
+        .and_then(|n| {
+            serde_json::from_str::<crate::services::quasar_auth_user::QuasarIdentityStore>(&n.note)
+                .ok()
+        })
+        .and_then(|st| st.omega_subscriptions.get(&uid).copied());
+    match (admin_exp, quasar_exp) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
 }
 
 /// Applies the stored Omega expiry to every character on the account: Omega (2) while the
@@ -213,7 +227,23 @@ pub fn sync_subscription(ctx: &ServerContext, uid: u64) -> (u32, u64) {
         crate::services::character_skills::catch_up_skill_queue(ctx, cid);
     }
     with_store(ctx, |snap, store| {
-        let exp = store.subscription_expiry.get(&uid).copied();
+        let admin_exp = store.subscription_expiry.get(&uid).copied();
+        let quasar_exp = snap
+            .owner_notes
+            .get(&-8_500_000_000_000_i64)
+            .and_then(|n| {
+                serde_json::from_str::<crate::services::quasar_auth_user::QuasarIdentityStore>(
+                    &n.note,
+                )
+                .ok()
+            })
+            .and_then(|st| st.omega_subscriptions.get(&uid).copied());
+        let exp = match (admin_exp, quasar_exp) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
         let target = exp.map(|until| if until > now { 2u32 } else { 1u32 });
         let mut grade = None;
         for ch in snap.characters.values_mut().filter(|c| c.user_id == uid) {

@@ -162,6 +162,8 @@ pub(crate) async fn handle_module_cycles(
             };
             let is_weapon = matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807);
             let is_upwell_weapon_or_aoe = (target_id_opt.is_some_and(|tid| {
+            let is_weapon = matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807);
+            let is_upwell_weapon_or_aoe = (target_id_opt.is_some_and(|tid| {
                 tid >= 1_000_000_000_000 || ctx.db.with_snapshot(|s| s.structures.contains_key(&tid) || s.sov_runtime.mercenary_dens.contains_key(&tid) || s.sov_runtime.mto_site_balls.contains_key(&tid) || (s.system_states.get(&sys_id).is_some_and(|st| st.sov_alliance_id.is_some()) && !s.characters.contains_key(&tid) && !s.characters.values().any(|c| c.active_ship_id == tid)))
             }) && is_weapon)
                 || (matches!(mod_type.group_id, 72 | 862) && ctx.db.with_snapshot(|s| s.structures.values().any(|st| st.solar_system_id == sys_id && st.state != "Destroyed")));
@@ -175,10 +177,18 @@ pub(crate) async fn handle_module_cycles(
                     matches!((kf, vf), (Some(k), Some(v)) if k != v)
                 })
             });
-            let is_container_target = !matches!(mod_type.group_id, 1122 | 650) && target_id_opt.is_some_and(|tid| {
-                ctx.db.with_snapshot(|s| s.items.get(&tid).and_then(|i| ctx.sde.types.get(&i.type_id)).is_some_and(|t| matches!(t.group_id, 340 | 448)))
-            });
-            if is_fw_pvp || is_upwell_weapon_or_aoe || is_container_target {
+            let is_special_target = !matches!(mod_type.group_id, 1122 | 650)
+                && (matches!(mod_type.group_id, 4060 | 4500 | 4805 | 4807)
+                    || target_id_opt.is_some_and(|tid| {
+                        ctx.living_world.get_convoy(tid).is_some()
+                            || ctx.db.with_snapshot(|s| {
+                                s.items
+                                    .get(&tid)
+                                    .and_then(|i| ctx.sde.types.get(&i.type_id))
+                                    .is_some_and(|t| matches!(t.group_id, 340 | 448 | 4644))
+                            })
+                    }));
+            if is_fw_pvp || is_upwell_weapon_or_aoe || is_special_target {
                 return crate::services::combat_crimewatch::combat_weapons::handle_weapons(ctx, session, service, method, args, kwargs).await;
             }
 
@@ -1094,7 +1104,7 @@ pub(crate) async fn handle_module_cycles(
                 ammo_type_id: active_burst_charge_tid,
                 damage_vector: if matches!(
                     mod_type.group_id,
-                    53 | 55 | 74 | 506 | 507 | 508 | 509 | 510 | 511 | 512 | 524 | 771 | 862 | 1245 | 1986
+                    53 | 55 | 74 | 506 | 507 | 508 | 509 | 510 | 511 | 512 | 524 | 771 | 862 | 1245 | 1986 | 4060
                 ) {
                     let dmg_mult = mod_state.get_attribute(64, &ctx.sde).max(1.0)
                         * (linked_turrets.len().max(1) as f64);

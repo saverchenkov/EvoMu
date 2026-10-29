@@ -66,11 +66,17 @@ pub fn derive_npc_archetype(ctx: &ServerContext, npc_type_id: u32) -> &'static s
         return "IncursionSansha";
     }
 
+    // 5b. Mordu's Legion Special Warfare Units (groups 1285..=1287)
+    if (1285..=1287).contains(&group_id) || (33864..=33866).contains(&npc_type_id) {
+        return "MorduCommander";
+    }
+
     // 6. Officer / Commander: SDE group name containing Officer/Commander, meta_group_id, or meta_level >= 11
     if group_name.contains("Officer")
         || group_name.contains("Commander")
-        || meta_group_id == Some(4) // Officer
-        || meta_group_id == Some(5) // Deadspace
+        || (4795..=4804).contains(&group_id)
+        || meta_group_id == Some(4) // Faction
+        || meta_group_id == Some(5) // Officer
         || meta_level >= 11
     {
         return "Officer";
@@ -309,7 +315,7 @@ pub async fn spawn_specialized_npc_entity(
         orbit_range: orb_range,
         damage_vector,
         entropic_cycles: 0,
-        drifter_overshield_hp: if archetype == "Drifter" { 4_000.0 } else { 0.0 },
+        drifter_overshield_hp: if archetype == "Drifter" && sde_type.is_none_or(|t| t.group_id != 1956) { 4_000.0 } else { 0.0 },
         drifter_doomsday_fired: false,
         web_speed_factor: web_factor,
         web_range,
@@ -601,7 +607,10 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 let is_police = matches!(npc.archetype.as_str(), "FactionPolice" | "Police");
                 let is_navy = matches!(npc.archetype.as_str(), "Navy")
                     || (matches!(npc.faction_id, 500001..=500004) && !matches!(npc.archetype.as_str(), "BeltRat" | "Pirate" | "FactionPolice" | "Police"));
-                let is_pirate = matches!(npc.archetype.as_str(), "BeltRat" | "Pirate" | "Officer" | "CloneSoldier");
+                let is_pirate = matches!(
+                    npc.archetype.as_str(),
+                    "BeltRat" | "Pirate" | "Officer" | "CloneSoldier" | "MorduCommander"
+                );
                 let is_edencom = matches!(npc.archetype.as_str(), "EDENCOM" | "Edencom");
 
                 // Capsules (pods) are never engaged by Faction Police or Empire Navy
@@ -776,11 +785,22 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             }
 
             let mut cycle_dmg = npc.damage_vector;
+            if npc.archetype == "Drifter" && npc.drifter_overshield_hp > 0.0 {
+                if let Some(ncs) = bp.combat_states.get(&nid) {
+                    let lost = (ncs.max_shield_hp - ncs.shield_hp).max(0.0)
+                        + (ncs.max_armor_hp - ncs.armor_hp).max(0.0)
+                        + (ncs.max_structure_hp - ncs.structure_hp).max(0.0);
+                    if lost >= npc.drifter_overshield_hp {
+                        npc.drifter_overshield_hp = 0.0;
+                    }
+                }
+            }
             if npc.archetype == "Triglavian" {
                 let mult = 1.0 + (npc.entropic_cycles as f64 * 0.10).min(1.50);
                 cycle_dmg = cycle_dmg.scaled(mult);
                 npc.entropic_cycles = npc.entropic_cycles.saturating_add(1);
             } else if npc.archetype == "Drifter"
+                && ctx.sde.types.get(&npc.type_id).is_none_or(|t| t.group_id != 1956)
                 && npc.drifter_overshield_hp <= 0.0
                 && !npc.drifter_doomsday_fired
             {
@@ -869,6 +889,9 @@ pub fn record_npc_threat_event(
     let delta = (damage_dealt.max(if is_ewar || is_logistics { 120.0 } else { 0.0 }) + sig_weight) * role_mult;
     with_mut_combat_runtime(ctx, |rt| {
         if let Some(npc) = rt.npc_entities.get_mut(&npc_ball_id) {
+            if npc.archetype == "Drifter" && npc.drifter_overshield_hp > 0.0 && damage_dealt > 0.0 {
+                npc.drifter_overshield_hp = (npc.drifter_overshield_hp - damage_dealt).max(0.0);
+            }
             let entry = npc.aggression_threat.entry(attacker_ball_id).or_insert(100.0);
             *entry += delta;
             npc.threat_table.insert(attacker_ball_id, *entry);
@@ -1026,10 +1049,18 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
                 }
             }
         }
-        "Officer" => {
-            if let Some((&tid, _)) = ctx.sde.types.iter().find(|(&id, t)| {
-                id == 14254 || (t.group_id == 52 && t.name.contains("Cormack"))
-            }) {
+        "Officer" | "MorduCommander" => {
+            if let Some(tid) = npc_type_id
+                .and_then(|ntid| crate::services::combat_crimewatch::combat_npc_encounters::resolve_officer_or_commander_sde_drop(ctx, ntid))
+                .map(|(tid, _)| tid)
+                .or_else(|| {
+                    ctx.sde
+                        .types
+                        .iter()
+                        .find(|(&id, t)| id == 14254 || (t.group_id == 52 && t.name.contains("Cormack")))
+                        .map(|(&tid, _)| tid)
+                })
+            {
                 if !dropped_types.contains(&tid) {
                     dropped_types.push(tid);
                 }
@@ -1190,6 +1221,7 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
             } else {
                 1
             };
+            let is_bpc = matches!(ltid, 33817 | 33819 | 33821);
             snap.items.insert(
                 lid,
                 InventoryItemRecord {
@@ -1198,14 +1230,14 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
                     owner_id: killer_char_id,
                     location_id: wid,
                     flag: InventoryFlag::Cargo,
-                    quantity: qty,
-                    singleton: false,
+                    quantity: if is_bpc { 1 } else { qty },
+                    singleton: is_bpc,
                     version: 1,
                     dynamic_attributes: HashMap::new(),
                     source_mutaplasmid_id: None,
                     insured_payout_isk: 0.0,
-                    is_blueprint_copy: false,
-                    blueprint_runs_remaining: None,
+                    is_blueprint_copy: is_bpc,
+                    blueprint_runs_remaining: is_bpc.then_some(1),
                 },
             );
         }

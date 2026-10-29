@@ -253,7 +253,13 @@ pub async fn handle_ship_or_npc_destruction(
     let is_pod_target = target_ball.type_id == 670;
     let victim_id = victim_char_opt.unwrap_or(target_ball_id);
     let wreck_owner_id = if victim_char_opt.is_some() { victim_id } else { attacker_char_id };
-    let wreck_type_id = ctx.sde.wrecks.get(&target_ball.type_id).copied().unwrap_or(26557);
+    let wreck_type_id = ctx.sde.wrecks.get(&target_ball.type_id).copied().unwrap_or_else(|| {
+        match crate::services::combat_crimewatch::combat_npc_ai::derive_npc_archetype(ctx, target_ball.type_id) {
+            "Drifter" => 37531,
+            "Sleeper" => 30495,
+            _ => 26557,
+        }
+    });
     let fitted_mods: Vec<(i64, u32, u16)> = ctx
         .ship_fittings
         .write()
@@ -716,6 +722,17 @@ pub async fn handle_ship_or_npc_destruction(
             )
             .await;
         }
+        let npc_arch = crate::services::combat_crimewatch::combat_npc_encounters::populate_npc_wreck_on_turret_kill(
+            ctx,
+            sys_id,
+            target_ball_id,
+            target_ball.type_id,
+            target_ball.position,
+            generated_wreck_id,
+            attacker_char_id,
+            &mut dropped_entries,
+        )
+        .await;
         crate::services::sov_gameplay::on_space_entity_destroyed(
             ctx,
             sys_id,
@@ -743,16 +760,19 @@ pub async fn handle_ship_or_npc_destruction(
                 snap.item_positions.remove(&target_ball_id);
             }
         });
-        let bounty = ctx
-            .sde
-            .types
-            .get(&target_ball.type_id)
-            .and_then(|t| {
-                t.default_attributes
-                    .get(&eve_sde::attr_ids::ENTITY_KILL_BOUNTY)
-                    .copied()
-            })
-            .unwrap_or(0.0);
+        let bounty = if sys_id >= 31_000_000 || npc_arch == "Sleeper" {
+            0.0
+        } else {
+            ctx.sde
+                .types
+                .get(&target_ball.type_id)
+                .and_then(|t| {
+                    t.default_attributes
+                        .get(&eve_sde::attr_ids::ENTITY_KILL_BOUNTY)
+                        .copied()
+                })
+                .unwrap_or(0.0)
+        };
         if bounty > 0.0 {
             with_mut_combat_runtime(ctx, |rt| {
                 let _ = rt.destroyed_npc_cache.remove(&target_ball_id);
@@ -876,6 +896,7 @@ pub async fn step_system_entropic_spools(
     solar_system_id: u32,
     dt: f64,
 ) {
+    crate::services::combat_crimewatch::combat_npc_encounters::finalize_cycle_destroyed_npcs(ctx, solar_system_id).await;
     let active_spool_keys: Vec<(i64, i64)> = {
         let mut guard = ctx.combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
         ctx.db.with_snapshot(|s| guard.sync_from_persisted(&s.combat_crimewatch_state));

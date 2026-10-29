@@ -285,12 +285,77 @@ impl NpcSpawnManager {
         Ok(spawned_ball_ids)
     }
 
-    /// Spawns belt rats at asteroid belts in a solar system based on system security and region (`feat:npc.belt-rats`, `feat:npc.clone-soldier-spawns`).
+    /// Spawns belt rats at asteroid belts in a solar system based on system security and region (`feat:npc.belt-rats`, `feat:npc.clone-soldier-spawns`, `feat:npc.officer-npc`, `feat:npc.drifters`).
     pub async fn spawn_belt_rats_for_system(
         &mut self,
         ctx: &ServerContext,
         sys_id: u32,
     ) -> Result<Vec<i64>, String> {
+        let now_unix = ctx.now_unix();
+        // Wormhole & Drifter Hive systems (31_000_000..32_000_000): spawn Drifter Cruiser + Battleship (`feat:npc.drifters`)
+        if (31_000_000..32_000_000).contains(&sys_id) {
+            let drifter_alive = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                rt.npc_entities
+                    .values()
+                    .any(|n| n.solar_system_id == sys_id && n.archetype == "Drifter")
+            });
+            let on_cd = self
+                .respawn_timers
+                .get(&(sys_id, 500_024))
+                .is_some_and(|&until| now_unix < until);
+            if !drifter_alive && !on_cd {
+                self.respawn_timers
+                    .insert((sys_id, 500_024), now_unix.saturating_add(600));
+                let anchor_pos = ctx
+                    .sde
+                    .celestials_in_system(sys_id)
+                    .first()
+                    .map(|c| c.position + DVec3::new(15_000.0, 0.0, 0.0))
+                    .unwrap_or(DVec3::new(15_000.0, 0.0, 0.0));
+                let cruiser_tid = ctx
+                    .sde
+                    .types
+                    .values()
+                    .filter(|t| t.group_id == 1956)
+                    .map(|t| t.type_id)
+                    .min()
+                    .unwrap_or(47153);
+                let bs_group = if (31_000_001..=31_000_006).contains(&sys_id) {
+                    1530
+                } else {
+                    1310
+                };
+                let bs_tid = ctx
+                    .sde
+                    .types
+                    .values()
+                    .filter(|t| t.group_id == bs_group)
+                    .map(|t| t.type_id)
+                    .min()
+                    .unwrap_or(34495);
+                let c_bid = crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity(
+                    ctx,
+                    sys_id,
+                    cruiser_tid,
+                    "Drifter",
+                    500_024,
+                    anchor_pos,
+                )
+                .await;
+                let b_bid = crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity(
+                    ctx,
+                    sys_id,
+                    bs_tid,
+                    "Drifter",
+                    500_024,
+                    anchor_pos + DVec3::new(2_500.0, 0.0, 0.0),
+                )
+                .await;
+                return Ok(vec![c_bid, b_bid]);
+            }
+            return Ok(Vec::new());
+        }
+
         let belt_positions: Vec<DVec3> = ctx
             .sde
             .celestials_in_system(sys_id)
@@ -310,7 +375,6 @@ impl NpcSpawnManager {
             .map(|s| s.security_status as f64)
             .unwrap_or(0.5);
         let reg_faction = regional_pirate_faction_id(ctx, sys_id);
-        let now_unix = ctx.now_unix();
 
         let max_ship_class: u32 = if sys_sec >= 0.45 {
             2 // High-sec: Frigate / Destroyer
@@ -425,6 +489,164 @@ impl NpcSpawnManager {
                 )
                 .await;
                 all_spawned.push(cs_ball_id);
+            }
+
+            // Low-sec Mordu's Legion Special Warfare Unit belt spawn (SDE groups 1285..=1287, faction 500018)
+            let mordu_cd = self
+                .respawn_timers
+                .get(&(sys_id, 500_018))
+                .is_some_and(|&until| now_unix < until)
+                || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                    rt.npc_entities
+                        .values()
+                        .any(|n| n.solar_system_id == sys_id && n.archetype == "MorduCommander")
+                });
+            if !mordu_cd {
+                self.respawn_timers
+                    .insert((sys_id, 500_018), now_unix.saturating_add(300));
+                if ctx.mechanic_rng.roll(0.25) {
+                    let mordu_grp: u32 = if sys_sec >= 0.30 {
+                        1285 // Frigate Operative (Garmur)
+                    } else if sys_sec >= 0.15 {
+                        1286 // Cruiser Specialist (Orthrus)
+                    } else {
+                        1287 // Battleship Commander (Barghest)
+                    };
+                    if let Some(mordu_tid) = ctx
+                        .sde
+                        .types
+                        .values()
+                        .filter(|t| t.group_id == mordu_grp)
+                        .map(|t| t.type_id)
+                        .min()
+                    {
+                        let m_pos = belt_positions
+                            .get(1)
+                            .copied()
+                            .unwrap_or(belt_positions[0])
+                            + DVec3::new(2_500.0, 0.0, 0.0);
+                        let m_bid = crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity(
+                            ctx,
+                            sys_id,
+                            mordu_tid,
+                            "MorduCommander",
+                            500_018,
+                            m_pos,
+                        )
+                        .await;
+                        all_spawned.push(m_bid);
+                    }
+                }
+            }
+        }
+
+        // Rare Faction Commander spawn at asteroid belts (`feat:npc.belt-rats`)
+        let cmd_cd = self
+            .respawn_timers
+            .get(&(sys_id, 900_050))
+            .is_some_and(|&until| now_unix < until);
+        if !cmd_cd {
+            self.respawn_timers
+                .insert((sys_id, 900_050), now_unix.saturating_add(300));
+            let cmd_prob = if sys_sec >= 0.45 {
+                0.08
+            } else if sys_sec >= 0.05 {
+                0.15
+            } else {
+                0.20
+            };
+            if ctx.mechanic_rng.roll(cmd_prob) {
+                let cmd_grp: u32 = match (reg_faction, sys_sec >= 0.45, sys_sec >= 0.05) {
+                    (500_011, true, _) => 789,
+                    (500_011, false, true) => 790,
+                    (500_011, false, false) => 848,
+                    (500_012, true, _) => 792,
+                    (500_012, false, true) => 791,
+                    (500_012, false, false) => 849,
+                    (500_019, true, _) => 810,
+                    (500_019, false, true) => 808,
+                    (500_019, false, false) => 851,
+                    (500_020, true, _) => 814,
+                    (500_020, false, true) => 812,
+                    (500_020, false, false) => 852,
+                    (_, true, _) => 800,
+                    (_, false, true) => 798,
+                    (_, false, false) => 850,
+                };
+                let mut cmd_tids: Vec<u32> = ctx
+                    .sde
+                    .types
+                    .values()
+                    .filter(|t| t.group_id == cmd_grp)
+                    .map(|t| t.type_id)
+                    .collect();
+                cmd_tids.sort_unstable();
+                if !cmd_tids.is_empty() {
+                    let pick = (ctx.mechanic_rng.try_next_u64().unwrap_or(0) as usize) % cmd_tids.len();
+                    let cmd_bid = crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity(
+                        ctx,
+                        sys_id,
+                        cmd_tids[pick],
+                        "Officer",
+                        reg_faction,
+                        belt_positions[0] + DVec3::new(1_800.0, 0.0, -1_200.0),
+                    )
+                    .await;
+                    all_spawned.push(cmd_bid);
+                }
+            }
+        }
+
+        // Rare Named Officer spawn in true null-sec asteroid belts (`sys_sec < 0.0`, `feat:npc.officer-npc`)
+        if sys_sec < 0.0 && sys_id < 31_000_000 {
+            let off_cd = self
+                .respawn_timers
+                .get(&(sys_id, 900_099))
+                .is_some_and(|&until| now_unix < until)
+                || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                    rt.npc_entities.values().any(|n| {
+                        n.solar_system_id == sys_id
+                            && ctx
+                                .sde
+                                .types
+                                .get(&n.type_id)
+                                .is_some_and(|t| matches!(t.group_id, 553 | 559 | 564 | 569 | 574))
+                    })
+                });
+            if !off_cd {
+                self.respawn_timers
+                    .insert((sys_id, 900_099), now_unix.saturating_add(600));
+                if ctx.mechanic_rng.roll(0.10) {
+                    let off_grp: u32 = match reg_faction {
+                        500_011 => 553, // Angel Officer
+                        500_012 => 559, // Blood Raiders Officer
+                        500_019 => 569, // Sansha Officer
+                        500_020 => 574, // Serpentis Officer
+                        _ => 564,       // Guristas Officer
+                    };
+                    let mut off_tids: Vec<u32> = ctx
+                        .sde
+                        .types
+                        .values()
+                        .filter(|t| t.group_id == off_grp)
+                        .map(|t| t.type_id)
+                        .collect();
+                    off_tids.sort_unstable();
+                    if !off_tids.is_empty() {
+                        let pick =
+                            (ctx.mechanic_rng.try_next_u64().unwrap_or(0) as usize) % off_tids.len();
+                        let off_bid = crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity(
+                            ctx,
+                            sys_id,
+                            off_tids[pick],
+                            "Officer",
+                            reg_faction,
+                            belt_positions[0] + DVec3::new(-2_500.0, 0.0, 1_500.0),
+                        )
+                        .await;
+                        all_spawned.push(off_bid);
+                    }
+                }
             }
         }
 

@@ -1116,16 +1116,17 @@ pub fn handle(
             };
             let current_dock = session.station_id.or(session.structure_id);
             let current_ship = session.ship_id;
-            let raw_id = args
+            let raw_ids: Vec<i64> = args
                 .first()
-                .and_then(|a| {
-                    a.as_i64().or_else(|| match a {
-                        PyRep::List(v) | PyRep::Tuple(v) => v.first().and_then(|x| x.as_i64()),
-                        _ => None,
-                    })
+                .map(|a| match a {
+                    PyRep::List(v) | PyRep::Tuple(v) | PyRep::Set(v) => v
+                        .iter()
+                        .filter_map(|x| x.as_i64().filter(|&id| id > 0))
+                        .collect(),
+                    _ => a.as_i64().filter(|&id| id > 0).into_iter().collect(),
                 })
-                .unwrap_or(0);
-            if raw_id <= 0 {
+                .unwrap_or_default();
+            if raw_ids.is_empty() {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "InjectSkillIntoBrain requires itemID or skill typeID".into(),
@@ -1134,115 +1135,113 @@ pub fn handle(
             let now_ft = ctx.now_blueos_filetime_ticks();
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let skill_type_id = if let Some(item) = snap.items.get(&raw_id) {
-                    item.type_id
-                } else if ctx.sde.types.contains_key(&(raw_id as u32)) {
-                    raw_id as u32
-                } else if let Some(inv_item) = snap.items.values().find(|i| {
-                    i.type_id == raw_id as u32
-                        && i.owner_id == char_id
-                        && snap.is_item_consumable_by(i, char_id, current_dock, current_ship)
-                }) {
-                    inv_item.type_id
-                } else {
-                    return Err(BridgeRpcError {
-                        code: "ItemNotFound".into(),
-                        message: format!("Skillbook item or skill type {raw_id} not found"),
-                    });
-                };
-
-                let Some(skill_type) = ctx.sde.types.get(&skill_type_id) else {
-                    return Err(BridgeRpcError {
-                        code: "SkillNotFound".into(),
-                        message: format!("Skill type {skill_type_id} not found in SDE"),
-                    });
-                };
-                if skill_type.category_id != 16 {
-                    return Err(BridgeRpcError {
-                        code: "InvalidSkillType".into(),
-                        message: format!("Type {skill_type_id} is not a skill (category 16)"),
-                    });
-                }
-
-                if let Some(skills_map) = snap.skills.get(&char_id) {
-                    if skills_map.contains_key(&skill_type_id) {
-                        return Err(BridgeRpcError {
-                            code: "SkillAlreadyInjected".into(),
-                            message: format!("Skill {} is already known to character", skill_type.name),
-                        });
-                    }
-                }
-
-                // Note: In modern EVE Online (post-Ascension), characters can inject any skillbook into
-                // their brain regardless of prerequisites; prerequisites are enforced when adding the
-                // skill to the training queue (`SaveSkillQueue`).
-
-                // R-SKB-01: Injection strictly requires an owned, reachable skillbook item to consume
-                let book_item = if let Some(item) = snap.items.get(&raw_id) {
-                    if item.owner_id == char_id && snap.is_item_consumable_by(item, char_id, current_dock, current_ship) {
-                        Some(item.item_id)
-                    } else {
-                        None
-                    }
-                } else {
-                    snap.items.values().find(|i| {
-                        i.type_id == skill_type_id
+                let mut injected_tids = Vec::with_capacity(raw_ids.len());
+                for raw_id in raw_ids {
+                    let skill_type_id = if let Some(item) = snap.items.get(&raw_id) {
+                        item.type_id
+                    } else if ctx.sde.types.contains_key(&(raw_id as u32)) {
+                        raw_id as u32
+                    } else if let Some(inv_item) = snap.items.values().find(|i| {
+                        i.type_id == raw_id as u32
                             && i.owner_id == char_id
                             && snap.is_item_consumable_by(i, char_id, current_dock, current_ship)
-                    }).map(|i| i.item_id)
-                };
-
-                let Some(item_id) = book_item else {
-                    return Err(BridgeRpcError {
-                        code: "ItemNotFound".into(),
-                        message: format!("Skillbook item for skill {} not found in inventory", skill_type.name),
-                    });
-                };
-
-                if let Some(item) = snap.items.get_mut(&item_id) {
-                    if item.quantity > 1 {
-                        item.quantity -= 1;
-                        item.version += 1;
+                    }) {
+                        inv_item.type_id
                     } else {
-                        snap.items.remove(&item_id);
+                        return Err(BridgeRpcError {
+                            code: "ItemNotFound".into(),
+                            message: format!("Skillbook item or skill type {raw_id} not found"),
+                        });
+                    };
+
+                    let Some(skill_type) = ctx.sde.types.get(&skill_type_id) else {
+                        return Err(BridgeRpcError {
+                            code: "SkillNotFound".into(),
+                            message: format!("Skill type {skill_type_id} not found in SDE"),
+                        });
+                    };
+                    if skill_type.category_id != 16 {
+                        return Err(BridgeRpcError {
+                            code: "InvalidSkillType".into(),
+                            message: format!("Type {skill_type_id} is not a skill (category 16)"),
+                        });
                     }
-                }
 
-                let skills_map = snap.skills.entry(char_id).or_default();
+                    if let Some(skills_map) = snap.skills.get(&char_id) {
+                        if skills_map.contains_key(&skill_type_id) {
+                            return Err(BridgeRpcError {
+                                code: "SkillAlreadyInjected".into(),
+                                message: format!("Skill {} is already known to character", skill_type.name),
+                            });
+                        }
+                    }
 
-                skills_map.insert(
-                    skill_type_id,
-                    TrainedSkillRecord {
-                        type_id: skill_type_id,
-                        level: 0,
-                        skill_points: 0.0,
-                    },
-                );
-                snap.skill_history
-                    .entry(char_id)
-                    .or_default()
-                    .push(SkillHistoryEntry {
-                        log_date_ft: now_ft,
-                        // 36 = SkillEventSkillInjected (CCP V24 / evemu)
-                        event_type_id: 36,
+                    // R-SKB-01: Injection strictly requires an owned, reachable skillbook item to consume
+                    let book_item = if let Some(item) = snap.items.get(&raw_id) {
+                        if item.owner_id == char_id && snap.is_item_consumable_by(item, char_id, current_dock, current_ship) {
+                            Some(item.item_id)
+                        } else {
+                            None
+                        }
+                    } else {
+                        snap.items.values().find(|i| {
+                            i.type_id == skill_type_id
+                                && i.owner_id == char_id
+                                && snap.is_item_consumable_by(i, char_id, current_dock, current_ship)
+                        }).map(|i| i.item_id)
+                    };
+
+                    let Some(item_id) = book_item else {
+                        return Err(BridgeRpcError {
+                            code: "ItemNotFound".into(),
+                            message: format!("Skillbook item for skill {} not found in inventory", skill_type.name),
+                        });
+                    };
+
+                    if let Some(item) = snap.items.get_mut(&item_id) {
+                        if item.quantity > 1 {
+                            item.quantity -= 1;
+                            item.version += 1;
+                        } else {
+                            snap.items.remove(&item_id);
+                        }
+                    }
+
+                    snap.skills.entry(char_id).or_default().insert(
                         skill_type_id,
-                        skill_level: 0,
-                        absolute_points: 0.0,
-                    });
-
-                Ok(skill_type_id)
+                        TrainedSkillRecord {
+                            type_id: skill_type_id,
+                            level: 0,
+                            skill_points: 0.0,
+                        },
+                    );
+                    snap.skill_history
+                        .entry(char_id)
+                        .or_default()
+                        .push(SkillHistoryEntry {
+                            log_date_ft: now_ft,
+                            // 36 = SkillEventSkillInjected (CCP V24 / evemu)
+                            event_type_id: 36,
+                            skill_type_id,
+                            skill_level: 0,
+                            absolute_points: 0.0,
+                        });
+                    injected_tids.push(skill_type_id);
+                }
+                Ok(injected_tids)
             });
 
             match res {
-                Ok(tid) => {
+                Ok(tids) => {
+                    let first_tid = tids.first().copied().unwrap_or(0);
                     super::jump_clone_names::emit_server_skills_changed(
                         ctx,
                         char_id,
-                        &[tid],
+                        &tids,
                         Some("SkillInjected"),
                     );
                     Some(Ok(PyRep::keyval([
-                        ("typeID", PyRep::Integer(tid as i64)),
+                        ("typeID", PyRep::Integer(first_tid as i64)),
                         ("injected", PyRep::Bool(true)),
                     ])))
                 }

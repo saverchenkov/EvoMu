@@ -438,15 +438,30 @@ impl CrimeWatchDirector {
                 snap.next_entity_id
             });
             let concord_pos = crim_pos + DVec3::new(200.0, 0.0, 200.0);
+            let (c_mass, c_radius, c_max_vel, c_inertia) = ctx
+                .sde
+                .types
+                .get(&11957)
+                .map(|t| {
+                    let mv = t.default_attributes.get(&37).copied().unwrap_or(1_200.0);
+                    let ag = t.default_attributes.get(&70).copied().unwrap_or(0.1);
+                    (
+                        t.mass.max(1.0),
+                        t.radius.max(1.0),
+                        mv.max(1.0),
+                        ag.max(0.01),
+                    )
+                })
+                .unwrap_or((10_000_000.0, 120.0, 1_200.0, 0.1));
             let concord_ball = Ball {
                 id: concord_ball_id,
                 type_id: 11957, // CONCORD Police Commander
                 position: concord_pos,
                 velocity: DVec3::ZERO,
-                max_velocity: 1_200.0,
-                inertia: 0.1,
-                mass: 10_000_000.0,
-                radius: 120.0,
+                max_velocity: c_max_vel,
+                inertia: c_inertia,
+                mass: c_mass,
+                radius: c_radius,
                 speed_fraction: 1.0,
                 mode: MovementMode::Stop,
             };
@@ -496,7 +511,19 @@ impl CrimeWatchDirector {
                 .unwrap_or(0);
             let locks_cleared = pre_locks.saturating_sub(post_locks);
 
-            // 2. CONCORD destroys the criminal ship through the canonical death pipeline (C-3)
+            // 2. CONCORD fires unlimited lethal omni-damage and destroys the criminal ship through the canonical death pipeline (C-3)
+            let _ = sys_handle
+                .apply_damage_with_attacker(
+                    criminal_ship_id,
+                    eve_destiny::DamageVector {
+                        em: 1.0e9,
+                        thermal: 1.0e9,
+                        kinetic: 1.0e9,
+                        explosive: 1.0e9,
+                    },
+                    Some(concord_ball_id),
+                )
+                .await;
             let death_res = execute_death_pipeline(
                 ctx,
                 sys_id,
@@ -508,7 +535,7 @@ impl CrimeWatchDirector {
             )
             .await;
 
-            // 3. Apply character security status penalty & grant 30-day Kill Right to victim
+            // 3. Apply character security status penalty & grant 30-day private Kill Right (0 fee until made public) to victim
             let kill_right_id = ctx.db.with_mut_snapshot(|snap| {
                 if let Some(crim) = snap.characters.get_mut(&criminal_char_id) {
                     let loss = compute_sec_status_loss(crim.security_status, false, 1.0);
@@ -522,7 +549,7 @@ impl CrimeWatchDirector {
                         kill_right_id: kr_id,
                         owner_id: victim_char_id,
                         target_id: criminal_char_id,
-                        activation_fee: IskCents::from_isk(1_000_000),
+                        activation_fee: IskCents(0),
                         is_active_suspect: false,
                     },
                 );

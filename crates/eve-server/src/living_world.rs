@@ -70,6 +70,79 @@ impl Default for LivingWorldDirector {
     }
 }
 
+/// Builds a `Ball` and `CombatState` from SDE attributes for `type_id`.
+pub fn sde_ball_and_combat(
+    sde: &eve_sde::SdeRegistry,
+    id: i64,
+    type_id: TypeId,
+    position: DVec3,
+) -> (Ball, eve_destiny::CombatState) {
+    let (mass, radius, max_vel, inertia, sh, ar, st) = sde
+        .types
+        .get(&type_id)
+        .map(|t| {
+            let a = &t.default_attributes;
+            let mv = a.get(&37).copied().unwrap_or(250.0).max(1.0);
+            let ag = a.get(&70).copied().unwrap_or(3.5).max(0.05);
+            let sh = a.get(&263).copied().unwrap_or(1_200.0).max(1.0);
+            let ar = a.get(&265).copied().unwrap_or(1_200.0).max(1.0);
+            let st = a.get(&9).copied().unwrap_or(1_500.0).max(1.0);
+            (t.mass.max(1_000.0), t.radius.max(20.0), mv, ag, sh, ar, st)
+        })
+        .unwrap_or((1_200_000.0, 40.0, 250.0, 3.5, 1_500.0, 1_200.0, 1_500.0));
+    (
+        Ball {
+            id,
+            type_id,
+            position,
+            velocity: DVec3::ZERO,
+            max_velocity: max_vel,
+            inertia,
+            mass,
+            radius,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        eve_destiny::CombatState {
+            shield_hp: sh,
+            max_shield_hp: sh,
+            armor_hp: ar,
+            max_armor_hp: ar,
+            structure_hp: st,
+            max_structure_hp: st,
+            ..eve_destiny::CombatState::default()
+        },
+    )
+}
+
+/// Resolves the empire/faction industrial hauler `TypeId` for `solar_system_id` from SDE (`group_id == 28`).
+pub fn hauler_type_for_system(sde: &eve_sde::SdeRegistry, solar_system_id: SolarSystemId) -> TypeId {
+    let faction_id = sde
+        .solar_systems
+        .get(&solar_system_id)
+        .and_then(|sys| {
+            sys.stations
+                .first()
+                .and_then(|st| st.owner_faction_id.map(|f| f as u32))
+                .or_else(|| sde.constellations.get(&sys.constellation_id).and_then(|c| c.faction_id))
+                .or_else(|| sde.regions.get(&sys.region_id).and_then(|r| r.faction_id))
+        })
+        .unwrap_or(500_001);
+    let target_race: u32 = match faction_id {
+        500_001 => 1, // Caldari
+        500_002 => 2, // Minmatar
+        500_003 => 4, // Amarr
+        500_004 => 8, // Gallente
+        _ => 1,
+    };
+    sde.types
+        .values()
+        .filter(|t| t.group_id == 28 && t.published && t.race_id == Some(target_race))
+        .map(|t| t.type_id)
+        .min()
+        .unwrap_or(648)
+}
+
 impl LivingWorldDirector {
     /// Initializes an empty `LivingWorldDirector` with `0` pre-seeded convoys (`S-5`).
     pub fn new() -> Self {
@@ -88,7 +161,7 @@ impl LivingWorldDirector {
             LivingWorldConvoy {
                 convoy_id: 800_000_001,
                 archetype: NpcArchetype::HaulerConvoy,
-                ship_type_id: 587,
+                ship_type_id: 49_793, // Frostline Transporter (SDE NPC hauler)
                 origin_system_id: 30_000_144,
                 current_system_id: 30_000_142,
                 destination_system_id: 30_000_142,
@@ -189,33 +262,32 @@ impl LivingWorldDirector {
                         .map(|st| st.position)
                 })
                 .unwrap_or(DVec3::ZERO);
-            let grid_origin = station_pos + DVec3::new(1_500.0, 0.0, 0.0);
-            let ball = Ball {
-                id: c.convoy_id,
-                type_id: c.ship_type_id,
-                position: grid_origin + DVec3::new(1_500.0, 0.0, 0.0),
-                velocity: DVec3::ZERO,
-                max_velocity: 300.0,
-                inertia: 3.5,
-                mass: 1_200_000.0,
-                radius: 40.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
+            let grid_origin = if c.archetype == NpcArchetype::MiningOp {
+                sde.celestials_in_system(solar_system_id)
+                    .into_iter()
+                    .find(|cel| cel.group_id == 9)
+                    .map(|cel| cel.position)
+                    .unwrap_or(station_pos + DVec3::new(1_500.0, 0.0, 0.0))
+            } else {
+                station_pos + DVec3::new(1_500.0, 0.0, 0.0)
             };
-            let _ = handle
-                .spawn_ball_with_combat(
-                    ball,
-                    eve_destiny::CombatState {
-                        shield_hp: 50.0,
-                        max_shield_hp: 50.0,
-                        armor_hp: 50.0,
-                        max_armor_hp: 50.0,
-                        structure_hp: 50.0,
-                        max_structure_hp: 50.0,
-                        ..eve_destiny::CombatState::default()
-                    },
-                )
-                .await;
+            let (ball, combat) = sde_ball_and_combat(
+                sde,
+                c.convoy_id,
+                c.ship_type_id,
+                grid_origin + DVec3::new(1_500.0, 0.0, 0.0),
+            );
+            let _ = handle.spawn_ball_with_combat(ball, combat).await;
+            if c.archetype == NpcArchetype::MiningOp {
+                let hauler_tid = hauler_type_for_system(sde, solar_system_id);
+                let (h_ball, h_combat) = sde_ball_and_combat(
+                    sde,
+                    c.convoy_id + 1_000_000,
+                    hauler_tid,
+                    grid_origin + DVec3::new(2_100.0, 0.0, 250.0),
+                );
+                let _ = handle.spawn_ball_with_combat(h_ball, h_combat).await;
+            }
             count += 1;
         }
         count
@@ -229,6 +301,34 @@ impl LivingWorldDirector {
             .get_mut(&convoy_id)
         {
             c.destroyed = true;
+        }
+    }
+
+    pub fn mark_convoy_destroyed_with_supply_shock(&self, convoy_id: i64, db: &WorldRepository) {
+        let convoy_opt = {
+            let mut guard = self.convoys.write().unwrap_or_else(|e| e.into_inner());
+            guard.get_mut(&convoy_id).and_then(|c| {
+                if c.destroyed {
+                    None
+                } else {
+                    c.destroyed = true;
+                    Some(c.clone())
+                }
+            })
+        };
+        if let Some(convoy) = convoy_opt {
+            db.with_mut_snapshot(|snap| {
+                for order in snap.market_orders.values_mut() {
+                    if !order.is_bid
+                        && order.is_npc
+                        && order.station_id == convoy.destination_station_id
+                        && order.type_id == convoy.cargo_type_id
+                    {
+                        let spiked = ((order.price.0 as f64) * 1.15).ceil();
+                        order.price = IskCents(spiked.clamp(1.0, i64::MAX as f64) as i64);
+                    }
+                }
+            });
         }
     }
 
@@ -348,9 +448,9 @@ impl LivingWorldDirector {
         convoy_id: i64,
         systems: &SystemRegistry,
         db: &WorldRepository,
-        _sde: &eve_sde::SdeRegistry,
+        sde: &eve_sde::SdeRegistry,
     ) -> Result<NpcMiningStepResult, String> {
-        let (sys_id, cargo_type, current_cargo, dest_station_id) = {
+        let (sys_id, ship_type_id, cargo_type, current_cargo, dest_station_id) = {
             let guard = self.convoys.read().unwrap_or_else(|e| e.into_inner());
             let c = guard
                 .get(&convoy_id)
@@ -363,6 +463,7 @@ impl LivingWorldDirector {
             }
             (
                 c.current_system_id,
+                c.ship_type_id,
                 c.cargo_type_id,
                 c.cargo_quantity,
                 c.destination_station_id,
@@ -386,18 +487,113 @@ impl LivingWorldDirector {
 
         let target_id = target.asteroid_id;
         let ore_type_id = target.type_id;
+        let ast_pos = handle
+            .get_ball_snapshot(target_id as i64)
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, b)| b.position)
+            .unwrap_or(DVec3::new(50_000.0, 0.0, 0.0));
 
-        // Run mining cycle using MN-04 mechanics
-        let extraction = handle.mine_asteroid(target_id, 250, 0.0).await?;
+        // Ensure miner and companion hauler balls are spawned at the asteroid belt (`feat:npc.mining-op-npc`)
+        if handle
+            .get_ball_snapshot(convoy_id)
+            .await
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            let (m_ball, m_combat) = sde_ball_and_combat(
+                sde,
+                convoy_id,
+                ship_type_id,
+                ast_pos + DVec3::new(500.0, 0.0, 0.0),
+            );
+            let _ = handle.spawn_ball_with_combat(m_ball, m_combat).await;
+        } else {
+            let _ = handle.set_ball_position(convoy_id, ast_pos + DVec3::new(500.0, 0.0, 0.0)).await;
+        }
+        let hauler_ball_id = convoy_id + 1_000_000;
+        if handle
+            .get_ball_snapshot(hauler_ball_id)
+            .await
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            let hauler_tid = hauler_type_for_system(sde, sys_id);
+            let (h_ball, h_combat) = sde_ball_and_combat(
+                sde,
+                hauler_ball_id,
+                hauler_tid,
+                ast_pos + DVec3::new(1_200.0, 0.0, 200.0),
+            );
+            let _ = handle.spawn_ball_with_combat(h_ball, h_combat).await;
+        } else {
+            let _ = handle.set_ball_position(hauler_ball_id, ast_pos + DVec3::new(1_200.0, 0.0, 200.0)).await;
+        }
+
+        // Compute SDE mining laser cycle yield & Venture ore hold capacity (`483` Miner I + `ship_type_id` hull attrs)
+        let ship_type = sde.types.get(&ship_type_id);
+        let turrets = ship_type
+            .and_then(|t| t.default_attributes.get(&102).copied())
+            .unwrap_or(2.0)
+            .max(1.0);
+        let role_bonus_pct = ship_type
+            .and_then(|t| t.default_attributes.get(&3239).copied())
+            .unwrap_or(0.0);
+        let laser_sde = sde.types.get(&483);
+        let laser_m3 = laser_sde
+            .and_then(|t| t.default_attributes.get(&77).copied())
+            .unwrap_or(10.0)
+            .max(1.0);
+        let laser_dur_s = (laser_sde
+            .and_then(|t| t.default_attributes.get(&73).copied())
+            .unwrap_or(15_000.0)
+            / 1_000.0)
+            .max(1.0);
+        let tick_m3 = laser_m3 * turrets * (1.0 + role_bonus_pct / 100.0) * (60.0 / laser_dur_s);
+        let ore_unit_vol = sde
+            .types
+            .get(&ore_type_id)
+            .map(|t| t.volume)
+            .unwrap_or(0.1)
+            .max(0.01);
+        let units_per_tick = ((tick_m3 / ore_unit_vol).floor() as u64).max(1);
+        let ore_hold_m3 = ship_type
+            .and_then(|t| t.default_attributes.get(&1556).copied().or(Some(t.capacity)))
+            .unwrap_or(5_000.0)
+            .max(500.0);
+
+        let extraction = handle.mine_asteroid(target_id, units_per_tick, 0.0).await?;
 
         let mut hauled = false;
         let mut final_cargo = current_cargo + extraction.mined_units as i32;
 
-        // When cargo threshold reached (>=5000 units), haul to NPC destination station
-        if final_cargo >= 5_000 {
+        // When SDE ore hold capacity (`specialOreHoldCapacity` attr 1556) is filled, companion hauler delivers to NPC station
+        if (final_cargo as f64) * ore_unit_vol >= ore_hold_m3 - 1e-6 {
             hauled = true;
             // Replenish destination station NPC market orders
             let added_units = final_cargo;
+            let (sys_region_id, owner_corp_id) = sde
+                .solar_systems
+                .get(&sys_id)
+                .map(|sys| {
+                    let corp = sys
+                        .stations
+                        .iter()
+                        .find(|st| st.station_id == dest_station_id)
+                        .or_else(|| sys.stations.first())
+                        .map(|st| st.owner_corporation_id)
+                        .unwrap_or(1_000_035);
+                    (sys.region_id, corp)
+                })
+                .unwrap_or((10_000_002, 1_000_035));
+            let ore_price = sde
+                .types
+                .get(&ore_type_id)
+                .map(|t| IskCents::from_f64_isk(t.base_price.max(5.0)))
+                .unwrap_or_else(|| IskCents::from_isk(5));
             db.with_mut_snapshot(|snap| {
                 let mut found_order = false;
                 for order in snap.market_orders.values_mut() {
@@ -419,12 +615,12 @@ impl LivingWorldDirector {
                         oid,
                         eve_db::MarketOrderRecord {
                             order_id: oid,
-                            owner_id: 1_000_035, // Caldari Navy
+                            owner_id: owner_corp_id,
                             station_id: dest_station_id,
-                            region_id: 10_000_002, // The Forge
+                            region_id: sys_region_id,
                             type_id: ore_type_id,
                             is_bid: false,
-                            price: IskCents::from_isk(5),
+                            price: ore_price,
                             vol_entered: added_units,
                             vol_remaining: added_units,
                             min_volume: 1,
@@ -442,6 +638,7 @@ impl LivingWorldDirector {
             let mut guard = self.convoys.write().unwrap_or_else(|e| e.into_inner());
             if let Some(c) = guard.get_mut(&convoy_id) {
                 c.cargo_quantity = final_cargo;
+                c.lod_level = 2;
             }
         }
 
@@ -586,27 +783,12 @@ impl LivingWorldDirector {
                         })
                         .unwrap_or(DVec3::new(10_000.0, 0.0, 0.0));
 
-                    let ball = Ball {
-                        id: convoy_id,
-                        type_id: ship_type_id,
-                        position: gate_pos + DVec3::new(1_000.0, 0.0, 0.0),
-                        velocity: DVec3::ZERO,
-                        max_velocity: 300.0,
-                        inertia: 3.5,
-                        mass: 1_200_000.0,
-                        radius: 40.0,
-                        speed_fraction: 0.0,
-                        mode: MovementMode::Stop,
-                    };
-                    let combat = eve_destiny::CombatState {
-                        shield_hp: 2_000.0,
-                        max_shield_hp: 2_000.0,
-                        armor_hp: 1_500.0,
-                        max_armor_hp: 1_500.0,
-                        structure_hp: 1_500.0,
-                        max_structure_hp: 1_500.0,
-                        ..eve_destiny::CombatState::default()
-                    };
+                    let (ball, combat) = sde_ball_and_combat(
+                        sde,
+                        convoy_id,
+                        ship_type_id,
+                        gate_pos + DVec3::new(1_000.0, 0.0, 0.0),
+                    );
                     let _ = new_handle.spawn_ball_with_combat(ball, combat).await;
                 }
 
@@ -630,6 +812,118 @@ impl LivingWorldDirector {
                 })
             }
         }
+    }
+
+    /// Ensures at least one `MiningOp` exists in `solar_system_id` (`feat:npc.mining-op-npc`).
+    pub fn ensure_system_mining_op(
+        &self,
+        solar_system_id: SolarSystemId,
+        sde: &eve_sde::SdeRegistry,
+    ) -> i64 {
+        {
+            let convoys = self.convoys.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(existing) = convoys
+                .values()
+                .find(|c| c.archetype == NpcArchetype::MiningOp && c.current_system_id == solar_system_id)
+            {
+                return existing.convoy_id;
+            }
+        }
+        let dest_station_id = sde
+            .solar_systems
+            .get(&solar_system_id)
+            .and_then(|sys| sys.stations.first().map(|st| st.station_id))
+            .unwrap_or(60_003_760);
+        let convoy_id = 800_100_000 + (solar_system_id as i64 % 100_000);
+        let mut convoys = self.convoys.write().unwrap_or_else(|e| e.into_inner());
+        convoys.entry(convoy_id).or_insert(LivingWorldConvoy {
+            convoy_id,
+            archetype: NpcArchetype::MiningOp,
+            ship_type_id: 32880, // Venture
+            origin_system_id: solar_system_id,
+            current_system_id: solar_system_id,
+            destination_system_id: solar_system_id,
+            destination_station_id: dest_station_id,
+            cargo_type_id: 1230, // Veldspar
+            cargo_quantity: 0,
+            lod_level: 1,
+            destroyed: false,
+        });
+        convoy_id
+    }
+
+    /// Ensures a stargate-routed `HaulerConvoy` exists originating in `solar_system_id` (`feat:npc.npc-hauler`).
+    pub fn ensure_system_hauler_convoy(
+        &self,
+        solar_system_id: SolarSystemId,
+        sde: &eve_sde::SdeRegistry,
+    ) -> i64 {
+        {
+            let convoys = self.convoys.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(existing) = convoys
+                .values()
+                .find(|c| c.archetype == NpcArchetype::HaulerConvoy && !c.destroyed)
+            {
+                return existing.convoy_id;
+            }
+        }
+        let next_sys = sde
+            .stargates()
+            .values()
+            .find(|g| g.from_solar_system_id == solar_system_id)
+            .map(|g| g.to_solar_system_id)
+            .unwrap_or(30_000_144);
+        let dest_station_id = sde
+            .solar_systems
+            .get(&next_sys)
+            .and_then(|sys| sys.stations.first().map(|st| st.station_id))
+            .unwrap_or(60_003_760);
+        let convoy_id = 800_200_000 + (solar_system_id as i64 % 100_000);
+        let hauler_tid = hauler_type_for_system(sde, solar_system_id);
+        {
+            let mut convoys = self.convoys.write().unwrap_or_else(|e| e.into_inner());
+            convoys.insert(
+                convoy_id,
+                LivingWorldConvoy {
+                    convoy_id,
+                    archetype: NpcArchetype::HaulerConvoy,
+                    ship_type_id: hauler_tid,
+                    origin_system_id: solar_system_id,
+                    current_system_id: solar_system_id,
+                    destination_system_id: next_sys,
+                    destination_station_id: dest_station_id,
+                    cargo_type_id: 34,
+                    cargo_quantity: 25_000,
+                    lod_level: 1,
+                    destroyed: false,
+                },
+            );
+        }
+        self.set_convoy_route(convoy_id, vec![solar_system_id, next_sys]);
+        convoy_id
+    }
+
+    /// Advances all active NPC mining operations on living-world ticks (`feat:npc.mining-op-npc`, `feat:mining.npc-mining-ops`).
+    pub async fn step_all_mining_ops(
+        &self,
+        systems: &SystemRegistry,
+        db: &WorldRepository,
+        sde: &eve_sde::SdeRegistry,
+    ) -> Vec<(i64, Result<NpcMiningStepResult, String>)> {
+        let active_ids: Vec<i64> = {
+            let convoys = self.convoys.read().unwrap_or_else(|e| e.into_inner());
+            convoys
+                .values()
+                .filter(|c| !c.destroyed && c.archetype == NpcArchetype::MiningOp)
+                .map(|c| c.convoy_id)
+                .collect()
+        };
+        let mut results = Vec::new();
+        for cid in active_ids {
+            let res = self.step_npc_mining_op(cid, systems, db, sde).await;
+            results.push((cid, res));
+        }
+        results
     }
 
     /// Advances all active hauler convoys on living-world ticks (`feat:npc.npc-hauler`).

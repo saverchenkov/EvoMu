@@ -467,3 +467,302 @@ pub fn flush_npc_bounty_tick(
     (pilot_isk, main_ess, reserve_ess)
 }
 
+/// Resolves SDE special module or BPC drop for Officer, Faction Commander, and Mordu's Legion NPCs (`feat:npc.officer-npc`, `feat:npc.belt-rats`).
+pub fn resolve_officer_or_commander_sde_drop(ctx: &ServerContext, npc_type_id: u32) -> Option<(u32, bool)> {
+    let sde_type = ctx.sde.types.get(&npc_type_id)?;
+    match sde_type.group_id {
+        1285 => return Some((33817, true)), // Garmur Blueprint (1-run BPC)
+        1286 => return Some((33819, true)), // Orthrus Blueprint (1-run BPC)
+        1287 => return Some((33821, true)), // Barghest Blueprint (1-run BPC)
+        _ => {}
+    }
+    if matches!(sde_type.group_id, 553 | 559 | 564 | 569 | 574 | 1174 | 4795..=4804) {
+        let first_name = sde_type.name.split_whitespace().next().unwrap_or("");
+        let mut candidates: Vec<u32> = ctx
+            .sde
+            .types
+            .values()
+            .filter(|t| {
+                t.published
+                    && t.category_id == 7
+                    && t.meta_group_id == Some(5)
+                    && !first_name.is_empty()
+                    && t.name.starts_with(first_name)
+            })
+            .map(|t| t.type_id)
+            .collect();
+        if candidates.is_empty() {
+            candidates = ctx
+                .sde
+                .types
+                .values()
+                .filter(|t| t.published && t.category_id == 7 && t.meta_group_id == Some(5))
+                .map(|t| t.type_id)
+                .collect();
+        }
+        candidates.sort_unstable();
+        if !candidates.is_empty() {
+            let draw = ctx.mechanic_rng.try_next_u64().unwrap_or(0) as usize;
+            return Some((candidates[draw % candidates.len()], false));
+        }
+    }
+    let faction_prefix = if sde_type.name.contains("Dread Guristas") {
+        Some("Dread Guristas")
+    } else if sde_type.name.contains("Shadow Serpentis") {
+        Some("Shadow Serpentis")
+    } else if sde_type.name.contains("Dark Blood") {
+        Some("Dark Blood")
+    } else if sde_type.name.contains("True Sansha") {
+        Some("True Sansha")
+    } else if sde_type.name.contains("Domination") {
+        Some("Domination")
+    } else {
+        None
+    };
+    if let Some(prefix) = faction_prefix {
+        let mut candidates: Vec<u32> = ctx
+            .sde
+            .types
+            .values()
+            .filter(|t| {
+                t.published
+                    && t.category_id == 7
+                    && t.meta_group_id == Some(4)
+                    && t.name.starts_with(prefix)
+            })
+            .map(|t| t.type_id)
+            .collect();
+        candidates.sort_unstable();
+        if !candidates.is_empty() {
+            let draw = ctx.mechanic_rng.try_next_u64().unwrap_or(0) as usize;
+            return Some((candidates[draw % candidates.len()], false));
+        }
+    }
+    None
+}
+
+/// Populates specialized NPC loot, convoy cargo, cooldowns, and wave hooks when an NPC is killed via turret/spool damage (`combat_weapons_spool.rs`).
+pub async fn populate_npc_wreck_on_turret_kill(
+    ctx: &ServerContext,
+    solar_system_id: SolarSystemId,
+    npc_ball_id: i64,
+    npc_type_id: u32,
+    pos: DVec3,
+    wreck_id: i64,
+    killer_char_id: i64,
+    dropped_entries: &mut Vec<eve_db::KillmailItemEntry>,
+) -> String {
+    let npc_opt = with_mut_combat_runtime(ctx, |rt| {
+        rt.npc_entities
+            .remove(&npc_ball_id)
+            .or_else(|| rt.destroyed_npc_cache.remove(&npc_ball_id))
+    });
+    if let Ok(mut spawns) = ctx.npc_spawns.write() {
+        if let Some(mgr) = spawns.get_mut(&solar_system_id) {
+            if let Some(removed) = mgr.entities.remove(&npc_ball_id) {
+                let group_empty = !mgr
+                    .entities
+                    .values()
+                    .any(|e| e.spawn_group_id == removed.spawn_group_id);
+                if group_empty {
+                    mgr.respawn_timers.insert(
+                        (solar_system_id, removed.spawn_group_id),
+                        ctx.now_unix().saturating_add(1_200),
+                    );
+                }
+            }
+        }
+    }
+    let convoy_opt = ctx.living_world.get_convoy(npc_ball_id);
+    if convoy_opt.is_some() {
+        if wreck_id > 0 {
+            ctx.living_world
+                .mark_convoy_destroyed_with_supply_shock(npc_ball_id, &ctx.db);
+        } else {
+            let _ = ctx
+                .living_world
+                .interdict_convoy(npc_ball_id, killer_char_id, &ctx.db);
+            ctx.living_world.mark_convoy_destroyed(npc_ball_id);
+        }
+    }
+
+    let archetype = npc_opt
+        .as_ref()
+        .map(|n| n.archetype.clone())
+        .unwrap_or_else(|| {
+            if convoy_opt.is_some() {
+                "Hauler".to_string()
+            } else {
+                crate::services::combat_crimewatch::combat_npc_ai::derive_npc_archetype(ctx, npc_type_id)
+                    .to_string()
+            }
+        });
+    if archetype == "CloneSoldier" {
+        let until = ctx.now_unix().saturating_add(1_200);
+        with_mut_combat_runtime(ctx, |rt| {
+            rt.clone_soldier_cooldown_until.insert(solar_system_id, until);
+        });
+    }
+
+    let mut loot_to_insert: Vec<(u32, i32, bool)> = Vec::new();
+    if let Some(tag_tid) = npc_opt.as_ref().and_then(|n| n.tag_drop_type_id) {
+        loot_to_insert.push((tag_tid, 1, false));
+    }
+    if let Some((custom_tid, custom_qty)) = npc_opt.as_ref().and_then(|n| n.custom_cargo_loot) {
+        loot_to_insert.push((custom_tid, (custom_qty as i32).max(1), false));
+    } else if let Some(ref conv) = convoy_opt {
+        if conv.cargo_quantity > 0 {
+            loot_to_insert.push((conv.cargo_type_id, conv.cargo_quantity, false));
+        }
+    }
+    if let Some((special_tid, is_bpc)) = resolve_officer_or_commander_sde_drop(ctx, npc_type_id) {
+        loot_to_insert.push((special_tid, 1, is_bpc));
+    }
+    if archetype == "Sleeper" {
+        loot_to_insert.push((30744, 1, false));
+        loot_to_insert.push((30259, 1, false));
+    } else if archetype == "PochvenHypnosianSleeper" {
+        if let Some((&tid, _)) = ctx.sde.types.iter().find(|(_, t)| t.name == "Interstellar Navigation Logs") {
+            loot_to_insert.push((tid, 1, false));
+        }
+    } else if archetype == "Triglavian" {
+        loot_to_insert.push((48121, 1, false));
+    }
+
+    if wreck_id > 0 && !loot_to_insert.is_empty() {
+        ctx.db.with_mut_snapshot(|snap| {
+            for &(ltid, qty, is_bpc) in &loot_to_insert {
+                snap.next_entity_id += 1;
+                let lid = snap.next_entity_id;
+                snap.items.insert(
+                    lid,
+                    eve_db::InventoryItemRecord {
+                        item_id: lid,
+                        type_id: ltid,
+                        owner_id: killer_char_id,
+                        location_id: wreck_id,
+                        flag: eve_db::InventoryFlag::Cargo,
+                        quantity: qty,
+                        singleton: is_bpc,
+                        version: 1,
+                        dynamic_attributes: std::collections::HashMap::new(),
+                        source_mutaplasmid_id: None,
+                        insured_payout_isk: 0.0,
+                        is_blueprint_copy: is_bpc,
+                        blueprint_runs_remaining: is_bpc.then_some(1),
+                    },
+                );
+                dropped_entries.push(eve_db::KillmailItemEntry {
+                    type_id: ltid,
+                    flag: eve_db::InventoryFlag::Cargo as u16,
+                    qty_dropped: qty,
+                    qty_destroyed: 0,
+                    singleton: is_bpc,
+                });
+            }
+        });
+    }
+
+    step_encounter_wave_on_kill(ctx, solar_system_id, npc_ball_id, pos).await;
+    crate::services::pve_exploration::handle_pve_site_npc_destruction(
+        ctx,
+        solar_system_id,
+        npc_ball_id,
+        killer_char_id,
+    )
+    .await;
+    archetype
+}
+
+/// Spawns space wrecks and specialized loot for NPCs destroyed by `ActiveModuleCycle` weapon ticks.
+pub async fn finalize_cycle_destroyed_npcs(ctx: &ServerContext, solar_system_id: SolarSystemId) {
+    let pending: Vec<ExtendedNpcEntity> = with_mut_combat_runtime(ctx, |rt| {
+        let ids: Vec<i64> = rt
+            .destroyed_npc_cache
+            .iter()
+            .filter(|(_, n)| n.solar_system_id == solar_system_id)
+            .map(|(&id, _)| id)
+            .collect();
+        ids.into_iter()
+            .filter_map(|id| rt.destroyed_npc_cache.remove(&id))
+            .collect()
+    });
+    if pending.is_empty() {
+        return;
+    }
+    let handle = ctx.systems.get_or_spawn(solar_system_id);
+    let killer_char_id = ctx
+        .db
+        .with_snapshot(|s| {
+            s.characters
+                .values()
+                .find(|c| c.solar_system_id == solar_system_id && c.station_id.is_none())
+                .map(|c| c.character_id)
+        })
+        .unwrap_or(0);
+    let now_unix = ctx.now_unix();
+    for npc in pending {
+        with_mut_combat_runtime(ctx, |rt| {
+            rt.destroyed_npc_cache.insert(npc.ball_id, npc.clone());
+        });
+        let wreck_tid = ctx.sde.wrecks.get(&npc.type_id).copied().unwrap_or_else(|| {
+            match npc.archetype.as_str() {
+                "Drifter" => 37531,
+                "Sleeper" => 30495,
+                _ => 26557,
+            }
+        });
+        let wreck_id = ctx.db.with_mut_snapshot(|snap| {
+            snap.next_entity_id += 1;
+            let wid = snap.next_entity_id;
+            crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, wid, now_unix, true);
+            snap.items.insert(
+                wid,
+                eve_db::InventoryItemRecord {
+                    item_id: wid,
+                    type_id: wreck_tid,
+                    owner_id: killer_char_id,
+                    location_id: solar_system_id as i64,
+                    flag: eve_db::InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.item_positions
+                .insert(wid, [npc.spawn_position.x, npc.spawn_position.y, npc.spawn_position.z]);
+            wid
+        });
+        let _ = handle
+            .spawn_ball_with_combat(
+                eve_destiny::Ball {
+                    id: wreck_id,
+                    type_id: wreck_tid,
+                    position: npc.spawn_position,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 1.0,
+                    mass: 1_000.0,
+                    radius: 25.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+                eve_destiny::CombatState::default(),
+            )
+            .await;
+        let mut dropped = Vec::new();
+        let _ = populate_npc_wreck_on_turret_kill(
+            ctx,
+            solar_system_id,
+            npc.ball_id,
+            npc.type_id,
+            npc.spawn_position,
+            wreck_id,
+            killer_char_id,
+            &mut dropped,
+        )
+        .await;
+    }
+}
+

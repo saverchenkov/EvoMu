@@ -164,6 +164,12 @@ pub fn purchase_skills_direct_for_char(
                     message: format!("Skill {sk_id} is already injected"),
                 });
             }
+            if st.base_price <= 0.0 {
+                return Err(BridgeRpcError {
+                    code: "SkillUnavailableForPurchase".into(),
+                    message: format!("Skill {sk_id} ({}) is drop-only and cannot be directly purchased", st.name),
+                });
+            }
             let npc_price_cents = snap
                 .market_orders
                 .values()

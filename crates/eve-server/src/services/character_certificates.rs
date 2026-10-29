@@ -79,26 +79,26 @@ pub fn derive_certificate_levels(
     let mut cert_levels = HashMap::new();
 
     if let Ok(bundle) = ctx.sde.load_certificates_and_masteries() {
-        // Group skills by group_id from SDE for dynamic certificate prerequisite matching
-        let mut group_skills: HashMap<u32, Vec<u32>> = HashMap::new();
-        for t in ctx.sde.types.values() {
-            if t.category_id == 16 && t.published {
-                group_skills.entry(t.group_id).or_default().push(t.type_id);
-            }
-        }
-
-        // Derive certificate levels dynamically from trained skills in each certificate's skill group
         for (&cid, cert) in &bundle.certificates {
+            if cert.skill_types.is_empty() {
+                continue;
+            }
             let mut cert_level = 0u8;
-            if let Some(skills) = group_skills.get(&cert.group_id) {
-                let trained_in_group: Vec<u8> = skills
-                    .iter()
-                    .filter_map(|sk_id| trained_skills.get(sk_id).copied())
-                    .filter(|&lvl| lvl > 0)
-                    .collect();
-                if !trained_in_group.is_empty() {
-                    let min_lvl = trained_in_group.iter().copied().min().unwrap_or(0);
-                    cert_level = min_lvl.clamp(1, 5);
+            for lvl in (1u8..=5u8).rev() {
+                let tier_idx = (lvl - 1) as usize;
+                let has_any_req = cert
+                    .skill_types
+                    .values()
+                    .any(|req_levels| req_levels[tier_idx] > 0);
+                let all_met = has_any_req
+                    && cert.skill_types.iter().all(|(&req_skill_id, req_levels)| {
+                        let req_lvl = req_levels[tier_idx];
+                        req_lvl == 0
+                            || trained_skills.get(&req_skill_id).copied().unwrap_or(0) >= req_lvl
+                    });
+                if all_met {
+                    cert_level = lvl;
+                    break;
                 }
             }
             if cert_level > 0 {
@@ -194,13 +194,6 @@ pub fn handle(
                     }
                 }
             }
-            if categories_map.is_empty() {
-                categories_map.insert(1, "Core".into());
-                categories_map.insert(2, "Armor".into());
-                categories_map.insert(3, "Shields".into());
-                categories_map.insert(4, "Gunnery".into());
-                categories_map.insert(5, "Navigation".into());
-            }
             let mut list: Vec<(u32, String)> = categories_map.into_iter().collect();
             list.sort_by_key(|(id, _)| *id);
             let categories: Vec<PyRep> = list
@@ -223,11 +216,6 @@ pub fn handle(
                         classes_map.insert(grp.group_id, (grp.name.clone(), grp.category_id));
                     }
                 }
-            }
-            if classes_map.is_empty() {
-                classes_map.insert(1, ("Core Fitting".into(), 1));
-                classes_map.insert(2, ("Core Capacitor".into(), 1));
-                classes_map.insert(3, ("Core Navigation".into(), 1));
             }
             let mut list: Vec<(u32, String, u32)> = classes_map
                 .into_iter()
@@ -258,6 +246,11 @@ pub fn handle(
                                 cert_ids.push(cid);
                             }
                         }
+                    }
+                }
+                for (&cid, cert) in &bundle.certificates {
+                    if cert.recommended_for.contains(&ship_type_id) && !cert_ids.contains(&cid) {
+                        cert_ids.push(cid);
                     }
                 }
             }
