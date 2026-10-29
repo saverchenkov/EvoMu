@@ -167,6 +167,7 @@ pub mod quasar_b34_services;
 pub mod season_fsd;
 pub mod season_manager;
 pub mod security_mgr;
+pub mod serverops_cluster;
 pub mod shipcaster_ops;
 pub mod social_corp_fleet;
 pub mod sov_fw_insurgency;

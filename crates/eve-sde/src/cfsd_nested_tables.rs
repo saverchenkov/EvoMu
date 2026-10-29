@@ -393,4 +393,217 @@ impl SdeRegistry {
         }
         Ok(out)
     }
+
+    /// Cached shipcaster, starter-shipcaster, landing-pad, and under-construction component
+    /// metadata decoded from `res:/staticdata/spacecomponentsbytype.fsdbinary`.
+    pub fn shipcaster_sde_components(&self) -> Result<&'static ShipcasterSdeComponents, SdeError> {
+        static CACHE: OnceLock<ShipcasterSdeComponents> = OnceLock::new();
+        if let Some(cached) = CACHE.get() {
+            return Ok(cached);
+        }
+        const RES_PATH: &str = "res:/staticdata/spacecomponentsbytype.fsdbinary";
+        let path = self.cdn_resource_path(RES_PATH)?;
+        let raw = std::fs::read(&path)
+            .map_err(|_| SdeError::MissingDatabase(path.display().to_string()))?;
+        let buf = CfsdBuf(&raw);
+
+        let mut launcher_factions = BTreeMap::new();
+        let mut landing_pad_factions = BTreeMap::new();
+        let mut starter_shipcasters = BTreeMap::new();
+        let mut under_construction = BTreeMap::new();
+
+        for rec in buf.dict_entries(56, 1832)? {
+            let tid = buf.u32(rec)?;
+            let Some(comps) = self.space_components_by_type.get(&tid) else {
+                continue;
+            };
+            if comps.iter().any(|c| c == "shipcasterLauncher") {
+                launcher_factions.insert(tid, buf.u32(rec + 888)?);
+            }
+            if comps.iter().any(|c| c == "builtLandingPad") {
+                landing_pad_factions.insert(tid, buf.u32(rec + 804)?);
+            }
+            if comps.iter().any(|c| c == "starterShipcaster") {
+                let dest_sys = buf.u32(rec + 960)?;
+                let dest_station = i64::from(buf.u32(rec + 968)?);
+                starter_shipcasters.insert(tid, (dest_sys, dest_station));
+            }
+            if comps.iter().any(|c| c == "underConstruction") {
+                let built_item_type_id = buf.u32(rec + 1128)?;
+                let interaction_range_m = f64::from(buf.u32(rec + 1148)?).max(2_500.0);
+                let (rel, expected_len) = (buf.u64(rec + 1112)?, buf.u64(rec + 1120)? as usize);
+                let mut input_items = BTreeMap::new();
+                if rel != 0 {
+                    let abs = usize::try_from(rel)
+                        .ok()
+                        .and_then(|r| r.checked_add(32))
+                        .ok_or_else(|| corrupt("underConstruction dict", rec + 1112))?;
+                    for entry in buf.dict_entries(abs, 40)? {
+                        let in_type_id = buf.u32(entry)?;
+                        let required_qty = buf.u32(entry + 28)?;
+                        let mut lp_corp_id = None;
+                        let mut lp_per_unit = 0_u32;
+                        let lp_rel = buf.u64(entry + 8)?;
+                        if lp_rel != 0 {
+                            let (lp_at, lp_n) = buf.counted(lp_rel)?;
+                            if lp_n >= 1 {
+                                lp_corp_id = Some(i64::from(buf.u32(lp_at + 16)?));
+                                lp_per_unit = buf.u32(lp_at + 20)?;
+                            }
+                        }
+                        input_items.insert(
+                            in_type_id,
+                            UnderConstructionInputItem {
+                                type_id: in_type_id,
+                                required_qty,
+                                lp_corp_id,
+                                lp_per_unit,
+                            },
+                        );
+                    }
+                }
+                if input_items.len() != expected_len {
+                    return Err(SdeError::InvalidSchema(format!(
+                        "underConstruction {tid}: decoded {} inputItems, expected {expected_len}",
+                        input_items.len()
+                    )));
+                }
+                under_construction.insert(
+                    tid,
+                    UnderConstructionSpec {
+                        constructor_type_id: tid,
+                        built_item_type_id,
+                        interaction_range_m,
+                        input_items,
+                    },
+                );
+            }
+        }
+
+        let parsed = ShipcasterSdeComponents {
+            launcher_factions,
+            landing_pad_factions,
+            starter_shipcasters,
+            under_construction,
+        };
+        let _ = CACHE.set(parsed);
+        Ok(CACHE.get().expect("ShipcasterSdeComponents initialized"))
+    }
+
+    /// Returns all rookie starter, career-agent, and Exordium embassy solar systems mapped to
+    /// `(race_id, primary_station_id)` from `sde_schools` (`11..=22`) and `sde_solar_systems`.
+    pub fn starter_shipcaster_systems_by_race(&self) -> BTreeMap<SolarSystemId, (u32, Option<i64>)> {
+        let mut out: BTreeMap<SolarSystemId, (u32, Option<i64>)> = BTreeMap::new();
+        let mut school_corp_race: HashMap<i64, u32> = HashMap::new();
+        for sch in self.schools.values() {
+            if (11..=22).contains(&sch.school_id) && matches!(sch.race_id, 1 | 2 | 4 | 8) {
+                school_corp_race.insert(sch.corporation_id, sch.race_id);
+                out.entry(sch.solar_system_id)
+                    .or_insert((sch.race_id, Some(sch.station_id)));
+            }
+        }
+        for st in self.stations.values() {
+            if let Some(&race_id) = school_corp_race.get(&st.owner_corporation_id) {
+                out.entry(st.solar_system_id)
+                    .or_insert((race_id, Some(st.station_id)));
+            }
+        }
+        for ag in self.agents.values() {
+            if let (Some(&race_id), Some(sys_id)) =
+                (school_corp_race.get(&ag.corporation_id), ag.solar_system_id)
+            {
+                out.entry(sys_id).or_insert((race_id, ag.station_id));
+            }
+        }
+        if let Some(db_path) = &self.db_path {
+            if let Ok(conn) = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+                if let Ok(mut stmt) = conn.prepare(
+                    "SELECT race_id, starting_stations_json, career_agents_json \
+                     FROM sde_schools WHERE school_id BETWEEN 11 AND 22",
+                ) {
+                    if let Ok(rows) = stmt.query_map([], |r| {
+                        Ok((
+                            r.get::<_, i64>(0)? as u32,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                        ))
+                    }) {
+                        for row in rows.flatten() {
+                            let (race_id, sts_json, ags_json) = row;
+                            if let Ok(station_ids) = serde_json::from_str::<Vec<i64>>(&sts_json) {
+                                for st_id in station_ids {
+                                    if let Some(st) = self.stations.get(&st_id) {
+                                        out.entry(st.solar_system_id)
+                                            .or_insert((race_id, Some(st_id)));
+                                    }
+                                }
+                            }
+                            if let Ok(agent_ids) = serde_json::from_str::<Vec<i64>>(&ags_json) {
+                                for ag_id in agent_ids {
+                                    if let Some(ag) = self.agents.get(&ag_id) {
+                                        if let Some(sys_id) = ag.solar_system_id {
+                                            out.entry(sys_id).or_insert((race_id, ag.station_id));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Ok(mut stmt) = conn.prepare(
+                    "SELECT system_id, faction_id FROM sde_solar_systems WHERE region_id = 10001004 AND faction_id IS NOT NULL",
+                ) {
+                    if let Ok(rows) = stmt.query_map([], |r| {
+                        Ok((r.get::<_, i64>(0)? as SolarSystemId, r.get::<_, i64>(1)? as u32))
+                    }) {
+                        for (sys_id, faction_id) in rows.flatten() {
+                            let race_opt = match faction_id {
+                                500_001 => Some(1),
+                                500_002 => Some(2),
+                                500_003 => Some(4),
+                                500_004 => Some(8),
+                                _ => None,
+                            };
+                            if let Some(race_id) = race_opt {
+                                let st_id = self
+                                    .solar_systems
+                                    .get(&sys_id)
+                                    .and_then(|s| s.stations.first().map(|st| st.station_id));
+                                out.entry(sys_id).or_insert((race_id, st_id));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+/// One required material entry in an SDE `underConstruction` space component (`75932..=75935`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnderConstructionInputItem {
+    pub type_id: TypeId,
+    pub required_qty: u32,
+    pub lp_corp_id: Option<i64>,
+    pub lp_per_unit: u32,
+}
+
+/// Decoded `underConstruction` component specification for a deployable constructor (`75932..=75935`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UnderConstructionSpec {
+    pub constructor_type_id: TypeId,
+    pub built_item_type_id: TypeId,
+    pub interaction_range_m: f64,
+    pub input_items: BTreeMap<TypeId, UnderConstructionInputItem>,
+}
+
+/// Decoded V24.01 SDE space-component tables for Empire/Deathless Shipcasters, Rookie Starter
+/// Shipcasters, Built Landing Pads, and FW Shipcaster Beacon Constructors.
+#[derive(Debug, Clone, Default)]
+pub struct ShipcasterSdeComponents {
+    pub launcher_factions: BTreeMap<TypeId, u32>,
+    pub landing_pad_factions: BTreeMap<TypeId, u32>,
+    pub starter_shipcasters: BTreeMap<TypeId, (SolarSystemId, i64)>,
+    pub under_construction: BTreeMap<TypeId, UnderConstructionSpec>,
 }

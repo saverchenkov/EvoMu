@@ -27,6 +27,12 @@ pub fn get_character_selection_data(
     session: &SessionState,
 ) -> Result<PyRep, BridgeRpcError> {
     let user_id = ServerContext::require_auth(session)?;
+    if ctx.is_shutting_down() && !session.has_gm_role() {
+        return Err(BridgeRpcError {
+            code: "ClusterShuttingDown".into(),
+            message: "Cluster shutdown in progress.".into(),
+        });
+    }
     let chars = ctx.db.get_characters_for_user(user_id);
     let now_unix = ctx.now_unix();
     let user_name = ctx

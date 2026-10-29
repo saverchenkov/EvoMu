@@ -1044,6 +1044,15 @@ async fn handle_call_component_from_client(
         )
         .await;
     }
+    if comp_name == "underConstruction" && comp_method == "DepositItemsFromShip" {
+        return crate::services::shipcaster_ops::deposit_items_from_ship(
+            ctx,
+            session,
+            trader_id,
+            args.get(3),
+        )
+        .await;
+    }
     if comp_name != "itemTrader" || comp_method != "ProcessTrade" {
         return Err(BridgeRpcError {
             code: "UnsupportedComponentCall".into(),

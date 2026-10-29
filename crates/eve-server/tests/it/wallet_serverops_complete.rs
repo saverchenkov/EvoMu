@@ -1,28 +1,11 @@
-//! Wallet, market-order lifecycle and server-ops integration tests.
-//!
-//! Covers personal wallet transfers (`account.GiveCash`), wallet balance + `OnAccountChange`,
-//! CSPA charge configuration, partial fills with minimum volume, order modification cooldown,
-//! cancellation refunds, skill-driven open-order limits, cross-region `GetCharOrders`, and the
-//! server-ops endpoints (`machoNet.GetTime`, `pingService.Ping`,
-//! `machoNet.GetClusterGameStatisticsForClient`, client telemetry sinks, `localizationServer`)
-//! plus the disabled real-money `FastCheckoutService`.
-
-
+//! Wallet, market-order lifecycle and server-ops telemetry/time integration tests (part 1).
 
 use crate::common;
-use eve_db::{
-    CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents, MarketOrderRecord,
-    TrainedSkillRecord, TypeId,
-};
+use eve_db::{IskCents, MarketOrderRecord, TrainedSkillRecord, TypeId};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::esi::{EsiHttpRequest, EsiRouter};
 use eve_server::router::ServerContext;
-use eve_server::services::wallet_serverops::{
-    assign_or_reinforce_system_node, compute_required_hypercores, create_bill,
-    get_system_tidi_factor, process_due_automatic_bills, run_daily_downtime_and_jobs,
-    set_system_tidi_factor, CorpBillRecord, HYPERCORE_TYPE_ID,
-};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -99,7 +82,6 @@ fn sell_args(type_id: TypeId, price: f64, qty: i64) -> Vec<PyRep> {
     ]
 }
 
-/// V24 `PlaceBuyOrder(stationID, typeID, price, quantity, orderRange, minVolume, duration, useCorp)`.
 fn buy_args(type_id: TypeId, price: f64, qty: i64, min_volume: i64) -> Vec<PyRep> {
     vec![
         PyRep::Integer(JITA_STATION_ID),
@@ -135,7 +117,6 @@ async fn test_partial_fill_min_volume_notifications_and_cancel_refund() {
     let ctx = ServerContext::new();
     let mut s1 = setup_pilot(&ctx, 701, "demo", "demo-secret", P1).await;
     let mut s2 = setup_pilot(&ctx, 702, "other", "other-secret", P2).await;
-    // Full escrow (no Margin Trading) so refunds are exact.
     set_skill(&ctx, P2, 16_597, 0);
     let foreign_bids = ctx.db.with_snapshot(|snap| {
         snap.market_orders.values().any(|o| {
@@ -144,7 +125,6 @@ async fn test_partial_fill_min_volume_notifications_and_cancel_refund() {
     });
     assert!(!foreign_bids, "fixture: no pre-existing Tritanium bids at >= 2.00 ISK in Jita");
 
-    // Buyer posts 100 Tritanium @ 2.00 with minimum volume 50.
     let p2_before_place = balance(&ctx, P2);
     let buy = rpc(&ctx, &mut s2, "marketProxy", "PlaceBuyOrder", &buy_args(TRITANIUM, 2.0, 100, 50))
         .await
@@ -156,7 +136,6 @@ async fn test_partial_fill_min_volume_notifications_and_cancel_refund() {
     assert_eq!(ctx.db.with_snapshot(|s| s.market_orders[&buy_oid].min_volume), 50);
     let _ = ctx.drain_notifications_for_char(P2);
 
-    // A 10-unit sale is below the order's minimum volume: it must not fill the bid.
     let small = rpc(&ctx, &mut s1, "marketProxy", "PlaceMultiSellOrder", &sell_args(TRITANIUM, 2.0, 10))
         .await
         .expect("PlaceMultiSellOrder 10 units");
@@ -169,7 +148,6 @@ async fn test_partial_fill_min_volume_notifications_and_cancel_refund() {
         .expect("cancel resting 10-unit sell");
     assert!(!own_orders_changed(&ctx, P2, buy_oid), "no fill -> no buyer order change");
 
-    // A 60-unit sale fills partially: 40 remain, seller paid, buyer notified.
     let p1_before_fill = balance(&ctx, P1);
     let fill = rpc(&ctx, &mut s1, "marketProxy", "PlaceMultiSellOrder", &sell_args(TRITANIUM, 2.0, 60))
         .await
@@ -182,7 +160,6 @@ async fn test_partial_fill_min_volume_notifications_and_cancel_refund() {
     let escrow_after_fill = ctx.db.with_snapshot(|s| s.market_orders[&buy_oid].escrow);
     assert_eq!(escrow_after_fill, IskCents::from_f64_isk(80.0), "escrow drawn down by 60 x 2.00");
 
-    // Cancel: the remaining 40 x 2.00 escrow is refunded; broker fee is not.
     let p2_before_cancel = balance(&ctx, P2);
     rpc(&ctx, &mut s2, "marketProxy", "CancelCharOrder", &[PyRep::Integer(buy_oid)])
         .await
@@ -193,7 +170,6 @@ async fn test_partial_fill_min_volume_notifications_and_cancel_refund() {
     assert_eq!(spent, IskCents::from_f64_isk(120.0).0 + broker_fee.0, "only fills + broker fee kept");
     assert!(ctx.db.with_snapshot(|s| s.market_orders.get(&buy_oid).map_or(true, |o| o.vol_remaining == 0)));
 
-    // Cancelling a resting sell returns the unsold items to the hangar.
     let hangar = |ctx: &ServerContext| {
         ctx.db.with_snapshot(|s| {
             s.items
@@ -256,7 +232,6 @@ async fn test_modify_order_relist_fee_and_five_minute_cooldown() {
     });
     assert!(relist_journaled, "relist fee journaled");
 
-    // The modification restarts the 5-minute timer.
     let again = rpc(&ctx, &mut s1, "marketProxy", "ModifyCharOrder", &[PyRep::Integer(oid), PyRep::Real(44.0)])
         .await
         .unwrap_err();
@@ -274,7 +249,6 @@ async fn test_order_limits_from_trade_retail_wholesale_tycoon() {
     for (tid, name) in &names {
         assert_eq!(ctx.sde.types.get(tid).map(|t| t.name.as_str()), Some(*name), "SDE skill {tid}");
     }
-    // (Trade, Retail, Wholesale, Tycoon) -> max open orders
     let cases: [([u8; 4], usize); 6] = [
         ([0, 0, 0, 0], 5),
         ([1, 0, 0, 0], 9),
@@ -429,7 +403,6 @@ async fn test_wallet_balance_give_cash_journal_and_account_change() {
         assert!(recv.reason.contains("fuel money") && recv.reason.contains(&P1.to_string()));
     });
 
-    // Insufficient funds are rejected without moving ISK or journaling.
     let journal_len = ctx.db.with_snapshot(|s| s.wallet_journal.len());
     let err = rpc(&ctx, &mut s1, "account", "GiveCash", &[PyRep::Integer(P2), PyRep::Real(1_000_000.0)])
         .await
@@ -457,7 +430,6 @@ async fn test_cspa_contact_cost_set_get_and_charged_to_strangers() {
     let bad = rpc(&ctx, &mut s2, "account", "SetContactCost", &[PyRep::Integer(-1)]).await.unwrap_err();
     assert_eq!(bad.code, "InvalidArgument");
 
-    // A stranger (different corporation, not a contact) mailing P2 pays the configured charge.
     ctx.db.with_mut_snapshot(|snap| {
         let p2_corp = snap.characters[&P2].corporation_id;
         let p1 = snap.characters.get_mut(&P1).unwrap();
@@ -485,7 +457,6 @@ async fn test_cspa_contact_cost_set_get_and_charged_to_strangers() {
     assert_eq!(sent.status_code, 201, "{}", String::from_utf8_lossy(&sent.body));
     assert_eq!(balance(&ctx, P1), IskCents::from_isk(7_500), "CSPA charge debited");
 
-    // Clearing the cost (None) removes the charge.
     rpc(&ctx, &mut s2, "account", "SetContactCost", &[PyRep::None]).await.expect("clear CSPA");
     assert_eq!(rpc(&ctx, &mut s2, "account", "GetDefaultContactCost", &[]).await.unwrap(), PyRep::None);
     let free = router.handle_request(&mail(0));
@@ -524,7 +495,6 @@ async fn test_machonet_time_and_ping_are_authoritative_blue_time() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut s1 = setup_pilot(&ctx, 761, "demo", "demo-secret", P1).await;
-    // Blue time = 100 ns ticks since 1601-01-01 UTC.
     let blue = |unix: u64| (unix as i64 + 11_644_473_600) * 10_000_000;
     let t0 = rpc(&ctx, &mut s1, "machoNet", "GetTime", &[]).await.expect("GetTime").as_i64().unwrap();
     assert_eq!(t0 / 10_000_000, blue(ctx.now_unix()) / 10_000_000);
@@ -630,648 +600,3 @@ async fn test_fast_checkout_served_as_disabled() {
     assert_eq!(balance(&ctx, P1), before);
     assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(P1)), plex_before);
 }
-
-#[tokio::test]
-async fn test_corporation_and_personal_bills_and_autopay() {
-    // parity: feat:wallet.bills
-    eve_testkit::attest(&["feat:wallet.bills"]);
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-    let mut s1 = setup_pilot(&ctx, 881, "demo", "demo-secret", P1).await;
-
-    let corp_id = ctx.db.with_snapshot(|s| s.characters[&P1].corporation_id);
-    let landlord_corp = 1_000_035_i64; // Caldari Navy
-    let now = ctx.now_unix();
-
-    // Setup corp wallet divisions with funds
-    ctx.db.with_mut_snapshot(|snap| {
-        let corp = snap.corporations.entry(corp_id).or_insert_with(|| CorporationRecord {
-            corporation_id: corp_id,
-            name: "Trader Corp".into(),
-            ticker: "TRDR".into(),
-            ceo_id: P1,
-            master_wallet: IskCents::from_isk(10_000_000),
-            ..Default::default()
-        });
-        corp.ceo_id = P1;
-        corp.master_wallet = IskCents::from_isk(10_000_000);
-        corp.ensure_wallet_divisions();
-        for d in &mut corp.wallet_divisions {
-            d.balance = IskCents::from_isk(1_000_000);
-        }
-    });
-
-    // 1. Create personal bill (e.g. personal fee 2,500 ISK)
-    let p_bill = create_bill(
-        &ctx,
-        1,
-        P1,
-        landlord_corp,
-        2_500.0,
-        now + 3600,
-        0.0,
-        0,
-        0,
-    );
-
-    // 2. Create corporation office rent bill (bill_type_id = 2, 10,000 ISK)
-    let c_bill = create_bill(
-        &ctx,
-        2,
-        corp_id,
-        landlord_corp,
-        10_000.0,
-        now + 3600,
-        0.0,
-        JITA_STATION_ID,
-        0,
-    );
-
-    // GetCorporationBills lists unpaid bills for the corporation and character
-    let bills_rep = rpc(&ctx, &mut s1, "billMgr", "GetCorporationBills", &[]).await.expect("GetCorporationBills");
-    let PyRep::Rowset { rows, .. } = bills_rep else { panic!("expected Rowset"); };
-    assert!(rows.iter().any(|r| r.first() == Some(&PyRep::Integer(p_bill))));
-    assert!(rows.iter().any(|r| r.first() == Some(&PyRep::Integer(c_bill))));
-
-    // 3. CharPayBill pays personal bill
-    let p1_before = balance(&ctx, P1);
-    let pay_p = rpc(&ctx, &mut s1, "billMgr", "CharPayBill", &[PyRep::Integer(p_bill)]).await.expect("CharPayBill");
-    assert_eq!(pay_p, PyRep::Bool(true));
-    assert_eq!(p1_before.0 - balance(&ctx, P1).0, 250_000);
-
-    // 4. PayCorporationBill pays corp office rent from division 3 (fromAccountKey = 1002)
-    let div3_before = ctx.db.with_snapshot(|s| s.corporations[&corp_id].wallet_divisions.iter().find(|d| d.division_id == 3).unwrap().balance);
-    let pay_c = rpc(&ctx, &mut s1, "billMgr", "PayCorporationBill", &[PyRep::Integer(c_bill), PyRep::Integer(1002)]).await.expect("PayCorporationBill");
-    assert_eq!(pay_c, PyRep::Bool(true));
-    let div3_after = ctx.db.with_snapshot(|s| s.corporations[&corp_id].wallet_divisions.iter().find(|d| d.division_id == 3).unwrap().balance);
-    assert_eq!(div3_before.0 - div3_after.0, 1_000_000);
-
-    // 5. Automatic payment settings (GetAutomaticPaySettings & SendAutomaticPaySettings)
-    let auto_dict = PyRep::Dict(vec![
-        (PyRep::Integer(2), PyRep::Bool(true)),
-        (PyRep::String("divisionID".into()), PyRep::Integer(1004)),
-    ]);
-    let set_ap = rpc(&ctx, &mut s1, "billMgr", "SendAutomaticPaySettings", &[PyRep::Dict(vec![(PyRep::Integer(corp_id), auto_dict)])]).await.expect("SendAutomaticPaySettings");
-    assert_eq!(set_ap, PyRep::Bool(true));
-
-    let get_ap = rpc(&ctx, &mut s1, "billMgr", "GetAutomaticPaySettings", &[]).await.expect("GetAutomaticPaySettings");
-    let PyRep::Dict(ap_entries) = get_ap else { panic!("expected Dict"); };
-    assert!(!ap_entries.is_empty());
-
-    // Create a due bill and verify process_due_automatic_bills honours settings
-    let due_bill = create_bill(
-        &ctx,
-        2,
-        corp_id,
-        landlord_corp,
-        5_000.0,
-        now - 10,
-        0.0,
-        0,
-        0,
-    );
-    let paid_auto = process_due_automatic_bills(&ctx);
-    assert!(paid_auto >= 1);
-    let is_due_paid = ctx.db.with_snapshot(|snap| {
-        snap.owner_notes
-            .values()
-            .filter(|n| n.character_id == -71)
-            .filter_map(|n| serde_json::from_str::<CorpBillRecord>(&n.note).ok())
-            .find(|b| b.bill_id == due_bill)
-            .map(|b| b.paid)
-    });
-    assert_eq!(is_due_paid, Some(true));
-}
-
-#[tokio::test]
-async fn test_new_eden_store_and_aurum_removal() {
-    // parity: feat:removed.aurum-currency
-    // DATA GAP: feat:wallet.nes-store (NES store catalog is live Quasar backend data not in V24 client FSD)
-    eve_testkit::attest(&["feat:removed.aurum-currency"]);
-    let ctx = ServerContext::new();
-    crate::common::seed_test_nes_store_catalog(&ctx);
-    let mut s1 = setup_pilot(&ctx, 882, "demo", "demo-secret", P1).await;
-
-    // 1. get_categories
-    let cats = rpc(&ctx, &mut s1, "storeManager", "get_categories", &[]).await.expect("get_categories");
-    let PyRep::List(cat_list) = cats else { panic!("expected List"); };
-    assert!(!cat_list.is_empty());
-
-    // 2. get_offers (shows offers priced in PLEX)
-    let offers = rpc(&ctx, &mut s1, "storeManager", "get_offers", &[]).await.expect("get_offers");
-    let PyRep::List(offer_list) = offers else { panic!("expected List"); };
-    assert!(!offer_list.is_empty());
-
-    // 3. can_purchase_offer validates
-    let can_p = rpc(&ctx, &mut s1, "storeManager", "can_purchase_offer", &[PyRep::Integer(1002)]).await.expect("can_purchase_offer");
-    assert_eq!(can_p, PyRep::Bool(true));
-
-    // 4. Legacy Aurum currency rejection (`feat:removed.aurum-currency`)
-    let aur_err = rpc(&ctx, &mut s1, "storeManager", "buy_offer", &[PyRep::Integer(1002), PyRep::String("AUR".into()), PyRep::Integer(1)]).await.unwrap_err();
-    assert_eq!(aur_err.code, "AurumCurrencyRemoved");
-
-    // 5. buy_offer debits PLEX and delivers SKIN item (`feat:wallet.nes-store`)
-    ctx.db.with_mut_snapshot(|s| {
-        s.adjust_plex_vault(P1, 500).unwrap();
-    });
-    let vault_before = ctx.db.with_snapshot(|s| s.plex_vault_balance(P1));
-    let buy_res = rpc(&ctx, &mut s1, "storeManager", "buy_offer", &[PyRep::Integer(1002), PyRep::String("PLX".into()), PyRep::Integer(1)]).await.expect("buy_offer");
-    let PyRep::KeyVal(buy_kv) = buy_res else { panic!("expected KeyVal"); };
-    assert_eq!(buy_kv.get("success"), Some(&PyRep::Bool(true)));
-    assert_eq!(buy_kv.get("offerID"), Some(&PyRep::Integer(1002)));
-    let vault_after = ctx.db.with_snapshot(|s| s.plex_vault_balance(P1));
-    assert_eq!(vault_before - vault_after, 110, "Offer 1002 costs 110 PLEX");
-
-    // Item delivered to station hangar
-    let has_skin = ctx.db.with_snapshot(|s| {
-        s.items.values().any(|i| i.owner_id == P1 && i.location_id == JITA_STATION_ID && i.flag == InventoryFlag::Hangar)
-    });
-    assert!(has_skin, "Purchased SKIN delivered to station hangar");
-}
-
-#[tokio::test]
-async fn test_station_direct_trade_window() {
-    // parity: feat:wallet.trade-window
-    eve_testkit::attest(&["feat:wallet.trade-window"]);
-    let ctx = ServerContext::new();
-    let mut s1 = setup_pilot(&ctx, 883, "demo", "demo-secret", P1).await;
-    let mut s2 = setup_pilot(&ctx, 884, "other", "other-secret", P2).await;
-
-    // Both pilots docked at Jita
-    s1.station_id = Some(JITA_STATION_ID);
-    s2.station_id = Some(JITA_STATION_ID);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&P1) { ch.station_id = Some(JITA_STATION_ID); }
-        if let Some(ch) = snap.characters.get_mut(&P2) { ch.station_id = Some(JITA_STATION_ID); }
-    });
-
-    // Give P1 100 Tritanium and 1 singleton ship in Jita hangar
-    let p1_item = ctx.db.with_mut_snapshot(|s| {
-        s.next_entity_id += 1;
-        let id = s.next_entity_id;
-        s.items.insert(id, InventoryItemRecord {
-            item_id: id,
-            type_id: TRITANIUM,
-            owner_id: P1,
-            location_id: JITA_STATION_ID,
-            flag: InventoryFlag::Hangar,
-            quantity: 100,
-            singleton: false,
-            version: 1,
-            ..Default::default()
-        });
-        id
-    });
-    let p1_singleton = ctx.db.with_mut_snapshot(|s| {
-        s.next_entity_id += 1;
-        let id = s.next_entity_id;
-        s.items.insert(id, InventoryItemRecord {
-            item_id: id,
-            type_id: 587,
-            owner_id: P1,
-            location_id: JITA_STATION_ID,
-            flag: InventoryFlag::Hangar,
-            quantity: 1,
-            singleton: true,
-            version: 1,
-            ..Default::default()
-        });
-        id
-    });
-
-    let p1_bal_before = balance(&ctx, P1);
-    let p2_bal_before = balance(&ctx, P2);
-
-    // 1. InitiateTrade
-    let init_rep = rpc(&ctx, &mut s1, "trademgr", "InitiateTrade", &[PyRep::Integer(P2)]).await.expect("InitiateTrade");
-    let trade_id = kv_i64(&init_rep, "tradeContainerID");
-
-    // 2. Reject overflow / negative quantities with InvalidQuantity
-    let overflow_qty = (1i64 << 32) - 1000;
-    let err_overflow = rpc(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(p1_item), PyRep::Integer(overflow_qty)]).await.unwrap_err();
-    assert_eq!(err_overflow.code, "InvalidQuantity");
-
-    let err_negative = rpc(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(p1_item), PyRep::Integer(-100)]).await.unwrap_err();
-    assert_eq!(err_negative.code, "InvalidQuantity");
-
-    // Reject splitting singleton with CannotSplitSingleton
-    let err_singleton = rpc(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(p1_singleton), PyRep::Integer(2)]).await.unwrap_err();
-    assert_eq!(err_singleton.code, "CannotSplitSingleton");
-
-    // Aggregate duplicate item_id offers in AddItem and reject when exceeding stack size
-    let off_item1 = rpc(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(p1_item), PyRep::Integer(60)]).await.expect("AddItem 60");
-    assert_eq!(kv_i64(&off_item1, "tradeContainerID"), trade_id);
-
-    rpc(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(p1_item), PyRep::Integer(30)]).await.expect("AddItem 30 (aggregates to 90)");
-
-    let err_exceed = rpc(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(p1_item), PyRep::Integer(20)]).await.unwrap_err();
-    assert_eq!(err_exceed.code, "InsufficientQuantity");
-
-    // Complete the remaining 10 units so total offered is 100
-    rpc(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(p1_item), PyRep::Integer(10)]).await.expect("AddItem 10 (aggregates to 100)");
-
-    // 3. P2 offers 50,000 ISK
-    let off_money = rpc(&ctx, &mut s2, "trademgr", "OfferMoney", &[PyRep::Integer(trade_id), PyRep::Real(50_000.0)]).await.expect("OfferMoney");
-    assert_eq!(kv_i64(&off_money, "tradeContainerID"), trade_id);
-
-    // 4. P1 accepts trade
-    let acc1 = rpc(&ctx, &mut s1, "trademgr", "MakeOffer", &[PyRep::Integer(trade_id), PyRep::Bool(true)]).await.expect("MakeOffer s1");
-    let PyRep::KeyVal(kv1) = acc1 else { panic!("expected KeyVal"); };
-    assert_eq!(kv1.get("completed"), Some(&PyRep::Bool(false)));
-
-    // 5. P2 accepts trade -> completes atomically
-    let acc2 = rpc(&ctx, &mut s2, "trademgr", "MakeOffer", &[PyRep::Integer(trade_id), PyRep::Bool(true)]).await.expect("MakeOffer s2");
-    let PyRep::KeyVal(kv2) = acc2 else { panic!("expected KeyVal"); };
-    assert_eq!(kv2.get("completed"), Some(&PyRep::Bool(true)));
-
-    // Verify atomic results:
-    // P2 received the 100 Tritanium
-    let p2_has_trit = ctx.db.with_snapshot(|s| {
-        s.items.get(&p1_item).map(|i| i.owner_id == P2 && i.quantity == 100 && i.flag == InventoryFlag::Hangar).unwrap_or(false)
-    });
-    assert!(p2_has_trit, "Item ownership transferred to P2 in hangar");
-
-    // ISK debited from P2 and credited to P1
-    assert_eq!(balance(&ctx, P1).0 - p1_bal_before.0, IskCents::from_isk(50_000).0);
-    assert_eq!(p2_bal_before.0 - balance(&ctx, P2).0, IskCents::from_isk(50_000).0);
-
-    // Partial stack trade step: Seller A (P1) offers 30 units out of 100 to Buyer B (P2)
-    let p1_partial_item = ctx.db.with_mut_snapshot(|s| {
-        s.next_entity_id += 1;
-        let id = s.next_entity_id;
-        s.items.insert(id, InventoryItemRecord {
-            item_id: id,
-            type_id: TRITANIUM,
-            owner_id: P1,
-            location_id: JITA_STATION_ID,
-            flag: InventoryFlag::Hangar,
-            quantity: 100,
-            singleton: false,
-            version: 1,
-            ..Default::default()
-        });
-        id
-    });
-
-    let p1_bal_before_partial = balance(&ctx, P1);
-    let p2_bal_before_partial = balance(&ctx, P2);
-    let total_isk_before = p1_bal_before_partial.0 + p2_bal_before_partial.0;
-
-    let init_rep2 = rpc(&ctx, &mut s1, "trademgr", "InitiateTrade", &[PyRep::Integer(P2)]).await.expect("InitiateTrade 2");
-    let trade_id2 = kv_i64(&init_rep2, "tradeContainerID");
-
-    rpc(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id2), PyRep::Integer(p1_partial_item), PyRep::Integer(30)]).await.expect("AddItem partial");
-    rpc(&ctx, &mut s2, "trademgr", "OfferMoney", &[PyRep::Integer(trade_id2), PyRep::Real(15_000.0)]).await.expect("OfferMoney partial");
-    rpc(&ctx, &mut s1, "trademgr", "MakeOffer", &[PyRep::Integer(trade_id2), PyRep::Bool(true)]).await.expect("MakeOffer 2 s1");
-    let acc2_2 = rpc(&ctx, &mut s2, "trademgr", "MakeOffer", &[PyRep::Integer(trade_id2), PyRep::Bool(true)]).await.expect("MakeOffer 2 s2");
-    let PyRep::KeyVal(kv2_2) = acc2_2 else { panic!("expected KeyVal"); };
-    assert_eq!(kv2_2.get("completed"), Some(&PyRep::Bool(true)));
-
-    // Assert that seller A retains exactly 70 units of the item in hangar
-    let p1_retains_70 = ctx.db.with_snapshot(|s| {
-        s.items.get(&p1_partial_item).map(|i| i.owner_id == P1 && i.quantity == 70 && i.location_id == JITA_STATION_ID && i.flag == InventoryFlag::Hangar).unwrap_or(false)
-    });
-    assert!(p1_retains_70, "Seller A retains exactly 70 units of the item in hangar");
-
-    // Assert that buyer B receives 30 units of the item in hangar
-    let p2_received_30 = ctx.db.with_snapshot(|s| {
-        s.items.values().any(|i| i.owner_id == P2 && i.type_id == TRITANIUM && i.quantity == 30 && i.location_id == JITA_STATION_ID && i.flag == InventoryFlag::Hangar)
-    });
-    assert!(p2_received_30, "Buyer B receives 30 units of the item in hangar");
-
-    // Assert ISK and item conservation
-    let total_isk_after = balance(&ctx, P1).0 + balance(&ctx, P2).0;
-    assert_eq!(total_isk_before, total_isk_after, "Total ISK is strictly conserved");
-    assert_eq!(balance(&ctx, P1).0 - p1_bal_before_partial.0, IskCents::from_isk(15_000).0);
-    assert_eq!(p2_bal_before_partial.0 - balance(&ctx, P2).0, IskCents::from_isk(15_000).0);
-
-    let total_item_units: i32 = ctx.db.with_snapshot(|s| {
-        s.items.values().filter(|i| (i.item_id == p1_partial_item || (i.owner_id == P2 && i.quantity == 30)) && i.type_id == TRITANIUM).map(|i| i.quantity).sum()
-    });
-    assert_eq!(total_item_units, 100, "Item units strictly conserved (70 retained + 30 transferred = 100)");
-}
-
-#[tokio::test]
-async fn test_hypernet_relay_and_hypercore_scaling_and_expiry() {
-    // parity: feat:wallet.hypernet-relay, feat:wallet.hypernet-hypercore-sizing-expiry
-    eve_testkit::attest(&["feat:wallet.hypernet-relay", "feat:wallet.hypernet-hypercore-sizing-expiry"]);
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-    let mut s1 = setup_pilot(&ctx, 885, "demo", "demo-secret", P1).await;
-    let mut s2 = setup_pilot(&ctx, 886, "other", "other-secret", P2).await;
-    s1.station_id = Some(JITA_STATION_ID);
-    s2.station_id = Some(JITA_STATION_ID);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&P1) { ch.station_id = Some(JITA_STATION_ID); }
-        if let Some(ch) = snap.characters.get_mut(&P2) { ch.station_id = Some(JITA_STATION_ID); }
-    });
-
-    // 1. HyperCore sizing formula & validation
-    assert!(compute_required_hypercores(10_000_000.0, 10).is_err());
-    let cores_8 = compute_required_hypercores(50_000_000.0, 8).unwrap();
-    let cores_512 = compute_required_hypercores(50_000_000.0, 512).unwrap();
-    assert!(cores_512 >= cores_8, "More nodes require more HyperCores");
-
-    // Put item and HyperCores in P1's hangar
-    let (raffle_item, _) = ctx.db.with_mut_snapshot(|s| {
-        s.next_entity_id += 1;
-        let it_id = s.next_entity_id;
-        s.items.insert(it_id, InventoryItemRecord {
-            item_id: it_id,
-            type_id: 587,
-            owner_id: P1,
-            location_id: JITA_STATION_ID,
-            flag: InventoryFlag::Hangar,
-            quantity: 1,
-            singleton: true,
-            version: 1,
-            ..Default::default()
-        });
-        s.next_entity_id += 1;
-        let hc_id = s.next_entity_id;
-        s.items.insert(hc_id, InventoryItemRecord {
-            item_id: hc_id,
-            type_id: HYPERCORE_TYPE_ID,
-            owner_id: P1,
-            location_id: JITA_STATION_ID,
-            flag: InventoryFlag::Hangar,
-            quantity: 50,
-            singleton: false,
-            version: 1,
-            ..Default::default()
-        });
-        (it_id, hc_id)
-    });
-
-    // 2. CreateRaffle (16 nodes, 10,000 ISK/ticket)
-    let c_raf = rpc(&ctx, &mut s1, "raffleProxy", "CreateRaffle", &[PyRep::Dict(vec![
-        (PyRep::String("itemID".into()), PyRep::Integer(raffle_item)),
-        (PyRep::String("ticketCount".into()), PyRep::Integer(16)),
-        (PyRep::String("ticketPrice".into()), PyRep::Real(10_000.0)),
-    ])]).await.expect("CreateRaffle");
-    let raffle_id = kv_i64(&c_raf, "raffle_id");
-
-    // Item escrowed from hangar
-    assert_eq!(ctx.db.with_snapshot(|s| s.items[&raffle_item].owner_id), -52_568);
-
-    // 3. P2 buys 1 ticket
-    let p2_before = balance(&ctx, P2);
-    let buy_t = rpc(&ctx, &mut s2, "raffleProxy", "BuyTicket", &[PyRep::Integer(raffle_id), PyRep::Integer(0)]).await.expect("BuyTicket");
-    assert_eq!(kv_i64(&buy_t, "raffle_id"), raffle_id);
-    assert_eq!(kv_i64(&buy_t, "tickets_remaining"), 15);
-    assert_eq!(p2_before.0 - balance(&ctx, P2).0, IskCents::from_isk(10_000).0);
-
-    // 4. 72-hour expiry sweep
-    ctx.advance_virtual_clock(72 * 3_600 + 1);
-    let raf_info = rpc(&ctx, &mut s1, "raffleProxy", "GetRaffle", &[PyRep::Integer(raffle_id)]).await.expect("GetRaffle sweeps expired");
-    let PyRep::KeyVal(r_kv) = raf_info else { panic!("expected KeyVal"); };
-    assert_eq!(r_kv.get("is_expired"), Some(&PyRep::Bool(true)));
-
-    // Ticket buyer refunded
-    assert_eq!(balance(&ctx, P2), p2_before, "Buyer refunded upon raffle expiry");
-    // Escrowed item returned to creator
-    assert_eq!(ctx.db.with_snapshot(|s| s.items[&raffle_item].flag), InventoryFlag::Hangar);
-    assert_eq!(ctx.db.with_snapshot(|s| s.items[&raffle_item].owner_id), P1);
-}
-
-#[tokio::test]
-async fn test_pos_towers_and_starbases_removed() {
-    // parity: feat:removed.pos-towers
-    eve_testkit::attest(&["feat:removed.pos-towers"]);
-    let ctx = ServerContext::new();
-    let mut s1 = setup_pilot(&ctx, 887, "demo", "demo-secret", P1).await;
-
-    let towers = rpc(&ctx, &mut s1, "posMgr", "GetControlTowers", &[]).await.expect("GetControlTowers");
-    assert_eq!(towers, PyRep::List(Vec::new()));
-
-    let moon = rpc(&ctx, &mut s1, "posMgr", "GetMoonForTower", &[PyRep::Integer(1)]).await.expect("GetMoonForTower");
-    assert_eq!(moon, PyRep::None);
-
-    let anchor_err = rpc(&ctx, &mut s1, "posMgr", "AnchorOrbital", &[PyRep::Integer(1), PyRep::Integer(1)]).await.unwrap_err();
-    assert_eq!(anchor_err.code, "StarbaseRemoved");
-}
-
-#[tokio::test]
-async fn test_time_dilation_and_node_balancing() {
-    // parity: feat:serverops.time-dilation, feat:serverops.node-balancing
-    eve_testkit::attest(&["feat:serverops.time-dilation", "feat:serverops.node-balancing"]);
-    let ctx = ServerContext::new();
-
-    // 1. Time dilation setting & notification
-    let factor = set_system_tidi_factor(&ctx, JITA_SYSTEM_ID as u32, 0.45);
-    assert!((factor - 0.45).abs() < 1e-6);
-    let read_factor = get_system_tidi_factor(&ctx, JITA_SYSTEM_ID as u32);
-    assert!((read_factor - 0.45).abs() < 1e-6);
-
-    // TiDi factor clamped between 0.10 and 1.0
-    let clamped_min = set_system_tidi_factor(&ctx, JITA_SYSTEM_ID as u32, 0.01);
-    assert!((clamped_min - 0.10).abs() < 1e-6);
-
-    // 2. Node distribution and reinforced dedicated node
-    let default_node = assign_or_reinforce_system_node(&ctx, JITA_SYSTEM_ID as u32, None);
-    assert!(default_node >= 1);
-    let dedicated = assign_or_reinforce_system_node(&ctx, JITA_SYSTEM_ID as u32, Some(42));
-    assert_eq!(dedicated, 42);
-    let retrieved = assign_or_reinforce_system_node(&ctx, JITA_SYSTEM_ID as u32, None);
-    assert_eq!(retrieved, 42);
-}
-
-#[tokio::test]
-async fn test_daily_downtime_and_maintenance_jobs() {
-    // parity: feat:serverops.downtime, feat:serverops.daily-jobs
-    eve_testkit::attest(&["feat:serverops.downtime", "feat:serverops.daily-jobs"]);
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-
-    // Advance clock to 11:05 UTC (window 11:00-11:15 UTC)
-    let current = ctx.now_unix();
-    let current_sec = current % 86_400;
-    let target_sec = 11 * 3_600 + 300;
-    if current_sec <= target_sec {
-        ctx.advance_virtual_clock(target_sec - current_sec);
-    } else {
-        ctx.advance_virtual_clock(86_400 - current_sec + target_sec);
-    }
-
-    let report = run_daily_downtime_and_jobs(&ctx);
-    assert_eq!(report.get("is1100UtcWindow"), Some(&1));
-    assert!(report.contains_key("replenishedAsteroids"));
-    assert!(report.contains_key("expiredMarketOrders"));
-    assert!(report.contains_key("autoPaidBills"));
-    assert!(report.contains_key("expiredRaffles"));
-}
-
-#[tokio::test]
-async fn test_downtime_contract_expiry_settlement_and_corp_bill_division_isolation() {
-    // Regression tests for Issues #16 and #17
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-    let mut s1 = setup_pilot(&ctx, 888, "demo", "demo-secret", P1).await;
-    let mut s2 = setup_pilot(&ctx, 889, "other", "other-secret", P2).await;
-    let now = ctx.now_unix();
-
-    // 1. Issue #16: Expired item exchange and auction contracts are settled during downtime
-    let exch_item_id = 995_001_i64;
-    let auc_item_id = 995_002_i64;
-    let exch_cid = 88_001_i64;
-    let auc_cid = 88_002_i64;
-    let p1_init = balance(&ctx, P1);
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            exch_item_id,
-            InventoryItemRecord {
-                item_id: exch_item_id,
-                type_id: 34,
-                owner_id: P1,
-                location_id: exch_cid,
-                flag: InventoryFlag::Locked,
-                quantity: 1000,
-                singleton: false,
-                version: 1,
-                ..Default::default()
-            },
-        );
-        snap.contracts.insert(
-            exch_cid,
-            eve_db::ContractRecord {
-                contract_id: exch_cid,
-                issuer_id: P1,
-                issuer_corp_id: 98_000_001,
-                contract_type: "ItemExchange".into(),
-                status: "Outstanding".into(),
-                start_station_id: JITA_STATION_ID,
-                end_station_id: JITA_STATION_ID,
-                reward: IskCents::from_isk(25_000),
-                expiration_unix: now - 10,
-                item_ids: vec![exch_item_id],
-                ..Default::default()
-            },
-        );
-        snap.items.insert(
-            auc_item_id,
-            InventoryItemRecord {
-                item_id: auc_item_id,
-                type_id: 587,
-                owner_id: P1,
-                location_id: auc_cid,
-                flag: InventoryFlag::Locked,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                ..Default::default()
-            },
-        );
-        snap.contracts.insert(
-            auc_cid,
-            eve_db::ContractRecord {
-                contract_id: auc_cid,
-                issuer_id: P1,
-                issuer_corp_id: 98_000_001,
-                contract_type: "Auction".into(),
-                status: "Outstanding".into(),
-                start_station_id: JITA_STATION_ID,
-                end_station_id: JITA_STATION_ID,
-                current_bid: IskCents::from_isk(100_000),
-                current_bidder_id: Some(P2),
-                expiration_unix: now - 10,
-                item_ids: vec![auc_item_id],
-                ..Default::default()
-            },
-        );
-    });
-
-    let report = run_daily_downtime_and_jobs(&ctx);
-    assert_eq!(report.get("expiredContracts"), Some(&2));
-    ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.contracts[&exch_cid].status, "Expired");
-        assert_eq!(snap.items[&exch_item_id].owner_id, P1);
-        assert_eq!(snap.items[&exch_item_id].location_id, JITA_STATION_ID);
-        assert_eq!(snap.items[&exch_item_id].flag, InventoryFlag::Hangar);
-
-        assert_eq!(snap.contracts[&auc_cid].status, "Completed");
-        assert_eq!(snap.contracts[&auc_cid].acceptor_id, Some(P2));
-        assert_eq!(snap.items[&auc_item_id].owner_id, P2);
-        assert_eq!(snap.items[&auc_item_id].location_id, JITA_STATION_ID);
-        assert_eq!(snap.items[&auc_item_id].flag, InventoryFlag::Hangar);
-    });
-    assert_eq!(
-        balance(&ctx, P1).0 - p1_init.0,
-        IskCents::from_isk(125_000).0,
-        "Issuer must receive 25k reward refund + 100k winning auction bid"
-    );
-
-    // 2. Issue #17: SendAutomaticPaySettings requires Accountant/Director/CEO role,
-    // and paying from Division 2 (1001) does not debit Division 1 (master_wallet).
-    let corp_id = ctx.db.with_snapshot(|s| s.characters[&P1].corporation_id);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch2) = snap.characters.get_mut(&P2) {
-            ch2.corporation_id = corp_id;
-        }
-        let corp = snap.corporations.entry(corp_id).or_insert_with(|| CorporationRecord {
-            corporation_id: corp_id,
-            name: "Trader Corp".into(),
-            ticker: "TRDR".into(),
-            ceo_id: P1,
-            master_wallet: IskCents::from_isk(50_000),
-            ..Default::default()
-        });
-        corp.ceo_id = P1;
-        corp.member_roles.insert(P2, 0);
-        corp.ensure_wallet_divisions();
-        corp.master_wallet = IskCents::from_isk(50_000);
-        for d in &mut corp.wallet_divisions {
-            if d.division_id == 1 {
-                d.balance = IskCents::from_isk(50_000);
-            } else if d.division_id == 2 {
-                d.balance = IskCents::from_isk(200_000);
-            }
-        }
-    });
-    s2.corporation_id = Some(corp_id);
-    s2.corp_role = 0;
-
-    let unauth_ap = rpc(
-        &ctx,
-        &mut s2,
-        "billMgr",
-        "SendAutomaticPaySettings",
-        &[PyRep::Dict(vec![(
-            PyRep::String("divisionID".into()),
-            PyRep::Integer(1001),
-        )])],
-    )
-    .await
-    .expect_err("Non-accountant must not configure automatic bill payment");
-    assert_eq!(unauth_ap.code, "CorpRoleRequired");
-
-    let bill_id = create_bill(
-        &ctx,
-        2,
-        corp_id,
-        1_000_035,
-        120_000.0,
-        now + 86_400,
-        0.0,
-        JITA_STATION_ID,
-        0,
-    );
-    rpc(
-        &ctx,
-        &mut s1,
-        "billMgr",
-        "PayCorporationBill",
-        &[PyRep::Integer(bill_id), PyRep::Integer(1001)],
-    )
-    .await
-    .expect("PayCorporationBill from division 2 (1001) succeeds even though division 1 only has 50k");
-
-    ctx.db.with_snapshot(|snap| {
-        let corp = &snap.corporations[&corp_id];
-        let div1 = corp.wallet_divisions.iter().find(|d| d.division_id == 1).unwrap().balance;
-        let div2 = corp.wallet_divisions.iter().find(|d| d.division_id == 2).unwrap().balance;
-        assert_eq!(corp.master_wallet, IskCents::from_isk(50_000), "master_wallet untouched");
-        assert_eq!(div1, IskCents::from_isk(50_000), "Division 1 untouched");
-        assert_eq!(div2, IskCents::from_isk(80_000), "Division 2 debited by 120k");
-    });
-}
-

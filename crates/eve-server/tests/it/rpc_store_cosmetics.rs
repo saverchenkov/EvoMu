@@ -56,11 +56,10 @@ async fn setup_pilot_session(ctx: &ServerContext) -> SessionState {
 
 #[tokio::test]
 async fn test_store_manager_categories_offers_and_purchases() {
-    // parity: rpc:storeManager.buy_offer
-    // parity: rpc:storeManager.can_purchase_offer
-    // parity: rpc:storeManager.get_categories
-    // parity: rpc:storeManager.get_offers
-    // parity: rpc:storeManager.get_products
+    // DATA GAP: `storeManager.*` NES store catalog (`categories`, `products`, `offers`) is
+    // server-authored commercial configuration not shipped in V24 client `.fsdbinary` / SQLite
+    // SDE assets, so `rpc:storeManager.*` rows remain un-attested while exercising the handler
+    // mechanics against a test-seeded catalog.
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     common::seed_test_nes_store_catalog(&ctx);

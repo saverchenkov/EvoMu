@@ -1,25 +1,11 @@
 //! Cluster Miscellaneous and Shipcaster Space Travel RPC Service Handlers.
 //!
-//! Provides solid, state-backed implementations for:
+//! Provides SDE-backed, persisted implementations for:
 //! - `charMgr.SaveCharacterSetting` and `charMgr.DeleteCharacterSetting`
 //! - `shipCasterLandingPadMgr.GetAllLandingPads` and `shipCasterLandingPadMgr.GetFactionLandingPads`
 //! - `shipCasterLauncherMgr.GetFactionsWithShipcaster`
 //! - `starterShipcasterTravelMgr.CanCharacterJump` and `starterShipcasterTravelMgr.CmdJumpThroughStarterShipcaster`
 //! - `shipcasterTravelMgr.CmdJumpThroughShipcaster`
-//!
-//! # Game Mechanics & Client Protocol Rationale
-//! - **Proximity & Distance**: Shipcaster jumping requires an active launcher ball in the current
-//!   solar system and operational range (<= 5,000m). Proximity checks fail closed if balls are absent.
-//! - **Combat/Weapons Timers**: Active crimewatch weapons timers prohibit shipcaster jumping.
-//! - **Destination Verification**: Shipcaster jumps enforce linked, active, non-disrupted landing pad registries.
-//! - **Jump Handoff & Session State**: Interstellar jumps remove the ship ball from the origin system,
-//!   spawn the ship ball with combat state at the destination, update character and item records in DB,
-//!   and emit complete `OnSessionChanged` events with `solarsystemid`, `solarsystemid2`, `constellationid`,
-//!   and `regionid`.
-//! - **Storage Safety**: Mutex `cluster_misc_state` is acquired and released prior to taking database
-//!   snapshot write locks, eliminating lock-order inversion and deadlock risks.
-//!
-//! All unhandled, hollow, or unverified RPC arms return `None` to fall through to `UnimplementedRPC`.
 
 #![forbid(unsafe_code)]
 
@@ -27,8 +13,9 @@ use crate::router::ServerContext;
 use eve_db::WorldRepository;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
+use eve_sde::SdeRegistry;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 const MISC_STATE_BLOB_KEY: &str = "cluster_misc_state";
@@ -38,33 +25,33 @@ const MAX_SETTINGS_PER_CHAR: usize = 500;
 const MAX_SETTING_KEY_LEN: usize = 128;
 const MAX_SETTING_VAL_SERIALIZED_BYTES: usize = 4_096;
 
-
-/// Six-minute (`360s`) rotation interval when an empire operates > 1 active Shipcaster Beacon (`Shipcaster.md:15`).
-pub const SHIPCASTER_ROTATION_INTERVAL_SECS: u64 = 360;
-
-/// Maximum simultaneous active Shipcaster Beacons per empire faction (`0..=3`, `Shipcaster.md:15`).
-pub const MAX_ACTIVE_BEACONS_PER_FACTION: usize = 3;
-
-/// DERIVED: Canonical Faction Warfare Landing Pad (Shipcaster Beacon) record.
-/// Traced to authentic SDE type IDs 75928..=75931 (group 4547) and pirate FOBs 78260 / 79172 (group 4644).
-#[derive(Clone, Serialize, Deserialize)]
+/// Dynamic Faction Warfare Landing Pad (Shipcaster Beacon / Constructor) record.
+/// Constructed in-space from SDE `underConstruction` (`75932..=75935`) into `builtLandingPad` (`75928..=75931`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LandingPadRecord {
     pub item_id: i64,
     pub type_id: u32,
+    #[serde(default)]
+    pub built_type_id: u32,
     pub solar_system_id: u32,
     pub faction_id: i32,
     pub is_built: bool,
     pub link_timestamp: i64,
     pub is_disrupted: bool,
     pub position: glam::DVec3,
+    #[serde(default)]
+    pub required_materials: BTreeMap<u32, u32>,
+    #[serde(default)]
+    pub contributed_materials: BTreeMap<u32, u32>,
 }
 
 impl LandingPadRecord {
     pub fn to_keyval(&self) -> PyRep {
+        let is_linked = self.is_built && !self.is_disrupted && self.link_timestamp > 0;
         let can_be_linked = self.is_built && !self.is_disrupted;
-        let is_linked = can_be_linked && self.link_timestamp > 0;
         PyRep::keyval([
             ("itemID", PyRep::Integer(self.item_id)),
+            ("typeID", PyRep::Integer(self.type_id as i64)),
             ("solarSystemID", PyRep::Integer(self.solar_system_id as i64)),
             ("factionID", PyRep::Integer(self.faction_id as i64)),
             ("isBuilt", PyRep::Bool(self.is_built)),
@@ -76,52 +63,8 @@ impl LandingPadRecord {
     }
 }
 
-/// Evaluates effective link state for a landing pad at `now_unix`.
-///
-/// Per `Shipcaster.md:15`, each empire (`500001..=500004`) may operate `0..=3` active Shipcaster
-/// Beacons simultaneously, and when `> 1` beacon is active (`isBuilt && !isDisrupted`), the
-/// Interstellar Shipcaster cycles its active link every 6 minutes (`360s`).
-pub fn effective_landing_pad(
-    pad: &LandingPadRecord,
-    all_pads: &[LandingPadRecord],
-    now_unix: u64,
-) -> LandingPadRecord {
-    let mut out = pad.clone();
-    if !matches!(pad.faction_id, 500001..=500004) {
-        return out;
-    }
-    let mut linkable: Vec<&LandingPadRecord> = all_pads
-        .iter()
-        .filter(|p| p.faction_id == pad.faction_id && p.is_built && !p.is_disrupted)
-        .collect();
-    linkable.sort_by_key(|p| p.item_id);
-    linkable.truncate(MAX_ACTIVE_BEACONS_PER_FACTION);
-
-    if linkable.is_empty() {
-        out.link_timestamp = 0;
-    } else if linkable.len() == 1 {
-        if pad.item_id == linkable[0].item_id {
-            out.link_timestamp = pad.link_timestamp.max(1);
-        } else {
-            out.link_timestamp = 0;
-        }
-    } else {
-        let slot = ((now_unix / SHIPCASTER_ROTATION_INTERVAL_SECS) as usize) % linkable.len();
-        if pad.item_id == linkable[slot].item_id {
-            let window_start = ((now_unix / SHIPCASTER_ROTATION_INTERVAL_SECS)
-                * SHIPCASTER_ROTATION_INTERVAL_SECS)
-                .max(1) as i64;
-            out.link_timestamp = window_start;
-        } else {
-            out.link_timestamp = 0;
-        }
-    }
-    out
-}
-
-/// DERIVED: Canonical Faction Warfare Interstellar Shipcaster Launcher record.
-/// Traced to authentic SDE type IDs 76465..=76468.
-#[derive(Clone, Serialize, Deserialize)]
+/// SDE-backed Interstellar Shipcaster Launcher (`76465..=76468` in Empire War HQ systems, `79018` in Zarzakh).
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LauncherRecord {
     pub item_id: i64,
     pub type_id: u32,
@@ -131,15 +74,17 @@ pub struct LauncherRecord {
     pub position: glam::DVec3,
 }
 
-/// DERIVED: Canonical Starter Shipcaster (Rookie Shipcaster) record.
-/// Traced to authentic SDE type IDs 93968..=94018.
-#[derive(Clone, Serialize, Deserialize)]
+/// SDE-backed Rookie Starter Shipcaster (`93968`, `93980`, `93984`, `94018`) across school starter,
+/// career-agent, and Exordium embassy solar systems.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StarterLauncherRecord {
     pub item_id: i64,
     pub type_id: u32,
     pub solar_system_id: u32,
     pub faction_id: i32,
     pub staging_system_id: u32,
+    #[serde(default)]
+    pub staging_station_id: i64,
     pub position: glam::DVec3,
 }
 
@@ -205,6 +150,8 @@ pub struct ZarzakhHorizonSiegeState {
 #[derive(Default, Clone, Serialize, Deserialize)]
 struct PersistedClusterMiscState {
     #[serde(default)]
+    persisted_shipcaster_state: bool,
+    #[serde(default)]
     char_settings: HashMap<i64, BTreeMap<String, PyRep>>,
     #[serde(default)]
     landing_pads: Vec<LandingPadRecord>,
@@ -212,6 +159,8 @@ struct PersistedClusterMiscState {
     launchers: Vec<LauncherRecord>,
     #[serde(default)]
     starter_launchers: Vec<StarterLauncherRecord>,
+    #[serde(default)]
+    used_starter_shipcaster_chars: BTreeSet<i64>,
     #[serde(default)]
     offered_load_slots: HashMap<i64, OfferedLoadSlot>,
     #[serde(default)]
@@ -228,10 +177,12 @@ struct PersistedClusterMiscState {
 
 #[derive(Default)]
 pub struct ClusterMiscRuntimeState {
+    pub sde_initialized: bool,
     pub char_settings: HashMap<i64, BTreeMap<String, PyRep>>,
     pub landing_pads: Vec<LandingPadRecord>,
     pub launchers: Vec<LauncherRecord>,
     pub starter_launchers: Vec<StarterLauncherRecord>,
+    pub used_starter_shipcaster_chars: BTreeSet<i64>,
     pub offered_load_slots: HashMap<i64, OfferedLoadSlot>,
     pub system_population_caps: HashMap<u32, usize>,
     pub char_energy: HashMap<i64, crate::services::character_energy::CharacterEnergyState>,
@@ -241,114 +192,35 @@ pub struct ClusterMiscRuntimeState {
     pub zarzakh_horizon_siege: ZarzakhHorizonSiegeState,
 }
 
-/// DERIVED: Canonical Empire Landing Pads (Shipcaster Beacons) in Faction Warfare warzones.
-/// Each empire supports `0..=3` active beacons cycling every 6 minutes (`360s`, `Shipcaster.md:15`).
-pub fn derived_landing_pads() -> Vec<LandingPadRecord> {
+/// Pirate Insurgency Forward Operating Base landing pads linked to the Zarzakh Deathless Shipcaster.
+/// Empire FW landing pads (`500001..=500004`) start empty and must be dynamically deployed, constructed, and linked.
+pub fn default_pirate_fob_pads() -> Vec<LandingPadRecord> {
     vec![
-        // Caldari State (`500001`): Onatoh (`30002811`) & Tama (`30002813`)
-        LandingPadRecord {
-            item_id: 104_000_001,
-            type_id: 75929, // State Shipcaster Beacon
-            solar_system_id: 30002811, // Onatoh / Black Rise FW warzone
-            faction_id: 500001,
-            is_built: true,
-            link_timestamp: 1_700_000_000,
-            is_disrupted: false,
-            position: glam::DVec3::new(100_000.0, 0.0, 0.0),
-        },
-        LandingPadRecord {
-            item_id: 104_000_005,
-            type_id: 75929, // State Shipcaster Beacon
-            solar_system_id: 30002813, // Tama / Black Rise FW warzone
-            faction_id: 500001,
-            is_built: true,
-            link_timestamp: 1_700_000_000,
-            is_disrupted: false,
-            position: glam::DVec3::new(100_000.0, 0.0, 0.0),
-        },
-        // Minmatar Republic (`500002`): Resbroko (`30002056`) & Amamake (`30002537`)
-        LandingPadRecord {
-            item_id: 104_000_002,
-            type_id: 75931, // Republic Shipcaster Beacon
-            solar_system_id: 30002056, // Resbroko / Metropolis FW warzone
-            faction_id: 500002,
-            is_built: true,
-            link_timestamp: 1_700_000_000,
-            is_disrupted: false,
-            position: glam::DVec3::new(100_000.0, 0.0, 0.0),
-        },
-        LandingPadRecord {
-            item_id: 104_000_006,
-            type_id: 75931, // Republic Shipcaster Beacon
-            solar_system_id: 30002537, // Amamake / Heimatar FW warzone
-            faction_id: 500002,
-            is_built: true,
-            link_timestamp: 1_700_000_000,
-            is_disrupted: false,
-            position: glam::DVec3::new(100_000.0, 0.0, 0.0),
-        },
-        // Amarr Empire (`500003`): NI-J0B (`30002185`) & Huola (`30003067`)
-        LandingPadRecord {
-            item_id: 104_000_003,
-            type_id: 75928, // Imperial Shipcaster Beacon
-            solar_system_id: 30002185, // NI-J0B / Bleak Lands FW warzone
-            faction_id: 500003,
-            is_built: true,
-            link_timestamp: 1_700_000_000,
-            is_disrupted: false,
-            position: glam::DVec3::new(100_000.0, 0.0, 0.0),
-        },
-        LandingPadRecord {
-            item_id: 104_000_007,
-            type_id: 75928, // Imperial Shipcaster Beacon
-            solar_system_id: 30003067, // Huola / Bleak Lands FW warzone
-            faction_id: 500003,
-            is_built: true,
-            link_timestamp: 1_700_000_000,
-            is_disrupted: false,
-            position: glam::DVec3::new(100_000.0, 0.0, 0.0),
-        },
-        // Gallente Federation (`500004`): Mantenault (`30003855`) & Oicx (`30003838`)
-        LandingPadRecord {
-            item_id: 104_000_004,
-            type_id: 75930, // Federation Shipcaster Beacon
-            solar_system_id: 30003855, // Mantenault / Essence FW warzone
-            faction_id: 500004,
-            is_built: true,
-            link_timestamp: 1_700_000_000,
-            is_disrupted: false,
-            position: glam::DVec3::new(100_000.0, 0.0, 0.0),
-        },
-        LandingPadRecord {
-            item_id: 104_000_008,
-            type_id: 75930, // Federation Shipcaster Beacon
-            solar_system_id: 30003838, // Oicx / Placid FW warzone
-            faction_id: 500004,
-            is_built: true,
-            link_timestamp: 1_700_000_000,
-            is_disrupted: false,
-            position: glam::DVec3::new(100_000.0, 0.0, 0.0),
-        },
-        // Insurgency Forward Operating Base Landing Pads
         LandingPadRecord {
             item_id: 104_000_020,
-            type_id: 78260, // Angel Cartel FOB (group 4644)
-            solar_system_id: 30002056, // Angel Cartel Insurgency FOB
+            type_id: 78260,
+            built_type_id: 78260,
+            solar_system_id: 30002056,
             faction_id: 500010,
             is_built: true,
             link_timestamp: 1_700_000_000,
             is_disrupted: false,
             position: glam::DVec3::new(120_000.0, 0.0, 0.0),
+            required_materials: BTreeMap::new(),
+            contributed_materials: BTreeMap::new(),
         },
         LandingPadRecord {
             item_id: 104_000_021,
-            type_id: 79172, // Guristas Pirates FOB (group 4644)
-            solar_system_id: 30002811, // Guristas Insurgency FOB
+            type_id: 79172,
+            built_type_id: 79172,
+            solar_system_id: 30002811,
             faction_id: 500011,
             is_built: true,
             link_timestamp: 1_700_000_000,
             is_disrupted: false,
             position: glam::DVec3::new(120_000.0, 0.0, 0.0),
+            required_materials: BTreeMap::new(),
+            contributed_materials: BTreeMap::new(),
         },
         // DERIVED: Zarzakh (`30_100_000`) and SDE type `79018` (`Deathless Interstellar Shipcaster`)
         // are authoritative SDE IDs; landing-pad item ID `104_000_030` and coordinates are server-side placements (`feat:navigation.deathless-shipcaster-zarzakh`).
@@ -365,159 +237,89 @@ pub fn derived_landing_pads() -> Vec<LandingPadRecord> {
     ]
 }
 
-/// Canonical Interstellar Shipcaster Launchers in Empire FW HQ systems (`Shipcaster.md:20-23, 30`).
-pub fn derived_launchers() -> Vec<LauncherRecord> {
-    vec![
-        LauncherRecord {
-            item_id: 105_000_001,
-            type_id: 76466, // State Interstellar Shipcaster
-            solar_system_id: 30045324, // Onnamon (Caldari FW HQ)
-            faction_id: 500001,
-            linked_pad_ids: vec![104_000_001, 104_000_005],
-            position: glam::DVec3::new(200_000.0, 0.0, 0.0),
-        },
-        LauncherRecord {
-            item_id: 105_000_002,
-            type_id: 76468, // Republic Interstellar Shipcaster
-            solar_system_id: 30002055, // Amo (Minmatar FW HQ)
-            faction_id: 500002,
-            linked_pad_ids: vec![104_000_002, 104_000_006],
-            position: glam::DVec3::new(200_000.0, 0.0, 0.0),
-        },
-        LauncherRecord {
-            item_id: 105_000_003,
-            type_id: 76465, // Imperial Interstellar Shipcaster
-            solar_system_id: 30002974, // Mehatoor (Amarr FW HQ)
-            faction_id: 500003,
-            linked_pad_ids: vec![104_000_003, 104_000_007],
-            position: glam::DVec3::new(200_000.0, 0.0, 0.0),
-        },
-        LauncherRecord {
-            item_id: 105_000_004,
-            type_id: 76467, // Federation Interstellar Shipcaster
-            solar_system_id: 30003788, // Intaki (Gallente FW HQ)
-            faction_id: 500004,
-            linked_pad_ids: vec![104_000_004, 104_000_008],
-            position: glam::DVec3::new(200_000.0, 0.0, 0.0),
-        },
-        // Deathless Shipcaster in Zarzakh (links to Angel and Guristas pirate FOBs)
-        LauncherRecord {
-            item_id: 105_000_010,
-            type_id: 79018, // Deathless Interstellar Shipcaster
-            solar_system_id: 30100000, // Zarzakh Deathless Shipcaster
-            faction_id: 0,
-            linked_pad_ids: vec![104_000_020, 104_000_021],
-            position: glam::DVec3::new(250_000.0, 0.0, 0.0),
-        },
-        // DERIVED: Turnur (`30002086`), Vard (`30002538`), Alsavoinon (`30003841`), Hikkoken (`30045338`)
-        // and SDE type `79018` are authoritative SDE IDs; beacon item IDs `105_000_011..=105_000_014` and positions are server-side placements (`feat:navigation.deathless-shipcaster-zarzakh`).
-        LauncherRecord {
-            item_id: 105_000_011,
-            type_id: 79018,
-            solar_system_id: 30002086, // Turnur
-            faction_id: 0,
-            linked_pad_ids: vec![104_000_030],
-            position: glam::DVec3::new(250_000.0, 0.0, 0.0),
-        },
-        LauncherRecord {
-            item_id: 105_000_012,
-            type_id: 79018,
-            solar_system_id: 30002538, // Vard
-            faction_id: 0,
-            linked_pad_ids: vec![104_000_030],
-            position: glam::DVec3::new(250_000.0, 0.0, 0.0),
-        },
-        LauncherRecord {
-            item_id: 105_000_013,
-            type_id: 79018,
-            solar_system_id: 30003841, // Alsavoinon
-            faction_id: 0,
-            linked_pad_ids: vec![104_000_030],
-            position: glam::DVec3::new(250_000.0, 0.0, 0.0),
-        },
-        LauncherRecord {
-            item_id: 105_000_014,
-            type_id: 79018,
-            solar_system_id: 30045338, // Hikkoken
-            faction_id: 0,
-            linked_pad_ids: vec![104_000_030],
-            position: glam::DVec3::new(250_000.0, 0.0, 0.0),
-        },
-    ]
-}
-
-fn starter_shipcaster_spec_for_race(race_id: u32) -> Option<(i32, u32, u32)> {
+fn starter_type_and_faction_for_race(race_id: u32) -> Option<(u32, i32)> {
     match race_id {
-        1 => Some((500001, 93980, 30045324)), // Caldari -> State Rookie Shipcaster -> Onnamon
-        2 => Some((500002, 94018, 30002055)), // Minmatar -> Republic Rookie Shipcaster -> Amo
-        4 => Some((500003, 93968, 30002974)), // Amarr -> Imperial Rookie Shipcaster -> Mehatoor
-        8 => Some((500004, 93984, 30003788)), // Gallente -> Federation Rookie Shipcaster -> Intaki
+        1 => Some((93980, 500_001)), // Caldari State Rookie Shipcaster
+        2 => Some((94018, 500_002)), // Minmatar Republic Rookie Shipcaster
+        4 => Some((93968, 500_003)), // Amarr Imperial Rookie Shipcaster
+        8 => Some((93984, 500_004)), // Gallente Federation Rookie Shipcaster
         _ => None,
     }
 }
 
-/// Derives Rookie Starter Shipcasters (`93968`, `93980`, `93984`, `94018`) across all 12 empire
-/// starter school systems (`school_id` `11..=22`) directly from [`eve_sde::SdeRegistry::schools`].
-pub fn starter_launchers_from_sde(sde: &eve_sde::SdeRegistry) -> Vec<StarterLauncherRecord> {
-    let mut school_ids: Vec<u32> = (11..=22).filter(|id| sde.schools.contains_key(id)).collect();
-    school_ids.sort_unstable();
-    let mut out = Vec::with_capacity(school_ids.len());
-    for school_id in school_ids {
-        let Some(school) = sde.schools.get(&school_id) else {
-            continue;
-        };
-        let Some((faction_id, type_id, staging_system_id)) =
-            starter_shipcaster_spec_for_race(school.race_id)
-        else {
-            continue;
-        };
-        out.push(StarterLauncherRecord {
-            item_id: 105_000_100 + (school_id as i64),
-            type_id,
-            solar_system_id: school.solar_system_id,
-            faction_id,
-            staging_system_id,
-            position: glam::DVec3::new(300_000.0, 0.0, 0.0),
-        });
+/// Builds the 4 Empire War HQ Interstellar Shipcasters (`Mehatoor`, `Onnamon`, `Intaki`, `Amo`)
+/// and the Zarzakh Deathless Interstellar Shipcaster directly from V24.01 SDE components.
+pub fn sde_launchers(sde: &SdeRegistry) -> Vec<LauncherRecord> {
+    let Ok(comps) = sde.shipcaster_sde_components() else {
+        return Vec::new();
+    };
+    let mut war_hq_by_faction: HashMap<u32, (u32, i64)> = HashMap::new();
+    for &race_id in &[1_u32, 2, 4, 8] {
+        if let Some((starter_tid, faction_id)) = starter_type_and_faction_for_race(race_id) {
+            if let Some(&(dest_sys, dest_station)) = comps.starter_shipcasters.get(&starter_tid) {
+                war_hq_by_faction.insert(faction_id as u32, (dest_sys, dest_station));
+            }
+        }
     }
-    if out.is_empty() {
-        derived_starter_launchers()
-    } else {
-        out
-    }
-}
-
-/// Canonical Rookie Starter Shipcasters across all 12 empire starter school systems (`sde_schools` `11..=22`),
-/// jumping to each empire's FW Interstellar Shipcaster HQ (`Onnamon`, `Amo`, `Mehatoor`, `Intaki`).
-pub fn derived_starter_launchers() -> Vec<StarterLauncherRecord> {
-    let schools: [(u32, u32, u32); 12] = [
-        (11, 4, 30003489), // Chaven (Imperial Academy) -> Mehatoor
-        (12, 4, 30005042), // Sehmy (Hedion University) -> Mehatoor
-        (13, 4, 30001672), // Emrayur (Royal Amarr Institute) -> Mehatoor
-        (14, 2, 30002547), // Ammold (Republic Military School) -> Amo
-        (15, 2, 30002505), // Hulm (Republic University) -> Amo
-        (16, 2, 30003410), // Ryddinjorn (Pator Tech School) -> Amo
-        (17, 1, 30000141), // Kisogo (State War Academy) -> Onnamon
-        (18, 1, 30001392), // Amsen (Science & Trade Institute) -> Onnamon
-        (19, 1, 30001407), // Todaki (School of Applied Knowledge) -> Onnamon
-        (20, 8, 30004971), // Duripant (Federal Navy Academy) -> Intaki
-        (21, 8, 30002715), // Bourynes (University of Caille) -> Intaki
-        (22, 8, 30005305), // Cistuvaert (Center for Advanced Studies) -> Intaki
-    ];
-    let mut out = Vec::with_capacity(schools.len());
-    for (school_id, race_id, solar_system_id) in schools {
-        if let Some((faction_id, type_id, staging_system_id)) =
-            starter_shipcaster_spec_for_race(race_id)
-        {
-            out.push(StarterLauncherRecord {
-                item_id: 105_000_100 + (school_id as i64),
-                type_id,
-                solar_system_id,
-                faction_id,
-                staging_system_id,
-                position: glam::DVec3::new(300_000.0, 0.0, 0.0),
+    let mut out = Vec::new();
+    for (&launcher_tid, &faction_u32) in &comps.launcher_factions {
+        if faction_u32 == 500_029 {
+            out.push(LauncherRecord {
+                item_id: 105_000_010,
+                type_id: launcher_tid,
+                solar_system_id: 30_100_000,
+                faction_id: faction_u32 as i32,
+                linked_pad_ids: vec![104_000_020, 104_000_021],
+                position: glam::DVec3::new(250_000.0, 0.0, 0.0),
+            });
+        } else if let Some(&(war_hq_sys, war_hq_station)) = war_hq_by_faction.get(&faction_u32) {
+            let anchor_pos = sde
+                .stations
+                .get(&war_hq_station)
+                .map(|st| st.position + glam::DVec3::new(50_000.0, 0.0, 0.0))
+                .unwrap_or_else(|| glam::DVec3::new(200_000.0, 0.0, 0.0));
+            out.push(LauncherRecord {
+                item_id: 105_000_000 + i64::from(launcher_tid),
+                type_id: launcher_tid,
+                solar_system_id: war_hq_sys,
+                faction_id: faction_u32 as i32,
+                linked_pad_ids: Vec::new(),
+                position: anchor_pos,
             });
         }
+    }
+    out.sort_by_key(|l| l.faction_id);
+    out
+}
+
+/// Builds Rookie Starter Shipcaster launchers across all 12 `sde_schools` starter & career-agent
+/// solar systems and the 4 Exordium embassy systems from V24.01 SDE components.
+pub fn sde_starter_launchers(sde: &SdeRegistry) -> Vec<StarterLauncherRecord> {
+    let Ok(comps) = sde.shipcaster_sde_components() else {
+        return Vec::new();
+    };
+    let systems_by_race = sde.starter_shipcaster_systems_by_race();
+    let mut out = Vec::new();
+    for (sys_id, (race_id, station_opt)) in systems_by_race {
+        let Some((starter_tid, faction_id)) = starter_type_and_faction_for_race(race_id) else {
+            continue;
+        };
+        let Some(&(dest_sys, dest_station)) = comps.starter_shipcasters.get(&starter_tid) else {
+            continue;
+        };
+        let position = station_opt
+            .and_then(|st_id| sde.stations.get(&st_id))
+            .map(|st| st.position + glam::DVec3::new(30_000.0, 0.0, 0.0))
+            .unwrap_or_else(|| glam::DVec3::new(300_000.0, 0.0, 0.0));
+        out.push(StarterLauncherRecord {
+            item_id: 105_100_000 + i64::from(sys_id.saturating_sub(30_000_000)),
+            type_id: starter_tid,
+            solar_system_id: sys_id,
+            faction_id,
+            staging_system_id: dest_sys,
+            staging_station_id: dest_station,
+            position,
+        });
     }
     out
 }
@@ -526,10 +328,12 @@ impl ClusterMiscRuntimeState {
     /// Deserializes previously persisted cluster miscellaneous settings from the world repository snapshot.
     pub fn from_db(db: &Arc<WorldRepository>) -> Self {
         let mut st = Self {
+            sde_initialized: false,
             char_settings: HashMap::new(),
-            landing_pads: derived_landing_pads(),
-            launchers: derived_launchers(),
-            starter_launchers: derived_starter_launchers(),
+            landing_pads: default_pirate_fob_pads(),
+            launchers: Vec::new(),
+            starter_launchers: Vec::new(),
+            used_starter_shipcaster_chars: BTreeSet::new(),
             offered_load_slots: HashMap::new(),
             system_population_caps: HashMap::new(),
             char_energy: HashMap::new(),
@@ -545,45 +349,39 @@ impl ClusterMiscRuntimeState {
         });
         if let Some(p) = persisted {
             st.char_settings = p.char_settings;
-            if !p.landing_pads.is_empty() {
-                let mut merged = p.landing_pads;
-                for canon in derived_landing_pads() {
-                    if !merged.iter().any(|x| x.item_id == canon.item_id) {
-                        merged.push(canon);
-                    }
-                }
-                st.landing_pads = merged;
-            }
-            if !p.launchers.is_empty() {
-                let mut merged = p.launchers;
-                for canon in derived_launchers() {
-                    if !merged.iter().any(|x| x.item_id == canon.item_id) {
-                        merged.push(canon);
-                    }
-                }
-                st.launchers = merged;
-            }
-            if !p.starter_launchers.is_empty() {
-                let mut merged = p.starter_launchers;
-                for canon in derived_starter_launchers() {
-                    if !merged.iter().any(|x| x.item_id == canon.item_id) {
-                        merged.push(canon);
-                    }
-                }
-                st.starter_launchers = merged;
-            }
+            st.used_starter_shipcaster_chars = p.used_starter_shipcaster_chars;
             st.offered_load_slots = p.offered_load_slots;
             st.char_energy = p.char_energy;
             st.target_cooldowns = p.target_cooldowns;
             st.target_charges = p.target_charges;
             st.zarzakh_toll_quotes = p.zarzakh_toll_quotes;
             st.zarzakh_horizon_siege = p.zarzakh_horizon_siege;
+            if p.persisted_shipcaster_state {
+                st.landing_pads = p.landing_pads;
+                st.launchers = p.launchers;
+                st.starter_launchers = p.starter_launchers;
+                st.sde_initialized = !st.launchers.is_empty() && !st.starter_launchers.is_empty();
+            }
         }
         st
     }
+
+    pub fn ensure_sde_initialized(&mut self, sde: &SdeRegistry) {
+        if self.sde_initialized {
+            return;
+        }
+        if self.launchers.is_empty() {
+            self.launchers = sde_launchers(sde);
+        }
+        if self.starter_launchers.is_empty() {
+            self.starter_launchers = sde_starter_launchers(sde);
+        }
+        self.sde_initialized = true;
+    }
 }
 
-/// Executes a closure with exclusive access to the miscellaneous runtime state mutex.
+/// Executes a closure with exclusive access to the miscellaneous runtime state mutex,
+/// lazily seeding SDE-backed shipcaster launchers on first access.
 pub fn with_misc_state<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&mut ClusterMiscRuntimeState) -> R,
@@ -592,16 +390,19 @@ pub fn with_misc_state<R>(
         .cluster_misc_state
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    guard.ensure_sde_initialized(&ctx.sde);
     f(&mut guard)
 }
 
 /// Persists the character settings and cluster travel state to SQLite via `service_state_blobs`.
 pub(crate) fn persist_misc_state(ctx: &ServerContext) {
     let p = with_misc_state(ctx, |st| PersistedClusterMiscState {
+        persisted_shipcaster_state: st.sde_initialized,
         char_settings: st.char_settings.clone(),
         landing_pads: st.landing_pads.clone(),
         launchers: st.launchers.clone(),
         starter_launchers: st.starter_launchers.clone(),
+        used_starter_shipcaster_chars: st.used_starter_shipcaster_chars.clone(),
         offered_load_slots: st.offered_load_slots.clone(),
         char_energy: st.char_energy.clone(),
         target_cooldowns: st.target_cooldowns.clone(),
@@ -632,12 +433,21 @@ pub(crate) fn get_character_settings_dict(ctx: &ServerContext, char_id: i64) -> 
 }
 
 pub fn populate_shipcaster_balls(solar_system_id: u32, ballpark: &mut eve_destiny::Ballpark) {
-    populate_shipcaster_balls_from_db(solar_system_id, ballpark, None);
+    populate_shipcaster_balls_with_sde(solar_system_id, ballpark, None, None);
 }
 
 pub fn populate_shipcaster_balls_from_db(
     solar_system_id: u32,
     ballpark: &mut eve_destiny::Ballpark,
+    db: Option<&Arc<WorldRepository>>,
+) {
+    populate_shipcaster_balls_with_sde(solar_system_id, ballpark, None, db);
+}
+
+pub fn populate_shipcaster_balls_with_sde(
+    solar_system_id: u32,
+    ballpark: &mut eve_destiny::Ballpark,
+    sde: Option<&SdeRegistry>,
     db: Option<&Arc<WorldRepository>>,
 ) {
     let persisted = db.and_then(|repo| {
@@ -649,64 +459,116 @@ pub fn populate_shipcaster_balls_from_db(
     });
     let launchers = persisted
         .as_ref()
-        .filter(|p| !p.launchers.is_empty())
-        .map(|p| {
-            let mut merged = p.launchers.clone();
-            for canon in derived_launchers() {
-                if !merged.iter().any(|x| x.item_id == canon.item_id) {
-                    merged.push(canon);
-                }
-            }
-            merged
-        })
-        .unwrap_or_else(derived_launchers);
+        .filter(|p| p.persisted_shipcaster_state && !p.launchers.is_empty())
+        .map(|p| p.launchers.clone())
+        .or_else(|| sde.map(sde_launchers))
+        .unwrap_or_default();
     let starter_launchers = persisted
         .as_ref()
-        .filter(|p| !p.starter_launchers.is_empty())
-        .map(|p| {
-            let mut merged = p.starter_launchers.clone();
-            for canon in derived_starter_launchers() {
-                if !merged.iter().any(|x| x.item_id == canon.item_id) {
-                    merged.push(canon);
-                }
-            }
-            merged
-        })
-        .unwrap_or_else(derived_starter_launchers);
+        .filter(|p| p.persisted_shipcaster_state && !p.starter_launchers.is_empty())
+        .map(|p| p.starter_launchers.clone())
+        .or_else(|| sde.map(sde_starter_launchers))
+        .unwrap_or_default();
     let pads = persisted
-        .filter(|p| !p.landing_pads.is_empty())
-        .map(|p| {
-            let mut merged = p.landing_pads;
-            for canon in derived_landing_pads() {
-                if !merged.iter().any(|x| x.item_id == canon.item_id) {
-                    merged.push(canon);
-                }
-            }
-            merged
-        })
-        .unwrap_or_else(derived_landing_pads);
+        .filter(|p| p.persisted_shipcaster_state)
+        .map(|p| p.landing_pads)
+        .unwrap_or_else(default_pirate_fob_pads);
     for l in launchers {
         if l.solar_system_id == solar_system_id {
+            let (group_id, category_id) = sde
+                .and_then(|s| s.types.get(&l.type_id))
+                .map(|t| (t.group_id, t.category_id))
+                .unwrap_or((4549, 2));
             ballpark.add_static_ball_with_meta(
-                eve_destiny::Ball { id: l.item_id, type_id: l.type_id, position: l.position, velocity: glam::DVec3::ZERO, max_velocity: 0.0, inertia: 0.0, mass: 1.0e10, radius: 20_000.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Rigid },
-                eve_destiny::SlimItemMeta { group_id: 4549, category_id: 65, owner_id: l.faction_id as i64, char_id: None, corp_id: 0, alliance_id: -1, security_status: 0.0, is_cloaked: false , ..Default::default()}
+                eve_destiny::Ball {
+                    id: l.item_id,
+                    type_id: l.type_id,
+                    position: l.position,
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 0.0,
+                    mass: 1.0e10,
+                    radius: 20_000.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Rigid,
+                },
+                eve_destiny::SlimItemMeta {
+                    group_id,
+                    category_id,
+                    owner_id: l.faction_id as i64,
+                    char_id: None,
+                    corp_id: 0,
+                    alliance_id: -1,
+                    security_status: 0.0,
+                    is_cloaked: false,
+                    ..Default::default()
+                },
             );
         }
     }
     for sl in starter_launchers {
         if sl.solar_system_id == solar_system_id {
+            let (group_id, category_id) = sde
+                .and_then(|s| s.types.get(&sl.type_id))
+                .map(|t| (t.group_id, t.category_id))
+                .unwrap_or((4549, 2));
             ballpark.add_static_ball_with_meta(
-                eve_destiny::Ball { id: sl.item_id, type_id: sl.type_id, position: sl.position, velocity: glam::DVec3::ZERO, max_velocity: 0.0, inertia: 0.0, mass: 1.0e10, radius: 20_000.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Rigid },
-                eve_destiny::SlimItemMeta { group_id: 4549, category_id: 65, owner_id: sl.faction_id as i64, char_id: None, corp_id: 0, alliance_id: -1, security_status: 0.0, is_cloaked: false , ..Default::default()}
+                eve_destiny::Ball {
+                    id: sl.item_id,
+                    type_id: sl.type_id,
+                    position: sl.position,
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 0.0,
+                    mass: 1.0e10,
+                    radius: 20_000.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Rigid,
+                },
+                eve_destiny::SlimItemMeta {
+                    group_id,
+                    category_id,
+                    owner_id: sl.faction_id as i64,
+                    char_id: None,
+                    corp_id: 0,
+                    alliance_id: -1,
+                    security_status: 0.0,
+                    is_cloaked: false,
+                    ..Default::default()
+                },
             );
         }
     }
     for p in pads {
         if p.solar_system_id == solar_system_id {
-            let group_id = if matches!(p.type_id, 78260 | 79172) { 4644 } else { 4547 };
+            let (group_id, category_id) = sde
+                .and_then(|s| s.types.get(&p.type_id))
+                .map(|t| (t.group_id, t.category_id))
+                .unwrap_or((4547, 2));
             ballpark.add_static_ball_with_meta(
-                eve_destiny::Ball { id: p.item_id, type_id: p.type_id, position: p.position, velocity: glam::DVec3::ZERO, max_velocity: 0.0, inertia: 0.0, mass: 1.0e10, radius: 20_000.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Rigid },
-                eve_destiny::SlimItemMeta { group_id, category_id: 65, owner_id: p.faction_id as i64, char_id: None, corp_id: 0, alliance_id: -1, security_status: 0.0, is_cloaked: false , ..Default::default()}
+                eve_destiny::Ball {
+                    id: p.item_id,
+                    type_id: p.type_id,
+                    position: p.position,
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 0.0,
+                    mass: 1.0e10,
+                    radius: 20_000.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Rigid,
+                },
+                eve_destiny::SlimItemMeta {
+                    group_id,
+                    category_id,
+                    owner_id: p.faction_id as i64,
+                    char_id: None,
+                    corp_id: 0,
+                    alliance_id: -1,
+                    security_status: 0.0,
+                    is_cloaked: false,
+                    ..Default::default()
+                },
             );
         }
     }
@@ -717,20 +579,30 @@ pub fn get_or_create_offered_load_slot(
     char_id: i64,
     current_sys: u32,
 ) -> Option<(String, u32)> {
-    let cap = with_misc_state(ctx, |st| st.system_population_caps.get(&current_sys).copied().unwrap_or(usize::MAX));
-    
+    let cap = with_misc_state(ctx, |st| {
+        st.system_population_caps
+            .get(&current_sys)
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+
     let chars_in_sys: Vec<i64> = ctx.db.with_snapshot(|snap| {
-        snap.characters.values()
+        snap.characters
+            .values()
             .filter(|c| c.solar_system_id == current_sys)
             .map(|c| c.character_id)
             .collect()
     });
-    let online_count = chars_in_sys.into_iter()
+    let online_count = chars_in_sys
+        .into_iter()
         .filter(|&cid| crate::services::character_contacts::is_character_online(ctx, cid))
         .count();
 
     if online_count >= cap {
-        let mut adj_systems: Vec<u32> = ctx.sde.jumps.values()
+        let mut adj_systems: Vec<u32> = ctx
+            .sde
+            .jumps
+            .values()
             .filter(|j| j.from_solar_system_id == current_sys)
             .map(|j| j.to_solar_system_id)
             .collect();
@@ -739,12 +611,14 @@ pub fn get_or_create_offered_load_slot(
         }
         adj_systems.sort_by_key(|&sys| {
             let sys_chars: Vec<i64> = ctx.db.with_snapshot(|snap| {
-                snap.characters.values()
+                snap.characters
+                    .values()
                     .filter(|c| c.solar_system_id == sys)
                     .map(|c| c.character_id)
                     .collect()
             });
-            sys_chars.into_iter()
+            sys_chars
+                .into_iter()
                 .filter(|&cid| crate::services::character_contacts::is_character_online(ctx, cid))
                 .count()
         });
@@ -804,16 +678,16 @@ pub async fn handle(
     _kwargs: &std::collections::HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        // --------------------------------------------------------------------
-        // charMgr: Client UI settings persistence
-        // --------------------------------------------------------------------
         ("charMgr", "SaveCharacterSetting") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let Some(key) = args.first().and_then(|v| v.as_str()).filter(|s| !s.is_empty()) else {
-                return Some(Err(rpc_err("CustomError", "SaveCharacterSetting requires a non-empty setting key")));
+                return Some(Err(rpc_err(
+                    "CustomError",
+                    "SaveCharacterSetting requires a non-empty setting key",
+                )));
             };
             if key.len() > MAX_SETTING_KEY_LEN {
                 return Some(Err(rpc_err("CustomError", "Setting key exceeds maximum length")));
@@ -821,7 +695,10 @@ pub async fn handle(
             let val = args.get(1).cloned().unwrap_or(PyRep::Bool(true));
             let serialized_len = serde_json::to_string(&val).map(|s| s.len()).unwrap_or(usize::MAX);
             if serialized_len > MAX_SETTING_VAL_SERIALIZED_BYTES {
-                return Some(Err(rpc_err("CustomError", "Setting value exceeds maximum allowed size")));
+                return Some(Err(rpc_err(
+                    "CustomError",
+                    "Setting value exceeds maximum allowed size",
+                )));
             }
 
             if key == "waypoints" {
@@ -836,7 +713,10 @@ pub async fn handle(
             let insert_res = with_misc_state(ctx, |st| {
                 let user_settings = st.char_settings.entry(char_id).or_default();
                 if !user_settings.contains_key(key) && user_settings.len() >= MAX_SETTINGS_PER_CHAR {
-                    return Err(rpc_err("CustomError", "Character settings limit reached (maximum 500 keys)"));
+                    return Err(rpc_err(
+                        "CustomError",
+                        "Character settings limit reached (maximum 500 keys)",
+                    ));
                 }
                 user_settings.insert(key.to_owned(), val);
                 Ok(())
@@ -856,7 +736,10 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let Some(key) = args.first().and_then(|v| v.as_str()).filter(|s| !s.is_empty()) else {
-                return Some(Err(rpc_err("CustomError", "DeleteCharacterSetting requires a non-empty setting key")));
+                return Some(Err(rpc_err(
+                    "CustomError",
+                    "DeleteCharacterSetting requires a non-empty setting key",
+                )));
             };
             if key == "waypoints" {
                 ctx.db.with_mut_snapshot(|snap| {
@@ -904,7 +787,10 @@ pub fn check_and_apply_shipcaster_target_cooldown(
             if now < expires {
                 return Err(BridgeRpcError {
                     code: "ShipcasterTargetOnCooldown".into(),
-                    message: format!("Shipcaster destination pad {pad_id} is on cooldown for {} more seconds", expires - now),
+                    message: format!(
+                        "Shipcaster destination pad {pad_id} is on cooldown for {} more seconds",
+                        expires - now
+                    ),
                 });
             }
             st.target_charges.insert(pad_id, 1);
@@ -1114,4 +1000,3 @@ pub fn set_zarzakh_horizon_siege_active(ctx: &ServerContext, active: bool) {
         emit_zarzakh_horizon_siege_changed(ctx, &state);
     }
 }
-

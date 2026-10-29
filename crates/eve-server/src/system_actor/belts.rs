@@ -154,7 +154,12 @@ pub fn populate_system_celestials(
         }
     }
 
-    crate::services::cluster_macho_misc_services::populate_shipcaster_balls(solar_system_id, ballpark);
+    crate::services::cluster_macho_misc_services::populate_shipcaster_balls_with_sde(
+        solar_system_id,
+        ballpark,
+        Some(sde),
+        None,
+    );
 }
 
 /// Populates asteroid belt entities (Veldspar, Scordite, Pyroxeres, etc.) around asteroid belt celestials (`SP-4`, `MN-01`).
@@ -473,6 +478,88 @@ pub(super) fn respawn_due_asteroids(
         }
     }
     respawned
+}
+
+/// Daily 11:00 UTC downtime maintenance respawn for an active solar system:
+/// - Respawns any asteroid belt (`belt_id > 0`) where all asteroids in that belt are depleted (`Asteroids_and_ore.md:69`).
+/// - Respawns any depleted ice asteroid (`group_id == 465`) back to `initial_units`.
+pub(crate) fn respawn_depleted_belts_on_downtime_inner(
+    ballpark: &mut Ballpark,
+    asteroids: &mut HashMap<BallId, AsteroidState>,
+    asteroid_templates: &HashMap<BallId, (AsteroidState, Ball)>,
+    sde_opt: &Option<Arc<SdeRegistry>>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+) -> usize {
+    let mut belt_ids: Vec<BallId> = asteroid_templates
+        .values()
+        .filter(|(ast, _)| ast.belt_id > 0)
+        .map(|(ast, _)| ast.belt_id)
+        .collect();
+    belt_ids.sort_unstable();
+    belt_ids.dedup();
+
+    let mut to_restore: Vec<BallId> = Vec::new();
+    for belt_id in belt_ids {
+        let belt_fully_depleted = asteroid_templates
+            .iter()
+            .filter(|(_, (orig_ast, _))| orig_ast.belt_id == belt_id)
+            .all(|(&id, _)| {
+                asteroids
+                    .get(&id)
+                    .is_some_and(|a| a.remaining_units == 0 || a.depleted)
+            });
+        if belt_fully_depleted {
+            for (&id, (orig_ast, _)) in asteroid_templates {
+                if orig_ast.belt_id == belt_id {
+                    to_restore.push(id);
+                }
+            }
+        }
+    }
+
+    // Ice belts (`group_id == 465`) respawn depleted ice blocks at downtime
+    for (&id, (orig_ast, _)) in asteroid_templates {
+        let is_ice = sde_opt
+            .as_ref()
+            .and_then(|s| s.types.get(&orig_ast.type_id))
+            .is_some_and(|t| t.group_id == 465);
+        if is_ice
+            && asteroids
+                .get(&id)
+                .is_some_and(|a| a.remaining_units < orig_ast.initial_units || a.depleted)
+            && !to_restore.contains(&id)
+        {
+            to_restore.push(id);
+        }
+    }
+
+    to_restore.sort_unstable();
+    to_restore.dedup();
+    let count = to_restore.len();
+    for id in to_restore {
+        if let Some((orig_ast, orig_ball)) = asteroid_templates.get(&id) {
+            restore_asteroid_from_template(id, orig_ast, orig_ball, ballpark, asteroids, sde_opt);
+            if let Some(db) = db_opt {
+                let init_qty = i64::try_from(orig_ast.initial_units).unwrap_or(i64::MAX);
+                db.with_mut_snapshot(|snap| {
+                    snap.asteroids.insert(
+                        id,
+                        eve_db::AsteroidRecord {
+                            asteroid_id: id,
+                            belt_id: orig_ast.belt_id,
+                            type_id: orig_ast.type_id,
+                            solar_system_id: ballpark.solar_system_id,
+                            position: (orig_ball.position.x, orig_ball.position.y, orig_ball.position.z),
+                            quantity: init_qty,
+                            initial_quantity: init_qty,
+                            radius: orig_ball.radius,
+                        },
+                    );
+                });
+            }
+        }
+    }
+    count
 }
 
 pub(super) fn handle_mine_asteroid(

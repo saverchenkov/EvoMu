@@ -508,3 +508,37 @@ pub type TargetLockCompletedHook = Arc<dyn Fn(CharacterId, BallId) + Send + Sync
 pub type SystemStepFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 pub type SystemStepHook =
     Arc<dyn Fn(SolarSystemId, f64, Vec<(BallId, Option<CharacterId>)>) -> SystemStepFuture + Send + Sync>;
+
+/// Default active-entity + module-cycle load units per worker node before load-induced Time Dilation engages.
+pub const DEFAULT_NODE_LOAD_TIDI_THRESHOLD: usize = 80;
+
+/// Runtime worker-node assignment, fleet-fight reinforcement, and simulation clock rebase tracking
+/// (`feat:serverops.node-balancing`, `feat:serverops.time-dilation`, `notify:DoSimClockRebase`).
+#[derive(Debug, Clone)]
+pub struct ClusterNodeRegistry {
+    pub worker_nodes: Vec<u32>,
+    pub system_node_overrides: HashMap<SolarSystemId, u32>,
+    /// Dedicated reinforced nodes (`node_id -> exclusive solar_system_id`).
+    pub reinforced_nodes: HashMap<u32, SolarSystemId>,
+    /// Explicit GM/operator Time Dilation overrides (`solar_system_id -> factor`).
+    pub manual_tidi_overrides: HashMap<SolarSystemId, f64>,
+    /// Last emitted simulated clock FILETIME (`100ns` ticks) and wall unix timestamp per system.
+    pub sim_clock_anchoring: HashMap<SolarSystemId, (u64, i64)>,
+    pub node_load_tidi_threshold: usize,
+    pub next_dedicated_node_id: u32,
+}
+
+impl Default for ClusterNodeRegistry {
+    fn default() -> Self {
+        Self {
+            worker_nodes: vec![1, 2, 3, 4],
+            system_node_overrides: HashMap::new(),
+            reinforced_nodes: HashMap::new(),
+            manual_tidi_overrides: HashMap::new(),
+            sim_clock_anchoring: HashMap::new(),
+            node_load_tidi_threshold: DEFAULT_NODE_LOAD_TIDI_THRESHOLD,
+            next_dedicated_node_id: 100,
+        }
+    }
+}
+

@@ -1,26 +1,26 @@
-//! Integration tests for Faction Warfare Interstellar Shipcasters and Rookie Starter Shipcasters.
-//!
-//! Attests parity for:
-//! - `rpc:shipCasterLandingPadMgr.GetAllLandingPads`
-//! - `rpc:shipCasterLandingPadMgr.GetFactionLandingPads`
-//! - `rpc:shipCasterLauncherMgr.GetFactionsWithShipcaster`
-//! - `rpc:starterShipcasterTravelMgr.CanCharacterJump`
-//! - `rpc:starterShipcasterTravelMgr.CmdJumpThroughStarterShipcaster`
-//! - `feat:navigation.starter-shipcaster`
-//! - `rpc:shipcasterTravelMgr.CmdJumpThroughShipcaster`
-//! - `feat:navigation.shipcaster`
+//! Integration tests for SDE-backed Faction Warfare Interstellar Shipcasters, Dynamic FW Beacon
+//! Construction/Linking/Cycling/Disruption, and Rookie Starter Shipcasters.
 
 use crate::common;
+use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
-use eve_proto::PyRep;
+use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
-use eve_server::services::cluster_macho_misc_services::{
-    LandingPadRecord, SHIPCASTER_ROTATION_INTERVAL_SECS, starter_launchers_from_sde,
-    with_misc_state,
-};
+use eve_server::services::cluster_macho_misc_services::with_misc_state;
 use glam::DVec3;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+
+async fn rpc(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    svc: &str,
+    method: &str,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    ctx.dispatch_rpc(sess, svc, None, method, args, &HashMap::new(), None)
+        .await
+}
 
 fn kv_i64(rep: &PyRep, key: &str) -> i64 {
     match rep {
@@ -44,6 +44,7 @@ async fn spawn_test_ship(
     type_id: u32,
     pos: DVec3,
 ) {
+    let _ = handle.remove_ball(ship_id).await;
     let _ = handle
         .spawn_ball_with_combat(
             Ball {
@@ -63,111 +64,347 @@ async fn spawn_test_ship(
         .await;
 }
 
+fn place_pilot_in_space(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+) {
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(sys_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = sys_id as i64;
+        }
+    });
+}
+
+async fn seed_and_build_caldari_beacon(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    char_id: i64,
+    ship_id: i64,
+    lowsec_sys: u32,
+    pos: DVec3,
+) -> PyRep {
+    place_pilot_in_space(ctx, sess, char_id, ship_id, lowsec_sys);
+    let handle = ctx.systems.get_or_spawn(lowsec_sys);
+    spawn_test_ship(ctx, &handle, char_id, ship_id, 601, pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
+
+    let cid = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.war_faction_id = Some(500_001);
+        }
+        snap.next_entity_id += 1;
+        let cid = snap.next_entity_id;
+        snap.items.insert(
+            cid,
+            InventoryItemRecord {
+                item_id: cid,
+                type_id: 75933, // State Shipcaster Beacon Constructor
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+        cid
+    });
+
+    let launched = rpc(
+        ctx,
+        sess,
+        "ship",
+        "LaunchForSelf",
+        &[
+            PyRep::List(vec![PyRep::Integer(cid)]),
+            PyRep::Real(pos.x),
+            PyRep::Real(pos.y),
+            PyRep::Real(pos.z),
+        ],
+    )
+    .await
+    .expect("LaunchForSelf beacon constructor");
+    let PyRep::List(launched_list) = launched else {
+        panic!("expected LaunchForSelf list");
+    };
+    let deployed = launched_list[0].clone();
+    let pad_id = kv_i64(&deployed, "itemID");
+    assert!(!kv_bool(&deployed, "isBuilt") && !kv_bool(&deployed, "isLinked"));
+    assert_eq!(kv_i64(&deployed, "linkTimestamp"), 0);
+
+    let comps = ctx.sde.shipcaster_sde_components().expect("SDE components");
+    let spec = comps.under_construction.get(&75933).expect("75933 spec");
+    let mut qty_dict = Vec::new();
+    for (&mat_tid, entry) in &spec.input_items {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.next_entity_id += 1;
+            let sid = snap.next_entity_id;
+            snap.items.insert(
+                sid,
+                InventoryItemRecord {
+                    item_id: sid,
+                    type_id: mat_tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::Cargo,
+                    quantity: i32::try_from(entry.required_qty).unwrap(),
+                    ..Default::default()
+                },
+            );
+        });
+        qty_dict.push((
+            PyRep::Integer(i64::from(mat_tid)),
+            PyRep::Integer(i64::from(entry.required_qty)),
+        ));
+    }
+    let dep_res = rpc(
+        ctx,
+        sess,
+        "beyonce",
+        "CallComponentFromClient",
+        &[
+            PyRep::Integer(pad_id),
+            PyRep::String("underConstruction".into()),
+            PyRep::String("DepositItemsFromShip".into()),
+            PyRep::Dict(qty_dict),
+        ],
+    )
+    .await
+    .expect("DepositItemsFromShip");
+    assert_eq!(
+        dep_res,
+        PyRep::Tuple(vec![PyRep::Bool(true), PyRep::Dict(vec![])])
+    );
+
+    let pads = rpc(
+        ctx,
+        sess,
+        "shipCasterLandingPadMgr",
+        "GetFactionLandingPads",
+        &[PyRep::Integer(500_001)],
+    )
+    .await
+    .expect("GetFactionLandingPads");
+    let PyRep::List(list) = pads else {
+        panic!("expected list");
+    };
+    list.into_iter()
+        .find(|p| kv_i64(p, "itemID") == pad_id)
+        .expect("constructed pad in GetFactionLandingPads")
+}
+
 #[tokio::test]
-async fn test_shipcaster_landing_pads_and_factions_complete() {
+async fn test_shipcaster_dynamic_fw_beacon_construction_linking_limit_and_disruption() {
     // parity: rpc:shipCasterLandingPadMgr.GetAllLandingPads
     // parity: rpc:shipCasterLandingPadMgr.GetFactionLandingPads
     // parity: rpc:shipCasterLauncherMgr.GetFactionsWithShipcaster
+    // parity: notify:OnShipcasterTargetStateChanged
     eve_testkit::attest(&[
         "rpc:shipCasterLandingPadMgr.GetAllLandingPads",
         "rpc:shipCasterLandingPadMgr.GetFactionLandingPads",
         "rpc:shipCasterLauncherMgr.GetFactionsWithShipcaster",
+        "notify:OnShipcasterTargetStateChanged",
     ]);
+
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
+    ctx.advance_secs(4_200);
     let mut sess = SessionState::new(30_101);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
 
-    let kw = HashMap::new();
     let char_id = 90_000_001;
-    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None).await.expect("SelectCharacterID");
+    rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)])
+        .await
+        .expect("SelectCharacterID");
+    let ship_id = sess.ship_id.unwrap_or(100_000_001);
 
-    // 1. GetAllLandingPads returns 8 empire FW beacons (2 per faction), with at most 1 linked per faction
-    let all_pads_rep = ctx.dispatch_rpc(&mut sess, "shipCasterLandingPadMgr", None, "GetAllLandingPads", &[], &kw, None).await.expect("GetAllLandingPads");
-    let PyRep::List(all_pads) = all_pads_rep else { panic!("GetAllLandingPads must return a List"); };
-    assert_eq!(all_pads.len(), 8, "Must seed 8 canonical Empire FW landing pads (2 per faction)");
-
-    let expected_factions = [500001, 500002, 500003, 500004];
-    let mut linked_per_faction: HashMap<i64, usize> = HashMap::new();
-    for pad in &all_pads {
-        let fid = kv_i64(pad, "factionID");
-        assert!(kv_i64(pad, "itemID") > 0, "Landing pad itemID must be positive");
-        assert!(kv_i64(pad, "solarSystemID") > 0, "Landing pad solarSystemID must be valid");
-        assert!(expected_factions.contains(&fid));
-        assert!(kv_bool(pad, "isBuilt") && kv_bool(pad, "canBeLinked") && !kv_bool(pad, "isDisrupted"));
-        if kv_bool(pad, "isLinked") {
-            *linked_per_faction.entry(fid).or_insert(0) += 1;
-        }
-    }
-    for fid in expected_factions {
-        assert_eq!(linked_per_faction.get(&fid).copied(), Some(1), "Each faction must have exactly 1 active linked beacon at a time");
-    }
-
-    // 2. GetFactionLandingPads & 6-minute (360s) rotation across 0..=3 active beacons
-    let expected_systems_by_faction: [(i64, [i64; 2]); 4] = [
-        (500001, [30002811, 30002813]), // Caldari: Onatoh & Tama
-        (500002, [30002056, 30002537]), // Minmatar: Resbroko & Amamake
-        (500003, [30002185, 30003067]), // Amarr: NI-J0B & Huola
-        (500004, [30003855, 30003838]), // Gallente: Mantenault & Oicx
-    ];
-    for &(fid, expected_sys) in &expected_systems_by_faction {
-        let rep = ctx.dispatch_rpc(&mut sess, "shipCasterLandingPadMgr", None, "GetFactionLandingPads", &[PyRep::Integer(fid)], &kw, None).await.expect("GetFactionLandingPads");
-        let PyRep::List(list) = rep else { panic!("Expected list"); };
-        assert_eq!(list.len(), 2);
-        let systems: Vec<i64> = list.iter().map(|p| kv_i64(p, "solarSystemID")).collect();
-        assert_eq!(systems, expected_sys);
-        let linked_before: Vec<i64> = list.iter().filter(|p| kv_bool(p, "isLinked")).map(|p| kv_i64(p, "itemID")).collect();
-        assert_eq!(linked_before.len(), 1);
-
-        // Advance clock by 360 seconds (6 minutes): linked beacon must cycle to the other beacon
-        ctx.advance_secs(SHIPCASTER_ROTATION_INTERVAL_SECS);
-        let rep_after = ctx.dispatch_rpc(&mut sess, "shipCasterLandingPadMgr", None, "GetFactionLandingPads", &[PyRep::Integer(fid)], &kw, None).await.expect("GetFactionLandingPads after 360s");
-        let PyRep::List(list_after) = rep_after else { panic!("Expected list"); };
-        let linked_after: Vec<i64> = list_after.iter().filter(|p| kv_bool(p, "isLinked")).map(|p| kv_i64(p, "itemID")).collect();
-        assert_eq!(linked_after.len(), 1);
-        assert_ne!(linked_before, linked_after, "Active beacon must rotate every 6 minutes (360s)");
-    }
-
-    // Add a 3rd active beacon for Caldari (Nennamaila 30045344) and verify 3-beacon rotation
+    // 1. Verify SDE War HQ launchers exist in Mehatoor, Onnamon, Intaki, and Amo with 0 initial empire pads
+    let factions_rep = rpc(&ctx, &mut sess, "shipCasterLauncherMgr", "GetFactionsWithShipcaster", &[])
+        .await
+        .expect("GetFactionsWithShipcaster");
+    assert_eq!(
+        factions_rep,
+        PyRep::List(vec![
+            PyRep::Integer(500001),
+            PyRep::Integer(500002),
+            PyRep::Integer(500003),
+            PyRep::Integer(500004),
+        ])
+    );
     with_misc_state(&ctx, |st| {
-        st.landing_pads.push(LandingPadRecord {
-            item_id: 104_000_009,
-            type_id: 75929,
-            solar_system_id: 30045344, // Nennamaila
-            faction_id: 500001,
-            is_built: true,
-            link_timestamp: 1_700_000_000,
-            is_disrupted: false,
-            position: DVec3::new(100_000.0, 0.0, 0.0),
-        });
+        let mut hq: Vec<(i32, u32, u32)> = st
+            .launchers
+            .iter()
+            .filter(|l| matches!(l.faction_id, 500001..=500004))
+            .map(|l| (l.faction_id, l.type_id, l.solar_system_id))
+            .collect();
+        hq.sort_by_key(|x| x.0);
+        assert_eq!(
+            hq,
+            vec![
+                (500001, 76466, 30045324), // Caldari -> Onnamon
+                (500002, 76468, 30002055), // Minmatar -> Amo
+                (500003, 76465, 30002974), // Amarr -> Mehatoor
+                (500004, 76467, 30003788), // Gallente -> Intaki
+            ]
+        );
     });
-    let mut seen_linked_ids = HashSet::new();
-    for _ in 0..3 {
-        let rep = ctx.dispatch_rpc(&mut sess, "shipCasterLandingPadMgr", None, "GetFactionLandingPads", &[PyRep::Integer(500001)], &kw, None).await.expect("GetFactionLandingPads 3 beacons");
-        let PyRep::List(list) = rep else { panic!("Expected list"); };
-        assert_eq!(list.len(), 3);
-        let linked: Vec<i64> = list.iter().filter(|p| kv_bool(p, "isLinked")).map(|p| kv_i64(p, "itemID")).collect();
-        assert_eq!(linked.len(), 1);
-        seen_linked_ids.insert(linked[0]);
-        ctx.advance_secs(SHIPCASTER_ROTATION_INTERVAL_SECS);
-    }
-    assert_eq!(seen_linked_ids.len(), 3, "All 3 active beacons must cycle across three 6-minute windows");
 
-    // Negative tests for GetFactionLandingPads
-    let empty = ctx.dispatch_rpc(&mut sess, "shipCasterLandingPadMgr", None, "GetFactionLandingPads", &[PyRep::Integer(999_999)], &kw, None).await.expect("Unknown faction");
-    assert_eq!(empty, PyRep::List(vec![]));
+    let init_pads = rpc(&ctx, &mut sess, "shipCasterLandingPadMgr", "GetAllLandingPads", &[])
+        .await
+        .expect("GetAllLandingPads");
+    assert_eq!(init_pads, PyRep::List(vec![]), "No empire landing pads may be statically pre-seeded");
 
-    let no_arg_err = ctx.dispatch_rpc(&mut sess, "shipCasterLandingPadMgr", None, "GetFactionLandingPads", &[], &kw, None).await.expect_err("Missing factionID");
+    let no_arg_err = rpc(&ctx, &mut sess, "shipCasterLandingPadMgr", "GetFactionLandingPads", &[])
+        .await
+        .expect_err("Missing factionID");
     assert_eq!(no_arg_err.code, "InvalidArguments");
 
-    // 3. GetFactionsWithShipcaster
-    let factions_rep = ctx.dispatch_rpc(&mut sess, "shipCasterLauncherMgr", None, "GetFactionsWithShipcaster", &[], &kw, None).await.expect("GetFactionsWithShipcaster");
-    let PyRep::List(factions) = factions_rep else { panic!("GetFactionsWithShipcaster must return List"); };
-    assert_eq!(factions, vec![PyRep::Integer(500001), PyRep::Integer(500002), PyRep::Integer(500003), PyRep::Integer(500004)]);
+    // 2. Highsec deployment rejected; lowsec FW deployment + SDE material contributions build & link up to 3 pads
+    place_pilot_in_space(&ctx, &mut sess, char_id, ship_id, 30_000_142); // Jita (highsec)
+    let hs_cid = ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().war_faction_id = Some(500_001);
+        snap.next_entity_id += 1;
+        let id = snap.next_entity_id;
+        snap.items.insert(
+            id,
+            InventoryItemRecord {
+                item_id: id,
+                type_id: 75933,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+        id
+    });
+    let hs_err = rpc(
+        &ctx,
+        &mut sess,
+        "ship",
+        "LaunchForSelf",
+        &[PyRep::List(vec![PyRep::Integer(hs_cid)])],
+    )
+    .await
+    .expect_err("Highsec beacon deployment must fail");
+    assert_eq!(hs_err.code, "InvalidBeaconDeploymentSystem");
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let lp_before = ctx
+        .db
+        .with_snapshot(|s| s.characters[&char_id].loyalty_points.get(&1_000_180).copied().unwrap_or(0));
+
+    // Build 4 Caldari beacons across lowsec systems (Onatoh 30002811, Tama 30002813, Kedama 30002812, Nennamaila 30045344)
+    let lowsec_systems = [30002811_u32, 30002813, 30002812, 30045344];
+    let mut built_pads = Vec::new();
+    for (idx, &ls_sys) in lowsec_systems.iter().enumerate() {
+        ctx.advance_secs(30);
+        let pad_rep = seed_and_build_caldari_beacon(
+            &ctx,
+            &mut sess,
+            char_id,
+            ship_id,
+            ls_sys,
+            DVec3::new(100_000.0 + (idx as f64) * 5_000.0, 0.0, 0.0),
+        )
+        .await;
+        built_pads.push(pad_rep);
+    }
+
+    // Verify militia LP rewarded from SDE underConstruction inputItems (28,000 LP per completed beacon)
+    let lp_after = ctx
+        .db
+        .with_snapshot(|s| s.characters[&char_id].loyalty_points.get(&1_000_180).copied().unwrap_or(0));
+    assert!(lp_after >= lp_before + 4 * 28_000);
+
+    // First 3 built pads auto-linked with real dynamic timestamps; 4th built pad stays unlinked due to 3-pad cap!
+    for pad in built_pads.iter().take(3) {
+        assert_eq!(kv_i64(pad, "typeID"), 75929);
+        assert!(kv_bool(pad, "isBuilt") && kv_bool(pad, "isLinked"));
+        assert!(kv_i64(pad, "linkTimestamp") > 1_700_004_000);
+    }
+    let fourth_pad_id = kv_i64(&built_pads[3], "itemID");
+    assert!(kv_bool(&built_pads[3], "isBuilt") && kv_bool(&built_pads[3], "canBeLinked"));
+    assert!(!kv_bool(&built_pads[3], "isLinked"));
+    assert_eq!(kv_i64(&built_pads[3], "linkTimestamp"), 0);
+
+    let cap_err = eve_server::services::shipcaster_ops::link_fw_landing_pad(&ctx, fourth_pad_id)
+        .expect_err("Linking 4th pad when 3 are active must fail");
+    assert_eq!(cap_err.code, "MaxLinkedLandingPadsReached");
+
+    let notes = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !notes.iter().any(|n| n.event == "OnUnderConstructionUpdated"),
+        "OnUnderConstructionUpdated is client-local and must not be emitted by the server"
+    );
+    assert!(notes.iter().any(|n| {
+        n.event == "OnSlimItemChange"
+            && n.args.len() == 2
+            && n.args[1].dict_get("component_underConstruction_completed") == Some(&PyRep::Bool(true))
+            && matches!(n.args[1].dict_get("component_underConstruction_progress"), Some(PyRep::Dict(d)) if !d.is_empty())
+    }));
+    assert!(notes
+        .iter()
+        .any(|n| n.event == "OnShipcasterTargetStateChanged" && n.args.len() == 1));
+
+    // 3. Disrupt pad #1 -> unlinks pad #1, emits OnShipcasterTargetStateChanged, and allows pad #4 to link!
+    let first_pad_id = kv_i64(&built_pads[0], "itemID");
+    place_pilot_in_space(&ctx, &mut sess, char_id, ship_id, lowsec_systems[0]);
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let disrupted_pad = eve_server::services::shipcaster_ops::disrupt_or_destroy_fw_landing_pad(
+        &ctx,
+        first_pad_id,
+        false,
+    )
+    .await
+    .expect("disrupt_or_destroy_fw_landing_pad");
+    let disrupted_rep = disrupted_pad.to_keyval();
+    assert!(
+        kv_bool(&disrupted_rep, "isDisrupted")
+            && !kv_bool(&disrupted_rep, "isLinked")
+            && !kv_bool(&disrupted_rep, "canBeLinked")
+    );
+    assert!(ctx
+        .drain_notifications_for_char(char_id)
+        .iter()
+        .any(|n| n.event == "OnShipcasterTargetStateChanged"
+            && n.args == vec![PyRep::Integer(first_pad_id)]));
+
+    let linked_fourth = eve_server::services::shipcaster_ops::link_fw_landing_pad(&ctx, fourth_pad_id)
+        .expect("4th built pad links once slot opens")
+        .to_keyval();
+    assert!(kv_bool(&linked_fourth, "isLinked"));
+
+    let caldari_pads = rpc(
+        &ctx,
+        &mut sess,
+        "shipCasterLandingPadMgr",
+        "GetFactionLandingPads",
+        &[PyRep::Integer(500001)],
+    )
+    .await
+    .expect("GetFactionLandingPads");
+    let PyRep::List(caldari_list) = caldari_pads else {
+        panic!("expected list");
+    };
+    assert_eq!(caldari_list.len(), 4);
 }
 
 #[tokio::test]
-async fn test_starter_shipcaster_travel_complete() {
+async fn test_starter_shipcaster_sde_systems_rookie_age_one_time_use_and_timers() {
     // parity: rpc:starterShipcasterTravelMgr.CanCharacterJump
     // parity: rpc:starterShipcasterTravelMgr.CmdJumpThroughStarterShipcaster
     // parity: feat:navigation.starter-shipcaster
@@ -176,215 +413,224 @@ async fn test_starter_shipcaster_travel_complete() {
         "rpc:starterShipcasterTravelMgr.CmdJumpThroughStarterShipcaster",
         "feat:navigation.starter-shipcaster",
     ]);
+
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let mut sess = SessionState::new(30_102);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
 
-    let kw = HashMap::new();
     let char_id = 90_000_001;
-    let starter_sys: u32 = 30000141; // Kisogo (State War Academy, school_id 17)
-    let hq_sys: u32 = 30045324;      // Onnamon (Caldari FW HQ)
-    let starter_launcher_id: i64 = 105_000_117;
-
-    // Verify all 12 SDE starter schools (school_id 11..=22) map to canonical empire FW HQs
-    let sde_starters = starter_launchers_from_sde(&ctx.sde);
-    assert_eq!(sde_starters.len(), 12, "All 12 empire starter school systems must have Rookie Shipcasters");
-    let expected_hq_by_school: [(i64, u32, u32); 12] = [
-        (105_000_111, 30003489, 30002974), // Chaven -> Mehatoor
-        (105_000_112, 30005042, 30002974), // Sehmy -> Mehatoor
-        (105_000_113, 30001672, 30002974), // Emrayur -> Mehatoor
-        (105_000_114, 30002547, 30002055), // Ammold -> Amo
-        (105_000_115, 30002505, 30002055), // Hulm -> Amo
-        (105_000_116, 30003410, 30002055), // Ryddinjorn -> Amo
-        (105_000_117, 30000141, 30045324), // Kisogo -> Onnamon
-        (105_000_118, 30001392, 30045324), // Amsen -> Onnamon
-        (105_000_119, 30001407, 30045324), // Todaki -> Onnamon
-        (105_000_120, 30004971, 30003788), // Duripant -> Intaki
-        (105_000_121, 30002715, 30003788), // Bourynes -> Intaki
-        (105_000_122, 30005305, 30003788), // Cistuvaert -> Intaki
-    ];
-    for (item_id, sys_id, dest_hq) in expected_hq_by_school {
-        let rec = sde_starters.iter().find(|s| s.item_id == item_id).expect("starter school record");
-        assert_eq!(rec.solar_system_id, sys_id);
-        assert_eq!(rec.staging_system_id, dest_hq);
-    }
-
-    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None).await.expect("SelectCharacterID");
+    rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)])
+        .await
+        .expect("SelectCharacterID");
     let ship_id = sess.ship_id.unwrap_or(100_000_001);
 
-    // 1. CanCharacterJump without weapons/criminal timer in starter hull
-    let can_jump = ctx.dispatch_rpc(&mut sess, "starterShipcasterTravelMgr", None, "CanCharacterJump", &[], &kw, None).await.expect("CanCharacterJump");
-    assert_eq!(can_jump, PyRep::Bool(true));
-
-    // 2. Docked jump rejected
-    sess.station_id = Some(60000001);
-    let docked_err = ctx.dispatch_rpc(&mut sess, "starterShipcasterTravelMgr", None, "CmdJumpThroughStarterShipcaster", &[PyRep::Integer(starter_launcher_id)], &kw, None).await.expect_err("Docked jump fail");
-    assert_eq!(docked_err.code, "CantDoThatWhileDocked");
-    sess.station_id = None;
-
-    // Undock to Kisogo starter system
-    sess.ship_id = Some(ship_id);
-    sess.solar_system_id = Some(starter_sys);
-    ctx.db.with_mut_snapshot(|s| if let Some(ch) = s.characters.get_mut(&char_id) { ch.solar_system_id = starter_sys; ch.station_id = None; ch.structure_id = None; });
-    let handle_starter = ctx.systems.get_or_spawn(starter_sys);
-
-    // 3. ShipNotInSpace error
-    let missing_err = ctx.dispatch_rpc(&mut sess, "starterShipcasterTravelMgr", None, "CmdJumpThroughStarterShipcaster", &[PyRep::Integer(starter_launcher_id)], &kw, None).await.expect_err("ShipNotInSpace");
-    assert_eq!(missing_err.code, "ShipNotInSpace");
-
-    // Spawn ball far away (50,000m; launcher is at 300,000m)
-    spawn_test_ship(&ctx, &handle_starter, char_id, ship_id, 601, DVec3::new(50_000.0, 0.0, 0.0)).await;
-
-    // 4. Invalid target ID & Outside operational range
-    let zero_err = ctx.dispatch_rpc(&mut sess, "starterShipcasterTravelMgr", None, "CmdJumpThroughStarterShipcaster", &[PyRep::Integer(0)], &kw, None).await.expect_err("TargetNotFound");
-    assert_eq!(zero_err.code, "TargetNotFound");
-
-    let range_err = ctx.dispatch_rpc(&mut sess, "starterShipcasterTravelMgr", None, "CmdJumpThroughStarterShipcaster", &[PyRep::Integer(starter_launcher_id)], &kw, None).await.expect_err("OutsideOperationalRange");
-    assert_eq!(range_err.code, "OutsideOperationalRange");
-
-    // Move ship within range (298,500m => 1,500m away from 300,000m launcher)
-    let _ = handle_starter.remove_ball(ship_id).await;
-    spawn_test_ship(&ctx, &handle_starter, char_id, ship_id, 601, DVec3::new(298_500.0, 0.0, 0.0)).await;
-
-    // 5. Weapons & criminal timers block jump
-    let now = ctx.now_unix();
-    { let mut cw = ctx.crimewatch.write().unwrap(); cw.get_or_create(char_id).weapon_timer_until_unix = now + 60; }
-    assert_eq!(ctx.dispatch_rpc(&mut sess, "starterShipcasterTravelMgr", None, "CanCharacterJump", &[], &kw, None).await.unwrap(), PyRep::Bool(false));
-    let timer_err = ctx.dispatch_rpc(&mut sess, "starterShipcasterTravelMgr", None, "CmdJumpThroughStarterShipcaster", &[PyRep::Integer(starter_launcher_id)], &kw, None).await.expect_err("WeaponsTimerActive");
-    assert_eq!(timer_err.code, "WeaponsTimerActive");
-    { let mut cw = ctx.crimewatch.write().unwrap(); cw.get_or_create(char_id).weapon_timer_until_unix = 0; }
-
-    { let mut cw = ctx.crimewatch.write().unwrap(); cw.get_or_create(char_id).criminal_flag_until_unix = now + 60; }
-    assert_eq!(ctx.dispatch_rpc(&mut sess, "starterShipcasterTravelMgr", None, "CanCharacterJump", &[], &kw, None).await.unwrap(), PyRep::Bool(false));
-    let crim_err = ctx.dispatch_rpc(&mut sess, "starterShipcasterTravelMgr", None, "CmdJumpThroughStarterShipcaster", &[PyRep::Integer(starter_launcher_id)], &kw, None).await.expect_err("CriminalTimerActive");
-    assert_eq!(crim_err.code, "CriminalTimerActive");
-    { let mut cw = ctx.crimewatch.write().unwrap(); cw.get_or_create(char_id).criminal_flag_until_unix = 0; }
-
-    // 6. Cruiser & Capital ship rejected on Rookie Shipcaster
-    ctx.db.with_mut_snapshot(|s| if let Some(ship) = s.items.get_mut(&ship_id) { ship.type_id = 621; }); // Caracal Cruiser
-    assert_eq!(ctx.dispatch_rpc(&mut sess, "starterShipcasterTravelMgr", None, "CanCharacterJump", &[], &kw, None).await.unwrap(), PyRep::Bool(false));
-    let cruiser_err = ctx.dispatch_rpc(&mut sess, "starterShipcasterTravelMgr", None, "CmdJumpThroughStarterShipcaster", &[PyRep::Integer(starter_launcher_id)], &kw, None).await.expect_err("Cruiser rejected");
-    assert_eq!(cruiser_err.code, "ShipClassNotEligibleForStarterShipcaster");
-
-    ctx.db.with_mut_snapshot(|s| if let Some(ship) = s.items.get_mut(&ship_id) { ship.type_id = 19720; }); // Revelation Dreadnought
-    let cap_err = ctx.dispatch_rpc(&mut sess, "starterShipcasterTravelMgr", None, "CmdJumpThroughStarterShipcaster", &[PyRep::Integer(starter_launcher_id)], &kw, None).await.expect_err("CapitalShipCannotJumpShipcaster");
-    assert_eq!(cap_err.code, "CapitalShipCannotJumpShipcaster");
-    ctx.db.with_mut_snapshot(|s| if let Some(ship) = s.items.get_mut(&ship_id) { ship.type_id = 601; });
-
-    // 7. Arbitrary destinationSystemID rejected; positive jump to Onnamon (30045324) succeeds
-    let invalid_dest_err = ctx.dispatch_rpc(&mut sess, "starterShipcasterTravelMgr", None, "CmdJumpThroughStarterShipcaster", &[PyRep::Integer(30000142)], &kw, None).await.expect_err("Arbitrary destination system");
-    assert_eq!(invalid_dest_err.code, "InvalidDestinationSystem");
-
-    ctx.advance_secs(15);
-    let jump_res = ctx.dispatch_rpc(&mut sess, "starterShipcasterTravelMgr", None, "CmdJumpThroughStarterShipcaster", &[PyRep::Integer(hq_sys as i64)], &kw, None).await.expect("Starter jump success to Onnamon");
-    assert_eq!(jump_res, PyRep::None);
-    assert_eq!(sess.solar_system_id, Some(hq_sys));
-
-    assert!(handle_starter.get_ball_snapshot(ship_id).await.unwrap().is_none());
-    let handle_hq = ctx.systems.get_or_spawn(hq_sys);
-    assert!(handle_hq.get_ball_snapshot(ship_id).await.unwrap().is_some());
-
-    ctx.db.with_snapshot(|s| {
-        assert_eq!(s.characters.get(&char_id).unwrap().solar_system_id, hq_sys);
-        assert_eq!(s.items.get(&ship_id).unwrap().location_id, hq_sys as i64);
+    // 1. Verify SDE starter shipcasters cover all 60 school starter/career systems + 4 Exordium embassy systems = 64 systems
+    let (career_launcher_id, career_launcher_pos) = with_misc_state(&ctx, |st| {
+        assert!(st.starter_launchers.len() >= 64, "Expected >= 64 SDE starter/career/embassy launchers");
+        for req_sys in [30030141_u32, 30013489, 30014971, 30012547, 30100070, 30100063, 30100077, 30100084] {
+            assert!(
+                st.starter_launchers.iter().any(|l| l.solar_system_id == req_sys),
+                "Missing SDE starter shipcaster in system {req_sys}"
+            );
+        }
+        let caldari_career = st
+            .starter_launchers
+            .iter()
+            .find(|l| l.solar_system_id == 30030141) // State War Academy career system (Jouvulen)
+            .expect("Jouvulen starter shipcaster");
+        assert_eq!(caldari_career.staging_system_id, 30045324); // Onnamon War HQ
+        assert_eq!(caldari_career.staging_station_id, 60015184);
+        (caldari_career.item_id, caldari_career.position)
     });
+
+    let now = ctx.now_unix();
+    place_pilot_in_space(&ctx, &mut sess, char_id, ship_id, 30030141);
+    let handle_starter = ctx.systems.get_or_spawn(30030141);
+    spawn_test_ship(&ctx, &handle_starter, char_id, ship_id, 601, career_launcher_pos + DVec3::new(1_500.0, 0.0, 0.0)).await;
+
+    // 2. Veteran character (> 30 days old) rejected by BOTH CanCharacterJump and CmdJumpThroughStarterShipcaster
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&char_id).unwrap().create_date_unix = now - 31 * 86_400;
+    });
+    assert_eq!(
+        rpc(&ctx, &mut sess, "starterShipcasterTravelMgr", "CanCharacterJump", &[]).await.unwrap(),
+        PyRep::Bool(false)
+    );
+    let vet_err = rpc(
+        &ctx,
+        &mut sess,
+        "starterShipcasterTravelMgr",
+        "CmdJumpThroughStarterShipcaster",
+        &[PyRep::Integer(career_launcher_id)],
+    )
+    .await
+    .expect_err("Veteran character rejected");
+    assert_eq!(vet_err.code, "CharacterTooOldForStarterShipcaster");
+
+    // Set rookie character age (5 days old <= 30 days)
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&char_id).unwrap().create_date_unix = now - 5 * 86_400;
+    });
+    assert_eq!(
+        rpc(&ctx, &mut sess, "starterShipcasterTravelMgr", "CanCharacterJump", &[]).await.unwrap(),
+        PyRep::Bool(true)
+    );
+
+    // 3. Weapons timer & capital ship block BOTH CanCharacterJump and CmdJumpThroughStarterShipcaster
+    ctx.crimewatch.write().unwrap().get_or_create(char_id).weapon_timer_until_unix = now + 60;
+    assert_eq!(
+        rpc(&ctx, &mut sess, "starterShipcasterTravelMgr", "CanCharacterJump", &[]).await.unwrap(),
+        PyRep::Bool(false)
+    );
+    ctx.crimewatch.write().unwrap().get_or_create(char_id).weapon_timer_until_unix = 0;
+
+    ctx.db.with_mut_snapshot(|s| s.items.get_mut(&ship_id).unwrap().type_id = 19720);
+    assert_eq!(
+        rpc(&ctx, &mut sess, "starterShipcasterTravelMgr", "CanCharacterJump", &[]).await.unwrap(),
+        PyRep::Bool(false)
+    );
+    let cap_err = rpc(
+        &ctx,
+        &mut sess,
+        "starterShipcasterTravelMgr",
+        "CmdJumpThroughStarterShipcaster",
+        &[PyRep::Integer(career_launcher_id)],
+    )
+    .await
+    .expect_err("Capital rejected");
+    assert_eq!(cap_err.code, "CapitalShipCannotJumpShipcaster");
+    ctx.db.with_mut_snapshot(|s| s.items.get_mut(&ship_id).unwrap().type_id = 601);
+
+    // 4. Positive rookie jump -> arrives in Onnamon (30045324), then one-time-use blocks any second jump!
+    ctx.advance_secs(15);
+    let jump_ok = rpc(
+        &ctx,
+        &mut sess,
+        "starterShipcasterTravelMgr",
+        "CmdJumpThroughStarterShipcaster",
+        &[PyRep::Integer(career_launcher_id)],
+    )
+    .await
+    .expect("Rookie jump to Onnamon War HQ");
+    assert_eq!(jump_ok, PyRep::None);
+    assert_eq!(sess.solar_system_id, Some(30045324));
+
+    assert_eq!(
+        rpc(&ctx, &mut sess, "starterShipcasterTravelMgr", "CanCharacterJump", &[]).await.unwrap(),
+        PyRep::Bool(false),
+        "One-time-use must immediately flip CanCharacterJump to false"
+    );
+    place_pilot_in_space(&ctx, &mut sess, char_id, ship_id, 30030141);
+    spawn_test_ship(&ctx, &handle_starter, char_id, ship_id, 601, career_launcher_pos + DVec3::new(1_500.0, 0.0, 0.0)).await;
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, char_id);
+    let reuse_err = rpc(
+        &ctx,
+        &mut sess,
+        "starterShipcasterTravelMgr",
+        "CmdJumpThroughStarterShipcaster",
+        &[PyRep::Integer(career_launcher_id)],
+    )
+    .await
+    .expect_err("Second starter shipcaster jump must fail");
+    assert_eq!(reuse_err.code, "StarterShipcasterAlreadyUsed");
 }
 
 #[tokio::test]
-async fn test_interstellar_shipcaster_travel_complete() {
+async fn test_interstellar_shipcaster_war_hq_jump_and_six_minute_cycle_rotation() {
     // parity: rpc:shipcasterTravelMgr.CmdJumpThroughShipcaster
     // parity: feat:navigation.shipcaster
     eve_testkit::attest(&[
         "rpc:shipcasterTravelMgr.CmdJumpThroughShipcaster",
         "feat:navigation.shipcaster",
     ]);
+
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
+    ctx.advance_secs(3_600);
     let mut sess = SessionState::new(30_103);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
 
-    let kw = HashMap::new();
     let char_id = 90_000_001;
-    let hq_sys: u32 = 30045324; // Onnamon (Caldari FW HQ)
-    let origin_launcher_id: i64 = 105_000_001;
-
-    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None).await.expect("SelectCharacterID");
+    rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)])
+        .await
+        .expect("SelectCharacterID");
     let ship_id = sess.ship_id.unwrap_or(100_000_001);
 
-    sess.ship_id = Some(ship_id);
-    sess.solar_system_id = Some(hq_sys);
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(ch) = s.characters.get_mut(&char_id) { ch.solar_system_id = hq_sys; ch.station_id = None; ch.structure_id = None; }
-        if let Some(ship) = s.items.get_mut(&ship_id) { ship.location_id = hq_sys as i64; }
+    // Construct 2 linked Caldari beacons in Onatoh (30002811) and Tama (30002813)
+    let pad_a = seed_and_build_caldari_beacon(&ctx, &mut sess, char_id, ship_id, 30002811, DVec3::new(100_000.0, 0.0, 0.0)).await;
+    let pad_b = seed_and_build_caldari_beacon(&ctx, &mut sess, char_id, ship_id, 30002813, DVec3::new(120_000.0, 0.0, 0.0)).await;
+    let pad_a_id = kv_i64(&pad_a, "itemID");
+    let pad_b_id = kv_i64(&pad_b, "itemID");
+
+    let (onnamon_launcher_id, onnamon_launcher_pos) = with_misc_state(&ctx, |st| {
+        let l = st.launchers.iter().find(|l| l.faction_id == 500_001).unwrap();
+        (l.item_id, l.position)
     });
 
-    let handle_hq = ctx.systems.get_or_spawn(hq_sys);
-    spawn_test_ship(&ctx, &handle_hq, char_id, ship_id, 601, DVec3::new(198_000.0, 0.0, 0.0)).await;
+    // Align clock to start of an even 360s cycle (`(now / 360) % 2 == 0` -> `pad_a` active, `pad_b` inactive)
+    let rem = ctx.now_unix() % 720;
+    if rem != 0 {
+        ctx.advance_secs(720 - rem);
+    }
 
-    // Determine currently linked and currently unlinked Caldari warzone beacons
-    let pads_rep = ctx.dispatch_rpc(&mut sess, "shipCasterLandingPadMgr", None, "GetFactionLandingPads", &[PyRep::Integer(500001)], &kw, None).await.expect("GetFactionLandingPads");
-    let PyRep::List(caldari_pads) = pads_rep else { panic!("Expected List"); };
-    let linked_pad = caldari_pads.iter().find(|p| kv_bool(p, "isLinked")).expect("1 linked Caldari pad");
-    let unlinked_pad = caldari_pads.iter().find(|p| !kv_bool(p, "isLinked")).expect("1 unlinked Caldari pad");
-    let linked_pad_id = kv_i64(linked_pad, "itemID");
-    let linked_pad_sys = kv_i64(linked_pad, "solarSystemID") as u32;
-    let unlinked_pad_id = kv_i64(unlinked_pad, "itemID");
-    let unlinked_pad_sys = kv_i64(unlinked_pad, "solarSystemID") as u32;
-
-    // 1. Non-existent landing pad rejected
-    let missing_err = ctx.dispatch_rpc(&mut sess, "shipcasterTravelMgr", None, "CmdJumpThroughShipcaster", &[PyRep::Integer(origin_launcher_id), PyRep::Integer(linked_pad_sys as i64), PyRep::Integer(999_999)], &kw, None).await.expect_err("Non-existent pad");
-    assert_eq!(missing_err.code, "LandingPadNotFound");
-
-    // 2. Hostile militia & neutral character rejected
-    ctx.db.with_mut_snapshot(|s| if let Some(ch) = s.characters.get_mut(&char_id) { ch.war_faction_id = Some(500002); });
-    let hostile_err = ctx.dispatch_rpc(&mut sess, "shipcasterTravelMgr", None, "CmdJumpThroughShipcaster", &[PyRep::Integer(linked_pad_id), PyRep::Integer(linked_pad_id), PyRep::Integer(origin_launcher_id)], &kw, None).await.expect_err("Hostile militia");
-    assert_eq!(hostile_err.code, "FactionShipcasterAccessDenied");
-
-    ctx.db.with_mut_snapshot(|s| if let Some(ch) = s.characters.get_mut(&char_id) { ch.war_faction_id = None; });
-    let neutral_err = ctx.dispatch_rpc(&mut sess, "shipcasterTravelMgr", None, "CmdJumpThroughShipcaster", &[PyRep::Integer(linked_pad_id), PyRep::Integer(linked_pad_id), PyRep::Integer(origin_launcher_id)], &kw, None).await.expect_err("Neutral militia");
-    assert_eq!(neutral_err.code, "FactionShipcasterAccessDenied");
-
-    // Enroll in Caldari militia (500001)
-    ctx.db.with_mut_snapshot(|s| if let Some(ch) = s.characters.get_mut(&char_id) { ch.war_faction_id = Some(500001); });
-
-    // 3. Capital ship rejected
-    ctx.db.with_mut_snapshot(|s| if let Some(ship) = s.items.get_mut(&ship_id) { ship.type_id = 19720; });
-    let cap_err = ctx.dispatch_rpc(&mut sess, "shipcasterTravelMgr", None, "CmdJumpThroughShipcaster", &[PyRep::Integer(linked_pad_id), PyRep::Integer(linked_pad_id), PyRep::Integer(origin_launcher_id)], &kw, None).await.expect_err("Capital ship");
-    assert_eq!(cap_err.code, "CapitalShipCannotJumpShipcaster");
-    ctx.db.with_mut_snapshot(|s| if let Some(ship) = s.items.get_mut(&ship_id) { ship.type_id = 601; });
-
-    // 4. Attempting to jump to the beacon NOT linked in this 6-minute window is rejected
-    let unlinked_window_err = ctx.dispatch_rpc(&mut sess, "shipcasterTravelMgr", None, "CmdJumpThroughShipcaster", &[PyRep::Integer(origin_launcher_id), PyRep::Integer(unlinked_pad_sys as i64), PyRep::Integer(unlinked_pad_id)], &kw, None).await.expect_err("Unlinked beacon in current 6m window");
-    assert_eq!(unlinked_window_err.code, "LandingPadNotLinked");
-
-    // 5. Positive jump to currently linked warzone beacon succeeds
+    place_pilot_in_space(&ctx, &mut sess, char_id, ship_id, 30045324); // Onnamon War HQ
+    let handle_hq = ctx.systems.get_or_spawn(30045324);
+    spawn_test_ship(&ctx, &handle_hq, char_id, ship_id, 601, onnamon_launcher_pos + DVec3::new(1_500.0, 0.0, 0.0)).await;
     eve_server::services::space_destiny::clear_session_change_timer(&ctx, char_id);
-    let jump_res = ctx.dispatch_rpc(&mut sess, "shipcasterTravelMgr", None, "CmdJumpThroughShipcaster", &[PyRep::Integer(linked_pad_id), PyRep::Integer(linked_pad_id), PyRep::Integer(origin_launcher_id)], &kw, None).await.expect("CmdJumpThroughShipcaster");
-    assert_eq!(jump_res, PyRep::None);
-    assert_eq!(sess.solar_system_id, Some(linked_pad_sys));
 
-    assert!(handle_hq.get_ball_snapshot(ship_id).await.unwrap().is_none());
-    let handle_warzone = ctx.systems.get_or_spawn(linked_pad_sys);
-    assert!(handle_warzone.get_ball_snapshot(ship_id).await.unwrap().is_some());
+    // 1. Inactive linked beacon in current 6-minute cycle is rejected
+    let cycle_err = rpc(
+        &ctx,
+        &mut sess,
+        "shipcasterTravelMgr",
+        "CmdJumpThroughShipcaster",
+        &[PyRep::Integer(onnamon_launcher_id), PyRep::Integer(30002813), PyRep::Integer(pad_b_id)],
+    )
+    .await
+    .expect_err("Jumping to off-cycle beacon must fail");
+    assert_eq!(cycle_err.code, "ShipcasterTargetNotActiveInCycle");
 
-    // 6. Return pilot to Onnamon HQ and advance clock by 360 seconds (6 minutes):
-    // Previously unlinked beacon is now the active linked target!
-    let _ = handle_warzone.remove_ball(ship_id).await;
-    spawn_test_ship(&ctx, &handle_hq, char_id, ship_id, 601, DVec3::new(198_000.0, 0.0, 0.0)).await;
-    sess.solar_system_id = Some(hq_sys);
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(ch) = s.characters.get_mut(&char_id) { ch.solar_system_id = hq_sys; }
-        if let Some(ship) = s.items.get_mut(&ship_id) { ship.location_id = hq_sys as i64; }
-    });
+    // 2. Hostile militia rejected
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&char_id).unwrap().war_faction_id = Some(500_002));
+    let hostile_err = rpc(
+        &ctx,
+        &mut sess,
+        "shipcasterTravelMgr",
+        "CmdJumpThroughShipcaster",
+        &[PyRep::Integer(onnamon_launcher_id), PyRep::Integer(30002811), PyRep::Integer(pad_a_id)],
+    )
+    .await
+    .expect_err("Hostile militia rejected");
+    assert_eq!(hostile_err.code, "FactionShipcasterAccessDenied");
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&char_id).unwrap().war_faction_id = Some(500_001));
 
-    // Immediate re-jump before session timer expires fails
-    let rejump_err = ctx.dispatch_rpc(&mut sess, "shipcasterTravelMgr", None, "CmdJumpThroughShipcaster", &[PyRep::Integer(linked_pad_id), PyRep::Integer(linked_pad_id), PyRep::Integer(origin_launcher_id)], &kw, None).await.expect_err("SessionChangeInProgress");
-    assert_eq!(rejump_err.code, "SessionChangeInProgress");
+    // 3. Jump to active cycle beacon (`pad_a` in Onatoh 30002811) succeeds!
+    let jump_a = rpc(
+        &ctx,
+        &mut sess,
+        "shipcasterTravelMgr",
+        "CmdJumpThroughShipcaster",
+        &[PyRep::Integer(onnamon_launcher_id), PyRep::Integer(30002811), PyRep::Integer(pad_a_id)],
+    )
+    .await
+    .expect("Jump to active pad_a");
+    assert_eq!(jump_a, PyRep::None);
+    assert_eq!(sess.solar_system_id, Some(30002811));
 
-    // Advance 360 seconds (clears 10s session timer AND rotates Shipcaster to the second beacon)
-    ctx.advance_secs(SHIPCASTER_ROTATION_INTERVAL_SECS);
-    let rotated_jump = ctx.dispatch_rpc(&mut sess, "shipcasterTravelMgr", None, "CmdJumpThroughShipcaster", &[PyRep::Integer(origin_launcher_id), PyRep::Integer(unlinked_pad_sys as i64), PyRep::Integer(unlinked_pad_id)], &kw, None).await.expect("Rotated CmdJumpThroughShipcaster after 360s");
-    assert_eq!(rotated_jump, PyRep::None);
-    assert_eq!(sess.solar_system_id, Some(unlinked_pad_sys));
+    // 4. Advance 360s (6 minutes) -> active target rotates to `pad_b` in Tama (30002813)!
+    ctx.advance_secs(360);
+    place_pilot_in_space(&ctx, &mut sess, char_id, ship_id, 30045324);
+    spawn_test_ship(&ctx, &handle_hq, char_id, ship_id, 601, onnamon_launcher_pos + DVec3::new(1_500.0, 0.0, 0.0)).await;
+    let jump_b = rpc(
+        &ctx,
+        &mut sess,
+        "shipcasterTravelMgr",
+        "CmdJumpThroughShipcaster",
+        &[PyRep::Integer(onnamon_launcher_id), PyRep::Integer(30002813), PyRep::Integer(pad_b_id)],
+    )
+    .await
+    .expect("Jump to rotated pad_b after 360s");
+    assert_eq!(jump_b, PyRep::None);
+    assert_eq!(sess.solar_system_id, Some(30002813));
 }

@@ -28,6 +28,7 @@ pub struct SystemHandle {
     pub ballpark: Arc<RwLock<Ballpark>>,
     pub(crate) actor_state: Arc<RwLock<super::SystemActorState>>,
     pub(crate) last_auto_stepped_unix: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) tidi_factor_bits: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) npc_death_hook: Arc<RwLock<Option<super::NpcDeathHook>>>,
     pub(crate) module_deactivation_hook: Arc<RwLock<Option<super::ModuleDeactivationHook>>>,
     pub(crate) target_lock_completed_hook: Arc<RwLock<Option<super::TargetLockCompletedHook>>>,
@@ -571,16 +572,86 @@ impl SystemHandle {
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
     }
 
+    pub fn tidi_factor(&self) -> f64 {
+        let raw = f64::from_bits(self.tidi_factor_bits.load(std::sync::atomic::Ordering::Relaxed));
+        if raw.is_finite() {
+            raw.clamp(0.10, 1.0)
+        } else {
+            1.0
+        }
+    }
+
+    pub fn set_tidi_factor_raw(&self, factor: f64) -> f64 {
+        let clamped = if factor.is_finite() {
+            factor.clamp(0.10, 1.0)
+        } else {
+            1.0
+        };
+        let prev_bits = self
+            .tidi_factor_bits
+            .swap(clamped.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        let prev = f64::from_bits(prev_bits);
+        if prev.is_finite() {
+            prev.clamp(0.10, 1.0)
+        } else {
+            1.0
+        }
+    }
+
+    /// Computes live simulation load in this solar system (dynamic balls + weighted active module/repair/anchoring cycles).
+    pub fn active_entity_and_cycle_load(&self) -> usize {
+        let dyn_balls = {
+            let bp = self.ballpark.read().unwrap_or_else(|e| e.into_inner());
+            bp.balls.keys().filter(|&&bid| !bp.is_static_ball(bid)).count()
+        };
+        let cycle_load = {
+            let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
+            st.active_module_cycles.len().saturating_mul(2)
+                + st.pending_anchoring_disruptors.len()
+                + st.active_nanite_repairs.len()
+        };
+        dyn_balls.saturating_add(cycle_load)
+    }
+
+    /// Synchronously respawns fully depleted SDE ore belts and depleted ice blocks during 11:00 UTC downtime.
+    pub fn respawn_depleted_belts_on_downtime(&self) -> usize {
+        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+        let super::SystemActorState {
+            asteroids,
+            asteroid_templates,
+            sde_opt,
+            db_opt,
+            ..
+        } = &mut *st;
+        let count = super::belts::respawn_depleted_belts_on_downtime_inner(
+            &mut bp,
+            asteroids,
+            asteroid_templates,
+            sde_opt,
+            db_opt,
+        );
+        if count > 0 {
+            super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        }
+        count
+    }
+
     pub fn try_step_manual(&self, dt: f64) {
+        let dt_sim = if dt > 0.0 && dt.is_finite() {
+            dt * self.tidi_factor()
+        } else {
+            dt
+        };
         let db_opt = {
             let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            if dt > 0.0 && dt.is_finite() {
-                st.sim_elapsed_secs += dt;
+            if dt_sim > 0.0 && dt_sim.is_finite() {
+                st.sim_elapsed_secs += dt_sim;
             }
             st.db_opt.clone()
         };
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        let events = bp.step(dt);
+        let events = bp.step(dt_sim);
         persist_landed_warps_in_db(&bp, &events, &db_opt);
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
         let broadcast = build_tick_broadcast(self.solar_system_id, &mut bp, events);

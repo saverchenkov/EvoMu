@@ -78,6 +78,7 @@ pub struct SystemRegistry {
     pub tactical_state: Arc<RwLock<crate::services::tactical_modules::TacticalModulesState>>,
     pending_notifications_opt: Option<Arc<RwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>>,
     notify_tx_opt: Option<broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
+    pub cluster_nodes: RwLock<ClusterNodeRegistry>,
 }
 
 impl Default for SystemRegistry {
@@ -104,6 +105,7 @@ impl SystemRegistry {
             tactical_state: Arc::new(RwLock::new(Default::default())),
             pending_notifications_opt: None,
             notify_tx_opt: None,
+            cluster_nodes: RwLock::new(ClusterNodeRegistry::default()),
         }
     }
 
@@ -124,6 +126,7 @@ impl SystemRegistry {
             tactical_state: Arc::new(RwLock::new(Default::default())),
             pending_notifications_opt: None,
             notify_tx_opt: None,
+            cluster_nodes: RwLock::new(ClusterNodeRegistry::default()),
         }
     }
 
@@ -144,6 +147,7 @@ impl SystemRegistry {
             tactical_state: Arc::new(RwLock::new(Default::default())),
             pending_notifications_opt: None,
             notify_tx_opt: None,
+            cluster_nodes: RwLock::new(ClusterNodeRegistry::default()),
         }
     }
 
@@ -392,12 +396,19 @@ impl SystemRegistry {
                     downtime_utc_atomic.load(std::sync::atomic::Ordering::Relaxed),
                 );
             }
-            crate::sp6_lifecycle::populate_persisted_space_objects(
+            let pending = crate::sp6_lifecycle::populate_persisted_space_objects(
                 &mut initial_ballpark,
                 solar_system_id,
                 sde,
                 db,
-            )
+            );
+            crate::services::cluster_macho_misc_services::populate_shipcaster_balls_with_sde(
+                solar_system_id,
+                &mut initial_ballpark,
+                Some(sde),
+                Some(db),
+            );
+            pending
         } else {
             Vec::new()
         };
@@ -424,6 +435,25 @@ impl SystemRegistry {
         }));
         let actor_state_actor = actor_state_shared.clone();
         let last_auto_stepped_unix = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let initial_tidi = self
+            .cluster_nodes
+            .read()
+            .ok()
+            .and_then(|cn| cn.manual_tidi_overrides.get(&solar_system_id).copied())
+            .or_else(|| {
+                self.db.as_ref().and_then(|db| {
+                    db.with_snapshot(|snap| {
+                        let nid = -(7_500_000_000_000_i64.saturating_add(solar_system_id as i64));
+                        snap.owner_notes
+                            .get(&nid)
+                            .and_then(|n| serde_json::from_str::<f64>(&n.note).ok())
+                    })
+                })
+            })
+            .unwrap_or(1.0)
+            .clamp(0.10, 1.0);
+        let tidi_factor_bits = Arc::new(std::sync::atomic::AtomicU64::new(initial_tidi.to_bits()));
+        let tidi_factor_bits_actor = tidi_factor_bits.clone();
 
         tokio::spawn(async move {
             // parity: feat:lifecycle.world-unobserved-system-sim, plan:SP-7
@@ -968,8 +998,17 @@ impl SystemRegistry {
                                 }
                             }
                             SystemCommand::StepManual { dt, reply } => {
-                                if dt > 0.0 && dt.is_finite() {
-                                    *sim_elapsed_secs += dt;
+                                let raw_tidi = f64::from_bits(
+                                    tidi_factor_bits_actor.load(std::sync::atomic::Ordering::Relaxed),
+                                );
+                                let tidi = if raw_tidi.is_finite() {
+                                    raw_tidi.clamp(0.10, 1.0)
+                                } else {
+                                    1.0
+                                };
+                                let dt_sim = if dt > 0.0 && dt.is_finite() { dt * tidi } else { dt };
+                                if dt_sim > 0.0 && dt_sim.is_finite() {
+                                    *sim_elapsed_secs += dt_sim;
                                 }
                                 respawn_due_asteroids(
                                     &mut ballpark,
@@ -979,7 +1018,7 @@ impl SystemRegistry {
                                     &db_opt,
                                 );
                                 sync_player_slim_items(&mut ballpark, &db_opt);
-                                let events = ballpark.step(dt);
+                                let events = ballpark.step(dt_sim);
                                 persist_landed_warps_in_db(&ballpark, &events, &db_opt);
                                 if let Some(lock_hook) = target_lock_completed_hook_actor.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
                                     for ev in &events {
@@ -1011,7 +1050,7 @@ impl SystemRegistry {
                                     &mut ballpark, active_module_cycles, pending_anchoring_disruptors,
                                     active_nanite_repairs, ship_rack_heat, rah_incoming_damage,
                                     &base_scramble_strengths, &base_core_strengths, &sde_opt, &db_opt,
-                                    mechanic_rng_opt, tactical_state, pending_cycle_actions, dt, deact_guard.as_ref(),
+                                    mechanic_rng_opt, tactical_state, pending_cycle_actions, dt_sim, deact_guard.as_ref(),
                                 );
                                 if let Some(db) = db_opt.as_ref() {
                                     for &(target_ball_id, _) in &destroyed_balls {
@@ -1064,7 +1103,7 @@ impl SystemRegistry {
                                         db_opt.as_ref(),
                                         mechanic_rng_opt.as_deref(),
                                         solar_system_id,
-                                        dt,
+                                        dt_sim,
                                         step_now_unix,
                                     );
                                     crate::services::doomsday_aoe_ops::step_bosonic_doomsday_in_ballpark(
@@ -1381,6 +1420,7 @@ impl SystemRegistry {
             ballpark: ballpark_shared,
             actor_state: actor_state_shared,
             last_auto_stepped_unix,
+            tidi_factor_bits,
             npc_death_hook: Arc::clone(&self.npc_death_hook),
             module_deactivation_hook: Arc::clone(&self.module_deactivation_hook),
             target_lock_completed_hook: Arc::clone(&self.target_lock_completed_hook),

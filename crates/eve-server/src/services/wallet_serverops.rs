@@ -14,6 +14,7 @@
 
 use super::wallet_services_ext;
 pub use super::wallet_services_ext::*;
+pub use super::serverops_cluster::*;
 
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::{InventoryFlag, IskCents, WorldStateSnapshot};
@@ -197,140 +198,6 @@ pub fn process_due_automatic_bills(ctx: &ServerContext) -> usize {
     })
 }
 
-/// Sets a solar system's Time Dilation factor (`0.10..=1.0`) (`feat:serverops.time-dilation`).
-pub fn set_system_tidi_factor(ctx: &ServerContext, solar_system_id: u32, requested_factor: f64) -> f64 {
-    let factor = requested_factor.clamp(0.10, 1.0);
-    let now = ctx.now_unix();
-    ctx.db.with_mut_snapshot(|snap| {
-        let nid = -(7_500_000_000_000_i64.saturating_add(solar_system_id as i64));
-        save_json_note(
-            snap,
-            nid,
-            -75,
-            solar_system_id as i64,
-            format!("tidi:{solar_system_id}"),
-            &factor,
-            now,
-        );
-    });
-    factor
-}
-
-/// Reads the current Time Dilation factor (`0.10..=1.0`, default `1.0`) for `solar_system_id`.
-pub fn get_system_tidi_factor(ctx: &ServerContext, solar_system_id: u32) -> f64 {
-    ctx.db.with_snapshot(|snap| {
-        let nid = -(7_500_000_000_000_i64.saturating_add(solar_system_id as i64));
-        snap.owner_notes.get(&nid).and_then(|n| serde_json::from_str::<f64>(&n.note).ok()).unwrap_or(1.0)
-    })
-}
-
-/// Assigns or reinforces a solar system onto a cluster node (`feat:serverops.node-balancing`).
-pub fn assign_or_reinforce_system_node(ctx: &ServerContext, solar_system_id: u32, dedicated_node_id: Option<u32>) -> u32 {
-    let now = ctx.now_unix();
-    let default_node = 1 + (solar_system_id % 4);
-    ctx.db.with_mut_snapshot(|snap| {
-        let nid = -(7_600_000_000_000_i64.saturating_add(solar_system_id as i64));
-        if let Some(node_id) = dedicated_node_id {
-            save_json_note(snap, nid, -76, solar_system_id as i64, format!("node:{solar_system_id}"), &node_id, now);
-            node_id
-        } else {
-            snap.owner_notes.get(&nid).and_then(|n| serde_json::from_str::<u32>(&n.note).ok()).unwrap_or(default_node)
-        }
-    })
-}
-
-/// Executes the 11:00 UTC cluster downtime cycle and daily maintenance jobs (`feat:serverops.downtime`, `feat:serverops.daily-jobs`).
-pub fn run_daily_downtime_and_jobs(ctx: &ServerContext) -> HashMap<String, i64> { run_daily_downtime_and_jobs_inner(ctx, false) }
-pub fn run_daily_downtime_and_jobs_forced(ctx: &ServerContext) -> HashMap<String, i64> { run_daily_downtime_and_jobs_inner(ctx, true) }
-
-fn run_daily_downtime_and_jobs_inner(ctx: &ServerContext, force_abyssal_evac: bool) -> HashMap<String, i64> {
-    let now = ctx.now_unix();
-    let is_1100_utc_window = (11 * 3_600..11 * 3_600 + 900).contains(&(now % 86_400));
-    let expired_raffles = sweep_expired_raffles(ctx) as i64;
-    let auto_paid_bills = process_due_automatic_bills(ctx) as i64;
-    let evacuated_abyssal = if is_1100_utc_window || force_abyssal_evac { crate::services::pve_special_sites::evacuate_abyssal_pockets_for_downtime(ctx) } else { 0 };
-    crate::services::fleet_social::fleet_social_notify::prune_offline_fleets_and_channels(ctx);
-    // parity: feat:lifecycle.wreck-downtime, feat:lifecycle.mission-downtime-respawn, plan:SP-7
-    let (npc_wrecks_cleaned, mission_npcs_respawned) =
-        crate::sp6_lifecycle::cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx);
-    crate::services::wormhole_pve_escalations::process_wormhole_sites_on_downtime(ctx);
-    let (replenished_asteroids, expired_order_list, expired_contracts, sov_decayed) =
-        ctx.db.with_mut_snapshot(|snap| {
-            let mut ast_count = 0_i64;
-            for item in snap.items.values_mut() {
-                if (30_000_000..=50_000_000).contains(&item.location_id)
-                    && ctx
-                        .sde
-                        .types
-                        .get(&item.type_id)
-                        .map(|t| t.category_id == 25)
-                        .unwrap_or(false)
-                {
-                    let target_qty = item
-                        .dynamic_attributes
-                        .get(&1805)
-                        .copied()
-                        .unwrap_or(25_000.0) as i32;
-                    if item.quantity < target_qty {
-                        item.quantity = target_qty;
-                        ast_count += 1;
-                    }
-                }
-            }
-            let expired_order_list = super::market_contracts::sweep_expired_orders(snap, now);
-            let expired_cids: Vec<i64> = snap
-                .contracts
-                .iter()
-                .filter(|(_, c)| {
-                    (c.status == "Outstanding" || c.status == "InProgress")
-                        && c.expiration_unix > 0
-                        && c.expiration_unix <= now
-                })
-                .map(|(&cid, _)| cid)
-                .collect();
-            let mut exp_contracts = 0_i64;
-            for cid in expired_cids {
-                if snap.resolve_expired_contract(cid, now).is_some() {
-                    exp_contracts += 1;
-                }
-            }
-            let mut sov_cnt = 0_i64;
-            for sov in snap.system_states.values_mut() {
-                if sov.sov_alliance_id.is_some() && sov.military_index > 1 {
-                    sov.military_index -= 1;
-                    sov_cnt += 1;
-                }
-            }
-            (ast_count, expired_order_list, exp_contracts, sov_cnt)
-        });
-    let expired_orders = expired_order_list.len() as i64;
-    super::market_contracts::emit_expired_order_notifications(ctx, &expired_order_list);
-    if is_1100_utc_window {
-        ctx.notify(
-            crate::router::NotificationTarget::All,
-            "OnClusterShutdownInitiated",
-            "clientID",
-            vec![
-                PyRep::String("UI/Shared/ClusterShutdownInitiated".into()),
-                PyRep::Integer(now as i64),
-                PyRep::Integer(900),
-            ],
-        );
-    }
-
-    HashMap::from([
-        ("is1100UtcWindow".into(), i64::from(is_1100_utc_window)),
-        ("replenishedAsteroids".into(), replenished_asteroids),
-        ("expiredMarketOrders".into(), expired_orders),
-        ("expiredContracts".into(), expired_contracts),
-        ("sovSystemsDecayed".into(), sov_decayed),
-        ("autoPaidBills".into(), auto_paid_bills),
-        ("expiredRaffles".into(), expired_raffles),
-        ("evacuatedAbyssalPilots".into(), evacuated_abyssal),
-        ("npcWrecksCleaned".into(), npc_wrecks_cleaned as i64),
-        ("missionNpcsRespawned".into(), mission_npcs_respawned as i64),
-    ])
-}
 
 fn bill_to_row(b: &CorpBillRecord) -> Vec<PyRep> {
     vec![
