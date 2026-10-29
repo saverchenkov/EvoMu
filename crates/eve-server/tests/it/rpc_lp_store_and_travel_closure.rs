@@ -1,16 +1,15 @@
-//! Integration tests for SDE-driven LP Store, NPC-NPC Standings, and Shipcaster Travel.
+//! Integration tests for LP Store mechanics, NPC-NPC Standings dispatch, and Shipcaster Travel mechanics.
 //!
-//! Attests parity for:
-//! - `rpc:LPStoreMgr.GetAvailableOffersFromCorp`
-//! - `rpc:LPStoreMgr.TakeOfferForCharacter`
-//! - `rpc:LPStoreMgr.TakeOfferForCorporation`
-//! - `rpc:standingMgr.GetNPCNPCStandings`
-//! - `rpc:shipCasterLandingPadMgr.GetAllLandingPads`
-//! - `rpc:shipCasterLandingPadMgr.GetFactionLandingPads`
-//! - `rpc:shipCasterLauncherMgr.GetFactionsWithShipcaster`
-//! - `rpc:shipcasterTravelMgr.CmdJumpThroughShipcaster`
-//! - `rpc:starterShipcasterTravelMgr.CanCharacterJump`
-//! - `rpc:starterShipcasterTravelMgr.CmdJumpThroughStarterShipcaster`
+//! Verifies:
+//! - `TakeOfferForCharacter` and `TakeOfferForCorporation` LP/ISK deduction, item consumption, and delivery.
+//! - `standingMgr.GetNPCNPCStandings` Rowset shape and standing values dispatch.
+//! - `starterShipcasterTravelMgr.CanCharacterJump` weapons timer and capital ship restrictions.
+//! - `CmdJumpThroughStarterShipcaster` and `CmdJumpThroughShipcaster` ball transfer and session timer checks.
+//!
+//! DATA GAPs (server-only data not present in V24 client FSD):
+//! - LP store corporation offer catalog is server-only.
+//! - Static NPC-NPC cross-standing matrix is server-internal.
+//! - Starter and interstellar shipcaster placements and linkages are server-side structures.
 
 use crate::common;
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
@@ -80,9 +79,8 @@ async fn spawn_test_ship(
 
 #[tokio::test]
 async fn test_lp_store_mgr_gameplay_closure() {
-    // parity: rpc:LPStoreMgr.GetAvailableOffersFromCorp
-    // parity: rpc:LPStoreMgr.TakeOfferForCharacter
-    // parity: rpc:LPStoreMgr.TakeOfferForCorporation
+    // DATA GAP: LP store corporation offer catalog is server-only and not present in V24 client FSD.
+    // Tests authentic LP/ISK deduction, required item trade-in consumption, and hangar delivery mechanics.
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
@@ -331,7 +329,7 @@ async fn test_lp_store_mgr_gameplay_closure() {
 
 #[tokio::test]
 async fn test_standing_mgr_npc_npc_standings_closure() {
-    // parity: rpc:standingMgr.GetNPCNPCStandings
+    // DATA GAP: static NPC-NPC standings table is server-internal; client SDE lacks full cross-standing matrix.
     let ctx = ServerContext::new();
     let mut sess = SessionState::new(4322);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -404,12 +402,8 @@ async fn test_standing_mgr_npc_npc_standings_closure() {
 
 #[tokio::test]
 async fn test_shipcaster_and_starter_travel_closure() {
-    // parity: rpc:shipCasterLandingPadMgr.GetAllLandingPads
-    // parity: rpc:shipCasterLandingPadMgr.GetFactionLandingPads
-    // parity: rpc:shipCasterLauncherMgr.GetFactionsWithShipcaster
-    // parity: rpc:shipcasterTravelMgr.CmdJumpThroughShipcaster
-    // parity: rpc:starterShipcasterTravelMgr.CanCharacterJump
-    // parity: rpc:starterShipcasterTravelMgr.CmdJumpThroughStarterShipcaster
+    // DATA GAP: Starter and interstellar shipcaster structures and linkages are server-side.
+    // Tests CanCharacterJump weapons timer and capital ship restrictions, proximity check, and ball transfer.
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
@@ -427,7 +421,7 @@ async fn test_shipcaster_and_starter_travel_closure() {
     .expect("SelectCharacterID");
 
     let ship_id = 100_000_001;
-    let starter_sys: u32 = 30002800; // Kisogo starter system
+    let starter_sys: u32 = 30002800; // Haatomo starter staging linkage
     let staging_sys: u32 = 30002813; // Tama staging system
     let starter_launcher_id: i64 = 105_000_101;
     let dest_pad_id: i64 = 104_000_001;

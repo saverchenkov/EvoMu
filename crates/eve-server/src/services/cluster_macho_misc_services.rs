@@ -245,14 +245,16 @@ pub fn derived_launchers() -> Vec<LauncherRecord> {
     ]
 }
 
-/// Canonical Rookie Starter Shipcasters across all 12 empire career/starter systems.
+/// DERIVED: Canonical Rookie Starter Shipcasters across empire starter systems.
+///
+/// DATA GAP: Starter shipcaster placements, system assignments, and staging linkages are server-side structures.
 pub fn derived_starter_launchers() -> Vec<StarterLauncherRecord> {
     vec![
         // Caldari State (500001)
         StarterLauncherRecord {
             item_id: 105_000_101,
             type_id: 93980, // State Rookie Shipcaster
-            solar_system_id: 30002800,
+            solar_system_id: 30002800, // Haatomo starter staging linkage
             faction_id: 500001,
             staging_system_id: 30002813, // Tama staging
             position: glam::DVec3::new(300_000.0, 0.0, 0.0),
@@ -260,7 +262,7 @@ pub fn derived_starter_launchers() -> Vec<StarterLauncherRecord> {
         StarterLauncherRecord {
             item_id: 105_000_105,
             type_id: 93980,
-            solar_system_id: 30000141, // Akiainavas
+            solar_system_id: 30000141, // Kisogo (State War Academy)
             faction_id: 500001,
             staging_system_id: 30002813,
             position: glam::DVec3::new(300_000.0, 0.0, 0.0),
@@ -268,7 +270,7 @@ pub fn derived_starter_launchers() -> Vec<StarterLauncherRecord> {
         StarterLauncherRecord {
             item_id: 105_000_106,
             type_id: 93980,
-            solar_system_id: 30001392, // Uitra
+            solar_system_id: 30001392, // Amsen (Science & Trade Institute)
             faction_id: 500001,
             staging_system_id: 30002813,
             position: glam::DVec3::new(300_000.0, 0.0, 0.0),
@@ -276,7 +278,7 @@ pub fn derived_starter_launchers() -> Vec<StarterLauncherRecord> {
         StarterLauncherRecord {
             item_id: 105_000_107,
             type_id: 93980,
-            solar_system_id: 30001407, // Kisogo
+            solar_system_id: 30001407, // Todaki (School of Applied Knowledge)
             faction_id: 500001,
             staging_system_id: 30002813,
             position: glam::DVec3::new(300_000.0, 0.0, 0.0),
@@ -285,7 +287,7 @@ pub fn derived_starter_launchers() -> Vec<StarterLauncherRecord> {
         StarterLauncherRecord {
             item_id: 105_000_102,
             type_id: 94018, // Republic Rookie Shipcaster
-            solar_system_id: 30002050,
+            solar_system_id: 30002050, // Hagilur starter staging linkage
             faction_id: 500002,
             staging_system_id: 30002057,
             position: glam::DVec3::new(300_000.0, 0.0, 0.0),
@@ -293,7 +295,7 @@ pub fn derived_starter_launchers() -> Vec<StarterLauncherRecord> {
         StarterLauncherRecord {
             item_id: 105_000_108,
             type_id: 94018,
-            solar_system_id: 30002547, // Amamake / Eembakkis
+            solar_system_id: 30002547, // Ammold (Republic Military School)
             faction_id: 500002,
             staging_system_id: 30002057,
             position: glam::DVec3::new(300_000.0, 0.0, 0.0),
@@ -301,7 +303,7 @@ pub fn derived_starter_launchers() -> Vec<StarterLauncherRecord> {
         StarterLauncherRecord {
             item_id: 105_000_109,
             type_id: 94018,
-            solar_system_id: 30002505, // Malukker
+            solar_system_id: 30002505, // Hulm (Republic University)
             faction_id: 500002,
             staging_system_id: 30002057,
             position: glam::DVec3::new(300_000.0, 0.0, 0.0),
@@ -309,7 +311,7 @@ pub fn derived_starter_launchers() -> Vec<StarterLauncherRecord> {
         StarterLauncherRecord {
             item_id: 105_000_110,
             type_id: 94018,
-            solar_system_id: 30003410, // Hulm
+            solar_system_id: 30003410, // Ryddinjorn (Pator Tech School)
             faction_id: 500002,
             staging_system_id: 30002057,
             position: glam::DVec3::new(300_000.0, 0.0, 0.0),
@@ -318,7 +320,7 @@ pub fn derived_starter_launchers() -> Vec<StarterLauncherRecord> {
         StarterLauncherRecord {
             item_id: 105_000_103,
             type_id: 93968, // Imperial Rookie Shipcaster
-            solar_system_id: 30002180,
+            solar_system_id: 30002180, // FRTC-5 starter staging linkage
             faction_id: 500003,
             staging_system_id: 30002187,
             position: glam::DVec3::new(300_000.0, 0.0, 0.0),
@@ -326,7 +328,7 @@ pub fn derived_starter_launchers() -> Vec<StarterLauncherRecord> {
         StarterLauncherRecord {
             item_id: 105_000_111,
             type_id: 93968,
-            solar_system_id: 30003489, // Chaven
+            solar_system_id: 30003489, // Chaven (Imperial Academy)
             faction_id: 500003,
             staging_system_id: 30002187,
             position: glam::DVec3::new(300_000.0, 0.0, 0.0),
@@ -334,7 +336,7 @@ pub fn derived_starter_launchers() -> Vec<StarterLauncherRecord> {
         StarterLauncherRecord {
             item_id: 105_000_112,
             type_id: 93968,
-            solar_system_id: 30005042, // Deepari
+            solar_system_id: 30005042, // Sehmy (Hedion University)
             faction_id: 500003,
             staging_system_id: 30002187,
             position: glam::DVec3::new(300_000.0, 0.0, 0.0),
@@ -342,7 +344,7 @@ pub fn derived_starter_launchers() -> Vec<StarterLauncherRecord> {
         StarterLauncherRecord {
             item_id: 105_000_113,
             type_id: 93968,
-            solar_system_id: 30001672, // Conoban
+            solar_system_id: 30001672, // Emrayur (Royal Amarr Institute)
             faction_id: 500003,
             staging_system_id: 30002187,
             position: glam::DVec3::new(300_000.0, 0.0, 0.0),
@@ -351,7 +353,7 @@ pub fn derived_starter_launchers() -> Vec<StarterLauncherRecord> {
         StarterLauncherRecord {
             item_id: 105_000_104,
             type_id: 93984, // Federation Rookie Shipcaster
-            solar_system_id: 30003850,
+            solar_system_id: 30003850, // Alparena starter staging linkage
             faction_id: 500004,
             staging_system_id: 30003856,
             position: glam::DVec3::new(300_000.0, 0.0, 0.0),
@@ -359,7 +361,7 @@ pub fn derived_starter_launchers() -> Vec<StarterLauncherRecord> {
         StarterLauncherRecord {
             item_id: 105_000_114,
             type_id: 93984,
-            solar_system_id: 30004971, // Duripant
+            solar_system_id: 30004971, // Duripant (Federal Navy Academy)
             faction_id: 500004,
             staging_system_id: 30003856,
             position: glam::DVec3::new(300_000.0, 0.0, 0.0),
@@ -367,7 +369,7 @@ pub fn derived_starter_launchers() -> Vec<StarterLauncherRecord> {
         StarterLauncherRecord {
             item_id: 105_000_115,
             type_id: 93984,
-            solar_system_id: 30002715, // Bourynes
+            solar_system_id: 30002715, // Bourynes (University of Caille)
             faction_id: 500004,
             staging_system_id: 30003856,
             position: glam::DVec3::new(300_000.0, 0.0, 0.0),
@@ -375,7 +377,7 @@ pub fn derived_starter_launchers() -> Vec<StarterLauncherRecord> {
         StarterLauncherRecord {
             item_id: 105_000_116,
             type_id: 93984,
-            solar_system_id: 30005305, // Clellinon
+            solar_system_id: 30005305, // Cistuvaert (Center for Advanced Studies)
             faction_id: 500004,
             staging_system_id: 30003856,
             position: glam::DVec3::new(300_000.0, 0.0, 0.0),

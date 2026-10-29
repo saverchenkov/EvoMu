@@ -1,4 +1,6 @@
-//! SDE-backed NPC Corporation Loyalty Point Store Catalog Generator.
+//! DERIVED canonical NPC Corporation Loyalty Point Store Catalog definitions.
+//!
+//! DATA GAP: Live EVE LP store corporation offer catalog is server-only and not present in client SDE / FSD.
 
 #![forbid(unsafe_code)]
 
@@ -11,7 +13,7 @@ const FEDERATION_NAVY_CORP: i64 = 1_000_036;
 const REPUBLIC_FLEET_CORP: i64 = 1_000_044;
 const AMARR_NAVY_CORP: i64 = 1_000_037;
 
-/// Generates standard SDE LP store offers for any NPC corporation.
+/// DERIVED fallback LP store offers for canonical NPC corporations.
 pub fn get_sde_npc_corp_lp_offers(corp_id: i64) -> Vec<LPOffer> {
     if corp_id == CALDARI_NAVY_CORP {
         vec![
@@ -225,43 +227,6 @@ pub fn get_sde_npc_corp_lp_offers(corp_id: i64) -> Vec<LPOffer> {
             ak_cost: 0,
             min_standing: None,
         }]
-    } else if (1_000_000..2_000_000).contains(&corp_id) {
-        let base_oid = corp_id.saturating_mul(10);
-        vec![
-            LPOffer {
-                offer_id: base_oid + 1,
-                corp_id,
-                type_id: 15810,
-                quantity: 1,
-                lp_cost: 2_400,
-                isk_cost: IskCents::from_isk(2_400_000),
-                req_items: vec![],
-                ak_cost: 0,
-                min_standing: None,
-            },
-            LPOffer {
-                offer_id: base_oid + 2,
-                corp_id,
-                type_id: 27361,
-                quantity: 1000,
-                lp_cost: 500,
-                isk_cost: IskCents::from_isk(500_000),
-                req_items: vec![],
-                ak_cost: 0,
-                min_standing: None,
-            },
-            LPOffer {
-                offer_id: base_oid + 3,
-                corp_id,
-                type_id: 621,
-                quantity: 1,
-                lp_cost: 10_000,
-                isk_cost: IskCents::from_isk(10_000_000),
-                req_items: vec![],
-                ak_cost: 0,
-                min_standing: None,
-            },
-        ]
     } else {
         Vec::new()
     }

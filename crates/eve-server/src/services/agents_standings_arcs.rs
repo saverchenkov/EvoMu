@@ -335,7 +335,9 @@ pub fn static_npc_faction_standings() -> Vec<(i64, i64, f64)> {
     ]
 }
 
-/// SDE-backed NPC corporation-to-corporation and faction standings.
+/// DERIVED: static NPC faction standings and member corporation standings.
+///
+/// DATA GAP: client SDE lacks full inter-NPC cross-standing matrix; inter-faction and member corporate standings are derived.
 pub fn get_sde_npc_npc_standings(sde: &eve_sde::SdeRegistry) -> Vec<(i64, i64, f64)> {
     let mut standings = static_npc_faction_standings();
     for (&corp_id, corp) in &sde.npc_corporations {
