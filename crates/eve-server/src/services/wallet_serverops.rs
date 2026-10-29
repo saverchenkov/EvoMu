@@ -310,8 +310,9 @@ pub fn run_daily_downtime_and_jobs(ctx: &ServerContext) -> HashMap<String, i64> 
             "OnClusterShutdownInitiated",
             "clientID",
             vec![
-                PyRep::String("DailyClusterDowntime".into()),
+                PyRep::String("UI/Shared/ClusterShutdownInitiated".into()),
                 PyRep::Integer(now as i64),
+                PyRep::Integer(900),
             ],
         );
     }

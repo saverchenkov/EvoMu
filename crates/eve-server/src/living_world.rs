@@ -774,12 +774,30 @@ impl LivingWorldDirector {
                     StepAction::AlreadyDocked
                 } else {
                     let now_unix = db.clock().now_unix_secs();
+                    // Hauler transit duration derived from SDE ship attributes:
+                    // align time (from inertia and mass) + intra-system warp transit + stargate jump delay
+                    let (mass, inertia, warp_speed) = sde
+                        .types
+                        .get(&c.ship_type_id)
+                        .map(|t| {
+                            let m = t.default_attributes.get(&eve_sde::attr_ids::MASS).copied().unwrap_or(t.mass);
+                            let ag = t.default_attributes.get(&eve_sde::attr_ids::AGILITY).copied().unwrap_or(0.5);
+                            let ws = t.default_attributes.get(&600).copied().unwrap_or(3.0).max(1.0);
+                            (m, ag, ws)
+                        })
+                        .unwrap_or((10_000_000.0, 0.5, 3.0));
+                    let tau = (inertia * mass) / 1_000_000.0;
+                    let align_secs = (4.0_f64.ln() * tau).ceil().clamp(2.0, 15.0);
+                    let warp_transit_secs = (15.0 / warp_speed).clamp(3.0, 10.0);
+                    let gate_jump_secs = 5.0;
+                    let transit_duration_secs = (align_secs + warp_transit_secs + gate_jump_secs).round() as u64;
+
                     if r.last_hop_unix == 0 {
                         r.last_hop_unix = now_unix;
                         StepAction::Traverse {
                             system_id: c.current_system_id,
                         }
-                    } else if now_unix.saturating_sub(r.last_hop_unix) < 15 {
+                    } else if now_unix.saturating_sub(r.last_hop_unix) < transit_duration_secs {
                         StepAction::Traverse {
                             system_id: c.current_system_id,
                         }

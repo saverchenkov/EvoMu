@@ -371,7 +371,9 @@ async fn test_belt_rats_clone_soldier_mordu_and_officer_spawns() {
     let null_belt = ctx.sde.celestials_in_system(null_sys).into_iter().find(|c| c.group_id == 9).unwrap();
     let (mut null_sess, null_guns) = setup_space_pilot(&ctx, 7104, "other", "other-secret", 90_000_002, null_sys, 910_004, 54733, 54754, 54783, 920_300, null_belt.position + DVec3::new(4_000.0, 0.0, 0.0)).await;
     let null_beyonce = bind_beyonce(&ctx, &mut null_sess, null_sys).await;
-    ctx.set_mechanic_rng_seed(Some(hit_seed));
+    // Seed 1_603_003 yields 6 consecutive draws < 0.10, guaranteeing the null-sec Officer spawn roll (0.10) hits
+    let officer_seed = 1_603_003u64;
+    ctx.set_mechanic_rng_seed(Some(officer_seed));
     tick_background_cluster(&ctx).await;
 
     let (off_bid, off_tid) = with_combat_runtime(&ctx, |rt| {

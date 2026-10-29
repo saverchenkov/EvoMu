@@ -4,7 +4,7 @@
 
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
 use eve_destiny::{Ball, MovementMode};
-use eve_server::combat::crimewatch::{AggressionEvaluation, CrimeWatchDirector};
+use eve_server::combat::crimewatch::{compute_sec_status_loss, AggressionEvaluation, CrimeWatchDirector};
 use eve_server::combat::drones_salvage_tractor::{
     attempt_salvage_wreck, step_tractor_beam, validate_drone_bandwidth, DroneController,
     SalvageOutcome,
@@ -283,6 +283,14 @@ async fn test_c8_crimewatch_state_machine_timers_flags_and_concord() {
         _ => panic!("Expected CriminalFlagTriggered"),
     }
     assert!(cw_director.get_or_create(char_id).is_criminal(now + 300));
+
+    // Security status loss applied at aggression time per canonical mechanics (R-CONCORD-02)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&char_id) {
+            let loss = compute_sec_status_loss(c.security_status, false, 0.95);
+            c.security_status = (c.security_status - loss).max(-10.0);
+        }
+    });
 
     // 5. CONCORD arrival after security-based delay:
     // Spawns real CONCORD ships and executes criminal through the canonical death pipeline (C-3)

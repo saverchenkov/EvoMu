@@ -299,6 +299,9 @@ async fn test_mn17_living_world_npc_mining_ops_and_market_hauling() {
         lod_level: 1, destroyed: false,
     });
 
+    // First step initializes mining cycle tracking (elapsed = 0.0s per R-LW-RATE-01)
+    let _ = director.step_npc_mining_op(convoy_id, &ctx.systems, &ctx.db, &ctx.sde).await.expect("init mining op");
+    ctx.advance_secs(60);
     let step_result = director.step_npc_mining_op(convoy_id, &ctx.systems, &ctx.db, &ctx.sde).await.expect("step_npc_mining_op succeeded");
     assert_eq!(step_result.convoy_id, convoy_id);
     assert!(step_result.asteroid_id > 0);

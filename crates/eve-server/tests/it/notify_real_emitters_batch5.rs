@@ -176,8 +176,10 @@ async fn test_batch5_station_damage_crimewatch_shutdown_scanners() {
 
     let ev_shut = events(&ctx, P1, "OnClusterShutdownInitiated");
     assert_eq!(ev_shut.len(), 1);
-    assert_eq!(ev_shut[0].len(), 2);
-    assert_eq!(ev_shut[0][0], PyRep::String("ScheduledMaintenance".into()));
+    assert_eq!(ev_shut[0].len(), 3);
+    assert_eq!(ev_shut[0][0], PyRep::String("UI/Shared/ClusterShutdownInitiated".into()));
+    assert!(ev_shut[0][1].as_i64().unwrap() > 0);
+    assert_eq!(ev_shut[0][2], PyRep::Integer(120));
 
     // 6. OnCargoScanComplete
     emit_cargo_scan_complete(&ctx, P1, 8001, vec![(34, 1000), (35, 500)]);

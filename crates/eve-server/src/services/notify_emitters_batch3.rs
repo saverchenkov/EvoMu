@@ -739,13 +739,19 @@ pub fn handle_batch3_gm_slash_cmd(
                 let mut st = ctx.cluster_state.write().unwrap_or_else(|e| e.into_inner());
                 st.shutdown_in_progress = true;
             }
+            let explanation = if reason.contains("Delay") {
+                "UI/Shared/ClusterShutdownDelayed"
+            } else {
+                "UI/Shared/ClusterShutdownInitiated"
+            };
             ctx.notify(
                 NotificationTarget::All,
                 "OnClusterShutdownInitiated",
                 "clientID",
                 vec![
-                    PyRep::String(reason.to_string()),
+                    PyRep::String(explanation.into()),
                     PyRep::Integer(target_ft),
+                    PyRep::Integer(secs as i64),
                 ],
             );
             Some(Ok(PyRep::keyval([
