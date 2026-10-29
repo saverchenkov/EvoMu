@@ -568,10 +568,10 @@ async fn test_quasar_achievements_progression_and_claims() {
     assert_eq!(unclaim_rsp.status_code, STATUS_OK);
     assert_eq!(unclaim_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve_public.achievement.reward.api.GetUnclaimedResponse");
 
-    // 7. Claim reward: ClaimRequest
+    // 7. Claim reward: ClaimRequest -> V24 ClaimResponse
     let claim_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.reward.api.ClaimRequest", vec![]).await;
     assert_eq!(claim_rsp.status_code, STATUS_OK, "ClaimRequest failed: {}", claim_rsp.status_message);
-    assert_eq!(claim_rsp.payload.as_ref().unwrap().normalized_type_name(), "google.protobuf.Empty");
+    assert_eq!(claim_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve_public.achievement.reward.api.ClaimResponse");
 
     // Verify WalletJournalEntry created for character
     let has_journal = ctx.db.with_snapshot(|snap| {

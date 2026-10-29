@@ -307,18 +307,31 @@ impl SdeRegistry {
         }
 
         let mut type_materials = HashMap::new();
+        let mut randomized_type_materials = HashMap::new();
         {
-            let mut stmt =
-                conn.prepare("SELECT type_id, materials_json FROM sde_type_materials")?;
+            let has_rand = conn
+                .prepare("SELECT randomized_materials_json FROM sde_type_materials LIMIT 0")
+                .is_ok();
+            let sql = if has_rand {
+                "SELECT type_id, materials_json, randomized_materials_json FROM sde_type_materials"
+            } else {
+                "SELECT type_id, materials_json, '[]' FROM sde_type_materials"
+            };
+            let mut stmt = conn.prepare(sql)?;
             let rows = stmt.query_map([], |r| {
                 let tid = r.get::<_, i64>(0)? as TypeId;
                 let m_str: String = r.get(1)?;
+                let rm_str: String = r.get::<_, Option<String>>(2)?.unwrap_or_else(|| "[]".into());
                 let entries: Vec<TypeMaterialEntry> = parse_json_col(1, &m_str)?;
-                Ok((tid, entries))
+                let rand_entries: Vec<RandomizedMaterialEntry> = parse_json_col(2, &rm_str)?;
+                Ok((tid, entries, rand_entries))
             })?;
             for r in rows {
-                let (tid, entries) = r?;
+                let (tid, entries, rand_entries) = r?;
                 type_materials.insert(tid, entries);
+                if !rand_entries.is_empty() {
+                    randomized_type_materials.insert(tid, rand_entries);
+                }
             }
         }
 
@@ -1316,6 +1329,7 @@ impl SdeRegistry {
             dungeon_asteroids,
             dungeon_gas_types,
             type_materials,
+            randomized_type_materials,
             dynamic_item_attributes,
             space_components_by_type,
             missions,

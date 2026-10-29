@@ -187,7 +187,7 @@ async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
         jita_sigs,
         vec![("Ore".to_string(), "Hidden Omber Deposit".to_string())]
     );
-    assert_eq!(wh_ore_anoms, 0, "No k-space ore anomaly in wormhole space");
+    assert_eq!(wh_ore_anoms, 4, "W-space Thera (class 12) seeds 4 Perimeter/Frontier wormhole ore anomalies");
     assert_eq!(
         wh_gas_sigs,
         vec![("Gas".to_string(), "Barren Perimeter Reservoir".to_string())]

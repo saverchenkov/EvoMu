@@ -224,6 +224,36 @@ pub fn handle_industry_jobs(
                             ),
                         });
                     }
+                    let react_prod_tid = bp
+                        .activities
+                        .get("reaction")
+                        .or_else(|| bp.activities.get("9"))
+                        .and_then(|a| a.products.first())
+                        .map(|p| p.type_id)
+                        .unwrap_or(bp.product_type_id);
+                    let is_unrefined_mineral_reaction = matches!(bp_type_id, 90274..=90282)
+                        || ctx
+                            .sde
+                            .types
+                            .get(&react_prod_tid)
+                            .is_some_and(|t| t.group_id == 4932);
+                    if is_unrefined_mineral_reaction {
+                        let has_composite_reactor = snap.items.values().any(|i| {
+                            i.location_id == station_id
+                                && (164..=171).contains(&(i.flag as u16))
+                                && matches!(i.type_id, 45537 | 35894)
+                                && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true)
+                                && i.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
+                        });
+                        if !has_composite_reactor {
+                            return Err(BridgeRpcError {
+                                code: "CompositeReactorRequired".into(),
+                                message: format!(
+                                    "Unrefined Mineral reaction formula {bp_type_id} requires an online Standup Composite Reactor I (45537) at facility {station_id}"
+                                ),
+                            });
+                        }
+                    }
                 }
                 if !is_structure_industry_service_online(snap, station_id, activity_id) {
                     return Err(BridgeRpcError {

@@ -39,6 +39,8 @@ pub struct CommunityTrackState {
     pub target_progress: u64,
     pub current_progress: u64,
     pub active: bool,
+    #[serde(default)]
+    pub tale_templates: Vec<u32>,
 }
 
 pub fn uuid_to_hex(u: &[u8; 16]) -> String {
@@ -131,14 +133,29 @@ impl ProgressionExtraManager {
                     if let Ok(id) = id_str.parse::<u32>() {
                         let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("Community Track").to_string();
                         let target = val.get("goal").and_then(|v| v.as_u64()).unwrap_or(100);
-                        tracks.entry(id).or_insert(CommunityTrackState {
-                            track_id: id,
-                            template_id: id,
-                            name,
-                            target_progress: target,
-                            current_progress: 0,
-                            active: true,
-                        });
+                        let tale_templates: Vec<u32> = val
+                            .get("tale_templates")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| arr.iter().filter_map(|x| x.as_u64().map(|n| n as u32)).collect())
+                            .unwrap_or_default();
+                        if let Some(existing) = tracks.get_mut(&id) {
+                            if existing.tale_templates.is_empty() {
+                                existing.tale_templates = tale_templates;
+                            }
+                        } else {
+                            tracks.insert(
+                                id,
+                                CommunityTrackState {
+                                    track_id: id,
+                                    template_id: id,
+                                    name,
+                                    target_progress: target,
+                                    current_progress: 0,
+                                    active: true,
+                                    tale_templates,
+                                },
+                            );
+                        }
                     }
                 }
             }
@@ -209,6 +226,24 @@ impl ProgressionExtraManager {
             return Some(track.clone());
         }
         None
+    }
+
+    pub fn record_tale_contribution(&self, tale_template_id: u32, delta: u64) -> Vec<CommunityTrackState> {
+        let mut map = self
+            .community_tracks
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut updated = Vec::new();
+        for track in map.values_mut() {
+            if track.active && track.tale_templates.contains(&tale_template_id) {
+                track.current_progress = track
+                    .current_progress
+                    .saturating_add(delta)
+                    .min(track.target_progress);
+                updated.push(track.clone());
+            }
+        }
+        updated
     }
 }
 
@@ -452,7 +487,17 @@ pub fn register_progression_extra_handlers(
                 tales.insert(id, (template_id, system_id, now));
                 id
             };
+            let progressed = mgr.record_tale_contribution(template_id, 1);
             mgr.save_to_db();
+            for tr in progressed {
+                let mut not_bytes = Vec::new();
+                encode_varint_field(1, tr.track_id as u64, &mut not_bytes);
+                let notice = GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.communitytrack.api.ProgressedNotice"),
+                    value: not_bytes,
+                };
+                ctx_queue_notice(crate::quasar_gateway::NoticeScope::Broadcast, notice, now);
+            }
             // The client's tale service invalidates its per-template tale cache on StartedNotice.
             ctx_queue_notice(
                 notices::tale_scope(),
@@ -481,6 +526,7 @@ pub fn register_progression_extra_handlers(
                 ids.into_iter().filter_map(|id| tales.remove(&id).map(|t| (id, t.1))).collect()
             };
             if !stopped.is_empty() {
+                let _ = mgr.record_tale_contribution(template_id, stopped.len() as u64);
                 mgr.save_to_db();
             }
             let now = ctx.now_unix();

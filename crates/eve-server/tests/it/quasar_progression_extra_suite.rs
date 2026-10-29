@@ -642,7 +642,8 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
     let r_ach = call_req(&ctx_reloaded, &session, "eve_public.achievement.api.GetRequest", make_id_request(2), true);
     assert_eq!(r_ach.status_code, STATUS_OK, "Achievement GetRequest failed");
     let ach_wm = WireMessage::decode(&r_ach.payload.as_ref().unwrap().value).expect("decode ach");
-    assert_eq!(ach_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(0), "Achievement 2 must be completed");
+    assert!(ach_wm.fields.iter().any(|f| f.field_number == 1), "Achievement 2 must have completed_date set");
+    assert!(ach_wm.fields.iter().all(|f| f.field_number != 2), "Achievement 2 must not emit not_completed when completed");
 
     let r_career = call_req(&ctx_reloaded, &session, "eve_public.app.eveonline.career.goal.GetAllRequest", Vec::new(), true);
     assert_eq!(r_career.status_code, STATUS_OK, "Career GetAllRequest failed");

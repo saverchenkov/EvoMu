@@ -632,72 +632,83 @@ pub struct WormholeOreSiteDef {
 }
 
 pub const WORMHOLE_ORE_SITES: &[WormholeOreSiteDef] = &[
-    WormholeOreSiteDef {
-        dungeon_name: "Ordinary Perimeter Deposit",
-        wh_class_min: 1,
-        wh_class_max: 3,
-        ores: &[(1230, 20_000), (1228, 15_000)], // Veldspar, Scordite
-        guard_npc_type_id: 30209,                 // Emergent Patroller
-        guard_npc_count: 3,
-        source: "eve-wiki/articles/Ordinary_Perimeter_Deposit.md",
-    },
-    WormholeOreSiteDef {
-        dungeon_name: "Common Perimeter Deposit",
-        wh_class_min: 1,
-        wh_class_max: 3,
-        ores: &[(20, 10_000), (1227, 8_000)], // Kernite, Omber
-        guard_npc_type_id: 30209,
-        guard_npc_count: 4,
-        source: "eve-wiki/articles/Common_Perimeter_Deposit.md",
-    },
-    WormholeOreSiteDef {
-        dungeon_name: "Unexceptional Frontier Deposit",
-        wh_class_min: 3,
-        wh_class_max: 5,
-        ores: &[(21, 6_000), (1226, 5_000)], // Jaspet, Hemorphite
-        guard_npc_type_id: 30210,            // Emergent Watchman
-        guard_npc_count: 5,
-        source: "eve-wiki/articles/Unexceptional_Frontier_Deposit.md",
-    },
-    WormholeOreSiteDef {
-        dungeon_name: "Average Frontier Deposit",
-        wh_class_min: 3,
-        wh_class_max: 5,
-        ores: &[(22, 4_000), (1231, 3_000)], // Hedbergite, Dark Ochre
-        guard_npc_type_id: 30210,
-        guard_npc_count: 5,
-        source: "eve-wiki/articles/Average_Frontier_Deposit.md",
-    },
-    WormholeOreSiteDef {
-        dungeon_name: "Exceptional Core Deposit",
-        wh_class_min: 5,
-        wh_class_max: 6,
-        ores: &[(1229, 2_000), (1232, 1_500), (11396, 500)], // Gneiss, Crokite, Mercoxit
-        guard_npc_type_id: 30200,                             // Awakened Patroller
-        guard_npc_count: 4,
-        source: "eve-wiki/articles/Exceptional_Core_Deposit.md",
-    },
-    WormholeOreSiteDef {
-        dungeon_name: "Infrequent Core Deposit",
-        wh_class_min: 5,
-        wh_class_max: 6,
-        ores: &[(29, 1_000), (1225, 800), (1223, 600)], // Bistot, Arkonor, Spodumain
-        guard_npc_type_id: 30200,
-        guard_npc_count: 5,
-        source: "eve-wiki/articles/Infrequent_Core_Deposit.md",
-    },
+    WormholeOreSiteDef { dungeon_name: "Ordinary Perimeter Deposit", wh_class_min: 1, wh_class_max: 3, ores: &[(1230, 20_000), (1228, 15_000)], guard_npc_type_id: 30209, guard_npc_count: 3, source: "eve-wiki/articles/Ordinary_Perimeter_Deposit.md" },
+    WormholeOreSiteDef { dungeon_name: "Common Perimeter Deposit", wh_class_min: 1, wh_class_max: 3, ores: &[(20, 10_000), (1227, 8_000)], guard_npc_type_id: 30209, guard_npc_count: 4, source: "eve-wiki/articles/Common_Perimeter_Deposit.md" },
+    WormholeOreSiteDef { dungeon_name: "Unexceptional Frontier Deposit", wh_class_min: 3, wh_class_max: 5, ores: &[(21, 6_000), (1226, 5_000)], guard_npc_type_id: 30210, guard_npc_count: 5, source: "eve-wiki/articles/Unexceptional_Frontier_Deposit.md" },
+    WormholeOreSiteDef { dungeon_name: "Average Frontier Deposit", wh_class_min: 3, wh_class_max: 5, ores: &[(22, 4_000), (1231, 3_000)], guard_npc_type_id: 30210, guard_npc_count: 5, source: "eve-wiki/articles/Average_Frontier_Deposit.md" },
+    WormholeOreSiteDef { dungeon_name: "Exceptional Core Deposit", wh_class_min: 5, wh_class_max: 6, ores: &[(1229, 2_000), (1232, 1_500), (11396, 500)], guard_npc_type_id: 30200, guard_npc_count: 4, source: "eve-wiki/articles/Exceptional_Core_Deposit.md" },
+    WormholeOreSiteDef { dungeon_name: "Infrequent Core Deposit", wh_class_min: 5, wh_class_max: 6, ores: &[(29, 1_000), (1225, 800), (1223, 600)], guard_npc_type_id: 30200, guard_npc_count: 5, source: "eve-wiki/articles/Infrequent_Core_Deposit.md" },
 ];
 
-pub fn resolve_wormhole_ore_site(
+pub fn wormhole_ore_sites_for_class(wh_class: u8) -> Vec<&'static WormholeOreSiteDef> {
+    let eff_class = match wh_class {
+        1..=6 => wh_class,
+        13 => return WORMHOLE_ORE_SITES.iter().collect(),
+        12 | 14..=18 => 3,
+        _ => 3,
+    };
+    WORMHOLE_ORE_SITES
+        .iter()
+        .filter(|d| eff_class >= d.wh_class_min && eff_class <= d.wh_class_max)
+        .collect()
+}
+
+pub fn resolve_wormhole_ore_site_with_dungeon(
     sde: &SdeRegistry,
     def: &WormholeOreSiteDef,
-) -> Result<Vec<(TypeId, i64)>, String> {
+) -> Result<(u32, Vec<(TypeId, i64)>), String> {
+    let dungeon_id = find_dungeon_id(sde, def.dungeon_name)
+        .ok_or_else(|| format!("dungeon '{}' not found in sde_dungeons", def.dungeon_name))?;
     for &(tid, _) in def.ores {
         if !sde.types.contains_key(&tid) {
             return Err(format!("Ore type {tid} not found in SDE"));
         }
     }
-    Ok(def.ores.to_vec())
+    if let Some(layout) = sde.dungeon_asteroids.get(&dungeon_id).filter(|v| !v.is_empty()) {
+        let total_rocks: i64 = layout.iter().map(|e| i64::from(e.asteroid_count)).sum();
+        let total_units: i64 = def.ores.iter().map(|&(_, u)| u).sum();
+        let units_per_rock = ((total_units * 8) / total_rocks.max(1)).max(1_000);
+        let mut rocks = Vec::with_capacity(total_rocks as usize);
+        for entry in layout {
+            if !sde.types.contains_key(&entry.type_id) {
+                return Err(format!("Dungeon asteroid type {} not found in SDE", entry.type_id));
+            }
+            for _ in 0..entry.asteroid_count {
+                rocks.push((entry.type_id, units_per_rock));
+            }
+        }
+        return Ok((dungeon_id, rocks));
+    }
+    Ok((dungeon_id, def.ores.to_vec()))
+}
+
+pub fn resolve_wormhole_ore_site(
+    sde: &SdeRegistry,
+    def: &WormholeOreSiteDef,
+) -> Result<Vec<(TypeId, i64)>, String> {
+    resolve_wormhole_ore_site_with_dungeon(sde, def).map(|(_, rocks)| rocks)
+}
+
+pub async fn spawn_wormhole_ore_guards(
+    ctx: &ServerContext,
+    sys_id: u32,
+    guard_waves: Vec<(i64, TypeId, DVec3)>,
+) {
+    if guard_waves.is_empty() {
+        return;
+    }
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    for (gid, npc_tid, gpos) in guard_waves {
+        let npc_rec = ctx.sde.types.get(&npc_tid);
+        let npc_rad = npc_rec.map(|t| t.radius.max(25.0)).unwrap_or(45.0);
+        let npc_mass = npc_rec.map(|t| t.mass.max(10_000.0)).unwrap_or(1_200_000.0);
+        let ball = Ball {
+            id: gid, type_id: npc_tid, position: gpos, velocity: DVec3::ZERO,
+            max_velocity: 320.0, inertia: 2.0, mass: npc_mass, radius: npc_rad,
+            speed_fraction: 0.0, mode: MovementMode::Stop,
+        };
+        let _ = handle.spawn_ball_with_combat(ball, ctx.build_type_combat_state(npc_tid)).await;
+    }
 }
 
 /// Phased Asteroid Field site lifecycle (`feat:mining.phased-asteroid-field-lifecycle`, `feat:mining.mobile-phase-anchor`).
