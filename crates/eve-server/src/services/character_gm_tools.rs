@@ -4,7 +4,7 @@
 
 use super::{catch_up_skill_queue, is_valid_doll_or_portrait_payload, notify_watchlist_logon, serialize_doll_pyrep};
 use crate::combat::death_pipeline::execute_death_pipeline;
-use crate::router::{NotificationTarget, ServerContext};
+use crate::router::ServerContext;
 use eve_db::{InventoryFlag, InventoryItemRecord, KillmailRecord, SkillHistoryEntry};
 use eve_destiny::{Ball, CombatState, MovementMode};
 use eve_machonet::SessionState;
@@ -703,18 +703,8 @@ pub async fn handle_gm_slash_ext(
             Ok((item_id, owner_id, loc_id, old_val)) => {
                 ctx.invalidate_ship_fitting(item_id);
                 ctx.invalidate_ship_fitting(loc_id);
-                ctx.notify(
-                    NotificationTarget::Character(owner_id),
-                    "OnModuleAttributeChange",
-                    "charid",
-                    vec![
-                        PyRep::Integer(owner_id),
-                        PyRep::Integer(item_id),
-                        PyRep::Integer(attr_id as i64),
-                        PyRep::Integer(now_ft),
-                        PyRep::Real(val),
-                        PyRep::Real(old_val),
-                    ],
+                crate::services::notify_emitters_batch3::emit_setattr_notifications(
+                    ctx, owner_id, loc_id, item_id, attr_id, now_ft, val, old_val,
                 );
                 Some(Ok(PyRep::keyval([
                     ("command", PyRep::String(cmd.to_string())),
@@ -1229,6 +1219,10 @@ pub async fn handle_gm_slash_ext(
     }
     if cmd == "/survey" || cmd.starts_with("/survey ") {
         return crate::services::operations_manager::handle_survey_slash(ctx, cid, cmd);
+    }
+
+    if let Some(res) = crate::services::notify_emitters_batch3::handle_batch3_gm_slash_cmd(ctx, cid, session.solar_system_id, cmd) {
+        return Some(res);
     }
 
     None

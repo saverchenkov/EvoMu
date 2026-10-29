@@ -871,11 +871,14 @@ fn handle_macho_net(
 
             {
                 let mut state = ctx.cluster_state.write().unwrap();
-                state.shutdown_in_progress = true;
+                state.shutdown_in_progress = timeout_seconds > 0;
                 state.origin_node_id = Some(origin_node_id);
-                state.shutdown_reason = Some(shutdown_reason);
+                state.shutdown_reason = Some(shutdown_reason.clone());
                 state.shutdown_timeout_seconds = Some(timeout_seconds);
                 state.shutdown_graceful = Some(graceful);
+            }
+            if timeout_seconds <= 0 {
+                crate::services::notify_emitters_batch3::emit_cluster_shutdown_cancelled(ctx, &shutdown_reason);
             }
             Some(Ok(PyRep::None))
         }

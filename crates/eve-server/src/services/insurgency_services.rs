@@ -57,15 +57,20 @@ pub fn read_insurgency_runtime<R>(
 
 /// Broadcasts `OnInsurgencyCampaignStartedForLocation` notification.
 pub fn emit_campaign_started(ctx: &ServerContext, sys_id: u32, campaign_id: i64) {
-    ctx.notify(
-        NotificationTarget::SolarSystem(sys_id),
-        "OnInsurgencyCampaignStartedForLocation",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(i64::from(sys_id)),
-            PyRep::Integer(campaign_id),
-        ],
-    );
+    let now = ctx.now_unix();
+    let snap_opt = read_insurgency_runtime(ctx, |rt| {
+        rt.campaigns
+            .get(&campaign_id)
+            .map(|c| build_campaign_snapshot_for_system(c, sys_id, now))
+    });
+    if let Some(snapshot) = snap_opt {
+        ctx.notify(
+            NotificationTarget::SolarSystem(sys_id),
+            "OnInsurgencyCampaignStartedForLocation",
+            "solarsystemid",
+            vec![snapshot],
+        );
+    }
 }
 
 /// Builds the campaign snapshot dictionary expected by client `insurgencyCampaignSvc`.

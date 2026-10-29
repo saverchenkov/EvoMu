@@ -170,7 +170,9 @@ pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, no
         if prev.0 != weap_sig { updates.push(("OnWeaponsTimerUpdate", vec![PyRep::Integer(weap_code), weap_val])); }
         if prev.1 != pvp_sig { updates.push(("OnPvpTimerUpdate", vec![PyRep::Integer(pvp_code), pvp_val])); }
         if prev.2 != npc_sig { updates.push(("OnNpcTimerUpdate", vec![PyRep::Integer(npc_code), npc_val])); }
-        if prev.3 != crim_sig { updates.push(("OnCriminalTimerUpdate", vec![PyRep::Integer(crim_code), crim_val])); }
+        if prev.3 != crim_sig {
+            updates.push(("OnCriminalTimerUpdate", vec![PyRep::Integer(crim_code), crim_val]));
+        }
         if is_all_idle {
             rt.crimewatch_timer_states.remove(&char_id);
         } else {

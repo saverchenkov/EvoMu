@@ -739,6 +739,7 @@ pub(super) async fn handle_fleet_ops(
                     notify::sync_fleet_options_to_db(ctx);
                     let old = notify::options_keyval(old_free, old_reg, auto);
                     notify::emit_options_changed(ctx, fleet_id, old, notify::options_keyval(is_free_move, reg, auto));
+                    crate::services::notify_emitters_batch3::emit_fleet_respawn_points_if_any(ctx, fleet_id);
                     Some(Ok(PyRep::keyval([("isFreeMove", PyRep::Bool(is_free_move)), ("isRegistered", PyRep::Bool(reg))])))
                 }
                 Err(e) => Some(Err(e)),

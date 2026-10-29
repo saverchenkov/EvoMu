@@ -1010,18 +1010,14 @@ impl ServerContext {
         armor: f64,
         structure: f64,
     ) -> Vec<PendingMachoNotification> {
+        let dmg = crate::services::notify_emitters_batch3_space::build_damage_state_tuple(
+            self, item_id, shield, armor, structure,
+        );
         self.notify(
             target,
             "OnDamageStateChange",
             "itemid",
-            vec![
-                PyRep::Integer(item_id),
-                PyRep::Tuple(vec![
-                    PyRep::Real(shield),
-                    PyRep::Real(armor),
-                    PyRep::Real(structure),
-                ]),
-            ],
+            vec![PyRep::Integer(item_id), dmg],
         )
     }
 

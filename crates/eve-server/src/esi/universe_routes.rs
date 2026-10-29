@@ -1322,6 +1322,9 @@ pub fn dispatch_universe_and_nav(
                     }
                 }
             });
+            crate::services::notify_emitters_batch3::emit_destination_change(
+                ctx, caller_id, destination_id, clear_other_waypoints, add_to_beginning,
+            );
             ctx.notify(
                 NotificationTarget::Character(caller_id),
                 "OnAutopilotUpdated",

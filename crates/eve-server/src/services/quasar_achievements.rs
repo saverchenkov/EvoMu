@@ -492,6 +492,12 @@ impl AchievementManager {
         self.save_to_db();
     }
 
+    pub fn clear_character(&self, character_id: u32) {
+        self.category_scores.write().unwrap_or_else(|e| e.into_inner()).retain(|&(cid, _), _| cid != character_id);
+        self.character_achievements.write().unwrap_or_else(|e| e.into_inner()).remove(&character_id);
+        self.save_to_db();
+    }
+
     pub fn claim_rewards(
         &self,
         character_id: u32,

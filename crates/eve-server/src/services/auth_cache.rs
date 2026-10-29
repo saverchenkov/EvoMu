@@ -167,20 +167,30 @@ pub async fn handle(
                     message: "SetGlobalConfigValue requires GM role".into(),
                 }));
             }
-            let key = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
+            let key = args
+                .first()
+                .and_then(|a| a.as_str())
+                .or_else(|| kwargs.get("key").and_then(|a| a.as_str()))
+                .unwrap_or("")
+                .to_string();
             if key.is_empty() {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "SetGlobalConfigValue requires config key".into(),
                 }));
             }
-            let val = args.get(1).cloned().unwrap_or(PyRep::None);
+            let val = args
+                .get(1)
+                .cloned()
+                .or_else(|| kwargs.get("value").cloned())
+                .or_else(|| kwargs.get("val").cloned())
+                .unwrap_or(PyRep::None);
             let serialized = {
                 let mut guard = ctx
                     .global_config_values
                     .write()
                     .unwrap_or_else(|e| e.into_inner());
-                guard.insert(key, val);
+                guard.insert(key.clone(), val.clone());
                 serde_json::to_string(&*guard).ok()
             };
             if let Some(json) = serialized {
@@ -189,6 +199,7 @@ pub async fn handle(
                         .insert("macho_global_config".into(), json);
                 });
             }
+            crate::services::notify_emitters_batch3::emit_global_config_updated(ctx, &key, &val);
             Some(Ok(PyRep::Bool(true)))
         }
 
