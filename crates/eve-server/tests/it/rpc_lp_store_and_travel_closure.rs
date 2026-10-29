@@ -4,7 +4,7 @@
 //! - `TakeOfferForCharacter` and `TakeOfferForCorporation` LP/ISK deduction, item consumption, and delivery.
 //! - `standingMgr.GetNPCNPCStandings` Rowset shape and standing values dispatch.
 //! - `starterShipcasterTravelMgr.CanCharacterJump` weapons timer and capital ship restrictions.
-//! - `CmdJumpThroughStarterShipcaster` proximity (> 100km), session timer, and ball transfer.
+//! - `CmdJumpThroughStarterShipcaster` 5km proximity boundary checks (4.9km success, 5.1km rejection), session timer, and ball transfer.
 //! - `CmdJumpThroughShipcaster` ball transfer and destination placement.
 //!
 //! DATA GAPs (server-only data not present in V24 client FSD):
@@ -532,7 +532,7 @@ async fn test_shipcaster_and_starter_travel_closure() {
     });
 
     // 5. CmdJumpThroughStarterShipcaster
-    // Negative test (a): Out of range (> 100km from launcher at 300km)
+    // Negative test (a): Out of range boundary check (5.1km > SHIPCASTER_MAX_RANGE_M 5.0km from launcher at 300km)
     let handle_starter = ctx.systems.get_or_spawn(starter_sys);
     spawn_test_ship(
         &ctx,
@@ -540,7 +540,7 @@ async fn test_shipcaster_and_starter_travel_closure() {
         char_id,
         ship_id,
         601,
-        DVec3::new(500_000.0, 0.0, 0.0),
+        DVec3::new(300_000.0, 5_100.0, 0.0),
     )
     .await;
     eve_server::services::space_destiny::clear_session_change_timer(&ctx, char_id);
@@ -555,10 +555,10 @@ async fn test_shipcaster_and_starter_travel_closure() {
     .unwrap_err();
     assert_eq!(oor_err.code, "OutsideOperationalRange");
 
-    // Negative test (b): Session-change timer active
+    // Negative test (b): Session-change timer active at valid in-range boundary (4.9km <= 5.0km)
     assert!(
         handle_starter
-            .set_ball_position(ship_id, DVec3::new(298_500.0, 0.0, 0.0))
+            .set_ball_position(ship_id, DVec3::new(300_000.0, 4_900.0, 0.0))
             .await
     );
     let now_unix = ctx.now_unix();
@@ -581,7 +581,7 @@ async fn test_shipcaster_and_starter_travel_closure() {
     .unwrap_err();
     assert_eq!(timer_err.code, "SessionChangeInProgress");
 
-    // Success path: clear session timer and perform jump
+    // Success path: clear session timer and perform jump at 4.9km boundary
     eve_server::services::space_destiny::clear_session_change_timer(&ctx, char_id);
     let jump_starter = rpc(
         &ctx,

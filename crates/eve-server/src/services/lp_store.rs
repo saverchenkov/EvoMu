@@ -12,10 +12,6 @@
 // parity: feat:lp.lp-balance
 // parity: feat:lp.lp-corp-wallet, feat:lp.concord-lp, feat:lp.lp-reward-logs, feat:wallet.evermarks
 // parity: feat:lifecycle.lp-durable
-// parity: rpc:LPStoreMgr.GetAvailableOffersFromCorp
-// parity: rpc:LPStoreMgr.TakeOfferForCharacter, rpc:LPStoreMgr.TakeOfferForCorporation
-// parity: feat:lp.lp-store-offers
-// parity: feat:lp.lp-store-buy
 
 #![forbid(unsafe_code)]
 
