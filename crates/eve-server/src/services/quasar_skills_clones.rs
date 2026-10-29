@@ -629,8 +629,7 @@ pub fn register_skill_handlers(
             value: out,
         })
     });
-    router.register_handler("eve.skilltype.GetRequest", Arc::clone(&skilltype_handler));
-    router.register_handler("eve_public.skilltype.GetRequest", skilltype_handler);
+    router.register_handler("eve.skilltype.GetRequest", skilltype_handler);
 
     // 12. eve.skillcategory.GetAllRequest -> GetAllResponse
     let sde_sk_cat = Arc::clone(&router.sde);
@@ -1318,32 +1317,24 @@ pub fn register_skill_handlers(
     );
 }
 
+fn extract_u32(v: Option<&DynamicValue>) -> Option<u32> {
+    match v {
+        Some(DynamicValue::Uint32(u)) => Some(*u),
+        Some(DynamicValue::Uint64(u)) => u32::try_from(*u).ok(),
+        Some(DynamicValue::Int32(i)) if *i > 0 => u32::try_from(*i).ok(),
+        Some(DynamicValue::Int64(i)) if *i > 0 => u32::try_from(*i).ok(),
+        Some(DynamicValue::Message(msg)) => extract_u32(msg.get(1)),
+        _ => None,
+    }
+}
+
 fn parse_skill_requirements(val: Option<&DynamicValue>, sde: &eve_sde::SdeRegistry) -> Result<Vec<SkillRequirement>, (u32, String)> {
     let mut reqs = Vec::new();
     if let Some(DynamicValue::Repeated(list)) = val {
         for item in list {
             if let DynamicValue::Message(m) = item {
-                let tid = m.get(1).and_then(|v| match v {
-                    DynamicValue::Message(id_msg) => id_msg.get(1).and_then(|t| match t {
-                        DynamicValue::Uint32(u) => Some(*u),
-                        DynamicValue::Uint64(u) => u32::try_from(*u).ok(),
-                        DynamicValue::Int32(i) if *i > 0 => u32::try_from(*i).ok(),
-                        DynamicValue::Int64(i) if *i > 0 => u32::try_from(*i).ok(),
-                        _ => None,
-                    }),
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Uint64(u) => u32::try_from(*u).ok(),
-                    DynamicValue::Int32(i) if *i > 0 => u32::try_from(*i).ok(),
-                    DynamicValue::Int64(i) if *i > 0 => u32::try_from(*i).ok(),
-                    _ => None,
-                }).unwrap_or(0);
-                let lvl = m.get(2).and_then(|v| match v {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Uint64(u) => u32::try_from(*u).ok(),
-                    DynamicValue::Int32(i) if *i > 0 => u32::try_from(*i).ok(),
-                    DynamicValue::Int64(i) if *i > 0 => u32::try_from(*i).ok(),
-                    _ => None,
-                }).unwrap_or(0);
+                let tid = extract_u32(m.get(1)).unwrap_or(0);
+                let lvl = extract_u32(m.get(2)).unwrap_or(0);
                 if tid == 0 || !(1..=5).contains(&lvl) || !sde.types.get(&tid).is_some_and(|info| info.published && info.category_id == 16) {
                     return Err((STATUS_BAD_REQUEST, "Invalid skill requirement type_id or level".into()));
                 }

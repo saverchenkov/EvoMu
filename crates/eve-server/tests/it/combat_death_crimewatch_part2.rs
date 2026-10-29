@@ -323,6 +323,14 @@ async fn test_c8_crimewatch_concord_timers_and_security_status() {
     }
     assert!(cw_director.get_or_create(char_id).is_criminal(now + 100));
 
+    // Security status loss applied at aggression time per canonical mechanics (R-CONCORD-02)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&char_id) {
+            let loss = compute_sec_status_loss(c.security_status, false, 0.95);
+            c.security_status = (c.security_status - loss).max(-10.0);
+        }
+    });
+
     // Spawn criminal ship in space
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let crim_ball = Ball {

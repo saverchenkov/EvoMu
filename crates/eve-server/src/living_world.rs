@@ -48,6 +48,7 @@ pub struct ConvoyRouteState {
     pub route: Vec<SolarSystemId>,
     pub route_index: usize,
     pub docked: bool,
+    pub last_hop_unix: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -575,7 +576,7 @@ impl LivingWorldDirector {
             let prev = guard.insert(convoy_id, now_unix);
             match prev {
                 Some(p) => (now_unix.saturating_sub(p).max(1)) as f64,
-                None => 60.0,
+                None => 0.0,
             }
         };
         let tick_m3 = laser_m3 * turrets * (1.0 + role_bonus_pct / 100.0) * (elapsed_tick_secs / laser_dur_s);
@@ -585,7 +586,11 @@ impl LivingWorldDirector {
             .map(|t| t.volume)
             .unwrap_or(0.1)
             .max(0.01);
-        let units_per_tick = ((tick_m3 / ore_unit_vol).floor() as u64).max(1);
+        let units_per_tick = if elapsed_tick_secs > 0.0 {
+            ((tick_m3 / ore_unit_vol).floor() as u64).max(1)
+        } else {
+            0
+        };
         let ore_hold_m3 = ship_type
             .and_then(|t| t.default_attributes.get(&1556).copied().or(Some(t.capacity)))
             .unwrap_or(5_000.0)
@@ -697,6 +702,7 @@ impl LivingWorldDirector {
                 route,
                 route_index: 0,
                 docked: false,
+                last_hop_unix: 0,
             },
         );
     }
@@ -726,12 +732,15 @@ impl LivingWorldDirector {
         &self,
         convoy_id: i64,
         systems: &SystemRegistry,
-        _db: &WorldRepository,
+        db: &WorldRepository,
         sde: &eve_sde::SdeRegistry,
     ) -> Result<ConvoyStepStatus, String> {
         enum StepAction {
             Destroyed,
             AlreadyDocked,
+            Traverse {
+                system_id: SolarSystemId,
+            },
             Jump {
                 prev_sys: SolarSystemId,
                 next_sys: SolarSystemId,
@@ -758,32 +767,46 @@ impl LivingWorldDirector {
                     route: vec![c.origin_system_id, c.destination_system_id],
                     route_index: 0,
                     docked: false,
+                    last_hop_unix: 0,
                 });
 
                 if r.docked {
                     StepAction::AlreadyDocked
                 } else {
-                    let prev_sys = c.current_system_id;
-                    if r.route_index + 1 < r.route.len() {
-                        r.route_index += 1;
-                        let next_sys = r.route[r.route_index];
-                        c.current_system_id = next_sys;
-                        StepAction::Jump {
-                            prev_sys,
-                            next_sys,
-                            lod_level: c.lod_level,
-                            ship_type_id: c.ship_type_id,
+                    let now_unix = db.clock().now_unix_secs();
+                    if r.last_hop_unix == 0 {
+                        r.last_hop_unix = now_unix;
+                        StepAction::Traverse {
+                            system_id: c.current_system_id,
+                        }
+                    } else if now_unix.saturating_sub(r.last_hop_unix) < 15 {
+                        StepAction::Traverse {
+                            system_id: c.current_system_id,
                         }
                     } else {
-                        r.docked = true;
-                        let lod = c.lod_level;
-                        if lod == 2 {
-                            c.lod_level = 1;
-                        }
-                        StepAction::Dock {
-                            destination_station_id: c.destination_station_id,
-                            destination_system_id: c.current_system_id,
-                            lod_level: lod,
+                        r.last_hop_unix = now_unix;
+                        let prev_sys = c.current_system_id;
+                        if r.route_index + 1 < r.route.len() {
+                            r.route_index += 1;
+                            let next_sys = r.route[r.route_index];
+                            c.current_system_id = next_sys;
+                            StepAction::Jump {
+                                prev_sys,
+                                next_sys,
+                                lod_level: c.lod_level,
+                                ship_type_id: c.ship_type_id,
+                            }
+                        } else {
+                            r.docked = true;
+                            let lod = c.lod_level;
+                            if lod == 2 {
+                                c.lod_level = 1;
+                            }
+                            StepAction::Dock {
+                                destination_station_id: c.destination_station_id,
+                                destination_system_id: c.current_system_id,
+                                lod_level: lod,
+                            }
                         }
                     }
                 }
@@ -793,6 +816,9 @@ impl LivingWorldDirector {
         match action {
             StepAction::Destroyed => Ok(ConvoyStepStatus::Destroyed),
             StepAction::AlreadyDocked => Ok(ConvoyStepStatus::AlreadyDocked),
+            StepAction::Traverse { system_id } => {
+                Ok(ConvoyStepStatus::TraversingSystem { system_id })
+            }
             StepAction::Jump {
                 prev_sys,
                 next_sys,

@@ -402,6 +402,8 @@ async fn test_hauler_convoy_multi_system_movement_and_cargo_drop() {
 
     // Step 1: Living-world cluster tick advances convoy along route: Jumps stargate from Jita into Perimeter
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    ctx.advance_secs(15);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert_eq!(
         ctx.living_world.get_convoy(convoy_id).unwrap().current_system_id,
         SYS_PERIMETER
@@ -425,6 +427,7 @@ async fn test_hauler_convoy_multi_system_movement_and_cargo_drop() {
     );
 
     // Step 2: Living-world cluster tick advances from Perimeter into Urlen
+    ctx.advance_secs(15);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert_eq!(
         ctx.living_world.get_convoy(convoy_id).unwrap().current_system_id,
@@ -432,6 +435,7 @@ async fn test_hauler_convoy_multi_system_movement_and_cargo_drop() {
     );
 
     // Step 3: Living-world cluster tick arrives at destination system, docks and despawns at destination station
+    ctx.advance_secs(15);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(ctx.living_world.is_convoy_docked(convoy_id));
 

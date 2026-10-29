@@ -535,12 +535,8 @@ impl CrimeWatchDirector {
             )
             .await;
 
-            // 3. Grant 30-day private Kill Right (0 fee until made public) to victim and apply security status loss
+            // 3. Grant 30-day private Kill Right (0 fee until made public) to victim
             let kill_right_id = ctx.db.with_mut_snapshot(|snap| {
-                if let Some(crim) = snap.characters.get_mut(&criminal_char_id) {
-                    let loss = compute_sec_status_loss(crim.security_status, false, 1.0);
-                    crim.security_status = (crim.security_status - loss).max(-10.0);
-                }
                 snap.next_entity_id += 1;
                 let kr_id = snap.next_entity_id;
                 snap.kill_rights.insert(

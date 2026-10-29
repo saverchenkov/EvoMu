@@ -87,7 +87,11 @@ async fn test_npc_mining_ops_and_hauler_convoy_lifecycle() {
     .expect("GetOrders Veldspar");
     let init_sell_vol = sum_sell_order_volume(&init_orders);
 
-    // Tick 1: spawns NPC Venture (32880) + racial Industrial at the belt, mines 1,600 SDE Veldspar units, and jumps HaulerConvoy through stargate!
+    // Tick 1: spawns NPC Venture (32880) + racial Industrial at the belt, and HaulerConvoy in transit
+    tick_background_cluster(&ctx).await;
+
+    // Advance 60s and tick: Venture completes 60s mining cycle (1,600 units) and HaulerConvoy jumps stargate (> 15s transit)!
+    ctx.advance_secs(60);
     tick_background_cluster(&ctx).await;
 
     let convoys = ctx.living_world.list_convoys();
@@ -169,6 +173,7 @@ async fn test_npc_mining_ops_and_hauler_convoy_lifecycle() {
             ctx.living_world.get_convoy(cid).unwrap()
         });
     if active_hauler.current_system_id == sys_id {
+        ctx.advance_secs(15);
         tick_background_cluster(&ctx).await;
     }
     let jumped_hauler = ctx.living_world.get_convoy(active_hauler.convoy_id).unwrap();

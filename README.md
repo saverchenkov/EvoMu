@@ -22,8 +22,8 @@ The goal: run your own server, point the **unmodified** EVE Online client at it,
 
 | | |
 |---|---|
-| **Parity ledger** | **5,723 of 6,351 rows closed (90.11%)**: 3,289 done, 2,434 not applicable, 628 open |
-| **Automated tests** | 1,268 passing, 0 failing (100% green across workspace) |
+| **Parity ledger** | **5,769 of 6,351 rows closed (90.84%)**: 3,335 done, 2,434 not applicable, 582 open |
+| **Automated tests** | 1,287 passing, 0 failing (100% green across workspace) |
 | **Technical Wiki** | [Comprehensive Game Systems & Technical Wiki](./docs/wiki/README.md) (16 domains) |
 | **Real-client journeys** | 0 of 29 passing |
 | **Action-plan tasks** | 83 of 117 done |
@@ -63,21 +63,21 @@ EvoMu includes an exhaustive, dual-perspective **[Technical & Game Systems Wiki]
 
 | Surface | What a row is | Rows | Done | N/A | Open | Closed |
 |---|---|---:|---:|---:|---:|---:|
-| ESI web API | one public API operation | 197 | 197 | 0 | 0 | 100% |
-| Static data | one data file the client ships | 213 | 153 | 57 | 3 | 98.6% |
-| Quasar backend | one protobuf message | 1,455 | 67 | 1,328 | 60 | 95.9% |
-| Space physics ("Destiny") | one movement mode or update type | 52 | 28 | 9 | 15 | 71.2% |
-| Server calls (RPC) | one method the client calls | 1,373 | 839 | 111 | 423 | 69.2% |
-| Gameplay features | one curated game behaviour | 1,603 | 978 | 94 | 531 | 66.9% |
-| Client notifications | one event the client listens for | 1,311 | 193 | 650 | 468 | 64.3% |
-| Action-plan tasks | one task in the [plan](./.agents/skills/evomu-adversarial-review/references/action_plan.md) | 114 | 37 | 0 | 77 | 32.5% |
+| ESI web API | one public API operation | 197 | 195 | 0 | 2 | 99.0% |
+| Static data | one data file the client ships | 213 | 156 | 57 | 0 | 100% |
+| Quasar backend | one protobuf message | 1,455 | 104 | 1,328 | 23 | 98.4% |
+| Space physics ("Destiny") | one movement mode or update type | 52 | 43 | 9 | 0 | 100% |
+| Server calls (RPC) | one method the client calls | 1,373 | 1,200 | 113 | 60 | 95.6% |
+| Gameplay features | one curated game behaviour | 1,603 | 1,285 | 94 | 224 | 86.0% |
+| Client notifications | one event the client listens for | 1,311 | 268 | 833 | 210 | 84.0% |
+| Action-plan tasks | one task in the [plan](./.agents/skills/evomu-adversarial-review/references/action_plan.md) | 117 | 83 | 0 | 34 | 70.9% |
 | Real-client journeys | one scripted session in the real client | 29 | 0 | 0 | 29 | 0% |
 
 *The table omits one dogma-effects sweep row (done).*
 
 **How to read this:**
 - **Quasar** is closed mostly by N/A: 1,328 of its 1,455 messages are ones the client never imports or never sends, found by a static analysis of the client's code.
-- **Server calls and gameplay features** are where the real building happened: 1,817 rows done.
+- **Server calls and gameplay features** are where the real building happened: 2,485 rows done.
 - **Plan tasks** close only when every one of a task's acceptance criteria is met. Many are waiting on the last few feature rows in their area, or on a real-client journey.
 
 ---
