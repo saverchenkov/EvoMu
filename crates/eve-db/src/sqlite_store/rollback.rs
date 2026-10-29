@@ -72,33 +72,37 @@ pub fn rollback_dirty_from_sqlite(
     }
 
     // 4. market_orders
-    snap.market_orders
-        .retain(|k, _| fp.market_orders.contains_key(k));
-    for (&k, &expected_h) in &fp.market_orders {
-        if snap.market_orders.get(&k).map(fp_market_order) != Some(expected_h) {
-            let ord = conn
-                .query_row(
-                    "SELECT order_id, owner_id, station_id, region_id, type_id, is_bid, price_cents, vol_entered, vol_remaining, min_volume, is_npc, escrow_cents FROM market_orders WHERE order_id = ?1",
-                    params![k],
-                    |r| {
-                        Ok(MarketOrderRecord {
-                            order_id: r.get(0)?,
-                            owner_id: r.get(1)?,
-                            station_id: r.get(2)?,
-                            region_id: r.get::<_, i64>(3)? as u32,
-                            type_id: r.get::<_, i64>(4)? as TypeId,
-                            is_bid: r.get::<_, i64>(5)? != 0,
-                            price: IskCents(r.get(6)?),
-                            vol_entered: r.get::<_, i64>(7)? as i32,
-                            vol_remaining: r.get::<_, i64>(8)? as i32,
-                            min_volume: r.get::<_, i64>(9)? as i32,
-                            is_npc: r.get::<_, i64>(10)? != 0,
-                            escrow: IskCents(r.get(11)?),
-                        })
-                    },
-                )
-                .map_err(|e| e.to_string())?;
-            snap.market_orders.insert(k, ord);
+    if fp_market_orders_digest(&snap.market_orders) != fp.market_orders_digest
+        || snap.market_orders.len() != fp.market_orders.len()
+    {
+        snap.market_orders
+            .retain(|k, _| fp.market_orders.contains_key(k));
+        for (&k, &expected_h) in fp.market_orders.iter() {
+            if snap.market_orders.get(&k).map(fp_market_order) != Some(expected_h) {
+                let ord = conn
+                    .query_row(
+                        "SELECT order_id, owner_id, station_id, region_id, type_id, is_bid, price_cents, vol_entered, vol_remaining, min_volume, is_npc, escrow_cents FROM market_orders WHERE order_id = ?1",
+                        params![k],
+                        |r| {
+                            Ok(MarketOrderRecord {
+                                order_id: r.get(0)?,
+                                owner_id: r.get(1)?,
+                                station_id: r.get(2)?,
+                                region_id: r.get::<_, i64>(3)? as u32,
+                                type_id: r.get::<_, i64>(4)? as TypeId,
+                                is_bid: r.get::<_, i64>(5)? != 0,
+                                price: IskCents(r.get(6)?),
+                                vol_entered: r.get::<_, i64>(7)? as i32,
+                                vol_remaining: r.get::<_, i64>(8)? as i32,
+                                min_volume: r.get::<_, i64>(9)? as i32,
+                                is_npc: r.get::<_, i64>(10)? != 0,
+                                escrow: IskCents(r.get(11)?),
+                            })
+                        },
+                    )
+                    .map_err(|e| e.to_string())?;
+                snap.market_orders.insert(k, ord);
+            }
         }
     }
 

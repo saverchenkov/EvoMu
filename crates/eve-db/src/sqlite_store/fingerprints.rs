@@ -187,21 +187,32 @@ pub(crate) fn fp_item(i: &InventoryItemRecord) -> u64 {
     h.finish()
 }
 
+#[inline]
 pub(crate) fn fp_market_order(o: &MarketOrderRecord) -> u64 {
-    let mut h = FnvHasher::new();
-    h.write_i64(o.order_id);
-    h.write_i64(o.owner_id);
-    h.write_i64(o.station_id);
-    h.write_u32(o.region_id);
-    h.write_u32(o.type_id);
-    h.write_bool(o.is_bid);
-    h.write_i64(o.price.0);
-    h.write_i32(o.vol_entered);
-    h.write_i32(o.vol_remaining);
-    h.write_i32(o.min_volume);
-    h.write_bool(o.is_npc);
-    h.write_i64(o.escrow.0);
-    h.finish()
+    const P: u64 = 0x517c_c1b7_2722_0a95;
+    let mut h = 0xcbf2_9ce4_8422_2325_u64;
+    h = (h ^ (o.order_id as u64)).wrapping_mul(P);
+    h = (h ^ (o.owner_id as u64)).wrapping_mul(P);
+    h = (h ^ (o.station_id as u64)).wrapping_mul(P);
+    h = (h ^ ((o.region_id as u64) | ((o.type_id as u64) << 32))).wrapping_mul(P);
+    h = (h ^ (o.price.0 as u64)).wrapping_mul(P);
+    h = (h ^ ((o.vol_entered as u32 as u64) | ((o.vol_remaining as u32 as u64) << 32)))
+        .wrapping_mul(P);
+    h = (h
+        ^ ((o.min_volume as u32 as u64)
+            | (u64::from(o.is_bid) << 32)
+            | (u64::from(o.is_npc) << 33)))
+        .wrapping_mul(P);
+    (h ^ (o.escrow.0 as u64)).wrapping_mul(P)
+}
+
+#[inline]
+pub(crate) fn fp_market_orders_digest(orders: &HashMap<i64, MarketOrderRecord>) -> u64 {
+    let mut xor = (orders.len() as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+    for ord in orders.values() {
+        xor ^= fp_market_order(ord);
+    }
+    xor
 }
 
 pub(crate) fn fp_contract(c: &ContractRecord) -> u64 {
@@ -364,7 +375,8 @@ pub struct TableFingerprints {
     pub active_implants: HashMap<i64, u64>,
     pub items: HashMap<i64, u64>,
     pub saved_fittings: HashMap<i64, u64>,
-    pub market_orders: HashMap<i64, u64>,
+    pub market_orders: std::sync::Arc<HashMap<i64, u64>>,
+    pub market_orders_digest: u64,
     pub wallet_journal_len: usize,
     pub wallet_journal_hash: u64,
     pub contracts: HashMap<i64, u64>,
@@ -454,9 +466,12 @@ pub fn compute_fingerprints(snap: &WorldStateSnapshot) -> TableFingerprints {
     for (&id, fit) in &snap.saved_fittings {
         fp.saved_fittings.insert(id, fp_json(fit));
     }
+    let mut mkt_map = HashMap::with_capacity(snap.market_orders.len());
     for (&id, ord) in &snap.market_orders {
-        fp.market_orders.insert(id, fp_market_order(ord));
+        mkt_map.insert(id, fp_market_order(ord));
     }
+    fp.market_orders = std::sync::Arc::new(mkt_map);
+    fp.market_orders_digest = fp_market_orders_digest(&snap.market_orders);
     for (&id, c) in &snap.contracts {
         fp.contracts.insert(id, fp_contract(c));
     }

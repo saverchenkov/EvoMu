@@ -281,27 +281,14 @@ pub fn handle(
                     return Some(Err(rpc_err("NoSolarSystem", "GetSystemAsks requires an active solarSystemID")));
                 };
                 let rows = ctx.db.with_snapshot(|snap| {
-                    let mut best_by_type: std::collections::BTreeMap<TypeId, &MarketOrderRecord> =
-                        std::collections::BTreeMap::new();
-                    for o in snap.market_orders.values().filter(|o| {
-                        !o.is_bid
-                            && o.vol_remaining > 0
-                            && resolve_station_solar_system(ctx, snap, o.station_id)
-                                == Some(solar_system_id)
-                    }) {
-                        match best_by_type.get(&o.type_id) {
-                            Some(prev) if o.price.0 >= prev.price.0 => {}
-                            _ => { best_by_type.insert(o.type_id, o); }
-                        }
-                    }
-                    best_by_type.into_values().map(|o| {
-                            vec![
-                                PyRep::Real(o.price.to_wire_f64()),
-                                PyRep::Real(o.vol_remaining as f64),
-                                PyRep::Integer(o.type_id as i64),
-                                PyRep::Integer(o.station_id),
-                            ]
-                        }).collect()
+                    crate::services::market_trading::best_asks_to_summary_rows(
+                        snap.market_orders.values().filter(|o| {
+                            !o.is_bid
+                                && o.vol_remaining > 0
+                                && resolve_station_solar_system(ctx, snap, o.station_id)
+                                    == Some(solar_system_id)
+                        }),
+                    )
                 });
                 return Some(Ok(DBRowDescriptor::market_summary_header().build_cindexed_rowset("typeID", rows)));
             }

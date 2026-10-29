@@ -287,7 +287,9 @@ pub fn compute_sales_tax_cents(fill_gross: IskCents, seller_acct_lvl: u8) -> Isk
     IskCents((((fill_gross.0 as i128) * tax_ppm + 500_000) / 1_000_000) as i64)
 }
 
-fn best_asks_to_summary_rows<'a>(
+const MAX_SUMMARY_ROWSET_TYPES: usize = 3_500;
+
+pub(crate) fn best_asks_to_summary_rows<'a>(
     orders: impl Iterator<Item = &'a MarketOrderRecord>,
 ) -> Vec<Vec<PyRep>> {
     let mut best_by_type: std::collections::BTreeMap<TypeId, &MarketOrderRecord> =
@@ -300,8 +302,25 @@ fn best_asks_to_summary_rows<'a>(
             }
         }
     }
-    best_by_type
-        .into_values()
+    let mut selected: Vec<&MarketOrderRecord> = if best_by_type.len() <= MAX_SUMMARY_ROWSET_TYPES {
+        best_by_type.into_values().collect()
+    } else {
+        let mut priority: Vec<&MarketOrderRecord> = Vec::with_capacity(MAX_SUMMARY_ROWSET_TYPES);
+        let mut rest: Vec<&MarketOrderRecord> = Vec::new();
+        for o in best_by_type.into_values() {
+            if o.owner_id != 1_000_035 {
+                priority.push(o);
+            } else {
+                rest.push(o);
+            }
+        }
+        let remaining = MAX_SUMMARY_ROWSET_TYPES.saturating_sub(priority.len());
+        priority.extend(rest.into_iter().take(remaining));
+        priority.sort_unstable_by_key(|o| o.type_id);
+        priority
+    };
+    selected
+        .drain(..)
         .map(|o| {
             vec![
                 PyRep::Real(o.price.to_wire_f64()),

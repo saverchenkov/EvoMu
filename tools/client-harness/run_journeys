@@ -469,6 +469,9 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         ship1, _ = sm1.RemoteSvc("ship").MachoBindObject((60003760, 15), None)
         undock1 = ship1.Undock(client1_ship_id, False, onlineModules=True)
         undock2 = sm2.RemoteSvc("stationSvc").Undock()
+        beyonce2, _ = sm2.RemoteSvc("beyonce").MachoBindObject(30000142, None)
+        beyonce2.CmdAlignTo(dstID=60003760)
+        beyonce2.CmdSetSpeedFraction(0.15)
 
         # Journey 6: planetary (deploy colony network from space & flush)
         try:
@@ -490,8 +493,6 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
 
         # Journey 7: undock_navigate & multiplayer_presence
         beyonce1, _ = sm1.RemoteSvc("beyonce").MachoBindObject(30000142, None)
-        beyonce2, _ = sm2.RemoteSvc("beyonce").MachoBindObject(30000142, None)
-        beyonce2.CmdStop()
         formations = beyonce1.GetFormations()
         beyonce1.UpdateStateRequest()
         beyonce2.UpdateStateRequest()
@@ -543,6 +544,7 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         )
 
         # Client 2 redocks at Jita 4-4 station (deterministic mock clock advance past 10s session timer)
+        beyonce2.CmdStop()
         sm2.RemoteSvc("timeControl").AdvanceClock(12)
         dock2 = sm2.RemoteSvc("stationSvc").Dock(60003760)
         log2.info("Client 2 redocked at 60003760 -> %r" % (dock2,))

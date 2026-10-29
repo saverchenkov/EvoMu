@@ -965,4 +965,33 @@ async fn test_v24_client_market_ui_every_tab_and_click_flow() {
         .await
         .expect("CorpGetTransactions");
     assert!(matches!(corp_tx, PyRep::Rowset { .. }));
+
+    // Full catalog market seeder (`seed_full_market_catalog` / persistent world init):
+    // Verifies all ~12,000 published gameplay types across ships, modules (including T2/Meta with
+    // SDE base_price == 0.0), ammo, blueprints, skills, drones, implants, structures, and fighters
+    // are seeded in Jita 4-4 with positive ask/bid prices.
+    let full_types = eve_server::world_seeder::select_full_market_types(&ctx.sde);
+    assert!(
+        full_types.len() >= 11_000,
+        "Full market seeder catalog must include >= 11,000 published gameplay types, got {}",
+        full_types.len()
+    );
+    let added = eve_server::world_seeder::seed_full_market_catalog(&ctx.db, &ctx.sde);
+    assert!(added > 10_000, "seed_full_market_catalog must insert full Jita order book, got {added}");
+
+    // Verify a T2 module with SDE base_price == 0.0 (Damage Control II, typeID 2048) has live Jita asks & bids > 0 ISK
+    let dc2_orders = call_rpc(&ctx, &mut sess, "marketProxy", "GetOrders", &[PyRep::Integer(2048)])
+        .await
+        .expect("GetOrders for Damage Control II (2048)");
+    let PyRep::Tuple(dc2_pair) = dc2_orders else {
+        panic!("GetOrders(2048) must return 2-tuple");
+    };
+    let dc2_asks = dc2_pair[0].crowset_rows().expect("DC2 asks CRowset");
+    let dc2_bids = dc2_pair[1].crowset_rows().expect("DC2 bids CRowset");
+    assert!(!dc2_asks.is_empty(), "Damage Control II must have seeded Jita sell orders");
+    assert!(!dc2_bids.is_empty(), "Damage Control II must have seeded Jita buy orders");
+    assert!(
+        dc2_asks[0].dbrow_get("price").and_then(|v| v.as_f64()).unwrap_or(0.0) > 100.0,
+        "Damage Control II ask price must be derived from BOM (> 100 ISK)"
+    );
 }

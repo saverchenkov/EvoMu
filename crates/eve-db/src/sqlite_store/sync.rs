@@ -353,28 +353,33 @@ pub fn sync_dirty_to_sqlite(
     }
 
     // 9. market_orders
-    let removed_orders: Vec<i64> = fp
-        .market_orders
-        .keys()
-        .filter(|k| !snap.market_orders.contains_key(*k))
-        .copied()
-        .collect();
-    for oid in removed_orders {
-        tx.execute(
-            "DELETE FROM market_orders WHERE order_id = ?1",
-            params![oid],
-        )
-        .map_err(|e| e.to_string())?;
-        fp.market_orders.remove(&oid);
-        delta.removed_market_orders.push(oid);
-    }
-    for (&oid, ord) in &snap.market_orders {
-        let h = fp_market_order(ord);
-        if fp.market_orders.get(&oid) != Some(&h) {
+    let mkt_digest = fp_market_orders_digest(&snap.market_orders);
+    if mkt_digest != fp.market_orders_digest || snap.market_orders.len() != fp.market_orders.len() {
+        let fp_orders = std::sync::Arc::make_mut(&mut fp.market_orders);
+        let removed_orders: Vec<i64> = fp_orders
+            .keys()
+            .filter(|k| !snap.market_orders.contains_key(*k))
+            .copied()
+            .collect();
+        for oid in removed_orders {
             tx.execute(
-                "INSERT OR REPLACE INTO market_orders (order_id, owner_id, station_id, region_id, type_id, is_bid, price_cents, vol_entered, vol_remaining, min_volume, is_npc, escrow_cents)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                params![
+                "DELETE FROM market_orders WHERE order_id = ?1",
+                params![oid],
+            )
+            .map_err(|e| e.to_string())?;
+            fp_orders.remove(&oid);
+            delta.removed_market_orders.push(oid);
+        }
+        for (&oid, ord) in &snap.market_orders {
+            let h = fp_market_order(ord);
+            if fp_orders.get(&oid) != Some(&h) {
+                let mut stmt = tx
+                    .prepare_cached(
+                        "INSERT OR REPLACE INTO market_orders (order_id, owner_id, station_id, region_id, type_id, is_bid, price_cents, vol_entered, vol_remaining, min_volume, is_npc, escrow_cents)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    )
+                    .map_err(|e| e.to_string())?;
+                stmt.execute(params![
                     ord.order_id,
                     ord.owner_id,
                     ord.station_id,
@@ -387,12 +392,13 @@ pub fn sync_dirty_to_sqlite(
                     ord.min_volume as i64,
                     i64::from(ord.is_npc),
                     ord.escrow.0,
-                ],
-            )
-            .map_err(|e| e.to_string())?;
-            fp.market_orders.insert(oid, h);
-            delta.upserted_market_orders.push(ord.clone());
+                ])
+                .map_err(|e| e.to_string())?;
+                fp_orders.insert(oid, h);
+                delta.upserted_market_orders.push(ord.clone());
+            }
         }
+        fp.market_orders_digest = mkt_digest;
     }
 
     // 10. wallet_journal
