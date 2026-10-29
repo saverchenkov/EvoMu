@@ -4,8 +4,8 @@
 
 [![Language: Rust](https://img.shields.io/badge/language-Rust_2021-orange.svg)](https://www.rust-lang.org/)
 [![Unsafe: forbidden](https://img.shields.io/badge/unsafe-forbidden-brightgreen.svg)](#architecture)
-[![Ledger: 86.7% closed](https://img.shields.io/badge/parity_ledger-86.7%25_closed-brightgreen.svg)](./docs/ACTION_PLAN_STATUS.md)
-[![Automated tests: 1,271 passed](https://img.shields.io/badge/automated_tests-1%2C271_passed-brightgreen.svg)](#at-a-glance)
+[![Ledger: 89.2% closed](https://img.shields.io/badge/parity_ledger-89.2%25_closed-brightgreen.svg)](./docs/ACTION_PLAN_STATUS.md)
+[![Automated tests: 1,275 passed](https://img.shields.io/badge/automated_tests-1%2C275_passed-brightgreen.svg)](#at-a-glance)
 [![Wiki: 16 domains](https://img.shields.io/badge/wiki-16_domains-blue.svg)](./docs/wiki/README.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 
@@ -22,8 +22,8 @@ The goal: run your own server, point the **unmodified** EVE Online client at it,
 
 | | |
 |---|---|
-| **Parity ledger** | **5,505 of 6,351 rows closed (86.68%)**: 3,246 done, 2,259 not applicable, 846 open |
-| **Automated tests** | 1,271 passing, 0 failing (100% green across workspace) |
+| **Parity ledger** | **5,662 of 6,351 rows closed (89.15%)**: 3,289 done, 2,373 not applicable, 689 open |
+| **Automated tests** | 1,275 passing, 0 failing (100% green across workspace) |
 | **Technical Wiki** | [Comprehensive Game Systems & Technical Wiki](./docs/wiki/README.md) (16 domains) |
 | **Real-client journeys** | 0 of 29 passing |
 | **Action-plan tasks** | 83 of 117 done |
