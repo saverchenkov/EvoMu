@@ -810,11 +810,14 @@ pub(crate) async fn handle_ships_and_services(
                     let Some(item) = snap.items.get(&item_id) else {
                         return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {item_id} not found") });
                     };
-                    if item.owner_id != char_id || item.location_id != station_id {
+                    if item.owner_id != char_id {
                         return Err(BridgeRpcError { code: "OwnershipOrLocationViolation".into(), message: format!("Item {item_id} must be owned by character {char_id} at station {station_id}") });
                     }
                     if matches!(item.flag as u16, 11..=34 | 92..=94 | 125..=132 | 158) {
                         return Err(BridgeRpcError { code: "CanNotUnassembleInThisItemLoc".into(), message: format!("Cannot repackage item {item_id} while it is fitted in slot {:?}", item.flag) });
+                    }
+                    if item.location_id != station_id {
+                        return Err(BridgeRpcError { code: "OwnershipOrLocationViolation".into(), message: format!("Item {item_id} must be owned by character {char_id} at station {station_id}") });
                     }
                     if item.flag != InventoryFlag::Hangar {
                         return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} must be in your station Hangar (current flag: {:?}) to repackage", item.flag) });
