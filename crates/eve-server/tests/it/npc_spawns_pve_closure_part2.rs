@@ -129,6 +129,7 @@ async fn test_npc_mining_ops_and_hauler_convoy_lifecycle() {
 
     // Advance 33 more ticks (each 20,000-unit rock takes 12 full + 1 partial 800-unit tick -> 33 ticks = 51,200 units >= 50,000 Venture ore hold)!
     for _ in 0..33 {
+        ctx.advance_secs(60);
         tick_background_cluster(&ctx).await;
     }
     let post_asts = tanoo_handle.populate_asteroid_belt_entities().await.unwrap();

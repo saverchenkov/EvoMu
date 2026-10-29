@@ -4,8 +4,8 @@
 
 [![Language: Rust](https://img.shields.io/badge/language-Rust_2021-orange.svg)](https://www.rust-lang.org/)
 [![Unsafe: forbidden](https://img.shields.io/badge/unsafe-forbidden-brightgreen.svg)](#architecture)
-[![Ledger: 89.2% closed](https://img.shields.io/badge/parity_ledger-89.2%25_closed-brightgreen.svg)](./docs/ACTION_PLAN_STATUS.md)
-[![Automated tests: 1,275 passed](https://img.shields.io/badge/automated_tests-1%2C275_passed-brightgreen.svg)](#at-a-glance)
+[![Ledger: 90.1% closed](https://img.shields.io/badge/parity_ledger-90.1%25_closed-brightgreen.svg)](./docs/ACTION_PLAN_STATUS.md)
+[![Automated tests: 1,268 passed](https://img.shields.io/badge/automated_tests-1%2C268_passed-brightgreen.svg)](#at-a-glance)
 [![Wiki: 16 domains](https://img.shields.io/badge/wiki-16_domains-blue.svg)](./docs/wiki/README.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 
@@ -14,7 +14,7 @@ The goal: run your own server, point the **unmodified** EVE Online client at it,
 > [!IMPORTANT]
 > **Not playable yet.** Most of the server exists and passes its own tests, but almost none of it is proven through the real game client yet. In manual runs, a locally reconfigured client logs in, selects a character, loads the station and undocks. None of the 29 scripted real-client journeys passes in the automated harness. The project counts as done only when all of them do.
 
-*Live metrics: [`docs/ACTION_PLAN_STATUS.md`](./docs/ACTION_PLAN_STATUS.md) & [Game Systems Wiki](./docs/wiki/README.md).*
+*All numbers below come from a pre-flight run on `main` at `538822b4` (2026-10-29). Live metrics: [`docs/ACTION_PLAN_STATUS.md`](./docs/ACTION_PLAN_STATUS.md) & [Game Systems Wiki](./docs/wiki/README.md).*
 
 ---
 
@@ -22,8 +22,8 @@ The goal: run your own server, point the **unmodified** EVE Online client at it,
 
 | | |
 |---|---|
-| **Parity ledger** | **5,662 of 6,351 rows closed (89.15%)**: 3,289 done, 2,373 not applicable, 689 open |
-| **Automated tests** | 1,275 passing, 0 failing (100% green across workspace) |
+| **Parity ledger** | **5,723 of 6,351 rows closed (90.11%)**: 3,289 done, 2,434 not applicable, 628 open |
+| **Automated tests** | 1,268 passing, 0 failing (100% green across workspace) |
 | **Technical Wiki** | [Comprehensive Game Systems & Technical Wiki](./docs/wiki/README.md) (16 domains) |
 | **Real-client journeys** | 0 of 29 passing |
 | **Action-plan tasks** | 83 of 117 done |

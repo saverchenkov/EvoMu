@@ -162,8 +162,6 @@ pub(crate) async fn handle_module_cycles(
             };
             let is_weapon = matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807);
             let is_upwell_weapon_or_aoe = (target_id_opt.is_some_and(|tid| {
-            let is_weapon = matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807);
-            let is_upwell_weapon_or_aoe = (target_id_opt.is_some_and(|tid| {
                 tid >= 1_000_000_000_000 || ctx.db.with_snapshot(|s| s.structures.contains_key(&tid) || s.sov_runtime.mercenary_dens.contains_key(&tid) || s.sov_runtime.mto_site_balls.contains_key(&tid) || (s.system_states.get(&sys_id).is_some_and(|st| st.sov_alliance_id.is_some()) && !s.characters.contains_key(&tid) && !s.characters.values().any(|c| c.active_ship_id == tid)))
             }) && is_weapon)
                 || (matches!(mod_type.group_id, 72 | 862) && ctx.db.with_snapshot(|s| s.structures.values().any(|st| st.solar_system_id == sys_id && st.state != "Destroyed")));

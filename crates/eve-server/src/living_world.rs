@@ -63,6 +63,7 @@ pub struct LivingWorldDirector {
     convoys: RwLock<HashMap<i64, LivingWorldConvoy>>,
     routes: RwLock<HashMap<i64, ConvoyRouteState>>,
     hauler_cooldowns: RwLock<HashMap<SolarSystemId, std::time::Instant>>,
+    mining_last_step: RwLock<HashMap<i64, u64>>,
 }
 
 impl Default for LivingWorldDirector {
@@ -151,6 +152,7 @@ impl LivingWorldDirector {
             convoys: RwLock::new(HashMap::new()),
             routes: RwLock::new(HashMap::new()),
             hauler_cooldowns: RwLock::new(HashMap::new()),
+            mining_last_step: RwLock::new(HashMap::new()),
         }
     }
 
@@ -566,8 +568,16 @@ impl LivingWorldDirector {
             .unwrap_or(15_000.0)
             / 1_000.0)
             .max(1.0);
-        // Yield scaled by elapsed cycle duration (60.0s simulation tick interval) over laser cycle time
-        let elapsed_tick_secs: f64 = 60.0;
+        // Yield scaled by elapsed cycle duration over laser cycle time (R-LW-RATE-01)
+        let now_unix = db.clock().now_unix_secs();
+        let elapsed_tick_secs: f64 = {
+            let mut guard = self.mining_last_step.write().unwrap_or_else(|e| e.into_inner());
+            let prev = guard.insert(convoy_id, now_unix);
+            match prev {
+                Some(p) => (now_unix.saturating_sub(p).max(1)) as f64,
+                None => 60.0,
+            }
+        };
         let tick_m3 = laser_m3 * turrets * (1.0 + role_bonus_pct / 100.0) * (elapsed_tick_secs / laser_dur_s);
         let ore_unit_vol = sde
             .types

@@ -51,6 +51,18 @@ async fn create_pilot_in_jita(ctx: &ServerContext, sid: u64, user: &str, pass: &
         &[PyRep::String(name.into()), PyRep::Integer(bl), PyRep::Integer(1), PyRep::Integer(anc), doll, portrait, PyRep::Integer(school), PyRep::None, PyRep::Integer(JITA_SYS as i64)],
     ).await.expect("CreateCharacterWithDoll").as_i64().expect("char_id");
     rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(cid)]).await.expect("SelectCharacterID");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&cid) {
+            c.solar_system_id = JITA_SYS;
+            c.station_id = Some(JITA_STN);
+            let ship_id = c.active_ship_id;
+            if let Some(ship) = snap.items.get_mut(&ship_id) {
+                ship.location_id = JITA_STN;
+            }
+        }
+    });
+    sess.solar_system_id = Some(JITA_SYS);
+    sess.station_id = Some(JITA_STN);
     (sess, cid)
 }
 
