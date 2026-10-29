@@ -184,7 +184,7 @@ pub fn load_facility_taxes(snap: &eve_db::WorldStateSnapshot, facility_id: i64) 
             .get(&facility_id)
             .map(|it| matches!(it.type_id, 35825 | 35826 | 35827 | 35835 | 35836))
             .unwrap_or(false);
-    let default_rate = if is_upwell { 0.05 } else { 0.10 };
+    let default_rate = if is_upwell { 0.05 } else { 0.0025 };
     let mut map = HashMap::new();
     for act in [1_u8, 3, 4, 5, 8, 9] {
         map.insert(act, default_rate);
@@ -407,6 +407,38 @@ pub fn compute_industry_job_costs_ext(
     compute_industry_job_costs_for_char(ctx, snap, None, bp_type_id, activity_id, runs, facility_id, is_alpha_clone)
 }
 
+/// Canonical System Cost Index (SCI) formula from wiki:Manufacturing.md:70,88:
+/// SCI = sqrt(system_work_hours / universe_work_hours over 28-day rolling window).
+/// Returns standard base SCI (0.01) when universe/system work is zero.
+pub fn compute_canonical_system_cost_index(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    sys_id: u32,
+    activity_id: u8,
+) -> f64 {
+    let cutoff = ctx.now_unix().saturating_sub(28 * 86_400);
+    let mut sys_work: u64 = 0;
+    let mut univ_work: u64 = 0;
+    for j in snap.industry_jobs.values() {
+        if j.activity_id != activity_id || (j.start_unix > 0 && j.start_unix < cutoff) {
+            continue;
+        }
+        let job_sys = resolve_facility_modifiers_and_system(ctx, snap, j.facility_id).map(|m| m.2);
+        let work = u64::from(j.runs).saturating_mul(j.duration_seconds);
+        if job_sys == Some(sys_id) {
+            sys_work = sys_work.saturating_add(work);
+        }
+        if job_sys.is_some() {
+            univ_work = univ_work.saturating_add(work);
+        }
+    }
+    if univ_work > 0 && sys_work > 0 {
+        ((sys_work as f64) / (univ_work as f64)).sqrt().clamp(0.001, 0.50)
+    } else {
+        0.01
+    }
+}
+
 pub fn compute_industry_job_costs_for_char(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
@@ -430,12 +462,7 @@ pub fn compute_industry_job_costs_for_char(
         resolve_facility_modifiers_and_system(ctx, snap, facility_id).unwrap_or((
             1529, 1000035, 30000142, 10000002, 1.0, 1.0, 1.0,
         ));
-    let ind_idx = snap
-        .system_states
-        .get(&sys_id)
-        .map(|s| s.industrial_index)
-        .unwrap_or(4);
-    let system_cost_index = (0.01 + 0.01 * (ind_idx as f64)).clamp(0.001, 0.50);
+    let system_cost_index = compute_canonical_system_cost_index(ctx, snap, sys_id, activity_id);
     let base_job_cost_isk =
         ((total_eiv * system_cost_index * structure_cost_modifier) * 100.0).round() / 100.0;
     let taxes = load_facility_taxes(snap, facility_id);
@@ -443,8 +470,8 @@ pub fn compute_industry_job_costs_for_char(
         .get(&activity_id)
         .or_else(|| taxes.get(&1))
         .copied()
-        .unwrap_or(0.10);
-    let raw_facility_tax_isk = ((base_job_cost_isk * facility_tax_rate) * 100.0).round() / 100.0;
+        .unwrap_or(0.0025);
+    let raw_facility_tax_isk = ((total_eiv * facility_tax_rate) * 100.0).round() / 100.0;
     let is_enemy_militia = char_id
         .and_then(|cid| snap.characters.get(&cid))
         .and_then(|c| c.war_faction_id)
@@ -464,9 +491,9 @@ pub fn compute_industry_job_costs_for_char(
     let fulcrum_bonus =
         is_fulcrum_pirate_ship_bonus_applicable(ctx, snap, char_id, bp_type_id, activity_id, facility_id);
     let scc_rate = if fulcrum_bonus { 0.004 } else { 0.04 };
-    let scc_surcharge_isk = ((base_job_cost_isk * scc_rate) * 100.0).round() / 100.0;
+    let scc_surcharge_isk = ((total_eiv * scc_rate) * 100.0).round() / 100.0;
     let alpha_clone_tax_isk = if is_alpha_clone {
-        ((base_job_cost_isk * 0.0025) * 100.0).round() / 100.0
+        ((total_eiv * 0.0025) * 100.0).round() / 100.0
     } else {
         0.0
     };
@@ -501,13 +528,8 @@ pub fn build_facility_pyrep(
     let (rig_mat, rig_time, rig_cost, rig_sec_mult) =
         resolve_structure_rig_bonuses_full(ctx, snap, facility_id, sys_id);
     let taxes = load_facility_taxes(snap, facility_id);
-    let mfg_tax = taxes.get(&1).copied().unwrap_or(0.10);
-    let ind_idx = snap
-        .system_states
-        .get(&sys_id)
-        .map(|s| s.industrial_index)
-        .unwrap_or(4);
-    let sys_cost_index = (0.01 + 0.01 * (ind_idx as f64)).clamp(0.001, 0.50);
+    let mfg_tax = taxes.get(&1).copied().unwrap_or(0.0025);
+    let sys_cost_index = compute_canonical_system_cost_index(ctx, snap, sys_id, 1);
     let tax_kv = PyRep::keyval([
         ("1", PyRep::Real(taxes.get(&1).copied().unwrap_or(mfg_tax))),
         ("3", PyRep::Real(taxes.get(&3).copied().unwrap_or(mfg_tax))),
@@ -1032,7 +1054,7 @@ pub fn handle_industry_facilities_bps(
                     });
                 }
                 let taxes = load_facility_taxes(snap, facility_id);
-                let mfg_tax = taxes.get(&1).copied().unwrap_or(0.10);
+                let mfg_tax = taxes.get(&1).copied().unwrap_or(0.0025);
                 Ok(PyRep::keyval([
                     ("facilityID", PyRep::Integer(facility_id)),
                     ("tax", PyRep::Real(mfg_tax)),
@@ -1228,7 +1250,7 @@ pub fn handle_industry_facilities_bps(
                     taxes.insert(act, rate);
                 }
                 save_facility_taxes(snap, facility_id, &taxes);
-                let mfg_tax = taxes.get(&1).copied().unwrap_or(0.10);
+                let mfg_tax = taxes.get(&1).copied().unwrap_or(0.0025);
                 Ok(PyRep::keyval([
                     ("facilityID", PyRep::Integer(facility_id)),
                     ("tax", PyRep::Real(mfg_tax)),
@@ -1260,40 +1282,16 @@ pub fn handle_industry_facilities_bps(
         ("map", "GetIndustryCostModifier") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let sys_id = args.first().and_then(|a| a.as_i64()).map(|v| v as u32).or(session.solar_system_id).unwrap_or(30_000_142);
-            let cutoff = ctx.now_unix().saturating_sub(28 * 86_400);
             let res = ctx.db.with_snapshot(|snap| {
-                let ind_idx = snap.system_states.get(&sys_id).map(|s| s.industrial_index).unwrap_or(4);
-                let base_idx = (0.01 + 0.01 * (ind_idx as f64)).clamp(0.001, 0.50);
-                let mut act_runs: HashMap<u8, u64> = HashMap::new();
-                for j in snap.industry_jobs.values() {
-                    if j.start_unix > 0 && j.start_unix < cutoff {
-                        continue;
-                    }
-                    let j_sys = resolve_facility_modifiers_and_system(ctx, snap, j.facility_id)
-                        .map(|(_, _, s, _, _, _, _)| s)
-                        .unwrap_or(30_000_142);
-                    if j_sys == sys_id {
-                        *act_runs.entry(j.activity_id).or_insert(0) += u64::from(j.runs);
-                    }
-                }
-                let idx_for = |act: u8, mult: f64| -> f64 {
-                    let runs = act_runs.get(&act).copied().unwrap_or(0) as f64;
-                    ((base_idx * mult) + 0.0005 * runs).clamp(0.001, 0.50)
-                };
+                let sci = |act| compute_canonical_system_cost_index(ctx, snap, sys_id, act);
                 PyRep::keyval([
                     ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                    ("1", PyRep::Real(idx_for(1, 1.0))),
-                    ("3", PyRep::Real(idx_for(3, 0.6))),
-                    ("4", PyRep::Real(idx_for(4, 0.6))),
-                    ("5", PyRep::Real(idx_for(5, 0.5))),
-                    ("8", PyRep::Real(idx_for(8, 0.8))),
-                    ("9", PyRep::Real(idx_for(9, 0.9))),
-                    ("manufacturing", PyRep::Real(idx_for(1, 1.0))),
-                    ("research_te", PyRep::Real(idx_for(3, 0.6))),
-                    ("research_me", PyRep::Real(idx_for(4, 0.6))),
-                    ("copying", PyRep::Real(idx_for(5, 0.5))),
-                    ("invention", PyRep::Real(idx_for(8, 0.8))),
-                    ("reaction", PyRep::Real(idx_for(9, 0.9))),
+                    ("1", PyRep::Real(sci(1))), ("3", PyRep::Real(sci(3))),
+                    ("4", PyRep::Real(sci(4))), ("5", PyRep::Real(sci(5))),
+                    ("8", PyRep::Real(sci(8))), ("9", PyRep::Real(sci(9))),
+                    ("manufacturing", PyRep::Real(sci(1))), ("research_te", PyRep::Real(sci(3))),
+                    ("research_me", PyRep::Real(sci(4))), ("copying", PyRep::Real(sci(5))),
+                    ("invention", PyRep::Real(sci(8))), ("reaction", PyRep::Real(sci(9))),
                 ])
             });
             Some(Ok(res))

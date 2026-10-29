@@ -513,7 +513,7 @@ async fn test_industry_blueprint_data_facilities_jobs() {
     assert_eq!(npc_fac.dict_get("materialModifier").and_then(|v| v.as_f64()), Some(1.0));
     assert_eq!(npc_fac.dict_get("timeModifier").and_then(|v| v.as_f64()), Some(1.0));
     assert_eq!(npc_fac.dict_get("costModifier").and_then(|v| v.as_f64()), Some(1.0));
-    assert_eq!(npc_fac.dict_get("tax").and_then(|v| v.as_f64()), Some(0.10));
+    assert_eq!(npc_fac.dict_get("tax").and_then(|v| v.as_f64()), Some(0.0025));
     let PyRep::List(npc_acts) = npc_fac.dict_get("activities").expect("NPC activities") else { panic!("Expected List") };
     assert!(npc_acts.contains(&PyRep::Integer(1)) && npc_acts.contains(&PyRep::Integer(8)));
     let struct_fac_in_list = fac_list.iter().find(|f| f.dict_get("facilityID").and_then(|v| v.as_i64()) == Some(raitaru_id)).expect("Structure in GetFacilities");
@@ -692,9 +692,10 @@ async fn test_industry_blueprint_data_facilities_jobs() {
     assert!(eiv > 0.0);
     assert!(sci > 0.0 && sci <= 0.50);
     assert!((struct_mod - 0.97).abs() < 1e-6);
-    let expected_base = (eiv * sci * 0.97 * 2.0 * 100.0).round() / 100.0;
-    let expected_fac_tax = (expected_base * 0.05 * 100.0).round() / 100.0;
-    let expected_scc = (expected_base * 0.04 * 100.0).round() / 100.0;
+    let total_eiv = eiv * 2.0;
+    let expected_base = (total_eiv * sci * 0.97 * 100.0).round() / 100.0;
+    let expected_fac_tax = (total_eiv * 0.05 * 100.0).round() / 100.0;
+    let expected_scc = (total_eiv * 0.04 * 100.0).round() / 100.0;
     let expected_total = ((expected_base + expected_fac_tax + expected_scc) * 100.0).round() / 100.0;
     assert!((base_job_cost - expected_base).abs() < 0.02);
     assert!((fac_tax_isk - expected_fac_tax).abs() < 0.02);
@@ -772,9 +773,9 @@ async fn test_industry_blueprint_data_facilities_jobs() {
     )
     .await
     .expect("InstallJob at NPC station");
-    let npc_base = npc_install.dict_get("baseJobCost").and_then(|v| v.as_f64()).unwrap();
+    let npc_eiv = npc_install.dict_get("estimatedItemValue").and_then(|v| v.as_f64()).unwrap();
     let npc_tax = npc_install.dict_get("facilityTaxISK").and_then(|v| v.as_f64()).unwrap();
-    assert!((npc_tax - (npc_base * 0.10 * 100.0).round() / 100.0).abs() < 0.02);
+    assert!((npc_tax - (npc_eiv * 0.0025 * 100.0).round() / 100.0).abs() < 0.02);
 }
 
 #[tokio::test]

@@ -16,7 +16,7 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
 
-fn notify_contract(ctx: &ServerContext, char_id: i64, event: &str, cid: i64) {
+pub fn notify_contract(ctx: &ServerContext, char_id: i64, event: &str, cid: i64) {
     ctx.notify(NotificationTarget::Character(char_id), event, "charid", vec![PyRep::Integer(cid)]);
 }
 
@@ -134,8 +134,7 @@ pub fn handle(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let is_break_wrap = matches!(service, "invbroker" | "repackagingSvc") && method == "BreakPlasticWrap";
-    if service != "contractProxy" && !is_break_wrap { return None; }
+    if service != "contractProxy" { return None; }
 
     match method {
         "CreateContract" => {
@@ -929,59 +928,6 @@ pub fn handle(
             }
         }
 
-        "BreakPlasticWrap" => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let wrap_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let now_unix = ctx.now_unix();
-            let sess_loc = session.station_id.or(session.structure_id);
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(wrap_item) = snap.items.get(&wrap_id).cloned() else {
-                    return Err(rpc_err("ItemNotFound", format!("Plastic Wrap {wrap_id} not found")));
-                };
-                if wrap_item.type_id != 3468 || wrap_item.owner_id != char_id {
-                    return Err(rpc_err("InvalidPlasticWrap", format!("Item {wrap_id} is not a Courier Plastic Wrap owned by {char_id}")));
-                }
-                let char_loc = snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id));
-                if sess_loc != Some(wrap_item.location_id) || char_loc != Some(wrap_item.location_id) {
-                    return Err(rpc_err("CustomInfo", format!("Must be docked at location {} where Plastic Wrap {wrap_id} is located", wrap_item.location_id)));
-                }
-                let cid_opt = snap.contracts.values().find(|c| {
-                    c.contract_type == "Courier"
-                        && c.status == "InProgress"
-                        && c.acceptor_id == Some(char_id)
-                        && c.item_ids.iter().any(|iid| snap.items.get(iid).is_some_and(|it| it.location_id == wrap_id))
-                }).map(|c| (c.contract_id, c.issuer_id, c.item_ids.clone()));
-                let Some((cid, issuer_id, item_ids)) = cid_opt else {
-                    return Err(rpc_err("ContractNotFound", format!("No active InProgress courier contract found for Plastic Wrap {wrap_id}")));
-                };
-                snap.fail_courier_contract(cid, now_unix);
-                for iid in &item_ids {
-                    if let Some(it) = snap.items.get_mut(iid) {
-                        it.owner_id = char_id;
-                        it.location_id = wrap_item.location_id;
-                        it.flag = InventoryFlag::Hangar;
-                        it.version += 1;
-                    }
-                }
-                snap.items.remove(&wrap_id);
-                Ok((cid, issuer_id, item_ids))
-            });
-            match res {
-                Ok((cid, issuer_id, extracted_ids)) => {
-                    notify_contract(ctx, issuer_id, "OnContractFailed", cid);
-                    Some(Ok(PyRep::keyval([
-                        ("contractID", PyRep::Integer(cid)),
-                        ("status", PyRep::String("Failed".into())),
-                        ("extractedItemIDs", PyRep::List(extracted_ids.into_iter().map(PyRep::Integer).collect())),
-                    ])))
-                }
-                Err(e) => Some(Err(e)),
-            }
-        }
-
         "GM_ExpireContract" => {
             let (user_id, _char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -1331,4 +1277,45 @@ pub fn handle(
 
         _ => None,
     }
+}
+
+/// Breaks a Courier Plastic Wrap item in the hauler's hangar (`feat:contracts.courier-plastic-wrap-break`).
+/// Extracts wrapped items into hauler's hangar, marks the courier contract as Failed,
+/// and transfers escrowed collateral to contract issuer via `fail_courier_contract`.
+pub fn break_courier_plastic_wrap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    wrap_id: i64,
+    now_unix: u64,
+) -> Result<(i64, i64, Vec<i64>), BridgeRpcError> {
+    let Some(wrap_item) = snap.items.get(&wrap_id).cloned() else {
+        return Err(rpc_err("ItemNotFound", format!("Plastic Wrap {wrap_id} not found")));
+    };
+    if wrap_item.type_id != 3468 || wrap_item.owner_id != char_id {
+        return Err(rpc_err("InvalidPlasticWrap", format!("Item {wrap_id} is not a Courier Plastic Wrap owned by {char_id}")));
+    }
+    let char_loc = snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id));
+    if char_loc != Some(wrap_item.location_id) {
+        return Err(rpc_err("CustomInfo", format!("Must be docked at location {} where Plastic Wrap {wrap_id} is located", wrap_item.location_id)));
+    }
+    let cid_opt = snap.contracts.values().find(|c| {
+        c.contract_type == "Courier"
+            && c.status == "InProgress"
+            && c.acceptor_id == Some(char_id)
+            && c.item_ids.iter().any(|iid| snap.items.get(iid).is_some_and(|it| it.location_id == wrap_id))
+    }).map(|c| (c.contract_id, c.issuer_id, c.item_ids.clone()));
+    let Some((cid, issuer_id, item_ids)) = cid_opt else {
+        return Err(rpc_err("ContractNotFound", format!("No active InProgress courier contract found for Plastic Wrap {wrap_id}")));
+    };
+    snap.fail_courier_contract(cid, now_unix);
+    for iid in &item_ids {
+        if let Some(it) = snap.items.get_mut(iid) {
+            it.owner_id = char_id;
+            it.location_id = wrap_item.location_id;
+            it.flag = InventoryFlag::Hangar;
+            it.version += 1;
+        }
+    }
+    snap.items.remove(&wrap_id);
+    Ok((cid, issuer_id, item_ids))
 }

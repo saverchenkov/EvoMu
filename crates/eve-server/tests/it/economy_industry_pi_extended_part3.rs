@@ -207,7 +207,7 @@ async fn test_industry_eiv_scc_surcharge_alpha_tax_and_fulcrum_pirate_bonus() {
 
     assert!((eiv_reported - expected_eiv_1_run).abs() < 1.0);
     assert!((base_cost_omega - eiv_reported * sci_reported * 2.0).abs() < 0.05);
-    assert!((scc_omega - base_cost_omega * 0.04).abs() < 0.05);
+    assert!((scc_omega - eiv_reported * 2.0 * 0.04).abs() < 0.05);
     assert_eq!(alpha_omega, 0.0);
     assert!((total_omega - (base_cost_omega + fac_tax_omega + scc_omega)).abs() < 0.05);
 
@@ -234,10 +234,15 @@ async fn test_industry_eiv_scc_surcharge_alpha_tax_and_fulcrum_pirate_bonus() {
         )
         .await
         .expect("Install Alpha manufacturing job");
+    let sci_alpha = alpha_job.dict_get("systemCostIndex").and_then(|v| v.as_f64()).unwrap();
+    let base_cost_alpha = alpha_job.dict_get("baseJobCost").and_then(|v| v.as_f64()).unwrap();
+    let fac_tax_alpha = alpha_job.dict_get("facilityTaxISK").and_then(|v| v.as_f64()).unwrap();
+    let scc_alpha = alpha_job.dict_get("sccSurchargeISK").and_then(|v| v.as_f64()).unwrap();
     let alpha_tax = alpha_job.dict_get("alphaCloneTaxISK").and_then(|v| v.as_f64()).unwrap();
     let total_alpha = alpha_job.dict_get("totalJobCost").and_then(|v| v.as_f64()).unwrap();
-    assert!((alpha_tax - base_cost_omega * 0.0025).abs() < 0.05);
-    assert!((total_alpha - (total_omega + alpha_tax)).abs() < 0.05);
+    assert!((base_cost_alpha - eiv_reported * sci_alpha * 2.0).abs() < 0.05);
+    assert!((alpha_tax - eiv_reported * 2.0 * 0.0025).abs() < 0.05);
+    assert!((total_alpha - (base_cost_alpha + fac_tax_alpha + scc_alpha + alpha_tax)).abs() < 0.05);
 
     // 2. The Fulcrum in Zarzakh pirate ship manufacturing bonus (-4% material, -20% time)
     ctx.db.with_mut_snapshot(|snap| {

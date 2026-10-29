@@ -1301,8 +1301,8 @@ async fn test_contracts_visibility_search_fees_limits_reject_blueprints_and_gm_e
     let pkg_id = acc_cw_kv.get("courierPackageID").and_then(|v| v.as_i64()).unwrap();
 
     let s1_bal_before_break = ctx.db.get_character(90_000_001).unwrap().balance;
-    let break_rep = rpc(&ctx, &mut s2, "contractProxy", "BreakPlasticWrap", &[PyRep::Integer(pkg_id)]).await
-        .expect("BreakPlasticWrap");
+    let break_rep = rpc(&ctx, &mut s2, "repackagingSvc", "RepackageItems", &[PyRep::List(vec![PyRep::Integer(pkg_id)])]).await
+        .expect("RepackageItems (break plastic wrap)");
     let PyRep::KeyVal(brk_kv) = break_rep else { panic!("Expected KeyVal"); };
     assert_eq!(brk_kv.get("status"), Some(&PyRep::String("Failed".into())));
     assert_eq!(brk_kv.get("extractedItemIDs"), Some(&PyRep::List(vec![PyRep::Integer(cour_wrap_item_id)])));

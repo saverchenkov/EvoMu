@@ -243,7 +243,7 @@ async fn test_industry_blueprint_data_owner_limits_facilities_taxes_and_sci() {
         .expect("GetFacilities");
     let PyRep::List(fac_list) = all_facs else { panic!("Expected List") };
     let jita_fac = fac_list.iter().find(|f| f.dict_get("facilityID").and_then(|v| v.as_i64()) == Some(JITA_STATION_ID)).expect("Jita NPC station");
-    assert_eq!(jita_fac.dict_get("tax").and_then(|v| v.as_f64()), Some(0.10));
+    assert_eq!(jita_fac.dict_get("tax").and_then(|v| v.as_f64()), Some(0.0025));
 
     let hs_fac = ctx.dispatch_rpc(&mut sess, "facilityManager", None, "GetFacility", &[PyRep::Integer(hs_raitaru_id)], &kw, None).await.expect("GetFacility HS Raitaru");
     let ls_fac = ctx.dispatch_rpc(&mut sess, "facilityManager", None, "GetFacility", &[PyRep::Integer(ls_azbel_id)], &kw, None).await.expect("GetFacility LS Azbel");
@@ -301,9 +301,9 @@ async fn test_industry_blueprint_data_owner_limits_facilities_taxes_and_sci() {
         )
         .await
         .expect("InstallJob at structure");
-    let struct_base = corp_job.dict_get("baseJobCost").and_then(|v| v.as_f64()).unwrap();
+    let struct_eiv = corp_job.dict_get("estimatedItemValue").and_then(|v| v.as_f64()).unwrap();
     let struct_tax = corp_job.dict_get("facilityTaxISK").and_then(|v| v.as_f64()).unwrap();
-    assert!((struct_tax - (struct_base * 0.035 * 100.0).round() / 100.0).abs() < 0.02);
+    assert!((struct_tax - (struct_eiv * 0.035 * 100.0).round() / 100.0).abs() < 0.02);
 
     let npc_job = ctx
         .dispatch_rpc(
@@ -323,9 +323,9 @@ async fn test_industry_blueprint_data_owner_limits_facilities_taxes_and_sci() {
         )
         .await
         .expect("InstallJob at NPC station");
-    let npc_base = npc_job.dict_get("baseJobCost").and_then(|v| v.as_f64()).unwrap();
+    let npc_eiv = npc_job.dict_get("estimatedItemValue").and_then(|v| v.as_f64()).unwrap();
     let npc_tax = npc_job.dict_get("facilityTaxISK").and_then(|v| v.as_f64()).unwrap();
-    assert!((npc_tax - (npc_base * 0.10 * 100.0).round() / 100.0).abs() < 0.02);
+    assert!((npc_tax - (npc_eiv * 0.0025 * 100.0).round() / 100.0).abs() < 0.02);
 
     let sci_active = ctx
         .dispatch_rpc(&mut sess, "map", None, "GetIndustryCostModifier", &[PyRep::Integer(JITA_SOLAR_SYSTEM_ID as i64)], &kw, None)

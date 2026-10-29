@@ -624,16 +624,16 @@ async fn break_plastic_wrap_requires_docked_at_wrap_station_and_combat_rng_seede
     let err_undocked = ctx
         .dispatch_rpc(
             &mut s_courier,
-            "contractProxy",
+            "repackagingSvc",
             None,
-            "BreakPlasticWrap",
-            &[PyRep::Integer(wrap_id)],
+            "RepackageItems",
+            &[PyRep::List(vec![PyRep::Integer(wrap_id)])],
             &empty_kw,
             None,
         )
         .await
         .expect_err("Undocked caller must not break station plastic wrap");
-    assert_eq!(err_undocked.code, "CustomInfo");
+    assert_eq!(err_undocked.code, "NotDocked");
 
     // OF-16: Caller docked at a different station (60_003_761) is also rejected.
     ctx.db.with_mut_snapshot(|s| {
@@ -643,10 +643,10 @@ async fn break_plastic_wrap_requires_docked_at_wrap_station_and_combat_rng_seede
     let err_wrong_station = ctx
         .dispatch_rpc(
             &mut s_courier,
-            "contractProxy",
+            "repackagingSvc",
             None,
-            "BreakPlasticWrap",
-            &[PyRep::Integer(wrap_id)],
+            "RepackageItems",
+            &[PyRep::List(vec![PyRep::Integer(wrap_id)])],
             &empty_kw,
             None,
         )
@@ -661,10 +661,10 @@ async fn break_plastic_wrap_requires_docked_at_wrap_station_and_combat_rng_seede
     s_courier.station_id = Some(60_003_760);
     ctx.dispatch_rpc(
         &mut s_courier,
-        "contractProxy",
+        "repackagingSvc",
         None,
-        "BreakPlasticWrap",
-        &[PyRep::Integer(wrap_id)],
+        "RepackageItems",
+        &[PyRep::List(vec![PyRep::Integer(wrap_id)])],
         &empty_kw,
         None,
     )

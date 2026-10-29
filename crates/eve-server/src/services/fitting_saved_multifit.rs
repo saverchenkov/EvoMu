@@ -713,32 +713,20 @@ pub(crate) async fn handle_ships_and_services(
                     message: "Repackaging items requires being docked".into(),
                 }));
             };
-            let extract_ids_from_list = |list: &[PyRep]| -> Vec<i64> {
-                list.iter()
-                    .filter_map(|v| {
-                        v.as_i64().or_else(|| match v {
-                            PyRep::Tuple(t) | PyRep::List(t) => t.first().and_then(|x| x.as_i64()),
-                            _ => None,
-                        })
-                    })
-                    .collect()
+            let extract_ids = |list: &[PyRep]| -> Vec<i64> {
+                list.iter().filter_map(|v| v.as_i64().or_else(|| match v {
+                    PyRep::Tuple(t) | PyRep::List(t) => t.first().and_then(|x| x.as_i64()),
+                    _ => None,
+                })).collect()
             };
             let item_ids: Vec<i64> = match args.first() {
                 Some(PyRep::Integer(id)) => vec![*id],
-                Some(PyRep::List(list) | PyRep::Tuple(list)) => extract_ids_from_list(list),
-                Some(PyRep::Dict(entries)) => {
-                    let mut ids = Vec::new();
-                    for (_, val) in entries {
-                        match val {
-                            PyRep::List(list) | PyRep::Tuple(list) => {
-                                ids.extend(extract_ids_from_list(list));
-                            }
-                            PyRep::Integer(id) => ids.push(*id),
-                            _ => {}
-                        }
-                    }
-                    ids
-                }
+                Some(PyRep::List(l) | PyRep::Tuple(l)) => extract_ids(l),
+                Some(PyRep::Dict(entries)) => entries.iter().flat_map(|(_, val)| match val {
+                    PyRep::List(l) | PyRep::Tuple(l) => extract_ids(l),
+                    PyRep::Integer(id) => vec![*id],
+                    _ => Vec::new(),
+                }).collect(),
                 _ => vec![0],
             };
             if item_ids.is_empty() {
@@ -746,6 +734,43 @@ pub(crate) async fn handle_ships_and_services(
                     code: "ItemNotFound".into(),
                     message: "RepackageItems requires at least one itemID".into(),
                 }));
+            }
+            let has_wrap = ctx.db.with_snapshot(|snap| {
+                item_ids.iter().any(|&id| snap.items.get(&id).is_some_and(|it| it.type_id == 3468))
+            });
+            if has_wrap {
+                let now_unix = ctx.now_unix();
+                let res = ctx.db.try_with_mut_snapshot(|snap| {
+                    let mut broken = Vec::new();
+                    for &item_id in &item_ids {
+                        if snap.items.get(&item_id).is_some_and(|it| it.type_id == 3468) {
+                            let (cid, issuer_id, extracted) =
+                                crate::services::contracts_service::break_courier_plastic_wrap(
+                                    snap, char_id, item_id, now_unix,
+                                )?;
+                            broken.push((item_id, cid, issuer_id, extracted));
+                        }
+                    }
+                    Ok(broken)
+                });
+                return match res {
+                    Ok(broken) => {
+                        let (wrap_id, cid, issuer_id, extracted) = broken.into_iter().next().unwrap_or((0, 0, 0, Vec::new()));
+                        if cid > 0 {
+                            crate::services::contracts_service::notify_contract(ctx, issuer_id, "OnContractFailed", cid);
+                        }
+                        Some(Ok(PyRep::keyval([
+                            ("itemID", PyRep::Integer(wrap_id)),
+                            ("singleton", PyRep::Bool(false)),
+                            ("version", PyRep::Integer(1)),
+                            ("repackagedCount", PyRep::Integer(1)),
+                            ("contractID", PyRep::Integer(cid)),
+                            ("status", PyRep::String("Failed".into())),
+                            ("extractedItemIDs", PyRep::List(extracted.into_iter().map(PyRep::Integer).collect())),
+                        ])))
+                    }
+                    Err(e) => Some(Err(e)),
+                };
             }
             for &item_id in &item_ids {
                 if Some(item_id) == session.ship_id {
@@ -759,11 +784,7 @@ pub(crate) async fn handle_ships_and_services(
                     .read()
                     .unwrap_or_else(|e| e.into_inner())
                     .get(&item_id)
-                    .map(|fit| {
-                        fit.rack_heat.iter().any(|&h| h > 0.0)
-                            || fit.modules.values().any(|m| m.damage_hp > 0.0)
-                    })
-                    .unwrap_or(false);
+                    .is_some_and(|fit| fit.rack_heat.iter().any(|&h| h > 0.0) || fit.modules.values().any(|m| m.damage_hp > 0.0));
                 if has_module_damage {
                     return Some(Err(BridgeRpcError {
                         code: "CantRepackageDamagedItem".into(),
@@ -782,98 +803,34 @@ pub(crate) async fn handle_ships_and_services(
                 // First pass: validate all items before mutating
                 for &item_id in &item_ids {
                     if item_id == active_ship_id {
-                        return Err(BridgeRpcError {
-                            code: "CannotRepackageActiveShip".into(),
-                            message: "Cannot repackage your currently active ship".into(),
-                        });
+                        return Err(BridgeRpcError { code: "CannotRepackageActiveShip".into(), message: "Cannot repackage your currently active ship".into() });
                     }
                     let Some(item) = snap.items.get(&item_id) else {
-                        return Err(BridgeRpcError {
-                            code: "ItemNotFound".into(),
-                            message: format!("Item {item_id} not found"),
-                        });
+                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {item_id} not found") });
                     };
-                    if item.owner_id != char_id {
-                        return Err(BridgeRpcError {
-                            code: "OwnershipOrLocationViolation".into(),
-                            message: format!(
-                                "Item {item_id} must be owned by character {char_id} at station {station_id}"
-                            ),
-                        });
+                    if item.owner_id != char_id || item.location_id != station_id {
+                        return Err(BridgeRpcError { code: "OwnershipOrLocationViolation".into(), message: format!("Item {item_id} must be owned by character {char_id} at station {station_id}") });
                     }
-                    // Fitted item check (IsShipFittingFlag: 11..=34 | 92..=94 | 125..=132 | 158) before location_id check
                     if matches!(item.flag as u16, 11..=34 | 92..=94 | 125..=132 | 158) {
-                        return Err(BridgeRpcError {
-                            code: "CanNotUnassembleInThisItemLoc".into(),
-                            message: format!(
-                                "Cannot repackage item {item_id} while it is fitted in slot {:?}",
-                                item.flag
-                            ),
-                        });
-                    }
-                    if item.location_id != station_id {
-                        return Err(BridgeRpcError {
-                            code: "OwnershipOrLocationViolation".into(),
-                            message: format!(
-                                "Item {item_id} must be owned by character {char_id} at station {station_id}"
-                            ),
-                        });
+                        return Err(BridgeRpcError { code: "CanNotUnassembleInThisItemLoc".into(), message: format!("Cannot repackage item {item_id} while it is fitted in slot {:?}", item.flag) });
                     }
                     if item.flag != InventoryFlag::Hangar {
-                        return Err(BridgeRpcError {
-                            code: "ItemLocked".into(),
-                            message: format!(
-                                "Item {item_id} must be in your station Hangar (current flag: {:?}) to repackage",
-                                item.flag
-                            ),
-                        });
+                        return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} must be in your station Hangar (current flag: {:?}) to repackage", item.flag) });
                     }
                     if snap.is_item_locked_in_contract_or_job(item_id) {
-                        return Err(BridgeRpcError {
-                            code: "ItemLocked".into(),
-                            message: format!(
-                                "Item {item_id} is locked in an active contract or industry job"
-                            ),
-                        });
+                        return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} is locked in an active contract or industry job") });
                     }
-                    let has_contained_items = snap.items.values().any(|other| {
-                        other.item_id != item_id
-                            && other.location_id == item_id
-                            && other.quantity > 0
-                    });
+                    let has_contained_items = snap.items.values().any(|o| o.item_id != item_id && o.location_id == item_id && o.quantity > 0);
                     if has_contained_items {
-                        return Err(BridgeRpcError {
-                            code: "CannotRepackageNonEmptyItem".into(),
-                            message: format!(
-                                "Cannot repackage item {item_id} while it contains fitted modules, rigs, or cargo"
-                            ),
-                        });
+                        return Err(BridgeRpcError { code: "CannotRepackageNonEmptyItem".into(), message: format!("Cannot repackage item {item_id} while it contains fitted modules, rigs, or cargo") });
                     }
                     if item.is_blueprint_copy {
-                        return Err(BridgeRpcError {
-                            code: "CannotRepackageBlueprintCopy".into(),
-                            message: format!("Blueprint copy {item_id} cannot be repackaged"),
-                        });
+                        return Err(BridgeRpcError { code: "CannotRepackageBlueprintCopy".into(), message: format!("Blueprint copy {item_id} cannot be repackaged") });
                     }
-                    let hull_or_armor_damage = item
-                        .dynamic_attributes
-                        .get(&attr_ids::DAMAGE)
-                        .copied()
-                        .unwrap_or(0.0)
-                        > 0.0
-                        || item
-                            .dynamic_attributes
-                            .get(&attr_ids::ARMOR_DAMAGE)
-                            .copied()
-                            .unwrap_or(0.0)
-                            > 0.0;
+                    let hull_or_armor_damage = item.dynamic_attributes.get(&attr_ids::DAMAGE).copied().unwrap_or(0.0) > 0.0
+                        || item.dynamic_attributes.get(&attr_ids::ARMOR_DAMAGE).copied().unwrap_or(0.0) > 0.0;
                     if hull_or_armor_damage {
-                        return Err(BridgeRpcError {
-                            code: "CantRepackageDamagedItem".into(),
-                            message: format!(
-                                "Item {item_id} has structural or armor damage and must be repaired before repackaging"
-                            ),
-                        });
+                        return Err(BridgeRpcError { code: "CantRepackageDamagedItem".into(), message: format!("Item {item_id} has structural or armor damage and must be repaired before repackaging") });
                     }
                     let confirm_reset = args.get(1).and_then(|a| a.as_bool()).unwrap_or(false);
                     let is_researched_bpo = !item.is_blueprint_copy
