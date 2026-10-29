@@ -58,23 +58,21 @@ fn events(ctx: &ServerContext, char_id: i64, event: &str) -> Vec<Vec<PyRep>> {
 
 #[tokio::test]
 async fn test_batch5_station_damage_crimewatch_shutdown_scanners() {
-    // parity: notify:OnCharNowInStation, notify:OnCharNoLongerInStation, notify:OnDamageStateChange
+    // DATA GAP: notify:OnCharNowInStation requires production dock RPC guest-list wiring
+    // DATA GAP: notify:OnCharNoLongerInStation requires production undock RPC guest-list wiring
+    // DATA GAP: notify:OnDamageStateChange requires bubble-scoped combat damage wiring
     // parity: notify:OnWeaponsTimerUpdate, notify:OnPvpTimerUpdate, notify:OnNpcTimerUpdate
     // parity: notify:OnCriminalTimerUpdate, notify:OnDisapprovalTimerUpdate, notify:OnClusterShutdownInitiated
-    // parity: notify:OnCargoScanComplete, notify:OnShipScanCompleted, notify:OnOreMined
+    // DATA GAP: notify:OnCargoScanComplete requires ship scanner module cycle wiring
+    // DATA GAP: notify:OnShipScanCompleted requires ship scanner module cycle wiring
+    // DATA GAP: notify:OnOreMined requires mining cycle wiring (OF-28)
     eve_testkit::attest(&[
-        "notify:OnCharNowInStation",
-        "notify:OnCharNoLongerInStation",
-        "notify:OnDamageStateChange",
         "notify:OnWeaponsTimerUpdate",
         "notify:OnPvpTimerUpdate",
         "notify:OnNpcTimerUpdate",
         "notify:OnCriminalTimerUpdate",
         "notify:OnDisapprovalTimerUpdate",
         "notify:OnClusterShutdownInitiated",
-        "notify:OnCargoScanComplete",
-        "notify:OnShipScanCompleted",
-        "notify:OnOreMined",
     ]);
 
     let ctx = new_ctx();
@@ -245,6 +243,10 @@ async fn test_batch5_space_combat_arena_and_ess() {
     assert_eq!(ev_cloak.len(), 1);
     assert_eq!(ev_cloak[0].len(), 2);
     assert_eq!(ev_cloak[0][0], PyRep::String("ProximityDecloak".into()));
+    assert_eq!(
+        ev_cloak[0][1],
+        PyRep::Dict(vec![(PyRep::String("distance".into()), PyRep::Real(1950.0))])
+    );
 
     // 2. OnKillNotification: Sent to victim and attacker
     emit_kill_notifications(&ctx, P1, P2);
@@ -252,7 +254,8 @@ async fn test_batch5_space_combat_arena_and_ess() {
     let ev_kill2 = events(&ctx, P2, "OnKillNotification");
     assert_eq!(ev_kill1.len(), 1);
     assert_eq!(ev_kill2.len(), 1);
-    assert_eq!(ev_kill1[0].len(), 0);
+    assert_eq!(ev_kill1[0], Vec::<PyRep>::new());
+    assert_eq!(ev_kill2[0], Vec::<PyRep>::new());
 
     // 3. OnLocalHackProgressUpdated: Container hacking progress in solar system
     emit_local_hack_progress_updated(&ctx, JITA_SYSTEM, 8501, 0.45);
@@ -267,21 +270,25 @@ async fn test_batch5_space_combat_arena_and_ess() {
     let ev_found = events(&ctx, P1, "OnMatchFound");
     let ev_exp = events(&ctx, P1, "OnAddExpiryDurationForAbyssalPvpContent");
     assert_eq!(ev_found.len(), 1);
-    assert_eq!(ev_found[0].len(), 0);
+    assert_eq!(ev_found[0], Vec::<PyRep>::new());
     assert_eq!(ev_exp.len(), 1);
     assert_eq!(ev_exp[0].len(), 1);
+    let expected_ft = (1_750_000_000i64 + 11_644_473_600) * 10_000_000;
+    assert_eq!(ev_exp[0][0], PyRep::Integer(expected_ft));
 
     // 5. OnMatchMakingFailure: Queue error notification
     emit_pvp_matchmaking_failure(&ctx, P1, 404);
     let ev_fail = events(&ctx, P1, "OnMatchMakingFailure");
     assert_eq!(ev_fail.len(), 1);
     assert_eq!(ev_fail[0].len(), 1);
+    assert_eq!(ev_fail[0][0], PyRep::List(vec![PyRep::Integer(404)]));
 
     // 6. DoDestinyUpdates: Batch destiny movement updates
     emit_destiny_updates(&ctx, P1, vec![PyRep::Integer(101), PyRep::Integer(102)]);
     let ev_dest = events(&ctx, P1, "DoDestinyUpdates");
     assert_eq!(ev_dest.len(), 1);
     assert_eq!(ev_dest[0].len(), 1);
+    assert_eq!(ev_dest[0][0], PyRep::List(vec![PyRep::Integer(101), PyRep::Integer(102)]));
 
     // 7. OnComponentRemovedSystemEnvironment: Clear environmental hazards
     emit_component_removed_system_environment(&ctx, JITA_SYSTEM);
@@ -294,19 +301,34 @@ async fn test_batch5_space_combat_arena_and_ess() {
     emit_ess_bank_link_notifications(&ctx, JITA_SYSTEM, P1, "AttemptLinkToReserveBank", true, 0.0);
     let ev_res = events(&ctx, P1, "OnESSReserveBankLinkNotification");
     assert_eq!(ev_res.len(), 1);
+    assert_eq!(ev_res[0].len(), 1);
+    assert_eq!(ev_res[0][0], PyRep::Integer(i64::from(JITA_SYSTEM)));
 
     emit_ess_bank_link_notifications(&ctx, JITA_SYSTEM, P1, "AttemptLinkToMainBank", true, 0.0);
     let ev_main = events(&ctx, P1, "OnESSMainBankLinkNotification");
     assert_eq!(ev_main.len(), 1);
+    assert_eq!(ev_main[0].len(), 1);
+    assert_eq!(ev_main[0][0], PyRep::Integer(i64::from(JITA_SYSTEM)));
 
     // 9. OnMainBankPlayerLinkDisconnected
     emit_ess_main_bank_link_disconnected(&ctx, JITA_SYSTEM, P1, "WarpedAway");
     let ev_disc = events(&ctx, P1, "OnMainBankPlayerLinkDisconnected");
     assert_eq!(ev_disc.len(), 1);
     assert_eq!(ev_disc[0].len(), 1);
+    if let PyRep::Dict(ref d) = ev_disc[0][0] {
+        assert_eq!(d.len(), 4);
+    } else {
+        panic!("expected PyRep::Dict for disconnect info");
+    }
 
     // 10. OnCosmicAnomalyAdded
     spawn_and_emit_cosmic_anomaly(&ctx, JITA_SYSTEM, 1001);
     let ev_anom = events(&ctx, P1, "OnCosmicAnomalyAdded");
     assert_eq!(ev_anom.len(), 1);
+    assert_eq!(ev_anom[0].len(), 1);
+    if let PyRep::KeyVal(ref kv) = ev_anom[0][0] {
+        assert!(kv.contains_key("targetID"));
+    } else {
+        panic!("expected PyRep::KeyVal for anomaly info");
+    }
 }
