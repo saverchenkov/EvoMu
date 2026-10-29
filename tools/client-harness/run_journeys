@@ -564,11 +564,12 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
             % (client1_ship_id, len(observed_client1_events), len(destiny_updates2)),
         }
 
-        # Journey 8: wormholes_filaments (warp to gate, filament activation, session change)
-        warp1 = beyonce1.CmdWarpToStuff("item", 50001249)
-        log1.info("beyonce1.CmdWarpToStuff(50001249) -> %r" % (warp1,))
+        # Journey 8: wormholes_filaments (warp >1,000 km off stations/gates to Jita IV 40009082, filament activation, session change)
+        warp1 = beyonce1.CmdWarpToStuff("item", 40009082)
+        log1.info("beyonce1.CmdWarpToStuff(40009082) -> %r" % (warp1,))
         time.sleep(0.2)
-        sm1.RemoteSvc("timeControl").AdvanceClock(6)
+        for _ in range(4):
+            sm1.RemoteSvc("timeControl").AdvanceClock(7)
         stop_warp = beyonce1.CmdStop()
         log1.info("beyonce1.CmdStop() after warp command -> %r" % (stop_warp,))
 
@@ -589,7 +590,7 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
 
         outcomes["wormholes_filaments"] = {
             "bridge_verified": bool(warp1 is not None and fil_res and abyssal_sys > 30000000 and abyssal_sys != 30000142 and abyssal_session_changed),
-            "evidence": "Client 1 warped towards stargate 50001249, activated Needlejack filament 53977, executed session change to nullsec system %d, and bound destination beyonce" % int(abyssal_sys),
+            "evidence": "Client 1 warped to Jita IV 40009082 (>1,000 km from stations/gates), activated Needlejack filament 53977, executed session change to nullsec system %d, and bound destination beyonce" % int(abyssal_sys),
         }
     finally:
         b1.close()

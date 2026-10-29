@@ -642,7 +642,7 @@ pub(crate) fn handle_market_transactions_rpc(
                 .and_then(|a| a.as_i64())
                 .filter(|&v| v > 0)
                 .map(|v| {
-                    if v > 100_000_000_000_000_000 {
+                    if v > 10_000_000_000_000 {
                         ((v / 10_000_000).saturating_sub(11_644_473_600)).max(0) as u64
                     } else {
                         v as u64
@@ -652,19 +652,42 @@ pub(crate) fn handle_market_transactions_rpc(
             let filter_acct_key = if is_corp {
                 args.get(1).and_then(|a| a.as_i64()).filter(|&v| v >= 1000)
             } else {
-                None
+                Some(1000)
             };
-            let rows = ctx.db.with_snapshot(|snap| {
+            let rows = match ctx.db.with_snapshot(|snap| -> Result<Vec<Vec<PyRep>>, BridgeRpcError> {
                 let target_owner = if is_corp {
-                    session
-                        .corporation_id
-                        .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id))
-                        .unwrap_or(0)
+                    let corp_id = snap
+                        .characters
+                        .get(&char_id)
+                        .map(|c| c.corporation_id)
+                        .or(session.corporation_id)
+                        .unwrap_or(0);
+                    if let Some(c) = snap.corporations.get(&corp_id) {
+                        let role = c.member_roles.get(&char_id).copied().unwrap_or(0);
+                        if char_id != c.ceo_id
+                            && !eve_db::corp_roles::has_role(
+                                role,
+                                eve_db::corp_roles::ROLE_ACCOUNTANT,
+                            )
+                            && !eve_db::corp_roles::has_role(
+                                role,
+                                eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT,
+                            )
+                        {
+                            return Err(BridgeRpcError {
+                                code: "CrpAccessDenied".into(),
+                                message: "Corporation transactions require Accountant or Junior Accountant".into(),
+                            });
+                        }
+                    }
+                    corp_id
                 } else {
                     char_id
                 };
-                snap.market_transactions
+                Ok(snap
+                    .market_transactions
                     .iter()
+                    .rev()
                     .filter(|tx| {
                         tx.date_unix >= min_unix
                             && (tx.buyer_id == target_owner || tx.seller_id == target_owner)
@@ -706,10 +729,14 @@ pub(crate) fn handle_market_transactions_rpc(
                             PyRep::Integer(client_id),
                             PyRep::Real(credit),
                             PyRep::Integer(tx.journal_ref_id),
+                            PyRep::Integer(tx.journal_ref_id),
                         ]
                     })
-                    .collect::<Vec<_>>()
-            });
+                    .collect::<Vec<_>>())
+            }) {
+                Ok(r) => r,
+                Err(e) => return Some(Err(e)),
+            };
             Some(Ok(PyRep::rowset(
                 vec![
                     "transactionID",
@@ -725,6 +752,7 @@ pub(crate) fn handle_market_transactions_rpc(
                     "sellerAccountID",
                     "clientID",
                     "credit",
+                    "journalRefID",
                     "journalTransactionID",
                 ],
                 rows,
