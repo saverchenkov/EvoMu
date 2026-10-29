@@ -1300,11 +1300,36 @@ async fn test_contracts_visibility_search_fees_limits_reject_blueprints_and_gm_e
     let PyRep::KeyVal(acc_cw_kv) = acc_cw else { panic!("Expected KeyVal"); };
     let pkg_id = acc_cw_kv.get("courierPackageID").and_then(|v| v.as_i64()).unwrap();
 
+    let normal_mod_id = 998_777_001i64;
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(
+            normal_mod_id,
+            eve_db::InventoryItemRecord {
+                item_id: normal_mod_id,
+                type_id: 587,
+                owner_id: 90_000_002,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
     let s1_bal_before_break = ctx.db.get_character(90_000_001).unwrap().balance;
-    let break_rep = rpc(&ctx, &mut s2, "repackagingSvc", "RepackageItems", &[PyRep::List(vec![PyRep::Integer(pkg_id)])]).await
-        .expect("RepackageItems (break plastic wrap)");
+    let break_rep = rpc(
+        &ctx,
+        &mut s2,
+        "repackagingSvc",
+        "RepackageItems",
+        &[PyRep::List(vec![PyRep::Integer(pkg_id), PyRep::Integer(normal_mod_id)])],
+    )
+    .await
+    .expect("RepackageItems mixed batch (break wrap + normal item)");
     let PyRep::KeyVal(brk_kv) = break_rep else { panic!("Expected KeyVal"); };
     assert_eq!(brk_kv.get("status"), Some(&PyRep::String("Failed".into())));
+    assert_eq!(brk_kv.get("repackagedCount"), Some(&PyRep::Integer(2)));
     assert_eq!(brk_kv.get("extractedItemIDs"), Some(&PyRep::List(vec![PyRep::Integer(cour_wrap_item_id)])));
     // Issuer receives 120,000 collateral + 15,000 reward refund = 135,000 ISK
     let s1_bal_after_break = ctx.db.get_character(90_000_001).unwrap().balance;
@@ -1313,6 +1338,8 @@ async fn test_contracts_visibility_search_fees_limits_reject_blueprints_and_gm_e
     let unwrapped_item = ctx.db.get_item(cour_wrap_item_id).unwrap();
     assert_eq!(unwrapped_item.owner_id, 90_000_002);
     assert!(ctx.db.get_item(pkg_id).is_none());
+    // Normal item was repackaged successfully (singleton reset to false)
+    assert_eq!(ctx.db.get_item(normal_mod_id).unwrap().singleton, false);
 
     // 5. GM_ExpireContract (`rpc:contractProxy.GM_ExpireContract`, `feat:admin.gm-contract-expire`, `feat:contracts.expiry`)
     let c_gm = rpc(

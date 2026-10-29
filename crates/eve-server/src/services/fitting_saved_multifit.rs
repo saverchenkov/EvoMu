@@ -735,44 +735,46 @@ pub(crate) async fn handle_ships_and_services(
                     message: "RepackageItems requires at least one itemID".into(),
                 }));
             }
-            let has_wrap = ctx.db.with_snapshot(|snap| {
-                item_ids.iter().any(|&id| snap.items.get(&id).is_some_and(|it| it.type_id == 3468))
+            let (wrap_ids, normal_ids): (Vec<i64>, Vec<i64>) = ctx.db.with_snapshot(|snap| {
+                item_ids.iter().partition(|&&id| snap.items.get(&id).is_some_and(|it| it.type_id == 3468))
             });
-            if has_wrap {
+            let mut broken_wraps = Vec::new();
+            if !wrap_ids.is_empty() {
                 let now_unix = ctx.now_unix();
                 let res = ctx.db.try_with_mut_snapshot(|snap| {
                     let mut broken = Vec::new();
-                    for &item_id in &item_ids {
-                        if snap.items.get(&item_id).is_some_and(|it| it.type_id == 3468) {
-                            let (cid, issuer_id, extracted) =
-                                crate::services::contracts_service::break_courier_plastic_wrap(
-                                    snap, char_id, item_id, now_unix,
-                                )?;
-                            broken.push((item_id, cid, issuer_id, extracted));
-                        }
+                    for &item_id in &wrap_ids {
+                        let (cid, issuer_id, extracted) =
+                            crate::services::contracts_service::break_courier_plastic_wrap(
+                                snap, char_id, item_id, now_unix,
+                            )?;
+                        broken.push((item_id, cid, issuer_id, extracted));
                     }
                     Ok(broken)
                 });
-                return match res {
-                    Ok(broken) => {
-                        let (wrap_id, cid, issuer_id, extracted) = broken.into_iter().next().unwrap_or((0, 0, 0, Vec::new()));
-                        if cid > 0 {
-                            crate::services::contracts_service::notify_contract(ctx, issuer_id, "OnContractFailed", cid);
-                        }
-                        Some(Ok(PyRep::keyval([
-                            ("itemID", PyRep::Integer(wrap_id)),
-                            ("singleton", PyRep::Bool(false)),
-                            ("version", PyRep::Integer(1)),
-                            ("repackagedCount", PyRep::Integer(1)),
-                            ("contractID", PyRep::Integer(cid)),
-                            ("status", PyRep::String("Failed".into())),
-                            ("extractedItemIDs", PyRep::List(extracted.into_iter().map(PyRep::Integer).collect())),
-                        ])))
-                    }
-                    Err(e) => Some(Err(e)),
+                broken_wraps = match res {
+                    Ok(b) => b,
+                    Err(e) => return Some(Err(e)),
                 };
+                for &(_wrap_id, cid, issuer_id, _) in &broken_wraps {
+                    if cid > 0 {
+                        crate::services::contracts_service::notify_contract(ctx, issuer_id, "OnContractFailed", cid);
+                    }
+                }
+                if normal_ids.is_empty() {
+                    let (wrap_id, cid, _, extracted) = broken_wraps.into_iter().next().unwrap_or((0, 0, 0, Vec::new()));
+                    return Some(Ok(PyRep::keyval([
+                        ("itemID", PyRep::Integer(wrap_id)),
+                        ("singleton", PyRep::Bool(false)),
+                        ("version", PyRep::Integer(1)),
+                        ("repackagedCount", PyRep::Integer(wrap_ids.len() as i64)),
+                        ("contractID", PyRep::Integer(cid)),
+                        ("status", PyRep::String("Failed".into())),
+                        ("extractedItemIDs", PyRep::List(extracted.into_iter().map(PyRep::Integer).collect())),
+                    ])));
+                }
             }
-            for &item_id in &item_ids {
+            for &item_id in &normal_ids {
                 if Some(item_id) == session.ship_id {
                     return Some(Err(BridgeRpcError {
                         code: "CannotRepackageActiveShip".into(),
@@ -801,7 +803,7 @@ pub(crate) async fn handle_ships_and_services(
                     .map(|c| c.active_ship_id)
                     .unwrap_or(0);
                 // First pass: validate all items before mutating
-                for &item_id in &item_ids {
+                for &item_id in &normal_ids {
                     if item_id == active_ship_id {
                         return Err(BridgeRpcError { code: "CannotRepackageActiveShip".into(), message: "Cannot repackage your currently active ship".into() });
                     }
@@ -854,7 +856,7 @@ pub(crate) async fn handle_ships_and_services(
                     }
                 }
                 let mut last_ver = 1_u64;
-                for &item_id in &item_ids {
+                for &item_id in &normal_ids {
                     if let Some(item) = snap.items.get_mut(&item_id) {
                         item.dynamic_attributes.remove(&1112);
                         item.dynamic_attributes.remove(&1113);
@@ -864,18 +866,25 @@ pub(crate) async fn handle_ships_and_services(
                         last_ver = item.version;
                     }
                 }
-                Ok((item_ids[0], last_ver, item_ids.len()))
+                Ok((normal_ids[0], last_ver, normal_ids.len()))
             });
             match res {
                 Ok((first_id, ver, count)) => {
-                    for &item_id in &item_ids {
+                    for &item_id in &normal_ids {
                         ctx.invalidate_ship_fitting(item_id);
                     }
+                    let total_count = count + broken_wraps.len();
+                    let (first_wrap, first_cid, first_extracted) = broken_wraps.into_iter().next()
+                        .map(|(w, c, _, ext)| (w, c, ext))
+                        .unwrap_or((0, 0, Vec::new()));
                     Some(Ok(PyRep::keyval([
-                        ("itemID", PyRep::Integer(first_id)),
+                        ("itemID", PyRep::Integer(if first_id > 0 { first_id } else { first_wrap })),
                         ("singleton", PyRep::Bool(false)),
                         ("version", PyRep::Integer(ver as i64)),
-                        ("repackagedCount", PyRep::Integer(count as i64)),
+                        ("repackagedCount", PyRep::Integer(total_count as i64)),
+                        ("contractID", PyRep::Integer(first_cid)),
+                        ("status", PyRep::String(if first_cid > 0 { "Failed".into() } else { "Completed".into() })),
+                        ("extractedItemIDs", PyRep::List(first_extracted.into_iter().map(PyRep::Integer).collect())),
                     ])))
                 }
                 Err(e) => Some(Err(e)),

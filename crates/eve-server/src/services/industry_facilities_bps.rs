@@ -424,7 +424,7 @@ pub fn compute_canonical_system_cost_index(
             continue;
         }
         let job_sys = resolve_facility_modifiers_and_system(ctx, snap, j.facility_id).map(|m| m.2);
-        let work = u64::from(j.runs).saturating_mul(j.duration_seconds);
+        let work = j.duration_seconds;
         if job_sys == Some(sys_id) {
             sys_work = sys_work.saturating_add(work);
         }

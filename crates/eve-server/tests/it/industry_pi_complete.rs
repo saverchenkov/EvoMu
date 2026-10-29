@@ -346,6 +346,42 @@ async fn test_industry_blueprint_data_owner_limits_facilities_taxes_and_sci() {
         .and_then(|v| v.as_f64())
         .unwrap();
     assert!((sci_expired - sci_before).abs() < 1e-9, "jobs older than 28 days must be excluded from cost index");
+
+    // Verify R-142028-01: jobs with same total duration produce equal SCI work (duration is not multiplied by runs twice)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.industry_jobs.clear();
+        snap.industry_jobs.insert(
+            990_001,
+            eve_db::IndustryJobRecord {
+                job_id: 990_001, installer_id: char_id, facility_id: JITA_STATION_ID,
+                blueprint_item_id: bp_item_id, blueprint_type_id: RIFTER_BP_TYPE_ID, activity_id: 1, runs: 1,
+                product_type_id: 587, status: "Active".into(), duration_seconds: 36_000, start_unix: ctx.now_unix(),
+            },
+        );
+        snap.industry_jobs.insert(
+            990_002,
+            eve_db::IndustryJobRecord {
+                job_id: 990_002, installer_id: char_id, facility_id: ls_azbel_id,
+                blueprint_item_id: bpc_item_id, blueprint_type_id: RIFTER_BP_TYPE_ID, activity_id: 1, runs: 10,
+                product_type_id: 587, status: "Active".into(), duration_seconds: 36_000, start_unix: ctx.now_unix(),
+            },
+        );
+    });
+    let sci_1run = ctx
+        .dispatch_rpc(&mut sess, "map", None, "GetIndustryCostModifier", &[PyRep::Integer(JITA_SOLAR_SYSTEM_ID as i64)], &kw, None)
+        .await
+        .expect("GetIndustryCostModifier Jita")
+        .dict_get("1")
+        .and_then(|v| v.as_f64())
+        .unwrap();
+    let sci_10runs = ctx
+        .dispatch_rpc(&mut sess, "map", None, "GetIndustryCostModifier", &[PyRep::Integer(ls_sys_id as i64)], &kw, None)
+        .await
+        .expect("GetIndustryCostModifier LS")
+        .dict_get("1")
+        .and_then(|v| v.as_f64())
+        .unwrap();
+    assert!((sci_1run - sci_10runs).abs() < 1e-9, "jobs with equal total duration must produce equal system cost index");
 }
 
 #[tokio::test]
