@@ -75,104 +75,76 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let sys_id: u32 = 30000208;
+    let (sys_id, _, _, _, _) = crate::sovereignty_equinox_gameplay_closure::find_nullsec_planets(&ctx);
     let corp_id: i64 = 98_000_100;
     let alliance_id: i64 = 99_000_200;
-    let hub_id: i64 = 600_000_010;
-    let jammer_id: i64 = 600_000_011;
+    let ship_id: i64 = 100_090_001;
+    let hub_pos = glam::DVec3::new(45_000_000.0, 45_000_000.0, 45_000_000.0);
+
+    let mut sess = crate::sovereignty_equinox_gameplay_closure::register_online_pilot(
+        &ctx, 42_003, "demo", "demo-secret", PILOT, corp_id, Some(alliance_id),
+        sys_id, ship_id, 11_957, hub_pos, eve_db::corp_roles::ROLE_DIRECTOR,
+    ).await;
 
     ctx.db.with_mut_snapshot(|s| {
-        s.alliances.insert(
-            alliance_id,
-            eve_db::AllianceRecord {
-                alliance_id,
-                name: "Test Sov Alliance".into(),
-                short_name: "TSA".into(),
-                executor_corp_id: corp_id,
-                member_corp_ids: HashSet::from([corp_id]),
-            },
-        );
-        s.corporations.insert(
-            corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                alliance_id: Some(alliance_id),
-                name: "Test Sov Corp".into(),
-                ticker: "TSC".into(),
-                ceo_id: PILOT,
-                members: HashSet::from([PILOT]),
-                master_wallet: IskCents::from_isk(0),
-                ..Default::default()
-            },
-        );
-        s.characters.get_mut(&PILOT).unwrap().corporation_id = corp_id;
-        s.characters.get_mut(&PILOT).unwrap().alliance_id = Some(alliance_id);
-        s.characters.get_mut(&PILOT).unwrap().solar_system_id = sys_id;
-
-        let st = s.system_states.entry(sys_id).or_insert_with(|| make_system_dynamic_state(sys_id));
-        st.sov_alliance_id = Some(alliance_id);
-
-        s.structures.insert(
-            hub_id,
-            UpwellStructureRecord {
-                structure_id: hub_id,
-                type_id: TYPE_SOVEREIGNTY_HUB,
-                owner_corp_id: corp_id,
-                solar_system_id: sys_id,
-                name: "Sov Hub".into(),
-                position: [0.0, 0.0, 0.0],
-                state: "ShieldVulnerable".into(),
-                quantum_core_installed: true,
-                fuel_blocks: 100,
-                shield_hp: 1_000_000.0,
-                armor_hp: 1_000_000.0,
-                hull_hp: 1_000_000.0,
-                reinforced_until_unix: 0,
-                last_damage_tick: 0,
-                last_damage_unix: 0, self_destruct_at_unix: None,
-            },
-        );
-        s.structures.insert(
-            jammer_id,
-            UpwellStructureRecord {
-                structure_id: jammer_id,
-                type_id: TYPE_TENEBREX_CYNO_JAMMER,
-                owner_corp_id: corp_id,
-                solar_system_id: sys_id,
-                name: "Cyno Jammer".into(),
-                position: [500.0, 500.0, 500.0],
-                state: "ShieldVulnerable".into(),
-                quantum_core_installed: true,
-                fuel_blocks: 100,
-                shield_hp: 500_000.0,
-                armor_hp: 500_000.0,
-                hull_hp: 500_000.0,
-                reinforced_until_unix: 0,
-                last_damage_tick: 0,
-                last_damage_unix: 0, self_destruct_at_unix: None,
-            },
-        );
-
-        let base_now = ctx.now_unix();
-        s.structure_vulnerability_windows.insert(hub_id, (base_now + 1000, base_now + 2000));
+        let sk = s.skills.entry(PILOT).or_default();
+        for sid in [21_603u32, 3_335, 12_092, 22_761] {
+            sk.insert(sid, eve_db::TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
+        }
+        for (iid, tid, flg, qty) in [
+            (990_010i64, TYPE_SOVEREIGNTY_HUB, eve_db::InventoryFlag::Cargo, 1),
+            (990_011, TYPE_TENEBREX_CYNO_JAMMER, eve_db::InventoryFlag::Cargo, 1),
+            (990_012, 4_247, eve_db::InventoryFlag::Cargo, 500),
+            (990_001, sov_services::TYPE_MAGMATIC_GAS, eve_db::InventoryFlag::Cargo, 5_000),
+            (990_002, sov_services::TYPE_SUPERIONIC_ICE, eve_db::InventoryFlag::Cargo, 5_000),
+            (990_003, eve_server::services::sov_gameplay::UPGRADE_CYNOSURAL_SUPPRESSION, eve_db::InventoryFlag::Cargo, 1),
+            (990_004, eve_server::services::sov_gameplay::UPGRADE_MAJOR_THREAT_DETECTION, eve_db::InventoryFlag::Cargo, 1),
+            (990_005, 88_227, eve_db::InventoryFlag::Cargo, 1),
+            (990_006, 88_229, eve_db::InventoryFlag::Cargo, 1),
+            (990_200, 21_096, eve_db::InventoryFlag::HiSlot0, 1),
+            (990_201, 16_273, eve_db::InventoryFlag::Cargo, 2_000),
+        ] {
+            s.items.insert(
+                iid,
+                eve_db::InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: PILOT,
+                    location_id: ship_id,
+                    flag: flg,
+                    quantity: qty,
+                    singleton: qty == 1,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        s.module_online_states.insert(990_200, true);
     });
+    ctx.invalidate_ship_fitting(ship_id);
 
-    let mut sess = SessionState::new(42_003);
-    select(&ctx, &mut sess, "demo", "demo-secret", PILOT).await;
-    sess.solar_system_id = Some(sys_id);
-    sess.corporation_id = Some(corp_id);
-    sess.alliance_id = Some(alliance_id);
+    // 1. Anchor Sovereignty Hub via live `structureDeployment.Anchor` and complete onlining + sovereignty claim!
+    let anchor_hub = sov_call(&ctx, &mut sess, "structureDeployment", "Anchor", &[PyRep::Integer(990_010), PyRep::String("Sov Hub".into())])
+        .await
+        .expect("anchor Sov Hub via structureDeployment.Anchor");
+    let hub_id = anchor_hub.dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
+    ctx.advance_virtual_clock(905);
+    eve_server::services::station_structure::structure_lifecycle::sync_all_structures(&ctx);
+    assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&sys_id].sov_alliance_id), Some(alliance_id));
 
-    let vuln_window = ctx.db.with_snapshot(|s| s.structure_vulnerability_windows.get(&hub_id).copied().unwrap());
-    let current_time = ctx.now_unix();
-    assert!(current_time < vuln_window.0);
-    let is_vulnerable = current_time >= vuln_window.0 && current_time <= vuln_window.1;
-    assert!(!is_vulnerable, "hub must not be vulnerable outside window");
-
-    ctx.advance_virtual_clock(1500);
-    let current_time_in_window = ctx.now_unix();
-    let is_vulnerable_now = current_time_in_window >= vuln_window.0 && current_time_in_window <= vuln_window.1;
-    assert!(is_vulnerable_now, "hub is vulnerable inside owner window");
+    // Advance 36 days so Strategic Index reaches 3 naturally via `tick_background_cluster` + configure vulnerability window via client RPC!
+    ctx.advance_virtual_clock(36 * 86_400);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    assert!(ctx.db.with_snapshot(|s| s.system_states[&sys_id].strategic_index) >= 3);
+    sov_call(
+        &ctx,
+        &mut sess,
+        "structureVulnerability",
+        "UpdateReinforceTimesFromClient",
+        &[PyRep::Integer(hub_id), PyRep::Integer(18), PyRep::Integer(3)],
+    )
+    .await
+    .expect("UpdateReinforceTimesFromClient");
 
     let access_group_id: i64 = 77_889;
     sov_call(&ctx, &mut sess, "sovMgr", "SetSovHubFuelAccessGroup", &[PyRep::Integer(hub_id), PyRep::Integer(access_group_id)])
@@ -182,60 +154,31 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
         .await
         .expect("GetSovHubFuelAccessGroup");
     assert_eq!(got_group.as_i64(), Some(access_group_id));
+    assert_eq!(
+        sov_call(&ctx, &mut sess, "sovMgr", "IsOnLocalSovHubFuelAccessGroup", &[PyRep::Integer(hub_id)]).await.unwrap(),
+        PyRep::Bool(true)
+    );
 
-    let is_on_group = sov_call(&ctx, &mut sess, "sovMgr", "IsOnLocalSovHubFuelAccessGroup", &[PyRep::Integer(hub_id)])
-        .await
-        .expect("IsOnLocalSovHubFuelAccessGroup");
-    assert_eq!(is_on_group, PyRep::Bool(true));
-
-    // Verify non-director line member without CEO/director/station manager role is denied
     let mut line_sess = SessionState::new(41_099);
     ctx.db.with_mut_snapshot(|s| {
         s.characters.get_mut(&OTHER).unwrap().corporation_id = corp_id;
     });
     select(&ctx, &mut line_sess, "other", "other-secret", OTHER).await;
-    let fuel_denied = sov_call(&ctx, &mut line_sess, "sovMgr", "SetSovHubFuelAccessGroup", &[PyRep::Integer(hub_id), PyRep::Integer(access_group_id)])
-        .await
-        .unwrap_err();
-    assert_eq!(fuel_denied.code, "CorpRoleDenied");
+    assert_eq!(
+        sov_call(&ctx, &mut line_sess, "sovMgr", "SetSovHubFuelAccessGroup", &[PyRep::Integer(hub_id), PyRep::Integer(access_group_id)])
+            .await
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
 
     let jammer_state_no_upgrade = sov_call(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[])
         .await
         .expect("GetCynoJammerState before Cynosural Suppression upgrade online");
     assert_eq!(jammer_state_no_upgrade.dict_get("isJammed"), Some(&PyRep::Bool(false)));
 
-    let ship_id = ctx.db.with_snapshot(|s| s.characters[&PILOT].active_ship_id);
-    sess.ship_id = Some(ship_id);
-    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(corp) = s.corporations.get_mut(&corp_id) {
-            corp.member_roles.insert(PILOT, eve_db::corp_roles::ROLE_DIRECTOR);
-        }
-        let entry = s.system_states.entry(sys_id).or_default();
-        entry.strategic_index = 3;
-        for (iid, tid, qty) in [
-            (990_001i64, sov_services::TYPE_MAGMATIC_GAS, 5_000),
-            (990_002, sov_services::TYPE_SUPERIONIC_ICE, 5_000),
-            (990_003, eve_server::services::sov_gameplay::UPGRADE_CYNOSURAL_SUPPRESSION, 1),
-            (990_004, eve_server::services::sov_gameplay::UPGRADE_MAJOR_THREAT_DETECTION, 1),
-        ] {
-            s.items.insert(
-                iid,
-                eve_db::InventoryItemRecord {
-                    item_id: iid,
-                    type_id: tid,
-                    owner_id: PILOT,
-                    location_id: ship_id,
-                    flag: eve_db::InventoryFlag::Cargo,
-                    quantity: qty,
-                    singleton: qty == 1,
-                    version: 1,
-                    ..Default::default()
-                },
-            );
-        }
-    });
-    for (fuel_iid, amt) in [(990_001u64, 3_000u64), (990_002u64, 3_000u64)] {
+    // 2. Fuel Sov Hub (`AddRequest`) and install + online `UPGRADE_CYNOSURAL_SUPPRESSION` + `UPGRADE_MAJOR_THREAT_DETECTION`!
+    for (fuel_iid, amt) in [(990_001u64, 5_000u64), (990_002u64, 5_000u64)] {
         let mut add = crate::quasar_sov_equinox_hub::id_req(1, fuel_iid);
         eve_proto::quasar::encode_varint_field(2, amt, &mut add);
         eve_proto::quasar::encode_bytes_field(3, &crate::quasar_sov_equinox_hub::idm(hub_id as u64), &mut add);
@@ -247,10 +190,12 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
         );
     }
     let mut proc = Vec::new();
-    for iid in [990_003u64, 990_004] {
+    for iid in [990_005u64, 990_006, 990_003, 990_004] {
         eve_proto::quasar::encode_bytes_field(1, &crate::quasar_sov_equinox_hub::idm(iid), &mut proc);
     }
     for tid in [
+        88_227u64,
+        88_229,
         eve_server::services::sov_gameplay::UPGRADE_CYNOSURAL_SUPPRESSION as u64,
         eve_server::services::sov_gameplay::UPGRADE_MAJOR_THREAT_DETECTION as u64,
     ] {
@@ -261,52 +206,128 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
     }
     eve_proto::quasar::encode_bytes_field(3, &crate::quasar_sov_equinox_hub::idm(hub_id as u64), &mut proc);
     assert_eq!(
-        crate::quasar_sov_equinox_hub::rpc(
-            &ctx,
-            &mut sess,
-            "eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationRequest",
-            proc
-        )
-        .await
-        .status_code,
+        crate::quasar_sov_equinox_hub::rpc(&ctx, &mut sess, "eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationRequest", proc)
+            .await
+            .status_code,
         eve_server::quasar_gateway::STATUS_OK
     );
 
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
+    // 3. Anchor Tenebrex Cyno Jammer (`37534`) via `structureDeployment.Anchor` & load fuel blocks via `invbroker.Add`!
+    let jam_pos = hub_pos + glam::DVec3::new(2_000_000.0, 0.0, 0.0);
+    let _ = ctx.systems.get_or_spawn(sys_id).spawn_ball(crate::sovereignty_equinox_gameplay_closure::make_ball(ship_id, 11_957, jam_pos)).await;
+    let anchor_jam = sov_call(&ctx, &mut sess, "structureDeployment", "Anchor", &[PyRep::Integer(990_011), PyRep::String("Cyno Jammer".into())])
+        .await
+        .expect("anchor Tenebrex");
+    let jammer_id = anchor_jam.dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
+    sov_call(
+        &ctx,
+        &mut sess,
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(990_012), PyRep::Integer(jammer_id), PyRep::Integer(133), PyRep::Integer(500)],
+    )
+    .await
+    .expect("fuel Tenebrex via invbroker.Add");
+    ctx.advance_virtual_clock(15 * 60 + 24 * 3_600 + 15 * 60 + 10);
+    eve_server::services::station_structure::structure_lifecycle::sync_all_structures(&ctx);
+    ctx.drain_notifications_for_char(PILOT);
+    ctx.advance_virtual_clock(eve_server::services::sov_gameplay::TENEBREX_SPOOL_UP_SECS + 5);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    assert!(ctx.drain_notifications_for_char(PILOT).iter().any(|n| n.event == "OnCynoJammerChanged"));
+
     let jammer_state_fueled = sov_call(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[])
         .await
-        .expect("GetCynoJammerState with Cynosural Suppression upgrade online");
+        .expect("GetCynoJammerState with Cynosural Suppression upgrade + Tenebrex online");
     assert_eq!(jammer_state_fueled.dict_get("isJammed"), Some(&PyRep::Bool(true)));
+    assert_eq!(
+        sov_call(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(990_200), PyRep::String("cynosuralGeneration".into())])
+            .await
+            .unwrap_err()
+            .code,
+        "CynoJammed"
+    );
 
     let has_anom = ctx.db.with_snapshot(|s| {
         s.cosmic_anomalies
             .get(&sys_id)
-            .map(|list| list.iter().any(|a| a.name.contains("Major Threat Detection")))
-            .unwrap_or(false)
+            .is_some_and(|list| list.iter().any(|a| a.name.contains("Major Threat Detection")))
     });
     assert!(has_anom, "combat anomaly spawned by online Major Threat Detection upgrade");
     let sys_balls = ctx.systems.get_or_spawn(sys_id).list_balls().await.unwrap();
-    assert!(
-        sys_balls.iter().any(|b| b.type_id == 37_453),
-        "combat upgrade site must spawn combat-capable NPC wave rat balls in space"
-    );
+    assert!(sys_balls.iter().any(|b| b.type_id == 37_453));
 
+    // 4. Hack Sov Hub via live `Data Analyzer I` (`22175`) + `hackingMgr.ClickedOnTile` -> `OnSovHubHacked`, jam disabled, cyno allowed!
+    let hacker_cid = 90_000_088i64;
+    let hacker_ship = 100_090_088i64;
+    let mut s_hacker = crate::sovereignty_equinox_gameplay_closure::register_online_pilot(
+        &ctx, 42_088, "other", "other-secret", hacker_cid, 98_000_188, Some(99_000_288),
+        sys_id, hacker_ship, 621, hub_pos + glam::DVec3::new(2_500.0, 0.0, 0.0), 0,
+    ).await;
+    ctx.db.with_mut_snapshot(|s| {
+        let sk = s.skills.entry(hacker_cid).or_default();
+        for sid in [3_405u32, 21_718] {
+            sk.insert(sid, eve_db::TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
+        }
+        s.items.insert(
+            990_300,
+            eve_db::InventoryItemRecord {
+                item_id: 990_300,
+                type_id: 22_175,
+                owner_id: hacker_cid,
+                location_id: hacker_ship,
+                flag: eve_db::InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        s.module_online_states.insert(990_300, true);
+    });
+    ctx.invalidate_ship_fitting(hacker_ship);
+    crate::sovereignty_equinox_gameplay_closure::lock_target_via_rpc(&ctx, &mut s_hacker, sys_id, hacker_ship, hub_id).await;
     ctx.drain_notifications_for_char(PILOT);
-    sov_services::record_hub_hack(&ctx, sys_id, hub_id, 3600);
-    assert!(sov_services::is_hub_hacked(&ctx, hub_id));
-    let jammer_state_hacked = sov_call(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[])
+    sov_call(&ctx, &mut s_hacker, "dogmaIM", "Activate", &[PyRep::Integer(990_300), PyRep::String("dataHacking".into()), PyRep::Integer(hub_id)])
         .await
-        .expect("GetCynoJammerState while hub is hacked");
-    assert_eq!(jammer_state_hacked.dict_get("isJammed"), Some(&PyRep::Bool(false)));
-
+        .expect("activate Data Analyzer I");
+    sov_call(&ctx, &mut s_hacker, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(hub_id)])
+        .await
+        .expect("StartNewGameInstance");
+    let mut won = false;
+    for _pass in 0..8 {
+        for tile in 1..24 {
+            for _ in 0..5 {
+                if let Ok(step) = sov_call(&ctx, &mut s_hacker, "hackingMgr", "ClickedOnTile", &[PyRep::Integer(hub_id), PyRep::Integer(tile)]).await {
+                    if step.dict_get("status").and_then(|v| v.as_str()) == Some("Won") {
+                        won = true;
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            if won { break; }
+        }
+        if won { break; }
+    }
+    assert!(won, "live hacking minigame must complete with Won");
+    assert!(sov_services::is_hub_hacked(&ctx, hub_id));
     let notifs = ctx.drain_notifications_for_char(PILOT);
     let hacked_notif = notifs.iter().find(|n| n.event == "OnSovHubHacked").expect("OnSovHubHacked");
     assert_eq!(hacked_notif.args.first().and_then(|a| a.as_i64()), Some(hub_id));
-    assert!(matches!(hacked_notif.args.get(1), Some(PyRep::List(_))));
 
-    ctx.advance_virtual_clock(3601);
+    let jammer_state_hacked = sov_call(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[])
+        .await
+        .expect("GetCynoJammerState after hub hack");
+    assert_eq!(jammer_state_hacked.dict_get("isJammed"), Some(&PyRep::Bool(false)));
+    assert!(sov_call(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(990_200), PyRep::String("cynosuralGeneration".into())]).await.is_ok());
+
+    ctx.advance_virtual_clock(3_605);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(!sov_services::is_hub_hacked(&ctx, hub_id));
+    let jammer_state_restored = sov_call(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[]).await.unwrap();
+    assert_eq!(jammer_state_restored.dict_get("isJammed"), Some(&PyRep::Bool(true)));
 }
 
 #[tokio::test]
@@ -594,6 +615,17 @@ async fn pirate_insurgency_campaigns_corruption_suppression_and_instances() {
     if let PyRep::List(list) = camps_vuln {
         assert_eq!(list[0].dict_get("isFobVulnerable"), Some(&PyRep::Bool(true)));
     }
+    let PyRep::Tuple(local_vuln) = sov_call(&ctx, &mut sess, "insurgencySolarsystem", "GetLocalCampaignClientSnapshot", &[]).await.unwrap() else {
+        panic!("expected tuple");
+    };
+    assert_eq!(local_vuln[1].dict_get("isFobVulnerable"), Some(&PyRep::Bool(true)));
+    ctx.db.with_mut_snapshot(|s| {
+        s.insurgency_runtime.empire_ambition_modifier.insert(insurgency_services::FACTION_GURISTAS, 1);
+    });
+    let PyRep::Tuple(local_amb) = sov_call(&ctx, &mut sess, "insurgencySolarsystem", "GetLocalCampaignClientSnapshot", &[]).await.unwrap() else {
+        panic!("expected tuple");
+    };
+    assert_eq!(local_amb[1].dict_get("isFobVulnerable"), Some(&PyRep::Bool(false)));
 
     let ice_id = insurgency_services::spawn_ice_heist(&ctx, sys_id);
     assert!(ice_id > 0);

@@ -33,8 +33,8 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
         "notify:OnInsurgencyCampaignEndingForLocation",
     ]);
 
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
+    let db_path = temp_sqlite_path("fw_insurgency_f4");
+    let ctx = open_sqlite_ctx(&db_path, true);
     let (_enemy_sys, front_sys, _cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
 
     let fob_pos = DVec3::new(95_000.0, 0.0, 45_000.0);
@@ -294,13 +294,6 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
     assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.empire_ambition_modifier.get(&500_010).copied().unwrap_or(0)), 0);
 
     drop(ctx);
-    let db_path = temp_sqlite_path("fw_insurgency_f4");
-    {
-        let ctx_sq = open_sqlite_ctx(&db_path, true);
-        ctx_sq.db.with_mut_snapshot(|s| {
-            s.insurgency_runtime.campaign_outcomes.insert(camp3, "Tie".into());
-        });
-    }
     let ctx_restarted = open_sqlite_ctx(&db_path, false);
     assert_eq!(ctx_restarted.db.with_snapshot(|s| s.insurgency_runtime.campaign_outcomes.get(&camp3).cloned()), Some("Tie".into()));
     let _ = std::fs::remove_file(&db_path);

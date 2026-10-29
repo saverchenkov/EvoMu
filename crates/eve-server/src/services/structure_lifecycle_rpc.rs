@@ -54,6 +54,9 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
     if type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK {
         return crate::services::sov_gameplay::handle_anchor_skyhook_rpc(ctx, session, args).await;
     }
+    if type_id == crate::services::sov_services::TYPE_SOVEREIGNTY_HUB {
+        return crate::services::sov_gameplay::handle_anchor_sov_hub_rpc(ctx, session, args).await;
+    }
     if ctx.sde.types.get(&type_id).is_some_and(|t| t.category_id == 22 || t.group_id == 361 || t.effect_ids.contains(&649)) {
         if let Some(res) = Box::pin(crate::services::station_structure::handle(
             ctx, session, "posMgr", "AnchorStructure", args, &std::collections::HashMap::new(),

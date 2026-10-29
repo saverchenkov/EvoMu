@@ -762,8 +762,8 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
             if now_unix >= window.1 {
                 let interval = 302_400; // ~3.5 days offset
                 let mut start = window.0 + interval;
-                while start + 7_200 <= now_unix {
-                    start += interval;
+                if start + 7_200 <= now_unix {
+                    start += ((now_unix - (start + 7_200)) / interval + 1) * interval;
                 }
                 *window = (start, start + 7_200);
             }

@@ -331,8 +331,7 @@ pub(crate) fn refresh_activities(snap: &mut WorldStateSnapshot, pending: &Pendin
     }
     let stage = stage_for_level(den.development_level);
     let count = snap.sov_runtime.mercenary_activities.values().filter(|a| a.den_id == den_id).count() as u32;
-    let cap = activity_capacity(stage);
-    for _ in count..cap {
+    for _ in count..activity_capacity(stage) {
         snap.sov_runtime.next_mercenary_activity_seq += 1;
         let seq = snap.sov_runtime.next_mercenary_activity_seq;
         let mut uuid = (den_id as u64).to_be_bytes().to_vec();

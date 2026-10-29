@@ -320,6 +320,7 @@ pub async fn ensure_warzone_sites_spawned(ctx: &ServerContext, sys_id: u32) {
             snap.fw_runtime.battlefield_zones.insert(bf_id, [0, 0, 0]);
             snap.fw_runtime.battlefield_participants.insert(bf_id, Vec::new());
             snap.fw_runtime.battlefield_waves.insert(bf_id, 1);
+            snap.fw_runtime.complex_last_step_unix.insert(bf_id, now);
         });
     }
 
@@ -1221,6 +1222,7 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
             for nid in cleanup_npcs {
                 let _ = sys_handle.remove_ball(nid).await;
             }
+            let _ = sys_handle.remove_ball(bf_id).await;
             let signed_vp = if lead_fac == occ_fac { -2_000 } else { 2_000 };
             add_victory_points(ctx, sys_id, signed_vp);
             let (occ_adv_d, att_adv_d) = if lead_fac == occ_fac { (6.0, 0.0) } else { (0.0, 6.0) };

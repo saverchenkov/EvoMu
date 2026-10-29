@@ -373,12 +373,15 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     set_pilot_location(&ctx, &mut s_gal, front_sys, None);
 
     // 5. Live 3-zone Frontline Battlefield capture:
-    //    - First verify defending Caldari militia (`500001`) can hold Zone 0, spawn real combat-capable NPC wave entities, and advance defender capture progress
-    //    - Next place 31 attacking Gallente militia ships across the 3 `BATTLEFIELD_ZONE_CENTERS` -> verify de-contesting, time-based capture completion,
-    //      `> 30` pilot LP scaling (`150,000 * 30 / 31 = 145,161 LP`), faction/corp standing gains, 4-hour `battlefield_respawn_unix` cooldown, and SQLite durability!
+    //    - First verify defending Caldari militia (`500001`) holds Zone 0, spawns combat-capable orbiting NPC waves,
+    //      completes Battlefield capture (`-2,000` VP decontest + State Protectorate LP & faction/corp standing), and triggers 4h cooldown
+    //    - Advance past 4h `BATTLEFIELD_RESPAWN_COOLDOWN_SECS` to spawn a fresh Battlefield, then place 31 attacking Gallente ships
+    //      across the 3 `BATTLEFIELD_ZONE_CENTERS` -> verify de-contesting, `> 30` pilot LP scaling (`145,161 LP`), standing gains, & SQLite durability!
     let bf_id = ctx.db.with_snapshot(|s| {
         s.fw_runtime.battlefield_instances.iter().find(|b| b.solar_system_id == front_sys && !b.completed).unwrap().instance_id
     });
+    let vp_before_def = ctx.db.with_snapshot(|s| s.fw_system_occupations[&front_sys].victory_points);
+    assert!(vp_before_def > 0, "earlier Novice capture contested front_sys above 0 VP ({vp_before_def})");
     set_hull(&ctx, gal_ship, 621, DVec3::new(0.0, 0.0, 0.0)).await;
     set_hull(&ctx, cal_ship, 587, DVec3::from_array(BATTLEFIELD_ZONE_CENTERS[0])).await;
     ctx.advance_secs(90);
@@ -397,14 +400,33 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     assert_eq!(wave_npcs.len(), 6, "Battlefield spawns 6 friendly/enemy NPC wave ships across the 3 zones");
     let first_npc_cs = ctx.systems.get_or_spawn(front_sys).get_combat_state(wave_npcs[0]).await.unwrap().expect("wave NPC combat state");
     assert!(first_npc_cs.shield_hp > 0.0 && first_npc_cs.structure_hp > 0.0, "Battlefield wave NPC has active CombatState");
+    for _ in 0..9 {
+        ctx.advance_secs(100);
+        eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    }
+    let (vp_after_def, cal_bf_lp, cal_fac_st) = ctx.db.with_snapshot(|s| {
+        let ch = &s.characters[&cal_cid];
+        (
+            s.fw_system_occupations[&front_sys].victory_points,
+            ch.loyalty_points.get(&1_000_180).copied().unwrap_or(0),
+            ch.standings.get(&500_001).copied().unwrap_or(0.0),
+        )
+    });
+    assert_eq!(vp_after_def, 0, "defender Battlefield completion applies -2,000 VP decontest clamped at 0");
+    assert!(cal_bf_lp >= 150_000 && cal_fac_st > 0.0, "defender earns 150k State Protectorate LP ({cal_bf_lp}) and standing ({cal_fac_st})");
     set_hull(&ctx, cal_ship, 587, DVec3::new(0.0, 0.0, 0.0)).await;
 
-    for idx in 0..30i64 {
-        let extra_cid = 90_100_000 + idx;
-        let extra_ship = 100_100_000 + idx;
-        let zc = DVec3::from_array(BATTLEFIELD_ZONE_CENTERS[(idx as usize) % 3]);
-        ctx.db.with_mut_snapshot(|s| {
-            let mut wch = s.characters[&gal_cid].clone();
+    ctx.advance_secs(BATTLEFIELD_RESPAWN_COOLDOWN_SECS + 10);
+    let respawned_bfs = rpc_call(&ctx, &mut s_gal, "dungeonInstanceCacheMgr", "GetFactionWarfareBattlefieldInstances", &[]).await.unwrap();
+    let PyRep::List(resp_list) = &respawned_bfs else { panic!("expected List") };
+    assert_eq!(resp_list.len(), 1, "new Frontline Battlefield spawns after 4h cooldown expires");
+
+    ctx.db.with_mut_snapshot(|s| {
+        let base_ch = s.characters[&gal_cid].clone();
+        for idx in 0..30i64 {
+            let extra_cid = 90_100_000 + idx;
+            let extra_ship = 100_100_000 + idx;
+            let mut wch = base_ch.clone();
             wch.character_id = extra_cid;
             wch.name = format!("BF Wingman {idx}");
             wch.solar_system_id = front_sys;
@@ -425,14 +447,21 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
                     ..Default::default()
                 },
             );
-        });
+        }
+    });
+    for idx in 0..30i64 {
+        let extra_ship = 100_100_000 + idx;
+        let zc = DVec3::from_array(BATTLEFIELD_ZONE_CENTERS[(idx as usize) % 3]);
         let _ = ctx.systems.get_or_spawn(front_sys).spawn_ball(make_ball(extra_ship, 621, zc + DVec3::new(500.0, 0.0, 0.0))).await;
     }
     set_hull(&ctx, gal_ship, 621, DVec3::from_array(BATTLEFIELD_ZONE_CENTERS[0])).await;
     let lp_before_bf = ctx.db.with_snapshot(|s| s.characters[&gal_cid].loyalty_points[&1_000_181]);
-    for _ in 0..3 {
+    for _ in 0..4 {
         ctx.advance_secs(120);
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+        if ctx.db.with_snapshot(|s| s.characters[&gal_cid].loyalty_points[&1_000_181] > lp_before_bf) {
+            break;
+        }
     }
     let (lp_after_bf, fac_st, corp_st) = ctx.db.with_snapshot(|s| {
         let ch = &s.characters[&gal_cid];

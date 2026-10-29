@@ -782,6 +782,20 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
         let mut upg_spawns: Vec<(u32, i64, &'static str, Vec<u32>, [f64; 3])> = Vec::new();
         let mut upg_despawns: Vec<(u32, i64)> = Vec::new();
         for (hid, hsys) in hub_ids {
+            if snap.sov_runtime.hacked_hubs.get(&hid).is_some_and(|&u| now_unix >= u) {
+                snap.sov_runtime.hacked_hubs.remove(&hid);
+                if let Some(hub) = snap.sov_runtime.sov_hubs.get_mut(&hid) {
+                    let fuel = hub.fuel.clone();
+                    for u in &mut hub.upgrades {
+                        if u.online
+                            && crate::services::quasar_sov_hub::upgrade_definition(&ctx.sde, u.type_id)
+                                .is_none_or(|d| fuel.get(&d.fuel_type).copied().unwrap_or(0) >= d.fuel_per_hour)
+                        {
+                            u.low_power = false;
+                        }
+                    }
+                }
+            }
             let _ = compute_hub_resources(snap, &ctx.sde, hid);
             let _ = enforce_hub_power_overload(snap, &ctx.sde, hid);
             let hub_hacked = snap.sov_runtime.hacked_hubs.get(&hid).is_some_and(|&u| now_unix < u);
@@ -903,7 +917,7 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
 
     for (sys_id, base_id) in upg_despawns {
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        for off in [1i64, 2] {
+        for off in [0i64, 1, 2] {
             let bid = base_id + off;
             let _ = sys_handle.remove_ball(bid).await;
             crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {

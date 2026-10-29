@@ -291,6 +291,7 @@ pub fn capture_warzone_system(
         let owner = occ.owner_faction_id;
         let threshold_i = occ.victory_points_threshold;
         snap.fw_runtime.system_victory_points.insert(sys_id, 0);
+        snap.fw_runtime.system_advantage.insert(sys_id, (0.0, 0.0));
         snap.fw_runtime.ihub_tiers.insert(sys_id, 0);
         snap.fw_runtime.ihub_lp_donations.insert(sys_id, 0);
         if let Some(st) = snap.system_states.get_mut(&sys_id) {

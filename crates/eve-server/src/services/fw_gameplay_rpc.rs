@@ -4,7 +4,7 @@
 
 use crate::router::ServerContext;
 use crate::services::fw_gameplay::{
-    apply_fw_or_insurgency_structure_damage, militia_lp_corp_id,
+    apply_fw_or_insurgency_structure_damage, militia_lp_corp_id, TYPE_ACCELERATION_GATE,
 };
 use crate::services::fw_services::{
     award_fw_kill_lp, donate_solar_system_lp, fw_opposing_faction, set_facwar_bunker_vulnerable,
@@ -174,6 +174,22 @@ pub async fn spawn_battlefield_wave_npc(
     npos: DVec3,
 ) {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    if sys_handle.get_ball_snapshot(bf_id).await.ok().flatten().is_none() {
+        let _ = sys_handle
+            .spawn_ball(Ball {
+                id: bf_id,
+                type_id: TYPE_ACCELERATION_GATE,
+                position: npos,
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 0.0,
+                mass: 1.0e8,
+                radius: 250.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Rigid,
+            })
+            .await;
+    }
     let mut cs = ctx.build_type_combat_state(ntid);
     if cs.max_structure_hp <= 0.0 {
         cs.max_shield_hp = 2_500.0;

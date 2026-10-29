@@ -28,7 +28,9 @@ use crate::services::quasar_sov_mercden::{
     encode_evolution_simulation, push_definitions_updated_notice, refresh_activities, simulate_den,
     MERCENARY_DEN_ABSOLUTE_MAX, TYPE_MERCENARY_DEN_MANAGEMENT,
 };
-use crate::services::sov_services::{emit_sov_structures_updated, TYPE_ORBITAL_SKYHOOK};
+use crate::services::sov_services::{
+    emit_sov_structures_updated, TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB,
+};
 use eve_db::{InventoryFlag, InventoryItemRecord, PersistedMercenaryDen, UpwellStructureRecord};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
@@ -671,11 +673,11 @@ pub async fn apply_mercenary_den_weapon_damage(
             }
         }
         if let Some(den_rec) = &removed_den {
-            let mut rem_info = den_rec.infomorphs;
-            while rem_info > 0 {
-                let chunk = rem_info.min(50);
-                stack_sizes.push(chunk);
-                rem_info -= chunk;
+            let full = den_rec.infomorphs / 50;
+            let rem = den_rec.infomorphs % 50;
+            stack_sizes.extend(std::iter::repeat_n(50, full as usize));
+            if rem > 0 {
+                stack_sizes.push(rem);
             }
         }
 
@@ -1111,6 +1113,68 @@ pub fn try_handle_sov_hub_data_hack(
         ("hubID", PyRep::Integer(target_id)),
         ("hacked", PyRep::Bool(false)),
     ])))
+}
+
+/// Anchors a Sovereignty Hub (`32458`) in an unclaimed claimable null-sec system via `structureDeployment.Anchor`.
+pub async fn handle_anchor_sov_hub_rpc(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot anchor a Sovereignty Hub while docked".into() });
+    }
+    let sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solarSystemID".into() })?;
+    let ship_id = session.ship_id.unwrap_or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0)));
+    let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0);
+    if sys_sec > 0.0 || sys_id >= 31_000_000 {
+        return Err(BridgeRpcError { code: "CannotAnchorSovHubOutsideNullSec".into(), message: format!("Sovereignty Hub can only be anchored in claimable null-security space (system {sys_id})") });
+    }
+    let (_, ship_ball) = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError { code: "DestinyQueryFailed".into(), message: e })?
+        .ok_or_else(|| BridgeRpcError { code: "ShipNotInSpace".into(), message: format!("Active ship {ship_id} is not spawned in space") })?;
+    let name = args.iter().filter_map(|a| a.as_str()).map(str::trim).filter(|s| !s.is_empty()).next_back().unwrap_or("Sovereignty Hub").to_string();
+    let first_arg = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+    let now = ctx.now_unix();
+    let hub_id = ctx.db.try_with_mut_snapshot(|snap| {
+        let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
+        let ally_id = snap.corporations.get(&corp_id).and_then(|c| c.alliance_id).or(session.alliance_id)
+            .ok_or_else(|| BridgeRpcError { code: "AllianceRequired".into(), message: "Anchoring a Sovereignty Hub requires membership in an alliance".into() })?;
+        let roles = snap.corporations.get(&corp_id).and_then(|c| c.member_roles.get(&char_id).copied()).unwrap_or(0) | session.corp_role;
+        let is_ceo = snap.corporations.get(&corp_id).is_some_and(|c| c.ceo_id == char_id);
+        if !is_ceo && (roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER)) == 0 {
+            return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Anchoring a Sovereignty Hub requires Director or Station Manager role".into() });
+        }
+        if snap.structures.values().any(|s| s.solar_system_id == sys_id && s.type_id == TYPE_SOVEREIGNTY_HUB && s.state != "Destroyed") {
+            return Err(BridgeRpcError { code: "SovHubAlreadyPresent".into(), message: format!("System {sys_id} already has an active Sovereignty Hub") });
+        }
+        let item_id = snap.items.values()
+            .filter(|i| (i.item_id == first_arg || first_arg == i64::from(TYPE_SOVEREIGNTY_HUB)) && i.type_id == TYPE_SOVEREIGNTY_HUB && i.location_id == ship_id && (i.owner_id == char_id || i.owner_id == corp_id) && i.quantity >= 1)
+            .map(|i| i.item_id).min()
+            .ok_or_else(|| BridgeRpcError { code: "MissingStructureItem".into(), message: "Sovereignty Hub item not found in active ship cargo".into() })?;
+        if let Some(it) = snap.items.get_mut(&item_id) {
+            if it.quantity > 1 { it.quantity -= 1; } else { snap.items.remove(&item_id); }
+        }
+        snap.next_entity_id += 1;
+        let id = 1_000_000_000_000 + snap.next_entity_id;
+        let _ = ally_id;
+        snap.structures.insert(id, UpwellStructureRecord {
+            structure_id: id, type_id: TYPE_SOVEREIGNTY_HUB, owner_corp_id: corp_id, solar_system_id: sys_id,
+            name: name.clone(), position: ship_ball.position.to_array(),
+            state: crate::services::station_structure::structure_lifecycle::STATE_ONLINING.into(),
+            quantum_core_installed: true, fuel_blocks: 0,
+            shield_hp: 15_000_000.0, armor_hp: 25_000_000.0, hull_hp: 40_000_000.0,
+            reinforced_until_unix: now + 900, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
+        });
+        snap.structure_vulnerability_windows.insert(id, ((now / 3_600) % 24, ((now / 86_400) + 4) % 7));
+        snap.system_states.entry(sys_id).or_default().solar_system_id = sys_id;
+        Ok(id)
+    })?;
+    let _ = ctx.systems.get_or_spawn(sys_id).spawn_ball(Ball {
+        id: hub_id, type_id: TYPE_SOVEREIGNTY_HUB, position: ship_ball.position, velocity: DVec3::ZERO,
+        max_velocity: 0.0, inertia: 1.0, mass: 1.0e9, radius: 3_500.0, speed_fraction: 0.0, mode: MovementMode::Rigid,
+    }).await;
+    Ok(PyRep::keyval([("structureID", PyRep::Integer(hub_id)), ("state", PyRep::String("Onlining".into()))]))
 }
 
 

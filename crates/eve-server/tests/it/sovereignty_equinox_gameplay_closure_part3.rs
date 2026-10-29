@@ -89,6 +89,7 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
             (995_020, TYPE_ANSIBLEX_JUMP_BRIDGE, PILOT_SHIP, 1),
             (995_021, TYPE_PHAROLUX_CYNO_BEACON, PILOT_SHIP, 1),
             (995_022, TYPE_TENEBREX_CYNO_JAMMER, PILOT_SHIP, 1),
+            (995_025, 4_247, PILOT_SHIP, 500), // Helium Fuel Block for Tenebrex fuel bay
         ] {
             snap.items.insert(
                 iid,
@@ -240,6 +241,12 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
     assert!(won, "Data Analyzer hacking minigame on Sov Hub must complete with Won");
     assert!(is_hub_hacked(&ctx, hub_a));
     assert!(drain_notif_events(&ctx, PILOT).iter().any(|e| e == "OnSovHubHacked"));
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    let hacked_balls = ctx.systems.get_or_spawn(null_sys).list_balls().await.unwrap();
+    assert!(
+        !hacked_balls.iter().any(|b| matches!(b.type_id, 1_230 | 1_228 | 37_453)),
+        "hacking Sov Hub despawns upgrade-spawned asteroid and NPC balls from ballpark"
+    );
     assert_eq!(
         rpc_call(&ctx, &mut s_dir, "structureDeployment", "Anchor", &[PyRep::Integer(995_020), PyRep::String("Ansiblex".into())])
             .await.unwrap_err().code,
@@ -247,14 +254,10 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
     );
 
     ctx.advance_secs(3_605);
-    ctx.db.with_mut_snapshot(|snap| {
-        for u in &mut snap.sov_runtime.sov_hubs.get_mut(&hub_a).unwrap().upgrades {
-            u.low_power = false;
-            if [UPGRADE_ADVANCED_LOGISTICS_NETWORK, UPGRADE_CYNOSURAL_NAVIGATION, UPGRADE_CYNOSURAL_SUPPRESSION].contains(&u.type_id) {
-                u.online = false;
-            }
-        }
-    });
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    assert!(!is_hub_hacked(&ctx, hub_a));
+    let respawned_balls = ctx.systems.get_or_spawn(null_sys).list_balls().await.unwrap();
+    assert!(respawned_balls.iter().any(|b| b.type_id == 37_453), "expired hack restores fueled online upgrades and respawns site balls");
 
     // R-SOVFW-05: Verify 35840, 35841, 37534 all require their respective Sov Hub upgrades online
     for (flex_iid, flex_label) in [
@@ -284,11 +287,8 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
     let tenebrex_rep = rpc_call(&ctx, &mut s_dir, "structureDeployment", "Anchor", &[PyRep::Integer(995_022), PyRep::String("Tenebrex Jammer".into())])
         .await.expect("anchor Tenebrex");
     let tenebrex_id = tenebrex_rep.dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(st) = snap.structures.get_mut(&tenebrex_id) {
-            st.fuel_blocks = 500;
-        }
-    });
+    rpc_call(&ctx, &mut s_dir, "invbroker", "Add", &[PyRep::Integer(995_025), PyRep::Integer(tenebrex_id), PyRep::Integer(133), PyRep::Integer(500)])
+        .await.expect("load Helium Fuel Blocks into Tenebrex via invbroker.Add");
     // Advance through anchoring (15m) + anchoring timer (24h) + onlining (15m) naturally:
     ctx.advance_secs(15 * 60 + 24 * 3_600 + 15 * 60 + 10);
     eve_server::services::station_structure::structure_lifecycle::sync_all_structures(&ctx);

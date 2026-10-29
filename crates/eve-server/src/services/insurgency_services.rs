@@ -59,9 +59,14 @@ pub fn read_insurgency_runtime<R>(
 pub fn emit_campaign_started(ctx: &ServerContext, sys_id: u32, campaign_id: i64) {
     let now = ctx.now_unix();
     let snap_opt = read_insurgency_runtime(ctx, |rt| {
-        rt.campaigns
-            .get(&campaign_id)
-            .map(|c| build_campaign_snapshot_for_system(c, sys_id, now))
+        rt.campaigns.get(&campaign_id).map(|c| {
+            build_campaign_snapshot_for_system(
+                c,
+                sys_id,
+                now,
+                rt.empire_ambition_modifier.get(&c.pirate_faction_id).copied().unwrap_or(0),
+            )
+        })
     });
     if let Some(snapshot) = snap_opt {
         ctx.notify(
@@ -74,7 +79,7 @@ pub fn emit_campaign_started(ctx: &ServerContext, sys_id: u32, campaign_id: i64)
 }
 
 /// Builds the campaign snapshot dictionary expected by client `insurgencyCampaignSvc`.
-pub fn build_campaign_snapshot_for_system(c: &InsurgencyCampaign, sys_id: u32, now: u64) -> PyRep {
+pub fn build_campaign_snapshot_for_system(c: &InsurgencyCampaign, sys_id: u32, now: u64, emp_mod: u8) -> PyRep {
     let (phase, end_time) = get_campaign_phase_and_timer(c, now);
     let c_pts = c.corruption_points.get(&sys_id).copied().unwrap_or(0);
     let s_pts = c.suppression_points.get(&sys_id).copied().unwrap_or(0);
@@ -94,7 +99,7 @@ pub fn build_campaign_snapshot_for_system(c: &InsurgencyCampaign, sys_id: u32, n
         ("phase", PyRep::String(phase.into())),
         ("phaseEndTime", PyRep::Integer(end_time as i64)),
         ("isFobSystem", PyRep::Bool(is_fob)),
-        ("isFobVulnerable", PyRep::Bool(phase == PHASE_ACTIVE && s5 >= 5)),
+        ("isFobVulnerable", PyRep::Bool(phase == PHASE_ACTIVE && s5 >= usize::from(5 + emp_mod.min(5)))),
         ("corruptionStage", PyRep::Integer(i64::from(c_stage))),
         ("suppressionStage", PyRep::Integer(i64::from(s_stage))),
         ("corruptionPoints", PyRep::Integer(c_pts)),
@@ -108,7 +113,7 @@ pub fn build_campaign_snapshot_for_system(c: &InsurgencyCampaign, sys_id: u32, n
 pub fn emit_campaign_updated(ctx: &ServerContext, sys_id: u32, campaign_id: i64, _stage: u8) {
     let now = ctx.now_unix();
     let snap = read_insurgency_runtime(ctx, |rt| {
-        rt.campaigns.get(&campaign_id).map(|c| build_campaign_snapshot_for_system(c, sys_id, now))
+        rt.campaigns.get(&campaign_id).map(|c| build_campaign_snapshot_for_system(c, sys_id, now, rt.empire_ambition_modifier.get(&c.pirate_faction_id).copied().unwrap_or(0)))
     });
     if let Some(snap) = snap {
         ctx.notify(
@@ -710,7 +715,7 @@ pub fn notify_stronghold_destruction(
         snap.insurgency_runtime
             .campaigns
             .get(&info.campaign_id)
-            .map(|c| build_campaign_snapshot_for_system(c, info.solar_system_id, now))
+            .map(|c| build_campaign_snapshot_for_system(c, info.solar_system_id, now, snap.insurgency_runtime.empire_ambition_modifier.get(&c.pirate_faction_id).copied().unwrap_or(0)))
     }).unwrap_or_else(|| {
         let sys_reps = vec![PyRep::Integer(i64::from(info.solar_system_id))];
         PyRep::keyval([
@@ -1290,7 +1295,7 @@ pub async fn handle(
                 rt.campaigns
                     .values()
                     .find(|c| c.systems.contains(&sys_id))
-                    .map(|c| build_campaign_snapshot_for_system(c, sys_id, now))
+                    .map(|c| build_campaign_snapshot_for_system(c, sys_id, now, rt.empire_ambition_modifier.get(&c.pirate_faction_id).copied().unwrap_or(0)))
             });
 
             Some(Ok(PyRep::Tuple(vec![

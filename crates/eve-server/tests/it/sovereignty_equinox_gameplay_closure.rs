@@ -36,6 +36,9 @@ pub(crate) fn temp_sqlite_path(tag: &str) -> PathBuf {
 
 pub(crate) fn open_sqlite_ctx(path: &std::path::Path, seed_demo: bool) -> ServerContext {
     let repo = eve_db::WorldRepository::open_sqlite(path).expect("open_sqlite");
+    repo.with_mut_snapshot(|snap| {
+        snap.markets_seeded = true;
+    });
     if seed_demo {
         let tpl = eve_db::WorldRepository::with_demo_seed()
             .with_snapshot(|s| s.characters.values().next().cloned().expect("demo char"));
