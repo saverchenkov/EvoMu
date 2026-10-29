@@ -2942,5 +2942,249 @@
   "rpc:corpmgr.stationID": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/shared/neocom/corporation/base_corporation_ui.pyj:151 corpmgr.stationID attribute access in client code."
+  },
+  "notify:OnMouseDownDrag": {
+    "disposition": "client_local",
+    "evidence": "carbonui/uilib.pyj:35 Uilib.EVENT_MAP (trinity.TR2WM_MOUSEMOVE drag state) & carbonui/primitives/base.pyj:24 Base.OnMouseDownDrag(): local UI mouse-drag input event dispatched directly on hovered UI widgets by Uilib; never sent over machoNet."
+  },
+  "notify:OnMouseEnter": {
+    "disposition": "client_local",
+    "evidence": "carbonui/uilib.pyj:35 Uilib.EVENT_MAP & carbonui/primitives/base.pyj:21 Base.OnMouseEnter(): local UI cursor-enter input callback dispatched directly on UI widgets by Uilib; never sent over machoNet."
+  },
+  "notify:OnMouseExit": {
+    "disposition": "client_local",
+    "evidence": "carbonui/uilib.pyj:35 Uilib.EVENT_MAP & carbonui/primitives/base.pyj:22 Base.OnMouseExit(): local UI cursor-exit input callback dispatched directly on UI widgets by Uilib; never sent over machoNet."
+  },
+  "notify:OnMouseHover": {
+    "disposition": "client_local",
+    "evidence": "carbonui/uilib.pyj:35 Uilib.EVENT_MAP & carbonui/primitives/base.pyj:19 Base.OnMouseHover(): local UI cursor-hover input callback dispatched directly on UI widgets by Uilib; never sent over machoNet."
+  },
+  "notify:OnMouseMove": {
+    "disposition": "client_local",
+    "evidence": "carbonui/uilib.pyj:35 Uilib.EVENT_MAP & carbonui/primitives/base.pyj:20 Base.OnMouseMove(): local UI cursor-move input callback dispatched directly on UI widgets by Uilib; never sent over machoNet."
+  },
+  "notify:OnMouseMoveDrag": {
+    "disposition": "client_local",
+    "evidence": "carbonui/uilib.pyj:35 Uilib.EVENT_MAP & carbonui/primitives/base.pyj:25 Base.OnMouseMoveDrag(): local UI mouse-drag movement callback dispatched directly on UI widgets by Uilib; never sent over machoNet."
+  },
+  "notify:OnMouseUp": {
+    "disposition": "client_local",
+    "evidence": "carbonui/uilib.pyj:35 Uilib.EVENT_MAP & carbonui/primitives/base.pyj:26 Base.OnMouseUp(): local UI mouse-button release callback dispatched directly on UI widgets by Uilib; never sent over machoNet."
+  },
+  "notify:OnMouseWheel": {
+    "disposition": "client_local",
+    "evidence": "carbonui/uilib.pyj:35,1057 Uilib._OnMouseWheel() & carbonui/primitives/base.pyj:27 Base.OnMouseWheel(): local UI scroll-wheel input callback dispatched directly on UI widgets by Uilib; never sent over machoNet."
+  },
+  "notify:OnMoveMeLocations": {
+    "disposition": "dead_client_code",
+    "evidence": "eve/client/script/util/publicQaToolsClient.pyj:65 def OnMoveMeLocations(self, solarsystems): public QA/dev debug tool handler; not emitted by live production server."
+  },
+  "notify:OnMultiEvent": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/remote/michelle.pyj:637 DoDestinyUpdate(): sm.ScatterEvent(\"OnMultiEvent\", dogmaMessages) \u2014 client-only local scatter expanding dogma messages inside DoDestinyUpdate; server emits DoDestinyUpdates."
+  },
+  "notify:OnNetClientReadProgress": {
+    "disposition": "dead_client_code",
+    "evidence": "eve/client/script/ui/shared/loading.pyj:153 Loading.OnNetClientReadProgress(self, have, need): legacy Carbon socket read-progress UI handler with zero sender in V24 code.ccp and zero string/symbol reference in exefile or client native libraries."
+  },
+  "notify:OnNodeDeath": {
+    "disposition": "client_local",
+    "evidence": "carbon/common/script/net/machoNet.pyj:2837,3052,3574,4441 MachoNetService.OnNodeDeath() & machoNetTransport.pyj:238: self.ServerBroadcast('OnNodeDeath', nodeID, confirmed, reason) \u2014 server-node-to-server-node internal cluster coordination broadcast; never sent to EVE game clients."
+  },
+  "notify:OnNodeLoadPush": {
+    "disposition": "client_local",
+    "evidence": "carbon/common/script/net/machoNet.pyj:2935,3000 MachoNetService.__NodeLoadPush(): self.ClusterBroadcast('OnNodeLoadPush', self.nodeCPULoadValue, self.serverNames) \u2014 internal cluster node CPU-load telemetry broadcast between server/proxy nodes; never sent to game clients."
+  },
+  "notify:OnNotificationUndeleted": {
+    "disposition": "dead_client_code",
+    "evidence": "eve/client/script/ui/services/mail/notificationSvc.pyj:443 notificationSvc.OnNotificationUndeleted(self, notificationIDs): unreferenced legacy mail notification undelete handler; V24 notificationMgr exposes only DeleteNotifications and MarkAllRead with no undelete RPC or UI path."
+  },
+  "notify:OnObjectPublicAttributesUpdated": {
+    "disposition": "dead_client_code",
+    "evidence": "carbon/common/script/net/ObjectCallGPCS.pyj:407 ObjectCall.OnObjectPublicAttributesUpdated() & carbon/common/script/net/machoNet.pyj:1218 (no-op return None): legacy Carbon MachoObject __publicattributes__ sync hook; zero classes in V24 code.ccp define __publicattributes__ or call UpdatePublicAttributes."
+  },
+  "notify:OnOfferAvailabilityChange": {
+    "disposition": "client_local",
+    "evidence": "contextualOffers/client/contextualOfferInnerService.pyj:53 ContextualOfferInnerService._NotifyOfAvailabilityChange(): self.scatterSvc.ScatterEvent(SCATTER_EVENT_ON_OFFER_AVAILABILITY_CHANGE) ('OnOfferAvailabilityChange' at contextualOfferClientConst.pyj:1), handled at neocomSvc.pyj:560; client-only local UI scatter."
+  },
+  "notify:OnOperationReplayed": {
+    "disposition": "dead_client_code",
+    "evidence": "eve/client/script/ui/shared/infoPanels/infoPanelSvc.pyj:402 InfoPanelSvc.OnOperationReplayed(self, categoryID, operationID): uncalled UI handler; V24 OperationsController resets replayable operations via OnOperationsProgressReset (operationscontroller.pyj:590) and never emits or scatters OnOperationReplayed."
+  },
+  "notify:OnOverviewOverrideChangedOnDoBallAddEgoChange": {
+    "disposition": "dead_client_code",
+    "evidence": "eve/client/script/ui/inflight/overview/overviewWindow.pyj:144 OverviewWindow.__notifyevents__: missing-comma Python string literal concatenation typo joining 'OnOverviewOverrideChanged' and 'OnDoBallAddEgoChange'; OverviewWindow defines no OnOverviewOverrideChangedOnDoBallAddEgoChange method and nothing emits it."
+  },
+  "notify:OnPathfinderSettingsChange": {
+    "disposition": "dead_client_code",
+    "evidence": "eve/client/script/ui/shared/market/marketbase.pyj:3700 MarketData.OnPathfinderSettingsChange(): uncalled local UI handler; V24 ClientPathfinderService scatters 'OnAutopilotUpdated' (clientPathfinderService.pyj:117) on route/security changes and never scatters OnPathfinderSettingsChange."
+  },
+  "notify:OnPeopleWhoShouldntBeLoggedInNotification": {
+    "disposition": "client_local",
+    "evidence": "carbon/common/script/net/machoNet.pyj:2952,2968 MachoNetService.__DisconnectUnauthorizedUsers(): self.ProxyBroadcast('OnPeopleWhoShouldntBeLoggedInNotification', ...) \u2014 internal DB-to-proxy node broadcast; proxy subsequently sends OnServerMessage to the client at machoNet.pyj:2993."
+  },
+  "notify:OnPreMatchStart": {
+    "disposition": "dead_client_code",
+    "evidence": "eve/devtools/script/form_tournament.pyj:407 def OnPreMatchStart(self, matchID, teamOneName, teamTwoName, nebula): tournament referee QA devtool event; not emitted by live production server."
+  },
+  "notify:OnProbeScanner_FocusOnResult": {
+    "disposition": "dead_client_code",
+    "evidence": "eve/client/script/ui/shared/mapView/mapViewProbeHandlerStandalone.pyj:344 MapViewProbeHandlerStandalone.OnProbeScanner_FocusOnResult(): uncalled local UI handler; V24 ScanResultNew.OnDblClick scatters 'OnProbeScanner_ProbeEntryDblClick' (scannerListEntries.pyj:371) and nothing scatters OnProbeScanner_FocusOnResult."
+  },
+  "notify:OnProjectDiscoveryClosed": {
+    "disposition": "client_local",
+    "evidence": "projectdiscovery/client/ui/projectdiscoverywindow.pyj:269 BaseProjectDiscoveryWindow.OnProjectDiscoveryClosed() & projectdiscovery/client/projects/exoplanets/gameplaymodes/exoplanetsproject.pyj:1078,1094 (onCloseEvent='OnProjectDiscoveryClosed'): local Project Discovery dialog/window close UI scatter; never sent by server."
+  },
+  "notify:OnProjectDiscoveryResetAndGetNewTask": {
+    "disposition": "client_local",
+    "evidence": "projectdiscovery/client/projects/exoplanets/gameplaymodes/exoplanetsproject.pyj:690,1110 ExoPlanetsProject.open_task_retrieval_error_dialogue() (onCloseEvent='OnProjectDiscoveryResetAndGetNewTask'): local Project Discovery error-dialog close UI scatter; never sent by server."
+  },
+  "notify:OnProjectDiscoveryStarted": {
+    "disposition": "client_local",
+    "evidence": "projectdiscovery/client/util/dialogue.pyj:184,357 Dialogue.skip_tutorial() & projectdiscovery/client/projects/subcellular/rewardsview.pyj:741 RewardsView.continue_from_reward(): sm.ScatterEvent(Events.ProjectDiscoveryStarted, ...) \u2014 client-only local UI scatter handled at exoplanetstutorial.pyj:232; never sent by server."
+  },
+  "notify:OnProjectDiscoveryTutorialDisplayMessageClosed": {
+    "disposition": "client_local",
+    "evidence": "projectdiscovery/client/projects/exoplanets/gameplaymodes/exoplanetstutorial.pyj:203,212 ExoPlanetsTutorial.OnProjectDiscoveryTutorialDisplayMessage() (onCloseEvent='OnProjectDiscoveryTutorialDisplayMessageClosed'): local tutorial dialog close UI scatter; never sent by server."
+  },
+  "notify:OnProvingGroundsMatchFound": {
+    "disposition": "dead_client_code",
+    "evidence": "carbon/client/script/environment/audioService.pyj:1036 AudioService.OnProvingGroundsMatchFound(): unreachable Proving Grounds arena audio trigger with zero sender in V24 code.ccp (Proving Grounds eve/pvp/provinggrounds protos are triaged dead_client_code in supervisor_triage.json)."
+  },
+  "notify:OnRWDungeonCompletedWithRewards": {
+    "disposition": "removed_from_live",
+    "evidence": "resourcewars/client/rwservice.pyj:150 RWService.OnRWDungeonCompletedWithRewards(): Resource Wars site notification; Resource Wars (RWManager, triaged removed_from_live in supervisor_triage.json) was permanently retired from live EVE Online."
+  },
+  "notify:OnRWDungeonCompletedWithoutRewards": {
+    "disposition": "removed_from_live",
+    "evidence": "resourcewars/client/rwservice.pyj:153 RWService.OnRWDungeonCompletedWithoutRewards(): Resource Wars site notification; Resource Wars (RWManager, triaged removed_from_live in supervisor_triage.json) was permanently retired from live EVE Online."
+  },
+  "notify:OnRWDungeonEntered": {
+    "disposition": "removed_from_live",
+    "evidence": "resourcewars/client/rwservice.pyj:111 RWService.OnRWDungeonEntered(): Resource Wars site entry notification; Resource Wars (RWManager, triaged removed_from_live in supervisor_triage.json) was permanently retired from live EVE Online."
+  },
+  "notify:OnRWDungeonExited": {
+    "disposition": "removed_from_live",
+    "evidence": "resourcewars/client/rwservice.pyj:124 RWService.OnRWDungeonExited(): Resource Wars site exit notification; Resource Wars (RWManager, triaged removed_from_live in supervisor_triage.json) was permanently retired from live EVE Online."
+  },
+  "notify:OnRWDungeonLobbyEntered": {
+    "disposition": "removed_from_live",
+    "evidence": "resourcewars/client/rwservice.pyj:215 RWService.OnRWDungeonLobbyEntered() & monolith_task_tracker/client/eventHandler.pyj:387: Resource Wars lobby notification; Resource Wars (RWManager, triaged removed_from_live in supervisor_triage.json) was permanently retired from live EVE Online."
+  },
+  "notify:OnRWDungeonLobbyExited": {
+    "disposition": "removed_from_live",
+    "evidence": "resourcewars/client/rwservice.pyj:220 RWService.OnRWDungeonLobbyExited(): Resource Wars lobby exit notification; Resource Wars (RWManager, triaged removed_from_live in supervisor_triage.json) was permanently retired from live EVE Online."
+  },
+  "notify:OnRWIncomingAlliedForces": {
+    "disposition": "removed_from_live",
+    "evidence": "resourcewars/client/rwservice.pyj:310 RWService.OnRWIncomingAlliedForces(): Resource Wars audio cue notification; Resource Wars (RWManager, triaged removed_from_live in supervisor_triage.json) was permanently retired from live EVE Online."
+  },
+  "notify:OnRWIncomingAlliedReinforcements": {
+    "disposition": "removed_from_live",
+    "evidence": "resourcewars/client/rwservice.pyj:313 RWService.OnRWIncomingAlliedReinforcements(): Resource Wars audio cue notification; Resource Wars (RWManager, triaged removed_from_live in supervisor_triage.json) was permanently retired from live EVE Online."
+  },
+  "notify:OnRWIncomingEnemyReinforcements": {
+    "disposition": "removed_from_live",
+    "evidence": "resourcewars/client/rwservice.pyj:316 RWService.OnRWIncomingEnemyReinforcements(): Resource Wars audio cue notification; Resource Wars (RWManager, triaged removed_from_live in supervisor_triage.json) was permanently retired from live EVE Online."
+  },
+  "notify:OnRWPirateDestroyed": {
+    "disposition": "removed_from_live",
+    "evidence": "resourcewars/client/rwservice.pyj:185 RWService.OnRWPirateDestroyed(): Resource Wars NPC kill counter notification; Resource Wars (RWManager, triaged removed_from_live in supervisor_triage.json) was permanently retired from live EVE Online."
+  },
+  "notify:OnRWTimerStarted": {
+    "disposition": "removed_from_live",
+    "evidence": "resourcewars/client/rwservice.pyj:208 RWService.OnRWTimerStarted(): Resource Wars site timer notification; Resource Wars (RWManager, triaged removed_from_live in supervisor_triage.json) was permanently retired from live EVE Online."
+  },
+  "notify:OnRecommendationsChanged": {
+    "disposition": "dead_client_code",
+    "evidence": "eve/client/script/ui/shared/infoPanels/infoPanelRecommendations.pyj:89 InfoPanelRecommendations.OnRecommendationsChanged(): uncalled local UI handler; V24 RecommendationService.AddToQueue (recommendationSvc.pyj:73) calls infoPanel.UpdateOperationsPanel directly and nothing emits OnRecommendationsChanged."
+  },
+  "notify:OnRefreshConnectivity": {
+    "disposition": "dead_client_code",
+    "evidence": "carbon/common/script/net/machoNet.pyj:2514,2518 MachoNetService.OnRefreshConnectivity(): server-mode-only (macho.mode == 'server') proxy transport track-laying handler with zero caller in V24 code.ccp and no client effect."
+  },
+  "notify:OnRemovalAsRef": {
+    "disposition": "dead_client_code",
+    "evidence": "eve/devtools/script/tournamentRefereeTools.pyj:1760 def OnRemovalAsRef(self, matchID): tournament referee QA devtool event; not emitted by live production server."
+  },
+  "notify:OnRestartWindow": {
+    "disposition": "client_local",
+    "evidence": "projectdiscovery/client/projects/exoplanets/gameplaymodes/exoplanetsproject.pyj:1062 ExoPlanetsProject.open_classification_error_dialogue() (onCloseEvent='OnRestartWindow') & projectdiscovery/client/ui/projectdiscoverywindow.pyj:272 BaseProjectDiscoveryWindow.OnRestartWindow(): local Project Discovery error-dialog close UI scatter; never sent by server."
+  },
+  "notify:OnRwPirateKilledByCharacter": {
+    "disposition": "removed_from_live",
+    "evidence": "notifications/client/rwPirateKilledNotificationAdapter.pyj:10 PirateKilledNotificationAdapter.OnRwPirateKilledByCharacter(): Resource Wars combat log notification; Resource Wars (RWManager, triaged removed_from_live in supervisor_triage.json) was permanently retired from live EVE Online."
+  },
+  "notify:OnRwPirateKilledByNpc": {
+    "disposition": "removed_from_live",
+    "evidence": "notifications/client/rwPirateKilledNotificationAdapter.pyj:13 PirateKilledNotificationAdapter.OnRwPirateKilledByNpc(): Resource Wars combat log notification; Resource Wars (RWManager, triaged removed_from_live in supervisor_triage.json) was permanently retired from live EVE Online."
+  },
+  "notify:OnSeasonDataChanged": {
+    "disposition": "dead_client_code",
+    "evidence": "eve/client/script/ui/shared/agencyNew/contentProviders/contentProviderAgency.pyj:18 ContentProviderAgency.OnSeasonDataChanged(): uncalled local Agency UI handler; V24 SeasonService scatters 'OnSeasonSelectionUpdated' (seasonservice.pyj:253,380,388) and nothing emits OnSeasonDataChanged."
+  },
+  "notify:OnSelectObject": {
+    "disposition": "dead_client_code",
+    "evidence": "eve/client/script/ui/inflight/dungeoneditor.pyj:699 DungeonEditor.OnSelectObject(self, selectedList, id): internal CCP Jessica/dev in-space dungeon editor selection hook checking id == 'In Game'; zero sender in shipping V24 code.ccp."
+  },
+  "notify:OnSuppressionValueChanged_local": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/shared/infoPanels/infoPanelLocationInfo.pyj:81 InfoPanelLocationInfo.__notifyevents__: client-only casing variant of OnSuppressionValueChanged_Local (scattered at corruptionSuppressionSvc.pyj:184); never emitted by server over machoNet."
+  },
+  "notify:OnTargetOBO": {
+    "disposition": "removed_from_live",
+    "evidence": "eve/client/script/parklife/playerOwned.pyj:630 PlayerOwned.OnTargetOBO() & eve/client/script/ui/inflight/moondefencebutton.pyj:940 DefenceStructureButton.OnTargetOBO(): legacy POS starbase manual sentry targeting (posMgr, triaged removed_from_live in supervisor_triage.json; replaced by Upwell structure weapons)."
+  },
+  "notify:OnTransitMarkingWithPeriod": {
+    "disposition": "client_local",
+    "evidence": "projectdiscovery/client/projects/exoplanets/graphtools/transitselectiontool.pyj:272-274 TransitSelectionTool._on_unfolded_mouse_up(): sm.ScatterEvent('OnTransitMarkingWithPeriod') \u2014 client-only local graph tool UI scatter; never sent by server."
+  },
+  "notify:OnTripleClick": {
+    "disposition": "client_local",
+    "evidence": "carbonui/uilib.pyj:35,1198 Uilib._TryExecuteClickHandler() & carbonui/primitives/base.pyj:30 Base.OnTripleClick(): local UI triple-click input callback dispatched directly on UI widgets by Uilib; never sent over machoNet."
+  },
+  "notify:OnTutorialReset": {
+    "disposition": "client_local",
+    "evidence": "projectdiscovery/client/util/dialogue.pyj:363 ResumeTutorialDialogue.reset_tutorial(): sm.ScatterEvent(projectDiscoveryEvents.ResetTutorial) ('OnTutorialReset' at projectdiscovery/client/const.pyj:43) \u2014 client-only local tutorial reset UI scatter; never sent by server."
+  },
+  "notify:OnUITestAnimationSelected": {
+    "disposition": "dead_client_code",
+    "evidence": "eve/devtools/script/uiAnimationTest.pyj:263 TestAnimationsWnd.OnUITestAnimationSelected(self, animFunc): uncalled internal CCP devtools UI animation test handler taking a Python callable; PlayAnimation at :343 scatters 'OnTestAnimationsPlayAnimation' instead."
+  },
+  "notify:OnUnHighlightExpertSystemShipTreeShips": {
+    "disposition": "dead_client_code",
+    "evidence": "eve/client/script/ui/shared/shipTree/shipTreeShipGroup.pyj:282 ShipGroupIconAndSkillBar.OnUnHighlightExpertSystemShipTreeShips(): uncalled local ship-tree UI hover fade handler with zero sender in V24 code.ccp."
+  },
+  "notify:OnVIPListChanged": {
+    "disposition": "dead_client_code",
+    "evidence": "carbon/common/script/net/machoNet.pyj:3993,4007 MachoNetService.OnVIPListChanged(): proxy-only cache invalidation handler for __PrimeVIPList (ConnectToSolServerService('DB2').CallProc('zuser.Users_SelectByRole', ROLE_VIPLOGIN)) with zero caller in V24 code.ccp and no client effect."
+  },
+  "notify:OnWeaponGroupsChanged": {
+    "disposition": "dead_client_code",
+    "evidence": "eve/client/script/ui/inflight/shipHud/slotsContainer.pyj:727 SlotsContainer.OnWeaponGroupsChanged(): uncalled legacy HUD weapon-bank handler superseded by 'OnRefreshModuleBanks' (slotsContainer.pyj:42,730, scattered by clientDogmaLocation.pyj:1069,1078); zero sender in V24 code.ccp."
+  },
+  "notify:ProcessActiveShipChanged": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/dogma/clientDogmaLocation.pyj:345 DogmaLocation._MakeShipActive(): sm.ChainEvent('ProcessActiveShipChanged', shipID, oldShipID) \u2014 client-only local chain event when switching active ship; never sent over machoNet."
+  },
+  "notify:ProcessDeviceChange": {
+    "disposition": "client_local",
+    "evidence": "carbonui/services/device.pyj:313 DeviceMgr._OnBeforeSwapChainChange() & eve/client/script/ui/services/windowsvc.pyj:64 WindowMgr.ProcessDeviceChange(): local graphics swap-chain/resolution change UI hook; never sent over machoNet."
+  },
+  "notify:ProcessRestartUI": {
+    "disposition": "dead_client_code",
+    "evidence": "eve/devtools/script/svc_console.pyj:310 ConsoleService.ProcessRestartUI() (and eve/devtools/script/svc_trainer.pyj:216, svc_poser.pyj:937): internal CCP devtools window reload hook with zero caller in shipping V24 code.ccp."
+  },
+  "notify:ProcessSessionChange": {
+    "disposition": "client_local",
+    "evidence": "carbon/common/script/sys/basesession.pyj:1542,1628,1681 CoreSession.ApplyRemoteAttributeChanges(): sm.NotifySessionChange('ProcessSessionChange', True, self, notify) \u2014 synthesized locally by CoreSession when applying SessionChangeNotification wire packets, never sent as a Notify method name."
+  },
+  "notify:ProcessSessionReset": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/parklife/gameui.pyj:613 GameUI.DoCharacterLogoff(): sm.ChainEvent('ProcessSessionReset') \u2014 client-only local character logoff cleanup chain event; never sent over machoNet."
+  },
+  "notify:ProcessTargetChanged": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/parklife/targetMgr.pyj:671 TargetMgr.OnTarget(): sm.ChainEvent('ProcessTargetChanged', what, tid, reason) \u2014 client-only local chain event synthesized inside TargetMgr.OnTarget for TurretSvc (turret.pyj:91); server sends OnTarget on the wire."
   }
 }
