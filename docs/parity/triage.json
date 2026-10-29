@@ -3191,10 +3191,6 @@
     "disposition": "dead_client_code",
     "evidence": "carbon/common/script/net/http.pyj ESPUrl and carbon/common/script/net/machoNet.pyj MachoNetService.__PrimeVIPList: internal server/ESP developer tool database procedure call not exposed to standard client gameplay; requires GM/admin DB2 cluster role."
   },
-  "rpc:cache.Setting": {
-    "disposition": "client_local",
-    "evidence": "carbon/common/script/net/httpService.pyj ConnectionService._GetDownloadableFileExtensions(): client-local property access on the local cache instance (self.cache.Setting); not a remote server-facing MachoNet RPC method."
-  },
   "rpc:debug.Exec": {
     "disposition": "dead_client_code",
     "evidence": "carbon/common/script/sys/debugSvc.pyj debugSvc.Exec(): internal debug console service method restricted to internal CCP dev builds and GM sessions; not accessible or called in live player gameplay."

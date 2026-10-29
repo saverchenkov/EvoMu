@@ -7,9 +7,9 @@ use crate::services::fw_gameplay::{
     apply_fw_or_insurgency_structure_damage, militia_lp_corp_id, TYPE_ACCELERATION_GATE,
 };
 use crate::services::fw_services::{
-    award_fw_kill_lp, donate_solar_system_lp, fw_opposing_faction, set_facwar_bunker_vulnerable,
-    update_system_advantage, HQ_SYSTEM_AMO, HQ_SYSTEM_INTAKI, HQ_SYSTEM_MEHATOOR,
-    HQ_SYSTEM_ONNAMON,
+    award_fw_kill_lp, donate_solar_system_lp, is_opposing_militia,
+    set_facwar_bunker_vulnerable, update_system_advantage, HQ_SYSTEM_AMO, HQ_SYSTEM_INTAKI,
+    HQ_SYSTEM_MEHATOOR, HQ_SYSTEM_ONNAMON,
 };
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
@@ -58,7 +58,7 @@ pub fn on_player_ship_destroyed_in_combat(
         let k_fac = snap.characters.get(&killer_char_id).and_then(|c| c.war_faction_id);
         let v_fac = snap.characters.get(&victim_char_id).and_then(|c| c.war_faction_id);
         match (k_fac, v_fac) {
-            (Some(kf), Some(vf)) => fw_opposing_faction(kf) == Some(vf) || kf != vf,
+            (Some(kf), Some(vf)) => is_opposing_militia(kf, vf),
             _ => false,
         }
     });

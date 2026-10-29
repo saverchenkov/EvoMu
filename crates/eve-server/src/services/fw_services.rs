@@ -41,6 +41,23 @@ pub fn fw_opposing_faction(faction_id: i64) -> Option<i64> {
     }
 }
 
+/// Returns true if two factions are in an opposing militia relationship (canonical empire war pairs or pirate insurgency pairs).
+pub fn is_opposing_militia(f1: i64, f2: i64) -> bool {
+    if fw_opposing_faction(f1) == Some(f2) {
+        return true;
+    }
+    // Pirate insurgencies opposing pairs:
+    // Guristas (500010) opposes Caldari (500001) and Gallente (500004)
+    // Angel Cartel (500011) opposes Minmatar (500002) and Amarr (500003)
+    matches!(
+        (f1, f2),
+        (500010, 500001 | 500004)
+            | (500001 | 500004, 500010)
+            | (500011, 500002 | 500003)
+            | (500002 | 500003, 500011)
+    )
+}
+
 /// Computes the frontline status (Frontline, Command, or Rearguard) for all warzone solar systems
 /// using genuine stargate graph adjacency (`feat:fw.frontlines`, `R-FW-P1-6`).
 ///

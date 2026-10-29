@@ -637,3 +637,30 @@ async fn pirate_insurgency_campaigns_corruption_suppression_and_instances() {
         assert_eq!(list[0].dict_get("instanceID").and_then(|v| v.as_i64()), Some(ice_id));
     }
 }
+
+#[tokio::test]
+async fn test_fw_allied_militia_kill_awards_zero_lp() {
+    let ctx = ServerContext::new();
+    let sys_id = 30002813u32;
+    ctx.db.with_mut_snapshot(|s| {
+        s.fw_system_occupations.insert(sys_id, eve_db::FwSystemOccupationRecord {
+            solar_system_id: sys_id, owner_faction_id: 500001, occupier_faction_id: 500001, victory_points: 100, victory_points_threshold: 3000,
+        });
+        s.characters.get_mut(&PILOT).unwrap().war_faction_id = Some(500001);
+        s.characters.get_mut(&OTHER).unwrap().war_faction_id = Some(500003);
+    });
+
+    let lp_init: i64 = ctx.db.with_snapshot(|s| s.characters[&PILOT].loyalty_points.values().copied().sum());
+    // 1. Caldari kills Amarr (Allies: State Protectorate & 24th Imperial Crusade) -> 0 LP
+    eve_server::services::fw_gameplay::on_player_ship_destroyed_in_combat(&ctx, sys_id, PILOT, OTHER, 601);
+    let lp_ally: i64 = ctx.db.with_snapshot(|s| s.characters[&PILOT].loyalty_points.values().copied().sum());
+    assert_eq!(lp_ally, lp_init, "Allied militia kill must award 0 LP");
+
+    // 2. Caldari kills Gallente (Opposing militia: Federal Defence Union) -> Awards LP
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&OTHER).unwrap().war_faction_id = Some(500004);
+    });
+    eve_server::services::fw_gameplay::on_player_ship_destroyed_in_combat(&ctx, sys_id, PILOT, OTHER, 601);
+    let lp_enemy: i64 = ctx.db.with_snapshot(|s| s.characters[&PILOT].loyalty_points.values().copied().sum());
+    assert!(lp_enemy > lp_init, "Opposing militia kill must award LP");
+}

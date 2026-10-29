@@ -297,11 +297,12 @@ async fn test_rpc_missing_batch3_part1() {
 
 #[tokio::test]
 async fn test_rpc_missing_batch3_part2() {
-    // parity: rpc:loadService.SetConfig, rpc:cache.Rowset
-    // DATA GAP: Triaged NA in docs/parity/triage.json (dev/QA/cluster RPCs): rpc:loadService.GetTotalStats, rpc:sessionMgr.EndAllGameSessions, rpc:sessionMgr.RemoveSessionsFromServer, rpc:userSvc.ProcessEVESessionCreated, rpc:cache.Setting, rpc:raffleMgr.QA_SeedRaffles, rpc:DB2.CallProc, rpc:debug.Exec
+    // parity: rpc:loadService.SetConfig, rpc:cache.Rowset, rpc:cache.Setting
+    // DATA GAP: Triaged NA in docs/parity/triage.json (dev/QA/cluster RPCs): rpc:loadService.GetTotalStats, rpc:sessionMgr.EndAllGameSessions, rpc:sessionMgr.RemoveSessionsFromServer, rpc:userSvc.ProcessEVESessionCreated, rpc:raffleMgr.QA_SeedRaffles, rpc:DB2.CallProc, rpc:debug.Exec
     eve_testkit::attest(&[
         "rpc:loadService.SetConfig",
         "rpc:cache.Rowset",
+        "rpc:cache.Setting",
     ]);
 
     let ctx = ServerContext::new();

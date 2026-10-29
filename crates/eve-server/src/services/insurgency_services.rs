@@ -987,8 +987,7 @@ async fn evaluate_system_fw_complex_tick(
         let Ok(Some((tick, ball))) = sys_handle.get_ball_snapshot(cand_ship_id).await else {
             continue;
         };
-        let in_beacon_range = ball.position.distance(beacon) <= 30_000.0
-            || ball.position.distance(glam::DVec3::ZERO) <= 30_000.0;
+        let in_beacon_range = ball.position.distance(beacon) <= 30_000.0;
         if ball.type_id == 670 || !in_beacon_range {
             continue;
         }
