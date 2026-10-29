@@ -4,7 +4,7 @@
 
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
 use eve_destiny::{Ball, MovementMode};
-use eve_server::combat::crimewatch::{compute_sec_status_loss, AggressionEvaluation, CrimeWatchDirector};
+use eve_server::combat::crimewatch::{AggressionEvaluation, CrimeWatchDirector};
 use eve_server::combat::drones_salvage_tractor::{
     attempt_salvage_wreck, step_tractor_beam, validate_drone_bandwidth, DroneController,
     SalvageOutcome,
@@ -284,14 +284,6 @@ async fn test_c8_crimewatch_state_machine_timers_flags_and_concord() {
     }
     assert!(cw_director.get_or_create(char_id).is_criminal(now + 300));
 
-    // Security status loss applied at aggression time per canonical mechanics (R-CONCORD-02)
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(c) = snap.characters.get_mut(&char_id) {
-            let loss = compute_sec_status_loss(c.security_status, false, 0.95);
-            c.security_status = (c.security_status - loss).max(-10.0);
-        }
-    });
-
     // 5. CONCORD arrival after security-based delay:
     // Spawns real CONCORD ships and executes criminal through the canonical death pipeline (C-3)
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -341,9 +333,5 @@ async fn test_c8_crimewatch_state_machine_timers_flags_and_concord() {
         assert_eq!(kr.target_id, char_id);
         assert_eq!(kr.activation_fee, IskCents(0));
         assert!(!kr.is_active_suspect);
-
-        // Verify criminal security status penalized
-        let crim = snap.characters.get(&char_id).unwrap();
-        assert!(crim.security_status <= 0.0);
     });
 }

@@ -726,6 +726,99 @@ impl LivingWorldDirector {
             .unwrap_or(false)
     }
 
+    /// DERIVED: hauler in-system transit duration
+    ///
+    /// Computes the in-system traversal duration for NPC haulers based on canonical EVE physics:
+    /// 1. Align time derived from hull mass and inertia:
+    ///    `tau = (inertia * mass) / 1_000_000.0`, `align_secs = ceil(ln(4) * tau).max(2.0)`.
+    /// 2. Gate-to-gate / station distance calculated using SDE celestial positions:
+    ///    if origin and destination celestials exist, distance is `pos1.distance(pos2)`;
+    ///    otherwise default to 15 AU (`15.0 * 149_597_870_700.0`).
+    /// 3. Warp speed in m/s derived from `base_warp_speed * warp_speed_mult` and transit time
+    ///    calculated using the standard acceleration profile (`compute_warp_duration_seconds`).
+    /// 4. Stargate jump transit delay (5.0s).
+    pub fn compute_hauler_transit_duration_secs(
+        sde: &eve_sde::SdeRegistry,
+        ship_type_id: u32,
+        current_system_id: SolarSystemId,
+        prev_system_id: Option<SolarSystemId>,
+        next_system_id: Option<SolarSystemId>,
+        destination_station_id: i64,
+    ) -> u64 {
+        const AU_METERS: f64 = 149_597_870_700.0;
+
+        let (mass, inertia, max_vel, warp_speed_au_s) = sde
+            .types
+            .get(&ship_type_id)
+            .map(|t| {
+                let m = t.default_attributes.get(&eve_sde::attr_ids::MASS).copied().unwrap_or(t.mass).max(1_000.0);
+                let ag = t.default_attributes.get(&eve_sde::attr_ids::AGILITY).copied().unwrap_or(0.5).max(0.01);
+                let mv = t.default_attributes.get(&37).copied().unwrap_or(150.0).max(10.0);
+                let base_warp = t.default_attributes.get(&1281).copied().unwrap_or(1.0).max(0.5);
+                let warp_mult = t.default_attributes.get(&600).copied().unwrap_or(3.0).max(1.0);
+                let ws = (base_warp * warp_mult).clamp(1.5, 12.0);
+                (m, ag, mv, ws)
+            })
+            .unwrap_or((10_000_000.0, 0.5, 150.0, 3.0));
+
+        let tau = (inertia * mass) / 1_000_000.0;
+        let align_secs = (4.0_f64.ln() * tau).ceil().max(2.0);
+
+        // Calculate gate-to-gate / station distance using SDE celestial positions:
+        // if origin and destination celestials exist, distance is pos1.distance(pos2);
+        // otherwise default to 15 AU (15.0 * 149_597_870_700.0).
+        let origin_pos = prev_system_id
+            .and_then(|prev| {
+                sde.stargates()
+                    .values()
+                    .find(|g| g.from_solar_system_id == current_system_id && g.to_solar_system_id == prev)
+                    .map(|g| g.position)
+            })
+            .or_else(|| {
+                sde.stations
+                    .values()
+                    .find(|sta| sta.solar_system_id == current_system_id)
+                    .map(|sta| sta.position)
+            })
+            .or_else(|| {
+                sde.stargates()
+                    .values()
+                    .find(|g| g.from_solar_system_id == current_system_id)
+                    .map(|g| g.position)
+            });
+
+        let dest_pos = next_system_id
+            .and_then(|next| {
+                sde.stargates()
+                    .values()
+                    .find(|g| g.from_solar_system_id == current_system_id && g.to_solar_system_id == next)
+                    .map(|g| g.position)
+            })
+            .or_else(|| {
+                sde.stations
+                    .get(&destination_station_id)
+                    .filter(|sta| sta.solar_system_id == current_system_id)
+                    .map(|sta| sta.position)
+            })
+            .or_else(|| {
+                sde.stations
+                    .values()
+                    .find(|sta| sta.solar_system_id == current_system_id)
+                    .map(|sta| sta.position)
+            });
+
+        let distance = match (origin_pos, dest_pos) {
+            (Some(pos1), Some(pos2)) => pos1.distance(pos2),
+            _ => 15.0 * 149_597_870_700.0,
+        };
+
+        let _warp_speed_mps = warp_speed_au_s * AU_METERS;
+        let warp_transit_secs = crate::formulas::compute_warp_duration_seconds(distance, warp_speed_au_s, max_vel);
+        let gate_jump_secs = 5.0;
+
+        (align_secs + warp_transit_secs + gate_jump_secs).round() as u64
+    }
+
     /// Advances a living-world hauler convoy along its multi-system stargate route (`feat:npc.npc-hauler`).
     /// The hauler jumps stargates across systems on ticks and docks/despawns at destination station.
     pub async fn step_hauler_convoy(
@@ -774,23 +867,25 @@ impl LivingWorldDirector {
                     StepAction::AlreadyDocked
                 } else {
                     let now_unix = db.clock().now_unix_secs();
-                    // Hauler transit duration derived from SDE ship attributes:
-                    // align time (from inertia and mass) + intra-system warp transit + stargate jump delay
-                    let (mass, inertia, warp_speed) = sde
-                        .types
-                        .get(&c.ship_type_id)
-                        .map(|t| {
-                            let m = t.default_attributes.get(&eve_sde::attr_ids::MASS).copied().unwrap_or(t.mass);
-                            let ag = t.default_attributes.get(&eve_sde::attr_ids::AGILITY).copied().unwrap_or(0.5);
-                            let ws = t.default_attributes.get(&600).copied().unwrap_or(3.0).max(1.0);
-                            (m, ag, ws)
-                        })
-                        .unwrap_or((10_000_000.0, 0.5, 3.0));
-                    let tau = (inertia * mass) / 1_000_000.0;
-                    let align_secs = (4.0_f64.ln() * tau).ceil().clamp(2.0, 15.0);
-                    let warp_transit_secs = (15.0 / warp_speed).clamp(3.0, 10.0);
-                    let gate_jump_secs = 5.0;
-                    let transit_duration_secs = (align_secs + warp_transit_secs + gate_jump_secs).round() as u64;
+                    // DERIVED: hauler in-system transit duration
+                    let prev_sys = if r.route_index > 0 {
+                        Some(r.route[r.route_index - 1])
+                    } else {
+                        None
+                    };
+                    let next_sys = if r.route_index + 1 < r.route.len() {
+                        Some(r.route[r.route_index + 1])
+                    } else {
+                        None
+                    };
+                    let transit_duration_secs = Self::compute_hauler_transit_duration_secs(
+                        sde,
+                        c.ship_type_id,
+                        c.current_system_id,
+                        prev_sys,
+                        next_sys,
+                        c.destination_station_id,
+                    );
 
                     if r.last_hop_unix == 0 {
                         r.last_hop_unix = now_unix;
