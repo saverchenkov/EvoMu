@@ -730,6 +730,14 @@ pub(crate) fn emit_combat_log_and_damage_state(
         })
     });
     if let Some(vic_id) = resolved_victim {
+        super::notify_emitters_batch5::emit_damage_state_change(
+            ctx,
+            vic_id,
+            target_ball_id,
+            shield_ratio,
+            armor_ratio,
+            hull_ratio,
+        );
         crate::services::fleet_social::stream_fleet_watchlist_damage(
             ctx,
             vic_id,

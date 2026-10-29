@@ -57,12 +57,13 @@ async fn test_crimewatch_states_timer_updates() {
     );
 
     let notifs = ctx.drain_notifications_for_char(char_id);
-    assert_eq!(notifs.len(), 5);
+    assert_eq!(notifs.len(), 6);
     assert!(notifs.iter().any(|n| n.event == "OnWeaponsTimerUpdate" && n.args == vec![PyRep::Integer(101), PyRep::Integer(unix_to_ft(now + 60))]));
     assert!(notifs.iter().any(|n| n.event == "OnPvpTimerUpdate" && n.args == vec![PyRep::Integer(201), PyRep::Integer(unix_to_ft(now + 300))]));
     assert!(notifs.iter().any(|n| n.event == "OnNpcTimerUpdate" && n.args == vec![PyRep::Integer(400), PyRep::None]));
     assert!(notifs.iter().any(|n| n.event == "OnCriminalTimerUpdate" && n.args == vec![PyRep::Integer(301), PyRep::Integer(unix_to_ft(now + 900))]));
     assert!(notifs.iter().any(|n| n.event == "OnDisapprovalTimerUpdate" && n.args == vec![PyRep::Integer(500), PyRep::None]));
+    assert!(notifs.iter().any(|n| n.event == "OnSystemCriminalFlagUpdates" && n.args == vec![PyRep::List(vec![]), PyRep::List(vec![]), PyRep::List(vec![PyRep::Integer(char_id)])]));
 
     // Re-sweep at same timestamp must be de-duplicated (no redundant notification queueing)
     eve_server::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications(&ctx, char_id, now);
@@ -72,10 +73,11 @@ async fn test_crimewatch_states_timer_updates() {
     let exp_now = now + 1000;
     eve_server::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications(&ctx, char_id, exp_now);
     let exp_notifs = ctx.drain_notifications_for_char(char_id);
-    assert_eq!(exp_notifs.len(), 3);
+    assert_eq!(exp_notifs.len(), 4);
     assert!(exp_notifs.iter().any(|n| n.event == "OnWeaponsTimerUpdate" && n.args == vec![PyRep::Integer(100), PyRep::None]));
     assert!(exp_notifs.iter().any(|n| n.event == "OnPvpTimerUpdate" && n.args == vec![PyRep::Integer(200), PyRep::None]));
     assert!(exp_notifs.iter().any(|n| n.event == "OnCriminalTimerUpdate" && n.args == vec![PyRep::Integer(300), PyRep::None]));
+    assert!(exp_notifs.iter().any(|n| n.event == "OnSystemCriminalFlagUpdates" && n.args == vec![PyRep::List(vec![PyRep::Integer(char_id)]), PyRep::List(vec![]), PyRep::List(vec![])]));
 
     // Pilot must be pruned from crimewatch_timer_states once all timers are idle
     let is_tracked = with_combat_runtime(&ctx, |rt| rt.crimewatch_timer_states.contains_key(&char_id));

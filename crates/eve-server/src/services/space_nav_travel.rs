@@ -1009,6 +1009,12 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
             ball_changed = true;
         }
         cs_changed = true;
+        crate::services::notify_emitters_batch3_space::emit_cloak_module_force_deactivated(
+            ctx,
+            char_id,
+            "DecloakProximityOrDeactivation",
+            2000.0,
+        );
     }
 
     if active_cap_mjfg && !cs.is_capital_mjfg && cs.mjfg_spool_remaining_s <= 0.0 {

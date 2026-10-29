@@ -632,6 +632,9 @@ impl ServerContext {
                     }
                     services::market_contracts::sweep_and_notify_expired_for_char(self, cid);
                     services::industry_pi::sync_character_pi_colonies_on_login(self, cid);
+                    if let Some(st_id) = session.station_id {
+                        services::notify_emitters_batch5::emit_char_station_notification(self, cid, st_id, true);
+                    }
                 }
             }
             if effective_service == "skillMgr2"

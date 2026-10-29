@@ -167,6 +167,8 @@ pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, no
 
     let is_all_idle = weap_code == 100 && pvp_code == 200 && npc_code == 400 && crim_code == 300 && dis_code == 500;
     let mut updates: Vec<(&str, Vec<PyRep>)> = Vec::new();
+    let mut crim_transition: Option<(Vec<i64>, Vec<i64>, Vec<i64>)> = None;
+    let mut dis_transition: Option<(Vec<i64>, Vec<i64>)> = None;
     with_mut_combat_runtime(ctx, |rt| {
         let prev_opt = rt.crimewatch_timer_states.get(&char_id).copied();
         if prev_opt.is_none() && is_all_idle { return; }
@@ -176,9 +178,21 @@ pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, no
         if prev.2 != npc_sig { updates.push(("OnNpcTimerUpdate", vec![PyRep::Integer(npc_code), npc_val])); }
         if prev.3 != crim_sig {
             updates.push(("OnCriminalTimerUpdate", vec![PyRep::Integer(crim_code), crim_val]));
+            if crim_code == 301 {
+                crim_transition = Some((vec![], vec![], vec![char_id]));
+            } else if crim_code == 302 {
+                crim_transition = Some((vec![], vec![char_id], vec![]));
+            } else if prev.3 != 0 && prev.3 != 300 {
+                crim_transition = Some((vec![char_id], vec![], vec![]));
+            }
         }
         if prev.4 != dis_sig {
             updates.push(("OnDisapprovalTimerUpdate", vec![PyRep::Integer(dis_code), dis_val]));
+            if dis_code == 501 {
+                dis_transition = Some((vec![], vec![char_id]));
+            } else if prev.4 != 0 && prev.4 != 500 {
+                dis_transition = Some((vec![char_id], vec![]));
+            }
         }
         if is_all_idle {
             rt.crimewatch_timer_states.remove(&char_id);
@@ -189,6 +203,21 @@ pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, no
     for (ev, a) in updates {
         ctx.notify(NotificationTarget::Character(char_id), ev, "charid", a);
     }
+    if let Some(sys_id) = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id)) {
+        if let Some((new_idles, new_suspects, new_criminals)) = crim_transition {
+            crate::services::notify_emitters_batch6::emit_system_criminal_flag_updates(ctx, sys_id, &new_idles, &new_suspects, &new_criminals);
+        }
+        if let Some((new_idles, new_naughty)) = dis_transition {
+            crate::services::notify_emitters_batch6::emit_system_disapproval_flag_updates(ctx, sys_id, &new_idles, &new_naughty);
+        }
+    }
+}
+
+/// Broadcasts `OnSecurityModified(solarSystemID, modifierAmount, newSecurity)` when system security changes.
+pub fn update_system_security_status(ctx: &ServerContext, sys_id: u32, new_sec: f64) {
+    let old_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.0);
+    let delta = new_sec - old_sec;
+    crate::services::notify_emitters_batch6::emit_security_modified(ctx, sys_id, delta, new_sec);
 }
 
 /// Evaluates whether an active Weapons Timer (60s), PvP Timer (15m), or High-Sec Criminal Timer blocks

@@ -3187,48 +3187,56 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/parklife/targetMgr.pyj:671 TargetMgr.OnTarget(): sm.ChainEvent('ProcessTargetChanged', what, tid, reason) \u2014 client-only local chain event synthesized inside TargetMgr.OnTarget for TurretSvc (turret.pyj:91); server sends OnTarget on the wire."
   },
-  "rpc:DB2.CallProc": {
-    "disposition": "dead_client_code",
-    "evidence": "carbon/common/script/net/http.pyj ESPUrl and carbon/common/script/net/machoNet.pyj MachoNetService.__PrimeVIPList: internal server/ESP developer tool database procedure call not exposed to standard client gameplay; requires GM/admin DB2 cluster role."
+  "notify:OnClientNodeGraphMessage": {
+    "disposition": "client_local",
+    "evidence": "nodegraph/client/service.pyj: NodeGraphService.OnClientNodeGraphMessage(self, node_graph_instance_id, key, value) \u2014 client-side NodeGraph message dispatch; no server emission."
   },
-  "rpc:debug.Exec": {
-    "disposition": "dead_client_code",
-    "evidence": "carbon/common/script/sys/debugSvc.pyj debugSvc.Exec(): internal debug console service method restricted to internal CCP dev builds and GM sessions; not accessible or called in live player gameplay."
+  "notify:OnClientNodeGraphUpdate": {
+    "disposition": "client_local",
+    "evidence": "nodegraph/client/service.pyj: NodeGraphService.OnClientNodeGraphUpdate(self, node_graph_instance_id, blackboard_parameters) \u2014 client-side NodeGraph blackboard update; no server emission."
   },
-  "rpc:loadService.GetTotalStats": {
-    "disposition": "dead_client_code",
-    "evidence": "carbon/common/script/sys/loadService.pyj LoadService.GetTotalStats(): internal metrics aggregator for cluster load testing nodes; dev-only service never invoked during standard live EVE gameplay."
+  "notify:OnStartClientNodeGraph": {
+    "disposition": "client_local",
+    "evidence": "nodegraph/client/service.pyj: NodeGraphService.OnStartClientNodeGraph(self, node_graph_id, node_graph_instance_id, blackboard_parameters) \u2014 client-side NodeGraph startup; no server emission."
   },
-  "rpc:loadService.StartLoad": {
-    "disposition": "dead_client_code",
-    "evidence": "carbon/common/script/sys/loadService.pyj LoadService.StartLoadOnAllNodes(): cluster stress testing service used exclusively by CCP internal QA/test nodes for synthetic load generation; not part of live game simulation."
+  "notify:OnStopClientNodeGraph": {
+    "disposition": "client_local",
+    "evidence": "nodegraph/client/service.pyj: NodeGraphService.OnStopClientNodeGraph(self, node_graph_instance_id) \u2014 client-side NodeGraph stop; no server emission."
   },
-  "rpc:loadService.StopLoad": {
-    "disposition": "dead_client_code",
-    "evidence": "carbon/common/script/sys/loadService.pyj LoadService.StopLoadOnAllNodes(): cluster stress testing service used exclusively by CCP internal QA/test nodes to halt synthetic load generation; not part of live game simulation."
+  "notify:OnStopAllClientNodeGraphs": {
+    "disposition": "client_local",
+    "evidence": "nodegraph/client/service.pyj: NodeGraphService.OnStopAllClientNodeGraphs(self) \u2014 client-side NodeGraph stop all; no server emission."
   },
-  "rpc:localizationServer.ReloadFSDPickle": {
-    "disposition": "dead_client_code",
-    "evidence": "carbon/client/script/localization/localizationClient.pyj, eve/devtools/script/insider.pyj, localization/settings/qaSettings.pyj: developer insider tool RPC for live-reloading localization FSD pickles during CCP internal QA testing; not used in production gameplay."
+  "notify:OnStopClientNodeGraphById": {
+    "disposition": "client_local",
+    "evidence": "nodegraph/client/service.pyj: NodeGraphService.OnStopClientNodeGraphById(self, node_graph_id) \u2014 client-side NodeGraph stop by ID; no server emission."
   },
-  "rpc:localizationServer.UpdateLocalizationQAWrap": {
-    "disposition": "dead_client_code",
-    "evidence": "carbon/client/script/localization/localizationClient.pyj, eve/devtools/script/insider.pyj, localization/settings/qaSettings.pyj: developer insider tool RPC for toggling QA localization wrapper tags during CCP internal QA testing; not used in production gameplay."
+  "notify:OnTutorialSkipped": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/shared/infoPanels/infoPanelSvc.pyj: InfoPanelSvc.OnTutorialSkipped(), operations/client/eventdirector/eventdirector.pyj: OperationsEventDirector.OnTutorialSkipped() \u2014 client-only UI tutorial skip scatter; no server emission."
   },
-  "rpc:raffleMgr.QA_SeedRaffles": {
-    "disposition": "dead_client_code",
-    "evidence": "raffles/client/insider.pyj QA insider developer menu tool for synthetic seeding of HyperNet raffles on CCP internal staging environments; strictly QA-only and not callable in live gameplay."
+  "notify:OnUiRevealForced": {
+    "disposition": "client_local",
+    "evidence": "uihider/ui_hider_service.pyj: UiHiderService.OnUiRevealForced() \u2014 client UI hider reveal scatter; no server emission."
   },
-  "rpc:sessionMgr.EndAllGameSessions": {
-    "disposition": "dead_client_code",
-    "evidence": "carbon/common/script/sys/sessions.pyj SessionMgr.EndAllGameSessions(): server-internal cluster management RPC used only during administrative server shutdown / VIP cluster maintenance; never called by standard clients."
+  "notify:OnUpdateLocalizationTextCache": {
+    "disposition": "client_local",
+    "evidence": "carbon/client/script/localization/localizationClient.pyj: LocalizationClient.OnUpdateLocalizationTextCache(self, cacheData) \u2014 client-side localization cache update; no server emission."
   },
-  "rpc:sessionMgr.RemoveSessionsFromServer": {
+  "notify:OnClientContactChangeOnBlockContacts": {
     "disposition": "dead_client_code",
-    "evidence": "carbon/common/script/sys/sessions.pyj SessionMgr.RemoveSessionsFromServer(): internal inter-node cluster administration RPC used during node rebalancing and maintenance; not invoked by standard client gameplay."
+    "evidence": "Zero handlers in V24 client bytecode (client_expectations.json notify.OnClientContactChangeOnBlockContacts); dead client code."
   },
-  "rpc:userSvc.ProcessEVESessionCreated": {
+  "notify:OnClientEvent_MarketItemReceived": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/shared/inventory/neocomInventoryBadging.pyj: NeocomInventoryBadging.OnClientEvent_MarketItemReceived(self, item_id, type_id, flag_id, location_id) \u2014 client inventory badge update; no server emission."
+  },
+  "notify:OnCollapsed": {
     "disposition": "dead_client_code",
-    "evidence": "carbon/common/script/net/machoNet.pyj MachoNetService.HandleAccept(): server-internal inter-service node handshake RPC invoked between proxy and Sol server nodes during session creation; not exposed as a client-facing RPC."
+    "evidence": "Zero handlers in V24 client bytecode (client_expectations.json notify.OnCollapsed); dead client code."
+  },
+  "notify:OnSkyhookCanBeHacked": {
+    "disposition": "dead_client_code",
+    "evidence": "Zero handlers in V24 client bytecode (client_expectations.json notify.OnSkyhookCanBeHacked); dead client code."
   }
 }
