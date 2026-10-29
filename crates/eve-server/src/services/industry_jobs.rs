@@ -16,7 +16,7 @@ use crate::formulas::{
 use crate::router::ServerContext;
 use crate::services::industry_pi::{
     ATTR_BLUEPRINT_ME, ATTR_BLUEPRINT_TE, compute_industry_job_costs_for_char,
-    emit_industry_job, handle_industry_job_queries, has_custom_facility_taxes,
+    emit_industry_job, handle_industry_job_queries,
     is_fulcrum_pirate_ship_bonus_applicable, is_structure_industry_service_online,
     load_job_cost_meta, resolve_decryptor_modifiers, resolve_facility_modifiers_and_system,
     resolve_structure_rig_bonus, restore_blueprint_flag, save_job_cost_meta,
@@ -52,7 +52,6 @@ pub fn handle_industry_jobs(
                 }));
             };
 
-            let mut is_v24_call = false;
             let mut explicit_bp_item_id: Option<i64> = None;
             let mut explicit_facility_id: Option<i64> = None;
             let lookup_first = |k: &str| -> Option<&PyRep> {
@@ -82,7 +81,6 @@ pub fn handle_industry_jobs(
 
             let (raw_bp_type_id, raw_activity_id, runs_raw) = match args.first() {
                 Some(PyRep::KeyVal(_) | PyRep::Dict(_)) => {
-                    is_v24_call = true;
                     explicit_bp_item_id = lookup_first("blueprintID")
                         .or_else(|| lookup_first("blueprintItemID"))
                         .and_then(|v| v.as_i64())
@@ -96,7 +94,6 @@ pub fn handle_industry_jobs(
                     (Some(btid), act, r)
                 }
                 _ if args.len() >= 4 => {
-                    is_v24_call = true;
                     explicit_bp_item_id = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0);
                     explicit_facility_id = args.get(4).and_then(|a| a.as_i64()).filter(|&id| id > 0);
                     (
@@ -629,13 +626,8 @@ pub fn handle_industry_jobs(
                 cost_meta.use_corp = use_corp;
                 cost_meta.owner_id = job_owner_id;
 
-                let use_full_eiv_debit = is_v24_call || has_custom_facility_taxes(snap, station_id);
-                let (charged_facility_tax_isk, total_debit_isk) = if use_full_eiv_debit {
-                    (cost_meta.facility_tax_isk, cost_meta.total_cost_isk)
-                } else {
-                    let legacy_tax = 1_000.0 * (runs as f64);
-                    (legacy_tax, legacy_tax)
-                };
+                let charged_facility_tax_isk = cost_meta.facility_tax_isk;
+                let total_debit_isk = cost_meta.total_cost_isk;
 
                 let total_debit_cents = IskCents::from_f64_isk(total_debit_isk);
                 if use_corp && snap.corporations.contains_key(&job_owner_id) {
@@ -844,37 +836,31 @@ pub fn handle_industry_jobs(
                         },
                     });
                 } else {
-                    if use_full_eiv_debit {
-                        let base_cents = IskCents::from_f64_isk(cost_meta.base_job_cost_isk);
-                        let tax_cents = IskCents::from_f64_isk(cost_meta.facility_tax_isk);
-                        let scc_cents = IskCents::from_f64_isk(cost_meta.scc_surcharge_isk);
-                        let alpha_cents = IskCents::from_f64_isk(cost_meta.alpha_clone_tax_isk);
+                    let base_cents = IskCents::from_f64_isk(cost_meta.base_job_cost_isk);
+                    let tax_cents = IskCents::from_f64_isk(cost_meta.facility_tax_isk);
+                    let scc_cents = IskCents::from_f64_isk(cost_meta.scc_surcharge_isk);
+                    let alpha_cents = IskCents::from_f64_isk(cost_meta.alpha_clone_tax_isk);
+                    if let Some(ch) = snap.characters.get_mut(&char_id) {
+                        ch.balance = ch.balance.checked_sub(base_cents).unwrap_or(IskCents(0));
+                        let b1 = ch.balance;
+                        snap.append_journal(char_id, "IndustryJobInstallationFee", base_cents, b1, format!("Base job cost for industry job {jid}"));
+                    }
+                    if let Some(ch) = snap.characters.get_mut(&char_id) {
+                        ch.balance = ch.balance.checked_sub(tax_cents).unwrap_or(IskCents(0));
+                        let b2 = ch.balance;
+                        snap.append_journal(char_id, "IndustryFacilityTax", tax_cents, b2, format!("Facility tax for industry job {jid}"));
+                    }
+                    if let Some(ch) = snap.characters.get_mut(&char_id) {
+                        ch.balance = ch.balance.checked_sub(scc_cents).unwrap_or(IskCents(0));
+                        let b3 = ch.balance;
+                        snap.append_journal(char_id, "IndustrySccSurcharge", scc_cents, b3, format!("SCC surcharge for industry job {jid}"));
+                    }
+                    if alpha_cents.0 > 0 {
                         if let Some(ch) = snap.characters.get_mut(&char_id) {
-                            ch.balance = ch.balance.checked_sub(base_cents).unwrap_or(IskCents(0));
-                            let b1 = ch.balance;
-                            snap.append_journal(char_id, "IndustryJobInstallationFee", base_cents, b1, format!("Base job cost for industry job {jid}"));
+                            ch.balance = ch.balance.checked_sub(alpha_cents).unwrap_or(IskCents(0));
+                            let b4 = ch.balance;
+                            snap.append_journal(char_id, "IndustryAlphaCloneTax", alpha_cents, b4, format!("Alpha clone tax for industry job {jid}"));
                         }
-                        if let Some(ch) = snap.characters.get_mut(&char_id) {
-                            ch.balance = ch.balance.checked_sub(tax_cents).unwrap_or(IskCents(0));
-                            let b2 = ch.balance;
-                            snap.append_journal(char_id, "IndustryFacilityTax", tax_cents, b2, format!("Facility tax for industry job {jid}"));
-                        }
-                        if let Some(ch) = snap.characters.get_mut(&char_id) {
-                            ch.balance = ch.balance.checked_sub(scc_cents).unwrap_or(IskCents(0));
-                            let b3 = ch.balance;
-                            snap.append_journal(char_id, "IndustrySccSurcharge", scc_cents, b3, format!("SCC surcharge for industry job {jid}"));
-                        }
-                        if alpha_cents.0 > 0 {
-                            if let Some(ch) = snap.characters.get_mut(&char_id) {
-                                ch.balance = ch.balance.checked_sub(alpha_cents).unwrap_or(IskCents(0));
-                                let b4 = ch.balance;
-                                snap.append_journal(char_id, "IndustryAlphaCloneTax", alpha_cents, b4, format!("Alpha clone tax for industry job {jid}"));
-                            }
-                        }
-                    } else if let Some(ch) = snap.characters.get_mut(&char_id) {
-                        ch.balance = ch.balance.checked_sub(total_debit_cents).unwrap_or(IskCents(0));
-                        let bal_after = ch.balance;
-                        snap.append_journal(char_id, "IndustryFacilityTax", total_debit_cents, bal_after, format!("Facility tax for industry job {jid}"));
                     }
                 }
 

@@ -372,6 +372,7 @@ pub fn compute_blueprint_eiv_per_run(
     };
     mats.into_iter()
         .map(|(tid, qty)| {
+            // DERIVED: EIV proxy uses SDE base_price as fallback when market adjusted prices are absent.
             let unit_price = ctx
                 .sde
                 .types
@@ -433,6 +434,7 @@ pub fn compute_canonical_system_cost_index(
         }
     }
     if univ_work > 0 && sys_work > 0 {
+        // DERIVED: floor/ceiling clamp (0.001 to 0.50) bounds System Cost Index against empty universe or extreme saturation.
         ((sys_work as f64) / (univ_work as f64)).sqrt().clamp(0.001, 0.50)
     } else {
         0.01

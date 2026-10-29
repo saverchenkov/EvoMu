@@ -1299,8 +1299,10 @@ async fn test_contracts_visibility_search_fees_limits_reject_blueprints_and_gm_e
         .expect("Accept Courier for BreakPlasticWrap");
     let PyRep::KeyVal(acc_cw_kv) = acc_cw else { panic!("Expected KeyVal"); };
     let pkg_id = acc_cw_kv.get("courierPackageID").and_then(|v| v.as_i64()).unwrap();
+    let s2_ship_id = s2.ship_id.unwrap();
 
     let normal_mod_id = 998_777_001i64;
+    let invalid_fitted_id = 998_777_002i64;
     ctx.db.with_mut_snapshot(|s| {
         s.items.insert(
             normal_mod_id,
@@ -1316,7 +1318,43 @@ async fn test_contracts_visibility_search_fees_limits_reject_blueprints_and_gm_e
                 ..Default::default()
             },
         );
+        s.items.insert(
+            invalid_fitted_id,
+            eve_db::InventoryItemRecord {
+                item_id: invalid_fitted_id,
+                type_id: 587,
+                owner_id: 90_000_002,
+                location_id: s2_ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
     });
+
+    // Negative test (R-145512-01): mixed batch containing a wrap and an invalid normal item
+    // (fitted to ship slot) must fail atomically without breaking wrap, failing contract, or moving ISK
+    let s1_bal_pre_neg = ctx.db.get_character(90_000_001).unwrap().balance;
+    let s2_bal_pre_neg = ctx.db.get_character(90_000_002).unwrap().balance;
+    let neg_err = rpc(
+        &ctx,
+        &mut s2,
+        "repackagingSvc",
+        "RepackageItems",
+        &[PyRep::List(vec![PyRep::Integer(pkg_id), PyRep::Integer(invalid_fitted_id)])],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(neg_err.code, "CanNotUnassembleInThisItemLoc");
+    assert!(ctx.db.get_item(pkg_id).is_some());
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.contracts[&cw_cid].status.clone()),
+        "InProgress"
+    );
+    assert_eq!(ctx.db.get_character(90_000_001).unwrap().balance, s1_bal_pre_neg);
+    assert_eq!(ctx.db.get_character(90_000_002).unwrap().balance, s2_bal_pre_neg);
     let s1_bal_before_break = ctx.db.get_character(90_000_001).unwrap().balance;
     let break_rep = rpc(
         &ctx,

@@ -99,10 +99,11 @@ async fn test_e4_industry_jobs_lifecycle_manufacturing_research_and_copying() {
     let PyRep::KeyVal(mfg_kv) = mfg_install else { panic!("Expected KeyVal"); };
     let mfg_job_id = mfg_kv.get("jobID").and_then(|v| v.as_i64()).unwrap();
     let tax_charged = mfg_kv.get("facilityTaxISK").and_then(|v| v.as_f64()).unwrap();
-    assert_eq!(tax_charged, 1_000.0);
+    assert_eq!(tax_charged, 640.0);
+    let total_cost = mfg_kv.get("totalJobCostISK").and_then(|v| v.as_f64()).unwrap();
 
     let s1_bal_after_install = ctx.db.get_character(90_000_001).unwrap().balance;
-    assert_eq!(s1_bal_before_job.0 - s1_bal_after_install.0, 100_000);
+    assert_eq!(s1_bal_before_job.0 - s1_bal_after_install.0, eve_db::IskCents::from_f64_isk(total_cost).0);
     let has_tax_journal = ctx.db.with_snapshot(|snap| {
         snap.wallet_journal.iter().any(|j| {
             j.character_id == 90_000_001 && j.entry_type == "IndustryFacilityTax"
