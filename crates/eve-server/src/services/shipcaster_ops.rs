@@ -265,7 +265,18 @@ pub async fn handle(
                 let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
                 cw.get_or_create(char_id).is_weapon_timer_active(now)
             };
-            Some(Ok(PyRep::Bool(!has_timer)))
+            if has_timer {
+                return Some(Ok(PyRep::Bool(false)));
+            }
+            if let Some(ship_id) = session.ship_id {
+                let ship_type_id = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0);
+                let ship_group_id = ctx.sde.types.get(&ship_type_id).map(|t| t.group_id).unwrap_or(0);
+                // Capital ships cannot use shipcasters
+                if matches!(ship_group_id, 30 | 485 | 547 | 659 | 883 | 1538 | 4594) {
+                    return Some(Ok(PyRep::Bool(false)));
+                }
+            }
+            Some(Ok(PyRep::Bool(true)))
         }
 
         ("starterShipcasterTravelMgr", "CmdJumpThroughStarterShipcaster") => {

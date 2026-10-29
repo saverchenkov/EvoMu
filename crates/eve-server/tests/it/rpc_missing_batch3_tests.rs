@@ -17,21 +17,17 @@ const PILOT2: i64 = 90_000_002;
 #[tokio::test]
 async fn test_rpc_missing_batch3_part1() {
     // parity: rpc:alert.LogModeChanged, rpc:alert.SendProxyStackTraceAlert
-    // parity: rpc:localizationServer.UpdateLocalizationQAWrap, rpc:localizationServer.ReloadFSDPickle
+    // DATA GAP: Triaged NA in docs/parity/triage.json (dev/QA/internal RPCs): rpc:localizationServer.UpdateLocalizationQAWrap, rpc:localizationServer.ReloadFSDPickle
     // parity: rpc:clientStatLogger.LogString, rpc:externalQueueMgr.PublishProxyEvent
     // parity: rpc:machoNet.ReloadClientCodeHash, rpc:tcpRawProxyService.GetESPTunnelingAddressByNodeID
-    // parity: rpc:loadService.StartLoad, rpc:loadService.StopLoad
+    // DATA GAP: Triaged NA in docs/parity/triage.json (cluster load test RPCs): rpc:loadService.StartLoad, rpc:loadService.StopLoad
     eve_testkit::attest(&[
         "rpc:alert.LogModeChanged",
         "rpc:alert.SendProxyStackTraceAlert",
-        "rpc:localizationServer.UpdateLocalizationQAWrap",
-        "rpc:localizationServer.ReloadFSDPickle",
         "rpc:clientStatLogger.LogString",
         "rpc:externalQueueMgr.PublishProxyEvent",
         "rpc:machoNet.ReloadClientCodeHash",
         "rpc:tcpRawProxyService.GetESPTunnelingAddressByNodeID",
-        "rpc:loadService.StartLoad",
-        "rpc:loadService.StopLoad",
     ]);
 
     let ctx = ServerContext::new();
@@ -301,21 +297,11 @@ async fn test_rpc_missing_batch3_part1() {
 
 #[tokio::test]
 async fn test_rpc_missing_batch3_part2() {
-    // parity: rpc:loadService.SetConfig, rpc:loadService.GetTotalStats
-    // parity: rpc:sessionMgr.EndAllGameSessions, rpc:sessionMgr.RemoveSessionsFromServer
-    // parity: rpc:userSvc.ProcessEVESessionCreated, rpc:cache.Rowset, rpc:cache.Setting
-    // parity: rpc:raffleMgr.QA_SeedRaffles, rpc:DB2.CallProc, rpc:debug.Exec
+    // parity: rpc:loadService.SetConfig, rpc:cache.Rowset
+    // DATA GAP: Triaged NA in docs/parity/triage.json (dev/QA/cluster RPCs): rpc:loadService.GetTotalStats, rpc:sessionMgr.EndAllGameSessions, rpc:sessionMgr.RemoveSessionsFromServer, rpc:userSvc.ProcessEVESessionCreated, rpc:cache.Setting, rpc:raffleMgr.QA_SeedRaffles, rpc:DB2.CallProc, rpc:debug.Exec
     eve_testkit::attest(&[
         "rpc:loadService.SetConfig",
-        "rpc:loadService.GetTotalStats",
-        "rpc:sessionMgr.EndAllGameSessions",
-        "rpc:sessionMgr.RemoveSessionsFromServer",
-        "rpc:userSvc.ProcessEVESessionCreated",
         "rpc:cache.Rowset",
-        "rpc:cache.Setting",
-        "rpc:raffleMgr.QA_SeedRaffles",
-        "rpc:DB2.CallProc",
-        "rpc:debug.Exec",
     ]);
 
     let ctx = ServerContext::new();

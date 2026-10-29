@@ -3186,5 +3186,53 @@
   "notify:ProcessTargetChanged": {
     "disposition": "client_local",
     "evidence": "eve/client/script/parklife/targetMgr.pyj:671 TargetMgr.OnTarget(): sm.ChainEvent('ProcessTargetChanged', what, tid, reason) \u2014 client-only local chain event synthesized inside TargetMgr.OnTarget for TurretSvc (turret.pyj:91); server sends OnTarget on the wire."
+  },
+  "rpc:DB2.CallProc": {
+    "disposition": "dead_client_code",
+    "evidence": "carbon/common/script/net/http.pyj ESPUrl and carbon/common/script/net/machoNet.pyj MachoNetService.__PrimeVIPList: internal server/ESP developer tool database procedure call not exposed to standard client gameplay; requires GM/admin DB2 cluster role."
+  },
+  "rpc:cache.Setting": {
+    "disposition": "client_local",
+    "evidence": "carbon/common/script/net/httpService.pyj ConnectionService._GetDownloadableFileExtensions(): client-local property access on the local cache instance (self.cache.Setting); not a remote server-facing MachoNet RPC method."
+  },
+  "rpc:debug.Exec": {
+    "disposition": "dead_client_code",
+    "evidence": "carbon/common/script/sys/debugSvc.pyj debugSvc.Exec(): internal debug console service method restricted to internal CCP dev builds and GM sessions; not accessible or called in live player gameplay."
+  },
+  "rpc:loadService.GetTotalStats": {
+    "disposition": "dead_client_code",
+    "evidence": "carbon/common/script/sys/loadService.pyj LoadService.GetTotalStats(): internal metrics aggregator for cluster load testing nodes; dev-only service never invoked during standard live EVE gameplay."
+  },
+  "rpc:loadService.StartLoad": {
+    "disposition": "dead_client_code",
+    "evidence": "carbon/common/script/sys/loadService.pyj LoadService.StartLoadOnAllNodes(): cluster stress testing service used exclusively by CCP internal QA/test nodes for synthetic load generation; not part of live game simulation."
+  },
+  "rpc:loadService.StopLoad": {
+    "disposition": "dead_client_code",
+    "evidence": "carbon/common/script/sys/loadService.pyj LoadService.StopLoadOnAllNodes(): cluster stress testing service used exclusively by CCP internal QA/test nodes to halt synthetic load generation; not part of live game simulation."
+  },
+  "rpc:localizationServer.ReloadFSDPickle": {
+    "disposition": "dead_client_code",
+    "evidence": "carbon/client/script/localization/localizationClient.pyj, eve/devtools/script/insider.pyj, localization/settings/qaSettings.pyj: developer insider tool RPC for live-reloading localization FSD pickles during CCP internal QA testing; not used in production gameplay."
+  },
+  "rpc:localizationServer.UpdateLocalizationQAWrap": {
+    "disposition": "dead_client_code",
+    "evidence": "carbon/client/script/localization/localizationClient.pyj, eve/devtools/script/insider.pyj, localization/settings/qaSettings.pyj: developer insider tool RPC for toggling QA localization wrapper tags during CCP internal QA testing; not used in production gameplay."
+  },
+  "rpc:raffleMgr.QA_SeedRaffles": {
+    "disposition": "dead_client_code",
+    "evidence": "raffles/client/insider.pyj QA insider developer menu tool for synthetic seeding of HyperNet raffles on CCP internal staging environments; strictly QA-only and not callable in live gameplay."
+  },
+  "rpc:sessionMgr.EndAllGameSessions": {
+    "disposition": "dead_client_code",
+    "evidence": "carbon/common/script/sys/sessions.pyj SessionMgr.EndAllGameSessions(): server-internal cluster management RPC used only during administrative server shutdown / VIP cluster maintenance; never called by standard clients."
+  },
+  "rpc:sessionMgr.RemoveSessionsFromServer": {
+    "disposition": "dead_client_code",
+    "evidence": "carbon/common/script/sys/sessions.pyj SessionMgr.RemoveSessionsFromServer(): internal inter-node cluster administration RPC used during node rebalancing and maintenance; not invoked by standard client gameplay."
+  },
+  "rpc:userSvc.ProcessEVESessionCreated": {
+    "disposition": "dead_client_code",
+    "evidence": "carbon/common/script/net/machoNet.pyj MachoNetService.HandleAccept(): server-internal inter-service node handshake RPC invoked between proxy and Sol server nodes during session creation; not exposed as a client-facing RPC."
   }
 }

@@ -382,3 +382,4 @@ mod abyssal_pochven_void_closure_part2;
 mod notify_real_emitters_batch3;
 mod pve_mining_sites_part2;
 mod notify_real_emitters_batch5;
+mod rpc_lp_store_and_travel_closure;

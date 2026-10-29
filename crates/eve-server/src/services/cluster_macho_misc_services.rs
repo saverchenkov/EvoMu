@@ -245,17 +245,43 @@ pub fn derived_launchers() -> Vec<LauncherRecord> {
     ]
 }
 
-/// DERIVED: Canonical Rookie Starter Shipcasters in Empire beginner systems.
+/// Canonical Rookie Starter Shipcasters across all 12 empire career/starter systems.
 pub fn derived_starter_launchers() -> Vec<StarterLauncherRecord> {
     vec![
+        // Caldari State (500001)
         StarterLauncherRecord {
             item_id: 105_000_101,
             type_id: 93980, // State Rookie Shipcaster
-            solar_system_id: 30002800, // Starter system
+            solar_system_id: 30002800,
             faction_id: 500001,
             staging_system_id: 30002813, // Tama staging
             position: glam::DVec3::new(300_000.0, 0.0, 0.0),
         },
+        StarterLauncherRecord {
+            item_id: 105_000_105,
+            type_id: 93980,
+            solar_system_id: 30000141, // Akiainavas
+            faction_id: 500001,
+            staging_system_id: 30002813,
+            position: glam::DVec3::new(300_000.0, 0.0, 0.0),
+        },
+        StarterLauncherRecord {
+            item_id: 105_000_106,
+            type_id: 93980,
+            solar_system_id: 30001392, // Uitra
+            faction_id: 500001,
+            staging_system_id: 30002813,
+            position: glam::DVec3::new(300_000.0, 0.0, 0.0),
+        },
+        StarterLauncherRecord {
+            item_id: 105_000_107,
+            type_id: 93980,
+            solar_system_id: 30001407, // Kisogo
+            faction_id: 500001,
+            staging_system_id: 30002813,
+            position: glam::DVec3::new(300_000.0, 0.0, 0.0),
+        },
+        // Minmatar Republic (500002)
         StarterLauncherRecord {
             item_id: 105_000_102,
             type_id: 94018, // Republic Rookie Shipcaster
@@ -265,6 +291,31 @@ pub fn derived_starter_launchers() -> Vec<StarterLauncherRecord> {
             position: glam::DVec3::new(300_000.0, 0.0, 0.0),
         },
         StarterLauncherRecord {
+            item_id: 105_000_108,
+            type_id: 94018,
+            solar_system_id: 30002547, // Amamake / Eembakkis
+            faction_id: 500002,
+            staging_system_id: 30002057,
+            position: glam::DVec3::new(300_000.0, 0.0, 0.0),
+        },
+        StarterLauncherRecord {
+            item_id: 105_000_109,
+            type_id: 94018,
+            solar_system_id: 30002505, // Malukker
+            faction_id: 500002,
+            staging_system_id: 30002057,
+            position: glam::DVec3::new(300_000.0, 0.0, 0.0),
+        },
+        StarterLauncherRecord {
+            item_id: 105_000_110,
+            type_id: 94018,
+            solar_system_id: 30003410, // Hulm
+            faction_id: 500002,
+            staging_system_id: 30002057,
+            position: glam::DVec3::new(300_000.0, 0.0, 0.0),
+        },
+        // Amarr Empire (500003)
+        StarterLauncherRecord {
             item_id: 105_000_103,
             type_id: 93968, // Imperial Rookie Shipcaster
             solar_system_id: 30002180,
@@ -273,9 +324,58 @@ pub fn derived_starter_launchers() -> Vec<StarterLauncherRecord> {
             position: glam::DVec3::new(300_000.0, 0.0, 0.0),
         },
         StarterLauncherRecord {
+            item_id: 105_000_111,
+            type_id: 93968,
+            solar_system_id: 30003489, // Chaven
+            faction_id: 500003,
+            staging_system_id: 30002187,
+            position: glam::DVec3::new(300_000.0, 0.0, 0.0),
+        },
+        StarterLauncherRecord {
+            item_id: 105_000_112,
+            type_id: 93968,
+            solar_system_id: 30005042, // Deepari
+            faction_id: 500003,
+            staging_system_id: 30002187,
+            position: glam::DVec3::new(300_000.0, 0.0, 0.0),
+        },
+        StarterLauncherRecord {
+            item_id: 105_000_113,
+            type_id: 93968,
+            solar_system_id: 30001672, // Conoban
+            faction_id: 500003,
+            staging_system_id: 30002187,
+            position: glam::DVec3::new(300_000.0, 0.0, 0.0),
+        },
+        // Gallente Federation (500004)
+        StarterLauncherRecord {
             item_id: 105_000_104,
             type_id: 93984, // Federation Rookie Shipcaster
             solar_system_id: 30003850,
+            faction_id: 500004,
+            staging_system_id: 30003856,
+            position: glam::DVec3::new(300_000.0, 0.0, 0.0),
+        },
+        StarterLauncherRecord {
+            item_id: 105_000_114,
+            type_id: 93984,
+            solar_system_id: 30004971, // Duripant
+            faction_id: 500004,
+            staging_system_id: 30003856,
+            position: glam::DVec3::new(300_000.0, 0.0, 0.0),
+        },
+        StarterLauncherRecord {
+            item_id: 105_000_115,
+            type_id: 93984,
+            solar_system_id: 30002715, // Bourynes
+            faction_id: 500004,
+            staging_system_id: 30003856,
+            position: glam::DVec3::new(300_000.0, 0.0, 0.0),
+        },
+        StarterLauncherRecord {
+            item_id: 105_000_116,
+            type_id: 93984,
+            solar_system_id: 30005305, // Clellinon
             faction_id: 500004,
             staging_system_id: 30003856,
             position: glam::DVec3::new(300_000.0, 0.0, 0.0),

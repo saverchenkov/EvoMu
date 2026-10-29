@@ -67,8 +67,8 @@ async fn test_lp_store_mgr_get_available_offers() {
     common::pin_clock(&ctx);
     let mut sess = setup_docked_session(&ctx).await;
 
-    // 0. Before LP store offers are registered in WorldStateSnapshot, GetAvailableOffersFromCorp returns an empty list
-    let empty_rep = rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[PyRep::Integer(CALDARI_NAVY_CORP)])
+    // 0. For unknown/non-NPC corps, GetAvailableOffersFromCorp returns an empty list
+    let empty_rep = rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[PyRep::Integer(999_888_777)])
         .await.expect("GetAvailableOffersFromCorp unseeded");
     assert_eq!(empty_rep, PyRep::List(vec![]));
 

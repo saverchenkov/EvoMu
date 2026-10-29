@@ -52,6 +52,7 @@ pub mod inventory_fitting;
 pub mod inventory_stacking;
 pub mod jump_clone_names;
 pub mod lp_store;
+pub mod lp_store_sde;
 pub mod lookup_svc;
 pub mod macho_cluster_mgmt;
 pub mod mail_notify;
