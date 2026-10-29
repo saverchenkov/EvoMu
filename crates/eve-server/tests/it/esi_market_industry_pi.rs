@@ -1036,6 +1036,22 @@ async fn test_esi6_industry_and_mining_routes() {
                 status: "Delivered".to_string(),
             },
         );
+        snap.industry_jobs.insert(
+            6403,
+            IndustryJobRecord {
+                job_id: 6403,
+                installer_id: 99_999_999, // non-corp installer
+                facility_id: 60_003_760, // Jita 4-4 (30_000_142)
+                blueprint_item_id: 100_000_009,
+                blueprint_type_id: 691,
+                product_type_id: 587,
+                activity_id: 1,
+                runs: 10,
+                duration_seconds: 7_200,
+                start_unix: now.saturating_sub(35 * 86_400), // 35 days old: outside 28-day rolling window
+                status: "Delivered".to_string(),
+            },
+        );
         snap.mining_ledger.push(MiningLedgerRecord {
             character_id: char_id,
             solar_system_id: 30_000_142,
@@ -1111,20 +1127,27 @@ async fn test_esi6_industry_and_mining_routes() {
         .iter()
         .find(|s| s["solar_system_id"] == json!(30_000_142))
         .expect("Jita industry cost indices");
-    assert!(jita_sys["cost_indices"]
+    let jita_ci = jita_sys["cost_indices"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|ci| ci["activity"] == json!("manufacturing") && ci["cost_index"] == json!(0.75)));
+        .find(|ci| ci["activity"] == json!("manufacturing"))
+        .expect("Jita manufacturing index");
+    let jita_val = jita_ci["cost_index"].as_f64().unwrap();
+    assert!((jita_val - 0.75_f64.sqrt()).abs() < 1e-6, "Jita cost index must match sqrt(0.75) (~0.866)");
+
     let perim_sys = sys_arr
         .iter()
         .find(|s| s["solar_system_id"] == json!(30_000_144))
         .expect("Perimeter industry cost indices");
-    assert!(perim_sys["cost_indices"]
+    let perim_ci = perim_sys["cost_indices"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|ci| ci["activity"] == json!("manufacturing") && ci["cost_index"] == json!(0.25)));
+        .find(|ci| ci["activity"] == json!("manufacturing"))
+        .expect("Perimeter manufacturing index");
+    let perim_val = perim_ci["cost_index"].as_f64().unwrap();
+    assert!((perim_val - 0.5).abs() < 1e-6, "Perimeter cost index must match sqrt(0.25) = 0.5");
 
     let char_jobs = get_json(
         &router,

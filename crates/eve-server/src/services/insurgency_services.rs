@@ -374,13 +374,17 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
         let in_act = now >= c.forecasting_end_unix && now < c.active_end_unix;
         let p = c.corruption_points.entry(sys_id).or_insert(0);
         let prev_stage = insurgency_stage(*p);
-        *p = (*p + points).max(0);
+        let s_stage = insurgency_stage(c.suppression_points.get(&sys_id).copied().unwrap_or(0));
+        let eff_pts = if s_stage >= 3 && points > 0 { ((points as f64) * 0.70).round() as i64 } else { points };
+        let new_pts = (*p + eff_pts).max(0);
+        *p = if s_stage >= 5 { new_pts.min(800) } else { new_pts };
         let s = insurgency_stage(*p);
         (*p, prev_stage, s, c.pirate_faction_id, active, in_act)
     });
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.system_states.entry(sys_id).or_default().insurgency_corruption_stage = stage;
+        crate::services::security_mgr::prune_ineligible_insurgency_sites_in_snap(snap, sys_id);
     });
 
     if in_active_phase && stage >= 3 && old_stage < 3 {
@@ -448,6 +452,7 @@ pub fn add_system_suppression(ctx: &ServerContext, campaign_id: i64, sys_id: u32
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.system_states.entry(sys_id).or_default().insurgency_suppression_stage = stage;
+        crate::services::security_mgr::prune_ineligible_insurgency_sites_in_snap(snap, sys_id);
     });
 
     emit_campaign_updated(ctx, sys_id, campaign_id, stage);

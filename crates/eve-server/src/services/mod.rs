@@ -130,6 +130,7 @@ pub mod quasar_sov_workforce;
 pub mod quasar_space_domain;
 pub mod quasar_space_services;
 pub mod season_manager;
+pub mod security_mgr;
 pub mod shipcaster_ops;
 pub mod social_corp_fleet;
 pub mod sov_fw_insurgency;

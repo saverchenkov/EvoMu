@@ -373,11 +373,16 @@ pub async fn step_sentry_gun_grid_aggression(
         .map(|s| s.security_status)
         .unwrap_or(0.0);
     // In Insurgency Corruption Stage 3+, low-sec (`0.0 < sec < 0.45`) sentry guns are disabled
+    // unless Counter-Insurgency Sentry Guns are deployed (Suppression Stage 5+).
     let corr = crate::services::insurgency_services::insurgency_system_corruption_stage(
         ctx,
         solar_system_id,
     );
-    if sys_sec <= 0.0 || (0.0 < sys_sec && sys_sec < 0.45 && corr >= 3) {
+    let supp = crate::services::security_mgr::insurgency_system_suppression_stage(
+        ctx,
+        solar_system_id,
+    );
+    if sys_sec <= 0.0 || (0.0 < sys_sec && sys_sec < 0.45 && corr >= 3 && supp < 5) {
         return (false, 0.0);
     }
 
@@ -409,7 +414,8 @@ pub async fn step_sentry_gun_grid_aggression(
 
     let mut applied = 0.0;
     if engaged && on_grid {
-        let sentry_dmg = DamageVector::new(88.0, 88.0, 88.0, 88.0);
+        let base_dmg = if supp >= 2 { 105.0 } else { 88.0 };
+        let sentry_dmg = DamageVector::new(base_dmg, base_dmg, base_dmg, base_dmg);
         if let Ok(Some((dmg, _, _))) = sys_handle.apply_damage(offender_ship_id, sentry_dmg).await {
             applied = dmg;
         }
@@ -1044,24 +1050,8 @@ pub async fn handle_crimewatch(
         ("bountyProxy", _) => handle_bounty_proxy(ctx, session, service, method, args),
 
 
-        ("securityMgr", "get_modified_systems") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let mut sec_map: HashMap<u32, f64> = with_combat_runtime(ctx, |rt| {
-                rt.modified_system_securities.clone()
-            });
-            ctx.db.with_snapshot(|snap| {
-                for (&sid, st) in &snap.system_states {
-                    if st.insurgency_corruption_stage >= 5 {
-                        // Havoc Pirate Insurgency Stage 5 sets effective system security to lawless (0.0)
-                        sec_map.insert(sid, 0.0);
-                    }
-                }
-            });
-            let entries = sec_map.into_iter().map(|(sid, sec)| (PyRep::Integer(sid as i64), PyRep::Real(sec))).collect();
-            Some(Ok(PyRep::Dict(entries)))
+        ("securityMgr", method) => {
+            crate::services::security_mgr::handle_security_mgr_call(ctx, session, method, args)
         }
 
         ("abyssal_content_manager", "ActivateAbyssalKey") => {

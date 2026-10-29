@@ -134,9 +134,14 @@ pub fn dispatch_economy_industry_route(
         })),
 
         ("GET", "/industry/systems") => Some(ctx.db.with_snapshot(|snap| {
+            let now_unix = ctx.now_unix();
+            let cutoff = now_unix.saturating_sub(28 * 86_400);
             let mut sys_work: BTreeMap<u32, BTreeMap<&'static str, u64>> = BTreeMap::new();
             let mut total_activity_work: BTreeMap<&'static str, u64> = BTreeMap::new();
             for j in snap.industry_jobs.values() {
+                if j.start_unix < cutoff {
+                    continue;
+                }
                 let Some(sid) = ctx
                     .sde
                     .stations
@@ -172,8 +177,8 @@ pub fn dispatch_economy_industry_route(
                             if total == 0 {
                                 return None;
                             }
-                            // DERIVED: CCP industry system cost index is the system's share of total universe work for that activity
-                            let cost_index = (work as f64) / (total as f64);
+                            // Canonical CCP industry system cost index: sqrt(system_work / universe_work)
+                            let cost_index = ((work as f64) / (total as f64)).sqrt();
                             Some(json!({
                                 "activity": activity,
                                 "cost_index": cost_index,

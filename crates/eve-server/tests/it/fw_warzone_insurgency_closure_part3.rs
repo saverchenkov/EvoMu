@@ -27,7 +27,6 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
     // parity: feat:fw.fw-pirate
     // parity: feat:fw.insurgency-lifecycle
     // parity: feat:fw.insurgency-spread
-    // DATA GAP: feat:fw.corruption-suppression-effects (open until real SDE tables imported)
     // parity: feat:fw.corruption-stage5-highsec-bubbles-concord
     // parity: notify:OnInsurgencyCampaignStartedForLocation
     // parity: notify:OnInsurgencyCampaignUpdatedForLocation

@@ -863,6 +863,54 @@ pub async fn tick_insurgency_campaigns(ctx: &ServerContext, now_unix: u64) {
                         // DERIVED (synthetic): baseline warzone complex capture beacon coordinates at grid origin.
                         st.fw_complex_position = Some([0.0, 0.0, 0.0]);
                     }
+                    let c_st = st.insurgency_corruption_stage;
+                    let s_st = st.insurgency_suppression_stage;
+
+                    let corr_table: &[(u8, &str, &str, f64)] = &[
+                        (1, "PirateMiningAmbush", "Insurgency Ambush Point", 200.0),
+                        (2, "IceHeist", "Insurgency Ice Heist", 300.0),
+                        (3, "LawlessOutpost", "Insurgency Lawless Outpost", 400.0),
+                        (4, "PirateRoamer", "Insurgency Pirate Roamer", 500.0),
+                    ];
+                    for &(req_stage, stype, sname, rew) in corr_table {
+                        if c_st >= req_stage && !snap.insurgency_runtime.insurgency_instances.iter().any(|s| {
+                            s.solar_system_id == sys && s.site_type == stype && !s.completed
+                        }) {
+                            let sid = (snap.insurgency_runtime.insurgency_instances.len() as i64) + 960_001;
+                            snap.insurgency_runtime.insurgency_instances.push(InsurgencySiteRecord {
+                                instance_id: sid,
+                                solar_system_id: sys,
+                                site_type: stype.into(),
+                                name: sname.into(),
+                                corruption_reward: rew,
+                                completed: false,
+                            });
+                        }
+                    }
+
+                    let supp_table: &[(u8, &str, &str, f64)] = &[
+                        (1, "LawEnforcementPatrol", "Counter-Insurgency Law Patrol", 200.0),
+                        (2, "CounterInsurgencyOutpost", "Counter-Insurgency Outpost", 300.0),
+                        (3, "AntiPiratePatrol", "Anti-Pirate Strike Force", 400.0),
+                        (4, "HeavyLawPatrol", "Heavy Law Enforcement Fleet", 500.0),
+                        (5, "CounterInsurgencySentry", "Counter-Insurgency Sentry Post", 600.0),
+                    ];
+                    for &(req_stage, stype, sname, rew) in supp_table {
+                        if s_st >= req_stage && !snap.insurgency_runtime.insurgency_instances.iter().any(|s| {
+                            s.solar_system_id == sys && s.site_type == stype && !s.completed
+                        }) {
+                            let sid = (snap.insurgency_runtime.insurgency_instances.len() as i64) + 970_001;
+                            snap.insurgency_runtime.insurgency_instances.push(InsurgencySiteRecord {
+                                instance_id: sid,
+                                solar_system_id: sys,
+                                site_type: stype.into(),
+                                name: sname.into(),
+                                corruption_reward: rew,
+                                completed: false,
+                            });
+                        }
+                    }
+
                     let has_site = snap.insurgency_runtime.insurgency_instances.iter().any(|s| {
                         s.solar_system_id == sys && s.site_type != "PirateStronghold" && !s.completed
                     });
@@ -877,6 +925,8 @@ pub async fn tick_insurgency_campaigns(ctx: &ServerContext, now_unix: u64) {
                             completed: false,
                         });
                     }
+
+                    crate::services::security_mgr::prune_ineligible_insurgency_sites_in_snap(snap, sys);
                 }
                 if !snap.insurgency_runtime.campaign_outcomes.contains_key(&cid) {
                     let p_mod = snap
