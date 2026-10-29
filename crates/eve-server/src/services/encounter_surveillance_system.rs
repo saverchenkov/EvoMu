@@ -506,8 +506,10 @@ pub async fn handle_ess_link(
         with_mut_combat_runtime(ctx, |rt| {
             rt.ess_reserve_unlocked_until.insert(sys_id, until);
         });
-        let reg_id = ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id as i64).unwrap_or(10000002);
-        super::notify_emitters_batch6::emit_reserve_bank_unlock(ctx, reg_id);
+        if let Some(sde_sys) = ctx.sde.solar_systems.get(&sys_id) {
+            let reg_id = sde_sys.region_id as i64;
+            super::notify_emitters_batch6::emit_reserve_bank_unlock(ctx, sys_id, reg_id);
+        }
     }
     if link_started_only {
         if method == "AttemptLinkToReserveBank" {
@@ -529,7 +531,6 @@ pub async fn handle_ess_link(
         let st = cw.get_or_create(char_id);
         st.suspect_flag_until_unix = suspect_until;
     }
-    let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[], &[char_id], &[]);
     emit_crimewatch_timer_notifications(ctx, char_id, now_unix);
 
     if payout > 0.0 {
@@ -542,15 +543,23 @@ pub async fn handle_ess_link(
             };
             list.push((char_id, payout, now_u));
         });
+        let link_id = ess_ball_id;
         if method != "AttemptLinkToReserveBank" {
-            super::notify_emitters_batch6::emit_main_bank_player_hack_success(ctx, char_id, sys_id, 1);
-            super::notify_emitters_batch6::emit_main_bank_player_link_disconnected(ctx, char_id, sys_id, "Completed", 1);
+            super::notify_emitters_batch6::emit_main_bank_player_hack_success(ctx, char_id, sys_id, link_id);
+            super::notify_emitters_batch6::emit_main_bank_player_link_disconnected(ctx, char_id, sys_id, "Completed", link_id);
         } else {
-            super::notify_emitters_batch6::emit_reserve_bank_player_link_disconnected(ctx, char_id, sys_id, 0);
+            super::notify_emitters_batch6::emit_reserve_bank_player_link_disconnected(ctx, char_id, sys_id, link_id);
         }
+        let (post_main, post_reserve) = ctx.db.with_snapshot(|snap| {
+            snap.system_states
+                .get(&sys_id)
+                .map(|s| (s.ess_main_bank.to_wire_f64(), s.ess_reserve_bank.to_wire_f64()))
+                .unwrap_or((0.0, 0.0))
+        });
         let ess_data = PyRep::keyval([
             ("solarSystemID", PyRep::Integer(sys_id as i64)),
-            ("mainBank", PyRep::Real(payout)),
+            ("mainBank", PyRep::Real(post_main)),
+            ("reserveBank", PyRep::Real(post_reserve)),
         ]);
         super::notify_emitters_batch6::emit_system_ess_data_changed(ctx, sys_id as i64, ess_data);
     }

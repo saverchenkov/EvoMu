@@ -113,10 +113,10 @@ pub fn emit_main_bank_player_hack_success(
 }
 
 /// Emits `OnReserveBankUnlock(data)` (`id_type = "solarsystemid"`).
-pub fn emit_reserve_bank_unlock(ctx: &ServerContext, region_id: i64) {
+pub fn emit_reserve_bank_unlock(ctx: &ServerContext, sys_id: u32, region_id: i64) {
     let payload = PyRep::keyval([("regionID", PyRep::Integer(region_id))]);
     ctx.notify(
-        NotificationTarget::All,
+        NotificationTarget::SolarSystem(sys_id),
         "OnReserveBankUnlock",
         "solarsystemid",
         vec![payload],

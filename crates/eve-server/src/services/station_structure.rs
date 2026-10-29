@@ -508,8 +508,6 @@ pub async fn handle(
                     "charid",
                     vec![PyRep::Integer(char_id)],
                 );
-            } else {
-                super::notify_emitters_batch5::emit_char_station_notification(ctx, char_id, station_id, false);
             }
             let invuln_end_ft = ctx.now_blueos_filetime_ticks() + 300_000_000;
             ctx.notify(
@@ -868,8 +866,6 @@ pub async fn handle(
                             "charid",
                             vec![PyRep::Integer(dock_id), hv_state],
                         );
-                    } else {
-                        super::notify_emitters_batch5::emit_char_station_notification(ctx, char_id, dock_id, true);
                     }
                     ctx.quasar_gateway.on_session_changed(session, now_unix);
                     Some(Ok(PyRep::keyval([

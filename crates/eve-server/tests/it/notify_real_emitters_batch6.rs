@@ -1,22 +1,23 @@
-//! Real server-side emission tests for Batch 6:
-//! Station guests, scanning, mining, decloak, hacking, death pipeline,
-//! ESS bank links, Faction Warfare, Safe Logoff, Crimewatch broadcasts, and Void/Abyssal space.
+//! Real production emitter tests for Notify Batch 6 (`P-5`, `T-1`).
+//! Covers Station, Scanners, Mining, Cloak, Hacking, Ship/Pod destruction,
+//! ESS, Dynamic Bounty, Faction Warfare, Insurgency, and SafeLogoff/Crimewatch.
 
 #![forbid(unsafe_code)]
 
-use crate::common;
+use std::collections::HashMap;
+use glam::DVec3;
+use eve_destiny::{Ball, MovementMode};
+use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::notify_emitters_batch3_space::*;
-use eve_server::services::notify_emitters_batch5::*;
-use eve_server::services::notify_emitters_batch6::*;
-use std::collections::HashMap;
+
+use crate::common;
 
 const P1: i64 = 90_000_001;
 const P2: i64 = 90_000_002;
-const JITA_STATION: i64 = 60_003_760;
-const JITA_SYSTEM: u32 = 30_000_142;
+const JITA_SYSTEM: u32 = 30000142;
+const JITA_STATION: i64 = 60003760;
 
 fn new_ctx() -> ServerContext {
     let sde = std::sync::Arc::new(
@@ -59,6 +60,32 @@ fn events(ctx: &ServerContext, char_id: i64, event: &str) -> Vec<Vec<PyRep>> {
     matched
 }
 
+fn make_item(
+    item_id: i64,
+    type_id: u32,
+    owner_id: i64,
+    location_id: i64,
+    flag: InventoryFlag,
+    quantity: i32,
+    singleton: bool,
+) -> InventoryItemRecord {
+    InventoryItemRecord {
+        item_id,
+        type_id,
+        owner_id,
+        location_id,
+        flag,
+        quantity,
+        singleton,
+        version: 1,
+        dynamic_attributes: HashMap::new(),
+        source_mutaplasmid_id: None,
+        insured_payout_isk: 0.0,
+        is_blueprint_copy: false,
+        blueprint_runs_remaining: None,
+    }
+}
+
 #[tokio::test]
 async fn test_batch6_station_scanners_mining_cloak_and_hack() {
     // parity: notify:OnCharNowInStation, notify:OnCharNoLongerInStation, notify:OnDamageStateChange
@@ -76,7 +103,7 @@ async fn test_batch6_station_scanners_mining_cloak_and_hack() {
     ]);
 
     let ctx = new_ctx();
-    let _s1 = pilot(&ctx, 821, "demo", "demo-secret", P1).await;
+    let mut s1 = pilot(&ctx, 821, "demo", "demo-secret", P1).await;
     let _s2 = pilot(&ctx, 822, "other", "other-secret", P2).await;
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -86,43 +113,74 @@ async fn test_batch6_station_scanners_mining_cloak_and_hack() {
         }
     });
 
-    // 1. OnCharNowInStation & OnCharNoLongerInStation: wired through docking/undocking
-    emit_char_station_notification(&ctx, P1, JITA_STATION, true);
-    let ev_now = events(&ctx, P2, "OnCharNowInStation");
-    assert_eq!(ev_now.len(), 1, "P2 receives OnCharNowInStation");
-
-    emit_char_station_notification(&ctx, P1, JITA_STATION, false);
+    // 1. Station Undock -> emits OnCharNoLongerInStation to station pilots
+    ctx.dispatch_rpc(&mut s1, "stationSvc", None, "Undock", &[], &HashMap::new(), None)
+        .await
+        .expect("Undock");
     let ev_gone = events(&ctx, P2, "OnCharNoLongerInStation");
     assert_eq!(ev_gone.len(), 1, "P2 receives OnCharNoLongerInStation");
+    assert_eq!(ev_gone[0].len(), 1);
+    if let PyRep::Tuple(ref row) = ev_gone[0][0] {
+        assert_eq!(row[0], PyRep::Integer(P1));
+    } else {
+        panic!("expected PyRep::Tuple for guest row");
+    }
 
-    // 2. OnDamageStateChange: wired through combat damage
-    emit_damage_state_change(&ctx, P1, 7001, 0.50, 0.75, 1.0);
+    // Station Dock -> emits OnCharNowInStation to station pilots
+    ctx.dispatch_rpc(&mut s1, "stationSvc", None, "Dock", &[PyRep::Integer(JITA_STATION)], &HashMap::new(), None)
+        .await
+        .expect("Dock");
+    let ev_now = events(&ctx, P2, "OnCharNowInStation");
+    assert_eq!(ev_now.len(), 1, "P2 receives OnCharNowInStation");
+    assert_eq!(ev_now[0].len(), 1);
+    if let PyRep::Tuple(ref row) = ev_now[0][0] {
+        assert_eq!(row[0], PyRep::Integer(P1));
+    } else {
+        panic!("expected PyRep::Tuple for guest row");
+    }
+
+    // 2. Combat Damage State
+    eve_server::services::notify_emitters_batch5::emit_damage_state_change(
+        &ctx, P1, 7001, 0.70, 0.90, 1.0,
+    );
     let ev_dmg = events(&ctx, P1, "OnDamageStateChange");
     assert_eq!(ev_dmg.len(), 1, "P1 receives OnDamageStateChange");
+    assert_eq!(ev_dmg[0][0], PyRep::Integer(7001));
 
-    // 3. OnCargoScanComplete & OnShipScanCompleted: scanner modules
-    emit_cargo_scan_complete(&ctx, P1, 7002, vec![(34, 100), (35, 200)]);
+    // 3. Scanner modules
+    eve_server::services::notify_emitters_batch5::emit_cargo_scan_complete(&ctx, P1, 7002, vec![(34, 100), (35, 200)]);
     let ev_cscan = events(&ctx, P1, "OnCargoScanComplete");
     assert_eq!(ev_cscan.len(), 1, "P1 receives OnCargoScanComplete");
+    assert_eq!(ev_cscan[0][0], PyRep::Integer(7002));
 
-    emit_ship_scan_completed(&ctx, P1, 7002, 500.0, 1000.0, vec![(443, 1)]);
+    eve_server::services::notify_emitters_batch5::emit_ship_scan_completed(&ctx, P1, 7002, 500.0, 1000.0, vec![(443, 1)]);
     let ev_sscan = events(&ctx, P1, "OnShipScanCompleted");
     assert_eq!(ev_sscan.len(), 1, "P1 receives OnShipScanCompleted");
+    assert_eq!(ev_sscan[0][0], PyRep::Integer(7002));
+    assert_eq!(ev_sscan[0][1], PyRep::Real(500.0));
+    assert_eq!(ev_sscan[0][2], PyRep::Real(1000.0));
 
-    // 4. OnOreMined: mining cycle yield
-    emit_ore_mined(&ctx, P1, 1230, 200, 200, 0, 0, 9901, 8801);
+    // 4. Mining cycle yield
+    eve_server::services::notify_emitters_batch5::emit_ore_mined(&ctx, P1, 1230, 200, 200, 0, 0, 9901, 8801);
     let ev_ore = events(&ctx, P1, "OnOreMined");
     assert_eq!(ev_ore.len(), 1, "P1 receives OnOreMined");
+    assert_eq!(ev_ore[0][0], PyRep::Integer(1230));
+    assert_eq!(ev_ore[0][1], PyRep::Integer(200));
 
-    // 5. OnCloakModuleForceDeactivated: forced decloak trigger
-    emit_cloak_module_force_deactivated(&ctx, P1, "DecloakProximityOrDeactivation", 2000.0);
+    // 5. Forced decloak
+    eve_server::services::notify_emitters_batch3_space::emit_cloak_module_force_deactivated(
+        &ctx, P1, "DecloakProximityOrDeactivation", 2000.0,
+    );
     let ev_cloak = events(&ctx, P1, "OnCloakModuleForceDeactivated");
     assert_eq!(ev_cloak.len(), 1, "P1 receives OnCloakModuleForceDeactivated");
+    assert_eq!(ev_cloak[0][0], PyRep::String("DecloakProximityOrDeactivation".into()));
+    assert_eq!(ev_cloak[0][1].dict_get("distance"), Some(&PyRep::Real(2000.0)));
 
-    // 6. OnLocalHackProgressUpdated: hacking minigame step
-    emit_local_hack_progress_updated(&ctx, JITA_SYSTEM, 9902, 0.5);
+    // 6. Hacking minigame step
+    eve_server::services::notify_emitters_batch3_space::emit_local_hack_progress_updated(&ctx, JITA_SYSTEM, 9902, 0.5);
     let ev_hack = events(&ctx, P1, "OnLocalHackProgressUpdated");
     assert_eq!(ev_hack.len(), 1, "P1 receives OnLocalHackProgressUpdated");
+    assert_eq!(ev_hack[0], vec![PyRep::Integer(9902), PyRep::Real(0.5)]);
 }
 
 #[tokio::test]
@@ -142,46 +200,78 @@ async fn test_batch6_ship_and_pod_destruction_pipeline() {
     let _s1 = pilot(&ctx, 831, "demo", "demo-secret", P1).await;
     let _s2 = pilot(&ctx, 832, "other", "other-secret", P2).await;
 
-    // 1. Ship destruction: victim ship dies -> OnShipDeath & OnKillNotification
-    emit_ship_death(&ctx, P1);
+    let ship1: i64 = 770_001;
+    let pod1: i64 = 770_002;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(ship1, make_item(ship1, 587, P1, JITA_SYSTEM as i64, InventoryFlag::Hangar, 1, false));
+        snap.items.insert(pod1, make_item(pod1, 670, P1, JITA_SYSTEM as i64, InventoryFlag::Hangar, 1, false));
+    });
+
+    // 1. Ship destruction via execute_death_pipeline_sync
+    let res = eve_server::combat::death_pipeline::execute_death_pipeline_sync(
+        &ctx,
+        JITA_SYSTEM,
+        P1,
+        ship1,
+        P2,
+        DVec3::ZERO,
+        42,
+    );
+    assert!(res.is_ok(), "execute_death_pipeline_sync must succeed");
+
     let ev_sd = events(&ctx, P1, "OnShipDeath");
-    assert_eq!(ev_sd.len(), 1, "Victim receives OnShipDeath");
+    assert_eq!(ev_sd.len(), 1, "P1 receives OnShipDeath");
+    assert!(ev_sd[0].is_empty());
 
-    emit_kill_notification(&ctx, P1);
-    emit_kill_notification(&ctx, P2);
-    let ev_km1 = events(&ctx, P1, "OnKillNotification");
-    let ev_km2 = events(&ctx, P2, "OnKillNotification");
-    assert_eq!(ev_km1.len(), 1, "Victim receives OnKillNotification");
-    assert_eq!(ev_km2.len(), 1, "Attacker receives OnKillNotification");
+    let ev_km_vic = events(&ctx, P1, "OnKillNotification");
+    assert_eq!(ev_km_vic.len(), 1, "Victim P1 receives OnKillNotification");
 
-    // 2. Pod destruction: OnPodDeath, OnPlayerPodDeath, OnPodKilled, OnPlayerPodRespawn
-    emit_pod_death(&ctx, P1);
+    let ev_km_atk = events(&ctx, P2, "OnKillNotification");
+    assert_eq!(ev_km_atk.len(), 1, "Attacker P2 receives OnKillNotification");
+
+    // 2. Pod destruction via execute_death_pipeline_sync_inner(is_pod=true)
+    let res_pod = eve_server::combat::death_pipeline::execute_death_pipeline_sync_inner(
+        &ctx,
+        JITA_SYSTEM,
+        P1,
+        pod1,
+        P2,
+        DVec3::ZERO,
+        43,
+        true,
+    );
+    assert!(res_pod.is_ok(), "execute_death_pipeline_sync_inner for pod must succeed");
+
     let ev_pd = events(&ctx, P1, "OnPodDeath");
-    assert_eq!(ev_pd.len(), 1, "Victim receives OnPodDeath");
+    assert_eq!(ev_pd.len(), 1, "P1 receives OnPodDeath");
+    assert!(ev_pd[0].is_empty());
 
-    emit_player_pod_death(&ctx, P1);
     let ev_ppd = events(&ctx, P1, "OnPlayerPodDeath");
-    assert_eq!(ev_ppd.len(), 1, "Victim receives OnPlayerPodDeath");
+    assert_eq!(ev_ppd.len(), 1, "P1 receives OnPlayerPodDeath");
+    assert!(ev_ppd[0].is_empty());
 
-    emit_pod_killed(&ctx, P1, 7005);
     let ev_pk = events(&ctx, P1, "OnPodKilled");
-    assert_eq!(ev_pk.len(), 1, "Victim receives OnPodKilled");
-    assert_eq!(ev_pk[0], vec![PyRep::Integer(7005)]);
+    assert_eq!(ev_pk.len(), 1, "P1 receives OnPodKilled");
+    assert_eq!(ev_pk[0], vec![PyRep::Integer(pod1)]);
 
-    emit_player_pod_respawn(&ctx, P1);
-    let ev_presh = events(&ctx, P1, "OnPlayerPodRespawn");
-    assert_eq!(ev_presh.len(), 1, "Victim receives OnPlayerPodRespawn");
+    let ev_respawn = events(&ctx, P1, "OnPlayerPodRespawn");
+    assert_eq!(ev_respawn.len(), 1, "P1 receives OnPlayerPodRespawn");
+    assert!(ev_respawn[0].is_empty());
+
+    let ev_km_atk2 = events(&ctx, P2, "OnKillNotification");
+    assert_eq!(ev_km_atk2.len(), 1, "Attacker P2 receives OnKillNotification for pod");
 }
 
 #[tokio::test]
 async fn test_batch6_ess_and_dynamic_bounty() {
-    // parity: notify:OnSystemESSDataChanged, notify:OnSystemDynamicBountyStateChanged
+    // parity: notify:OnSystemDynamicBountyStateChanged, notify:OnSystemESSDataChanged
     // parity: notify:OnESSMainBankLinkNotification, notify:OnESSReserveBankLinkNotification
     // parity: notify:OnMainBankPlayerLinkDisconnected, notify:OnReserveBankPlayerLinkDisconnected
-    // parity: notify:OnMainBankPlayerHackSuccess, notify:OnReserveBankUnlock, notify:OnEssReserveBankInventoryFull
+    // parity: notify:OnMainBankPlayerHackSuccess, notify:OnReserveBankUnlock
+    // parity: notify:OnEssReserveBankInventoryFull
     eve_testkit::attest(&[
-        "notify:OnSystemESSDataChanged",
         "notify:OnSystemDynamicBountyStateChanged",
+        "notify:OnSystemESSDataChanged",
         "notify:OnESSMainBankLinkNotification",
         "notify:OnESSReserveBankLinkNotification",
         "notify:OnMainBankPlayerLinkDisconnected",
@@ -192,48 +282,143 @@ async fn test_batch6_ess_and_dynamic_bounty() {
     ]);
 
     let ctx = new_ctx();
-    let _s1 = pilot(&ctx, 841, "demo", "demo-secret", P1).await;
+    let mut s1 = pilot(&ctx, 841, "demo", "demo-secret", P1).await;
+    let nullsec_sys_id = 30_004_759; // 1DQ1-A (K-space null-sec in SW quadrant)
+    let ess_ball_id = 899_001_i64;
+    let key_item_id = 899_002_i64;
+    let ship_id = 899_003_i64;
 
-    // 1. Dynamic Bounty & ESS System Data
-    emit_system_dynamic_bounty_state_changed(&ctx, JITA_SYSTEM as i64, 1.45);
+    s1.solar_system_id = Some(nullsec_sys_id);
+    s1.ship_id = Some(ship_id);
+    s1.station_id = None;
+    s1.structure_id = None;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&P1) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = nullsec_sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        let st = snap.system_states.entry(nullsec_sys_id).or_default();
+        st.ess_main_bank = eve_db::IskCents(50_000_000_00);
+        st.ess_reserve_bank = eve_db::IskCents(100_000_000_00);
+        snap.items.insert(
+            ship_id,
+            make_item(ship_id, 587, P1, nullsec_sys_id as i64, InventoryFlag::None, 1, true),
+        );
+        snap.items.insert(
+            key_item_id,
+            make_item(key_item_id, 57720, P1, ship_id, InventoryFlag::Cargo, 1, false),
+        );
+    });
+
+    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(P1, eve_server::services::combat_crimewatch::SafetyLevel::Yellow);
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(nullsec_sys_id);
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: ess_ball_id,
+            type_id: 32882,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 50_000_000.0,
+            radius: 500.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::new(1000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 0.5,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+
+    // 1. Dynamic Bounty via step_dynamic_bounty_multiplier
+    let new_rate = eve_server::services::combat_crimewatch::step_dynamic_bounty_multiplier(&ctx, nullsec_sys_id, 50_000_000.0, 0.0);
     let ev_dbs = events(&ctx, P1, "OnSystemDynamicBountyStateChanged");
-    assert_eq!(ev_dbs.len(), 1);
-    assert_eq!(ev_dbs[0], vec![PyRep::Integer(JITA_SYSTEM as i64), PyRep::Real(1.45)]);
+    assert_eq!(ev_dbs.len(), 1, "P1 receives OnSystemDynamicBountyStateChanged");
+    assert_eq!(ev_dbs[0], vec![PyRep::Integer(nullsec_sys_id as i64), PyRep::Real(new_rate)]);
 
-    let ess_data = PyRep::keyval([("solarSystemID", PyRep::Integer(JITA_SYSTEM as i64))]);
-    emit_system_ess_data_changed(&ctx, JITA_SYSTEM as i64, ess_data.clone());
-    let ev_ess_data = events(&ctx, P1, "OnSystemESSDataChanged");
-    assert_eq!(ev_ess_data.len(), 1);
-
-    // 2. Main and Reserve bank link notifications
-    emit_ess_main_bank_link_notification(&ctx, JITA_SYSTEM);
+    // 2. ESS Main Bank Link start
+    let kw = HashMap::new();
+    let res_start = ctx
+        .dispatch_rpc(&mut s1, "essMgr", None, "AttemptLinkToMainBank", &[PyRep::Integer(ess_ball_id)], &kw, None)
+        .await
+        .expect("AttemptLinkToMainBank start");
+    assert_eq!(res_start.dict_get("linkStartedOnly"), Some(&PyRep::Bool(true)));
     let ev_main_link = events(&ctx, P1, "OnESSMainBankLinkNotification");
-    assert_eq!(ev_main_link.len(), 1);
+    assert_eq!(ev_main_link.len(), 1, "P1 receives OnESSMainBankLinkNotification");
 
-    emit_ess_reserve_bank_link_notification(&ctx, JITA_SYSTEM);
-    let ev_res_link = events(&ctx, P1, "OnESSReserveBankLinkNotification");
-    assert_eq!(ev_res_link.len(), 1);
+    // 3. ESS Main Bank Hack complete (advance 5 ticks)
+    for _ in 0..5 {
+        let _ = sys_handle.step_manual(1.0).await;
+    }
+    let res_comp = ctx
+        .dispatch_rpc(&mut s1, "essMgr", None, "AttemptLinkToMainBank", &[PyRep::Integer(ess_ball_id)], &kw, None)
+        .await
+        .expect("AttemptLinkToMainBank complete");
+    assert_eq!(res_comp.dict_get("stolenISK"), Some(&PyRep::Real(50_000_000.0)));
 
-    // 3. Link disconnects, hack success, unlock, inventory full
-    emit_main_bank_player_link_disconnected(&ctx, P1, JITA_SYSTEM, "Completed", 101);
-    let ev_main_disc = events(&ctx, P1, "OnMainBankPlayerLinkDisconnected");
-    assert_eq!(ev_main_disc.len(), 1);
-
-    emit_reserve_bank_player_link_disconnected(&ctx, P1, JITA_SYSTEM, 0);
-    let ev_res_disc = events(&ctx, P1, "OnReserveBankPlayerLinkDisconnected");
-    assert_eq!(ev_res_disc.len(), 1);
-
-    emit_main_bank_player_hack_success(&ctx, P1, JITA_SYSTEM, 101);
     let ev_hack_ok = events(&ctx, P1, "OnMainBankPlayerHackSuccess");
-    assert_eq!(ev_hack_ok.len(), 1);
+    assert_eq!(ev_hack_ok.len(), 1, "P1 receives OnMainBankPlayerHackSuccess");
+    assert_eq!(ev_hack_ok[0][0].dict_get("characterID"), Some(&PyRep::Integer(P1)));
+    assert_eq!(ev_hack_ok[0][0].dict_get("solarSystemID"), Some(&PyRep::Integer(nullsec_sys_id as i64)));
+    assert_eq!(ev_hack_ok[0][0].dict_get("linkID"), Some(&PyRep::Integer(ess_ball_id)));
 
-    emit_reserve_bank_unlock(&ctx, 10000002);
+    let ev_disc = events(&ctx, P1, "OnMainBankPlayerLinkDisconnected");
+    assert_eq!(ev_disc.len(), 1, "P1 receives OnMainBankPlayerLinkDisconnected");
+    assert_eq!(ev_disc[0][0].dict_get("reason"), Some(&PyRep::String("Completed".into())));
+
+    let ev_ess_data = events(&ctx, P1, "OnSystemESSDataChanged");
+    assert_eq!(ev_ess_data.len(), 1, "P1 receives OnSystemESSDataChanged");
+    assert_eq!(ev_ess_data[0][0], PyRep::Integer(nullsec_sys_id as i64));
+    assert_eq!(ev_ess_data[0][1].dict_get("mainBank"), Some(&PyRep::Real(0.0)));
+
+    // 4. ESS Reserve Bank Link start (with key)
+    let res_res_start = ctx
+        .dispatch_rpc(&mut s1, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_ball_id)], &kw, None)
+        .await
+        .expect("AttemptLinkToReserveBank start");
+    assert_eq!(res_res_start.dict_get("linkStartedOnly"), Some(&PyRep::Bool(true)));
+    let ev_res_link = events(&ctx, P1, "OnESSReserveBankLinkNotification");
+    assert_eq!(ev_res_link.len(), 1, "P1 receives OnESSReserveBankLinkNotification");
+
     let ev_unlock = events(&ctx, P1, "OnReserveBankUnlock");
-    assert_eq!(ev_unlock.len(), 1);
+    assert_eq!(ev_unlock.len(), 1, "P1 receives OnReserveBankUnlock");
+    assert_eq!(ev_unlock[0][0].dict_get("regionID"), Some(&PyRep::Integer(10000060)));
 
-    emit_ess_reserve_bank_inventory_full(&ctx, JITA_SYSTEM);
+    // Advance 5 ticks and complete Reserve Bank link
+    for _ in 0..5 {
+        let _ = sys_handle.step_manual(1.0).await;
+    }
+    let res_res_comp = ctx
+        .dispatch_rpc(&mut s1, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_ball_id)], &kw, None)
+        .await
+        .expect("AttemptLinkToReserveBank complete");
+    assert!(res_res_comp.dict_get("stolenISK").is_some());
+
+    let ev_res_disc = events(&ctx, P1, "OnReserveBankPlayerLinkDisconnected");
+    assert_eq!(ev_res_disc.len(), 1, "P1 receives OnReserveBankPlayerLinkDisconnected");
+
+    // 5. Reserve Bank inventory full notification
+    eve_server::services::notify_emitters_batch3_space::emit_ess_reserve_bank_inventory_full(&ctx, nullsec_sys_id);
     let ev_inv_full = events(&ctx, P1, "OnEssReserveBankInventoryFull");
-    assert_eq!(ev_inv_full.len(), 1);
+    assert_eq!(ev_inv_full.len(), 1, "P1 receives OnEssReserveBankInventoryFull");
 }
 
 #[tokio::test]
@@ -256,7 +441,7 @@ async fn test_batch6_faction_warfare_and_insurgency() {
     ]);
 
     let ctx = new_ctx();
-    let _s1 = pilot(&ctx, 851, "demo", "demo-secret", P1).await;
+    let mut s1 = pilot(&ctx, 851, "demo", "demo-secret", P1).await;
 
     ctx.db.with_mut_snapshot(|s| {
         s.fw_system_occupations.insert(
@@ -275,10 +460,12 @@ async fn test_batch6_faction_warfare_and_insurgency() {
     eve_server::services::fw_services::set_facwar_bunker_vulnerable(&ctx, JITA_SYSTEM, 500001, true);
     let ev_v = events(&ctx, P1, "OnFacWarBunkerVulnerable");
     assert_eq!(ev_v.len(), 1);
+    assert_eq!(ev_v[0], vec![PyRep::Integer(500001)]);
 
     eve_server::services::fw_services::set_facwar_bunker_vulnerable(&ctx, JITA_SYSTEM, 0, false);
     let ev_nv = events(&ctx, P1, "OnFacWarBunkerNonVulnerable");
     assert_eq!(ev_nv.len(), 1);
+    assert_eq!(ev_nv[0], vec![PyRep::Integer(0)]);
 
     // 2. Objective & Scoreboard
     eve_server::services::fw_services::complete_fw_dungeon_and_objective(
@@ -286,69 +473,73 @@ async fn test_batch6_faction_warfare_and_insurgency() {
     );
     let ev_obj = events(&ctx, P1, "OnFwObjectiveCompletedInSolarSystem");
     assert_eq!(ev_obj.len(), 1);
+    assert_eq!(ev_obj[0][0], PyRep::Integer(i64::from(JITA_SYSTEM)));
+
     let ev_sb = events(&ctx, P1, "OnFwScoreboardWon");
     assert_eq!(ev_sb.len(), 1);
+    assert_eq!(ev_sb[0][0], PyRep::Integer(i64::from(JITA_SYSTEM)));
 
     // 3. Solar system LP change & Victory Points
     eve_server::services::fw_services::donate_solar_system_lp(&ctx, JITA_SYSTEM, 1000, 2000);
     let ev_lp = events(&ctx, P1, "OnSolarSystemLPChange");
     assert_eq!(ev_lp.len(), 1);
+    assert_eq!(ev_lp[0], vec![PyRep::Integer(1000), PyRep::Integer(2000)]);
 
     eve_server::services::fw_services::add_victory_points(&ctx, JITA_SYSTEM, 50);
     let ev_vp = events(&ctx, P1, "OnVictoryPointStateUpdated");
     assert_eq!(ev_vp.len(), 1);
+    assert_eq!(ev_vp[0][0], PyRep::Integer(i64::from(JITA_SYSTEM)));
 
     // 4. Capture changed
-    emit_fw_capture_changed(&ctx, JITA_SYSTEM, 9906, 500001, 50.0, 600000.0);
+    eve_server::services::notify_emitters_batch3_space::emit_fw_capture_changed(&ctx, JITA_SYSTEM, 9906, 500001, 50.0, 600000.0);
     let ev_cap = events(&ctx, P1, "OnCaptureChanged");
     assert_eq!(ev_cap.len(), 1);
+    assert_eq!(ev_cap[0][0], PyRep::Integer(9906));
+    assert_eq!(ev_cap[0][1], PyRep::Integer(500001));
 
-    // 5. System corruption & suppression
-    ctx.notify(
-        eve_server::router::NotificationTarget::SolarSystem(JITA_SYSTEM),
-        "OnSystemFullyCorruptedForFaction",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(i64::from(JITA_SYSTEM)),
-            PyRep::Integer(500010),
-            PyRep::Integer(1000),
-            PyRep::Integer(1000),
-        ],
-    );
+    // 5. System corruption & suppression via real add_system_corruption / add_system_suppression
+    let camp_id = 9999_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.insurgency_runtime.campaigns.insert(
+            camp_id,
+            eve_db::PersistedInsurgencyCampaign {
+                campaign_id: camp_id,
+                pirate_faction_id: 500010,
+                target_faction_id: 500001,
+                fob_solar_system_id: JITA_SYSTEM,
+                systems: vec![JITA_SYSTEM],
+                created_at_unix: 1000,
+                forecasting_end_unix: 2000,
+                active_end_unix: 2_000_000_000,
+                winddown_end_unix: 2_000_000_000,
+                corruption_points: Default::default(),
+                suppression_points: Default::default(),
+            },
+        );
+    });
+
+    eve_server::services::insurgency_services::add_system_corruption(&ctx, camp_id, JITA_SYSTEM, 1000);
     let ev_corr = events(&ctx, P1, "OnSystemFullyCorruptedForFaction");
-    assert_eq!(ev_corr.len(), 1);
+    assert_eq!(ev_corr.len(), 1, "P1 receives OnSystemFullyCorruptedForFaction");
+    assert_eq!(ev_corr[0][0], PyRep::Integer(i64::from(JITA_SYSTEM)));
+    assert_eq!(ev_corr[0][1], PyRep::Integer(500010));
 
-    ctx.notify(
-        eve_server::router::NotificationTarget::SolarSystem(JITA_SYSTEM),
-        "OnSystemFullySuppressedForFaction",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(i64::from(JITA_SYSTEM)),
-            PyRep::Integer(1000),
-            PyRep::Integer(1000),
-        ],
-    );
+    eve_server::services::insurgency_services::add_system_suppression(&ctx, camp_id, JITA_SYSTEM, 1000);
     let ev_supp = events(&ctx, P1, "OnSystemFullySuppressedForFaction");
-    assert_eq!(ev_supp.len(), 1);
+    assert_eq!(ev_supp.len(), 1, "P1 receives OnSystemFullySuppressedForFaction");
+    assert_eq!(ev_supp[0][0], PyRep::Integer(i64::from(JITA_SYSTEM)));
 
-    // 6. Solarsystem interference changed
-    ctx.notify(
-        eve_server::router::NotificationTarget::SolarSystem(JITA_SYSTEM),
-        "OnSolarsystemInterferenceChanged",
-        "solarsystemid",
-        vec![PyRep::Integer(i64::from(JITA_SYSTEM)), PyRep::Integer(2)],
-    );
-    let ev_inter = events(&ctx, P1, "OnSolarsystemInterferenceChanged");
-    assert_eq!(ev_inter.len(), 1);
+    // 6. Stellar interference via record_system_interference_activity
+    eve_server::services::pve_special_sites::record_system_interference_activity(&ctx, &mut s1, JITA_SYSTEM, 0.40);
+    let ev_interf = events(&ctx, P1, "OnSolarsystemInterferenceChanged");
+    assert_eq!(ev_interf.len(), 1, "P1 receives OnSolarsystemInterferenceChanged");
+    assert_eq!(ev_interf[0][0], PyRep::Integer(i64::from(JITA_SYSTEM)));
 }
 
 #[tokio::test]
-async fn test_batch6_safelogoff_crimewatch_and_abyssal_void() {
+async fn test_batch6_safelogoff_and_crimewatch() {
     // parity: notify:OnSafeLogoffActivated, notify:OnSafeLogoffTimerStarted, notify:OnSafeLogoffAborted
     // parity: notify:OnSafeLogoffFailed, notify:OnSystemCriminalFlagUpdates, notify:OnSystemDisapprovalFlagUpdates
-    // parity: notify:OnSecurityModified, notify:OnVoidSpaceEntered, notify:OnVoidSpaceContentFinished
-    // parity: notify:OnVoidSpaceRelog, notify:OnAbyssalLocationEntered, notify:OnAbyssalContentFinished
-    // parity: notify:OnAddExpiryDurationForAbyssalPvpContent
     eve_testkit::attest(&[
         "notify:OnSafeLogoffActivated",
         "notify:OnSafeLogoffTimerStarted",
@@ -356,125 +547,84 @@ async fn test_batch6_safelogoff_crimewatch_and_abyssal_void() {
         "notify:OnSafeLogoffFailed",
         "notify:OnSystemCriminalFlagUpdates",
         "notify:OnSystemDisapprovalFlagUpdates",
-        "notify:OnSecurityModified",
-        "notify:OnVoidSpaceEntered",
-        "notify:OnVoidSpaceContentFinished",
-        "notify:OnVoidSpaceRelog",
-        "notify:OnAbyssalLocationEntered",
-        "notify:OnAbyssalContentFinished",
-        "notify:OnAddExpiryDurationForAbyssalPvpContent",
     ]);
 
     let ctx = new_ctx();
-    let _s1 = pilot(&ctx, 861, "demo", "demo-secret", P1).await;
+    let mut s1 = pilot(&ctx, 861, "demo", "demo-secret", P1).await;
+    let empty = HashMap::new();
 
-    // 1. Safe Logoff notifications
-    ctx.notify(
-        eve_server::router::NotificationTarget::Character(P1),
-        "OnSafeLogoffTimerStarted",
-        "charid",
-        vec![PyRep::Integer(30_000)],
-    );
-    let ev_slt = events(&ctx, P1, "OnSafeLogoffTimerStarted");
-    assert_eq!(ev_slt.len(), 1);
-
-    ctx.notify(
-        eve_server::router::NotificationTarget::Character(P1),
-        "OnSafeLogoffActivated",
-        "charid",
-        vec![],
-    );
-    let ev_sla = events(&ctx, P1, "OnSafeLogoffActivated");
-    assert_eq!(ev_sla.len(), 1);
-
-    ctx.notify(
-        eve_server::router::NotificationTarget::Character(P1),
-        "OnSafeLogoffAborted",
-        "charid",
-        vec![PyRep::String("AbortedByUser".into())],
-    );
-    let ev_sab = events(&ctx, P1, "OnSafeLogoffAborted");
-    assert_eq!(ev_sab.len(), 1);
-
-    ctx.notify(
-        eve_server::router::NotificationTarget::Character(P1),
-        "OnSafeLogoffFailed",
-        "charid",
-        vec![PyRep::List(vec![PyRep::String("ShipInCombat".into())])],
-    );
+    // 1. SafeLogoff while docked -> fails with SAFE_LOGOFF_DOCKED and emits OnSafeLogoffFailed
+    let fail_res = ctx
+        .dispatch_rpc(&mut s1, "ship", None, "SafeLogoff", &[], &empty, None)
+        .await
+        .expect("SafeLogoff docked");
+    assert_eq!(fail_res, PyRep::List(vec![PyRep::String("SAFE_LOGOFF_DOCKED".into())]));
     let ev_slf = events(&ctx, P1, "OnSafeLogoffFailed");
-    assert_eq!(ev_slf.len(), 1);
+    assert_eq!(ev_slf.len(), 1, "P1 receives OnSafeLogoffFailed");
+    assert_eq!(ev_slf[0], vec![PyRep::List(vec![PyRep::String("SAFE_LOGOFF_DOCKED".into())])]);
 
-    // 2. Crimewatch broadcasts
-    emit_system_criminal_flag_updates(&ctx, JITA_SYSTEM, &[], &[P1], &[]);
-    let ev_crim_bcast = events(&ctx, P1, "OnSystemCriminalFlagUpdates");
-    assert_eq!(ev_crim_bcast.len(), 1);
+    // 2. Undock into space
+    ctx.dispatch_rpc(&mut s1, "stationSvc", None, "Undock", &[], &empty, None)
+        .await
+        .expect("Undock");
 
-    emit_system_disapproval_flag_updates(&ctx, JITA_SYSTEM, &[], &[P1]);
-    let ev_dis_bcast = events(&ctx, P1, "OnSystemDisapprovalFlagUpdates");
-    assert_eq!(ev_dis_bcast.len(), 1);
+    // 3. Valid SafeLogoff in space -> emits OnSafeLogoffTimerStarted
+    let start_res = ctx
+        .dispatch_rpc(&mut s1, "ship", None, "SafeLogoff", &[], &empty, None)
+        .await
+        .expect("SafeLogoff space");
+    assert_eq!(start_res, PyRep::List(vec![]));
+    let ev_slt = events(&ctx, P1, "OnSafeLogoffTimerStarted");
+    assert_eq!(ev_slt.len(), 1, "P1 receives OnSafeLogoffTimerStarted");
+    assert_eq!(ev_slt[0].len(), 1);
 
-    emit_security_modified(&ctx, JITA_SYSTEM, -0.1, 0.9);
-    let ev_sec_mod = events(&ctx, P1, "OnSecurityModified");
-    assert_eq!(ev_sec_mod.len(), 1);
+    // 4. Abort SafeLogoff -> emits OnSafeLogoffAborted
+    let abort_res = ctx
+        .dispatch_rpc(&mut s1, "ship", None, "AbortSafeLogoff", &[], &empty, None)
+        .await
+        .expect("AbortSafeLogoff");
+    assert_eq!(abort_res, PyRep::Bool(true));
+    let ev_sab = events(&ctx, P1, "OnSafeLogoffAborted");
+    assert_eq!(ev_sab.len(), 1, "P1 receives OnSafeLogoffAborted");
+    assert_eq!(ev_sab[0], vec![PyRep::String("SAFE_LOGOFF_ABORT_GENERIC".into())]);
 
-    // 3. Abyssal & Void space
-    let void_data = PyRep::Dict(vec![
-        (PyRep::String("content_id".into()), PyRep::Integer(9910)),
-        (PyRep::String("nebula_graphic_id".into()), PyRep::Integer(200_001)),
-    ]);
-    ctx.notify(
-        eve_server::router::NotificationTarget::Character(P1),
-        "OnVoidSpaceEntered",
-        "charid",
-        vec![void_data.clone()],
+    // 5. Restart SafeLogoff, advance 31 seconds -> on_advance_secs processes tick and emits OnSafeLogoffActivated
+    ctx.dispatch_rpc(&mut s1, "ship", None, "SafeLogoff", &[], &empty, None)
+        .await
+        .expect("SafeLogoff restart");
+    let _ = events(&ctx, P1, "OnSafeLogoffTimerStarted");
+
+    ctx.advance_secs(31);
+    let ev_sla = events(&ctx, P1, "OnSafeLogoffActivated");
+    assert_eq!(ev_sla.len(), 1, "P1 receives OnSafeLogoffActivated");
+    assert!(ev_sla[0].is_empty());
+
+    // 6. Crimewatch flag updates broadcast to system via real emit_crimewatch_timer_notifications
+    let now_unix = ctx.now_unix_secs();
+    if let Ok(mut cw) = ctx.crimewatch.write() {
+        let entry = cw.states.entry(P1).or_default();
+        entry.suspect_flag_until_unix = now_unix + 900;
+    }
+    eve_server::services::combat_crimewatch::emit_crimewatch_timer_notifications(&ctx, P1, now_unix);
+    let ev_crim = events(&ctx, P1, "OnSystemCriminalFlagUpdates");
+    assert_eq!(ev_crim.len(), 1, "P1 receives OnSystemCriminalFlagUpdates");
+    assert_eq!(
+        ev_crim[0],
+        vec![
+            PyRep::List(vec![]),
+            PyRep::List(vec![PyRep::Integer(P1)]),
+            PyRep::List(vec![]),
+        ]
     );
-    let ev_vse = events(&ctx, P1, "OnVoidSpaceEntered");
-    assert_eq!(ev_vse.len(), 1);
 
-    ctx.notify(
-        eve_server::router::NotificationTarget::Character(P1),
-        "OnVoidSpaceContentFinished",
-        "charid",
-        vec![PyRep::Integer(9910), PyRep::Integer(1)],
+    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.disapproval_flags.insert(P1, now_unix + 300);
+    });
+    eve_server::services::combat_crimewatch::emit_crimewatch_timer_notifications(&ctx, P1, now_unix);
+    let ev_dis = events(&ctx, P1, "OnSystemDisapprovalFlagUpdates");
+    assert_eq!(ev_dis.len(), 1, "P1 receives OnSystemDisapprovalFlagUpdates");
+    assert_eq!(
+        ev_dis[0],
+        vec![PyRep::List(vec![]), PyRep::List(vec![PyRep::Integer(P1)])]
     );
-    let ev_vsf = events(&ctx, P1, "OnVoidSpaceContentFinished");
-    assert_eq!(ev_vsf.len(), 1);
-
-    ctx.notify(
-        eve_server::router::NotificationTarget::Character(P1),
-        "OnVoidSpaceRelog",
-        "charid",
-        vec![void_data],
-    );
-    let ev_vsr = events(&ctx, P1, "OnVoidSpaceRelog");
-    assert_eq!(ev_vsr.len(), 1);
-
-    let aby_data = PyRep::Dict(vec![
-        (PyRep::String("content_id".into()), PyRep::Integer(9911)),
-        (PyRep::String("difficulty_tier".into()), PyRep::Integer(3)),
-        (PyRep::String("location_id".into()), PyRep::Integer(32_000_001)),
-        (PyRep::String("nebula_graphic_id".into()), PyRep::Integer(21_003)),
-    ]);
-    ctx.notify(
-        eve_server::router::NotificationTarget::Character(P1),
-        "OnAbyssalLocationEntered",
-        "charid",
-        vec![aby_data],
-    );
-    let ev_ale = events(&ctx, P1, "OnAbyssalLocationEntered");
-    assert_eq!(ev_ale.len(), 1);
-
-    ctx.notify(
-        eve_server::router::NotificationTarget::Character(P1),
-        "OnAbyssalContentFinished",
-        "charid",
-        vec![PyRep::Integer(9911), PyRep::Integer(1)],
-    );
-    let ev_acf = events(&ctx, P1, "OnAbyssalContentFinished");
-    assert_eq!(ev_acf.len(), 1);
-
-    emit_pvp_match_found_and_expiry(&ctx, P1, 123456789);
-    let ev_pvp_exp = events(&ctx, P1, "OnAddExpiryDurationForAbyssalPvpContent");
-    assert_eq!(ev_pvp_exp.len(), 1);
 }
