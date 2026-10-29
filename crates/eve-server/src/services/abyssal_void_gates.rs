@@ -565,6 +565,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
     let _ = origin_sys_handle.spawn_ball_with_combat(ball, cs).await;
     session.solar_system_id = Some(origin_sys);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, origin_sys);
+    // DATA GAP: V24 content-finished timer_type enum mappings are Tranquility server-only
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
         "OnAbyssalContentFinished",
@@ -937,6 +938,7 @@ pub(crate) async fn handle_void_space_end_gate_activation(
     let _ = origin_handle.spawn_ball_with_combat(ball, cs).await;
     session.solar_system_id = Some(origin_sys);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, origin_sys);
+    // DATA GAP: V24 content-finished timer_type enum mappings are Tranquility server-only
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
         "OnVoidSpaceContentFinished",

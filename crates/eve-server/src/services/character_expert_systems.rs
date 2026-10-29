@@ -442,6 +442,7 @@ fn blackboard_map_to_pyrep_dict(bb: &HashMap<String, String>) -> PyRep {
 /// Starts a client node graph instance when an AIR operation is activated in space
 /// (`operationsManager.activate_operation_in_solar_system`), persisting its blackboard in
 /// `service_state_blobs` and emitting `OnStartClientNodeGraph`.
+// DATA GAP: V24 operation node graph mappings are Tranquility server-only
 pub fn start_client_node_graph_for_operation(
     ctx: &ServerContext,
     char_id: i64,
@@ -454,7 +455,7 @@ pub fn start_client_node_graph_for_operation(
     } else if ctx.sde.node_graphs.contains_key(&716) {
         716
     } else {
-        473
+        return;
     };
     let instance_id = char_id * 100_000 + graph_id;
     let bb_dict = ctx.db.with_mut_snapshot(|snap| {
@@ -478,6 +479,7 @@ pub fn start_client_node_graph_for_operation(
 
 /// Stops and removes any active operation client node graph matching `cat_id` when
 /// `operationsManager.complete_category_for_character` finishes the category.
+// DATA GAP: V24 operation node graph mappings are Tranquility server-only
 pub fn stop_active_operation_node_graph(ctx: &ServerContext, char_id: i64, cat_id: i64) {
     let prefix = format!("node_graph_bb:{char_id}:");
     let cat_str = cat_id.to_string();
@@ -515,6 +517,7 @@ pub fn stop_active_operation_node_graph(ctx: &ServerContext, char_id: i64, cat_i
 
 /// Marks AIR NPE completed for `char_id`, removes any active NPE node-graph blackboard from
 /// `service_state_blobs`, and emits `OnStopClientNodeGraphById` on the active->completed transition.
+// DATA GAP: V24 AIR NPE client node graph ID is Tranquility server-only
 pub fn skip_air_npe_and_stop_graph(
     ctx: &ServerContext,
     char_id: i64,

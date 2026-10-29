@@ -483,6 +483,7 @@ pub struct DisposalOutcome {
     pub asset_safety_wrap_ids: Vec<i64>,
     pub dropped_item_ids: Vec<i64>,
     pub destroyed_item_ids: Vec<i64>,
+    pub pending_signal_tracker_notifs: Vec<(i64, Vec<eve_proto::PyRep>)>,
 }
 
 /// Moves a structure's contents out: rigs are destroyed; in J-space or when an Abandoned
@@ -590,7 +591,7 @@ fn dispose_contents(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &mu
 /// Removes the structure's ball, emits `OnStructureRemoved` / `OnStructureRemovedFromSpace` at
 /// completion, and spawns balls at the structure position for dropped core, fittings, and
 /// packaged structure item (`feat:lifecycle.structure-leave_space`).
-fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldStateSnapshot, st: &UpwellStructureRecord, out: &DisposalOutcome) {
+fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldStateSnapshot, st: &UpwellStructureRecord, out: &mut DisposalOutcome) {
     let active_handle = ctx.systems.active_system_handles().into_iter().find(|(id, _)| *id == st.solar_system_id).map(|(_, h)| h);
     if let Some(handle) = active_handle {
         handle.try_remove_ball(st.structure_id);
@@ -669,7 +670,7 @@ fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldSt
         let _ = ctx.notify_tx.send((cid, notif));
     }
     drop(queues);
-    crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_structure_removed_with_snap(ctx, snap, st.solar_system_id, st.structure_id);
+    out.pending_signal_tracker_notifs.extend(crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_structure_removed_with_snap(ctx, snap, st.solar_system_id, st.structure_id));
 }
 
 /// Maximum tethering distance from the structure center in meters:
@@ -731,7 +732,7 @@ pub fn destroy_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext
     ext.active_pilot_by_structure.remove(&structure_id); ext.previous_ship_by_structure.remove(&structure_id);
     // feat:clones.clone-destroyed-structure: clones in destroyed structure are moved home (implants lost) per V24 rules.
     relocate_structure_clones_to_home(ctx, snap, &st);
-    emit_structure_left_space_and_spawn_drops(ctx, snap, &st, &out);
+    emit_structure_left_space_and_spawn_drops(ctx, snap, &st, &mut out);
     out
 }
 
@@ -805,7 +806,7 @@ pub fn package_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext
     snap.structure_vulnerability_windows.remove(&structure_id);
     // feat:clones.clone-destroyed-structure: clones in unanchored/packaged structure are moved home (implants lost) per V24 rules.
     relocate_structure_clones_to_home(ctx, snap, &st);
-    emit_structure_left_space_and_spawn_drops(ctx, snap, &st, &out);
+    emit_structure_left_space_and_spawn_drops(ctx, snap, &st, &mut out);
     out
 }
 
@@ -1052,6 +1053,9 @@ pub fn sync_all_structures(ctx: &ServerContext) -> Vec<(i64, DisposalOutcome)> {
         save_ext_state(snap, &ext);
         gone
     });
+    for (_, out) in &gone {
+        crate::services::fleet_social::fleet_social_scanning::dispatch_signal_tracker_notifications(ctx, out.pending_signal_tracker_notifs.clone());
+    }
     for (sys_id, aid, corp_id, hub_id) in sov_claims {
         let _ = crate::services::sov_services::claim_system_sovereignty(ctx, sys_id, aid, corp_id, hub_id);
     }

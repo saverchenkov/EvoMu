@@ -405,9 +405,9 @@ async fn notify_batch2_fighters_ewar_mutual_wars_strip_and_tracker() {
 
 // parity: notify:OnNewProbe, notify:OnSystemScanStarted, notify:OnProbeWarpStart
 // parity: notify:OnSystemScanStopped, notify:OnProbesIdle, notify:OnProbeStateChanged
-// parity: notify:OnScannerInfoRemoved, notify:OnAbyssalLocationEntered, notify:OnAddExpiryDurationForAbyssalContent
-// parity: notify:OnAbyssalContentFinished, notify:OnAbyssalLocationExited, notify:OnVoidSpaceEntered
-// parity: notify:OnAddExpiryDurationForVoidSpaceContent, notify:OnVoidSpaceRelog
+// parity: notify:OnScannerInfoRemoved, notify:OnAddExpiryDurationForAbyssalContent
+// parity: notify:OnAbyssalLocationExited, notify:OnVoidSpaceEntered
+// parity: notify:OnAddExpiryDurationForVoidSpaceContent
 #[tokio::test]
 async fn notify_batch2_probe_scanning_abyssal_and_void_space() {
     eve_testkit::attest(&[
@@ -418,13 +418,10 @@ async fn notify_batch2_probe_scanning_abyssal_and_void_space() {
         "notify:OnProbesIdle",
         "notify:OnProbeStateChanged",
         "notify:OnScannerInfoRemoved",
-        "notify:OnAbyssalLocationEntered",
         "notify:OnAddExpiryDurationForAbyssalContent",
-        "notify:OnAbyssalContentFinished",
         "notify:OnAbyssalLocationExited",
         "notify:OnVoidSpaceEntered",
         "notify:OnAddExpiryDurationForVoidSpaceContent",
-        "notify:OnVoidSpaceRelog",
     ]);
 
     let ctx = ServerContext::new();
@@ -527,28 +524,20 @@ async fn notify_batch2_probe_scanning_abyssal_and_void_space() {
     assert!(relog_args[0].dict_get("end_time").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
 }
 
-// parity: notify:OnVoidSpaceContentFinished, notify:OnSeasonSelected, notify:OnChallengeProgressUpdate
-// parity: notify:OnChallengeCompleted, notify:OnChallengeRewardsGranted, notify:OnSeasonalPointsUpdated
-// parity: notify:OnSeasonalGoalCompleted, notify:OnSeasonOmegaRewardsClaimed, notify:OnSeasonsFsdDataChanged
-// parity: notify:OnExpertSystemsUpdated, notify:OnStartClientNodeGraph, notify:OnClientNodeGraphUpdate
-// parity: notify:OnStopClientNodeGraph, notify:OnStopClientNodeGraphById
+// parity: notify:OnSeasonSelected, notify:OnChallengeProgressUpdate, notify:OnChallengeCompleted
+// parity: notify:OnChallengeRewardsGranted, notify:OnSeasonalPointsUpdated, notify:OnSeasonsFsdDataChanged
+// parity: notify:OnExpertSystemsUpdated, notify:OnClientNodeGraphUpdate
 #[tokio::test]
 async fn notify_batch2_void_exit_seasons_expert_systems_and_node_graphs() {
     eve_testkit::attest(&[
-        "notify:OnVoidSpaceContentFinished",
         "notify:OnSeasonSelected",
         "notify:OnChallengeProgressUpdate",
         "notify:OnChallengeCompleted",
         "notify:OnChallengeRewardsGranted",
         "notify:OnSeasonalPointsUpdated",
-        "notify:OnSeasonalGoalCompleted",
-        "notify:OnSeasonOmegaRewardsClaimed",
         "notify:OnSeasonsFsdDataChanged",
         "notify:OnExpertSystemsUpdated",
-        "notify:OnStartClientNodeGraph",
         "notify:OnClientNodeGraphUpdate",
-        "notify:OnStopClientNodeGraph",
-        "notify:OnStopClientNodeGraphById",
     ]);
 
     let ctx = ServerContext::new();

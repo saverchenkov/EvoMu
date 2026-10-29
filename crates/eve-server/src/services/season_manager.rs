@@ -1053,7 +1053,7 @@ pub fn handle_season_manager(
                 Ok((rep, season_id, prev_pts, pts, is_omega)) => {
                     ctx.notify(NotificationTarget::Character(char_id), "OnChallengeRewardsGranted", "charid", vec![PyRep::Integer(ch_id)]);
                     ctx.notify(NotificationTarget::Character(char_id), "OnSeasonalPointsUpdated", "charid", vec![PyRep::Integer(season_id), PyRep::Integer(pts)]);
-                    // DERIVED: 10-point seasonal goal milestone cadence; V24 `seasonselection.fsdbinary` ships no static reward-track point thresholds (live-ops server schedule).
+                    // DATA GAP: V24 seasonselection.fsdbinary ships no static reward-track point thresholds or clone-grade requirements
                     let (prev_goal, new_goal) = (prev_pts / 10, pts / 10);
                     if new_goal > prev_goal {
                         for g_idx in prev_goal..new_goal {

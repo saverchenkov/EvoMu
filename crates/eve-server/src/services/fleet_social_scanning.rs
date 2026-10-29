@@ -1011,9 +1011,13 @@ pub(crate) fn signal_tracker_subscribers_in_snap(
     };
     let mut subs: Vec<i64> = serde_json::from_str(raw).unwrap_or_default();
     subs.retain(|cid| {
-        snap.characters
-            .get(cid)
-            .is_some_and(|c| c.solar_system_id == sys_id)
+        snap.characters.get(cid).is_some_and(|c| {
+            c.solar_system_id == sys_id
+                && snap
+                    .sessions
+                    .get(&c.user_id)
+                    .is_some_and(|os| os.character_id == Some(*cid))
+        })
     });
     subs.sort_unstable();
     subs.dedup();
@@ -1195,45 +1199,34 @@ pub(crate) fn emit_signal_tracker_structure_delta(
 }
 
 pub(crate) fn emit_signal_tracker_structure_removed_with_snap(
-    ctx: &ServerContext,
+    _ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
     sys_id: u32,
     structure_id: i64,
-) {
+) -> Vec<(i64, Vec<PyRep>)> {
     let subs = signal_tracker_subscribers_in_snap(snap, sys_id);
     if subs.is_empty() {
-        return;
+        return Vec::new();
     }
-    let now_ft = ctx.now_blueos_filetime_ticks();
     let args = vec![
         PyRep::Integer(i64::from(sys_id)),
         PyRep::Dict(Vec::new()),
         PyRep::List(vec![PyRep::Integer(structure_id)]),
     ];
-    let mut queues = ctx
-        .pending_notifications
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
-    for cid in subs {
-        let uid = snap.characters.get(&cid).map(|c| c.user_id);
-        let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(
-            cid,
-            uid,
+    subs.into_iter().map(|cid| (cid, args.clone())).collect()
+}
+
+pub(crate) fn dispatch_signal_tracker_notifications(
+    ctx: &ServerContext,
+    notifs: impl IntoIterator<Item = (i64, Vec<PyRep>)>,
+) {
+    for (cid, args) in notifs {
+        ctx.notify(
+            NotificationTarget::Character(cid),
             "OnSignalTrackerStructureUpdate",
             "charid",
-            args.clone(),
+            args,
         );
-        let notif = crate::router::PendingMachoNotification {
-            recipient_char_id: cid,
-            event: "OnSignalTrackerStructureUpdate".into(),
-            id_type: "charid".into(),
-            args: args.clone(),
-            packet,
-            marshaled_packet,
-            created_filetime: now_ft,
-        };
-        queues.entry(cid).or_default().push(notif.clone());
-        let _ = ctx.notify_tx.send((cid, notif));
     }
 }
 
@@ -1302,22 +1295,17 @@ pub(crate) fn emit_signal_tracker_site_removed_with_db(
         ];
         for &(cid, uid) in &recips {
             let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(
-                cid,
-                uid,
-                event_name,
-                "charid",
-                args.clone(),
+                cid, uid, event_name, "charid", args.clone(),
             );
             let notif = crate::router::cache_notifications::PendingMachoNotification {
-                recipient_char_id: cid,
-                event: event_name.into(),
-                id_type: "charid".into(),
-                args: args.clone(),
-                packet,
-                marshaled_packet,
-                created_filetime: now_ft,
+                recipient_char_id: cid, event: event_name.into(), id_type: "charid".into(),
+                args: args.clone(), packet, marshaled_packet, created_filetime: now_ft,
             };
-            queues.entry(cid).or_default().push(notif.clone());
+            let q = queues.entry(cid).or_default();
+            if q.len() >= crate::router::cache_notifications::MAX_PENDING_NOTIFICATIONS_PER_CHAR {
+                q.remove(0);
+            }
+            q.push(notif.clone());
             let _ = notify_tx.send((cid, notif));
         }
     }

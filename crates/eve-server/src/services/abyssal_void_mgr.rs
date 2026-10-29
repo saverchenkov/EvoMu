@@ -192,6 +192,7 @@ pub async fn handle(
                     });
                     let rem_sec = vs.expires_at_sec.saturating_sub(ctx.now_unix()) as i64;
                     let end_ft = ctx.now_blueos_filetime_ticks() + rem_sec.max(1) * 10_000_000;
+                    // DATA GAP: V24 live room IDs and nebula graphic IDs are Tranquility server-only dynamic instancing data
                     let client_data = PyRep::Dict(vec![
                         (PyRep::String("content_id".into()), PyRep::Integer(persisted_cid)),
                         (PyRep::String("nebula_graphic_id".into()), PyRep::Integer(200_001)),
@@ -552,6 +553,7 @@ fn emit_abyssal_entry_notifications(
     tier: u8,
     remaining_sec: i64,
 ) {
+    // DATA GAP: V24 live room IDs and nebula graphic IDs are Tranquility server-only dynamic instancing data
     let client_data = PyRep::Dict(vec![
         (PyRep::String("content_id".into()), PyRep::Integer(pocket_id)),
         (PyRep::String("nebula_graphic_id".into()), PyRep::Integer(21_000 + tier as i64)),
