@@ -155,14 +155,19 @@ impl WorldRepository {
 
             let (sys_id, station_id, const_id, reg_id) = if let Some(target_sys_id) = qa_starter_system_id {
                 if let Some(target_sys) = sde.solar_systems.get(&target_sys_id) {
-                    let st_id = target_sys
+                    if let Some(st) = target_sys
                         .stations
                         .iter()
                         .find(|s| s.station_id == 60_003_760)
                         .or_else(|| target_sys.stations.first())
-                        .map(|s| s.station_id)
-                        .unwrap_or(school.station_id);
-                    (target_sys_id, st_id, target_sys.constellation_id, target_sys.region_id)
+                    {
+                        (target_sys_id, st.station_id, target_sys.constellation_id, target_sys.region_id)
+                    } else {
+                        let sys = sde.solar_systems.get(&school.solar_system_id);
+                        let const_id = sys.map(|s| s.constellation_id).unwrap_or(20_000_020);
+                        let reg_id = sys.map(|s| s.region_id).unwrap_or(10_000_002);
+                        (school.solar_system_id, school.station_id, const_id, reg_id)
+                    }
                 } else {
                     let sys = sde.solar_systems.get(&school.solar_system_id);
                     let const_id = sys.map(|s| s.constellation_id).unwrap_or(20_000_020);

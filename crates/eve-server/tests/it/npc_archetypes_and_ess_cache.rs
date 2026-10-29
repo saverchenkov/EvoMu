@@ -292,7 +292,15 @@ async fn test_npc_archetypes_dynamically_derived_from_sde() {
     let (_ow, off_bounty, off_loot) =
         destroy_specialized_npc_and_queue_bounty(&ctx, sys_id, officer_npc, char_id).await;
     assert!(off_bounty >= 25_000_000.0, "Officer NPC must pay high bounty");
-    assert!(off_loot.contains(&14254), "Officer NPC must drop officer module (14254)");
+    assert!(
+        off_loot.iter().any(|&tid| {
+            ctx.sde
+                .types
+                .get(&tid)
+                .is_some_and(|t| t.meta_group_id == Some(5) && t.name.starts_with("Cormack"))
+        }),
+        "Officer NPC must drop an officer module"
+    );
 
     // 7. Triglavian (`48086`): spawn dynamically, verify archetype and SDE loot (database & condensate)
     let triglavian_npc = spawn_specialized_npc_entity(&ctx, sys_id, 48086, "", 46, DVec3::new(10_000.0, 0.0, 0.0)).await;

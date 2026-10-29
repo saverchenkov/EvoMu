@@ -559,31 +559,67 @@ pub fn register_skill_handlers(
 
     // 11. eve.skilltype.GetRequest -> GetResponse
     let sde_sk_type = Arc::clone(&router.sde);
-    let skilltype_handler: QuasarHandlerFn = Arc::new(move |_ctx, _any, dyn_msg| {
-        let tid = dyn_msg
-            .get(1)
-            .and_then(|v| match v {
+    let skilltype_handler: QuasarHandlerFn = Arc::new(move |_ctx, any, dyn_msg| {
+        let tid_from_dyn = dyn_msg.get(1).and_then(|v| match v {
+            DynamicValue::Uint32(u) => Some(*u),
+            DynamicValue::Int32(i) => Some(*i as u32),
+            DynamicValue::Uint64(u) => Some(*u as u32),
+            DynamicValue::Int64(i) => Some(*i as u32),
+            DynamicValue::Message(m) => m.get(1).and_then(|mv| match mv {
                 DynamicValue::Uint32(u) => Some(*u),
                 DynamicValue::Int32(i) => Some(*i as u32),
+                DynamicValue::Uint64(u) => Some(*u as u32),
+                DynamicValue::Int64(i) => Some(*i as u32),
                 _ => None,
+            }),
+            _ => None,
+        });
+        let tid = tid_from_dyn
+            .or_else(|| {
+                eve_proto::quasar::WireMessage::decode(&any.value).ok().and_then(|wm| {
+                    wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| {
+                        f.value.as_varint().map(|v| v as u32).or_else(|| {
+                            f.value.as_bytes().and_then(|b| {
+                                eve_proto::quasar::WireMessage::decode(b).ok().and_then(|swm| {
+                                    swm.fields
+                                        .iter()
+                                        .find(|s| s.field_number == 1)
+                                        .and_then(|s| s.value.as_varint().map(|v| v as u32))
+                                })
+                            })
+                        })
+                    })
+                })
             })
             .unwrap_or(3300);
 
-        let (rank, prim_attr, sec_attr) = sde_sk_type
-            .types
-            .get(&tid)
-            .map(|t| {
-                let r = t.default_attributes.get(&275).copied().unwrap_or(1.0).round() as u64;
-                let p = t.default_attributes.get(&180).copied().unwrap_or(167.0).round() as u64;
-                let s = t.default_attributes.get(&181).copied().unwrap_or(168.0).round() as u64;
-                (r.max(1), p, s)
-            })
-            .unwrap_or((1, 167, 168));
+        let Some(skill_type) = sde_sk_type.types.get(&tid) else {
+            return Err((STATUS_NOT_FOUND, format!("Skill type {tid} not found in SDE")));
+        };
+
+        let rank = skill_type
+            .default_attributes
+            .get(&275)
+            .copied()
+            .unwrap_or(1.0)
+            .round() as u64;
+        let prim_attr = skill_type
+            .default_attributes
+            .get(&180)
+            .copied()
+            .unwrap_or(167.0)
+            .round() as u64;
+        let sec_attr = skill_type
+            .default_attributes
+            .get(&181)
+            .copied()
+            .unwrap_or(168.0)
+            .round() as u64;
 
         let mut out = Vec::new();
         let mut attr_bytes = Vec::new();
         encode_varint_field(1, tid as u64, &mut attr_bytes);
-        encode_varint_field(2, rank, &mut attr_bytes);
+        encode_varint_field(2, rank.max(1), &mut attr_bytes);
         encode_varint_field(3, prim_attr, &mut attr_bytes);
         encode_varint_field(4, sec_attr, &mut attr_bytes);
         encode_bytes_field(1, &attr_bytes, &mut out);

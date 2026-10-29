@@ -11,16 +11,28 @@ use eve_proto::{BridgeRpcError, PyRep};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Authorizes mutating certificate operations: target must match caller character unless session has GM permissions.
+/// Authorizes mutating certificate operations: requires GM role (`ROLE_GM_MASK` or `has_gm_role()`).
 fn check_target_auth(
+    session: &SessionState,
+    _caller_cid: i64,
+    _target_cid: i64,
+) -> Result<(), BridgeRpcError> {
+    if session.has_gm_role() || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0 {
+        return Ok(());
+    }
+    Err(BridgeRpcError::user_error("AccessDenied"))
+}
+
+/// Authorizes updating certificate display flags (own character or GM).
+fn check_flags_auth(
     session: &SessionState,
     caller_cid: i64,
     target_cid: i64,
 ) -> Result<(), BridgeRpcError> {
-    if target_cid == caller_cid {
-        return Ok(());
-    }
-    if session.has_gm_role() {
+    if target_cid == caller_cid
+        || session.has_gm_role()
+        || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0
+    {
         return Ok(());
     }
     Err(BridgeRpcError::user_error("AccessDenied"))
@@ -106,17 +118,6 @@ pub fn derive_certificate_levels(
         }
     }
 
-    // Include explicitly granted certificates (cannot downgrade higher skill-derived level)
-    ctx.db.with_snapshot(|snap| {
-        let state = load_certificate_state(snap, char_id);
-        for (cid, lvl) in state.certificates {
-            cert_levels
-                .entry(cid)
-                .and_modify(|cur| *cur = (*cur).max(lvl))
-                .or_insert(lvl);
-        }
-    });
-
     cert_levels
 }
 
@@ -141,7 +142,20 @@ pub fn handle(
 
     match method {
         "GetMyCertificates" => {
-            let cert_map = derive_certificate_levels(ctx, char_id);
+            let mut cert_map = derive_certificate_levels(ctx, char_id);
+            if session.has_gm_role()
+                || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0
+            {
+                ctx.db.with_snapshot(|snap| {
+                    let state = load_certificate_state(snap, char_id);
+                    for (cid, lvl) in state.certificates {
+                        cert_map
+                            .entry(cid)
+                            .and_modify(|cur| *cur = (*cur).max(lvl))
+                            .or_insert(lvl);
+                    }
+                });
+            }
             let entries: Vec<(PyRep, PyRep)> = cert_map
                 .into_iter()
                 .map(|(cid, lvl)| (PyRep::Integer(cid as i64), PyRep::Integer(lvl as i64)))
@@ -163,7 +177,20 @@ pub fn handle(
                 .first()
                 .and_then(|a| a.as_i64())
                 .unwrap_or(char_id);
-            let cert_map = derive_certificate_levels(ctx, target_char_id);
+            let mut cert_map = derive_certificate_levels(ctx, target_char_id);
+            if session.has_gm_role()
+                || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0
+            {
+                ctx.db.with_snapshot(|snap| {
+                    let state = load_certificate_state(snap, target_char_id);
+                    for (cid, lvl) in state.certificates {
+                        cert_map
+                            .entry(cid)
+                            .and_modify(|cur| *cur = (*cur).max(lvl))
+                            .or_insert(lvl);
+                    }
+                });
+            }
             let entries: Vec<(PyRep, PyRep)> = cert_map
                 .into_iter()
                 .map(|(cid, lvl)| (PyRep::Integer(cid as i64), PyRep::Integer(lvl as i64)))
@@ -291,7 +318,7 @@ pub fn handle(
                 return Some(Err(e));
             }
 
-            let level = level.clamp(1, 5);
+            let level = level.clamp(0, 5);
             ctx.db.with_mut_snapshot(|snap| {
                 let mut st = load_certificate_state(snap, target_cid);
                 st.certificates.insert(cert_id, level);
@@ -331,7 +358,7 @@ pub fn handle(
                                         t.first().and_then(|v| v.as_i64()),
                                         t.get(1).and_then(|v| v.as_i64()),
                                     ) {
-                                        st.certificates.insert(cid as u32, (lvl as u8).clamp(1, 5));
+                                        st.certificates.insert(cid as u32, (lvl as u8).clamp(0, 5));
                                     } else if let Some(cid) = t.first().and_then(|v| v.as_i64()) {
                                         st.certificates.insert(cid as u32, 1);
                                     }
@@ -339,7 +366,7 @@ pub fn handle(
                                 PyRep::Dict(entries) => {
                                     for (k, v) in entries {
                                         if let (Some(cid), Some(lvl)) = (k.as_i64(), v.as_i64()) {
-                                            st.certificates.insert(cid as u32, (lvl as u8).clamp(1, 5));
+                                            st.certificates.insert(cid as u32, (lvl as u8).clamp(0, 5));
                                         }
                                     }
                                 }
@@ -350,7 +377,7 @@ pub fn handle(
                     PyRep::Dict(entries) => {
                         for (k, v) in entries {
                             if let (Some(cid), Some(lvl)) = (k.as_i64(), v.as_i64()) {
-                                st.certificates.insert(cid as u32, lvl as u8);
+                                st.certificates.insert(cid as u32, (lvl as u8).clamp(0, 5));
                             }
                         }
                     }
@@ -389,20 +416,20 @@ pub fn handle(
                                         if let (Some(cid), Some(lvl), Some(flg)) =
                                             (t[0].as_i64(), t[1].as_i64(), t[2].as_i64())
                                         {
-                                            st.certificates.insert(cid as u32, lvl as u8);
+                                            st.certificates.insert(cid as u32, (lvl as u8).clamp(0, 5));
                                             st.flags.insert(cid as u32, flg as u32);
                                         }
                                     } else if let (Some(cid), Some(lvl)) = (
                                         t.first().and_then(|v| v.as_i64()),
                                         t.get(1).and_then(|v| v.as_i64()),
                                     ) {
-                                        st.certificates.insert(cid as u32, lvl as u8);
+                                        st.certificates.insert(cid as u32, (lvl as u8).clamp(0, 5));
                                     }
                                 }
                                 PyRep::Dict(entries) => {
                                     for (k, v) in entries {
                                         if let (Some(cid), Some(lvl)) = (k.as_i64(), v.as_i64()) {
-                                            st.certificates.insert(cid as u32, lvl as u8);
+                                            st.certificates.insert(cid as u32, (lvl as u8).clamp(0, 5));
                                         }
                                     }
                                 }
@@ -413,7 +440,7 @@ pub fn handle(
                     PyRep::Dict(entries) => {
                         for (k, v) in entries {
                             if let (Some(cid), Some(lvl)) = (k.as_i64(), v.as_i64()) {
-                                st.certificates.insert(cid as u32, lvl as u8);
+                                st.certificates.insert(cid as u32, (lvl as u8).clamp(0, 5));
                             }
                         }
                     }
@@ -470,7 +497,7 @@ pub fn handle(
                 (char_id, Vec::new())
             };
 
-            if let Err(e) = check_target_auth(session, char_id, target_cid) {
+            if let Err(e) = check_flags_auth(session, char_id, target_cid) {
                 return Some(Err(e));
             }
 

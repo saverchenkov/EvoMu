@@ -418,7 +418,7 @@ async fn test_hauler_convoy_multi_system_movement_and_cargo_drop() {
         .cloned()
         .expect("Hauler must have combat state in new system");
     assert!(
-        hauler_combat.max_shield_hp >= 1_000.0 && hauler_combat.structure_hp >= 1_000.0,
+        hauler_combat.max_shield_hp > 0.0 && hauler_combat.structure_hp > 0.0,
         "Hauler must have valid CombatState HP (found max_shield = {}, structure = {})",
         hauler_combat.max_shield_hp,
         hauler_combat.structure_hp

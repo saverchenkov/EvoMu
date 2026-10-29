@@ -374,7 +374,7 @@ async fn test_concord_response_and_faction_police_enforcement() {
     );
     assert!(
         att_after.security_status <= -5.0,
-        "Three unlawful pod shots + CONCORD penalty must organically drop security status <= -5.0, got {}",
+        "Three unlawful pod shots must organically drop security status <= -5.0, got {}",
         att_after.security_status
     );
 

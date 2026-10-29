@@ -43,22 +43,27 @@ async fn create_and_select_alpha_pilot(ctx: &ServerContext, sid: u64, user: &str
         ctx, &mut sess, "charUnboundMgr", "CreateCharacterWithDoll",
         &[PyRep::String(char_name.into()), PyRep::Integer(1), PyRep::Integer(1), PyRep::Integer(11), doll, portrait, PyRep::Integer(17), PyRep::None, PyRep::Integer(JITA_SYS as i64)],
     ).await.expect("CreateCharacterWithDoll").as_i64().expect("char_id");
+    // Verify R-QA-SYS-01: normal account cannot choose starter system
+    let created_char = ctx.db.get_character(cid).expect("created character");
+    assert_ne!(created_char.solar_system_id, JITA_SYS, "Normal account cannot choose starter system (R-QA-SYS-01)");
     rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(cid)]).await.expect("SelectCharacterID");
     (sess, cid)
 }
 
 fn place_hangar_item(ctx: &ServerContext, item_id: i64, type_id: u32, owner_id: i64, qty: i32) {
+    let loc_id = ctx.db.get_character(owner_id).ok().and_then(|c| c.station_id).unwrap_or(JITA_STN);
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(item_id, InventoryItemRecord {
-            item_id, type_id, owner_id, location_id: JITA_STN, flag: InventoryFlag::Hangar,
+            item_id, type_id, owner_id, location_id: loc_id, flag: InventoryFlag::Hangar,
             quantity: qty, singleton: false, version: 1, ..Default::default()
         });
     });
 }
 
 async fn upgrade_to_omega_via_nes(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, plex_item_id: i64) {
+    let loc_id = ctx.db.get_character(char_id).ok().and_then(|c| c.station_id).or(sess.station_id).unwrap_or(JITA_STN);
     place_hangar_item(ctx, plex_item_id, 44_992, char_id, 500);
-    rpc(ctx, sess, "invbroker", "DepositPlexToVault", &[PyRep::Integer(JITA_STN), PyRep::Integer(plex_item_id), PyRep::Integer(500), PyRep::Integer(0)]).await.expect("DepositPlexToVault");
+    rpc(ctx, sess, "invbroker", "DepositPlexToVault", &[PyRep::Integer(loc_id), PyRep::Integer(plex_item_id), PyRep::Integer(500), PyRep::Integer(0)]).await.expect("DepositPlexToVault");
     rpc(ctx, sess, "storeManager", "buy_offer", &[PyRep::Integer(1001)]).await.expect("buy_offer 1001 30d Omega");
 }
 
@@ -274,12 +279,16 @@ async fn test_feat_skills_certificates_and_plans_and_accelerators() {
     let PyRep::Dict(d_after) = c_after.dict_get("certificates").unwrap() else { panic!("expected Dict") };
     assert_eq!(d_after.iter().find(|(k, _)| k.as_i64() == Some(196)).and_then(|(_, v)| v.as_i64()), Some(5));
 
+    // Non-GM players cannot grant certificates (R-CERT-01: AccessDenied)
     // rpc-lint: allow crucible legacy service certificateMgr
-    assert_eq!(rpc(&ctx, &mut alpha_sess, "certificateMgr", "GrantCertificate", &[PyRep::Integer(char_id), PyRep::Integer(101), PyRep::Integer(3)]).await.unwrap().as_bool(), Some(true));
+    assert_eq!(rpc(&ctx, &mut alpha_sess, "certificateMgr", "GrantCertificate", &[PyRep::Integer(char_id), PyRep::Integer(101), PyRep::Integer(3)]).await.unwrap_err().code, "AccessDenied");
     // rpc-lint: allow crucible legacy service certificateMgr
     assert_eq!(rpc(&ctx, &mut alpha_sess, "certificateMgr", "UpdateCertificateFlags", &[PyRep::Integer(101), PyRep::Integer(7)]).await.unwrap().as_bool(), Some(true));
+    // GM session can grant certificates (clamped to 0..=5)
+    let mut gm_cert_sess = alpha_sess.clone();
+    gm_cert_sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
     // rpc-lint: allow crucible legacy service certificateMgr
-    assert_eq!(rpc(&ctx, &mut alpha_sess, "certificateMgr", "GrantCertificate", &[PyRep::Integer(90_000_001), PyRep::Integer(101), PyRep::Integer(5)]).await.unwrap_err().code, "AccessDenied");
+    assert_eq!(rpc(&ctx, &mut gm_cert_sess, "certificateMgr", "GrantCertificate", &[PyRep::Integer(char_id), PyRep::Integer(101), PyRep::Integer(3)]).await.unwrap().as_bool(), Some(true));
 
     // --- 2. Skill Plans (`feat:skills.skill-plans`) ---
     let (mut sp_attr, mut sp_req, mut req_entry, mut req_tid) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -326,6 +335,41 @@ async fn test_feat_skills_certificates_and_plans_and_accelerators() {
             .and_then(|w| w.fields.first().and_then(|id_f| id_f.value.as_bytes()).map(|u| u.starts_with(b"CERT")))
             .unwrap_or(false)
     }));
+
+    // Skill Type & Category handlers against SDE (`eve.skilltype.GetRequest`, `eve.skillcategory.GetAllRequest`)
+    let mut id_msg = Vec::new();
+    encode_varint_field(1, 3327, &mut id_msg);
+    let mut sk_type_req = Vec::new();
+    encode_bytes_field(1, &id_msg, &mut sk_type_req);
+    let sk_type_rsp = quasar_rpc(&ctx, &mut ceo_sess, "eve.skilltype.GetRequest", sk_type_req).await;
+    assert_eq!(sk_type_rsp.status_code, 200, "status message: {}", sk_type_rsp.status_message);
+    let sk_wm = WireMessage::decode(&sk_type_rsp.payload.unwrap().value).unwrap();
+    let sk_attr_bytes = sk_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap();
+    let sk_inner = WireMessage::decode(sk_attr_bytes).unwrap();
+    let sk_tid = sk_inner.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_varint().unwrap();
+    assert_eq!(sk_tid, 3327, "Must retrieve requested skill type ID 3327");
+    let rank = sk_inner.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_varint().unwrap();
+    assert_eq!(rank, 1, "Spaceship Command must have rank 1");
+
+    // Invalid skill type returns 404 Not Found
+    let mut invalid_id_msg = Vec::new();
+    encode_varint_field(1, 999_999, &mut invalid_id_msg);
+    let mut invalid_req = Vec::new();
+    encode_bytes_field(1, &invalid_id_msg, &mut invalid_req);
+    let not_found_rsp = quasar_rpc(&ctx, &mut ceo_sess, "eve.skilltype.GetRequest", invalid_req).await;
+    assert_eq!(not_found_rsp.status_code, 404, "Nonexistent skill type must return 404");
+
+    let cat_all_rsp = quasar_rpc(&ctx, &mut ceo_sess, "eve.skillcategory.GetAllRequest", Vec::new()).await;
+    assert_eq!(cat_all_rsp.status_code, 200);
+    let cat_wm = WireMessage::decode(&cat_all_rsp.payload.unwrap().value).unwrap();
+    assert!(!cat_wm.fields.is_empty(), "Skill categories must return published skill groups");
+    assert!(cat_wm.fields.iter().any(|f| {
+        WireMessage::decode(f.value.as_bytes().unwrap_or(&[]))
+            .ok()
+            .and_then(|w| w.fields.iter().find(|fl| fl.field_number == 1).and_then(|id_f| id_f.value.as_varint()))
+            .map(|gid| gid == 257)
+            .unwrap_or(false)
+    }), "Skill categories must include Spaceship Command group (257)");
 
     // --- 3. Cerebral Accelerators (`feat:skills.accelerators`) via real `dogmaIM.UseBooster` + clock ---
     rpc(&ctx, &mut alpha_sess, "skillMgr2", "SaveSkillQueue", &[PyRep::List(vec![

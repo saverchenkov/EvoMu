@@ -285,10 +285,24 @@ pub fn handle_char_unbound(
             };
             let doll_str = serialize_doll_pyrep(char_info_rep);
             let portrait_str = serialize_doll_pyrep(portrait_info_rep);
-            let qa_starter_system_id = args
-                .get(8 + offset)
-                .and_then(|a| a.as_i64())
-                .map(|v| v as u32);
+            let is_qa_or_gm = session.has_gm_role()
+                || (session.role
+                    & (eve_machonet::service_roles::ROLE_QA
+                        | eve_machonet::service_roles::ROLE_GM_MASK))
+                    != 0;
+            let qa_starter_system_id = if is_qa_or_gm {
+                args.get(8 + offset)
+                    .and_then(|a| a.as_i64())
+                    .map(|v| v as u32)
+                    .filter(|&sys_id| {
+                        ctx.sde
+                            .solar_systems
+                            .get(&sys_id)
+                            .is_some_and(|sys| !sys.stations.is_empty())
+                    })
+            } else {
+                None
+            };
 
             let res = ctx.db.create_character_with_system(
                 user_id,

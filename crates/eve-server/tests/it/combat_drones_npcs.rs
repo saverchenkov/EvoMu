@@ -1194,7 +1194,15 @@ async fn test_c4_npc_archetypes_triglavian_drifter_sleeper_edencom_clone_soldier
     let (_ow, officer_bounty, officer_loot) =
         destroy_specialized_npc_and_queue_bounty(&ctx, sys_id, officer_npc, char_id).await;
     assert!(officer_bounty >= 25_000_000.0, "Officer NPC must have high bounty");
-    assert!(officer_loot.contains(&14254), "Officer NPC must drop officer faction module");
+    assert!(
+        officer_loot.iter().any(|&tid| {
+            ctx.sde
+                .types
+                .get(&tid)
+                .is_some_and(|t| t.meta_group_id == Some(5) && t.name.starts_with("Cormack"))
+        }),
+        "Officer NPC must drop an officer faction module"
+    );
 
     // Clone Soldier Negotiator (`33175`) warp scrambles at 24 km and drops Negotiator Tag (`33141`)
     let cs_neg = spawn_specialized_npc_entity(
