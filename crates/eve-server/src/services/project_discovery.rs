@@ -234,12 +234,6 @@ pub struct PlayerProjectState {
     pub project_id: String,
     #[serde(default)]
     pub last_submitted_task_index: i64,
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
-}
-
-fn default_enabled() -> bool {
-    true
 }
 
 fn default_max_bonus_samples() -> i64 {
@@ -268,21 +262,26 @@ impl Default for PlayerProjectState {
             max_bonus_samples: 10,
             project_id: ACTIVE_PROJECT_ID.into(),
             last_submitted_task_index: 0,
-            enabled: true,
         }
     }
 }
 
-/// Return whether Project Discovery is enabled for `char_id` in persisted `PlayerProjectState`.
-pub fn is_project_discovery_enabled(ctx: &ServerContext, char_id: i64) -> bool {
-    read_player_state(ctx, char_id, |st| st.enabled)
-}
+/// Global config key (`machoNet.SetGlobalConfigValue`) controlling Project Discovery enablement.
+pub const PROJECT_DISCOVERY_ENABLED_CONFIG_KEY: &str = "projectDiscoveryEnabled";
 
-/// Update whether Project Discovery is enabled for `char_id` in persisted `PlayerProjectState`.
-pub fn set_project_discovery_enabled(ctx: &ServerContext, char_id: i64, enabled: bool) {
-    with_player_state(ctx, char_id, |st, _| {
-        st.enabled = enabled;
-    });
+/// Return whether Project Discovery is enabled on `ctx` (`machoNet` global config overriding `ServerConfig`).
+pub fn is_project_discovery_enabled(ctx: &ServerContext) -> bool {
+    if let Ok(guard) = ctx.global_config_values.read() {
+        if let Some(val) = guard.get(PROJECT_DISCOVERY_ENABLED_CONFIG_KEY) {
+            return match val {
+                PyRep::Bool(b) => *b,
+                PyRep::Integer(i) => *i != 0,
+                PyRep::String(s) => s == "1" || s.eq_ignore_ascii_case("true"),
+                _ => ctx.feature_flags.enable_project_discovery,
+            };
+        }
+    }
+    ctx.feature_flags.enable_project_discovery
 }
 
 fn read_player_state<F, R>(ctx: &ServerContext, char_id: i64, f: F) -> R
@@ -358,7 +357,7 @@ pub fn handle_project_discovery(
 
     match (service, method) {
         ("ProjectDiscovery", "is_enabled") => {
-            let enabled = is_project_discovery_enabled(ctx, char_id);
+            let enabled = is_project_discovery_enabled(ctx);
             return Some(Ok(PyRep::Bool(enabled)));
         }
         ("ProjectDiscovery", "initialize_tutorial_status") => {

@@ -871,18 +871,43 @@ fn handle_seasonal_login_claim_reward(
     res
 }
 
+/// Global config keys (`machoNet.SetGlobalConfigValue`) controlling `infoGatheringMgr`.
+pub const INFO_GATHERING_ENABLED_CONFIG_KEY: &str = "infoGatheringEnabled";
+pub const INFO_GATHERING_INTERVAL_CONFIG_KEY: &str = "infoGatheringClientWorkerInterval";
+
+fn info_gathering_config(ctx: &ServerContext) -> (bool, i64) {
+    let mut enabled = ctx.feature_flags.enable_info_gathering;
+    let mut interval = (ctx.feature_flags.info_gathering_interval_secs as i64).max(1);
+    if let Ok(guard) = ctx.global_config_values.read() {
+        if let Some(val) = guard.get(INFO_GATHERING_ENABLED_CONFIG_KEY) {
+            enabled = match val {
+                PyRep::Bool(b) => *b,
+                PyRep::Integer(i) => *i != 0,
+                PyRep::String(s) => s == "1" || s.eq_ignore_ascii_case("true"),
+                _ => enabled,
+            };
+        }
+        if let Some(val) = guard.get(INFO_GATHERING_INTERVAL_CONFIG_KEY) {
+            let parsed = match val {
+                PyRep::Integer(i) => Some(*i),
+                PyRep::String(s) => s.parse::<i64>().ok(),
+                _ => None,
+            };
+            if let Some(v) = parsed {
+                interval = v.max(1);
+            }
+        }
+    }
+    (enabled, interval)
+}
+
 fn handle_info_gathering_get_state_and_config(
     ctx: &ServerContext,
     session: &SessionState,
 ) -> Result<PyRep, BridgeRpcError> {
     ServerContext::require_auth(session)?;
 
-    let (is_enabled, worker_interval) = ctx.db.with_snapshot(|snap| {
-        let ext = load_cosmetics_ui_state(snap);
-        let enabled = ext.info_gathering_enabled.unwrap_or(true);
-        let interval = ext.info_gathering_interval.unwrap_or(300).max(1);
-        (enabled, interval)
-    });
+    let (is_enabled, worker_interval) = info_gathering_config(ctx);
 
     let mut sde_event_ids: Vec<i64> = ctx
         .sde
@@ -913,9 +938,7 @@ fn handle_info_gathering_log_events(
         .first()
         .ok_or_else(|| err("InvalidArgument", "Missing events dictionary or list"))?;
 
-    let is_enabled = ctx
-        .db
-        .with_snapshot(|snap| load_cosmetics_ui_state(snap).info_gathering_enabled.unwrap_or(true));
+    let (is_enabled, _) = info_gathering_config(ctx);
     let status_code = if is_enabled { 0 } else { 1 };
 
     let (status_entries, event_logs): (Vec<(PyRep, PyRep)>, Vec<String>) = match events {
@@ -1063,16 +1086,17 @@ fn handle_community_track_get_attributes(
             })
             .unwrap_or_default();
 
-        let (template_id, quasar_progress) = if let Some(track) = quasar_tracks.get(&track_uid) {
-            let tid = if track.template_id != 0 {
-                i64::from(track.template_id)
-            } else {
-                i64::from(track.track_id)
-            };
-            (tid, i64::try_from(track.current_progress).unwrap_or(i64::MAX))
-        } else {
-            (instance_id, 0)
-        };
+        let track = quasar_tracks
+            .get(&track_uid)
+            .filter(|t| t.active)
+            .ok_or_else(|| {
+                err(
+                    "CommunityTrackInstanceNotFound",
+                    format!("Active community track instance {instance_id} not found"),
+                )
+            })?;
+
+        let template_id = i64::from(track.template_id);
 
         let template = templates.get(&template_id).ok_or_else(|| {
             err(
@@ -1083,13 +1107,7 @@ fn handle_community_track_get_attributes(
             )
         })?;
 
-        let ext = load_cosmetics_ui_state(snap);
-        let raw_progress = quasar_progress.max(
-            ext.community_track_points
-                .get(&instance_id)
-                .copied()
-                .unwrap_or(0),
-        );
+        let raw_progress = i64::try_from(track.current_progress).unwrap_or(i64::MAX);
         let progress = raw_progress.clamp(0, i64::from(template.goal));
 
         // 2-tuple (fsd_identifier, progress) per V24 communitytracks/client/repository.pyj:114.

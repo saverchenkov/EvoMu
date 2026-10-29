@@ -63,10 +63,20 @@ pub struct FeatureFlagsConfig {
     pub enable_living_world: bool,
     #[serde(default)]
     pub seed_demo: bool,
+    #[serde(default = "default_true")]
+    pub enable_project_discovery: bool,
+    #[serde(default = "default_true")]
+    pub enable_info_gathering: bool,
+    #[serde(default = "default_info_gathering_interval_secs")]
+    pub info_gathering_interval_secs: u64,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_info_gathering_interval_secs() -> u64 {
+    300
 }
 
 impl Default for FeatureFlagsConfig {
@@ -76,6 +86,9 @@ impl Default for FeatureFlagsConfig {
             enable_esi_http: true,
             enable_living_world: true,
             seed_demo: false,
+            enable_project_discovery: true,
+            enable_info_gathering: true,
+            info_gathering_interval_secs: default_info_gathering_interval_secs(),
         }
     }
 }
@@ -177,6 +190,9 @@ impl ServerConfig {
         if cfg.downtime_utc_secs_of_day >= 86_400 {
             return Err("downtime_utc_secs_of_day in evomu.toml must be < 86400".into());
         }
+        if cfg.feature_flags.info_gathering_interval_secs == 0 {
+            return Err("feature_flags.info_gathering_interval_secs in evomu.toml must be >= 1".into());
+        }
         Ok(cfg)
     }
 
@@ -273,6 +289,9 @@ enable_quasar_gateway = false
 enable_esi_http = true
 enable_living_world = false
 seed_demo = true
+enable_project_discovery = false
+enable_info_gathering = false
+info_gathering_interval_secs = 600
 "#;
         let cfg = ServerConfig::from_toml_str(toml_text).expect("parse ServerConfig");
         assert_eq!(cfg.bind_address, "127.0.0.1");
@@ -287,6 +306,9 @@ seed_demo = true
         assert!(cfg.feature_flags.enable_esi_http);
         assert!(!cfg.feature_flags.enable_living_world);
         assert!(cfg.feature_flags.seed_demo);
+        assert!(!cfg.feature_flags.enable_project_discovery);
+        assert!(!cfg.feature_flags.enable_info_gathering);
+        assert_eq!(cfg.feature_flags.info_gathering_interval_secs, 600);
 
         assert!(ServerConfig::from_toml_str(r#"bind_address = """#).is_err());
         assert!(ServerConfig::from_toml_str(r#"sde_path = """#).is_err());
@@ -294,5 +316,6 @@ seed_demo = true
         assert!(ServerConfig::from_toml_str(r#"belt_respawn_interval_secs = 0"#).is_err());
         assert!(ServerConfig::from_toml_str(r#"belt_respawn_interval_secs = 9999999"#).is_err());
         assert!(ServerConfig::from_toml_str(r#"downtime_utc_secs_of_day = 86400"#).is_err());
+        assert!(ServerConfig::from_toml_str("[feature_flags]\ninfo_gathering_interval_secs = 0").is_err());
     }
 }

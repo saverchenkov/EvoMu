@@ -333,12 +333,17 @@ async fn test_fast_checkout_and_activity_complete() {
     // ------------------------------------------------------------------------
     // Part 2: FastCheckoutService Tutorial RPCs & Multi-Character Isolation
     // ------------------------------------------------------------------------
-    // 2.1 FastCheckoutService.is_enabled (state-backed per character)
+    // 2.1 FastCheckoutService.is_enabled (driven via live machoNet.SetGlobalConfigValue)
     assert_eq!(rpc(&ctx, &mut sess1, "FastCheckoutService", "is_enabled", &[]).await.expect("is_enabled"), PyRep::Bool(true));
-    eve_server::services::fast_checkout_and_activity::set_project_discovery_enabled(&ctx, CHAR_ID, false);
+    assert_eq!(rpc(&ctx, &mut sess1, "ProjectDiscovery", "is_enabled", &[]).await.expect("PD is_enabled"), PyRep::Bool(true));
+    let non_gm_err = rpc(&ctx, &mut sess1, "machoNet", "SetGlobalConfigValue", &[PyRep::String("projectDiscoveryEnabled".into()), PyRep::Bool(false)]).await.expect_err("non-GM must fail");
+    assert_eq!(non_gm_err.code, "InsufficientRole");
+    let mut gm_sess = sess1.clone();
+    gm_sess.role |= eve_machonet::service_roles::ROLE_GML;
+    rpc(&ctx, &mut gm_sess, "machoNet", "SetGlobalConfigValue", &[PyRep::String("projectDiscoveryEnabled".into()), PyRep::Bool(false)]).await.expect("GM disable ProjectDiscovery");
     assert_eq!(rpc(&ctx, &mut sess1, "FastCheckoutService", "is_enabled", &[]).await.expect("is_enabled disabled"), PyRep::Bool(false));
-    assert_eq!(rpc(&ctx, &mut sess2, "FastCheckoutService", "is_enabled", &[]).await.expect("is_enabled char 2"), PyRep::Bool(true));
-    eve_server::services::fast_checkout_and_activity::set_project_discovery_enabled(&ctx, CHAR_ID, true);
+    assert_eq!(rpc(&ctx, &mut sess2, "ProjectDiscovery", "is_enabled", &[]).await.expect("PD is_enabled disabled"), PyRep::Bool(false));
+    rpc(&ctx, &mut gm_sess, "machoNet", "SetGlobalConfigValue", &[PyRep::String("projectDiscoveryEnabled".into()), PyRep::Bool(true)]).await.expect("GM enable ProjectDiscovery");
     assert_eq!(rpc(&ctx, &mut sess1, "FastCheckoutService", "is_enabled", &[]).await.expect("is_enabled re-enabled"), PyRep::Bool(true));
 
     // 2.2 FastCheckoutService.initialize_tutorial_status (new char 1: incomplete -> Bool(false))
@@ -474,7 +479,13 @@ async fn test_fast_checkout_and_activity_complete() {
     .expect("GetActivityBadgeStatuses char 2");
     assert_eq!(badges_char2, PyRep::PySet(vec![]));
 
-    // 3.2 activityMgr.ActivitySeen records seen SDE newactivities IDs (42, 43) for Character 1 only
+    // 3.2 activityMgr.ActivitySeen rejects invalid/non-SDE IDs and records SDE newactivities IDs (42, 43) for Character 1 only
+    assert_eq!(rpc(&ctx, &mut sess1, "activityMgr", "ActivitySeen", &[]).await.expect_err("missing arg").code, "InvalidArgument");
+    assert_eq!(rpc(&ctx, &mut sess1, "activityMgr", "ActivitySeen", &[PyRep::Integer(0)]).await.expect_err("zero id").code, "InvalidArgument");
+    assert_eq!(rpc(&ctx, &mut sess1, "activityMgr", "ActivitySeen", &[PyRep::Integer(-1)]).await.expect_err("negative id").code, "InvalidArgument");
+    assert_eq!(rpc(&ctx, &mut sess1, "activityMgr", "ActivitySeen", &[PyRep::String("bad".into())]).await.expect_err("non-int").code, "InvalidArgument");
+    assert_eq!(rpc(&ctx, &mut sess1, "activityMgr", "ActivitySeen", &[PyRep::Integer(46)]).await.expect_err("gap id 46").code, "InvalidActivityID");
+    assert_eq!(rpc(&ctx, &mut sess1, "activityMgr", "ActivitySeen", &[PyRep::Integer(999_999)]).await.expect_err("unknown id").code, "InvalidActivityID");
     let seen_res = rpc(
         &ctx,
         &mut sess1,
@@ -496,6 +507,7 @@ async fn test_fast_checkout_and_activity_complete() {
     .await
     .expect("ActivitySeen 43 char 1");
     assert_eq!(seen_res_2, PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess1, "activityMgr", "ActivitySeen", &[PyRep::Integer(42)]).await.expect("ActivitySeen 42 dup"), PyRep::Bool(true));
 
     let badges_char1_after_seen = rpc(
         &ctx,

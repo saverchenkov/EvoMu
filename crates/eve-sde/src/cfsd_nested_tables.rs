@@ -345,4 +345,32 @@ impl SdeRegistry {
     pub fn operation_tasks(&self) -> Result<BTreeMap<String, Value>, SdeError> {
         self.load_cfsd_nested("res:/staticdata/operationtasks.fsdbinary")
     }
+
+    /// Loads the 46 activity IDs from `res:/staticdata/newactivities.fsdbinary` (`stride = 88`).
+    pub fn load_new_activity_ids(&self) -> Result<std::collections::BTreeSet<i64>, SdeError> {
+        const RES_PATH: &str = "res:/staticdata/newactivities.fsdbinary";
+        let path = self.cdn_resource_path(RES_PATH)?;
+        let raw = std::fs::read(&path)
+            .map_err(|_| SdeError::MissingDatabase(path.display().to_string()))?;
+        if let Some(info) = self.resources.get(RES_PATH) {
+            if raw.len() as u64 != info.byte_size {
+                return Err(SdeError::InvalidSchema(format!(
+                    "{RES_PATH}: size differs from importer pin"
+                )));
+            }
+        }
+        let buf = CfsdBuf(&raw);
+        let count = buf.u64(40)? as usize;
+        let mut out = std::collections::BTreeSet::new();
+        for rec in buf.dict_entries(56, 88)? {
+            out.insert(buf.u64(rec)? as i64);
+        }
+        if out.len() != count {
+            return Err(SdeError::InvalidSchema(format!(
+                "{RES_PATH}: decoded {} records, header says {count}",
+                out.len()
+            )));
+        }
+        Ok(out)
+    }
 }

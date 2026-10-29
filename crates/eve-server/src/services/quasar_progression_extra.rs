@@ -122,10 +122,15 @@ impl ProgressionExtraManager {
         if let Some(sde) = sde {
             if let Ok(records) = sde.load_cfsd_nested("res:/staticdata/community_track_templates.fsdbinary") {
                 let mut tracks = mgr.community_tracks.write().unwrap_or_else(|e| e.into_inner());
+                for t in tracks.values_mut() {
+                    if t.template_id == 0 {
+                        t.template_id = t.track_id;
+                    }
+                }
                 for (id_str, val) in records {
                     if let Ok(id) = id_str.parse::<u32>() {
                         let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("Community Track").to_string();
-                        let target = val.get("goal").and_then(|v| v.as_u64()).unwrap_or(1_000_000);
+                        let target = val.get("goal").and_then(|v| v.as_u64()).unwrap_or(100);
                         tracks.entry(id).or_insert(CommunityTrackState {
                             track_id: id,
                             template_id: id,
@@ -277,7 +282,8 @@ pub fn register_progression_extra_handlers(
             let mut out = Vec::new();
             let mut attr_bytes = Vec::new();
             let mut def_id = Vec::new();
-            encode_varint_field(1, track.track_id as u64, &mut def_id);
+            let def_tid = if track.template_id != 0 { track.template_id } else { track.track_id };
+            encode_varint_field(1, def_tid as u64, &mut def_id);
             encode_bytes_field(1, &def_id, &mut attr_bytes);
             encode_varint_field(2, track.current_progress, &mut attr_bytes);
             encode_varint_field(3, track.target_progress, &mut attr_bytes);

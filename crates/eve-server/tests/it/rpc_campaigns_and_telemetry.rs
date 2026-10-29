@@ -366,24 +366,20 @@ async fn test_info_gathering_telemetry_rpcs() {
     );
     assert!(matches!(field(&cfg, "infoTypesOncePerRun"), PyRep::List(_)));
 
-    // State mutation: disabling info gathering and updating interval is reflected in GetStateAndConfig
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut ext = eve_server::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
-        ext.info_gathering_enabled = Some(false);
-        ext.info_gathering_interval = Some(600);
-        eve_server::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
-    });
+    // State mutation via live machoNet.SetGlobalConfigValue: disabling info gathering and updating interval
+    let mut gm_sess = sess.clone();
+    gm_sess.role |= eve_machonet::service_roles::ROLE_GML;
+    rpc(&ctx, &mut gm_sess, "machoNet", "SetGlobalConfigValue", &[PyRep::String("infoGatheringEnabled".into()), PyRep::Bool(false)]).await.expect("disable infoGathering");
+    rpc(&ctx, &mut gm_sess, "machoNet", "SetGlobalConfigValue", &[PyRep::String("infoGatheringClientWorkerInterval".into()), PyRep::Integer(600)]).await.expect("set interval 600");
     let cfg_disabled = rpc(&ctx, &mut sess, "infoGatheringMgr", "GetStateAndConfig", &[])
         .await
         .expect("GetStateAndConfig disabled");
     assert_eq!(field(&cfg_disabled, "clientWorkerInterval").as_i64(), Some(600));
     assert_eq!(field(&cfg_disabled, "isEnabled").as_bool(), Some(false));
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut ext = eve_server::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
-        ext.info_gathering_enabled = Some(true);
-        ext.info_gathering_interval = Some(300);
-        eve_server::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
-    });
+    let disabled_log = rpc(&ctx, &mut sess, "infoGatheringMgr", "LogInfoEventsFromClient", &[PyRep::List(vec![PyRep::String("dropped_evt".into())])]).await.expect("disabled log");
+    assert_eq!(disabled_log, PyRep::Dict(vec![(PyRep::String("dropped_evt".into()), PyRep::Integer(1))]));
+    rpc(&ctx, &mut gm_sess, "machoNet", "SetGlobalConfigValue", &[PyRep::String("infoGatheringEnabled".into()), PyRep::Bool(true)]).await.expect("enable infoGathering");
+    rpc(&ctx, &mut gm_sess, "machoNet", "SetGlobalConfigValue", &[PyRep::String("infoGatheringClientWorkerInterval".into()), PyRep::Integer(300)]).await.expect("set interval 300");
 
     // 2. infoGatheringMgr.LogInfoEventsFromClient: requires 1 arg (dict or list)
     let missing_arg = rpc(&ctx, &mut sess, "infoGatheringMgr", "LogInfoEventsFromClient", &[])
@@ -608,19 +604,23 @@ async fn test_milestones_and_community_tracks() {
         }
     }
     sess.role &= !eve_machonet::service_roles::ROLE_ADMIN;
-    let clamped_attrs = rpc(
-        &ctx,
-        &mut sess,
-        "communityTrackMgr",
-        "get_instance_attributes_public",
-        &[PyRep::Integer(1)],
-    )
-    .await
-    .expect("get_instance_attributes_public clamped to SDE goal");
-    assert_eq!(
-        clamped_attrs,
-        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(100)])
-    );
+    let clamped_attrs = rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(1)])
+        .await
+        .expect("get_instance_attributes_public clamped to SDE goal");
+    assert_eq!(clamped_attrs, PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(100)]));
+
+    // Stopping track 1 marks it inactive -> get_instance_attributes_public rejects it; restarting restores it
+    sess.role |= eve_machonet::service_roles::ROLE_ADMIN;
+    let (mut tid_pb, mut track_id_req) = (Vec::new(), Vec::new());
+    eve_proto::quasar::encode_varint_field(1, 1, &mut tid_pb);
+    eve_proto::quasar::encode_bytes_field(1, &tid_pb, &mut track_id_req);
+    assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut sess, "eve.communitytrack.api.StopRequest", track_id_req.clone()).await.status_code, 200);
+    let stopped_err = rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(1)]).await.expect_err("inactive track must fail");
+    // rpc-lint: allow error code check
+    assert_eq!(stopped_err.code, "CommunityTrackInstanceNotFound");
+    assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut sess, "eve.communitytrack.api.StartRequest", track_id_req).await.status_code, 200);
+    sess.role &= !eve_machonet::service_roles::ROLE_ADMIN;
+    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(1)]).await.expect("restarted track"), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(100)]));
 
     // 4. communityTrackMgr.change_qa_mode: requires QA/GM privileges
     let denied = rpc(

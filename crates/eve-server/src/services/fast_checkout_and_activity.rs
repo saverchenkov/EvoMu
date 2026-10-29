@@ -30,6 +30,14 @@ use std::collections::HashMap;
 const ACTIVITY_MGR_PREFIX: &str = "activity_mgr:";
 const PROJECT_DISCOVERY_KEY_PREFIX: &str = "project_discovery:";
 const FAST_CHECKOUT_PREFIX: &str = "fast_checkout:";
+const MAX_SEEN_ACTIVITIES: usize = 128;
+
+static SDE_NEW_ACTIVITY_IDS: std::sync::OnceLock<std::collections::BTreeSet<i64>> =
+    std::sync::OnceLock::new();
+
+fn sde_new_activity_ids(sde: &eve_sde::SdeRegistry) -> &'static std::collections::BTreeSet<i64> {
+    SDE_NEW_ACTIVITY_IDS.get_or_init(|| sde.load_new_activity_ids().unwrap_or_default())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FastCheckoutOfferRecord {
@@ -125,11 +133,6 @@ pub fn set_user_fast_checkout_enabled(ctx: &ServerContext, user_id: u64, enabled
     let mut st = get_user_fast_checkout_state(ctx, user_id);
     st.enabled = enabled;
     save_user_fast_checkout_state(ctx, user_id, &st);
-}
-
-/// Update whether Project Discovery (`FastCheckoutService.is_enabled`) is enabled for `char_id`.
-pub fn set_project_discovery_enabled(ctx: &ServerContext, char_id: i64, enabled: bool) {
-    crate::services::project_discovery::set_project_discovery_enabled(ctx, char_id, enabled);
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -502,8 +505,8 @@ fn handle_is_enabled(
     ctx: &ServerContext,
     session: &SessionState,
 ) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let enabled = crate::services::project_discovery::is_project_discovery_enabled(ctx, char_id);
+    let (_, _char_id) = ServerContext::require_character(session)?;
+    let enabled = crate::services::project_discovery::is_project_discovery_enabled(ctx);
     Ok(PyRep::Bool(enabled))
 }
 
@@ -612,6 +615,16 @@ fn handle_activity_seen(
         });
     };
 
+    let valid_ids = sde_new_activity_ids(&ctx.sde);
+    if !valid_ids.contains(&activity_id) {
+        return Err(BridgeRpcError {
+            code: "InvalidActivityID".into(),
+            message: format!(
+                "Unknown activityID {activity_id} not in res:/staticdata/newactivities.fsdbinary"
+            ),
+        });
+    }
+
     let key = format!("{ACTIVITY_MGR_PREFIX}{char_id}");
     ctx.db.with_mut_snapshot(|snap| {
         let mut state = snap
@@ -620,6 +633,10 @@ fn handle_activity_seen(
             .and_then(|j| serde_json::from_str::<CharacterActivityState>(j).ok())
             .unwrap_or_default();
         if !state.seen_activities.contains(&activity_id) {
+            if state.seen_activities.len() >= MAX_SEEN_ACTIVITIES {
+                let overflow = state.seen_activities.len() + 1 - MAX_SEEN_ACTIVITIES;
+                state.seen_activities.drain(0..overflow);
+            }
             state.seen_activities.push(activity_id);
         }
         if let Ok(js) = serde_json::to_string(&state) {
