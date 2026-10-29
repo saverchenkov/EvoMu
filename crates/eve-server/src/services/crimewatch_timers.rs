@@ -167,6 +167,8 @@ pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, no
 
     let is_all_idle = weap_code == 100 && pvp_code == 200 && npc_code == 400 && crim_code == 300 && dis_code == 500;
     let mut updates: Vec<(&str, Vec<PyRep>)> = Vec::new();
+    let mut crim_transition: Option<(Vec<i64>, Vec<i64>, Vec<i64>)> = None;
+    let mut dis_transition: Option<(Vec<i64>, Vec<i64>)> = None;
     with_mut_combat_runtime(ctx, |rt| {
         let prev_opt = rt.crimewatch_timer_states.get(&char_id).copied();
         if prev_opt.is_none() && is_all_idle { return; }
@@ -176,9 +178,21 @@ pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, no
         if prev.2 != npc_sig { updates.push(("OnNpcTimerUpdate", vec![PyRep::Integer(npc_code), npc_val])); }
         if prev.3 != crim_sig {
             updates.push(("OnCriminalTimerUpdate", vec![PyRep::Integer(crim_code), crim_val]));
+            if crim_code == 301 {
+                crim_transition = Some((vec![], vec![], vec![char_id]));
+            } else if crim_code == 302 {
+                crim_transition = Some((vec![], vec![char_id], vec![]));
+            } else if prev.3 != 0 && prev.3 != 300 {
+                crim_transition = Some((vec![char_id], vec![], vec![]));
+            }
         }
         if prev.4 != dis_sig {
             updates.push(("OnDisapprovalTimerUpdate", vec![PyRep::Integer(dis_code), dis_val]));
+            if dis_code == 501 {
+                dis_transition = Some((vec![], vec![char_id]));
+            } else if prev.4 != 0 && prev.4 != 500 {
+                dis_transition = Some((vec![char_id], vec![]));
+            }
         }
         if is_all_idle {
             rt.crimewatch_timer_states.remove(&char_id);
@@ -189,20 +203,12 @@ pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, no
     for (ev, a) in updates {
         ctx.notify(NotificationTarget::Character(char_id), ev, "charid", a);
     }
-    let (cur_sys, is_suspect, is_crim, is_dis) = (
-        ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id)),
-        crim_code == 302,
-        crim_code == 301,
-        dis_code == 501,
-    );
-    if let Some(sys_id) = cur_sys {
-        if is_suspect || is_crim {
-            let suspects = if is_suspect { vec![char_id] } else { vec![] };
-            let criminals = if is_crim { vec![char_id] } else { vec![] };
-            crate::services::notify_emitters_batch6::emit_system_criminal_flag_updates(ctx, sys_id, &[], &suspects, &criminals);
+    if let Some(sys_id) = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id)) {
+        if let Some((new_idles, new_suspects, new_criminals)) = crim_transition {
+            crate::services::notify_emitters_batch6::emit_system_criminal_flag_updates(ctx, sys_id, &new_idles, &new_suspects, &new_criminals);
         }
-        if is_dis {
-            crate::services::notify_emitters_batch6::emit_system_disapproval_flag_updates(ctx, sys_id, &[], &[char_id]);
+        if let Some((new_idles, new_naughty)) = dis_transition {
+            crate::services::notify_emitters_batch6::emit_system_disapproval_flag_updates(ctx, sys_id, &new_idles, &new_naughty);
         }
     }
 }
