@@ -691,20 +691,34 @@ pub async fn finalize_cycle_destroyed_npcs(ctx: &ServerContext, solar_system_id:
         return;
     }
     let handle = ctx.systems.get_or_spawn(solar_system_id);
-    let killer_char_id = ctx
-        .db
-        .with_snapshot(|s| {
-            s.characters
-                .values()
-                .find(|c| c.solar_system_id == solar_system_id && c.station_id.is_none())
-                .map(|c| c.character_id)
-        })
-        .unwrap_or(0);
     let now_unix = ctx.now_unix();
     for npc in pending {
         with_mut_combat_runtime(ctx, |rt| {
             rt.destroyed_npc_cache.insert(npc.ball_id, npc.clone());
         });
+        let killer_char_id = npc
+            .threat_table
+            .iter()
+            .chain(npc.aggression_threat.iter())
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(&k, _)| k)
+            .or(npc.target_id)
+            .and_then(|killer_id| {
+                ctx.db.with_snapshot(|s| {
+                    if s.characters.contains_key(&killer_id) {
+                        Some(killer_id)
+                    } else if let Some(ship) = s.items.get(&killer_id) {
+                        if s.characters.contains_key(&ship.owner_id) {
+                            Some(ship.owner_id)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+            })
+            .unwrap_or(0);
         let wreck_tid = ctx.sde.wrecks.get(&npc.type_id).copied().unwrap_or_else(|| {
             match npc.archetype.as_str() {
                 "Drifter" => 37531,

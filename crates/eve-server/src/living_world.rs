@@ -62,6 +62,7 @@ pub enum ConvoyStepStatus {
 pub struct LivingWorldDirector {
     convoys: RwLock<HashMap<i64, LivingWorldConvoy>>,
     routes: RwLock<HashMap<i64, ConvoyRouteState>>,
+    hauler_cooldowns: RwLock<HashMap<SolarSystemId, std::time::Instant>>,
 }
 
 impl Default for LivingWorldDirector {
@@ -149,6 +150,7 @@ impl LivingWorldDirector {
         Self {
             convoys: RwLock::new(HashMap::new()),
             routes: RwLock::new(HashMap::new()),
+            hauler_cooldowns: RwLock::new(HashMap::new()),
         }
     }
 
@@ -301,6 +303,10 @@ impl LivingWorldDirector {
             .get_mut(&convoy_id)
         {
             c.destroyed = true;
+            if c.archetype == NpcArchetype::HaulerConvoy {
+                let mut cd = self.hauler_cooldowns.write().unwrap_or_else(|e| e.into_inner());
+                cd.insert(c.origin_system_id, std::time::Instant::now() + std::time::Duration::from_secs(1800));
+            }
         }
     }
 
@@ -312,6 +318,10 @@ impl LivingWorldDirector {
                     None
                 } else {
                     c.destroyed = true;
+                    if c.archetype == NpcArchetype::HaulerConvoy {
+                        let mut cd = self.hauler_cooldowns.write().unwrap_or_else(|e| e.into_inner());
+                        cd.insert(c.origin_system_id, std::time::Instant::now() + std::time::Duration::from_secs(1800));
+                    }
                     Some(c.clone())
                 }
             })
@@ -369,6 +379,10 @@ impl LivingWorldDirector {
                 ));
             }
             c.destroyed = true;
+            if c.archetype == NpcArchetype::HaulerConvoy {
+                let mut cd = self.hauler_cooldowns.write().unwrap_or_else(|e| e.into_inner());
+                cd.insert(c.origin_system_id, std::time::Instant::now() + std::time::Duration::from_secs(1800));
+            }
             c.clone()
         };
 
@@ -552,7 +566,9 @@ impl LivingWorldDirector {
             .unwrap_or(15_000.0)
             / 1_000.0)
             .max(1.0);
-        let tick_m3 = laser_m3 * turrets * (1.0 + role_bonus_pct / 100.0) * (60.0 / laser_dur_s);
+        // Yield scaled by elapsed cycle duration (60.0s simulation tick interval) over laser cycle time
+        let elapsed_tick_secs: f64 = 60.0;
+        let tick_m3 = laser_m3 * turrets * (1.0 + role_bonus_pct / 100.0) * (elapsed_tick_secs / laser_dur_s);
         let ore_unit_vol = sde
             .types
             .get(&ore_type_id)
@@ -589,12 +605,20 @@ impl LivingWorldDirector {
                     (sys.region_id, corp)
                 })
                 .unwrap_or((10_000_002, 1_000_035));
-            let ore_price = sde
-                .types
-                .get(&ore_type_id)
-                .map(|t| IskCents::from_f64_isk(t.base_price.max(5.0)))
-                .unwrap_or_else(|| IskCents::from_isk(5));
             db.with_mut_snapshot(|snap| {
+                // Determine regional market price for ore from active sell orders, or fall back to SDE base price
+                let ore_price = snap
+                    .market_orders
+                    .values()
+                    .filter(|o| !o.is_bid && o.region_id == sys_region_id && o.type_id == ore_type_id && o.price.0 > 0)
+                    .map(|o| o.price)
+                    .min()
+                    .unwrap_or_else(|| {
+                        sde.types
+                            .get(&ore_type_id)
+                            .map(|t| IskCents::from_f64_isk(t.base_price.max(5.0)))
+                            .unwrap_or_else(|| IskCents::from_isk(5))
+                    });
                 let mut found_order = false;
                 for order in snap.market_orders.values_mut() {
                     if !order.is_bid
@@ -858,13 +882,20 @@ impl LivingWorldDirector {
         solar_system_id: SolarSystemId,
         sde: &eve_sde::SdeRegistry,
     ) -> i64 {
+        let convoy_id = 800_200_000 + (solar_system_id as i64 % 100_000);
         {
             let convoys = self.convoys.read().unwrap_or_else(|e| e.into_inner());
-            if let Some(existing) = convoys
-                .values()
-                .find(|c| c.archetype == NpcArchetype::HaulerConvoy && !c.destroyed)
-            {
-                return existing.convoy_id;
+            if let Some(existing) = convoys.get(&convoy_id) {
+                if !existing.destroyed {
+                    return existing.convoy_id;
+                }
+                // Hauler respawn cooldown: if destroyed, enforce respawn delay before recreation
+                let cooldowns = self.hauler_cooldowns.read().unwrap_or_else(|e| e.into_inner());
+                if let Some(&respawn_at) = cooldowns.get(&solar_system_id) {
+                    if std::time::Instant::now() < respawn_at {
+                        return existing.convoy_id;
+                    }
+                }
             }
         }
         let next_sys = sde
@@ -878,8 +909,25 @@ impl LivingWorldDirector {
             .get(&next_sys)
             .and_then(|sys| sys.stations.first().map(|st| st.station_id))
             .unwrap_or(60_003_760);
-        let convoy_id = 800_200_000 + (solar_system_id as i64 % 100_000);
         let hauler_tid = hauler_type_for_system(sde, solar_system_id);
+        // DERIVED: Primary regional mineral cargo (Tritanium type_id 34, SDE volume 0.01 m3) scaled to hauler cargo hold
+        let cargo_type_id = sde
+            .types
+            .get(&34)
+            .map(|t| t.type_id)
+            .unwrap_or(34);
+        let cargo_m3 = sde
+            .types
+            .get(&hauler_tid)
+            .map(|t| t.capacity)
+            .unwrap_or(5_000.0);
+        let unit_vol = sde
+            .types
+            .get(&cargo_type_id)
+            .map(|t| t.volume)
+            .unwrap_or(0.01)
+            .max(0.01);
+        let cargo_quantity = ((cargo_m3 * 0.1 / unit_vol) as i32).max(25_000);
         {
             let mut convoys = self.convoys.write().unwrap_or_else(|e| e.into_inner());
             convoys.insert(
@@ -892,8 +940,8 @@ impl LivingWorldDirector {
                     current_system_id: solar_system_id,
                     destination_system_id: next_sys,
                     destination_station_id: dest_station_id,
-                    cargo_type_id: 34,
-                    cargo_quantity: 25_000,
+                    cargo_type_id,
+                    cargo_quantity,
                     lod_level: 1,
                     destroyed: false,
                 },

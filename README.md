@@ -4,8 +4,8 @@
 
 [![Language: Rust](https://img.shields.io/badge/language-Rust_2021-orange.svg)](https://www.rust-lang.org/)
 [![Unsafe: forbidden](https://img.shields.io/badge/unsafe-forbidden-brightgreen.svg)](#architecture)
-[![Ledger: 87.0% closed](https://img.shields.io/badge/parity_ledger-87.0%25_closed-brightgreen.svg)](./docs/ACTION_PLAN_STATUS.md)
-[![Automated tests: 1,225 passed](https://img.shields.io/badge/automated_tests-1%2C225_passed-brightgreen.svg)](#at-a-glance)
+[![Ledger: 86.7% closed](https://img.shields.io/badge/parity_ledger-86.7%25_closed-brightgreen.svg)](./docs/ACTION_PLAN_STATUS.md)
+[![Automated tests: 1,271 passed](https://img.shields.io/badge/automated_tests-1%2C271_passed-brightgreen.svg)](#at-a-glance)
 [![Wiki: 16 domains](https://img.shields.io/badge/wiki-16_domains-blue.svg)](./docs/wiki/README.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 
@@ -22,11 +22,11 @@ The goal: run your own server, point the **unmodified** EVE Online client at it,
 
 | | |
 |---|---|
-| **Parity ledger** | **5,526 of 6,351 rows closed (87.01%)**: 3,267 done, 2,259 not applicable, 825 open |
-| **Automated tests** | 1,225 passing, 0 failing (100% green across workspace) |
+| **Parity ledger** | **5,505 of 6,351 rows closed (86.68%)**: 3,246 done, 2,259 not applicable, 846 open |
+| **Automated tests** | 1,271 passing, 0 failing (100% green across workspace) |
 | **Technical Wiki** | [Comprehensive Game Systems & Technical Wiki](./docs/wiki/README.md) (16 domains) |
 | **Real-client journeys** | 0 of 29 passing |
-| **Action-plan tasks** | 85 of 117 done |
+| **Action-plan tasks** | 83 of 117 done |
 | **Static data** | Full game database built from the client: 53,288 item types, 8,490 solar systems, 5,210 stations, 2,892 missions |
 
 ### What the ledger is

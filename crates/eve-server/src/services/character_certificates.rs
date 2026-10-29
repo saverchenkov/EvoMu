@@ -6,7 +6,7 @@
 
 use crate::router::ServerContext;
 use eve_db::WorldStateSnapshot;
-use eve_machonet::{service_roles, SessionState};
+use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -20,8 +20,7 @@ fn check_target_auth(
     if target_cid == caller_cid {
         return Ok(());
     }
-    const GM_MASK: u64 = service_roles::ROLE_GML | service_roles::ROLE_ADMIN;
-    if (session.role & GM_MASK) != 0 {
+    if session.has_gm_role() {
         return Ok(());
     }
     Err(BridgeRpcError::user_error("AccessDenied"))
@@ -107,11 +106,14 @@ pub fn derive_certificate_levels(
         }
     }
 
-    // Include explicitly granted certificates
+    // Include explicitly granted certificates (cannot downgrade higher skill-derived level)
     ctx.db.with_snapshot(|snap| {
         let state = load_certificate_state(snap, char_id);
         for (cid, lvl) in state.certificates {
-            cert_levels.insert(cid, lvl);
+            cert_levels
+                .entry(cid)
+                .and_modify(|cur| *cur = (*cur).max(lvl))
+                .or_insert(lvl);
         }
     });
 
@@ -289,6 +291,7 @@ pub fn handle(
                 return Some(Err(e));
             }
 
+            let level = level.clamp(1, 5);
             ctx.db.with_mut_snapshot(|snap| {
                 let mut st = load_certificate_state(snap, target_cid);
                 st.certificates.insert(cert_id, level);
@@ -328,7 +331,7 @@ pub fn handle(
                                         t.first().and_then(|v| v.as_i64()),
                                         t.get(1).and_then(|v| v.as_i64()),
                                     ) {
-                                        st.certificates.insert(cid as u32, lvl as u8);
+                                        st.certificates.insert(cid as u32, (lvl as u8).clamp(1, 5));
                                     } else if let Some(cid) = t.first().and_then(|v| v.as_i64()) {
                                         st.certificates.insert(cid as u32, 1);
                                     }
@@ -336,7 +339,7 @@ pub fn handle(
                                 PyRep::Dict(entries) => {
                                     for (k, v) in entries {
                                         if let (Some(cid), Some(lvl)) = (k.as_i64(), v.as_i64()) {
-                                            st.certificates.insert(cid as u32, lvl as u8);
+                                            st.certificates.insert(cid as u32, (lvl as u8).clamp(1, 5));
                                         }
                                     }
                                 }
