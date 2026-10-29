@@ -469,7 +469,30 @@ fn compute_fw_leaderboards(
         let mut corps: HashMap<i64, SixBucketStats> = HashMap::new();
         let mut facs: HashMap<i64, SixBucketStats> = HashMap::new();
         let mut allys: HashMap<i64, SixBucketStats> = HashMap::new();
-        if !snap.fw_runtime.stat_events.is_empty() {
+
+        // Seed lifetime totals from folded historical events (> 7 days old)
+        for (&cid, &(k, vp)) in &snap.fw_runtime.historical_char_totals {
+            let s = chars.entry(cid).or_default();
+            s.vals[2] += k;
+            s.vals[5] += vp;
+        }
+        for (&cid, &(k, vp)) in &snap.fw_runtime.historical_corp_totals {
+            let s = corps.entry(cid).or_default();
+            s.vals[2] += k;
+            s.vals[5] += vp;
+        }
+        for (&fid, &(k, vp)) in &snap.fw_runtime.historical_fac_totals {
+            let s = facs.entry(fid).or_default();
+            s.vals[2] += k;
+            s.vals[5] += vp;
+        }
+        for (&aid, &(k, vp)) in &snap.fw_runtime.historical_ally_totals {
+            let s = allys.entry(aid).or_default();
+            s.vals[2] += k;
+            s.vals[5] += vp;
+        }
+
+        if !snap.fw_runtime.stat_events.is_empty() || !snap.fw_runtime.historical_char_totals.is_empty() {
             for ev in &snap.fw_runtime.stat_events {
                 let age = now.saturating_sub(ev.timestamp_unix);
                 chars.entry(ev.character_id).or_default().add_event(age, ev.kills, ev.victory_points);
@@ -549,6 +572,9 @@ pub async fn handle(
                 (PyRep::Integer(19), fac_all.to_py_dict()),
                 (PyRep::Integer(32), ally_all.to_py_dict()),
             ]);
+            // DERIVED (synthetic): Returns dictionary with keys 0 (top performers) and 1 (aggregate sums)
+            // grouped by entity type (1: character, 2: corporation, 19: faction, 32: alliance), along with
+            // named sub-tables ("characters", "corporations", "factions", "alliances") matching V24 client facwar expectations.
             Some(Ok(PyRep::Dict(vec![
                 (PyRep::Integer(0), top_groups),
                 (PyRep::Integer(1), all_groups),

@@ -259,6 +259,34 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
     ctx.set_invention_roll_override(Some(0.05));
     rpc_call(&ctx, &mut s_gal, "dogmaIM", "Activate", &[PyRep::Integer(998_000), PyRep::Integer(cal_ship)])
         .await.expect("destroy enemy militia ship");
+
+    // Add historical FW stat events at distinct rolling window boundaries:
+    // Event 1 (just occurred): 1 kill, 20 VP (within yesterday < 24h, lastWeek < 7d, total)
+    // Event 2 (2 days ago): 2 kills, 40 VP (outside yesterday, within lastWeek < 7d, total)
+    // Event 3 (10 days ago): 3 kills, 60 VP (outside 7d, folded into total and pruned from stat_events)
+    let now_sec = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fw_runtime.stat_events.push(eve_db::PersistedFwStatEvent {
+            timestamp_unix: now_sec - 2 * 86_400,
+            character_id: gal_cid,
+            corporation_id: gal_corp,
+            alliance_id: None,
+            faction_id: 500_004,
+            kills: 2,
+            victory_points: 40,
+        });
+        snap.fw_runtime.stat_events.push(eve_db::PersistedFwStatEvent {
+            timestamp_unix: now_sec - 10 * 86_400,
+            character_id: gal_cid,
+            corporation_id: gal_corp,
+            alliance_id: None,
+            faction_id: 500_004,
+            kills: 3,
+            victory_points: 60,
+        });
+        eve_server::services::fw_services::prune_and_fold_fw_stat_events_in_snap(snap, now_sec);
+    });
+
     let lb = rpc_call(&ctx, &mut s_gal, "facWarMgr", "GetStats_TopAndAllKillsAndVPs", &[]).await.unwrap();
     let find_stat = |cat_name: &str, field_key: &str, id_key: &str, expected_id: i64| -> i64 {
         let sub = lb.dict_get(cat_name).unwrap();
@@ -268,16 +296,42 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
             .and_then(|row| row.dict_get("amount").and_then(|v| v.as_i64()))
             .unwrap_or(0)
     };
-    for cat in ["killsY", "killsLW", "killsTotal"] {
-        assert_eq!(find_stat("characters", cat, "characterID", gal_cid), 1, "character {cat}");
-        assert_eq!(find_stat("corporations", cat, "corporationID", gal_corp), 1, "corporation {cat}");
-        assert_eq!(find_stat("factions", cat, "factionID", 500_004), 1, "faction {cat}");
-    }
-    for cat in ["vpY", "vpLW", "vpTotal"] {
-        assert_eq!(find_stat("characters", cat, "characterID", gal_cid), 20, "character {cat}");
-        assert_eq!(find_stat("corporations", cat, "corporationID", gal_corp), 20, "corporation {cat}");
-        assert_eq!(find_stat("factions", cat, "factionID", 500_004), 20, "faction {cat}");
-    }
+
+    // Verify rolling window progression: yesterday (1) < lastWeek (1+2=3) < total (1+2+3=6)
+    assert_eq!(find_stat("characters", "killsY", "characterID", gal_cid), 1);
+    assert_eq!(find_stat("characters", "killsLW", "characterID", gal_cid), 3);
+    assert_eq!(find_stat("characters", "killsTotal", "characterID", gal_cid), 6);
+    assert!(find_stat("characters", "killsY", "characterID", gal_cid) < find_stat("characters", "killsLW", "characterID", gal_cid));
+    assert!(find_stat("characters", "killsLW", "characterID", gal_cid) < find_stat("characters", "killsTotal", "characterID", gal_cid));
+
+    assert_eq!(find_stat("corporations", "killsY", "corporationID", gal_corp), 1);
+    assert_eq!(find_stat("corporations", "killsLW", "corporationID", gal_corp), 3);
+    assert_eq!(find_stat("corporations", "killsTotal", "corporationID", gal_corp), 6);
+
+    assert_eq!(find_stat("factions", "killsY", "factionID", 500_004), 1);
+    assert_eq!(find_stat("factions", "killsLW", "factionID", 500_004), 3);
+    assert_eq!(find_stat("factions", "killsTotal", "factionID", 500_004), 6);
+
+    // Verify rolling window progression for victory points: yesterday (20) < lastWeek (60) < total (120)
+    assert_eq!(find_stat("characters", "vpY", "characterID", gal_cid), 20);
+    assert_eq!(find_stat("characters", "vpLW", "characterID", gal_cid), 60);
+    assert_eq!(find_stat("characters", "vpTotal", "characterID", gal_cid), 120);
+    assert!(find_stat("characters", "vpY", "characterID", gal_cid) < find_stat("characters", "vpLW", "characterID", gal_cid));
+    assert!(find_stat("characters", "vpLW", "characterID", gal_cid) < find_stat("characters", "vpTotal", "characterID", gal_cid));
+
+    assert_eq!(find_stat("corporations", "vpY", "corporationID", gal_corp), 20);
+    assert_eq!(find_stat("corporations", "vpLW", "corporationID", gal_corp), 60);
+    assert_eq!(find_stat("corporations", "vpTotal", "corporationID", gal_corp), 120);
+
+    assert_eq!(find_stat("factions", "vpY", "factionID", 500_004), 20);
+    assert_eq!(find_stat("factions", "vpLW", "factionID", 500_004), 60);
+    assert_eq!(find_stat("factions", "vpTotal", "factionID", 500_004), 120);
+
+    // Verify bounded log: events older than 7 days were folded and pruned from active stat_events
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.fw_runtime.stat_events.iter().all(|e| now_sec.saturating_sub(e.timestamp_unix) <= 7 * 86_400));
+        assert_eq!(snap.fw_runtime.historical_char_totals.get(&gal_cid), Some(&(3, 60)));
+    });
 
     // 6. SDE FW Agent (`agent_type_id == 9`) mission gating (`NotEnlistedInMilitia`) & repeatable acceptance!
     let (fw_agent_id, fw_sys, fw_sta, fw_fac) = ctx.sde.agents.values()

@@ -436,6 +436,10 @@ pub async fn handle(
         }
 
         ("sovMgr", "GetSovHubFuelAccessGroup") => {
+            let (_, _char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let arg0 = args.first().and_then(|a| a.as_i64());
             let Some(hub_id) = ctx.db.with_snapshot(|snap| resolve_sov_hub_id(snap, arg0, session.solar_system_id)) else {
                 return Some(Err(BridgeRpcError {
@@ -463,13 +467,18 @@ pub async fn handle(
                     .get(&char_id)
                     .and_then(|c| c.alliance_id)
                     .or_else(|| snap.corporations.get(&char_corp).and_then(|c| c.alliance_id));
+                let effective_roles = if session.corp_role != 0 {
+                    session.corp_role
+                } else {
+                    snap.corporations.get(&char_corp).and_then(|c| c.member_roles.get(&char_id).copied()).unwrap_or(0)
+                };
                 can_access_sov_hub_fuel(
                     snap,
                     hub_id,
                     char_id,
                     char_corp,
                     char_alliance,
-                    session.corp_role,
+                    effective_roles,
                     false,
                 )
             });

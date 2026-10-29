@@ -29,7 +29,7 @@ pub const PHASE_FORECASTING: &str = "Forecasting";
 pub const PHASE_ACTIVE: &str = "Active";
 pub const PHASE_WINDDOWN: &str = "WindDown";
 
-/// Authoritative V24.01 Insurgency campaign state constants (`pirateinsurgency/const.pyj`).
+/// DERIVED (synthetic): Insurgency campaign state constants matching client name comparisons in OnInsurgencyStateChangedForFaction.
 pub const CAMPAIGN_STATE_INITIAL: i64 = 1;
 pub const CAMPAIGN_STATE_FORECASTING: i64 = 2;
 pub const CAMPAIGN_STATE_ACTIVE: i64 = 3;

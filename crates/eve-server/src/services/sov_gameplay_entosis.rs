@@ -8,7 +8,7 @@ use crate::router::{NotificationTarget, ServerContext};
 use crate::services::quasar_sov_hub::{compute_hub_resources, enforce_hub_power_overload, PendingNotices};
 use crate::services::quasar_sov_mercden::{complete_mercenary_activity_in_snap, refresh_activities};
 use crate::services::sov_services::{
-    calculate_adm, claim_system_sovereignty_async, emit_sov_structures_updated, is_hub_hacked,
+    calculate_adm, emit_sov_structures_updated, is_hub_hacked,
     TYPE_PHAROLUX_CYNO_BEACON, TYPE_SOVEREIGNTY_HUB, TYPE_TENEBREX_CYNO_JAMMER as SOV_TENEBREX_TYPE,
 };
 use eve_db::{CosmicAnomalyRecord, InventoryItemRecord, WorldStateSnapshot};
@@ -276,7 +276,7 @@ async fn spawn_command_nodes_for_hub(ctx: &ServerContext, hub_id: i64, hub_sys_i
     let const_systems = constellation_systems_for_hub(ctx, hub_sys_id);
     let spawned: Vec<(i64, u32, [f64; 3])> = ctx.db.with_mut_snapshot(|snap| {
         let mut out = Vec::new();
-        for idx in 0..5usize {
+        for idx in 0..4usize {
             let n_sys = const_systems[idx % const_systems.len()];
             snap.next_entity_id += 1;
             let node_id = snap.next_entity_id;
@@ -501,8 +501,6 @@ async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
                     hub_id: i64,
                     hub_sys: u32,
                     defender_won: bool,
-                    winner_alliance: i64,
-                    winner_corp: i64,
                     remaining_nodes: Vec<(i64, u32)>,
                 },
             }
@@ -511,10 +509,10 @@ async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
                 let (hub_id, _, _) = snap.sov_runtime.command_nodes.remove(&target_id)?;
                 snap.items.remove(&target_id);
                 snap.item_positions.remove(&target_id);
-                let (hub_sys, hub_owner_corp) = snap
+                let (hub_sys, hub_owner_corp, hub_pos) = snap
                     .structures
                     .get(&hub_id)
-                    .map(|s| (s.solar_system_id, s.owner_corp_id))?;
+                    .map(|s| (s.solar_system_id, s.owner_corp_id, s.position))?;
                 let defender = snap.system_states.get(&hub_sys).and_then(|s| s.sov_alliance_id);
                 let capturer_corp = snap
                     .characters
@@ -533,12 +531,6 @@ async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
                     progress = (progress + SOV_COMMAND_NODE_SCORE_DELTA).min(1.0);
                 } else {
                     progress = (progress - SOV_COMMAND_NODE_SCORE_DELTA).max(0.0);
-                    let attacker_key = if alliance_id > 0 { alliance_id } else { -capturer_corp.max(1) };
-                    if let Some(att) = scores.iter_mut().skip(1).find(|(k, _)| *k == attacker_key) {
-                        att.1 += SOV_COMMAND_NODE_SCORE_DELTA;
-                    } else {
-                        scores.push((attacker_key, SOV_COMMAND_NODE_SCORE_DELTA));
-                    }
                 }
                 scores[0].0 = def_key;
                 scores[0].1 = progress;
@@ -551,7 +543,7 @@ async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
                         .values()
                         .filter(|&&(hid, _, _)| hid == hub_id)
                         .count();
-                    let need = 5usize.saturating_sub(active_cnt);
+                    let need = 4usize.saturating_sub(active_cnt);
                     let mut respawned = Vec::with_capacity(need);
                     for off in 0..need {
                         snap.next_entity_id += 1;
@@ -597,56 +589,67 @@ async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
                     snap.items.remove(nid);
                     snap.item_positions.remove(nid);
                 }
-                let (winner_alliance, winner_corp) = if defender_won {
-                    (defender.unwrap_or(0), hub_owner_corp)
-                } else {
-                    let winning_attacker_key = scores
-                        .iter()
-                        .skip(1)
-                        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-                        .map(|(k, _)| *k)
-                        .unwrap_or_else(|| if alliance_id > 0 { alliance_id } else { -capturer_corp.max(1) });
-                    if winning_attacker_key > 0 {
-                        let corp = if alliance_id == winning_attacker_key && capturer_corp > 0 {
-                            capturer_corp
-                        } else {
-                            snap.corporations
-                                .iter()
-                                .find(|(_, c)| c.alliance_id == Some(winning_attacker_key))
-                                .map(|(&cid, _)| cid)
-                                .unwrap_or(capturer_corp)
-                        };
-                        (winning_attacker_key, corp)
-                    } else {
-                        (0, -winning_attacker_key)
-                    }
-                };
                 snap.sov_runtime.command_node_scores.remove(&hub_id);
                 if let Some(st) = snap.structures.get_mut(&hub_id) {
                     if defender_won {
                         st.state = "Online".into();
                         st.reinforced_until_unix = 0;
                     } else {
-                        st.state = "ShieldVulnerable".into();
+                        st.state = "Destroyed".into();
                         st.reinforced_until_unix = 0;
-                        if winner_corp > 0 {
-                            st.owner_corp_id = winner_corp;
-                        }
                     }
                 }
                 if !defender_won {
-                    snap.sov_runtime.sov_claimed_since_unix.insert(hub_sys, now_unix);
+                    snap.sov_runtime.sov_claimed_since_unix.remove(&hub_sys);
                     if let Some(sys_st) = snap.system_states.get_mut(&hub_sys) {
                         sys_st.sov_alliance_id = None;
                         sys_st.strategic_index = 0;
+                    }
+                    if let Some(hub_data) = snap.sov_runtime.sov_hubs.remove(&hub_id) {
+                        for (idx, upg) in hub_data.upgrades.into_iter().enumerate() {
+                            if idx % 2 == 0 {
+                                snap.next_entity_id += 1;
+                                let drop_id = snap.next_entity_id;
+                                snap.items.insert(
+                                    drop_id,
+                                    InventoryItemRecord {
+                                        item_id: drop_id,
+                                        type_id: upg.type_id,
+                                        owner_id: 1,
+                                        location_id: i64::from(hub_sys),
+                                        quantity: 1,
+                                        singleton: true,
+                                        ..Default::default()
+                                    },
+                                );
+                                snap.item_positions.insert(drop_id, hub_pos);
+                            }
+                        }
+                        for (fuel_type, qty) in hub_data.fuel {
+                            let drop_qty = (qty + 1) / 2;
+                            if drop_qty > 0 {
+                                snap.next_entity_id += 1;
+                                let drop_id = snap.next_entity_id;
+                                snap.items.insert(
+                                    drop_id,
+                                    InventoryItemRecord {
+                                        item_id: drop_id,
+                                        type_id: fuel_type,
+                                        owner_id: 1,
+                                        location_id: i64::from(hub_sys),
+                                        quantity: drop_qty as i32,
+                                        ..Default::default()
+                                    },
+                                );
+                                snap.item_positions.insert(drop_id, hub_pos);
+                            }
+                        }
                     }
                 }
                 Some(NodeOutcome::Won {
                     hub_id,
                     hub_sys,
                     defender_won,
-                    winner_alliance,
-                    winner_corp,
                     remaining_nodes,
                 })
             });
@@ -658,18 +661,15 @@ async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
                     hub_id,
                     hub_sys,
                     defender_won,
-                    winner_alliance,
-                    winner_corp,
                     remaining_nodes,
                 }) => {
                     for (nid, nsys) in remaining_nodes {
                         let _ = ctx.systems.get_or_spawn(nsys).remove_ball(nid).await;
                     }
-                    if !defender_won && winner_corp > 0 {
-                        let _ = claim_system_sovereignty_async(ctx, hub_sys, winner_alliance, winner_corp, hub_id).await;
-                    } else {
-                        emit_sov_structures_updated(ctx, hub_sys, vec![PyRep::Integer(hub_id)]);
+                    if !defender_won {
+                        let _ = ctx.systems.get_or_spawn(hub_sys).remove_ball(hub_id).await;
                     }
+                    emit_sov_structures_updated(ctx, hub_sys, vec![PyRep::Integer(hub_id)]);
                 }
                 None => {}
             }

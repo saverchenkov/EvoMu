@@ -429,37 +429,37 @@ async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes()
         v.sort_by_key(|x| x.0);
         v
     });
-    assert_eq!(nodes.len(), 5);
+    assert_eq!(nodes.len(), 4);
 
     let init_prog = ctx.db.with_snapshot(|s| s.sov_runtime.command_node_scores[&hub_id][0].1);
     assert!((init_prog - 0.60).abs() < 1e-5, "initial campaign progress must start at 0.60 (60%)");
 
     // 3. Contested Command Node captures & continuous respawn preventing deadlock!
     // Defender captures 2 nodes (+0.07 each -> 0.74), Attacker captures 2 nodes (-0.07 each -> 0.60).
-    // Active nodes remain 5 after every capture.
+    // Active nodes remain 4 after every capture.
     let node_wait = 320 + ((ENTOSIS_NODE_BASE_CAPTURE_SECS * adm).ceil() as u64) + 30;
 
     let (n1, sys1, pos1) = pick_active_node(&ctx, hub_id);
     entosis_node(&ctx, &mut s_def, PILOT, def_ship, 639, def_entosis_mod, n1, sys1, pos1, node_wait).await;
-    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 5, "defender capture 1 respawns node");
+    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 4, "defender capture 1 respawns node");
     let p1 = ctx.db.with_snapshot(|s| s.sov_runtime.command_node_scores[&hub_id][0].1);
     assert!((p1 - 0.67).abs() < 1e-4);
 
     let (n2, sys2, pos2) = pick_active_node(&ctx, hub_id);
     entosis_node(&ctx, &mut s_atk, atk_cid, atk_ship, 621, entosis_mod, n2, sys2, pos2, node_wait).await;
-    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 5, "attacker capture 1 respawns node");
+    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 4, "attacker capture 1 respawns node");
     let p2 = ctx.db.with_snapshot(|s| s.sov_runtime.command_node_scores[&hub_id][0].1);
     assert!((p2 - 0.60).abs() < 1e-4);
 
     let (n3, sys3, pos3) = pick_active_node(&ctx, hub_id);
     entosis_node(&ctx, &mut s_def, PILOT, def_ship, 639, def_entosis_mod, n3, sys3, pos3, node_wait).await;
-    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 5, "defender capture 2 respawns node");
+    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 4, "defender capture 2 respawns node");
     let p3 = ctx.db.with_snapshot(|s| s.sov_runtime.command_node_scores[&hub_id][0].1);
     assert!((p3 - 0.67).abs() < 1e-4);
 
     let (n4, sys4, pos4) = pick_active_node(&ctx, hub_id);
     entosis_node(&ctx, &mut s_atk, atk_cid, atk_ship, 621, entosis_mod, n4, sys4, pos4, node_wait).await;
-    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 5, "attacker capture 2 respawns node (2-2 split)");
+    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 4, "attacker capture 2 respawns node (2-2 split)");
     let p4 = ctx.db.with_snapshot(|s| s.sov_runtime.command_node_scores[&hub_id][0].1);
     assert!((p4 - 0.60).abs() < 1e-4);
 
@@ -467,7 +467,7 @@ async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes()
     for cap_idx in 0..5 {
         let (nid, nsys, npos) = pick_active_node(&ctx, hub_id);
         entosis_node(&ctx, &mut s_def, PILOT, def_ship, 639, def_entosis_mod, nid, nsys, npos, node_wait).await;
-        assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 5, "defender intermediate capture {cap_idx}");
+        assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 4, "defender intermediate capture {cap_idx}");
     }
     let (n_final, sys_final, pos_final) = pick_active_node(&ctx, hub_id);
     entosis_node(&ctx, &mut s_def, PILOT, def_ship, 639, def_entosis_mod, n_final, sys_final, pos_final, node_wait).await;
@@ -477,7 +477,7 @@ async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes()
     assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&null_sys].sov_alliance_id), Some(ALLIANCE));
     assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 0, "all command nodes despawned on resolution");
 
-    // 4. Attackers re-entosis Sov Hub and capture 9 nodes unified under Attacker side to claim system sovereignty!
+    // 4. Attackers re-entosis Sov Hub and capture 9 nodes unified under Attacker side to destroy hub & clear sovereignty!
     s_atk.solar_system_id = Some(null_sys);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&atk_cid) { ch.solar_system_id = null_sys; }
@@ -493,11 +493,11 @@ async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes()
     ctx.advance_secs(hub_capture_wait);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert_eq!(ctx.db.with_snapshot(|s| s.structures[&hub_id].state.clone()), "HullReinforced");
-    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 5);
+    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 4);
 
     // Multi-attacker unification: Attacker 1 captures 5 nodes (-0.35, prog drops 0.60 -> 0.25).
     // Attacker 2 captures 4 nodes (-0.28, prog drops 0.25 -> 0.0, attackers win!).
-    // Attacker 1 has majority captures (5 vs 4) -> Attacker 1's alliance wins sovereignty.
+    // Per EVE rules: On attacker victory, Sovereignty Hub is destroyed, system sov is cleared.
     for _ in 0..5 {
         let (nid, nsys, npos) = pick_active_node(&ctx, hub_id);
         entosis_node(&ctx, &mut s_atk, atk_cid, atk_ship, 621, entosis_mod, nid, nsys, npos, node_wait).await;
@@ -510,13 +510,14 @@ async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes()
         entosis_node(&ctx, &mut s_atk2, atk2_cid, atk2_ship, 621, entosis_mod2, nid, nsys, npos, node_wait).await;
     }
 
-    assert_eq!(ctx.db.with_snapshot(|s| s.structures[&hub_id].state.clone()), "ShieldVulnerable");
-    assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&null_sys].sov_alliance_id), Some(atk_ally));
-    assert_eq!(ctx.db.with_snapshot(|s| s.structures[&hub_id].owner_corp_id), atk_corp);
+    assert_eq!(ctx.db.with_snapshot(|s| s.structures[&hub_id].state.clone()), "Destroyed");
+    assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&null_sys].sov_alliance_id), None);
+    assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&null_sys].strategic_index), 0);
     assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 0);
 
     drop(ctx);
     let ctx_restarted = open_sqlite_ctx(&db_path, false);
-    assert_eq!(ctx_restarted.db.with_snapshot(|s| s.system_states[&null_sys].sov_alliance_id), Some(atk_ally));
+    assert_eq!(ctx_restarted.db.with_snapshot(|s| s.system_states[&null_sys].sov_alliance_id), None);
+    assert_eq!(ctx_restarted.db.with_snapshot(|s| s.structures[&hub_id].state.clone()), "Destroyed");
     let _ = std::fs::remove_file(&db_path);
 }

@@ -439,6 +439,38 @@ pub fn calculate_fw_lp_reward(base_lp: i64, status: i64) -> i64 {
     ((base_lp as f64) * mult).round() as i64
 }
 
+/// Prunes FW stat events older than 7 days from `stat_events` and folds their kills & VPs
+/// into per-entity cumulative historical totals (`historical_*_totals`).
+pub fn prune_and_fold_fw_stat_events_in_snap(snap: &mut eve_db::WorldStateSnapshot, now_unix: u64) {
+    let mut i = 0;
+    while i < snap.fw_runtime.stat_events.len() {
+        let age = now_unix.saturating_sub(snap.fw_runtime.stat_events[i].timestamp_unix);
+        if age > 7 * 86_400 {
+            let ev = snap.fw_runtime.stat_events.swap_remove(i);
+            let ce = snap.fw_runtime.historical_char_totals.entry(ev.character_id).or_default();
+            ce.0 += ev.kills;
+            ce.1 += ev.victory_points;
+            if ev.corporation_id > 0 {
+                let co = snap.fw_runtime.historical_corp_totals.entry(ev.corporation_id).or_default();
+                co.0 += ev.kills;
+                co.1 += ev.victory_points;
+            }
+            if ev.faction_id > 0 {
+                let fa = snap.fw_runtime.historical_fac_totals.entry(ev.faction_id).or_default();
+                fa.0 += ev.kills;
+                fa.1 += ev.victory_points;
+            }
+            if let Some(aid) = ev.alliance_id.filter(|&a| a > 0) {
+                let al = snap.fw_runtime.historical_ally_totals.entry(aid).or_default();
+                al.0 += ev.kills;
+                al.1 += ev.victory_points;
+            }
+        } else {
+            i += 1;
+        }
+    }
+}
+
 /// Records a timestamped FW kill/VP event and updates rolling `fw_character_stats` windows.
 pub fn record_fw_stat_event_in_snap(
     snap: &mut eve_db::WorldStateSnapshot,
@@ -448,6 +480,7 @@ pub fn record_fw_stat_event_in_snap(
     kills: i64,
     victory_points: i64,
 ) {
+    prune_and_fold_fw_stat_events_in_snap(snap, now_unix);
     let (corp_id, alliance_id, char_fac) = snap
         .characters
         .get(&char_id)
@@ -472,6 +505,7 @@ pub fn record_fw_stat_event_in_snap(
             });
         }
     }
+
     let rec = snap.fw_character_stats.entry(char_id).or_insert_with(|| {
         eve_db::snapshot_ext::FwCharacterStatsRecord {
             character_id: char_id,
@@ -486,35 +520,27 @@ pub fn record_fw_stat_event_in_snap(
     if fid_opt.is_some() {
         rec.faction_id = fid_opt;
     }
-    if snap.fw_runtime.stat_events.iter().any(|e| e.character_id == char_id) {
-        let (mut ky, mut klw, mut kt, mut vy, mut vlw, mut vt) = (0, 0, 0, 0, 0, 0);
-        for ev in snap.fw_runtime.stat_events.iter().filter(|e| e.character_id == char_id) {
-            let age = now_unix.saturating_sub(ev.timestamp_unix);
-            kt += ev.kills;
-            vt += ev.victory_points;
-            if age < 7 * 86_400 {
-                klw += ev.kills;
-                vlw += ev.victory_points;
-            }
-            if age < 86_400 {
-                ky += ev.kills;
-                vy += ev.victory_points;
-            }
+    let (hist_k, hist_v) = snap.fw_runtime.historical_char_totals.get(&char_id).copied().unwrap_or((0, 0));
+    let (mut ky, mut klw, mut kt, mut vy, mut vlw, mut vt) = (0, 0, hist_k, 0, 0, hist_v);
+    for ev in snap.fw_runtime.stat_events.iter().filter(|e| e.character_id == char_id) {
+        let age = now_unix.saturating_sub(ev.timestamp_unix);
+        kt += ev.kills;
+        vt += ev.victory_points;
+        if age < 7 * 86_400 {
+            klw += ev.kills;
+            vlw += ev.victory_points;
         }
-        rec.kills.yesterday = ky;
-        rec.kills.last_week = klw;
-        rec.kills.total = kt;
-        rec.victory_points.yesterday = vy;
-        rec.victory_points.last_week = vlw;
-        rec.victory_points.total = vt;
-    } else {
-        rec.kills.yesterday += kills;
-        rec.kills.last_week += kills;
-        rec.kills.total += kills;
-        rec.victory_points.yesterday += victory_points;
-        rec.victory_points.last_week += victory_points;
-        rec.victory_points.total += victory_points;
+        if age < 86_400 {
+            ky += ev.kills;
+            vy += ev.victory_points;
+        }
     }
+    rec.kills.yesterday = ky;
+    rec.kills.last_week = klw;
+    rec.kills.total = kt;
+    rec.victory_points.yesterday = vy;
+    rec.victory_points.last_week = vlw;
+    rec.victory_points.total = vt;
 }
 
 /// Awards FW LP for an enemy kill in a warzone solar system, scaled by system status (`feat:fw.fw-lp`).

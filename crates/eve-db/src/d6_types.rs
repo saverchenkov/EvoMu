@@ -315,6 +315,18 @@ pub struct PersistedFwState {
     /// Timestamped FW PvP kill and victory-point events for rolling `yesterday` / `lastWeek` / `total` leaderboards.
     #[serde(default)]
     pub stat_events: Vec<PersistedFwStatEvent>,
+    /// Pruned historical kills and victory points older than 7 days, folded by character ID.
+    #[serde(default)]
+    pub historical_char_totals: HashMap<i64, (i64, i64)>,
+    /// Pruned historical kills and victory points older than 7 days, folded by corporation ID.
+    #[serde(default)]
+    pub historical_corp_totals: HashMap<i64, (i64, i64)>,
+    /// Pruned historical kills and victory points older than 7 days, folded by faction ID.
+    #[serde(default)]
+    pub historical_fac_totals: HashMap<i64, (i64, i64)>,
+    /// Pruned historical kills and victory points older than 7 days, folded by alliance ID.
+    #[serde(default)]
+    pub historical_ally_totals: HashMap<i64, (i64, i64)>,
 }
 
 /// Timestamped FW PvP kill and victory-point event for rolling `yesterday` / `lastWeek` / `total` leaderboards.

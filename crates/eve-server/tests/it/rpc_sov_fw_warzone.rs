@@ -171,7 +171,23 @@ async fn setup_sov_fw_env(ctx: &ServerContext) -> SessionState {
                 "VFK-IV Skyhook",
             ),
         );
+
+        let mut ext = eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        let mut members = HashMap::new();
+        members.insert(CHAR_ID, 1i64);
+        ext.owner_groups.insert(42, eve_server::services::station_structure::structure_upwell_ops::AccessGroupRecord {
+            group_id: 42,
+            creator_id: CHAR_ID,
+            owner_corp_id: CORP_ID,
+            name: "Fuel Group".into(),
+            description: "Sov Hub Fuel ACL".into(),
+            members,
+        });
+        eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
     });
+
+    sess.corporation_id = Some(CORP_ID);
+    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
 
     sess
 }
