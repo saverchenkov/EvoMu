@@ -164,26 +164,129 @@ Rules: [`AGENTS.md`](./AGENTS.md). Process: [`docs/SUPERVISOR_CODER_ARCHITECTURE
 
 ---
 
-## Getting started
+## Server Setup & Static Data (`evedb` / SDE) Import Guide
 
-**You need:** a stable Rust toolchain, Python 3, and an installed EVE Online client (V24.01). The game's static data can't be redistributed, so you build it from your own client install, and it stays out of git.
+### Prerequisites
 
+- **Rust toolchain:** Stable Rust (`1.75+`) with `cargo`.
+- **Python 3:** Python `3.9+` (used by the SDE importer and client journey harness).
+- **C compiler (macOS / Linux):** Xcode Command Line Tools (`xcode-select --install`) on macOS so `import_sde.py` can compile [`tools/sde-import/cfsd_runner.c`](./tools/sde-import/cfsd_runner.c) against the client's `libpython2.7.dylib`. On Windows, `import_sde.py` loads `python27.dll` directly via `ctypes` without requiring a C compiler.
+- **EVE Online Client (V24.01, build 3619879):** Installed with a populated `SharedCache` (`tq` client build + `ResFiles` resource cache). Because CCP's client static data cannot be redistributed in git, EvoMu extracts the static database (`data/evomu_sde.sqlite`) directly from your local EVE installation.
+
+---
+
+### 1. Import the EVE Static Data Database (`data/evomu_sde.sqlite`)
+
+EvoMu's SDE importer ([`tools/sde-import/import_sde.py`](./tools/sde-import/import_sde.py)) reads the 213 binary FSD resources (`*Loader.so` / `*.pyd` and `fsd.schemas.binaryLoader` inside `code.ccp`), solar system & station geometry (`mapObjects.db`), and English localization pickles (`res:/localizationfsd/localization_fsd_en-us.pickle`) directly from your EVE client's `SharedCache`, verifies MD5 checksums and record counts against [`docs/index/staticdata_catalog.json`](./docs/index/staticdata_catalog.json), and builds:
+
+- **`data/evomu_sde.sqlite`** *(gitignored)* — Complete runtime static database containing **53,288 item types**, **8,490 solar systems**, **5,210 stations**, **2,892 missions**, dogma attributes/effects/modifiers, blueprints, reprocessing materials, wormhole classes, and NPC spawn tables.
+- **`data/sde_import_manifest.json`** *(gitignored)* — Audit manifest of every imported table row count and verified client resource checksum.
+
+#### Run the importer
+
+**macOS** *(default `SharedCache`: `~/Library/Application Support/EVE Online/SharedCache`)*:
 ```bash
-git clone https://github.com/saverchenkov/EvoMu.git
-cd EvoMu
-
-# 1. Build the static-data database from your client (writes data/evomu_sde.sqlite; macOS client paths today)
-/usr/bin/python3 tools/sde-import/import_sde.py
-
-# 2. Build and run the tests (integration tests are one binary: crates/eve-server/tests/it/)
-cargo build --workspace
-cargo test --workspace
-
-# 3. Run the server (26000 = client protocol, 26001 = dev bridge; settings in evomu.toml)
-cargo run -p eve-server
+# On Apple Silicon (M1/M2/M3/M4), run under arch -x86_64 because EVE.app's embedded
+# libpython2.7.dylib and *Loader.so FSD extractors are x86_64 binaries:
+arch -x86_64 /usr/bin/python3 tools/sde-import/import_sde.py
 ```
 
-To point the real client at your server, see [`docs/BLOCKERS.md`](./docs/BLOCKERS.md) §3.
+**Windows** *(default `SharedCache`: `C:/Games/EVE`, or pass `--shared-cache`)*:
+```powershell
+python tools/sde-import/import_sde.py --shared-cache "C:/Games/EVE"
+```
+
+#### Importer CLI options
+| Flag | Default | Description |
+|---|---|---|
+| `--shared-cache <PATH>` | `~/Library/Application Support/EVE Online/SharedCache` (macOS) or `C:/Games/EVE` (Windows) | Path to the EVE Online `SharedCache` directory containing `tq/` and `ResFiles/`. |
+| `--out <PATH>` | `data/evomu_sde.sqlite` | Destination SQLite static database path. |
+| `--manifest <PATH>` | `data/sde_import_manifest.json` | Destination JSON manifest path. |
+| `--force-extract` | `false` | Forces re-extraction of cached FSD binary JSON in `/tmp/evomu_sde_cfsd` before building SQLite. |
+
+---
+
+### 2. Configure the Server ([`evomu.toml`](./evomu.toml))
+
+On startup, `eve-server` loads [`evomu.toml`](./evomu.toml) from the working directory (or the path in `EVOMU_CONFIG_PATH`).
+
+```toml
+bind_address = "127.0.0.1"
+macho_port = 26000   # Native V24.01 eveMarshal / machoNet GPSTransport TCP port (EVE client)
+bridge_port = 26002  # JSON / MessagePack Client Bridge TCP port (dev harness & evomu_bridge.py)
+esi_port = 26004     # ESI OpenAPI + OAuth2 / PKCE (S256) SSO HTTP port
+
+sde_path = "data/evomu_sde.sqlite"
+world_db_path = "data/evomu_world.sqlite"
+
+[feature_flags]
+enable_quasar_gateway = true
+enable_esi_http = true
+enable_living_world = true
+seed_demo = false
+
+# Optional: provision an admin / GM account at startup (passwords hashed at rest with Argon2id)
+[[admin_accounts]]
+username = "gm_admin"
+password_token = "replace-with-strong-secret"
+character_id = 90000003
+character_name = "ISD Polaris"
+
+# Optional: provision player accounts and auto-create a starter character on first boot
+[[player_accounts]]
+username = "pilot1"
+password_token = "replace-with-strong-secret"
+
+[player_accounts.starter_character]
+name = "Capsuleer One"
+bloodline_id = 1          # 1 = Deteis (Caldari)
+gender = 1                # 1 = Male, 0 = Female
+ancestry_id = 11          # 11 = Scientists
+school_id = 17            # 17 = State War Academy
+solar_system_id = 30000142 # Jita
+station_id = 60003760      # Jita IV - Moon 4 - Caldari Navy Assembly Plant
+initial_balance_isk = 100000000
+```
+
+#### Environment variable overrides
+All settings can be overridden via environment variables without editing `evomu.toml`:
+
+| Variable | Description |
+|---|---|
+| `EVOMU_CONFIG_PATH` | Path to a custom `.toml` configuration file (defaults to `./evomu.toml`). |
+| `EVOMU_SDE_PATH` | Override `sde_path` (`data/evomu_sde.sqlite`). |
+| `EVOMU_DB_PATH` / `EVOMU_SNAPSHOT_PATH` | Override `world_db_path` (`data/evomu_world.sqlite`). |
+| `EVOMU_ACCOUNTS` | Comma-separated `user:password` list to provision player accounts on startup (e.g. `pilot1:pass1,pilot2:pass2`). |
+| `EVOMU_GM_ACCOUNT` | `user:password` spec for a GM account (provisions character `90000003`, `"ISD Polaris"`). |
+| `EVOMU_ADMIN_TOKEN` | Provisions GM account `"admin"` with the given password token. |
+| `RUST_LOG` | Tracing filter (defaults to `eve_server=info,eve_destiny=info`). |
+
+---
+
+### 3. Build, Run & Seed the World Database
+
+```bash
+# 1. Build and run the server (release mode recommended for gameplay / client sessions)
+cargo run --release -p eve-server
+```
+
+On first boot, `eve-server` automatically:
+1. Opens `data/evomu_sde.sqlite` and validates the static data registry (`53,288` types, `8,490` solar systems).
+2. Creates and initializes the persistent relational world database at `data/evomu_world.sqlite` (with WAL journaling and incremental row-fingerprint sync).
+3. **Seeds the regional markets ([`world_seeder.rs`](./crates/eve-server/src/world_seeder.rs))**: Populates **12,035** published gameplay item types (**17,352** market orders) across **Jita 4-4** (`60003760`), **Amarr VIII** (`60008494`), **Dodixie IX** (`60011866`), and **Rens VI** (`60004588`) — covering ships, T1/T2/T3/Meta modules, rigs, ammo/charges, blueprints, skillbooks, drones, fighters, implants, boosters, materials, ores, planetary commodities, and Upwell structures.
+4. Provisions any configured `[[player_accounts]]`, `starter_character` entries, and `[[admin_accounts]]`.
+5. Pre-spawns the Jita (`30000142`) solar system physics actor and starts the 1 Hz cluster tick loop.
+
+#### Running tests & the end-to-end client journey harness
+```bash
+# Run unit and integration test suites across the workspace
+cargo test --workspace
+
+# Run the 12 scripted client-bridge journeys end-to-end against a fresh eve-server instance
+python3 tools/client-harness/run_journeys --out /tmp/evomu_harness --bridge-harness-test
+```
+
+To point the real V24.01 EVE client at your local server, see [`docs/BLOCKERS.md`](./docs/BLOCKERS.md) §3.
 
 ---
 
