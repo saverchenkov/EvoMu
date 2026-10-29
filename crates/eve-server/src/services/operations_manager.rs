@@ -490,15 +490,8 @@ pub fn handle(
         }
 
         ("operationsManager", "complete_category_for_character") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(cat_id) = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .filter(|id| (1..=1_000).contains(id))
-            else {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let Some(cat_id) = args.first().and_then(|a| a.as_i64()).filter(|id| (1..=1_000).contains(id)) else {
                 return Some(Err(BridgeRpcError::user_error("CustomInfo")));
             };
             let now = ctx.now_unix();
@@ -510,15 +503,12 @@ pub fn handle(
                 }
                 if rec.active_category_id == Some(cat_id) {
                     rec.active_category_id = None;
+                    rec.active_operation_id = None;
                 }
                 save_store(snap, &store, now);
             });
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnOperationCategoryCompleted",
-                "charid",
-                vec![PyRep::Integer(cat_id)],
-            );
+            crate::services::character_expert_systems::stop_active_operation_node_graph(ctx, char_id, cat_id);
+            ctx.notify(NotificationTarget::Character(char_id), "OnOperationCategoryCompleted", "charid", vec![PyRep::Integer(cat_id)]);
             Some(Ok(PyRep::Bool(true)))
         }
 
@@ -623,30 +613,16 @@ pub fn handle(
         }
 
         ("operationsManager", "activate_operation_in_solar_system") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(op_id) = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .filter(|id| (1..=100_000).contains(id))
-            else {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let Some(op_id) = args.first().and_then(|a| a.as_i64()).filter(|id| (1..=100_000).contains(id)) else {
                 return Some(Err(BridgeRpcError::user_error("CustomInfo")));
             };
-            let char_sys = session.solar_system_id.or_else(|| {
-                ctx.db
-                    .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id))
-            });
+            let char_sys = session.solar_system_id.or_else(|| ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id)));
             let Some(curr_sys) = char_sys.filter(|id| ctx.sde.solar_systems.contains_key(id)) else {
                 return Some(Err(BridgeRpcError::user_error("CustomInfo")));
             };
             let op_sys = if let Some(req_arg) = args.get(1) {
-                let Some(req_sys) = req_arg
-                    .as_i64()
-                    .and_then(|s| u32::try_from(s).ok())
-                    .filter(|id| ctx.sde.solar_systems.contains_key(id) && *id == curr_sys)
-                else {
+                let Some(req_sys) = req_arg.as_i64().and_then(|s| u32::try_from(s).ok()).filter(|id| ctx.sde.solar_systems.contains_key(id) && *id == curr_sys) else {
                     return Some(Err(BridgeRpcError::user_error("CustomInfo")));
                 };
                 req_sys
@@ -662,65 +638,39 @@ pub fn handle(
                 let rec = store.by_character.entry(char_id).or_default();
                 rec.active_operation_id = Some(op_id);
                 rec.active_operation_system_id = Some(op_sys);
-                let cat_id = args
-                    .get(2)
-                    .and_then(|a| a.as_i64())
-                    .or(rec.active_category_id)
-                    .unwrap_or(1);
+                let cat_id = args.get(2).and_then(|a| a.as_i64()).or(rec.active_category_id).unwrap_or(1);
                 rec.active_category_id = Some(cat_id);
                 save_store(snap, &store, now);
                 cat_id
             });
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnOperationCategoryChanged",
-                "charid",
-                vec![PyRep::Integer(cat_id), PyRep::Integer(op_id)],
-            );
+            crate::services::character_expert_systems::start_client_node_graph_for_operation(ctx, char_id, op_id, cat_id, op_sys);
+            ctx.notify(NotificationTarget::Character(char_id), "OnOperationCategoryChanged", "charid", vec![PyRep::Integer(cat_id), PyRep::Integer(op_id)]);
             Some(Ok(PyRep::Bool(true)))
         }
 
         ("operationsManager", "block_task") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(task_id) = args
-                .get(2)
-                .and_then(|a| a.as_i64())
-                .or_else(|| args.first().and_then(|a| a.as_i64()))
-                .filter(|id| (1..=100_000).contains(id))
-            else {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let Some(task_id) = args.get(2).and_then(|a| a.as_i64()).or_else(|| args.first().and_then(|a| a.as_i64())).filter(|id| (1..=100_000).contains(id)) else {
                 return Some(Err(BridgeRpcError::user_error("CustomInfo")));
             };
             let now = ctx.now_unix();
             ctx.db.with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
-                let rec = store.by_character.entry(char_id).or_default();
-                rec.blocked_tasks.insert(task_id);
+                store.by_character.entry(char_id).or_default().blocked_tasks.insert(task_id);
                 save_store(snap, &store, now);
             });
             Some(Ok(PyRep::Bool(true)))
         }
 
         ("operationsManager", "unblock_task") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(task_id) = args
-                .get(2)
-                .and_then(|a| a.as_i64())
-                .or_else(|| args.first().and_then(|a| a.as_i64()))
-                .filter(|id| (1..=100_000).contains(id))
-            else {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let Some(task_id) = args.get(2).and_then(|a| a.as_i64()).or_else(|| args.first().and_then(|a| a.as_i64())).filter(|id| (1..=100_000).contains(id)) else {
                 return Some(Err(BridgeRpcError::user_error("CustomInfo")));
             };
             let now = ctx.now_unix();
             ctx.db.with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
-                let rec = store.by_character.entry(char_id).or_default();
-                rec.blocked_tasks.remove(&task_id);
+                store.by_character.entry(char_id).or_default().blocked_tasks.remove(&task_id);
                 save_store(snap, &store, now);
             });
             Some(Ok(PyRep::Bool(true)))

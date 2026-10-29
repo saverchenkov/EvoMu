@@ -439,23 +439,40 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
         let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
     }
 
-    ctx.db.with_mut_snapshot(|snap| {
+    let (added_anoms, added_sigs) = ctx.db.with_mut_snapshot(|snap| {
+        let mut added_a = Vec::new();
         let sys_anoms = snap.cosmic_anomalies.entry(solar_system_id).or_default();
         for a in new_anoms {
             if !sys_anoms.iter().any(|x| x.anomaly_id == a.anomaly_id) {
+                added_a.push(a.clone());
                 sys_anoms.push(a);
             }
         }
+        let mut added_s = Vec::new();
         let sys_sigs = snap.cosmic_signatures.entry(solar_system_id).or_default();
         for s in new_sigs {
             if !sys_sigs.iter().any(|x| x.signature_id == s.signature_id) {
+                added_s.push(s.clone());
                 sys_sigs.push(s);
             }
         }
         for item in cans_to_insert {
             snap.items.insert(item.item_id, item);
         }
+        (added_a, added_s)
     });
+    crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_anomaly_delta(
+        ctx,
+        solar_system_id,
+        &added_anoms,
+        &[],
+    );
+    crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_signature_delta(
+        ctx,
+        solar_system_id,
+        &added_sigs,
+        &[],
+    );
 
     with_pve_exploration_reg(ctx, |reg| {
         reg.seeded_systems.insert(solar_system_id, true);

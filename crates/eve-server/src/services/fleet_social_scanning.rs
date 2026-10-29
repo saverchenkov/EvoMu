@@ -74,36 +74,9 @@ pub(super) async fn handle_scanning_and_wormholes(
                     .collect();
                 (ac, a_rows, st_rows)
             });
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnSignalTrackerSignatureUpdate",
-                "charid",
-                vec![
-                    PyRep::Integer(sys_id as i64),
-                    PyRep::Dict(Vec::new()),
-                    PyRep::List(Vec::new()),
-                ],
-            );
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnSignalTrackerAnomalyUpdate",
-                "charid",
-                vec![
-                    PyRep::Integer(sys_id as i64),
-                    PyRep::Dict(Vec::new()),
-                    PyRep::List(Vec::new()),
-                ],
-            );
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnSignalTrackerStructureUpdate",
-                "charid",
-                vec![
-                    PyRep::Integer(sys_id as i64),
-                    PyRep::Dict(Vec::new()),
-                    PyRep::List(Vec::new()),
-                ],
-            );
+            if method == "SignalTrackerRegister" {
+                register_signal_tracker_subscriber(ctx, sys_id, char_id);
+            }
             Some(Ok(PyRep::keyval([
                 ("solarSystemID", PyRep::Integer(sys_id as i64)),
                 ("service", PyRep::String("scanMgr".into())),
@@ -989,4 +962,363 @@ pub(super) async fn handle_scanning_and_wormholes(
 /// signal tracker and probe results always agree.
 async fn ensure_system_signatures(ctx: &ServerContext, sys_id: u32) -> Vec<CosmicSignatureRecord> {
     crate::services::space_destiny::ensure_system_signatures_and_anomalies(ctx, sys_id).await.0
+}
+
+const SIGNAL_TRACKER_SUB_PREFIX: &str = "signal_tracker_sub:";
+
+pub(crate) fn register_signal_tracker_subscriber(ctx: &ServerContext, sys_id: u32, char_id: i64) {
+    let target_key = format!("{SIGNAL_TRACKER_SUB_PREFIX}{sys_id}");
+    ctx.db.with_mut_snapshot(|snap| {
+        let existing_keys: Vec<String> = snap
+            .service_state_blobs
+            .keys()
+            .filter(|k| k.starts_with(SIGNAL_TRACKER_SUB_PREFIX) && k.as_str() != target_key)
+            .cloned()
+            .collect();
+        for key in existing_keys {
+            if let Some(raw) = snap.service_state_blobs.get(&key) {
+                let mut subs: Vec<i64> = serde_json::from_str(raw).unwrap_or_default();
+                subs.retain(|&c| c != char_id);
+                if subs.is_empty() {
+                    snap.service_state_blobs.remove(&key);
+                } else if let Ok(json) = serde_json::to_string(&subs) {
+                    snap.service_state_blobs.insert(key, json);
+                }
+            }
+        }
+        let mut subs: Vec<i64> = snap
+            .service_state_blobs
+            .get(&target_key)
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or_default();
+        if !subs.contains(&char_id) {
+            subs.push(char_id);
+            subs.sort_unstable();
+        }
+        if let Ok(json) = serde_json::to_string(&subs) {
+            snap.service_state_blobs.insert(target_key, json);
+        }
+    });
+}
+
+pub(crate) fn signal_tracker_subscribers_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    sys_id: u32,
+) -> Vec<i64> {
+    let key = format!("{SIGNAL_TRACKER_SUB_PREFIX}{sys_id}");
+    let Some(raw) = snap.service_state_blobs.get(&key) else {
+        return Vec::new();
+    };
+    let mut subs: Vec<i64> = serde_json::from_str(raw).unwrap_or_default();
+    subs.retain(|cid| {
+        snap.characters
+            .get(cid)
+            .is_some_and(|c| c.solar_system_id == sys_id)
+    });
+    subs.sort_unstable();
+    subs.dedup();
+    subs
+}
+
+pub(crate) fn build_signal_tracker_signature_kv(sig: &CosmicSignatureRecord) -> PyRep {
+    PyRep::keyval([
+        (
+            "position",
+            PyRep::Tuple(vec![
+                PyRep::Real(sig.position[0]),
+                PyRep::Real(sig.position[1]),
+                PyRep::Real(sig.position[2]),
+            ]),
+        ),
+        ("targetID", PyRep::String(sig.signature_id.clone())),
+        ("difficulty", PyRep::Integer(1)),
+        ("dungeonID", PyRep::None),
+        ("archetypeID", PyRep::None),
+        ("deviation", PyRep::Real(0.0)),
+    ])
+}
+
+pub(crate) fn build_signal_tracker_anomaly_kv(anom: &eve_db::CosmicAnomalyRecord) -> PyRep {
+    PyRep::keyval([
+        ("instanceID", PyRep::String(anom.anomaly_id.clone())),
+        (
+            "position",
+            PyRep::Tuple(vec![
+                PyRep::Real(anom.position[0]),
+                PyRep::Real(anom.position[1]),
+                PyRep::Real(anom.position[2]),
+            ]),
+        ),
+        ("targetID", PyRep::String(anom.anomaly_id.clone())),
+        ("difficulty", PyRep::Integer(1)),
+        ("dungeonID", PyRep::None),
+        ("archetypeID", PyRep::None),
+        ("dungeonNameID", PyRep::None),
+        ("factionID", PyRep::None),
+        ("scanStrengthAttribute", PyRep::None),
+        ("allowedTypes", PyRep::None),
+    ])
+}
+
+pub(crate) fn build_signal_tracker_structure_kv(
+    ctx: &ServerContext,
+    st: &eve_db::UpwellStructureRecord,
+) -> PyRep {
+    let (group_id, category_id) = ctx
+        .sde
+        .types
+        .get(&st.type_id)
+        .map(|t| (i64::from(t.group_id), i64::from(t.category_id)))
+        .unwrap_or((1657, 65));
+    PyRep::keyval([
+        ("typeID", PyRep::Integer(i64::from(st.type_id))),
+        ("groupID", PyRep::Integer(group_id)),
+        ("categoryID", PyRep::Integer(category_id)),
+        (
+            "position",
+            PyRep::Tuple(vec![
+                PyRep::Real(st.position[0]),
+                PyRep::Real(st.position[1]),
+                PyRep::Real(st.position[2]),
+            ]),
+        ),
+        ("targetID", PyRep::Integer(st.structure_id)),
+    ])
+}
+
+pub(crate) fn emit_signal_tracker_signature_delta(
+    ctx: &ServerContext,
+    sys_id: u32,
+    added: &[CosmicSignatureRecord],
+    removed_ids: &[String],
+) {
+    if added.is_empty() && removed_ids.is_empty() {
+        return;
+    }
+    let subs = ctx.db.with_snapshot(|snap| signal_tracker_subscribers_in_snap(snap, sys_id));
+    if subs.is_empty() {
+        return;
+    }
+    let added_dict = PyRep::Dict(
+        added
+            .iter()
+            .map(|sig| {
+                (
+                    PyRep::String(sig.signature_id.clone()),
+                    build_signal_tracker_signature_kv(sig),
+                )
+            })
+            .collect(),
+    );
+    let removed_list = PyRep::List(removed_ids.iter().cloned().map(PyRep::String).collect());
+    let args = vec![PyRep::Integer(i64::from(sys_id)), added_dict, removed_list];
+    for cid in subs {
+        ctx.notify(
+            NotificationTarget::Character(cid),
+            "OnSignalTrackerSignatureUpdate",
+            "charid",
+            args.clone(),
+        );
+    }
+}
+
+pub(crate) fn emit_signal_tracker_anomaly_delta(
+    ctx: &ServerContext,
+    sys_id: u32,
+    added: &[eve_db::CosmicAnomalyRecord],
+    removed_ids: &[String],
+) {
+    if added.is_empty() && removed_ids.is_empty() {
+        return;
+    }
+    let subs = ctx.db.with_snapshot(|snap| signal_tracker_subscribers_in_snap(snap, sys_id));
+    if subs.is_empty() {
+        return;
+    }
+    let added_dict = PyRep::Dict(
+        added
+            .iter()
+            .map(|anom| {
+                (
+                    PyRep::String(anom.anomaly_id.clone()),
+                    build_signal_tracker_anomaly_kv(anom),
+                )
+            })
+            .collect(),
+    );
+    let removed_list = PyRep::List(removed_ids.iter().cloned().map(PyRep::String).collect());
+    let args = vec![PyRep::Integer(i64::from(sys_id)), added_dict, removed_list];
+    for cid in subs {
+        ctx.notify(
+            NotificationTarget::Character(cid),
+            "OnSignalTrackerAnomalyUpdate",
+            "charid",
+            args.clone(),
+        );
+    }
+}
+
+pub(crate) fn emit_signal_tracker_structure_delta(
+    ctx: &ServerContext,
+    sys_id: u32,
+    added: &[eve_db::UpwellStructureRecord],
+    removed_ids: &[i64],
+) {
+    if added.is_empty() && removed_ids.is_empty() {
+        return;
+    }
+    let subs = ctx.db.with_snapshot(|snap| signal_tracker_subscribers_in_snap(snap, sys_id));
+    if subs.is_empty() {
+        return;
+    }
+    let added_dict = PyRep::Dict(
+        added
+            .iter()
+            .map(|st| {
+                (
+                    PyRep::Integer(st.structure_id),
+                    build_signal_tracker_structure_kv(ctx, st),
+                )
+            })
+            .collect(),
+    );
+    let removed_list = PyRep::List(removed_ids.iter().copied().map(PyRep::Integer).collect());
+    let args = vec![PyRep::Integer(i64::from(sys_id)), added_dict, removed_list];
+    for cid in subs {
+        ctx.notify(
+            NotificationTarget::Character(cid),
+            "OnSignalTrackerStructureUpdate",
+            "charid",
+            args.clone(),
+        );
+    }
+}
+
+pub(crate) fn emit_signal_tracker_structure_removed_with_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    sys_id: u32,
+    structure_id: i64,
+) {
+    let subs = signal_tracker_subscribers_in_snap(snap, sys_id);
+    if subs.is_empty() {
+        return;
+    }
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let args = vec![
+        PyRep::Integer(i64::from(sys_id)),
+        PyRep::Dict(Vec::new()),
+        PyRep::List(vec![PyRep::Integer(structure_id)]),
+    ];
+    let mut queues = ctx
+        .pending_notifications
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    for cid in subs {
+        let uid = snap.characters.get(&cid).map(|c| c.user_id);
+        let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(
+            cid,
+            uid,
+            "OnSignalTrackerStructureUpdate",
+            "charid",
+            args.clone(),
+        );
+        let notif = crate::router::PendingMachoNotification {
+            recipient_char_id: cid,
+            event: "OnSignalTrackerStructureUpdate".into(),
+            id_type: "charid".into(),
+            args: args.clone(),
+            packet,
+            marshaled_packet,
+            created_filetime: now_ft,
+        };
+        queues.entry(cid).or_default().push(notif.clone());
+        let _ = ctx.notify_tx.send((cid, notif));
+    }
+}
+
+pub(crate) fn emit_signal_tracker_site_removed_with_db(
+    db: &eve_db::WorldRepository,
+    pending_notifications: &std::sync::RwLock<
+        HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
+    >,
+    notify_tx: &tokio::sync::broadcast::Sender<(
+        i64,
+        crate::router::cache_notifications::PendingMachoNotification,
+    )>,
+    site_id: &str,
+) {
+    let (sys_id_opt, was_anom, was_sig, recips) = db.with_snapshot(|snap| {
+        let mut found_sys = None;
+        let mut is_a = false;
+        let mut is_s = false;
+        for (&sid, anoms) in &snap.cosmic_anomalies {
+            if anoms.iter().any(|a| a.anomaly_id == site_id && a.cleared) {
+                found_sys = Some(sid);
+                is_a = true;
+                is_s = snap
+                    .cosmic_signatures
+                    .get(&sid)
+                    .is_some_and(|l| l.iter().any(|s| s.signature_id == site_id && s.collapsed));
+                break;
+            }
+        }
+        if found_sys.is_none() {
+            for (&sid, sigs) in &snap.cosmic_signatures {
+                if sigs.iter().any(|s| s.signature_id == site_id && s.collapsed) {
+                    found_sys = Some(sid);
+                    is_s = true;
+                    break;
+                }
+            }
+        }
+        let rec: Vec<(i64, Option<u64>)> = found_sys
+            .map(|sid| {
+                signal_tracker_subscribers_in_snap(snap, sid)
+                    .into_iter()
+                    .map(|cid| (cid, snap.characters.get(&cid).map(|c| c.user_id)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        (found_sys, is_a, is_s, rec)
+    });
+    let Some(sys_id) = sys_id_opt else { return };
+    if recips.is_empty() {
+        return;
+    }
+    let now_ft = db.clock().now_blueos_filetime_ticks();
+    let mut queues = pending_notifications.write().unwrap_or_else(|e| e.into_inner());
+    for (event_name, active) in [
+        ("OnSignalTrackerAnomalyUpdate", was_anom),
+        ("OnSignalTrackerSignatureUpdate", was_sig),
+    ] {
+        if !active {
+            continue;
+        }
+        let args = vec![
+            PyRep::Integer(i64::from(sys_id)),
+            PyRep::Dict(Vec::new()),
+            PyRep::List(vec![PyRep::String(site_id.to_string())]),
+        ];
+        for &(cid, uid) in &recips {
+            let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(
+                cid,
+                uid,
+                event_name,
+                "charid",
+                args.clone(),
+            );
+            let notif = crate::router::cache_notifications::PendingMachoNotification {
+                recipient_char_id: cid,
+                event: event_name.into(),
+                id_type: "charid".into(),
+                args: args.clone(),
+                packet,
+                marshaled_packet,
+                created_filetime: now_ft,
+            };
+            queues.entry(cid).or_default().push(notif.clone());
+            let _ = notify_tx.send((cid, notif));
+        }
+    }
 }

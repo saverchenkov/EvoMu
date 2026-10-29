@@ -787,12 +787,6 @@ pub fn handle_season_manager(
                             character_progress_kv,
                         ],
                     );
-                    ctx.notify(
-                        NotificationTarget::Character(char_id),
-                        "OnSeasonSelectionUpdated",
-                        "charid",
-                        vec![],
-                    );
                     Some(Ok(PyRep::Bool(true)))
                 }
                 Err(e) => Some(Err(e)),
@@ -1035,7 +1029,7 @@ pub fn handle_season_manager(
                 let (prev_pts, reward_pts, season_id) = (st.season_points, ch.points, st.selected_season_id);
                 st.season_points += reward_pts;
                 let pts = st.season_points;
-                let is_omega = snap.characters.get(&char_id).map(|c| c.clone_grade >= 2).unwrap_or(true);
+                let is_omega = snap.characters.get(&char_id).map(|c| c.clone_grade >= 2).unwrap_or(false);
                 let delivered_rep = if !ch.client_event_driven && ch.reward_type_id > 0 && ch.reward_quantity > 0 {
                     snap.next_entity_id += 1;
                     let reward_item_id = snap.next_entity_id;
@@ -1059,6 +1053,7 @@ pub fn handle_season_manager(
                 Ok((rep, season_id, prev_pts, pts, is_omega)) => {
                     ctx.notify(NotificationTarget::Character(char_id), "OnChallengeRewardsGranted", "charid", vec![PyRep::Integer(ch_id)]);
                     ctx.notify(NotificationTarget::Character(char_id), "OnSeasonalPointsUpdated", "charid", vec![PyRep::Integer(season_id), PyRep::Integer(pts)]);
+                    // DERIVED: 10-point seasonal goal milestone cadence; V24 `seasonselection.fsdbinary` ships no static reward-track point thresholds (live-ops server schedule).
                     let (prev_goal, new_goal) = (prev_pts / 10, pts / 10);
                     if new_goal > prev_goal {
                         for g_idx in prev_goal..new_goal {

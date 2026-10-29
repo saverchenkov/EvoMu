@@ -1298,29 +1298,10 @@ pub async fn handle_extended(
         ("air_npe", "skip_air_npe") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let now = ctx.now_unix();
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let (curr_node, completed) = {
-                    let npe = snap.npe_progress.entry(char_id).or_insert_with(|| {
-                        eve_db::NpeProgressRecord {
-                            character_id: char_id,
-                            node_graph_id: 473,
-                            current_node_id: 1,
-                            completed: false,
-                            career_goal_progress: Default::default(),
-                            claimed_goals: Default::default(),
-                        }
-                    });
-                    npe.completed = true;
-                    npe.current_node_id = 4;
-                    (npe.current_node_id, npe.completed)
-                };
-                crate::services::operations_manager::sync_air_npe_skip(snap, char_id, now);
-                Ok((curr_node, completed))
-            });
-            match res {
-                Ok((curr_node, completed)) => Some(Ok(PyRep::keyval([
-                    ("nodeGraphID", PyRep::Integer(473)),
-                    ("currentNodeID", PyRep::Integer(curr_node as i64)),
+            match crate::services::character_expert_systems::skip_air_npe_and_stop_graph(ctx, char_id, now) {
+                Ok((graph_id, curr_node, completed)) => Some(Ok(PyRep::keyval([
+                    ("nodeGraphID", PyRep::Integer(i64::from(graph_id))),
+                    ("currentNodeID", PyRep::Integer(i64::from(curr_node))),
                     ("completed", PyRep::Bool(completed)),
                 ]))),
                 Err(e) => Some(Err(e)),

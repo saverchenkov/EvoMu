@@ -1020,6 +1020,26 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
     let now_unix = ctx.now_unix();
     ctx.crimewatch.write().unwrap().trigger_weapon_timer(char_id, now_unix);
 
+    let cycle_duration_ms = ctx
+        .sde
+        .types
+        .get(&fb.type_id)
+        .and_then(|t| t.default_attributes.get(&2123).copied())
+        .filter(|&v| v > 0.0)
+        .unwrap_or(10_000.0);
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    session.push_notification(
+        "OnFighterAbilitySlotActivated",
+        vec![
+            PyRep::Integer(fighter_ball_id),
+            PyRep::Integer(slot_id as i64),
+            if charge_count > 0 { PyRep::Integer(remaining_charges) } else { PyRep::None },
+            PyRep::Integer(now_ft),
+            PyRep::Real(cycle_duration_ms),
+            PyRep::Real(cd_secs as f64),
+        ],
+    );
+
     Some(Ok(PyRep::keyval([
         ("fighterID", PyRep::Integer(fighter_ball_id)),
         ("slotID", PyRep::Integer(slot_id as i64)),

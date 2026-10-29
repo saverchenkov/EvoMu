@@ -601,6 +601,9 @@ pub async fn ensure_system_signatures_and_anomalies(
 ) -> (Vec<CosmicSignatureRecord>, Vec<CosmicAnomalyRecord>) {
     let now_unix = ctx.now_unix();
     let mut expired_balls_to_despawn: Vec<(SolarSystemId, i64)> = Vec::new();
+    let mut expired_sig_ids: Vec<String> = Vec::new();
+    let mut added_sigs: Vec<CosmicSignatureRecord> = Vec::new();
+    let mut expired_anom_ids: Vec<String> = Vec::new();
     let (sigs, anomalies) = ctx
         .db
         .try_with_mut_snapshot(|snap| {
@@ -654,33 +657,36 @@ pub async fn ensure_system_signatures_and_anomalies(
             let mut spawned_replacements = Vec::new();
             let base_len = list.len() as u32;
             for (idx, sig) in list.iter_mut().enumerate() {
-                if sig.sig_group == "Wormhole"
-                    && !sig.collapsed
+                if !sig.collapsed
                     && sig.lifetime_seconds > 0
                     && now_unix >= sig.created_unix.saturating_add(sig.lifetime_seconds)
                 {
                     sig.collapsed = true;
-                    let ent_id = wormhole_item_id_for_signature(sys_id, &sig.signature_id);
-                    expired_balls_to_despawn.push((sys_id, ent_id));
-                    if let Some(dest_sys) = sig.destination_system_id {
-                        let exit_id = wormhole_exit_item_id_for_signature(dest_sys, &sig.signature_id);
-                        expired_balls_to_despawn.push((dest_sys, exit_id));
-                    }
-                    if let Some(rep) = build_static_replacement_wormhole(
-                        ctx,
-                        sys_id,
-                        sig,
-                        now_unix,
-                        base_len + (idx as u32) + 1,
-                    ) {
-                        spawned_replacements.push(rep);
+                    expired_sig_ids.push(sig.signature_id.clone());
+                    if sig.sig_group == "Wormhole" {
+                        let ent_id = wormhole_item_id_for_signature(sys_id, &sig.signature_id);
+                        expired_balls_to_despawn.push((sys_id, ent_id));
+                        if let Some(dest_sys) = sig.destination_system_id {
+                            let exit_id = wormhole_exit_item_id_for_signature(dest_sys, &sig.signature_id);
+                            expired_balls_to_despawn.push((dest_sys, exit_id));
+                        }
+                        if let Some(rep) = build_static_replacement_wormhole(
+                            ctx,
+                            sys_id,
+                            sig,
+                            now_unix,
+                            base_len + (idx as u32) + 1,
+                        ) {
+                            spawned_replacements.push(rep);
+                        }
                     }
                 }
             }
+            added_sigs = spawned_replacements.clone();
             list.extend(spawned_replacements);
 
             let sigs_clone = list.clone();
-            let anoms = snap
+            let anom_list = snap
                 .cosmic_anomalies
                 .entry(sys_id)
                 .or_insert_with(|| {
@@ -701,11 +707,33 @@ pub async fn ensure_system_signatures_and_anomalies(
                         lifetime_seconds: 86_400,
                         cleared: false,
                     }]
-                })
-                .clone();
+                });
+            for anom in anom_list.iter_mut() {
+                if !anom.cleared
+                    && anom.lifetime_seconds > 0
+                    && now_unix >= anom.created_unix.saturating_add(anom.lifetime_seconds)
+                {
+                    anom.cleared = true;
+                    expired_anom_ids.push(anom.anomaly_id.clone());
+                }
+            }
+            let anoms = anom_list.clone();
             Ok::<_, std::convert::Infallible>((sigs_clone, anoms))
         })
         .unwrap();
+
+    crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_signature_delta(
+        ctx,
+        sys_id,
+        &added_sigs,
+        &expired_sig_ids,
+    );
+    crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_anomaly_delta(
+        ctx,
+        sys_id,
+        &[],
+        &expired_anom_ids,
+    );
 
     for (b_sys, b_id) in expired_balls_to_despawn {
         let h = ctx.systems.get_or_spawn(b_sys);
@@ -980,6 +1008,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
 
     let mut collapsed_balls_to_remove: Vec<(SolarSystemId, i64)> = Vec::new();
     let mut replacement_to_spawn: Option<CosmicSignatureRecord> = None;
+    let mut collapsed_sig_delta: Option<(SolarSystemId, String)> = None;
 
     let res = ctx.db.try_with_mut_snapshot(|snap| {
         let mut reverse_parent_sys_opt: Option<SolarSystemId> = None;
@@ -1087,6 +1116,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             collapsed_balls_to_remove.push((old_sys, wh_id));
             collapsed_balls_to_remove.push((dest_sys, exit_wh_id));
             if !was_already_collapsed {
+                collapsed_sig_delta = Some((sig_host_sys, sig_id_str.clone()));
                 spawn_replacement(sigs, wh_idx);
             }
             let code = if elapsed >= sigs[wh_idx].lifetime_seconds {
@@ -1117,6 +1147,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
 
         if sigs[wh_idx].remaining_mass_kg <= 0.0 {
             sigs[wh_idx].collapsed = true;
+            collapsed_sig_delta = Some((sig_host_sys, sig_id_str.clone()));
             collapsed_balls_to_remove.push((old_sys, wh_id));
             collapsed_balls_to_remove.push((dest_sys, exit_wh_id));
             spawn_replacement(sigs, wh_idx);
@@ -1129,6 +1160,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
         sigs[wh_idx].remaining_mass_kg -= ship_mass;
         if sigs[wh_idx].remaining_mass_kg <= 0.0 {
             sigs[wh_idx].collapsed = true;
+            collapsed_sig_delta = Some((sig_host_sys, sig_id_str.clone()));
             collapsed_balls_to_remove.push((old_sys, wh_id));
             collapsed_balls_to_remove.push((dest_sys, exit_wh_id));
             spawn_replacement(sigs, wh_idx);
@@ -1148,6 +1180,15 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
     for (b_sys, rem_id) in &collapsed_balls_to_remove {
         let h = ctx.systems.get_or_spawn(*b_sys);
         let _ = h.remove_ball(*rem_id).await;
+    }
+    if let Some((host_sys, collapsed_id)) = collapsed_sig_delta {
+        let added_vec: Vec<CosmicSignatureRecord> = replacement_to_spawn.iter().cloned().collect();
+        crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_signature_delta(
+            ctx,
+            host_sys,
+            &added_vec,
+            &[collapsed_id],
+        );
     }
     let mut rep_sig_id: Option<String> = None;
     let mut rep_wh_id: Option<i64> = None;

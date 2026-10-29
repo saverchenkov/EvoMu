@@ -349,6 +349,14 @@ pub fn abandon_drones_and_fighters_for_ship_sync(
 ) {
     abandon_drones_on_warp_sync(ctx, char_id, ship_id, sys_id);
 
+    if let Ok(mut probes) = ctx.active_scanner_probes.write() {
+        for p in probes.values_mut() {
+            if p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0 {
+                p.state = 0;
+            }
+        }
+    }
+
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let candidate_fighter_items: Vec<(i64, bool)> = if let Ok(fighters) = ctx.active_fighters.read() {
         fighters

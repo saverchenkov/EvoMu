@@ -2071,6 +2071,10 @@
     "disposition": "client_local",
     "evidence": "packages/probescanning/probeTracker.pyj:155 ProbeTracker.UpdateProbeState(): sm.ScatterEvent('OnProbeStateUpdated', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
   },
+  "notify:OnProbeWarpEnd": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/shared/mapView/mapViewProbeHandlerStandalone.pyj:221 MapViewProbeHandlerStandalone.OnProbeWarpEnd() -> OnProbeWarpEnd_Thread(): client-only standalone map probe animation callback; ScanSvc (eve/client/script/parklife/scanSvc.pyj:283) registers only OnProbeWarpStart and never registers OnProbeWarpEnd; no machoNet cast in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
+  },
   "notify:OnProcessLoginProgress": {
     "disposition": "client_local",
     "evidence": "carbon/common/script/net/machoNet.pyj:1884 MachoNetService.ConnectToServer(): sm.ScatterEvent('OnProcessLoginProgress', ...) \u2014 client-only local UI scatter (3 site(s)); no machoNet cast in client code; no server emission. Line from V24 bytecode line table."

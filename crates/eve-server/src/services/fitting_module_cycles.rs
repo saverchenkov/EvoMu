@@ -1181,6 +1181,7 @@ pub(crate) async fn handle_module_cycles(
             };
 
             if let Err(e) = sys.add_module_cycle(cycle).await {
+                ctx.remove_projected_ewar_by_module(module_id);
                 let code = if e.contains("WarpScrambled") {
                     "WarpScrambled"
                 } else {
@@ -1195,6 +1196,7 @@ pub(crate) async fn handle_module_cycles(
             if let Err(e) = evaluate_module_cycle_aggression_or_assistance(
                 ctx, &sys, sys_id, char_id, ship_id, mod_type.group_id, target_id_opt,
             ).await {
+                ctx.remove_projected_ewar_by_module(module_id);
                 let _ = sys.remove_module_cycle(ship_id, module_id).await;
                 if cap_need > 0.0 {
                     if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
@@ -1225,6 +1227,7 @@ pub(crate) async fn handle_module_cycles(
             {
                 Ok(rep_opt) => rep_opt,
                 Err(e) => {
+                    ctx.remove_projected_ewar_by_module(module_id);
                     let _ = sys.remove_module_cycle(ship_id, module_id).await;
                     if cap_need > 0.0 {
                         if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
@@ -1282,6 +1285,10 @@ pub(crate) async fn handle_module_cycles(
 
             // V24 client derives `OnModuleActivated` from `OnGodmaShipEffect` (active=1).
             let _ = ctx.notify_module_effect_started(char_id, ship_id, module_id, m.type_id, Some(effect_name.as_str()), target_id_opt);
+            emit_committed_ewar_and_system_wide_notifications(
+                ctx, sys_id, char_id, ship_id, module_id, m.type_id, mod_type, m.charge_type_id,
+                disables_target_mwd_mjd, hic_bubble_radius_m, target_id_opt,
+            );
 
             if let Some(rep) = instant_rep_opt {
                 return Some(Ok(rep));

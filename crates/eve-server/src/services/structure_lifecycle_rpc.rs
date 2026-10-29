@@ -191,6 +191,9 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
         Ok((id, corp_id))
     })?;
     ensure_structure_ball_in_space(ctx, sys_id, structure_id).await;
+    if let Some(st_rec) = ctx.db.with_snapshot(|snap| snap.structures.get(&structure_id).cloned()) {
+        crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_structure_delta(ctx, sys_id, &[st_rec], &[]);
+    }
     ctx.notify(
         crate::router::NotificationTarget::SolarSystem(sys_id),
         "OnStructureAdded",

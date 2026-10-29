@@ -41,7 +41,7 @@ pub mod fleet_social_notify;
 #[path = "fleet_social_persistence.rs"]
 pub mod fleet_social_persistence;
 #[path = "fleet_social_scanning.rs"]
-mod fleet_social_scanning;
+pub(crate) mod fleet_social_scanning;
 
 pub use fleet_social_notify::stream_fleet_watchlist_damage;
 pub use fleet_social_persistence::{hydrate_social_state_from_db, persist_social_state};

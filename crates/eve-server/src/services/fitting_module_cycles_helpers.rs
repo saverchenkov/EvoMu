@@ -1057,7 +1057,7 @@ pub(crate) async fn evaluate_module_cycle_aggression_or_assistance(
     if matches!(
         group_id,
         52 | 53 | 55 | 65 | 68 | 71 | 74 | 201 | 208 | 291 | 379 | 506..=512
-            | 524 | 771 | 1245 | 1672 | 1674 | 1986 | 4060 | 4500 | 4805 | 4807
+            | 524 | 771 | 899 | 1245 | 1672 | 1674 | 1986 | 4060 | 4500 | 4805 | 4807
     ) {
         let is_pod = sys.get_ball_snapshot(target_id).await.ok().flatten().is_some_and(|(_, b)| b.type_id == 670)
             || ctx.db.with_snapshot(|s| s.items.get(&target_id).is_some_and(|i| i.type_id == 670));

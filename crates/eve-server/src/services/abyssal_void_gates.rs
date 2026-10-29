@@ -709,6 +709,7 @@ pub(crate) async fn handle_void_space_player_jump(
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys);
     origin_handle.try_remove_ball(ship_id);
 
+    let effective_content_id = if content_id > 0 { content_id } else { target_id };
     let _ = ctx.db.try_with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = VOID_SPACE_SYSTEM_ID;
@@ -717,6 +718,8 @@ pub(crate) async fn handle_void_space_player_jump(
             sh.location_id = VOID_SPACE_SYSTEM_ID as i64;
         }
         snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]);
+        snap.service_state_blobs
+            .insert(format!("void_space_content:{char_id}"), effective_content_id.to_string());
         Ok::<(), BridgeRpcError>(())
     });
 
@@ -759,7 +762,6 @@ pub(crate) async fn handle_void_space_player_jump(
     session.solar_system_id = Some(VOID_SPACE_SYSTEM_ID);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, VOID_SPACE_SYSTEM_ID);
 
-    let effective_content_id = if content_id > 0 { content_id } else { target_id };
     let client_data = PyRep::Dict(vec![
         (
             PyRep::String("content_id".into()),
@@ -830,6 +832,9 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
             reg.void_space_sessions.remove(&char_id);
         });
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.service_state_blobs.remove(&format!("void_space_content:{char_id}"));
+        });
         crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
         return Err(BridgeRpcError {
             code: "PocketCollapsed".into(),
@@ -893,16 +898,24 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         vs.origin_position[1] + 1_000.0,
         vs.origin_position[2] + 1_000.0,
     ];
-    let _ = ctx.db.try_with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = origin_sys;
-        }
-        if let Some(sh) = snap.items.get_mut(&ship_id) {
-            sh.location_id = origin_sys as i64;
-        }
-        snap.item_positions.insert(ship_id, exit_pos);
-        Ok::<(), BridgeRpcError>(())
-    });
+    let finished_content_id = ctx
+        .db
+        .try_with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.solar_system_id = origin_sys;
+            }
+            if let Some(sh) = snap.items.get_mut(&ship_id) {
+                sh.location_id = origin_sys as i64;
+            }
+            snap.item_positions.insert(ship_id, exit_pos);
+            let cid = snap
+                .service_state_blobs
+                .remove(&format!("void_space_content:{char_id}"))
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(vs.target_id);
+            Ok::<i64, BridgeRpcError>(cid)
+        })
+        .unwrap_or(vs.target_id);
 
     let origin_handle = ctx.systems.get_or_spawn(origin_sys);
     let ship_type = ctx
@@ -928,7 +941,7 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         crate::router::NotificationTarget::Character(char_id),
         "OnVoidSpaceContentFinished",
         "charid",
-        vec![PyRep::Integer(vs.target_id), PyRep::Integer(1)],
+        vec![PyRep::Integer(finished_content_id), PyRep::Integer(1)],
     );
 
     Ok(PyRep::keyval([

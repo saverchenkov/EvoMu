@@ -73,7 +73,7 @@ pub async fn tick_sov_prospecting_deposit_respawn(ctx: &ServerContext, sys_id: u
     let sov_pos = derive_system_site_position_from_sde(ctx, sys_id, 3, 5.0);
     let now = ctx.now_unix();
 
-    let newly_spawned = ctx.db.with_mut_snapshot(|snap| {
+    let (newly_spawned, cleared_anom_ids, added_anom_opt, added_sig_opt) = ctx.db.with_mut_snapshot(|snap| {
         for &(aid, rem) in &live_ast_states {
             if let Some(ast) = snap.asteroids.get_mut(&aid) { ast.quantity = rem; }
         }
@@ -124,7 +124,7 @@ pub async fn tick_sov_prospecting_deposit_respawn(ctx: &ServerContext, sys_id: u
         }
 
         let Some((respawn_secs, site)) = installed_upgrade else {
-            return Vec::new();
+            return (Vec::new(), newly_cleared_anom_ids, None, None);
         };
         let has_uncleared = snap
             .cosmic_anomalies
@@ -139,7 +139,7 @@ pub async fn tick_sov_prospecting_deposit_respawn(ctx: &ServerContext, sys_id: u
                 })
             });
         if !ready_to_respawn {
-            return Vec::new();
+            return (Vec::new(), newly_cleared_anom_ids, None, None);
         }
 
         let sov_pos_vec = DVec3::from_array(sov_pos);
@@ -182,7 +182,7 @@ pub async fn tick_sov_prospecting_deposit_respawn(ctx: &ServerContext, sys_id: u
             );
             spawned.push((aid, a.type_id, a.units as u64, uvol, rad, DVec3::from_array(pos)));
         }
-        snap.cosmic_anomalies.entry(sys_id).or_default().push(CosmicAnomalyRecord {
+        let new_anom = CosmicAnomalyRecord {
             anomaly_id: anom_id.clone(),
             solar_system_id: sys_id,
             name: site.name.clone(),
@@ -194,8 +194,8 @@ pub async fn tick_sov_prospecting_deposit_respawn(ctx: &ServerContext, sys_id: u
             created_unix: now,
             lifetime_seconds: 0,
             cleared: false,
-        });
-        snap.cosmic_signatures.entry(sys_id).or_default().push(CosmicSignatureRecord {
+        };
+        let new_sig = CosmicSignatureRecord {
             signature_id: anom_id,
             solar_system_id: sys_id,
             sig_group: "SovOre".into(),
@@ -210,9 +210,19 @@ pub async fn tick_sov_prospecting_deposit_respawn(ctx: &ServerContext, sys_id: u
             remaining_mass_kg: 0.0,
             max_jump_mass_kg: 0.0,
             collapsed: false,
-        });
-        spawned
+        };
+        snap.cosmic_anomalies.entry(sys_id).or_default().push(new_anom.clone());
+        snap.cosmic_signatures.entry(sys_id).or_default().push(new_sig.clone());
+        (spawned, newly_cleared_anom_ids, Some(new_anom), Some(new_sig))
     });
+    let added_anoms: Vec<CosmicAnomalyRecord> = added_anom_opt.into_iter().collect();
+    let added_sigs: Vec<CosmicSignatureRecord> = added_sig_opt.into_iter().collect();
+    crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_anomaly_delta(
+        ctx, sys_id, &added_anoms, &cleared_anom_ids,
+    );
+    crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_signature_delta(
+        ctx, sys_id, &added_sigs, &cleared_anom_ids,
+    );
 
     for (aid, tid, units, uvol, rad, pos) in newly_spawned {
         let ball = Ball {

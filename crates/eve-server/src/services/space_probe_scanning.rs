@@ -747,7 +747,6 @@ async fn handle_request_scans(
                 let from_t = PyRep::Tuple(vec![PyRep::Real(old_pos.x), PyRep::Real(old_pos.y), PyRep::Real(old_pos.z)]);
                 let to_t = PyRep::Tuple(vec![PyRep::Real(new_pos.x), PyRep::Real(new_pos.y), PyRep::Real(new_pos.z)]);
                 let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeWarpStart", "charid", vec![PyRep::Integer(pid), from_t, to_t, PyRep::Integer(warp_ft), PyRep::Integer(1000)]);
-                let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeWarpEnd", "charid", vec![PyRep::Integer(pid)]);
             }
         }
     }
@@ -1253,7 +1252,8 @@ async fn handle_reconnect_probes(
     let mut reconnected_ids = Vec::new();
     if let Ok(mut map) = ctx.active_scanner_probes.write() {
         for p in map.values_mut() {
-            if p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state >= 0 {
+            let is_disconnected = p.state == 0 || (ship_id != 0 && p.ship_id != ship_id && p.state > 0);
+            if p.owner_char_id == char_id && p.solar_system_id == sys_id && is_disconnected {
                 p.state = 1;
                 if ship_id != 0 {
                     p.ship_id = ship_id;

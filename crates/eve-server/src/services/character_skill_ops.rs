@@ -466,17 +466,45 @@ fn strip_ship_fitting(
 
     ctx.invalidate_ship_fitting(ship_id);
     if !stripped.is_empty() {
-        let mut item_kvs = Vec::with_capacity(stripped.len());
-        let first_prev_flag = stripped[0].2 as i64;
-        for (item, _prev_loc, prev_flag) in &stripped {
-            item_kvs.push(PyRep::keyval([
-                ("itemID", PyRep::Integer(item.item_id)),
-                ("typeID", PyRep::Integer(item.type_id as i64)),
-                ("ownerID", PyRep::Integer(item.owner_id)),
-                ("locationID", PyRep::Integer(item.location_id)),
-                ("flagID", PyRep::Integer(item.flag as i64)),
-                ("quantity", PyRep::Integer(item.quantity as i64)),
-            ]));
+        let mut grouped: std::collections::BTreeMap<(i64, i64), Vec<PyRep>> =
+            std::collections::BTreeMap::new();
+        for (item, prev_loc, prev_flag) in &stripped {
+            let (group_id, category_id) = ctx
+                .sde
+                .types
+                .get(&item.type_id)
+                .map(|t| (i64::from(t.group_id), i64::from(t.category_id)))
+                .unwrap_or((0, 0));
+            let singleton_val = if item.is_blueprint_copy {
+                2
+            } else if item.singleton {
+                1
+            } else {
+                0
+            };
+            let qty_val = if item.is_blueprint_copy {
+                -2
+            } else if item.singleton {
+                -1
+            } else {
+                i64::from(item.quantity)
+            };
+            grouped
+                .entry((*prev_loc, *prev_flag as i64))
+                .or_default()
+                .push(PyRep::keyval([
+                    ("itemID", PyRep::Integer(item.item_id)),
+                    ("typeID", PyRep::Integer(i64::from(item.type_id))),
+                    ("ownerID", PyRep::Integer(item.owner_id)),
+                    ("locationID", PyRep::Integer(item.location_id)),
+                    ("flagID", PyRep::Integer(item.flag as i64)),
+                    ("quantity", PyRep::Integer(qty_val)),
+                    ("stacksize", PyRep::Integer(i64::from(item.quantity))),
+                    ("singleton", PyRep::Integer(singleton_val)),
+                    ("groupID", PyRep::Integer(group_id)),
+                    ("categoryID", PyRep::Integer(category_id)),
+                    ("customInfo", PyRep::String(String::new())),
+                ]));
             if matches!(*prev_flag as u16, 11..=34 | 164..=171) {
                 ctx.notify(
                     NotificationTarget::Character(char_id),
@@ -486,16 +514,18 @@ fn strip_ship_fitting(
                 );
             }
         }
-        let change_dict = PyRep::Dict(vec![
-            (PyRep::Integer(3), PyRep::Integer(ship_id)),
-            (PyRep::Integer(4), PyRep::Integer(first_prev_flag)),
-        ]);
-        ctx.notify(
-            NotificationTarget::Character(char_id),
-            "OnItemsChanged",
-            "charid",
-            vec![PyRep::List(item_kvs), change_dict, PyRep::Integer(dock_id)],
-        );
+        for ((prev_loc, prev_flag), item_kvs) in grouped {
+            let change_dict = PyRep::Dict(vec![
+                (PyRep::Integer(3), PyRep::Integer(prev_loc)),
+                (PyRep::Integer(4), PyRep::Integer(prev_flag)),
+            ]);
+            ctx.notify(
+                NotificationTarget::Character(char_id),
+                "OnItemsChanged",
+                "charid",
+                vec![PyRep::List(item_kvs), change_dict, PyRep::Integer(dock_id)],
+            );
+        }
     }
 
     let stripped_ids: Vec<PyRep> = stripped

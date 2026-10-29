@@ -561,6 +561,9 @@ pub fn notify_pve_destruction_events(
     let mut to_send = Vec::new();
 
     if let Some(site_id) = cleared_site_id {
+        crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_site_removed_with_db(
+            db, pending_notifications, notify_tx, &site_id,
+        );
         let (packet, marshaled_packet) = crate::router::ServerContext::build_macho_notification_packet(
             killer_char_id,
             None,
@@ -855,18 +858,29 @@ pub async fn advance_site_wave_or_complete(
             ).await;
         }
 
-        ctx.db.with_mut_snapshot(|snap| {
+        let (was_anom, was_sig) = ctx.db.with_mut_snapshot(|snap| {
+            let mut a_hit = false;
+            let mut s_hit = false;
             if let Some(anoms) = snap.cosmic_anomalies.get_mut(&solar_system_id) {
-                if let Some(a) = anoms.iter_mut().find(|a| a.anomaly_id == site_id) {
+                if let Some(a) = anoms.iter_mut().find(|a| a.anomaly_id == site_id && !a.cleared) {
                     a.cleared = true;
+                    a_hit = true;
                 }
             }
             if let Some(sigs) = snap.cosmic_signatures.get_mut(&solar_system_id) {
-                if let Some(s) = sigs.iter_mut().find(|s| s.signature_id == site_id) {
+                if let Some(s) = sigs.iter_mut().find(|s| s.signature_id == site_id && !s.collapsed) {
                     s.collapsed = true;
+                    s_hit = true;
                 }
             }
+            (a_hit, s_hit)
         });
+        if was_anom {
+            crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_anomaly_delta(ctx, solar_system_id, &[], &[site_id.to_string()]);
+        }
+        if was_sig {
+            crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_signature_delta(ctx, solar_system_id, &[], &[site_id.to_string()]);
+        }
 
         session.push_notification("OnCosmicAnomalyRemoved", vec![PyRep::String(site_id.to_string())]);
         if let Some(ref esc) = escalation_created {

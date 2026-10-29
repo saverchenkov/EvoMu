@@ -184,10 +184,16 @@ pub async fn handle(
             if session.solar_system_id == Some(VOID_SPACE_SYSTEM_ID) {
                 let vs_opt = with_pve_special_reg(ctx, |reg| reg.void_space_sessions.get(&char_id).cloned());
                 if let Some(vs) = vs_opt {
+                    let persisted_cid = ctx.db.with_snapshot(|snap| {
+                        snap.service_state_blobs
+                            .get(&format!("void_space_content:{char_id}"))
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .unwrap_or(vs.target_id)
+                    });
                     let rem_sec = vs.expires_at_sec.saturating_sub(ctx.now_unix()) as i64;
                     let end_ft = ctx.now_blueos_filetime_ticks() + rem_sec.max(1) * 10_000_000;
                     let client_data = PyRep::Dict(vec![
-                        (PyRep::String("content_id".into()), PyRep::Integer(vs.target_id)),
+                        (PyRep::String("content_id".into()), PyRep::Integer(persisted_cid)),
                         (PyRep::String("nebula_graphic_id".into()), PyRep::Integer(200_001)),
                         (PyRep::String("end_time".into()), PyRep::Integer(end_ft)),
                     ]);

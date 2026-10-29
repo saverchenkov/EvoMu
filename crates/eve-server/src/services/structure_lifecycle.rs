@@ -668,6 +668,8 @@ fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldSt
         queues.entry(cid).or_default().push(notif.clone());
         let _ = ctx.notify_tx.send((cid, notif));
     }
+    drop(queues);
+    crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_structure_removed_with_snap(ctx, snap, st.solar_system_id, st.structure_id);
 }
 
 /// Maximum tethering distance from the structure center in meters:

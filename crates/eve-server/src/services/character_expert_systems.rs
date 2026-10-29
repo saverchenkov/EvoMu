@@ -344,6 +344,7 @@ pub fn handle(
         }
 
         // parity: rpc:node_graph.process_client_graph_message
+        // DATA GAP: `OnClientNodeGraphMessage` (`SendMessageToClientGraph`) requires server-authored node-graph execution scripts not shipped in V24 client/SDE.
         ("node_graph", "process_client_graph_message") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -371,7 +372,12 @@ pub fn handle(
                 }));
             }
             let node_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-            let msg_name = args.get(2).and_then(|a| a.as_str()).unwrap_or("ObjectiveCompleted");
+            let Some(msg_name) = args.get(2).and_then(|a| a.as_str()).filter(|s| !s.is_empty()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "process_client_graph_message requires a non-empty message key".into(),
+                }));
+            };
             let msg_data = args.get(3).cloned().unwrap_or(PyRep::None);
 
             let data_str = match &msg_data {
@@ -384,9 +390,8 @@ pub fn handle(
             };
 
             let instance_id = char_id * 100_000 + graph_id;
-            let (first_start, bb_dict) = ctx.db.with_mut_snapshot(|snap| {
+            let bb_dict = ctx.db.with_mut_snapshot(|snap| {
                 let blob_key = node_graph_bb_blob_key(char_id, graph_id);
-                let first = !snap.service_state_blobs.contains_key(&blob_key);
                 let mut bb: HashMap<String, String> = snap
                     .service_state_blobs
                     .get(&blob_key)
@@ -401,60 +406,149 @@ pub fn handle(
                     snap.service_state_blobs.insert(blob_key, json);
                 }
 
-                if matches!(msg_name, "NodeCompleted" | "ObjectiveCompleted" | "StepCompleted") {
+                if msg_name.starts_with("client_") {
                     if let Some(npe) = snap.npe_progress.get_mut(&char_id) {
-                        if npe.node_graph_id == graph_id as u32 {
+                        if npe.node_graph_id == graph_id as u32 && !npe.completed {
                             npe.current_node_id = (node_id as u32).saturating_add(1);
                         }
                     }
                 }
-                let mut entries: Vec<(PyRep, PyRep)> = bb
-                    .into_iter()
-                    .map(|(k, v)| (PyRep::String(k), PyRep::String(v)))
-                    .collect();
-                entries.sort_by(|a, b| a.0.as_str().cmp(&b.0.as_str()));
-                (first, PyRep::Dict(entries))
+                blackboard_map_to_pyrep_dict(&bb)
             });
 
-            if first_start || msg_name == "StartNodeGraph" {
-                ctx.notify(
-                    NotificationTarget::Character(char_id),
-                    "OnStartClientNodeGraph",
-                    "charid",
-                    vec![PyRep::Integer(graph_id), PyRep::Integer(instance_id), bb_dict.clone()],
-                );
-            }
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnClientNodeGraphUpdate",
                 "charid",
                 vec![PyRep::Integer(instance_id), bb_dict],
             );
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnClientNodeGraphMessage",
-                "charid",
-                vec![PyRep::Integer(instance_id), PyRep::String(msg_name.to_string()), msg_data],
-            );
-            if matches!(msg_name, "StopNodeGraph" | "GraphCompleted") {
-                ctx.notify(
-                    NotificationTarget::Character(char_id),
-                    "OnStopClientNodeGraph",
-                    "charid",
-                    vec![PyRep::Integer(instance_id)],
-                );
-            } else if msg_name == "StopNodeGraphById" {
-                ctx.notify(
-                    NotificationTarget::Character(char_id),
-                    "OnStopClientNodeGraphById",
-                    "charid",
-                    vec![PyRep::Integer(graph_id)],
-                );
-            }
 
             Some(Ok(PyRep::None))
         }
 
         _ => None,
     }
+}
+
+fn blackboard_map_to_pyrep_dict(bb: &HashMap<String, String>) -> PyRep {
+    let mut entries: Vec<(PyRep, PyRep)> = bb
+        .iter()
+        .map(|(k, v)| (PyRep::String(k.clone()), PyRep::String(v.clone())))
+        .collect();
+    entries.sort_by(|a, b| a.0.as_str().cmp(&b.0.as_str()));
+    PyRep::Dict(entries)
+}
+
+/// Starts a client node graph instance when an AIR operation is activated in space
+/// (`operationsManager.activate_operation_in_solar_system`), persisting its blackboard in
+/// `service_state_blobs` and emitting `OnStartClientNodeGraph`.
+pub fn start_client_node_graph_for_operation(
+    ctx: &ServerContext,
+    char_id: i64,
+    op_id: i64,
+    cat_id: i64,
+    solar_system_id: u32,
+) {
+    let graph_id: i64 = if ctx.sde.node_graphs.contains_key(&(op_id as u32)) {
+        op_id
+    } else if ctx.sde.node_graphs.contains_key(&716) {
+        716
+    } else {
+        473
+    };
+    let instance_id = char_id * 100_000 + graph_id;
+    let bb_dict = ctx.db.with_mut_snapshot(|snap| {
+        let blob_key = node_graph_bb_blob_key(char_id, graph_id);
+        let mut bb: HashMap<String, String> = HashMap::new();
+        bb.insert("operation_id".into(), op_id.to_string());
+        bb.insert("category_id".into(), cat_id.to_string());
+        bb.insert("solar_system_id".into(), solar_system_id.to_string());
+        if let Ok(json) = serde_json::to_string(&bb) {
+            snap.service_state_blobs.insert(blob_key, json);
+        }
+        blackboard_map_to_pyrep_dict(&bb)
+    });
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnStartClientNodeGraph",
+        "charid",
+        vec![PyRep::Integer(graph_id), PyRep::Integer(instance_id), bb_dict],
+    );
+}
+
+/// Stops and removes any active operation client node graph matching `cat_id` when
+/// `operationsManager.complete_category_for_character` finishes the category.
+pub fn stop_active_operation_node_graph(ctx: &ServerContext, char_id: i64, cat_id: i64) {
+    let prefix = format!("node_graph_bb:{char_id}:");
+    let cat_str = cat_id.to_string();
+    let stopped_instances = ctx.db.with_mut_snapshot(|snap| {
+        let matching_keys: Vec<(String, i64)> = snap
+            .service_state_blobs
+            .iter()
+            .filter_map(|(k, v)| {
+                let gid_str = k.strip_prefix(&prefix)?;
+                let gid: i64 = gid_str.parse().ok()?;
+                let bb: HashMap<String, String> = serde_json::from_str(v).ok()?;
+                if bb.get("category_id").map(String::as_str) == Some(cat_str.as_str()) {
+                    Some((k.clone(), gid))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let mut stopped = Vec::with_capacity(matching_keys.len());
+        for (key, gid) in matching_keys {
+            snap.service_state_blobs.remove(&key);
+            stopped.push(char_id * 100_000 + gid);
+        }
+        stopped
+    });
+    for instance_id in stopped_instances {
+        ctx.notify(
+            NotificationTarget::Character(char_id),
+            "OnStopClientNodeGraph",
+            "charid",
+            vec![PyRep::Integer(instance_id)],
+        );
+    }
+}
+
+/// Marks AIR NPE completed for `char_id`, removes any active NPE node-graph blackboard from
+/// `service_state_blobs`, and emits `OnStopClientNodeGraphById` on the active->completed transition.
+pub fn skip_air_npe_and_stop_graph(
+    ctx: &ServerContext,
+    char_id: i64,
+    now_unix: u64,
+) -> Result<(u32, u32, bool), BridgeRpcError> {
+    let (graph_id, curr_node, completed, should_emit_stop) = ctx.db.try_with_mut_snapshot(|snap| {
+        let was_completed = snap.npe_progress.get(&char_id).is_some_and(|n| n.completed);
+        let (gid, cnode, comp) = {
+            let npe = snap.npe_progress.entry(char_id).or_insert_with(|| eve_db::NpeProgressRecord {
+                character_id: char_id,
+                node_graph_id: 473,
+                current_node_id: 1,
+                completed: false,
+                career_goal_progress: Default::default(),
+                claimed_goals: Default::default(),
+            });
+            npe.completed = true;
+            npe.current_node_id = 4;
+            (npe.node_graph_id, npe.current_node_id, npe.completed)
+        };
+        let removed_bb = snap
+            .service_state_blobs
+            .remove(&node_graph_bb_blob_key(char_id, i64::from(gid)))
+            .is_some();
+        crate::services::operations_manager::sync_air_npe_skip(snap, char_id, now_unix);
+        Ok::<_, BridgeRpcError>((gid, cnode, comp, !was_completed || removed_bb))
+    })?;
+    if should_emit_stop {
+        ctx.notify(
+            NotificationTarget::Character(char_id),
+            "OnStopClientNodeGraphById",
+            "charid",
+            vec![PyRep::Integer(i64::from(graph_id))],
+        );
+    }
+    Ok((graph_id, curr_node, completed))
 }
