@@ -4,7 +4,8 @@
 //! - `TakeOfferForCharacter` and `TakeOfferForCorporation` LP/ISK deduction, item consumption, and delivery.
 //! - `standingMgr.GetNPCNPCStandings` Rowset shape and standing values dispatch.
 //! - `starterShipcasterTravelMgr.CanCharacterJump` weapons timer and capital ship restrictions.
-//! - `CmdJumpThroughStarterShipcaster` and `CmdJumpThroughShipcaster` ball transfer and session timer checks.
+//! - `CmdJumpThroughStarterShipcaster` proximity (> 100km), session timer, and ball transfer.
+//! - `CmdJumpThroughShipcaster` ball transfer and destination placement.
 //!
 //! DATA GAPs (server-only data not present in V24 client FSD):
 //! - LP store corporation offer catalog is server-only.
@@ -17,37 +18,24 @@ use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
-use eve_server::services::lp_store::{load_corp_lp_balances, save_corp_lp_balances};
+use eve_server::services::lp_store::{
+    load_corp_lp_balances, save_corp_lp_balances, save_lp_store_offers, LPOffer,
+};
 use glam::DVec3;
 use std::collections::HashMap;
 
 async fn rpc(
-    ctx: &ServerContext,
-    sess: &mut SessionState,
-    service: &str,
-    method: &str,
-    args: &[PyRep],
+    ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None)
-        .await
+    ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None).await
 }
 
-fn k_i64(r: &PyRep, k: &str) -> Option<i64> {
-    r.dict_get(k).and_then(|v| v.as_i64())
-}
-
+fn k_i64(r: &PyRep, k: &str) -> Option<i64> { r.dict_get(k).and_then(|v| v.as_i64()) }
 fn kv_i64(rep: &PyRep, key: &str) -> i64 {
-    match rep {
-        PyRep::KeyVal(m) => m.get(key).and_then(|v| v.as_i64()).unwrap_or(0),
-        _ => 0,
-    }
+    match rep { PyRep::KeyVal(m) => m.get(key).and_then(|v| v.as_i64()).unwrap_or(0), _ => 0 }
 }
-
 fn kv_bool(rep: &PyRep, key: &str) -> bool {
-    match rep {
-        PyRep::KeyVal(m) => m.get(key).and_then(|v| v.as_bool()).unwrap_or(false),
-        _ => false,
-    }
+    match rep { PyRep::KeyVal(m) => m.get(key).and_then(|v| v.as_bool()).unwrap_or(false), _ => false }
 }
 
 async fn spawn_test_ship(
@@ -58,23 +46,14 @@ async fn spawn_test_ship(
     type_id: u32,
     pos: DVec3,
 ) {
-    let _ = handle
-        .spawn_ball_with_combat(
-            Ball {
-                id: ship_id,
-                type_id,
-                position: pos,
-                velocity: DVec3::ZERO,
-                max_velocity: 1000.0,
-                inertia: 1.0,
-                mass: 100_000.0,
-                radius: 50.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            ctx.build_ship_combat_state(char_id, ship_id, type_id),
-        )
-        .await;
+    let _ = handle.spawn_ball_with_combat(
+        Ball {
+            id: ship_id, type_id, position: pos, velocity: DVec3::ZERO,
+            max_velocity: 1000.0, inertia: 1.0, mass: 100_000.0, radius: 50.0,
+            speed_fraction: 0.0, mode: MovementMode::Stop,
+        },
+        ctx.build_ship_combat_state(char_id, ship_id, type_id),
+    ).await;
 }
 
 #[tokio::test]
@@ -91,50 +70,59 @@ async fn test_lp_store_mgr_gameplay_closure() {
 
     let mut sess = SessionState::new(4321);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-    rpc(
-        &ctx,
-        &mut sess,
-        "charUnboundMgr",
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-    )
-    .await
-    .expect("SelectCharacterID");
+    rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)])
+        .await
+        .expect("SelectCharacterID");
     sess.station_id = Some(station_id);
     sess.ship_id = Some(ship_id);
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
 
-    // 1. GetAvailableOffersFromCorp from SDE for multiple corps WITHOUT fixtures
-    for corp in &[1_000_035, 1_000_036, 1_000_037, 1_000_044, 1_000_125, 1_000_419] {
-        let rep = rpc(
-            &ctx,
-            &mut sess,
-            "LPStoreMgr",
-            "GetAvailableOffersFromCorp",
-            &[PyRep::Integer(*corp)],
-        )
-        .await
-        .unwrap_or_else(|e| panic!("GetAvailableOffersFromCorp failed for {corp}: {e:?}"));
-        let PyRep::List(ref offers) = rep else {
-            panic!("Expected List for {corp}");
-        };
-        assert!(!offers.is_empty(), "Corp {corp} must have SDE offers");
-        for o in offers {
-            assert_eq!(k_i64(o, "corpID"), Some(*corp));
-            assert!(k_i64(o, "offerID").unwrap_or(0) > 0);
-            assert!(k_i64(o, "typeID").unwrap_or(0) > 0);
-            assert!(k_i64(o, "quantity").unwrap_or(0) > 0);
-            assert!(k_i64(o, "lpCost").unwrap_or(0) >= 0);
-            assert!(
-                o.dict_get("iskCost")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(-1.0)
-                    >= 0.0
-            );
-        }
+    // Seed LP store test offers for corp 1_000_035
+    let test_offers = vec![
+        LPOffer {
+            offer_id: 1001, corp_id: 1_000_035, type_id: 15810, quantity: 1,
+            lp_cost: 2_400, isk_cost: IskCents::from_isk(2_400_000),
+            req_items: vec![], ak_cost: 0, min_standing: None,
+        },
+        LPOffer {
+            offer_id: 1004, corp_id: 1_000_035, type_id: 621, quantity: 1,
+            lp_cost: 5_000, isk_cost: IskCents::from_isk(5_000_000),
+            req_items: vec![(34, 100)], ak_cost: 0, min_standing: None,
+        },
+    ];
+    ctx.db.with_mut_snapshot(|s| {
+        save_lp_store_offers(s, &test_offers);
+    });
+
+    // 1. GetAvailableOffersFromCorp returns seeded offers for corporation
+    let rep = rpc(
+        &ctx,
+        &mut sess,
+        "LPStoreMgr",
+        "GetAvailableOffersFromCorp",
+        &[PyRep::Integer(1_000_035)],
+    )
+    .await
+    .expect("GetAvailableOffersFromCorp");
+    let PyRep::List(ref offers) = rep else {
+        panic!("Expected List for 1_000_035");
+    };
+    assert_eq!(offers.len(), 2, "Seeded corp must return 2 offers");
+    for o in offers {
+        assert_eq!(k_i64(o, "corpID"), Some(1_000_035));
+        assert!(k_i64(o, "offerID").unwrap_or(0) > 0);
+        assert!(k_i64(o, "typeID").unwrap_or(0) > 0);
+        assert!(k_i64(o, "quantity").unwrap_or(0) > 0);
+        assert!(k_i64(o, "lpCost").unwrap_or(0) >= 0);
+        assert!(
+            o.dict_get("iskCost")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(-1.0)
+                >= 0.0
+        );
     }
 
-    // Unknown/player corp returns empty
+    // Unknown or unseeded corp returns empty list
     let empty_rep = rpc(
         &ctx,
         &mut sess,
@@ -146,7 +134,7 @@ async fn test_lp_store_mgr_gameplay_closure() {
     .expect("GetAvailableOffersFromCorp unknown");
     assert_eq!(empty_rep, PyRep::List(vec![]));
 
-    // 2. TakeOfferForCharacter with SDE offer (offer 1001: Ballistic Control System, 2400 LP, 2.4M ISK)
+    // 2. TakeOfferForCharacter with seeded offer (offer 1001: Ballistic Control System, 2400 LP, 2.4M ISK)
     ctx.db.with_mut_snapshot(|s| {
         let ch = s.characters.get_mut(&char_id).unwrap();
         ch.corporation_id = corp_id;
@@ -159,16 +147,10 @@ async fn test_lp_store_mgr_gameplay_closure() {
             name: "LP Test Corp".into(),
             ticker: "LPTC".into(),
             ceo_id: char_id + 999,
-            alliance_id: None,
-            tax_rate: 0.05,
             master_wallet: IskCents::from_isk(100_000_000),
             members: [char_id].into_iter().collect(),
-            member_roles: HashMap::new(),
-            applications: HashMap::new(),
-            wallet_divisions: vec![],
-            description: "".into(),
-            url: "".into(),
             hq_station_id: Some(station_id),
+            ..Default::default()
         };
         corp.ensure_wallet_divisions();
         corp.wallet_divisions[0].balance = IskCents::from_isk(100_000_000);
@@ -181,11 +163,7 @@ async fn test_lp_store_mgr_gameplay_closure() {
         &mut sess,
         "LPStoreMgr",
         "TakeOfferForCharacter",
-        &[
-            PyRep::Integer(1_000_035),
-            PyRep::Integer(1001),
-            PyRep::Integer(2),
-        ],
+        &[PyRep::Integer(1_000_035), PyRep::Integer(1001), PyRep::Integer(2)],
     )
     .await
     .expect("TakeOfferForCharacter 1001 x2");
@@ -249,11 +227,7 @@ async fn test_lp_store_mgr_gameplay_closure() {
         &mut sess,
         "LPStoreMgr",
         "TakeOfferForCharacter",
-        &[
-            PyRep::Integer(1_000_035),
-            PyRep::Integer(1004),
-            PyRep::Integer(2),
-        ],
+        &[PyRep::Integer(1_000_035), PyRep::Integer(1004), PyRep::Integer(2)],
     )
     .await
     .expect("TakeOfferForCharacter 1004 x2 with trade-in");
@@ -297,11 +271,7 @@ async fn test_lp_store_mgr_gameplay_closure() {
         &mut sess,
         "LPStoreMgr",
         "TakeOfferForCorporation",
-        &[
-            PyRep::Integer(1_000_035),
-            PyRep::Integer(1001),
-            PyRep::Integer(1),
-        ],
+        &[PyRep::Integer(1_000_035), PyRep::Integer(1001), PyRep::Integer(1)],
     )
     .await
     .expect("TakeOfferForCorporation 1001");
@@ -334,15 +304,9 @@ async fn test_standing_mgr_npc_npc_standings_closure() {
     let mut sess = SessionState::new(4322);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     let char_id = 90_000_001;
-    rpc(
-        &ctx,
-        &mut sess,
-        "charUnboundMgr",
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-    )
-    .await
-    .expect("SelectCharacterID");
+    rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)])
+        .await
+        .expect("SelectCharacterID");
 
     let rep = rpc(&ctx, &mut sess, "standingMgr", "GetNPCNPCStandings", &[])
         .await
@@ -355,7 +319,7 @@ async fn test_standing_mgr_npc_npc_standings_closure() {
     assert_eq!(columns, vec!["fromID", "toID", "standing"]);
     assert!(
         rows.len() > 100,
-        "Must contain rich SDE NPC standings (got {})",
+        "Must contain derived NPC standings (got {})",
         rows.len()
     );
 
@@ -410,15 +374,9 @@ async fn test_shipcaster_and_starter_travel_closure() {
     let mut sess = SessionState::new(4323);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     let char_id = 90_000_001;
-    rpc(
-        &ctx,
-        &mut sess,
-        "charUnboundMgr",
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-    )
-    .await
-    .expect("SelectCharacterID");
+    rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)])
+        .await
+        .expect("SelectCharacterID");
 
     let ship_id = 100_000_001;
     let starter_sys: u32 = 30002800; // Haatomo starter staging linkage
@@ -574,7 +532,7 @@ async fn test_shipcaster_and_starter_travel_closure() {
     });
 
     // 5. CmdJumpThroughStarterShipcaster
-    eve_server::services::space_destiny::clear_session_change_timer(&ctx, char_id);
+    // Negative test (a): Out of range (> 100km from launcher at 300km)
     let handle_starter = ctx.systems.get_or_spawn(starter_sys);
     spawn_test_ship(
         &ctx,
@@ -582,10 +540,49 @@ async fn test_shipcaster_and_starter_travel_closure() {
         char_id,
         ship_id,
         601,
-        DVec3::new(298_500.0, 0.0, 0.0),
+        DVec3::new(500_000.0, 0.0, 0.0),
     )
     .await;
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, char_id);
+    let oor_err = rpc(
+        &ctx,
+        &mut sess,
+        "starterShipcasterTravelMgr",
+        "CmdJumpThroughStarterShipcaster",
+        &[PyRep::Integer(starter_launcher_id)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(oor_err.code, "OutsideOperationalRange");
 
+    // Negative test (b): Session-change timer active
+    assert!(
+        handle_starter
+            .set_ball_position(ship_id, DVec3::new(298_500.0, 0.0, 0.0))
+            .await
+    );
+    let now_unix = ctx.now_unix();
+    eve_server::services::space_destiny::record_session_change_timer(
+        &ctx,
+        char_id,
+        now_unix,
+        starter_sys,
+        0,
+        "test_session_lock",
+    );
+    let timer_err = rpc(
+        &ctx,
+        &mut sess,
+        "starterShipcasterTravelMgr",
+        "CmdJumpThroughStarterShipcaster",
+        &[PyRep::Integer(starter_launcher_id)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(timer_err.code, "SessionChangeInProgress");
+
+    // Success path: clear session timer and perform jump
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, char_id);
     let jump_starter = rpc(
         &ctx,
         &mut sess,

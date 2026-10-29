@@ -87,9 +87,6 @@ pub fn get_corp_lp_offers(snap: &eve_db::WorldStateSnapshot, corp_id: i64) -> Ve
             }
         }
     }
-    if offers.is_empty() {
-        offers = super::lp_store_sde::get_sde_npc_corp_lp_offers(corp_id);
-    }
     offers
 }
 
