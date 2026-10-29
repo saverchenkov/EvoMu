@@ -336,14 +336,12 @@ pub async fn step_sentry_gun_grid_aggression(
         .get(&solar_system_id)
         .map(|s| s.security_status)
         .unwrap_or(0.0);
-    // In Insurgency Corruption Stage 3+, low-sec sentry guns are disabled
-    let corruption_stage = ctx.db.with_snapshot(|snap| {
-        snap.system_states
-            .get(&solar_system_id)
-            .map(|st| st.insurgency_corruption_stage)
-            .unwrap_or(0)
-    });
-    if sys_sec <= 0.0 || (sys_sec <= 0.4 && sys_sec > 0.0 && corruption_stage >= 3) {
+    // In Insurgency Corruption Stage 3+, low-sec (`0.0 < sec < 0.45`) sentry guns are disabled
+    let corr = crate::services::insurgency_services::insurgency_system_corruption_stage(
+        ctx,
+        solar_system_id,
+    );
+    if sys_sec <= 0.0 || (0.0 < sys_sec && sys_sec < 0.45 && corr >= 3) {
         return (false, 0.0);
     }
 

@@ -618,14 +618,35 @@ pub fn record_sov_system_activity(
 pub fn on_space_entity_destroyed(
     ctx: &ServerContext,
     solar_system_id: u32,
-    _killer_char_id: Option<i64>,
+    killer_char_id: Option<i64>,
     target_ball_id: i64,
     target_type_id: u32,
 ) {
+    on_space_entity_destroyed_ext(
+        ctx,
+        solar_system_id,
+        killer_char_id,
+        target_ball_id,
+        target_type_id,
+        false,
+    );
+}
+
+/// Extended destruction hook distinguishing pre-removed specialized NPCs from unpiloted hulls.
+pub fn on_space_entity_destroyed_ext(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    _killer_char_id: Option<i64>,
+    target_ball_id: i64,
+    target_type_id: u32,
+    was_tracked_npc: bool,
+) {
     let now = ctx.now_unix();
     let pending: PendingNotices = Arc::new(RwLock::new(Vec::new()));
+    let mut was_mto_npc = false;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(act_key) = snap.sov_runtime.mto_site_balls.remove(&target_ball_id) {
+            was_mto_npc = true;
             if let Some(a) = snap.sov_runtime.mercenary_activities.remove(&act_key) {
                 complete_mercenary_activity_in_snap(snap, &pending, &a, a.den_id, a.solar_system_id);
                 let hub_ids: Vec<i64> = snap
@@ -641,13 +662,63 @@ pub fn on_space_entity_destroyed(
         }
     });
     flush_pending_quasar(ctx, &pending, now);
+    record_rat_kill_military_index(
+        ctx,
+        solar_system_id,
+        target_ball_id,
+        target_type_id,
+        was_mto_npc || was_tracked_npc,
+    );
+}
 
-    let is_npc = ctx
+/// Credits Sovereignty Military Index (`record_sov_system_activity`) only for genuine NPC entities
+/// (`category_id == 11` or tracked in server NPC/site registries), never player-owned/unpiloted `category_id == 6` ships.
+pub fn record_rat_kill_military_index(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    target_ball_id: i64,
+    target_type_id: u32,
+    was_site_or_tracked_npc: bool,
+) {
+    if target_type_id == 670 {
+        return;
+    }
+    let category_id = ctx
         .sde
         .types
         .get(&target_type_id)
-        .is_some_and(|t| t.category_id == 11 || t.category_id == 6);
-    if is_npc {
+        .map(|t| t.category_id)
+        .unwrap_or(0);
+    let is_player_item_or_structure = ctx.db.with_snapshot(|snap| {
+        snap.structures.contains_key(&target_ball_id)
+            || snap.items.get(&target_ball_id).is_some_and(|it| {
+                ctx.sde
+                    .types
+                    .get(&it.type_id)
+                    .is_some_and(|t| t.category_id == 6)
+            })
+    });
+    if is_player_item_or_structure {
+        return;
+    }
+    let in_npc_spawns = ctx
+        .npc_spawns
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&solar_system_id)
+        .is_some_and(|mgr| mgr.entities.contains_key(&target_ball_id));
+    let in_combat_npc = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        rt.npc_entities.contains_key(&target_ball_id)
+            || rt.destroyed_npc_cache.contains_key(&target_ball_id)
+    });
+    let in_fw_or_convoy = ctx.living_world.get_convoy(target_ball_id).is_some()
+        || ctx.db.with_snapshot(|snap| {
+            snap.fw_runtime
+                .battlefield_npc_waves
+                .values()
+                .any(|w| w.contains(&target_ball_id))
+        });
+    if category_id == 11 || was_site_or_tracked_npc || in_npc_spawns || in_combat_npc || in_fw_or_convoy {
         record_sov_system_activity(ctx, solar_system_id, 1, 0.0);
     }
 }

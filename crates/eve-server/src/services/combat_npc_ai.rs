@@ -899,6 +899,7 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
             .or_else(|| rt.destroyed_npc_cache.remove(&npc_ball_id))
     });
     let convoy_opt = ctx.living_world.get_convoy(npc_ball_id);
+    let had_tracked_npc = npc_opt.is_some() || convoy_opt.is_some();
     let sde_bounty = |tid: u32| -> f64 {
         ctx.sde.types.get(&tid).and_then(|t| t.default_attributes.get(&481).copied()).unwrap_or(0.0)
     };
@@ -918,6 +919,16 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
     });
     if convoy_opt.is_some() {
         ctx.living_world.mark_convoy_destroyed(npc_ball_id);
+    }
+    if let Some(tid) = npc_type_id {
+        crate::services::sov_gameplay::on_space_entity_destroyed_ext(
+            ctx,
+            solar_system_id,
+            (killer_char_id > 0).then_some(killer_char_id),
+            npc_ball_id,
+            tid,
+            had_tracked_npc,
+        );
     }
     if archetype == "CloneSoldier" {
         let until = ctx.now_unix().saturating_add(1_200);

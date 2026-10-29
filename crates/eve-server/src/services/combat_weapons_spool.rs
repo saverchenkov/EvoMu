@@ -731,6 +731,18 @@ pub async fn handle_ship_or_npc_destruction(
             target_ball.type_id,
         )
         .await;
+        ctx.db.with_mut_snapshot(|snap| {
+            let is_unpiloted_hull = snap.items.get(&target_ball_id).is_some_and(|it| {
+                ctx.sde
+                    .types
+                    .get(&it.type_id)
+                    .is_some_and(|t| t.category_id == 6)
+            });
+            if is_unpiloted_hull {
+                snap.items.remove(&target_ball_id);
+                snap.item_positions.remove(&target_ball_id);
+            }
+        });
         let bounty = ctx
             .sde
             .types

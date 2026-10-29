@@ -328,6 +328,22 @@ pub fn insurgency_stage(points: i64) -> u8 {
     ((points.max(0) as f64 / 200.0).ceil() as u8).min(5)
 }
 
+/// Returns the active Insurgency corruption stage (`0..=5`) for `sys_id`, or `0` outside active/winddown campaigns.
+pub fn insurgency_system_corruption_stage(ctx: &ServerContext, sys_id: u32) -> u8 {
+    let now = ctx.now_unix();
+    ctx.db.with_snapshot(|snap| {
+        let mut stage = 0u8;
+        let mut covered = false;
+        for c in snap.insurgency_runtime.campaigns.values() {
+            if c.systems.contains(&sys_id) && now >= c.forecasting_end_unix && now < c.winddown_end_unix {
+                covered = true;
+                stage = stage.max(insurgency_stage(c.corruption_points.get(&sys_id).copied().unwrap_or(0)));
+            }
+        }
+        if covered { stage.max(snap.system_states.get(&sys_id).map_or(0, |st| st.insurgency_corruption_stage)) } else { 0 }
+    })
+}
+
 /// Advances corruption points in a system and updates corruption stage (1..5).
 pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32, points: i64) -> (i64, u8) {
     let now = ctx.now_unix();
@@ -345,9 +361,7 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
     });
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(st) = snap.system_states.get_mut(&sys_id) {
-            st.insurgency_corruption_stage = stage;
-        }
+        snap.system_states.entry(sys_id).or_default().insurgency_corruption_stage = stage;
     });
 
     if in_active_phase && stage >= 3 && old_stage < 3 {
@@ -384,12 +398,7 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
             NotificationTarget::SolarSystem(sys_id),
             "OnSystemFullyCorruptedForFaction",
             "solarsystemid",
-            vec![
-                PyRep::Integer(i64::from(sys_id)),
-                PyRep::Integer(pirate_faction),
-                PyRep::Integer(pts),
-                PyRep::Integer(1000),
-            ],
+            vec![PyRep::Integer(i64::from(sys_id)), PyRep::Integer(pirate_faction), PyRep::Integer(pts), PyRep::Integer(1000)],
         );
         let should_resolve = with_insurgency_runtime(ctx, |rt| {
             let Some(camp) = rt.campaigns.get(&campaign_id) else { return false; };
@@ -408,28 +417,19 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
 /// Advances suppression points in a system and updates suppression stage (1..5).
 pub fn add_system_suppression(ctx: &ServerContext, campaign_id: i64, sys_id: u32, points: i64) -> (i64, u8) {
     let now = ctx.now_unix();
-    let (pts, old_stage, stage, campaign_active, in_active_phase) = with_insurgency_runtime(ctx, |rt| {
+    let (pts, stage, campaign_active) = with_insurgency_runtime(ctx, |rt| {
         let Some(c) = rt.campaigns.get_mut(&campaign_id) else {
-            return (0, 0, 1, false, false);
+            return (0, 1, false);
         };
         let active = now < c.winddown_end_unix;
-        let in_act = now >= c.forecasting_end_unix && now < c.active_end_unix;
         let p = c.suppression_points.entry(sys_id).or_insert(0);
-        let prev_stage = if *p == 0 { 0 } else { insurgency_stage(*p) };
         *p = (*p + points).max(0);
-        let s = insurgency_stage(*p).max(1);
-        (*p, prev_stage, s, active, in_act)
+        (*p, insurgency_stage(*p).max(1), active)
     });
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(st) = snap.system_states.get_mut(&sys_id) {
-            st.insurgency_suppression_stage = stage;
-        }
+        snap.system_states.entry(sys_id).or_default().insurgency_suppression_stage = stage;
     });
-
-    if in_active_phase && stage >= 3 && old_stage < 3 {
-        let _ = crate::services::fw_gameplay::try_spread_insurgency_from_system(ctx, campaign_id, sys_id);
-    }
 
     emit_campaign_updated(ctx, sys_id, campaign_id, stage);
 

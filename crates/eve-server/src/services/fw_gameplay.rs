@@ -421,10 +421,10 @@ pub async fn activate_fw_complex_gate_in_space(
 
     let is_empire_faction = matches!(faction_id, None | Some(500_001..=500_004));
     let is_t1_or_navy_frigate = group_id == 25
-        && matches!(meta_group_id, None | Some(1) | Some(3))
+        && matches!(meta_group_id, None | Some(1) | Some(3) | Some(4))
         && is_empire_faction;
     let is_t2_or_pirate_frigate = matches!(group_id, 324 | 830 | 831 | 893 | 1527)
-        || (group_id == 25 && (!is_empire_faction || meta_group_id == Some(4)));
+        || (group_id == 25 && (!is_empire_faction || meta_group_id == Some(2)));
     let is_destroyer = matches!(group_id, 420 | 541 | 1305 | 1534);
     let is_cruiser = matches!(group_id, 26 | 358 | 832 | 833 | 894 | 906 | 963);
     let is_bc_or_bs = matches!(group_id, 419 | 540 | 1201 | 27 | 898 | 900);

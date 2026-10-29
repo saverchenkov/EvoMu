@@ -111,22 +111,44 @@ pub async fn ensure_campaign_pirate_fob(ctx: &ServerContext, campaign_id: i64) -
     Some(fob_id)
 }
 
-/// Spreads an active Pirate Insurgency when `source_sys_id` reaches Stage 3 (`>= 3`),
-/// adding a stargate-adjacent `0.0..=0.8` solar system (`ctx.sde.jumps`) and spawning an insurgency site + complex grid there.
+/// Spreads an active Pirate Insurgency when `source_sys_id` reaches Corruption Stage 3 (`>= 3`)
+/// (unless `source_sys_id` is Stage 5 Suppressed), adding a stargate-adjacent `0.0..=0.8` Empire system.
 pub fn try_spread_insurgency_from_system(
     ctx: &ServerContext,
     campaign_id: i64,
     source_sys_id: u32,
 ) -> Option<u32> {
-    let covered = with_insurgency_runtime(ctx, |rt| {
-        rt.campaigns.get(&campaign_id).map(|c| c.systems.clone())
+    let (covered, suppressed5) = with_insurgency_runtime(ctx, |rt| {
+        rt.campaigns.get(&campaign_id).map(|c| {
+            let s5: std::collections::HashSet<u32> = c
+                .suppression_points
+                .iter()
+                .filter(|(_, &pts)| insurgency_stage(pts) >= 5)
+                .map(|(&sid, _)| sid)
+                .collect();
+            (c.systems.clone(), s5)
+        })
     })?;
+    let source_stage5_suppressed = suppressed5.contains(&source_sys_id)
+        || ctx.db.with_snapshot(|snap| {
+            snap.system_states
+                .get(&source_sys_id)
+                .is_some_and(|st| st.insurgency_suppression_stage >= 5)
+        });
+    if source_stage5_suppressed {
+        return None;
+    }
 
     let valid_sec = |sys_id: u32| -> bool {
-        ctx.sde
-            .solar_systems
-            .get(&sys_id)
-            .is_some_and(|s| s.security_status > 0.0 && s.security_status <= 0.8 && s.solar_system_id < 31_000_000)
+        ctx.sde.solar_systems.get(&sys_id).is_some_and(|s| {
+            s.solar_system_id < 30_100_000
+                && matches!(s.wormhole_class_id, None | Some(7..=9))
+                && s.security_status >= 0.0
+                && s.security_status < 0.85
+                && ctx.sde.regions.get(&s.region_id).is_some_and(|r| {
+                    matches!(r.faction_id, Some(500_001..=500_004 | 500_007 | 500_008))
+                })
+        })
     };
     let has_hs_covered = covered.iter().any(|&s| {
         ctx.sde
@@ -158,11 +180,27 @@ pub fn try_spread_insurgency_from_system(
         .min_by_key(|&s| rank(s));
 
     if candidate.is_none() {
+        let state_s5: std::collections::HashSet<u32> = ctx.db.with_snapshot(|snap| {
+            covered
+                .iter()
+                .copied()
+                .filter(|s| {
+                    suppressed5.contains(s)
+                        || snap
+                            .system_states
+                            .get(s)
+                            .is_some_and(|st| st.insurgency_suppression_stage >= 5)
+                })
+                .collect()
+        });
         candidate = ctx
             .sde
             .jumps
             .values()
-            .filter(|j| covered.contains(&j.from_solar_system_id))
+            .filter(|j| {
+                covered.contains(&j.from_solar_system_id)
+                    && !state_s5.contains(&j.from_solar_system_id)
+            })
             .map(|j| j.to_solar_system_id)
             .filter(|s| !covered.contains(s) && valid_sec(*s))
             .min_by_key(|&s| rank(s));

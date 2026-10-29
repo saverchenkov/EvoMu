@@ -97,16 +97,48 @@ async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes()
 
     ctx.set_invention_roll_override(Some(0.50));
     let _ = drain_notif_events(&ctx, PILOT);
+
+    // Negative check: ejecting from player ships (`ship.Eject`, `category_id == 6`) in sovereign nullsec
+    // and destroying the empty hulls grants ZERO Military Index points!
+    for ej_idx in 0..5i64 {
+        let alt_cid = 90_090_001 + ej_idx;
+        let alt_ship = 879_001 + ej_idx;
+        let alt_pos = hub_pos + DVec3::new(3_200.0 + (ej_idx as f64) * 80.0, 0.0, 0.0);
+        let mut s_alt = register_online_pilot(
+            &ctx, (74_500 + ej_idx) as u64, &format!("ej{ej_idx}"), "ej-secret", alt_cid, CORP, Some(ALLIANCE),
+            null_sys, alt_ship, 24_690, alt_pos, 0,
+        ).await;
+        rpc_call(&ctx, &mut s_alt, "ship", "Eject", &[]).await.expect("eject from player ship in nullsec");
+        let mut hull_cs = ctx.build_type_combat_state(24_690);
+        hull_cs.signature_radius = 40_000.0;
+        hull_cs.max_shield_hp = 10.0;
+        hull_cs.shield_hp = 10.0;
+        hull_cs.max_armor_hp = 10.0;
+        hull_cs.armor_hp = 10.0;
+        hull_cs.max_structure_hp = 10.0;
+        hull_cs.structure_hp = 10.0;
+        let _ = ctx.systems.get_or_spawn(null_sys).spawn_ball_with_combat(make_ball(alt_ship, 24_690, alt_pos), hull_cs).await;
+        lock_target_via_rpc(&ctx, &mut s_def, null_sys, PILOT_SHIP, alt_ship).await;
+        let gun_id = if ej_idx % 2 == 0 { 996_000 } else { 996_002 };
+        rpc_call(&ctx, &mut s_def, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::Integer(alt_ship)])
+            .await.expect("destroy ejected empty player hull");
+        crate::sovereignty_equinox_gameplay_closure::step_weapon_ticks(&ctx, null_sys).await;
+    }
+    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.sov_npc_kills.get(&null_sys).copied().unwrap_or(0)), 0, "destroying 5 ejected player hulls must credit 0 NPC kills");
+    assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&null_sys].military_index), 0, "destroying 5 ejected player hulls must not raise Military Index");
+
+    // Positive check: destroying 5 genuine SDE `category_id == 11` Guristas rats (`17005` Pith Extinguisher) advances Military Index to 1!
     for idx in 0..5i64 {
         let rat_id = 880_001 + idx;
-        let mut rat_cs = ctx.build_type_combat_state(24_690);
+        let mut rat_cs = ctx.build_type_combat_state(17_005);
+        rat_cs.signature_radius = 40_000.0;
         rat_cs.max_shield_hp = 10.0;
         rat_cs.shield_hp = 10.0;
         rat_cs.max_armor_hp = 10.0;
         rat_cs.armor_hp = 10.0;
         rat_cs.max_structure_hp = 10.0;
         rat_cs.structure_hp = 10.0;
-        let _ = ctx.systems.get_or_spawn(null_sys).spawn_ball_with_combat(make_ball(rat_id, 24_690, hub_pos + DVec3::new(3_500.0 + (idx as f64) * 100.0, 0.0, 0.0)), rat_cs).await;
+        let _ = ctx.systems.get_or_spawn(null_sys).spawn_ball_with_combat(make_ball(rat_id, 17_005, hub_pos + DVec3::new(3_500.0 + (idx as f64) * 100.0, 0.0, 0.0)), rat_cs).await;
         lock_target_via_rpc(&ctx, &mut s_def, null_sys, PILOT_SHIP, rat_id).await;
         let gun_id = if idx % 2 == 0 { 996_000 } else { 996_002 };
         rpc_call(&ctx, &mut s_def, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::Integer(rat_id)])
@@ -118,9 +150,7 @@ async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes()
                 "single NPC kill must not advance Military Index 1 (threshold is 5 kills)"
             );
         }
-        if idx % 2 == 1 {
-            crate::sovereignty_equinox_gameplay_closure::step_weapon_ticks(&ctx, null_sys).await;
-        }
+        crate::sovereignty_equinox_gameplay_closure::step_weapon_ticks(&ctx, null_sys).await;
     }
     assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&null_sys].military_index), 1);
 

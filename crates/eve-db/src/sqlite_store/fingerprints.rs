@@ -354,72 +354,217 @@ pub(crate) fn fp_skill_queue(q: &[SkillQueueEntry]) -> u64 {
     h.finish()
 }
 
+#[inline]
+fn hash_map_xor<K, V, F>(h: &mut FnvHasher, map: &HashMap<K, V>, mut hash_entry: F)
+where
+    F: FnMut(&mut FnvHasher, &K, &V),
+{
+    h.write_u64(map.len() as u64);
+    let mut xor = 0u64;
+    let mut sum = 0u64;
+    for (k, v) in map {
+        let mut eh = FnvHasher::new();
+        hash_entry(&mut eh, k, v);
+        let entry_fp = eh.finish();
+        xor ^= entry_fp;
+        sum = sum.wrapping_add(entry_fp.rotate_left(13));
+    }
+    h.write_u64(xor);
+    h.write_u64(sum);
+}
+
+#[inline]
+fn write_opt_u64(h: &mut FnvHasher, v: Option<u64>) {
+    match v {
+        Some(x) => {
+            h.write_u8(1);
+            h.write_u64(x);
+        }
+        None => h.write_u8(0),
+    }
+}
+
+#[inline]
+fn write_opt_i64(h: &mut FnvHasher, v: Option<i64>) {
+    match v {
+        Some(x) => {
+            h.write_u8(1);
+            h.write_i64(x);
+        }
+        None => h.write_u8(0),
+    }
+}
+
+#[inline]
+fn write_opt_f64(h: &mut FnvHasher, v: Option<f64>) {
+    match v {
+        Some(x) => {
+            h.write_u8(1);
+            h.write_f64(x);
+        }
+        None => h.write_u8(0),
+    }
+}
+
+#[inline]
+fn write_vec3(h: &mut FnvHasher, v: &[f64; 3]) {
+    h.write_f64(v[0]);
+    h.write_f64(v[1]);
+    h.write_f64(v[2]);
+}
+
+#[inline]
+fn write_opt_vec3(h: &mut FnvHasher, v: &Option<[f64; 3]>) {
+    match v {
+        Some(arr) => {
+            h.write_u8(1);
+            write_vec3(h, arr);
+        }
+        None => h.write_u8(0),
+    }
+}
+
 pub(crate) fn fp_sp6_lifecycle(st: &crate::Sp6PersistedState) -> u64 {
+    let crate::Sp6PersistedState {
+        safe_logoffs,
+        disconnected_ships,
+        self_destructs,
+        abyssal_sessions,
+        pvp_timers_until,
+        npc_timers_until,
+        weapon_timers_until,
+        criminal_timers_until,
+        last_downtime_day_idx,
+        ship_combat_hp,
+        space_object_meta,
+        missions_awaiting_downtime_respawn,
+    } = st;
     let mut h = FnvHasher::new();
-    h.write_u64(st.safe_logoffs.len() as u64);
-    for (&k, v) in &st.safe_logoffs {
-        h.write_i64(k);
-        h.write_u32(v.solar_system_id);
-        h.write_u64(v.complete_at_unix);
-    }
-    h.write_u64(st.disconnected_ships.len() as u64);
-    for (&k, v) in &st.disconnected_ships {
-        h.write_i64(k);
-        h.write_u32(v.solar_system_id);
-        h.write_u64(v.disconnected_at_unix);
-    }
-    h.write_u64(st.self_destructs.len() as u64);
-    for (&k, v) in &st.self_destructs {
-        h.write_i64(k);
-        h.write_u64(v.detonate_at_unix);
-    }
-    h.write_u64(st.abyssal_sessions.len() as u64);
-    for (&k, v) in &st.abyssal_sessions {
-        h.write_i64(k);
-        h.write_u64(v.collapse_at_unix);
-    }
-    h.write_u64(st.pvp_timers_until.len() as u64);
-    for (&k, &v) in &st.pvp_timers_until {
-        h.write_i64(k);
-        h.write_u64(v);
-    }
-    h.write_u64(st.npc_timers_until.len() as u64);
-    for (&k, &v) in &st.npc_timers_until {
-        h.write_i64(k);
-        h.write_u64(v);
-    }
-    h.write_u64(st.weapon_timers_until.len() as u64);
-    for (&k, &v) in &st.weapon_timers_until {
-        h.write_i64(k);
-        h.write_u64(v);
-    }
-    h.write_u64(st.criminal_timers_until.len() as u64);
-    for (&k, &v) in &st.criminal_timers_until {
-        h.write_i64(k);
-        h.write_u64(v);
-    }
-    h.write_u64(st.last_downtime_day_idx.unwrap_or(0));
-    h.write_u64(st.ship_combat_hp.len() as u64);
-    for (&k, v) in &st.ship_combat_hp {
-        h.write_i64(k);
-        h.write_f64(v.shield_hp);
-        h.write_f64(v.armor_hp);
-        h.write_f64(v.hull_hp);
-    }
-    h.write_u64(st.space_object_meta.len() as u64);
-    for (&k, v) in &st.space_object_meta {
-        h.write_i64(k);
-        h.write_u64(v.created_unix.unwrap_or(0));
-        h.write_u8(v.is_npc_wreck as u8);
-        h.write_u64(v.anchor_start_unix.unwrap_or(0));
-        h.write_u64(v.anchoring_delay_secs.to_bits());
-        h.write_u8(v.anchor_completed as u8);
-        h.write_u64(v.bubble_radius_m.map(|r| r.to_bits()).unwrap_or(0));
-        h.write_i64(v.drone_ball_id.unwrap_or(0));
-        h.write_i64(v.planet_id.unwrap_or(0));
-    }
-    h.write_u64(st.missions_awaiting_downtime_respawn.len() as u64);
-    for &(c, m) in &st.missions_awaiting_downtime_respawn {
+    hash_map_xor(&mut h, safe_logoffs, |eh, &k, v| {
+        let crate::SafeLogoffEntry {
+            char_id,
+            ship_id,
+            solar_system_id,
+            started_unix,
+            complete_at_unix,
+            completed,
+        } = *v;
+        eh.write_i64(k);
+        eh.write_i64(char_id);
+        eh.write_i64(ship_id);
+        eh.write_u32(solar_system_id);
+        eh.write_u64(started_unix);
+        eh.write_u64(complete_at_unix);
+        eh.write_bool(completed);
+    });
+    hash_map_xor(&mut h, disconnected_ships, |eh, &k, v| {
+        let crate::DisconnectedShipEntry {
+            char_id,
+            ship_id,
+            ship_type_id,
+            solar_system_id,
+            disconnected_at_unix,
+            remove_at_unix,
+            ref emergency_warp_dest,
+            ref last_position,
+            removed_from_space,
+            ref pre_warp_position,
+        } = *v;
+        eh.write_i64(k);
+        eh.write_i64(char_id);
+        eh.write_i64(ship_id);
+        eh.write_u32(ship_type_id);
+        eh.write_u32(solar_system_id);
+        eh.write_u64(disconnected_at_unix);
+        eh.write_u64(remove_at_unix);
+        write_opt_vec3(eh, emergency_warp_dest);
+        write_vec3(eh, last_position);
+        eh.write_bool(removed_from_space);
+        write_opt_vec3(eh, pre_warp_position);
+    });
+    hash_map_xor(&mut h, self_destructs, |eh, &k, v| {
+        let crate::SelfDestructPersistedEntry {
+            ship_id,
+            char_id,
+            solar_system_id,
+            started_unix,
+            detonate_at_unix,
+        } = *v;
+        eh.write_i64(k);
+        eh.write_i64(ship_id);
+        eh.write_i64(char_id);
+        eh.write_u32(solar_system_id);
+        eh.write_u64(started_unix);
+        eh.write_u64(detonate_at_unix);
+    });
+    hash_map_xor(&mut h, abyssal_sessions, |eh, &k, v| {
+        let crate::AbyssalPersistedSession {
+            char_id,
+            ship_id,
+            pocket_system_id,
+            origin_system_id,
+            entered_unix,
+            collapse_at_unix,
+        } = *v;
+        eh.write_i64(k);
+        eh.write_i64(char_id);
+        eh.write_i64(ship_id);
+        eh.write_u32(pocket_system_id);
+        eh.write_u32(origin_system_id);
+        eh.write_u64(entered_unix);
+        eh.write_u64(collapse_at_unix);
+    });
+    hash_map_xor(&mut h, pvp_timers_until, |eh, &k, &v| {
+        eh.write_i64(k);
+        eh.write_u64(v);
+    });
+    hash_map_xor(&mut h, npc_timers_until, |eh, &k, &v| {
+        eh.write_i64(k);
+        eh.write_u64(v);
+    });
+    hash_map_xor(&mut h, weapon_timers_until, |eh, &k, &v| {
+        eh.write_i64(k);
+        eh.write_u64(v);
+    });
+    hash_map_xor(&mut h, criminal_timers_until, |eh, &k, &v| {
+        eh.write_i64(k);
+        eh.write_u64(v);
+    });
+    write_opt_u64(&mut h, *last_downtime_day_idx);
+    hash_map_xor(&mut h, ship_combat_hp, |eh, &k, v| {
+        let crate::PersistedCombatHp {
+            shield_hp,
+            armor_hp,
+            hull_hp,
+        } = *v;
+        eh.write_i64(k);
+        eh.write_f64(shield_hp);
+        eh.write_f64(armor_hp);
+        eh.write_f64(hull_hp);
+    });
+    hash_map_xor(&mut h, space_object_meta, |eh, &k, v| {
+        let crate::PersistedSpaceObjectMeta {
+            created_unix,
+            is_npc_wreck,
+            anchor_start_unix,
+            anchoring_delay_secs,
+            anchor_completed,
+            bubble_radius_m,
+            drone_ball_id,
+            planet_id,
+        } = *v;
+        eh.write_i64(k);
+        write_opt_u64(eh, created_unix);
+        eh.write_bool(is_npc_wreck);
+        write_opt_u64(eh, anchor_start_unix);
+        eh.write_f64(anchoring_delay_secs);
+        eh.write_bool(anchor_completed);
+        write_opt_f64(eh, bubble_radius_m);
+        write_opt_i64(eh, drone_ball_id);
+        write_opt_i64(eh, planet_id);
+    });
+    h.write_u64(missions_awaiting_downtime_respawn.len() as u64);
+    for &(c, m) in missions_awaiting_downtime_respawn {
         h.write_i64(c);
         h.write_u32(m);
     }
@@ -632,4 +777,200 @@ pub fn compute_fingerprints(snap: &WorldStateSnapshot) -> TableFingerprints {
         super::d6_corp_crimewatch_store::compute_d6_corp_crimewatch_fingerprints(snap);
     fp.d6_batch4 = super::d6_batch4_store::compute_d6_batch4_fingerprints(snap);
     fp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fp_sp6_lifecycle;
+    use crate::{
+        AbyssalPersistedSession, DisconnectedShipEntry, PersistedCombatHp,
+        PersistedSpaceObjectMeta, SafeLogoffEntry, SelfDestructPersistedEntry, Sp6PersistedState,
+    };
+    use std::collections::HashMap;
+
+    fn sample_sp6(keys: &[i64], cap: usize, scramble: bool) -> Sp6PersistedState {
+        let mut st = Sp6PersistedState {
+            safe_logoffs: HashMap::with_capacity(cap),
+            disconnected_ships: HashMap::with_capacity(cap),
+            self_destructs: HashMap::with_capacity(cap),
+            abyssal_sessions: HashMap::with_capacity(cap),
+            pvp_timers_until: HashMap::with_capacity(cap),
+            npc_timers_until: HashMap::with_capacity(cap),
+            weapon_timers_until: HashMap::with_capacity(cap),
+            criminal_timers_until: HashMap::with_capacity(cap),
+            last_downtime_day_idx: Some(19_850),
+            ship_combat_hp: HashMap::with_capacity(cap),
+            space_object_meta: HashMap::with_capacity(cap),
+            missions_awaiting_downtime_respawn: vec![(90_000_001, 42), (90_000_002, 77)],
+        };
+        if scramble {
+            for dummy in 9_000..9_032 {
+                st.pvp_timers_until.insert(dummy, 1);
+                st.safe_logoffs.insert(dummy, SafeLogoffEntry::default());
+            }
+            for dummy in 9_000..9_032 {
+                st.pvp_timers_until.remove(&dummy);
+                st.safe_logoffs.remove(&dummy);
+            }
+        }
+        for &k in keys {
+            let u = k as u64;
+            st.safe_logoffs.insert(
+                k,
+                SafeLogoffEntry {
+                    char_id: k,
+                    ship_id: k + 10_000,
+                    solar_system_id: 30_000_142 + (k as u32),
+                    started_unix: 1_700_000_000 + u,
+                    complete_at_unix: 1_700_000_030 + u,
+                    completed: false,
+                },
+            );
+            st.disconnected_ships.insert(
+                k,
+                DisconnectedShipEntry {
+                    char_id: k,
+                    ship_id: k + 20_000,
+                    ship_type_id: 587 + (k as u32),
+                    solar_system_id: 30_002_187,
+                    disconnected_at_unix: 1_700_001_000 + u,
+                    remove_at_unix: 1_700_001_060 + u,
+                    emergency_warp_dest: Some([10.0 + k as f64, 20.0, 30.0]),
+                    last_position: [1.0, 2.0, 3.0 + k as f64],
+                    removed_from_space: false,
+                    pre_warp_position: Some([-5.0, 0.0, 5.0]),
+                },
+            );
+            st.self_destructs.insert(
+                k + 30_000,
+                SelfDestructPersistedEntry {
+                    ship_id: k + 30_000,
+                    char_id: k,
+                    solar_system_id: 30_002_537,
+                    started_unix: 1_700_002_000 + u,
+                    detonate_at_unix: 1_700_002_120 + u,
+                },
+            );
+            st.abyssal_sessions.insert(
+                k,
+                AbyssalPersistedSession {
+                    char_id: k,
+                    ship_id: k + 40_000,
+                    pocket_system_id: 32_000_001,
+                    origin_system_id: 30_000_142,
+                    entered_unix: 1_700_003_000 + u,
+                    collapse_at_unix: 1_700_004_200 + u,
+                },
+            );
+            st.pvp_timers_until.insert(k, 1_700_010_000 + u);
+            st.npc_timers_until.insert(k, 1_700_020_000 + u);
+            st.weapon_timers_until.insert(k, 1_700_030_000 + u);
+            st.criminal_timers_until.insert(k, 1_700_040_000 + u);
+            st.ship_combat_hp.insert(
+                k + 50_000,
+                PersistedCombatHp {
+                    shield_hp: 250.0 + k as f64,
+                    armor_hp: 500.0,
+                    hull_hp: 650.0,
+                },
+            );
+            st.space_object_meta.insert(
+                k + 60_000,
+                PersistedSpaceObjectMeta {
+                    created_unix: Some(1_700_050_000 + u),
+                    is_npc_wreck: false,
+                    anchor_start_unix: Some(1_700_050_010 + u),
+                    anchoring_delay_secs: 60.0,
+                    anchor_completed: false,
+                    bubble_radius_m: Some(20_000.0),
+                    drone_ball_id: Some(k + 70_000),
+                    planet_id: Some(40_000_001),
+                },
+            );
+        }
+        st
+    }
+
+    #[test]
+    fn fp_sp6_lifecycle_order_and_capacity_independent() {
+        let forward = sample_sp6(&[101, 202, 303, 404], 0, false);
+        let reverse = sample_sp6(&[404, 303, 202, 101], 128, true);
+        let perm = sample_sp6(&[303, 101, 404, 202], 16, false);
+        assert_eq!(fp_sp6_lifecycle(&forward), fp_sp6_lifecycle(&reverse));
+        assert_eq!(fp_sp6_lifecycle(&forward), fp_sp6_lifecycle(&perm));
+    }
+
+    #[test]
+    fn fp_sp6_lifecycle_sensitive_to_every_persisted_field() {
+        let base = sample_sp6(&[101, 202], 4, false);
+        let base_fp = fp_sp6_lifecycle(&base);
+        let check = |mutate: &dyn Fn(&mut Sp6PersistedState), label: &str| {
+            let mut m = base.clone();
+            mutate(&mut m);
+            assert_ne!(fp_sp6_lifecycle(&m), base_fp, "fingerprint missed {label}");
+        };
+
+        check(&|s| s.safe_logoffs.get_mut(&101).unwrap().char_id += 1, "safe_logoffs.char_id");
+        check(&|s| s.safe_logoffs.get_mut(&101).unwrap().ship_id += 1, "safe_logoffs.ship_id");
+        check(&|s| s.safe_logoffs.get_mut(&101).unwrap().solar_system_id += 1, "safe_logoffs.solar_system_id");
+        check(&|s| s.safe_logoffs.get_mut(&101).unwrap().started_unix += 1, "safe_logoffs.started_unix");
+        check(&|s| s.safe_logoffs.get_mut(&101).unwrap().complete_at_unix += 1, "safe_logoffs.complete_at_unix");
+        check(&|s| s.safe_logoffs.get_mut(&101).unwrap().completed = true, "safe_logoffs.completed");
+
+        check(&|s| s.disconnected_ships.get_mut(&101).unwrap().char_id += 1, "disconnected.char_id");
+        check(&|s| s.disconnected_ships.get_mut(&101).unwrap().ship_id += 1, "disconnected.ship_id");
+        check(&|s| s.disconnected_ships.get_mut(&101).unwrap().ship_type_id += 1, "disconnected.ship_type_id");
+        check(&|s| s.disconnected_ships.get_mut(&101).unwrap().solar_system_id += 1, "disconnected.solar_system_id");
+        check(&|s| s.disconnected_ships.get_mut(&101).unwrap().disconnected_at_unix += 1, "disconnected.disconnected_at_unix");
+        check(&|s| s.disconnected_ships.get_mut(&101).unwrap().remove_at_unix += 1, "disconnected.remove_at_unix");
+        check(&|s| s.disconnected_ships.get_mut(&101).unwrap().emergency_warp_dest = None, "disconnected.emergency_warp_dest=None");
+        check(&|s| s.disconnected_ships.get_mut(&101).unwrap().emergency_warp_dest = Some([0.0; 3]), "disconnected.emergency_warp_dest=zero");
+        check(&|s| s.disconnected_ships.get_mut(&101).unwrap().last_position[1] += 1.0, "disconnected.last_position");
+        check(&|s| s.disconnected_ships.get_mut(&101).unwrap().removed_from_space = true, "disconnected.removed_from_space");
+        check(&|s| s.disconnected_ships.get_mut(&101).unwrap().pre_warp_position = None, "disconnected.pre_warp_position=None");
+        check(&|s| s.disconnected_ships.get_mut(&101).unwrap().pre_warp_position = Some([9.0, 8.0, 7.0]), "disconnected.pre_warp_position=val");
+
+        check(&|s| s.self_destructs.get_mut(&30_101).unwrap().ship_id += 1, "self_destructs.ship_id");
+        check(&|s| s.self_destructs.get_mut(&30_101).unwrap().char_id += 1, "self_destructs.char_id");
+        check(&|s| s.self_destructs.get_mut(&30_101).unwrap().solar_system_id += 1, "self_destructs.solar_system_id");
+        check(&|s| s.self_destructs.get_mut(&30_101).unwrap().started_unix += 1, "self_destructs.started_unix");
+        check(&|s| s.self_destructs.get_mut(&30_101).unwrap().detonate_at_unix += 1, "self_destructs.detonate_at_unix");
+
+        check(&|s| s.abyssal_sessions.get_mut(&101).unwrap().char_id += 1, "abyssal.char_id");
+        check(&|s| s.abyssal_sessions.get_mut(&101).unwrap().ship_id += 1, "abyssal.ship_id");
+        check(&|s| s.abyssal_sessions.get_mut(&101).unwrap().pocket_system_id += 1, "abyssal.pocket_system_id");
+        check(&|s| s.abyssal_sessions.get_mut(&101).unwrap().origin_system_id += 1, "abyssal.origin_system_id");
+        check(&|s| s.abyssal_sessions.get_mut(&101).unwrap().entered_unix += 1, "abyssal.entered_unix");
+        check(&|s| s.abyssal_sessions.get_mut(&101).unwrap().collapse_at_unix += 1, "abyssal.collapse_at_unix");
+
+        check(&|s| *s.pvp_timers_until.get_mut(&101).unwrap() += 1, "pvp_timers_until");
+        check(&|s| *s.npc_timers_until.get_mut(&101).unwrap() += 1, "npc_timers_until");
+        check(&|s| *s.weapon_timers_until.get_mut(&101).unwrap() += 1, "weapon_timers_until");
+        check(&|s| *s.criminal_timers_until.get_mut(&101).unwrap() += 1, "criminal_timers_until");
+        check(&|s| s.last_downtime_day_idx = None, "last_downtime_day_idx=None");
+        check(&|s| s.last_downtime_day_idx = Some(0), "last_downtime_day_idx=Some(0)");
+        {
+            let mut m_none = base.clone();
+            m_none.last_downtime_day_idx = None;
+            let mut m_zero = base.clone();
+            m_zero.last_downtime_day_idx = Some(0);
+            assert_ne!(fp_sp6_lifecycle(&m_none), fp_sp6_lifecycle(&m_zero));
+        }
+
+        check(&|s| s.ship_combat_hp.get_mut(&50_101).unwrap().shield_hp += 0.5, "ship_combat_hp.shield_hp");
+        check(&|s| s.ship_combat_hp.get_mut(&50_101).unwrap().armor_hp += 0.5, "ship_combat_hp.armor_hp");
+        check(&|s| s.ship_combat_hp.get_mut(&50_101).unwrap().hull_hp += 0.5, "ship_combat_hp.hull_hp");
+
+        check(&|s| s.space_object_meta.get_mut(&60_101).unwrap().created_unix = None, "meta.created_unix");
+        check(&|s| s.space_object_meta.get_mut(&60_101).unwrap().is_npc_wreck = true, "meta.is_npc_wreck");
+        check(&|s| s.space_object_meta.get_mut(&60_101).unwrap().anchor_start_unix = None, "meta.anchor_start_unix");
+        check(&|s| s.space_object_meta.get_mut(&60_101).unwrap().anchoring_delay_secs += 1.0, "meta.anchoring_delay_secs");
+        check(&|s| s.space_object_meta.get_mut(&60_101).unwrap().anchor_completed = true, "meta.anchor_completed");
+        check(&|s| s.space_object_meta.get_mut(&60_101).unwrap().bubble_radius_m = None, "meta.bubble_radius_m");
+        check(&|s| s.space_object_meta.get_mut(&60_101).unwrap().drone_ball_id = None, "meta.drone_ball_id");
+        check(&|s| s.space_object_meta.get_mut(&60_101).unwrap().planet_id = None, "meta.planet_id");
+
+        check(&|s| s.missions_awaiting_downtime_respawn.reverse(), "missions_awaiting_downtime_respawn.order");
+        check(&|s| s.missions_awaiting_downtime_respawn[0].1 += 1, "missions_awaiting_downtime_respawn.val");
+    }
 }

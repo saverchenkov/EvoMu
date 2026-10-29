@@ -121,7 +121,7 @@ async fn test_fw_insurgency_and_security_mgr() {
     assert!(!camp_list.is_empty(), "Campaign list not empty");
     assert_eq!(camp_list[0].dict_get("campaignID"), Some(&PyRep::Integer(101)));
     assert_eq!(camp_list[0].dict_get("pirateFactionID"), Some(&PyRep::Integer(500_010)));
-    assert_eq!(camp_list[0].dict_get("isFobVulnerable"), Some(&PyRep::Bool(true)));
+    assert_eq!(camp_list[0].dict_get("isFobVulnerable"), Some(&PyRep::Bool(false)));
 
     // 2b. insurgencySolarsystem.GetLocalCampaignClientSnapshot
     let local_camp = ctx
@@ -133,8 +133,31 @@ async fn test_fw_insurgency_and_security_mgr() {
     assert!(is_keyval(&camp_tuple[1]));
     assert_eq!(camp_tuple[1].dict_get("campaignID"), Some(&PyRep::Integer(101)));
     assert_eq!(camp_tuple[1].dict_get("isFobSystem"), Some(&PyRep::Bool(true)));
+    assert_eq!(camp_tuple[1].dict_get("isFobVulnerable"), Some(&PyRep::Bool(false)));
     assert_eq!(camp_tuple[1].dict_get("corruptionStage"), Some(&PyRep::Integer(3)));
     assert_eq!(camp_tuple[1].dict_get("suppressionStage"), Some(&PyRep::Integer(1)));
+
+    // Once 5 insurgency systems reach Stage 5 Suppression (>= 1,000 pts), the Pirate FOB becomes vulnerable.
+    with_insurgency_runtime(&ctx, |rt| {
+        let camp = rt.campaigns.get_mut(&101).expect("campaign 101");
+        camp.systems = vec![sys_id, 30_002_058, 30_002_059, 30_002_060, 30_002_061];
+        for &s in &camp.systems {
+            camp.suppression_points.insert(s, 1_000);
+        }
+    });
+    let all_camps_v = ctx
+        .dispatch_rpc(&mut sess, "insurgencySolarsystem", None, "GetAllVisibleCampaigns", &[], &kw, None)
+        .await
+        .expect("GetAllVisibleCampaigns post-suppression");
+    let PyRep::List(camp_list_v) = &all_camps_v else { panic!("Expected List") };
+    assert_eq!(camp_list_v[0].dict_get("isFobVulnerable"), Some(&PyRep::Bool(true)));
+    let local_camp_v = ctx
+        .dispatch_rpc(&mut sess, "insurgencySolarsystem", None, "GetLocalCampaignClientSnapshot", &[], &kw, None)
+        .await
+        .expect("GetLocalCampaignClientSnapshot post-suppression");
+    let PyRep::Tuple(camp_tuple_v) = &local_camp_v else { panic!("Expected Tuple") };
+    assert_eq!(camp_tuple_v[1].dict_get("isFobVulnerable"), Some(&PyRep::Bool(true)));
+    assert_eq!(camp_tuple_v[1].dict_get("suppressionStage"), Some(&PyRep::Integer(5)));
 
     // 3. securityMgr.get_modified_systems (both runtime modified security and Stage 5 lawless corruption)
     let stage5_sys_id = 30_000_142u32;

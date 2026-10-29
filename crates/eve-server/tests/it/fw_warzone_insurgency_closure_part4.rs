@@ -199,10 +199,57 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
         "SuppressionGoalNotReached"
     );
 
-    // Move pirate ship off `[0,0,0]` and suppress 5 systems to Stage 5 via live Empire 60s destiny pulses
-    // (Stage 3 spreads the campaign across stargates to a 5th and 6th connected system; pulse the 6th system 3 times to Stage 3)!
+    // Verify Suppression Stage 3 and Stage 5 do NOT spread insurgency, AND Stage 5 Suppression blocks Corruption Stage 3 spread!
     let _ = ctx.systems.get_or_spawn(front_sys).spawn_ball(make_ball(pir_ship, 621, DVec3::new(90_000.0, 0.0, 0.0))).await;
-    for idx in 0..6usize {
+    let first_sys = ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp2].systems[0]);
+    s_emp.solar_system_id = Some(first_sys);
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&emp_cid).unwrap().solar_system_id = first_sys;
+        s.items.get_mut(&emp_ship).unwrap().location_id = first_sys as i64;
+    });
+    let sh0 = ctx.systems.get_or_spawn(first_sys);
+    let _ = sh0.spawn_ball(make_ball(emp_ship, 19_722, DVec3::ZERO)).await;
+    for _ in 0..5 {
+        sh0.step_manual(60.0).await.unwrap();
+        eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    }
+    let _ = sh0.remove_ball(emp_ship).await;
+    assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp2].systems.len()), 4, "Suppression Stage 3/5 must never spread insurgency");
+
+    // Pulse Corruption Stage 3 on Stage-5-suppressed `first_sys` -> blocked from spreading!
+    s_pir.solar_system_id = Some(first_sys);
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&pir_cid).unwrap().solar_system_id = first_sys;
+        s.items.get_mut(&pir_ship).unwrap().location_id = first_sys as i64;
+    });
+    let _ = sh0.spawn_ball(make_ball(pir_ship, 621, DVec3::ZERO)).await;
+    for _ in 0..3 {
+        sh0.step_manual(60.0).await.unwrap();
+        eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    }
+    let _ = sh0.remove_ball(pir_ship).await;
+    assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp2].systems.len()), 4, "Stage 5 Suppression blocks Corruption Stage 3 spread");
+
+    // Spread `camp2` to 5th and 6th systems via Corruption Stage 3 on unsuppressed `systems[1]` and `systems[2]`.
+    for idx in 1..=2usize {
+        let csys = ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp2].systems[idx]);
+        s_pir.solar_system_id = Some(csys);
+        ctx.db.with_mut_snapshot(|s| {
+            s.characters.get_mut(&pir_cid).unwrap().solar_system_id = csys;
+            s.items.get_mut(&pir_ship).unwrap().location_id = csys as i64;
+        });
+        let sh = ctx.systems.get_or_spawn(csys);
+        let _ = sh.spawn_ball(make_ball(pir_ship, 621, DVec3::ZERO)).await;
+        for _ in 0..3 {
+            sh.step_manual(60.0).await.unwrap();
+            eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+        }
+        let _ = sh.remove_ball(pir_ship).await;
+    }
+    assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp2].systems.len()), 6);
+
+    // Suppress `systems[1..5]` to Stage 5 (making 5 Stage-5-suppressed systems total) and pulse `systems[5]` 3 times to 600 pts!
+    for idx in 1..6usize {
         let tsys = ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp2].systems[idx]);
         s_emp.solar_system_id = Some(tsys);
         ctx.db.with_mut_snapshot(|s| {

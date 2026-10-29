@@ -265,10 +265,14 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
             "ShipTooLargeForGate"
         );
     }
-    // Dreadnought (`19726`) CAN enter `Open` complex; Destroyer (`16242`) CAN enter `Small` complex!
+    // Dreadnought (`19726`) CAN enter `Open` complex; Empire Navy Frigate (`17841` Federation Navy Comet) CAN enter `Novice` complex!
     set_hull(&ctx, gal_ship, 19_726, open_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
     assert!(rpc_call(&ctx, &mut s_gal, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(open_gate)]).await.is_ok());
-    // Clear occupancy on `open_gate` before testing Novice capture.
+    set_hull(&ctx, gal_ship, 17_841, novice_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
+    let navy_novice = rpc_call(&ctx, &mut s_gal, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(novice_gate)]).await.expect("Navy Frigate allowed in Novice");
+    assert_eq!(navy_novice.dict_get("activated"), Some(&PyRep::Bool(true)));
+    assert_eq!(navy_novice.dict_get("complexTier"), Some(&PyRep::String("Novice".into())));
+    // Clear occupancy on `open_gate` and `novice_gate` before testing Novice capture.
     ctx.db.with_mut_snapshot(|s| { s.fw_runtime.complex_occupants.clear(); });
 
     // 3. Live `dogmaIM.Activate` combat weapon fire on FW Supply Cache/Depot/ListeningPost/Propaganda:

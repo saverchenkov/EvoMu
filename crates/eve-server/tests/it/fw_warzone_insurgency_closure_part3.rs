@@ -118,6 +118,40 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
     assert!(after_spread.len() > start_systems.len(), "Corruption Stage 3 spreads insurgency to adjacent 0.0..=0.8 system");
     assert!(is_sentry_disabled_by_corruption(&ctx, front_sys), "Stage 3 corruption disables gate/station sentry guns");
 
+    // Verify 0.4-rounded (`0.40 < true_sec < 0.45`) low-sec sentry guns:
+    // (a) engage when system is NOT in an active insurgency campaign even if stale `insurgency_corruption_stage == 3`
+    // (b) cease fire (`(false, 0.0)`) once covered by an active insurgency campaign at Corruption Stage 3!
+    let ls_044_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| s.solar_system_id < 30_100_000 && s.security_status > 0.43 && s.security_status < 0.45 && !after_spread.contains(&s.solar_system_id))
+        .expect("0.44 true-sec low-sec system in SDE")
+        .solar_system_id;
+    let ls_044_ship = 100_000_039i64;
+    let ls_044_h = ctx.systems.get_or_spawn(ls_044_sys);
+    let _ = ls_044_h
+        .spawn_ball_with_combat(make_ball(ls_044_ship, 621, DVec3::new(5_000.0, 0.0, 0.0)), ctx.build_type_combat_state(621))
+        .await;
+    ctx.db.with_mut_snapshot(|s| {
+        s.system_states.entry(ls_044_sys).or_default().insurgency_corruption_stage = 3;
+    });
+    assert!(!is_sentry_disabled_by_corruption(&ctx, ls_044_sys), "Non-campaign system must not disable sentries");
+    let (eng_non_camp, dmg_non_camp) = eve_server::services::combat_crimewatch::step_sentry_gun_grid_aggression(
+        &ctx, ls_044_sys, pir_cid, ls_044_ship, DVec3::ZERO, true,
+    ).await;
+    assert!(eng_non_camp && dmg_non_camp > 0.0, "Sentries must engage in 0.44 low-sec outside active insurgency");
+    ctx.db.with_mut_snapshot(|s| {
+        let c = s.insurgency_runtime.campaigns.get_mut(&camp_id).unwrap();
+        c.systems.push(ls_044_sys);
+        c.corruption_points.insert(ls_044_sys, 450);
+    });
+    assert!(is_sentry_disabled_by_corruption(&ctx, ls_044_sys), "0.44 true-sec (0.4 rounded) Stage 3 insurgency disables sentries");
+    let (eng_corr3, dmg_corr3) = eve_server::services::combat_crimewatch::step_sentry_gun_grid_aggression(
+        &ctx, ls_044_sys, pir_cid, ls_044_ship, DVec3::ZERO, true,
+    ).await;
+    assert_eq!((eng_corr3, dmg_corr3), (false, 0.0), "Stage 3 corruption in 0.44 low-sec disables step_sentry_gun_grid_aggression");
+
     // Pulse 2 more times on `front_sys` to reach Corruption Stage 5 (`1,000` pts)!
     for _ in 0..2 {
         sys_front_h.step_manual(60.0).await.unwrap();
