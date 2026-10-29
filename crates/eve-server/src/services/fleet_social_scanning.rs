@@ -1024,21 +1024,45 @@ pub(crate) fn signal_tracker_subscribers_in_snap(
     subs
 }
 
-pub(crate) fn build_signal_tracker_signature_kv(sig: &CosmicSignatureRecord) -> PyRep {
+pub(crate) fn build_signal_tracker_signature_kv(
+    sde: &eve_sde::SdeRegistry,
+    sig: &CosmicSignatureRecord,
+) -> PyRep {
+    let (diff_level, _) = crate::services::space_destiny::signature_difficulty_level_and_min_strength(
+        sde,
+        sig.solar_system_id,
+        sig,
+    );
+    let dev_radius = if sig.signal_strength >= 1.0 {
+        0.0
+    } else {
+        (1.0 - sig.signal_strength.clamp(0.0, 1.0)) * (diff_level as f64) * AU_IN_METERS
+    };
+    let reported_pos = if dev_radius > 0.0 {
+        let h = sig.signature_id.bytes().fold(14695981039346656037_u64, |a, b| (a ^ (b as u64)).wrapping_mul(1099511628211));
+        let dx = ((h & 0xFFFF) as f64 / 65535.0) * 2.0 - 1.0;
+        let dy = (((h >> 16) & 0xFFFF) as f64 / 65535.0) * 2.0 - 1.0;
+        let dz = (((h >> 32) & 0xFFFF) as f64 / 65535.0) * 2.0 - 1.0;
+        let dir = glam::DVec3::new(dx, dy, dz).try_normalize().unwrap_or(glam::DVec3::X);
+        let off = dir * (dev_radius * 0.75);
+        [sig.position[0] + off.x, sig.position[1] + off.y, sig.position[2] + off.z]
+    } else {
+        sig.position
+    };
     PyRep::keyval([
         (
             "position",
             PyRep::Tuple(vec![
-                PyRep::Real(sig.position[0]),
-                PyRep::Real(sig.position[1]),
-                PyRep::Real(sig.position[2]),
+                PyRep::Real(reported_pos[0]),
+                PyRep::Real(reported_pos[1]),
+                PyRep::Real(reported_pos[2]),
             ]),
         ),
         ("targetID", PyRep::String(sig.signature_id.clone())),
-        ("difficulty", PyRep::Integer(1)),
+        ("difficulty", PyRep::Integer(i64::from(diff_level))),
         ("dungeonID", PyRep::None),
         ("archetypeID", PyRep::None),
-        ("deviation", PyRep::Real(0.0)),
+        ("deviation", PyRep::Real(dev_radius)),
     ])
 }
 
@@ -1109,7 +1133,7 @@ pub(crate) fn emit_signal_tracker_signature_delta(
             .map(|sig| {
                 (
                     PyRep::String(sig.signature_id.clone()),
-                    build_signal_tracker_signature_kv(sig),
+                    build_signal_tracker_signature_kv(&ctx.sde, sig),
                 )
             })
             .collect(),

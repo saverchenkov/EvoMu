@@ -252,18 +252,20 @@ pub fn handle(
                     }));
                 }
             };
-            let es_dict = ctx.db.with_mut_snapshot(|snap| {
+            let (es_dict, was_removed) = ctx.db.with_mut_snapshot(|snap| {
                 let mut records = load_expert_systems(snap, char_id);
-                records.remove(&type_id);
+                let removed = records.remove(&type_id).is_some();
                 save_expert_systems(snap, char_id, &records);
-                expert_systems_to_py_dict(&records)
+                (expert_systems_to_py_dict(&records), removed)
             });
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnExpertSystemsUpdated",
-                "charid",
-                vec![es_dict, PyRep::Bool(false), PyRep::Integer(type_id)],
-            );
+            if was_removed {
+                ctx.notify(
+                    NotificationTarget::Character(char_id),
+                    "OnExpertSystemsUpdated",
+                    "charid",
+                    vec![es_dict, PyRep::Bool(false), PyRep::Integer(type_id)],
+                );
+            }
             Some(Ok(PyRep::None))
         }
 

@@ -1,6 +1,6 @@
 //! Real production server-to-client `notify:On*` emission integration tests (Batch 2).
 //!
-//! Exercises 43 V24.01 server-to-client notifications end-to-end through `ctx.dispatch_rpc`,
+//! Exercises 32 V24.01 server-to-client notifications end-to-end through `ctx.dispatch_rpc`,
 //! asserting exact V24 positional/dict payload arguments and persisted world-state transitions.
 
 #![forbid(unsafe_code)]
@@ -318,7 +318,18 @@ async fn notify_batch2_fighters_ewar_mutual_wars_strip_and_tracker() {
     let exp_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     let sig_upd = find_notif(&exp_notifs, "OnSignalTrackerSignatureUpdate");
     assert_eq!(sig_upd[0], PyRep::Integer(sys_lowsec as i64));
-    assert!(matches!(&sig_upd[1], PyRep::Dict(d) if !d.is_empty() && d[0].1.dict_get("targetID").is_some()));
+    let PyRep::Dict(ref sig_dict) = sig_upd[1] else { panic!("expected dict") };
+    assert!(!sig_dict.is_empty() && sig_dict[0].1.dict_get("targetID").is_some());
+    let sig_kv = &sig_dict[0].1;
+    let dev = sig_kv.dict_get("deviation").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    assert!(dev > 0.0, "unscanned signature must report positive deviation");
+    let reported_pos = match sig_kv.dict_get("position") {
+        Some(PyRep::Tuple(t)) => [t[0].as_f64().unwrap(), t[1].as_f64().unwrap(), t[2].as_f64().unwrap()],
+        _ => panic!("expected position tuple"),
+    };
+    let target_id = sig_kv.dict_get("targetID").and_then(|v| v.as_str()).unwrap();
+    let true_pos = ctx.db.with_snapshot(|s| s.cosmic_signatures.get(&sys_lowsec).and_then(|sigs| sigs.iter().find(|r| r.signature_id == target_id).map(|r| r.position))).unwrap();
+    assert_ne!(reported_pos, true_pos, "reported position must deviate from true position");
     assert!(matches!(&sig_upd[2], PyRep::List(l) if !l.is_empty()));
     let anom_rem = find_notif(&exp_notifs, "OnSignalTrackerAnomalyUpdate");
     assert!(matches!(&anom_rem[2], PyRep::List(l) if !l.is_empty()));
