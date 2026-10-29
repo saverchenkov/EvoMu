@@ -67,7 +67,7 @@ EvoMu includes an exhaustive, dual-perspective **[Technical & Game Systems Wiki]
 | Static data | one data file the client ships | 213 | 156 | 57 | 0 | 100% |
 | Quasar backend | one protobuf message | 1,455 | 104 | 1,328 | 23 | 98.4% |
 | Space physics ("Destiny") | one movement mode or update type | 52 | 43 | 9 | 0 | 100% |
-| Server calls (RPC) | one method the client calls | 1,373 | 1,200 | 113 | 60 | 95.6% |
+| Server calls (RPC) | one method the client calls | 1,373 | 1,200 | 124 | 49 | 96.4% |
 | Gameplay features | one curated game behaviour | 1,603 | 1,285 | 94 | 224 | 86.0% |
 | Client notifications | one event the client listens for | 1,311 | 268 | 833 | 210 | 84.0% |
 | Action-plan tasks | one task in the [plan](./.agents/skills/evomu-adversarial-review/references/action_plan.md) | 117 | 83 | 0 | 34 | 70.9% |

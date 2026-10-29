@@ -9,7 +9,7 @@
 use eve_db::{CharacterRecord, InventoryFlag, InventoryItemRecord, IskCents};
 use eve_destiny::{Ball, DamageVector, MovementMode};
 use eve_machonet::SessionState;
-use eve_server::living_world::{LivingWorldConvoy, NpcArchetype};
+use eve_server::living_world::{LivingWorldConvoy, LivingWorldDirector, NpcArchetype};
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
     create_custom_encounter_site,
@@ -402,7 +402,15 @@ async fn test_hauler_convoy_multi_system_movement_and_cargo_drop() {
 
     // Step 1: Living-world cluster tick advances convoy along route: Jumps stargate from Jita into Perimeter
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    ctx.advance_secs(15);
+    let transit_jita = LivingWorldDirector::compute_hauler_transit_duration_secs(&ctx.sde, hauler_type_id, SYS_JITA, None, Some(SYS_PERIMETER), 60_003_766);
+    ctx.advance_secs(transit_jita - 1);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    assert_eq!(
+        ctx.living_world.get_convoy(convoy_id).unwrap().current_system_id,
+        SYS_JITA,
+        "Hauler must still be in Jita before full transit elapsed"
+    );
+    ctx.advance_secs(1);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert_eq!(
         ctx.living_world.get_convoy(convoy_id).unwrap().current_system_id,
@@ -427,7 +435,15 @@ async fn test_hauler_convoy_multi_system_movement_and_cargo_drop() {
     );
 
     // Step 2: Living-world cluster tick advances from Perimeter into Urlen
-    ctx.advance_secs(15);
+    let transit_perim = LivingWorldDirector::compute_hauler_transit_duration_secs(&ctx.sde, hauler_type_id, SYS_PERIMETER, Some(SYS_JITA), Some(SYS_URLEN), 60_003_766);
+    ctx.advance_secs(transit_perim - 1);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    assert_eq!(
+        ctx.living_world.get_convoy(convoy_id).unwrap().current_system_id,
+        SYS_PERIMETER,
+        "Hauler must still be in Perimeter before full transit elapsed"
+    );
+    ctx.advance_secs(1);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert_eq!(
         ctx.living_world.get_convoy(convoy_id).unwrap().current_system_id,
@@ -435,7 +451,8 @@ async fn test_hauler_convoy_multi_system_movement_and_cargo_drop() {
     );
 
     // Step 3: Living-world cluster tick arrives at destination system, docks and despawns at destination station
-    ctx.advance_secs(15);
+    let transit_urlen = LivingWorldDirector::compute_hauler_transit_duration_secs(&ctx.sde, hauler_type_id, SYS_URLEN, Some(SYS_PERIMETER), None, 60_003_766);
+    ctx.advance_secs(transit_urlen);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(ctx.living_world.is_convoy_docked(convoy_id));
 

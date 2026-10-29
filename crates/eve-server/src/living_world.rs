@@ -756,6 +756,7 @@ impl LivingWorldDirector {
                 let mv = t.default_attributes.get(&37).copied().unwrap_or(150.0).max(10.0);
                 let base_warp = t.default_attributes.get(&1281).copied().unwrap_or(1.0).max(0.5);
                 let warp_mult = t.default_attributes.get(&600).copied().unwrap_or(3.0).max(1.0);
+                // DERIVED: warp speed multiplier clamped to [1.5, 12.0] AU/s to bound industrial haulers to scout ceilings
                 let ws = (base_warp * warp_mult).clamp(1.5, 12.0);
                 (m, ag, mv, ws)
             })
@@ -771,19 +772,22 @@ impl LivingWorldDirector {
             .and_then(|prev| {
                 sde.stargates()
                     .values()
-                    .find(|g| g.from_solar_system_id == current_system_id && g.to_solar_system_id == prev)
+                    .filter(|g| g.from_solar_system_id == current_system_id && g.to_solar_system_id == prev)
+                    .min_by_key(|g| g.stargate_id)
                     .map(|g| g.position)
             })
             .or_else(|| {
                 sde.stations
                     .values()
-                    .find(|sta| sta.solar_system_id == current_system_id)
+                    .filter(|sta| sta.solar_system_id == current_system_id)
+                    .min_by_key(|sta| sta.station_id)
                     .map(|sta| sta.position)
             })
             .or_else(|| {
                 sde.stargates()
                     .values()
-                    .find(|g| g.from_solar_system_id == current_system_id)
+                    .filter(|g| g.from_solar_system_id == current_system_id)
+                    .min_by_key(|g| g.stargate_id)
                     .map(|g| g.position)
             });
 
@@ -791,7 +795,8 @@ impl LivingWorldDirector {
             .and_then(|next| {
                 sde.stargates()
                     .values()
-                    .find(|g| g.from_solar_system_id == current_system_id && g.to_solar_system_id == next)
+                    .filter(|g| g.from_solar_system_id == current_system_id && g.to_solar_system_id == next)
+                    .min_by_key(|g| g.stargate_id)
                     .map(|g| g.position)
             })
             .or_else(|| {
@@ -803,16 +808,17 @@ impl LivingWorldDirector {
             .or_else(|| {
                 sde.stations
                     .values()
-                    .find(|sta| sta.solar_system_id == current_system_id)
+                    .filter(|sta| sta.solar_system_id == current_system_id)
+                    .min_by_key(|sta| sta.station_id)
                     .map(|sta| sta.position)
             });
 
+        // DERIVED: fallback to canonical 15 AU average system intra-gate distance if stargates missing in SDE
         let distance = match (origin_pos, dest_pos) {
             (Some(pos1), Some(pos2)) => pos1.distance(pos2),
-            _ => 15.0 * 149_597_870_700.0,
+            _ => 15.0 * AU_METERS,
         };
 
-        let _warp_speed_mps = warp_speed_au_s * AU_METERS;
         let warp_transit_secs = crate::formulas::compute_warp_duration_seconds(distance, warp_speed_au_s, max_vel);
         let gate_jump_secs = 5.0;
 

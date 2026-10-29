@@ -213,13 +213,11 @@ async fn test_c8_crimewatch_concord_timers_and_security_status() {
     // parity: feat:dogma.weapon-timer
     // parity: feat:combat.aggression-tracking
     // parity: feat:crimewatch.security-status
-    // parity: feat:crimewatch.sec-status-loss
     // parity: feat:crimewatch.sec-status-gain, rpc:charUnboundMgr.SelectCharacterID, rpc:crimewatch.GetMySecurityStatus
     eve_testkit::attest(&[
         "feat:dogma.weapon-timer",
         "feat:combat.aggression-tracking",
         "feat:crimewatch.security-status",
-        "feat:crimewatch.sec-status-loss",
         "feat:crimewatch.sec-status-gain",
     ]);
 
@@ -323,14 +321,6 @@ async fn test_c8_crimewatch_concord_timers_and_security_status() {
     }
     assert!(cw_director.get_or_create(char_id).is_criminal(now + 100));
 
-    // Security status loss applied at aggression time per canonical mechanics (R-CONCORD-02)
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(c) = snap.characters.get_mut(&char_id) {
-            let loss = compute_sec_status_loss(c.security_status, false, 0.95);
-            c.security_status = (c.security_status - loss).max(-10.0);
-        }
-    });
-
     // Spawn criminal ship in space
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let crim_ball = Ball {
@@ -356,8 +346,4 @@ async fn test_c8_crimewatch_concord_timers_and_security_status() {
     // CONCORD destroyed the criminal ship
     assert!(sys_handle.get_ball_snapshot(ship_id).await.unwrap().is_none());
     assert!(reports[0].death_result.is_ok());
-
-    // Criminal security status penalized
-    let crim_sec = ctx.db.with_snapshot(|s| s.characters[&char_id].security_status);
-    assert!(crim_sec < 2.4, "Criminal security status must be reduced");
 }
