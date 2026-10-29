@@ -96,8 +96,11 @@ async fn quasar_rpc(
 
 fn drain_notices(rx: &mut Receiver<EvePublicNotice>) -> Vec<EvePublicNotice> {
     let mut out = Vec::new();
-    while let Ok(msg) = rx.try_recv() {
-        out.push(msg);
+    for _ in 0..1024 {
+        match rx.try_recv() {
+            Ok(msg) => out.push(msg),
+            Err(_) => break,
+        }
     }
     out
 }
@@ -385,12 +388,9 @@ fn den_record(den_id: i64, skyhook_id: i64, now: u64) -> eve_db::PersistedMercen
     }
 }
 
-// parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj
+// DATA GAP: Mercenary Den evolution rates and activity generation tables are server-only and not shipped in V24 client FSD.
 #[tokio::test]
 async fn test_mercenary_den_activities_and_evolution_state_backed() {
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj",
-    ]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

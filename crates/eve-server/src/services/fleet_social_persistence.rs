@@ -57,7 +57,6 @@ pub(crate) struct SocialExtrasState {
     pub(crate) delayed_local_speakers: HashMap<String, HashSet<i64>>,
     pub(crate) chat_rate_window: HashMap<i64, (u64, u32)>,
     pub(crate) active_probes: HashMap<i64, Vec<(i64, [f64; 3], f64, u64)>>,
-    pub(crate) escalations: HashMap<i64, Vec<(i64, String, u32, u64)>>,
     pub(crate) forced_session_corp_sync: HashMap<i64, (i64, Option<i64>, u64)>,
 }
 

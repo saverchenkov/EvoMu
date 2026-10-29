@@ -120,11 +120,11 @@ async fn q_final_cosmetics_titles_palette_market() {
 // 3. Entitlements, Faction, Freelance, Payment & Stargate Requests
 #[tokio::test]
 async fn q_final_entitlements_faction_freelance_payment_stargate() {
+    // DATA GAP: Payment purchase offer catalog (`eve_public/payment/purchase/api_pb2.pyj`) is external store data not in V24 client FSD.
     // parity: quasar:eveProto/generated/eve_public/faction/activity/activity_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj, quasar:eveProto/generated/eve_public/plex/vault/transaction/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/plex/vault/transaction/api/requests_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/faction/activity/activity_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj",
         "quasar:eveProto/generated/eve_public/plex/vault/transaction/api/requests_pb2.pyj",
     ]);
     let reg = QuasarDescriptorRegistry::open_default().expect("registry");
@@ -243,7 +243,11 @@ async fn q_final_entitlements_faction_freelance_payment_stargate() {
         .quasar_gateway
         .take_stream_receiver(sess.session_id)
         .expect("take_stream_receiver");
-    while stream_rx.try_recv().is_ok() {}
+    for _ in 0..1024 {
+        if stream_rx.try_recv().is_err() {
+            break;
+        }
+    }
 
     for sg_notice in [
         "eve_public.stargate.lock.api.RestrictedSystemsNotice",
@@ -264,13 +268,8 @@ async fn q_final_entitlements_faction_freelance_payment_stargate() {
 
     // Mutate score via admin IncrementContributionScoreRequest and SetContributionScoreRequest and verify notices + GetSolarSystemScoresRequest
     sess.role |= 0x2000_0000_0000_0000;
-    let mut inc_payload = vec![0x0A, 0x05, 0x08, 0x8E, 0x88, 0xA7, 0x0E, 0x12, 0x04, 0x08, 0xA1, 0xC2, 0x1E, 0x18];
-    let mut v = 500_u64;
-    while v >= 0x80 {
-        inc_payload.push(((v as u8) & 0x7F) | 0x80);
-        v >>= 7;
-    }
-    inc_payload.push(v as u8);
+    let mut inc_payload = vec![0x0A, 0x05, 0x08, 0x8E, 0x88, 0xA7, 0x0E, 0x12, 0x04, 0x08, 0xA1, 0xC2, 0x1E];
+    eve_proto::quasar::encode_varint_field(3, 500, &mut inc_payload);
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.faction.activity.admin.IncrementContributionScoreRequest", inc_payload, b"corr-fac-inc").await.status_code, STATUS_OK);
     let contrib_n = stream_rx.recv().await.expect("recv ScoreContributionNotice").payload.unwrap();
     assert_eq!(contrib_n.normalized_type_name(), "eve_public.faction.activity.ScoreContributionNotice");
@@ -327,7 +326,11 @@ async fn q_final_cosmetic_skinr_and_tale_notices() {
         .quasar_gateway
         .take_stream_receiver(sess.session_id)
         .expect("take_stream_receiver");
-    while stream_rx.try_recv().is_ok() {}
+    for _ in 0..1024 {
+        if stream_rx.try_recv().is_err() {
+            break;
+        }
+    }
 
     let notice_types = [
         "eve_public.cosmetic.character.title.api.GrantedNotice",
@@ -397,7 +400,11 @@ async fn q_final_sovereignty_and_goals_notices() {
         .quasar_gateway
         .take_stream_receiver(sess.session_id)
         .expect("take_stream_receiver");
-    while stream_rx.try_recv().is_ok() {}
+    for _ in 0..1024 {
+        if stream_rx.try_recv().is_err() {
+            break;
+        }
+    }
 
     let notice_types = [
         "eve_public.sovereignty.hub.api.ResourcesSimulatedNotice",

@@ -90,8 +90,11 @@ pub async fn quasar_rpc(
 
 fn drain_notices(rx: &mut Receiver<EvePublicNotice>) -> Vec<EvePublicNotice> {
     let mut out = Vec::new();
-    while let Ok(msg) = rx.try_recv() {
-        out.push(msg);
+    for _ in 0..1024 {
+        match rx.try_recv() {
+            Ok(msg) => out.push(msg),
+            Err(_) => break,
+        }
     }
     out
 }
@@ -304,11 +307,9 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
 
 #[tokio::test]
 async fn quasar_career_goals_paths_and_milestones() {
-    // parity: feat:quasar.career, quasar:eveProto/generated/eve_public/career/goal/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/career/goal/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/career/goal/api/admin/requests_pb2.pyj
+    // DATA GAP: Individual AIR Career Program goal UUIDs, targets, and rewards are server-authored and not shipped in V24 client FSD.
+    // parity: quasar:eveProto/generated/eve_public/career/goal/api/admin/requests_pb2.pyj
     eve_testkit::attest(&[
-        "feat:quasar.career",
-        "quasar:eveProto/generated/eve_public/career/goal/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/career/goal/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/career/goal/api/admin/requests_pb2.pyj",
     ]);
 

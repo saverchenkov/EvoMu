@@ -128,19 +128,20 @@ async fn quasar_rpc(
 
 fn drain_notices(rx: &mut Receiver<EvePublicNotice>) -> Vec<EvePublicNotice> {
     let mut out = Vec::new();
-    while let Ok(msg) = rx.try_recv() {
-        out.push(msg);
+    for _ in 0..1024 {
+        match rx.try_recv() {
+            Ok(msg) => out.push(msg),
+            Err(_) => break,
+        }
     }
     out
 }
 
 #[tokio::test]
 async fn test_authentic_career_goals_and_milestones_remediated() {
-    // parity: feat:quasar.career, quasar:eveProto/generated/eve_public/career/goal/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/career/goal/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/career/goal/api/admin/requests_pb2.pyj
+    // DATA GAP: Individual AIR Career Program goal UUIDs, targets, and rewards are server-authored and not shipped in V24 client FSD.
+    // parity: quasar:eveProto/generated/eve_public/career/goal/api/admin/requests_pb2.pyj
     eve_testkit::attest(&[
-        "feat:quasar.career",
-        "quasar:eveProto/generated/eve_public/career/goal/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/career/goal/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/career/goal/api/admin/requests_pb2.pyj",
     ]);
 
@@ -346,16 +347,13 @@ async fn test_authentic_campaign_definitions_remediated() {
 
 #[tokio::test]
 async fn test_authentic_achievements_and_cdn_metadata_remediated() {
+    // DATA GAP: Achievement showcase scores and milestone reward amounts are server-only and not present in res:/staticdata/achievements.static.
     // parity: feat:quasar.achievement
     // parity: quasar:eveProto/generated/eve_public/achievement/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/reward/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/showcase/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj
     eve_testkit::attest(&[
         "feat:quasar.achievement",
         "quasar:eveProto/generated/eve_public/achievement/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/achievement/reward/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/achievement/showcase/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj",
     ]);
 

@@ -33,6 +33,8 @@ use std::sync::{Arc, RwLock};
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CommunityTrackState {
     pub track_id: u32,
+    #[serde(default)]
+    pub template_id: u32,
     pub name: String,
     pub target_progress: u64,
     pub current_progress: u64,
@@ -126,6 +128,7 @@ impl ProgressionExtraManager {
                         let target = val.get("goal").and_then(|v| v.as_u64()).unwrap_or(1_000_000);
                         tracks.entry(id).or_insert(CommunityTrackState {
                             track_id: id,
+                            template_id: id,
                             name,
                             target_progress: target,
                             current_progress: 0,
@@ -134,6 +137,7 @@ impl ProgressionExtraManager {
                     }
                 }
             }
+            mgr.save_to_db();
         }
         mgr
     }

@@ -333,17 +333,13 @@ async fn test_fast_checkout_and_activity_complete() {
     // ------------------------------------------------------------------------
     // Part 2: FastCheckoutService Tutorial RPCs & Multi-Character Isolation
     // ------------------------------------------------------------------------
-    // 2.1 FastCheckoutService.is_enabled
-    let is_enabled = rpc(
-        &ctx,
-        &mut sess1,
-        "FastCheckoutService",
-        "is_enabled",
-        &[],
-    )
-    .await
-    .expect("is_enabled");
-    assert_eq!(is_enabled, PyRep::Bool(true));
+    // 2.1 FastCheckoutService.is_enabled (state-backed per character)
+    assert_eq!(rpc(&ctx, &mut sess1, "FastCheckoutService", "is_enabled", &[]).await.expect("is_enabled"), PyRep::Bool(true));
+    eve_server::services::fast_checkout_and_activity::set_project_discovery_enabled(&ctx, CHAR_ID, false);
+    assert_eq!(rpc(&ctx, &mut sess1, "FastCheckoutService", "is_enabled", &[]).await.expect("is_enabled disabled"), PyRep::Bool(false));
+    assert_eq!(rpc(&ctx, &mut sess2, "FastCheckoutService", "is_enabled", &[]).await.expect("is_enabled char 2"), PyRep::Bool(true));
+    eve_server::services::fast_checkout_and_activity::set_project_discovery_enabled(&ctx, CHAR_ID, true);
+    assert_eq!(rpc(&ctx, &mut sess1, "FastCheckoutService", "is_enabled", &[]).await.expect("is_enabled re-enabled"), PyRep::Bool(true));
 
     // 2.2 FastCheckoutService.initialize_tutorial_status (new char 1: incomplete -> Bool(false))
     let init_res_1 = rpc(
@@ -455,7 +451,7 @@ async fn test_fast_checkout_and_activity_complete() {
     // ------------------------------------------------------------------------
     // Part 3: activityMgr RPCs & Multi-Character Isolation
     // ------------------------------------------------------------------------
-    // 3.1 activityMgr.GetActivityBadgeStatuses returns default active badges [101, 102, 103] as PySet
+    // 3.1 activityMgr.GetActivityBadgeStatuses returns persisted seen activity IDs as PySet (initially empty)
     let badges_char1 = rpc(
         &ctx,
         &mut sess1,
@@ -465,14 +461,7 @@ async fn test_fast_checkout_and_activity_complete() {
     )
     .await
     .expect("GetActivityBadgeStatuses char 1");
-    assert_eq!(
-        badges_char1,
-        PyRep::PySet(vec![
-            PyRep::Integer(101),
-            PyRep::Integer(102),
-            PyRep::Integer(103),
-        ])
-    );
+    assert_eq!(badges_char1, PyRep::PySet(vec![]));
 
     let badges_char2 = rpc(
         &ctx,
@@ -483,26 +472,30 @@ async fn test_fast_checkout_and_activity_complete() {
     )
     .await
     .expect("GetActivityBadgeStatuses char 2");
-    assert_eq!(
-        badges_char2,
-        PyRep::PySet(vec![
-            PyRep::Integer(101),
-            PyRep::Integer(102),
-            PyRep::Integer(103),
-        ])
-    );
+    assert_eq!(badges_char2, PyRep::PySet(vec![]));
 
-    // 3.2 activityMgr.ActivitySeen(102) marks it seen for Character 1 only
+    // 3.2 activityMgr.ActivitySeen records seen SDE newactivities IDs (42, 43) for Character 1 only
     let seen_res = rpc(
         &ctx,
         &mut sess1,
         "activityMgr",
         "ActivitySeen",
-        &[PyRep::Integer(102)],
+        &[PyRep::Integer(42)],
     )
     .await
-    .expect("ActivitySeen char 1");
+    .expect("ActivitySeen 42 char 1");
     assert_eq!(seen_res, PyRep::Bool(true));
+
+    let seen_res_2 = rpc(
+        &ctx,
+        &mut sess1,
+        "activityMgr",
+        "ActivitySeen",
+        &[PyRep::Integer(43)],
+    )
+    .await
+    .expect("ActivitySeen 43 char 1");
+    assert_eq!(seen_res_2, PyRep::Bool(true));
 
     let badges_char1_after_seen = rpc(
         &ctx,
@@ -515,10 +508,10 @@ async fn test_fast_checkout_and_activity_complete() {
     .expect("GetActivityBadgeStatuses char 1 after ActivitySeen");
     assert_eq!(
         badges_char1_after_seen,
-        PyRep::PySet(vec![PyRep::Integer(101), PyRep::Integer(103)])
+        PyRep::PySet(vec![PyRep::Integer(42), PyRep::Integer(43)])
     );
 
-    // Multi-character isolation: Character 2 still sees badge 102 active!
+    // Multi-character isolation: Character 2 still has an empty seen set!
     let badges_char2_after_seen = rpc(
         &ctx,
         &mut sess2,
@@ -528,14 +521,7 @@ async fn test_fast_checkout_and_activity_complete() {
     )
     .await
     .expect("GetActivityBadgeStatuses char 2 after char 1 ActivitySeen");
-    assert_eq!(
-        badges_char2_after_seen,
-        PyRep::PySet(vec![
-            PyRep::Integer(101),
-            PyRep::Integer(102),
-            PyRep::Integer(103),
-        ])
-    );
+    assert_eq!(badges_char2_after_seen, PyRep::PySet(vec![]));
 
     // 3.3 activityMgr.GetActivitiesPopState (initially empty dict for both characters)
     let pop_char1_initial = rpc(

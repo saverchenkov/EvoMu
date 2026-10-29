@@ -26,21 +26,17 @@ async fn rpc(ctx: &ServerContext, sess: &mut SessionState, service: &str, method
 
 #[tokio::test]
 async fn test_project_discovery_state_and_tasks() {
+    // DATA GAP: MMOS citizen science tasks, training tasks, and XP/reward tables (`get_new_task`, `get_data_from_url`, `new_training_task`, `get_total_needed_xp`, `get_tutorial_xp_reward`, `give_tutorial_rewards`, `post_classification`) are external backend data not in V24 client FSD.
     // parity: rpc:ProjectDiscovery.fix_task_id, rpc:ProjectDiscovery.get_current_task_index
-    // parity: rpc:ProjectDiscovery.get_data_from_url, rpc:ProjectDiscovery.get_new_task
     // parity: rpc:ProjectDiscovery.get_player_state, rpc:ProjectDiscovery.get_player_statistics
     // parity: rpc:ProjectDiscovery.get_project_id, rpc:ProjectDiscovery.get_remaining_bonus_samples
-    // parity: rpc:ProjectDiscovery.new_training_task
     eve_testkit::attest(&[
         "rpc:ProjectDiscovery.fix_task_id",
         "rpc:ProjectDiscovery.get_current_task_index",
-        "rpc:ProjectDiscovery.get_data_from_url",
-        "rpc:ProjectDiscovery.get_new_task",
         "rpc:ProjectDiscovery.get_player_state",
         "rpc:ProjectDiscovery.get_player_statistics",
         "rpc:ProjectDiscovery.get_project_id",
         "rpc:ProjectDiscovery.get_remaining_bonus_samples",
-        "rpc:ProjectDiscovery.new_training_task",
     ]);
 
     let ctx = ServerContext::new();
@@ -50,21 +46,23 @@ async fn test_project_discovery_state_and_tasks() {
     let proj = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_project_id", &[]).await.expect("get_project_id");
     assert_eq!(proj, PyRep::String("mcgill-polyseg".into()));
 
-    // 2. get_player_state
+    // 2. get_player_state (`projectdiscovery/common/const.pyj`: `INITIAL_PLAYER_SCORE = 0.0`)
     let state = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_state", &[]).await.expect("get_player_state");
     let PyRep::KeyVal(skv) = state else { panic!("expected KeyVal from get_player_state") };
     assert_eq!(skv.get("rank").and_then(|v| v.as_i64()), Some(1));
-    assert!(skv.get("score").is_some());
-    assert!(skv.get("accuracy").is_some());
+    assert_eq!(skv.get("score").and_then(|v| v.as_f64()), Some(0.0));
+    assert_eq!(skv.get("accuracy").and_then(|v| v.as_f64()), Some(0.0));
     assert_eq!(skv.get("analysisKredits").and_then(|v| v.as_i64()), Some(0));
     assert_eq!(skv.get("finishedTutorial").and_then(|v| v.as_bool()), Some(false));
     assert_eq!(skv.get("totalXP").and_then(|v| v.as_f64()), Some(0.0));
 
-    // 3. get_player_statistics
+    // 3. get_player_statistics (`INITIAL_PLAYER_SCORE = 0.0`)
     let stats = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_statistics", &[]).await.expect("get_player_statistics");
     let PyRep::KeyVal(tkv) = stats else { panic!("expected KeyVal from get_player_statistics") };
     assert_eq!(tkv.get("tasks_submitted").and_then(|v| v.as_i64()), Some(0));
-    assert!(tkv.get("project").and_then(|p| p.dict_get("score")).is_some());
+    assert_eq!(tkv.get("score").and_then(|v| v.as_f64()), Some(0.0));
+    assert_eq!(tkv.get("accuracy").and_then(|v| v.as_f64()), Some(0.0));
+    assert_eq!(tkv.get("project").and_then(|p| p.dict_get("score")).and_then(|v| v.as_f64()), Some(0.0));
     assert!(matches!(tkv.get("projects"), Some(PyRep::List(l)) if !l.is_empty()));
 
     // 4. get_total_needed_xp: unconfigured store returns 0.0; persisted MMOS config in ProjectDiscoveryStore drives thresholds
@@ -162,7 +160,8 @@ async fn test_project_discovery_state_and_tasks() {
     let stats_after = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_statistics", &[]).await.expect("get_player_statistics after");
     let PyRep::KeyVal(after_kv) = stats_after else { panic!("expected KeyVal") };
     assert_eq!(after_kv.get("tasks_submitted").and_then(|v| v.as_i64()), Some(1));
-    assert!(after_kv.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0) > 100.0);
+    assert_eq!(after_kv.get("score").and_then(|v| v.as_f64()), Some(100.0));
+    assert_eq!(after_kv.get("accuracy").and_then(|v| v.as_f64()), Some(1.0));
 }
 
 #[tokio::test]

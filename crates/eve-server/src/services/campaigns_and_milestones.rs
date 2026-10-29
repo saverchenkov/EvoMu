@@ -405,7 +405,7 @@ pub async fn handle(
             Some(handle_seasonal_login_claim_reward(ctx, session))
         }
         ("infoGatheringMgr", "GetStateAndConfig") => {
-            Some(handle_info_gathering_get_state_and_config(session))
+            Some(handle_info_gathering_get_state_and_config(ctx, session))
         }
         ("infoGatheringMgr", "LogInfoEventsFromClient") => {
             Some(handle_info_gathering_log_events(ctx, session, args))
@@ -872,17 +872,33 @@ fn handle_seasonal_login_claim_reward(
 }
 
 fn handle_info_gathering_get_state_and_config(
+    ctx: &ServerContext,
     session: &SessionState,
 ) -> Result<PyRep, BridgeRpcError> {
     ServerContext::require_auth(session)?;
 
+    let (is_enabled, worker_interval) = ctx.db.with_snapshot(|snap| {
+        let ext = load_cosmetics_ui_state(snap);
+        let enabled = ext.info_gathering_enabled.unwrap_or(true);
+        let interval = ext.info_gathering_interval.unwrap_or(300).max(1);
+        (enabled, interval)
+    });
+
+    let mut sde_event_ids: Vec<i64> = ctx
+        .sde
+        .load_event_types()
+        .map(|m| m.into_keys().map(i64::from).collect())
+        .unwrap_or_default();
+    sde_event_ids.sort_unstable();
+    let info_types: Vec<PyRep> = sde_event_ids.into_iter().map(PyRep::Integer).collect();
+
     Ok(PyRep::keyval([
-        ("clientWorkerInterval", PyRep::Integer(300)),
+        ("clientWorkerInterval", PyRep::Integer(worker_interval)),
         ("infoTypeAggregates", PyRep::Dict(Vec::new())),
         ("infoTypeParameters", PyRep::Dict(Vec::new())),
-        ("infoTypes", PyRep::List(Vec::new())),
+        ("infoTypes", PyRep::List(info_types)),
         ("infoTypesOncePerRun", PyRep::List(Vec::new())),
-        ("isEnabled", PyRep::Bool(true)),
+        ("isEnabled", PyRep::Bool(is_enabled)),
     ]))
 }
 
@@ -897,6 +913,11 @@ fn handle_info_gathering_log_events(
         .first()
         .ok_or_else(|| err("InvalidArgument", "Missing events dictionary or list"))?;
 
+    let is_enabled = ctx
+        .db
+        .with_snapshot(|snap| load_cosmetics_ui_state(snap).info_gathering_enabled.unwrap_or(true));
+    let status_code = if is_enabled { 0 } else { 1 };
+
     let (status_entries, event_logs): (Vec<(PyRep, PyRep)>, Vec<String>) = match events {
         PyRep::Dict(entries) => {
             let mut status = Vec::with_capacity(entries.len());
@@ -908,7 +929,7 @@ fn handle_info_gathering_log_events(
                     _ => "unknown".to_string(),
                 };
                 logs.push(format!("{key_str}:{v:?}"));
-                status.push((k.clone(), PyRep::Integer(0)));
+                status.push((k.clone(), PyRep::Integer(status_code)));
             }
             (status, logs)
         }
@@ -922,7 +943,7 @@ fn handle_info_gathering_log_events(
                     _ => PyRep::Integer(idx as i64),
                 };
                 logs.push(format!("{item:?}"));
-                status.push((key, PyRep::Integer(0)));
+                status.push((key, PyRep::Integer(status_code)));
             }
             (status, logs)
         }
@@ -934,16 +955,18 @@ fn handle_info_gathering_log_events(
         }
     };
 
-    // Record in bounded FIFO telemetry buffer in snapshot
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut ext = load_cosmetics_ui_state(snap);
-        ext.client_telemetry_events.extend(event_logs);
-        if ext.client_telemetry_events.len() > MAX_TELEMETRY_EVENTS {
-            let overflow = ext.client_telemetry_events.len() - MAX_TELEMETRY_EVENTS;
-            ext.client_telemetry_events.drain(0..overflow);
-        }
-        save_cosmetics_ui_state(snap, &ext);
-    });
+    if is_enabled {
+        // Record in bounded FIFO telemetry buffer in snapshot
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut ext = load_cosmetics_ui_state(snap);
+            ext.client_telemetry_events.extend(event_logs);
+            if ext.client_telemetry_events.len() > MAX_TELEMETRY_EVENTS {
+                let overflow = ext.client_telemetry_events.len() - MAX_TELEMETRY_EVENTS;
+                ext.client_telemetry_events.drain(0..overflow);
+            }
+            save_cosmetics_ui_state(snap, &ext);
+        });
+    }
 
     Ok(PyRep::Dict(status_entries))
 }
@@ -1013,7 +1036,13 @@ fn handle_community_track_get_attributes(
         )
     })?;
 
-    if instance_id <= 0 {
+    let Ok(track_uid) = u32::try_from(instance_id) else {
+        return Err(err(
+            "InvalidInstanceID",
+            format!("Instance ID {instance_id} is invalid"),
+        ));
+    };
+    if track_uid == 0 {
         return Err(err(
             "InvalidInstanceID",
             format!("Instance ID {instance_id} is invalid"),
@@ -1023,30 +1052,44 @@ fn handle_community_track_get_attributes(
     let templates = get_sde_community_tracks(&ctx.sde);
 
     ctx.db.with_snapshot(|snap| {
-        let ext = load_cosmetics_ui_state(snap);
-        let template = templates
-            .get(&instance_id)
-            .or_else(|| {
-                if ext.community_track_points.contains_key(&instance_id) {
-                    templates.values().next()
-                } else {
-                    None
-                }
+        let quasar_tracks = snap
+            .quasar_state_blobs
+            .get("quasar_community_tracks")
+            .and_then(|json| {
+                serde_json::from_str::<
+                    HashMap<u32, crate::services::quasar_progression_extra::CommunityTrackState>,
+                >(json)
+                .ok()
             })
-            .ok_or_else(|| {
-                err(
-                    "CommunityTrackInstanceNotFound",
-                    format!(
-                        "Community track instance {instance_id} not found in SDE community_track_templates"
-                    ),
-                )
-            })?;
+            .unwrap_or_default();
 
-        let raw_progress = ext
-            .community_track_points
-            .get(&instance_id)
-            .copied()
-            .unwrap_or(0);
+        let (template_id, quasar_progress) = if let Some(track) = quasar_tracks.get(&track_uid) {
+            let tid = if track.template_id != 0 {
+                i64::from(track.template_id)
+            } else {
+                i64::from(track.track_id)
+            };
+            (tid, i64::try_from(track.current_progress).unwrap_or(i64::MAX))
+        } else {
+            (instance_id, 0)
+        };
+
+        let template = templates.get(&template_id).ok_or_else(|| {
+            err(
+                "CommunityTrackInstanceNotFound",
+                format!(
+                    "Community track instance {instance_id} (template {template_id}) not found in SDE community_track_templates"
+                ),
+            )
+        })?;
+
+        let ext = load_cosmetics_ui_state(snap);
+        let raw_progress = quasar_progress.max(
+            ext.community_track_points
+                .get(&instance_id)
+                .copied()
+                .unwrap_or(0),
+        );
         let progress = raw_progress.clamp(0, i64::from(template.goal));
 
         // 2-tuple (fsd_identifier, progress) per V24 communitytracks/client/repository.pyj:114.

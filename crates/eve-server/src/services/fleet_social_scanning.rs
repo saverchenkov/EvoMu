@@ -907,37 +907,6 @@ pub(super) async fn handle_scanning_and_wormholes(
             Some(Ok(PyRep::None))
         }
 
-        ("dungeonExplorationMgr", "GetMyEscalatingPathDetails") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let now_unix = ctx.now_unix();
-            let mut st = ctx.social_extras.lock().unwrap();
-            let list = st.escalations.entry(char_id).or_default();
-            if list.is_empty() {
-                list.push((
-                    800_001,
-                    "DED 4/10 Sansha Command Complex".into(),
-                    30_000_144,
-                    now_unix + 86_400,
-                ));
-            }
-            let rows: Vec<Vec<PyRep>> = list
-                .iter()
-                .filter(|(_, _, _, exp)| *exp > now_unix)
-                .map(|(eid, name, dest_sys, exp)| {
-                    vec![
-                        PyRep::Integer(*eid),
-                        PyRep::String(name.clone()),
-                        PyRep::Integer(*dest_sys as i64),
-                        PyRep::Integer(*exp as i64),
-                    ]
-                })
-                .collect();
-            Some(Ok(PyRep::rowset(
-                vec!["instanceID", "dungeonName", "solarSystemID", "expiryTime"],
-                rows,
-            )))
-        }
-
         ("livingWorld", "GetMiningOps") => {
             let sys_id = args
                 .first()

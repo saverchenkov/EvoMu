@@ -44,20 +44,21 @@ fn make_uuid_request(uuid: [u8; 16]) -> Vec<u8> {
 
 fn drain_notices(rx: &mut Receiver<EvePublicNotice>) -> Vec<EvePublicNotice> {
     let mut notifs = Vec::new();
-    while let Ok(n) = rx.try_recv() {
-        notifs.push(n);
+    for _ in 0..1024 {
+        match rx.try_recv() {
+            Ok(n) => notifs.push(n),
+            Err(_) => break,
+        }
     }
     notifs
 }
 
 #[tokio::test]
 async fn quasar_achievements_categories_scores_and_claims() {
+    // DATA GAP: Achievement category bucketing, showcase scores, and reward amounts are server-only and not present in res:/staticdata/achievements.static.
     // parity: quasar:eveProto/generated/eve_public/achievement/api/admin/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/category/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/reward/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/showcase/api/requests_pb2.pyj
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut sess = crate::quasar_progression_complete::build_sess(10_003, 90_000_001, 98_000_001);

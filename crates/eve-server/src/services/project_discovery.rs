@@ -201,7 +201,7 @@ pub fn project_discovery_total_needed_xp_from_store(
 /// Resolve the player's rank for a given cumulative `experience` using `ProjectDiscoveryStore`.
 pub fn rank_for_xp(store: &ProjectDiscoveryStore, experience: f64, current_rank: i64) -> i64 {
     let mut rank = current_rank.max(1);
-    loop {
+    for _ in 0..10_000 {
         let needed = project_discovery_total_needed_xp_from_store(store, rank);
         if needed > 0.0 && experience >= needed {
             rank += 1;
@@ -234,6 +234,12 @@ pub struct PlayerProjectState {
     pub project_id: String,
     #[serde(default)]
     pub last_submitted_task_index: i64,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 fn default_max_bonus_samples() -> i64 {
@@ -249,8 +255,8 @@ impl Default for PlayerProjectState {
         Self {
             rank: 1,
             experience: 0.0,
-            accuracy: 0.95,
-            score: 100.0,
+            accuracy: INITIAL_PLAYER_SCORE,
+            score: INITIAL_PLAYER_SCORE,
             tasks_submitted: 0,
             analysis_kredits: 0,
             tutorial_level: 1,
@@ -262,8 +268,21 @@ impl Default for PlayerProjectState {
             max_bonus_samples: 10,
             project_id: ACTIVE_PROJECT_ID.into(),
             last_submitted_task_index: 0,
+            enabled: true,
         }
     }
+}
+
+/// Return whether Project Discovery is enabled for `char_id` in persisted `PlayerProjectState`.
+pub fn is_project_discovery_enabled(ctx: &ServerContext, char_id: i64) -> bool {
+    read_player_state(ctx, char_id, |st| st.enabled)
+}
+
+/// Update whether Project Discovery is enabled for `char_id` in persisted `PlayerProjectState`.
+pub fn set_project_discovery_enabled(ctx: &ServerContext, char_id: i64, enabled: bool) {
+    with_player_state(ctx, char_id, |st, _| {
+        st.enabled = enabled;
+    });
 }
 
 fn read_player_state<F, R>(ctx: &ServerContext, char_id: i64, f: F) -> R
@@ -339,9 +358,8 @@ pub fn handle_project_discovery(
 
     match (service, method) {
         ("ProjectDiscovery", "is_enabled") => {
-            // const-ok: `CommonProjectDiscoveryClientService.is_enabled` caches this boolean
-            // (`projectdiscovery/client/baseservice.pyj:32-35`); Project Discovery is enabled in EvoMu.
-            return Some(Ok(PyRep::Bool(true)));
+            let enabled = is_project_discovery_enabled(ctx, char_id);
+            return Some(Ok(PyRep::Bool(enabled)));
         }
         ("ProjectDiscovery", "initialize_tutorial_status") => {
             let complete = read_player_state(ctx, char_id, |st| st.tutorial_complete || st.tutorial_skipped);
@@ -391,6 +409,7 @@ pub fn handle_project_discovery(
             Some(Ok(res))
         }
 
+        // DERIVED (synthetic): DATA GAP — MMOS rank XP progression curve is external server data not shipped in V24 client FSD.
         "get_total_needed_xp" => {
             let rank = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
             let needed = ctx.db.with_snapshot(|snap| {
@@ -449,6 +468,7 @@ pub fn handle_project_discovery(
             Some(Ok(PyRep::Bool(entitled)))
         }
 
+        // DERIVED (synthetic): DATA GAP — MMOS tutorial XP reward is external server data not shipped in V24 client FSD.
         "give_tutorial_rewards" | "give_tutorial_complete_experience" => {
             // V24 `projectdiscovery/client/projects/subcellular/tutorial.pyj:601`:
             // `give_tutorial_rewards()` grants `get_tutorial_xp_reward()` XP (`AK_Reward = 0`, `ISK_Reward = 0`, `LP_Reward = 0`).
@@ -500,6 +520,7 @@ pub fn handle_project_discovery(
             Some(Ok(PyRep::Bool(granted)))
         }
 
+        // DERIVED (synthetic): DATA GAP — MMOS tutorial XP reward is external server data not shipped in V24 client FSD.
         "get_tutorial_xp_reward" => {
             let reward = ctx.db.with_snapshot(|snap| {
                 let store = load_discovery_store(snap);
@@ -508,6 +529,7 @@ pub fn handle_project_discovery(
             Some(Ok(PyRep::Real(reward)))
         }
 
+        // DERIVED (synthetic): DATA GAP — MMOS citizen science tasks and URLs are external backend data not in V24 client FSD.
         "get_new_task" => {
             let (task_idx, pid, url) = with_player_state(ctx, char_id, |st, snap| {
                 if st.current_task_index < st.last_submitted_task_index + 1 {
@@ -549,6 +571,7 @@ pub fn handle_project_discovery(
             ])))
         }
 
+        // DERIVED (synthetic): DATA GAP — MMOS training task solutions are external backend data not in V24 client FSD.
         "new_training_task" => {
             let lvl = read_player_state(ctx, char_id, |st| st.tutorial_level);
             let task_num = args
@@ -587,6 +610,7 @@ pub fn handle_project_discovery(
             Some(Ok(PyRep::String(pid)))
         }
 
+        // DERIVED (synthetic): DATA GAP — MMOS classification consensus grading and XP/AK rewards are external backend data not in V24 client FSD.
         "post_classification" => {
             if args.len() < 2 {
                 return Some(Err(BridgeRpcError {
@@ -643,6 +667,7 @@ pub fn handle_project_discovery(
                         message: "Active task has already been submitted".into(),
                     });
                 }
+                let prev_tasks = st.tasks_submitted;
                 st.last_submitted_task_index = st.current_task_index;
                 st.tasks_submitted += 1;
                 let store = load_discovery_store(snap);
@@ -651,9 +676,13 @@ pub fn handle_project_discovery(
                     .get(&req_task_index)
                     .copied()
                     .unwrap_or(false);
-                st.accuracy = (((st.accuracy * 9.0) + if is_accurate { 1.0 } else { 0.0 }) / 10.0)
-                    .clamp(0.0, 1.0);
-                st.score = (st.score + if is_accurate { 2.5 } else { -5.0 }).clamp(0.0, 1000.0);
+                let sample_acc = if is_accurate { 1.0 } else { 0.0 };
+                st.accuracy = if prev_tasks <= 0 {
+                    sample_acc
+                } else {
+                    (((st.accuracy * 9.0) + sample_acc) / 10.0).clamp(0.0, 1.0)
+                };
+                st.score = (st.accuracy * 100.0).clamp(0.0, 1000.0);
                 let xp_gain = if is_accurate {
                     store.classification_xp_accurate
                 } else {
@@ -870,6 +899,7 @@ pub fn handle_project_discovery(
             Some(Ok(PyRep::Integer(idx)))
         }
 
+        // DERIVED (synthetic): DATA GAP — MMOS task payload URLs are external backend data not in V24 client FSD.
         "get_data_from_url" => {
             let url = args
                 .first()

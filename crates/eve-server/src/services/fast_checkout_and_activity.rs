@@ -30,8 +30,6 @@ use std::collections::HashMap;
 const ACTIVITY_MGR_PREFIX: &str = "activity_mgr:";
 const PROJECT_DISCOVERY_KEY_PREFIX: &str = "project_discovery:";
 const FAST_CHECKOUT_PREFIX: &str = "fast_checkout:";
-// DERIVED: Default active activity badges for character UI
-const DEFAULT_ACTIVE_BADGES: [i64; 3] = [101, 102, 103];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FastCheckoutOfferRecord {
@@ -62,7 +60,7 @@ impl Default for UserFastCheckoutState {
     }
 }
 
-// DERIVED: Standard CCP PLEX store packages (110, 240, 500, 1100 PLEX) for FastCheckout fallback
+// DERIVED (synthetic): DATA GAP — FastCheckout PLEX store catalog is external web-store data not shipped in V24 client FSD.
 pub fn standard_plex_offers() -> Vec<FastCheckoutOfferRecord> {
     vec![
         FastCheckoutOfferRecord {
@@ -129,12 +127,15 @@ pub fn set_user_fast_checkout_enabled(ctx: &ServerContext, user_id: u64, enabled
     save_user_fast_checkout_state(ctx, user_id, &st);
 }
 
+/// Update whether Project Discovery (`FastCheckoutService.is_enabled`) is enabled for `char_id`.
+pub fn set_project_discovery_enabled(ctx: &ServerContext, char_id: i64, enabled: bool) {
+    crate::services::project_discovery::set_project_discovery_enabled(ctx, char_id, enabled);
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CharacterActivityState {
     #[serde(default)]
     pub seen_activities: Vec<i64>,
-    #[serde(default)]
-    pub badge_statuses: Vec<i64>,
     #[serde(default)]
     pub pop_state: Vec<(PyRep, PyRep)>,
 }
@@ -160,7 +161,9 @@ pub fn handle(
         ("FastCheckoutService", "initialize_tutorial_status") => {
             Some(handle_initialize_tutorial_status(ctx, session))
         }
-        ("FastCheckoutService", "is_enabled") => Some(Ok(PyRep::Bool(true))),
+        ("FastCheckoutService", "is_enabled") => {
+            Some(handle_is_enabled(ctx, session))
+        }
         ("FastCheckoutService", "reset_tutorial") => {
             Some(handle_reset_tutorial(ctx, session))
         }
@@ -495,6 +498,15 @@ fn handle_request_mining_details(
     Ok(dict)
 }
 
+fn handle_is_enabled(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let enabled = crate::services::project_discovery::is_project_discovery_enabled(ctx, char_id);
+    Ok(PyRep::Bool(enabled))
+}
+
 fn handle_get_tutorial_completion_status(
     ctx: &ServerContext,
     session: &SessionState,
@@ -592,10 +604,11 @@ fn handle_activity_seen(
         .first()
         .and_then(|a| a.as_i64())
         .or_else(|| kwargs.get("activityID").and_then(|v| v.as_i64()))
+        .filter(|&id| id > 0)
     else {
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
-            message: "ActivitySeen requires activityID".into(),
+            message: "ActivitySeen requires a positive activityID".into(),
         });
     };
 
@@ -609,10 +622,6 @@ fn handle_activity_seen(
         if !state.seen_activities.contains(&activity_id) {
             state.seen_activities.push(activity_id);
         }
-        if state.badge_statuses.is_empty() {
-            state.badge_statuses = DEFAULT_ACTIVE_BADGES.to_vec();
-        }
-        state.badge_statuses.retain(|&id| id != activity_id);
         if let Ok(js) = serde_json::to_string(&state) {
             snap.service_state_blobs.insert(key, js);
         }
@@ -642,24 +651,14 @@ fn handle_get_activity_badge_statuses(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let key = format!("{ACTIVITY_MGR_PREFIX}{char_id}");
-    let badges = ctx.db.with_snapshot(|snap| {
-        let state = snap
-            .service_state_blobs
+    let seen_activities = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
             .get(&key)
             .and_then(|j| serde_json::from_str::<CharacterActivityState>(j).ok())
-            .unwrap_or_default();
-        let base_badges = if state.badge_statuses.is_empty() {
-            // DERIVED: Default active activity badges for character UI
-            DEFAULT_ACTIVE_BADGES.to_vec()
-        } else {
-            state.badge_statuses.clone()
-        };
-        base_badges
-            .into_iter()
-            .filter(|id| !state.seen_activities.contains(id))
-            .collect::<Vec<i64>>()
+            .map(|st| st.seen_activities)
+            .unwrap_or_default()
     });
-    let list = badges.into_iter().map(PyRep::Integer).collect();
+    let list = seen_activities.into_iter().map(PyRep::Integer).collect();
     Ok(PyRep::PySet(list))
 }
 

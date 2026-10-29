@@ -75,8 +75,11 @@ async fn quasar_rpc(
 
 fn drain_notices(rx: &mut Receiver<EvePublicNotice>) -> Vec<EvePublicNotice> {
     let mut out = Vec::new();
-    while let Ok(msg) = rx.try_recv() {
-        out.push(msg);
+    for _ in 0..1024 {
+        match rx.try_recv() {
+            Ok(msg) => out.push(msg),
+            Err(_) => break,
+        }
     }
     out
 }
@@ -315,7 +318,7 @@ async fn test_quasar_store_catalog_products_and_offers() {
 
 #[tokio::test]
 async fn test_payment_schedules_tokens_and_user_license() {
-    // parity: quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj
+    // DATA GAP: Payment purchase offer catalog (`eve_public/payment/purchase/api_pb2.pyj`) is external store data not in V24 client FSD.
     // parity: quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/payment/schedule/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/payment/token/api/notices_pb2.pyj
@@ -514,13 +517,11 @@ async fn test_payment_schedules_tokens_and_user_license() {
 
 #[tokio::test]
 async fn test_quasar_achievements_progression_and_claims() {
+    // DATA GAP: Achievement categories, showcase scores, and milestone rewards are server-only and not present in res:/staticdata/achievements.static.
     // parity: quasar:eveProto/generated/eve_public/achievement/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/api/admin/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/category/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/reward/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/showcase/api/requests_pb2.pyj
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let (uid, cid) = (1u64, 90_000_001);

@@ -542,9 +542,8 @@ async fn test_contextual_offers_telemetry_tracking() {
     });
 }
 
-    // parity: rpc:FastCheckoutService.BuyOffer
+    // DATA GAP: FastCheckoutService.GetOffersForUser and FastCheckoutService.BuyOffer depend on external web-store PLEX offer catalog not shipped in V24 client FSD.
     // parity: rpc:FastCheckoutService.ClearFastCheckoutCacheForUser
-    // parity: rpc:FastCheckoutService.GetOffersForUser
     // parity: rpc:FastCheckoutService.GetTestingConfiguration
     // parity: rpc:FastCheckoutService.IsFastCheckoutEnabledForUser
 #[tokio::test]

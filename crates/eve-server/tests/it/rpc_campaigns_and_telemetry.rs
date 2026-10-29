@@ -348,7 +348,7 @@ async fn test_info_gathering_telemetry_rpcs() {
     let mut sess = SessionState::new(31_004);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
 
-    // 1. infoGatheringMgr.GetStateAndConfig: returns KeyVal config
+    // 1. infoGatheringMgr.GetStateAndConfig: returns KeyVal config backed by SDE eventtypes.static
     let cfg = rpc(&ctx, &mut sess, "infoGatheringMgr", "GetStateAndConfig", &[])
         .await
         .expect("GetStateAndConfig");
@@ -356,8 +356,34 @@ async fn test_info_gathering_telemetry_rpcs() {
     assert_eq!(field(&cfg, "isEnabled").as_bool(), Some(true));
     assert!(matches!(field(&cfg, "infoTypeAggregates"), PyRep::Dict(_)));
     assert!(matches!(field(&cfg, "infoTypeParameters"), PyRep::Dict(_)));
-    assert!(matches!(field(&cfg, "infoTypes"), PyRep::List(_)));
+    let PyRep::List(info_types) = field(&cfg, "infoTypes") else {
+        panic!("expected List for infoTypes");
+    };
+    assert_eq!(
+        info_types.len(),
+        72,
+        "infoTypes must contain the 72 SDE event types from res:/staticdata/eventtypes.static"
+    );
     assert!(matches!(field(&cfg, "infoTypesOncePerRun"), PyRep::List(_)));
+
+    // State mutation: disabling info gathering and updating interval is reflected in GetStateAndConfig
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = eve_server::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
+        ext.info_gathering_enabled = Some(false);
+        ext.info_gathering_interval = Some(600);
+        eve_server::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
+    });
+    let cfg_disabled = rpc(&ctx, &mut sess, "infoGatheringMgr", "GetStateAndConfig", &[])
+        .await
+        .expect("GetStateAndConfig disabled");
+    assert_eq!(field(&cfg_disabled, "clientWorkerInterval").as_i64(), Some(600));
+    assert_eq!(field(&cfg_disabled, "isEnabled").as_bool(), Some(false));
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = eve_server::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
+        ext.info_gathering_enabled = Some(true);
+        ext.info_gathering_interval = Some(300);
+        eve_server::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
+    });
 
     // 2. infoGatheringMgr.LogInfoEventsFromClient: requires 1 arg (dict or list)
     let missing_arg = rpc(&ctx, &mut sess, "infoGatheringMgr", "LogInfoEventsFromClient", &[])
@@ -550,12 +576,38 @@ async fn test_milestones_and_community_tracks() {
     assert_eq!(track_tuple[0].as_i64(), Some(1));
     assert_eq!(track_tuple[1].as_i64(), Some(0));
 
-    // Progress is clamped to the SDE template goal (100 for template 1)
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut ext = eve_server::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
-        ext.community_track_points.insert(1, 150);
-        eve_server::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
-    });
+    // Advance community track 1 via Quasar eve.communitytrack.api.AddProgressRequest (+45, then +105 clamped to SDE goal 100)
+    sess.role |= eve_machonet::service_roles::ROLE_ADMIN;
+    for delta in [45_u64, 105_u64] {
+        let (mut add_pb, mut id_pb) = (Vec::new(), Vec::new());
+        eve_proto::quasar::encode_varint_field(1, 1, &mut id_pb);
+        eve_proto::quasar::encode_bytes_field(1, &id_pb, &mut add_pb);
+        eve_proto::quasar::encode_varint_field(2, delta, &mut add_pb);
+        let rsp = crate::quasar_progression_complete::quasar_rpc(
+            &ctx,
+            &mut sess,
+            "eve.communitytrack.api.AddProgressRequest",
+            add_pb,
+        )
+        .await;
+        assert_eq!(rsp.status_code, 200);
+        if delta == 45 {
+            let mid_attrs = rpc(
+                &ctx,
+                &mut sess,
+                "communityTrackMgr",
+                "get_instance_attributes_public",
+                &[PyRep::Integer(1)],
+            )
+            .await
+            .expect("get_instance_attributes_public mid progress");
+            assert_eq!(
+                mid_attrs,
+                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(45)])
+            );
+        }
+    }
+    sess.role &= !eve_machonet::service_roles::ROLE_ADMIN;
     let clamped_attrs = rpc(
         &ctx,
         &mut sess,

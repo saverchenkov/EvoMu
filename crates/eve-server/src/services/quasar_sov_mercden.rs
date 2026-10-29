@@ -279,8 +279,9 @@ pub(crate) fn refresh_activities(snap: &mut WorldStateSnapshot, pending: &Pendin
         return;
     }
     let stage = stage_for_level(den.development_level);
-    let mut count = snap.sov_runtime.mercenary_activities.values().filter(|a| a.den_id == den_id).count() as u32;
-    while count < activity_capacity(stage) {
+    let count = snap.sov_runtime.mercenary_activities.values().filter(|a| a.den_id == den_id).count() as u32;
+    let cap = activity_capacity(stage);
+    for _ in count..cap {
         snap.sov_runtime.next_mercenary_activity_seq += 1;
         let seq = snap.sov_runtime.next_mercenary_activity_seq;
         let mut uuid = (den_id as u64).to_be_bytes().to_vec();
@@ -303,7 +304,6 @@ pub(crate) fn refresh_activities(snap: &mut WorldStateSnapshot, pending: &Pendin
         id_field(3, u64::from(den.solar_system_id), &mut n);
         push_notice(pending, den.solar_system_id, "eve_public.sovereignty.mercenaryden.activity.api.AddedNotice", n);
         snap.sov_runtime.mercenary_activities.insert(hex(&uuid), a);
-        count += 1;
     }
     if let Some(d) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
         d.next_activity_generation_unix = now + ACTIVITY_GENERATION_SECS;
@@ -362,7 +362,7 @@ fn modify_level_handler(
     );
 }
 
-// parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj
+// DERIVED (synthetic): DATA GAP — Mercenary Den evolution rates and activity generation parameters are server-only tables not shipped in V24 client FSD.
 /// Registers mercenary den, admin and activity handlers.
 pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     {
