@@ -65,6 +65,7 @@ pub mod mining_sites;
 pub mod mobile_deployables;
 pub mod notify_emitters_batch3;
 pub mod notify_emitters_batch3_space;
+pub mod notify_emitters_batch5;
 pub mod operations_manager;
 pub mod operations_manager_helpers;
 pub mod petitioner_ops;

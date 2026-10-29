@@ -146,6 +146,7 @@ pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, no
     let unix_to_ft = |u: u64| -> i64 { (u as i64 + 11_644_473_600) * 10_000_000 };
     let st = ctx.crimewatch.read().ok().and_then(|cw| cw.states.get(&char_id).cloned()).unwrap_or_default();
     let npc_exp = with_combat_runtime(ctx, |rt| rt.npc_timers.get(&char_id).copied().filter(|&exp| now_unix < exp));
+    let dis_exp = with_combat_runtime(ctx, |rt| rt.disapproval_flags.get(&char_id).copied().filter(|&exp| now_unix < exp));
     let (weap_code, weap_val, weap_sig) = if st.is_weapon_timer_active(now_unix) {
         (101i64, PyRep::Integer(unix_to_ft(st.weapon_timer_until_unix)), st.weapon_timer_until_unix as i64)
     } else { (100i64, PyRep::None, 100i64) };
@@ -160,23 +161,29 @@ pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, no
     } else if st.is_suspect(now_unix) {
         (302i64, PyRep::Integer(unix_to_ft(st.suspect_flag_until_unix)), -(st.suspect_flag_until_unix as i64))
     } else { (300i64, PyRep::None, 300i64) };
+    let (dis_code, dis_val, dis_sig) = if let Some(exp) = dis_exp {
+        (501i64, PyRep::Integer(unix_to_ft(exp)), exp as i64)
+    } else { (500i64, PyRep::None, 500i64) };
 
-    let is_all_idle = weap_code == 100 && pvp_code == 200 && npc_code == 400 && crim_code == 300;
+    let is_all_idle = weap_code == 100 && pvp_code == 200 && npc_code == 400 && crim_code == 300 && dis_code == 500;
     let mut updates: Vec<(&str, Vec<PyRep>)> = Vec::new();
     with_mut_combat_runtime(ctx, |rt| {
         let prev_opt = rt.crimewatch_timer_states.get(&char_id).copied();
         if prev_opt.is_none() && is_all_idle { return; }
-        let prev = prev_opt.unwrap_or((0, 0, 0, 0));
+        let prev = prev_opt.unwrap_or((0, 0, 0, 0, 0));
         if prev.0 != weap_sig { updates.push(("OnWeaponsTimerUpdate", vec![PyRep::Integer(weap_code), weap_val])); }
         if prev.1 != pvp_sig { updates.push(("OnPvpTimerUpdate", vec![PyRep::Integer(pvp_code), pvp_val])); }
         if prev.2 != npc_sig { updates.push(("OnNpcTimerUpdate", vec![PyRep::Integer(npc_code), npc_val])); }
         if prev.3 != crim_sig {
             updates.push(("OnCriminalTimerUpdate", vec![PyRep::Integer(crim_code), crim_val]));
         }
+        if prev.4 != dis_sig {
+            updates.push(("OnDisapprovalTimerUpdate", vec![PyRep::Integer(dis_code), dis_val]));
+        }
         if is_all_idle {
             rt.crimewatch_timer_states.remove(&char_id);
         } else {
-            rt.crimewatch_timer_states.insert(char_id, (weap_sig, pvp_sig, npc_sig, crim_sig));
+            rt.crimewatch_timer_states.insert(char_id, (weap_sig, pvp_sig, npc_sig, crim_sig, dis_sig));
         }
     });
     for (ev, a) in updates {

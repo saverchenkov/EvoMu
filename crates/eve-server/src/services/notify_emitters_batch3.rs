@@ -730,6 +730,29 @@ pub fn handle_batch3_gm_slash_cmd(
                 ("explanationLabel", PyRep::String(label.to_string())),
             ])))
         }
+        "/shutdown" if parts.get(1).is_some_and(|s| s.parse::<u64>().is_ok()) => {
+            let secs: u64 = parts[1].parse().unwrap_or(60);
+            let reason = parts.get(2).copied().unwrap_or("ServerRestart");
+            let now_ft = ctx.now_blueos_filetime_ticks();
+            let target_ft = now_ft + (secs as i64 * 10_000_000);
+            {
+                let mut st = ctx.cluster_state.write().unwrap_or_else(|e| e.into_inner());
+                st.shutdown_in_progress = true;
+            }
+            ctx.notify(
+                NotificationTarget::All,
+                "OnClusterShutdownInitiated",
+                "clientID",
+                vec![
+                    PyRep::String(reason.to_string()),
+                    PyRep::Integer(target_ft),
+                ],
+            );
+            Some(Ok(PyRep::keyval([
+                ("shutdownInitiated", PyRep::Bool(true)),
+                ("targetFt", PyRep::Integer(target_ft)),
+            ])))
+        }
         "/fastcheckout" => {
             let enabled = parts
                 .get(1)
