@@ -70,6 +70,39 @@ fn splitmix64(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
+pub(crate) fn ship_free_cargo_m3(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    ship_id: i64,
+) -> Result<f64, BridgeRpcError> {
+    let ship_item = snap.items.get(&ship_id).ok_or_else(|| BridgeRpcError {
+        code: "ShipNotFound".into(),
+        message: format!("Active ship {ship_id} not found in inventory"),
+    })?;
+    let cap = ship_item
+        .dynamic_attributes
+        .get(&38)
+        .copied()
+        .or_else(|| ctx.sde.types.get(&ship_item.type_id).map(|t| t.capacity))
+        .unwrap_or(0.0);
+    if cap <= 0.0 {
+        return Err(BridgeRpcError {
+            code: "NotEnoughCargoSpace".into(),
+            message: format!("Active ship {ship_id} has no cargo hold capacity"),
+        });
+    }
+    let used: f64 = snap
+        .items
+        .values()
+        .filter(|it| it.location_id == ship_id && it.flag == InventoryFlag::Cargo)
+        .map(|it| {
+            let unit_vol = ctx.sde.types.get(&it.type_id).map(|t| t.volume).unwrap_or(1.0);
+            (it.quantity.max(1) as f64) * unit_vol
+        })
+        .sum();
+    Ok((cap - used).max(0.0))
+}
+
 // =========================================================================
 // 1. Mercenary Den Anchoring, Component Extraction, Combat & Repair
 // =========================================================================
@@ -144,7 +177,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
             "charid",
             vec![
                 PyRep::String("SkyhookNotFound".into()),
-                PyRep::keyval([("itemID", PyRep::Integer(explicit_skyhook_id.unwrap_or(0)))]),
+                PyRep::Dict(vec![(PyRep::String("itemID".into()), PyRep::Integer(explicit_skyhook_id.unwrap_or(0)))]),
             ],
         );
         return Err(BridgeRpcError {
@@ -175,7 +208,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
             "charid",
             vec![
                 PyRep::String("MercenaryDenTooFarFromSkyhook".into()),
-                PyRep::keyval([("itemID", PyRep::Integer(skyhook_id))]),
+                PyRep::Dict(vec![(PyRep::String("itemID".into()), PyRep::Integer(skyhook_id))]),
             ],
         );
         return Err(BridgeRpcError {
@@ -194,7 +227,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
                 "charid",
                 vec![
                     PyRep::String("DenPlanetMismatch".into()),
-                    PyRep::keyval([("itemID", PyRep::Integer(skyhook_id))]),
+                    PyRep::Dict(vec![(PyRep::String("itemID".into()), PyRep::Integer(skyhook_id))]),
                 ],
             );
             return Err(BridgeRpcError {
@@ -223,7 +256,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
             "charid",
             vec![
                 PyRep::String("PlanetNotTemperate".into()),
-                PyRep::keyval([("itemID", PyRep::Integer(skyhook_id))]),
+                PyRep::Dict(vec![(PyRep::String("itemID".into()), PyRep::Integer(skyhook_id))]),
             ],
         );
         return Err(BridgeRpcError {
@@ -349,7 +382,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
                     "charid",
                     vec![
                         PyRep::String(err.code.clone()),
-                        PyRep::keyval([("itemID", PyRep::Integer(skyhook_id))]),
+                        PyRep::Dict(vec![(PyRep::String("itemID".into()), PyRep::Integer(skyhook_id))]),
                     ],
                 );
             }
@@ -378,7 +411,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
         "charid",
         vec![
             PyRep::String("MercenaryDenRegistered".into()),
-            PyRep::keyval([("itemID", PyRep::Integer(den_id))]),
+            PyRep::Dict(vec![(PyRep::String("itemID".into()), PyRep::Integer(den_id))]),
         ],
     );
     emit_sov_structures_updated(ctx, sys_id, vec![PyRep::Integer(den_id)]);
@@ -480,6 +513,15 @@ pub async fn handle_mercden_component_call(
                 message: "Mercenary Den is reinforced and inaccessible until shields reach >= 50%".into(),
             });
         }
+        let free_m3 = ship_free_cargo_m3(ctx, snap, ship_id)?;
+        let unit_vol = ctx
+            .sde
+            .types
+            .get(&TYPE_INFOMORPH_DECRYPTION_KEY)
+            .map(|t| t.volume)
+            .unwrap_or(0.01)
+            .max(1e-6);
+        let max_owner_units = ((free_m3 + 1e-9) / unit_vol).floor() as u32;
         let den_mut = snap.sov_runtime.mercenary_dens.get_mut(&den_id).expect("checked");
         if simulate_den(den_mut, now) {
             let mut n = Vec::new();
@@ -499,7 +541,6 @@ pub async fn handle_mercden_component_call(
                 message: "Mercenary Den currently holds 0 Infomorph Decryption Keys".into(),
             });
         }
-        den_mut.infomorphs = 0;
         let skyhook_id = den_mut.skyhook_id;
         let tax_pct = u32::from(
             snap.sov_runtime
@@ -509,8 +550,29 @@ pub async fn handle_mercden_component_call(
                 .unwrap_or(0)
                 .min(100),
         );
-        let tax_qty = (total.saturating_mul(tax_pct)) / 100;
-        let owner_qty = total.saturating_sub(tax_qty);
+        let full_tax_qty = (total.saturating_mul(tax_pct)) / 100;
+        let full_owner_qty = total.saturating_sub(full_tax_qty);
+        if full_owner_qty > 0 && max_owner_units == 0 {
+            return Err(BridgeRpcError {
+                code: "NotEnoughCargoSpace".into(),
+                message: "Active ship does not have enough free cargo capacity to extract Infomorph Decryption Keys".into(),
+            });
+        }
+        let extracted_total = if max_owner_units >= full_owner_qty || tax_pct >= 100 {
+            total
+        } else {
+            ((u64::from(max_owner_units) * 100) / u64::from(100 - tax_pct)).min(u64::from(total)) as u32
+        };
+        if extracted_total == 0 {
+            return Err(BridgeRpcError {
+                code: "NotEnoughCargoSpace".into(),
+                message: "Active ship does not have enough free cargo capacity to extract Infomorph Decryption Keys".into(),
+            });
+        }
+        let den_mut = snap.sov_runtime.mercenary_dens.get_mut(&den_id).expect("checked");
+        den_mut.infomorphs = total.saturating_sub(extracted_total);
+        let tax_qty = (extracted_total.saturating_mul(tax_pct)) / 100;
+        let owner_qty = extracted_total.saturating_sub(tax_qty);
 
         if owner_qty > 0 {
             snap.next_entity_id += 1;
@@ -758,7 +820,7 @@ pub async fn apply_mercenary_den_weapon_damage(
                     "charid",
                     vec![
                         PyRep::String("MercenaryDenRemoved".into()),
-                        PyRep::keyval([("itemID", PyRep::Integer(den_id))]),
+                        PyRep::Dict(vec![(PyRep::String("itemID".into()), PyRep::Integer(den_id))]),
                     ],
                 );
             }

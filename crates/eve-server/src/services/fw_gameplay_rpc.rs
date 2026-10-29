@@ -390,48 +390,135 @@ fn corp_standing_with_faction(snap: &eve_db::WorldStateSnapshot, cid: i64, fac: 
     if cnt > 0 { sum / (cnt as f64) } else { 0.0 }
 }
 
-fn leaderboards_summary(
-    ctx: &ServerContext,
-) -> (
-    Vec<(i64, i64, i64, i64)>,
-    Vec<(i64, i64, i64)>,
-    Vec<(i64, i64, i64)>,
-) {
-    ctx.db.with_snapshot(|snap| {
-        let mut char_rows: Vec<(i64, i64, i64, i64)> = snap
-            .fw_character_stats
-            .values()
-            .map(|r| {
-                (
-                    r.character_id,
-                    r.kills.yesterday,
-                    r.kills.last_week,
-                    r.kills.total + r.victory_points.total,
-                )
+const FW_STAT_KEYS: [&str; 6] = ["killsY", "killsLW", "killsTotal", "vpY", "vpLW", "vpTotal"];
+
+#[derive(Debug, Clone, Copy, Default)]
+struct SixBucketStats {
+    vals: [i64; 6],
+}
+
+impl SixBucketStats {
+    fn add_event(&mut self, age_secs: u64, kills: i64, vps: i64) {
+        if age_secs < 86_400 {
+            self.vals[0] += kills;
+            self.vals[3] += vps;
+        }
+        if age_secs < 7 * 86_400 {
+            self.vals[1] += kills;
+            self.vals[4] += vps;
+        }
+        self.vals[2] += kills;
+        self.vals[5] += vps;
+    }
+
+    fn to_py_dict(self) -> PyRep {
+        PyRep::Dict(
+            FW_STAT_KEYS
+                .iter()
+                .enumerate()
+                .map(|(i, &k)| (PyRep::String(k.into()), PyRep::Integer(self.vals[i])))
+                .collect(),
+        )
+    }
+}
+
+fn build_entity_subtables(id_key: &str, map: &HashMap<i64, SixBucketStats>) -> (PyRep, SixBucketStats, SixBucketStats) {
+    let mut top = SixBucketStats::default();
+    let mut all = SixBucketStats::default();
+    for s in map.values() {
+        for i in 0..6 {
+            if s.vals[i] > top.vals[i] {
+                top.vals[i] = s.vals[i];
+            }
+            all.vals[i] += s.vals[i];
+        }
+    }
+    let mut sub = Vec::with_capacity(6);
+    for (idx, &k) in FW_STAT_KEYS.iter().enumerate() {
+        let mut rows: Vec<(i64, i64)> = map
+            .iter()
+            .filter_map(|(&id, s)| (s.vals[idx] > 0).then_some((id, s.vals[idx])))
+            .collect();
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        rows.truncate(100);
+        let list = rows
+            .into_iter()
+            .map(|(id, amt)| {
+                PyRep::keyval([
+                    (id_key, PyRep::Integer(id)),
+                    ("amount", PyRep::Integer(amt)),
+                ])
             })
             .collect();
-        char_rows.sort_by(|a, b| b.3.cmp(&a.3));
-        let mut corp_map: HashMap<i64, (i64, i64)> = HashMap::new();
-        let mut fac_map: HashMap<i64, (i64, i64)> = HashMap::new();
-        for r in snap.fw_character_stats.values() {
-            if let Some(ch) = snap.characters.get(&r.character_id) {
-                let ce = corp_map.entry(ch.corporation_id).or_insert((0, 0));
-                ce.0 += r.kills.total;
-                ce.1 += r.victory_points.total;
+        sub.push((PyRep::String(k.into()), PyRep::List(list)));
+    }
+    (PyRep::Dict(sub), top, all)
+}
+
+fn compute_fw_leaderboards(
+    ctx: &ServerContext,
+) -> (
+    HashMap<i64, SixBucketStats>,
+    HashMap<i64, SixBucketStats>,
+    HashMap<i64, SixBucketStats>,
+    HashMap<i64, SixBucketStats>,
+) {
+    let now = ctx.now_unix();
+    ctx.db.with_snapshot(|snap| {
+        let mut chars: HashMap<i64, SixBucketStats> = HashMap::new();
+        let mut corps: HashMap<i64, SixBucketStats> = HashMap::new();
+        let mut facs: HashMap<i64, SixBucketStats> = HashMap::new();
+        let mut allys: HashMap<i64, SixBucketStats> = HashMap::new();
+        if !snap.fw_runtime.stat_events.is_empty() {
+            for ev in &snap.fw_runtime.stat_events {
+                let age = now.saturating_sub(ev.timestamp_unix);
+                chars.entry(ev.character_id).or_default().add_event(age, ev.kills, ev.victory_points);
+                if ev.corporation_id > 0 {
+                    corps.entry(ev.corporation_id).or_default().add_event(age, ev.kills, ev.victory_points);
+                }
+                if ev.faction_id > 0 {
+                    facs.entry(ev.faction_id).or_default().add_event(age, ev.kills, ev.victory_points);
+                }
+                if let Some(aid) = ev.alliance_id.filter(|&a| a > 0) {
+                    allys.entry(aid).or_default().add_event(age, ev.kills, ev.victory_points);
+                }
             }
-            if let Some(fid) = r.faction_id {
-                let fe = fac_map.entry(fid).or_insert((0, 0));
-                fe.0 += r.kills.total;
-                fe.1 += r.victory_points.total;
+        } else {
+            for r in snap.fw_character_stats.values() {
+                let b = SixBucketStats {
+                    vals: [
+                        r.kills.yesterday,
+                        r.kills.last_week,
+                        r.kills.total,
+                        r.victory_points.yesterday,
+                        r.victory_points.last_week,
+                        r.victory_points.total,
+                    ],
+                };
+                chars.insert(r.character_id, b);
+                if let Some(ch) = snap.characters.get(&r.character_id) {
+                    if ch.corporation_id > 0 {
+                        let ce = corps.entry(ch.corporation_id).or_default();
+                        for i in 0..6 {
+                            ce.vals[i] += b.vals[i];
+                        }
+                    }
+                    if let Some(aid) = ch.alliance_id.filter(|&a| a > 0) {
+                        let ae = allys.entry(aid).or_default();
+                        for i in 0..6 {
+                            ae.vals[i] += b.vals[i];
+                        }
+                    }
+                }
+                if let Some(fid) = r.faction_id.filter(|&f| f > 0) {
+                    let fe = facs.entry(fid).or_default();
+                    for i in 0..6 {
+                        fe.vals[i] += b.vals[i];
+                    }
+                }
             }
         }
-        let mut corp_rows: Vec<(i64, i64, i64)> =
-            corp_map.into_iter().map(|(c, (k, v))| (c, k, v)).collect();
-        corp_rows.sort_by(|a, b| b.2.cmp(&a.2));
-        let mut fac_rows: Vec<(i64, i64, i64)> =
-            fac_map.into_iter().map(|(f, (k, v))| (f, k, v)).collect();
-        fac_rows.sort_by(|a, b| b.2.cmp(&a.2));
-        (char_rows, corp_rows, fac_rows)
+        (chars, corps, facs, allys)
     })
 }
 
@@ -445,43 +532,46 @@ pub async fn handle(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("facWarMgr", "GetStats_TopAndAllKillsAndVPs") => {
-            let (chars, corps, facs) = leaderboards_summary(ctx);
-            let char_list: Vec<_> = chars
-                .into_iter()
-                .map(|(c, y, w, tot)| {
-                    PyRep::keyval([
-                        ("characterID", PyRep::Integer(c)),
-                        ("yesterday", PyRep::Integer(y)),
-                        ("lastWeek", PyRep::Integer(w)),
-                        ("total", PyRep::Integer(tot)),
-                    ])
-                })
-                .collect();
-            let corp_list: Vec<_> = corps
-                .into_iter()
-                .map(|(c, k, vp)| {
-                    PyRep::keyval([
-                        ("corporationID", PyRep::Integer(c)),
-                        ("kills", PyRep::Integer(k)),
-                        ("victoryPoints", PyRep::Integer(vp)),
-                    ])
-                })
-                .collect();
-            let fac_list: Vec<_> = facs
-                .into_iter()
-                .map(|(f, k, vp)| {
-                    PyRep::keyval([
-                        ("factionID", PyRep::Integer(f)),
-                        ("kills", PyRep::Integer(k)),
-                        ("victoryPoints", PyRep::Integer(vp)),
-                    ])
-                })
-                .collect();
-            Some(Ok(PyRep::keyval([
-                ("characters", PyRep::List(char_list)),
-                ("corporations", PyRep::List(corp_list)),
-                ("factions", PyRep::List(fac_list)),
+            let (chars, corps, facs, allys) = compute_fw_leaderboards(ctx);
+            let (char_sub, char_top, char_all) = build_entity_subtables("characterID", &chars);
+            let (corp_sub, corp_top, corp_all) = build_entity_subtables("corporationID", &corps);
+            let (fac_sub, fac_top, fac_all) = build_entity_subtables("factionID", &facs);
+            let (ally_sub, ally_top, ally_all) = build_entity_subtables("allianceID", &allys);
+            let top_groups = PyRep::Dict(vec![
+                (PyRep::Integer(1), char_top.to_py_dict()),
+                (PyRep::Integer(2), corp_top.to_py_dict()),
+                (PyRep::Integer(19), fac_top.to_py_dict()),
+                (PyRep::Integer(32), ally_top.to_py_dict()),
+            ]);
+            let all_groups = PyRep::Dict(vec![
+                (PyRep::Integer(1), char_all.to_py_dict()),
+                (PyRep::Integer(2), corp_all.to_py_dict()),
+                (PyRep::Integer(19), fac_all.to_py_dict()),
+                (PyRep::Integer(32), ally_all.to_py_dict()),
+            ]);
+            Some(Ok(PyRep::Dict(vec![
+                (PyRep::Integer(0), top_groups),
+                (PyRep::Integer(1), all_groups),
+                (PyRep::String("characters".into()), char_sub),
+                (PyRep::String("corporations".into()), corp_sub),
+                (PyRep::String("factions".into()), fac_sub),
+                (PyRep::String("alliances".into()), ally_sub),
             ])))
+        }
+        ("facWarMgr", "GetStats_Character") => {
+            let cid = args.first().and_then(|a| a.as_i64()).or(session.character_id).unwrap_or(0);
+            let (chars, _, _, _) = compute_fw_leaderboards(ctx);
+            Some(Ok(chars.get(&cid).copied().unwrap_or_default().to_py_dict()))
+        }
+        ("facWarMgr", "GetStats_Corp") => {
+            let cid = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(0);
+            let (_, corps, _, _) = compute_fw_leaderboards(ctx);
+            Some(Ok(corps.get(&cid).copied().unwrap_or_default().to_py_dict()))
+        }
+        ("facWarMgr", "GetStats_Alliance") => {
+            let aid = args.first().and_then(|a| a.as_i64()).or(session.alliance_id).unwrap_or(0);
+            let (_, _, _, allys) = compute_fw_leaderboards(ctx);
+            Some(Ok(allys.get(&aid).copied().unwrap_or_default().to_py_dict()))
         }
         ("facWarMgr", "GetCorporationWarFactionID") => {
             let cid = args

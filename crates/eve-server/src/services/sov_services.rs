@@ -68,6 +68,104 @@ pub fn emit_sovereignty_changed(ctx: &ServerContext, sys_id: u32, alliance_id: O
     });
 }
 
+/// Resolves a Sovereignty Hub structure ID from either a direct `hub_id`, a `solarSystemID` argument,
+/// or the caller's current `session.solar_system_id`.
+pub(crate) fn resolve_sov_hub_id(
+    snap: &eve_db::WorldStateSnapshot,
+    arg_id_or_sys: Option<i64>,
+    session_sys: Option<u32>,
+) -> Option<i64> {
+    if let Some(raw) = arg_id_or_sys {
+        if snap.structures.contains_key(&raw) {
+            return Some(raw);
+        }
+        if let Ok(sys_id) = u32::try_from(raw) {
+            if let Some((&hid, _)) = snap
+                .structures
+                .iter()
+                .find(|(_, s)| s.solar_system_id == sys_id && s.type_id == TYPE_SOVEREIGNTY_HUB && s.state != "Destroyed")
+            {
+                return Some(hid);
+            }
+        }
+        return Some(raw);
+    }
+    let sys_id = session_sys?;
+    snap.structures
+        .iter()
+        .find(|(_, s)| s.solar_system_id == sys_id && s.type_id == TYPE_SOVEREIGNTY_HUB && s.state != "Destroyed")
+        .map(|(&hid, _)| hid)
+}
+
+/// Evaluates whether `(char_id, corp_id, alliance_id)` is permitted to access fuel on `hub_id`.
+///
+/// When `fuel_access_groups[&hub_id]` references an existing [`AccessGroupRecord`] in
+/// `StructureExtendedState.owner_groups`, membership is strictly evaluated with character > corp >
+/// alliance precedence (`ACL_ROLE_BLOCKED = -1` denies). When no fuel ACL is configured (`0`),
+/// owning-corp (or, for `allow_alliance_mgr_when_unset`, owning-alliance) `ROLE_DIRECTOR | ROLE_STATION_MANAGER`
+/// / CEO is required.
+pub(crate) fn can_access_sov_hub_fuel(
+    snap: &eve_db::WorldStateSnapshot,
+    hub_id: i64,
+    char_id: i64,
+    corp_id: i64,
+    alliance_id: Option<i64>,
+    extra_roles: u64,
+    allow_alliance_mgr_when_unset: bool,
+) -> bool {
+    let Some(st) = snap
+        .structures
+        .get(&hub_id)
+        .filter(|s| s.type_id == TYPE_SOVEREIGNTY_HUB && s.state != "Destroyed")
+    else {
+        return false;
+    };
+    let group_id = snap.sov_runtime.fuel_access_groups.get(&hub_id).copied().unwrap_or(0);
+    if group_id > 0 {
+        let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        if let Some(grp) = ext.owner_groups.get(&group_id) {
+            if let Some(&r) = grp.members.get(&char_id) {
+                return r >= 0;
+            }
+            if grp.creator_id == char_id {
+                return true;
+            }
+            if let Some(&r) = grp.members.get(&corp_id) {
+                return r >= 0;
+            }
+            if let Some(aid) = alliance_id.filter(|&a| a > 0) {
+                if let Some(&r) = grp.members.get(&aid) {
+                    return r >= 0;
+                }
+            }
+            return false;
+        }
+    }
+    let role_mask = snap
+        .corporations
+        .get(&corp_id)
+        .and_then(|c| c.member_roles.get(&char_id).copied())
+        .unwrap_or(0)
+        | extra_roles;
+    let is_ceo = snap.corporations.get(&corp_id).is_some_and(|c| c.ceo_id == char_id);
+    let has_mgr = is_ceo
+        || eve_db::corp_roles::has_role(
+            role_mask,
+            eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER,
+        );
+    if !has_mgr {
+        return false;
+    }
+    if st.owner_corp_id == corp_id {
+        return true;
+    }
+    if group_id == 0 && allow_alliance_mgr_when_unset {
+        let hub_ally = snap.corporations.get(&st.owner_corp_id).and_then(|c| c.alliance_id);
+        return alliance_id.is_some() && alliance_id == hub_ally;
+    }
+    false
+}
+
 /// Broadcasts `OnSolarSystemSovStructuresUpdated` notification.
 pub fn emit_sov_structures_updated(ctx: &ServerContext, sys_id: u32, structs: Vec<PyRep>) {
     ctx.notify(
@@ -303,10 +401,11 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(hub_id) = args.first().and_then(|a| a.as_i64()) else {
+            let arg0 = args.first().and_then(|a| a.as_i64());
+            let Some(hub_id) = ctx.db.with_snapshot(|snap| resolve_sov_hub_id(snap, arg0, session.solar_system_id)) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArguments".into(),
-                    message: "SetSovHubFuelAccessGroup requires hubID".into(),
+                    message: "SetSovHubFuelAccessGroup requires hubID or solarSystemID".into(),
                 }));
             };
             let access_group_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
@@ -345,10 +444,11 @@ pub async fn handle(
         }
 
         ("sovMgr", "GetSovHubFuelAccessGroup") => {
-            let Some(hub_id) = args.first().and_then(|a| a.as_i64()) else {
+            let arg0 = args.first().and_then(|a| a.as_i64());
+            let Some(hub_id) = ctx.db.with_snapshot(|snap| resolve_sov_hub_id(snap, arg0, session.solar_system_id)) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArguments".into(),
-                    message: "GetSovHubFuelAccessGroup requires hubID".into(),
+                    message: "GetSovHubFuelAccessGroup requires hubID or solarSystemID".into(),
                 }));
             };
             let group_id = read_sov_runtime(ctx, |rt| rt.fuel_access_groups.get(&hub_id).copied().unwrap_or(0));
@@ -360,26 +460,26 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(hub_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArguments".into(),
-                    message: "IsOnLocalSovHubFuelAccessGroup requires hubID".into(),
-                }));
-            };
+            let arg0 = args.first().and_then(|a| a.as_i64());
             let allowed = ctx.db.with_snapshot(|snap| {
+                let Some(hub_id) = resolve_sov_hub_id(snap, arg0, session.solar_system_id) else {
+                    return false;
+                };
                 let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                let char_alliance = snap.characters.get(&char_id).and_then(|c| c.alliance_id);
-                if let Some(st) = snap.structures.get(&hub_id) {
-                    if st.owner_corp_id == char_corp {
-                        return true;
-                    }
-                    if let Some(hub_alliance) = snap.corporations.get(&st.owner_corp_id).and_then(|c| c.alliance_id) {
-                        if Some(hub_alliance) == char_alliance {
-                            return true;
-                        }
-                    }
-                }
-                false
+                let char_alliance = snap
+                    .characters
+                    .get(&char_id)
+                    .and_then(|c| c.alliance_id)
+                    .or_else(|| snap.corporations.get(&char_corp).and_then(|c| c.alliance_id));
+                can_access_sov_hub_fuel(
+                    snap,
+                    hub_id,
+                    char_id,
+                    char_corp,
+                    char_alliance,
+                    session.corp_role,
+                    false,
+                )
             });
             Some(Ok(PyRep::Bool(allowed)))
         }

@@ -439,6 +439,84 @@ pub fn calculate_fw_lp_reward(base_lp: i64, status: i64) -> i64 {
     ((base_lp as f64) * mult).round() as i64
 }
 
+/// Records a timestamped FW kill/VP event and updates rolling `fw_character_stats` windows.
+pub fn record_fw_stat_event_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    now_unix: u64,
+    char_id: i64,
+    faction_opt: Option<i64>,
+    kills: i64,
+    victory_points: i64,
+) {
+    let (corp_id, alliance_id, char_fac) = snap
+        .characters
+        .get(&char_id)
+        .map(|c| {
+            let ally = c
+                .alliance_id
+                .or_else(|| snap.corporations.get(&c.corporation_id).and_then(|co| co.alliance_id));
+            (c.corporation_id, ally, c.war_faction_id)
+        })
+        .unwrap_or((0, None, None));
+    let fid_opt = faction_opt.or(char_fac);
+    if let Some(fid) = fid_opt {
+        if kills > 0 || victory_points > 0 {
+            snap.fw_runtime.stat_events.push(eve_db::PersistedFwStatEvent {
+                timestamp_unix: now_unix,
+                character_id: char_id,
+                corporation_id: corp_id,
+                alliance_id,
+                faction_id: fid,
+                kills,
+                victory_points,
+            });
+        }
+    }
+    let rec = snap.fw_character_stats.entry(char_id).or_insert_with(|| {
+        eve_db::snapshot_ext::FwCharacterStatsRecord {
+            character_id: char_id,
+            faction_id: fid_opt,
+            enlisted_on_unix: fid_opt.map(|_| now_unix),
+            current_rank: 1,
+            highest_rank: 1,
+            kills: Default::default(),
+            victory_points: Default::default(),
+        }
+    });
+    if fid_opt.is_some() {
+        rec.faction_id = fid_opt;
+    }
+    if snap.fw_runtime.stat_events.iter().any(|e| e.character_id == char_id) {
+        let (mut ky, mut klw, mut kt, mut vy, mut vlw, mut vt) = (0, 0, 0, 0, 0, 0);
+        for ev in snap.fw_runtime.stat_events.iter().filter(|e| e.character_id == char_id) {
+            let age = now_unix.saturating_sub(ev.timestamp_unix);
+            kt += ev.kills;
+            vt += ev.victory_points;
+            if age < 7 * 86_400 {
+                klw += ev.kills;
+                vlw += ev.victory_points;
+            }
+            if age < 86_400 {
+                ky += ev.kills;
+                vy += ev.victory_points;
+            }
+        }
+        rec.kills.yesterday = ky;
+        rec.kills.last_week = klw;
+        rec.kills.total = kt;
+        rec.victory_points.yesterday = vy;
+        rec.victory_points.last_week = vlw;
+        rec.victory_points.total = vt;
+    } else {
+        rec.kills.yesterday += kills;
+        rec.kills.last_week += kills;
+        rec.kills.total += kills;
+        rec.victory_points.yesterday += victory_points;
+        rec.victory_points.last_week += victory_points;
+        rec.victory_points.total += victory_points;
+    }
+}
+
 /// Awards FW LP for an enemy kill in a warzone solar system, scaled by system status (`feat:fw.fw-lp`).
 pub fn award_fw_kill_lp(
     ctx: &ServerContext,
@@ -468,23 +546,7 @@ pub fn award_fw_kill_lp(
                 *ch.loyalty_points.entry(militia_corp).or_insert(0) += final_lp;
             }
         }
-        let rec = snap.fw_character_stats.entry(killer_char_id).or_insert_with(|| {
-            eve_db::snapshot_ext::FwCharacterStatsRecord {
-                character_id: killer_char_id,
-                faction_id: fid_opt,
-                enlisted_on_unix: fid_opt.map(|_| now_u),
-                current_rank: 1,
-                highest_rank: 1,
-                kills: Default::default(),
-                victory_points: Default::default(),
-            }
-        });
-        rec.kills.yesterday += 1;
-        rec.kills.last_week += 1;
-        rec.kills.total += 1;
-        rec.victory_points.yesterday += 20;
-        rec.victory_points.last_week += 20;
-        rec.victory_points.total += 20;
+        record_fw_stat_event_in_snap(snap, now_u, killer_char_id, fid_opt, 1, 20);
     });
 
     add_victory_points(ctx, sys_id, 20);

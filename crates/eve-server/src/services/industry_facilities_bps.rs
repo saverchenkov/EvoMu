@@ -445,7 +445,16 @@ pub fn compute_industry_job_costs_for_char(
         .copied()
         .unwrap_or(0.10);
     let raw_facility_tax_isk = ((base_job_cost_isk * facility_tax_rate) * 100.0).round() / 100.0;
-    let fw_tier = snap.fw_runtime.ihub_tiers.get(&sys_id).copied().unwrap_or(0);
+    let is_enemy_militia = char_id
+        .and_then(|cid| snap.characters.get(&cid))
+        .and_then(|c| c.war_faction_id)
+        .zip(snap.fw_system_occupations.get(&sys_id).map(|o| o.occupier_faction_id))
+        .is_some_and(|(cf, of)| matches!((cf, of), (500_001, 500_004) | (500_004, 500_001) | (500_002, 500_003) | (500_003, 500_002)));
+    let fw_tier = if is_enemy_militia {
+        0
+    } else {
+        snap.fw_runtime.ihub_tiers.get(&sys_id).copied().unwrap_or(0)
+    };
     let facility_tax_isk = if fw_tier > 0 {
         ((crate::services::industry_pi::compute_facility_tax_bonus_for_tier(raw_facility_tax_isk, fw_tier)) * 100.0).round() / 100.0
     } else {

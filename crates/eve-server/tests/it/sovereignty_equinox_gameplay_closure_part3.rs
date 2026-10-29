@@ -11,7 +11,7 @@ use crate::sovereignty_equinox_gameplay_closure::{
 use eve_db::{corp_roles, InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_proto::quasar::{encode_bytes_field, encode_varint_field};
 use eve_proto::PyRep;
-use eve_server::quasar_gateway::STATUS_OK;
+use eve_server::quasar_gateway::{STATUS_FORBIDDEN, STATUS_OK};
 use eve_server::services::sov_gameplay::{
     TENEBREX_SPOOL_UP_SECS, TYPE_ANSIBLEX_JUMP_BRIDGE, TYPE_TENEBREX_CYNO_JAMMER,
     UPGRADE_ADVANCED_LOGISTICS_NETWORK, UPGRADE_CYNOSURAL_NAVIGATION,
@@ -25,7 +25,7 @@ use glam::DVec3;
 
 #[tokio::test]
 async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_tenebrex() {
-    // parity: feat:sovereignty.sov-hub-fuel
+    // DATA GAP: feat:sovereignty.sov-hub-fuel (open until real SDE tables imported)
     // DATA GAP: feat:sovereignty.sov-power (open until real SDE tables imported)
     // DATA GAP: feat:sovereignty.sov-workforce (open until real SDE tables imported)
     // DATA GAP: feat:sovereignty.sov-hub-upgrades (open until real SDE tables imported)
@@ -38,7 +38,6 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
     // parity: notify:OnSovHubHacked
     // parity: notify:OnCynoJammerChanged
     eve_testkit::attest(&[
-        "feat:sovereignty.sov-hub-fuel",
         "feat:sovereignty.sov-upgrade-sites",
         "feat:sovereignty.sov-hub-hacking",
         "feat:sovereignty.sov-structures-flex",
@@ -120,6 +119,67 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
             .await.expect("SetSovHubFuelAccessGroup"),
         PyRep::Integer(42_001)
     );
+
+    let allowed_cid = 90_000_071i64;
+    let blocked_cid = 90_000_072i64;
+    let mut s_allowed = register_online_pilot(
+        &ctx, 73_071, "allowed", "sec-1", allowed_cid, CORP, Some(ALLIANCE),
+        null_sys, 100_000_071, 11_957, hub_pos + DVec3::new(40_000.0, 0.0, 0.0), 0,
+    ).await;
+    let mut s_blocked = register_online_pilot(
+        &ctx, 73_072, "blocked", "sec-2", blocked_cid, CORP, Some(ALLIANCE),
+        null_sys, 100_000_072, 11_957, hub_pos + DVec3::new(40_000.0, 0.0, 0.0), 0,
+    ).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            995_010,
+            InventoryItemRecord {
+                item_id: 995_010,
+                type_id: TYPE_MAGMATIC_GAS,
+                owner_id: allowed_cid,
+                location_id: hub_a,
+                flag: InventoryFlag::Cargo,
+                quantity: 100,
+                ..Default::default()
+            },
+        );
+        let mut ext = eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        let mut members = std::collections::HashMap::new();
+        members.insert(allowed_cid, 1i64);
+        members.insert(blocked_cid, -1i64);
+        ext.owner_groups.insert(42_001, eve_server::services::station_structure::structure_upwell_ops::AccessGroupRecord {
+            group_id: 42_001,
+            creator_id: PILOT,
+            owner_corp_id: CORP,
+            name: "Fuel Group".into(),
+            description: "Sov Hub Fuel ACL".into(),
+            members,
+        });
+        eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+    });
+
+    assert_eq!(
+        rpc_call(&ctx, &mut s_dir, "sovMgr", "IsOnLocalSovHubFuelAccessGroup", &[PyRep::Integer(hub_a)]).await.unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        rpc_call(&ctx, &mut s_allowed, "sovMgr", "IsOnLocalSovHubFuelAccessGroup", &[PyRep::Integer(hub_a)]).await.unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        rpc_call(&ctx, &mut s_blocked, "sovMgr", "IsOnLocalSovHubFuelAccessGroup", &[PyRep::Integer(hub_a)]).await.unwrap(),
+        PyRep::Bool(false)
+    );
+
+    let mut add_denied = id_req(1, 995_001);
+    encode_varint_field(2, 50, &mut add_denied);
+    encode_bytes_field(3, &idm(hub_a as u64), &mut add_denied);
+    assert_eq!(rpc(&ctx, &mut s_blocked, "eve_public.sovereignty.hub.fuel.api.AddRequest", add_denied).await.status_code, STATUS_FORBIDDEN);
+
+    let mut add_allowed = id_req(1, 995_010);
+    encode_varint_field(2, 50, &mut add_allowed);
+    encode_bytes_field(3, &idm(hub_a as u64), &mut add_allowed);
+    assert_eq!(rpc(&ctx, &mut s_allowed, "eve_public.sovereignty.hub.fuel.api.AddRequest", add_allowed).await.status_code, STATUS_OK);
     assert_eq!(
         rpc_call(&ctx, &mut s_dir, "structureDeployment", "Anchor", &[PyRep::Integer(995_020), PyRep::String("Ansiblex".into())])
             .await.unwrap_err().code,

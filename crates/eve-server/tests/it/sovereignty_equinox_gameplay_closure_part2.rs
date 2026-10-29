@@ -5,13 +5,13 @@
 use crate::quasar_sov_equinox_hub::{field, fields, id_req, rpc, structure, subscribe};
 use crate::sovereignty_equinox_gameplay_closure::{
     drain_notif_events, drain_quasar, find_nullsec_planets, fit_siege_artillery,
-    lock_target_via_rpc, make_ball, register_online_pilot, rpc_call, step_weapon_ticks, ALLIANCE,
-    CORP, PILOT, PILOT_SHIP,
+    lock_target_via_rpc, make_ball, register_online_pilot, rpc_call, set_pilot_location,
+    step_weapon_ticks, ALLIANCE, CORP, PILOT, PILOT_SHIP,
 };
 use eve_db::{corp_roles, InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_proto::quasar::encode_bytes_field;
 use eve_proto::PyRep;
-use eve_server::quasar_gateway::{STATUS_CONFLICT, STATUS_OK};
+use eve_server::quasar_gateway::{STATUS_CONFLICT, STATUS_FORBIDDEN, STATUS_OK};
 use eve_server::router::ServerContext;
 use eve_server::services::quasar_sov_hub::compute_hub_resources;
 use eve_server::services::quasar_sov_mercden::TYPE_MERCENARY_DEN_MANAGEMENT;
@@ -147,10 +147,21 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
     assert_eq!(rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.activity.api.GetAllRequest", Vec::new()).await.status_code, STATUS_OK);
     let acts = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenRequest", id_req(1, den_id as u64))
         .await.payload.unwrap().value;
-    let first_act = fields(&acts, 1).last().unwrap().clone();
+    let act_list = fields(&acts, 1);
+    let first_act = act_list.last().unwrap().clone();
     let mut start_req = Vec::new();
     encode_bytes_field(1, &field(&first_act, 1).unwrap(), &mut start_req);
+
+    // Negative check: caller docked or in another solar system is rejected on StartRequest
+    set_pilot_location(&ctx, &mut s_owner, null_sys, Some(60_003_760));
+    assert_eq!(
+        rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.activity.api.StartRequest", start_req.clone()).await.status_code,
+        STATUS_FORBIDDEN
+    );
+    set_pilot_location(&ctx, &mut s_owner, null_sys, None);
+
     let _ = drain_quasar(&mut rx);
+    let pre_mto_bal = ctx.db.with_snapshot(|s| s.characters[&PILOT].balance.0);
     assert_eq!(rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.activity.api.StartRequest", start_req).await.status_code, STATUS_OK);
     assert!(drain_quasar(&mut rx).iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.StartedNotice"));
 
@@ -197,10 +208,65 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
     let restored_wf = ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available);
     assert_eq!(restored_wf, base_wf);
 
+    // MTO completion routes real IskCents with WalletJournalEntry and OnAccountChange notification
+    let post_mto_bal = ctx.db.with_snapshot(|s| s.characters[&PILOT].balance.0);
+    assert!(post_mto_bal > pre_mto_bal, "MTO completion awards real journaled ISK");
+    let has_mto_journal = ctx.db.with_snapshot(|s| {
+        s.wallet_journal.iter().any(|e| e.character_id == PILOT && e.entry_type == "MercenaryTacticalOperationReward")
+    });
+    assert!(has_mto_journal, "MTO completion appends MercenaryTacticalOperationReward wallet journal entry");
+
+    // Start an MTO that times out: uncompleted expiry despawns site ball and awards 0 ISK
+    let acts_second = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenRequest", id_req(1, den_id as u64))
+        .await.payload.unwrap().value;
+    let act_list_second = fields(&acts_second, 1);
+    if let Some(second_act) = act_list_second.first() {
+        let mut second_start = Vec::new();
+        encode_bytes_field(1, &field(second_act, 1).unwrap(), &mut second_start);
+        assert_eq!(rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.activity.api.StartRequest", second_start).await.status_code, STATUS_OK);
+        eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+        let balls_before = ctx.db.with_snapshot(|s| s.sov_runtime.mto_site_balls.len());
+        assert_eq!(balls_before, 1);
+        let bal_before_timeout = ctx.db.with_snapshot(|s| s.characters[&PILOT].balance.0);
+        ctx.advance_secs(1_801); // 30m timeout
+        eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+        let balls_after = ctx.db.with_snapshot(|s| s.sov_runtime.mto_site_balls.len());
+        assert_eq!(balls_after, 0, "expired MTO despawns its site ball");
+        assert_eq!(ctx.db.with_snapshot(|s| s.characters[&PILOT].balance.0), bal_before_timeout, "expired MTO awards no ISK");
+    }
+
     // 4. Live `beyonce.CallComponentFromClient` (`mercenaryDen.extract_infomorphs_to_ship`) deducts 20% sov tax.
     let den_pos = ctx.systems.get_or_spawn(null_sys).get_ball_snapshot(den_id).await.unwrap().unwrap().1.position;
     let cs_near = ctx.build_ship_combat_state(PILOT, PILOT_SHIP, 19_722);
     let _ = ctx.systems.get_or_spawn(null_sys).spawn_ball_with_combat(make_ball(PILOT_SHIP, 19_722, den_pos + DVec3::new(2_000.0, 0.0, 0.0)), cs_near).await;
+
+    // Negative cargo hold check: full cargo hold returns NotEnoughCargoSpace
+    let full_cargo_id = 992_999i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            full_cargo_id,
+            InventoryItemRecord {
+                item_id: full_cargo_id,
+                type_id: 34,
+                owner_id: PILOT,
+                location_id: PILOT_SHIP,
+                flag: InventoryFlag::Cargo,
+                quantity: 50_000_000,
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(
+        rpc_call(
+            &ctx, &mut s_owner, "beyonce", "CallComponentFromClient",
+            &[PyRep::Integer(den_id), PyRep::String("mercenaryDen".into()), PyRep::String("extract_infomorphs_to_ship".into())],
+        ).await.unwrap_err().code,
+        "NotEnoughCargoSpace"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&full_cargo_id);
+    });
+
     let ext_rep = rpc_call(
         &ctx, &mut s_owner, "beyonce", "CallComponentFromClient",
         &[PyRep::Integer(den_id), PyRep::String("mercenaryDen".into()), PyRep::String("extract_infomorphs_to_ship".into())],

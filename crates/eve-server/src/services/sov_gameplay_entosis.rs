@@ -230,8 +230,8 @@ pub fn register_entosis_capture_target(
     });
 }
 
-async fn spawn_command_nodes_for_hub(ctx: &ServerContext, hub_id: i64, hub_sys_id: u32) {
-    let const_systems: Vec<u32> = if let Some(cs) = ctx.sde.solar_systems.get(&hub_sys_id) {
+fn constellation_systems_for_hub(ctx: &ServerContext, hub_sys_id: u32) -> Vec<u32> {
+    if let Some(cs) = ctx.sde.solar_systems.get(&hub_sys_id) {
         let mut v: Vec<u32> = ctx
             .sde
             .solar_systems
@@ -243,8 +243,32 @@ async fn spawn_command_nodes_for_hub(ctx: &ServerContext, hub_id: i64, hub_sys_i
         if v.is_empty() { vec![hub_sys_id] } else { v }
     } else {
         vec![hub_sys_id]
-    };
+    }
+}
 
+async fn spawn_command_node_balls(ctx: &ServerContext, spawned: Vec<(i64, u32, [f64; 3])>) {
+    for (node_id, n_sys, pos) in spawned {
+        let _ = ctx
+            .systems
+            .get_or_spawn(n_sys)
+            .spawn_ball(Ball {
+                id: node_id,
+                type_id: TYPE_STRUCTURE_COMMAND_NODE,
+                position: DVec3::from_array(pos),
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 0.0,
+                mass: 5.0e7,
+                radius: 250.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Rigid,
+            })
+            .await;
+    }
+}
+
+async fn spawn_command_nodes_for_hub(ctx: &ServerContext, hub_id: i64, hub_sys_id: u32) {
+    let const_systems = constellation_systems_for_hub(ctx, hub_sys_id);
     let spawned: Vec<(i64, u32, [f64; 3])> = ctx.db.with_mut_snapshot(|snap| {
         let mut out = Vec::new();
         for idx in 0..5usize {
@@ -271,25 +295,7 @@ async fn spawn_command_nodes_for_hub(ctx: &ServerContext, hub_id: i64, hub_sys_i
         snap.sov_runtime.command_node_scores.insert(hub_id, Vec::new());
         out
     });
-
-    for (node_id, n_sys, pos) in spawned {
-        let _ = ctx
-            .systems
-            .get_or_spawn(n_sys)
-            .spawn_ball(Ball {
-                id: node_id,
-                type_id: TYPE_STRUCTURE_COMMAND_NODE,
-                position: DVec3::from_array(pos),
-                velocity: DVec3::ZERO,
-                max_velocity: 0.0,
-                inertia: 0.0,
-                mass: 5.0e7,
-                radius: 250.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Rigid,
-            })
-            .await;
-    }
+    spawn_command_node_balls(ctx, spawned).await;
 }
 
 fn remove_ship_entosis_link(ctx: &ServerContext, ship_id: i64) {
@@ -476,29 +482,86 @@ async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
             );
         } else {
             let _ = sys_handle.remove_ball(target_id).await;
-            let campaign_win = ctx.db.with_mut_snapshot(|snap| {
+            enum NodeOutcome {
+                Respawned(Vec<(i64, u32, [f64; 3])>),
+                Won {
+                    hub_id: i64,
+                    hub_sys: u32,
+                    defender_won: bool,
+                    winner_alliance: i64,
+                    winner_corp: i64,
+                    remaining_nodes: Vec<(i64, u32)>,
+                },
+            }
+            let outcome = ctx.db.with_mut_snapshot(|snap| -> Option<NodeOutcome> {
                 snap.sov_runtime.entosis_capture_progress.remove(&target_id);
                 let (hub_id, _, _) = snap.sov_runtime.command_nodes.remove(&target_id)?;
                 snap.items.remove(&target_id);
                 snap.item_positions.remove(&target_id);
-                let scores = snap.sov_runtime.command_node_scores.entry(hub_id).or_default();
-                let new_score = if let Some(pair) = scores.iter_mut().find(|(a, _)| *a == alliance_id) {
-                    pair.1 += 0.25;
-                    pair.1
-                } else {
-                    scores.push((alliance_id, 0.25));
-                    0.25
-                };
-                if new_score + 1e-6 < 1.0 {
-                    return None;
-                }
-                let hub_sys = snap.structures.get(&hub_id).map(|s| s.solar_system_id)?;
+                let (hub_sys, hub_owner_corp) = snap
+                    .structures
+                    .get(&hub_id)
+                    .map(|s| (s.solar_system_id, s.owner_corp_id))?;
                 let defender = snap.system_states.get(&hub_sys).and_then(|s| s.sov_alliance_id);
-                let attacker_corp = snap
+                let capturer_corp = snap
                     .characters
                     .get(&char_id)
                     .map(|c| c.corporation_id)
                     .unwrap_or(0);
+                let is_defender = (defender.is_some() && defender == Some(alliance_id))
+                    || (hub_owner_corp > 0 && capturer_corp == hub_owner_corp);
+                let side_key = if is_defender {
+                    defender.unwrap_or(-hub_owner_corp.max(1))
+                } else {
+                    alliance_id
+                };
+                let scores = snap.sov_runtime.command_node_scores.entry(hub_id).or_default();
+                let new_score = if let Some(pair) = scores.iter_mut().find(|(a, _)| *a == side_key) {
+                    pair.1 += 0.25;
+                    pair.1
+                } else {
+                    scores.push((side_key, 0.25));
+                    0.25
+                };
+                if new_score + 1e-6 < 1.0 {
+                    let const_systems = constellation_systems_for_hub(ctx, hub_sys);
+                    let active_cnt = snap
+                        .sov_runtime
+                        .command_nodes
+                        .values()
+                        .filter(|&&(hid, _, _)| hid == hub_id)
+                        .count();
+                    let need = 5usize.saturating_sub(active_cnt);
+                    let mut respawned = Vec::with_capacity(need);
+                    for off in 0..need {
+                        snap.next_entity_id += 1;
+                        let node_id = snap.next_entity_id;
+                        let seed = (node_id.unsigned_abs() as usize).wrapping_add(off);
+                        let n_sys = const_systems[seed % const_systems.len()];
+                        let pos = crate::services::space_destiny::space_docking_cloaking::pick_system_celestial_position(
+                            ctx,
+                            n_sys,
+                            ((seed % 20) as u32) + 15,
+                        )
+                        .0;
+                        snap.items.insert(
+                            node_id,
+                            InventoryItemRecord {
+                                item_id: node_id,
+                                type_id: TYPE_STRUCTURE_COMMAND_NODE,
+                                owner_id: 1,
+                                location_id: i64::from(n_sys),
+                                quantity: 1,
+                                singleton: true,
+                                ..Default::default()
+                            },
+                        );
+                        snap.item_positions.insert(node_id, pos);
+                        snap.sov_runtime.command_nodes.insert(node_id, (hub_id, n_sys, 0));
+                        respawned.push((node_id, n_sys, pos));
+                    }
+                    return Some(NodeOutcome::Respawned(respawned));
+                }
                 let remaining_nodes: Vec<(i64, u32)> = snap
                     .sov_runtime
                     .command_nodes
@@ -508,6 +571,7 @@ async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
                     .collect();
                 for (nid, _) in &remaining_nodes {
                     snap.sov_runtime.command_nodes.remove(nid);
+                    snap.sov_runtime.entosis_capture_progress.remove(nid);
                     snap.items.remove(nid);
                     snap.item_positions.remove(nid);
                 }
@@ -515,28 +579,48 @@ async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
                 if let Some(st) = snap.structures.get_mut(&hub_id) {
                     st.state = "ShieldVulnerable".into();
                     st.reinforced_until_unix = 0;
-                    if defender != Some(alliance_id) && attacker_corp > 0 {
-                        st.owner_corp_id = attacker_corp;
+                    if !is_defender && capturer_corp > 0 {
+                        st.owner_corp_id = capturer_corp;
                     }
                 }
-                if defender != Some(alliance_id) {
+                if !is_defender {
                     snap.sov_runtime.sov_claimed_since_unix.insert(hub_sys, now_unix);
                     if let Some(sys_st) = snap.system_states.get_mut(&hub_sys) {
                         sys_st.sov_alliance_id = None;
                         sys_st.strategic_index = 0;
                     }
                 }
-                Some((hub_id, hub_sys, defender, attacker_corp, remaining_nodes))
+                Some(NodeOutcome::Won {
+                    hub_id,
+                    hub_sys,
+                    defender_won: is_defender,
+                    winner_alliance: alliance_id,
+                    winner_corp: capturer_corp,
+                    remaining_nodes,
+                })
             });
-            if let Some((hub_id, hub_sys, defender, attacker_corp, rem_nodes)) = campaign_win {
-                for (nid, nsys) in rem_nodes {
-                    let _ = ctx.systems.get_or_spawn(nsys).remove_ball(nid).await;
+            match outcome {
+                Some(NodeOutcome::Respawned(respawned)) => {
+                    spawn_command_node_balls(ctx, respawned).await;
                 }
-                if defender != Some(alliance_id) && attacker_corp > 0 {
-                    let _ = claim_system_sovereignty_async(ctx, hub_sys, alliance_id, attacker_corp, hub_id).await;
-                } else {
-                    emit_sov_structures_updated(ctx, hub_sys, vec![PyRep::Integer(hub_id)]);
+                Some(NodeOutcome::Won {
+                    hub_id,
+                    hub_sys,
+                    defender_won,
+                    winner_alliance,
+                    winner_corp,
+                    remaining_nodes,
+                }) => {
+                    for (nid, nsys) in remaining_nodes {
+                        let _ = ctx.systems.get_or_spawn(nsys).remove_ball(nid).await;
+                    }
+                    if !defender_won && winner_corp > 0 {
+                        let _ = claim_system_sovereignty_async(ctx, hub_sys, winner_alliance, winner_corp, hub_id).await;
+                    } else {
+                        emit_sov_structures_updated(ctx, hub_sys, vec![PyRep::Integer(hub_id)]);
+                    }
                 }
+                None => {}
             }
         }
     }
@@ -644,11 +728,19 @@ pub fn on_space_entity_destroyed_ext(
     let now = ctx.now_unix();
     let pending: PendingNotices = Arc::new(RwLock::new(Vec::new()));
     let mut was_mto_npc = false;
+    let mut mto_account_change: Option<(i64, f64)> = None;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(act_key) = snap.sov_runtime.mto_site_balls.remove(&target_ball_id) {
             was_mto_npc = true;
             if let Some(a) = snap.sov_runtime.mercenary_activities.remove(&act_key) {
-                complete_mercenary_activity_in_snap(snap, &pending, &a, a.den_id, a.solar_system_id);
+                mto_account_change = complete_mercenary_activity_in_snap(
+                    snap,
+                    &pending,
+                    &a,
+                    a.den_id,
+                    a.solar_system_id,
+                    now,
+                );
                 let hub_ids: Vec<i64> = snap
                     .structures
                     .values()
@@ -661,6 +753,9 @@ pub fn on_space_entity_destroyed_ext(
             }
         }
     });
+    if let Some((cid, new_bal)) = mto_account_change {
+        let _ = ctx.notify_account_change(cid, "cash", cid, new_bal);
+    }
     flush_pending_quasar(ctx, &pending, now);
     record_rat_kill_military_index(
         ctx,
@@ -839,7 +934,10 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
     tick_skyhooks(ctx, now_unix).await;
 
     let pending: PendingNotices = Arc::new(RwLock::new(Vec::new()));
-    let (mto_balls, spool_events, strat_events, upg_spawns, upg_despawns) = ctx.db.with_mut_snapshot(|snap| {
+    let (mto_balls, den_systems, spool_events, strat_events, upg_spawns, upg_despawns) = ctx.db.with_mut_snapshot(|snap| {
+        let mut den_systems: Vec<u32> = snap.sov_runtime.mercenary_dens.values().map(|d| d.solar_system_id).collect();
+        den_systems.sort_unstable();
+        den_systems.dedup();
         let den_ids: Vec<i64> = snap.sov_runtime.mercenary_dens.keys().copied().collect();
         for did in den_ids {
             refresh_activities(snap, &pending, did, now_unix);
@@ -981,10 +1079,21 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
             }
         }
 
-        (mto_to_spawn, spools, strat_updates, upg_spawns, upg_despawns)
+        (mto_to_spawn, den_systems, spools, strat_updates, upg_spawns, upg_despawns)
     });
 
     flush_pending_quasar(ctx, &pending, now_unix);
+
+    for dsys in den_systems {
+        let sys_handle = ctx.systems.get_or_spawn(dsys);
+        if let Ok(balls) = sys_handle.list_balls().await {
+            for b in balls {
+                if b.type_id == 24_690 && !mto_balls.iter().any(|&(msys, bid, _)| msys == dsys && bid == b.id) {
+                    let _ = sys_handle.remove_ball(b.id).await;
+                }
+            }
+        }
+    }
 
     for (sys_id, base_id) in upg_despawns {
         let sys_handle = ctx.systems.get_or_spawn(sys_id);

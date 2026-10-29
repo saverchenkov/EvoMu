@@ -136,30 +136,45 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
         ch.region_id = mkt_reg;
         ch.constellation_id = ctx.sde.solar_systems[&mkt_sys].constellation_id;
         ch.balance = IskCents::from_isk(500_000_000);
-        ch.loyalty_points.insert(1_000_180, 300_000);
+        ch.loyalty_points.insert(1_000_180, 500_000);
     });
     s_cal.solar_system_id = Some(mkt_sys);
     s_cal.station_id = Some(mkt_sta);
     s_cal.region_id = Some(mkt_reg);
 
+    let bp_id = *ctx.sde.blueprints.keys().next().unwrap() as i64;
     let bal0 = ctx.db.with_snapshot(|s| s.characters[&cal_cid].balance.0);
     rpc_call(
         &ctx, &mut s_cal, "marketProxy", "PlaceBuyOrder",
         &[PyRep::Integer(mkt_sta), PyRep::Integer(34), PyRep::Real(1_000.0), PyRep::Integer(1_000), PyRep::Integer(-1), PyRep::Integer(1), PyRep::Integer(90)],
     ).await.expect("PlaceBuyOrder at Tier 0");
-    let cost_tier0 = bal0 - ctx.db.with_snapshot(|s| s.characters[&cal_cid].balance.0);
+    let fee_tier0 = (bal0 - ctx.db.with_snapshot(|s| s.characters[&cal_cid].balance.0)) - 100_000_000;
+    let bp_data0 = rpc_call(&ctx, &mut s_cal, "blueprintManager", "GetBlueprintData", &[PyRep::Integer(bp_id)]).await.unwrap();
+    let tax_tier0 = bp_data0.dict_get("facilityTaxISK").and_then(|v| v.as_f64()).unwrap();
+    assert!(tax_tier0 > 0.0);
+    assert!(fee_tier0 > 0);
 
-    let don_rep = rpc_call(&ctx, &mut s_cal, "facWarMgr", "DonateLPsToSolarSystem", &[PyRep::Integer(mkt_sys as i64), PyRep::Integer(210_000)])
-        .await.expect("DonateLPsToSolarSystem to Tier 5");
-    assert_eq!(don_rep.dict_get("tier").and_then(|v| v.as_i64()), Some(5));
+    for (tier, donate_amt) in [(1u8, 40_000), (2, 20_000), (3, 30_000), (4, 50_000), (5, 60_000)] {
+        let don = rpc_call(&ctx, &mut s_cal, "facWarMgr", "DonateLPsToSolarSystem", &[PyRep::Integer(mkt_sys as i64), PyRep::Integer(donate_amt)]).await.unwrap();
+        assert_eq!(don.dict_get("tier").and_then(|v| v.as_i64()), Some(tier as i64));
 
-    let bal1 = ctx.db.with_snapshot(|s| s.characters[&cal_cid].balance.0);
-    rpc_call(
-        &ctx, &mut s_cal, "marketProxy", "PlaceBuyOrder",
-        &[PyRep::Integer(mkt_sta), PyRep::Integer(34), PyRep::Real(1_000.0), PyRep::Integer(1_000), PyRep::Integer(-1), PyRep::Integer(1), PyRep::Integer(90)],
-    ).await.expect("PlaceBuyOrder at Tier 5");
-    let cost_tier5 = bal1 - ctx.db.with_snapshot(|s| s.characters[&cal_cid].balance.0);
-    assert!(cost_tier5 < cost_tier0, "FW Tier 5 lowers live station PlaceBuyOrder broker fee ({cost_tier5} < {cost_tier0})");
+        let expected_mult = 1.0 - 0.10 * (tier as f64);
+
+        ctx.db.with_mut_snapshot(|s| s.market_orders.clear());
+        let bal_before = ctx.db.with_snapshot(|s| s.characters[&cal_cid].balance.0);
+        rpc_call(
+            &ctx, &mut s_cal, "marketProxy", "PlaceBuyOrder",
+            &[PyRep::Integer(mkt_sta), PyRep::Integer(34), PyRep::Real(1_000.0), PyRep::Integer(1_000), PyRep::Integer(-1), PyRep::Integer(1), PyRep::Integer(90)],
+        ).await.expect("PlaceBuyOrder");
+        let fee_t = (bal_before - ctx.db.with_snapshot(|s| s.characters[&cal_cid].balance.0)) - 100_000_000;
+        let expected_fee = ((fee_tier0 as f64) * expected_mult).round() as i64;
+        assert!((fee_t - expected_fee).abs() <= 100, "broker fee at Tier {tier}: {fee_t} expected ~{expected_fee}");
+
+        let bp_data = rpc_call(&ctx, &mut s_cal, "blueprintManager", "GetBlueprintData", &[PyRep::Integer(bp_id)]).await.unwrap();
+        let tax_t = bp_data.dict_get("facilityTaxISK").and_then(|v| v.as_f64()).unwrap();
+        let expected_tax = ((tax_tier0 * expected_mult) * 100.0).round() / 100.0;
+        assert!((tax_t - expected_tax).abs() <= 0.05, "facility tax at Tier {tier}: {tax_t} expected ~{expected_tax}");
+    }
 
     // Move Caldari pilot back to `front_sys` in space.
     set_pilot_location(&ctx, &mut s_cal, front_sys, None);
@@ -245,7 +260,24 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
     rpc_call(&ctx, &mut s_gal, "dogmaIM", "Activate", &[PyRep::Integer(998_000), PyRep::Integer(cal_ship)])
         .await.expect("destroy enemy militia ship");
     let lb = rpc_call(&ctx, &mut s_gal, "facWarMgr", "GetStats_TopAndAllKillsAndVPs", &[]).await.unwrap();
-    assert!(format!("{lb:?}").contains(&gal_cid.to_string()));
+    let find_stat = |cat_name: &str, field_key: &str, id_key: &str, expected_id: i64| -> i64 {
+        let sub = lb.dict_get(cat_name).unwrap();
+        let list = sub.dict_get(field_key).and_then(|v| match v { PyRep::List(l) => Some(l), _ => None }).unwrap();
+        list.iter()
+            .find(|row| row.dict_get(id_key).and_then(|v| v.as_i64()) == Some(expected_id))
+            .and_then(|row| row.dict_get("amount").and_then(|v| v.as_i64()))
+            .unwrap_or(0)
+    };
+    for cat in ["killsY", "killsLW", "killsTotal"] {
+        assert_eq!(find_stat("characters", cat, "characterID", gal_cid), 1, "character {cat}");
+        assert_eq!(find_stat("corporations", cat, "corporationID", gal_corp), 1, "corporation {cat}");
+        assert_eq!(find_stat("factions", cat, "factionID", 500_004), 1, "faction {cat}");
+    }
+    for cat in ["vpY", "vpLW", "vpTotal"] {
+        assert_eq!(find_stat("characters", cat, "characterID", gal_cid), 20, "character {cat}");
+        assert_eq!(find_stat("corporations", cat, "corporationID", gal_corp), 20, "corporation {cat}");
+        assert_eq!(find_stat("factions", cat, "factionID", 500_004), 20, "faction {cat}");
+    }
 
     // 6. SDE FW Agent (`agent_type_id == 9`) mission gating (`NotEnlistedInMilitia`) & repeatable acceptance!
     let (fw_agent_id, fw_sys, fw_sta, fw_fac) = ctx.sde.agents.values()

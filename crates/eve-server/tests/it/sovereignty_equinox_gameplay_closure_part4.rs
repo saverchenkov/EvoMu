@@ -10,11 +10,72 @@ use crate::sovereignty_equinox_gameplay_closure::{
 };
 use eve_db::{corp_roles, InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_proto::PyRep;
+use eve_machonet::SessionState;
+use eve_server::router::ServerContext;
 use eve_server::services::sov_gameplay::{
     ENTOSIS_HUB_BASE_CAPTURE_SECS, ENTOSIS_NODE_BASE_CAPTURE_SECS,
 };
 use eve_server::services::sov_services::{claim_system_sovereignty, TYPE_SOVEREIGNTY_HUB};
 use glam::DVec3;
+
+fn pick_active_node(ctx: &ServerContext, hub_id: i64) -> (i64, u32, [f64; 3]) {
+    ctx.db.with_snapshot(|s| {
+        let (&nid, &(_, nsys, _)) = s
+            .sov_runtime
+            .command_nodes
+            .iter()
+            .find(|(_, &(hid, _, _))| hid == hub_id)
+            .expect("active command node");
+        (nid, nsys, s.item_positions[&nid])
+    })
+}
+
+async fn entosis_node(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    cid: i64,
+    ship_id: i64,
+    ship_type: u32,
+    mod_id: i64,
+    node_id: i64,
+    nsys: u32,
+    npos: [f64; 3],
+    wait_secs: u64,
+) {
+    let prev_sys = sess.solar_system_id.unwrap_or(nsys);
+    if prev_sys != nsys {
+        let _ = ctx.systems.get_or_spawn(prev_sys).remove_ball(ship_id).await;
+    }
+    sess.solar_system_id = Some(nsys);
+    sess.ship_id = Some(ship_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.solar_system_id = nsys;
+            ch.active_ship_id = ship_id;
+        }
+        if let Some(it) = snap.items.get_mut(&ship_id) {
+            it.location_id = nsys as i64;
+        }
+    });
+    let cs = ctx.build_ship_combat_state(cid, ship_id, ship_type);
+    let _ = ctx
+        .systems
+        .get_or_spawn(nsys)
+        .spawn_ball_with_combat(make_ball(ship_id, ship_type, DVec3::from_array(npos) + DVec3::new(4_000.0, 0.0, 0.0)), cs)
+        .await;
+    lock_target_via_rpc(ctx, sess, nsys, ship_id, node_id).await;
+    rpc_call(
+        ctx,
+        sess,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(mod_id), PyRep::String("default".into()), PyRep::Integer(node_id)],
+    )
+    .await
+    .expect("activate Entosis Link on Command Node");
+    ctx.advance_secs(wait_secs);
+    eve_server::sp6_lifecycle::tick_background_cluster(ctx).await;
+}
 
 #[tokio::test]
 async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes() {
@@ -255,6 +316,50 @@ async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes()
         );
         snap.module_online_states.insert(entosis_mod, true);
     });
+    let def_ship = 100_000_002i64;
+    let def_entosis_mod = 996_070i64;
+    let def_stront = 996_071i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            def_ship,
+            InventoryItemRecord {
+                item_id: def_ship,
+                type_id: 639,
+                owner_id: PILOT,
+                location_id: null_sys as i64,
+                flag: InventoryFlag::None,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            def_entosis_mod,
+            InventoryItemRecord {
+                item_id: def_entosis_mod,
+                type_id: 34_593,
+                owner_id: PILOT,
+                location_id: def_ship,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            def_stront,
+            InventoryItemRecord {
+                item_id: def_stront,
+                type_id: 16_275,
+                owner_id: PILOT,
+                location_id: def_ship,
+                flag: InventoryFlag::Cargo,
+                quantity: 100,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(def_entosis_mod, true);
+    });
+    ctx.invalidate_ship_fitting(def_ship);
     ctx.invalidate_ship_fitting(atk_ship);
     lock_target_via_rpc(&ctx, &mut s_atk, null_sys, atk_ship, hub_id).await;
 
@@ -283,28 +388,65 @@ async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes()
     });
     assert_eq!(nodes.len(), 5);
 
-    // 3. Live Entosis capture of 4 Constellation Command Nodes (`0.25 * 4 = 1.0`) flips `sov_alliance_id`!
+    // 3. Contested Command Node captures & continuous respawn preventing deadlock!
+    // Defender captures 2 nodes, Attacker captures 2 nodes. Active nodes remain 5 after every capture.
     let node_wait = 320 + ((ENTOSIS_NODE_BASE_CAPTURE_SECS * adm).ceil() as u64) + 30;
-    for &(node_id, nsys, npos) in nodes.iter().take(4) {
-        s_atk.solar_system_id = Some(nsys);
-        ctx.db.with_mut_snapshot(|snap| {
-            if let Some(ch) = snap.characters.get_mut(&atk_cid) {
-                ch.solar_system_id = nsys;
-            }
-            if let Some(it) = snap.items.get_mut(&atk_ship) {
-                it.location_id = nsys as i64;
-            }
-        });
-        let cs_atk = ctx.build_ship_combat_state(atk_cid, atk_ship, 621);
-        let _ = ctx.systems.get_or_spawn(nsys).spawn_ball_with_combat(make_ball(atk_ship, 621, DVec3::from_array(npos) + DVec3::new(4_000.0, 0.0, 0.0)), cs_atk).await;
-        lock_target_via_rpc(&ctx, &mut s_atk, nsys, atk_ship, node_id).await;
-        rpc_call(&ctx, &mut s_atk, "dogmaIM", "Activate", &[PyRep::Integer(entosis_mod), PyRep::String("default".into()), PyRep::Integer(node_id)])
-            .await.expect("activate Entosis Link on Command Node");
-        ctx.advance_secs(node_wait);
-        eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+
+    let (n1, sys1, pos1) = pick_active_node(&ctx, hub_id);
+    entosis_node(&ctx, &mut s_def, PILOT, def_ship, 639, def_entosis_mod, n1, sys1, pos1, node_wait).await;
+    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 5, "defender capture 1 respawns node");
+
+    let (n2, sys2, pos2) = pick_active_node(&ctx, hub_id);
+    entosis_node(&ctx, &mut s_atk, atk_cid, atk_ship, 621, entosis_mod, n2, sys2, pos2, node_wait).await;
+    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 5, "attacker capture 1 respawns node");
+
+    let (n3, sys3, pos3) = pick_active_node(&ctx, hub_id);
+    entosis_node(&ctx, &mut s_def, PILOT, def_ship, 639, def_entosis_mod, n3, sys3, pos3, node_wait).await;
+    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 5, "defender capture 2 respawns node");
+
+    let (n4, sys4, pos4) = pick_active_node(&ctx, hub_id);
+    entosis_node(&ctx, &mut s_atk, atk_cid, atk_ship, 621, entosis_mod, n4, sys4, pos4, node_wait).await;
+    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 5, "attacker capture 2 respawns node (2-2 split)");
+
+    // Defender captures 2 more nodes to reach 1.0 (4 total nodes) -> Defender retains Sovereignty Hub!
+    let (n5, sys5, pos5) = pick_active_node(&ctx, hub_id);
+    entosis_node(&ctx, &mut s_def, PILOT, def_ship, 639, def_entosis_mod, n5, sys5, pos5, node_wait).await;
+    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 5);
+
+    let (n6, sys6, pos6) = pick_active_node(&ctx, hub_id);
+    entosis_node(&ctx, &mut s_def, PILOT, def_ship, 639, def_entosis_mod, n6, sys6, pos6, node_wait).await;
+
+    // Defender victory assertion: hub restored to ShieldVulnerable, sovereign alliance remains ALLIANCE
+    assert_eq!(ctx.db.with_snapshot(|s| s.structures[&hub_id].state.clone()), "ShieldVulnerable");
+    assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&null_sys].sov_alliance_id), Some(ALLIANCE));
+    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 0, "all command nodes despawned on resolution");
+
+    // 4. Attacker re-entoses Sov Hub and captures 4 nodes to claim system sovereignty!
+    s_atk.solar_system_id = Some(null_sys);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&atk_cid) { ch.solar_system_id = null_sys; }
+        if let Some(it) = snap.items.get_mut(&atk_ship) { it.location_id = null_sys as i64; }
+    });
+    let cs_atk_re = ctx.build_ship_combat_state(atk_cid, atk_ship, 621);
+    let _ = ctx.systems.get_or_spawn(null_sys).spawn_ball_with_combat(make_ball(atk_ship, 621, hub_pos + DVec3::new(5_000.0, 0.0, 0.0)), cs_atk_re).await;
+    lock_target_via_rpc(&ctx, &mut s_atk, null_sys, atk_ship, hub_id).await;
+    let cur_sec = ctx.now_unix() % 86_400;
+    ctx.advance_secs((86_400 + 23 * 3_600 - cur_sec) % 86_400);
+    rpc_call(&ctx, &mut s_atk, "dogmaIM", "Activate", &[PyRep::Integer(entosis_mod), PyRep::String("default".into()), PyRep::Integer(hub_id)])
+        .await.expect("activate Entosis Link on Sov Hub for second campaign");
+    ctx.advance_secs(hub_capture_wait);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    assert_eq!(ctx.db.with_snapshot(|s| s.structures[&hub_id].state.clone()), "HullReinforced");
+    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 5);
+
+    for _ in 0..4 {
+        let (nid, nsys, npos) = pick_active_node(&ctx, hub_id);
+        entosis_node(&ctx, &mut s_atk, atk_cid, atk_ship, 621, entosis_mod, nid, nsys, npos, node_wait).await;
     }
 
+    assert_eq!(ctx.db.with_snapshot(|s| s.structures[&hub_id].state.clone()), "ShieldVulnerable");
     assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&null_sys].sov_alliance_id), Some(atk_ally));
+    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 0);
 
     drop(ctx);
     let ctx_restarted = open_sqlite_ctx(&db_path, false);

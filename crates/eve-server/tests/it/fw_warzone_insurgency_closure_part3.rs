@@ -15,7 +15,10 @@ use eve_server::services::combat_npc_police::{
 };
 use eve_server::services::fw_gameplay::PIRATE_FOB_STRUCTURE_BASE_ID;
 use eve_server::services::insurgency_services::{
-    ACTIVE_DURATION_SECS, FORECASTING_DURATION_SECS, WINDDOWN_DURATION_SECS,
+    add_system_corruption, add_system_suppression, ACTIVE_DURATION_SECS,
+    CAMPAIGN_STATE_ACTIVE, CAMPAIGN_STATE_ANTIPIRATE_WIN, CAMPAIGN_STATE_FORECASTING,
+    CAMPAIGN_STATE_NO_WINNER, CAMPAIGN_STATE_PIRATE_WIN, FORECASTING_DURATION_SECS,
+    WINDDOWN_DURATION_SECS,
 };
 use glam::DVec3;
 
@@ -24,7 +27,7 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
     // parity: feat:fw.fw-pirate
     // parity: feat:fw.insurgency-lifecycle
     // parity: feat:fw.insurgency-spread
-    // parity: feat:fw.corruption-suppression-effects
+    // DATA GAP: feat:fw.corruption-suppression-effects (open until real SDE tables imported)
     // parity: feat:fw.corruption-stage5-highsec-bubbles-concord
     // parity: notify:OnInsurgencyCampaignStartedForLocation
     // parity: notify:OnInsurgencyCampaignUpdatedForLocation
@@ -33,7 +36,6 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
         "feat:fw.fw-pirate",
         "feat:fw.insurgency-lifecycle",
         "feat:fw.insurgency-spread",
-        "feat:fw.corruption-suppression-effects",
         "feat:fw.corruption-stage5-highsec-bubbles-concord",
         "notify:OnInsurgencyCampaignStartedForLocation",
         "notify:OnInsurgencyCampaignUpdatedForLocation",
@@ -60,6 +62,9 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
     let start_ev = notifs_start.iter().find(|n| n.event == "OnInsurgencyCampaignStartedForLocation").expect("OnInsurgencyCampaignStartedForLocation");
     assert_eq!(start_ev.args.len(), 1, "OnInsurgencyCampaignStartedForLocation arity 1");
     assert!(start_ev.args[0].dict_get("coveredSolarsystemIDs").is_some(), "snapshot must contain coveredSolarsystemIDs");
+    let state_start = notifs_start.iter().find(|n| n.event == "OnInsurgencyStateChangedForFaction").expect("OnInsurgencyStateChangedForFaction on start");
+    assert_eq!(state_start.args[0].as_i64(), Some(CAMPAIGN_STATE_FORECASTING));
+    assert_eq!(state_start.args[1].as_i64(), Some(500_010));
 
     let (camp_id, start_systems) = ctx.db.with_snapshot(|s| {
         let c = s.insurgency_runtime.campaigns.values().next().expect("auto-seeded campaign");
@@ -102,6 +107,10 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
     //    advance Corruption stages, emitting `OnInsurgencyCampaignUpdatedForLocation` and spreading at Stage 3!
     ctx.advance_secs(FORECASTING_DURATION_SECS + 10);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    let notifs_act = ctx.drain_notifications_for_char(pir_cid);
+    let state_act = notifs_act.iter().find(|n| n.event == "OnInsurgencyStateChangedForFaction").expect("OnInsurgencyStateChangedForFaction on active");
+    assert_eq!(state_act.args[0].as_i64(), Some(CAMPAIGN_STATE_ACTIVE));
+    assert_eq!(state_act.args[1].as_i64(), Some(500_010));
     let snap_act = rpc_call(&ctx, &mut s_pir, "insurgencySolarsystem", "GetLocalCampaignClientSnapshot", &[]).await.unwrap();
     let PyRep::Tuple(act_tup) = &snap_act else { panic!("expected Tuple, got {snap_act:?}") };
     assert_eq!(act_tup[1].dict_get("phase").and_then(|v| v.as_str()), Some("Active"));
@@ -151,6 +160,18 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
         &ctx, ls_044_sys, pir_cid, ls_044_ship, DVec3::ZERO, true,
     ).await;
     assert_eq!((eng_corr3, dmg_corr3), (false, 0.0), "Stage 3 corruption in 0.44 low-sec disables step_sentry_gun_grid_aggression");
+
+    // Verify mid-campaign stage reduction to 0 when points drop to 0 in add_system_corruption and add_system_suppression:
+    let (c_pts_zero, c_stage_zero) = add_system_corruption(&ctx, camp_id, ls_044_sys, -10_000);
+    assert_eq!((c_pts_zero, c_stage_zero), (0, 0));
+    assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&ls_044_sys].insurgency_corruption_stage), 0);
+
+    let (s_pts_up, s_stage_up) = add_system_suppression(&ctx, camp_id, ls_044_sys, 450);
+    assert_eq!((s_pts_up, s_stage_up), (450, 3));
+    assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&ls_044_sys].insurgency_suppression_stage), 3);
+    let (s_pts_zero, s_stage_zero) = add_system_suppression(&ctx, camp_id, ls_044_sys, -10_000);
+    assert_eq!((s_pts_zero, s_stage_zero), (0, 0));
+    assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&ls_044_sys].insurgency_suppression_stage), 0);
 
     // Pulse 2 more times on `front_sys` to reach Corruption Stage 5 (`1,000` pts)!
     for _ in 0..2 {
@@ -287,7 +308,32 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
     let _ = drain_notif_events(&ctx, pir_cid);
     ctx.advance_secs(ACTIVE_DURATION_SECS + WINDDOWN_DURATION_SECS + 120);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    let end_notifs = drain_notif_events(&ctx, pir_cid);
-    assert!(end_notifs.iter().any(|e| e == "OnInsurgencyStateChangedForFaction"));
+    let end_notifs = ctx.drain_notifications_for_char(pir_cid);
+    let end_ev = end_notifs.iter().find(|n| n.event == "OnInsurgencyStateChangedForFaction").expect("OnInsurgencyStateChangedForFaction on campaign end");
+    assert_eq!(end_ev.args[0].as_i64(), Some(CAMPAIGN_STATE_NO_WINNER));
+    assert_eq!(end_ev.args[1].as_i64(), Some(500_010));
     assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&hs_sys].insurgency_corruption_stage), 0);
+
+    // Assert OnInsurgencyStateChangedForFaction matches authoritative V24 constants for PirateWin and AntiPirateWin:
+    let test_camp_p = 888_001i64;
+    eve_server::services::insurgency_services::init_insurgency_campaign(&ctx, test_camp_p, 500_010, 500_001, hs_sys, vec![hs_sys]);
+    let _ = ctx.drain_notifications_for_char(pir_cid);
+    ctx.db.with_mut_snapshot(|s| {
+        s.insurgency_runtime.campaign_outcomes.insert(test_camp_p, "PirateWin".into());
+    });
+    eve_server::services::insurgency_services::end_insurgency_campaign(&ctx, test_camp_p);
+    let p_notifs = ctx.drain_notifications_for_char(pir_cid);
+    let p_ev = p_notifs.iter().find(|n| n.event == "OnInsurgencyStateChangedForFaction").expect("PirateWin state notif");
+    assert_eq!(p_ev.args[0].as_i64(), Some(CAMPAIGN_STATE_PIRATE_WIN));
+
+    let test_camp_e = 888_002i64;
+    eve_server::services::insurgency_services::init_insurgency_campaign(&ctx, test_camp_e, 500_010, 500_001, hs_sys, vec![hs_sys]);
+    let _ = ctx.drain_notifications_for_char(pir_cid);
+    ctx.db.with_mut_snapshot(|s| {
+        s.insurgency_runtime.campaign_outcomes.insert(test_camp_e, "AntiPirateWin".into());
+    });
+    eve_server::services::insurgency_services::end_insurgency_campaign(&ctx, test_camp_e);
+    let e_notifs = ctx.drain_notifications_for_char(pir_cid);
+    let e_ev = e_notifs.iter().find(|n| n.event == "OnInsurgencyStateChangedForFaction").expect("AntiPirateWin state notif");
+    assert_eq!(e_ev.args[0].as_i64(), Some(CAMPAIGN_STATE_ANTIPIRATE_WIN));
 }

@@ -838,8 +838,26 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                 }
                 transact(&db, |snap| {
                     let c = caller(ctx, snap)?;
-                    require_roles(ctx, HUB_MANAGER_ROLES, "add sovereignty hub fuel")?;
-                    let sys = owned_structure(snap, &c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?.solar_system_id;
+                    let hub_st = snap
+                        .structures
+                        .get(&hub_id)
+                        .filter(|s| s.type_id == TYPE_SOVEREIGNTY_HUB && s.state != "Destroyed")
+                        .ok_or((STATUS_NOT_FOUND, format!("Sovereignty hub {hub_id} not found")))?;
+                    let sys = hub_st.solar_system_id;
+                    if !super::sov_services::can_access_sov_hub_fuel(
+                        snap,
+                        hub_id,
+                        c.cid,
+                        c.corp,
+                        c.alliance,
+                        effective_roles(ctx),
+                        true,
+                    ) {
+                        return Err((
+                            STATUS_FORBIDDEN,
+                            format!("Not authorized by fuel access group or corporation role on Sovereignty hub {hub_id}"),
+                        ));
+                    }
                     let it = snap
                         .items
                         .get(&item_id)

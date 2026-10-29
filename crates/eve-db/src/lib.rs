@@ -35,7 +35,7 @@ pub use snapshot_ext::{
     LpRewardLogEntry, MailingListRecord, MarketDailySummary, MarketHistoryDayRecord,
     SocialContactRecord, StarbaseDetailSettings,
 };
-pub use d6_types::{DetailedKillmail, KillmailAttackerEntry, KillmailItemEntry};
+pub use d6_types::{DetailedKillmail, KillmailAttackerEntry, KillmailItemEntry, PersistedFwStatEvent};
 pub use types::*;
 
 use serde::{Deserialize, Serialize};

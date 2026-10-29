@@ -677,6 +677,7 @@ pub async fn handle_skyhook_component_call(
             }
             let req_qty_opt = args.get(4).and_then(|a| a.as_i64()).filter(|&q| q > 0).map(|q| q as u64);
             let (reagent_tid, extracted, rem_sec) = ctx.db.try_with_mut_snapshot(|snap| {
+                let free_m3 = super::ship_free_cargo_m3(ctx, snap, ship_id)?;
                 let _ = advance_skyhook_reagents_in_snap(snap, skyhook_id, now);
                 let entry = snap
                     .sov_runtime
@@ -686,13 +687,29 @@ pub async fn handle_skyhook_component_call(
                         code: "SkyhookReagentBayNotFound".into(),
                         message: format!("Skyhook {skyhook_id} has no reagent bay"),
                     })?;
-                let take = req_qty_opt.unwrap_or(entry.1).min(entry.1);
-                if take == 0 {
+                if entry.1 == 0 {
                     return Err(BridgeRpcError {
                         code: "NoSecuredReagentsAvailable".into(),
                         message: format!("Skyhook {skyhook_id} has 0 secured reagents available"),
                     });
                 }
+                let unit_vol = ctx
+                    .sde
+                    .types
+                    .get(&entry.0)
+                    .map(|t| t.volume)
+                    .unwrap_or(0.01)
+                    .max(1e-6);
+                let max_units = ((free_m3 + 1e-9) / unit_vol).floor() as u64;
+                if max_units == 0 {
+                    return Err(BridgeRpcError {
+                        code: "NotEnoughCargoSpace".into(),
+                        message: format!(
+                            "Active ship {ship_id} does not have enough free cargo capacity to extract Skyhook reagents"
+                        ),
+                    });
+                }
+                let take = req_qty_opt.unwrap_or(entry.1).min(entry.1).min(max_units);
                 entry.1 -= take;
                 let r_tid = entry.0;
                 let rem_s = entry.1;

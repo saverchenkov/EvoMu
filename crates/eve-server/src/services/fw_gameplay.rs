@@ -925,27 +925,6 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
             let total_lp = calculate_fw_lp_reward(base_lp, status);
             let per_pilot_lp = total_lp / (present.len().max(1) as i64);
             let lp_corp = militia_lp_corp_id(&ctx.sde, first_fac);
-            ctx.db.with_mut_snapshot(|snap| {
-                for &(cid, _) in &present {
-                    if let Some(ch) = snap.characters.get_mut(&cid) {
-                        *ch.loyalty_points.entry(lp_corp).or_insert(0) += per_pilot_lp;
-                    }
-                    let rec = snap.fw_character_stats.entry(cid).or_insert_with(|| {
-                        eve_db::snapshot_ext::FwCharacterStatsRecord {
-                            character_id: cid,
-                            faction_id: Some(first_fac),
-                            enlisted_on_unix: Some(now_unix),
-                            current_rank: 1,
-                            highest_rank: 1,
-                            kills: Default::default(),
-                            victory_points: Default::default(),
-                        }
-                    });
-                    rec.victory_points.yesterday += 20;
-                    rec.victory_points.last_week += 20;
-                    rec.victory_points.total += 20;
-                }
-            });
             let net_adv = (my_adv - their_adv).max(0.0);
             let base_vp = ((100.0 * (1.0 + net_adv * 0.01)).round() as i64).max(50);
             let vp_earned = match status {
@@ -953,6 +932,22 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
                 STATUS_COMMAND => (base_vp * 3) / 4,
                 _ => base_vp / 2,
             };
+            let per_pilot_vp = (vp_earned / (present.len().max(1) as i64)).max(1);
+            ctx.db.with_mut_snapshot(|snap| {
+                for &(cid, _) in &present {
+                    if let Some(ch) = snap.characters.get_mut(&cid) {
+                        *ch.loyalty_points.entry(lp_corp).or_insert(0) += per_pilot_lp;
+                    }
+                    crate::services::fw_services::record_fw_stat_event_in_snap(
+                        snap,
+                        now_unix,
+                        cid,
+                        Some(first_fac),
+                        0,
+                        per_pilot_vp,
+                    );
+                }
+            });
             let signed_vp = if first_fac == occ_fac { -vp_earned } else { vp_earned };
             add_victory_points(ctx, sys_id, signed_vp);
             complete_fw_dungeon_and_objective(ctx, sys_id, first_fac, first_fac != occ_fac, 1, gid);
@@ -988,19 +983,22 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
         });
         if friendly > 0 && enemy == 0 {
             let should_reward = ctx.db.with_mut_snapshot(|snap| {
-                let Some(st) = snap.structures.get_mut(&sid) else { return false; };
-                if st.last_damage_unix > 0 && now_unix >= st.last_damage_unix + 30 {
-                    st.last_damage_unix = 0;
-                    let max_hp = if site_kind == "SupplyDepot" { 3_000.0 } else { 1_500.0 };
-                    st.shield_hp = max_hp;
-                    st.armor_hp = max_hp;
-                    st.hull_hp = max_hp;
+                let defended = snap
+                    .structures
+                    .get(&sid)
+                    .is_some_and(|st| st.last_damage_unix > 0 && now_unix >= st.last_damage_unix + 30);
+                if defended {
+                    snap.fw_runtime.supply_sites.remove(&sid);
+                    snap.structures.remove(&sid);
+                    snap.items.remove(&sid);
+                    snap.item_positions.remove(&sid);
                     true
                 } else {
                     false
                 }
             });
             if should_reward {
+                let _ = sys_handle.remove_ball(sid).await;
                 let adv_delta = if site_kind == "SupplyDepot" { 5.0 } else { 2.0 };
                 let occ_fac = ctx
                     .db
@@ -1202,6 +1200,7 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
                 (BATTLEFIELD_MAX_PILOT_LP * (BATTLEFIELD_MAX_FULL_PAYOUT_PILOTS as i64)) / (n as i64)
             };
             let lp_corp = militia_lp_corp_id(&ctx.sde, lead_fac);
+            let per_pilot_vp = (2_000 / (n as i64)).max(1);
             let cleanup_npcs = ctx.db.with_mut_snapshot(|snap| {
                 for &cid in &winning_pilots {
                     if let Some(ch) = snap.characters.get_mut(&cid) {
@@ -1211,6 +1210,14 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
                         let cur_corp_st = ch.standings.get(&lp_corp).copied().unwrap_or(0.0);
                         ch.standings.insert(lp_corp, crate::formulas::apply_standing_increase(cur_corp_st, 5.0));
                     }
+                    crate::services::fw_services::record_fw_stat_event_in_snap(
+                        snap,
+                        now_unix,
+                        cid,
+                        Some(lead_fac),
+                        0,
+                        per_pilot_vp,
+                    );
                 }
                 snap.fw_runtime.battlefield_npc_waves.remove(&bf_id).unwrap_or_default()
             });

@@ -986,7 +986,9 @@ pub(crate) fn handle_industry_job_queries(
     }
 }
 
-// DERIVED (synthetic): FW I-Hub tier facility tax/cost reduction (10% per tier, max 50% at tier 5), matching facilityBonus = tier * 10.0.
+/// Authoritative V24.01 FW I-Hub tier facility tax/broker-fee multiplier from
+/// `eve/common/script/util/facwarCommon.pyj` (`BENEFITS_BY_LEVEL` `BENEFIT_MARKETREDUCTION` /
+/// `BENEFIT_INDUSTRYCOST` = `[0, 10, 20, 30, 40, 50]`%, `GetAdjustedFeePercentage = fee * (1 - 0.1 * level)`).
 pub fn compute_facility_tax_bonus_for_tier(base_fee: f64, tier: u8) -> f64 {
     let discount = (f64::from(tier) * 0.10).min(0.50);
     base_fee * (1.0 - discount)

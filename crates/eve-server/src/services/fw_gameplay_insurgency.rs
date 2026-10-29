@@ -459,12 +459,17 @@ pub fn evaluate_and_resolve_insurgency_campaign(
 
     for sys in sys_list {
         emit_campaign_updated(ctx, sys, campaign_id, 5);
+        let outcome_state = match outcome.as_str() {
+            "PirateWin" => crate::services::insurgency_services::CAMPAIGN_STATE_PIRATE_WIN,
+            "EmpireWin" | "AntiPirateWin" => crate::services::insurgency_services::CAMPAIGN_STATE_ANTIPIRATE_WIN,
+            _ => crate::services::insurgency_services::CAMPAIGN_STATE_NO_WINNER,
+        };
         ctx.notify(
             NotificationTarget::SolarSystem(sys),
             "OnInsurgencyStateChangedForFaction",
             "solarsystemid",
             vec![
-                PyRep::Integer(if outcome == "PirateWin" { 2 } else { 3 }),
+                PyRep::Integer(outcome_state),
                 PyRep::Integer(pirate_fac),
                 PyRep::Integer(i64::from(fob_sys)),
             ],
@@ -834,15 +839,22 @@ pub async fn tick_insurgency_campaigns(ctx: &ServerContext, now_unix: u64) {
     for cid in camp_ids {
         let _ = ensure_campaign_pirate_fob(ctx, cid).await;
 
-        let action = ctx.db.with_mut_snapshot(|snap| {
-            let camp = snap.insurgency_runtime.campaigns.get(&cid)?.clone();
+        let (action, notify_active) = ctx.db.with_mut_snapshot(|snap| {
+            let Some(camp) = snap.insurgency_runtime.campaigns.get(&cid).cloned() else {
+                return (None, None);
+            };
             let (phase, _) = get_campaign_phase_and_timer(&camp, now_unix);
             if now_unix >= camp.winddown_end_unix {
-                return Some("End");
+                return (Some("End"), None);
             }
             if phase == PHASE_FORECASTING {
-                return None;
+                return (None, None);
             }
+            let notify_active = if phase == PHASE_ACTIVE && snap.insurgency_runtime.active_state_notified.insert(cid) {
+                Some((camp.systems.clone(), camp.pirate_faction_id, camp.fob_solar_system_id))
+            } else {
+                None
+            };
             if phase == PHASE_ACTIVE {
                 // Ensure each covered system has an active insurgency outpost site & complex capture grid.
                 for &sys in &camp.systems {
@@ -896,17 +908,32 @@ pub async fn tick_insurgency_campaigns(ctx: &ServerContext, now_unix: u64) {
                         .get(&(PIRATE_FOB_STRUCTURE_BASE_ID + cid))
                         .is_some_and(|st| st.state == "Destroyed");
                     if c5 >= usize::from(5 + p_mod) || (s5 >= usize::from(5 + e_mod) && fob_destroyed) {
-                        return Some("Resolve");
+                        return (Some("Resolve"), notify_active);
                     }
                 }
-                return None;
+                return (None, notify_active);
             }
             // WindDown phase (`now_unix >= active_end_unix && now_unix < winddown_end_unix`): resolve Tie if unresolved.
             if !snap.insurgency_runtime.campaign_outcomes.contains_key(&cid) {
-                return Some("Resolve");
+                return (Some("Resolve"), notify_active);
             }
-            None
+            (None, notify_active)
         });
+
+        if let Some((systems, p_fac, fob_sys)) = notify_active {
+            for sys in systems {
+                ctx.notify(
+                    NotificationTarget::SolarSystem(sys),
+                    "OnInsurgencyStateChangedForFaction",
+                    "solarsystemid",
+                    vec![
+                        PyRep::Integer(crate::services::insurgency_services::CAMPAIGN_STATE_ACTIVE),
+                        PyRep::Integer(p_fac),
+                        PyRep::Integer(i64::from(fob_sys)),
+                    ],
+                );
+            }
+        }
 
         match action {
             Some("Resolve") => {

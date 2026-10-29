@@ -2,7 +2,7 @@
 
 use crate::types::IskCents;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub mod tuple_map_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -312,6 +312,21 @@ pub struct PersistedFwState {
     /// Spawned NPC wave entity IDs inside battlefield sites: `battlefield_id -> Vec<i64>`.
     #[serde(default)]
     pub battlefield_npc_waves: HashMap<i64, Vec<i64>>,
+    /// Timestamped FW PvP kill and victory-point events for rolling `yesterday` / `lastWeek` / `total` leaderboards.
+    #[serde(default)]
+    pub stat_events: Vec<PersistedFwStatEvent>,
+}
+
+/// Timestamped FW PvP kill and victory-point event for rolling `yesterday` / `lastWeek` / `total` leaderboards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedFwStatEvent {
+    pub timestamp_unix: u64,
+    pub character_id: i64,
+    pub corporation_id: i64,
+    pub alliance_id: Option<i64>,
+    pub faction_id: i64,
+    pub kills: i64,
+    pub victory_points: i64,
 }
 
 /// One upgrade installed into a Sovereignty Hub (`eve_public.sovereignty.hub.upgrade`).
@@ -518,6 +533,8 @@ pub struct PersistedInsurgencyState {
     pub campaign_outcomes: HashMap<i64, String>,
     #[serde(default)]
     pub surrender_ihub_vulnerable_unix: HashMap<u32, u64>,
+    #[serde(default)]
+    pub active_state_notified: HashSet<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

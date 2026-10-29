@@ -349,14 +349,13 @@ pub(crate) fn find_nullsec_planets(ctx: &ServerContext) -> (u32, i64, i64, i64, 
 #[tokio::test]
 async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() {
     // parity: feat:sovereignty.skyhook-acquire
-    // parity: feat:sovereignty.sov-reagents
+    // DATA GAP: feat:sovereignty.sov-reagents (open until real SDE tables imported)
     // parity: feat:sovereignty.skyhook-reagent-maturity
     // parity: feat:sovereignty.skyhook-theft
     // parity: notify:OnSkyhookFirstActivation
     // parity: notify:OnSkyhookCanBeHacked
     eve_testkit::attest(&[
         "feat:sovereignty.skyhook-acquire",
-        "feat:sovereignty.sov-reagents",
         "feat:sovereignty.skyhook-reagent-maturity",
         "feat:sovereignty.skyhook-theft",
         "notify:OnSkyhookFirstActivation",
@@ -542,7 +541,32 @@ async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() 
     });
     assert_eq!(stolen_qty, 247);
 
+    let full_cargo_item_id = 991_999i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            full_cargo_item_id,
+            InventoryItemRecord {
+                item_id: full_cargo_item_id,
+                type_id: 34, // Tritanium
+                owner_id: PILOT,
+                location_id: PILOT_SHIP,
+                flag: InventoryFlag::Cargo,
+                quantity: 50_000_000,
+                ..Default::default()
+            },
+        );
+    });
     let _ = ctx.systems.get_or_spawn(sys_id).spawn_ball(make_ball(PILOT_SHIP, 621, sky_ball_pos + DVec3::new(3_000.0, 0.0, 0.0))).await;
+    assert_eq!(
+        rpc_call(
+            &ctx, &mut s_dir, "beyonce", "CallComponentFromClient",
+            &[PyRep::Integer(lava_skyhook), PyRep::String("orbitalSkyhook".into()), PyRep::String("ExtractReagentsToShip".into())],
+        ).await.unwrap_err().code,
+        "NotEnoughCargoSpace"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&full_cargo_item_id);
+    });
     let ext_rep = rpc_call(
         &ctx, &mut s_dir, "beyonce", "CallComponentFromClient",
         &[PyRep::Integer(lava_skyhook), PyRep::String("orbitalSkyhook".into()), PyRep::String("ExtractReagentsToShip".into())],

@@ -7,7 +7,7 @@ use crate::sovereignty_equinox_gameplay_closure::{
     rpc_call, set_pilot_location, step_weapon_ticks, temp_sqlite_path,
 };
 use eve_db::snapshot_ext::FwSystemOccupationRecord;
-use eve_db::{InventoryFlag, InventoryItemRecord};
+use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::fw_gameplay::{BATTLEFIELD_RESPAWN_COOLDOWN_SECS, BATTLEFIELD_ZONE_CENTERS};
@@ -115,7 +115,7 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     // parity: feat:fw.fw-site-dungeons
     // parity: feat:fw.battlefield-capture-rules
     // parity: feat:fw.battlefield-gameplay
-    // parity: feat:fw.fw-lp
+    // DATA GAP: feat:fw.fw-lp (open until real SDE lpstore tables imported)
     eve_testkit::attest(&[
         "feat:fw.frontline-system-designation",
         "feat:fw.complex-ship-size-gating",
@@ -125,12 +125,10 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
         "feat:fw.fw-site-dungeons",
         "feat:fw.battlefield-capture-rules",
         "feat:fw.battlefield-gameplay",
-        "feat:fw.fw-lp",
     ]);
 
     let db_path = temp_sqlite_path("fw_warzone_f1");
     let ctx = open_sqlite_ctx(&db_path, true);
-    crate::common::seed_test_lp_store_offers(&ctx);
     let (_enemy_sys, front_sys, cmd_sys, rear_sys) = setup_warzone_chain(&ctx);
 
     let gal_cid = 90_000_011i64;
@@ -324,13 +322,65 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
         // Move attacker away, place friendly Caldari defender on grid:
         set_hull(&ctx, gal_ship, 19_722, DVec3::new(0.0, 0.0, 0.0)).await;
         set_hull(&ctx, cal_ship, 587, def_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
+        ctx.db.with_mut_snapshot(|snap| {
+            let sk = snap.skills.entry(cal_cid).or_default();
+            for sid in [3300u32, 3303, 3306, 3413, 3426, 3456] {
+                sk.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
+            }
+            snap.items.insert(
+                996_000,
+                InventoryItemRecord {
+                    item_id: 996_000,
+                    type_id: 484, // 125mm Gatling AutoCannon I
+                    owner_id: cal_cid,
+                    location_id: cal_ship,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                996_001,
+                InventoryItemRecord {
+                    item_id: 996_001,
+                    type_id: 185, // EMP S
+                    owner_id: cal_cid,
+                    location_id: cal_ship,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 100,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(996_000, true);
+            snap.module_active_charges.insert(996_000, 185);
+        });
+        ctx.invalidate_ship_fitting(cal_ship);
+        let _ = ctx.systems.get_or_spawn(front_sys).add_target_lock(
+            cal_ship,
+            eve_destiny::TargetLock {
+                target_id: def_sid,
+                lock_time_ms: 1000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(100_000.0),
+            },
+        ).await;
+
+        // Friendly militia cannot attack own supply site:
+        assert_eq!(
+            rpc_call(&ctx, &mut s_cal, "dogmaIM", "Activate", &[
+                PyRep::Integer(996_000), PyRep::String("targetAttack".into()), PyRep::Integer(def_sid),
+            ]).await.unwrap_err().code,
+            "CannotAttackFriendlyStructure"
+        );
         let _ = drain_notif_events(&ctx, cal_cid);
 
         // Advance 31s and tick background cluster:
         ctx.advance_secs(31);
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
-        assert_eq!(ctx.db.with_snapshot(|s| s.structures[&def_sid].last_damage_unix), 0, "friendly defense resolved timer reset");
+        assert!(!ctx.db.with_snapshot(|s| s.structures.contains_key(&def_sid)), "friendly defense resolves and despawns site");
         assert!(drain_notif_events(&ctx, cal_cid).iter().any(|e| e == "OnSolarsystemAdvantageStateUpdated_Local"), "defense emits OnSolarsystemAdvantageStateUpdated_Local");
         let (occ_adv, att_adv) = ctx.db.with_snapshot(|s| s.fw_runtime.system_advantage[&front_sys]);
         assert!(occ_adv > 0.0 && att_adv > occ_adv, "occupier defense credits occ_adv ({occ_adv}) while attacker supply kills credit att_adv ({att_adv})");
@@ -338,7 +388,7 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
 
     // 4. Live Novice complex capture via `keeper.ActivateAccelerationGate` + `tick_background_cluster`:
     //    opposing militia ship in pocket pauses timer; removing defender completes capture in <4 ticks thanks to Advantage,
-    //    crediting Federation Navy (`1000181`) LP redeemable via `LPStoreMgr.TakeOfferForCharacter`!
+    //    crediting Federation Navy (`1000181`) LP!
     set_hull(&ctx, gal_ship, 593, novice_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
     set_hull(&ctx, cal_ship, 587, novice_pos + DVec3::new(1_200.0, 0.0, 0.0)).await;
     rpc_call(&ctx, &mut s_gal, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(novice_gate)]).await.unwrap();
@@ -366,15 +416,6 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     assert!(gal_lp >= 10_000, "Frontline Novice capture awards Federation Navy (1000181) LP (got {gal_lp})");
     let lp_bals = rpc_call(&ctx, &mut s_gal, "LPSvc", "GetAllMyCharacterWalletLPBalances", &[]).await.unwrap();
     assert!(format!("{lp_bals:?}").contains("1000181"));
-
-    // Redeem militia LP at an NPC station via `LPStoreMgr.TakeOfferForCharacter`.
-    ctx.db.with_mut_snapshot(|s| {
-        s.characters.get_mut(&gal_cid).unwrap().loyalty_points.insert(1_000_125, 5_000);
-    });
-    set_pilot_location(&ctx, &mut s_gal, 30_000_142, Some(60_003_760));
-    rpc_call(&ctx, &mut s_gal, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(1_000_125), PyRep::Integer(5001), PyRep::Integer(1)])
-        .await.expect("redeem LP offer");
-    set_pilot_location(&ctx, &mut s_gal, front_sys, None);
 
     // 5. Live 3-zone Frontline Battlefield capture:
     //    - First verify defending Caldari militia (`500001`) holds Zone 0, spawns combat-capable orbiting NPC waves,

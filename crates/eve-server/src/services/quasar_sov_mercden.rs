@@ -250,7 +250,8 @@ pub(crate) fn complete_mercenary_activity_in_snap(
     a: &PersistedMercenaryActivity,
     den_id: i64,
     solar_system_id: u32,
-) {
+    now_unix: u64,
+) -> Option<(i64, f64)> {
     let mut owner_cid = a.started_by;
     if let Some(den_mut) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
         if owner_cid <= 0 {
@@ -266,11 +267,21 @@ pub(crate) fn complete_mercenary_activity_in_snap(
     }
     // DERIVED (synthetic): ISK completion reward per Mercenary Tactical Operation (50,000 ISK per infomorph bonus unit).
     let isk_reward = i64::from(a.infomorph_bonus.max(10)) * 50_000;
+    let reward_cents = eve_db::IskCents::from_isk(isk_reward);
+    let mut account_change = None;
     if owner_cid > 0 {
         if let Some(ch) = snap.characters.get_mut(&owner_cid) {
-            ch.balance = eve_db::IskCents(
-                ch.balance.0.saturating_add(eve_db::IskCents::from_isk(isk_reward).0),
+            ch.balance = ch.balance.checked_add(reward_cents).unwrap_or(ch.balance);
+            let new_bal = ch.balance;
+            let _ = now_unix;
+            snap.append_journal(
+                owner_cid,
+                "MercenaryTacticalOperationReward",
+                reward_cents,
+                new_bal,
+                format!("Mercenary Tactical Operation reward at den {den_id}"),
             );
+            account_change = Some((owner_cid, new_bal.to_wire_f64()));
         }
     }
     let hex_key = hex(&a.uuid);
@@ -292,10 +303,12 @@ pub(crate) fn complete_mercenary_activity_in_snap(
         a.anarchy_impact,
         a.infomorph_bonus,
     );
+    account_change
 }
 
-/// Expires stale operations and, when the generation timer elapsed, fills the den up to its
-/// capacity — emitting `RemovedNotice` / `AddedNotice` for each change.
+/// Expires stale operations (including timed-out started operations without completion rewards)
+/// and, when the generation timer elapsed, fills the den up to its capacity — emitting
+/// `RemovedNotice` / `AddedNotice` for each change.
 pub(crate) fn refresh_activities(snap: &mut WorldStateSnapshot, pending: &PendingNotices, den_id: i64, now: u64) {
     tick_den(snap, pending, den_id, now);
     let Some(den) = snap.sov_runtime.mercenary_dens.get(&den_id).cloned() else { return };
@@ -303,27 +316,27 @@ pub(crate) fn refresh_activities(snap: &mut WorldStateSnapshot, pending: &Pendin
         .sov_runtime
         .mercenary_activities
         .iter()
-        .filter(|(_, a)| a.den_id == den_id && !a.started && a.expiry_unix <= now)
+        .filter(|(_, a)| a.den_id == den_id && a.expiry_unix <= now)
         .map(|(k, _)| k.clone())
         .collect();
     for key in expired {
         if let Some(a) = snap.sov_runtime.mercenary_activities.remove(&key) {
+            if a.started {
+                let hex_key = hex(&a.uuid);
+                snap.sov_runtime.mto_site_balls.retain(|&bid, v| {
+                    if v == &hex_key {
+                        snap.items.remove(&bid);
+                        snap.item_positions.remove(&bid);
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
             let mut n = Vec::new();
             id_field(1, den_id as u64, &mut n);
             encode_bytes_field(2, &encode_activity_id(&a.uuid), &mut n);
             push_notice(pending, den.solar_system_id, "eve_public.sovereignty.mercenaryden.activity.api.RemovedNotice", n);
-        }
-    }
-    let completed: Vec<String> = snap
-        .sov_runtime
-        .mercenary_activities
-        .iter()
-        .filter(|(_, a)| a.den_id == den_id && a.started && a.expiry_unix <= now)
-        .map(|(k, _)| k.clone())
-        .collect();
-    for key in completed {
-        if let Some(a) = snap.sov_runtime.mercenary_activities.remove(&key) {
-            complete_mercenary_activity_in_snap(snap, pending, &a, den_id, den.solar_system_id);
         }
     }
     if !den.enabled || now < den.next_activity_generation_unix {
@@ -581,6 +594,22 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                         .cloned()
                         .ok_or((STATUS_NOT_FOUND, format!("Activity {key} not found")))?;
                     owned_den(snap, cid, a.den_id)?;
+                    let ch = snap
+                        .characters
+                        .get(&cid)
+                        .ok_or((STATUS_NOT_FOUND, format!("Character {cid} not found")))?;
+                    if ch.solar_system_id != a.solar_system_id
+                        || ch.station_id.is_some()
+                        || ch.structure_id.is_some()
+                    {
+                        return Err((
+                            STATUS_FORBIDDEN,
+                            format!(
+                                "Character {cid} must be undocked in solar system {} to start Mercenary Tactical Operation",
+                                a.solar_system_id
+                            ),
+                        ));
+                    }
                     if a.started {
                         return Err((STATUS_CONFLICT, format!("Activity {key} already started")));
                     }

@@ -29,6 +29,16 @@ pub const PHASE_FORECASTING: &str = "Forecasting";
 pub const PHASE_ACTIVE: &str = "Active";
 pub const PHASE_WINDDOWN: &str = "WindDown";
 
+/// Authoritative V24.01 Insurgency campaign state constants (`pirateinsurgency/const.pyj`).
+pub const CAMPAIGN_STATE_INITIAL: i64 = 1;
+pub const CAMPAIGN_STATE_FORECASTING: i64 = 2;
+pub const CAMPAIGN_STATE_ACTIVE: i64 = 3;
+pub const CAMPAIGN_STATE_PIRATE_WIN: i64 = 4;
+pub const CAMPAIGN_STATE_ANTIPIRATE_WIN: i64 = 5;
+pub const CAMPAIGN_STATE_NO_WINNER: i64 = 6;
+pub const CAMPAIGN_STATE_CLEANUP: i64 = 7;
+pub const CAMPAIGN_STATE_TERMINAL: i64 = 99;
+
 /// DERIVED (synthetic): FOB vulnerability window and campaign phase durations based on Havoc expansion defaults.
 pub const FORECASTING_DURATION_SECS: u64 = 48 * 3600; // 48h
 pub const ACTIVE_DURATION_SECS: u64 = 7 * 86400;      // 7 days
@@ -186,20 +196,21 @@ pub fn init_insurgency_campaign(
         }
         if !snap.items.contains_key(&stronghold_id) {
             snap.items.insert(stronghold_id, eve_db::InventoryItemRecord {
-                item_id: stronghold_id,
-                type_id,
-                owner_id: pirate_faction,
-                location_id: fob_system as i64,
-                flag: eve_db::InventoryFlag::None,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                ..Default::default()
+                item_id: stronghold_id, type_id, owner_id: pirate_faction, location_id: fob_system as i64,
+                flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, version: 1, ..Default::default()
             });
             snap.item_positions.insert(stronghold_id, pos);
         }
     });
 
+    let initial_campaign_state = if now < fc_end {
+        CAMPAIGN_STATE_FORECASTING
+    } else {
+        with_insurgency_runtime(ctx, |rt| {
+            rt.active_state_notified.insert(campaign_id);
+        });
+        CAMPAIGN_STATE_ACTIVE
+    };
     for sys in &systems {
         emit_campaign_started(ctx, *sys, campaign_id);
         ctx.notify(
@@ -207,7 +218,7 @@ pub fn init_insurgency_campaign(
             "OnInsurgencyStateChangedForFaction",
             "solarsystemid",
             vec![
-                PyRep::Integer(1),
+                PyRep::Integer(initial_campaign_state),
                 PyRep::Integer(pirate_faction),
                 PyRep::Integer(i64::from(fob_system)),
             ],
@@ -265,7 +276,15 @@ fn encode_pirate_increased_notice(sys_id: u32, old_pts: u64, new_pts: u64) -> Ve
 /// Ends an active pirate insurgency campaign and emits `OnInsurgencyCampaignEndingForLocation`,
 /// `OnInsurgencyStateChangedForFaction`, and Quasar `ResetNotice` for corruption and suppression.
 pub fn end_insurgency_campaign(ctx: &ServerContext, campaign_id: i64) {
-    let removed = with_insurgency_runtime(ctx, |rt| rt.campaigns.remove(&campaign_id));
+    let outcome_state = match ctx.db.with_snapshot(|s| s.insurgency_runtime.campaign_outcomes.get(&campaign_id).cloned()) {
+        Some(ref s) if s == "PirateWin" => CAMPAIGN_STATE_PIRATE_WIN,
+        Some(ref s) if s == "EmpireWin" || s == "AntiPirateWin" => CAMPAIGN_STATE_ANTIPIRATE_WIN,
+        _ => CAMPAIGN_STATE_NO_WINNER,
+    };
+    let removed = with_insurgency_runtime(ctx, |rt| {
+        rt.active_state_notified.remove(&campaign_id);
+        rt.campaigns.remove(&campaign_id)
+    });
     if let Some(c) = removed {
         let now = ctx.now_unix();
         for sys in &c.systems {
@@ -286,7 +305,7 @@ pub fn end_insurgency_campaign(ctx: &ServerContext, campaign_id: i64) {
                 "OnInsurgencyStateChangedForFaction",
                 "solarsystemid",
                 vec![
-                    PyRep::Integer(0),
+                    PyRep::Integer(outcome_state),
                     PyRep::Integer(c.pirate_faction_id),
                     PyRep::Integer(i64::from(c.fob_solar_system_id)),
                 ],
@@ -349,14 +368,14 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
     let now = ctx.now_unix();
     let (pts, old_stage, stage, pirate_faction, campaign_active, in_active_phase) = with_insurgency_runtime(ctx, |rt| {
         let Some(c) = rt.campaigns.get_mut(&campaign_id) else {
-            return (0, 0, 1, FACTION_GURISTAS, false, false);
+            return (0, 0, 0, FACTION_GURISTAS, false, false);
         };
         let active = now < c.winddown_end_unix;
         let in_act = now >= c.forecasting_end_unix && now < c.active_end_unix;
         let p = c.corruption_points.entry(sys_id).or_insert(0);
-        let prev_stage = if *p == 0 { 0 } else { insurgency_stage(*p) };
+        let prev_stage = insurgency_stage(*p);
         *p = (*p + points).max(0);
-        let s = insurgency_stage(*p).max(1);
+        let s = insurgency_stage(*p);
         (*p, prev_stage, s, c.pirate_faction_id, active, in_act)
     });
 
@@ -419,12 +438,12 @@ pub fn add_system_suppression(ctx: &ServerContext, campaign_id: i64, sys_id: u32
     let now = ctx.now_unix();
     let (pts, stage, campaign_active) = with_insurgency_runtime(ctx, |rt| {
         let Some(c) = rt.campaigns.get_mut(&campaign_id) else {
-            return (0, 1, false);
+            return (0, 0, false);
         };
         let active = now < c.winddown_end_unix;
         let p = c.suppression_points.entry(sys_id).or_insert(0);
         *p = (*p + points).max(0);
-        (*p, insurgency_stage(*p).max(1), active)
+        (*p, insurgency_stage(*p), active)
     });
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -522,15 +541,8 @@ pub fn spawn_pirate_stronghold(ctx: &ServerContext, campaign_id: i64) -> Option<
     ctx.db.with_mut_snapshot(|snap| {
         if !snap.items.contains_key(&id) {
             snap.items.insert(id, eve_db::InventoryItemRecord {
-                item_id: id,
-                type_id,
-                owner_id: fid,
-                location_id: fob as i64,
-                flag: eve_db::InventoryFlag::None,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                ..Default::default()
+                item_id: id, type_id, owner_id: fid, location_id: fob as i64,
+                flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, version: 1, ..Default::default()
             });
             snap.item_positions.insert(id, pos);
         }
@@ -748,48 +760,26 @@ pub fn notify_stronghold_destruction(
             update_args.clone(),
         );
         let notif = crate::router::cache_notifications::PendingMachoNotification {
-            recipient_char_id: cid,
-            event: "OnInsurgencyCampaignUpdatedForLocation".into(),
-            id_type: "solarsystemid".into(),
-            args: update_args.clone(),
-            packet,
-            marshaled_packet,
-            created_filetime: now_ft,
+            recipient_char_id: cid, event: "OnInsurgencyCampaignUpdatedForLocation".into(),
+            id_type: "solarsystemid".into(), args: update_args.clone(), packet, marshaled_packet, created_filetime: now_ft,
         };
         if let Some(pend) = pending_notifications {
-            if let Ok(mut map) = pend.write() {
-                map.entry(cid).or_default().push(notif.clone());
-            }
+            if let Ok(mut map) = pend.write() { map.entry(cid).or_default().push(notif.clone()); }
         }
-        if let Some(tx) = notify_tx {
-            let _ = tx.send((cid, notif));
-        }
+        if let Some(tx) = notify_tx { let _ = tx.send((cid, notif)); }
 
         if let Some(ref fs_args) = full_supp_args {
             let (packet_fs, marshaled_packet_fs) = crate::router::ServerContext::build_macho_notification_packet(
-                cid,
-                None,
-                "OnSystemFullySuppressedForFaction",
-                "solarsystemid",
-                fs_args.clone(),
+                cid, None, "OnSystemFullySuppressedForFaction", "solarsystemid", fs_args.clone(),
             );
             let notif_fs = crate::router::cache_notifications::PendingMachoNotification {
-                recipient_char_id: cid,
-                event: "OnSystemFullySuppressedForFaction".into(),
-                id_type: "solarsystemid".into(),
-                args: fs_args.clone(),
-                packet: packet_fs,
-                marshaled_packet: marshaled_packet_fs,
-                created_filetime: now_ft,
+                recipient_char_id: cid, event: "OnSystemFullySuppressedForFaction".into(),
+                id_type: "solarsystemid".into(), args: fs_args.clone(), packet: packet_fs, marshaled_packet: marshaled_packet_fs, created_filetime: now_ft,
             };
             if let Some(pend) = pending_notifications {
-                if let Ok(mut map) = pend.write() {
-                    map.entry(cid).or_default().push(notif_fs.clone());
-                }
+                if let Ok(mut map) = pend.write() { map.entry(cid).or_default().push(notif_fs.clone()); }
             }
-            if let Some(tx) = notify_tx {
-                let _ = tx.send((cid, notif_fs));
-            }
+            if let Some(tx) = notify_tx { let _ = tx.send((cid, notif_fs)); }
         }
     }
 }
