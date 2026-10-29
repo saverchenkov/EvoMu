@@ -206,25 +206,18 @@ async fn test_batch5_station_damage_crimewatch_shutdown_scanners() {
 
 #[tokio::test]
 async fn test_batch5_space_combat_arena_and_ess() {
-    // parity: notify:OnCloakModuleForceDeactivated, notify:OnKillNotification, notify:OnLocalHackProgressUpdated
-    // parity: notify:OnMatchFound, notify:OnMatchMakingFailure, notify:OnAddExpiryDurationForAbyssalPvpContent
-    // parity: notify:DoDestinyUpdates, notify:OnComponentRemovedSystemEnvironment
-    // parity: notify:OnESSReserveBankLinkNotification, notify:OnESSMainBankLinkNotification
-    // parity: notify:OnMainBankPlayerLinkDisconnected, notify:OnCosmicAnomalyAdded
-    eve_testkit::attest(&[
-        "notify:OnCloakModuleForceDeactivated",
-        "notify:OnKillNotification",
-        "notify:OnLocalHackProgressUpdated",
-        "notify:OnMatchFound",
-        "notify:OnMatchMakingFailure",
-        "notify:OnAddExpiryDurationForAbyssalPvpContent",
-        "notify:DoDestinyUpdates",
-        "notify:OnComponentRemovedSystemEnvironment",
-        "notify:OnESSReserveBankLinkNotification",
-        "notify:OnESSMainBankLinkNotification",
-        "notify:OnMainBankPlayerLinkDisconnected",
-        "notify:OnCosmicAnomalyAdded",
-    ]);
+    // DATA GAP: notify:OnCloakModuleForceDeactivated requires production wiring through combat decloak loop
+    // DATA GAP: notify:OnKillNotification requires production wiring through combat death pipeline
+    // DATA GAP: notify:OnLocalHackProgressUpdated requires production wiring through hacking loop
+    // DATA GAP: notify:OnMatchFound requires production wiring through abyssal matchmaking loop
+    // DATA GAP: notify:OnMatchMakingFailure requires production wiring through abyssal matchmaking loop
+    // DATA GAP: notify:OnAddExpiryDurationForAbyssalPvpContent requires production wiring through abyssal arena loop
+    // DATA GAP: notify:DoDestinyUpdates requires production wiring through destiny 1Hz loop
+    // DATA GAP: notify:OnComponentRemovedSystemEnvironment requires production wiring through space environment loop
+    // DATA GAP: notify:OnESSReserveBankLinkNotification requires production wiring through ESS link loop
+    // DATA GAP: notify:OnESSMainBankLinkNotification requires production wiring through ESS link loop
+    // DATA GAP: notify:OnMainBankPlayerLinkDisconnected requires production wiring through ESS disconnect loop
+    // DATA GAP: notify:OnCosmicAnomalyAdded requires production wiring through exploration loop
 
     let ctx = new_ctx();
     let _s1 = pilot(&ctx, 821, "demo", "demo-secret", P1).await;
@@ -317,6 +310,7 @@ async fn test_batch5_space_combat_arena_and_ess() {
     assert_eq!(ev_disc[0].len(), 1);
     if let PyRep::Dict(ref d) = ev_disc[0][0] {
         assert_eq!(d.len(), 4);
+        assert!(d.iter().any(|(k, v)| k == &PyRep::String("reason".into()) && v == &PyRep::String("WarpedAway".into())));
     } else {
         panic!("expected PyRep::Dict for disconnect info");
     }
@@ -328,6 +322,7 @@ async fn test_batch5_space_combat_arena_and_ess() {
     assert_eq!(ev_anom[0].len(), 1);
     if let PyRep::KeyVal(ref kv) = ev_anom[0][0] {
         assert!(kv.contains_key("targetID"));
+        assert_eq!(kv.get("solarSystemID"), Some(&PyRep::Integer(i64::from(JITA_SYSTEM))));
     } else {
         panic!("expected PyRep::KeyVal for anomaly info");
     }
