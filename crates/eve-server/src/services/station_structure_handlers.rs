@@ -493,3 +493,73 @@ pub(crate) fn handle_get_structure_info(ctx: &ServerContext, session: &mut Sessi
         Ok(build_structure_dir_entry(ctx, snap, session, &ext, st, now, char_id, caller_corp, has_acl))
     })
 }
+
+/// Enforces V24 station service standing gates loaded from `res:/staticdata/stationstandingsrestrictions.fsdbinary`.
+pub fn check_station_service_standing(
+    ctx: &ServerContext,
+    char_id: i64,
+    station_id: i64,
+    raw_service_id: i64,
+    service_id: u32,
+    owner_corp: i64,
+    owner_fac: Option<i64>,
+) -> Result<(), BridgeRpcError> {
+    let restrictions = ctx
+        .sde
+        .load_cfsd_nested("res:/staticdata/stationstandingsrestrictions.fsdbinary")
+        .map_err(|e| BridgeRpcError {
+            code: "StaticDataUnavailable".into(),
+            message: format!("Failed to load station standings restrictions: {e}"),
+        })?;
+
+    let service_key = service_id.to_string();
+    let corp_key = owner_corp.to_string();
+    let gate = if let Some(entry) = restrictions.get(&corp_key) {
+        entry
+            .get("services")
+            .and_then(|svcs| svcs.get(&service_key))
+            .and_then(|v| v.as_f64())
+            .map(|min_st| (owner_corp, min_st))
+    } else {
+        owner_fac.and_then(|fid| {
+            restrictions
+                .get(&fid.to_string())
+                .and_then(|entry| entry.get("services"))
+                .and_then(|svcs| svcs.get(&service_key))
+                .and_then(|v| v.as_f64())
+                .map(|min_st| (fid, min_st))
+        })
+    };
+
+    let Some((gate_entity_id, min_standing)) = gate else {
+        return Ok(());
+    };
+
+    let eff_standing = ctx.db.with_snapshot(|snap| {
+        let ch = snap.characters.get(&char_id);
+        let raw = ch
+            .and_then(|c| c.standings.get(&gate_entity_id).copied())
+            .unwrap_or(0.0);
+        let has_entry = ch.is_some_and(|c| c.standings.contains_key(&gate_entity_id));
+        let (eff, _, _, _) =
+            crate::services::agents_missions::agents_standings_arcs::compute_effective_standing_breakdown(
+                ctx,
+                snap,
+                char_id,
+                gate_entity_id,
+                raw,
+                has_entry,
+            );
+        eff
+    });
+
+    if eff_standing + 1e-9 < min_standing {
+        return Err(BridgeRpcError {
+            code: "StandingTooLowForStationService".into(),
+            message: format!(
+                "Character {char_id} standing {eff_standing:.2} with {gate_entity_id} is below required {min_standing:.2} for service {raw_service_id} at station {station_id}"
+            ),
+        });
+    }
+    Ok(())
+}

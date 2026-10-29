@@ -299,7 +299,8 @@ async fn test_lp_store_mgr_gameplay_closure() {
 
 #[tokio::test]
 async fn test_standing_mgr_npc_npc_standings_closure() {
-    // DATA GAP: static NPC-NPC standings table is server-internal; client SDE lacks full cross-standing matrix.
+    // parity: feat:standings.npc-npc-standings, rpc:standingMgr.GetNPCNPCStandings
+    eve_testkit::attest(&["feat:standings.npc-npc-standings", "rpc:standingMgr.GetNPCNPCStandings"]);
     let ctx = ServerContext::new();
     let mut sess = SessionState::new(4322);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -318,15 +319,16 @@ async fn test_standing_mgr_npc_npc_standings_closure() {
 
     assert_eq!(columns, vec!["fromID", "toID", "standing"]);
     assert!(
-        rows.len() > 100,
-        "Must contain derived NPC standings (got {})",
+        rows.len() >= 5_000,
+        "Must contain full CCP repFactions and SDE NPC corp standings (got {})",
         rows.len()
     );
 
-    // Verify inter-faction and member-corp standings exist
-    let mut found_caldari_gallente = false;
-    let mut found_caldari_amarr = false;
-    let mut found_caldari_navy = false;
+    // Verify exact CCP repFactions and member-corp standings
+    let mut caldari_gallente = None;
+    let mut caldari_amarr = None;
+    let mut caldari_navy = None;
+    let mut soe_minmatar = None;
 
     for row in &rows {
         assert_eq!(row.len(), 3);
@@ -343,25 +345,23 @@ async fn test_standing_mgr_npc_npc_standings_closure() {
         );
 
         if from_id == 500001 && to_id == 500004 {
-            found_caldari_gallente = true;
-            assert!(standing < 0.0, "Caldari-Gallente must be negative");
+            caldari_gallente = Some(standing);
         }
         if from_id == 500001 && to_id == 500003 {
-            found_caldari_amarr = true;
-            assert!(standing > 0.0, "Caldari-Amarr must be positive");
+            caldari_amarr = Some(standing);
         }
         if from_id == 1000035 && to_id == 500001 {
-            found_caldari_navy = true;
-            assert!(
-                standing > 0.0,
-                "Caldari Navy standing with Caldari State must be positive"
-            );
+            caldari_navy = Some(standing);
+        }
+        if from_id == 500016 && to_id == 500002 {
+            soe_minmatar = Some(standing);
         }
     }
 
-    assert!(found_caldari_gallente, "Must have Caldari-Gallente standing");
-    assert!(found_caldari_amarr, "Must have Caldari-Amarr standing");
-    assert!(found_caldari_navy, "Must have Caldari Navy corp standing");
+    assert_eq!(caldari_gallente, Some(-5.0), "Caldari-Gallente must match CCP repFactions (-5.0)");
+    assert_eq!(caldari_amarr, Some(7.0), "Caldari-Amarr must match CCP repFactions (7.0)");
+    assert_eq!(caldari_navy, Some(10.0), "Caldari Navy standing with Caldari State must be 10.0");
+    assert_eq!(soe_minmatar, Some(4.0), "Servant Sisters of EVE standing with Minmatar Republic must be 4.0");
 }
 
 #[tokio::test]

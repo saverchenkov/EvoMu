@@ -164,8 +164,22 @@ async fn test_mission_tracker_and_standing_mgr_rpcs() {
         .expect("GetNPCNPCStandings");
     match npc_standings {
         PyRep::Rowset { rows, columns, .. } => {
-            assert!(!rows.is_empty());
+            assert!(rows.len() >= 5_000, "Must include full CCP faction and SDE corp standings");
             assert_eq!(columns, vec!["fromID", "toID", "standing"]);
+            let rel = |f: i64, t: i64| -> Option<f64> {
+                rows.iter().find_map(|r| {
+                    if r.first().and_then(|v| v.as_i64()) == Some(f) && r.get(1).and_then(|v| v.as_i64()) == Some(t) {
+                        r.get(2).and_then(|v| v.as_f64())
+                    } else {
+                        None
+                    }
+                })
+            };
+            assert_eq!(rel(500_001, 500_003), Some(7.0));
+            assert_eq!(rel(500_001, 500_004), Some(-5.0));
+            assert_eq!(rel(500_006, 500_019), Some(-3.0));
+            assert_eq!(rel(1_000_035, 500_001), Some(10.0));
+            assert_eq!(rel(1_000_002, 1_000_035), Some(8.0));
         }
         other => panic!("expected Rowset from GetNPCNPCStandings, got {other:?}"),
     }

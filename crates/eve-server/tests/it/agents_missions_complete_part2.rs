@@ -440,7 +440,26 @@ async fn test_standings_formulas_derived_effective_corp_standing_data_and_transa
     let npc_st = rpc_call(&ctx, &mut sess, "standingMgr", "GetNPCNPCStandings", &[])
         .await
         .expect("GetNPCNPCStandings");
-    assert!(!matches!(npc_st, PyRep::None));
+    let PyRep::Rowset { columns: npc_cols, rows: npc_rows, .. } = npc_st else {
+        panic!("Expected Rowset from GetNPCNPCStandings");
+    };
+    assert_eq!(npc_cols, vec!["fromID", "toID", "standing"]);
+    assert!(npc_rows.len() >= 5_000, "Must return full 382-pair CCP faction matrix plus SDE corp standings, got {}", npc_rows.len());
+    let find_npc_rel = |from_id: i64, to_id: i64| -> Option<f64> {
+        npc_rows.iter().find_map(|r| {
+            if r.first().and_then(|v| v.as_i64()) == Some(from_id) && r.get(1).and_then(|v| v.as_i64()) == Some(to_id) {
+                r.get(2).and_then(|v| v.as_f64())
+            } else {
+                None
+            }
+        })
+    };
+    assert_eq!(find_npc_rel(500_001, 500_003), Some(7.0));
+    assert_eq!(find_npc_rel(500_001, 500_004), Some(-5.0));
+    assert_eq!(find_npc_rel(500_003, 500_002), Some(-5.0));
+    assert_eq!(find_npc_rel(500_002, 500_015), Some(4.0));
+    assert_eq!(find_npc_rel(500_026, 500_027), Some(-10.0));
+    assert_eq!(find_npc_rel(1_000_035, 500_001), Some(10.0));
 
     // Complete a Storyline mission -> verifies asymptotic gain formula, derived faction propagation, and GetStandingTransactions
     let (sl_agent_id, sl_corp_id, _) = find_agent_by_level_and_type(&ctx, 1, 6);

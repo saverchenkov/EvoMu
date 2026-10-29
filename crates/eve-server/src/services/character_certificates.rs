@@ -121,6 +121,37 @@ pub fn derive_certificate_levels(
     cert_levels
 }
 
+/// Derives ship mastery tier (`0..=5`) for `ship_type_id` from the character's derived certificate levels.
+pub fn derive_ship_mastery_level(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_type_id: u32,
+) -> u8 {
+    let Ok(bundle) = ctx.sde.load_certificates_and_masteries() else {
+        return 0;
+    };
+    let Some(levels) = bundle.masteries_by_ship_type.get(&ship_type_id) else {
+        return 0;
+    };
+    let cert_levels = derive_certificate_levels(ctx, char_id);
+    let mut mastery = 0u8;
+    for (idx, req_certs) in levels.iter().enumerate() {
+        let target_lvl = (idx as u8).saturating_add(1);
+        if req_certs.is_empty() {
+            break;
+        }
+        let all_met = req_certs
+            .iter()
+            .all(|cid| cert_levels.get(cid).copied().unwrap_or(0) >= target_lvl);
+        if all_met {
+            mastery = target_lvl;
+        } else {
+            break;
+        }
+    }
+    mastery
+}
+
 /// Dispatches `certificateMgr` RPCs (`feat:skills.certificates`).
 pub fn handle(
     ctx: &ServerContext,

@@ -267,15 +267,32 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let raw_service_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0) as u32;
-            let station_id = args.get(1).and_then(|a| a.as_i64()).or(session.station_id).unwrap_or(60_003_760);
-            let service_id = if raw_service_id.is_power_of_two() && raw_service_id > 0 {
-                raw_service_id.trailing_zeros() + 1
+            let raw_service_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            if raw_service_id <= 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "StationServiceUnavailable".into(),
+                    message: format!("Invalid station service ID {raw_service_id}"),
+                }));
+            }
+            let Some(station_id) = args
+                .get(1)
+                .and_then(|a| a.as_i64())
+                .or(session.station_id)
+                .or(session.structure_id)
+            else {
+                return Some(Err(BridgeRpcError {
+                    code: "MissingStationId".into(),
+                    message: "DoStandingCheckForStationService requires a stationID argument or active session stationID".into(),
+                }));
+            };
+            let raw_u32 = u32::try_from(raw_service_id).unwrap_or(0);
+            let service_id = if raw_u32.is_power_of_two() && raw_u32 > 0 {
+                raw_u32.trailing_zeros() + 1
             } else {
-                raw_service_id
+                raw_u32
             };
             let (owner_corp, owner_fac) = if let Some(st) = ctx.sde.stations.get(&station_id) {
-                if raw_service_id > 0 && !npc_station_offers_service(&ctx.sde, station_id, raw_service_id as i64) {
+                if !npc_station_offers_service(&ctx.sde, station_id, raw_service_id) {
                     return Some(Err(BridgeRpcError {
                         code: "StationServiceUnavailable".into(),
                         message: format!("Station {station_id} does not offer service {raw_service_id}"),
@@ -290,20 +307,16 @@ pub async fn handle(
                     message: format!("Station {station_id} not found in SDE"),
                 }));
             };
-            let (corp_st, fac_st) = ctx.db.with_snapshot(|snap| {
-                let ch = snap.characters.get(&char_id);
-                let cs = ch.and_then(|c| c.standings.get(&owner_corp).copied()).unwrap_or(0.0);
-                let fs = ch.and_then(|c| owner_fac.and_then(|fid| c.standings.get(&fid).copied())).unwrap_or(0.0);
-                (cs, fs)
-            });
-            let min_standing = if service_id == 10 || raw_service_id == 512 { 0.0 } else { -2.0 };
-            if corp_st < min_standing || fac_st < -2.0 {
-                return Some(Err(BridgeRpcError {
-                    code: "StandingTooLowForStationService".into(),
-                    message: format!(
-                        "Character {char_id} standing (corp {corp_st:.2}, faction {fac_st:.2}) is below required {min_standing:.1} for service {raw_service_id} at station {station_id}"
-                    ),
-                }));
+            if let Err(err) = crate::services::station_structure_handlers::check_station_service_standing(
+                ctx,
+                char_id,
+                station_id,
+                raw_service_id,
+                service_id,
+                owner_corp,
+                owner_fac,
+            ) {
+                return Some(Err(err));
             }
             Some(Ok(PyRep::Bool(true)))
         }

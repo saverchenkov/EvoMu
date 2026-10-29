@@ -229,6 +229,22 @@ pub fn is_pirate_entity(ctx: &ServerContext, entity_id: i64) -> bool {
     false
 }
 
+pub fn is_trig_or_edencom_entity(ctx: &ServerContext, entity_id: i64) -> bool {
+    let is_te_fac = |fid: i64| matches!(fid, 500_026 | 500_027);
+    if is_te_fac(entity_id) {
+        return true;
+    }
+    if let Some(fid) = ctx.sde.npc_corporations.get(&entity_id).and_then(|c| c.faction_id) {
+        return is_te_fac(i64::from(fid));
+    }
+    if let Some(agent) = ctx.sde.agents.get(&entity_id) {
+        if let Some(fid) = ctx.sde.npc_corporations.get(&agent.corporation_id).and_then(|c| c.faction_id) {
+            return is_te_fac(i64::from(fid));
+        }
+    }
+    false
+}
+
 pub fn compute_effective_standing_breakdown(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
@@ -237,6 +253,9 @@ pub fn compute_effective_standing_breakdown(
     raw_standing: f64,
     has_entry: bool,
 ) -> (f64, f64, f64, f64) {
+    if is_trig_or_edencom_entity(ctx, entity_id) {
+        return (raw_standing.clamp(-10.0, 10.0), 0.0, 0.0, 0.0);
+    }
     let sk = snap.skills.get(&char_id);
     let conn_lvl = sk
         .and_then(|m| m.get(&SKILL_CONNECTIONS))
@@ -308,74 +327,9 @@ pub fn compute_effective_agent_standing(
     vals.into_iter().fold(-10.0_f64, f64::max)
 }
 
-pub fn static_npc_faction_standings() -> Vec<(i64, i64, f64)> {
-    vec![
-        // Caldari State (500001)
-        (500_001, 500_003, 0.5), (500_001, 500_004, -0.5), (500_001, 500_002, -0.3),
-        (500_001, 500_007, 0.4), (500_001, 500_008, 0.5), (500_001, 500_010, -0.8), (500_001, 500_019, -1.0),
-        // Minmatar Republic (500002)
-        (500_002, 500_004, 0.5), (500_002, 500_003, -0.5), (500_002, 500_001, -0.3),
-        (500_002, 500_007, -0.7), (500_002, 500_011, -0.8), (500_002, 500_015, 0.5), (500_002, 500_019, -1.0),
-        // Amarr Empire (500003)
-        (500_003, 500_001, 0.5), (500_003, 500_002, -0.5), (500_003, 500_004, -0.3),
-        (500_003, 500_007, 0.8), (500_003, 500_008, 0.7), (500_003, 500_012, -0.8), (500_003, 500_019, -1.0),
-        // Gallente Federation (500004)
-        (500_004, 500_002, 0.5), (500_004, 500_001, -0.5), (500_004, 500_003, -0.3),
-        (500_004, 500_016, 0.4), (500_004, 500_020, -0.8), (500_004, 500_019, -1.0),
-        // CONCORD Assembly (500006)
-        (500_006, 500_001, 0.5), (500_006, 500_002, 0.5), (500_006, 500_003, 0.5), (500_006, 500_004, 0.5),
-        (500_006, 500_010, -1.0), (500_006, 500_011, -1.0), (500_006, 500_012, -1.0), (500_006, 500_019, -1.0), (500_006, 500_020, -1.0),
-        // Ammatar Mandate (500007) & Khanid Kingdom (500008)
-        (500_007, 500_003, 0.8), (500_007, 500_002, -0.7), (500_008, 500_003, 0.7), (500_008, 500_001, 0.5),
-        // Pirate factions (Guristas 500010, Angel 500011, Blood Raiders 500012, Sansha 500019, Serpentis 500020)
-        (500_010, 500_001, -0.8), (500_011, 500_002, -0.8), (500_012, 500_003, -0.8), (500_019, 500_001, -1.0),
-        (500_019, 500_002, -1.0), (500_019, 500_003, -1.0), (500_019, 500_004, -1.0), (500_020, 500_004, -0.8),
-        // Triglavian Collective (500026) <-> EDENCOM (500027)
-        (500_026, 500_027, -1.0), (500_027, 500_026, -1.0),
-    ]
-}
-
-/// DERIVED: static NPC faction standings and member corporation standings.
-///
-/// DATA GAP: client SDE lacks full inter-NPC cross-standing matrix; inter-faction and member corporate standings are derived.
-pub fn get_sde_npc_npc_standings(sde: &eve_sde::SdeRegistry) -> Vec<(i64, i64, f64)> {
-    let mut standings = static_npc_faction_standings();
-    for (&corp_id, corp) in &sde.npc_corporations {
-        if let Some(fid) = corp.faction_id {
-            let fid_i64 = fid as i64;
-            standings.push((fid_i64, corp_id, 1.0));
-            standings.push((corp_id, fid_i64, 1.0));
-            match fid {
-                500001 => {
-                    standings.push((corp_id, 500004, -0.5));
-                    standings.push((corp_id, 500003, 0.5));
-                    standings.push((corp_id, 500002, -0.3));
-                    standings.push((corp_id, 1_000_035, 0.8));
-                }
-                500002 => {
-                    standings.push((corp_id, 500003, -0.5));
-                    standings.push((corp_id, 500004, 0.5));
-                    standings.push((corp_id, 500001, -0.3));
-                    standings.push((corp_id, 1_000_044, 0.8));
-                }
-                500003 => {
-                    standings.push((corp_id, 500002, -0.5));
-                    standings.push((corp_id, 500001, 0.5));
-                    standings.push((corp_id, 500004, -0.3));
-                    standings.push((corp_id, 1_000_037, 0.8));
-                }
-                500004 => {
-                    standings.push((corp_id, 500001, -0.5));
-                    standings.push((corp_id, 500002, 0.5));
-                    standings.push((corp_id, 500003, -0.3));
-                    standings.push((corp_id, 1_000_036, 0.8));
-                }
-                _ => {}
-            }
-        }
-    }
-    standings
-}
+pub use crate::services::npc_standings_data::{
+    get_sde_npc_npc_standings, static_npc_faction_standings, CCP_NPC_FACTION_STANDINGS,
+};
 
 pub fn apply_mission_completion_standings(
     ctx: &ServerContext,
@@ -432,20 +386,46 @@ pub fn apply_mission_completion_standings(
                 ch.standings.insert(fid, new_fac);
                 changes.push((fid, new_fac, fac_delta));
 
-                // Propagate derived standings to allied and opposing factions
-                for (src_f, dst_f, rel) in static_npc_faction_standings() {
-                    if src_f == fid {
-                        let cur_other = ch.standings.get(&dst_f).copied().unwrap_or(0.0);
-                        let new_other = if rel > 0.0 {
-                            apply_standing_increase(cur_other, fac_pct * rel * 0.5)
+                // Propagate derived standings using CCP repFactions & SDE faction size_factor
+                let primary_size = ctx
+                    .sde
+                    .factions
+                    .get(&(fid as u32))
+                    .map(|f| f.size_factor)
+                    .unwrap_or(5.0);
+                for &(secondary_f, target_f, rel) in CCP_NPC_FACTION_STANDINGS {
+                    if target_f == fid && rel != 0.0 {
+                        let secondary_size = ctx
+                            .sde
+                            .factions
+                            .get(&(secondary_f as u32))
+                            .map(|f| f.size_factor)
+                            .unwrap_or(5.0);
+                        let size_ratio = if primary_size > 0.0 && secondary_size > 0.0 {
+                            (primary_size / secondary_size).clamp(0.25, 4.0)
                         } else {
-                            let loss_pct = (fac_pct * rel.abs() * 0.4).min(10.0);
-                            (cur_other - (cur_other + 10.0) * (loss_pct / 100.0)).clamp(-10.0, 10.0)
+                            1.0
+                        };
+                        let modifier = (rel / 10.0) * size_ratio;
+                        let cur_other = ch.standings.get(&secondary_f).copied().unwrap_or(0.0);
+                        let new_other = if modifier > 0.0 {
+                            if cur_other >= rel {
+                                cur_other
+                            } else {
+                                apply_standing_increase(cur_other, fac_pct * modifier * 0.5).min(rel)
+                            }
+                        } else if cur_other <= rel {
+                            cur_other
+                        } else {
+                            let loss_pct = (fac_pct * modifier.abs() * 0.4).min(10.0);
+                            (cur_other - (cur_other + 10.0) * (loss_pct / 100.0))
+                                .max(rel)
+                                .clamp(-10.0, 10.0)
                         };
                         let d_other = new_other - cur_other;
                         if d_other.abs() > 1e-6 {
-                            ch.standings.insert(dst_f, new_other);
-                            changes.push((dst_f, new_other, d_other));
+                            ch.standings.insert(secondary_f, new_other);
+                            changes.push((secondary_f, new_other, d_other));
                         }
                     }
                 }
