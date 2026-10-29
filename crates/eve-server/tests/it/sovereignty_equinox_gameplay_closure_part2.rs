@@ -228,11 +228,23 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
         let balls_before = ctx.db.with_snapshot(|s| s.sov_runtime.mto_site_balls.len());
         assert_eq!(balls_before, 1);
         let bal_before_timeout = ctx.db.with_snapshot(|s| s.characters[&PILOT].balance.0);
+        let player_maelstrom_ship_id = 100_000_999i64;
+        let cs_player_maelstrom = ctx.build_ship_combat_state(PILOT, player_maelstrom_ship_id, 24_690);
+        let _ = ctx.systems.get_or_spawn(null_sys).spawn_ball_with_combat(
+            make_ball(player_maelstrom_ship_id, 24_690, DVec3::new(100_000.0, 0.0, 0.0)),
+            cs_player_maelstrom,
+        ).await;
+        assert!(ctx.systems.get_or_spawn(null_sys).get_ball_snapshot(player_maelstrom_ship_id).await.unwrap().is_some());
         ctx.advance_secs(1_801); // 30m timeout
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
         let balls_after = ctx.db.with_snapshot(|s| s.sov_runtime.mto_site_balls.len());
         assert_eq!(balls_after, 0, "expired MTO despawns its site ball");
         assert_eq!(ctx.db.with_snapshot(|s| s.characters[&PILOT].balance.0), bal_before_timeout, "expired MTO awards no ISK");
+        assert!(
+            ctx.systems.get_or_spawn(null_sys).get_ball_snapshot(player_maelstrom_ship_id).await.unwrap().is_some(),
+            "player Maelstrom (type 24690) in den system must survive cluster ticks and not be swept",
+        );
+        let _ = ctx.systems.get_or_spawn(null_sys).remove_ball(player_maelstrom_ship_id).await;
     }
 
     // 4. Live `beyonce.CallComponentFromClient` (`mercenaryDen.extract_infomorphs_to_ship`) deducts 20% sov tax.

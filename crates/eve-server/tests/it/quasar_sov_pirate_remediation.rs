@@ -402,6 +402,11 @@ async fn test_mercenary_den_activities_and_evolution_state_backed() {
         snap.structures.insert(den_id, structure(den_id, 98_000_001, sys_id, 85_230));
         snap.sov_runtime.mercenary_dens.insert(den_id, den_record(den_id, skyhook_id, ctx.now_unix()));
         snap.skills.entry(PILOT).or_default().insert(85_233, eve_db::TrainedSkillRecord { type_id: 85_233, level: 3, skill_points: 0.0 });
+        if let Some(ch) = snap.characters.get_mut(&PILOT) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+        }
     });
 
     let max = rpc(&ctx, &mut s, "eve_public.sovereignty.mercenaryden.api.GetMaximumForCharacterRequest", Vec::new()).await;
@@ -455,9 +460,9 @@ async fn test_mercenary_den_activities_and_evolution_state_backed() {
     assert_ne!(rpc(&ctx, &mut s, "eve_public.sovereignty.mercenaryden.activity.api.StartRequest", start_req).await.status_code, STATUS_OK);
     assert_eq!(ctx.db.with_snapshot(|snap| snap.sov_runtime.mercenary_activities.values().filter(|a| a.started).count()), 1);
 
-    // After completion window (1800s), activity completes via real server tick/refresh.
-    ctx.advance_secs(2_000);
-    rpc(&ctx, &mut s, "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenRequest", id_req(1, den_id as u64)).await;
+    // Complete tactical operation via space entity destruction.
+    let site_ball_id = ctx.db.with_snapshot(|snap| snap.sov_runtime.mto_site_balls.keys().copied().next()).expect("site ball");
+    eve_server::services::sov_gameplay::on_space_entity_destroyed_ext(&ctx, sys_id, Some(PILOT), site_ball_id, 24_690, true);
     let complete_notices = drain(&mut rx);
     assert!(complete_notices.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.CompletedNotice"));
     assert_eq!(ctx.db.with_snapshot(|snap| snap.sov_runtime.mercenary_activities.values().filter(|a| a.started).count()), 0);

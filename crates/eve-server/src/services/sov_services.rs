@@ -141,18 +141,10 @@ pub(crate) fn can_access_sov_hub_fuel(
             return false;
         }
     }
-    let role_mask = snap
-        .corporations
-        .get(&corp_id)
-        .and_then(|c| c.member_roles.get(&char_id).copied())
-        .unwrap_or(0)
-        | extra_roles;
-    let is_ceo = snap.corporations.get(&corp_id).is_some_and(|c| c.ceo_id == char_id);
-    let has_mgr = is_ceo
-        || eve_db::corp_roles::has_role(
-            role_mask,
-            eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER,
-        );
+    let has_mgr = eve_db::corp_roles::has_role(
+        extra_roles,
+        eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER,
+    );
     if !has_mgr {
         return false;
     }
