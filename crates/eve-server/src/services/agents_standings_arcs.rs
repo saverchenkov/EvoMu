@@ -14,7 +14,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::formulas::apply_standing_increase;
+use crate::formulas::{apply_standing_decrease, apply_standing_increase};
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, StandingTransactionRecord};
 use eve_machonet::SessionState;
@@ -329,7 +329,81 @@ pub fn compute_effective_agent_standing(
 
 pub use crate::services::npc_standings_data::{
     get_sde_npc_npc_standings, static_npc_faction_standings, CCP_NPC_FACTION_STANDINGS,
+    DERIVED_FACTION_STANDINGS,
 };
+
+/// Applies a primary faction standing percentage change (`fac_pct`, positive for gain or
+/// negative for loss) and, when `apply_derived` is true, propagates derived faction standings
+/// per EVE Wiki (`NPC_standings.md`):
+/// - `Inter-Faction Standing Modifier = Secondary's view of Primary * (Primary Size / Secondary Size)`
+/// - `Derived Standing % = Gain % * (Inter-Faction Standing Modifier / 10.0)`
+/// - Gains and enemy losses are capped at Secondary's standing view of Primary (`rel`).
+/// - When `fac_pct < 0.0` (faction standing loss), friends (`rel > 0.0`) receive negative derived
+///   standings while enemies (`rel < 0.0`) do not receive positive derived standings.
+pub fn apply_faction_standing_with_derived(
+    ctx: &ServerContext,
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    primary_faction_id: i64,
+    fac_pct: f64,
+    apply_derived: bool,
+    changes: &mut Vec<(i64, f64, f64)>,
+) {
+    if fac_pct.abs() <= 1e-9 {
+        return;
+    }
+    let Some(ch) = snap.characters.get_mut(&char_id) else {
+        return;
+    };
+    let cur_fac = ch.standings.get(&primary_faction_id).copied().unwrap_or(0.0);
+    let new_fac = if fac_pct >= 0.0 {
+        apply_standing_increase(cur_fac, fac_pct)
+    } else {
+        apply_standing_decrease(cur_fac, fac_pct.abs())
+    };
+    let fac_delta = new_fac - cur_fac;
+    ch.standings.insert(primary_faction_id, new_fac);
+    if fac_delta.abs() > 1e-9 {
+        changes.push((primary_faction_id, new_fac, fac_delta));
+    }
+    if !apply_derived {
+        return;
+    }
+    let primary_size = ctx.sde.factions.get(&(primary_faction_id as u32)).map_or(5.0, |f| f.size_factor);
+    if primary_size <= 0.0 {
+        return;
+    }
+    for &(secondary_f, target_f, rel) in CCP_NPC_FACTION_STANDINGS.iter().chain(DERIVED_FACTION_STANDINGS.iter()) {
+        if target_f != primary_faction_id || rel == 0.0 {
+            continue;
+        }
+        let secondary_size = ctx.sde.factions.get(&(secondary_f as u32)).map_or(5.0, |f| f.size_factor);
+        if secondary_size <= 0.0 {
+            continue;
+        }
+        let modifier = rel * (primary_size / secondary_size);
+        let derived_pct = fac_pct * (modifier / 10.0);
+        let cur_other = ch.standings.get(&secondary_f).copied().unwrap_or(0.0);
+        let new_other = if fac_pct > 0.0 {
+            if rel > 0.0 {
+                if cur_other >= rel { cur_other } else { apply_standing_increase(cur_other, derived_pct).min(rel) }
+            } else if cur_other <= rel {
+                cur_other
+            } else {
+                apply_standing_decrease(cur_other, derived_pct.abs()).max(rel)
+            }
+        } else if rel > 0.0 {
+            apply_standing_decrease(cur_other, derived_pct.abs())
+        } else {
+            cur_other
+        };
+        let d_other = new_other - cur_other;
+        if d_other.abs() > 1e-6 {
+            ch.standings.insert(secondary_f, new_other);
+            changes.push((secondary_f, new_other, d_other));
+        }
+    }
+}
 
 pub fn apply_mission_completion_standings(
     ctx: &ServerContext,
@@ -372,64 +446,21 @@ pub fn apply_mission_completion_standings(
             .map(|f| f as i64),
     };
 
-    if scaled_pct > 0.0 {
+    if scaled_pct.abs() > 1e-9 {
         if let Some(fid) = faction_id {
             let fac_pct = if is_storyline_or_special {
                 scaled_pct * 0.50
             } else {
                 scaled_pct * 0.15
             };
-            if let Some(ch) = snap.characters.get_mut(&char_id) {
-                let cur_fac = ch.standings.get(&fid).copied().unwrap_or(0.0);
-                let new_fac = apply_standing_increase(cur_fac, fac_pct);
-                let fac_delta = new_fac - cur_fac;
-                ch.standings.insert(fid, new_fac);
-                changes.push((fid, new_fac, fac_delta));
-
-                // Propagate derived standings using CCP repFactions & SDE faction size_factor
-                let primary_size = ctx
-                    .sde
-                    .factions
-                    .get(&(fid as u32))
-                    .map(|f| f.size_factor)
-                    .unwrap_or(5.0);
-                for &(secondary_f, target_f, rel) in CCP_NPC_FACTION_STANDINGS {
-                    if target_f == fid && rel != 0.0 {
-                        let secondary_size = ctx
-                            .sde
-                            .factions
-                            .get(&(secondary_f as u32))
-                            .map(|f| f.size_factor)
-                            .unwrap_or(5.0);
-                        let size_ratio = if primary_size > 0.0 && secondary_size > 0.0 {
-                            (primary_size / secondary_size).clamp(0.25, 4.0)
-                        } else {
-                            1.0
-                        };
-                        let modifier = (rel / 10.0) * size_ratio;
-                        let cur_other = ch.standings.get(&secondary_f).copied().unwrap_or(0.0);
-                        let new_other = if modifier > 0.0 {
-                            if cur_other >= rel {
-                                cur_other
-                            } else {
-                                apply_standing_increase(cur_other, fac_pct * modifier * 0.5).min(rel)
-                            }
-                        } else if cur_other <= rel {
-                            cur_other
-                        } else {
-                            let loss_pct = (fac_pct * modifier.abs() * 0.4).min(10.0);
-                            (cur_other - (cur_other + 10.0) * (loss_pct / 100.0))
-                                .max(rel)
-                                .clamp(-10.0, 10.0)
-                        };
-                        let d_other = new_other - cur_other;
-                        if d_other.abs() > 1e-6 {
-                            ch.standings.insert(secondary_f, new_other);
-                            changes.push((secondary_f, new_other, d_other));
-                        }
-                    }
-                }
-            }
+            // Per EVE Wiki (NPC standings: Derived standings): Epic Arc (agent_type_id == 10)
+            // and Career Agent (agent_type_id == 12) missions do not trigger derived standings.
+            let apply_derived = !ctx
+                .sde
+                .agents
+                .get(&agent_id)
+                .is_some_and(|a| matches!(a.agent_type_id, 10 | 12));
+            apply_faction_standing_with_derived(ctx, snap, char_id, fid, fac_pct, apply_derived, &mut changes);
         }
     }
 

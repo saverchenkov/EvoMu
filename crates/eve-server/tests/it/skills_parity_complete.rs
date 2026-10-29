@@ -339,9 +339,24 @@ async fn test_feat_skills_certificates_and_plans_and_accelerators() {
     encode_bytes_field(2, &f2_id, &mut f2_req);
     encode_bytes_field(1, &f2_id, &mut sh_req);
     assert_eq!(quasar_rpc(&ctx, &mut ceo_sess, "eve_public.character.skill.plan.SetActiveRequest", f2_req).await.status_code, 200);
+    let active_rsp = quasar_rpc(&ctx, &mut ceo_sess, "eve_public.character.skill.plan.GetActiveRequest", Vec::new()).await;
+    assert_eq!(active_rsp.status_code, 200);
+    let active_wm = WireMessage::decode(&active_rsp.payload.unwrap().value).unwrap();
+    let active_id_wm = WireMessage::decode(active_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(active_id_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap(), &plan_uuid);
+    let active_attr_wm = WireMessage::decode(active_wm.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(active_attr_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_str(), Ok(Some("Frigate Mastery")));
+
     let shared_rsp = quasar_rpc(&ctx, &mut member_sess, "eve_public.character.skill.plan.GetSharedRequest", sh_req).await;
     assert_eq!(shared_rsp.status_code, 200);
-    assert!(!shared_rsp.payload.unwrap().value.is_empty());
+    let shared_wm = WireMessage::decode(&shared_rsp.payload.unwrap().value).unwrap();
+    let shared_attr_wm = WireMessage::decode(shared_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(shared_attr_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_str(), Ok(Some("Frigate Mastery")));
+    assert_eq!(shared_attr_wm.fields.iter().find(|f| f.field_number == 3).unwrap().value.as_str(), Ok(Some("Core combat frigate skills")));
+    let shared_req_wm = WireMessage::decode(shared_attr_wm.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_bytes().unwrap()).unwrap();
+    let shared_tid_wm = WireMessage::decode(shared_req_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(shared_tid_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_varint(), Some(3327));
+    assert_eq!(shared_req_wm.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_varint(), Some(4));
 
     // Corporation skill plans: unprivileged member gets 403 on CreateRequest, CEO creates (200), member reads via GetAllRequest (200)
     let (mut corp_attr, mut corp_val) = (Vec::new(), Vec::new());
@@ -454,6 +469,10 @@ async fn test_feat_skills_certificates_and_plans_and_accelerators() {
     let mut ceo2 = login_and_select(&ctx2, 1025, "demo", "demo-secret", 90_000_001).await;
     let active_reloaded = quasar_rpc(&ctx2, &mut ceo2, "eve_public.character.skill.plan.GetActiveRequest", Vec::new()).await;
     assert_eq!(active_reloaded.status_code, 200);
-    assert!(!active_reloaded.payload.unwrap().value.is_empty());
+    let reload_wm = WireMessage::decode(&active_reloaded.payload.unwrap().value).unwrap();
+    let reload_id_wm = WireMessage::decode(reload_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(reload_id_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap(), &plan_uuid);
+    let reload_attr_wm = WireMessage::decode(reload_wm.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(reload_attr_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_str(), Ok(Some("Frigate Mastery")));
     let _ = std::fs::remove_file(&db_path);
 }

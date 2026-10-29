@@ -324,12 +324,8 @@ async fn test_standing_mgr_npc_npc_standings_closure() {
         rows.len()
     );
 
-    // Verify exact CCP repFactions and member-corp standings
-    let mut caldari_gallente = None;
-    let mut caldari_amarr = None;
-    let mut caldari_navy = None;
-    let mut soe_minmatar = None;
-
+    // Verify exact CCP repFactions (.25/.75 precision) and derived corp/Triglavian standings
+    let mut rel_map = HashMap::new();
     for row in &rows {
         assert_eq!(row.len(), 3);
         let from_id = row[0].as_i64().expect("fromID");
@@ -339,29 +335,41 @@ async fn test_standing_mgr_npc_npc_standings_closure() {
             PyRep::Integer(v) => *v as f64,
             other => panic!("expected real standing, got {other:?}"),
         };
-        assert!(
-            (-10.0..=10.0).contains(&standing),
-            "Standing must be in [-10, 10]"
-        );
-
-        if from_id == 500001 && to_id == 500004 {
-            caldari_gallente = Some(standing);
-        }
-        if from_id == 500001 && to_id == 500003 {
-            caldari_amarr = Some(standing);
-        }
-        if from_id == 1000035 && to_id == 500001 {
-            caldari_navy = Some(standing);
-        }
-        if from_id == 500016 && to_id == 500002 {
-            soe_minmatar = Some(standing);
+        assert!((-10.0..=10.0).contains(&standing), "Standing must be in [-10, 10]");
+        rel_map.insert((from_id, to_id), standing);
+    }
+    for &(f, t, exp) in &[
+        (500_001, 500_004, -5.0), (500_001, 500_003, 7.0), (500_016, 500_002, 4.0),
+        (500_001, 500_005, 1.75), (500_005, 500_001, 1.75), (500_002, 500_013, 1.25),
+        (500_013, 500_002, 1.25), (500_003, 500_014, -1.25), (500_005, 500_013, 1.25),
+        (500_013, 500_005, 1.25), (500_013, 500_019, -1.75), (500_014, 500_008, -3.75),
+        (500_017, 500_019, -1.75), (500_019, 500_017, -1.75), (500_017, 500_020, -1.25),
+        (500_020, 500_017, -1.25), (500_001, 500_016, -0.25), (500_003, 500_013, 0.25),
+        (500_026, 500_027, -10.0), (500_027, 500_026, -10.0), (1_000_035, 500_001, 10.0),
+    ] {
+        assert_eq!(rel_map.get(&(f, t)).copied(), Some(exp), "mismatch for ({f}, {t})");
+    }
+    if let Ok(out) = std::process::Command::new("gzip")
+        .args(["-dc", "/Users/sergeya/ai/evemu_Crucible/sql/base/repFactions.sql.gz"])
+        .output()
+    {
+        if out.status.success() {
+            let sql = String::from_utf8_lossy(&out.stdout);
+            let mut parsed = 0usize;
+            for chunk in sql.split('(').skip(1) {
+                if !chunk.starts_with("500") { continue; }
+                let body = chunk.split(')').next().unwrap_or("");
+                let mut parts = body.split(',');
+                if let (Some(a), Some(b), Some(c)) = (parts.next(), parts.next(), parts.next()) {
+                    let (f, t, exp): (i64, i64, f64) = (a.trim().parse().unwrap(), b.trim().parse().unwrap(), c.trim().parse().unwrap());
+                    let got = rel_map.get(&(f, t)).copied().unwrap_or_else(|| panic!("missing ({f}, {t})"));
+                    assert!((got - exp).abs() < 1e-9, "({f}, {t}) expected {exp}, got {got}");
+                    parsed += 1;
+                }
+            }
+            assert_eq!(parsed, 380, "must verify all 380 repFactions rows");
         }
     }
-
-    assert_eq!(caldari_gallente, Some(-5.0), "Caldari-Gallente must match CCP repFactions (-5.0)");
-    assert_eq!(caldari_amarr, Some(7.0), "Caldari-Amarr must match CCP repFactions (7.0)");
-    assert_eq!(caldari_navy, Some(10.0), "Caldari Navy standing with Caldari State must be 10.0");
-    assert_eq!(soe_minmatar, Some(4.0), "Servant Sisters of EVE standing with Minmatar Republic must be 4.0");
 }
 
 #[tokio::test]

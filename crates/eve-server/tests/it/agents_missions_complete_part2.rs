@@ -461,8 +461,39 @@ async fn test_standings_formulas_derived_effective_corp_standing_data_and_transa
     assert_eq!(find_npc_rel(500_026, 500_027), Some(-10.0));
     assert_eq!(find_npc_rel(1_000_035, 500_001), Some(10.0));
 
+    // Verify exact EVE Wiki derived standing formula (NPC_standings.md:140-156):
+    // +2% Minmatar (500_002, size 5.0) -> -1% Amarr (500_003, size 5.0, rel -5.0) & +1% Thukker (500_015, size 3.0, rel +3.0)
+    use eve_server::services::agents_missions::apply_faction_standing_with_derived;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().standings.clear();
+        let mut chg = Vec::new();
+        apply_faction_standing_with_derived(&ctx, snap, char_id, 500_002, 2.0, true, &mut chg);
+        let st = &snap.characters[&char_id].standings;
+        assert!((st[&500_002] - 0.20).abs() < 1e-9, "Minmatar +2% gain -> +0.20");
+        assert!((st[&500_003] - (-0.10)).abs() < 1e-9, "Amarr -1% derived -> -0.10, got {}", st[&500_003]);
+        assert!((st[&500_015] - 0.10).abs() < 1e-9, "Thukker +1% derived -> +0.10, got {}", st[&500_015]);
+        assert!((st[&500_001] - (-0.04)).abs() < 1e-9, "Caldari -0.4% derived -> -0.04, got {}", st[&500_001]);
+
+        // Cap at secondary faction's standing toward primary (-5.00 for Amarr -> Minmatar)
+        snap.characters.get_mut(&char_id).unwrap().standings.insert(500_003, -4.98);
+        apply_faction_standing_with_derived(&ctx, snap, char_id, 500_002, 2.0, true, &mut chg);
+        assert!((snap.characters[&char_id].standings[&500_003] - (-5.0)).abs() < 1e-9, "Amarr must cap at -5.00");
+        apply_faction_standing_with_derived(&ctx, snap, char_id, 500_002, 2.0, true, &mut chg);
+        assert!((snap.characters[&char_id].standings[&500_003] - (-5.0)).abs() < 1e-9, "Amarr at -5.00 must not drop further");
+
+        // Asymmetric standing loss: -2% Minmatar lowers friend Thukker (-1%), never raises enemy Amarr
+        snap.characters.get_mut(&char_id).unwrap().standings.clear();
+        apply_faction_standing_with_derived(&ctx, snap, char_id, 500_002, -2.0, true, &mut chg);
+        let st_loss = &snap.characters[&char_id].standings;
+        assert!((st_loss[&500_002] - (-0.20)).abs() < 1e-9);
+        assert!((st_loss[&500_015] - (-0.10)).abs() < 1e-9, "Friend Thukker must suffer -1% derived loss");
+        assert_eq!(st_loss.get(&500_003).copied().unwrap_or(0.0), 0.0, "Enemy Amarr must NOT gain positive derived standing");
+        snap.characters.get_mut(&char_id).unwrap().standings.clear();
+    });
+
     // Complete a Storyline mission -> verifies asymptotic gain formula, derived faction propagation, and GetStandingTransactions
     let (sl_agent_id, sl_corp_id, _) = find_agent_by_level_and_type(&ctx, 1, 6);
+    let sl_faction_id = ctx.sde.npc_corporations.get(&sl_corp_id).and_then(|c| c.faction_id).map(i64::from).unwrap_or(500_001);
     let (sl_sys_id, _) = colocate_with_agent(&ctx, &mut sess, char_id, sl_agent_id);
     let mut storyline_missions: Vec<&eve_sde::MissionTemplate> = ctx
         .sde
@@ -499,6 +530,12 @@ async fn test_standings_formulas_derived_effective_corp_standing_data_and_transa
     )
     .await
     .expect("Complete storyline mission for derived standings");
+
+    ctx.db.with_snapshot(|snap| {
+        let st = &snap.characters[&char_id].standings;
+        assert!(st.get(&sl_faction_id).copied().unwrap_or(0.0) > 0.0, "Storyline must grant primary faction standing");
+        assert!(st.values().any(|&v| v < 0.0), "Storyline must propagate negative derived standing to hostile factions");
+    });
 
     let txs = rpc_call(
         &ctx,

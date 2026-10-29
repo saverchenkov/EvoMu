@@ -1,17 +1,27 @@
 //! Static CCP NPC-to-NPC faction and corporation standing matrix (`feat:standings.npc-npc-standings`, `rpc:standingMgr.GetNPCNPCStandings`).
 //!
-//! Populated from CCP's canonical `repFactions` inter-faction matrix (380 directional pairs across
-//! factions `500001..=500020` on the `[-10.0, 10.0]` standing scale, plus Triglavian Collective
-//! `500026` <-> EDENCOM `500027`), extended with SDE `npc_corporations` / `factions` relationships.
+//! DATA GAP: EVE V24 client FSD (`SharedCache`) does not bundle live server-side inter-NPC
+//! cross-standing tables (`repFactions` / `chrNPCStandings`), nor does `evomu_sde.sqlite`.
+//! The 380 directional inter-faction pairs across factions `500001..=500020` in
+//! [`CCP_NPC_FACTION_STANDINGS`] are populated verbatim (exact `f64` values, preserving all
+//! `.25` and `.75` entries) from the Crucible-era CCP `repFactions` SQL dump at
+//! `evemu_Crucible/sql/base/repFactions.sql.gz`.
+//!
+//! DERIVED: Post-Crucible Triglavian Collective (`500026`) <-> EDENCOM (`500027`) mutual
+//! hostility (`-10.0`) is separated into [`DERIVED_FACTION_STANDINGS`], and NPC corporation
+//! relationships in [`get_sde_npc_npc_standings`] (`10.0` member-corp <-> parent-faction,
+//! inherited faction -> target-faction, and `8.0` corp -> faction executor corp) are derived
+//! from `evomu_sde.sqlite` `npc_corporations` and `factions`.
 
 #![forbid(unsafe_code)]
 
-/// Canonical CCP `repFactions` directional inter-faction standings `(from_id, to_id, standing)` in `[-10.0, 10.0]`.
+/// Canonical CCP `repFactions` directional inter-faction standings `(from_id, to_id, standing)`
+/// in `[-10.0, 10.0]`, extracted verbatim from `evemu_Crucible/sql/base/repFactions.sql.gz` (380 pairs).
 pub const CCP_NPC_FACTION_STANDINGS: &[(i64, i64, f64)] = &[
     (500_001, 500_002, -2.0_f64),
     (500_001, 500_003, 7.0_f64),
     (500_001, 500_004, -5.0_f64),
-    (500_001, 500_005, 1.8_f64),
+    (500_001, 500_005, 1.75_f64),
     (500_001, 500_006, 3.0_f64),
     (500_001, 500_007, 4.0_f64),
     (500_001, 500_008, 4.5_f64),
@@ -38,7 +48,7 @@ pub const CCP_NPC_FACTION_STANDINGS: &[(i64, i64, f64)] = &[
     (500_002, 500_010, 0.0_f64),
     (500_002, 500_011, -9.0_f64),
     (500_002, 500_012, 0.0_f64),
-    (500_002, 500_013, 1.2_f64),
+    (500_002, 500_013, 1.25_f64),
     (500_002, 500_014, 4.0_f64),
     (500_002, 500_015, 4.0_f64),
     (500_002, 500_016, 2.5_f64),
@@ -58,7 +68,7 @@ pub const CCP_NPC_FACTION_STANDINGS: &[(i64, i64, f64)] = &[
     (500_003, 500_011, 0.0_f64),
     (500_003, 500_012, -8.0_f64),
     (500_003, 500_013, 0.25_f64),
-    (500_003, 500_014, -1.2_f64),
+    (500_003, 500_014, -1.25_f64),
     (500_003, 500_015, -5.0_f64),
     (500_003, 500_016, -1.0_f64),
     (500_003, 500_017, -0.25_f64),
@@ -84,7 +94,7 @@ pub const CCP_NPC_FACTION_STANDINGS: &[(i64, i64, f64)] = &[
     (500_004, 500_018, -2.0_f64),
     (500_004, 500_019, 0.0_f64),
     (500_004, 500_020, -9.0_f64),
-    (500_005, 500_001, 1.8_f64),
+    (500_005, 500_001, 1.75_f64),
     (500_005, 500_002, 2.5_f64),
     (500_005, 500_003, -0.5_f64),
     (500_005, 500_004, -0.25_f64),
@@ -95,7 +105,7 @@ pub const CCP_NPC_FACTION_STANDINGS: &[(i64, i64, f64)] = &[
     (500_005, 500_010, 0.0_f64),
     (500_005, 500_011, 0.0_f64),
     (500_005, 500_012, 0.0_f64),
-    (500_005, 500_013, 1.2_f64),
+    (500_005, 500_013, 1.25_f64),
     (500_005, 500_014, 1.0_f64),
     (500_005, 500_015, 0.25_f64),
     (500_005, 500_016, 2.0_f64),
@@ -237,10 +247,10 @@ pub const CCP_NPC_FACTION_STANDINGS: &[(i64, i64, f64)] = &[
     (500_012, 500_019, 4.5_f64),
     (500_012, 500_020, -2.0_f64),
     (500_013, 500_001, 1.5_f64),
-    (500_013, 500_002, 1.2_f64),
+    (500_013, 500_002, 1.25_f64),
     (500_013, 500_003, 0.25_f64),
     (500_013, 500_004, 3.0_f64),
-    (500_013, 500_005, 1.2_f64),
+    (500_013, 500_005, 1.25_f64),
     (500_013, 500_006, 9.0_f64),
     (500_013, 500_007, 0.75_f64),
     (500_013, 500_008, 0.75_f64),
@@ -253,7 +263,7 @@ pub const CCP_NPC_FACTION_STANDINGS: &[(i64, i64, f64)] = &[
     (500_013, 500_016, 5.0_f64),
     (500_013, 500_017, 1.5_f64),
     (500_013, 500_018, 1.5_f64),
-    (500_013, 500_019, -1.8_f64),
+    (500_013, 500_019, -1.75_f64),
     (500_013, 500_020, -1.0_f64),
     (500_014, 500_001, -2.0_f64),
     (500_014, 500_002, 4.0_f64),
@@ -262,7 +272,7 @@ pub const CCP_NPC_FACTION_STANDINGS: &[(i64, i64, f64)] = &[
     (500_014, 500_005, 1.0_f64),
     (500_014, 500_006, 3.0_f64),
     (500_014, 500_007, -1.0_f64),
-    (500_014, 500_008, -3.8_f64),
+    (500_014, 500_008, -3.75_f64),
     (500_014, 500_009, -1.0_f64),
     (500_014, 500_010, 0.0_f64),
     (500_014, 500_011, -3.0_f64),
@@ -329,8 +339,8 @@ pub const CCP_NPC_FACTION_STANDINGS: &[(i64, i64, f64)] = &[
     (500_017, 500_015, -0.5_f64),
     (500_017, 500_016, 6.0_f64),
     (500_017, 500_018, 1.5_f64),
-    (500_017, 500_019, -1.8_f64),
-    (500_017, 500_020, -1.2_f64),
+    (500_017, 500_019, -1.75_f64),
+    (500_017, 500_020, -1.25_f64),
     (500_018, 500_001, 9.0_f64),
     (500_018, 500_002, -2.0_f64),
     (500_018, 500_003, 5.0_f64),
@@ -366,7 +376,7 @@ pub const CCP_NPC_FACTION_STANDINGS: &[(i64, i64, f64)] = &[
     (500_019, 500_014, 0.0_f64),
     (500_019, 500_015, -3.0_f64),
     (500_019, 500_016, 0.0_f64),
-    (500_019, 500_017, -1.8_f64),
+    (500_019, 500_017, -1.75_f64),
     (500_019, 500_018, -5.0_f64),
     (500_019, 500_020, -2.0_f64),
     (500_020, 500_001, 0.0_f64),
@@ -385,22 +395,32 @@ pub const CCP_NPC_FACTION_STANDINGS: &[(i64, i64, f64)] = &[
     (500_020, 500_014, -7.0_f64),
     (500_020, 500_015, 0.0_f64),
     (500_020, 500_016, -3.0_f64),
-    (500_020, 500_017, -1.2_f64),
+    (500_020, 500_017, -1.25_f64),
     (500_020, 500_018, 0.0_f64),
     (500_020, 500_019, -2.0_f64),
-    (500_026, 500_027, -1e+01_f64),
-    (500_027, 500_026, -1e+01_f64),
 ];
 
-/// Returns the static directional NPC faction-to-faction standing matrix `(from_id, to_id, standing)`.
+/// DERIVED: Post-Crucible inter-faction standings absent from `evemu_Crucible/sql/base/repFactions.sql.gz`.
+pub const DERIVED_FACTION_STANDINGS: &[(i64, i64, f64)] = &[
+    // DERIVED: Post-Crucible Triglavian Invasion / Pochven bipolar opposition (`500026` <-> `500027`)
+    (500_026, 500_027, -10.0_f64),
+    (500_027, 500_026, -10.0_f64),
+];
+
+/// Returns the directional NPC faction-to-faction standing matrix `(from_id, to_id, standing)`,
+/// combining all 380 canonical `repFactions` entries with [`DERIVED_FACTION_STANDINGS`].
 pub fn static_npc_faction_standings() -> Vec<(i64, i64, f64)> {
-    CCP_NPC_FACTION_STANDINGS.to_vec()
+    let mut out = Vec::with_capacity(CCP_NPC_FACTION_STANDINGS.len() + DERIVED_FACTION_STANDINGS.len());
+    out.extend_from_slice(CCP_NPC_FACTION_STANDINGS);
+    out.extend_from_slice(DERIVED_FACTION_STANDINGS);
+    out
 }
 
 /// Returns the full NPC-to-NPC standing table (inter-faction + SDE member/executor corporations)
 /// served by `standingMgr.GetNPCNPCStandings`.
 pub fn get_sde_npc_npc_standings(sde: &eve_sde::SdeRegistry) -> Vec<(i64, i64, f64)> {
-    let mut standings = static_npc_faction_standings();
+    let faction_standings = static_npc_faction_standings();
+    let mut standings = faction_standings.clone();
     let mut corp_ids: Vec<i64> = sde.npc_corporations.keys().copied().collect();
     corp_ids.sort_unstable();
     for corp_id in corp_ids {
@@ -409,13 +429,16 @@ pub fn get_sde_npc_npc_standings(sde: &eve_sde::SdeRegistry) -> Vec<(i64, i64, f
         };
         if let Some(fid) = corp.faction_id {
             let fid_i64 = i64::from(fid);
+            // DERIVED: Member corporation <-> parent faction standing (+10.0)
             standings.push((fid_i64, corp_id, 10.0));
             standings.push((corp_id, fid_i64, 10.0));
-            for &(src_f, dst_f, rel) in CCP_NPC_FACTION_STANDINGS {
+            // DERIVED: Member corporation inherits parent faction view of target factions
+            for &(src_f, dst_f, rel) in &faction_standings {
                 if src_f == fid_i64 {
                     standings.push((corp_id, dst_f, rel));
                 }
             }
+            // DERIVED: Member corporation -> parent faction executor corporation standing (+8.0)
             if let Some(exec_corp_id) = sde.factions.get(&fid).and_then(|f| f.corporation_id) {
                 if exec_corp_id != corp_id {
                     standings.push((corp_id, exec_corp_id, 8.0));
