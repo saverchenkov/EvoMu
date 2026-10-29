@@ -844,6 +844,8 @@ impl ServerContext {
             cluster_state,
             global_config_values: std::sync::RwLock::new(std::collections::HashMap::new()),
             alert_telemetry: std::sync::Mutex::new(Default::default()),
+            flight_recorder: std::sync::Arc::new(crate::flight_recorder::FlightRecorder::new()),
+            bug_reporting: std::sync::Arc::new(crate::bug_reporting::BugReportingRuntime::new()),
             npc_spawns: std::sync::RwLock::new(std::collections::HashMap::new()),
             combat_rng_seq: std::sync::atomic::AtomicU64::new(0),
         }

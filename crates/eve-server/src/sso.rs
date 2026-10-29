@@ -21,6 +21,8 @@ use tokio::net::TcpStream;
 
 /// Maximum HTTP request size accepted by the SSO/ESI listener (256 KiB).
 pub const MAX_HTTP_REQUEST_BYTES: usize = 256 * 1024;
+/// Maximum HTTP body size accepted for `POST /bugs/api/attachment/{id}` (32 MiB for screenshots + `igbr.zip`).
+pub const MAX_BUG_ATTACHMENT_BYTES: usize = 32 * 1024 * 1024;
 
 /// Structured HTTP response produced by the SSO/ESI HTTP handler.
 #[derive(Debug, Clone)]
@@ -123,7 +125,14 @@ pub async fn handle_http_connection(mut stream: TcpStream, ctx: Arc<ServerContex
         .get("content-length")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0);
-    if content_length > MAX_HTTP_REQUEST_BYTES {
+    let is_bug_attachment_upload =
+        method == "POST" && target.starts_with("/bugs/api/attachment/");
+    let max_body_bytes = if is_bug_attachment_upload {
+        MAX_BUG_ATTACHMENT_BYTES
+    } else {
+        MAX_HTTP_REQUEST_BYTES
+    };
+    if content_length > max_body_bytes {
         let resp = HttpResponse::json(
             413,
             "Payload Too Large",
@@ -131,6 +140,14 @@ pub async fn handle_http_connection(mut stream: TcpStream, ctx: Arc<ServerContex
         );
         stream.write_all(&resp.to_wire_bytes()).await?;
         return Ok(());
+    }
+
+    if headers
+        .get("expect")
+        .is_some_and(|v| v.eq_ignore_ascii_case("100-continue"))
+    {
+        stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
+        stream.flush().await?;
     }
 
     while buf.len() < header_end + content_length {
@@ -255,6 +272,9 @@ pub fn handle_http_request(
         Some((p, q)) => (p, q),
         None => (target, ""),
     };
+    if path == "/bugs/api" || path.starts_with("/bugs/api/") {
+        return crate::bug_reporting::handle_bugs_http_request(ctx, method, path, headers, body);
+    }
     let query_params = parse_urlencoded(query_str);
     let body_params = parse_request_body(headers, body);
 

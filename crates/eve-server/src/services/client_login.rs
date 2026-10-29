@@ -145,6 +145,15 @@ pub async fn handle(
                 "client stack trace reported: {first_line}"
             );
             tracing::debug!(error_id = entry.0, stack_hash = hash, "client stack trace body:\n{trace}");
+            let bundle = crate::bug_reporting::BugIncidentBundle::build_snapshot(
+                ctx,
+                session,
+                hash,
+                stack_key,
+                trace,
+            );
+            let queue_dir = Some(ctx.bug_reporting.effective_queue_dir());
+            crate::bug_reporting::schedule_incident_capture(bundle, queue_dir, None);
             Some(Ok(log_mode_tuple(Some(entry))))
         }
         ("alert", "BeanDelivery") => {

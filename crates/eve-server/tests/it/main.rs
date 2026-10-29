@@ -384,3 +384,4 @@ mod pve_mining_sites_part2;
 mod notify_real_emitters_batch5;
 mod notify_real_emitters_batch6;
 mod rpc_lp_store_and_travel_closure;
+mod client_bug_reporting_suite;

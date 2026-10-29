@@ -643,17 +643,22 @@ fn handle_macho_net(
                 .read()
                 .map(|s| (s.cluster_name.clone(), s.cluster_mode.clone()))
                 .unwrap_or_else(|_| ("TRANQUILITY".into(), "LIVE".into()));
-            let mut configs = vec![
-                (PyRep::String("machoVersion".into()), PyRep::Integer(496)),
-                (PyRep::String("build".into()), PyRep::Integer(crate::services::auth_cache::V24_01_BUILD)),
-                (PyRep::String("clusterName".into()), PyRep::String(cluster_name)),
-                (PyRep::String("clusterMode".into()), PyRep::String(cluster_mode)),
-            ];
-            if let Ok(extra) = ctx.global_config_values.read() {
-                for (k, v) in extra.iter() {
-                    configs.push((PyRep::String(k.clone()), v.clone()));
-                }
+            let mut merged: std::collections::BTreeMap<String, PyRep> =
+                std::collections::BTreeMap::new();
+            merged.insert("machoVersion".into(), PyRep::Integer(496));
+            merged.insert(
+                "build".into(),
+                PyRep::Integer(crate::services::auth_cache::V24_01_BUILD),
+            );
+            merged.insert("clusterName".into(), PyRep::String(cluster_name));
+            merged.insert("clusterMode".into(), PyRep::String(cluster_mode));
+            for (k, v) in crate::bug_reporting::build_client_global_config(ctx, None) {
+                merged.insert(k, v);
             }
+            let configs = merged
+                .into_iter()
+                .map(|(k, v)| (PyRep::String(k), v))
+                .collect();
             Some(Ok(PyRep::Dict(configs)))
         }
 

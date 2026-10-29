@@ -290,6 +290,38 @@ To point the real V24.01 EVE client at your local server, see [`docs/BLOCKERS.md
 
 ---
 
+### 4. Client Exception Telemetry & In-Game `F12` Bug Reporting
+
+Both automatic crash collection and the native in-game **`F12` -> Report a Bug** window are **enabled by default** with **zero client modification**:
+
+* **Automatic In-Band Exception Capture (`alert.SendClientStackTraceAlert`)**: The stock V24.01 EVE client hooks `sys.excepthook` via `carbon/common/script/sys/alert.pyj` and automatically transmits unhandled Python tracebacks to `eve-server` over MachoNet RPC (`TCP 26000`).
+* **Native In-Game `F12 -> Report a Bug` (`bugreporter` HTTP API)**: During the MachoNet handshake (`config_vals`), `eve-server` sets `bugReporting_ShowButton = "1"` and points `bugReporting_BugReportServer` at `http://<connected-server-ip>:26004/bugs/api` (overridable via `EVOMU_BUG_SERVER_URL`). Pressing **`F12` -> Report a Bug** opens the native EVE bug reporting window with annotated screenshot capture, reproduction steps, category selection, and automatic `igbr.zip` upload (`fitting.txt` active EFT ship fit + `logs.txt` client log tail).
+* **Rich Server-Side Diagnostic Context**: Every automatic crash and manual `F12` bug report is enriched with:
+  1. **MachoNet RPC Flight Recorder**: Rolling ring buffer of the last 20 RPC calls made by that session (service, method, arguments with credential masking, latency, and return status).
+  2. **Server Log Slice (Before & After)**: Circular buffer of server logs prior to the report, plus a non-blocking trailing window (`+1.5s`) to capture cascade events or disconnects.
+  3. **Spatial & Vessel Snapshot**: Character name, corporation/alliance, solar system security status, docked station/citadel ID or in-space coordinates $(x, y, z)$, and active ship hull/fitting.
+* **Local File Staging**: Reports and `F12` attachments (`attachments/EBR-.../`) are staged locally in `.evomu-bugs/queue/` (configurable via `EVOMU_BUG_QUEUE_DIR`).
+* **LAN Playtesting (e.g. Windows Client -> Mac Server)**: Set `bind_address = "0.0.0.0"` under `[network]` in `evomu.toml` so your Windows PC can reach both MachoNet (`26000`) and the HTTP `/bugs/api` listener (`26004`); `eve-server` automatically advertises the exact LAN IP your client connected to.
+
+#### Batch Syncing Bugs to GitHub Issues
+
+Use the standalone CLI tool (requires [GitHub CLI `gh`](https://cli.github.com/) authenticated via `gh auth login`) to batch upload staged crash and `F12` reports to GitHub with automated deduplication by signature hash:
+
+```bash
+# Preview pending bug reports without modifying GitHub or local files
+python3 tools/sync_bugs_to_github.py --dry-run
+
+# Upload reports to GitHub issues on saverchenkov/EvoMu (archives JSON + attachments to .evomu-bugs/uploaded/)
+python3 tools/sync_bugs_to_github.py
+
+# Upload and permanently delete local queue files and attachments
+python3 tools/sync_bugs_to_github.py --delete
+```
+
+If an issue for the same error signature already exists on GitHub, `sync_bugs_to_github.py` appends a comment with the new occurrence and context rather than creating duplicate issues.
+
+---
+
 ## Architecture
 
 ```mermaid

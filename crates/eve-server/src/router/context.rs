@@ -85,6 +85,8 @@ pub struct ServerContext {
     pub cluster_state: Arc<RwLock<crate::services::macho_cluster_mgmt::MachoClusterState>>,
     pub global_config_values: RwLock<HashMap<String, eve_proto::PyRep>>,
     pub alert_telemetry: std::sync::Mutex<crate::services::client_login::AlertTelemetryState>,
+    pub flight_recorder: Arc<crate::flight_recorder::FlightRecorder>,
+    pub bug_reporting: Arc<crate::bug_reporting::BugReportingRuntime>,
     pub npc_spawns: RwLock<HashMap<u32, crate::combat::npc_ai::NpcSpawnManager>>,
     pub combat_rng_seq: AtomicU64,
 }
@@ -345,6 +347,8 @@ impl ServerContext {
             cluster_state: Arc::new(RwLock::new(crate::services::macho_cluster_mgmt::MachoClusterState::default())),
             global_config_values: RwLock::new(persisted_global_config),
             alert_telemetry: std::sync::Mutex::new(crate::services::client_login::AlertTelemetryState::default()),
+            flight_recorder: Arc::new(crate::flight_recorder::FlightRecorder::new()),
+            bug_reporting: Arc::new(crate::bug_reporting::BugReportingRuntime::new()),
             npc_spawns: RwLock::new(HashMap::new()),
             combat_rng_seq: AtomicU64::new(1),
         };

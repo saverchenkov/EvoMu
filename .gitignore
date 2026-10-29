@@ -27,6 +27,9 @@ Thumbs.db
 # Independent review gate state (local; must not affect tree fingerprints)
 /.evomu-reviews/*
 
+# Staged client bug reports & F12 screenshots/attachments (local; synced via tools/sync_bugs_to_github.py)
+/.evomu-bugs/
+
 # Generated runtime/SDE SQLite databases, raw or compressed (client-derived; rebuilt locally via tools/sde-import; never committed)
 /data/*.sqlite*
 /data/quasar_descriptors.*

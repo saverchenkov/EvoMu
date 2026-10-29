@@ -478,7 +478,10 @@ async fn test_rpc_auth_cache_char_settings_and_login_services() {
     assert_eq!(lang, PyRep::None);
     assert_eq!(s1.language_id, "DE");
     let ver = rpc(&ctx, &mut s1, "cache", "GetServerVersionAndBuild", &[]).await;
-    assert_eq!(ver.dict_get("build"), Some(&PyRep::Integer(3_624_425)));
+    assert_eq!(
+        ver,
+        PyRep::Tuple(vec![PyRep::Real(24.01), PyRep::Integer(3_624_425)])
+    );
     assert_eq!(rpc(&ctx, &mut s1, "charMgr", "GetCharacterSettings", &[]).await, PyRep::Dict(vec![]));
     assert_eq!(rpc(&ctx, &mut s1, "localizationServer", "GetAllTextChanges", &[]).await, PyRep::None);
     let qa_err = ctx.dispatch_rpc(&mut s1, "localizationServer", None, "UpdateLocalizationQAWrap", &[PyRep::Dict(vec![(PyRep::Integer(665_412), PyRep::String("DE".into()))])], &HashMap::new(), None).await.unwrap_err();

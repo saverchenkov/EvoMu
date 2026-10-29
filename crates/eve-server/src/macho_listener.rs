@@ -86,6 +86,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
         .peer_addr()
         .map(|a| a.ip().to_string())
         .unwrap_or_else(|_| "127.0.0.1".to_string());
+    let local_ip = stream.local_addr().ok().map(|a| a.ip().to_string());
 
     let mut session = SessionState::new(session_id);
     session.address = peer_addr.clone();
@@ -94,6 +95,10 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
     ver.user_count = ctx.db.online_session_count().max(1);
     let mut handshake =
         MachoHandshakeStateMachine::new(ver, MACHO_PROXY_NODE_ID, session_id, client_id);
+    handshake.set_config_vals(crate::bug_reporting::build_client_global_config(
+        &ctx,
+        local_ip.as_deref(),
+    ));
 
     let (close_tx, mut close_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
     ctx.register_session_closer(session_id, close_tx);
@@ -336,6 +341,12 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             };
 
                             let cluster_users = ctx.db.online_session_count();
+                            handshake.set_config_vals(
+                                crate::bug_reporting::build_client_global_config(
+                                    &ctx,
+                                    local_ip.as_deref(),
+                                ),
+                            );
                             match handshake.complete_challenge(&challenge, auth_res, cluster_users)
                             {
                                 Ok(frames) => {

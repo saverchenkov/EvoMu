@@ -1027,6 +1027,7 @@ pub struct MachoHandshakeStateMachine {
     pub session_id: u64,
     pub client_id: u64,
     pub vip_key: Option<String>,
+    pub config_vals: HashMap<String, PyRep>,
     password_version_1_requested: bool,
     pending_server_challenge: Vec<u8>,
     pending_identity: Option<HandshakeIdentity>,
@@ -1046,10 +1047,16 @@ impl MachoHandshakeStateMachine {
             session_id,
             client_id,
             vip_key: None,
+            config_vals: HashMap::new(),
             password_version_1_requested: false,
             pending_server_challenge: vec![0u8; DEFAULT_HANDSHAKE_PADDING_LEN],
             pending_identity: None,
         }
+    }
+
+    /// Sets `config_vals` advertised inside `CryptoServerHandshake` (`InitClientGlobalConfig`).
+    pub fn set_config_vals(&mut self, config_vals: HashMap<String, PyRep>) {
+        self.config_vals = config_vals;
     }
 
     pub fn is_authenticated(&self) -> bool {
@@ -1265,12 +1272,13 @@ impl MachoHandshakeStateMachine {
                 return Err(closed);
             }
         };
-        let server_hs = CryptoServerHandshake::for_client_challenge(
+        let mut server_hs = CryptoServerHandshake::for_client_challenge(
             &challenge.client_challenge,
             &self.expected_version,
             self.proxy_node_id,
             cluster_user_count,
         );
+        server_hs.config_vals = self.config_vals.clone();
         self.pending_server_challenge = server_hs.server_challenge.clone();
         self.pending_identity = Some(identity);
         self.phase = HandshakePhase::AwaitingHandshakeResult;

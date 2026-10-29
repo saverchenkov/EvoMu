@@ -2,11 +2,14 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bug_reporting;
 pub mod combat;
 pub mod config;
 pub mod esi;
+pub mod flight_recorder;
 pub mod formulas;
 pub mod living_world;
+pub mod log_ring_buffer;
 pub mod quasar_gateway;
 pub mod rng;
 pub mod macho_listener;

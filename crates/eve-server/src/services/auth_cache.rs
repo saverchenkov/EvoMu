@@ -204,12 +204,11 @@ pub async fn handle(
         }
 
         ("cache", "GetServerVersionAndBuild") => {
-            let ticks = ctx.now_blueos_filetime_ticks();
-            Some(Ok(PyRep::keyval([
-                ("version", PyRep::Real(V24_01_VERSION)),
-                ("build", PyRep::Integer(V24_01_BUILD)),
-                ("sdeTypes", PyRep::Integer(ctx.sde.types.len() as i64)),
-                ("timestamp", PyRep::Integer(ticks)),
+            // V24 `eve/client/script/ui/services/bugReporting.pyj:218` (`CollectData`):
+            // `serverVersion, serverBuild = sm.RemoteSvc('cache').GetServerVersionAndBuild()`
+            Some(Ok(PyRep::Tuple(vec![
+                PyRep::Real(V24_01_VERSION),
+                PyRep::Integer(V24_01_BUILD),
             ])))
         }
 

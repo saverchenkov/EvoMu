@@ -46,6 +46,21 @@ fn append_unimplemented_rpc_log(
     }
 }
 
+fn format_pyrep_summary(rep: &PyRep) -> String {
+    match rep {
+        PyRep::None => "None".to_string(),
+        PyRep::Bool(b) => format!("Bool({b})"),
+        PyRep::Integer(i) => format!("Int({i})"),
+        PyRep::Real(f) => format!("Real({f:.2})"),
+        PyRep::String(s) => format!("Str[{}]", s.len()),
+        PyRep::List(l) => format!("List[{}]", l.len()),
+        PyRep::Tuple(t) => format!("Tuple[{}]", t.len()),
+        PyRep::Dict(d) => format!("Dict[{}]", d.len()),
+        PyRep::Object { type_name, .. } => format!("Obj({type_name})"),
+        _ => "PyRep".to_string(),
+    }
+}
+
 impl ServerContext {
     /// Dispatches an incoming RPC call `(service, bound_id, method, args, kwargs)` across the 12
     /// modular domain handlers, enforcing authentication and ownership checks.
@@ -72,6 +87,7 @@ impl ServerContext {
             .unwrap_or(0);
 
         let prev_station_id = session.station_id;
+        let start_time = std::time::Instant::now();
         let res = Box::pin(self.dispatch_rpc_inner(
             session,
             service,
@@ -82,6 +98,22 @@ impl ServerContext {
             caller_trace,
         ))
         .await;
+        let duration = start_time.elapsed();
+
+        let status_desc = match &res {
+            Ok(rep) => format!("Ok({})", format_pyrep_summary(rep)),
+            Err(e) => format!("Err({}: {})", e.code, e.message),
+        };
+        self.flight_recorder.record(
+            session.session_id,
+            service,
+            bound_id,
+            method,
+            args,
+            kwargs,
+            duration,
+            &status_desc,
+        );
 
         if res.is_ok() && matches!(service, "stationSvc" | "ship" | "structureDocking") {
             if let Some(cid) = session.character_id {

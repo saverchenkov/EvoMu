@@ -28,11 +28,20 @@ const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "eve_server=info,eve_destiny=info".into()),
-        )
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "eve_server=info,eve_destiny=info".into());
+    let fmt_layer = tracing_subscriber::fmt::layer();
+    let ring_layer = eve_server::log_ring_buffer::LogRingLayer::new(
+        eve_server::log_ring_buffer::global_log_ring(),
+    );
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt_layer)
+        .with(ring_layer)
         .init();
 
     let cfg = eve_server::config::ServerConfig::load_default_or_env()
