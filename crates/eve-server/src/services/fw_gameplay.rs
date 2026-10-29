@@ -910,6 +910,14 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
                 false
             }
         });
+        crate::services::notify_emitters_batch3_space::emit_fw_capture_changed(
+            ctx,
+            sys_id,
+            gid,
+            first_fac,
+            delta_pct,
+            base_dur as f64 * 1000.0,
+        );
         if done_now {
             let _ = sys_handle.remove_ball(gid).await;
             let _ = sys_handle.remove_ball(guard_id).await;

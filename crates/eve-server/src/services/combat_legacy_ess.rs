@@ -13,7 +13,7 @@ pub fn step_dynamic_bounty_multiplier(
     ratting_isk_destroyed: f64,
     pvp_isk_destroyed: f64,
 ) -> f64 {
-    ctx.db.with_mut_snapshot(|snap| {
+    let rate = ctx.db.with_mut_snapshot(|snap| {
         let st = snap
             .system_states
             .entry(solar_system_id)
@@ -49,7 +49,13 @@ pub fn step_dynamic_bounty_multiplier(
         };
         st.dbs_multiplier = (st.dbs_multiplier - rat_decay + pvp_boost + eq_drift).clamp(0.50, 2.00);
         st.dbs_multiplier
-    })
+    });
+    crate::services::notify_emitters_batch6::emit_system_dynamic_bounty_state_changed(
+        ctx,
+        solar_system_id as i64,
+        rate,
+    );
+    rate
 }
 
 pub async fn handle_legacy_and_ess(

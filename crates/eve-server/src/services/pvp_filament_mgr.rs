@@ -856,6 +856,14 @@ pub async fn handle(
 
             match res {
                 Ok(Some((mid, end_gate_id, arena_offset, teams, participants))) => {
+                    let char_ids: Vec<i64> = participants.iter().map(|(c, _, _)| *c).collect();
+                    for &cid in &char_ids {
+                        crate::services::notify_emitters_batch3_space::emit_pvp_match_found_and_expiry(
+                            ctx,
+                            cid,
+                            ctx.now_unix().saturating_add(900),
+                        );
+                    }
                     spawn_matched_arena_instance(
                         ctx,
                         session,
@@ -869,7 +877,14 @@ pub async fn handle(
                     Some(Ok(PyRep::Integer(5)))
                 }
                 Ok(None) => Some(Ok(PyRep::Integer(30))),
-                Err(e) => Some(Err(e)),
+                Err(e) => {
+                    crate::services::notify_emitters_batch3_space::emit_pvp_matchmaking_failure(
+                        ctx,
+                        char_id,
+                        1,
+                    );
+                    Some(Err(e))
+                }
             }
         }
 

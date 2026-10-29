@@ -864,6 +864,18 @@ pub async fn handle_pve_hacking(
                 let mut spewed = Vec::new();
                 let mut puzzle_solved = false;
                 let already_hacked = reg.hacked_containers.contains(&(game.solar_system_id, container_id));
+                let revealed_count = game.tiles.iter().filter(|t| t.revealed).count();
+                let hack_prog = if core_destroyed {
+                    1.0
+                } else {
+                    (revealed_count as f64 / game.tiles.len().max(1) as f64).clamp(0.0, 1.0)
+                };
+                crate::services::notify_emitters_batch3_space::emit_local_hack_progress_updated(
+                    ctx,
+                    game.solar_system_id,
+                    container_id,
+                    hack_prog,
+                );
                 if timer_expired || game.virus_coherence <= 0 {
                     game.status = "Failed".into();
                 } else if core_destroyed {

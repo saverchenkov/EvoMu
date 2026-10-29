@@ -189,6 +189,29 @@ pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, no
     for (ev, a) in updates {
         ctx.notify(NotificationTarget::Character(char_id), ev, "charid", a);
     }
+    let (cur_sys, is_suspect, is_crim, is_dis) = (
+        ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id)),
+        crim_code == 302,
+        crim_code == 301,
+        dis_code == 501,
+    );
+    if let Some(sys_id) = cur_sys {
+        if is_suspect || is_crim {
+            let suspects = if is_suspect { vec![char_id] } else { vec![] };
+            let criminals = if is_crim { vec![char_id] } else { vec![] };
+            crate::services::notify_emitters_batch6::emit_system_criminal_flag_updates(ctx, sys_id, &[], &suspects, &criminals);
+        }
+        if is_dis {
+            crate::services::notify_emitters_batch6::emit_system_disapproval_flag_updates(ctx, sys_id, &[], &[char_id]);
+        }
+    }
+}
+
+/// Broadcasts `OnSecurityModified(solarSystemID, modifierAmount, newSecurity)` when system security changes.
+pub fn update_system_security_status(ctx: &ServerContext, sys_id: u32, new_sec: f64) {
+    let old_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.0);
+    let delta = new_sec - old_sec;
+    crate::services::notify_emitters_batch6::emit_security_modified(ctx, sys_id, delta, new_sec);
 }
 
 /// Evaluates whether an active Weapons Timer (60s), PvP Timer (15m), or High-Sec Criminal Timer blocks

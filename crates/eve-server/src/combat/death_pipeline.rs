@@ -657,7 +657,16 @@ pub fn execute_death_pipeline_sync_inner(
         );
     });
 
+    crate::services::notify_emitters_batch6::emit_kill_notification(ctx, victim_char_id);
+    crate::services::notify_emitters_batch6::emit_kill_notification(ctx, attacker_char_id);
+    if !is_pod {
+        crate::services::notify_emitters_batch6::emit_ship_death(ctx, victim_char_id);
+    }
+
     if is_pod {
+        crate::services::notify_emitters_batch6::emit_pod_death(ctx, victim_char_id);
+        crate::services::notify_emitters_batch6::emit_player_pod_death(ctx, victim_char_id);
+        crate::services::notify_emitters_batch6::emit_pod_killed(ctx, victim_char_id, victim_ship_id);
         let cleared_zarzakh_gate = ctx.db.with_mut_snapshot(|snap| {
             snap.zarzakh_gate_locks
                 .remove(&victim_char_id)
@@ -679,6 +688,7 @@ pub fn execute_death_pipeline_sync_inner(
         let _ = ctx
             .db
             .respawn_character_at_home_station(victim_char_id, victim_ship_id, &ctx.sde);
+        crate::services::notify_emitters_batch6::emit_player_pod_respawn(ctx, victim_char_id);
     }
 
     crate::services::combat_crimewatch::combat_wrecks_killmails::register_container_lifetime(

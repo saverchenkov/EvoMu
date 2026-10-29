@@ -506,6 +506,15 @@ pub async fn handle_ess_link(
         with_mut_combat_runtime(ctx, |rt| {
             rt.ess_reserve_unlocked_until.insert(sys_id, until);
         });
+        let reg_id = ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id as i64).unwrap_or(10000002);
+        super::notify_emitters_batch6::emit_reserve_bank_unlock(ctx, reg_id);
+    }
+    if link_started_only {
+        if method == "AttemptLinkToReserveBank" {
+            super::notify_emitters_batch6::emit_ess_reserve_bank_link_notification(ctx, sys_id);
+        } else {
+            super::notify_emitters_batch6::emit_ess_main_bank_link_notification(ctx, sys_id);
+        }
     }
     if clear_unlock {
         with_mut_combat_runtime(ctx, |rt| {
@@ -533,6 +542,17 @@ pub async fn handle_ess_link(
             };
             list.push((char_id, payout, now_u));
         });
+        if method != "AttemptLinkToReserveBank" {
+            super::notify_emitters_batch6::emit_main_bank_player_hack_success(ctx, char_id, sys_id, 1);
+            super::notify_emitters_batch6::emit_main_bank_player_link_disconnected(ctx, char_id, sys_id, "Completed", 1);
+        } else {
+            super::notify_emitters_batch6::emit_reserve_bank_player_link_disconnected(ctx, char_id, sys_id, 0);
+        }
+        let ess_data = PyRep::keyval([
+            ("solarSystemID", PyRep::Integer(sys_id as i64)),
+            ("mainBank", PyRep::Real(payout)),
+        ]);
+        super::notify_emitters_batch6::emit_system_ess_data_changed(ctx, sys_id as i64, ess_data);
     }
     Ok(PyRep::keyval([
         ("solarSystemID", PyRep::Integer(sys_id as i64)),

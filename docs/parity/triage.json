@@ -3230,5 +3230,57 @@
   "rpc:userSvc.ProcessEVESessionCreated": {
     "disposition": "dead_client_code",
     "evidence": "carbon/common/script/net/machoNet.pyj MachoNetService.HandleAccept(): server-internal inter-service node handshake RPC invoked between proxy and Sol server nodes during session creation; not exposed as a client-facing RPC."
+  },
+  "notify:OnClientNodeGraphMessage": {
+    "disposition": "client_local",
+    "evidence": "nodegraph/client/service.pyj: NodeGraphService.OnClientNodeGraphMessage(self, node_graph_instance_id, key, value) \u2014 client-side NodeGraph message dispatch; no server emission."
+  },
+  "notify:OnClientNodeGraphUpdate": {
+    "disposition": "client_local",
+    "evidence": "nodegraph/client/service.pyj: NodeGraphService.OnClientNodeGraphUpdate(self, node_graph_instance_id, blackboard_parameters) \u2014 client-side NodeGraph blackboard update; no server emission."
+  },
+  "notify:OnStartClientNodeGraph": {
+    "disposition": "client_local",
+    "evidence": "nodegraph/client/service.pyj: NodeGraphService.OnStartClientNodeGraph(self, node_graph_id, node_graph_instance_id, blackboard_parameters) \u2014 client-side NodeGraph startup; no server emission."
+  },
+  "notify:OnStopClientNodeGraph": {
+    "disposition": "client_local",
+    "evidence": "nodegraph/client/service.pyj: NodeGraphService.OnStopClientNodeGraph(self, node_graph_instance_id) \u2014 client-side NodeGraph stop; no server emission."
+  },
+  "notify:OnStopAllClientNodeGraphs": {
+    "disposition": "client_local",
+    "evidence": "nodegraph/client/service.pyj: NodeGraphService.OnStopAllClientNodeGraphs(self) \u2014 client-side NodeGraph stop all; no server emission."
+  },
+  "notify:OnStopClientNodeGraphById": {
+    "disposition": "client_local",
+    "evidence": "nodegraph/client/service.pyj: NodeGraphService.OnStopClientNodeGraphById(self, node_graph_id) \u2014 client-side NodeGraph stop by ID; no server emission."
+  },
+  "notify:OnTutorialSkipped": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/shared/infoPanels/infoPanelSvc.pyj: InfoPanelSvc.OnTutorialSkipped(), operations/client/eventdirector/eventdirector.pyj: OperationsEventDirector.OnTutorialSkipped() \u2014 client-only UI tutorial skip scatter; no server emission."
+  },
+  "notify:OnUiRevealForced": {
+    "disposition": "client_local",
+    "evidence": "uihider/ui_hider_service.pyj: UiHiderService.OnUiRevealForced() \u2014 client UI hider reveal scatter; no server emission."
+  },
+  "notify:OnUpdateLocalizationTextCache": {
+    "disposition": "client_local",
+    "evidence": "carbon/client/script/localization/localizationClient.pyj: LocalizationClient.OnUpdateLocalizationTextCache(self, cacheData) \u2014 client-side localization cache update; no server emission."
+  },
+  "notify:OnClientContactChangeOnBlockContacts": {
+    "disposition": "dead_client_code",
+    "evidence": "Zero handlers in V24 client bytecode (client_expectations.json notify.OnClientContactChangeOnBlockContacts); dead client code."
+  },
+  "notify:OnClientEvent_MarketItemReceived": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/shared/inventory/neocomInventoryBadging.pyj: NeocomInventoryBadging.OnClientEvent_MarketItemReceived(self, item_id, type_id, flag_id, location_id) \u2014 client inventory badge update; no server emission."
+  },
+  "notify:OnCollapsed": {
+    "disposition": "dead_client_code",
+    "evidence": "Zero handlers in V24 client bytecode (client_expectations.json notify.OnCollapsed); dead client code."
+  },
+  "notify:OnSkyhookCanBeHacked": {
+    "disposition": "dead_client_code",
+    "evidence": "Zero handlers in V24 client bytecode (client_expectations.json notify.OnSkyhookCanBeHacked); dead client code."
   }
 }
