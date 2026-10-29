@@ -99,10 +99,6 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/shared/neocom/journal.pyj:267 JournalSvc.OnAgentMissionChange(): sm.ScatterEvent('OnAgentMissionChanged', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnAgentMissionChanged' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
-  "notify:OnModuleActivated": {
-    "disposition": "client_local",
-    "evidence": "dogma/client/clientDogmaLocation.pyj ClientDogmaLocation._NotifyOfEffectActivation(): sm.ScatterEvent('OnModuleActivated', ...) \u2014 client-only local scatter derived from OnGodmaShipEffect(active=1); never sent by server."
-  },
   "notify:OnAgentSlashCommandExecuted": {
     "disposition": "dead_client_code",
     "evidence": "eve/client/script/ui/station/agents/agents.pyj:582 Agents.OnAgentSlashCommandExecuted(self, agentID): internal QA/developer `/agent` slash-command callback in client UI; zero scatter or server cast in Tranquility V24."
@@ -110,6 +106,14 @@
   "notify:OnAirNPEFocusChanged": {
     "disposition": "client_local",
     "evidence": "jobboard/client/features/storylines/job.pyj:30 StorylineJob.OnExpandedMissionChanged(): sm.ScatterEvent('OnAirNPEFocusChanged', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnAirNPEFocusChanged' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
+  },
+  "notify:OnAirNpeObjectiveUpdated": {
+    "disposition": "client_local",
+    "evidence": "packages/storylines/client/objectives/trackers/airnpetracker.pyj:16 AirNpeObjectiveTracker._notify_of_update(): sm.ScatterEvent('OnAirNpeObjectiveUpdated', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnAllianceLogoReady": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/services/evePhotosvc.pyj:599 EvePhoto.GetAllianceLogo() passes callback='OnAllianceLogoReady' (line 604) to EvePhoto.__FetchFromImageServer() at line 666: sm.ScatterEvent(callback, itemID, size) \u2014 client-only local HTTP image-cache callback scatter; no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
   },
   "notify:OnAmmoInBankChanged": {
     "disposition": "dead_client_code",
@@ -146,6 +150,10 @@
   "notify:OnAudioDeactivated": {
     "disposition": "client_local",
     "evidence": "carbon/client/script/environment/audioService.pyj:270 AudioService.Deactivate(): sm.ScatterEvent('OnAudioDeactivated', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnAudioDeactivated' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
+  },
+  "notify:OnAutoPilotJump": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/parklife/autopilot.pyj:453 AutoPilot.Update(): sm.ScatterEvent('OnAutoPilotJump', ...) \u2014 client-only local UI scatter (2 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
   },
   "notify:OnAutoPilotOff": {
     "disposition": "client_local",
@@ -275,6 +283,10 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/shared/systemMenu/systemmenu.pyj:2908 SystemMenu.OnCheckBoxChange(): sm.ScatterEvent('OnCameraZoomModifierChanged', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnCameraZoomModifierChanged' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnCapacitorChange": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/inflight/shipHud/capacitorContainer.pyj:180 CapacitorContainer.Update(): sm.ScatterEvent('OnCapacitorChange', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnCapacitorContainerTooltipClosed": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/inflight/shipHud/capacitorContainer.pyj:73 CapacitorContainer._UpdateCapacitorTooltip(): sm.ScatterEvent('OnCapacitorContainerTooltipClosed', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnCapacitorContainerTooltipClosed' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
@@ -311,6 +323,18 @@
     "disposition": "client_local",
     "evidence": "seasons/client/seasonservice.pyj:205 SeasonService.OnChallengeRewardsGranted(): sm.ScatterEvent('OnChallengeRewardsGrantedInClient', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnChallengeRewardsGrantedInClient' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnChannelDeleted": {
+    "disposition": "client_local",
+    "evidence": "packages/xmppchatclient/xmppchatsvc.pyj:1500 XmppChatService.DeleteChannel(): sm.ScatterEvent('OnChannelDeleted', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnChannelJoined": {
+    "disposition": "client_local",
+    "evidence": "packages/xmppchatclient/xmppchatsvc.pyj:1295 XmppChatService._JoinChannelInternal(): sm.ScatterEvent('OnChannelJoined', ...) \u2014 client-only local UI scatter (2 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnChannelLeft": {
+    "disposition": "client_local",
+    "evidence": "packages/xmppchatclient/xmppchatsvc.pyj:1445 XmppChatService.CloseChannelWindow(): sm.ScatterEvent('OnChannelLeft', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnChannelsJoined": {
     "disposition": "removed_from_live",
     "evidence": "carbon/client/script/environment/audioService.pyj:800 AudioService.OnChannelsJoined(self, channelIDs): legacy LSC (Large Scale Chat) bulk channel join notification; LSC was superseded by XMPP chat in V24 and no live server channel join broadcast uses LSC."
@@ -335,6 +359,10 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/shared/neocom/wallet/loyaltyPointsWalletSvc.pyj:69 LoyaltyPointsWalletSvc.OnLPChange(): sm.ScatterEvent('OnCharacterLPBalanceChange_Local', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnCharacterLPBalanceChange_Local' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnCharacterLpUpdatedInWallet": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/shared/neocom/neocom/neocomSvc.pyj:1074 NeocomSvc.OnCharacterLPBalanceChange_Local(): sm.ScatterEvent('OnCharacterLpUpdatedInWallet', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnCharacterSelected": {
     "disposition": "client_local",
     "evidence": "eve/client/script/parklife/gameui.pyj:649 GameUI.OnCharacterSelected(): sm.ScatterEvent('OnCharacterSelected', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no server emission. Line from V24 bytecode line table."
@@ -342,6 +370,10 @@
   "notify:OnCharacterSelectionViewEntered": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/services/viewStateSvc.pyj:542 ViewStateSvc._NotifyOfViewStateChange(): sm.ScatterEvent('OnCharacterSelectionViewEntered', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnCharacterSelectionViewEntered' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
+  },
+  "notify:OnCharacterSessionChanged": {
+    "disposition": "client_local",
+    "evidence": "carbon/common/script/sys/sessions.pyj:659 SessionMgr.OnSessionChanged(): sm.ScatterEvent('OnCharacterSessionChanged', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
   },
   "notify:OnChargeLoadedToModule": {
     "disposition": "dead_client_code",
@@ -687,6 +719,14 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/services/crimewatchSvc.pyj:647 CrimewatchService.SafetyActivated(): sm.ScatterEvent('OnCrimewatchSafetyCheckFailed', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnCrimewatchSafetyCheckFailed' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnCurrSessionSpaceEnteredFirstTime": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/view/transitions.pyj:325 CharSelectCreateToSpaceTransition._EndTransition(): sm.ScatterEvent('OnCurrSessionSpaceEnteredFirstTime', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnCurrentShipSkinChange": {
+    "disposition": "client_local",
+    "evidence": "packages/cosmetics/client/shipSkinStateController.pyj:83 ShipSkinStateController._notify_of_skin_change(): sm.ScatterEvent('OnCurrentShipSkinChange', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnCurrentSystemSecurityChanged": {
     "disposition": "client_local",
     "evidence": "security/client/securitySvc.pyj:71 SecurityService.OnSecurityModified(): sm.ScatterEvent('OnCurrentSystemSecurityChanged', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnCurrentSystemSecurityChanged' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
@@ -718,6 +758,10 @@
   "notify:OnDailyRewardClaimedLocal": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/shared/loginRewards/reminderCont.pyj:173 ReminderCont.OnDailyRewardClaimed(): sm.ScatterEvent('OnDailyRewardClaimedLocal', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnDamageStateChanged": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/dogma/clientDogmaLocation.pyj:428 DogmaLocation.OnModuleAttributeChanges(): sm.ScatterEvent('OnDamageStateChanged', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
   },
   "notify:OnDataLoaded": {
     "disposition": "client_local",
@@ -754,6 +798,10 @@
   "notify:OnDetrend": {
     "disposition": "client_local",
     "evidence": "projectdiscovery/client/projects/exoplanets/detrendingcontrolpanel.pyj:101 DetrendingControlPanel.detrend(): sm.ScatterEvent('OnDetrend', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnDetrend' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
+  },
+  "notify:OnDirectionalScanComplete": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/parklife/directionalScanSvc.pyj:56 DirectionalScanSvc.DirectionalScan(): sm.ScatterEvent('OnDirectionalScanComplete', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
   },
   "notify:OnDirectionalScanStarted": {
     "disposition": "client_local",
@@ -851,9 +899,21 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/dogma/clientDogmaLocation.pyj:1713 DogmaLocation.OnDroneControlLost(): sm.ScatterEvent('OnDogmaDronesChanged', ...) \u2014 client-only literal local scatter (2 site(s)); no machoNet cast of 'OnDogmaDronesChanged' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnDogmaItemChange": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/dogma/clientDogmaLocation.pyj:754 DogmaLocation.OnItemChange(): sm.ScatterEvent('OnDogmaItemChange', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnDollUpdated": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/login/charcreation/charCreation.pyj:267 BaseCharacterCreationStep.OnMouseUp(): sm.ScatterEvent('OnDollUpdated', ...) \u2014 client-only literal local scatter (3 site(s)); no machoNet cast of 'OnDollUpdated' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
+  },
+  "notify:OnDroneControlLost": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/remote/michelle.pyj:2035 Park.OnDroneStateChange(): sm.ScatterEvent('OnDroneControlLost', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnDroneStateChange2": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/remote/michelle.pyj:2052 Park.OnDroneStateChange(): sm.ScatterEvent('OnDroneStateChange2', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
   },
   "notify:OnDronesSelected": {
     "disposition": "client_local",
@@ -922,6 +982,10 @@
   "notify:OnEnableDetrend": {
     "disposition": "client_local",
     "evidence": "projectdiscovery/client/projects/exoplanets/graphs/exoplanetsgraph.pyj:210 ExoPlanetsGraph._setup_layout(): sm.ScatterEvent('OnEnableDetrend', ...) \u2014 client-only literal local scatter (2 site(s)); no machoNet cast of 'OnEnableDetrend' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
+  },
+  "notify:OnEndChangeDevice": {
+    "disposition": "client_local",
+    "evidence": "packages/carbonui/services/device.pyj:326 DeviceMgr._OnSwapChainChange(): sm.ScatterEvent('OnEndChangeDevice', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
   },
   "notify:OnEngagementTimerHintResize": {
     "disposition": "client_local",
@@ -1011,6 +1075,10 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/shared/infoPanels/infoPanelSvc.pyj:300 InfoPanelSvc.SetExpandedMission(): sm.ScatterEvent('OnExpandedMissionChanged', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnExpandedMissionChanged' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnExpertSystemsUpdated_Local": {
+    "disposition": "client_local",
+    "evidence": "packages/expertSystems/client/service.pyj:70 ExpertSystemService.OnExpertSystemsUpdated(): sm.ScatterEvent('OnExpertSystemsUpdated_Local', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnExternalDragEnded": {
     "disposition": "client_local",
     "evidence": "carbonui/primitives/dragdrop.pyj:185 DragDropObject._DoDrag(): sm.ScatterEvent('OnExternalDragEnded', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no server emission. Line from V24 bytecode line table."
@@ -1026,6 +1094,10 @@
   "notify:OnFacilitiesReloaded": {
     "disposition": "client_local",
     "evidence": "eve/client/script/industry/facilitySvc.pyj:39 FacilityService.OnSessionChanged(): sm.ScatterEvent('OnFacilitiesReloaded', ...) \u2014 client-only literal local scatter (3 site(s)); no machoNet cast of 'OnFacilitiesReloaded' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
+  },
+  "notify:OnFailLockTarget": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/parklife/targetMgr.pyj:1503 TargetMgr.FailLockTarget(): sm.ScatterEvent('OnFailLockTarget', ...) \u2014 client-only local UI scatter (2 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
   },
   "notify:OnFavoriteGroupChanged": {
     "disposition": "client_local",
@@ -1183,6 +1255,10 @@
     "disposition": "client_local",
     "evidence": "carbon/common/script/net/machoNet.pyj:1708 MachoNetService.GetGlobalConfig(): sm.ScatterEvent('OnGlobalConfigChanged', ...) \u2014 client-only local UI scatter (3 site(s)); no machoNet cast in client code; no server emission. Line from V24 bytecode line table."
   },
+  "notify:OnGodmaItemChange": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/environment/godma.pyj:1480 StateManager.OnItemChange(): sm.ScatterEvent('OnGodmaItemChange', ...) \u2014 client-only local UI scatter (5 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnGraphicSettingsChanged": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/shared/systemMenu/systemmenu.pyj:1329 SystemMenu.SetGfxSetting(): sm.ScatterEvent('OnGraphicSettingsChanged', ...) \u2014 client-only local UI scatter (3 site(s)); no machoNet cast in client code; no server emission. Line from V24 bytecode line table."
@@ -1307,9 +1383,17 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/shared/industry/browserBlueprints.pyj:787 BrowserBlueprints.OnScrollKeyDown(): sm.ScatterEvent('OnIndustryLeftOrRightKey', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnIndustryLeftOrRightKey' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnIndustryMaterialValueSettingChanged": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/shared/industry/views/baseView.pyj:100 BaseView.OnInputMaterialValueSetting(): sm.ScatterEvent('OnIndustryMaterialValueSettingChanged', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnIndustryRemoveBlueprint": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/shared/industry/views/blueprintCenter.pyj:644 BlueprintItemIcon.RemoveBlueprint(): sm.ScatterEvent('OnIndustryRemoveBlueprint', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnIndustryRemoveBlueprint' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
+  },
+  "notify:OnIndustrySlotsUpdated": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/industry/industrySvc.pyj:339 IndustryService._UpdateSlots_thread(): sm.ScatterEvent('OnIndustrySlotsUpdated', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
   },
   "notify:OnIndustryViewExpandCollapse": {
     "disposition": "client_local",
@@ -1615,6 +1699,10 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/shared/mapView/mapViewWorld.pyj:353 MapViewWorld.SetActiveItemID(): sm.ScatterEvent('OnMapLocationSelected', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnMapLocationSelected' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnMapModeChangeDone": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/view/starMapView.pyj:54 StarMapView.ShowView(): sm.ScatterEvent('OnMapModeChangeDone', ...) \u2014 client-only local UI scatter (2 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnMapReset": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/shared/maps/mapSvc.pyj:72 MapSvc.Reset(): sm.ScatterEvent('OnMapReset', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnMapReset' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
@@ -1682,6 +1770,18 @@
   "notify:OnMiningLaserFiredLocal": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/moonmining/schedulingSvc.pyj:73 SchedulingSvc.FireLaser(): sm.ScatterEvent('OnMiningLaserFiredLocal', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnMiningLaserFiredLocal' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
+  },
+  "notify:OnMiningLedgerGraphSettingChanged": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/shared/ledger/ledgerGraph.pyj:151 LedgerGraphCont.OnSettingChanged(): sm.ScatterEvent('OnMiningLedgerGraphSettingChanged', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnModuleActivated": {
+    "disposition": "client_local",
+    "evidence": "dogma/client/clientDogmaLocation.pyj ClientDogmaLocation._NotifyOfEffectActivation(): sm.ScatterEvent('OnModuleActivated', ...) \u2014 client-only local scatter derived from OnGodmaShipEffect(active=1); never sent by server."
+  },
+  "notify:OnModuleRepaired": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/environment/godma.pyj:2634 StateManager.StopRepairModule(): sm.ScatterEvent('OnModuleRepaired', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
   },
   "notify:OnMoonProcessChange": {
     "disposition": "removed_from_live",
@@ -1779,6 +1879,10 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/services/mail/notificationSvc.pyj:274 notificationSvc.MarkAllReadInGroup(): sm.ScatterEvent('OnNotificationsRefresh', ...) \u2014 client-only literal local scatter (7 site(s)); no machoNet cast of 'OnNotificationsRefresh' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnObjectExplode": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/environment/spaceObject/spaceObject.pyj:971 SpaceObject.Explode(): sm.ScatterEvent('OnObjectExplode', ...) \u2014 client-only local UI scatter (2 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnOpenCargoExecuted": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/services/menusvc.pyj:3587 MenuSvc.OpenCargo(): sm.ScatterEvent('OnOpenCargoExecuted', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnOpenCargoExecuted' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
@@ -1855,6 +1959,10 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/shared/planet/templateSavingUtil.pyj:106 SaveToLocalFile(): sm.ScatterEvent('OnPITemplatesUpdated', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnPITemplatesUpdated' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnPetitionCreated": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/shared/neocom/petitionWindow.pyj:386 PetitionWindow.CreatePetition(): sm.ScatterEvent('OnPetitionCreated', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnPhaseStabilizerSlimUpdate": {
     "disposition": "client_local",
     "evidence": "spacecomponents/client/components/phaseStabilizer.pyj:99 PhaseStabilizer._OnSlimItemUpdate(): sm.ScatterEvent('OnPhaseStabilizerSlimUpdate', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnPhaseStabilizerSlimUpdate' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
@@ -1887,6 +1995,10 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/shared/planet/planetUISvc.pyj:301 PlanetUISvc._Open(): sm.ScatterEvent('OnPlanetViewChanged', ...) \u2014 client-only literal local scatter (2 site(s)); no machoNet cast of 'OnPlanetViewChanged' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnPortraitCreated": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/services/evePhotosvc.pyj:492 EvePhoto.GetPortrait() passes callback='OnPortraitCreated' to EvePhoto.__FetchFromImageServer() at line 666: sm.ScatterEvent(callback, itemID, size) \u2014 client-only local portrait render/HTTP callback scatter; no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnPortraitPicked": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/login/characterCreationContainer.pyj:3211 CharacterCreationContainer.AnimateToStoredPortrait_thread(): sm.ScatterEvent('OnPortraitPicked', ...) \u2014 client-only literal local scatter (2 site(s)); no machoNet cast of 'OnPortraitPicked' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
@@ -1898,6 +2010,22 @@
   "notify:OnPrimaryViewChanged": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/services/viewStateSvc.pyj:619 ViewStateSvc._OpenView(): sm.ScatterEvent('OnPrimaryViewChanged', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnPrimaryViewChanged' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
+  },
+  "notify:OnProbeAdded": {
+    "disposition": "client_local",
+    "evidence": "packages/probescanning/probeTracker.pyj:52 ProbeTracker.AddProbe(): sm.ScatterEvent('OnProbeAdded', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnProbePositionsUpdated": {
+    "disposition": "client_local",
+    "evidence": "packages/probescanning/probeTracker.pyj:192 ProbeTracker.ProbeGoToPoint(): sm.ScatterEvent('OnProbePositionsUpdated', ...) \u2014 client-only local UI scatter (3 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnProbeRangeUpdated": {
+    "disposition": "client_local",
+    "evidence": "packages/probescanning/probeTracker.pyj:121 ProbeTracker.SetProbeRangeStep(): sm.ScatterEvent('OnProbeRangeUpdated', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnProbeRemoved": {
+    "disposition": "client_local",
+    "evidence": "packages/probescanning/probeTracker.pyj:66 ProbeTracker.RemoveProbe(): sm.ScatterEvent('OnProbeRemoved', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
   },
   "notify:OnProbeScannerClosed": {
     "disposition": "client_local",
@@ -1938,6 +2066,10 @@
   "notify:OnProbeScanner_ScanResultMouseExit": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/inflight/scannerListEntries.pyj:363 ScanResultNew.OnMouseExit(): sm.ScatterEvent('OnProbeScanner_ScanResultMouseExit', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnProbeScanner_ScanResultMouseExit' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
+  },
+  "notify:OnProbeStateUpdated": {
+    "disposition": "client_local",
+    "evidence": "packages/probescanning/probeTracker.pyj:155 ProbeTracker.UpdateProbeState(): sm.ScatterEvent('OnProbeStateUpdated', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
   },
   "notify:OnProcessLoginProgress": {
     "disposition": "client_local",
@@ -2071,6 +2203,14 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/parklife/scanSvc.pyj:346 ScanSvc.Thread_ShowReconnectToProbesAvailable(): sm.ScatterEvent('OnReconnectToProbesAvailable', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no server emission. Line from V24 bytecode line table."
   },
+  "notify:OnRedeemWndOpened": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/shared/redeem/window.pyj:44 RedeemWindowDark.ApplyAttributes(): sm.ScatterEvent('OnRedeemWndOpened', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnRedeemingTokensUpdated": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/services/redeemsvc.pyj:201 RedeemService.OnRedeemingQueueUpdated(): sm.ScatterEvent('OnRedeemingTokensUpdated', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnRedrawFittingMgmt": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/shared/fitting/fittingMgmtCont.pyj:426 FittingMgmtCont.SaveExistingFitting(): sm.ScatterEvent('OnRedrawFittingMgmt', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnRedrawFittingMgmt' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
@@ -2090,6 +2230,10 @@
   "notify:OnRefreshPins": {
     "disposition": "client_local",
     "evidence": "eve/client/script/environment/planet/clientPlanet.pyj:408 ClientPlanet.InstallSchematic(): sm.ScatterEvent('OnRefreshPins', ...) \u2014 client-only literal local scatter (4 site(s)); no machoNet cast of 'OnRefreshPins' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
+  },
+  "notify:OnRefreshScanResults": {
+    "disposition": "client_local",
+    "evidence": "packages/probescanning/scanHandler.pyj:67 ScanHandler.InjectResults(): sm.ScatterEvent('OnRefreshScanResults', ...) \u2014 client-only local UI scatter (6 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
   },
   "notify:OnRefreshWhenDockingRequestDenied": {
     "disposition": "client_local",
@@ -2207,6 +2351,10 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/parklife/scenarioMgr.pyj:273 ScenarioMgr._SendSelectionEvent(): sm.ScatterEvent('OnSelectObjectInGame', ...) \u2014 client-only local UI scatter (3 site(s)); no machoNet cast in client code; no server emission. Line from V24 bytecode line table."
   },
+  "notify:OnSelectedIndustryJobChanged": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/shared/industry/views/blueprintCenter.pyj:218 BlueprintCenter.UpdateStateJob(): sm.ScatterEvent('OnSelectedIndustryJobChanged', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnSelectedItemButtonClicked": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/inflight/selectedItemButton.pyj:94 SelectedItemButton._ExecuteFunction(): sm.ScatterEvent('OnSelectedItemButtonClicked', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnSelectedItemButtonClicked' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
@@ -2219,9 +2367,25 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/hacking/hackingUISvc.pyj:326 HackingSvc.SetSelectedUtilElement(): sm.ScatterEvent('OnSelectedUtilityElementChanged', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnSelectedUtilityElementChanged' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnSessionEnd": {
+    "disposition": "client_local",
+    "evidence": "carbon/common/script/sys/basesession.pyj:1307 CoreSession.ClearAttributes(): sm.ScatterEvent('OnSessionEnd', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnSessionMutated": {
+    "disposition": "client_local",
+    "evidence": "carbon/common/script/sys/sessions.pyj:546 SessionMgr.PerformSessionChange(): sm.ScatterEvent('OnSessionMutated', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnSessionReset": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/parklife/gameui.pyj:621 GameUI.DoCharacterLogoff(): sm.ScatterEvent('OnSessionReset', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnSetCameraOffset": {
     "disposition": "client_local",
     "evidence": "eve/client/script/parklife/sceneManager.pyj:518 SceneManager.UpdateCameraOffset(): sm.ScatterEvent('OnSetCameraOffset', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnSetCameraOffset' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
+  },
+  "notify:OnSetDevice": {
+    "disposition": "client_local",
+    "evidence": "packages/carbonui/services/device.pyj:322 DeviceMgr._OnSwapChainChange(): sm.ScatterEvent('OnSetDevice', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
   },
   "notify:OnSetSearchBarFocus": {
     "disposition": "client_local",
@@ -2399,6 +2563,10 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/parklife/state.pyj:733 StateSvc._NotifyOnStateSetupChange(): sm.ScatterEvent('OnStateSetupChange', ...) \u2014 client-only literal local scatter (2 site(s)); no machoNet cast of 'OnStateSetupChange' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnStationServicesHangarDeselected": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/shared/dockedUI/inventory.pyj:163 InventorySubPanel.OnSelectedTabDeselected(): sm.ScatterEvent('OnStationServicesHangarDeselected', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnStructureAccessUpdated": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/services/structure/structureProximityTracker.pyj:104 StructureProximityTracker._RefreshDockability(): sm.ScatterEvent('OnStructureAccessUpdated', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnStructureAccessUpdated' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
@@ -2435,6 +2603,10 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/services/corruptionSuppressionSvc.pyj:206 CorruptionSuppressionSvc._OnSuppressionValueChanged(): sm.ScatterEvent('OnSuppressionValueChanged_Local', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnSuppressionValueChanged_Local' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnSuspectsAndCriminalsUpdate": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/services/crimewatchSvc.pyj:265 CrimewatchService.UpdateSuspectsAndCriminals(): sm.ScatterEvent('OnSuspectsAndCriminalsUpdate', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnSwitchTooltipImage": {
     "disposition": "client_local",
     "evidence": "projectdiscovery/client/projects/exoplanets/ui/category.pyj:919 TooltipExampleSprite.OnMouseEnter(): sm.ScatterEvent('OnSwitchTooltipImage', ...) \u2014 client-only local UI scatter (2 site(s)); no machoNet cast in client code; no server emission. Line from V24 bytecode line table."
@@ -2442,6 +2614,10 @@
   "notify:OnSystemScanBegun": {
     "disposition": "client_local",
     "evidence": "eve/client/script/parklife/scanSvc.pyj:298 ScanSvc.OnSystemScanStarted(): sm.ScatterEvent('OnSystemScanBegun', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnSystemScanBegun' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
+  },
+  "notify:OnSystemScanDone": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/parklife/scanSvc.pyj:313 ScanSvc.OnSystemScanStopped(): sm.ScatterEvent('OnSystemScanDone', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
   },
   "notify:OnSystemScanFilterChanged": {
     "disposition": "client_local",
@@ -2451,13 +2627,25 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/services/fwVictoryPointSvc.pyj:76 FwVictoryPointSvc.OnVictoryPointStateUpdated(): sm.ScatterEvent('OnSystemStatusChanged', ...) \u2014 client-only literal local scatter (2 site(s)); no machoNet cast of 'OnSystemStatusChanged' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnSystemWideEffectAdd": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/parklife/systemWideEffectSvc.pyj:27 SystemWideEffectSvc.OnSystemWideEffectStart(): sm.ScatterEvent('OnSystemWideEffectAdd', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnSystemWideEffectInfoUpdated": {
     "disposition": "client_local",
     "evidence": "eve/client/script/parklife/systemWideEffectSvc.pyj:23 SystemWideEffectSvc.OnUpdateSystemWideEffectsInfo(): sm.ScatterEvent('OnSystemWideEffectInfoUpdated', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnSystemWideEffectInfoUpdated' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnSystemWideEffectRemove": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/parklife/systemWideEffectSvc.pyj:34 SystemWideEffectSvc.OnSystemWideEffectStop(): sm.ScatterEvent('OnSystemWideEffectRemove', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnTacticalOverlayChange": {
     "disposition": "client_local",
     "evidence": "eve/client/script/parklife/tactical.pyj:751 TacticalSvc.HideTacticalOverlay(): sm.ScatterEvent('OnTacticalOverlayChange', ...) \u2014 client-only literal local scatter (2 site(s)); no machoNet cast of 'OnTacticalOverlayChange' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
+  },
+  "notify:OnTargetLockStarted": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/parklife/targetMgr.pyj:1488 TargetMgr.StartLockTarget(): sm.ScatterEvent('OnTargetLockStarted', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
   },
   "notify:OnTaskLoaded": {
     "disposition": "client_local",
@@ -2487,9 +2675,21 @@
     "disposition": "client_local",
     "evidence": "nodditests/common/tracker.pyj:37 TestTracker.pass_test(): sm.ScatterEvent('OnTestSucceeded', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no server emission. Line from V24 bytecode line table."
   },
+  "notify:OnTimeReset": {
+    "disposition": "client_local",
+    "evidence": "carbon/common/script/net/machoNet.pyj:1209 MachoNetService.ConnectivityTest(): sm.ScatterEvent('OnTimeReset', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnTitleGrantedNotificationClicked": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/shared/neocom/characterSheetWindow.pyj:458 CharacterSheetWindow.OpenDecorationsToTitle(): sm.ScatterEvent('OnTitleGrantedNotificationClicked', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnTitleGrantedNotificationClicked' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
+  },
+  "notify:OnToggleWindowed": {
+    "disposition": "client_local",
+    "evidence": "packages/carbonui/services/device.pyj:411 DeviceMgr.ToggleWindowed(): sm.ScatterEvent('OnToggleWindowed', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnTokensRedeemed": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/services/redeemsvc.pyj:167 RedeemService.NotifyOfTokensRedeemed(): sm.ScatterEvent('OnTokensRedeemed', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
   },
   "notify:OnToolTipExampleClicked": {
     "disposition": "client_local",
@@ -2511,6 +2711,14 @@
     "disposition": "client_local",
     "evidence": "projectdiscovery/client/projects/exoplanets/graphtools/transitselectiontool.pyj:249 TransitSelectionTool._on_folded_mouse_up(): sm.ScatterEvent('OnTransitMarkingInFoldedMode', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnTransitMarkingInFoldedMode' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnTransitMarkingWithoutPeriod": {
+    "disposition": "client_local",
+    "evidence": "packages/projectdiscovery/client/projects/exoplanets/graphtools/transitselectiontool.pyj:275 TransitSelectionTool._on_unfolded_mouse_up(): sm.ScatterEvent('OnTransitMarkingWithoutPeriod', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnTravelStateChanged": {
+    "disposition": "client_local",
+    "evidence": "packages/tacticalNavigation/tacticalNavigationService.pyj:176 TravelState._notify_state_changed(): sm.ScatterEvent('OnTravelStateChanged', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnTreatmentWndOpenedOtherWnd": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/shared/recommendation/recommendationCont.pyj:566 TopSection.OpenInAgency(): sm.ScatterEvent('OnTreatmentWndOpenedOtherWnd', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnTreatmentWndOpenedOtherWnd' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
@@ -2527,6 +2735,10 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/parklife/gameui.pyj:997 GameUI.SetLanguage(): sm.ScatterEvent('OnUIRefresh', ...) \u2014 client-only local UI scatter (3 site(s)); no machoNet cast in client code; no server emission. Line from V24 bytecode line table."
   },
+  "notify:OnUIScalingChange": {
+    "disposition": "client_local",
+    "evidence": "packages/carbonui/services/device.pyj:613 DeviceMgr.SetUIScaleValue(): sm.ScatterEvent('OnUIScalingChange', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnUIoffsetChanged": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/shared/systemMenu/systemmenu.pyj:2884 SystemMenu.OnCheckBoxChange(): sm.ScatterEvent('OnUIoffsetChanged', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnUIoffsetChanged' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
@@ -2534,6 +2746,10 @@
   "notify:OnUiHighlightDeleted": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/services/uipointersvc.pyj:706 UIPointerSvc.StopPointingTo(): sm.ScatterEvent('OnUiHighlightDeleted', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnUiHighlightDeleted' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
+  },
+  "notify:OnUnderConstructionUpdated": {
+    "disposition": "client_local",
+    "evidence": "packages/spacecomponents/client/components/underConstruction.pyj:58 UnderConstruction.OnSlimItemUpdated(): sm.ScatterEvent('OnUnderConstructionUpdated', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
   },
   "notify:OnUnfreezeOverviewWindows": {
     "disposition": "client_local",
@@ -2583,6 +2799,34 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/services/wars/war_cso.pyj:106 Wars.OnSessionChanged(): sm.ScatterEvent('OnWarStatusUpdated', ...) \u2014 client-only literal local scatter (3 site(s)); no machoNet cast of 'OnWarStatusUpdated' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnWarpActive": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/environment/effects/Warp.pyj:577 Warping.WarpLoop(): sm.ScatterEvent('OnWarpActive', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnWarpArrived": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/environment/effects/Warp.pyj:631 Warping.WarpLoop(): sm.ScatterEvent('OnWarpArrived', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnWarpDecelerate": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/environment/effects/Warp.pyj:610 Warping.WarpLoop(): sm.ScatterEvent('OnWarpDecelerate', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnWarpFinished": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/environment/effects/Warp.pyj:655 Warping.WarpLoop(): sm.ScatterEvent('OnWarpFinished', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnWarpStarted": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/environment/effects/Warp.pyj:561 Warping.WarpLoop(): sm.ScatterEvent('OnWarpStarted', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnWarpStarted2": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/environment/effects/Warp.pyj:607 Warping.WarpLoop(): sm.ScatterEvent('OnWarpStarted2', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnWarpToAsteroidBelt": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/services/menuSvcExtras/movementFunctions.pyj:501 WarpToItem.WarpToItem(): sm.ScatterEvent('OnWarpToAsteroidBelt', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
+  },
   "notify:OnWarzoneOccupationStateUpdated_Local": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/services/fwWarzoneSvc.pyj:128 FwWarzoneSvc.OnWarzoneOccupationStateUpdated(): sm.ScatterEvent('OnWarzoneOccupationStateUpdated_Local', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnWarzoneOccupationStateUpdated_Local' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
@@ -2618,6 +2862,10 @@
   "notify:OnWindowSetInactive": {
     "disposition": "client_local",
     "evidence": "carbonui/services/registry.pyj:301 RegistryHandler._TriggerInactiveEvents(): sm.ScatterEvent('OnWindowSetInactive', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnWindowSetInactive' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
+  },
+  "notify:OnWreckLootAll": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/environment/invControllers.pyj:1615 BaseCelestialContainer.LootAll(): sm.ScatterEvent('OnWreckLootAll', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
   },
   "notify:ProcessBountyInfoUpdated": {
     "disposition": "client_local",

@@ -976,14 +976,21 @@ pub fn handle_season_manager(
                         message: "Server-side activity challenge cannot be progressed via client events".into(),
                     });
                 }
+                let was_completed = ch.completed;
                 ch.progress = ch.progress.saturating_add(amount).min(ch.max_progress);
                 if ch.progress >= ch.max_progress {
                     ch.completed = true;
                 }
-                Ok(PyRep::None)
+                Ok((ch_id, ch.progress, !was_completed && ch.completed))
             });
             match res {
-                Ok(rep) => Some(Ok(rep)),
+                Ok((cid, new_prog, newly_completed)) => {
+                    ctx.notify(NotificationTarget::Character(char_id), "OnChallengeProgressUpdate", "charid", vec![PyRep::Integer(cid), PyRep::Integer(new_prog)]);
+                    if newly_completed {
+                        ctx.notify(NotificationTarget::Character(char_id), "OnChallengeCompleted", "charid", vec![PyRep::Integer(cid)]);
+                    }
+                    Some(Ok(PyRep::None))
+                }
                 Err(e) => Some(Err(e)),
             }
         }
@@ -1025,43 +1032,50 @@ pub fn handle_season_manager(
                 }
                 ch.completed = true;
                 ch.claimed = true;
-                st.season_points += ch.points;
+                let (prev_pts, reward_pts, season_id) = (st.season_points, ch.points, st.selected_season_id);
+                st.season_points += reward_pts;
                 let pts = st.season_points;
-                let reward_pts = ch.points;
+                let is_omega = snap.characters.get(&char_id).map(|c| c.clone_grade >= 2).unwrap_or(true);
                 let delivered_rep = if !ch.client_event_driven && ch.reward_type_id > 0 && ch.reward_quantity > 0 {
                     snap.next_entity_id += 1;
                     let reward_item_id = snap.next_entity_id;
-                    snap.items.insert(
-                        reward_item_id,
-                        eve_db::InventoryItemRecord {
-                            item_id: reward_item_id,
-                            type_id: ch.reward_type_id,
-                            owner_id: char_id,
-                            location_id: target_location,
-                            flag: eve_db::InventoryFlag::Hangar,
-                            quantity: ch.reward_quantity,
-                            singleton: false,
-                            ..Default::default()
-                        },
-                    );
+                    snap.items.insert(reward_item_id, eve_db::InventoryItemRecord {
+                        item_id: reward_item_id, type_id: ch.reward_type_id, owner_id: char_id,
+                        location_id: target_location, flag: eve_db::InventoryFlag::Hangar,
+                        quantity: ch.reward_quantity, singleton: false, ..Default::default()
+                    });
                     PyRep::Integer(reward_item_id)
                 } else {
                     PyRep::None
                 };
-
                 let rep = PyRep::keyval([
-                    ("challengeID", PyRep::Integer(ch_id)),
-                    ("claimed", PyRep::Bool(true)),
-                    ("seasonPoints", PyRep::Integer(pts)),
-                    ("rewardGranted", PyRep::Bool(true)),
-                    ("rewardPoints", PyRep::Integer(reward_pts)),
-                    ("deliveredItemID", delivered_rep),
+                    ("challengeID", PyRep::Integer(ch_id)), ("claimed", PyRep::Bool(true)),
+                    ("seasonPoints", PyRep::Integer(pts)), ("rewardGranted", PyRep::Bool(true)),
+                    ("rewardPoints", PyRep::Integer(reward_pts)), ("deliveredItemID", delivered_rep),
                 ]);
-                Ok(rep)
+                Ok((rep, season_id, prev_pts, pts, is_omega))
             });
-
             match res {
-                Ok(rep) => Some(Ok(rep)),
+                Ok((rep, season_id, prev_pts, pts, is_omega)) => {
+                    ctx.notify(NotificationTarget::Character(char_id), "OnChallengeRewardsGranted", "charid", vec![PyRep::Integer(ch_id)]);
+                    ctx.notify(NotificationTarget::Character(char_id), "OnSeasonalPointsUpdated", "charid", vec![PyRep::Integer(season_id), PyRep::Integer(pts)]);
+                    let (prev_goal, new_goal) = (prev_pts / 10, pts / 10);
+                    if new_goal > prev_goal {
+                        for g_idx in prev_goal..new_goal {
+                            let goal_data = PyRep::Dict(vec![
+                                (PyRep::String("goal_index".into()), PyRep::Integer(g_idx)),
+                                (PyRep::String("points_required".into()), PyRep::Integer((g_idx + 1) * 10)),
+                                (PyRep::String("completed".into()), PyRep::Bool(true)),
+                            ]);
+                            ctx.notify(NotificationTarget::Character(char_id), "OnSeasonalGoalCompleted", "charid", vec![PyRep::Integer(g_idx), goal_data]);
+                        }
+                        if is_omega {
+                            let claimed_idxs: Vec<PyRep> = (prev_goal..new_goal).map(PyRep::Integer).collect();
+                            ctx.notify(NotificationTarget::Character(char_id), "OnSeasonOmegaRewardsClaimed", "charid", vec![PyRep::List(claimed_idxs)]);
+                        }
+                    }
+                    Some(Ok(rep))
+                }
                 Err(e) => Some(Err(e)),
             }
         }
@@ -1305,7 +1319,13 @@ pub fn handle_season_manager(
                 Ok(())
             });
             match res {
-                Ok(()) => Some(Ok(PyRep::Bool(true))),
+                Ok(()) => {
+                    let sent = ctx.notify(NotificationTarget::All, "OnSeasonsFsdDataChanged", "charid", vec![]);
+                    if !sent.iter().any(|n| n.recipient_char_id == char_id) {
+                        ctx.notify(NotificationTarget::Character(char_id), "OnSeasonsFsdDataChanged", "charid", vec![]);
+                    }
+                    Some(Ok(PyRep::Bool(true)))
+                }
                 Err(e) => Some(Err(e)),
             }
         }

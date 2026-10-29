@@ -304,6 +304,26 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                                 }
                             });
                         }
+                        let effect_id = mod_type.effect_ids.first().copied().unwrap_or(6753) as i64;
+                        let sw_args = vec![
+                            PyRep::Integer(effect_id),
+                            PyRep::Integer(module_id),
+                            PyRep::Integer(m.type_id as i64),
+                        ];
+                        let sent = ctx.notify(
+                            crate::router::NotificationTarget::SolarSystem(_sys_id),
+                            "OnSystemWideEffectStart",
+                            "solarsystemid2",
+                            sw_args.clone(),
+                        );
+                        if !sent.iter().any(|n| n.recipient_char_id == char_id) {
+                            ctx.notify(
+                                crate::router::NotificationTarget::Character(char_id),
+                                "OnSystemWideEffectStart",
+                                "charid",
+                                sw_args,
+                            );
+                        }
                     }
                 }
 
@@ -377,6 +397,18 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                     let scram_eval = eve_dogma::eval_warp_scrambler_effects(&[&mod_state], &[0.0], &ctx.sde);
                     warp_scramble_points = scram_eval.scramble_strength.max(1);
                     disables_target_mwd_mjd = scram_eval.blocks_mwd;
+                    let jam_type = if disables_target_mwd_mjd { "warpScramblerMWD" } else { "warpScrambler" };
+                    let ewar_args = vec![
+                        PyRep::Integer(ship_id),
+                        PyRep::Integer(module_id),
+                        PyRep::Integer(target_id),
+                        PyRep::String(jam_type.into()),
+                    ];
+                    ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnEwarStart", "charid", ewar_args.clone());
+                    let target_owner = ctx.db.with_snapshot(|s| s.items.get(&target_id).map(|i| i.owner_id)).unwrap_or(0);
+                    if target_owner > 0 && target_owner != char_id {
+                        ctx.notify(crate::router::NotificationTarget::Character(target_owner), "OnEwarStart", "charid", ewar_args);
+                    }
                 }
 
                 // SDE attribute `3265` (`activationRequiresActiveIndustrialCore`, e.g. Shipboard Compressors `group_id == 4174`):
@@ -585,6 +617,24 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                                 ctx.effective_target_signature_radius(target_id, base_sig);
                             let _ = sys.set_combat_state(target_id, t_cs).await;
                         }
+                    }
+                    let jam_type = match mod_type.group_id {
+                        65 | 1672 => "webify",
+                        208 => "remoteSensorDampener",
+                        291 => "trackingDisrupt",
+                        379 => "targetPaint",
+                        _ => "electronic",
+                    };
+                    let ewar_args = vec![
+                        PyRep::Integer(ship_id),
+                        PyRep::Integer(module_id),
+                        PyRep::Integer(target_id),
+                        PyRep::String(jam_type.into()),
+                    ];
+                    ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnEwarStart", "charid", ewar_args.clone());
+                    let target_owner = ctx.db.with_snapshot(|s| s.items.get(&target_id).map(|i| i.owner_id)).unwrap_or(0);
+                    if target_owner > 0 && target_owner != char_id {
+                        ctx.notify(crate::router::NotificationTarget::Character(target_owner), "OnEwarStart", "charid", ewar_args);
                     }
                 }
 

@@ -124,6 +124,7 @@ mod notify_corp_emission_alliances;
 mod notify_econ_char_emission;
 mod notify_fleet_emission;
 mod notify_mail_emission;
+mod notify_real_emitters_batch2;
 mod notify_space_sov_fleet_emission;
 mod planetary_interaction_complete;
 mod pi_planet_mgr_rpc;

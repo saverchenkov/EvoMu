@@ -78,6 +78,21 @@ pub fn get_active_expert_system_skills(
     skills
 }
 
+fn expert_systems_to_py_dict(records: &BTreeMap<i64, ExpertSystemRecord>) -> PyRep {
+    let mut dict = Vec::with_capacity(records.len());
+    for (&tid, rec) in records {
+        dict.push((
+            PyRep::Integer(tid),
+            PyRep::keyval([
+                ("typeID", PyRep::Integer(rec.type_id)),
+                ("insertedAt", PyRep::Integer(rec.inserted_at_ft)),
+                ("expiresAt", PyRep::Integer(rec.expires_at_ft)),
+            ]),
+        ));
+    }
+    PyRep::Dict(dict)
+}
+
 pub fn handle(
     ctx: &ServerContext,
     session: &SessionState,
@@ -94,18 +109,7 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let records = ctx.db.with_snapshot(|snap| load_expert_systems(snap, char_id));
-            let mut dict = Vec::with_capacity(records.len());
-            for (&tid, rec) in &records {
-                dict.push((
-                    PyRep::Integer(tid),
-                    PyRep::keyval([
-                        ("typeID", PyRep::Integer(rec.type_id)),
-                        ("insertedAt", PyRep::Integer(rec.inserted_at_ft)),
-                        ("expiresAt", PyRep::Integer(rec.expires_at_ft)),
-                    ]),
-                ));
-            }
-            Some(Ok(PyRep::Dict(dict)))
+            Some(Ok(expert_systems_to_py_dict(&records)))
         }
 
         // parity: rpc:expertSystemMgr.ConsumeExpertSystem
@@ -216,16 +220,16 @@ pub fn handle(
                 entry.skills_granted = skills_granted;
                 entry.expires_at_ft = entry.expires_at_ft.max(now_ft) + duration_ticks;
                 save_expert_systems(snap, char_id, &records);
-                Ok(())
+                Ok((expert_systems_to_py_dict(&records), resolved_type_id))
             });
 
             match consume_res {
-                Ok(()) => {
+                Ok((es_dict, added_type_id)) => {
                     ctx.notify(
                         NotificationTarget::Character(char_id),
-                        "OnExpertSystemsUpdated_Local",
+                        "OnExpertSystemsUpdated",
                         "charid",
-                        vec![],
+                        vec![es_dict, PyRep::Bool(true), PyRep::Integer(added_type_id)],
                     );
                     Some(Ok(PyRep::None))
                 }
@@ -248,16 +252,17 @@ pub fn handle(
                     }));
                 }
             };
-            ctx.db.with_mut_snapshot(|snap| {
+            let es_dict = ctx.db.with_mut_snapshot(|snap| {
                 let mut records = load_expert_systems(snap, char_id);
                 records.remove(&type_id);
                 save_expert_systems(snap, char_id, &records);
+                expert_systems_to_py_dict(&records)
             });
             ctx.notify(
                 NotificationTarget::Character(char_id),
-                "OnExpertSystemsUpdated_Local",
+                "OnExpertSystemsUpdated",
                 "charid",
-                vec![],
+                vec![es_dict, PyRep::Bool(false), PyRep::Integer(type_id)],
             );
             Some(Ok(PyRep::None))
         }
@@ -378,8 +383,10 @@ pub fn handle(
                 other => format!("{other:?}"),
             };
 
-            ctx.db.with_mut_snapshot(|snap| {
+            let instance_id = char_id * 100_000 + graph_id;
+            let (first_start, bb_dict) = ctx.db.with_mut_snapshot(|snap| {
                 let blob_key = node_graph_bb_blob_key(char_id, graph_id);
+                let first = !snap.service_state_blobs.contains_key(&blob_key);
                 let mut bb: HashMap<String, String> = snap
                     .service_state_blobs
                     .get(&blob_key)
@@ -401,7 +408,49 @@ pub fn handle(
                         }
                     }
                 }
+                let mut entries: Vec<(PyRep, PyRep)> = bb
+                    .into_iter()
+                    .map(|(k, v)| (PyRep::String(k), PyRep::String(v)))
+                    .collect();
+                entries.sort_by(|a, b| a.0.as_str().cmp(&b.0.as_str()));
+                (first, PyRep::Dict(entries))
             });
+
+            if first_start || msg_name == "StartNodeGraph" {
+                ctx.notify(
+                    NotificationTarget::Character(char_id),
+                    "OnStartClientNodeGraph",
+                    "charid",
+                    vec![PyRep::Integer(graph_id), PyRep::Integer(instance_id), bb_dict.clone()],
+                );
+            }
+            ctx.notify(
+                NotificationTarget::Character(char_id),
+                "OnClientNodeGraphUpdate",
+                "charid",
+                vec![PyRep::Integer(instance_id), bb_dict],
+            );
+            ctx.notify(
+                NotificationTarget::Character(char_id),
+                "OnClientNodeGraphMessage",
+                "charid",
+                vec![PyRep::Integer(instance_id), PyRep::String(msg_name.to_string()), msg_data],
+            );
+            if matches!(msg_name, "StopNodeGraph" | "GraphCompleted") {
+                ctx.notify(
+                    NotificationTarget::Character(char_id),
+                    "OnStopClientNodeGraph",
+                    "charid",
+                    vec![PyRep::Integer(instance_id)],
+                );
+            } else if msg_name == "StopNodeGraphById" {
+                ctx.notify(
+                    NotificationTarget::Character(char_id),
+                    "OnStopClientNodeGraphById",
+                    "charid",
+                    vec![PyRep::Integer(graph_id)],
+                );
+            }
 
             Some(Ok(PyRep::None))
         }

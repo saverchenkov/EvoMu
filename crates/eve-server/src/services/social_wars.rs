@@ -106,6 +106,16 @@ fn sync_wars(ctx: &ServerContext) {
     }
 }
 
+fn emit_mutual_wars_updated(ctx: &ServerContext, actor_char_id: i64, corp_a: i64, corp_b: i64) {
+    let mut sent = ctx.notify(NotificationTarget::Corporation(corp_a), "OnMutualWarsUpdated_Remote", "corpid", vec![]);
+    if corp_b != corp_a {
+        sent.extend(ctx.notify(NotificationTarget::Corporation(corp_b), "OnMutualWarsUpdated_Remote", "corpid", vec![]));
+    }
+    if !sent.iter().any(|n| n.recipient_char_id == actor_char_id) {
+        ctx.notify(NotificationTarget::Character(actor_char_id), "OnMutualWarsUpdated_Remote", "charid", vec![]);
+    }
+}
+
 fn emit_war_changed(ctx: &ServerContext, war_id: i64, change_entries: Vec<(&str, PyRep, PyRep)>) {
     let now = ctx.now_unix();
     let Some((w, meta)) = ctx.db.with_snapshot(|snap| {
@@ -848,6 +858,7 @@ pub(super) fn handle_wars(
                     .mutual_invites
                     .insert((my_corp, to_corp), now);
             });
+            emit_mutual_wars_updated(ctx, char_id, my_corp, to_corp);
             Some(Ok(PyRep::keyval([("fromID", PyRep::Integer(my_corp)), ("toID", PyRep::Integer(to_corp)), ("sentDate", PyRep::Integer(now as i64))])))
         }
 
@@ -880,6 +891,9 @@ pub(super) fn handle_wars(
                     .remove(&(my_corp, to_corp))
                     .is_some()
             });
+            if removed {
+                emit_mutual_wars_updated(ctx, char_id, my_corp, to_corp);
+            }
             Some(Ok(PyRep::Bool(removed)))
         }
 
@@ -903,6 +917,7 @@ pub(super) fn handle_wars(
                 ctx.db.with_mut_snapshot(|snap| {
                     snap.war_state.mutual_invites.remove(&(from_corp, my_corp));
                 });
+                emit_mutual_wars_updated(ctx, char_id, my_corp, from_corp);
                 return Some(Ok(PyRep::keyval([("accepted", PyRep::Bool(false)), ("warID", PyRep::None)])));
             }
             let war_id = ctx.db.with_mut_snapshot(|snap| {
@@ -913,6 +928,7 @@ pub(super) fn handle_wars(
                 snap.war_state.wars.insert(wid, WarMeta::default());
                 wid
             });
+            emit_mutual_wars_updated(ctx, char_id, my_corp, from_corp);
             emit_war_changed(
                 ctx,
                 war_id,

@@ -466,22 +466,17 @@ fn strip_ship_fitting(
 
     ctx.invalidate_ship_fitting(ship_id);
     if !stripped.is_empty() {
-        let mut batch_entries = Vec::new();
-        for (item, prev_loc, prev_flag) in &stripped {
-            batch_entries.push((
-                PyRep::keyval([
-                    ("itemID", PyRep::Integer(item.item_id)),
-                    ("typeID", PyRep::Integer(item.type_id as i64)),
-                    ("ownerID", PyRep::Integer(item.owner_id)),
-                    ("locationID", PyRep::Integer(item.location_id)),
-                    ("flagID", PyRep::Integer(item.flag as i64)),
-                    ("quantity", PyRep::Integer(item.quantity as i64)),
-                ]),
-                PyRep::Dict(vec![
-                    (PyRep::Integer(3), PyRep::Integer(*prev_loc)),
-                    (PyRep::Integer(4), PyRep::Integer(*prev_flag as i64)),
-                ]),
-            ));
+        let mut item_kvs = Vec::with_capacity(stripped.len());
+        let first_prev_flag = stripped[0].2 as i64;
+        for (item, _prev_loc, prev_flag) in &stripped {
+            item_kvs.push(PyRep::keyval([
+                ("itemID", PyRep::Integer(item.item_id)),
+                ("typeID", PyRep::Integer(item.type_id as i64)),
+                ("ownerID", PyRep::Integer(item.owner_id)),
+                ("locationID", PyRep::Integer(item.location_id)),
+                ("flagID", PyRep::Integer(item.flag as i64)),
+                ("quantity", PyRep::Integer(item.quantity as i64)),
+            ]));
             if matches!(*prev_flag as u16, 11..=34 | 164..=171) {
                 ctx.notify(
                     NotificationTarget::Character(char_id),
@@ -491,11 +486,15 @@ fn strip_ship_fitting(
                 );
             }
         }
+        let change_dict = PyRep::Dict(vec![
+            (PyRep::Integer(3), PyRep::Integer(ship_id)),
+            (PyRep::Integer(4), PyRep::Integer(first_prev_flag)),
+        ]);
         ctx.notify(
             NotificationTarget::Character(char_id),
             "OnItemsChanged",
             "charid",
-            vec![PyRep::Dict(batch_entries)],
+            vec![PyRep::List(item_kvs), change_dict, PyRep::Integer(dock_id)],
         );
     }
 

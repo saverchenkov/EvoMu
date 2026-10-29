@@ -177,10 +177,28 @@ pub async fn handle(
         }
 
         ("voidSpaceMgr", "ClientIsReady") => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if session.solar_system_id == Some(VOID_SPACE_SYSTEM_ID) {
+                let vs_opt = with_pve_special_reg(ctx, |reg| reg.void_space_sessions.get(&char_id).cloned());
+                if let Some(vs) = vs_opt {
+                    let rem_sec = vs.expires_at_sec.saturating_sub(ctx.now_unix()) as i64;
+                    let end_ft = ctx.now_blueos_filetime_ticks() + rem_sec.max(1) * 10_000_000;
+                    let client_data = PyRep::Dict(vec![
+                        (PyRep::String("content_id".into()), PyRep::Integer(vs.target_id)),
+                        (PyRep::String("nebula_graphic_id".into()), PyRep::Integer(200_001)),
+                        (PyRep::String("end_time".into()), PyRep::Integer(end_ft)),
+                    ]);
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(char_id),
+                        "OnVoidSpaceRelog",
+                        "charid",
+                        vec![client_data],
+                    );
+                }
+            }
             Some(Ok(PyRep::keyval([("ready", PyRep::Bool(true))])))
         }
 
@@ -381,6 +399,7 @@ async fn activate_trace(
     let _ = abyss_handle.spawn_ball_with_combat(ball, cs).await;
     session.solar_system_id = Some(ABYSSAL_SPACE_SYSTEM_ID);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, ABYSSAL_SPACE_SYSTEM_ID);
+    emit_abyssal_entry_notifications(ctx, char_id, pocket_id, tier, remaining_sec);
 
     Ok(PyRep::keyval([
         ("pocketID", PyRep::Integer(pocket_id)),
@@ -501,6 +520,7 @@ async fn activate_inventory_filament(
     let _ = abyss_handle.spawn_ball_with_combat(ball, cs).await;
     session.solar_system_id = Some(ABYSSAL_SPACE_SYSTEM_ID);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, ABYSSAL_SPACE_SYSTEM_ID);
+    emit_abyssal_entry_notifications(ctx, char_id, pocket_id, tier, 1_200);
 
     Ok(PyRep::keyval([
         ("pocketID", PyRep::Integer(pocket_id)),
@@ -517,4 +537,33 @@ async fn activate_inventory_filament(
             PyRep::List(room1_npcs.iter().map(|&id| PyRep::Integer(id)).collect()),
         ),
     ]))
+}
+
+fn emit_abyssal_entry_notifications(
+    ctx: &ServerContext,
+    char_id: i64,
+    pocket_id: i64,
+    tier: u8,
+    remaining_sec: i64,
+) {
+    let client_data = PyRep::Dict(vec![
+        (PyRep::String("content_id".into()), PyRep::Integer(pocket_id)),
+        (PyRep::String("nebula_graphic_id".into()), PyRep::Integer(21_000 + tier as i64)),
+        (PyRep::String("difficulty_tier".into()), PyRep::Integer(tier as i64)),
+        (PyRep::String("location_id".into()), PyRep::Integer(ABYSSAL_SPACE_SYSTEM_ID as i64)),
+        (PyRep::String("rooms_completed".into()), PyRep::Integer(0)),
+    ]);
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnAbyssalLocationEntered",
+        "charid",
+        vec![client_data],
+    );
+    let end_ft = ctx.now_blueos_filetime_ticks() + remaining_sec.max(1) * 10_000_000;
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnAddExpiryDurationForAbyssalContent",
+        "charid",
+        vec![PyRep::Integer(end_ft)],
+    );
 }

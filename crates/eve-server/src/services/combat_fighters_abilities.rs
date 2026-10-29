@@ -658,7 +658,11 @@ async fn activate_single_fighter_ability(
                     let mut b = fighter_ball.clone();
                     b.max_velocity *= 1.0 + speed_bonus_pct / 100.0;
                     b.speed_fraction = 1.0;
-                    let _ = sys_handle.spawn_ball(b).await;
+                    if let Ok(Some(cs)) = sys_handle.get_combat_state(fighter_ball_id).await {
+                        let _ = sys_handle.spawn_ball_with_combat(b, cs).await;
+                    } else {
+                        let _ = sys_handle.spawn_ball(b).await;
+                    }
                 }
                 let _ = sys_handle.set_speed_fraction(fighter_ball_id, 1.0).await;
             }
@@ -705,13 +709,16 @@ async fn activate_single_fighter_ability(
         0
     };
 
+    let now_ft = ctx.now_blueos_filetime_ticks();
     session.push_notification(
         "OnFighterAbilitySlotActivated",
         vec![
             PyRep::Integer(fighter_ball_id),
             PyRep::Integer(slot_id as i64),
-            PyRep::Integer(ability_id as i64),
-            PyRep::Integer(target_id.unwrap_or(0)),
+            if charge_count > 0 { PyRep::Integer(remaining_charges) } else { PyRep::None },
+            PyRep::Integer(now_ft),
+            PyRep::Real(cycle_duration_ms),
+            if cooldown_sec > 0.0 { PyRep::Real(cooldown_sec) } else { PyRep::None },
         ],
     );
 
@@ -1133,7 +1140,11 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
                 .unwrap_or(400.0);
             if let Ok(Some((_, mut b))) = sys_handle.get_ball_snapshot(fighter_ball_id).await {
                 b.max_velocity /= 1.0 + speed_bonus_pct / 100.0;
-                let _ = sys_handle.spawn_ball(b).await;
+                if let Ok(Some(cs)) = sys_handle.get_combat_state(fighter_ball_id).await {
+                    let _ = sys_handle.spawn_ball_with_combat(b, cs).await;
+                } else {
+                    let _ = sys_handle.spawn_ball(b).await;
+                }
             }
         }
     } else if slot_id == 0 {
@@ -1141,6 +1152,11 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
             f.target_id = None;
         }
     }
+
+    session.push_notification(
+        "OnFighterAbilitySlotDeactivated",
+        vec![PyRep::Integer(fighter_ball_id), PyRep::Integer(slot_id as i64), PyRep::None],
+    );
 
     Some(Ok(PyRep::keyval([
         ("fighterID", PyRep::Integer(fighter_ball_id)),

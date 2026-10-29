@@ -737,10 +737,18 @@ async fn handle_request_scans(
         return Some(Err(BridgeRpcError::user_error("InvalidProbeCoordinates")));
     }
 
+    let warp_ft = ctx.now_blueos_filetime_ticks();
     for (pid, new_pos) in moved_balls {
         if let Ok(Some((_, mut b))) = sys_handle.get_ball_snapshot(pid).await {
+            let old_pos = b.position;
             b.position = new_pos;
             let _ = sys_handle.spawn_ball(b).await;
+            if (old_pos - new_pos).length_squared() > 1.0 {
+                let from_t = PyRep::Tuple(vec![PyRep::Real(old_pos.x), PyRep::Real(old_pos.y), PyRep::Real(old_pos.z)]);
+                let to_t = PyRep::Tuple(vec![PyRep::Real(new_pos.x), PyRep::Real(new_pos.y), PyRep::Real(new_pos.z)]);
+                let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeWarpStart", "charid", vec![PyRep::Integer(pid), from_t, to_t, PyRep::Integer(warp_ft), PyRep::Integer(1000)]);
+                let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeWarpEnd", "charid", vec![PyRep::Integer(pid)]);
+            }
         }
     }
 
@@ -1030,18 +1038,11 @@ async fn handle_request_scans(
         }
     }
 
-    let _ = ctx.notify(
-        crate::router::NotificationTarget::Character(char_id),
-        "OnSystemScanStarted",
-        "charid",
-        vec![PyRep::Integer(now_unix as i64), PyRep::Integer(4000), PyRep::Integer(active_probes.len() as i64)],
-    );
-    let _ = ctx.notify(
-        crate::router::NotificationTarget::Character(char_id),
-        "OnSystemScanStopped",
-        "charid",
-        vec![PyRep::Integer(active_probes.len() as i64), PyRep::List(rows.clone()), PyRep::List(Vec::new())],
-    );
+    let scan_probe_ids: Vec<PyRep> = active_probes.iter().map(|p| PyRep::Integer(p.probe_id)).collect();
+    let idle_probes: Vec<PyRep> = active_probes.iter().map(|p| PyRep::keyval([("probeID", PyRep::Integer(p.probe_id)), ("destination", PyRep::Tuple(vec![PyRep::Real(p.destination[0]), PyRep::Real(p.destination[1]), PyRep::Real(p.destination[2])]))])).collect();
+    let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnSystemScanStarted", "charid", vec![PyRep::Integer(ctx.now_blueos_filetime_ticks()), PyRep::Integer(4000), PyRep::List(scan_probe_ids.clone())]);
+    let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnSystemScanStopped", "charid", vec![PyRep::List(scan_probe_ids), PyRep::List(rows.clone()), PyRep::List(Vec::new())]);
+    let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbesIdle", "charid", vec![PyRep::List(idle_probes)]);
 
     Some(Ok(PyRep::List(rows)))
 }
@@ -1222,12 +1223,8 @@ async fn handle_recover_probes(
 
     let rec_ids: Vec<PyRep> = recovered_probes.iter().map(|p| PyRep::Integer(p.probe_id)).collect();
     if count > 0 {
-        let _ = ctx.notify(
-            crate::router::NotificationTarget::Character(char_id),
-            "OnProbesIdle",
-            "charid",
-            vec![PyRep::List(rec_ids.clone())],
-        );
+        let idle_kvs: Vec<PyRep> = recovered_probes.iter().map(|p| PyRep::keyval([("probeID", PyRep::Integer(p.probe_id)), ("destination", PyRep::Tuple(vec![PyRep::Real(p.destination[0]), PyRep::Real(p.destination[1]), PyRep::Real(p.destination[2])]))])).collect();
+        let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbesIdle", "charid", vec![PyRep::List(idle_kvs)]);
     }
     Some(Ok(PyRep::keyval([
         ("recoveredProbeIDs", PyRep::List(rec_ids)),
@@ -1253,7 +1250,7 @@ async fn handle_reconnect_probes(
     let (auto_returned, expired_lost) = expire_overdue_probes_for_char(ctx, char_id, now_unix).await;
     let ship_id = session.ship_id.unwrap_or(0);
 
-    let mut reconnected = Vec::new();
+    let mut reconnected_ids = Vec::new();
     if let Ok(mut map) = ctx.active_scanner_probes.write() {
         for p in map.values_mut() {
             if p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state >= 0 {
@@ -1261,11 +1258,15 @@ async fn handle_reconnect_probes(
                 if ship_id != 0 {
                     p.ship_id = ship_id;
                 }
-                reconnected.push(PyRep::Integer(p.probe_id));
+                reconnected_ids.push(p.probe_id);
             }
         }
     }
-    let count = reconnected.len() as i64;
+    for &pid in &reconnected_ids {
+        let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(1)]);
+    }
+    let count = reconnected_ids.len() as i64;
+    let reconnected: Vec<PyRep> = reconnected_ids.into_iter().map(PyRep::Integer).collect();
     Some(Ok(PyRep::keyval([
         ("reconnectedProbeIDs", PyRep::List(reconnected)),
         ("reconnectedCount", PyRep::Integer(count)),
@@ -1307,6 +1308,10 @@ async fn handle_destroy_probe(
     for p in &destroyed_probes {
         let _ = sys_handle.remove_ball(p.probe_id).await;
         let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnRemoveProbe", "charid", vec![PyRep::Integer(p.probe_id)]);
+    }
+    let any_left = ctx.active_scanner_probes.read().ok().is_some_and(|m| m.values().any(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state >= 0));
+    if !destroyed_probes.is_empty() && !any_left {
+        let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnScannerInfoRemoved", "charid", vec![]);
     }
 
     Some(Ok(PyRep::keyval([

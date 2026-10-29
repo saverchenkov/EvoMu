@@ -451,7 +451,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
     }
 
     let now_u = ctx.now_unix();
-    let (removed_pid, despawned_trace_ids) =
+    let (exited_pid, removed_pid, despawned_trace_ids) =
         crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
             let mut traces = Vec::new();
             if let Some(mut p) = reg.abyssal_pockets.remove(&char_id) {
@@ -482,12 +482,12 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
                             true
                         }
                     });
-                    (Some(pid), traces)
+                    (pid, Some(pid), traces)
                 } else {
-                    (None, traces)
+                    (pid, None, traces)
                 }
             } else {
-                (None, traces)
+                (0, None, traces)
             }
         });
 
@@ -565,6 +565,18 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
     let _ = origin_sys_handle.spawn_ball_with_combat(ball, cs).await;
     session.solar_system_id = Some(origin_sys);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, origin_sys);
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnAbyssalContentFinished",
+        "charid",
+        vec![PyRep::Integer(exited_pid), PyRep::Integer(1)],
+    );
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnAbyssalLocationExited",
+        "charid",
+        vec![],
+    );
 
     Ok(PyRep::keyval([
         ("solarSystemID", PyRep::Integer(origin_sys as i64)),
@@ -764,6 +776,13 @@ pub(crate) async fn handle_void_space_player_jump(
         "charid",
         vec![client_data],
     );
+    let void_end_ft = ctx.now_blueos_filetime_ticks() + 1_200 * 10_000_000;
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnAddExpiryDurationForVoidSpaceContent",
+        "charid",
+        vec![PyRep::Integer(void_end_ft)],
+    );
 
     Ok(PyRep::keyval([
         ("solarSystemID", PyRep::Integer(VOID_SPACE_SYSTEM_ID as i64)),
@@ -905,6 +924,12 @@ pub(crate) async fn handle_void_space_end_gate_activation(
     let _ = origin_handle.spawn_ball_with_combat(ball, cs).await;
     session.solar_system_id = Some(origin_sys);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, origin_sys);
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnVoidSpaceContentFinished",
+        "charid",
+        vec![PyRep::Integer(vs.target_id), PyRep::Integer(1)],
+    );
 
     Ok(PyRep::keyval([
         ("solarSystemID", PyRep::Integer(origin_sys as i64)),
