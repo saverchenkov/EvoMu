@@ -328,8 +328,24 @@ async fn notify_batch2_fighters_ewar_mutual_wars_strip_and_tracker() {
         _ => panic!("expected position tuple"),
     };
     let target_id = sig_kv.dict_get("targetID").and_then(|v| v.as_str()).unwrap();
-    let true_pos = ctx.db.with_snapshot(|s| s.cosmic_signatures.get(&sys_lowsec).and_then(|sigs| sigs.iter().find(|r| r.signature_id == target_id).map(|r| r.position))).unwrap();
-    assert_ne!(reported_pos, true_pos, "reported position must deviate from true position");
+    let sig_rec = ctx.db.with_snapshot(|s| s.cosmic_signatures.get(&sys_lowsec).and_then(|sigs| sigs.iter().find(|r| r.signature_id == target_id).cloned())).unwrap();
+    let true_pos = sig_rec.position;
+    let dist = ((reported_pos[0] - true_pos[0]).powi(2) + (reported_pos[1] - true_pos[1]).powi(2) + (reported_pos[2] - true_pos[2]).powi(2)).sqrt();
+    assert!(dist <= dev + 1.0, "offset distance {dist} must be <= deviation {dev}");
+    assert!(dist >= 0.05 * dev, "offset distance {dist} must be non-zero");
+    // Verify offset cannot be reversed from public targetID + deviation alone
+    let h = target_id.bytes().fold(14695981039346656037_u64, |a, b| (a ^ (b as u64)).wrapping_mul(1099511628211));
+    let naive_x = reported_pos[0] - (((h & 0xFFFF) as f64 / 65535.0) * 2.0 - 1.0) * dev * 0.75;
+    assert_ne!(naive_x, true_pos[0], "true position must not be derivable from targetID and deviation");
+    // Verify CSPRNG non-determinism across draws:
+    let kv2 = eve_server::services::fleet_social::build_signal_tracker_signature_kv(&ctx.sde, &sig_rec);
+    let pos2 = match kv2.dict_get("position") {
+        Some(PyRep::Tuple(t)) => [t[0].as_f64().unwrap(), t[1].as_f64().unwrap(), t[2].as_f64().unwrap()],
+        _ => panic!("expected position tuple"),
+    };
+    let dist2 = ((pos2[0] - true_pos[0]).powi(2) + (pos2[1] - true_pos[1]).powi(2) + (pos2[2] - true_pos[2]).powi(2)).sqrt();
+    assert!(dist2 <= dev + 1.0, "second draw distance {dist2} must be <= deviation {dev}");
+    assert_ne!(reported_pos, pos2, "subsequent reports must draw unpredictable CSPRNG offsets");
     assert!(matches!(&sig_upd[2], PyRep::List(l) if !l.is_empty()));
     let anom_rem = find_notif(&exp_notifs, "OnSignalTrackerAnomalyUpdate");
     assert!(matches!(&anom_rem[2], PyRep::List(l) if !l.is_empty()));

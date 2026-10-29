@@ -45,6 +45,7 @@ pub(crate) mod fleet_social_scanning;
 
 pub use fleet_social_notify::stream_fleet_watchlist_damage;
 pub use fleet_social_persistence::{hydrate_social_state_from_db, persist_social_state};
+pub use fleet_social_scanning::build_signal_tracker_signature_kv;
 pub(crate) use fleet_social_persistence::update_calendar_response_from_esi;
 pub use fleet_social_corp_tail::{
     execute_pending_auto_kicks_for_docked_char, execute_pending_auto_kicks_on_downtime,

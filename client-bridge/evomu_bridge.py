@@ -5,7 +5,7 @@ evomu_bridge.py -- Client-side Python ServiceManager (`sm`) & `michelle` Transpo
 Fixes & Hardening:
 1. Full frame demultiplexer: Separates asynchronous `ServerEvent` notifications from
    `RpcResponse` frames and correlates pending RPCs strictly by `req_id`.
-2. Enforces per-request timeouts (`DEFAULT_RPC_TIMEOUT = 10.0s`) and max frame size bounds.
+2. Enforces per-request timeouts (`DEFAULT_RPC_TIMEOUT = 30.0s`) and max frame size bounds.
 3. Supports bound remote objects (`bound_id`) alongside standard service calls.
 4. Hydrates `util.KeyVal` and `util.Rowset` in pure Python on the client.
 """
@@ -24,7 +24,7 @@ _TEXT_TYPE = unicode if PY2 else str  # noqa: F821
 
 MAX_FRAME_SIZE = 4 * 1024 * 1024  # 4 MiB
 _CINDEXED_NAMES = ("dbutil.CIndexedRowset", "carbon.common.script.sys.crowset.CIndexedRowset")
-DEFAULT_RPC_TIMEOUT = 10.0
+DEFAULT_RPC_TIMEOUT = 30.0
 
 
 class LocalKeyVal(dict):
@@ -290,8 +290,10 @@ class EvoMuBridgeConnection(object):
         args,
         kwargs,
         bound_id=None,
-        timeout=DEFAULT_RPC_TIMEOUT,
+        timeout=None,
     ):
+        if timeout is None:
+            timeout = DEFAULT_RPC_TIMEOUT
         with self._write_lock:
             if self.sock is None:
                 self.connect()
@@ -400,7 +402,9 @@ class PublicGatewayShim(object):
         self._bridge = bridge
         self._notice_handlers = collections.defaultdict(list)
 
-    def send_character_request(self, request_proto, response_cls, timeout=DEFAULT_RPC_TIMEOUT):
+    def send_character_request(self, request_proto, response_cls, timeout=None):
+        if timeout is None:
+            timeout = DEFAULT_RPC_TIMEOUT
         type_name = getattr(request_proto, "DESCRIPTOR", None)
         full_name = type_name.full_name if type_name is not None else type(request_proto).__name__
         payload_bytes = bytearray(

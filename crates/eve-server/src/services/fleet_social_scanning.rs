@@ -1024,7 +1024,26 @@ pub(crate) fn signal_tracker_subscribers_in_snap(
     subs
 }
 
-pub(crate) fn build_signal_tracker_signature_kv(
+fn random_sphere_offset(dev_radius: f64, sig_id: &str) -> glam::DVec3 {
+    let mut b = [0u8; 24];
+    if getrandom::getrandom(&mut b).is_err() {
+        let t = sig_id.bytes().fold(0x517c_c1b7_2722_0a95_u64, |a, c| (a ^ (c as u64)).wrapping_mul(1099511628211));
+        b[..8].copy_from_slice(&t.to_le_bytes());
+        b[8..16].copy_from_slice(&(t.wrapping_mul(0x9E37_79B9_7F4A_7C15)).to_le_bytes());
+        b[16..24].copy_from_slice(&(t.wrapping_mul(0xBF58_476D_1CE4_E5B9)).to_le_bytes());
+    }
+    let u1 = ((u64::from_le_bytes(b[0..8].try_into().unwrap()) >> 11) as f64) * (1.0 / ((1u64 << 53) as f64));
+    let u2 = ((u64::from_le_bytes(b[8..16].try_into().unwrap()) >> 11) as f64) * (1.0 / ((1u64 << 53) as f64));
+    let u3 = ((u64::from_le_bytes(b[16..24].try_into().unwrap()) >> 11) as f64) * (1.0 / ((1u64 << 53) as f64));
+    let theta = u1 * 2.0 * std::f64::consts::PI;
+    let z = u2 * 2.0 - 1.0;
+    let xy_r = (1.0 - z * z).max(0.0).sqrt();
+    let dir = glam::DVec3::new(xy_r * theta.cos(), xy_r * theta.sin(), z).try_normalize().unwrap_or(glam::DVec3::X);
+    let r_factor = u3.cbrt().clamp(0.1, 1.0);
+    dir * (dev_radius * r_factor)
+}
+
+pub fn build_signal_tracker_signature_kv(
     sde: &eve_sde::SdeRegistry,
     sig: &CosmicSignatureRecord,
 ) -> PyRep {
@@ -1039,25 +1058,14 @@ pub(crate) fn build_signal_tracker_signature_kv(
         (1.0 - sig.signal_strength.clamp(0.0, 1.0)) * (diff_level as f64) * AU_IN_METERS
     };
     let reported_pos = if dev_radius > 0.0 {
-        let h = sig.signature_id.bytes().fold(14695981039346656037_u64, |a, b| (a ^ (b as u64)).wrapping_mul(1099511628211));
-        let dx = ((h & 0xFFFF) as f64 / 65535.0) * 2.0 - 1.0;
-        let dy = (((h >> 16) & 0xFFFF) as f64 / 65535.0) * 2.0 - 1.0;
-        let dz = (((h >> 32) & 0xFFFF) as f64 / 65535.0) * 2.0 - 1.0;
-        let dir = glam::DVec3::new(dx, dy, dz).try_normalize().unwrap_or(glam::DVec3::X);
-        let off = dir * (dev_radius * 0.75);
+        let off = random_sphere_offset(dev_radius, &sig.signature_id);
         [sig.position[0] + off.x, sig.position[1] + off.y, sig.position[2] + off.z]
     } else {
         sig.position
     };
+    let pos_rep = PyRep::Tuple(vec![PyRep::Real(reported_pos[0]), PyRep::Real(reported_pos[1]), PyRep::Real(reported_pos[2])]);
     PyRep::keyval([
-        (
-            "position",
-            PyRep::Tuple(vec![
-                PyRep::Real(reported_pos[0]),
-                PyRep::Real(reported_pos[1]),
-                PyRep::Real(reported_pos[2]),
-            ]),
-        ),
+        ("position", pos_rep),
         ("targetID", PyRep::String(sig.signature_id.clone())),
         ("difficulty", PyRep::Integer(i64::from(diff_level))),
         ("dungeonID", PyRep::None),
@@ -1067,16 +1075,10 @@ pub(crate) fn build_signal_tracker_signature_kv(
 }
 
 pub(crate) fn build_signal_tracker_anomaly_kv(anom: &eve_db::CosmicAnomalyRecord) -> PyRep {
+    let pos_rep = PyRep::Tuple(vec![PyRep::Real(anom.position[0]), PyRep::Real(anom.position[1]), PyRep::Real(anom.position[2])]);
     PyRep::keyval([
         ("instanceID", PyRep::String(anom.anomaly_id.clone())),
-        (
-            "position",
-            PyRep::Tuple(vec![
-                PyRep::Real(anom.position[0]),
-                PyRep::Real(anom.position[1]),
-                PyRep::Real(anom.position[2]),
-            ]),
-        ),
+        ("position", pos_rep),
         ("targetID", PyRep::String(anom.anomaly_id.clone())),
         ("difficulty", PyRep::Integer(1)),
         ("dungeonID", PyRep::None),
@@ -1098,18 +1100,12 @@ pub(crate) fn build_signal_tracker_structure_kv(
         .get(&st.type_id)
         .map(|t| (i64::from(t.group_id), i64::from(t.category_id)))
         .unwrap_or((1657, 65));
+    let pos_rep = PyRep::Tuple(vec![PyRep::Real(st.position[0]), PyRep::Real(st.position[1]), PyRep::Real(st.position[2])]);
     PyRep::keyval([
         ("typeID", PyRep::Integer(i64::from(st.type_id))),
         ("groupID", PyRep::Integer(group_id)),
         ("categoryID", PyRep::Integer(category_id)),
-        (
-            "position",
-            PyRep::Tuple(vec![
-                PyRep::Real(st.position[0]),
-                PyRep::Real(st.position[1]),
-                PyRep::Real(st.position[2]),
-            ]),
-        ),
+        ("position", pos_rep),
         ("targetID", PyRep::Integer(st.structure_id)),
     ])
 }
