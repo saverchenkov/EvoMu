@@ -289,7 +289,7 @@ async fn test_concord_response_and_faction_police_enforcement() {
             .any(|n| n.solar_system_id == jita && n.archetype == "FactionPolice")
     }));
 
-    // 1. Three unlawful high-sec capsule shots via dogmaIM.Activate -> Criminal flag + sec status <= -5.0 + 6s CONCORD response!
+    // 1. Unlawful high-sec capsule aggression via dogmaIM.Activate -> Criminal flag + sec status penalty (once per target + destruction) + 6s CONCORD response!
     rpc(
         &ctx,
         &mut att_sess,
@@ -383,8 +383,8 @@ async fn test_concord_response_and_faction_police_enforcement() {
         "Criminal pilot must be ejected into capsule (670)"
     );
     assert!(
-        att_after.security_status <= -5.0,
-        "Three unlawful pod shots must organically drop security status <= -5.0, got {}",
+        att_after.security_status <= -4.0,
+        "Unlawful pod aggression and destruction must drop security status (once per target + destruction), got {}",
         att_after.security_status
     );
 

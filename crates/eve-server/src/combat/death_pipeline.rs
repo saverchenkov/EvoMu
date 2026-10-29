@@ -592,6 +592,32 @@ pub fn execute_death_pipeline_sync_inner(
             victim_char_id,
             victim_ship_type_id,
         );
+        // Security status penalty for illegal ship or pod kill (R-SECLOSS-PER-ACTIVATION)
+        if attacker_char_id != 1_000_125 {
+            let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0);
+            if sys_sec > 0.0 {
+                let is_legal = ctx.db.with_snapshot(|snap| {
+                    crate::services::combat_crimewatch::is_legal_war_or_suspect_target(snap, attacker_char_id, victim_char_id, now_unix)
+                }) || {
+                    let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+                    let vst = cw.get_or_create(victim_char_id);
+                    vst.is_suspect(now_unix) || vst.is_criminal(now_unix)
+                } || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                    rt.has_limited_engagement_with(victim_char_id, attacker_char_id, now_unix)
+                });
+                if !is_legal {
+                    let is_pod = victim_ship_type_id == 670;
+                    let old_sec = ctx.db.with_snapshot(|s| s.characters.get(&attacker_char_id).map(|c| c.security_status).unwrap_or(0.0));
+                    let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, is_pod, sys_sec);
+                    let new_sec = (old_sec - loss).clamp(-10.0, 10.0);
+                    ctx.db.with_mut_snapshot(|s| {
+                        if let Some(ch) = s.characters.get_mut(&attacker_char_id) {
+                            ch.security_status = new_sec;
+                        }
+                    });
+                }
+            }
+        }
     }
 
     let km_hash = crate::services::combat_crimewatch::compute_killmail_esi_hash(

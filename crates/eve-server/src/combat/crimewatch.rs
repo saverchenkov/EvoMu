@@ -283,6 +283,11 @@ impl CrimeWatchDirector {
             })
     }
 
+    /// Retrieves an active PvP aggression record between aggressor and victim if unexpired (`feat:combat.aggression-tracking`).
+    pub fn get_aggression(&self, aggressor: i64, victim: i64, now_unix: u64) -> Option<&AggressionRecord> {
+        self.aggression_mgr.get_aggression(aggressor, victim, now_unix)
+    }
+
     /// Records weapon activation (e.g. firing turret or launcher): grants 60-second weapon timer.
     pub fn trigger_weapon_timer(&mut self, character_id: i64, now_unix: u64) {
         let st = self.get_or_create(character_id);
