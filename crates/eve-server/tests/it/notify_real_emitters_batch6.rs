@@ -116,13 +116,15 @@ async fn test_batch6_station_scanners_mining_cloak_and_hack() {
         .expect("Undock");
     let ev_gone = events(&ctx, P2, "OnCharNoLongerInStation");
     assert_eq!(ev_gone.len(), 1, "P2 receives OnCharNoLongerInStation");
-    assert_eq!(ev_gone[0].len(), 1);
-    if let PyRep::Tuple(ref row) = ev_gone[0][0] {
-        assert_eq!(row[0], PyRep::Integer(P1));
-        assert_eq!(row[1], PyRep::Integer(1_000_170));
-    } else {
-        panic!("expected PyRep::Tuple for guest row");
-    }
+    assert_eq!(
+        ev_gone[0],
+        vec![PyRep::Tuple(vec![
+            PyRep::Integer(P1),
+            PyRep::Integer(1_000_170),
+            PyRep::None,
+            PyRep::None,
+        ])]
+    );
 
     // Station Dock -> emits OnCharNowInStation to station pilots
     ctx.dispatch_rpc(&mut s1, "stationSvc", None, "Dock", &[PyRep::Integer(JITA_STATION)], &HashMap::new(), None)
@@ -130,13 +132,15 @@ async fn test_batch6_station_scanners_mining_cloak_and_hack() {
         .expect("Dock");
     let ev_now = events(&ctx, P2, "OnCharNowInStation");
     assert_eq!(ev_now.len(), 1, "P2 receives OnCharNowInStation");
-    assert_eq!(ev_now[0].len(), 1);
-    if let PyRep::Tuple(ref row) = ev_now[0][0] {
-        assert_eq!(row[0], PyRep::Integer(P1));
-        assert_eq!(row[1], PyRep::Integer(1_000_170));
-    } else {
-        panic!("expected PyRep::Tuple for guest row");
-    }
+    assert_eq!(
+        ev_now[0],
+        vec![PyRep::Tuple(vec![
+            PyRep::Integer(P1),
+            PyRep::Integer(1_000_170),
+            PyRep::None,
+            PyRep::None,
+        ])]
+    );
 }
 
 #[tokio::test]
@@ -223,13 +227,13 @@ async fn test_batch6_ship_and_pod_destruction_pipeline() {
 
 #[tokio::test]
 async fn test_batch6_ess_and_dynamic_bounty() {
-    // parity: notify:OnSystemDynamicBountyStateChanged, notify:OnSystemESSDataChanged
+    // parity: notify:OnSystemESSDataChanged
     // parity: notify:OnESSMainBankLinkNotification, notify:OnESSReserveBankLinkNotification
     // parity: notify:OnMainBankPlayerLinkDisconnected, notify:OnReserveBankPlayerLinkDisconnected
     // parity: notify:OnMainBankPlayerHackSuccess, notify:OnReserveBankUnlock
+    // DATA GAP: notify:OnSystemDynamicBountyStateChanged requires dynamic bounty multiplier stepping from ratting bounty / pvp loss path
     // DATA GAP: notify:OnEssReserveBankInventoryFull requires ESS container inventory overflow wiring
     eve_testkit::attest(&[
-        "notify:OnSystemDynamicBountyStateChanged",
         "notify:OnSystemESSDataChanged",
         "notify:OnESSMainBankLinkNotification",
         "notify:OnESSReserveBankLinkNotification",
@@ -306,13 +310,7 @@ async fn test_batch6_ess_and_dynamic_bounty() {
         })
         .await;
 
-    // 1. Dynamic Bounty via step_dynamic_bounty_multiplier
-    let new_rate = eve_server::services::combat_crimewatch::step_dynamic_bounty_multiplier(&ctx, nullsec_sys_id, 50_000_000.0, 0.0);
-    let ev_dbs = events(&ctx, P1, "OnSystemDynamicBountyStateChanged");
-    assert_eq!(ev_dbs.len(), 1, "P1 receives OnSystemDynamicBountyStateChanged");
-    assert_eq!(ev_dbs[0], vec![PyRep::Integer(nullsec_sys_id as i64), PyRep::Real(new_rate)]);
-
-    // 2. ESS Main Bank Link start
+    // 1. ESS Main Bank Link start
     let kw = HashMap::new();
     let res_start = ctx
         .dispatch_rpc(&mut s1, "essMgr", None, "AttemptLinkToMainBank", &[PyRep::Integer(ess_ball_id)], &kw, None)
@@ -323,7 +321,7 @@ async fn test_batch6_ess_and_dynamic_bounty() {
     assert_eq!(ev_main_link.len(), 1, "P1 receives OnESSMainBankLinkNotification");
     assert_eq!(ev_main_link[0], vec![PyRep::Integer(nullsec_sys_id as i64)]);
 
-    // 3. ESS Main Bank Hack complete (advance 5 ticks)
+    // 2. ESS Main Bank Hack complete (advance 5 ticks)
     for _ in 0..5 {
         let _ = sys_handle.step_manual(1.0).await;
     }
@@ -353,7 +351,7 @@ async fn test_batch6_ess_and_dynamic_bounty() {
     assert_eq!(ev_ess_data[0][1].dict_get("mainBank"), Some(&PyRep::Real(0.0)));
     assert_eq!(ev_ess_data[0][1].dict_get("reserveBank"), Some(&PyRep::Real(100_000_000.0)));
 
-    // 4. ESS Reserve Bank Link start (with key)
+    // 3. ESS Reserve Bank Link start (with key)
     let res_res_start = ctx
         .dispatch_rpc(&mut s1, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_ball_id)], &kw, None)
         .await
@@ -375,7 +373,7 @@ async fn test_batch6_ess_and_dynamic_bounty() {
         .dispatch_rpc(&mut s1, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_ball_id)], &kw, None)
         .await
         .expect("AttemptLinkToReserveBank complete");
-    assert!(res_res_comp.dict_get("stolenISK").is_some());
+    assert_eq!(res_res_comp.dict_get("stolenISK"), Some(&PyRep::Real(6_666_666.66)));
 
     let ev_res_disc = events(&ctx, P1, "OnReserveBankPlayerLinkDisconnected");
     assert_eq!(ev_res_disc.len(), 1, "P1 receives OnReserveBankPlayerLinkDisconnected");
@@ -527,6 +525,7 @@ async fn test_batch6_safelogoff_and_crimewatch() {
         .expect("Undock");
 
     // 3. Valid SafeLogoff in space -> emits OnSafeLogoffTimerStarted
+    let expected_ft = eve_server::sp6_lifecycle::unix_to_filetime(ctx.now_unix() + 30);
     let start_res = ctx
         .dispatch_rpc(&mut s1, "ship", None, "SafeLogoff", &[], &empty, None)
         .await
@@ -534,8 +533,7 @@ async fn test_batch6_safelogoff_and_crimewatch() {
     assert_eq!(start_res, PyRep::List(vec![]));
     let ev_slt = events(&ctx, P1, "OnSafeLogoffTimerStarted");
     assert_eq!(ev_slt.len(), 1, "P1 receives OnSafeLogoffTimerStarted");
-    assert_eq!(ev_slt[0].len(), 1);
-    assert!(ev_slt[0][0].as_i64().is_some_and(|ft| ft > 0));
+    assert_eq!(ev_slt[0], vec![PyRep::Integer(expected_ft)]);
 
     // 4. Abort SafeLogoff -> emits OnSafeLogoffAborted
     let abort_res = ctx
