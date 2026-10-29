@@ -3,11 +3,246 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
-use crate::services::fw_gameplay::militia_lp_corp_id;
-use crate::services::fw_services::donate_solar_system_lp;
+use crate::services::fw_gameplay::{
+    apply_fw_or_insurgency_structure_damage, militia_lp_corp_id,
+};
+use crate::services::fw_services::{
+    award_fw_kill_lp, donate_solar_system_lp, fw_opposing_faction, set_facwar_bunker_vulnerable,
+    update_system_advantage, HQ_SYSTEM_AMO, HQ_SYSTEM_INTAKI, HQ_SYSTEM_MEHATOOR,
+    HQ_SYSTEM_ONNAMON,
+};
+use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
+use glam::DVec3;
 use std::collections::HashMap;
+
+/// Returns War HQ station services if `sys_id` is one of the 4 Empire Militia War HQ systems.
+pub fn get_war_hq_services(sys_id: u32) -> Option<(&'static str, Vec<&'static str>)> {
+    match sys_id {
+        HQ_SYSTEM_MEHATOOR => Some((
+            "24th Imperial Crusade HQ (Mehatoor)",
+            vec!["MilitiaCommandHQ", "CounterInsurgencyBriefing", "MilitiaLPStore"],
+        )),
+        HQ_SYSTEM_ONNAMON => Some((
+            "State Protectorate HQ (Onnamon)",
+            vec!["MilitiaCommandHQ", "CounterInsurgencyBriefing", "MilitiaLPStore"],
+        )),
+        HQ_SYSTEM_INTAKI => Some((
+            "Federal Defence Union HQ (Intaki)",
+            vec!["MilitiaCommandHQ", "CounterInsurgencyBriefing", "MilitiaLPStore"],
+        )),
+        HQ_SYSTEM_AMO => Some((
+            "Tribal Liberation Force HQ (Amo)",
+            vec!["MilitiaCommandHQ", "CounterInsurgencyBriefing", "MilitiaLPStore"],
+        )),
+        _ => None,
+    }
+}
+
+/// Credits FW PvP kill LP, VP, and leaderboard kills when an enlisted pilot destroys an opposing militia pilot's ship.
+pub fn on_player_ship_destroyed_in_combat(
+    ctx: &ServerContext,
+    sys_id: u32,
+    killer_char_id: i64,
+    victim_char_id: i64,
+    victim_ship_type_id: u32,
+) {
+    if killer_char_id <= 0 || killer_char_id == victim_char_id {
+        return;
+    }
+    let is_enemy_militia_kill = ctx.db.with_snapshot(|snap| {
+        if !snap.fw_system_occupations.contains_key(&sys_id) {
+            return false;
+        }
+        let k_fac = snap.characters.get(&killer_char_id).and_then(|c| c.war_faction_id);
+        let v_fac = snap.characters.get(&victim_char_id).and_then(|c| c.war_faction_id);
+        match (k_fac, v_fac) {
+            (Some(kf), Some(vf)) => fw_opposing_faction(kf) == Some(vf) || kf != vf,
+            _ => false,
+        }
+    });
+    if is_enemy_militia_kill {
+        let hull_val = ctx
+            .sde
+            .types
+            .get(&victim_ship_type_id)
+            .map(|t| t.base_price)
+            .unwrap_or(10_000_000.0)
+            .max(1_000_000.0);
+        let _ = award_fw_kill_lp(ctx, killer_char_id, sys_id, hull_val);
+    }
+}
+
+/// Invoked from `combat_weapons_spool.rs` when a non-player ball is destroyed in space.
+pub async fn on_space_entity_destroyed(
+    ctx: &ServerContext,
+    _sys_id: u32,
+    killer_char_id: Option<i64>,
+    target_ball_id: i64,
+    _target_type_id: u32,
+) {
+    let Some(killer) = killer_char_id else {
+        return;
+    };
+    let is_supply = ctx
+        .db
+        .with_snapshot(|s| s.fw_runtime.supply_sites.contains_key(&target_ball_id));
+    if is_supply {
+        let _ = apply_fw_or_insurgency_structure_damage(ctx, killer, target_ball_id, 1.0e9).await;
+    }
+}
+
+/// Defends a friendly Supply Cache or Supply Depot in an FW warzone system,
+/// shifting system Advantage and emitting `OnSolarsystemAdvantageStateUpdated_Local`.
+pub fn resolve_friendly_supply_site_defense(
+    ctx: &ServerContext,
+    char_id: i64,
+    structure_id: i64,
+) -> Result<PyRep, BridgeRpcError> {
+    let (sys_id, site_kind, site_fac) = ctx
+        .db
+        .with_snapshot(|s| s.fw_runtime.supply_sites.get(&structure_id).cloned())
+        .ok_or_else(|| BridgeRpcError {
+            code: "StructureNotFound".into(),
+            message: format!("Supply site {structure_id} not found"),
+        })?;
+    let char_fac = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&char_id).and_then(|c| c.war_faction_id))
+        .ok_or_else(|| BridgeRpcError {
+            code: "NotEnlistedInMilitia".into(),
+            message: "Only militia-enlisted pilots can defend friendly Supply Caches/Depots".into(),
+        })?;
+    if char_fac != site_fac {
+        return Err(BridgeRpcError {
+            code: "CannotDefendEnemyStructure".into(),
+            message: "Cannot defend an enemy militia Supply Cache/Depot".into(),
+        });
+    }
+    let is_depot = site_kind == "SupplyDepot";
+    let adv_delta = if is_depot { 5.0 } else { 2.0 };
+    let occ_fac = ctx
+        .db
+        .with_snapshot(|s| s.fw_system_occupations.get(&sys_id).map(|o| o.occupier_faction_id))
+        .unwrap_or(site_fac);
+    let (occ_d, att_d) = if site_fac == occ_fac { (adv_delta, 0.0) } else { (0.0, adv_delta) };
+    let (occ_adv, att_adv) = update_system_advantage(ctx, sys_id, occ_d, att_d);
+    let (friendly_adv, enemy_adv) = if site_fac == occ_fac { (occ_adv, att_adv) } else { (att_adv, occ_adv) };
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&structure_id) {
+            let max_hp = if is_depot { 3_000.0 } else { 1_500.0 };
+            st.shield_hp = max_hp;
+            st.armor_hp = max_hp;
+            st.hull_hp = max_hp;
+        }
+    });
+    Ok(PyRep::keyval([
+        ("structureID", PyRep::Integer(structure_id)),
+        ("defended", PyRep::Bool(true)),
+        ("siteKind", PyRep::String(site_kind)),
+        ("friendlyAdvantage", PyRep::Real(friendly_adv)),
+        ("enemyAdvantage", PyRep::Real(enemy_adv)),
+    ]))
+}
+
+/// Regenerates an unattacked vulnerable FW I-Hub after 2 hours, lowering system contested % back to `80%`.
+pub fn regenerate_unattacked_fw_ihub(ctx: &ServerContext, sys_id: u32) -> f64 {
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fw_runtime.ihub_vulnerable.insert(sys_id, false);
+        if let Some(occ) = snap.fw_system_occupations.get_mut(&sys_id) {
+            let reduced_vp = (occ.victory_points_threshold * 80) / 100;
+            occ.victory_points = reduced_vp;
+            snap.fw_runtime.system_victory_points.insert(sys_id, reduced_vp);
+        }
+        if let Some(st) = snap.system_states.get_mut(&sys_id) {
+            st.fw_contested_pct = 80.0;
+        }
+    });
+    set_facwar_bunker_vulnerable(ctx, sys_id, 0, false);
+    80.0
+}
+
+/// Spawns a combat-capable militia NPC wave ship (`ExtendedNpcEntity` + `CombatState`) inside a Battlefield capture zone.
+pub async fn spawn_battlefield_wave_npc(
+    ctx: &ServerContext,
+    sys_id: u32,
+    bf_id: i64,
+    nid: i64,
+    ntid: u32,
+    fac_id: i64,
+    npos: DVec3,
+) {
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let mut cs = ctx.build_type_combat_state(ntid);
+    if cs.max_structure_hp <= 0.0 {
+        cs.max_shield_hp = 2_500.0;
+        cs.shield_hp = 2_500.0;
+        cs.max_armor_hp = 2_500.0;
+        cs.armor_hp = 2_500.0;
+        cs.max_structure_hp = 3_000.0;
+        cs.structure_hp = 3_000.0;
+    }
+    let _ = sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: nid,
+                type_id: ntid,
+                position: npos,
+                velocity: DVec3::new(120.0, 0.0, 0.0),
+                max_velocity: 280.0,
+                inertia: 1.0,
+                mass: 1.2e7,
+                radius: 120.0,
+                speed_fraction: 0.5,
+                mode: MovementMode::Orbit {
+                    target_id: bf_id,
+                    range: 5_000.0,
+                },
+            },
+            cs,
+        )
+        .await;
+    let entity = crate::services::combat_crimewatch::ExtendedNpcEntity {
+        ball_id: nid,
+        type_id: ntid,
+        faction_id: fac_id as u32,
+        archetype: "BattlefieldMilitiaWave".into(),
+        solar_system_id: sys_id,
+        spawn_group_id: bf_id as u32,
+        target_id: None,
+        aggression_threat: HashMap::new(),
+        threat_table: HashMap::new(),
+        bounty_isk: 150_000.0,
+        optimal_range: 18_000.0,
+        orbit_range: 5_000.0,
+        damage_vector: eve_destiny::DamageVector {
+            em: 25.0,
+            explosive: 25.0,
+            kinetic: 25.0,
+            thermal: 25.0,
+        },
+        entropic_cycles: 0,
+        drifter_overshield_hp: 0.0,
+        drifter_doomsday_fired: false,
+        web_speed_factor: 0.0,
+        web_range: 0.0,
+        scram_strength: 0.0,
+        scram_range: 0.0,
+        neut_amount: 0.0,
+        ecm_jammed: false,
+        remote_shield_rep: 0.0,
+        remote_armor_rep: 0.0,
+        remote_rep_range: 0.0,
+        tag_drop_type_id: None,
+        spawn_position: npos,
+        sleeper_wh_class: 0,
+        custom_cargo_loot: None,
+    };
+    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        rt.npc_entities.insert(nid, entity);
+    });
+}
 
 /// Donates militia-corp Loyalty Points to a warzone system's I-Hub (`facWarMgr.DonateLPsToSolarSystem`),
 /// upgrading system Tier (`1..=5`) and lowering local NPC station broker fees & industry job costs.

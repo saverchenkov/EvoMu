@@ -67,8 +67,8 @@ pub fn apply_adm_scaled_vulnerability_window_in_snap(
     let dur = compute_adm_vulnerability_seconds(adm);
     let center_sec = u64::from(center_hour_utc % 24) * 3_600;
     let half = dur / 2;
-    let start_sec = center_sec.saturating_sub(half);
-    let end_sec = (start_sec + dur).min(86_400);
+    let start_sec = (center_sec + 86_400 - (half % 86_400)) % 86_400;
+    let end_sec = (start_sec + dur) % 86_400;
     snap.sov_runtime
         .adm_vulnerability_windows
         .insert(hub_id, (start_sec, end_sec));
@@ -77,15 +77,36 @@ pub fn apply_adm_scaled_vulnerability_window_in_snap(
     Some((start_sec, end_sec))
 }
 
+/// Checks whether a Sovereignty Hub is currently inside its configured vulnerability window,
+/// properly handling daily windows that wrap across midnight UTC (`start_sec > end_sec`).
+pub fn is_hub_within_vulnerability_window_in_snap(
+    snap: &WorldStateSnapshot,
+    hub_id: i64,
+    now_unix: u64,
+) -> bool {
+    let Some(&(s_v, e_v)) = snap
+        .sov_runtime
+        .adm_vulnerability_windows
+        .get(&hub_id)
+        .or_else(|| snap.structure_vulnerability_windows.get(&hub_id))
+    else {
+        return true;
+    };
+    if s_v == 0 && e_v == 0 {
+        return true;
+    }
+    is_second_in_window(now_unix, s_v, e_v)
+}
+
 fn is_second_in_window(now_unix: u64, start_v: u64, end_v: u64) -> bool {
-    if end_v > 86_400 {
-        return now_unix >= start_v && now_unix < end_v;
+    if start_v > 86_400 || end_v > 86_400 {
+        return now_unix >= start_v && now_unix <= end_v;
     }
     let sec_of_day = now_unix % 86_400;
     if start_v <= end_v {
-        sec_of_day >= start_v && sec_of_day < end_v
+        sec_of_day >= start_v && sec_of_day <= end_v
     } else {
-        sec_of_day >= start_v || sec_of_day < end_v
+        sec_of_day >= start_v || sec_of_day <= end_v
     }
 }
 
@@ -136,18 +157,11 @@ pub async fn precheck_entosis_activation(
                     message: format!("Sovereignty Hub {target_id} is currently in state {}", st.state),
                 });
             }
-            if let Some(&(s_v, e_v)) = snap
-                .sov_runtime
-                .adm_vulnerability_windows
-                .get(&target_id)
-                .or_else(|| snap.structure_vulnerability_windows.get(&target_id))
-            {
-                if (s_v > 0 || e_v > 0) && !is_second_in_window(now, s_v, e_v) {
-                    return Err(BridgeRpcError {
-                        code: "SovHubInvulnerableOutsideWindow".into(),
-                        message: format!("Sovereignty Hub {target_id} is outside its daily vulnerability window"),
-                    });
-                }
+            if !is_hub_within_vulnerability_window_in_snap(snap, target_id, now) {
+                return Err(BridgeRpcError {
+                    code: "SovHubInvulnerableOutsideWindow".into(),
+                    message: format!("Sovereignty Hub {target_id} is outside its daily vulnerability window"),
+                });
             }
             Ok(Some((sys_id, DVec3::from_array(st.position), attacker_alliance)))
         } else {
@@ -565,21 +579,23 @@ pub fn record_sov_system_activity(
             *m = m.saturating_add(ore_m3_mined_delta.max(0.0).round() as u64);
             *m
         };
-        // DERIVED (synthetic): activity thresholds per Military (kills) and Industrial (mined m3) index level.
+        // DERIVED (synthetic): Sovereignty.md:291 notes exact NPC kill / mining volume formulas are unpublished by CCP;
+        // require >= 5 NPC kills for Military Index 1 (5/15/35/70/120 kills for levels 1..=5) and >= 1,000 m3 mined ore
+        // for Industrial Index 1 (1,000 / 5,000 / 15,000 / 35,000 / 75,000 m3 for levels 1..=5).
         let mil: u8 = match kills {
-            0 => 0,
-            1..=4 => 1,
-            5..=14 => 2,
-            15..=29 => 3,
-            30..=49 => 4,
+            0..=4 => 0,
+            5..=14 => 1,
+            15..=34 => 2,
+            35..=69 => 3,
+            70..=119 => 4,
             _ => 5,
         };
         let ind: u8 = match mined {
-            0 => 0,
-            1..=999 => 1,
-            1_000..=4_999 => 2,
-            5_000..=14_999 => 3,
-            15_000..=29_999 => 4,
+            0..=999 => 0,
+            1_000..=4_999 => 1,
+            5_000..=14_999 => 2,
+            15_000..=34_999 => 3,
+            35_000..=74_999 => 4,
             _ => 5,
         };
         let st = snap.system_states.entry(solar_system_id).or_default();
@@ -720,14 +736,18 @@ pub fn is_tenebrex_jammer_active_in_snap(
         if snap.sov_runtime.hacked_hubs.get(&hid).is_some_and(|&u| now_unix < u) {
             return false;
         }
-        if let Some(hub_cfg) = snap.sov_runtime.sov_hubs.get(&hid) {
-            let upg_ok = hub_cfg
-                .upgrades
-                .iter()
-                .any(|u| u.type_id == UPGRADE_CYNOSURAL_SUPPRESSION && u.online && !u.low_power);
-            if !upg_ok {
-                return false;
-            }
+        let upg_ok = snap
+            .sov_runtime
+            .sov_hubs
+            .get(&hid)
+            .is_some_and(|hub_cfg| {
+                hub_cfg
+                    .upgrades
+                    .iter()
+                    .any(|u| u.type_id == UPGRADE_CYNOSURAL_SUPPRESSION && u.online && !u.low_power)
+            });
+        if !upg_ok {
+            return false;
         }
     }
     snap.structures.values().any(|st| {
@@ -748,7 +768,7 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
     tick_skyhooks(ctx, now_unix).await;
 
     let pending: PendingNotices = Arc::new(RwLock::new(Vec::new()));
-    let (mto_balls, spool_events, strat_events) = ctx.db.with_mut_snapshot(|snap| {
+    let (mto_balls, spool_events, strat_events, upg_spawns, upg_despawns) = ctx.db.with_mut_snapshot(|snap| {
         let den_ids: Vec<i64> = snap.sov_runtime.mercenary_dens.keys().copied().collect();
         for did in den_ids {
             refresh_activities(snap, &pending, did, now_unix);
@@ -759,6 +779,8 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
             .keys()
             .filter_map(|&hid| snap.structures.get(&hid).map(|s| (hid, s.solar_system_id)))
             .collect();
+        let mut upg_spawns: Vec<(u32, i64, &'static str, Vec<u32>, [f64; 3])> = Vec::new();
+        let mut upg_despawns: Vec<(u32, i64)> = Vec::new();
         for (hid, hsys) in hub_ids {
             let _ = compute_hub_resources(snap, &ctx.sde, hid);
             let _ = enforce_hub_power_overload(snap, &ctx.sde, hid);
@@ -770,20 +792,32 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
                 .map(|h| h.upgrades.clone())
                 .unwrap_or_default();
             let mut active_sigs = Vec::new();
-            if !hub_hacked {
-                for u in upgrades.iter().filter(|u| u.online && !u.low_power) {
-                    let Some(t) = ctx.sde.types.get(&u.type_id).filter(|t| t.group_id == 4768) else {
-                        continue;
-                    };
-                    let (arch, site_name) = if t.name.contains("Threat Detection") {
-                        ("Combat", format!("Sovereign {}", t.name))
-                    } else if t.name.contains("Prospecting Array") {
-                        ("Ore", format!("Sovereign {}", t.name))
-                    } else if t.name.contains("Exploration Detector") {
-                        ("Data", format!("Sovereign {}", t.name))
+            for u in &upgrades {
+                let Some(t) = ctx.sde.types.get(&u.type_id).filter(|t| t.group_id == 4768) else {
+                    continue;
+                };
+                let (arch, site_name, pos, ores) = if t.name.contains("Threat Detection") {
+                    ("Combat", format!("Sovereign {}", t.name), [165_000.0, 25_000.0, 0.0], Vec::new())
+                } else if t.name.contains("Prospecting Array") {
+                    let ores = if t.name.contains("Tritanium") {
+                        vec![1230, 1228]
+                    } else if t.name.contains("Isogen") {
+                        vec![20, 1226]
+                    } else if t.name.contains("Zydrine") {
+                        vec![19, 1229]
+                    } else if t.name.contains("Megacyte") {
+                        vec![22, 1225]
                     } else {
-                        continue;
+                        vec![1228, 1229]
                     };
+                    ("Ore", format!("Sovereign {}", t.name), [160_000.0, 25_000.0, 0.0], ores)
+                } else if t.name.contains("Exploration Detector") {
+                    ("Data", format!("Sovereign {}", t.name), [170_000.0, 25_000.0, 0.0], Vec::new())
+                } else {
+                    continue;
+                };
+                let base_id = 1_940_000_000 + (hid.unsigned_abs() as i64 % 100_000) * 100 + i64::from(u.type_id % 100) * 2;
+                if !hub_hacked && u.online && !u.low_power {
                     let sig = format!("SOV-{hid}-{}", u.type_id);
                     active_sigs.push(sig.clone());
                     let list = snap.cosmic_anomalies.entry(hsys).or_default();
@@ -793,15 +827,18 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
                             solar_system_id: hsys,
                             name: site_name,
                             anomaly_type: arch.into(),
-                            position: [160_000.0, 25_000.0, 0.0],
+                            position: pos,
                             signal_strength: 1.0,
-                            ore_types: if arch == "Ore" { vec![1228, 1229] } else { Vec::new() },
+                            ore_types: ores.clone(),
                             remaining_volume: if arch == "Ore" { 100_000.0 } else { 0.0 },
                             created_unix: now_unix,
                             lifetime_seconds: 86_400,
                             cleared: false,
                         });
                     }
+                    upg_spawns.push((hsys, base_id, arch, ores, pos));
+                } else {
+                    upg_despawns.push((hsys, base_id));
                 }
             }
             let prefix = format!("SOV-{hid}-");
@@ -859,10 +896,86 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
             }
         }
 
-        (mto_to_spawn, spools, strat_updates)
+        (mto_to_spawn, spools, strat_updates, upg_spawns, upg_despawns)
     });
 
     flush_pending_quasar(ctx, &pending, now_unix);
+
+    for (sys_id, base_id) in upg_despawns {
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        for off in [1i64, 2] {
+            let bid = base_id + off;
+            let _ = sys_handle.remove_ball(bid).await;
+            crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                rt.npc_entities.remove(&bid);
+            });
+        }
+    }
+    for (sys_id, base_id, arch, ores, pos) in upg_spawns {
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        let p0 = DVec3::from_array(pos);
+        if arch == "Ore" {
+            for (idx, &otid) in ores.iter().take(2).enumerate() {
+                let aid = base_id + (idx as i64) + 1;
+                if sys_handle.get_ball_snapshot(aid).await.ok().flatten().is_none() {
+                    let apos = p0 + DVec3::new((idx as f64) * 500.0, 0.0, 0.0);
+                    let uvol = ctx.sde.types.get(&otid).map(|t| t.volume).unwrap_or(0.1).max(0.01);
+                    let st = crate::system_actor::AsteroidState {
+                        asteroid_id: aid,
+                        belt_id: 0,
+                        type_id: otid,
+                        initial_units: 50_000,
+                        remaining_units: 50_000,
+                        unit_volume: uvol,
+                        depleted: false,
+                        respawn_at_tick: None,
+                    };
+                    let ball = Ball {
+                        id: aid,
+                        type_id: otid,
+                        position: apos,
+                        velocity: DVec3::ZERO,
+                        max_velocity: 0.0,
+                        inertia: 1.0,
+                        mass: 80_000.0,
+                        radius: 120.0,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Stop,
+                    };
+                    let _ = sys_handle.spawn_asteroid(st, ball).await;
+                }
+            }
+        } else if arch == "Combat" {
+            for idx in 0..2i64 {
+                let nid = base_id + idx + 1;
+                if sys_handle.get_ball_snapshot(nid).await.ok().flatten().is_none() {
+                    let npos = p0 + DVec3::new((idx as f64) * 1_500.0, 0.0, 0.0);
+                    crate::services::fw_gameplay::spawn_battlefield_wave_npc(
+                        ctx, sys_id, base_id, nid, 37_453, 500_010, npos,
+                    )
+                    .await;
+                }
+            }
+        } else if arch == "Data" {
+            let cid = base_id + 1;
+            if sys_handle.get_ball_snapshot(cid).await.ok().flatten().is_none() {
+                let _ = sys_handle
+                    .spawn_ball(Ball {
+                        id: cid,
+                        type_id: 23,
+                        position: p0,
+                        velocity: DVec3::ZERO,
+                        max_velocity: 0.0,
+                        inertia: 0.0,
+                        mass: 2_500.0,
+                        radius: 40.0,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Rigid,
+                    })
+                    .await;
+            }
+        }
+    }
 
     for (sys_id, bid, pos) in mto_balls {
         let sys_handle = ctx.systems.get_or_spawn(sys_id);

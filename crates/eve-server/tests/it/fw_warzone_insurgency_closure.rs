@@ -38,6 +38,14 @@ pub(crate) fn setup_warzone_chain(ctx: &ServerContext) -> (u32, u32, u32, u32) {
     let neighbors = |sys: u32| -> &[u32] {
         adj.get(&sys).map(|v| v.as_slice()).unwrap_or(&[])
     };
+    let has_hs_nb = |sys: u32| -> bool {
+        ctx.sde.jumps.values().any(|j| {
+            j.from_solar_system_id == sys
+                && ctx.sde.solar_systems.get(&j.to_solar_system_id).is_some_and(|s| {
+                    (0.5..=0.8).contains(&s.security_status) && s.solar_system_id < 31_000_000
+                })
+        })
+    };
     let mut chosen = None;
     'outer: for &front in &lowsec {
         let fnbs = neighbors(front);
@@ -47,7 +55,12 @@ pub(crate) fn setup_warzone_chain(ctx: &ServerContext) -> (u32, u32, u32, u32) {
                     continue;
                 }
                 for &rear in neighbors(cmd) {
-                    if rear != front && rear != enemy && !neighbors(rear).contains(&enemy) && !neighbors(rear).contains(&front) {
+                    if rear != front
+                        && rear != enemy
+                        && !neighbors(rear).contains(&enemy)
+                        && !neighbors(rear).contains(&front)
+                        && has_hs_nb(front)
+                    {
                         chosen = Some((enemy, front, cmd, rear));
                         break 'outer;
                     }
@@ -261,23 +274,26 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     // 3. Live `dogmaIM.Activate` combat weapon fire on FW Supply Cache/Depot/ListeningPost/Propaganda:
     //    raises attacker Advantage (`OnSolarsystemAdvantageStateUpdated_Local`), drops Cargo Container (`23`) loot, and speeds up complex capture!
     fit_siege_artillery(&ctx, gal_cid, gal_ship, 997_000);
-    let supply_sites: Vec<(i64, DVec3)> = ctx.db.with_snapshot(|s| {
+    let mut supply_sites: Vec<(i64, DVec3)> = ctx.db.with_snapshot(|s| {
         s.fw_runtime.supply_sites.iter()
             .filter(|(_, (sys, _, _))| *sys == front_sys)
             .map(|(&sid, _)| (sid, DVec3::from_array(s.structures[&sid].position)))
             .collect()
     });
+    supply_sites.sort_by_key(|&(sid, _)| sid);
     assert!(supply_sites.len() >= 2);
     let _ = drain_notif_events(&ctx, gal_cid);
     for &(sid, spos) in supply_sites.iter().take(2) {
         set_hull(&ctx, gal_ship, 19_722, spos + DVec3::new(2_000.0, 0.0, 0.0)).await;
         lock_target_via_rpc(&ctx, &mut s_gal, front_sys, gal_ship, sid).await;
-        for _ in 0..5 {
-            let _ = rpc_call(&ctx, &mut s_gal, "dogmaIM", "Activate", &[
-                PyRep::Integer(997_000),
-                PyRep::String("targetAttack".into()),
-                PyRep::Integer(sid),
-            ]).await;
+        for _ in 0..8 {
+            for gun_id in [997_000, 997_002, 997_004] {
+                let _ = rpc_call(&ctx, &mut s_gal, "dogmaIM", "Activate", &[
+                    PyRep::Integer(gun_id),
+                    PyRep::String("targetAttack".into()),
+                    PyRep::Integer(sid),
+                ]).await;
+            }
             step_weapon_ticks(&ctx, front_sys).await;
             if ctx.db.with_snapshot(|s| !s.fw_runtime.supply_sites.contains_key(&sid) || s.structures.get(&sid).map(|st| st.state.as_str()) == Some("Destroyed")) {
                 break;
@@ -312,6 +328,8 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
 
         assert_eq!(ctx.db.with_snapshot(|s| s.structures[&def_sid].last_damage_unix), 0, "friendly defense resolved timer reset");
         assert!(drain_notif_events(&ctx, cal_cid).iter().any(|e| e == "OnSolarsystemAdvantageStateUpdated_Local"), "defense emits OnSolarsystemAdvantageStateUpdated_Local");
+        let (occ_adv, att_adv) = ctx.db.with_snapshot(|s| s.fw_runtime.system_advantage[&front_sys]);
+        assert!(occ_adv > 0.0 && att_adv > occ_adv, "occupier defense credits occ_adv ({occ_adv}) while attacker supply kills credit att_adv ({att_adv})");
     }
 
     // 4. Live Novice complex capture via `keeper.ActivateAccelerationGate` + `tick_background_cluster`:
@@ -355,8 +373,32 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     set_pilot_location(&ctx, &mut s_gal, front_sys, None);
 
     // 5. Live 3-zone Frontline Battlefield capture:
-    //    place 31 Gallente militia ships across the 3 `BATTLEFIELD_ZONE_CENTERS` -> verify `> 30` pilot LP scaling
-    //    (`150,000 * 30 / 31 = 145,161 LP`), 4-hour `battlefield_respawn_unix` cooldown, and SQLite durability!
+    //    - First verify defending Caldari militia (`500001`) can hold Zone 0, spawn real combat-capable NPC wave entities, and advance defender capture progress
+    //    - Next place 31 attacking Gallente militia ships across the 3 `BATTLEFIELD_ZONE_CENTERS` -> verify de-contesting, time-based capture completion,
+    //      `> 30` pilot LP scaling (`150,000 * 30 / 31 = 145,161 LP`), faction/corp standing gains, 4-hour `battlefield_respawn_unix` cooldown, and SQLite durability!
+    let bf_id = ctx.db.with_snapshot(|s| {
+        s.fw_runtime.battlefield_instances.iter().find(|b| b.solar_system_id == front_sys && !b.completed).unwrap().instance_id
+    });
+    set_hull(&ctx, gal_ship, 621, DVec3::new(0.0, 0.0, 0.0)).await;
+    set_hull(&ctx, cal_ship, 587, DVec3::from_array(BATTLEFIELD_ZONE_CENTERS[0])).await;
+    ctx.advance_secs(90);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    let (def_zone0, def_fac, def_prog, wave_npcs) = ctx.db.with_snapshot(|s| {
+        let bf = s.fw_runtime.battlefield_instances.iter().find(|b| b.instance_id == bf_id).unwrap();
+        (
+            s.fw_runtime.battlefield_zones[&bf_id][0],
+            bf.faction_id,
+            bf.capture_progress,
+            s.fw_runtime.battlefield_npc_waves.get(&bf_id).cloned().unwrap_or_default(),
+        )
+    });
+    assert_eq!((def_zone0, def_fac), (500_001, 500_001), "defending Caldari militia captures Zone 0");
+    assert!(def_prog > 0.0 && def_prog < 100.0, "defender holding 1 zone for 90s advances Battlefield progress ({def_prog}%)");
+    assert_eq!(wave_npcs.len(), 6, "Battlefield spawns 6 friendly/enemy NPC wave ships across the 3 zones");
+    let first_npc_cs = ctx.systems.get_or_spawn(front_sys).get_combat_state(wave_npcs[0]).await.unwrap().expect("wave NPC combat state");
+    assert!(first_npc_cs.shield_hp > 0.0 && first_npc_cs.structure_hp > 0.0, "Battlefield wave NPC has active CombatState");
+    set_hull(&ctx, cal_ship, 587, DVec3::new(0.0, 0.0, 0.0)).await;
+
     for idx in 0..30i64 {
         let extra_cid = 90_100_000 + idx;
         let extra_ship = 100_100_000 + idx;
@@ -388,13 +430,22 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     }
     set_hull(&ctx, gal_ship, 621, DVec3::from_array(BATTLEFIELD_ZONE_CENTERS[0])).await;
     let lp_before_bf = ctx.db.with_snapshot(|s| s.characters[&gal_cid].loyalty_points[&1_000_181]);
-    for _ in 0..2 {
+    for _ in 0..3 {
+        ctx.advance_secs(120);
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     }
-    let lp_after_bf = ctx.db.with_snapshot(|s| s.characters[&gal_cid].loyalty_points[&1_000_181]);
+    let (lp_after_bf, fac_st, corp_st) = ctx.db.with_snapshot(|s| {
+        let ch = &s.characters[&gal_cid];
+        (
+            ch.loyalty_points[&1_000_181],
+            ch.standings.get(&500_004).copied().unwrap_or(0.0),
+            ch.standings.get(&1_000_181).copied().unwrap_or(0.0),
+        )
+    });
     let bf_award = lp_after_bf - lp_before_bf;
     let expected_scaled = (150_000 * 30) / 31;
     assert_eq!(bf_award, expected_scaled, "31 pilots in 3-zone Battlefield scale 150k LP to 145,161 LP");
+    assert!(fac_st > 0.0 && corp_st > 0.0, "Battlefield completion awards faction ({fac_st}) and militia corp ({corp_st}) standing");
     let wingman_last_lp = ctx.db.with_snapshot(|s| s.characters[&(90_100_000 + 29)].loyalty_points.get(&1_000_181).copied().unwrap_or(0));
     assert_eq!(wingman_last_lp, expected_scaled, "31st pilot also receives scaled LP");
 

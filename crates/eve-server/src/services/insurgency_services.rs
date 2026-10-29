@@ -81,6 +81,7 @@ pub fn build_campaign_snapshot_for_system(c: &InsurgencyCampaign, sys_id: u32, n
     let c_stage = if c_pts == 0 { 0 } else { ((c_pts as f64 / 200.0).ceil() as u8).clamp(1, 5) };
     let s_stage = if s_pts == 0 { 0 } else { ((s_pts as f64 / 200.0).ceil() as u8).clamp(1, 5) };
     let is_fob = c.fob_solar_system_id == sys_id;
+    let s5 = c.suppression_points.values().filter(|&&pts| insurgency_stage(pts) >= 5).count();
     let sys_reps: Vec<PyRep> = c.systems.iter().map(|&s| PyRep::Integer(i64::from(s))).collect();
 
     PyRep::keyval([
@@ -93,8 +94,7 @@ pub fn build_campaign_snapshot_for_system(c: &InsurgencyCampaign, sys_id: u32, n
         ("phase", PyRep::String(phase.into())),
         ("phaseEndTime", PyRep::Integer(end_time as i64)),
         ("isFobSystem", PyRep::Bool(is_fob)),
-        // DERIVED (synthetic): FOB is vulnerable exclusively during the Active campaign phase
-        ("isFobVulnerable", PyRep::Bool(phase == PHASE_ACTIVE)),
+        ("isFobVulnerable", PyRep::Bool(phase == PHASE_ACTIVE && s5 >= 5)),
         ("corruptionStage", PyRep::Integer(i64::from(c_stage))),
         ("suppressionStage", PyRep::Integer(i64::from(s_stage))),
         ("corruptionPoints", PyRep::Integer(c_pts)),
@@ -403,15 +403,17 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
 /// Advances suppression points in a system and updates suppression stage (1..5).
 pub fn add_system_suppression(ctx: &ServerContext, campaign_id: i64, sys_id: u32, points: i64) -> (i64, u8) {
     let now = ctx.now_unix();
-    let (pts, stage, campaign_active) = with_insurgency_runtime(ctx, |rt| {
+    let (pts, old_stage, stage, campaign_active, in_active_phase) = with_insurgency_runtime(ctx, |rt| {
         let Some(c) = rt.campaigns.get_mut(&campaign_id) else {
-            return (0, 1, false);
+            return (0, 0, 1, false, false);
         };
         let active = now < c.winddown_end_unix;
+        let in_act = now >= c.forecasting_end_unix && now < c.active_end_unix;
         let p = c.suppression_points.entry(sys_id).or_insert(0);
+        let prev_stage = if *p == 0 { 0 } else { insurgency_stage(*p) };
         *p = (*p + points).max(0);
         let s = insurgency_stage(*p).max(1);
-        (*p, s, active)
+        (*p, prev_stage, s, active, in_act)
     });
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -419,6 +421,10 @@ pub fn add_system_suppression(ctx: &ServerContext, campaign_id: i64, sys_id: u32
             st.insurgency_suppression_stage = stage;
         }
     });
+
+    if in_active_phase && stage >= 3 && old_stage < 3 {
+        let _ = crate::services::fw_gameplay::try_spread_insurgency_from_system(ctx, campaign_id, sys_id);
+    }
 
     emit_campaign_updated(ctx, sys_id, campaign_id, stage);
 
@@ -1253,6 +1259,8 @@ pub async fn handle(
                     .values()
                     .map(|c| {
                         let (phase, end_time) = get_campaign_phase_and_timer(c, now);
+                        let emp_mod = rt.empire_ambition_modifier.get(&c.pirate_faction_id).copied().unwrap_or(0).min(5);
+                        let s5 = c.suppression_points.values().filter(|&&pts| insurgency_stage(pts) >= 5).count();
                         let sys_reps: Vec<PyRep> = c.systems.iter().map(|&s| PyRep::Integer(i64::from(s))).collect();
                         PyRep::keyval([
                             ("campaignID", PyRep::Integer(c.campaign_id)),
@@ -1262,7 +1270,7 @@ pub async fn handle(
                             ("phase", PyRep::String(phase.into())),
                             ("phaseEndTime", PyRep::Integer(end_time as i64)),
                             ("systems", PyRep::List(sys_reps)),
-                            ("isFobVulnerable", PyRep::Bool(phase == PHASE_ACTIVE)),
+                            ("isFobVulnerable", PyRep::Bool(phase == PHASE_ACTIVE && s5 >= usize::from(5 + emp_mod))),
                         ])
                     })
                     .collect::<Vec<PyRep>>()

@@ -91,56 +91,34 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
     // Give Empire pilot 1 pulse of Suppression contribution on `front_sys` before Pirate corrupts 5 systems to Stage 5.
-    let _ = ctx.systems.get_or_spawn(front_sys).spawn_ball(make_ball(pir_ship, 621, DVec3::new(90_000.0, 0.0, 0.0))).await;
-    let _ = ctx.systems.get_or_spawn(front_sys).spawn_ball(make_ball(emp_ship, 639, DVec3::ZERO)).await;
-    ctx.db.with_mut_snapshot(|s| {
-        s.system_states.entry(front_sys).or_default().last_fw_capture_tick = 0;
-    });
-    eve_server::services::insurgency_services::step_system_insurgency_tick_delta(&ctx, front_sys, Some(60)).await;
-    let _ = ctx.systems.get_or_spawn(front_sys).spawn_ball(make_ball(emp_ship, 639, DVec3::new(90_000.0, 0.0, 0.0))).await;
+    let front_h = ctx.systems.get_or_spawn(front_sys);
+    let _ = front_h.spawn_ball(make_ball(pir_ship, 621, DVec3::new(90_000.0, 0.0, 0.0))).await;
+    let _ = front_h.spawn_ball(make_ball(emp_ship, 639, DVec3::ZERO)).await;
+    front_h.step_manual(60.0).await.unwrap();
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    let _ = front_h.spawn_ball(make_ball(emp_ship, 639, DVec3::new(90_000.0, 0.0, 0.0))).await;
 
     let emp_lp0 = ctx.db.with_snapshot(|s| s.characters[&emp_cid].loyalty_points.get(&1_000_180).copied().unwrap_or(0));
     let pir_lp0: i64 = ctx.db.with_snapshot(|s| s.characters[&pir_cid].loyalty_points.values().sum());
     let emp_isk0 = ctx.db.with_snapshot(|s| s.characters[&emp_cid].balance.to_wire_f64());
     let pir_isk0 = ctx.db.with_snapshot(|s| s.characters[&pir_cid].balance.to_wire_f64());
 
-    ctx.db.with_mut_snapshot(|s| {
-        let c = s.insurgency_runtime.campaigns.get_mut(&camp1).unwrap();
-        for sys in ctx.sde.solar_systems.values() {
-            if c.systems.len() >= 5 {
-                break;
-            }
-            if sys.security_status > 0.0 && sys.security_status < 0.45 && !c.systems.contains(&sys.solar_system_id) {
-                c.systems.push(sys.solar_system_id);
-            }
-        }
-        for &sys in &c.systems {
-            c.corruption_points.entry(sys).or_insert(0);
-        }
-    });
-
-    // Corrupt 5 campaign systems to Stage 5 via live 60s destiny pulses (Stage 3 on `front_sys` spreads the 5th system!).
+    // Corrupt 5 campaign systems to Stage 5 via live 60s destiny pulses (Stage 3 on `front_sys` spreads the 5th stargate-connected system!).
     for idx in 0..5usize {
         let target_sys = ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp1].systems[idx]);
         s_pir.solar_system_id = Some(target_sys);
         ctx.db.with_mut_snapshot(|s| {
             s.characters.get_mut(&pir_cid).unwrap().solar_system_id = target_sys;
             s.items.get_mut(&pir_ship).unwrap().location_id = target_sys as i64;
-            s.system_states.entry(target_sys).or_default().fw_complex_position = Some([0.0, 0.0, 0.0]);
         });
         let sys_h = ctx.systems.get_or_spawn(target_sys);
         let _ = sys_h.spawn_ball(make_ball(pir_ship, 621, DVec3::ZERO)).await;
         for _ in 0..5 {
-            ctx.db.with_mut_snapshot(|s| {
-                let st = s.system_states.entry(target_sys).or_default();
-                st.fw_complex_position.get_or_insert([0.0, 0.0, 0.0]);
-                st.last_fw_capture_tick = 0;
-            });
-            eve_server::services::insurgency_services::step_system_insurgency_tick_delta(&ctx, target_sys, Some(60)).await;
+            sys_h.step_manual(60.0).await.unwrap();
+            eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
         }
+        let _ = sys_h.remove_ball(pir_ship).await;
     }
-
-
 
     assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.campaign_outcomes.get(&camp1).cloned()), Some("PirateWin".into()));
     assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.pirate_ambition_modifier[&500_010]), 1);
@@ -150,8 +128,8 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
     assert_eq!(emp_lp_gain, 600_000, "loser at >=45% share receives 0.4x (600,000 LP)");
     let pir_isk_gain = ctx.db.with_snapshot(|s| s.characters[&pir_cid].balance.to_wire_f64()) - pir_isk0;
     let emp_isk_gain = ctx.db.with_snapshot(|s| s.characters[&emp_cid].balance.to_wire_f64()) - emp_isk0;
-    assert_eq!(pir_isk_gain, (INSURGENCY_MAX_PAYOUT_LP * 1_000) as f64, "winner received contribution-scaled ISK");
-    assert_eq!(emp_isk_gain, (600_000 * 1_000) as f64, "loser received contribution-scaled ISK");
+    assert_eq!(pir_isk_gain, (INSURGENCY_MAX_PAYOUT_LP * 100) as f64, "winner received contribution-scaled ISK");
+    assert_eq!(emp_isk_gain, (600_000 * 100) as f64, "loser received contribution-scaled ISK");
 
     // Surrendered `front_sys` FW I-Hub is still invulnerable at +24h, then unlocks at +25h (`SURRENDER_IHUB_VULNERABILITY_DELAY_SECS`)!
     let ihub_id = ctx.db.with_snapshot(|s| {
@@ -205,24 +183,12 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
     fast_forward_secs(&ctx, FORECASTING_DURATION_SECS + 10);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
-    // Ensure Campaign 2 has >= 5 systems so Empire can suppress 5 systems to Stage 5!
-    ctx.db.with_mut_snapshot(|s| {
-        let c = s.insurgency_runtime.campaigns.get_mut(&camp2).unwrap();
-        for sys in ctx.sde.solar_systems.values() {
-            if c.systems.len() >= 5 {
-                break;
-            }
-            if sys.security_status > 0.0 && sys.security_status < 0.45 && !c.systems.contains(&sys.solar_system_id) {
-                c.systems.push(sys.solar_system_id);
-            }
-        }
-        for &sys in &c.systems {
-            c.suppression_points.entry(sys).or_insert(0);
-        }
-    });
+    let vis_before_supp = rpc_call(&ctx, &mut s_emp, "insurgencySolarsystem", "GetAllVisibleCampaigns", &[]).await.unwrap();
+    let PyRep::List(vis_list0) = &vis_before_supp else { panic!("expected List") };
+    assert_eq!(vis_list0[0].dict_get("isFobVulnerable"), Some(&PyRep::Bool(false)), "FOB is invulnerable before 5 suppressed systems");
 
     fit_siege_artillery(&ctx, emp_cid, emp_ship, 999_500);
-    let _ = ctx.systems.get_or_spawn(front_sys).spawn_ball(make_ball(emp_ship, 639, fob_pos + DVec3::new(1_000.0, 0.0, 0.0))).await;
+    let _ = ctx.systems.get_or_spawn(front_sys).spawn_ball(make_ball(emp_ship, 19_722, fob_pos + DVec3::new(1_000.0, 0.0, 0.0))).await;
     lock_target_via_rpc(&ctx, &mut s_emp, front_sys, emp_ship, fob2).await;
     assert_eq!(
         rpc_call(&ctx, &mut s_emp, "dogmaIM", "Activate", &[
@@ -233,65 +199,50 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
         "SuppressionGoalNotReached"
     );
 
-    // Move pirate ship off `[0,0,0]` and suppress 5 systems to Stage 5 via live Empire 60s pulses!
+    // Move pirate ship off `[0,0,0]` and suppress 5 systems to Stage 5 via live Empire 60s destiny pulses
+    // (Stage 3 spreads the campaign across stargates to a 5th and 6th connected system; pulse the 6th system 3 times to Stage 3)!
     let _ = ctx.systems.get_or_spawn(front_sys).spawn_ball(make_ball(pir_ship, 621, DVec3::new(90_000.0, 0.0, 0.0))).await;
-    let camp2_systems = ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp2].systems.clone());
-    for (i, &tsys) in camp2_systems.iter().take(5).enumerate() {
+    for idx in 0..6usize {
+        let tsys = ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp2].systems[idx]);
         s_emp.solar_system_id = Some(tsys);
         ctx.db.with_mut_snapshot(|s| {
             s.characters.get_mut(&emp_cid).unwrap().solar_system_id = tsys;
             s.items.get_mut(&emp_ship).unwrap().location_id = tsys as i64;
-            s.system_states.entry(tsys).or_default().fw_complex_position = Some([0.0, 0.0, 0.0]);
         });
         let sh = ctx.systems.get_or_spawn(tsys);
-        let _ = sh.spawn_ball(make_ball(emp_ship, 639, DVec3::ZERO)).await;
-        // On the 5th system, stop at Stage 4 (4 pulses) first so we also prove FOB hull destruction raises Stage 4 -> Stage 5,
-        // wait: FOB requires 5 Stage-5 systems first! Let's add a 6th system at Stage 4 (`800` pts) to prove FOB kill raises it `+1` stage (`800 -> 1000`)!
-        let _ = i;
-        for _ in 0..5 {
-            ctx.db.with_mut_snapshot(|s| {
-                let st = s.system_states.entry(tsys).or_default();
-                st.fw_complex_position.get_or_insert([0.0, 0.0, 0.0]);
-                st.last_fw_capture_tick = 0;
-            });
-            eve_server::services::insurgency_services::step_system_insurgency_tick_delta(&ctx, tsys, Some(60)).await;
-            // Do NOT run tick_background_cluster on the 5th Stage-5 system until after FOB siege so we test live FOB siege before tick auto-resolves!
+        let _ = sh.spawn_ball(make_ball(emp_ship, 19_722, DVec3::ZERO)).await;
+        let pulses = if idx < 5 { 5 } else { 3 };
+        for _ in 0..pulses {
+            sh.step_manual(60.0).await.unwrap();
+            eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
         }
+        let _ = sh.remove_ball(emp_ship).await;
     }
-    let sixth_sys = ctx.sde.solar_systems.values()
-        .find(|s| s.security_status > 0.0 && s.security_status < 0.45 && !camp2_systems.contains(&s.solar_system_id))
-        .unwrap()
-        .solar_system_id;
+    let sixth_sys = ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp2].systems[5]);
+    assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp2].suppression_points[&sixth_sys]), 600);
+
+    let vis_after_supp = rpc_call(&ctx, &mut s_emp, "insurgencySolarsystem", "GetAllVisibleCampaigns", &[]).await.unwrap();
+    let PyRep::List(vis_list1) = &vis_after_supp else { panic!("expected List") };
+    assert_eq!(vis_list1[0].dict_get("isFobVulnerable"), Some(&PyRep::Bool(true)), "FOB becomes vulnerable once 5 systems reach Suppression Stage 5");
+
     ctx.db.with_mut_snapshot(|s| {
-        let c = s.insurgency_runtime.campaigns.get_mut(&camp2).unwrap();
-        c.systems.push(sixth_sys);
-        c.suppression_points.insert(sixth_sys, 600); // Stage 3 -> FOB kill raises +1 stage to Stage 4 (800)!
         s.characters.get_mut(&emp_cid).unwrap().solar_system_id = front_sys;
         s.items.get_mut(&emp_ship).unwrap().location_id = front_sys as i64;
     });
     s_emp.solar_system_id = Some(front_sys);
-    let _ = ctx.systems.get_or_spawn(front_sys).spawn_ball(make_ball(emp_ship, 639, fob_pos + DVec3::new(1_000.0, 0.0, 0.0))).await;
+    let cs_emp = ctx.build_ship_combat_state(emp_cid, emp_ship, 19_722);
+    let _ = ctx.systems.get_or_spawn(front_sys).spawn_ball_with_combat(make_ball(emp_ship, 19_722, fob_pos + DVec3::new(1_000.0, 0.0, 0.0)), cs_emp).await;
     lock_target_via_rpc(&ctx, &mut s_emp, front_sys, emp_ship, fob2).await;
 
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(st) = s.structures.get_mut(&fob2) {
-            st.shield_hp = 0.0;
-            st.armor_hp = 50.0;
-        }
-    });
-
     let mut reinf_until = 0u64;
-    for _ in 0..8 {
-        ctx.db.with_mut_snapshot(|s| {
-            if let Some(st) = s.structures.get_mut(&fob2) {
-                st.last_damage_tick = 0;
-            }
-        });
-        let _ = rpc_call(&ctx, &mut s_emp, "dogmaIM", "Activate", &[
-            PyRep::Integer(999_500),
-            PyRep::String("targetAttack".into()),
-            PyRep::Integer(fob2),
-        ]).await;
+    for _ in 0..10 {
+        for gid in [999_500i64, 999_502, 999_504] {
+            let _ = rpc_call(&ctx, &mut s_emp, "dogmaIM", "Activate", &[
+                PyRep::Integer(gid),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(fob2),
+            ]).await;
+        }
         step_weapon_ticks(&ctx, front_sys).await;
         if ctx.db.with_snapshot(|s| s.structures[&fob2].state == "ArmorReinforced") {
             reinf_until = ctx.db.with_snapshot(|s| s.structures[&fob2].reinforced_until_unix);
@@ -301,11 +252,6 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
     }
     let timer_len = reinf_until.saturating_sub(ctx.now_unix() - 25);
     assert!((7_200..=14_400).contains(&timer_len), "FOB armor reinforcement is 3h ± 1h (got {timer_len}s)");
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(st) = s.structures.get_mut(&fob2) {
-            st.last_damage_tick = 0;
-        }
-    });
     lock_target_via_rpc(&ctx, &mut s_emp, front_sys, emp_ship, fob2).await;
     assert_eq!(
         rpc_call(&ctx, &mut s_emp, "dogmaIM", "Activate", &[
@@ -317,29 +263,22 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
     );
 
     fast_forward_secs(&ctx, 14_500);
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(st) = s.structures.get_mut(&fob2) {
-            st.hull_hp = 50.0;
-        }
-    });
     lock_target_via_rpc(&ctx, &mut s_emp, front_sys, emp_ship, fob2).await;
-    for _ in 0..8 {
-        ctx.db.with_mut_snapshot(|s| {
-            if let Some(st) = s.structures.get_mut(&fob2) {
-                st.last_damage_tick = 0;
-            }
-        });
-        let _ = rpc_call(&ctx, &mut s_emp, "dogmaIM", "Activate", &[
-            PyRep::Integer(999_500),
-            PyRep::String("targetAttack".into()),
-            PyRep::Integer(fob2),
-        ]).await;
+    for _ in 0..10 {
+        for gid in [999_500i64, 999_502, 999_504] {
+            let _ = rpc_call(&ctx, &mut s_emp, "dogmaIM", "Activate", &[
+                PyRep::Integer(gid),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(fob2),
+            ]).await;
+        }
         step_weapon_ticks(&ctx, front_sys).await;
         if ctx.db.with_snapshot(|s| s.structures[&fob2].state == "Destroyed") {
             break;
         }
         fast_forward_secs(&ctx, 25);
     }
+    assert_eq!(ctx.db.with_snapshot(|s| s.structures[&fob2].state.clone()), "Destroyed");
     assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp2].suppression_points[&sixth_sys]), 800);
     assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.pirate_ambition_modifier[&500_010]), 0, "Empire underdog win reduces Pirate Ambition 1 -> 0");
 

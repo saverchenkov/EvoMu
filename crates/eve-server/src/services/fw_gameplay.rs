@@ -21,11 +21,10 @@ pub use fw_gameplay_rpc::*;
 
 use crate::router::ServerContext;
 use crate::services::fw_services::{
-    add_victory_points, award_fw_kill_lp, calculate_capture_speed_multiplier,
+    add_victory_points, calculate_capture_speed_multiplier,
     calculate_fw_lp_reward, capture_warzone_system, complete_fw_dungeon_and_objective,
     compute_system_frontline_status, fw_opposing_faction,
-    set_facwar_bunker_vulnerable, spawn_battlefield_site, update_system_advantage, HQ_SYSTEM_AMO,
-    HQ_SYSTEM_INTAKI, HQ_SYSTEM_MEHATOOR, HQ_SYSTEM_ONNAMON, STATUS_COMMAND, STATUS_FRONTLINE,
+    spawn_battlefield_site, update_system_advantage, STATUS_COMMAND, STATUS_FRONTLINE,
     STATUS_REARGUARD,
 };
 use crate::services::insurgency_services::{
@@ -122,29 +121,6 @@ pub fn get_system_frontline_rules(
             vec!["Novice", "Small"],
             0.50,
         ),
-    }
-}
-
-/// Returns War HQ station services if `sys_id` is one of the 4 Empire Militia War HQ systems.
-pub fn get_war_hq_services(sys_id: u32) -> Option<(&'static str, Vec<&'static str>)> {
-    match sys_id {
-        HQ_SYSTEM_MEHATOOR => Some((
-            "24th Imperial Crusade HQ (Mehatoor)",
-            vec!["MilitiaCommandHQ", "CounterInsurgencyBriefing", "MilitiaLPStore"],
-        )),
-        HQ_SYSTEM_ONNAMON => Some((
-            "State Protectorate HQ (Onnamon)",
-            vec!["MilitiaCommandHQ", "CounterInsurgencyBriefing", "MilitiaLPStore"],
-        )),
-        HQ_SYSTEM_INTAKI => Some((
-            "Federal Defence Union HQ (Intaki)",
-            vec!["MilitiaCommandHQ", "CounterInsurgencyBriefing", "MilitiaLPStore"],
-        )),
-        HQ_SYSTEM_AMO => Some((
-            "Tribal Liberation Force HQ (Amo)",
-            vec!["MilitiaCommandHQ", "CounterInsurgencyBriefing", "MilitiaLPStore"],
-        )),
-        _ => None,
     }
 }
 
@@ -658,7 +634,7 @@ pub async fn apply_fw_or_insurgency_structure_damage(
             );
             Ok((true, 0.0, 0.0, 0.0, pos, att_fac, can_id, vec![loot_id, supply_item_id]))
         })?;
-        let (destroyed, s_hp, a_hp, h_hp, pos, _att_fac, can_id, dropped_ids) = outcome;
+        let (destroyed, s_hp, a_hp, h_hp, pos, att_fac, can_id, dropped_ids) = outcome;
         if destroyed {
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let _ = sys_handle.remove_ball(structure_id).await;
@@ -682,7 +658,13 @@ pub async fn apply_fw_or_insurgency_structure_damage(
                 "Propaganda" => 4.0,
                 _ => 2.0,
             };
-            let (friendly_adv, enemy_adv) = update_system_advantage(ctx, sys_id, adv_delta, 0.0);
+            let occ_fac = ctx
+                .db
+                .with_snapshot(|s| s.fw_system_occupations.get(&sys_id).map(|o| o.occupier_faction_id))
+                .unwrap_or(site_fac);
+            let (occ_d, att_d) = if att_fac == occ_fac { (adv_delta, 0.0) } else { (0.0, adv_delta) };
+            let (occ_adv, att_adv) = update_system_advantage(ctx, sys_id, occ_d, att_d);
+            let (friendly_adv, enemy_adv) = if att_fac == occ_fac { (occ_adv, att_adv) } else { (att_adv, occ_adv) };
             let dropped_reps: Vec<PyRep> = dropped_ids.into_iter().map(PyRep::Integer).collect();
             return Ok(PyRep::keyval([
                 ("structureID", PyRep::Integer(structure_id)),
@@ -816,114 +798,6 @@ pub async fn apply_fw_or_insurgency_structure_damage(
     ]))
 }
 
-/// Credits FW PvP kill LP, VP, and leaderboard kills when an enlisted pilot destroys an opposing militia pilot's ship.
-pub fn on_player_ship_destroyed_in_combat(
-    ctx: &ServerContext,
-    sys_id: u32,
-    killer_char_id: i64,
-    victim_char_id: i64,
-    victim_ship_type_id: u32,
-) {
-    if killer_char_id <= 0 || killer_char_id == victim_char_id {
-        return;
-    }
-    let is_enemy_militia_kill = ctx.db.with_snapshot(|snap| {
-        if !snap.fw_system_occupations.contains_key(&sys_id) {
-            return false;
-        }
-        let k_fac = snap.characters.get(&killer_char_id).and_then(|c| c.war_faction_id);
-        let v_fac = snap.characters.get(&victim_char_id).and_then(|c| c.war_faction_id);
-        match (k_fac, v_fac) {
-            (Some(kf), Some(vf)) => fw_opposing_faction(kf) == Some(vf) || kf != vf,
-            _ => false,
-        }
-    });
-    if is_enemy_militia_kill {
-        let hull_val = ctx
-            .sde
-            .types
-            .get(&victim_ship_type_id)
-            .map(|t| t.base_price)
-            .unwrap_or(10_000_000.0)
-            .max(1_000_000.0);
-        let _ = award_fw_kill_lp(ctx, killer_char_id, sys_id, hull_val);
-    }
-}
-
-/// Invoked from `combat_weapons_spool.rs` when a non-player ball is destroyed in space.
-pub async fn on_space_entity_destroyed(
-    ctx: &ServerContext,
-    _sys_id: u32,
-    killer_char_id: Option<i64>,
-    target_ball_id: i64,
-    _target_type_id: u32,
-) {
-    let Some(killer) = killer_char_id else {
-        return;
-    };
-    let is_supply = ctx
-        .db
-        .with_snapshot(|s| s.fw_runtime.supply_sites.contains_key(&target_ball_id));
-    if is_supply {
-        let _ = apply_fw_or_insurgency_structure_damage(ctx, killer, target_ball_id, 1.0e9).await;
-    }
-}
-
-/// Defends a friendly Supply Cache or Supply Depot in an FW warzone system,
-/// shifting system Advantage and emitting `OnSolarsystemAdvantageStateUpdated_Local`.
-pub fn resolve_friendly_supply_site_defense(
-    ctx: &ServerContext,
-    char_id: i64,
-    structure_id: i64,
-) -> Result<PyRep, BridgeRpcError> {
-    let (sys_id, site_kind, site_fac) = ctx
-        .db
-        .with_snapshot(|s| s.fw_runtime.supply_sites.get(&structure_id).cloned())
-        .ok_or_else(|| BridgeRpcError { code: "StructureNotFound".into(), message: format!("Supply site {structure_id} not found") })?;
-    let char_fac = ctx
-        .db
-        .with_snapshot(|s| s.characters.get(&char_id).and_then(|c| c.war_faction_id))
-        .ok_or_else(|| BridgeRpcError { code: "NotEnlistedInMilitia".into(), message: "Only militia-enlisted pilots can defend friendly Supply Caches/Depots".into() })?;
-    if char_fac != site_fac {
-        return Err(BridgeRpcError { code: "CannotDefendEnemyStructure".into(), message: "Cannot defend an enemy militia Supply Cache/Depot".into() });
-    }
-    let is_depot = site_kind == "SupplyDepot";
-    let adv_delta = if is_depot { 5.0 } else { 2.0 };
-    let (friendly_adv, enemy_adv) = update_system_advantage(ctx, sys_id, adv_delta, 0.0);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(st) = snap.structures.get_mut(&structure_id) {
-            let max_hp = if is_depot { 3_000.0 } else { 1_500.0 };
-            st.shield_hp = max_hp;
-            st.armor_hp = max_hp;
-            st.hull_hp = max_hp;
-        }
-    });
-    Ok(PyRep::keyval([
-        ("structureID", PyRep::Integer(structure_id)),
-        ("defended", PyRep::Bool(true)),
-        ("siteKind", PyRep::String(site_kind)),
-        ("friendlyAdvantage", PyRep::Real(friendly_adv)),
-        ("enemyAdvantage", PyRep::Real(enemy_adv)),
-    ]))
-}
-
-/// Regenerates an unattacked vulnerable FW I-Hub after 2 hours, lowering system contested % back to `80%`.
-pub fn regenerate_unattacked_fw_ihub(ctx: &ServerContext, sys_id: u32) -> f64 {
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.fw_runtime.ihub_vulnerable.insert(sys_id, false);
-        if let Some(occ) = snap.fw_system_occupations.get_mut(&sys_id) {
-            let reduced_vp = (occ.victory_points_threshold * 80) / 100;
-            occ.victory_points = reduced_vp;
-            snap.fw_runtime.system_victory_points.insert(sys_id, reduced_vp);
-        }
-        if let Some(st) = snap.system_states.get_mut(&sys_id) {
-            st.fw_contested_pct = 80.0;
-        }
-    });
-    set_facwar_bunker_vulnerable(ctx, sys_id, 0, false);
-    80.0
-}
-
 /// Live 1 Hz Faction Warfare & Pirate Insurgency background scheduler (`cluster_tick.rs`).
 pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
     // 1. Seed warzone complexes, supply sites, I-Hubs, and Frontline Battlefields in active warzone systems.
@@ -999,11 +873,16 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
             // Contested by opposing militia ships inside the capture pocket -> timer paused!
             continue;
         }
-        let (friendly_adv, enemy_adv) = ctx
+        let (occ_adv, attacker_adv) = ctx
             .db
             .with_snapshot(|s| s.fw_runtime.system_advantage.get(&sys_id).copied())
             .unwrap_or((0.0, 0.0));
-        let speed_mult = calculate_capture_speed_multiplier(friendly_adv, enemy_adv);
+        let (my_adv, their_adv) = if first_fac == occ_fac {
+            (occ_adv, attacker_adv)
+        } else {
+            (attacker_adv, occ_adv)
+        };
+        let speed_mult = calculate_capture_speed_multiplier(my_adv, their_adv);
         let last_step = ctx.db.with_snapshot(|s| {
             s.fw_runtime.complex_last_step_unix.get(&gid).copied().unwrap_or(now_unix)
         });
@@ -1066,7 +945,7 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
                     rec.victory_points.total += 20;
                 }
             });
-            let net_adv = (friendly_adv - enemy_adv).max(0.0);
+            let net_adv = (my_adv - their_adv).max(0.0);
             let base_vp = ((100.0 * (1.0 + net_adv * 0.01)).round() as i64).max(50);
             let vp_earned = match status {
                 STATUS_FRONTLINE => base_vp,
@@ -1122,7 +1001,12 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
             });
             if should_reward {
                 let adv_delta = if site_kind == "SupplyDepot" { 5.0 } else { 2.0 };
-                update_system_advantage(ctx, sys_id, adv_delta, 0.0);
+                let occ_fac = ctx
+                    .db
+                    .with_snapshot(|s| s.fw_system_occupations.get(&sys_id).map(|o| o.occupier_faction_id))
+                    .unwrap_or(site_fac);
+                let (occ_d, att_d) = if site_fac == occ_fac { (adv_delta, 0.0) } else { (0.0, adv_delta) };
+                update_system_advantage(ctx, sys_id, occ_d, att_d);
             }
         }
     }
@@ -1137,12 +1021,17 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
             .collect()
     });
     for (bf_id, sys_id, bf_fac) in active_bfs {
+        let occ_fac = ctx
+            .db
+            .with_snapshot(|s| s.fw_system_occupations.get(&sys_id).map(|o| o.occupier_faction_id))
+            .unwrap_or(bf_fac);
+        let enemy_fac = fw_opposing_faction(occ_fac).unwrap_or(bf_fac);
         let has_pilots = ctx.db.with_snapshot(|snap| {
             snap.characters.values().any(|c| {
                 c.solar_system_id == sys_id
                     && c.station_id.is_none()
                     && c.structure_id.is_none()
-                    && matches!(c.war_faction_id, Some(500_001..=500_004))
+                    && matches!(c.war_faction_id, Some(f) if f == occ_fac || f == enemy_fac)
             })
         });
         if !has_pilots {
@@ -1151,7 +1040,7 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
         let sys_zones = battlefield_zone_centers_for_system(ctx, sys_id);
         let bf_center = DVec3::from_array(sys_zones[1]);
-        // Spawn real friendly and enemy NPC wave combat balls at capture zones during site progression
+        // Spawn real combat-capable friendly and enemy NPC wave ships at the 3 capture zones.
         let wave_id = ctx.db.with_snapshot(|snap| snap.fw_runtime.battlefield_waves.get(&bf_id).copied().unwrap_or(1));
         let npcs_to_spawn = ctx.db.with_mut_snapshot(|snap| {
             let wave_npcs = snap.fw_runtime.battlefield_npc_waves.entry(bf_id).or_default();
@@ -1163,11 +1052,11 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
                     let enid = bf_id + 1_000_000 + (wave_id as i64) * 100 + (zi as i64) * 2 + 2;
                     if !wave_npcs.contains(&fnid) {
                         wave_npcs.push(fnid);
-                        spawns.push((fnid, 37_453, zpos + DVec3::new(1_500.0, 0.0, 0.0)));
+                        spawns.push((fnid, 37_453, occ_fac, zpos + DVec3::new(1_500.0, 0.0, 0.0)));
                     }
                     if !wave_npcs.contains(&enid) {
                         wave_npcs.push(enid);
-                        spawns.push((enid, 37_453, zpos + DVec3::new(-1_500.0, 0.0, 0.0)));
+                        spawns.push((enid, 37_453, enemy_fac, zpos + DVec3::new(-1_500.0, 0.0, 0.0)));
                     }
                 }
                 spawns
@@ -1175,24 +1064,17 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
                 Vec::new()
             }
         });
-        for (nid, ntid, npos) in npcs_to_spawn {
-            let _ = sys_handle.spawn_ball(Ball {
-                id: nid,
-                type_id: ntid,
-                position: npos,
-                velocity: DVec3::ZERO,
-                max_velocity: 0.0,
-                inertia: 1.0,
-                mass: 1.0e6,
-                radius: 25.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Rigid,
-            }).await;
+        for (nid, ntid, nfac, npos) in npcs_to_spawn {
+            spawn_battlefield_wave_npc(ctx, sys_id, bf_id, nid, ntid, nfac, npos).await;
         }
 
         let balls = sys_handle.list_balls().await.unwrap_or_default();
         let mut uncloaked_balls = Vec::with_capacity(balls.len());
         for b in balls {
+            if b.type_id == 670 {
+                // Faction_warfare.md:208: Pods cannot capture or hold a Battlefield point.
+                continue;
+            }
             let cloaked = sys_handle
                 .get_combat_state(b.id)
                 .await
@@ -1219,33 +1101,58 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
                 .collect()
         });
         let fixed_center = DVec3::from_array(BATTLEFIELD_ZONE_CENTERS[1]);
-        let pilots_on_grid: Vec<i64> = pilot_ships
+        let all_on_grid: Vec<(i64, i64)> = pilot_ships
             .iter()
-            .filter(|(_, f, pos)| *f == bf_fac && (pos.distance(bf_center) <= 60_000.0 || pos.distance(fixed_center) <= 60_000.0))
-            .map(|(cid, _, _)| *cid)
+            .filter(|(_, f, pos)| (*f == occ_fac || *f == enemy_fac) && (pos.distance(bf_center) <= 60_000.0 || pos.distance(fixed_center) <= 60_000.0))
+            .map(|&(cid, f, _)| (cid, f))
             .collect();
-        if pilots_on_grid.is_empty() {
+        if all_on_grid.is_empty() {
             continue;
         }
         let mut zones = [0i64; 3];
         for zi in 0..3 {
             let zpos_cel = DVec3::from_array(sys_zones[zi]);
             let zpos_fixed = DVec3::from_array(BATTLEFIELD_ZONE_CENTERS[zi]);
-            let friendly_in = pilot_ships
+            let occ_in = pilot_ships
                 .iter()
-                .any(|(_, f, p)| *f == bf_fac && (p.distance(zpos_cel) <= 15_000.0 || p.distance(zpos_fixed) <= 15_000.0));
+                .any(|(_, f, p)| *f == occ_fac && (p.distance(zpos_cel) <= 15_000.0 || p.distance(zpos_fixed) <= 15_000.0));
             let enemy_in = pilot_ships
                 .iter()
-                .any(|(_, f, p)| *f != bf_fac && matches!(*f, 500_001..=500_004) && (p.distance(zpos_cel) <= 15_000.0 || p.distance(zpos_fixed) <= 15_000.0));
-            if friendly_in && !enemy_in {
-                zones[zi] = bf_fac;
+                .any(|(_, f, p)| *f == enemy_fac && (p.distance(zpos_cel) <= 15_000.0 || p.distance(zpos_fixed) <= 15_000.0));
+            if occ_in && !enemy_in {
+                zones[zi] = occ_fac;
+            } else if enemy_in && !occ_in {
+                zones[zi] = enemy_fac;
             }
         }
-        let held = zones.iter().filter(|&&z| z == bf_fac).count();
-        if held == 0 {
+        let occ_held = zones.iter().filter(|&&z| z == occ_fac).count();
+        let enemy_held = zones.iter().filter(|&&z| z == enemy_fac).count();
+        if occ_held == enemy_held {
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.fw_runtime.battlefield_zones.insert(bf_id, zones);
+                snap.fw_runtime.complex_last_step_unix.insert(bf_id, now_unix);
+            });
             continue;
         }
+        let (lead_fac, net_held) = if enemy_held > occ_held {
+            (enemy_fac, enemy_held - occ_held)
+        } else {
+            (occ_fac, occ_held - enemy_held)
+        };
+        let winning_pilots: Vec<i64> = all_on_grid
+            .iter()
+            .filter(|&&(_, f)| f == lead_fac)
+            .map(|&(cid, _)| cid)
+            .collect();
+        let last_step = ctx.db.with_snapshot(|s| {
+            s.fw_runtime.complex_last_step_unix.get(&bf_id).copied().unwrap_or(now_unix)
+        });
+        let dt = now_unix.saturating_sub(last_step).max(1);
+        // DERIVED (synthetic): Faction_warfare.md:206 states holding capture points ticks progress to 100%
+        // without specifying an exact per-zone tick rate; scale 900s base duration across net held zones (300s when holding all 3 zones).
+        let delta_pct = ((dt as f64) * (net_held as f64) / 900.0 * 100.0).clamp(0.1, 100.0);
         let done_bf = ctx.db.with_mut_snapshot(|snap| {
+            snap.fw_runtime.complex_last_step_unix.insert(bf_id, now_unix);
             let Some(pos) = snap
                 .fw_runtime
                 .battlefield_instances
@@ -1257,50 +1164,68 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
             snap.fw_runtime.battlefield_zones.insert(bf_id, zones);
             snap.fw_runtime
                 .battlefield_participants
-                .insert(bf_id, pilots_on_grid.clone());
+                .insert(bf_id, winning_pilots.clone());
             snap.fw_runtime
                 .battlefield_waves
                 .entry(bf_id)
                 .and_modify(|v| *v += 1)
                 .or_insert(1);
-            // DERIVED (synthetic): 20% Battlefield capture progress per held zone per tick.
             let bf = &mut snap.fw_runtime.battlefield_instances[pos];
-            bf.capture_progress = (bf.capture_progress + (held as f64) * 20.0).clamp(0.0, 100.0);
+            if bf.faction_id != lead_fac && bf.capture_progress > 0.0 {
+                if bf.capture_progress > delta_pct {
+                    bf.capture_progress -= delta_pct;
+                } else {
+                    bf.capture_progress = (delta_pct - bf.capture_progress).clamp(0.0, 100.0);
+                    bf.faction_id = lead_fac;
+                }
+            } else {
+                bf.faction_id = lead_fac;
+                bf.capture_progress = (bf.capture_progress + delta_pct).clamp(0.0, 100.0);
+            }
             if bf.capture_progress >= 100.0 && !bf.completed {
                 bf.completed = true;
                 snap.fw_runtime
                     .battlefield_respawn_unix
                     .insert(sys_id, now_unix + BATTLEFIELD_RESPAWN_COOLDOWN_SECS);
+                snap.fw_runtime.complex_last_step_unix.remove(&bf_id);
                 true
             } else {
                 false
             }
         });
         if done_bf {
-            let n = pilots_on_grid.len().max(1);
+            let n = winning_pilots.len().max(1);
             let per_pilot_lp = if n <= BATTLEFIELD_MAX_FULL_PAYOUT_PILOTS {
                 BATTLEFIELD_MAX_PILOT_LP
             } else {
                 (BATTLEFIELD_MAX_PILOT_LP * (BATTLEFIELD_MAX_FULL_PAYOUT_PILOTS as i64)) / (n as i64)
             };
-            let lp_corp = militia_lp_corp_id(&ctx.sde, bf_fac);
+            let lp_corp = militia_lp_corp_id(&ctx.sde, lead_fac);
             let cleanup_npcs = ctx.db.with_mut_snapshot(|snap| {
-                for &cid in &pilots_on_grid {
+                for &cid in &winning_pilots {
                     if let Some(ch) = snap.characters.get_mut(&cid) {
                         *ch.loyalty_points.entry(lp_corp).or_insert(0) += per_pilot_lp;
-                        let cur_st = ch.standings.get(&bf_fac).copied().unwrap_or(0.0);
-                        let new_st = crate::formulas::apply_standing_increase(cur_st, 5.0);
-                        ch.standings.insert(bf_fac, new_st);
+                        let cur_fac_st = ch.standings.get(&lead_fac).copied().unwrap_or(0.0);
+                        ch.standings.insert(lead_fac, crate::formulas::apply_standing_increase(cur_fac_st, 5.0));
+                        let cur_corp_st = ch.standings.get(&lp_corp).copied().unwrap_or(0.0);
+                        ch.standings.insert(lp_corp, crate::formulas::apply_standing_increase(cur_corp_st, 5.0));
                     }
                 }
                 snap.fw_runtime.battlefield_npc_waves.remove(&bf_id).unwrap_or_default()
             });
+            crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                for &nid in &cleanup_npcs {
+                    rt.npc_entities.remove(&nid);
+                }
+            });
             for nid in cleanup_npcs {
                 let _ = sys_handle.remove_ball(nid).await;
             }
-            add_victory_points(ctx, sys_id, 2_000);
-            update_system_advantage(ctx, sys_id, 6.0, 0.0);
-            complete_fw_dungeon_and_objective(ctx, sys_id, bf_fac, true, 2, bf_id);
+            let signed_vp = if lead_fac == occ_fac { -2_000 } else { 2_000 };
+            add_victory_points(ctx, sys_id, signed_vp);
+            let (occ_adv_d, att_adv_d) = if lead_fac == occ_fac { (6.0, 0.0) } else { (0.0, 6.0) };
+            update_system_advantage(ctx, sys_id, occ_adv_d, att_adv_d);
+            complete_fw_dungeon_and_objective(ctx, sys_id, lead_fac, lead_fac != occ_fac, 2, bf_id);
         }
     }
 

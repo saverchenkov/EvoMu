@@ -193,20 +193,13 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
     let _ = sys_front_h.spawn_ball(make_ball(pir_ship, 12_032, DVec3::new(15_000.0, 0.0, 0.0))).await;
     assert!(rpc_call(&ctx, &mut s_pir, "dogmaIM", "Activate", &[PyRep::Integer(999_110)]).await.is_ok());
 
-    // 4. High-Sec (`0.5..=0.8`) Stage 5 Corruption: live beacon pulses corrupt a High-Sec system to Stage 5 ->
+    // 4. High-Sec (`0.5..=0.8`) Stage 5 Corruption: live beacon pulses corrupt the stargate-spread High-Sec system to Stage 5 ->
     //    ship PvP gives `Suspect` without CONCORD, whereas Capsule (`670`) PvP still gives `Criminal` + CONCORD!
-    let hs_sys = ctx.sde.solar_systems.values()
-        .find(|s| (0.5..=0.8).contains(&s.security_status) && s.solar_system_id < 31_000_000)
-        .unwrap()
-        .solar_system_id;
+    let hs_sys = *after_spread
+        .iter()
+        .find(|&&s| ctx.sde.solar_systems[&s].security_status >= 0.5)
+        .expect("Stage 3 stargate spread added adjacent 0.5..=0.8 High-Sec system");
     ctx.db.with_mut_snapshot(|s| {
-        let c = s.insurgency_runtime.campaigns.get_mut(&camp_id).unwrap();
-        if !c.systems.contains(&hs_sys) {
-            c.systems.push(hs_sys);
-        }
-        c.corruption_points.insert(hs_sys, 0);
-        c.suppression_points.insert(hs_sys, 0);
-        s.system_states.entry(hs_sys).or_default().fw_complex_position = Some([0.0, 0.0, 0.0]);
         s.characters.get_mut(&pir_cid).unwrap().solar_system_id = hs_sys;
         s.items.get_mut(&pir_ship).unwrap().type_id = 639;
         s.items.get_mut(&pir_ship).unwrap().location_id = hs_sys as i64;

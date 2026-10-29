@@ -76,9 +76,10 @@ pub async fn ensure_campaign_pirate_fob(ctx: &ServerContext, campaign_id: i64) -
             position: pos,
             quantum_core_installed: true,
             fuel_blocks: 10_000,
-            shield_hp: 10_000.0,
-            armor_hp: 10_000.0,
-            hull_hp: 15_000.0,
+            // DERIVED (synthetic): baseline Pirate FOB shield/armor/hull HP scaled for live Dreadnought siege artillery volleys.
+            shield_hp: 2_500.0,
+            armor_hp: 2_500.0,
+            hull_hp: 3_500.0,
             reinforced_until_unix: 0,
             last_damage_unix: 0,
             last_damage_tick: 0,
@@ -110,8 +111,8 @@ pub async fn ensure_campaign_pirate_fob(ctx: &ServerContext, campaign_id: i64) -
     Some(fob_id)
 }
 
-/// Spreads an active Pirate Insurgency when `source_sys_id` reaches Corruption Stage 3 (`>= 3`),
-/// adding an adjacent `0.0..=0.8` solar system and spawning an insurgency site + complex grid there.
+/// Spreads an active Pirate Insurgency when `source_sys_id` reaches Stage 3 (`>= 3`),
+/// adding a stargate-adjacent `0.0..=0.8` solar system (`ctx.sde.jumps`) and spawning an insurgency site + complex grid there.
 pub fn try_spread_insurgency_from_system(
     ctx: &ServerContext,
     campaign_id: i64,
@@ -125,7 +126,26 @@ pub fn try_spread_insurgency_from_system(
         ctx.sde
             .solar_systems
             .get(&sys_id)
-            .is_some_and(|s| s.security_status > 0.0 && s.security_status <= 0.8)
+            .is_some_and(|s| s.security_status > 0.0 && s.security_status <= 0.8 && s.solar_system_id < 31_000_000)
+    };
+    let has_hs_covered = covered.iter().any(|&s| {
+        ctx.sde
+            .solar_systems
+            .get(&s)
+            .is_some_and(|sys| sys.security_status >= 0.5)
+    });
+    let wz_systems: std::collections::HashSet<u32> = ctx.db.with_snapshot(|snap| {
+        snap.fw_system_occupations.keys().copied().collect()
+    });
+    let rank = |sys_id: u32| -> (u8, u8, u32) {
+        let is_hs = ctx
+            .sde
+            .solar_systems
+            .get(&sys_id)
+            .is_some_and(|s| s.security_status >= 0.5);
+        let hs_prio = if !has_hs_covered && is_hs { 0 } else { 1 };
+        let wz_prio = if wz_systems.contains(&sys_id) { 0 } else { 1 };
+        (hs_prio, wz_prio, sys_id)
     };
 
     let mut candidate: Option<u32> = ctx
@@ -135,7 +155,7 @@ pub fn try_spread_insurgency_from_system(
         .filter(|j| j.from_solar_system_id == source_sys_id)
         .map(|j| j.to_solar_system_id)
         .filter(|s| !covered.contains(s) && valid_sec(*s))
-        .min();
+        .min_by_key(|&s| rank(s));
 
     if candidate.is_none() {
         candidate = ctx
@@ -145,7 +165,7 @@ pub fn try_spread_insurgency_from_system(
             .filter(|j| covered.contains(&j.from_solar_system_id))
             .map(|j| j.to_solar_system_id)
             .filter(|s| !covered.contains(s) && valid_sec(*s))
-            .min();
+            .min_by_key(|&s| rank(s));
     }
 
     let new_sys = candidate?;
@@ -372,7 +392,8 @@ pub fn evaluate_and_resolve_insurgency_campaign(
         for &(cid, fid, lp_award) in &payouts {
             if lp_award > 0 {
                 let lp_corp = militia_lp_corp_id(&ctx.sde, fid);
-                let isk_award = lp_award.saturating_mul(1_000);
+                // DERIVED (synthetic): Insurgency.md:66 specifies an ISK+LP payout at insurgency conclusion without an exact ISK formula; scale ISK at 100 ISK per LP (150M ISK max at 1.5M LP cap).
+                let isk_award = lp_award.saturating_mul(100);
                 if let Some(ch) = snap.characters.get_mut(&cid) {
                     *ch.loyalty_points.entry(lp_corp).or_insert(0) += lp_award;
                     let isk_cents = eve_db::IskCents::from_isk(isk_award);
@@ -437,12 +458,14 @@ pub async fn apply_pirate_fob_structure_damage(
             reinf_until: u64,
             camp_id: i64,
             attacker_fac: i64,
+            contrib_pts: i64,
         },
         Destroyed {
             sys_id: u32,
             camp_id: i64,
             systems: Vec<u32>,
             attacker_fac: i64,
+            contrib_pts: i64,
         },
     }
 
@@ -536,17 +559,23 @@ pub async fn apply_pirate_fob_structure_damage(
         }
         st.last_damage_unix = now;
         let mut rem_dmg = damage.max(0.0);
+        let mut dealt = 0.0;
+        // DERIVED (synthetic): scale FOB combat contribution points from fraction of total FOB HP (8,500 HP) dealt relative to 1,000-point stage threshold.
+        let pts_for_dealt = |d: f64| -> i64 { ((d / 8_500.0) * 1_000.0).round().max(1.0) as i64 };
 
         if existing_reinf.is_none() {
             if st.shield_hp > 0.0 {
                 let take = rem_dmg.min(st.shield_hp);
                 st.shield_hp -= take;
                 rem_dmg -= take;
+                dealt += take;
             }
             if rem_dmg > 0.0 && st.armor_hp > 0.0 {
                 let take = rem_dmg.min(st.armor_hp);
                 st.armor_hp -= take;
+                dealt += take;
             }
+            let contrib_pts = pts_for_dealt(dealt);
             if st.armor_hp <= 0.0 {
                 let jitter = fob_reinforcement_jitter_secs(camp_id, now);
                 let timer_secs = ((FOB_ARMOR_REINFORCEMENT_BASE_SECS as i64) + jitter).max(7_200) as u64;
@@ -566,6 +595,7 @@ pub async fn apply_pirate_fob_structure_damage(
                     reinf_until: until,
                     camp_id,
                     attacker_fac,
+                    contrib_pts,
                 });
             }
             return Ok(FobStep::Damaged {
@@ -576,11 +606,14 @@ pub async fn apply_pirate_fob_structure_damage(
                 reinf_until: 0,
                 camp_id,
                 attacker_fac,
+                contrib_pts,
             });
         }
 
         st.state = "HullVulnerable".into();
-        st.hull_hp = (st.hull_hp - rem_dmg).max(0.0);
+        let take_hull = rem_dmg.min(st.hull_hp.max(0.0));
+        st.hull_hp = (st.hull_hp - take_hull).max(0.0);
+        let contrib_pts = pts_for_dealt(take_hull);
         if st.hull_hp > 0.0 {
             return Ok(FobStep::Damaged {
                 state: st.state.clone(),
@@ -590,6 +623,7 @@ pub async fn apply_pirate_fob_structure_damage(
                 reinf_until: existing_reinf.unwrap_or(0),
                 camp_id,
                 attacker_fac,
+                contrib_pts,
             });
         }
 
@@ -599,6 +633,7 @@ pub async fn apply_pirate_fob_structure_damage(
             camp_id,
             systems,
             attacker_fac,
+            contrib_pts,
         })
     })?;
 
@@ -611,8 +646,9 @@ pub async fn apply_pirate_fob_structure_damage(
             reinf_until,
             camp_id,
             attacker_fac,
+            contrib_pts,
         } => {
-            record_insurgency_contribution(ctx, camp_id, attacker_char_id, attacker_fac, 50);
+            record_insurgency_contribution(ctx, camp_id, attacker_char_id, attacker_fac, contrib_pts);
             Ok(PyRep::keyval([
                 ("structureID", PyRep::Integer(structure_id)),
                 ("state", PyRep::String(state)),
@@ -627,9 +663,10 @@ pub async fn apply_pirate_fob_structure_damage(
             camp_id,
             systems,
             attacker_fac,
+            contrib_pts,
         } => {
             let _ = ctx.systems.get_or_spawn(sys_id).remove_ball(structure_id).await;
-            record_insurgency_contribution(ctx, camp_id, attacker_char_id, attacker_fac, 250);
+            record_insurgency_contribution(ctx, camp_id, attacker_char_id, attacker_fac, contrib_pts);
             for s in &systems {
                 let _ = add_system_suppression(ctx, camp_id, *s, 200);
             }
@@ -708,27 +745,36 @@ pub async fn tick_insurgency_campaigns(ctx: &ServerContext, now_unix: u64) {
             .map(|o| o.occupier_faction_id)
             .unwrap_or(500_001);
         let mut starting = vec![frontline_sys];
-        let mut adj: Vec<u32> = ctx
-            .sde
-            .jumps
-            .values()
-            .filter(|j| j.from_solar_system_id == frontline_sys)
-            .map(|j| j.to_solar_system_id)
-            .filter(|s| {
-                ctx.sde
-                    .solar_systems
-                    .get(s)
-                    .is_some_and(|sys| (0.0..=0.8).contains(&sys.security_status))
-            })
-            .collect();
-        adj.sort_unstable();
-        adj.dedup();
-        for s in adj {
+        for pass in 0..3 {
             if starting.len() >= 4 {
                 break;
             }
-            if !starting.contains(&s) {
-                starting.push(s);
+            let frontier = starting.clone();
+            let mut adj: Vec<u32> = ctx
+                .sde
+                .jumps
+                .values()
+                .filter(|j| frontier.contains(&j.from_solar_system_id))
+                .map(|j| j.to_solar_system_id)
+                .filter(|s| {
+                    !starting.contains(s)
+                        && ctx
+                            .sde
+                            .solar_systems
+                            .get(s)
+                            .is_some_and(|sys| sys.security_status > 0.0 && sys.security_status <= 0.8 && sys.solar_system_id < 31_000_000)
+                })
+                .collect();
+            let _ = pass;
+            adj.sort_by_key(|s| (if snap.fw_system_occupations.contains_key(s) { 0u8 } else { 1u8 }, *s));
+            adj.dedup();
+            for s in adj {
+                if starting.len() >= 4 {
+                    break;
+                }
+                if !starting.contains(&s) {
+                    starting.push(s);
+                }
             }
         }
         let next_cid = (now_unix % 100_000) as i64 + 900_001;
@@ -807,7 +853,11 @@ pub async fn tick_insurgency_campaigns(ctx: &ServerContext, now_unix: u64) {
                         .values()
                         .filter(|&&pts| insurgency_stage(pts) >= 5)
                         .count();
-                    if c5 >= usize::from(5 + p_mod) || s5 >= usize::from(5 + e_mod) {
+                    let fob_destroyed = snap
+                        .structures
+                        .get(&(PIRATE_FOB_STRUCTURE_BASE_ID + cid))
+                        .is_some_and(|st| st.state == "Destroyed");
+                    if c5 >= usize::from(5 + p_mod) || (s5 >= usize::from(5 + e_mod) && fob_destroyed) {
                         return Some("Resolve");
                     }
                 }

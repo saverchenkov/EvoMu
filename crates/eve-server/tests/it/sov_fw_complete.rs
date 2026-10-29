@@ -348,9 +348,9 @@ async fn sov_hub_anchoring_claims_unclaimed_nullsec_and_emits_notifications() {
 
     let sys_st = ctx.db.with_snapshot(|s| s.system_states.get(&sys_id).cloned()).expect("system state exists");
     assert_eq!(sys_st.sov_alliance_id, Some(alliance_id));
-    assert!(sys_st.military_index >= 1);
-    assert!(sys_st.industrial_index >= 1);
-    assert!(sys_st.strategic_index >= 1);
+    assert_eq!(sys_st.military_index, 0);
+    assert_eq!(sys_st.industrial_index, 0);
+    assert_eq!(sys_st.strategic_index, 0);
 
     let notifs = ctx.drain_notifications_for_char(PILOT);
     let sov_notif = notifs.iter().find(|n| n.event == "OnSovereigntyChanged").expect("OnSovereigntyChanged");

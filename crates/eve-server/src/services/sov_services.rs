@@ -204,9 +204,6 @@ pub fn claim_system_sovereignty(
         }
         st.solar_system_id = sys_id;
         st.sov_alliance_id = Some(alliance_id);
-        st.military_index = st.military_index.max(1);
-        st.industrial_index = st.industrial_index.max(1);
-        st.strategic_index = st.strategic_index.max(1);
         snap.sov_runtime.sov_claimed_since_unix.entry(sys_id).or_insert(now);
         Ok(())
     })?;

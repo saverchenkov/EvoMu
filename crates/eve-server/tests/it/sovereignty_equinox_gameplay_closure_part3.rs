@@ -170,6 +170,15 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
     let anoms = ctx.db.with_snapshot(|s| s.cosmic_anomalies.get(&null_sys).cloned().unwrap_or_default());
     assert!(anoms.iter().any(|a| a.anomaly_type == "Combat" && a.name.contains("Major Threat")));
     assert!(anoms.iter().any(|a| a.anomaly_type == "Ore" && a.name.contains("Prospecting Array")));
+    let sys_balls = ctx.systems.get_or_spawn(null_sys).list_balls().await.unwrap();
+    assert!(
+        sys_balls.iter().any(|b| b.type_id == 1_230 || b.type_id == 1_228),
+        "Ore upgrade anomaly must spawn real mineable asteroid balls in space"
+    );
+    assert!(
+        sys_balls.iter().any(|b| b.type_id == 37_453),
+        "Combat upgrade anomaly must spawn real combat-capable NPC rat balls in space"
+    );
 
     // 4. Hostile Data Analyzer (`22175`) hacking on Sov Hub emits `OnSovHubHacked` and disables upgrades!
     let hacker_cid = 90_000_077i64;
@@ -179,10 +188,10 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
         null_sys, hacker_ship, 621, hub_pos + DVec3::new(2_500.0, 0.0, 0.0), 0,
     ).await;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.skills.entry(hacker_cid).or_default().insert(
-            3_405,
-            TrainedSkillRecord { type_id: 3_405, level: 5, skill_points: 256_000.0 },
-        );
+        let sk = snap.skills.entry(hacker_cid).or_default();
+        for sid in [3_405u32, 21_718] {
+            sk.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
+        }
         snap.items.insert(
             995_100,
             InventoryItemRecord {
@@ -205,7 +214,30 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
         .await.expect("hack Sov Hub via Data Analyzer I");
     assert_eq!(hack_rep.dict_get("containerUnlocked"), Some(&PyRep::Bool(false)));
     assert!(!is_hub_hacked(&ctx, hub_a));
-    eve_server::services::inventory_fitting::fitting_scanners_superweapons::mark_hacking_container_unlocked(&ctx, hacker_cid, hub_a);
+    rpc_call(&ctx, &mut s_hacker, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(hub_a)])
+        .await.expect("start live hacking minigame on Sov Hub");
+    let mut won = false;
+    for _pass in 0..8 {
+        for tile in 1..24 {
+            for _ in 0..5 {
+                if let Ok(step) = rpc_call(&ctx, &mut s_hacker, "hackingMgr", "ClickedOnTile", &[PyRep::Integer(hub_a), PyRep::Integer(tile)]).await {
+                    if step.dict_get("status").and_then(|v| v.as_str()) == Some("Won") {
+                        won = true;
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            if won {
+                break;
+            }
+        }
+        if won {
+            break;
+        }
+    }
+    assert!(won, "Data Analyzer hacking minigame on Sov Hub must complete with Won");
     assert!(is_hub_hacked(&ctx, hub_a));
     assert!(drain_notif_events(&ctx, PILOT).iter().any(|e| e == "OnSovHubHacked"));
     assert_eq!(

@@ -72,25 +72,59 @@ async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes()
             },
         );
         snap.module_online_states.insert(996_050, true);
+        // Fit Expanded Cargohold II (`1319`) so Naglfar cargo hold exceeds 1,500 m3 for >= 1,000 m3 ore threshold
+        for (slot_idx, flag) in [InventoryFlag::LoSlot0, InventoryFlag::LoSlot1].into_iter().enumerate() {
+            let mod_id = 996_060 + slot_idx as i64;
+            snap.items.insert(
+                mod_id,
+                InventoryItemRecord {
+                    item_id: mod_id,
+                    type_id: 1_319,
+                    owner_id: PILOT,
+                    location_id: PILOT_SHIP,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(mod_id, true);
+        }
     });
     ctx.invalidate_ship_fitting(PILOT_SHIP);
     let cs_def = ctx.build_ship_combat_state(PILOT, PILOT_SHIP, 19_722);
     let _ = ctx.systems.get_or_spawn(null_sys).spawn_ball_with_combat(make_ball(PILOT_SHIP, 19_722, hub_pos + DVec3::new(2_500.0, 0.0, 0.0)), cs_def).await;
 
-    let rat_id = 880_001i64;
-    let mut rat_cs = ctx.build_type_combat_state(24_690);
-    rat_cs.shield_hp = 100.0;
-    rat_cs.armor_hp = 100.0;
-    rat_cs.structure_hp = 100.0;
-    let _ = ctx.systems.get_or_spawn(null_sys).spawn_ball_with_combat(make_ball(rat_id, 24_690, hub_pos + DVec3::new(3_500.0, 0.0, 0.0)), rat_cs).await;
-    lock_target_via_rpc(&ctx, &mut s_def, null_sys, PILOT_SHIP, rat_id).await;
     ctx.set_invention_roll_override(Some(0.50));
     let _ = drain_notif_events(&ctx, PILOT);
-    rpc_call(&ctx, &mut s_def, "dogmaIM", "Activate", &[PyRep::Integer(996_000), PyRep::Integer(rat_id)])
-        .await.expect("destroy NPC rat to advance Military Index");
+    for idx in 0..5i64 {
+        let rat_id = 880_001 + idx;
+        let mut rat_cs = ctx.build_type_combat_state(24_690);
+        rat_cs.max_shield_hp = 10.0;
+        rat_cs.shield_hp = 10.0;
+        rat_cs.max_armor_hp = 10.0;
+        rat_cs.armor_hp = 10.0;
+        rat_cs.max_structure_hp = 10.0;
+        rat_cs.structure_hp = 10.0;
+        let _ = ctx.systems.get_or_spawn(null_sys).spawn_ball_with_combat(make_ball(rat_id, 24_690, hub_pos + DVec3::new(3_500.0 + (idx as f64) * 100.0, 0.0, 0.0)), rat_cs).await;
+        lock_target_via_rpc(&ctx, &mut s_def, null_sys, PILOT_SHIP, rat_id).await;
+        let gun_id = if idx % 2 == 0 { 996_000 } else { 996_002 };
+        rpc_call(&ctx, &mut s_def, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::Integer(rat_id)])
+            .await.expect("destroy NPC rat to advance Military Index");
+        if idx == 0 {
+            assert_eq!(
+                ctx.db.with_snapshot(|s| s.system_states[&null_sys].military_index),
+                0,
+                "single NPC kill must not advance Military Index 1 (threshold is 5 kills)"
+            );
+        }
+        if idx % 2 == 1 {
+            crate::sovereignty_equinox_gameplay_closure::step_weapon_ticks(&ctx, null_sys).await;
+        }
+    }
     assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&null_sys].military_index), 1);
 
-    let rock_id = 880_002i64;
+    let rock_id = 880_010i64;
     ctx.systems
         .get_or_spawn(null_sys)
         .spawn_asteroid(
@@ -113,6 +147,13 @@ async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes()
         .await.expect("activate Miner I on Scordite");
     ctx.advance_secs(65);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.system_states[&null_sys].industrial_index),
+        0,
+        "single 50 m3 mining cycle must not advance Industrial Index 1 (threshold is 1,000 m3)"
+    );
+    ctx.advance_secs(25 * 60);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(ctx.db.with_snapshot(|s| s.system_states[&null_sys].industrial_index >= 1));
     let _ = rpc_call(&ctx, &mut s_def, "dogmaIM", "Deactivate", &[PyRep::Integer(996_050), PyRep::String("miningLaser".into())]).await;
     let _ = drain_notif_events(&ctx, PILOT);
@@ -129,14 +170,18 @@ async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes()
     let adm = sov_info.dict_get("vulnerabilityOccupancyLevel").and_then(|v| v.as_f64()).unwrap();
     assert!(adm > 1.0);
 
-    // 2. ADM-scaled vulnerability window via `structureVulnerability.UpdateReinforceTimesFromClient`.
-    rpc_call(&ctx, &mut s_def, "structureVulnerability", "UpdateReinforceTimesFromClient", &[PyRep::Integer(hub_id), PyRep::Integer(12), PyRep::Integer(0)])
+    // 2. ADM-scaled midnight-wrapping vulnerability window (`center_hour_utc = 23`) via `structureVulnerability.UpdateReinforceTimesFromClient`.
+    rpc_call(&ctx, &mut s_def, "structureVulnerability", "UpdateReinforceTimesFromClient", &[PyRep::Integer(hub_id), PyRep::Integer(23), PyRep::Integer(0)])
         .await.expect("UpdateReinforceTimesFromClient");
     let (v_start, v_end) = ctx.db.with_snapshot(|s| s.sov_runtime.adm_vulnerability_windows[&hub_id]);
-    assert!(v_end - v_start < 18 * 3_600);
+    assert!(
+        v_start > v_end,
+        "23:00 UTC center with ADM > 1.0 must wrap across midnight (start_sec={v_start} > end_sec={v_end})"
+    );
 
+    // Advance to 10:00 UTC (outside the wrapped [~17:22 .. ~04:37] window)
     let cur_sec = ctx.now_unix() % 86_400;
-    ctx.advance_secs((86_400 + 3_600 - cur_sec) % 86_400);
+    ctx.advance_secs((86_400 + 10 * 3_600 - cur_sec) % 86_400);
 
     let atk_cid = 90_000_077i64;
     let atk_corp = 98_000_077i64;
@@ -189,9 +234,10 @@ async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes()
         "SovHubInvulnerableOutsideWindow"
     );
 
-    ctx.advance_secs(11 * 3_600);
+    // Advance 15 hours to ~01:00 UTC (after midnight, inside the wrapped [~17:22 .. ~04:37] window)
+    ctx.advance_secs(15 * 3_600);
     let act1 = rpc_call(&ctx, &mut s_atk, "dogmaIM", "Activate", &[PyRep::Integer(entosis_mod), PyRep::String("default".into()), PyRep::Integer(hub_id)])
-        .await.expect("activate Entosis Link I inside vulnerability window");
+        .await.expect("activate Entosis Link I inside midnight-wrapped vulnerability window");
     assert_eq!(act1.dict_get("cycleIndex").and_then(|v| v.as_i64()), Some(1));
     assert!(ctx.db.with_snapshot(|s| s.items[&stront_item].quantity) < 100);
 

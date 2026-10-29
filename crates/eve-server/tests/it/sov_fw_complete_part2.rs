@@ -199,46 +199,106 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
         .unwrap_err();
     assert_eq!(fuel_denied.code, "CorpRoleDenied");
 
-    ctx.db.with_mut_snapshot(|s| {
-        s.structures.get_mut(&hub_id).unwrap().fuel_blocks = 0;
-        s.structures.get_mut(&jammer_id).unwrap().fuel_blocks = 0;
-    });
-    let jammer_state_empty = sov_call(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[])
+    let jammer_state_no_upgrade = sov_call(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[])
         .await
-        .expect("GetCynoJammerState empty");
-    assert_eq!(jammer_state_empty.dict_get("isJammed"), Some(&PyRep::Bool(false)));
+        .expect("GetCynoJammerState before Cynosural Suppression upgrade online");
+    assert_eq!(jammer_state_no_upgrade.dict_get("isJammed"), Some(&PyRep::Bool(false)));
 
+    let ship_id = ctx.db.with_snapshot(|s| s.characters[&PILOT].active_ship_id);
+    sess.ship_id = Some(ship_id);
+    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
     ctx.db.with_mut_snapshot(|s| {
-        s.structures.get_mut(&jammer_id).unwrap().fuel_blocks = 50;
+        if let Some(corp) = s.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(PILOT, eve_db::corp_roles::ROLE_DIRECTOR);
+        }
+        let entry = s.system_states.entry(sys_id).or_default();
+        entry.strategic_index = 3;
+        for (iid, tid, qty) in [
+            (990_001i64, sov_services::TYPE_MAGMATIC_GAS, 5_000),
+            (990_002, sov_services::TYPE_SUPERIONIC_ICE, 5_000),
+            (990_003, eve_server::services::sov_gameplay::UPGRADE_CYNOSURAL_SUPPRESSION, 1),
+            (990_004, eve_server::services::sov_gameplay::UPGRADE_MAJOR_THREAT_DETECTION, 1),
+        ] {
+            s.items.insert(
+                iid,
+                eve_db::InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: PILOT,
+                    location_id: ship_id,
+                    flag: eve_db::InventoryFlag::Cargo,
+                    quantity: qty,
+                    singleton: qty == 1,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
     });
+    for (fuel_iid, amt) in [(990_001u64, 3_000u64), (990_002u64, 3_000u64)] {
+        let mut add = crate::quasar_sov_equinox_hub::id_req(1, fuel_iid);
+        eve_proto::quasar::encode_varint_field(2, amt, &mut add);
+        eve_proto::quasar::encode_bytes_field(3, &crate::quasar_sov_equinox_hub::idm(hub_id as u64), &mut add);
+        assert_eq!(
+            crate::quasar_sov_equinox_hub::rpc(&ctx, &mut sess, "eve_public.sovereignty.hub.fuel.api.AddRequest", add)
+                .await
+                .status_code,
+            eve_server::quasar_gateway::STATUS_OK
+        );
+    }
+    let mut proc = Vec::new();
+    for iid in [990_003u64, 990_004] {
+        eve_proto::quasar::encode_bytes_field(1, &crate::quasar_sov_equinox_hub::idm(iid), &mut proc);
+    }
+    for tid in [
+        eve_server::services::sov_gameplay::UPGRADE_CYNOSURAL_SUPPRESSION as u64,
+        eve_server::services::sov_gameplay::UPGRADE_MAJOR_THREAT_DETECTION as u64,
+    ] {
+        let mut cfg = Vec::new();
+        eve_proto::quasar::encode_bytes_field(1, &crate::quasar_sov_equinox_hub::idm(tid), &mut cfg);
+        eve_proto::quasar::encode_varint_field(2, 1, &mut cfg);
+        eve_proto::quasar::encode_bytes_field(2, &cfg, &mut proc);
+    }
+    eve_proto::quasar::encode_bytes_field(3, &crate::quasar_sov_equinox_hub::idm(hub_id as u64), &mut proc);
+    assert_eq!(
+        crate::quasar_sov_equinox_hub::rpc(
+            &ctx,
+            &mut sess,
+            "eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationRequest",
+            proc
+        )
+        .await
+        .status_code,
+        eve_server::quasar_gateway::STATUS_OK
+    );
+
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+
     let jammer_state_fueled = sov_call(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[])
         .await
-        .expect("GetCynoJammerState fueled");
+        .expect("GetCynoJammerState with Cynosural Suppression upgrade online");
     assert_eq!(jammer_state_fueled.dict_get("isJammed"), Some(&PyRep::Bool(true)));
 
-    ctx.db.with_mut_snapshot(|s| {
-        s.cosmic_anomalies.entry(sys_id).or_default().push(eve_db::CosmicAnomalyRecord {
-            anomaly_id: "DNG-SOV-COMBAT-001".into(),
-            solar_system_id: sys_id,
-            name: "Major Threat Detection Site".into(),
-            anomaly_type: "CombatAnomaly".into(),
-            position: [1000.0, 2000.0, 3000.0],
-            signal_strength: 1.0,
-            ore_types: Vec::new(),
-            remaining_volume: 0.0,
-            created_unix: ctx.now_unix(),
-            lifetime_seconds: 3600,
-            cleared: false,
-        });
-    });
     let has_anom = ctx.db.with_snapshot(|s| {
-        s.cosmic_anomalies.get(&sys_id).map(|list| list.iter().any(|a| a.name == "Major Threat Detection Site")).unwrap_or(false)
+        s.cosmic_anomalies
+            .get(&sys_id)
+            .map(|list| list.iter().any(|a| a.name.contains("Major Threat Detection")))
+            .unwrap_or(false)
     });
-    assert!(has_anom, "combat anomaly spawned by upgrade");
+    assert!(has_anom, "combat anomaly spawned by online Major Threat Detection upgrade");
+    let sys_balls = ctx.systems.get_or_spawn(sys_id).list_balls().await.unwrap();
+    assert!(
+        sys_balls.iter().any(|b| b.type_id == 37_453),
+        "combat upgrade site must spawn combat-capable NPC wave rat balls in space"
+    );
 
     ctx.drain_notifications_for_char(PILOT);
     sov_services::record_hub_hack(&ctx, sys_id, hub_id, 3600);
     assert!(sov_services::is_hub_hacked(&ctx, hub_id));
+    let jammer_state_hacked = sov_call(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[])
+        .await
+        .expect("GetCynoJammerState while hub is hacked");
+    assert_eq!(jammer_state_hacked.dict_get("isJammed"), Some(&PyRep::Bool(false)));
 
     let notifs = ctx.drain_notifications_for_char(PILOT);
     let hacked_notif = notifs.iter().find(|n| n.event == "OnSovHubHacked").expect("OnSovHubHacked");
@@ -468,7 +528,7 @@ async fn pirate_insurgency_campaigns_corruption_suppression_and_instances() {
         insurgency_services::FACTION_GURISTAS,
         CALDARI,
         sys_id,
-        vec![sys_id, 30000013],
+        vec![sys_id, 30000013, 30000014, 30000015, 30000016],
     );
 
     let notifs = ctx.drain_notifications_for_char(PILOT);
@@ -495,7 +555,7 @@ async fn pirate_insurgency_campaigns_corruption_suppression_and_instances() {
         .expect("GetAllVisibleCampaigns Active");
     if let PyRep::List(list) = camps_active {
         assert_eq!(list[0].dict_get("phase").and_then(|v| v.as_str()), Some("Active"));
-        assert_eq!(list[0].dict_get("isFobVulnerable"), Some(&PyRep::Bool(true)));
+        assert_eq!(list[0].dict_get("isFobVulnerable"), Some(&PyRep::Bool(false)));
     }
 
     ctx.drain_notifications_for_char(PILOT);
@@ -524,6 +584,16 @@ async fn pirate_insurgency_campaigns_corruption_suppression_and_instances() {
     assert_eq!(snap.dict_get("suppressionStage").and_then(|v| v.as_i64()), Some(3));
     assert_eq!(snap.dict_get("corruptionPoints").and_then(|v| v.as_i64()), Some(250));
     assert_eq!(snap.dict_get("suppressionPoints").and_then(|v| v.as_i64()), Some(450));
+
+    for s in [sys_id, 30000013, 30000014, 30000015, 30000016] {
+        let _ = insurgency_services::add_system_suppression(&ctx, campaign_id, s, 1_000);
+    }
+    let camps_vuln = sov_call(&ctx, &mut sess, "insurgencySolarsystem", "GetAllVisibleCampaigns", &[])
+        .await
+        .expect("GetAllVisibleCampaigns FOB Vulnerable");
+    if let PyRep::List(list) = camps_vuln {
+        assert_eq!(list[0].dict_get("isFobVulnerable"), Some(&PyRep::Bool(true)));
+    }
 
     let ice_id = insurgency_services::spawn_ice_heist(&ctx, sys_id);
     assert!(ice_id > 0);
