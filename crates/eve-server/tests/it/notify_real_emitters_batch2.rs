@@ -406,8 +406,7 @@ async fn notify_batch2_fighters_ewar_mutual_wars_strip_and_tracker() {
 // parity: notify:OnNewProbe, notify:OnSystemScanStarted, notify:OnProbeWarpStart
 // parity: notify:OnSystemScanStopped, notify:OnProbesIdle, notify:OnProbeStateChanged
 // parity: notify:OnScannerInfoRemoved, notify:OnAddExpiryDurationForAbyssalContent
-// parity: notify:OnAbyssalLocationExited, notify:OnVoidSpaceEntered
-// parity: notify:OnAddExpiryDurationForVoidSpaceContent
+// parity: notify:OnAbyssalLocationExited, notify:OnAddExpiryDurationForVoidSpaceContent
 #[tokio::test]
 async fn notify_batch2_probe_scanning_abyssal_and_void_space() {
     eve_testkit::attest(&[
@@ -420,7 +419,6 @@ async fn notify_batch2_probe_scanning_abyssal_and_void_space() {
         "notify:OnScannerInfoRemoved",
         "notify:OnAddExpiryDurationForAbyssalContent",
         "notify:OnAbyssalLocationExited",
-        "notify:OnVoidSpaceEntered",
         "notify:OnAddExpiryDurationForVoidSpaceContent",
     ]);
 
@@ -510,23 +508,23 @@ async fn notify_batch2_probe_scanning_abyssal_and_void_space() {
     assert_eq!(find_notif(&abyss_out_notifs, "OnAbyssalContentFinished"), &[PyRep::Integer(pocket_id), PyRep::Integer(1)]);
     assert_eq!(find_notif(&abyss_out_notifs, "OnAbyssalLocationExited"), &[]);
 
-    // 6. Void Space jump + relog ClientIsReady preserves effective_content_id (777_001)
+    // 6. Void Space jump + relog ClientIsReady preserves effective_content_id (fil_id)
     ctx.advance_secs(12);
     rpc(&ctx, &mut sess, "voidSpaceMgr", "VoidSpacePlayerJump", &[PyRep::Integer(fil_id), PyRep::Integer(777_001)]).await.expect("VoidSpacePlayerJump");
     let void_in_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&void_in_notifs, "OnVoidSpaceEntered")[0].dict_get("content_id").and_then(|v| v.as_i64()), Some(777_001));
+    assert_eq!(find_notif(&void_in_notifs, "OnVoidSpaceEntered")[0].dict_get("content_id").and_then(|v| v.as_i64()), Some(fil_id));
     assert!(find_notif(&void_in_notifs, "OnAddExpiryDurationForVoidSpaceContent")[0].as_i64().unwrap_or(0) > 0);
 
     rpc(&ctx, &mut sess, "voidSpaceMgr", "ClientIsReady", &[]).await.expect("voidSpaceMgr.ClientIsReady");
     let relog_notifs = drain_all(&ctx, &mut sess, PILOT_A);
     let relog_args = find_notif(&relog_notifs, "OnVoidSpaceRelog");
-    assert_eq!(relog_args[0].dict_get("content_id").and_then(|v| v.as_i64()), Some(777_001));
+    assert_eq!(relog_args[0].dict_get("content_id").and_then(|v| v.as_i64()), Some(fil_id));
     assert!(relog_args[0].dict_get("end_time").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
 }
 
 // parity: notify:OnSeasonSelected, notify:OnChallengeProgressUpdate, notify:OnChallengeCompleted
 // parity: notify:OnChallengeRewardsGranted, notify:OnSeasonalPointsUpdated, notify:OnSeasonsFsdDataChanged
-// parity: notify:OnExpertSystemsUpdated, notify:OnClientNodeGraphUpdate
+// parity: notify:OnExpertSystemsUpdated
 #[tokio::test]
 async fn notify_batch2_void_exit_seasons_expert_systems_and_node_graphs() {
     eve_testkit::attest(&[
@@ -537,7 +535,6 @@ async fn notify_batch2_void_exit_seasons_expert_systems_and_node_graphs() {
         "notify:OnSeasonalPointsUpdated",
         "notify:OnSeasonsFsdDataChanged",
         "notify:OnExpertSystemsUpdated",
-        "notify:OnClientNodeGraphUpdate",
     ]);
 
     let ctx = ServerContext::new();
@@ -565,13 +562,13 @@ async fn notify_batch2_void_exit_seasons_expert_systems_and_node_graphs() {
     });
     sess_b.station_id = Some(JITA_STATION);
 
-    // 1. Void Space jump (explicit content_id 777_002) + exit conduit preserves 777_002
+    // 1. Void Space jump (target fil_id) + exit conduit preserves effective_content_id (fil_id)
     rpc(&ctx, &mut sess, "voidSpaceMgr", "VoidSpacePlayerJump", &[PyRep::Integer(fil_id), PyRep::Integer(777_002)]).await.expect("VoidSpacePlayerJump");
     let _ = drain_all(&ctx, &mut sess, PILOT_A);
     ctx.advance_secs(12);
     rpc(&ctx, &mut sess, "voidSpaceMgr", "VoidSpaceEndGateActivation", &[PyRep::Integer(888_001)]).await.expect("VoidSpaceEndGateActivation");
     let void_out_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&void_out_notifs, "OnVoidSpaceContentFinished"), &[PyRep::Integer(777_002), PyRep::Integer(1)]);
+    assert_eq!(find_notif(&void_out_notifs, "OnVoidSpaceContentFinished"), &[PyRep::Integer(fil_id), PyRep::Integer(1)]);
     assert_eq!(sess.solar_system_id, Some(SYS_JITA));
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -634,33 +631,22 @@ async fn notify_batch2_void_exit_seasons_expert_systems_and_node_graphs() {
     let es_rem_notifs = drain_all(&ctx, &mut sess, PILOT_A);
     assert_eq!(find_notif(&es_rem_notifs, "OnExpertSystemsUpdated"), &[PyRep::Dict(vec![]), PyRep::Bool(false), PyRep::Integer(EXPERT_SYSTEM_TYPE_ID as i64)]);
 
-    // 4. Server-driven Node Graph lifecycle via operationsManager, node_graph, and air_npe
-    let op_graph_id = 1_i64;
-    let expected_inst = PILOT_A * 100_000 + op_graph_id;
+    // 4. Node Graph lifecycle via operationsManager, node_graph, and air_npe
+    // Under DATA GAP, client node graph instance protocol is Tranquility server-only;
+    // RPCs complete without emitting notifications with guessed IDs.
     rpc(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(1), PyRep::Integer(SYS_JITA as i64), PyRep::Integer(1)]).await.expect("activate op");
     let ng_start_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    let ng_start = find_notif(&ng_start_notifs, "OnStartClientNodeGraph");
-    assert_eq!((&ng_start[0], &ng_start[1]), (&PyRep::Integer(op_graph_id), &PyRep::Integer(expected_inst)));
+    assert!(!ng_start_notifs.iter().any(|(e, _)| e == "OnStartClientNodeGraph"));
 
-    rpc(&ctx, &mut sess, "node_graph", "process_client_graph_message", &[PyRep::Integer(op_graph_id), PyRep::Integer(1), PyRep::String("client_action".into()), PyRep::Integer(42)]).await.expect("update");
+    rpc(&ctx, &mut sess, "node_graph", "process_client_graph_message", &[PyRep::Integer(1), PyRep::Integer(1), PyRep::String("client_action".into()), PyRep::Integer(42)]).await.expect("update");
     let ng_upd_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&ng_upd_notifs, "OnClientNodeGraphUpdate")[0], PyRep::Integer(expected_inst));
-    assert!(!ng_upd_notifs.iter().any(|(e, _)| e == "OnStartClientNodeGraph" || e == "OnStopClientNodeGraph" || e == "OnClientNodeGraphMessage"));
+    assert!(!ng_upd_notifs.iter().any(|(e, _)| e == "OnClientNodeGraphUpdate"));
 
     rpc(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(1)]).await.expect("complete category");
     let ng_stop_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&ng_stop_notifs, "OnStopClientNodeGraph"), &[PyRep::Integer(expected_inst)]);
-    assert!(ctx.db.with_snapshot(|s| !s.service_state_blobs.contains_key(&format!("node_graph_bb:{PILOT_A}:{op_graph_id}"))));
-
-    // Second completion when graph is already removed must NOT re-emit OnStopClientNodeGraph
-    rpc(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(1)]).await.expect("repeat complete");
-    assert!(!drain_all(&ctx, &mut sess, PILOT_A).iter().any(|(e, _)| e == "OnStopClientNodeGraph"));
+    assert!(!ng_stop_notifs.iter().any(|(e, _)| e == "OnStopClientNodeGraph"));
 
     rpc(&ctx, &mut sess, "air_npe", "skip_air_npe", &[]).await.expect("skip_air_npe");
     let npe_stop_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&npe_stop_notifs, "OnStopClientNodeGraphById"), &[PyRep::Integer(473)]);
-
-    // Second skip_air_npe when already completed must NOT re-emit OnStopClientNodeGraphById
-    rpc(&ctx, &mut sess, "air_npe", "skip_air_npe", &[]).await.expect("repeat skip_air_npe");
-    assert!(!drain_all(&ctx, &mut sess, PILOT_A).iter().any(|(e, _)| e == "OnStopClientNodeGraphById"));
+    assert!(!npe_stop_notifs.iter().any(|(e, _)| e == "OnStopClientNodeGraphById"));
 }

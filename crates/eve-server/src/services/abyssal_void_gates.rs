@@ -602,7 +602,7 @@ pub(crate) async fn handle_void_space_player_jump(
     crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, cur_sys)?;
 
     let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-    let content_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+    let _content_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
     if target_id <= 0 {
         return Err(BridgeRpcError {
             code: "MissingRequiredArgument".into(),
@@ -710,7 +710,9 @@ pub(crate) async fn handle_void_space_player_jump(
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys);
     origin_handle.try_remove_ball(ship_id);
 
-    let effective_content_id = if content_id > 0 { content_id } else { target_id };
+    // Server-validated target ID (filament or gate) is used as effective_content_id;
+    // client-supplied content_id is not trusted directly.
+    let effective_content_id = target_id;
     let _ = ctx.db.try_with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = VOID_SPACE_SYSTEM_ID;
@@ -763,6 +765,7 @@ pub(crate) async fn handle_void_space_player_jump(
     session.solar_system_id = Some(VOID_SPACE_SYSTEM_ID);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, VOID_SPACE_SYSTEM_ID);
 
+    // DATA GAP: V24 live room IDs and nebula graphic IDs are Tranquility server-only
     let client_data = PyRep::Dict(vec![
         (
             PyRep::String("content_id".into()),
