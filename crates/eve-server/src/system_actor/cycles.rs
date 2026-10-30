@@ -1295,7 +1295,9 @@ impl SystemHandle {
             crate::sp6_lifecycle::persist_ship_combat_hp_batch_in_db(
                 db,
                 bp.combat_states.iter().filter_map(|(&bid, cs)| {
-                    if !bp.is_static_ball(bid) && bid < 700_000_000 {
+                    if !bp.is_static_ball(bid)
+                        && bp.ball_slim_meta.get(&bid).is_none_or(|m| m.category_id != 11)
+                    {
                         Some((bid, cs))
                     } else {
                         None

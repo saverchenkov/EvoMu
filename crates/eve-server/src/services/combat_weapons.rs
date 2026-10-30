@@ -459,7 +459,15 @@ pub async fn handle_weapons(
                 let all_balls = sys_handle.list_balls().await.unwrap_or_default();
                 let nearest = all_balls
                     .into_iter()
-                    .filter(|b| b.id != ship_id && (b.id < 700_000_000 || (b.id >= 1_895_000_000 && b.id < 1_900_000_000)))
+                    .filter(|b| {
+                        b.id != ship_id
+                            && (with_combat_runtime(ctx, |rt| {
+                                rt.npc_entities.contains_key(&b.id)
+                                    || rt.active_drones_in_space.contains_key(&b.id)
+                            }) || ctx.sde.types.get(&b.type_id).is_some_and(|t| {
+                                matches!(t.category_id, 6 | 11 | 18 | 65)
+                            }))
+                    })
                     .min_by(|a, b| {
                         attacker_ball
                             .position

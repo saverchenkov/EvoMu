@@ -1094,9 +1094,16 @@ pub async fn handle_pve_exploration(
                 );
             }
             let char_id = session.character_id.unwrap_or(0);
-            Some(crate::services::pve_expeditions::enter_combat_anomaly_site(
+            let res = crate::services::pve_expeditions::enter_combat_anomaly_site(
                 ctx, char_id, sys_id, &site_id,
-            ))
+            );
+            if res.is_ok() {
+                crate::services::wormhole_pve_escalations::step_wormhole_pve_system(
+                    ctx, sys_id, 1.0,
+                )
+                .await;
+            }
+            Some(res)
         }
 
         // parity: feat:pve.ded-complexes, feat:pve.sleeper-caches

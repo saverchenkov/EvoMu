@@ -13,8 +13,7 @@ use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
     destroy_specialized_npc_and_queue_bounty, dispatch_combat_rpc,
     process_ship_insurance_payout, spawn_specialized_npc_entity, step_extended_npc_ai,
-    sync_ship_insurance_contracts, with_combat_runtime,
-    with_mut_combat_runtime, InsuranceContractState,
+    with_combat_runtime, with_mut_combat_runtime,
 };
 use glam::DVec3;
 use std::collections::HashMap;
@@ -467,51 +466,40 @@ async fn test_insurance_voiding_and_12_week_expiry() {
     let sys_id = 30_000_142;
     seed_pilot(&ctx, char_id, ship_id, sys_id, DVec3::ZERO).await;
 
-    // 1. Insure ship with Platinum level (12-week contract = 7,257,600s)
-    let start_unix = ctx.now_unix();
+    let mut sess = make_session(char_id, ship_id, sys_id, Some(60_003_760));
+    let cost_isk = 1.0_f64; // Platinum fraction (1.0)
+
+    // 1. Insure ship via real insuranceSvc.InsureShip RPC (12-week contract = 7,257,600s)
     let twelve_weeks = 12 * 7 * 86_400;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.insurance_contracts.insert(
-            ship_id,
-            InsuranceContractState {
-                ship_id,
-                ship_type_id: 587,
-                owner_id: char_id,
-                level_name: "Platinum".into(),
-                level_fraction: 1.0,
-                cost_isk: 250_000.0,
-                payout_isk: 1_000_000.0,
-                start_unix,
-                end_unix: start_unix.saturating_add(twelve_weeks),
-            },
-        );
-    });
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(it) = s.items.get_mut(&ship_id) {
-            it.insured_payout_isk = 1_000_000.0;
-        }
-    });
+    let _ins_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "insuranceSvc",
+            None,
+            "InsureShip",
+            &[PyRep::Integer(ship_id), PyRep::Real(cost_isk), PyRep::Bool(false), PyRep::Bool(true)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect("InsureShip RPC");
 
-    // 2. Verify contract is active before expiry
-    sync_ship_insurance_contracts(&ctx, char_id);
-    assert!(
-        with_combat_runtime(&ctx, |rt| rt.insurance_contracts.contains_key(&ship_id)),
-        "Paid insurance contract must remain active during the 12-week period"
-    );
+    // 2. Verify contract is active before expiry via GetContractForShip
+    let contract_rep = ctx
+        .dispatch_rpc(&mut sess, "insuranceSvc", None, "GetContractForShip", &[PyRep::Integer(ship_id)], &HashMap::new(), None)
+        .await
+        .expect("GetContractForShip");
+    assert!(!matches!(contract_rep, PyRep::None), "Paid insurance contract must be active");
 
-    // 3. Voiding via RPC (`insuranceSvc.UnInsureShip` / repackage) removes the insurance contract
-    let mut sess = eve_machonet::SessionState::default();
-    sess.user_id = Some(1);
-    sess.character_id = Some(char_id);
-    sess.ship_id = Some(ship_id);
-    sess.solar_system_id = Some(sys_id);
-    let unins_rep = eve_server::services::combat_crimewatch::dispatch_combat_rpc(
+    // 3. Voiding via RPC (`insuranceSvc.UnInsureShip`) removes the insurance contract
+    sess.station_id = None;
+    let unins_rep = dispatch_combat_rpc(
         &ctx,
         &mut sess,
         "insuranceSvc",
         "UnInsureShip",
         &[PyRep::Integer(ship_id)],
-        &std::collections::HashMap::new(),
+        &HashMap::new(),
     )
     .await
     .expect("UnInsureShip RPC");
@@ -521,29 +509,29 @@ async fn test_insurance_voiding_and_12_week_expiry() {
         "Voided insurance contract must be removed from runtime"
     );
 
-    // 4. Re-insure and advance clock past 12 weeks (`12 * 7 * 86_400 + 10` s) -> expired contract falls back to 40% Basic payout and delivers EVE-mail
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.insurance_contracts.insert(
-            ship_id,
-            InsuranceContractState {
-                ship_id,
-                ship_type_id: 587,
-                owner_id: char_id,
-                level_name: "Platinum".into(),
-                level_fraction: 1.0,
-                cost_isk: 250_000.0,
-                payout_isk: 1_000_000.0,
-                start_unix,
-                end_unix: start_unix.saturating_add(twelve_weeks),
-            },
-        );
-    });
+    // 4. Re-insure via RPC and advance clock past 12 weeks (`12 * 7 * 86_400 + 10` s) -> expired contract falls back to 40% Basic payout and delivers EVE-mail
+    sess.station_id = Some(60_003_760);
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "insuranceSvc",
+            None,
+            "InsureShip",
+            &[PyRep::Integer(ship_id), PyRep::Real(cost_isk), PyRep::Bool(false), PyRep::Bool(true)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect("Re-InsureShip RPC");
+    let full_payout = with_combat_runtime(&ctx, |rt| rt.insurance_contracts.get(&ship_id).map(|c| c.payout_isk).unwrap_or(0.0));
+    assert!(full_payout > 0.0);
+
     ctx.advance_secs(twelve_weeks + 10);
     let mails_before = ctx.db.with_snapshot(|s| s.mails.len());
     let payout = process_ship_insurance_payout(&ctx, char_id, ship_id, 587, false);
     assert!(
-        payout > 0.0 && payout < 1_000_000.0,
-        "Expired or voided ship loss must fall back to the default 40% payout ({payout} ISK)"
+        payout > 0.0 && payout < full_payout,
+        "Expired or voided ship loss must fall back to the default 40% payout ({payout} < {full_payout} ISK)"
     );
     let has_ins_mail = ctx.db.with_snapshot(|s| {
         s.mails.len() > mails_before

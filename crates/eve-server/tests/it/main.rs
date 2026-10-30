@@ -463,3 +463,5 @@ mod open_feats_b35_c;
 mod open_feats_b35_d;
 mod quasar_sov_workforce_transit;
 mod quasar_faction_payment_schedule;
+mod capital_combat_sp7_closure;
+mod capital_combat_sp7_closure_part2;

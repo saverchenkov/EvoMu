@@ -178,12 +178,13 @@ pub fn process_ship_insurance_payout(
     if concord_killed_criminal || ship_type_id == 670 {
         return 0.0;
     }
-    let valid_contract = contract_opt.filter(|c| c.end_unix > now_unix);
+    let valid_contract = contract_opt.as_ref().filter(|c| c.end_unix > now_unix);
     let contract_owner_id = valid_contract.as_ref().map(|c| c.owner_id);
-    let contract_payout = valid_contract
-        .as_ref()
-        .map(|c| c.payout_isk)
-        .unwrap_or(db_payout);
+    let contract_payout = match contract_opt {
+        Some(ref c) if c.end_unix > now_unix => c.payout_isk,
+        Some(_) => 0.0,
+        None => db_payout,
+    };
     let payout_isk = if contract_payout > 0.0 {
         contract_payout
     } else {
@@ -912,7 +913,14 @@ pub async fn handle_wrecks_killmails(
                 }));
             };
             let now_unix = ctx.now_unix();
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let Some(sys_id) = session.solar_system_id.or_else(|| {
+                ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
+            }) else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Character has no active solar system".into(),
+                }));
+            };
             let _ = step_wreck_and_jetcan_decay(ctx, sys_id, now_unix).await;
 
             let wreck_opt = ctx

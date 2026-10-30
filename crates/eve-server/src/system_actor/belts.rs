@@ -257,7 +257,7 @@ pub(super) fn ensure_default_slim_meta(
         SlimItemMeta {
             group_id,
             category_id,
-            owner_id: if ball.id >= 700_000_000 { 1 } else { ball.id },
+            owner_id: if category_id == 11 { 1 } else { ball.id },
             char_id: None,
             corp_id: -1,
             alliance_id: -1,

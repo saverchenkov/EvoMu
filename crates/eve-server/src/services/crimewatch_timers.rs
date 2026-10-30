@@ -975,7 +975,14 @@ pub async fn handle_crimewatch(
                 (t, q)
             };
             let now_unix = ctx.now_unix();
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let Some(sys_id) = session.solar_system_id.or_else(|| {
+                ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
+            }) else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Character has no active solar system".into(),
+                }));
+            };
 
             // Enforce Clone Soldier Tag security status tier bands (`feat:crimewatch.sec-tag-tier-bands`):
             // 35661 Trainer:     -10.0 to -8.0
@@ -1091,7 +1098,14 @@ pub async fn handle_crimewatch(
             if let Err(e) = crate::sp6_lifecycle::require_no_pvp_timer_for_filament(ctx, char_id) {
                 return Some(Err(e));
             }
-            let origin_sys = session.solar_system_id.unwrap_or(30_000_142);
+            let Some(origin_sys) = session.solar_system_id.or_else(|| {
+                ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
+            }) else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Character has no active solar system".into(),
+                }));
+            };
             let ship_id = session.ship_id.unwrap_or(100_000_002);
             if let Err(e) = crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "activate filament") {
                 return Some(Err(e));
