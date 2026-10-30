@@ -24,10 +24,8 @@ use glam::DVec3;
 
 #[tokio::test]
 async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() {
-    // parity: feat:sovereignty.mercenary-den
+    // DATA GAP: feat:sovereignty.mercenary-den / mercenary-den-development-anarchy / mercenary-den-anarchy-evolution — synthetic yield/capacity/anarchy values pending V24.01 client/SDE tables (docs/BLOCKERS.md §8)
     // parity: feat:sovereignty.mercenary-den-anchoring
-    // parity: feat:sovereignty.mercenary-den-development-anarchy
-    // parity: feat:sovereignty.mercenary-den-anarchy-evolution
     // DATA GAP: feat:pve.mercenary-tactical-ops (open until real SDE tables imported)
     // parity: feat:sovereignty.mercenary-den-reinforcement-loot
     // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj
@@ -37,10 +35,7 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
     // parity: notify:OnMercenaryDenRegistrationSuccess
     // parity: notify:OnMyMercenaryDenRemoved
     eve_testkit::attest(&[
-        "feat:sovereignty.mercenary-den",
         "feat:sovereignty.mercenary-den-anchoring",
-        "feat:sovereignty.mercenary-den-development-anarchy",
-        "feat:sovereignty.mercenary-den-anarchy-evolution",
         "feat:sovereignty.mercenary-den-reinforcement-loot",
         "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj",

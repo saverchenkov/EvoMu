@@ -422,6 +422,7 @@ pub(crate) fn refresh_activities(snap: &mut WorldStateSnapshot, pending: &Pendin
             started_by: 0,
             expiry_unix: now + ACTIVITY_LIFETIME_SECS,
             development_impact: 10,
+            // DERIVED: synthetic MTO anarchy delta (-10) pending V24.01 client/SDE MTO tables
             anarchy_impact: -10,
             infomorph_bonus: 350,
         };

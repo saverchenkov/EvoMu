@@ -21,15 +21,12 @@ use glam::DVec3;
 
 #[tokio::test]
 async fn test_sov_power_workforce_fuel_upgrades_reagents_and_sites_parity() {
-    // parity: feat:sovereignty.sov-hub-upgrades
+    // DATA GAP: feat:sovereignty.sov-hub-upgrades / sov-hub-fuel — 44 wiki-derived (build 3538132) upgrade definitions & 0 startup-cost placeholder pending V24.01 SDE import (docs/BLOCKERS.md §7)
     // DATA GAP: feat:sovereignty.sov-power — server-only celestial power table (docs/BLOCKERS.md §7)
     // DATA GAP: feat:sovereignty.sov-workforce — server-only celestial workforce table (docs/BLOCKERS.md §7)
     // DATA GAP: feat:sovereignty.sov-reagents — server-only planetary reagent yield table (docs/BLOCKERS.md §7)
-    // parity: feat:sovereignty.sov-hub-fuel
     // parity: feat:sovereignty.sov-upgrade-sites
     eve_testkit::attest(&[
-        "feat:sovereignty.sov-hub-upgrades",
-        "feat:sovereignty.sov-hub-fuel",
         "feat:sovereignty.sov-upgrade-sites",
     ]);
 

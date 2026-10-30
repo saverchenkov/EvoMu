@@ -254,14 +254,7 @@ async fn test_sov_cyno_jammer_upgrade_and_hub_hacking_parity() {
 
 #[tokio::test]
 async fn test_mercenary_den_lifecycle_evolution_and_anarchy_parity() {
-    // parity: feat:sovereignty.mercenary-den
-    // parity: feat:sovereignty.mercenary-den-development-anarchy
-    // parity: feat:sovereignty.mercenary-den-anarchy-evolution
-    eve_testkit::attest(&[
-        "feat:sovereignty.mercenary-den",
-        "feat:sovereignty.mercenary-den-development-anarchy",
-        "feat:sovereignty.mercenary-den-anarchy-evolution",
-    ]);
+    // DATA GAP: feat:sovereignty.mercenary-den / mercenary-den-development-anarchy / mercenary-den-anarchy-evolution — synthetic yield/capacity/anarchy values pending V24.01 client/SDE tables (docs/BLOCKERS.md §8)
 
     let db_path = temp_sqlite_path("sov_mercden_evo");
     let ctx = open_sqlite_ctx(&db_path, true);

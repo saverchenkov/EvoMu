@@ -25,10 +25,9 @@ use glam::DVec3;
 
 #[tokio::test]
 async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_tenebrex() {
-    // parity: feat:sovereignty.sov-hub-fuel
+    // DATA GAP: feat:sovereignty.sov-hub-fuel / sov-hub-upgrades — 44 wiki-derived (build 3538132) upgrade definitions & 0 startup-cost placeholder pending V24.01 SDE import (docs/BLOCKERS.md §7)
     // DATA GAP: feat:sovereignty.sov-power — server-only celestial power table (docs/BLOCKERS.md §7)
     // DATA GAP: feat:sovereignty.sov-workforce — server-only celestial workforce table (docs/BLOCKERS.md §7)
-    // parity: feat:sovereignty.sov-hub-upgrades
     // parity: feat:sovereignty.sov-upgrade-sites
     // parity: feat:sovereignty.sov-hub-hacking
     // parity: feat:sovereignty.sov-structures-flex
@@ -38,8 +37,6 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
     // parity: notify:OnSovHubHacked
     // parity: notify:OnCynoJammerChanged
     eve_testkit::attest(&[
-        "feat:sovereignty.sov-hub-fuel",
-        "feat:sovereignty.sov-hub-upgrades",
         "feat:sovereignty.sov-upgrade-sites",
         "feat:sovereignty.sov-hub-hacking",
         "feat:sovereignty.sov-structures-flex",

@@ -185,14 +185,17 @@ fn split_tier(name: &str) -> (&str, u64) {
     }
 }
 
-/// Builds the definition of an SDE Sovereignty Hub upgrade type using CCP's V24
-/// `sovereigntyUpgrades` values (`Sovereignty.md:124-199`).
+/// DERIVED: Builds the definition of an SDE Sovereignty Hub upgrade type from the `44`
+/// upgrade rows transcribed from `eve-wiki/articles/Sovereignty.md:155-198` (SDE build
+/// `3538132`, not yet imported into `data/evomu_sde.sqlite`), with `fuel_startup: 0` as a
+/// `DERIVED` placeholder pending V24.01 client/SDE startup-cost data (`docs/BLOCKERS.md` §7).
 pub fn upgrade_definition(sde: &SdeRegistry, type_id: u32) -> Option<UpgradeDefinition> {
     let t = sde.types.get(&type_id)?;
     if !t.published || !SOV_HUB_UPGRADE_GROUPS.contains(&t.group_id) {
         return None;
     }
     let (base, _) = split_tier(&t.name);
+    // DERIVED: 44 upgrade definitions transcribed from `eve-wiki/articles/Sovereignty.md:155-198` (build 3538132).
     let (power_required, workforce_required, fuel_type, fuel_per_hour, exclusive_group, power_produced, workforce_produced) =
         match type_id {
             // Group 4772: Sovereignty Hub Service Infrastructure Upgrades
@@ -238,6 +241,7 @@ pub fn upgrade_definition(sde: &SdeRegistry, type_id: u32) -> Option<UpgradeDefi
         workforce_required,
         fuel_type,
         fuel_per_hour,
+        // DERIVED: placeholder (0) pending V24.01 client/SDE startup-cost data
         fuel_startup: 0,
         exclusive_group: exclusive_group.to_string(),
         power_produced,
