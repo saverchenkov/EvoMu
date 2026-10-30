@@ -512,3 +512,5 @@ mod open_feats_b42;
 mod open_feats_and_rpcs_b9;
 mod open_feats_and_rpcs_b34;
 mod open_feats_and_rpcs_b34_part2;
+mod open_feats_and_rpcs_b5;
+mod open_feats_ships_pve_b5;
