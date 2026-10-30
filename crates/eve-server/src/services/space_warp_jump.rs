@@ -130,6 +130,7 @@ async fn handle_cmd_warp_to_stuff(
             message: "Session has no active ship".into(),
         });
     };
+    crate::services::pve_open_feats_b36::check_ess_intrusion_bubble_restriction(ctx, sys_id, ship_id, "warp").await?;
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp")?;
     crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "warp")?;
     crate::services::tourney_service::check_tourney_warp_restricted(ctx, sys_id, char_id)?;
@@ -252,6 +253,7 @@ async fn handle_cmd_warp_to_stuff(
             resolved_pos = Some(pos);
         }
         "mission" | "dungeon" | "location" | "epinstance" => {
+            crate::services::pve_open_feats_b36::mark_wormhole_site_activated(ctx, sys_id, &target_id.to_string());
             resolved_pos =
                 crate::services::pve_dungeon_runtime::resolve_deadspace_or_escalation_warp_target(
                     ctx,

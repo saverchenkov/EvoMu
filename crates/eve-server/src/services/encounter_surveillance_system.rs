@@ -146,6 +146,7 @@ pub fn prime_cache_result(
     if !(sys_sec <= 0.0 && sys_id < 31_000_000) {
         return Ok(PyRep::None);
     }
+    let _ = crate::services::pve_open_feats_b36::tick_ess_main_bank_autopayout(ctx, ctx.now_unix());
 
     let rep = ctx.db.with_snapshot(|snap| {
         let Some(st) = snap.system_states.get(&sys_id) else {

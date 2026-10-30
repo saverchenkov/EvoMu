@@ -75,6 +75,10 @@ pub struct PveSiteInstance {
     pub sleeper_gas_cloud_active: bool,
     pub cleared: bool,
     #[serde(default)]
+    pub activated: bool,
+    #[serde(default)]
+    pub downtimes_since_activation: u32,
+    #[serde(default)]
     pub created_unix: u64,
     #[serde(default)]
     pub lifetime_seconds: u64,

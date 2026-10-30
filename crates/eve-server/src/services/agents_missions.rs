@@ -1181,16 +1181,21 @@ pub async fn handle(
                             save_epic_arc_states(snap, char_id, &arcs);
                         }
 
+                        let mut resolved_storyline_agent_id = storyline_agent_id;
                         let (t, storyline) = if (!is_storyline && tmpl.has_standing_rewards) || is_rnd {
-                            let count = snap.mission_tally.entry(char_id).or_insert(0);
-                            *count += 1;
-                            let t = *count;
-                            (t, t % 16 == 0)
+                            let t = {
+                                let count = snap.mission_tally.entry(char_id).or_insert(0);
+                                *count += 1;
+                                *count
+                            };
+                            let sl_opt = ctx.sde.agents.get(&m_agent_id).and_then(|ca| crate::services::pve_open_feats_b36::record_mission_completion_and_resolve_storyline(ctx, snap, char_id, ca));
+                            if let Some(sl_id) = sl_opt { resolved_storyline_agent_id = sl_id; }
+                            (t, sl_opt.is_some())
                         } else {
-                            let t = snap.mission_tally.get(&char_id).copied().unwrap_or(0);
-                            (t, false)
+                            (snap.mission_tally.get(&char_id).copied().unwrap_or(0), false)
                         };
                         if storyline {
+                            let storyline_agent_id = resolved_storyline_agent_id;
                             if let Some(storyline_tmpl) = ctx.sde.missions
                                 .values().filter(|sm| {
                                     is_storyline_template(sm)

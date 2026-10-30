@@ -196,6 +196,9 @@ pub(crate) async fn handle_module_cycles(
                 );
             }
 
+            if let Err(e) = crate::services::pve_open_feats_b36::check_ess_module_activation_allowed(ctx, sys_id, ship_id, mod_type).await {
+                return Some(Err(e));
+            }
             if mod_type.group_id == 330 {
                 if (32_000_000..=32_999_999).contains(&sys_id) {
                     return Some(Err(BridgeRpcError { code: "CannotCloakInAbyssalSpace".into(), message: "Cloaking devices cannot be activated inside Abyssal Deadspace".into() }));
