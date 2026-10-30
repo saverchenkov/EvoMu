@@ -4,7 +4,6 @@
 #![forbid(unsafe_code)]
 
 use crate::router::{NotificationTarget, ServerContext};
-use crate::services::cosmetics_ui_ops::{load_cosmetics_ui_state, save_cosmetics_ui_state};
 use crate::services::notify_emitters_batch3::{
     emit_alpha_injection_available,
     emit_datacore_bought, emit_milestone_timer_started,
@@ -146,76 +145,12 @@ pub fn emit_login_milestone_timer_started(ctx: &ServerContext, char_id: i64, tim
     emit_milestone_timer_started(ctx, char_id, time_left_ft);
 }
 
-/// Emits V24-conformant 2-arg `OnLoginMilestoneAchieved(milestoneID, iskAmount)` (`id_type = "charid"`).
-// parity: notify:OnLoginMilestoneAchieved
-pub fn emit_login_milestone_achieved_v24(
-    ctx: &ServerContext,
-    char_id: i64,
-    milestone_id: i64,
-    isk_amount: f64,
-) {
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnLoginMilestoneAchieved",
-        "charid",
-        vec![PyRep::Integer(milestone_id), PyRep::Real(isk_amount)],
-    );
-}
-
-/// Evaluates due 120-minute login milestones and expired 24-hour Daily Alpha Injector cooldowns on cluster tick.
-// parity: notify:OnLoginMilestoneAchieved, notify:OnAlphaInjectionAvailable
-pub fn sweep_due_login_milestones_and_alpha_injectors(ctx: &ServerContext, now_unix: u64) {
-    const MILESTONE_DURATION_SECS: u64 = 7_200;
-    const DAILY_RESET_SECS: u64 = 86_400;
-    // DERIVED: 500,000 ISK daily 120-minute login milestone reward (not in V24 FSD)
-    const MILESTONE_REWARD_ISK: i64 = 500_000;
+/// Evaluates expired 24-hour Daily Alpha Injector cooldowns on cluster tick.
+// parity: notify:OnAlphaInjectionAvailable
+pub fn sweep_due_login_milestones_and_alpha_injectors(ctx: &ServerContext, _now_unix: u64) {
     let now_ft = ctx.now_blueos_filetime_ticks();
-    let current_day = now_unix / DAILY_RESET_SECS;
 
-    let (achieved_chars, ready_alpha_chars) = ctx.db.with_mut_snapshot(|snap| {
-        let mut ext = load_cosmetics_ui_state(snap);
-        let mut last_claim_day: HashMap<i64, u64> = snap
-            .service_state_blobs
-            .get("login_milestone_last_day")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
-        let mut achieved = Vec::new();
-        let mut logon_cids: Vec<i64> = ext.milestone_logons.keys().copied().collect();
-        logon_cids.sort_unstable();
-        for cid in logon_cids {
-            let Some(&logon_unix) = ext.milestone_logons.get(&cid) else {
-                continue;
-            };
-            if now_unix < logon_unix.saturating_add(MILESTONE_DURATION_SECS) {
-                continue;
-            }
-            if last_claim_day.get(&cid).copied() == Some(current_day) {
-                continue;
-            }
-            last_claim_day.insert(cid, current_day);
-            ext.claimed_milestones.entry(cid).or_default().push(1);
-            let reward_cents = IskCents::from_isk(MILESTONE_REWARD_ISK);
-            if let Some(ch) = snap.characters.get_mut(&cid) {
-                ch.balance = ch.balance.checked_add(reward_cents).unwrap_or(ch.balance);
-                let bal_after = ch.balance;
-                snap.append_journal(
-                    cid,
-                    "LoginMilestoneReward",
-                    reward_cents,
-                    bal_after,
-                    "Daily 120-minute login milestone reward",
-                );
-                achieved.push((cid, bal_after.to_wire_f64()));
-            }
-        }
-        if !achieved.is_empty() {
-            save_cosmetics_ui_state(snap, &ext);
-            if let Ok(json) = serde_json::to_string(&last_claim_day) {
-                snap.service_state_blobs
-                    .insert("login_milestone_last_day".into(), json);
-            }
-        }
-
+    let ready_alpha_chars = ctx.db.with_mut_snapshot(|snap| {
         let cooldowns = super::implant_plugging::load_alpha_injector_cooldowns(snap);
         let mut notified_map: HashMap<i64, bool> = snap
             .service_state_blobs
@@ -249,13 +184,9 @@ pub fn sweep_due_login_milestones_and_alpha_injectors(ctx: &ServerContext, now_u
                     .insert("alpha_avail_notified".into(), json);
             }
         }
-        (achieved, alpha_ready)
+        alpha_ready
     });
 
-    for (cid, bal_wire) in achieved_chars {
-        let _ = ctx.notify_account_change(cid, "cash", cid, bal_wire);
-        emit_login_milestone_achieved_v24(ctx, cid, 1, MILESTONE_REWARD_ISK as f64);
-    }
     for cid in ready_alpha_chars {
         emit_alpha_injection_available(ctx, cid);
     }
@@ -336,68 +267,6 @@ pub fn emit_player_state_updated(ctx: &ServerContext, char_id: i64, player_state
         "OnPlayerStateUpdated",
         "charid",
         vec![player_state_rep],
-    );
-}
-
-/// Emits `OnServerBrainUpdated((brainVersion, grayMatter))` (`1` arg, `id_type = "charid"`),
-/// marshaling `(charEffects, shipEffects, structureEffects)` for V24 `BaseDogmaLocation.ProcessBrainData`.
-pub fn emit_server_brain_updated(ctx: &ServerContext, char_id: i64) {
-    let (version, gray_matter) = ctx.db.with_mut_snapshot(|snap| {
-        let mut versions: HashMap<i64, i64> = snap
-            .service_state_blobs
-            .get("char_brain_versions")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
-        let next_ver = versions.get(&char_id).copied().unwrap_or(0).saturating_add(1);
-        versions.insert(char_id, next_ver);
-        if let Ok(json) = serde_json::to_string(&versions) {
-            snap.service_state_blobs
-                .insert("char_brain_versions".into(), json);
-        }
-
-        let mut skill_ids: Vec<TypeId> = snap
-            .skills
-            .get(&char_id)
-            .map(|m| m.keys().copied().collect())
-            .unwrap_or_default();
-        skill_ids.sort_unstable();
-        let char_effects: Vec<PyRep> = skill_ids
-            .into_iter()
-            .filter_map(|tid| {
-                let lvl = snap.skills.get(&char_id)?.get(&tid)?.level;
-                Some(PyRep::Tuple(vec![
-                    PyRep::Integer(i64::from(tid)),
-                    PyRep::Integer(i64::from(lvl)),
-                ]))
-            })
-            .collect();
-
-        let ship_effects: Vec<PyRep> = snap
-            .active_implants
-            .get(&char_id)
-            .map(|imps| {
-                imps.iter()
-                    .map(|&tid| PyRep::Integer(i64::from(tid)))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let brain_tuple = PyRep::Tuple(vec![
-            PyRep::List(char_effects),
-            PyRep::List(ship_effects),
-            PyRep::List(Vec::new()),
-        ]);
-        (next_ver, eve_proto::marshal::encode(&brain_tuple))
-    });
-
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnServerBrainUpdated",
-        "charid",
-        vec![PyRep::Tuple(vec![
-            PyRep::Integer(version),
-            PyRep::Bytes(gray_matter),
-        ])],
     );
 }
 
@@ -503,13 +372,18 @@ pub fn handle_rnd_buy_datacores(
         }
     }
     let now_unix = ctx.now_unix();
-    let station_id = ctx
+    let Some(station_id) = ctx
         .sde
         .agents
         .get(&agent_id)
         .and_then(|a| a.station_id)
         .or(session.station_id)
-        .unwrap_or(60_003_760);
+    else {
+        return Err(err(
+            "AgentLocationUnknown",
+            format!("Cannot resolve station location for R&D agent {agent_id}"),
+        ));
+    };
     let (item_id, dc_type_id, rem_rp, bal_after_isk) = ctx.db.try_with_mut_snapshot(|snap| {
         let mut entries = super::agents_missions::load_rnd_research_entries(snap, char_id);
         let Some(entry) = entries.iter_mut().find(|e| e.agent_id == agent_id) else {
@@ -520,6 +394,7 @@ pub fn handle_rnd_buy_datacores(
         };
         let elapsed_days = (now_unix.saturating_sub(entry.started_unix) as f64) / 86_400.0;
         let total_rp = entry.initial_points + entry.points_per_day * elapsed_days;
+        // DERIVED: 50 RP per datacore (V24 R&D datacore redemption cost)
         let rp_cost = 50.0 * (qty as f64);
         if total_rp + 1e-6 < rp_cost {
             return Err(err(
@@ -527,6 +402,7 @@ pub fn handle_rnd_buy_datacores(
                 format!("Buying {qty} datacore(s) requires {rp_cost:.1} RP, character has {total_rp:.1} RP"),
             ));
         }
+        // DERIVED: 10,000 ISK per datacore redemption fee
         let isk_cost = IskCents::from_isk(10_000 * i64::from(qty));
         let mut bal_after_opt = None;
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -552,11 +428,30 @@ pub fn handle_rnd_buy_datacores(
         let rem_rp = (total_rp - rp_cost).max(0.0);
         entry.initial_points = rem_rp;
         entry.started_unix = now_unix;
-        let dc_type_id: TypeId = if entry.research_type_id == 11452 {
-            20172
-        } else {
-            20424
-        };
+        let skill_name = ctx
+            .sde
+            .types
+            .get(&entry.research_type_id)
+            .map(|t| t.name.as_str())
+            .ok_or_else(|| {
+                err(
+                    "UnknownResearchSkill",
+                    format!("Research skill {} not found in SDE", entry.research_type_id),
+                )
+            })?;
+        let expected_dc_name = format!("Datacore - {skill_name}");
+        let dc_type_id: TypeId = ctx
+            .sde
+            .types
+            .values()
+            .find(|t| t.name == expected_dc_name)
+            .map(|t| t.type_id)
+            .ok_or_else(|| {
+                err(
+                    "UnknownDatacoreType",
+                    format!("Datacore type '{expected_dc_name}' not found in SDE"),
+                )
+            })?;
         super::agents_missions::save_rnd_research_entries(snap, char_id, &entries);
         snap.next_entity_id += 1;
         let item_id = snap.next_entity_id;

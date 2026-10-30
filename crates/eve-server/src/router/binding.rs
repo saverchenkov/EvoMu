@@ -955,6 +955,43 @@ impl ServerContext {
                 let _ = notify_tx.send((char_id, r_notif));
             }
         }));
+
+        let db_lock = Arc::clone(&self.db);
+        let pending_lock = Arc::clone(&self.pending_notifications);
+        let notify_tx_lock = self.notify_tx.clone();
+        self.systems.set_target_lock_completed_hook(Arc::new(move |char_id, target_id| {
+            let now = db_lock.clock().now_blueos_filetime_ticks();
+            let user_id = db_lock.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.user_id));
+            let args = vec![PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Tuple(vec![
+                    PyRep::String("OnTarget".into()),
+                    PyRep::String("add".into()),
+                    PyRep::Integer(target_id),
+                    PyRep::String(String::new()),
+                ]),
+                PyRep::Integer(0),
+            ])])];
+            let (packet, marshaled_packet) =
+                ServerContext::build_macho_notification_packet(char_id, user_id, "OnMultiEvent", "charid", args.clone());
+            let notif = PendingMachoNotification {
+                recipient_char_id: char_id,
+                event: "OnMultiEvent".to_string(),
+                id_type: "charid".to_string(),
+                args,
+                packet,
+                marshaled_packet,
+                created_filetime: now,
+            };
+            {
+                let mut q_guard = pending_lock.write().unwrap_or_else(|e| e.into_inner());
+                let q = q_guard.entry(char_id).or_default();
+                if q.len() >= 512 {
+                    q.remove(0);
+                }
+                q.push(notif.clone());
+            }
+            let _ = notify_tx_lock.send((char_id, notif));
+        }));
     }
 
     /// Constructs a lightweight `ServerContext` handle referencing shared core components for system step execution.

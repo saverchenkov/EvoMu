@@ -4,7 +4,7 @@
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::cosmetics_ui_ops::{load_cosmetics_ui_state, save_cosmetics_ui_state};
 use crate::services::notify_emitters_batch3::emit_crate_loot_spawned;
-use crate::services::notify_emitters_batch9::{emit_server_brain_updated, emit_skill_bundle_injected};
+use crate::services::notify_emitters_batch9::emit_skill_bundle_injected;
 use eve_db::{
     InventoryFlag, InventoryItemRecord, SkillHistoryEntry,
     TrainedSkillRecord, WorldStateSnapshot,
@@ -416,7 +416,6 @@ fn handle_crate_claim_skill_bundle(ctx: &ServerContext, session: &SessionState, 
     })?;
     if injected_skills > 0 {
         emit_skill_bundle_injected(ctx, char_id, injected_skills, sp_grant.round() as i64);
-        emit_server_brain_updated(ctx, char_id);
         ctx.notify(
             NotificationTarget::Character(char_id),
             "OnFreeSkillPointsChanged",

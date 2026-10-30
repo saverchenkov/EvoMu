@@ -7,11 +7,10 @@ use crate::notify_real_emitters_batch9::login_docked;
 use eve_db::InventoryFlag;
 use eve_proto::PyRep;
 
-// parity: notify:OnLoginMilestoneAchieved, notify:OnMilestoneTimerStarted, notify:OnRedeemingQueueUpdated, notify:OnCrateLootSpawned, notify:OnPodOrCorvetteAssembly
+// parity: notify:OnMilestoneTimerStarted, notify:OnRedeemingQueueUpdated, notify:OnCrateLootSpawned, notify:OnPodOrCorvetteAssembly
 #[tokio::test]
 async fn notify_batch9_milestones_redeeming_crates_and_assembly() {
     eve_testkit::attest(&[
-        "notify:OnLoginMilestoneAchieved",
         "notify:OnMilestoneTimerStarted",
         "notify:OnRedeemingQueueUpdated",
         "notify:OnCrateLootSpawned",
@@ -46,36 +45,15 @@ async fn notify_batch9_milestones_redeeming_crates_and_assembly() {
         .iter()
         .any(|(e, _)| e == "OnLoginMilestoneAchieved"));
 
-    // Positive: Advancing cluster tick past 7200s completes the login milestone and emits OnLoginMilestoneAchieved([1, 500000.0])
+    // Negative 1c: Advancing cluster tick past 7200s does NOT auto-credit ISK or emit OnLoginMilestoneAchieved
     let future_unix = ctx.now_unix() + 7_205;
     eve_server::services::notify_emitters_batch9::sweep_due_login_milestones_and_alpha_injectors(
         &ctx,
         future_unix,
     );
-    let achieved_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    assert_eq!(
-        find_notif(&achieved_notifs, "OnLoginMilestoneAchieved"),
-        &[PyRep::Integer(1), PyRep::Real(500_000.0)]
-    );
-
-    // Negative 2b: Re-running sweep on same day does not duplicate OnLoginMilestoneAchieved
-    eve_server::services::notify_emitters_batch9::sweep_due_login_milestones_and_alpha_injectors(
-        &ctx,
-        future_unix + 60,
-    );
     assert!(!drain_all(&ctx, &mut sess_a, PILOT_A)
         .iter()
         .any(|(e, _)| e == "OnLoginMilestoneAchieved"));
-
-    // Positive 2c: Next day (+86400s) resets daily cadence and emits OnLoginMilestoneAchieved again
-    eve_server::services::notify_emitters_batch9::sweep_due_login_milestones_and_alpha_injectors(
-        &ctx,
-        future_unix + 86_400,
-    );
-    assert_eq!(
-        find_notif(&drain_all(&ctx, &mut sess_a, PILOT_A), "OnLoginMilestoneAchieved"),
-        &[PyRep::Integer(1), PyRep::Real(500_000.0)]
-    );
 
     // 3. OnRedeemingQueueUpdated
     // Negative 3a: TrashRedeemTokens with non-existent token does NOT emit OnRedeemingQueueUpdated
@@ -381,9 +359,7 @@ async fn notify_batch9_password_player_state_brain_and_subscription() {
     .await
     .expect("ApplyFreeSkillPoints");
     let brain_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    let brain_args = find_notif(&brain_notifs, "OnServerBrainUpdated");
-    assert_eq!(brain_args.len(), 1);
-    assert!(matches!(&brain_args[0], PyRep::Tuple(t) if t.len() == 2));
+    assert!(!brain_notifs.iter().any(|(e, _)| e == "OnServerBrainUpdated"));
 
     // 9-10. OnSubscriptionChangedServer & OnSubscriptionTimeUpdateServer
     let uid_a = sess_a.user_id.unwrap_or(9_211);

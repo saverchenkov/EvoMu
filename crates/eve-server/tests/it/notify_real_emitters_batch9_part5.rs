@@ -86,12 +86,11 @@ async fn notify_batch9_jump_queue_flagged_lists_and_cfg_data() {
     assert!(matches!(&cfg_args[1], PyRep::List(elems) if elems.len() == 6));
 }
 
-// parity: notify:OnServerMessage, notify:OnUpdateLocalizationTextCache
+// parity: notify:OnServerMessage
 #[tokio::test]
 async fn notify_batch9_ccp_notification_server_msg_localization_and_service_map() {
     eve_testkit::attest(&[
         "notify:OnServerMessage",
-        "notify:OnUpdateLocalizationTextCache",
     ]);
 
     let ctx = new_ctx();
@@ -129,23 +128,10 @@ async fn notify_batch9_ccp_notification_server_msg_localization_and_service_map(
         &[PyRep::String("Welcome to Tranquility".into())]
     );
 
-    // 6. OnUpdateLocalizationTextCache
-    // Negative 6a: Non-GM calling UpdateLocalizationQAWrap fails with RoleRequired
-    let loc_dict = PyRep::Dict(vec![(PyRep::Integer(1001), PyRep::String("Override Text".into()))]);
+    // 6. UpdateLocalizationQAWrap remains fail-closed (UnimplementedRPC) and does not emit OnUpdateLocalizationTextCache
     assert!(rpc(
         &ctx,
         &mut sess_a,
-        "localizationServer",
-        "UpdateLocalizationQAWrap",
-        &[loc_dict.clone()],
-    )
-    .await
-    .is_err());
-
-    // Negative 6b: Boolean QA-wrap toggle fails with UnimplementedRPC
-    assert!(rpc(
-        &ctx,
-        &mut sess_gm,
         "localizationServer",
         "UpdateLocalizationQAWrap",
         &[PyRep::Bool(true)],
@@ -153,16 +139,16 @@ async fn notify_batch9_ccp_notification_server_msg_localization_and_service_map(
     .await
     .is_err());
 
-    // Positive: GM updating localization text cache emits OnUpdateLocalizationTextCache
-    let _ = rpc(
+    let qa_err = rpc(
         &ctx,
         &mut sess_gm,
         "localizationServer",
         "UpdateLocalizationQAWrap",
-        &[loc_dict],
+        &[PyRep::Bool(true)],
     )
     .await
-    .expect("UpdateLocalizationQAWrap");
+    .unwrap_err();
+    assert_eq!(qa_err.code, "UnimplementedRPC");
     let loc_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    assert!(loc_notifs.iter().any(|(e, _)| e == "OnUpdateLocalizationTextCache"));
+    assert!(!loc_notifs.iter().any(|(e, _)| e == "OnUpdateLocalizationTextCache"));
 }

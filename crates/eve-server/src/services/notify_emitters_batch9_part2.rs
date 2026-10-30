@@ -8,12 +8,10 @@ use crate::router::{NotificationTarget, ServerContext};
 use crate::services::notify_emitters_batch3_space::{
     emit_module_activation_godma_notifications, flush_module_profile_and_ewar_end,
 };
-use eve_db::OwnerNoteRecord;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::TypeId;
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
@@ -41,6 +39,63 @@ pub fn emit_priming_needed_for_trade_items(
     );
 }
 
+/// Counts how many items in a multi-sell order are assembled and damaged (hull, armor, or fitted module/heat damage).
+pub fn count_damaged_sell_items(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    caller_corp_id: i64,
+    use_corp: bool,
+    parsed_items: &[(u32, u32, i64, eve_db::IskCents, i32, i32)],
+) -> i64 {
+    let mut damaged_count: i64 = 0;
+    for (station_id, type_id, raw_item_id, _, _, _) in parsed_items {
+        let candidate_opt = if *raw_item_id > 0 {
+            snap.items.get(raw_item_id)
+        } else {
+            snap.items.values().find(|i| {
+                i.type_id == *type_id
+                    && i.singleton
+                    && (snap.is_item_consumable_by(i, char_id, Some(*station_id), None)
+                        || (use_corp
+                            && i.owner_id == caller_corp_id
+                            && i.location_id == *station_id
+                            && i.flag != eve_db::InventoryFlag::Locked
+                            && !snap.is_item_locked_in_contract_or_job(i.item_id)))
+            })
+        };
+        if let Some(item) = candidate_opt {
+            if item.singleton {
+                let hull_or_armor_dmg = item
+                    .dynamic_attributes
+                    .get(&eve_sde::attr_ids::DAMAGE)
+                    .copied()
+                    .unwrap_or(0.0)
+                    > 0.0
+                    || item
+                        .dynamic_attributes
+                        .get(&eve_sde::attr_ids::ARMOR_DAMAGE)
+                        .copied()
+                        .unwrap_or(0.0)
+                        > 0.0;
+                let module_dmg = ctx
+                    .ship_fittings
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&item.item_id)
+                    .is_some_and(|fit| {
+                        fit.rack_heat.iter().any(|&h| h > 0.0)
+                            || fit.modules.values().any(|m| m.damage_hp > 0.0)
+                    });
+                if hull_or_armor_dmg || module_dmg {
+                    damaged_count += 1;
+                }
+            }
+        }
+    }
+    damaged_count
+}
+
 /// Emits `OnSellRepackageErrors(repackageErrorCount)` (`1` arg, `id_type = "charid"`).
 // parity: notify:OnSellRepackageErrors
 pub fn emit_sell_repackage_errors(
@@ -49,21 +104,15 @@ pub fn emit_sell_repackage_errors(
     error_code: &str,
     count: i64,
 ) {
-    if count <= 0 {
+    if count <= 0 || error_code != "CantRepackageDamagedItem" {
         return;
     }
-    let client_key = match error_code {
-        "CannotSellAssembledItem" | "CannotSellItemWithContents" | "CantRepackageDamagedItem" => {
-            "CantRepackageDamagedItem"
-        }
-        other => other,
-    };
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnSellRepackageErrors",
         "charid",
         vec![PyRep::Dict(vec![(
-            PyRep::String(client_key.to_string()),
+            PyRep::String("CantRepackageDamagedItem".into()),
             PyRep::Integer(count),
         )])],
     );
@@ -343,156 +392,29 @@ pub fn emit_structure_cfg_data_changed(
     );
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct JumpQueueSystemConfig {
-    threshold: usize,
-    key_life: i64,
-    queue: Vec<i64>,
-    jump_keys: HashMap<i64, i64>,
-}
-
-/// Emits `OnJumpQueueUpdate(solarsystemID, space, queue, jumpKeys, keyLife)`.
-pub fn emit_jump_queue_update_v24(
-    ctx: &ServerContext,
-    char_id: i64,
-    sys_id: u32,
-    space: i64,
-    queue: &[i64],
-    jump_keys: &[(i64, i64)],
-    key_life: i64,
-) {
-    let queue_rep = PyRep::List(queue.iter().copied().map(PyRep::Integer).collect());
-    let keys_rep = PyRep::Dict(
-        jump_keys
-            .iter()
-            .map(|&(cid, issued_ft)| (PyRep::Integer(cid), PyRep::Integer(issued_ft)))
-            .collect(),
-    );
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnJumpQueueUpdate",
-        "charid",
-        vec![
-            PyRep::Integer(i64::from(sys_id)),
-            PyRep::Integer(space),
-            queue_rep,
-            keys_rep,
-            PyRep::Integer(key_life),
-        ],
-    );
-}
-
-/// Evaluates whether `dest_sys_id` has an active jump-queue threshold on stargate jump and emits `OnJumpQueueUpdate`.
-pub fn check_and_notify_stargate_jump_queue(
-    ctx: &ServerContext,
-    char_id: i64,
-    dest_sys_id: u32,
-) {
-    let now_ft = ctx.now_blueos_filetime_ticks();
-    let update_opt = ctx.db.with_mut_snapshot(|snap| {
-        let mut cfgs: HashMap<u32, JumpQueueSystemConfig> = snap
-            .service_state_blobs
-            .get("jump_queue_configs")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
-        let cfg = cfgs.get_mut(&dest_sys_id)?;
-        if cfg.threshold == 0 {
-            return None;
-        }
-        let pilots_in_dest = snap
-            .characters
-            .values()
-            .filter(|c| c.solar_system_id == dest_sys_id)
-            .count();
-        if pilots_in_dest < cfg.threshold && !cfg.queue.contains(&char_id) {
-            return None;
-        }
-        if !cfg.queue.contains(&char_id) {
-            cfg.queue.push(char_id);
-        }
-        let key_life = cfg.key_life.max(30);
-        cfg.jump_keys.insert(char_id, now_ft);
-        let space = (cfg.threshold as i64).saturating_sub(pilots_in_dest as i64).max(0);
-        let queue_vec = cfg.queue.clone();
-        let mut keys_vec: Vec<(i64, i64)> = cfg.jump_keys.iter().map(|(&k, &v)| (k, v)).collect();
-        keys_vec.sort_by_key(|&(k, _)| k);
-        if let Ok(json) = serde_json::to_string(&cfgs) {
-            snap.service_state_blobs
-                .insert("jump_queue_configs".into(), json);
-        }
-        Some((space, queue_vec, keys_vec, key_life))
-    });
-    if let Some((space, queue_vec, keys_vec, key_life)) = update_opt {
-        emit_jump_queue_update_v24(ctx, char_id, dest_sys_id, space, &queue_vec, &keys_vec, key_life);
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct FlaggedSiteRecord {
-    url: String,
-    flag: i64,
-}
-
-/// Dispatches `browserLockdownSvc` read-only queries.
+/// Dispatches `browserLockdownSvc` queries (fail-closed until real lockdown state exists).
 pub fn handle_misc_batch9(
-    ctx: &ServerContext,
+    _ctx: &ServerContext,
     session: &SessionState,
     service: &str,
     method: &str,
     _args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("browserLockdownSvc", "GetDefaultHomePage") => {
+        (
+            "browserLockdownSvc",
+            "GetDefaultHomePage"
+            | "IsBrowserInLockdown"
+            | "GetFlaggedSitesHash"
+            | "GetFlaggedSitesList",
+        ) => {
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
             }
-            Some(Ok(PyRep::String("about:blank".into())))
-        }
-        ("browserLockdownSvc", "IsBrowserInLockdown") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            let locked = ctx.db.with_snapshot(|snap| {
-                snap.service_state_blobs
-                    .get("browser_lockdown_enabled")
-                    .and_then(|s| s.parse::<bool>().ok())
-                    .unwrap_or(false)
-            });
-            Some(Ok(PyRep::Bool(locked)))
-        }
-        ("browserLockdownSvc", "GetFlaggedSitesHash") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            let hash = ctx.db.with_snapshot(|snap| {
-                snap.service_state_blobs
-                    .get("browser_flagged_sites_hash")
-                    .cloned()
-                    .unwrap_or_else(|| "0000000000000000".into())
-            });
-            Some(Ok(PyRep::String(hash)))
-        }
-        ("browserLockdownSvc", "GetFlaggedSitesList") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            let list: Vec<PyRep> = ctx.db.with_snapshot(|snap| {
-                let sites: Vec<FlaggedSiteRecord> = snap
-                    .service_state_blobs
-                    .get("browser_flagged_sites")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
-                sites
-                    .into_iter()
-                    .map(|s| {
-                        PyRep::keyval([
-                            ("siteUrl", PyRep::String(s.url)),
-                            ("siteFlag", PyRep::Integer(s.flag)),
-                        ])
-                    })
-                    .collect()
-            });
-            Some(Ok(PyRep::List(list)))
+            Some(Err(err(
+                "UnimplementedRPC",
+                format!("browserLockdownSvc.{method} is not yet implemented"),
+            )))
         }
         _ => None,
     }
@@ -541,12 +463,11 @@ pub fn handle_get_all_text_changes(
     })
 }
 
-/// Extracted `localizationServer.UpdateLocalizationQAWrap` handler emitting `OnUpdateLocalizationTextCache`.
-// parity: notify:OnUpdateLocalizationTextCache
+/// Extracted `localizationServer.UpdateLocalizationQAWrap` handler (fail-closed until QA-wrap state exists).
 pub fn handle_update_localization_qa_wrap(
-    ctx: &ServerContext,
+    _ctx: &ServerContext,
     session: &SessionState,
-    args: &[PyRep],
+    _args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let _ = ServerContext::require_auth(session)?;
     let qa_roles = eve_db::service_roles::ROLE_GMH
@@ -559,55 +480,8 @@ pub fn handle_update_localization_qa_wrap(
             "localizationServer.UpdateLocalizationQAWrap requires GM or Content/Programmer role",
         ));
     }
-    let updated_entries = ctx.db.try_with_mut_snapshot(|snap| {
-        let mut overrides: BTreeMap<i64, String> = snap
-            .owner_notes
-            .get(&LOCALIZATION_NOTE_ID)
-            .and_then(|n| serde_json::from_str(&n.note).ok())
-            .unwrap_or_default();
-        let mut applied = Vec::new();
-        if let Some(PyRep::Dict(entries)) = args.first() {
-            for (k, v) in entries {
-                if let (Some(msg_id), Some(text)) = (k.as_i64(), v.as_str()) {
-                    overrides.insert(msg_id, text.to_string());
-                    applied.push((PyRep::Integer(msg_id), PyRep::String(text.to_string())));
-                }
-            }
-        } else if args.first().and_then(PyRep::as_bool).is_some() {
-            return Err(err(
-                "UnimplementedRPC",
-                "Boolean QA-wrap toggle is not supported in UpdateLocalizationQAWrap",
-            ));
-        }
-        snap.owner_notes.insert(
-            LOCALIZATION_NOTE_ID,
-            OwnerNoteRecord {
-                note_id: LOCALIZATION_NOTE_ID,
-                character_id: 0,
-                item_id: 0,
-                label: "localization_overrides".into(),
-                note: serde_json::to_string(&overrides).unwrap_or_default(),
-                timestamp_unix: 0,
-            },
-        );
-        Ok(applied)
-    })?;
-    if !updated_entries.is_empty() {
-        let msg_per_lang = PyRep::Dict(vec![(
-            PyRep::String("en-us".into()),
-            PyRep::Dict(updated_entries),
-        )]);
-        let cache_data = PyRep::Tuple(vec![
-            msg_per_lang,
-            PyRep::Dict(Vec::new()),
-            PyRep::Dict(Vec::new()),
-        ]);
-        ctx.notify(
-            NotificationTarget::All,
-            "OnUpdateLocalizationTextCache",
-            "clientID",
-            vec![cache_data],
-        );
-    }
-    Ok(PyRep::Bool(true))
+    Err(err(
+        "UnimplementedRPC",
+        "localizationServer.UpdateLocalizationQAWrap is not yet implemented",
+    ))
 }

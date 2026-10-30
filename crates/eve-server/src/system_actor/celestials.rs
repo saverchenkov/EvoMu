@@ -30,6 +30,7 @@ pub struct SystemHandle {
     pub(crate) last_auto_stepped_unix: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) npc_death_hook: Arc<RwLock<Option<super::NpcDeathHook>>>,
     pub(crate) module_deactivation_hook: Arc<RwLock<Option<super::ModuleDeactivationHook>>>,
+    pub(crate) target_lock_completed_hook: Arc<RwLock<Option<super::TargetLockCompletedHook>>>,
     pub(crate) system_step_hook: Arc<RwLock<Option<super::SystemStepHook>>>,
 }
 

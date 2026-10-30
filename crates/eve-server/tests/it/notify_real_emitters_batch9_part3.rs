@@ -355,12 +355,26 @@ async fn notify_batch9_agents_epic_journal_and_datacores() {
         .unwrap_or(20410);
 
     // Negative 9a: Buying datacores without active research fails and does not emit OnDatacoreBought
+    let (rd_sys, rd_sta) = ctx
+        .sde
+        .agents
+        .get(&rnd_agent_id)
+        .map(|a| (a.solar_system_id.unwrap_or(30_000_142), a.station_id.unwrap_or(JITA_STATION)))
+        .unwrap_or((30_000_142, JITA_STATION));
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.solar_system_id = rd_sys;
+            ch.station_id = Some(rd_sta);
+        }
+    });
+    sess_a.solar_system_id = Some(rd_sys);
+    sess_a.station_id = Some(rd_sta);
     assert!(rpc(
         &ctx,
         &mut sess_a,
         "agentMgr",
         "DoAction",
-        &[PyRep::Integer(rnd_agent_id), PyRep::Integer(14), PyRep::Integer(datacore_tid as i64), PyRep::Integer(1)],
+        &[PyRep::Integer(14), PyRep::Integer(rnd_agent_id), PyRep::Integer(1), PyRep::Integer(datacore_tid as i64)],
     )
     .await
     .is_err());
@@ -383,32 +397,17 @@ async fn notify_batch9_agents_epic_journal_and_datacores() {
         );
     });
 
-    // Negative 9b: Requesting 100 datacores (10,000 RP) when only 500 RP available fails
-    assert!(rpc(
+    // Negative 9b: Requesting 100 datacores (5,000 RP) when only 500 RP available fails with InsufficientResearchPoints
+    let err_9b = rpc(
         &ctx,
         &mut sess_a,
         "agentMgr",
         "DoAction",
-        &[PyRep::Integer(rnd_agent_id), PyRep::Integer(14), PyRep::Integer(datacore_tid as i64), PyRep::Integer(100)],
+        &[PyRep::Integer(14), PyRep::Integer(rnd_agent_id), PyRep::Integer(100), PyRep::Integer(datacore_tid as i64)],
     )
     .await
-    .is_err());
-
-    // Positive: Buying 2 datacores (200 RP) succeeds and emits OnDatacoreBought
-    let (rd_sys, rd_sta) = ctx
-        .sde
-        .agents
-        .get(&rnd_agent_id)
-        .map(|a| (a.solar_system_id.unwrap_or(30_000_142), a.station_id.unwrap_or(JITA_STATION)))
-        .unwrap_or((30_000_142, JITA_STATION));
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
-            ch.solar_system_id = rd_sys;
-            ch.station_id = Some(rd_sta);
-        }
-    });
-    sess_a.solar_system_id = Some(rd_sys);
-    sess_a.station_id = Some(rd_sta);
+    .unwrap_err();
+    assert_eq!(err_9b.code, "InsufficientResearchPoints");
     let _ = rpc(
         &ctx,
         &mut sess_a,

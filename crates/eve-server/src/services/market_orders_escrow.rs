@@ -239,6 +239,16 @@ pub fn handle_orders_escrow(
                 };
                 let broker_ppm = (broker_rate * 1_000_000.0).round() as i128;
 
+                let damaged_count = crate::services::notify_emitters_batch9_part2::count_damaged_sell_items(
+                    ctx, snap, char_id, caller_corp_id, use_corp, &parsed_items,
+                );
+                if damaged_count > 0 {
+                    return Err(BridgeRpcError {
+                        code: "CantRepackageDamagedItem".into(),
+                        message: damaged_count.to_string(),
+                    });
+                }
+
                 let mut order_ids = Vec::with_capacity(parsed_items.len());
                 let mut total_broker_fee = IskCents(0);
                 let mut total_sales_tax = IskCents(0);
@@ -807,12 +817,13 @@ pub fn handle_orders_escrow(
                     ])))
                 }
                 Err(e) => {
-                    if e.code == "CannotSellAssembledItem" || e.code == "CannotSellItemWithContents" {
+                    if e.code == "CantRepackageDamagedItem" {
+                        let count = e.message.parse::<i64>().unwrap_or(1).max(1);
                         crate::services::notify_emitters_batch9_part2::emit_sell_repackage_errors(
                             ctx,
                             char_id,
-                            &e.code,
-                            1,
+                            "CantRepackageDamagedItem",
+                            count,
                         );
                     }
                     Some(Err(e))
@@ -987,12 +998,13 @@ pub fn handle_orders_escrow(
                     Some(Ok(PyRep::Bool(true)))
                 }
                 Err(e) => {
-                    if e.code == "CannotSellAssembledItem" || e.code == "CannotSellItemWithContents" {
+                    if e.code == "CantRepackageDamagedItem" {
+                        let count = e.message.parse::<i64>().unwrap_or(1).max(1);
                         crate::services::notify_emitters_batch9_part2::emit_sell_repackage_errors(
                             ctx,
                             char_id,
-                            &e.code,
-                            1,
+                            "CantRepackageDamagedItem",
+                            count,
                         );
                     }
                     Some(Err(e))
@@ -1321,12 +1333,13 @@ pub fn handle_orders_escrow(
                     }
                 }
                 Err(e) => {
-                    if e.code == "CannotSellAssembledItem" || e.code == "CannotSellItemWithContents" {
+                    if e.code == "CantRepackageDamagedItem" {
+                        let count = e.message.parse::<i64>().unwrap_or(1).max(1);
                         crate::services::notify_emitters_batch9_part2::emit_sell_repackage_errors(
                             ctx,
                             char_id,
-                            &e.code,
-                            1,
+                            "CantRepackageDamagedItem",
+                            count,
                         );
                     }
                     Some(Err(e))

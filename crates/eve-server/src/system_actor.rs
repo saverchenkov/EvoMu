@@ -67,6 +67,7 @@ pub struct SystemRegistry {
     mechanic_rng: Arc<crate::rng::MechanicRng>,
     pub(crate) npc_death_hook: Arc<RwLock<Option<NpcDeathHook>>>,
     pub(crate) module_deactivation_hook: Arc<RwLock<Option<ModuleDeactivationHook>>>,
+    pub(crate) target_lock_completed_hook: Arc<RwLock<Option<TargetLockCompletedHook>>>,
     pub(crate) system_step_hook: Arc<RwLock<Option<SystemStepHook>>>,
     /// PvE special-site balls (system, ball id) already spawned once into this registry's ballparks.
     /// Runtime-only (lives and dies with the ballparks), so no sentinel ball is needed in space.
@@ -94,6 +95,7 @@ impl SystemRegistry {
             mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
             npc_death_hook: Arc::new(RwLock::new(None)),
             module_deactivation_hook: Arc::new(RwLock::new(None)),
+            target_lock_completed_hook: Arc::new(RwLock::new(None)),
             system_step_hook: Arc::new(RwLock::new(None)),
             special_site_spawned_balls: std::sync::Mutex::new(std::collections::HashSet::new()),
             hydrated_wh_ore_anomalies: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -111,6 +113,7 @@ impl SystemRegistry {
             mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
             npc_death_hook: Arc::new(RwLock::new(None)),
             module_deactivation_hook: Arc::new(RwLock::new(None)),
+            target_lock_completed_hook: Arc::new(RwLock::new(None)),
             system_step_hook: Arc::new(RwLock::new(None)),
             special_site_spawned_balls: std::sync::Mutex::new(std::collections::HashSet::new()),
             hydrated_wh_ore_anomalies: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -128,6 +131,7 @@ impl SystemRegistry {
             mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
             npc_death_hook: Arc::new(RwLock::new(None)),
             module_deactivation_hook: Arc::new(RwLock::new(None)),
+            target_lock_completed_hook: Arc::new(RwLock::new(None)),
             system_step_hook: Arc::new(RwLock::new(None)),
             special_site_spawned_balls: std::sync::Mutex::new(std::collections::HashSet::new()),
             hydrated_wh_ore_anomalies: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -149,6 +153,10 @@ impl SystemRegistry {
 
     pub fn set_module_deactivation_hook(&self, hook: ModuleDeactivationHook) {
         *self.module_deactivation_hook.write().unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+
+    pub fn set_target_lock_completed_hook(&self, hook: TargetLockCompletedHook) {
+        *self.target_lock_completed_hook.write().unwrap_or_else(|e| e.into_inner()) = Some(hook);
     }
 
     pub fn set_system_step_hook(&self, hook: SystemStepHook) {
@@ -323,6 +331,8 @@ impl SystemRegistry {
         let mechanic_rng = self.mechanic_rng.clone();
         let module_deactivation_hook = self.module_deactivation_hook.clone();
         let module_deactivation_hook_actor = module_deactivation_hook.clone();
+        let target_lock_completed_hook = self.target_lock_completed_hook.clone();
+        let target_lock_completed_hook_actor = target_lock_completed_hook.clone();
         let mut initial_ballpark = Ballpark::new(solar_system_id);
         if let Some(sde) = &sde_opt {
             populate_system_celestials(&mut initial_ballpark, solar_system_id, sde);
@@ -982,6 +992,31 @@ impl SystemRegistry {
                                 );
                                 sync_player_slim_items(&mut ballpark, &db_opt);
                                 let events = ballpark.step(dt);
+                                if let Some(lock_hook) = target_lock_completed_hook_actor.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                                    for ev in &events {
+                                        if let DestinyEvent::OnTarget { mode, source_id, target_id } = ev {
+                                            if mode == "locked" {
+                                                let char_id_opt = ballpark
+                                                    .ball_slim_meta
+                                                    .get(source_id)
+                                                    .and_then(|m| m.char_id)
+                                                    .or_else(|| {
+                                                        db_opt.as_ref().and_then(|db| {
+                                                            db.with_snapshot(|s| {
+                                                                s.characters
+                                                                    .values()
+                                                                    .find(|c| c.active_ship_id == *source_id)
+                                                                    .map(|c| c.character_id)
+                                                            })
+                                                        })
+                                                    });
+                                                if let Some(cid) = char_id_opt.filter(|&c| c > 0) {
+                                                    lock_hook(cid, *target_id);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                 let mut destroyed_balls = step_cycles_and_capacitor(
                                     &mut ballpark, active_module_cycles, pending_anchoring_disruptors,
@@ -1280,6 +1315,7 @@ impl SystemRegistry {
             last_auto_stepped_unix,
             npc_death_hook: Arc::clone(&self.npc_death_hook),
             module_deactivation_hook: Arc::clone(&self.module_deactivation_hook),
+            target_lock_completed_hook: Arc::clone(&self.target_lock_completed_hook),
             system_step_hook: Arc::clone(&self.system_step_hook),
         };
         let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());

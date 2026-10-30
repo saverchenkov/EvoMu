@@ -281,7 +281,6 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
             &trained_details,
             !paused_by_lapse,
         );
-        super::notify_emitters_batch9::emit_server_brain_updated(ctx, char_id);
     }
     for (skill_type_id, lvl, _, _) in completed_events {
         let _ = ctx.notify_skill_trained(char_id, 0, skill_type_id, lvl);
@@ -899,7 +898,6 @@ pub fn handle(
                             "charid",
                             vec![PyRep::Real(remaining_free)],
                         );
-                        super::notify_emitters_batch9::emit_server_brain_updated(ctx, char_id);
                         Some(Ok(PyRep::Real(new_skill_sp)))
                     }
                     Err(e) => Some(Err(e)),
@@ -1055,7 +1053,6 @@ pub fn handle(
                         "charid",
                         vec![PyRep::Real(rem_free)],
                     );
-                    super::notify_emitters_batch9::emit_server_brain_updated(ctx, char_id);
                     Some(Ok(PyRep::Real(sp)))
                 }
                 Err(e) => Some(Err(e)),

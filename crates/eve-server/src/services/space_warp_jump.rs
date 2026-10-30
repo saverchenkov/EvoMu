@@ -906,12 +906,6 @@ async fn handle_cmd_stargate_jump(
         .on_gameplay_event(char_id as u32, "travel", 1, &ctx.quasar_gateway);
     ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["stargateJumps"], 1, now_unix, &ctx.quasar_gateway);
 
-    crate::services::notify_emitters_batch9_part2::check_and_notify_stargate_jump_queue(
-        ctx,
-        char_id,
-        dest_sys_id,
-    );
-
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, dest_sys_id as i64)?;
 
     Ok(PyRep::keyval([

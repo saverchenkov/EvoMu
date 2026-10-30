@@ -437,7 +437,6 @@ pub fn inject_implant(
         "charid",
         vec![],
     );
-    crate::services::notify_emitters_batch9::emit_server_brain_updated(ctx, char_id);
     Ok(PyRep::None)
 }
 
@@ -512,7 +511,6 @@ pub fn destroy_implant(
         "charid",
         vec![],
     );
-    crate::services::notify_emitters_batch9::emit_server_brain_updated(ctx, char_id);
     Ok(PyRep::None)
 }
 

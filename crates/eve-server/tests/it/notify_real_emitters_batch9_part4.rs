@@ -221,7 +221,7 @@ async fn notify_batch9_facilities_industry_trade_and_repackage_errors() {
     });
     let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
 
-    // Negative 4a: Selling an assembled ship fails with CannotSellAssembledItem and emits OnSellRepackageErrors
+    // Negative 4a: Selling a clean, undamaged assembled ship fails with CannotSellAssembledItem and does NOT emit OnSellRepackageErrors
     let sell_entry = PyRep::keyval([
         ("stationID", PyRep::Integer(JITA_STATION)),
         ("typeID", PyRep::Integer(587)),
@@ -230,7 +230,27 @@ async fn notify_batch9_facilities_industry_trade_and_repackage_errors() {
         ("quantity", PyRep::Integer(1)),
         ("duration", PyRep::Integer(7)),
     ]);
-    assert!(rpc(
+    let clean_err = rpc(
+        &ctx,
+        &mut sess_a,
+        "marketProxy",
+        "PlaceMultiSellOrder",
+        &[PyRep::List(vec![sell_entry.clone()]), PyRep::Bool(false), PyRep::Integer(7)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(clean_err.code, "CannotSellAssembledItem");
+    assert!(!drain_all(&ctx, &mut sess_a, PILOT_A)
+        .iter()
+        .any(|(e, _)| e == "OnSellRepackageErrors"));
+
+    // Positive 4: Selling a damaged assembled ship fails with CantRepackageDamagedItem and emits OnSellRepackageErrors
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(it) = snap.items.get_mut(&assembled_ship_id) {
+            it.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, 25.0);
+        }
+    });
+    let dmg_err = rpc(
         &ctx,
         &mut sess_a,
         "marketProxy",
@@ -238,7 +258,8 @@ async fn notify_batch9_facilities_industry_trade_and_repackage_errors() {
         &[PyRep::List(vec![sell_entry]), PyRep::Bool(false), PyRep::Integer(7)],
     )
     .await
-    .is_err());
+    .unwrap_err();
+    assert_eq!(dmg_err.code, "CantRepackageDamagedItem");
     let repack_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     let repack_args = find_notif(&repack_notifs, "OnSellRepackageErrors");
     assert_eq!(repack_args.len(), 1);
@@ -401,10 +422,28 @@ async fn notify_batch9_godma_and_location_cache_invalidation() {
         .await
         .is_err());
 
-    // Positive: AddTarget(ship_b) emits OnMultiEvent
+    // Positive: AddTarget(ship_b) does not emit OnMultiEvent until lock timer finishes, then emits [("OnTarget", "add", ship_b, ""), 0]
     let _ = rpc(&ctx, &mut sess_a, "dogmaIM", "AddTarget", &[PyRep::Integer(ship_b)])
         .await
         .expect("AddTarget");
+    let pre_lock_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    assert!(!pre_lock_notifs.iter().any(|(e, _)| e == "OnMultiEvent"));
+    ctx.systems
+        .get_or_spawn(SYS_JITA)
+        .step_manual(10.0)
+        .await
+        .expect("step_manual");
     let target_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    assert!(target_notifs.iter().any(|(e, _)| e == "OnMultiEvent"));
+    assert_eq!(
+        find_notif(&target_notifs, "OnMultiEvent"),
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Tuple(vec![
+                PyRep::String("OnTarget".into()),
+                PyRep::String("add".into()),
+                PyRep::Integer(ship_b),
+                PyRep::String(String::new()),
+            ]),
+            PyRep::Integer(0),
+        ])])]
+    );
 }
