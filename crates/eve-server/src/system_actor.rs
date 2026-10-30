@@ -831,84 +831,11 @@ impl SystemRegistry {
                                 let _ = reply.send(updated);
                             }
                             SystemCommand::EmitDestinyEvent { ball_id, event, reply } => {
-                                let known = ballpark.balls.contains_key(&ball_id)
-                                    || matches!(event, DestinyEvent::OnSovereigntyChanged { .. });
-                                if known {
-                                    let scope = ballpark.balls.contains_key(&ball_id).then_some(ball_id);
-                                    match event {
-                                        DestinyEvent::SetBallFree { ball_id: id, is_free } if id == ball_id => {
-                                            ballpark.set_ball_free(id, is_free);
-                                        }
-                                        DestinyEvent::SetBallHarmonic { ball_id: id, harmonic } if id == ball_id => {
-                                            ballpark.set_ball_harmonic(id, harmonic);
-                                        }
-                                        DestinyEvent::SetBallInteractive { ball_id: id, is_interactive } if id == ball_id => {
-                                            ballpark.set_ball_interactive(id, is_interactive);
-                                        }
-                                        DestinyEvent::SetBallRadius { ball_id: id, radius } if id == ball_id => {
-                                            ballpark.set_ball_radius(id, radius);
-                                        }
-                                        DestinyEvent::OnSovereigntyChanged { alliance_id, .. } => {
-                                            ballpark.set_sovereignty(alliance_id);
-                                        }
-                                        DestinyEvent::OnClientControllerEvent {
-                                            ball_id: id,
-                                            target_id,
-                                            event_name,
-                                            value,
-                                            delay,
-                                        } if id == ball_id => {
-                                            ballpark.emit_client_controller_event(
-                                                id,
-                                                target_id,
-                                                event_name,
-                                                value,
-                                                delay,
-                                            );
-                                        }
-                                        DestinyEvent::OnShipStateUpdate { module_states } => {
-                                            ballpark.update_ship_module_states(ball_id, module_states);
-                                        }
-                                        DestinyEvent::OnDbuffUpdated { ball_id: id, dbuffs } if id == ball_id => {
-                                            ballpark.update_dbuffs(id, dbuffs);
-                                        }
-                                        DestinyEvent::OnDotVictimUpdated {
-                                            ball_id: id,
-                                            flat_dps,
-                                            pct_dps,
-                                            remaining_ticks,
-                                        } if id == ball_id => {
-                                            ballpark.apply_breacher_dot(id, flat_dps, pct_dps, remaining_ticks);
-                                        }
-                                        DestinyEvent::OnDroneStateChange {
-                                            drone_id,
-                                            owner_id,
-                                            controller_id,
-                                            activity_state,
-                                            type_id,
-                                            controller_owner_id,
-                                            target_id,
-                                        } if drone_id == ball_id => {
-                                            ballpark.update_drone_state(
-                                                drone_id,
-                                                owner_id,
-                                                controller_id,
-                                                activity_state,
-                                                type_id,
-                                                controller_owner_id,
-                                                target_id,
-                                            );
-                                        }
-                                        other => {
-                                            if let DestinyEvent::OnSlimItemChange { ball_id: slim_id } = &other {
-                                                if let Some(meta) = ballpark.ball_slim_meta.get_mut(slim_id) {
-                                                    meta.char_id = (*slim_id == ball_id).then_some(meta.owner_id);
-                                                }
-                                            }
-                                            ballpark.emit_event(scope, other);
-                                        }
-                                    }
-                                }
+                                let known = celestials::apply_destiny_event_in_actor(
+                                    &mut ballpark,
+                                    ball_id,
+                                    event,
+                                );
                                 let _ = reply.send(known);
                             }
                             SystemCommand::GotoPoint { ball_id, point, reply } => {

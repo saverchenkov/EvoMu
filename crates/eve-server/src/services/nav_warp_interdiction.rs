@@ -500,3 +500,142 @@ pub async fn handle_use_warp_vector(
         ),
     ]))
 }
+
+async fn handle_get_session_change_timer(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let now_unix = ctx.now_unix();
+    let sys_id = session
+        .solar_system_id
+        .or_else(|| {
+            ctx.db
+                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
+        })
+        .unwrap_or(0);
+    let cur_tick_opt = if let Some(ship_id) = session.ship_id {
+        let h = ctx.systems.get_or_spawn(sys_id);
+        h.get_ball_snapshot(ship_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(t, _)| (sys_id, t))
+    } else {
+        None
+    };
+    if let Some(active) = crate::services::space_destiny::check_session_change_timer_active(
+        ctx,
+        char_id,
+        now_unix,
+        cur_tick_opt,
+    ) {
+        let rem = active.expires_unix.saturating_sub(now_unix);
+        return Ok(PyRep::keyval([
+            ("active", PyRep::Bool(true)),
+            ("remainingSeconds", PyRep::Integer(rem as i64)),
+            ("trigger", PyRep::String(active.reason)),
+        ]));
+    }
+    Ok(PyRep::keyval([
+        ("active", PyRep::Bool(false)),
+        ("remainingSeconds", PyRep::Integer(0)),
+        ("trigger", PyRep::None),
+    ]))
+}
+
+pub(crate) async fn handle_set_session_check(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    if args.is_empty() {
+        return handle_get_session_change_timer(ctx, session).await;
+    }
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let now_unix = ctx.now_unix();
+    let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+    let cur_tick_opt = if let Some(ship_id) = session.ship_id {
+        let h = ctx.systems.get_or_spawn(sys_id);
+        h.get_ball_snapshot(ship_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(t, _)| (sys_id, t))
+    } else {
+        None
+    };
+
+    let reason = match args.first() {
+        Some(PyRep::Dict(_)) | Some(PyRep::KeyVal(_)) | Some(PyRep::Object { .. }) => {
+            let check_rep = args.first().unwrap();
+            if let Some(req_sys) = check_rep
+                .dict_get("solarsystemid2")
+                .or_else(|| check_rep.dict_get("solarsystemid"))
+                .and_then(PyRep::as_i64)
+            {
+                if req_sys > 0 && req_sys as u32 != sys_id {
+                    return Err(BridgeRpcError {
+                        code: "SessionCheckMismatch".into(),
+                        message: format!("Session solarsystemid2 is {sys_id}, not {req_sys}"),
+                    });
+                }
+            }
+            "session_change"
+        }
+        Some(other) => other.as_str().unwrap_or("session_change"),
+        None => "session_change",
+    };
+    let is_valid_trigger = matches!(
+        reason,
+        "login"
+            | "stargate_jump"
+            | "wormhole_jump"
+            | "jump_bridge"
+            | "jump_drive"
+            | "dock"
+            | "undock"
+            | "fleet_join"
+            | "fleet_position_change"
+            | "fleet_change"
+            | "ship_board"
+            | "ship_eject"
+            | "board_or_eject"
+            | "pod_transition"
+            | "clone_jump"
+            | "clone_swap"
+            | "corp_join"
+            | "corp_leave"
+            | "wallet_division_change"
+            | "session_change"
+    );
+    if !is_valid_trigger {
+        return Err(BridgeRpcError {
+            code: "InvalidSessionChangeTrigger".into(),
+            message: format!("Unknown session-change trigger '{reason}'"),
+        });
+    }
+    if let Some(active) = crate::services::space_destiny::check_session_change_timer_active(
+        ctx,
+        char_id,
+        now_unix,
+        cur_tick_opt,
+    ) {
+        return Err(BridgeRpcError {
+            code: "SessionChangeInProgress".into(),
+            message: format!(
+                "Cannot perform session change '{reason}' while 10s timer from '{}' is active",
+                active.reason
+            ),
+        });
+    }
+    let tick = cur_tick_opt.map(|(_, t)| t).unwrap_or(0);
+    crate::services::space_destiny::record_client_session_check_timer(
+        ctx, char_id, now_unix, sys_id, tick, reason,
+    );
+    Ok(PyRep::keyval([
+        ("sessionChangeTimerSeconds", PyRep::Integer(10)),
+        ("trigger", PyRep::String(reason.to_string())),
+        ("expiresUnix", PyRep::Integer((now_unix + 10) as i64)),
+    ]))
+}
