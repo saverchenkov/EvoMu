@@ -948,11 +948,30 @@ pub async fn handle(
                 }));
             };
             let structs_list = ctx.db.with_snapshot(|snap| {
+                let aid = snap
+                    .system_states
+                    .get(&sys_id)
+                    .and_then(|s| s.sov_alliance_id);
+                let is_sov_struct = |type_id: u32| -> bool {
+                    type_id == crate::services::sov_services::TYPE_SOVEREIGNTY_HUB
+                        || matches!(type_id, 32226 | 32458 | 81080)
+                        || ctx
+                            .sde
+                            .types
+                            .get(&type_id)
+                            .and_then(|t| ctx.sde.groups.get(&t.group_id))
+                            .is_some_and(|g| {
+                                g.name == "Sovereignty Hub"
+                                    || g.name == "Territorial Claim Unit"
+                                    || g.name == "Infrastructure Hub"
+                            })
+                };
                 snap.structures
                     .values()
                     .filter(|s| {
                         s.solar_system_id == sys_id
-                            && matches!(s.type_id, 32226 | 32458 | 81080)
+                            && s.state != "Destroyed"
+                            && is_sov_struct(s.type_id)
                     })
                     .map(|s| {
                         let vuln = snap
@@ -960,10 +979,11 @@ pub async fn handle(
                             .get(&s.structure_id)
                             .copied()
                             .unwrap_or((0, 0));
-                        let owner_alliance_id = snap
+                        let struct_aid = snap
                             .corporations
                             .get(&s.owner_corp_id)
-                            .and_then(|c| c.alliance_id);
+                            .and_then(|c| c.alliance_id)
+                            .or(aid);
                         PyRep::keyval([
                             ("itemID", PyRep::Integer(s.structure_id)),
                             ("structureID", PyRep::Integer(s.structure_id)),
@@ -971,7 +991,7 @@ pub async fn handle(
                             ("corporationID", PyRep::Integer(s.owner_corp_id)),
                             (
                                 "allianceID",
-                                owner_alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                                struct_aid.map(PyRep::Integer).unwrap_or(PyRep::None),
                             ),
                             ("solarSystemID", PyRep::Integer(sys_id as i64)),
                             ("vulnerableStartTime", PyRep::Integer(vuln.0 as i64)),

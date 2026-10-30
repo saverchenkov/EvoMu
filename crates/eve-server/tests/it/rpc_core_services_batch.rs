@@ -298,6 +298,7 @@ async fn test_rpc_lookup_svc_batch() {
     assert!(oid >= 90_000_000);
 
     // 10. LookupWarableCorporationsOrAlliances (Player corps group 2, Alliances group 32)
+    // Caller's own corp/alliance and structureless corps must be excluded; war-eligible targets returned.
     sess.corporation_id = Some(98_000_001);
     sess.alliance_id = Some(99_000_001);
     ctx.db.with_mut_snapshot(|snap| {
@@ -322,6 +323,17 @@ async fn test_rpc_lookup_svc_batch() {
                 ..Default::default()
             },
         );
+        snap.corporations.insert(
+            98_000_077,
+            eve_db::CorporationRecord {
+                corporation_id: 98_000_077,
+                name: "Federation War Target Corp".into(),
+                ticker: "FWTC".into(),
+                ceo_id: 90_000_077,
+                alliance_id: Some(99_000_077),
+                ..Default::default()
+            },
+        );
         snap.structures.insert(
             1_000_000_050_001,
             eve_db::UpwellStructureRecord {
@@ -341,6 +353,18 @@ async fn test_rpc_lookup_svc_batch() {
                 last_damage_tick: 0,
                 last_damage_unix: 0,
                 self_destruct_at_unix: None,
+            },
+        );
+        snap.structures.insert(
+            1_030_000_077,
+            eve_db::UpwellStructureRecord {
+                structure_id: 1_030_000_077,
+                type_id: 35832, // Astrahus
+                owner_corp_id: 98_000_077,
+                solar_system_id: 30_000_142,
+                name: "Target Astrahus".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
             },
         );
         snap.alliances.insert(
@@ -363,6 +387,16 @@ async fn test_rpc_lookup_svc_batch() {
                 member_corp_ids: [98_000_051].into_iter().collect(),
             },
         );
+        snap.alliances.insert(
+            99_000_077,
+            eve_db::AllianceRecord {
+                alliance_id: 99_000_077,
+                name: "Federation War Target Alliance".into(),
+                short_name: "FWTA".into(),
+                executor_corp_id: 98_000_077,
+                ..Default::default()
+            },
+        );
     });
     let res = ctx
         .dispatch_rpc(
@@ -383,11 +417,15 @@ async fn test_rpc_lookup_svc_batch() {
     let has_peaceful_alliance = warable.iter().any(|w| w.dict_get("ownerID") == Some(&PyRep::Integer(99_000_051)));
     let has_target_corp = warable.iter().any(|w| w.dict_get("ownerID") == Some(&PyRep::Integer(98_000_050)) && w.dict_get("groupID") == Some(&PyRep::Integer(2)));
     let has_target_alliance = warable.iter().any(|w| w.dict_get("ownerID") == Some(&PyRep::Integer(99_000_050)) && w.dict_get("groupID") == Some(&PyRep::Integer(32)));
+    let has_corp = warable.iter().any(|w| w.dict_get("ownerID") == Some(&PyRep::Integer(98_000_077)) && w.dict_get("groupID") == Some(&PyRep::Integer(2)));
+    let has_alliance = warable.iter().any(|w| w.dict_get("ownerID") == Some(&PyRep::Integer(99_000_077)) && w.dict_get("groupID") == Some(&PyRep::Integer(32)));
     assert!(!has_own_corp, "Caller's own corp must be excluded");
     assert!(!has_peaceful_corp, "Corp without Upwell structures must be excluded even if in an alliance");
     assert!(!has_peaceful_alliance, "Alliance with no structure-owning member corps must be excluded");
     assert!(has_target_corp, "Must find warable corp with Upwell structure");
     assert!(has_target_alliance, "Must find warable alliance");
+    assert!(has_corp, "Must find warable target corp with structure");
+    assert!(has_alliance, "Must find warable target alliance with structure");
 }
 
 #[tokio::test]

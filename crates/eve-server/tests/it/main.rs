@@ -467,3 +467,4 @@ mod capital_combat_sp7_closure;
 mod capital_combat_sp7_closure_part2;
 mod capital_combat_sp7_closure_part3;
 mod capital_combat_sp7_closure_part4;
+mod economy_industry_lookup_sov_closure;
