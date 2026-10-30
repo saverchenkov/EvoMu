@@ -530,6 +530,15 @@ async fn light_cyno(
         ));
     }
     let is_covert = type_attr(ctx, mod_type, ATTR_IS_COVERT) > 0.0;
+    let in_fleet_or_no_fleets = ctx.db.with_snapshot(|s| s.fleets.is_empty() || fleet_of(s, char_id).is_some());
+    if !in_fleet_or_no_fleets {
+        return Err(err("MustBeInFleet", "Activating a cynosural field requires fleet membership"));
+    }
+    if let Ok(Some((_, ball))) = sys.get_ball_snapshot(ship_id).await {
+        if ball.velocity.length() >= 500.0 {
+            return Err(err("ShipMovingTooFast", "Cannot activate cynosural field while moving at 500 m/s or faster"));
+        }
+    }
     if !is_covert && active_cyno_jammer(ctx, sys_id).is_some() {
         return Err(err("CynoJammed", format!("A cynosural jammer is active in system {sys_id}")));
     }
@@ -560,10 +569,13 @@ async fn light_cyno(
             format!("{} requires a Covert Reconfiguration subsystem to light {}", ship_type.name, mod_type.name),
         ));
     }
-    let duration_ms = if mod_vals[0] > 0.0 {
+    let base_dur_ms = type_attr(ctx, mod_type, attr_ids::DURATION);
+    let duration_ms = if ship_type_id == 44996 && !is_covert {
+        base_dur_ms
+    } else if mod_vals[0] > 0.0 {
         mod_vals[0]
     } else {
-        type_attr(ctx, mod_type, attr_ids::DURATION)
+        base_dur_ms
     };
     let fuel_type = type_attr(ctx, mod_type, ATTR_CONSUMPTION_TYPE) as TypeId;
     let cft_lvl = ctx.db.with_snapshot(|s| {

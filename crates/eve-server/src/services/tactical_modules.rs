@@ -51,6 +51,16 @@ pub struct TacticalModulesState {
     pub pending_wubble_probes: Vec<(usize, PendingWubbleProbe)>,
     pub active_wubble_debuffs: HashMap<(usize, i64), ActiveWubbleDebuff>,
     pub tsb_self_penalty_until: HashMap<(usize, i64), u64>,
+    pub clone_vat_bay_activated_ships: std::collections::HashSet<(usize, i64)>,
+}
+
+pub fn is_clone_vat_bay_active_required(ctx: &ServerContext, ship_id: i64) -> bool {
+    let db_key = db_key_of(ctx);
+    ctx.tactical_state
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone_vat_bay_activated_ships
+        .contains(&(db_key, ship_id))
 }
 
 fn db_key_of(ctx: &ServerContext) -> usize { db_ptr_key(&ctx.db) }
@@ -528,9 +538,10 @@ pub async fn activate_auto_targeting_system(
     }
 
     let ship_max = fit.ship.get_attribute(attr_ids::MAX_LOCKED_TARGETS, &ctx.sde).max(1.0) as usize;
+    let auto_tgt_bonus = mod_type.default_attributes.get(&193).copied().unwrap_or(2.0).round() as usize;
     let tm_lvl = ctx.character_skill_levels(char_id).get(&3429).copied().unwrap_or(0);
     let atm_lvl = ctx.character_skill_levels(char_id).get(&3430).copied().unwrap_or(0);
-    let max_locked = eve_dogma::compute_effective_max_locked_targets(ship_max, tm_lvl, atm_lvl);
+    let max_locked = eve_dogma::compute_effective_max_locked_targets(ship_max, tm_lvl, atm_lvl) + auto_tgt_bonus;
     let max_range = fit.ship.get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde).min(hostile_range);
     let scan_res = fit.ship.get_attribute(attr_ids::SCAN_RESOLUTION, &ctx.sde).max(1.0);
 
@@ -612,24 +623,27 @@ pub async fn activate_auto_targeting_system(
 /// Validates wormhole jump eligibility for `ship_id` and deactivates `Bastion Module I` (`33400`) on jump.
 pub async fn prepare_ship_for_wormhole_jump(
     ctx: &ServerContext,
-    _old_handle: &SystemHandle,
+    old_handle: &SystemHandle,
     _char_id: i64,
     ship_id: i64,
     _current_ball: &mut Ball,
 ) -> Result<bool, BridgeRpcError> {
     check_ship_navigation_lock(ctx, ship_id, "jump wormhole")?;
 
-    let blocking_mod = ctx.db.with_snapshot(|snap| {
+    let (blocking_mod, bastion_mod_ids) = ctx.db.with_snapshot(|snap| {
         let mut blocking = None;
+        let mut bastions = Vec::new();
         for item in snap.items.values() {
             if item.location_id == ship_id && snap.module_active_states.contains(&item.item_id) {
-                if matches!(item.type_id, 33400 | 20280 | 4292 | 27951 | 4294 | 28583 | 42890 | 58945 | 58950 | 62590 | 62591 | 34593 | 34595) {
+                if item.type_id == 33400 {
+                    bastions.push(item.item_id);
+                } else if matches!(item.type_id, 20280 | 4292 | 27951 | 4294 | 28583 | 42890 | 58945 | 58950 | 62590 | 62591 | 34593 | 34595) {
                     blocking = Some(item.type_id);
                     break;
                 }
             }
         }
-        blocking
+        (blocking, bastions)
     });
 
     if let Some(block_tid) = blocking_mod {
@@ -637,6 +651,24 @@ pub async fn prepare_ship_for_wormhole_jump(
             code: "CannotJumpWormholeWhileImmobilized".into(),
             message: format!("Cannot jump wormhole while immobilizing module (type {block_tid}) is active"),
         });
+    }
+
+    if !bastion_mod_ids.is_empty() {
+        ctx.db.with_mut_snapshot(|snap| {
+            for mid in &bastion_mod_ids {
+                snap.module_active_states.remove(mid);
+            }
+        });
+        for mid in &bastion_mod_ids {
+            let _ = old_handle.remove_module_cycle(ship_id, *mid).await;
+        }
+        if let Ok(Some(mut cs)) = old_handle.get_combat_state(ship_id).await {
+            cs.is_mwd_mjd_disabled = false;
+            cs.disallow_assistance = false;
+            let _ = old_handle.set_combat_state(ship_id, cs).await;
+        }
+        ctx.invalidate_ship_fitting(ship_id);
+        return Ok(true);
     }
 
     Ok(false)
@@ -699,10 +731,10 @@ pub async fn activate_superweapon_with_args(
             return Err(BridgeRpcError { code: "SiegeRequiredForLance".into(), message: "Disruptive Lance can only be activated while a Siege Module is active".into() });
         }
         let skills = ctx.character_skill_levels(char_id);
-        let op_lvl = skills.get(&77738).copied().unwrap_or(0);
-        let lancer_lvl = skills.get(&77739).copied().or_else(|| skills.get(&76079).copied()).unwrap_or(0);
+        let op_lvl = skills.get(&77739).copied().unwrap_or(0);
+        let lancer_lvl = skills.get(&77738).copied().or_else(|| skills.get(&76079).copied()).unwrap_or(0);
         if op_lvl == 0 || lancer_lvl == 0 {
-            return Err(BridgeRpcError { code: "SkillMissing".into(), message: "Activating a Disruptive Lance requires Disruptive Lance Operation (77738) and Lancer Dreadnought (77739)".into() });
+            return Err(BridgeRpcError { code: "SkillMissing".into(), message: "Activating a Disruptive Lance requires Disruptive Lance Operation (77739) and Lancer Dreadnoughts (77738)".into() });
         }
 
         let base_cap = mod_type.default_attributes.get(&6).copied().unwrap_or(30_000.0);
@@ -1233,6 +1265,7 @@ pub async fn activate_command_burst(
         return Err(BridgeRpcError { code: "SkillMissing".into(), message: format!("Tech II Command Burst {} requires Specialist skill {specialist_skill_id}", mod_type.name) });
     }
 
+    let leadership_lvl = skills.get(&3348).copied().unwrap_or(0).min(5);
     let wing_cmd_lvl = skills.get(&11574).or_else(|| skills.get(&11572)).copied().unwrap_or(0).min(5);
     let fleet_cmd_lvl = skills.get(&24764).or_else(|| skills.get(&3354)).copied().unwrap_or(0).min(5);
     let ind_cmd_lvl = skills.get(&29637).copied().unwrap_or(0).min(5) as f64;
@@ -1249,7 +1282,12 @@ pub async fn activate_command_burst(
     let ind_core_range_bonus = match active_ind_core_tid {
         Some(62590) => 0.45, Some(62591) => 0.60, Some(58945) => 0.75, Some(58950) => 1.00, Some(28583) => 2.00, Some(42890) => 2.50, _ => 0.0,
     };
-    let aoe_range = 15_000.0 * ship_range_mult * (1.0 + 0.10 * (wing_cmd_lvl as f64)) * (1.0 + 0.05 * (fleet_cmd_lvl as f64)) * (1.0 + ind_core_range_bonus);
+    let aoe_range = 15_000.0
+        * (1.0 + 0.07 * (leadership_lvl as f64))
+        * (1.0 + 0.06 * (wing_cmd_lvl as f64))
+        * (1.0 + 0.05 * (fleet_cmd_lvl as f64))
+        * ship_range_mult
+        * (1.0 + ind_core_range_bonus);
     let cycle_duration_s = 15.0 * (1.0 + 0.10 * (command_lvl as f64));
 
     let mod_strength_bonus = if is_t2_module { 0.25 } else { 0.0 };
@@ -1375,4 +1413,3 @@ pub fn apply_transient_item_attrs(ctx: &ServerContext, item_id: i64, merged_attr
         for (&attr_id, &val) in tr_attrs { merged_attrs.insert(attr_id, val); }
     });
 }
-

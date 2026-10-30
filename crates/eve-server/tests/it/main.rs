@@ -509,3 +509,4 @@ mod open_feats_batch6_part2_closure;
 mod esi_b6_closure;
 mod open_feats_b42;
 mod open_feats_and_rpcs_b9;
+mod open_feats_and_rpcs_b34;

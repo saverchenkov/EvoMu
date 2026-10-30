@@ -728,9 +728,9 @@ pub(crate) async fn handle_module_cycles(
                     && (mod_type.effect_ids.contains(&6730)
                         || mod_type.default_attributes.get(&554).copied().unwrap_or(0.0) > 0.0
                         || mod_type.name.contains("Microwarpdrive"));
-                let is_mjd = mod_type.group_id == 1189
-                    || mod_type.group_id == 4769
-                    || mod_type.name.contains("Micro Jump Drive");
+                let is_mjd = matches!(mod_type.group_id, 1189 | 1533 | 4769)
+                    || mod_type.name.contains("Micro Jump Drive")
+                    || mod_type.name.contains("Micro Jump Field Generator");
                 let is_mwd_or_mjd = is_mwd || is_mjd;
 
                 if mod_type.group_id == 46 || is_mjd {
@@ -1306,14 +1306,10 @@ pub(crate) async fn handle_module_cycles(
                 return Some(Ok(rep));
             }
 
-            if let Some(res) = build_specialized_module_result(
-                method, &fit, ctx, module_id, mod_type,
-                hic_bubble_radius_m, warp_scramble_points, active_burst_charge_tid,
-            ) {
+            if let Some(res) = build_specialized_module_result(method, &fit, ctx, module_id, mod_type, hic_bubble_radius_m, warp_scramble_points, active_burst_charge_tid) {
                 Some(Ok(res))
             } else if mod_type.group_id == 49 || mod_type.default_attributes.contains_key(&197) {
-                let rep = handle_survey_scanner_activation(ctx, &sys, sys_id, char_id, ship_id, module_id, mod_type, &mod_state).await;
-                Some(Ok(rep))
+                Some(Ok(handle_survey_scanner_activation(ctx, &sys, sys_id, char_id, ship_id, module_id, mod_type, &mod_state).await))
             } else {
                 let max_vel = if mod_type.group_id == 330 {
                     sys.get_ball_snapshot(ship_id)

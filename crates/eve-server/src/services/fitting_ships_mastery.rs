@@ -49,6 +49,12 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             }
             let now_unix = ctx.now_unix_secs();
             if method == "Eject" {
+                if crate::services::inventory_fitting::fitting_cyno_portal::is_ship_cyno_active(ctx, old_ship_id) {
+                    return Some(Err(BridgeRpcError {
+                        code: "CynosuralFieldActive".into(),
+                        message: "Cannot eject from ship while a Cynosural Field Generator is active".into(),
+                    }));
+                }
                 let (has_weapon_timer, has_criminal_timer) = {
                     let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());
                     let st = cw.states.get(&char_id);

@@ -306,7 +306,11 @@ pub(crate) fn step_cycles_and_capacitor(
                         .get(&cycle.ship_id)
                         .is_some_and(|cs| cs.is_mwd_mjd_disabled);
                 if !scrambled {
-                    let _ = ballpark.micro_jump(cycle.ship_id, jump_dist);
+                    if cycle.module_type_id == 37479 {
+                        let _ = ballpark.micro_jump_field(cycle.ship_id, jump_dist, 6_000.0, 25);
+                    } else {
+                        let _ = ballpark.micro_jump(cycle.ship_id, jump_dist);
+                    }
                 }
             }
 

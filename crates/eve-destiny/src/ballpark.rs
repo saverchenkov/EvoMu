@@ -725,6 +725,10 @@ impl Ballpark {
         let (caster_pos, dir) = self.heading_for_ball(ball_id);
         let delta = dir * distance_meters;
         let max_extra = max_jumped_ships.saturating_sub(1);
+        let caster_is_cap_mjfg = self
+            .combat_states
+            .get(&ball_id)
+            .is_some_and(|cs| cs.is_capital_mjfg);
 
         let mut candidates: Vec<(BallId, f64)> = self
             .balls
@@ -738,6 +742,9 @@ impl Ballpark {
                 }
                 let grp = self.ball_group_ids.get(&other_id).copied().unwrap_or(25);
                 if matches!(grp, 6 | 7 | 8 | 9 | 10 | 15 | 1404 | 1406 | 1657 | 1971 | 1980 | 1981) {
+                    return None;
+                }
+                if caster_is_cap_mjfg && matches!(grp, 30 | 485 | 547 | 659 | 883 | 1538 | 4594) {
                     return None;
                 }
                 let is_marauder = grp == 900 || matches!(b.type_id, 28659 | 28661 | 28665 | 28710);
