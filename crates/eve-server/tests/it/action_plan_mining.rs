@@ -229,7 +229,9 @@ async fn test_action_plan_c5_mn01_to_mn07_mining_data_belts_lasers_holds_crystal
     let PyRep::Tuple(b_tup) = ctx.dispatch_rpc(&mut sess, "beyonce", None, "MachoBindObject", &[PyRep::Integer(30_000_144), PyRep::None], &kw, None).await.expect("Bind beyonce") else { panic!() };
     ctx.drain_notifications_for_char(char_id);
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(b_tup[0].as_i64().unwrap() as u64), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(first_belt_id), PyRep::Real(0.0)], &kw, None).await.expect("CmdWarpToStuff to belt");
-    assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnWarpToAsteroidBelt"), "Warping to belt must emit OnWarpToAsteroidBelt");
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs.iter().any(|n| n.event == "OnWarpStarted"), "Warping to belt must emit OnWarpStarted");
+    assert!(!notifs.iter().any(|n| n.event == "OnWarpToAsteroidBelt"), "OnWarpToAsteroidBelt is client_local and must not be emitted by server");
     for _ in 0..30 {
         let _ = perim.step_manual(1.0).await.unwrap();
         if perim.get_ball_snapshot(ship_id).await.unwrap().unwrap().1.position.distance(first_belt_cel.position) < 5_000.0 { break; }

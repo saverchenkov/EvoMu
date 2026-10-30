@@ -593,7 +593,7 @@ async fn test_mn02_ice_harvesting_and_gas_harvesting_cycles() {
         Ball {
             id: gas_ast_id,
             type_id: 30370,
-            position: ship_ball.position + DVec3::new(2_000.0, 0.0, 0.0),
+            position: ship_ball.position + DVec3::new(1_000.0, 0.0, 0.0),
             velocity: DVec3::ZERO,
             max_velocity: 0.0,
             inertia: 0.0,
