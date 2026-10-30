@@ -517,6 +517,7 @@ fn test_esi_corp_endpoint_specific_role_gates_and_routes() {
         "esi-industry.read_corporation_mining.v1",
         "esi-planets.read_customs_offices.v1",
     ];
+    let tok_ceo = issue_token_with_scopes(&ctx, ceo_id, all_scopes.clone());
     let tok_no_role = issue_token_with_scopes(&ctx, no_role_id, all_scopes.clone());
     let tok_sec = issue_token_with_scopes(&ctx, sec_officer_id, all_scopes.clone());
     let tok_acct = issue_token_with_scopes(&ctx, accountant_id, all_scopes.clone());
@@ -544,15 +545,17 @@ fn test_esi_corp_endpoint_specific_role_gates_and_routes() {
         assert_status(&router, url, Some(&tok_sec), 403);
     }
 
-    // Orders & Order History: Accountant, Junior_Accountant, and Trader succeed (200); Station_Manager fails (403)
-    for tok in [&tok_acct, &tok_jr_acct, &tok_trader] {
+    // Orders & Order History: OpenAPI x-required-roles = ["Accountant", "Trader"] (Accountant/Trader succeed 200; Junior_Accountant/Station_Manager fail 403)
+    for tok in [&tok_acct, &tok_trader] {
         let ord = get_validated_json(&router, &spec, &orders_url, Some(tok));
         assert_eq!(ord.as_array().unwrap().len(), 1);
         let hist = get_validated_json(&router, &spec, &orders_hist_url, Some(tok));
         assert_eq!(hist.as_array().unwrap().len(), 1);
     }
-    assert_status(&router, &orders_url, Some(&tok_station_mgr), 403);
-    assert_status(&router, &orders_hist_url, Some(&tok_station_mgr), 403);
+    for tok in [&tok_jr_acct, &tok_station_mgr] {
+        assert_status(&router, &orders_url, Some(tok), 403);
+        assert_status(&router, &orders_hist_url, Some(tok), 403);
+    }
 
     // Mining Extractions: OpenAPI x-required-roles = ["Station_Manager"] (Station_Manager succeeds 200; Accountant/Trader/Junior_Accountant fail 403)
     let ext = get_validated_json(&router, &spec, &extractions_url, Some(&tok_station_mgr));
@@ -571,10 +574,10 @@ fn test_esi_corp_endpoint_specific_role_gates_and_routes() {
         assert_status(&router, &observer_detail_url, Some(tok), 403);
     }
 
-    // Customs Offices: Station_Manager succeeds (200); Accountant, Trader, and Junior_Accountant fail (403)
-    let pocos = get_validated_json(&router, &spec, &customs_url, Some(&tok_station_mgr));
+    // Customs Offices: OpenAPI x-required-roles = ["Director"] (Director/CEO succeeds 200; Station_Manager/Accountant/Trader/Junior_Accountant fail 403)
+    let pocos = get_validated_json(&router, &spec, &customs_url, Some(&tok_ceo));
     assert_eq!(pocos.as_array().unwrap().len(), 1);
-    for tok in [&tok_acct, &tok_trader, &tok_jr_acct] {
+    for tok in [&tok_station_mgr, &tok_acct, &tok_trader, &tok_jr_acct] {
         assert_status(&router, &customs_url, Some(tok), 403);
     }
 }

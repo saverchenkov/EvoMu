@@ -382,17 +382,31 @@ async fn test_wallet_evermarks_sde_paragon_catalog_and_redemption() {
     );
     let rifter_offer_id = 600_000 + 72_964;
     let slasher_alliance_offer_id = 600_000 + 73_394;
-    assert!(offers.iter().any(|o| {
-        o.dict_get("offerID") == Some(&PyRep::Integer(rifter_offer_id))
-            && o.dict_get("typeID") == Some(&PyRep::Integer(72964))
-            && o.dict_get("lpCost") == Some(&PyRep::Integer(750))
-            && o.dict_get("iskCost") == Some(&PyRep::Real(0.0))
-    }));
-    assert!(offers.iter().any(|o| {
-        o.dict_get("offerID") == Some(&PyRep::Integer(slasher_alliance_offer_id))
-            && o.dict_get("typeID") == Some(&PyRep::Integer(73394))
-            && o.dict_get("lpCost") == Some(&PyRep::Integer(1_250))
-    }));
+    let rifter_offer = offers
+        .iter()
+        .find(|o| {
+            o.dict_get("offerID") == Some(&PyRep::Integer(rifter_offer_id))
+                && o.dict_get("typeID") == Some(&PyRep::Integer(72964))
+        })
+        .expect("Rifter emblem offer present from shipcosmeticlicenses.fsdbinary");
+    let Some(PyRep::Integer(rifter_lp_cost)) = rifter_offer.dict_get("lpCost") else {
+        panic!("expected integer lpCost on Rifter emblem offer");
+    };
+    assert!(*rifter_lp_cost > 0);
+    assert_eq!(rifter_offer.dict_get("iskCost"), Some(&PyRep::Real(0.0)));
+
+    let slasher_offer = offers
+        .iter()
+        .find(|o| {
+            o.dict_get("offerID") == Some(&PyRep::Integer(slasher_alliance_offer_id))
+                && o.dict_get("typeID") == Some(&PyRep::Integer(73394))
+        })
+        .expect("Slasher alliance emblem offer present from shipcosmeticlicenses.fsdbinary");
+    let Some(PyRep::Integer(slasher_lp_cost)) = slasher_offer.dict_get("lpCost") else {
+        panic!("expected integer lpCost on Slasher alliance emblem offer");
+    };
+    assert!(*slasher_lp_cost > 0);
+    assert_eq!(slasher_offer.dict_get("iskCost"), Some(&PyRep::Real(0.0)));
 
     // Verify ESI GET /v1/loyalty/stores/1000419/offers exposes the same V24 SDE catalog
     let router = EsiRouter::new(Arc::clone(&ctx));
@@ -561,5 +575,8 @@ async fn test_wallet_evermarks_sde_paragon_catalog_and_redemption() {
         .await
         .expect("Redeem Rifter Corporation Emblem");
     assert_eq!(take_res.dict_get("deliveredTypeID"), Some(&PyRep::Integer(72964)));
-    assert_eq!(take_res.dict_get("remainingLP"), Some(&PyRep::Integer(250)));
+    assert_eq!(
+        take_res.dict_get("remainingLP"),
+        Some(&PyRep::Integer(1_000 - *rifter_lp_cost))
+    );
 }

@@ -112,6 +112,32 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
     sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
 
     // 1. Out-of-the-box ServerContext seeds all 5 V24 AIR Daily Operations from contributionmethods.fsdbinary
+    let methods = ctx
+        .sde
+        .contribution_methods()
+        .expect("SDE contribution_methods must load from contributionmethods.fsdbinary");
+    let mut expected_titles = Vec::new();
+    for key in [
+        "KillNPC",
+        "MineOre",
+        "ScanSignature",
+        "SpaceJump",
+        "ManufactureItem",
+    ] {
+        let entry = methods.get(key).unwrap_or_else(|| {
+            panic!(
+                "SDE contribution_methods missing key {key}; available keys: {:?}",
+                methods.keys().collect::<Vec<_>>()
+            )
+        });
+        let title_id = entry
+            .get("titleID")
+            .and_then(|v| v.as_u64())
+            .filter(|&v| v > 0)
+            .unwrap_or_else(|| panic!("SDE contribution_methods[{key}] missing positive titleID")) as u32;
+        expected_titles.push(title_id);
+    }
+
     let all_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetAllCurrentRequest", Vec::new()).await;
     assert_eq!(all_rsp.status_code, STATUS_OK);
     let wm = WireMessage::decode(&all_rsp.payload.unwrap().value).expect("decode GetAllCurrentResponse");
@@ -155,7 +181,7 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
         assert_eq!(assigner_msg.get(1), Some(&DynamicValue::Uint32(1_000_419)));
         assert!(matches!(get_dyn.get(4), Some(DynamicValue::Repeated(v)) if v.len() == 2));
     }
-    for expected_title in [665_455, 665_390, 665_435, 665_465, 665_394] {
+    for expected_title in expected_titles {
         assert!(
             seen_title_ids.contains(&expected_title),
             "Missing SDE contributionmethod titleID {expected_title} in {seen_title_ids:?}"
@@ -339,11 +365,85 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
     assert_eq!(after_isk, initial_isk + IskCents::from_isk(1_500_000).0);
     assert!((after_sp - (initial_sp + 15_000.0)).abs() < 1e-6);
 
-    // 4. Advance virtual clock by 86,400s (next UTC day bucket) -> daily goals reset cleanly
+    // 4. Advance virtual clock by 86,400s (next 11:00 UTC downtime bucket) -> daily goals reset cleanly
     ctx.advance_virtual_clock(86_400);
     let next_day_goals = ctx.quasar_gateway.progression.daily_goals.get_or_init_goals(char_id);
     assert_eq!(next_day_goals.len(), 5);
     assert!(next_day_goals
         .iter()
         .all(|g| g.current_progress == 0 && !g.completed && !g.claimed));
+}
+
+#[tokio::test]
+async fn test_daily_goals_reset_at_1100_utc_downtime_not_midnight() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    // Advance to 23:59:00 UTC on the next UTC day
+    let next_utc_midnight = (ctx.now_unix() / 86_400 + 1) * 86_400;
+    let t_2359_utc = next_utc_midnight + 86_340;
+    ctx.advance_virtual_clock(t_2359_utc - ctx.now_unix());
+
+    let char_id = 90_000_002u32;
+    let mut sess = SessionState::new(11_102);
+    sess.user_id = Some(2);
+    sess.character_id = Some(char_id as i64);
+    sess.corporation_id = Some(98_000_001);
+    sess.solar_system_id = Some(30_000_142);
+    sess.station_id = Some(60_003_760);
+    sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+
+    let goals_init = ctx
+        .quasar_gateway
+        .progression
+        .daily_goals
+        .get_or_init_goals_at(char_id, ctx.now_unix());
+    assert_eq!(goals_init.len(), 5);
+    let scan_uuid = goals_init.iter().find(|g| g.template.category == 3).unwrap().uuid;
+
+    // Progress & claim ScanSignature at 23:59 UTC
+    ctx.quasar_gateway
+        .progression
+        .daily_goals
+        .add_progress(char_id, &scan_uuid, 5, ctx.now_unix());
+    let redeem_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.dailygoal.api.RedeemRequest",
+        make_uuid_request(scan_uuid),
+    )
+    .await;
+    assert_eq!(redeem_rsp.status_code, STATUS_OK);
+
+    // Advance 120s to 00:01 UTC (2026-01-02 00:01:00 UTC): must NOT reset across 00:00 UTC
+    ctx.advance_virtual_clock(120);
+    let goals_0001 = ctx
+        .quasar_gateway
+        .progression
+        .daily_goals
+        .get_or_init_goals_at(char_id, ctx.now_unix());
+    let scan_0001 = goals_0001.iter().find(|g| g.uuid == scan_uuid).unwrap();
+    assert!(scan_0001.claimed, "daily goal must NOT reset at 00:00 UTC");
+    assert_eq!(scan_0001.current_progress, 5);
+
+    // Advance to 10:59 UTC (10h 58m = 39_480s later): still same downtime bucket, must NOT reset
+    ctx.advance_virtual_clock(39_480);
+    let goals_1059 = ctx
+        .quasar_gateway
+        .progression
+        .daily_goals
+        .get_or_init_goals_at(char_id, ctx.now_unix());
+    let scan_1059 = goals_1059.iter().find(|g| g.uuid == scan_uuid).unwrap();
+    assert!(scan_1059.claimed, "daily goal must NOT reset before 11:00 UTC downtime");
+
+    // Advance 120s to 11:01 UTC: crosses 11:00 UTC downtime -> MUST reset
+    ctx.advance_virtual_clock(120);
+    let goals_1101 = ctx
+        .quasar_gateway
+        .progression
+        .daily_goals
+        .get_or_init_goals_at(char_id, ctx.now_unix());
+    let scan_1101 = goals_1101.iter().find(|g| g.uuid == scan_uuid).unwrap();
+    assert!(!scan_1101.claimed, "daily goal MUST reset after 11:00 UTC downtime");
+    assert!(!scan_1101.completed);
+    assert_eq!(scan_1101.current_progress, 0);
 }

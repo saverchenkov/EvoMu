@@ -1,8 +1,11 @@
 //! `quasar_daily_goals` — V24.01 Quasar Daily Goals Service (`feat:quasar.dailygoal`, `feat:pve.daily-goals`, `Q-4`).
 //!
 //! Implements live backend semantics for the EVE Online V24 AIR Daily Goals system:
-//! - SDE-backed daily goal seeding from `res:/staticdata/contributionmethods.fsdbinary` and `res:/localizationfsd/localization_fsd_en-us.pickle`.
-//! - Daily goal rotation, progress tracking, and reward redemption (ISK, SP).
+//! - Localization message IDs (`titleID`, `progressDescriptionID`, `descriptionID`) seeded from
+//!   `res:/staticdata/contributionmethods.fsdbinary` and `res:/localizationfsd/localization_fsd_en-us.pickle`.
+//!   Note: V24 AIR Daily Goal targets, rewards, and completion costs are server-authored (`DERIVED`,
+//!   not stored in client `.fsdbinary` static files).
+//! - Daily goal rotation (at `11:00 UTC` downtime), progress tracking, and reward redemption (ISK, SP).
 //! - Request handlers for `eve_public.dailygoal.api` and `eve.dailygoal.api`.
 //! - Real-time notice publication (`CurrentGoalsNotice`, `ProgressedNotice`, `CompletedNotice`, `RedeemedNotice`).
 //! - Live wallet/skill-point persistence in `WorldRepository`.
@@ -158,7 +161,8 @@ fn ensure_character_daily_goals_with_templates(
     now_unix: u64,
 ) -> bool {
     let mut changed = false;
-    let day_bucket = now_unix / 86_400;
+    // Daily goals reset at 11:00 UTC downtime (39_600s offset from 00:00 UTC).
+    let day_bucket = now_unix.saturating_sub(39_600) / 86_400;
     for tpl in templates {
         if let Some(existing) = goals.iter_mut().find(|g| g.uuid == tpl.uuid) {
             existing.template = tpl.clone();
@@ -195,11 +199,19 @@ fn ensure_character_daily_goals_with_templates(
 
 pub fn build_sde_daily_goal_templates(sde: &eve_sde::SdeRegistry) -> Vec<DailyGoalTemplate> {
     let methods = sde.contribution_methods().unwrap_or_default();
+    // DERIVED: Only localization message IDs come from `res:/staticdata/contributionmethods.fsdbinary`.
+    // Targets (25, 2_000, 5, 10, 1), ISK rewards (500_000), SP rewards (5_000.0), and EverMark/ISK
+    // completion costs (Some(2_500) EM, Some(100_000) ISK) are server-authored (DERIVED).
     let specs: [(&str, u32, u32, u64, i64, f64, Option<i64>, Option<i64>, u32, u32, u32); 5] = [
-        ("DestroyNPC", 1, 3, 25, 500_000, 5_000.0, None, Some(2_500), 665_455, 696_260, 665_456),
-        ("MineAsteroid", 2, 2, 2_000, 500_000, 5_000.0, Some(100_000), Some(2_500), 665_390, 696_245, 665_395),
+        // DERIVED: target=25, isk_reward=500_000, sp_reward=5_000.0, completion_cost_evermarks=Some(2_500)
+        ("KillNPC", 1, 3, 25, 500_000, 5_000.0, None, Some(2_500), 659_195, 696_260, 665_456),
+        // DERIVED: target=2_000, isk_reward=500_000, sp_reward=5_000.0, completion_cost_isk=Some(100_000), completion_cost_evermarks=Some(2_500)
+        ("MineOre", 2, 2, 2_000, 500_000, 5_000.0, Some(100_000), Some(2_500), 665_390, 696_245, 665_395),
+        // DERIVED: target=5, isk_reward=500_000, sp_reward=5_000.0, completion_cost_evermarks=Some(2_500)
         ("ScanSignature", 3, 1, 5, 500_000, 5_000.0, None, Some(2_500), 665_435, 696_251, 665_401),
-        ("JumpStargate", 4, 4, 10, 500_000, 5_000.0, None, Some(2_500), 665_465, 696_262, 665_466),
+        // DERIVED: target=10, isk_reward=500_000, sp_reward=5_000.0, completion_cost_evermarks=Some(2_500)
+        ("SpaceJump", 4, 4, 10, 500_000, 5_000.0, None, Some(2_500), 665_465, 696_262, 665_466),
+        // DERIVED: target=1, isk_reward=500_000, sp_reward=5_000.0, completion_cost_evermarks=Some(2_500)
         ("ManufactureItem", 5, 2, 1, 500_000, 5_000.0, None, Some(2_500), 665_394, 696_246, 665_412),
     ];
     specs

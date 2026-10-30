@@ -55,6 +55,9 @@ pub fn load_lp_store_offers(snap: &eve_db::WorldStateSnapshot) -> Vec<LPOffer> {
         .unwrap_or_default()
 }
 
+/// DERIVED: Synthesized EverMark price tiers by hull group and cosmetic type (`1` = corp, `2` = alliance).
+/// `res:/staticdata/shipcosmeticlicenses.fsdbinary` defines the published emblem offer list, while
+/// EverMark prices are server-authored (`DERIVED`).
 fn paragon_emblem_evermark_cost(ship_group_id: u32, cosmetic_type: u8) -> i64 {
     let base = match ship_group_id {
         25 | 31 | 237 => 750,
@@ -68,8 +71,8 @@ fn paragon_emblem_evermark_cost(ship_group_id: u32, cosmetic_type: u8) -> i64 {
     if cosmetic_type == 2 { (base * 5) / 3 } else { base }
 }
 
-/// Loads V24 SDE Paragon (`1_000_419`) EverMarks Ship Cosmetic Emblem offers from
-/// `res:/staticdata/shipcosmeticlicenses.fsdbinary`.
+/// Loads Paragon (`1_000_419`) Ship Cosmetic Emblem offers from
+/// `res:/staticdata/shipcosmeticlicenses.fsdbinary` (offer list from V24 SDE; EverMark prices `DERIVED`).
 pub fn paragon_sde_evermark_offers(sde: &eve_sde::SdeRegistry) -> &'static [LPOffer] {
     static PARAGON_OFFERS: std::sync::OnceLock<Vec<LPOffer>> = std::sync::OnceLock::new();
     PARAGON_OFFERS.get_or_init(|| {

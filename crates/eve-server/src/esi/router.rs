@@ -640,17 +640,6 @@ impl EsiRouter {
                         _ => 0,
                     };
                 }
-                if matches!(
-                    (op.method.as_str(), op.path_pattern.as_str()),
-                    ("GET", "/corporations/{corporation_id}/orders")
-                        | ("GET", "/corporations/{corporation_id}/orders/history")
-                ) {
-                    required_role_mask |= eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT;
-                } else if (op.method.as_str(), op.path_pattern.as_str())
-                    == ("GET", "/corporations/{corporation_id}/customs_offices")
-                {
-                    required_role_mask |= eve_db::corp_roles::ROLE_STATION_MANAGER;
-                }
                 let (char_corp, has_corp_role) = self.ctx.db.with_snapshot(|snap| {
                     let c_corp = snap
                         .characters
