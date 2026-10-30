@@ -182,101 +182,110 @@ async fn handle_wormhole_jump(
         });
     }
 
-    let cancel_err = |code: &str, message: String| -> BridgeRpcError {
-        ctx.notify(
-            crate::router::NotificationTarget::Character(char_id),
-            "OnWormholeJumpCancel",
-            "charid",
-            vec![],
-        );
+    let jump_err = |code: &str, message: String| -> BridgeRpcError {
         BridgeRpcError { code: code.into(), message }
     };
 
-    let dist = current_ball.position.distance(wh_ball.position);
-    if dist > 2_500.0 {
-        return Err(cancel_err(
-            "OutsideWormholeJumpRange",
-            format!("Ship is {:.1} m from wormhole (must be <= 2500 m)", dist),
-        ));
-    }
-
-    let (ship_mass, _) =
-        super::space_docking_cloaking::compute_effective_ship_jump_mass(ctx, ship_id, current_ball.mass);
-    let now_unix = ctx.now_unix();
-    if let Some(_active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
-        return Err(cancel_err(
-            "SessionChangeTimerActive",
-            "Session change timer is active".into(),
-        ));
-    }
-
-    let (dest_sys_id, dest_sig_pos) = ctx.db.try_with_mut_snapshot(|snap| {
-        let Some(dest_sys) = snap
-            .system_states
-            .get(&old_sys)
-            .and_then(|st| st.wormhole_destination_system_id)
-        else {
-            return Err(cancel_err(
-                "NoWormholeDestination",
-                format!("Solar system {old_sys} has no active wormhole destination"),
-            ));
-        };
-        let pol_expiry = snap
-            .wh_polarizations
-            .get(&(char_id, dest_sys as i64))
-            .copied()
-            .unwrap_or(0);
-        if pol_expiry > now_unix {
-            return Err(cancel_err(
-                "WormholePolarized",
-                format!(
-                    "Character is polarized for system {} for another {} seconds",
-                    dest_sys,
-                    pol_expiry.saturating_sub(now_unix)
-                ),
+    let prep_res: Result<(u32, DVec3), BridgeRpcError> = (|| {
+        let dist = current_ball.position.distance(wh_ball.position);
+        if dist > 2_500.0 {
+            return Err(jump_err(
+                "OutsideWormholeJumpRange",
+                format!("Ship is {:.1} m from wormhole (must be <= 2500 m)", dist),
             ));
         }
-        let max_jump = snap
-            .cosmic_signatures
-            .get(&old_sys)
-            .and_then(|sigs| {
-                sigs.iter()
-                    .find(|s| s.sig_group == "Wormhole" && s.destination_system_id == Some(dest_sys))
-                    .map(|s| s.max_jump_mass_kg)
-            })
-            .unwrap_or(0.0);
-        if max_jump > 0.0 && ship_mass > max_jump {
-            return Err(cancel_err(
-                "ShipTooHeavyForWormhole",
-                format!(
-                    "Ship mass {:.1} kg exceeds wormhole jump limit {:.1} kg",
-                    ship_mass, max_jump
-                ),
+
+        let (ship_mass, _) =
+            super::space_docking_cloaking::compute_effective_ship_jump_mass(ctx, ship_id, current_ball.mass);
+        let now_unix = ctx.now_unix();
+        if let Some(_active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
+            return Err(jump_err(
+                "SessionChangeTimerActive",
+                "Session change timer is active".into(),
             ));
         }
-        for sys in [old_sys, dest_sys] {
-            if let Some(st) = snap.system_states.get_mut(&sys) {
-                if st.wormhole_remaining_mass_kg < ship_mass {
-                    return Err(cancel_err(
-                        "WormholeMassCollapsed",
-                        "Wormhole lacks remaining mass capacity for this ship".into(),
-                    ));
-                }
-                st.wormhole_remaining_mass_kg -= ship_mass;
+
+        ctx.db.try_with_mut_snapshot(|snap| {
+            let Some(dest_sys) = snap
+                .system_states
+                .get(&old_sys)
+                .and_then(|st| st.wormhole_destination_system_id)
+            else {
+                return Err(jump_err(
+                    "NoWormholeDestination",
+                    format!("Solar system {old_sys} has no active wormhole destination"),
+                ));
+            };
+            let pol_expiry = snap
+                .wh_polarizations
+                .get(&(char_id, dest_sys as i64))
+                .copied()
+                .unwrap_or(0);
+            if pol_expiry > now_unix {
+                return Err(jump_err(
+                    "WormholePolarized",
+                    format!(
+                        "Character is polarized for system {} for another {} seconds",
+                        dest_sys,
+                        pol_expiry.saturating_sub(now_unix)
+                    ),
+                ));
             }
+            let max_jump = snap
+                .cosmic_signatures
+                .get(&old_sys)
+                .and_then(|sigs| {
+                    sigs.iter()
+                        .find(|s| s.sig_group == "Wormhole" && s.destination_system_id == Some(dest_sys))
+                        .map(|s| s.max_jump_mass_kg)
+                })
+                .unwrap_or(0.0);
+            if max_jump > 0.0 && ship_mass > max_jump {
+                return Err(jump_err(
+                    "ShipTooHeavyForWormhole",
+                    format!(
+                        "Ship mass {:.1} kg exceeds wormhole jump limit {:.1} kg",
+                        ship_mass, max_jump
+                    ),
+                ));
+            }
+            for sys in [old_sys, dest_sys] {
+                if let Some(st) = snap.system_states.get_mut(&sys) {
+                    if st.wormhole_remaining_mass_kg < ship_mass {
+                        return Err(jump_err(
+                            "WormholeMassCollapsed",
+                            "Wormhole lacks remaining mass capacity for this ship".into(),
+                        ));
+                    }
+                    st.wormhole_remaining_mass_kg -= ship_mass;
+                }
+            }
+            snap.wh_polarizations
+                .insert((char_id, dest_sys as i64), now_unix + 300);
+            snap.wh_polarizations
+                .insert((char_id, old_sys as i64), now_unix + 300);
+            let sig_pos = snap
+                .system_states
+                .get(&dest_sys)
+                .and_then(|st| st.signature_position)
+                .map(DVec3::from_array)
+                .unwrap_or(DVec3::new(10_500.0, 0.0, 0.0));
+            Ok((dest_sys, sig_pos))
+        })
+    })();
+
+    let (dest_sys_id, dest_sig_pos) = match prep_res {
+        Ok(v) => v,
+        Err(e) => {
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnWormholeJumpCancel",
+                "charid",
+                vec![],
+            );
+            return Err(e);
         }
-        snap.wh_polarizations
-            .insert((char_id, dest_sys as i64), now_unix + 300);
-        snap.wh_polarizations
-            .insert((char_id, old_sys as i64), now_unix + 300);
-        let sig_pos = snap
-            .system_states
-            .get(&dest_sys)
-            .and_then(|st| st.signature_position)
-            .map(DVec3::from_array)
-            .unwrap_or(DVec3::new(10_500.0, 0.0, 0.0));
-        Ok((dest_sys, sig_pos))
-    })?;
+    };
 
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, old_sys);
     let existing_ball = old_handle.remove_ball(ship_id).await;

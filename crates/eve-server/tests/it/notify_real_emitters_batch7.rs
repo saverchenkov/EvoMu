@@ -5,7 +5,7 @@ use eve_db::{AsteroidRecord, InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, MovementMode, SlimItemMeta, TargetLock};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use eve_server::router::{BoundObjectEntry, ServerContext};
+use eve_server::router::ServerContext;
 use eve_server::sp6_lifecycle::tick_background_cluster;
 use glam::DVec3;
 use std::collections::HashMap;
@@ -327,7 +327,13 @@ async fn notify_batch7_mining_probes_scanners_and_space() {
     let moon_scan_args = find_notif(&scan_done_notifs, "OnMoonScanComplete");
     assert_eq!(moon_scan_args.len(), 2);
     assert_eq!(moon_scan_args[0], PyRep::Integer(MOON_JITA));
-    assert!(matches!(&moon_scan_args[1], PyRep::Dict(d) if !d.is_empty()));
+    let PyRep::Dict(moon_ores) = &moon_scan_args[1] else { panic!("expected Dict for moon scan") };
+    assert!(!moon_ores.is_empty());
+    for (k, v) in moon_ores {
+        let tid = k.as_i64().expect("ore typeID") as u32;
+        let frac = v.as_f64().expect("ore fraction");
+        assert!(ctx.sde.types.contains_key(&tid) && (0.0..=1.0).contains(&frac));
+    }
     assert_eq!(find_notif(&scan_done_notifs, "OnRemoveMoonProbe"), &[PyRep::Integer(probe_id)]);
 
     // 6. OnScanNoMaterials (1-arg moonID) on Pochven moon (40001416 in Kuharah 30000021)
@@ -465,9 +471,11 @@ async fn notify_batch7_mining_probes_scanners_and_space() {
     let ship_scan_args = find_notif(&scan_notifs, "OnShipScanCompleted");
     assert_eq!(ship_scan_args.len(), 4);
     assert_eq!(ship_scan_args[0], PyRep::Integer(ship_b));
-    assert!(matches!(ship_scan_args[1], PyRep::Real(_)));
-    assert!(matches!(ship_scan_args[2], PyRep::Real(_)));
-    assert!(matches!(&ship_scan_args[3], PyRep::List(hw) if !hw.is_empty()));
+    let cap_cur = ship_scan_args[1].as_f64().expect("capacitorCharge");
+    let cap_max = ship_scan_args[2].as_f64().expect("capacitorCapacity");
+    assert!(cap_cur > 0.0 && cap_max >= cap_cur);
+    let PyRep::List(hw) = &ship_scan_args[3] else { panic!("expected hardwareList") };
+    assert!(hw.contains(&PyRep::Tuple(vec![PyRep::Integer(2873), PyRep::Integer(1)])));
 
     // 10-11. OnDamageStateChange (2-arg) & OnMachoObjectDisconnect (3-arg on pod death)
     let (a_gun_id, a_ammo_id) = (710_000_141_i64, 710_000_142_i64);
@@ -508,23 +516,32 @@ async fn notify_batch7_mining_probes_scanners_and_space() {
     let dmg_args = find_notif(&dmg_notifs_b, "OnDamageStateChange");
     assert_eq!(dmg_args.len(), 2);
     assert_eq!(dmg_args[0], PyRep::Integer(ship_b));
-    assert!(matches!(&dmg_args[1], PyRep::Tuple(t) if t.len() == 3));
+    let PyRep::Tuple(ds) = &dmg_args[1] else { panic!("expected damageState tuple") };
+    assert_eq!(ds.len(), 3);
+    let PyRep::Tuple(sh_tup) = &ds[0] else { panic!("expected shield tuple") };
+    assert_eq!(sh_tup.len(), 3);
+    let (sh_r, ar_r, hu_r) = (sh_tup[0].as_f64().unwrap(), ds[1].as_f64().unwrap(), ds[2].as_f64().unwrap());
+    assert!((0.0..1.0).contains(&sh_r) && ar_r == 1.0 && hu_r == 1.0);
 
-    // Pod Pilot C via weapon fire with bound object registered -> 3-arg OnMachoObjectDisconnect
-    {
-        let mut bo = ctx.bound_objects.write().unwrap_or_else(|e| e.into_inner());
-        bo.insert(
-            777_001,
-            BoundObjectEntry {
-                bound_id: 777_001,
-                session_id: 7_103,
-                user_id: 3,
-                character_id: PILOT_C,
-                service: "beyonce".into(),
-                object_id: SYS_JITA as i64,
-            },
-        );
-    }
+    // Pod Pilot C via weapon fire with bound beyonce object -> 3-arg OnMachoObjectDisconnect
+    let bind_beyonce = ctx
+        .dispatch_rpc(
+            &mut sess_c,
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Tuple(vec![PyRep::Integer(SYS_JITA as i64), PyRep::Integer(6)]), PyRep::None],
+            &HashMap::new(),
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("MachoBindObject beyonce");
+    let PyRep::Tuple(bind_parts) = bind_beyonce else { panic!("MachoBindObject tuple") };
+    let PyRep::SubStruct(sub_s) = &bind_parts[0] else { panic!("SubStruct OID") };
+    let PyRep::SubStream(sub_t) = sub_s.as_ref() else { panic!("SubStream OID") };
+    let PyRep::Tuple(oid_pair) = sub_t.as_ref() else { panic!("(oid, refID) tuple") };
+    assert!(oid_pair[0].as_str().unwrap_or("").starts_with("N=888444:"));
+    assert!(oid_pair[1].as_i64().unwrap_or(0) > 116_444_736_000_000_000);
     let mut pod_cs = ctx.build_ship_combat_state(PILOT_C, pod_c, 670);
     pod_cs.is_cloaked = false;
     pod_cs.gate_cloak_remaining_ticks = 0;
@@ -557,9 +574,10 @@ async fn notify_batch7_mining_probes_scanners_and_space() {
         .expect("fire at pod_c");
     let pod_notifs = drain_all(&ctx, &mut sess_c, PILOT_C);
     let disc_args = find_notif(&pod_notifs, "OnMachoObjectDisconnect");
-    assert_eq!(disc_args, &[PyRep::String("N=1:777001".into()), PyRep::Integer(PILOT_C), PyRep::Integer(777_001)]);
+    let macho_client_c = (1_000_000_000_000_u64 + sess_c.session_id) as i64;
+    assert_eq!(disc_args, &[oid_pair[0].clone(), PyRep::Integer(macho_client_c), oid_pair[1].clone()]);
 
-    // 12. OnWormholeJumpCancel (0-arg) when outside jump range
+    // 12. OnWormholeJumpCancel (0-arg) across out-of-range, no-destination, and polarized branches
     let wh_ball_id = 710_000_199_i64;
     let _ = jita
         .spawn_ball_with_meta(
@@ -599,8 +617,36 @@ async fn notify_batch7_mining_probes_scanners_and_space() {
         .await
         .expect_err("wormhole outside range must fail");
     assert_eq!(wh_err.code, "OutsideWormholeJumpRange");
-    let wh_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    assert_eq!(find_notif(&wh_notifs, "OnWormholeJumpCancel"), &[]);
+    assert_eq!(find_notif(&drain_all(&ctx, &mut sess_a, PILOT_A), "OnWormholeJumpCancel"), &[]);
+
+    // Move ship_a within 2500m of wormhole and test NoWormholeDestination + WormholePolarized without deadlock
+    if let Ok(Some((_, mut sb))) = jita.get_ball_snapshot(ship_a).await {
+        sb.position = DVec3::new(49_500.0, 0.0, 0.0);
+        let _ = jita.spawn_ball(sb).await;
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.system_states.get_mut(&SYS_JITA) {
+            st.wormhole_destination_system_id = None;
+        }
+    });
+    let no_dest_err = rpc(&ctx, &mut sess_a, "wormholeMgr", "WormholeJump", &[PyRep::Integer(wh_ball_id)])
+        .await
+        .expect_err("wormhole without destination must fail");
+    assert_eq!(no_dest_err.code, "NoWormholeDestination");
+    assert_eq!(find_notif(&drain_all(&ctx, &mut sess_a, PILOT_A), "OnWormholeJumpCancel"), &[]);
+    assert!(ctx.db.with_snapshot(|s| s.characters.contains_key(&PILOT_A)));
+
+    let pol_now = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.system_states.entry(SYS_JITA).or_default().wormhole_destination_system_id = Some(30_000_144);
+        snap.wh_polarizations.insert((PILOT_A, 30_000_144), pol_now + 300);
+    });
+    let pol_err = rpc(&ctx, &mut sess_a, "wormholeMgr", "WormholeJump", &[PyRep::Integer(wh_ball_id)])
+        .await
+        .expect_err("polarized wormhole jump must fail");
+    assert_eq!(pol_err.code, "WormholePolarized");
+    assert_eq!(find_notif(&drain_all(&ctx, &mut sess_a, PILOT_A), "OnWormholeJumpCancel"), &[]);
+    assert!(ctx.db.with_snapshot(|s| s.characters.contains_key(&PILOT_A)));
 
     // 13. OnRemoteMessage (2-arg) via GM /heal slash command
     sess_a.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
@@ -609,6 +655,7 @@ async fn notify_batch7_mining_probes_scanners_and_space() {
         .expect("GM /heal");
     let heal_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     let remote_args = find_notif(&heal_notifs, "OnRemoteMessage");
-    assert!(remote_args.len() >= 2);
+    assert_eq!(remote_args.len(), 2);
     assert_eq!(remote_args[0], PyRep::String("CustomInfo".into()));
+    assert!(remote_args[1].dict_get("info").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()));
 }

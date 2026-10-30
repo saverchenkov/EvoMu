@@ -15,8 +15,8 @@ use std::collections::{HashMap, HashSet};
 // parity: notify:OnFittingAdded, notify:OnFittingDeleted, notify:OnManyFittingsDeleted
 // parity: notify:OnDroneStateChange, notify:OnStanceActive
 // parity: notify:OnGroupJumpAnchorActivated, notify:OnGroupJumpedPassenger
-// parity: notify:OnCharacterEnergyChanged, notify:OnNonDiminishingInjectionsUsed
-// parity: notify:OnSkillBundleInjected
+// parity: notify:OnNonDiminishingInjectionsUsed
+// DATA GAP: OnCharacterEnergyChanged (no V24 gameplay CEQ consumer yet) and OnSkillBundleInjected (skill bundle definitions absent from V24 client FSD) remain open.
 #[tokio::test]
 async fn notify_batch7_weapons_fittings_drones_stances_jump_and_skills() {
     eve_testkit::attest(&[
@@ -29,9 +29,7 @@ async fn notify_batch7_weapons_fittings_drones_stances_jump_and_skills() {
         "notify:OnStanceActive",
         "notify:OnGroupJumpAnchorActivated",
         "notify:OnGroupJumpedPassenger",
-        "notify:OnCharacterEnergyChanged",
         "notify:OnNonDiminishingInjectionsUsed",
-        "notify:OnSkillBundleInjected",
     ]);
 
     let ctx = new_ctx();
@@ -303,8 +301,22 @@ async fn notify_batch7_weapons_fittings_drones_stances_jump_and_skills() {
         &[PyRep::Integer(PILOT_A), PyRep::Integer(sys_dest as i64)]
     );
 
-    // 10. OnCharacterEnergyChanged (2-arg) via GM /energy slash command
+    // 10. GM /energy input validation + characterEnergyMgr state check (DATA GAP: OnCharacterEnergyChanged remains open without gameplay CEQ consumer)
     sess_a.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
+    assert_eq!(
+        rpc(&ctx, &mut sess_a, "slash", "SlashCmd", &[PyRep::String("/energy bogus 100".into())])
+            .await
+            .expect_err("invalid char_id must fail")
+            .code,
+        "InvalidArguments"
+    );
+    assert_eq!(
+        rpc(&ctx, &mut sess_a, "slash", "SlashCmd", &[PyRep::String("/energy 999999999 100".into())])
+            .await
+            .expect_err("nonexistent char_id must fail")
+            .code,
+        "CharacterNotFound"
+    );
     rpc(&ctx, &mut sess_a, "slash", "SlashCmd", &[PyRep::String("/energy 2840".into())])
         .await
         .expect("GM /energy");
@@ -314,7 +326,7 @@ async fn notify_batch7_weapons_fittings_drones_stances_jump_and_skills() {
     assert_eq!(energy_args[0], PyRep::Integer(PILOT_A));
     assert_eq!(energy_args[1].dict_get("currentEnergy").and_then(|v| v.as_i64()), Some(2840));
 
-    // 11-12. OnNonDiminishingInjectionsUsed (1-arg) & OnSkillBundleInjected (2-arg)
+    // 11. OnNonDiminishingInjectionsUsed (1-arg) + crateService.ClaimSkillBundle (DATA GAP: OnSkillBundleInjected remains open)
     let (mini_inj_id, crate_id) = (720_000_071_i64, 720_000_072_i64);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&PILOT_A) {

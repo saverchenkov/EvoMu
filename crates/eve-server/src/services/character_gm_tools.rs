@@ -1237,13 +1237,17 @@ pub async fn handle_gm_slash_ext(
     if let Some(rest) = cmd.strip_prefix("/energy ") {
         let parts: Vec<&str> = rest.split_whitespace().collect();
         let (target_cid, new_energy) = match parts.as_slice() {
-            [val_s] => (cid, val_s.parse::<i64>().ok()),
-            [cid_s, val_s] => (cid_s.parse::<i64>().unwrap_or(cid), val_s.parse::<i64>().ok()),
-            _ => (cid, None),
+            [val_s] => (Some(cid), val_s.parse::<i64>().ok()),
+            [cid_s, val_s] => (cid_s.parse::<i64>().ok(), val_s.parse::<i64>().ok()),
+            _ => (None, None),
         };
-        let Some(energy_val) = new_energy else {
+        let (Some(target_cid), Some(energy_val)) = (target_cid.filter(|&id| id > 0), new_energy) else {
             return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /energy [char_id] <amount>".into() }));
         };
+        if !ctx.db.with_snapshot(|snap| snap.characters.contains_key(&target_cid)) {
+            return Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {target_cid} not found") }));
+        }
+        // DATA GAP: notify:OnCharacterEnergyChanged remains open until a V24 gameplay CEQ consumer (CRAB beacons / Mobile Phase Anchors) exists.
         let st = crate::services::character_energy::set_character_energy(ctx, target_cid, energy_val);
         return Some(Ok(crate::services::character_energy::energy_to_keyval(&st)));
     }

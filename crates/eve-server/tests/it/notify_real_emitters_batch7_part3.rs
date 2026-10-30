@@ -120,13 +120,12 @@ async fn notify_batch7_cosmetics_petitions_mail_pi_and_escalations() {
     );
     let cos_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     let cos_single = find_notif(&cos_notifs, "OnShipCosmeticChanged");
-    assert_eq!(cos_single.len(), 3);
-    assert_eq!(cos_single[0], PyRep::Integer(ship_a));
-    assert_eq!(cos_single[1], PyRep::Integer(0));
+    assert_eq!(cos_single, &[PyRep::Integer(ship_a), PyRep::Integer(0), PyRep::Integer(1)]);
     let cos_map = find_notif(&cos_notifs, "OnShipCosmeticsChanged");
-    assert_eq!(cos_map.len(), 2);
-    assert_eq!(cos_map[0], PyRep::Integer(ship_a));
-    assert!(matches!(cos_map[1], PyRep::Dict(_)));
+    assert_eq!(
+        cos_map,
+        &[PyRep::Integer(ship_a), PyRep::Dict(vec![(PyRep::Integer(0), PyRep::Integer(1))])]
+    );
 
     // 5-8. OnNewPetition (1-arg), OnAssignPetition (2-arg), OnPetitionMessage (4-arg), OnClosePetition (1-arg)
     let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
@@ -212,6 +211,7 @@ async fn notify_batch7_cosmetics_petitions_mail_pi_and_escalations() {
     sess_a.solar_system_id = Some(SYS_JITA);
     sess_a.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
 
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
     rpc(
         &ctx,
         &mut sess_a,
@@ -226,6 +226,12 @@ async fn notify_batch7_cosmetics_petitions_mail_pi_and_escalations() {
     )
     .await
     .expect("Deploy PI colony");
+    let deploy_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    assert_eq!(
+        find_notif(&deploy_notifs, "OnMajorPlanetStateUpdate"),
+        &[PyRep::Integer(jita_planet_id), PyRep::Bool(true)]
+    );
+
     rpc(
         &ctx,
         &mut sess_a,
@@ -235,7 +241,8 @@ async fn notify_batch7_cosmetics_petitions_mail_pi_and_escalations() {
     )
     .await
     .expect("ImportToColony");
-    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let import_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    assert!(!import_notifs.iter().any(|(e, _)| e == "OnPILaunchesChange"));
 
     let launch_rep = rpc(
         &ctx,
@@ -264,6 +271,15 @@ async fn notify_batch7_cosmetics_petitions_mail_pi_and_escalations() {
     assert_eq!(
         find_notif(&orb_notifs, "OnMajorPlanetStateUpdate"),
         &[PyRep::Integer(jita_planet_id), PyRep::Bool(false)]
+    );
+
+    rpc(&ctx, &mut sess_a, "planetMgr", "UserAbandonPlanet", &[PyRep::Integer(jita_planet_id)])
+        .await
+        .expect("UserAbandonPlanet");
+    let abandon_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    assert_eq!(
+        find_notif(&abandon_notifs, "OnMajorPlanetStateUpdate"),
+        &[PyRep::Integer(jita_planet_id), PyRep::Bool(true)]
     );
 
     // 12. OnEscalatingPathMessage (1-arg instanceID) via combat anomaly escalation

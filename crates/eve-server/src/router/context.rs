@@ -25,7 +25,7 @@ pub struct BoundObjectEntry {
     pub user_id: u64,
     pub character_id: i64,
     pub service: String,
-    pub object_id: i64,
+    pub object_id: i64, pub oid_str: String, pub ref_id: i64,
 }
 
 static NEXT_CTX_INSTANCE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);

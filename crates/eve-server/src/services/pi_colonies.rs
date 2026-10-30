@@ -319,9 +319,14 @@ pub fn handle_pi_colonies(
                 snap.planetary_colony_layouts.remove(&(char_id, planet_id));
                 Ok(PyRep::Bool(true))
             });
-            // No notification: the V24 client calls `UserAbandonPlanet` from
-            // `ClientPlanet._SubmitChanges` and itself scatters
-            // `OnPlanetCommandCenterDeployedOrRemoved` via `planetSvc`.
+            if res.is_ok() {
+                ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnMajorPlanetStateUpdate",
+                    "charid",
+                    vec![PyRep::Integer(planet_id), PyRep::Bool(true)],
+                );
+            }
             Some(res)
         }
 
@@ -1212,8 +1217,9 @@ pub fn handle_pi_colonies(
                     })?;
                 let net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
                 let (pins_rep, links_rep, _) = format_pi_pins_links(&net);
+                let cc_changed = prev_colony.is_none();
                 Ok((
-                    net.pins.len(),
+                    cc_changed,
                     PyRep::keyval([
                         ("planetID", PyRep::Integer(planet_id)), ("currentLevel", PyRep::Integer(col.command_center_level as i64)),
                         ("commandCenterLevel", PyRep::Integer(col.command_center_level as i64)), ("pinsCount", PyRep::Integer(net.pins.len() as i64)),
@@ -1227,10 +1233,17 @@ pub fn handle_pi_colonies(
             });
 
             match res {
-                // No notification: after this RPC returns, the V24 client's
-                // `ClientPlanet._SubmitChanges` scatters `OnPlanetChangesSubmitted`, and
-                // `planetSvc.OnPlanetChangesSubmitted` derives `OnColonyPinCountUpdated`.
-                Ok((_pin_cnt, rep)) => Some(Ok(rep)),
+                Ok((cc_changed, rep)) => {
+                    if cc_changed {
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(char_id),
+                            "OnMajorPlanetStateUpdate",
+                            "charid",
+                            vec![PyRep::Integer(planet_id), PyRep::Bool(true)],
+                        );
+                    }
+                    Some(Ok(rep))
+                }
                 Err(e) => Some(Err(e)),
             }
         }

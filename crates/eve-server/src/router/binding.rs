@@ -180,6 +180,8 @@ impl ServerContext {
         service: &str,
         object_id: i64,
     ) {
+        let oid_str = format!("N={}:{bound_id}", eve_machonet::MACHO_PROXY_NODE_ID);
+        let ref_id = (self.now_unix() as i64 + 11_644_473_600).saturating_mul(10_000_000);
         self.bound_objects
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -192,6 +194,8 @@ impl ServerContext {
                     character_id: char_id,
                     service: service.to_string(),
                     object_id,
+                    oid_str,
+                    ref_id,
                 },
             );
     }
@@ -202,8 +206,18 @@ impl ServerContext {
     /// the JSON bridge gets the plain bound ID.
     pub fn bound_object_rep(&self, bound_id: u64, caller_trace: Option<&str>) -> PyRep {
         if caller_trace == Some("machoNet:26000") {
-            let oid_str = format!("N={}:{bound_id}", eve_machonet::MACHO_PROXY_NODE_ID);
-            let ref_id = (self.now_unix() as i64 + 11_644_473_600).saturating_mul(10_000_000);
+            let (oid_str, ref_id) = self
+                .bound_objects
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&bound_id)
+                .map(|b| (b.oid_str.clone(), b.ref_id))
+                .unwrap_or_else(|| {
+                    (
+                        format!("N={}:{bound_id}", eve_machonet::MACHO_PROXY_NODE_ID),
+                        (self.now_unix() as i64 + 11_644_473_600).saturating_mul(10_000_000),
+                    )
+                });
             PyRep::SubStruct(Box::new(PyRep::SubStream(Box::new(PyRep::Tuple(vec![
                 PyRep::ascii_bytes(oid_str),
                 PyRep::Integer(ref_id),

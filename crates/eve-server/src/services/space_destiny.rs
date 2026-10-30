@@ -266,23 +266,25 @@ fn record_session_change_timer_with_invuln(
         ctx.bound_objects
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|&bid, b| {
+            .retain(|&_bid, b| {
                 if b.character_id == char_id && (b.service == "beyonce" || b.service == "scanMgr") {
-                    removed_oids.push(bid);
+                    let macho_client_id =
+                        1_000_000_000_000_u64.saturating_add(b.session_id) as i64;
+                    removed_oids.push((b.oid_str.clone(), macho_client_id, b.ref_id));
                     false
                 } else {
                     true
                 }
             });
-        for bid in removed_oids {
+        for (oid_str, client_id, ref_id) in removed_oids {
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
                 "OnMachoObjectDisconnect",
                 "clientID",
                 vec![
-                    PyRep::String(format!("N=1:{bid}")),
-                    PyRep::Integer(char_id),
-                    PyRep::Integer(bid as i64),
+                    PyRep::ascii_bytes(oid_str),
+                    PyRep::Integer(client_id),
+                    PyRep::Integer(ref_id),
                 ],
             );
         }
