@@ -440,3 +440,115 @@ async fn test_abyssal_entry_ship_limits_coop_and_trace_lifecycle() {
         assert!(!(32_000_000..=32_999_999).contains(&ch.solar_system_id), "Pilot no longer in Abyssal space");
     });
 }
+
+#[tokio::test]
+async fn test_abyssal_coop_staggered_rooms_reentry_kinematics_and_pod_corpse() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let sys_id = SYS_08_LASHESIH;
+    let (char1, char2) = (90_000_001_i64, 90_000_002_i64);
+    let uid3 = ctx.db.provision_player_account("abyss_stagger3", "pw123");
+    let char3 = ctx.db.create_character(uid3, "Amarr Abyss Pilot", 1, 1, 11, 17, &ctx.sde).unwrap().character_id;
+    let (ship1, ship2, ship3) = (625_000_001_i64, 625_000_002_i64, 625_000_003_i64);
+    let base = DVec3::new(35_000_000.0, 2.0e9, 0.0);
+
+    // 1. BF-06: activate_trace enforces cloak/tether checks, 30m un-entered lifetime, and fitted exit Ball kinematics
+    let mut sess1 = login_pilot_in_space(&ctx, 887_401, "demo", "demo-secret", char1, ship1, 624, sys_id, base).await;
+    seed_cargo_item(&ctx, 725_100_001, FIL_T1_ELEC, char1, ship1, 1);
+    let dep1 = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(725_100_001)], &kw, None).await.expect("dep1");
+    let tr1 = dep1.dict_get("traceBallID").unwrap().as_i64().unwrap();
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    { let mut bp = sys_h.ballpark.write().unwrap(); bp.combat_states.get_mut(&ship1).unwrap().is_cloaked = true; }
+    assert_eq!(ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(tr1)], &kw, None).await.unwrap_err().code, "ShipIsCloaked");
+    { let mut bp = sys_h.ballpark.write().unwrap(); let cs = bp.combat_states.get_mut(&ship1).unwrap(); cs.is_cloaked = false; cs.is_tethered = true; }
+    assert_eq!(ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(tr1)], &kw, None).await.unwrap_err().code, "ShipIsTethered");
+    { let mut bp = sys_h.ballpark.write().unwrap(); bp.combat_states.get_mut(&ship1).unwrap().is_tethered = false; }
+
+    ctx.advance_secs(1_250); // > 20m, < 30m: un-entered trace still valid
+    let ent1 = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(tr1)], &kw, None).await.expect("enter at 1250s");
+    let pid1 = ent1.dict_get("pocketID").unwrap().as_i64().unwrap();
+    let p_sys = ent1.dict_get("solarSystemID").unwrap().as_i64().unwrap() as u32;
+    let p_h = ctx.systems.get_or_spawn(p_sys);
+    for r in 0..3 {
+        crate::abyssal_room_combat::destroy_room_npcs_via_damage(&ctx, char1, r).await;
+        let gid = 1_895_000_000 + pid1 * 10 + (r as i64 + 1);
+        let gpos = p_h.get_ball_snapshot(gid).await.unwrap().unwrap().1.position;
+        let _ = p_h.set_ball_position(ship1, gpos + DVec3::new(100.0, 0.0, 0.0)).await;
+        let method = if r < 2 { "AbyssalGateActivation" } else { "AbyssalEndGateActivation" };
+        ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, method, &[PyRep::Integer(gid)], &kw, None).await.expect("transit");
+    }
+    let (_, exit_maller) = sys_h.get_ball_snapshot(ship1).await.unwrap().expect("exited Maller ball");
+    let exp_fit = ctx.get_or_rebuild_ship_fitting(char1, ship1).expect("Maller fitting");
+    assert!((exit_maller.max_velocity - exp_fit.ship.get_attribute(37, &ctx.sde)).abs() < 1e-3 && (exit_maller.max_velocity - 250.0).abs() > 1.0, "Exit ball uses fitted Dogma max_velocity (not hardcoded 250.0)");
+    assert!((exit_maller.inertia - exp_fit.ship.get_attribute(70, &ctx.sde)).abs() < 1e-4 && (exit_maller.inertia - 0.5).abs() > 1e-3, "Exit ball uses fitted Dogma inertia (not hardcoded 0.5)");
+
+    // 2. BF-02 & BF-06: Co-op staggered room boundary safety, TraceAlreadyEntered re-entry refusal, and boundary pod corpse/implant/faction corvette
+    let base_c = DVec3::new(50_000_000.0, 2.0e9, 0.0);
+    move_pilot_to_system(&ctx, &mut sess1, char1, ship1, 587, sys_id, base_c).await;
+    let mut sess2 = login_pilot_in_space(&ctx, 887_402, "other", "other-secret", char2, ship2, 587, sys_id, base_c + DVec3::new(200.0, 0.0, 0.0)).await;
+    let mut sess3 = login_pilot_in_space(&ctx, 887_403, "abyss_stagger3", "pw123", char3, ship3, 587, sys_id, base_c + DVec3::new(400.0, 0.0, 0.0)).await;
+    let implant_iid = 725_200_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(99_401, FleetRecord { fleet_id: 99_401, boss_id: char1, members: vec![char1, char2, char3], ..Default::default() });
+        snap.characters.get_mut(&char3).unwrap().race_id = 4; // Amarr -> Impairor (596)
+        snap.items.insert(implant_iid, InventoryItemRecord {
+            item_id: implant_iid, type_id: 9_899, owner_id: char3, location_id: char3, flag: InventoryFlag::Implant, quantity: 1, singleton: true, version: 1, ..Default::default()
+        });
+        snap.active_implants.insert(char3, vec![9_899]);
+    });
+    seed_cargo_item(&ctx, 725_100_010, FIL_T1_ELEC, char1, ship1, 3);
+    let dep_c = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(725_100_010)], &kw, None).await.expect("dep coop");
+    let tr_c = dep_c.dict_get("traceBallID").unwrap().as_i64().unwrap();
+    let e_c1 = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(tr_c)], &kw, None).await.expect("c1");
+    let e_c2 = ctx.dispatch_rpc(&mut sess2, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(tr_c)], &kw, None).await.expect("c2");
+    let _ = ctx.dispatch_rpc(&mut sess3, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(tr_c)], &kw, None).await.expect("c3");
+    let c_pid = e_c1.dict_get("pocketID").unwrap().as_i64().unwrap();
+    assert_eq!(Some(c_pid), e_c2.dict_get("pocketID").and_then(|v| v.as_i64()));
+
+    // Pilot 1 advances to Room 3 while Pilot 2 stays in Room 1 -> Pilot 2 takes ZERO boundary damage
+    for r in 0..2 {
+        crate::abyssal_room_combat::destroy_room_npcs_via_damage(&ctx, char1, r).await;
+        let gid = 1_895_000_000 + c_pid * 10 + (r as i64 + 1);
+        let gpos = p_h.get_ball_snapshot(gid).await.unwrap().unwrap().1.position;
+        let _ = p_h.set_ball_position(ship1, gpos + DVec3::new(100.0, 0.0, 0.0)).await;
+        ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalGateActivation", &[PyRep::Integer(gid)], &kw, None).await.expect("c1 advance");
+    }
+    let ship2_hp_before = p_h.get_combat_state(ship2).await.unwrap().unwrap().structure_hp;
+    for _ in 0..4 {
+        let mut bp = p_h.ballpark.write().unwrap();
+        let _ = eve_server::services::pve_special_sites_abyssal::step_abyssal_hazards_and_pylons_in_ballpark(&mut bp, Some(&ctx.sde), Some(&ctx.db), p_sys);
+    }
+    assert_eq!(p_h.get_combat_state(ship2).await.unwrap().unwrap().structure_hp, ship2_hp_before, "Pilot 2 in Room 1 takes zero boundary damage when Pilot 1 is in Room 3");
+
+    // Pilot 1 exits Room 3 while Pilot 2 & 3 remain -> Pilot 1 re-entry into open trace rejected with TraceAlreadyEntered
+    crate::abyssal_room_combat::destroy_room_npcs_via_damage(&ctx, char1, 2).await;
+    let r3_gid = 1_895_000_000 + c_pid * 10 + 3;
+    let r3_gpos = p_h.get_ball_snapshot(r3_gid).await.unwrap().unwrap().1.position;
+    let _ = p_h.set_ball_position(ship1, r3_gpos + DVec3::new(100.0, 0.0, 0.0)).await;
+    ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEndGateActivation", &[PyRep::Integer(r3_gid)], &kw, None).await.expect("c1 exit");
+    let tr_pos = sys_h.get_ball_snapshot(tr_c).await.unwrap().expect("trace still open for c2/c3").1.position;
+    let _ = sys_h.set_ball_position(ship1, tr_pos + DVec3::new(200.0, 0.0, 0.0)).await;
+    let re_err = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(tr_c)], &kw, None).await.unwrap_err();
+    assert_eq!(re_err.code, "TraceAlreadyEntered", "Exited pilot cannot re-enter same trace without filaments");
+
+    // Pilot 3 strays > 75 km in Room 1 -> ship & capsule destroyed -> implant destroyed, Corpse (25) spawned, DetailedKillmail & Amarr Impairor (596)
+    let r1_center = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| DVec3::from_array(reg.abyssal_pockets[&char3].grid_offset));
+    let _ = p_h.set_ball_position(ship3, r1_center + DVec3::new(85_000.0, 0.0, 0.0)).await;
+    if let Ok(Some(mut cs)) = p_h.get_combat_state(ship3).await { cs.structure_hp = 200.0; let _ = p_h.set_combat_state(ship3, cs).await; }
+    for _ in 0..30 {
+        if ctx.db.with_snapshot(|s| s.characters[&char3].station_id.is_some()) { break; }
+        let mut bp = p_h.ballpark.write().unwrap();
+        let _ = eve_server::services::pve_special_sites_abyssal::step_abyssal_hazards_and_pylons_in_ballpark(&mut bp, Some(&ctx.sde), Some(&ctx.db), p_sys);
+    }
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&implant_iid), "Plugged-in implant destroyed on boundary pod death");
+        assert!(!snap.active_implants.contains_key(&char3), "active_implants cleared on boundary pod death");
+        assert!(snap.items.values().any(|i| i.type_id == 25 && i.owner_id == char3 && i.location_id == p_sys as i64), "Corpse (type 25) spawned in Abyssal space");
+        assert!(snap.combat_crimewatch_state.detailed_killmails.values().any(|km| {
+            km.victim_character_id == char3 && km.victim_ship_type_id == 670 && km.destroyed_items.iter().any(|d| d.type_id == 9_899)
+        }), "DetailedKillmail recorded for capsule with destroyed implant 9899");
+        let new_ship_id = snap.characters[&char3].active_ship_id;
+        assert_eq!(snap.items[&new_ship_id].type_id, 596, "Amarr pilot respawned in Impairor (596) faction rookie corvette");
+    });
+}

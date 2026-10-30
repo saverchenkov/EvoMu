@@ -268,8 +268,15 @@ async fn activate_trace(
     }
 
     let now_u = ctx.now_unix();
+    let fallback_ttl = if trace.pocket_id.is_some() {
+        1_200
+    } else {
+        crate::services::pve_special_sites_abyssal::UNENTERED_GATE_LIFETIME_SEC
+    };
     if (trace.expires_at_sec > 0 && now_u >= trace.expires_at_sec)
-        || (trace.expires_at_sec == 0 && trace.created_unix > 0 && now_u >= trace.created_unix + 1_200)
+        || (trace.expires_at_sec == 0
+            && trace.created_unix > 0
+            && now_u >= trace.created_unix + fallback_ttl)
     {
         with_pve_special_reg(ctx, |reg| {
             reg.abyssal_traces.remove(&trace.trace_ball_id);
@@ -282,6 +289,20 @@ async fn activate_trace(
     }
 
     let sys_handle = ctx.systems.get_or_spawn(cur_sys);
+    if let Ok(Some(cs)) = sys_handle.get_combat_state(ship_id).await {
+        if cs.is_cloaked {
+            return Err(BridgeRpcError {
+                code: "ShipIsCloaked".into(),
+                message: "Cannot activate Abyssal entrance trace while cloaked".into(),
+            });
+        }
+        if cs.is_tethered {
+            return Err(BridgeRpcError {
+                code: "ShipIsTethered".into(),
+                message: "Cannot activate Abyssal entrance trace while tethered".into(),
+            });
+        }
+    }
     let ship_pos = if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
         ball.position
     } else {
@@ -326,7 +347,7 @@ async fn activate_trace(
         });
     }
 
-    let (tier, weather) =
+    let (tier, _weather) =
         crate::services::pve_special_sites::classify_abyssal_filament(trace.filament_type_id)
             .unwrap_or((1, crate::services::pve_special_sites::AbyssalWeatherKind::Electrical));
     let origin_sec = ctx
@@ -340,28 +361,27 @@ async fn activate_trace(
             origin_sec, tier,
         )?;
 
-    let cap_exceeded = with_pve_special_reg(ctx, |reg| {
-        for (tid, t) in reg.abyssal_traces.iter_mut() {
-            if *tid != trace.trace_ball_id {
-                t.entered_char_ids.retain(|&cid| cid != char_id);
-            }
-        }
+    let entry_check = with_pve_special_reg(ctx, |reg| {
         if let Some(t) = reg.abyssal_traces.get_mut(&trace.trace_ball_id) {
-            if !t.entered_char_ids.contains(&char_id) && t.entered_char_ids.len() >= eff_cap as usize {
-                return true;
+            if t.entered_char_ids.contains(&char_id) {
+                return Err(BridgeRpcError {
+                    code: "TraceAlreadyEntered".into(),
+                    message: "Pilot has already entered this Abyssal entrance trace".into(),
+                });
             }
-            if !t.entered_char_ids.contains(&char_id) {
-                t.entered_char_ids.push(char_id);
+            if t.entered_char_ids.len() >= eff_cap as usize {
+                return Err(BridgeRpcError {
+                    code: "TraceShipLimitReached".into(),
+                    message: format!(
+                        "Abyssal trace ship limit ({eff_cap}) reached for this hull class"
+                    ),
+                });
             }
+            t.entered_char_ids.push(char_id);
         }
-        false
+        Ok(())
     });
-    if cap_exceeded {
-        return Err(BridgeRpcError {
-            code: "TraceShipLimitReached".into(),
-            message: format!("Abyssal trace ship limit ({eff_cap}) reached for this hull class"),
-        });
-    }
+    entry_check?;
 
     if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
         ctx.db.with_mut_snapshot(|snap| {
@@ -378,27 +398,27 @@ async fn activate_trace(
             .trigger_suspect_flag(char_id, entry_now);
     }
     let (pocket_id, room1_npcs) =
-        crate::services::pve_special_sites::enter_abyssal_pocket_for_character(
+        crate::services::pve_special_sites_abyssal::enter_abyssal_pocket_with_trace(
             ctx,
             session,
             char_id,
             trace.filament_type_id,
             tier,
             cur_sys,
+            Some(trace.trace_ball_id),
         )
         .await;
-    let (remaining_sec, penalty_pct) = with_pve_special_reg(ctx, |reg| {
+    let remaining_sec = with_pve_special_reg(ctx, |reg| {
         reg.abyssal_pockets
             .get(&char_id)
             .map(|p| {
-                let rem = if p.fleet_ship_ids.len() <= 1 {
+                if p.fleet_ship_ids.len() <= 1 {
                     1_200
                 } else {
                     p.collapse_at_sec.saturating_sub(entry_now).min(1_200) as i64
-                };
-                (rem, p.weather_penalty_pct)
+                }
             })
-            .unwrap_or((1_200, 50.0))
+            .unwrap_or(1_200)
     });
 
     sys_handle.try_remove_ball(ship_id);
@@ -407,34 +427,18 @@ async fn activate_trace(
         .db
         .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(621));
     let mut cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type);
-    let mut max_vel = ctx
-        .sde
-        .types
-        .get(&ship_type)
-        .and_then(|t| t.default_attributes.get(&37).copied())
-        .unwrap_or(250.0);
-    let mut opt_range = 20_000.0;
-    crate::services::pve_special_sites_abyssal::apply_abyssal_weather_to_combat_and_nav(
-        weather,
-        penalty_pct,
-        50.0,
-        &mut cs,
-        &mut max_vel,
-        &mut opt_range,
-    );
+    for r in cs.shield_resonance.iter_mut().chain(cs.armor_resonance.iter_mut()).chain(cs.structure_resonance.iter_mut()) {
+        *r = r.clamp(0.0, 1.0);
+    }
+    cs.capacitor_recharge_time_ms = cs.capacitor_recharge_time_ms.max(1_000.0);
     let base = DVec3::from_array(pocket_grid_offset(ctx, pocket_id));
-    let ball = eve_destiny::Ball {
-        id: ship_id,
-        type_id: ship_type,
-        position: base + DVec3::new(0.0, 0.0, -50_000.0),
-        velocity: DVec3::ZERO,
-        max_velocity: max_vel,
-        inertia: 0.5,
-        mass: 1_000_000.0,
-        radius: 50.0,
-        speed_fraction: 0.0,
-        mode: eve_destiny::MovementMode::Stop,
-    };
+    let ball = crate::services::pve_abyssal_pylons::build_fitted_ship_space_ball(
+        ctx,
+        char_id,
+        ship_id,
+        ship_type,
+        base + DVec3::new(0.0, 0.0, -50_000.0),
+    );
     let _ = abyss_handle.spawn_ball_with_combat(ball, cs).await;
     session.solar_system_id = Some(ABYSSAL_SPACE_SYSTEM_ID);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, ABYSSAL_SPACE_SYSTEM_ID);
@@ -470,10 +474,6 @@ async fn activate_inventory_filament(
 
     let (_iid, filament_type_id, tier, max_ships, origin_sec, ship_pos) =
         validate_and_consume_abyssal_filaments(ctx, char_id, ship_id, cur_sys, filament_arg).await?;
-
-    let weather = crate::services::pve_special_sites::classify_abyssal_filament(filament_type_id)
-        .map(|(_, w)| w)
-        .unwrap_or(crate::services::pve_special_sites::AbyssalWeatherKind::Electrical);
 
     let now_unix = ctx.now_unix();
     let origin_handle = ctx.systems.get_or_spawn(cur_sys);
@@ -512,21 +512,16 @@ async fn activate_inventory_filament(
         .await;
 
     let (pocket_id, room1_npcs) =
-        crate::services::pve_special_sites::enter_abyssal_pocket_for_character(
+        crate::services::pve_special_sites_abyssal::enter_abyssal_pocket_with_trace(
             ctx,
             session,
             char_id,
             filament_type_id,
             tier,
             cur_sys,
+            Some(trace_ball_id),
         )
         .await;
-    let penalty_pct = with_pve_special_reg(ctx, |reg| {
-        reg.abyssal_pockets
-            .get(&char_id)
-            .map(|p| p.weather_penalty_pct)
-            .unwrap_or(50.0)
-    });
 
     origin_handle.try_remove_ball(ship_id);
     let abyss_handle = ctx.systems.get_or_spawn(ABYSSAL_SPACE_SYSTEM_ID);
@@ -534,34 +529,18 @@ async fn activate_inventory_filament(
         .db
         .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(621));
     let mut cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type);
-    let mut max_vel = ctx
-        .sde
-        .types
-        .get(&ship_type)
-        .and_then(|t| t.default_attributes.get(&37).copied())
-        .unwrap_or(250.0);
-    let mut opt_range = 20_000.0;
-    crate::services::pve_special_sites_abyssal::apply_abyssal_weather_to_combat_and_nav(
-        weather,
-        penalty_pct,
-        50.0,
-        &mut cs,
-        &mut max_vel,
-        &mut opt_range,
-    );
+    for r in cs.shield_resonance.iter_mut().chain(cs.armor_resonance.iter_mut()).chain(cs.structure_resonance.iter_mut()) {
+        *r = r.clamp(0.0, 1.0);
+    }
+    cs.capacitor_recharge_time_ms = cs.capacitor_recharge_time_ms.max(1_000.0);
     let base = DVec3::from_array(pocket_grid_offset(ctx, pocket_id));
-    let ball = eve_destiny::Ball {
-        id: ship_id,
-        type_id: ship_type,
-        position: base + DVec3::new(0.0, 0.0, -50_000.0),
-        velocity: DVec3::ZERO,
-        max_velocity: max_vel,
-        inertia: 0.5,
-        mass: 1_000_000.0,
-        radius: 50.0,
-        speed_fraction: 0.0,
-        mode: eve_destiny::MovementMode::Stop,
-    };
+    let ball = crate::services::pve_abyssal_pylons::build_fitted_ship_space_ball(
+        ctx,
+        char_id,
+        ship_id,
+        ship_type,
+        base + DVec3::new(0.0, 0.0, -50_000.0),
+    );
     let _ = abyss_handle.spawn_ball_with_combat(ball, cs).await;
     session.solar_system_id = Some(ABYSSAL_SPACE_SYSTEM_ID);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, ABYSSAL_SPACE_SYSTEM_ID);

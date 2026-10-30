@@ -84,6 +84,7 @@ pub mod pve_incursion_sites;
 pub mod pve_metaliminal_storms;
 pub mod pve_sleeper_caches;
 pub mod pve_abyssal_hazards;
+pub mod pve_abyssal_pylons;
 pub mod pve_special_sites;
 pub mod pve_special_sites_abyssal;
 pub mod pvp_filament_arena;

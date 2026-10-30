@@ -20,8 +20,8 @@ use eve_server::services::pve_special_sites::with_pve_special_reg;
 use eve_server::services::pve_special_sites_abyssal::{
     evacuate_abyssal_pockets_for_downtime, evaluate_abyssal_spatial_clouds_for_ship,
     pulse_abyssal_automated_pylons, roll_abyssal_weather_penalty_pct, spatial_cloud_radius_m,
-    step_abyssal_hazards_and_pylons_in_ballpark, AbyssalWeatherKind,
-    AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID, AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID,
+    step_abyssal_hazards_and_pylons_in_ballpark, suppressor_radius_m, tracking_pylon_radius_and_mult,
+    AbyssalWeatherKind, AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID, AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID,
     AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID, BIOLUMINESCENT_CLOUD_LARGE_TYPE_ID,
     BIOLUMINESCENT_CLOUD_SMALL_TYPE_ID, BIOLUMINESCENT_CLOUD_TYPE_ID,
     FILAMENT_CLOUD_LARGE_TYPE_ID, FILAMENT_CLOUD_SMALL_TYPE_ID, FILAMENT_CLOUD_TYPE_ID,
@@ -83,17 +83,8 @@ async fn test_abyssal_in_pocket_restrictions_boundary_damage_and_clearing() {
     let bm_id = 730_300_001_i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.bookmarks.insert(bm_id, BookmarkRecord {
-            bookmark_id: bm_id,
-            owner_id: char1,
-            label: "Abyss BM".into(),
-            solar_system_id: abyss_sys,
-            x: gate_pos.x + 200_000.0,
-            y: gate_pos.y,
-            z: gate_pos.z,
-            item_id: None,
-            memo: String::new(),
-            folder_id: None,
-            is_shared: false,
+            bookmark_id: bm_id, owner_id: char1, label: "Abyss BM".into(), solar_system_id: abyss_sys,
+            x: gate_pos.x + 200_000.0, y: gate_pos.y, z: gate_pos.z, item_id: None, memo: String::new(), folder_id: None, is_shared: false,
         });
     });
     let beyonce_oid = ctx.bind_object(&sess1, "beyonce", abyss_sys as i64).expect("bind beyonce");
@@ -275,31 +266,11 @@ async fn test_abyssal_in_pocket_restrictions_boundary_damage_and_clearing() {
     let p2_sys = ent2.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
     eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.active_drones_in_space.insert(space_drone, eve_server::services::combat_crimewatch::DroneSpaceState {
-            ball_id: space_drone,
-            drone_item_id: space_drone,
-            type_id: 2456,
-            group_id: 100,
-            owner_char_id: char2,
-            original_owner_char_id: char2,
-            parent_ship_id: ship2,
-            solar_system_id: p2_sys,
-            target_id: None,
-            activity_state: 0,
-            assist_char_id: None,
-            guard_char_id: None,
-            is_abandoned: false,
-            is_sentry: false,
-            bandwidth_used: 5.0,
-            max_velocity: 400.0,
-            optimal_range: 5_000.0,
-            damage_vector: DamageVector::default(),
-            shield_repair_amount: 0.0,
-            armor_repair_amount: 0.0,
-            hull_repair_amount: 0.0,
-            web_speed_factor: 1.0,
-            neut_amount: 0.0,
-            ecm_strength: 0.0,
-            tp_sig_bonus_pct: 0.0,
+            ball_id: space_drone, drone_item_id: space_drone, type_id: 2456, group_id: 100, owner_char_id: char2,
+            original_owner_char_id: char2, parent_ship_id: ship2, solar_system_id: p2_sys, target_id: None, activity_state: 0,
+            assist_char_id: None, guard_char_id: None, is_abandoned: false, is_sentry: false, bandwidth_used: 5.0,
+            max_velocity: 400.0, optimal_range: 5_000.0, damage_vector: DamageVector::default(), shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0, hull_repair_amount: 0.0, web_speed_factor: 1.0, neut_amount: 0.0, ecm_strength: 0.0, tp_sig_bonus_pct: 0.0,
         });
     });
 
@@ -356,12 +327,11 @@ async fn test_abyssal_in_pocket_restrictions_boundary_damage_and_clearing() {
     }
 }
 
-// parity: feat:abyssal.automated-pylons, feat:abyssal.weather-effects-and-penalties
+// parity: feat:abyssal.automated-pylons
 #[tokio::test]
 async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
     eve_testkit::attest(&[
         "feat:abyssal.automated-pylons",
-        "feat:abyssal.weather-effects-and-penalties",
     ]);
 
     let ctx = ServerContext::new();
@@ -370,7 +340,14 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
     let abyss_sys = 32_000_005_u32;
     let sys_h = ctx.systems.get_or_spawn(abyss_sys);
 
-    // 1. Automated Pylons: Small (15km), Medium (25km), Large (40km) Suppressors & Multibody Tracking Pylons (ships + sentry drones)
+    // 1. Automated Pylons (V24 SDE): Suppressors (47437=15km, 47438=40km, 48254=40km; spare Sentry Drones & Tesseras)
+    // and Multibody Tracking Pylons (47469=15km 1.8x, 47470=40km 1.6x; buff player ships, Sentry Drones, and NPC ships)
+    assert_eq!(suppressor_radius_m(Some(&ctx.sde), AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID, 0.0), 15_000.0);
+    assert_eq!(suppressor_radius_m(Some(&ctx.sde), AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID, 0.0), 40_000.0);
+    assert_eq!(suppressor_radius_m(Some(&ctx.sde), AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID, 0.0), 40_000.0);
+    assert_eq!(tracking_pylon_radius_and_mult(Some(&ctx.sde), MULTIBODY_TRACKING_PYLON_TYPE_ID, 0.0), (15_000.0, 1.8));
+    assert_eq!(tracking_pylon_radius_and_mult(Some(&ctx.sde), MULTIBODY_TRACKING_PYLON_MEDIUM_TYPE_ID, 0.0), (40_000.0, 1.6));
+
     let ship_id = 740_000_001_i64;
     let sentry_id = 740_000_002_i64;
     let drone_id = 740_000_003_i64;
@@ -378,15 +355,17 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
     let fighter_id = 740_000_005_i64;
     let rogue_npc_id = 740_000_006_i64;
     let trig_npc_id = 740_000_007_i64;
+    let tessera_id = 740_000_008_i64;
 
     for (bid, tid, pos, max_vel) in [
         (ship_id, 621_u32, DVec3::new(10_000.0, 0.0, 0.0), 250.0),
         (sentry_id, 23_559, DVec3::new(10_500.0, 0.0, 0.0), 0.0), // Warden I Sentry Drone (group 100)
-        (drone_id, 2456, DVec3::new(20_000.0, 0.0, 0.0), 400.0), // Hobgoblin I at 20km
-        (missile_id, 204, DVec3::new(20_000.0, 100.0, 0.0), 2_000.0), // Inferno Cruise Missile at 20km
-        (fighter_id, 23_057, DVec3::new(20_000.0, 200.0, 0.0), 800.0), // Dragonfly I Fighter at 20km
-        (rogue_npc_id, 47_847, DVec3::new(20_000.0, 300.0, 0.0), 500.0), // Sparkneedle Tessella (group 1997) at 20km
-        (trig_npc_id, 48_092, DVec3::new(5_000.0, 0.0, 0.0), 400.0), // Striking Damavik (group 1982) at 5km
+        (drone_id, 2456, DVec3::new(35_000.0, 0.0, 0.0), 400.0), // Hobgoblin I at 35km
+        (missile_id, 204, DVec3::new(35_000.0, 100.0, 0.0), 2_000.0), // Inferno Cruise Missile at 35km
+        (fighter_id, 23_057, DVec3::new(35_000.0, 200.0, 0.0), 800.0), // Dragonfly I Fighter at 35km
+        (rogue_npc_id, 47_847, DVec3::new(35_000.0, 300.0, 0.0), 500.0), // Sparkneedle Tessella (group 1997) at 35km
+        (trig_npc_id, 48_092, DVec3::new(12_000.0, 0.0, 0.0), 400.0), // Striking Damavik NPC (id >= 700M) at 12km
+        (tessera_id, 48_262, DVec3::new(10_000.0, 200.0, 0.0), 300.0), // Blastlance Tessera cruiser spared at 10km
     ] {
         let mut cs = ctx.build_type_combat_state(tid);
         cs.shield_hp = 5_000.0;
@@ -404,46 +383,55 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
         max_velocity: 0.0, inertia: 1.0, mass: 1.0, radius: 15_000.0, speed_fraction: 0.0, mode: MovementMode::Stop,
     }).await;
     let _ = pulse_abyssal_automated_pylons(&ctx, abyss_sys).await;
-    assert_eq!(sys_h.get_combat_state(drone_id).await.unwrap().unwrap().shield_hp, 5_000.0, "Small suppressor (15km) spares drone at 20km");
-    assert_eq!(sys_h.get_combat_state(trig_npc_id).await.unwrap().unwrap().shield_hp, 5_000.0, "Suppressor spares Triglavian NPC at 5km");
+    assert_eq!(sys_h.get_combat_state(drone_id).await.unwrap().unwrap().shield_hp, 5_000.0, "Small suppressor (15km) spares drone at 35km");
+    assert_eq!(sys_h.get_combat_state(sentry_id).await.unwrap().unwrap().shield_hp, 5_000.0, "Suppressor spares stationary Sentry Drone at 10.5km");
+    assert_eq!(sys_h.get_combat_state(tessera_id).await.unwrap().unwrap().shield_hp, 5_000.0, "Suppressor spares Tessera cruiser at 10km");
+    assert_eq!(sys_h.get_combat_state(trig_npc_id).await.unwrap().unwrap().shield_hp, 5_000.0, "Suppressor spares Triglavian NPC at 12km");
     assert_eq!(sys_h.get_combat_state(ship_id).await.unwrap().unwrap().shield_hp, 5_000.0, "Suppressor spares player ship at 10km");
     sys_h.try_remove_ball(740_010_001);
 
-    assert_eq!(AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID, 47_438);
-    assert_eq!(AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID, 48_254);
     let _ = sys_h.spawn_ball(Ball {
         id: 740_010_002, type_id: AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID, position: DVec3::ZERO, velocity: DVec3::ZERO,
-        max_velocity: 0.0, inertia: 1.0, mass: 1.0, radius: 25_000.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+        max_velocity: 0.0, inertia: 1.0, mass: 1.0, radius: 40_000.0, speed_fraction: 0.0, mode: MovementMode::Stop,
     }).await;
     let _ = pulse_abyssal_automated_pylons(&ctx, abyss_sys).await;
-    assert!(sys_h.get_combat_state(drone_id).await.unwrap().unwrap().shield_hp < 5_000.0, "Medium suppressor (25km) damages drone at 20km");
-    assert!(sys_h.get_combat_state(missile_id).await.unwrap().unwrap().shield_hp < 5_000.0, "Medium suppressor damages missile at 20km");
-    assert!(sys_h.get_combat_state(fighter_id).await.unwrap().unwrap().shield_hp < 5_000.0, "Medium suppressor damages fighter at 20km");
-    assert!(sys_h.get_combat_state(rogue_npc_id).await.unwrap().unwrap().shield_hp < 5_000.0, "Medium suppressor damages rogue drone NPC at 20km");
+    assert!(sys_h.get_combat_state(drone_id).await.unwrap().unwrap().shield_hp < 5_000.0, "Medium suppressor (SDE 40km) damages drone at 35km");
+    assert!(sys_h.get_combat_state(missile_id).await.unwrap().unwrap().shield_hp < 5_000.0, "Medium suppressor damages missile at 35km");
+    assert!(sys_h.get_combat_state(fighter_id).await.unwrap().unwrap().shield_hp < 5_000.0, "Medium suppressor damages fighter at 35km");
+    assert!(sys_h.get_combat_state(rogue_npc_id).await.unwrap().unwrap().shield_hp < 5_000.0, "Medium suppressor damages rogue drone NPC at 35km");
+    assert_eq!(sys_h.get_combat_state(sentry_id).await.unwrap().unwrap().shield_hp, 5_000.0, "Medium suppressor still spares Sentry Drone");
 
-    let _ = sys_h.set_ball_position(drone_id, DVec3::new(35_000.0, 0.0, 0.0)).await;
-    let hp_35 = sys_h.get_combat_state(drone_id).await.unwrap().unwrap().shield_hp;
+    let _ = sys_h.set_ball_position(drone_id, DVec3::new(42_000.0, 0.0, 0.0)).await;
+    let hp_42 = sys_h.get_combat_state(drone_id).await.unwrap().unwrap().shield_hp;
     let _ = pulse_abyssal_automated_pylons(&ctx, abyss_sys).await;
-    assert_eq!(sys_h.get_combat_state(drone_id).await.unwrap().unwrap().shield_hp, hp_35, "Medium suppressor (25km) spares drone at 35km");
+    assert_eq!(sys_h.get_combat_state(drone_id).await.unwrap().unwrap().shield_hp, hp_42, "Medium suppressor (40km) spares drone at 42km");
     sys_h.try_remove_ball(740_010_002);
 
+    let _ = sys_h.set_ball_position(drone_id, DVec3::new(38_000.0, 0.0, 0.0)).await;
     let _ = sys_h.spawn_ball(Ball {
         id: 740_010_003, type_id: AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID, position: DVec3::ZERO, velocity: DVec3::ZERO,
         max_velocity: 0.0, inertia: 1.0, mass: 1.0, radius: 40_000.0, speed_fraction: 0.0, mode: MovementMode::Stop,
     }).await;
     let _ = pulse_abyssal_automated_pylons(&ctx, abyss_sys).await;
-    assert!(sys_h.get_combat_state(drone_id).await.unwrap().unwrap().shield_hp < hp_35, "Large suppressor (40km) damages drone at 35km");
+    assert!(sys_h.get_combat_state(drone_id).await.unwrap().unwrap().shield_hp < hp_42, "Large suppressor (40km) damages drone at 38km");
     sys_h.try_remove_ball(740_010_003);
 
-    assert_eq!(MULTIBODY_TRACKING_PYLON_TYPE_ID, 47_469);
-    assert_eq!(MULTIBODY_TRACKING_PYLON_MEDIUM_TYPE_ID, 47_470);
+    // Medium-Range Tracking Pylon (47470, 40km, +60% -> 1.6x) & Short-Range Tracking Pylon (47469, 15km, +80% -> 1.8x)
     let _ = sys_h.spawn_ball(Ball {
         id: 740_010_004, type_id: MULTIBODY_TRACKING_PYLON_MEDIUM_TYPE_ID, position: DVec3::ZERO, velocity: DVec3::ZERO,
-        max_velocity: 0.0, inertia: 1.0, mass: 1.0, radius: 30_000.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+        max_velocity: 0.0, inertia: 1.0, mass: 1.0, radius: 40_000.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }).await;
+    let _ = pulse_abyssal_automated_pylons(&ctx, abyss_sys).await;
+    assert!((sys_h.get_combat_state(ship_id).await.unwrap().unwrap().tracking_speed_multiplier - 1.6).abs() < 1e-6);
+    assert!((sys_h.get_combat_state(sentry_id).await.unwrap().unwrap().tracking_speed_multiplier - 1.6).abs() < 1e-6);
+    assert!((sys_h.get_combat_state(trig_npc_id).await.unwrap().unwrap().tracking_speed_multiplier - 1.6).abs() < 1e-6, "NPC ship receives 47470 tracking buff");
+    let _ = sys_h.spawn_ball(Ball {
+        id: 740_010_005, type_id: MULTIBODY_TRACKING_PYLON_TYPE_ID, position: DVec3::ZERO, velocity: DVec3::ZERO,
+        max_velocity: 0.0, inertia: 1.0, mass: 1.0, radius: 15_000.0, speed_fraction: 0.0, mode: MovementMode::Stop,
     }).await;
     let _ = pulse_abyssal_automated_pylons(&ctx, abyss_sys).await;
     assert!((sys_h.get_combat_state(ship_id).await.unwrap().unwrap().tracking_speed_multiplier - 1.8).abs() < 1e-6);
-    assert!((sys_h.get_combat_state(sentry_id).await.unwrap().unwrap().tracking_speed_multiplier - 1.8).abs() < 1e-6);
+    assert!((sys_h.get_combat_state(trig_npc_id).await.unwrap().unwrap().tracking_speed_multiplier - 1.8).abs() < 1e-6, "NPC ship receives 47469 1.8x tracking buff");
 
     // 2. Bioadaptive Cache (47951) vs Extraction Subnode (49662): T0 has NO Extraction Subnode; T1+ spawns both & 48120 wreck on destroy
     let char1 = 90_000_001_i64;
@@ -479,11 +467,29 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
         assert_eq!(s.items[&cache3_id].type_id, 47_951, "Bioadaptive Cache type 47951");
         assert_eq!(s.items[&subnode3_id].type_id, 49_662, "Extraction Subnode type 49662");
     });
+    // BF-04: Suppressor killing last room Rogue Drone NPC (47847) unlocks Room 1 conduit & cleans npc_entities
+    let p3_h = ctx.systems.get_or_spawn(p3_sys);
+    let r1_npcs = with_pve_special_reg(&ctx, |reg| reg.abyssal_pockets[&char1].rooms[0].npc_ball_ids.clone());
+    for &nid in &r1_npcs[1..] {
+        let _ = p3_h.apply_damage_with_attacker(nid, DamageVector { em: 1e7, thermal: 1e7, kinetic: 1e7, explosive: 1e7 }, Some(char1)).await;
+    }
+    let last_npc = r1_npcs[0];
+    let sup_pos = p3_h.get_ball_snapshot(1_899_000_000 + pid3 * 100 + 11).await.unwrap().unwrap().1.position;
+    {
+        let mut bp = p3_h.ballpark.write().unwrap();
+        if let Some(b) = bp.balls.get_mut(&last_npc) { b.type_id = 47_847; b.position = sup_pos; }
+        if let Some(cs) = bp.combat_states.get_mut(&last_npc) { cs.shield_hp = 0.0; cs.armor_hp = 0.0; cs.structure_hp = 10.0; }
+    }
+    let _ = pulse_abyssal_automated_pylons(&ctx, p3_sys).await;
+    assert!(with_pve_special_reg(&ctx, |reg| reg.abyssal_pockets[&char1].rooms[0].cleared), "Suppressor kill unlocks room conduit");
+    assert!(!eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| rt.npc_entities.contains_key(&last_npc)), "Suppressor kill cleans npc_entities");
+
     eve_server::services::pve_special_sites_abyssal::on_abyssal_cache_destroyed_core(&ctx.systems, &ctx.db, p3_sys, cache3_id, Some(char1)).await;
     ctx.db.with_snapshot(|s| {
         let wreck = s.items.values().find(|i| i.type_id == 48_120 && i.location_id == p3_sys as i64).expect("Triglavian Bioadaptive Wreck 48120 spawned");
         assert!(s.items.values().any(|i| i.location_id == wreck.item_id && i.quantity >= 4), "Loot transferred to wreck");
     });
+    let _ = evacuate_abyssal_pockets_for_downtime(&ctx);
 
     // 3. Spatial hazard clouds (Bioluminescence, Filament Small/Medium/Large, Tachyon): SDE radii, numeric modifiers & exit restoration
     assert_eq!(spatial_cloud_radius_m(Some(&ctx.sde), BIOLUMINESCENT_CLOUD_SMALL_TYPE_ID, 0.0), 5_000.0);
@@ -558,6 +564,7 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
     assert_eq!(roll_abyssal_weather_penalty_pct(&ctx, 4), 70.0);
 
     let base_ship_cs = ctx.build_ship_combat_state(char1, c_ship, 621);
+    let fitted_base_vel = eve_server::services::pve_abyssal_pylons::build_fitted_ship_space_ball(&ctx, char1, c_ship, 621, DVec3::ZERO).max_velocity;
     let base_opt = ctx.sde.types.get(&621).and_then(|t| t.default_attributes.get(&54).copied()).unwrap_or(15_000.0);
     let base_scan = ctx.sde.types.get(&621).and_then(|t| t.default_attributes.get(&564).copied()).unwrap_or(250.0);
     let weather_cases = [
@@ -596,35 +603,74 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
         let n_base_vel = ctx.sde.types.get(&n_ball.type_id).and_then(|t| t.default_attributes.get(&37).copied()).filter(|&v| v > 0.0).unwrap_or(380.0);
         let pen = exp_pen / 100.0;
         let dyn_attrs = ctx.db.with_snapshot(|s| s.items[&c_ship].dynamic_attributes.clone());
+        let pen_res = |r: f64| (r * (1.0 + pen)).clamp(0.0, 1.0);
         match weather {
             AbyssalWeatherKind::Electrical => {
-                assert!((s_cs.shield_resonance[0] - (1.0 - (1.0 - base_ship_cs.shield_resonance[0]) * (1.0 - pen))).abs() < 1e-4);
-                assert!((s_cs.armor_resonance[0] - (1.0 - ((1.0 - base_ship_cs.armor_resonance[0]) + base_ship_cs.armor_resonance[0] * 0.5))).abs() < 1e-4);
+                assert!((s_cs.shield_resonance[0] - pen_res(base_ship_cs.shield_resonance[0])).abs() < 1e-4);
+                assert!((s_cs.armor_resonance[0] - pen_res(base_ship_cs.armor_resonance[0])).abs() < 1e-4);
+                assert!((s_cs.structure_resonance[0] - pen_res(base_ship_cs.structure_resonance[0])).abs() < 1e-4);
                 assert!((s_cs.capacitor_recharge_time_ms - (base_ship_cs.capacitor_recharge_time_ms * 0.5).max(1_000.0)).abs() < 1.0);
-                assert!((n_cs.shield_resonance[0] - (1.0 - (1.0 - n_base_cs.shield_resonance[0]) * (1.0 - pen))).abs() < 1e-4);
+                assert!((n_cs.armor_resonance[0] - pen_res(n_base_cs.armor_resonance[0])).abs() < 1e-4);
             }
             AbyssalWeatherKind::Dark => {
-                assert!((s_ball.max_velocity - default_vel * 1.5).abs() < 1e-3);
+                assert!((s_ball.max_velocity - fitted_base_vel * 1.5).abs() < 1e-3);
                 assert!((dyn_attrs[&54] - base_opt * (1.0 - pen)).abs() < 1.0);
                 assert!((n_ball.max_velocity - n_base_vel * 1.5).abs() < 1e-3);
             }
             AbyssalWeatherKind::Exotic => {
-                assert!((s_cs.shield_resonance[2] - (1.0 - (1.0 - base_ship_cs.shield_resonance[2]) * (1.0 - pen))).abs() < 1e-4);
+                assert!((s_cs.shield_resonance[2] - pen_res(base_ship_cs.shield_resonance[2])).abs() < 1e-4);
+                assert!((s_cs.armor_resonance[2] - pen_res(base_ship_cs.armor_resonance[2])).abs() < 1e-4);
+                assert!((s_cs.structure_resonance[2] - pen_res(base_ship_cs.structure_resonance[2])).abs() < 1e-4);
                 assert!((dyn_attrs[&564] - base_scan * 1.5).abs() < 1e-3);
-                assert!((n_cs.shield_resonance[2] - (1.0 - (1.0 - n_base_cs.shield_resonance[2]) * (1.0 - pen))).abs() < 1e-4);
+                assert!((n_cs.armor_resonance[2] - pen_res(n_base_cs.armor_resonance[2])).abs() < 1e-4);
             }
             AbyssalWeatherKind::Firestorm => {
                 assert!((s_cs.max_armor_hp - base_ship_cs.max_armor_hp * 1.5).abs() < 1.0);
-                assert!((s_cs.armor_resonance[1] - (1.0 - (1.0 - base_ship_cs.armor_resonance[1]) * (1.0 - pen))).abs() < 1e-4);
-                assert!((n_cs.armor_resonance[1] - (1.0 - (1.0 - n_base_cs.armor_resonance[1]) * (1.0 - pen))).abs() < 1e-4);
+                assert!((s_cs.armor_resonance[1] - pen_res(base_ship_cs.armor_resonance[1])).abs() < 1e-4);
+                assert!((s_cs.structure_resonance[1] - pen_res(base_ship_cs.structure_resonance[1])).abs() < 1e-4);
+                assert!((n_cs.armor_resonance[1] - pen_res(n_base_cs.armor_resonance[1])).abs() < 1e-4);
             }
             AbyssalWeatherKind::Gamma => {
                 assert!((s_cs.max_shield_hp - base_ship_cs.max_shield_hp * 1.5).abs() < 1.0);
-                assert!((s_cs.shield_resonance[3] - (1.0 - (1.0 - base_ship_cs.shield_resonance[3]) * (1.0 - pen))).abs() < 1e-4);
-                assert!((n_cs.shield_resonance[3] - (1.0 - (1.0 - n_base_cs.shield_resonance[3]) * (1.0 - pen))).abs() < 1e-4);
+                assert!((s_cs.shield_resonance[3] - pen_res(base_ship_cs.shield_resonance[3])).abs() < 1e-4);
+                assert!((s_cs.structure_resonance[3] - pen_res(base_ship_cs.structure_resonance[3])).abs() < 1e-4);
+                assert!((n_cs.shield_resonance[3] - pen_res(n_base_cs.shield_resonance[3])).abs() < 1e-4);
             }
         }
         let _ = evacuate_abyssal_pockets_for_downtime(&ctx);
         assert!(ctx.db.with_snapshot(|s| s.items[&c_ship].dynamic_attributes.is_empty()), "Ship attributes restored on exit");
     }
+
+    // BF-03: Live Gunnery turret range penalty in Dark weather (-50%: ~44.9km skilled -> ~22.4km, so 30km fails in Dark and succeeds after exit)
+    move_pilot_to_system(&ctx, &mut sess1, char1, c_ship, 624, SYS_LOW_TAMA, DVec3::new(90_000_000.0, 2.0e9, 0.0)).await;
+    let (turret_id, ammo_id) = (740_300_001_i64, 740_300_002_i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(turret_id, InventoryItemRecord { item_id: turret_id, type_id: 487, owner_id: char1, location_id: c_ship, flag: InventoryFlag::HiSlot0, quantity: 1, singleton: true, version: 1, ..Default::default() });
+        snap.items.insert(ammo_id, InventoryItemRecord { item_id: ammo_id, type_id: 182, owner_id: char1, location_id: c_ship, flag: InventoryFlag::HiSlot0, quantity: 40, singleton: false, version: 1, ..Default::default() });
+        snap.module_online_states.insert(turret_id, true);
+    });
+    ctx.invalidate_ship_fitting(c_ship);
+    ctx.set_mechanic_rng_seed(Some(low_seed)); // T5 Dark -> -50% penalty
+    seed_cargo_item(&ctx, 740_300_003, 47_894, char1, c_ship, 1);
+    let d_dk = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(740_300_003)], &kw, None).await.expect("dep dark");
+    let e_dk = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(d_dk.dict_get("traceBallID").unwrap().as_i64().unwrap())], &kw, None).await.expect("ent dark");
+    let dk_sys = e_dk.dict_get("solarSystemID").unwrap().as_i64().unwrap() as u32;
+    let dk_npc = e_dk.dict_get("npcBallIDs").and_then(|v| if let PyRep::List(l) = v { l[0].as_i64() } else { None }).unwrap();
+    let dk_h = ctx.systems.get_or_spawn(dk_sys);
+    let _ = dk_h.set_ball_position(c_ship, DVec3::ZERO).await;
+    let _ = dk_h.set_ball_position(dk_npc, DVec3::new(30_000.0, 0.0, 0.0)).await;
+    let _ = dk_h.add_target_lock(c_ship, eve_destiny::TargetLock { target_id: dk_npc, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await;
+    let oor = eve_server::services::combat_crimewatch::dispatch_combat_rpc(&ctx, &mut sess1, "dogmaIM", "Activate", &[PyRep::Integer(turret_id), PyRep::String("projectileFired".into()), PyRep::Integer(dk_npc)], &kw).await.unwrap_err();
+    assert_eq!(oor.code, "TargetOutOfRange", "Dark weather -50% turret optimal/falloff blocks shot at 30km");
+    let _ = ctx.dispatch_rpc(&mut sess1, "dogmaIM", None, "Activate", &[PyRep::Integer(turret_id), PyRep::String("projectileFired".into()), PyRep::Integer(dk_npc)], &kw, None).await;
+    let _ = dk_h.try_step_full_tick(1.0);
+    assert!(!dk_h.has_module_cycle(c_ship, turret_id).await, "Module cycle auto-deactivates beyond Dark-penalized range");
+    let _ = evacuate_abyssal_pockets_for_downtime(&ctx);
+    assert!(ctx.db.with_snapshot(|s| s.items[&turret_id].dynamic_attributes.is_empty()), "Turret dynamic_attributes restored on exit");
+    move_pilot_to_system(&ctx, &mut sess1, char1, c_ship, 624, SYS_LOW_TAMA, DVec3::ZERO).await;
+    let tama_h = ctx.systems.get_or_spawn(SYS_LOW_TAMA);
+    let dummy_t = 740_300_099_i64;
+    let _ = tama_h.spawn_ball_with_combat(Ball { id: dummy_t, type_id: 48_090, position: DVec3::new(30_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 100.0, inertia: 1.0, mass: 1_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop }, ctx.build_type_combat_state(48_090)).await;
+    let _ = tama_h.add_target_lock(c_ship, eve_destiny::TargetLock { target_id: dummy_t, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await;
+    eve_server::services::combat_crimewatch::dispatch_combat_rpc(&ctx, &mut sess1, "dogmaIM", "Activate", &[PyRep::Integer(turret_id), PyRep::String("projectileFired".into()), PyRep::Integer(dummy_t)], &kw).await.expect("Restored turret hits 30km outside Dark weather");
 }

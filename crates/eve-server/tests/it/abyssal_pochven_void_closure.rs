@@ -136,13 +136,59 @@ async fn test_void_space_player_jump_and_gate_activation() {
         .expect_err("Targeting own ship must fail");
     assert_eq!(self_err.code, "InvalidTarget");
 
-    // 5. Jump via cargo filament: seed filament in active ship cargo
+    // 4b. BF-05: Non-Void Space filaments (Needlejack 53977, Pochven 56065, Abyssal 47763) and Abyssal Trace (47458) rejected
+    for (idx, non_void_tid) in [53_977_u32, 56_065, 47_763].into_iter().enumerate() {
+        let bad_iid = 200_000_700 + idx as i64;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(bad_iid, eve_db::InventoryItemRecord {
+                item_id: bad_iid,
+                type_id: non_void_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: eve_db::InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            });
+        });
+        let err = ctx
+            .dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(bad_iid)], &kw, None)
+            .await
+            .expect_err("Non-Void filament must be rejected by VoidSpacePlayerJump");
+        assert_eq!(err.code, "InvalidTarget", "type {non_void_tid} rejected");
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.remove(&bad_iid);
+        });
+    }
+    let _ = jita_handle
+        .spawn_ball(Ball {
+            id: 200_000_750,
+            type_id: 47_458, // Abyssal Trace
+            position: DVec3::new(500.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            radius: 50.0,
+            mass: 1_000.0,
+            mode: MovementMode::Stop,
+            speed_fraction: 0.0,
+            max_velocity: 0.0,
+            inertia: 1.0,
+        })
+        .await;
+    let trace_err = ctx
+        .dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(200_000_750)], &kw, None)
+        .await
+        .expect_err("Abyssal Trace must be rejected by VoidSpacePlayerJump");
+    assert_eq!(trace_err.code, "InvalidTarget");
+    jita_handle.try_remove_ball(200_000_750);
+
+    // 5. Jump via cargo filament: seed Warp Matrix Filament (SDE group 4145) in active ship cargo and move >1,000 km from Jita stations/gates
+    let _ = jita_handle.set_ball_position(ship_id, DVec3::new(0.0, 2.0e9, 0.0)).await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             filament_item_id,
             eve_db::InventoryItemRecord {
                 item_id: filament_item_id,
-                type_id: 47_763, // Calm Firestorm Filament (Abyssal/Void filament)
+                type_id: 62_448, // QA Void Filament (SDE group 4145 Warp Matrix Filaments)
                 owner_id: char_id,
                 location_id: ship_id,
                 flag: eve_db::InventoryFlag::Cargo,

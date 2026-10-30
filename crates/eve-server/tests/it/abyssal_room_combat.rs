@@ -282,7 +282,7 @@ async fn test_abyssal_deadspace_mechanics_and_collapse_lifecycle() {
     let abyss_handle = ctx.systems.get_or_spawn(abyssal_sys);
     let pilot_cs = abyss_handle.get_combat_state(ship_id).await.unwrap().expect("abyssal pilot CombatState");
     assert!(pilot_cs.shield_resonance[0] > 0.5, "Electrical storm reduces EM shield resistance");
-    assert!(pilot_cs.armor_resonance[0] < 0.5, "Electrical storm increases EM armor resistance");
+    assert!(pilot_cs.armor_resonance[0] > 0.5 && pilot_cs.structure_resonance[0] > 0.67, "V24 SDE Electrical storm reduces EM armor and hull resistance");
 
     // 3. Verify spatial hazard clouds status effects
     // Move ship into Tachyon cloud boundary (at (15000, 0, 0))

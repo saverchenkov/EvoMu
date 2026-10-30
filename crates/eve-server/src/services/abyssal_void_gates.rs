@@ -17,41 +17,29 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 
-fn is_actual_filament_type(ctx: &ServerContext, type_id: u32) -> bool {
-    crate::services::pve_special_sites::classify_abyssal_filament(type_id).is_some()
-        || ctx
-            .sde
-            .types
-            .get(&type_id)
-            .map(|t| {
-                matches!(t.group_id, 1979 | 4041 | 4087 | 4145 | 4743)
-            })
-            .unwrap_or(false)
+fn is_void_space_filament_type(ctx: &ServerContext, type_id: u32) -> bool {
+    // V24 SDE group 4145 = Warp Matrix Filaments (Void Space / Homefront Warp Matrix filaments only)
+    ctx.sde
+        .types
+        .get(&type_id)
+        .is_some_and(|t| t.group_id == 4145)
 }
 
 fn is_valid_void_entrance_gate(ctx: &ServerContext, target_id: i64, ball_type_id: u32) -> bool {
-    // Specific Abyssal / Void Space Trace and Conduit types (Triglavian Space Trace, Origin Conduit, Void Space Gate)
-    if matches!(
-        ball_type_id,
-        47_458 | 47_686 | 47_833 | 47_834 | 47_956 | 56_693 | 60_589 | 60_608 | 60_770 | 80_944
-    ) {
+    if ball_type_id == crate::services::pve_abyssal_hazards::ABYSSAL_TRACE_TYPE_ID {
+        return false;
+    }
+    if matches!(ball_type_id, 60_770 | 82_139) {
         return true;
     }
-    // Registered abyssal trace or void space entrance object
-    let is_registered = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-        reg.abyssal_traces.contains_key(&target_id)
-            || reg.void_space_sessions.values().any(|s| s.target_id == target_id)
-    });
-    if is_registered {
-        return true;
-    }
-    // Real SDE Abyssal Space Trace (group 1991) or Triglavian Space Portal (group 4081)
-    if let Some(t) = ctx.sde.types.get(&ball_type_id) {
-        if t.group_id == 1991 || t.group_id == 4081 {
-            return true;
-        }
-    }
-    false
+    crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+        !reg.abyssal_traces.contains_key(&target_id)
+            && reg.void_space_sessions.values().any(|s| s.target_id == target_id)
+    })
+}
+
+fn is_valid_void_exit_gate(ball_type_id: u32) -> bool {
+    matches!(ball_type_id, 47_686 | 60_608 | 80_944 | 82_139)
 }
 
 enum GateInspect {
@@ -228,10 +216,12 @@ pub(crate) async fn handle_abyssal_gate_activation(
             if other.pocket_id == pid {
                 other.rooms[curr_idx].cleared = true;
                 other.rooms[curr_idx].gate_unlocked_at_sec.get_or_insert(now_u);
+                other.ship_room.insert(ship_id, next_room);
             }
         }
         let p = reg.abyssal_pockets.get_mut(&char_id)?;
         p.current_room = next_room;
+        p.ship_room.insert(ship_id, next_room);
         let any_still_in_curr_room = reg.abyssal_pockets.values().any(|other| {
             other.pocket_id == pid
                 && !other.completed
@@ -265,7 +255,7 @@ pub(crate) async fn handle_abyssal_gate_activation(
         for c in 1..=3_i64 {
             abyss_handle.try_remove_ball(1_898_000_000 + pid * 100 + (curr_room as i64) * 10 + c);
         }
-        for py in 1..=4_i64 {
+        for py in 1..=5_i64 {
             abyss_handle.try_remove_ball(1_899_000_000 + pid * 100 + (curr_room as i64) * 10 + py);
         }
         ctx.db.with_mut_snapshot(|snap| {
@@ -466,6 +456,8 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
                     if other.pocket_id == pid {
                         other.rooms[2].cleared = true;
                         other.rooms[2].gate_unlocked_at_sec.get_or_insert(now_u);
+                        other.ship_room.remove(&ship_id);
+                        other.fleet_ship_ids.retain(|&sid| sid != ship_id);
                     }
                 }
                 let any_remaining = reg.abyssal_pockets.values().any(|other| {
@@ -514,7 +506,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         for c in 1..=3_i64 {
             abyss_handle.try_remove_ball(1_898_000_000 + pid * 100 + 30 + c);
         }
-        for py in 1..=4_i64 {
+        for py in 1..=5_i64 {
             abyss_handle.try_remove_ball(1_899_000_000 + pid * 100 + 30 + py);
         }
         ctx.db.with_mut_snapshot(|snap| {
@@ -553,18 +545,13 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         .db
         .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(621));
     let cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type);
-    let ball = eve_destiny::Ball {
-        id: ship_id,
-        type_id: ship_type,
-        position: DVec3::from_array(exit_pos),
-        velocity: DVec3::ZERO,
-        max_velocity: 250.0,
-        inertia: 0.5,
-        mass: 1_000_000.0,
-        radius: 50.0,
-        speed_fraction: 0.0,
-        mode: eve_destiny::MovementMode::Stop,
-    };
+    let ball = crate::services::pve_abyssal_pylons::build_fitted_ship_space_ball(
+        ctx,
+        char_id,
+        ship_id,
+        ship_type,
+        DVec3::from_array(exit_pos),
+    );
     let _ = origin_sys_handle.spawn_ball_with_combat(ball, cs).await;
     session.solar_system_id = Some(origin_sys);
     ctx.sync_character_local_chat(char_id, Some(pocket_sys), origin_sys);
@@ -665,7 +652,7 @@ pub(crate) async fn handle_void_space_player_jump(
                     && i.flag == eve_db::InventoryFlag::Cargo
                     && (i.item_id == target_id || i.type_id as i64 == target_id)
                     && i.quantity >= 1
-                    && is_actual_filament_type(ctx, i.type_id)
+                    && is_void_space_filament_type(ctx, i.type_id)
             })
             .map(|i| i.item_id)
     });
@@ -798,18 +785,13 @@ pub(crate) async fn handle_void_space_player_jump(
         .db
         .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(621));
     let cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type);
-    let ball = eve_destiny::Ball {
-        id: ship_id,
-        type_id: ship_type,
-        position: DVec3::ZERO,
-        velocity: DVec3::ZERO,
-        max_velocity: 250.0,
-        inertia: 0.5,
-        mass: 1_000_000.0,
-        radius: 50.0,
-        speed_fraction: 0.0,
-        mode: eve_destiny::MovementMode::Stop,
-    };
+    let ball = crate::services::pve_abyssal_pylons::build_fitted_ship_space_ball(
+        ctx,
+        char_id,
+        ship_id,
+        ship_type,
+        DVec3::ZERO,
+    );
     let _ = void_handle.spawn_ball_with_combat(ball, cs).await;
     session.solar_system_id = Some(VOID_SPACE_SYSTEM_ID);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, VOID_SPACE_SYSTEM_ID);
@@ -923,7 +905,7 @@ pub(crate) async fn handle_void_space_end_gate_activation(
             message: format!("Gate {gate_id} is not present in Void Space"),
         });
     };
-    if !is_valid_void_entrance_gate(ctx, gate_id, gb.type_id) {
+    if !is_valid_void_exit_gate(gb.type_id) {
         return Err(BridgeRpcError {
             code: "InvalidGate".into(),
             message: format!("Ball {gate_id} (type {}) is not a valid Void Space exit gate", gb.type_id),
@@ -975,18 +957,13 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         .db
         .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(621));
     let cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type);
-    let ball = eve_destiny::Ball {
-        id: ship_id,
-        type_id: ship_type,
-        position: DVec3::from_array(exit_pos),
-        velocity: DVec3::ZERO,
-        max_velocity: 250.0,
-        inertia: 0.5,
-        mass: 1_000_000.0,
-        radius: 50.0,
-        speed_fraction: 0.0,
-        mode: eve_destiny::MovementMode::Stop,
-    };
+    let ball = crate::services::pve_abyssal_pylons::build_fitted_ship_space_ball(
+        ctx,
+        char_id,
+        ship_id,
+        ship_type,
+        DVec3::from_array(exit_pos),
+    );
     let _ = origin_handle.spawn_ball_with_combat(ball, cs).await;
     session.solar_system_id = Some(origin_sys);
     ctx.sync_character_local_chat(char_id, Some(VOID_SPACE_SYSTEM_ID), origin_sys);

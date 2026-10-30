@@ -72,46 +72,25 @@ async fn test_abyssal_weather_all_types_and_tier_scaling() {
             let mut max_vel = 250.0;
             let mut opt_range = 15_000.0;
 
-            apply_abyssal_weather_to_combat_and_nav(
-                weather,
-                penalty_pct,
-                bonus_pct,
-                &mut cs,
-                &mut max_vel,
-                &mut opt_range,
-            );
-
+            apply_abyssal_weather_to_combat_and_nav(weather, penalty_pct, bonus_pct, &mut cs, &mut max_vel, &mut opt_range);
             match weather {
                 AbyssalWeatherKind::Electrical => {
-                    assert!(cs.shield_resonance[0] > 0.5, "Electrical storm reduces EM shield resist");
-                    assert!(cs.armor_resonance[0] < 0.5, "Electrical storm increases EM armor resist");
+                    assert!(cs.shield_resonance[0] > 0.5 && cs.armor_resonance[0] > 0.5, "Electrical storm penalizes EM shield & armor resonance");
                 }
                 AbyssalWeatherKind::Dark => {
-                    assert!(max_vel > 250.0, "Dark weather increases ship velocity");
-                    assert!(opt_range < 15_000.0, "Dark weather decreases turret optimal");
+                    assert!(max_vel > 250.0 && opt_range < 15_000.0, "Dark weather boosts velocity and reduces turret optimal");
                 }
                 AbyssalWeatherKind::Exotic => {
-                    assert!(cs.shield_resonance[2] > 0.35, "Exotic weather reduces Kinetic shield resist");
-                    assert!(cs.armor_resonance[2] < 0.8, "Exotic weather increases Kinetic armor resist");
+                    assert!(cs.shield_resonance[2] > 0.6 && cs.armor_resonance[2] > 0.75, "Exotic weather penalizes Kinetic shield & armor resonance");
                 }
                 AbyssalWeatherKind::Firestorm => {
-                    assert!(cs.max_armor_hp > 1000.0, "Firestorm increases armor HP");
-                    assert!(cs.shield_resonance[1] > 0.2, "Firestorm reduces thermal resist");
+                    assert!(cs.max_armor_hp > 1000.0 && cs.shield_resonance[1] > 0.8, "Firestorm boosts armor HP and penalizes Thermal resonance");
                 }
                 AbyssalWeatherKind::Gamma => {
-                    assert!(cs.max_shield_hp > 1000.0, "Gamma storm increases shield HP");
-                    assert!(cs.shield_resonance[3] > 0.5, "Gamma storm reduces explosive resist");
+                    assert!(cs.max_shield_hp > 1000.0 && cs.shield_resonance[3] > 0.5, "Gamma boosts shield HP and penalizes Explosive resonance");
                 }
             }
-
-            // Also test real dogma attribute modifications on ship.dynamic_attributes
-            let saved = apply_abyssal_weather_dogma_modifiers_to_ship(
-                &ctx,
-                ship_id,
-                weather,
-                penalty_pct,
-                bonus_pct,
-            );
+            let saved = apply_abyssal_weather_dogma_modifiers_to_ship(&ctx, ship_id, weather, penalty_pct, bonus_pct);
             assert!(!saved.is_empty(), "Saved pre-weather attributes");
             let dyn_attrs = ctx.db.with_snapshot(|s| s.items.get(&ship_id).unwrap().dynamic_attributes.clone());
             let base_ty = ctx.sde.types.get(&621).unwrap();
@@ -569,9 +548,10 @@ async fn test_abyssal_trace_scanning_and_fleet_entry() {
         }
     }
     assert!(origin_handle.get_ball_snapshot(trace_id).await.unwrap().is_none(), "Trace despawned after last fleet member exits");
-    assert!(origin_handle.get_ball_snapshot(unent_trace_id).await.unwrap().is_some(), "Un-entered trace remains active before 20m lifetime");
-    ctx.advance_secs(905); // total > 1200s from t=0 -> un-entered trace expires via cluster tick
-    assert!(origin_handle.get_ball_snapshot(unent_trace_id).await.unwrap().is_none(), "Un-entered trace despawned automatically at 20m expiry");
+    ctx.advance_secs(905); // t=1205s (> 20m, < 30m): un-entered trace stays alive
+    assert!(origin_handle.get_ball_snapshot(unent_trace_id).await.unwrap().is_some(), "Un-entered trace remains active past 20m before 30m lifetime");
+    ctx.advance_secs(600); // t=1805s (> 30m): un-entered trace expires via cluster tick
+    assert!(origin_handle.get_ball_snapshot(unent_trace_id).await.unwrap().is_none(), "Un-entered trace despawned automatically at 30m expiry");
 }
 
 #[tokio::test]

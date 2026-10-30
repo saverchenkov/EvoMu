@@ -105,7 +105,7 @@ pub async fn handle_weapons(
                     charge_quantity: 1,
                     damage_hp: 0.0,
                     max_hp: 40.0,
-                    dynamic_attribute_overrides: std::collections::HashMap::new(),
+                    dynamic_attribute_overrides: item_rec.dynamic_attributes.clone(),
                 };
                 fit.modules.insert(module_id, fm.clone());
                 fm
@@ -585,19 +585,14 @@ pub async fn handle_weapons(
                                     .is_some_and(|eid| charge_type.effect_ids.contains(&eid))))
                 })
             };
-            let optimal_range = if has_charge_mod(54) {
-                base_opt
-            } else {
-                base_opt * range_mult
-            };
-            let falloff_range = {
-                let v = mod_state.get_attribute(158, &ctx.sde);
-                if v > 0.0 {
-                    v
-                } else {
-                    mod_type.default_attributes.get(&158).copied().unwrap_or(5_000.0)
-                }
-            };
+            let dark_mult = crate::services::pve_abyssal_hazards::dark_weather_midpocket_turret_mult(
+                ctx, char_id, sys_id, is_missile_launcher, module_id, &mod_type,
+            );
+            let optimal_range = (if has_charge_mod(54) { base_opt } else { base_opt * range_mult }) * dark_mult;
+            let falloff_v = mod_state.get_attribute(158, &ctx.sde);
+            let falloff_range = (if falloff_v > 0.0 { falloff_v } else {
+                mod_type.default_attributes.get(&158).copied().unwrap_or(5_000.0)
+            }) * dark_mult;
             let dist = if is_upwell_target {
                 (attacker_ball.position.distance(target_ball.position) - target_ball.radius - attacker_ball.radius).max(0.0)
             } else {
