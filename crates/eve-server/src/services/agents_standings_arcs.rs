@@ -584,7 +584,10 @@ pub fn handle_special_dialogue_action(
                     }
                 }
                 let neg_lvl = sk(3356).min(5) as f64;
-                let agent_standing = snap.characters.get(&char_id).and_then(|c| c.standings.get(&agent_id)).map(|&raw| compute_effective_standing_breakdown(ctx, snap, char_id, agent_id, raw, true).0).unwrap_or(0.0);
+                let has_completed_mission = snap.active_missions.values().any(|m| m.character_id == char_id && m.agent_id == agent_id && m.state == "Completed");
+                let agent_standing = snap.characters.get(&char_id).and_then(|c| c.standings.get(&agent_id)).map(|&raw| {
+                    if has_completed_mission || raw < 0.0 { compute_effective_standing_breakdown(ctx, snap, char_id, agent_id, raw, true).0 } else { raw.clamp(-10.0, 10.0) }
+                }).unwrap_or(0.0);
                 let rp_per_day = (1.0 + (20.0 + 5.0 * neg_lvl + agent_standing) / 100.0) * ((skill_lvl as f64) + (agent_info.level as f64)).powi(2);
                 if let Some(existing) = entries.iter_mut().find(|e| e.agent_id == agent_id) {
                     let elapsed_days = (now_unix.saturating_sub(existing.started_unix) as f64) / 86_400.0;

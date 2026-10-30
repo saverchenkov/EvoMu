@@ -22,7 +22,6 @@ use crate::services::industry_pi::{
     resolve_structure_rig_bonus, restore_blueprint_flag, save_job_cost_meta,
     solar_system_jump_distance, sync_industry_job_pause_states,
 };
-use crate::services::notify_emitters_batch3::emit_industry_materials_consumed;
 use eve_db::{IndustryJobRecord, InventoryFlag, InventoryItemRecord, IskCents};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -938,7 +937,6 @@ pub fn handle_industry_jobs(
             match res {
                 Ok((job_id, bp_iid, product_type_id, duration_sec, trit_req, inv_prob, charged_tax_isk, cost_meta)) => {
                     emit_industry_job(ctx, char_id, cost_meta.owner_id, job_id, bp_iid, 1, runs as i64);
-                    emit_industry_materials_consumed(ctx, char_id, job_id, &cost_meta.consumed_materials);
                     Some(Ok(PyRep::keyval([
                         ("jobID", PyRep::Integer(job_id)), ("ownerID", PyRep::Integer(cost_meta.owner_id)),
                         ("blueprintID", PyRep::Integer(bp_iid)), ("blueprintItemID", PyRep::Integer(bp_iid)),

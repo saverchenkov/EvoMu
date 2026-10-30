@@ -153,7 +153,10 @@ pub fn load_snapshot_from_sqlite(
             .map_err(|e| e.to_string())?;
         for r in rows {
             let js = r.map_err(|e| e.to_string())?;
-            let item: InventoryItemRecord = serde_json::from_str(&js).map_err(|e| e.to_string())?;
+            let mut item: InventoryItemRecord = serde_json::from_str(&js).map_err(|e| e.to_string())?;
+            for aid in [84, 109, 110, 111, 112, 113, 267, 268, 269, 270, 271, 272, 273, 274, 1175, 1176, 1177] {
+                item.dynamic_attributes.remove(&aid);
+            }
             snap.items.insert(item.item_id, item);
         }
     }

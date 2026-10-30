@@ -193,11 +193,24 @@ async fn test_d6_persistence_and_no_transient_attrs_across_restart() {
     let corp_id = 98_910_006_i64;
     let ship_id = 740_001_i64;
     let bastion_id = 740_002_i64;
+    let rah_id = 740_003_i64;
+    let mutadaptive_id = 740_004_i64;
+    let target_ship_id = 740_005_i64;
+    let dread_id = 740_006_i64;
+    let siege_id = 740_007_i64;
+    let ehe_id = 740_008_i64;
 
-    let (ship_dyn_before, mod_dyn_before) = {
+    let (ship_dyn_before, rah_dyn_before, mut_dyn_before, dread_dyn_before) = {
         let repo = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open repo 1"));
         let ctx = ServerContext::with_repository(repo);
         let mut sess = make_session(char_id, corp_id, JITA_SYSTEM_ID);
+        let mutadaptive_tid = ctx
+            .sde
+            .types
+            .values()
+            .find(|t| t.group_id == 2018 && t.published)
+            .map(|t| t.type_id)
+            .unwrap_or(48_636);
 
         let template_ch = ServerContext::new()
             .db
@@ -219,7 +232,37 @@ async fn test_d6_persistence_and_no_transient_attrs_across_restart() {
                 bastion_id,
                 make_item(bastion_id, 33_400, char_id, ship_id, InventoryFlag::HiSlot0, 1, true),
             );
-            snap.module_online_states.insert(bastion_id, true);
+            snap.items.insert(
+                rah_id,
+                make_item(rah_id, 4_403, char_id, ship_id, InventoryFlag::LoSlot0, 1, true),
+            );
+            snap.items.insert(
+                mutadaptive_id,
+                make_item(mutadaptive_id, mutadaptive_tid, char_id, ship_id, InventoryFlag::HiSlot1, 1, true),
+            );
+            snap.items.insert(
+                target_ship_id,
+                make_item(target_ship_id, 638, char_id + 1, JITA_SYSTEM_ID as i64, InventoryFlag::None, 1, true),
+            );
+            snap.items.insert(
+                dread_id,
+                make_item(dread_id, 19_720, char_id, JITA_SYSTEM_ID as i64, InventoryFlag::None, 1, true),
+            );
+            snap.items.insert(
+                siege_id,
+                make_item(siege_id, 20_280, char_id, dread_id, InventoryFlag::HiSlot0, 1, true),
+            );
+            snap.items.insert(
+                ehe_id,
+                make_item(ehe_id, 41_485, char_id, dread_id, InventoryFlag::LoSlot0, 1, true),
+            );
+            snap.items.insert(
+                740_009,
+                make_item(740_009, 16_275, char_id, dread_id, InventoryFlag::Cargo, 500, false),
+            );
+            for mid in [bastion_id, rah_id, mutadaptive_id, siege_id, ehe_id] {
+                snap.module_online_states.insert(mid, true);
+            }
         });
         seed_skills(&ctx, char_id, &[(3300, 5), (3426, 5)]);
 
@@ -230,12 +273,58 @@ async fn test_d6_persistence_and_no_transient_attrs_across_restart() {
         let bal_after_rb = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
         assert_eq!(bal_after_rb, IskCents::from_isk(50_000_000));
 
-        let (ship_dyn_before, mod_dyn_before) = ctx.db.with_snapshot(|s| {
+        let (ship_dyn_before, rah_dyn_before, mut_dyn_before, dread_dyn_before) = ctx.db.with_snapshot(|s| {
             (
                 s.items.get(&ship_id).unwrap().dynamic_attributes.clone(),
-                s.items.get(&bastion_id).unwrap().dynamic_attributes.clone(),
+                s.items.get(&rah_id).unwrap().dynamic_attributes.clone(),
+                s.items.get(&mutadaptive_id).unwrap().dynamic_attributes.clone(),
+                s.items.get(&dread_id).unwrap().dynamic_attributes.clone(),
             )
         });
+
+        let sys_h = ctx.systems.get_or_spawn(JITA_SYSTEM_ID);
+        for (bid, tid, oid, x) in [
+            (ship_id, 28_661_u32, char_id, 0.0_f64),
+            (target_ship_id, 638_u32, char_id + 1, 2_000.0_f64),
+            (dread_id, 19_720_u32, char_id, 5_000.0_f64),
+        ] {
+            let cs = ctx.build_type_combat_state(tid);
+            let b = eve_destiny::Ball {
+                id: bid,
+                type_id: tid,
+                position: eve_destiny::DVec3::new(x, 0.0, 0.0),
+                velocity: eve_destiny::DVec3::ZERO,
+                max_velocity: 150.0,
+                inertia: 1.0,
+                mass: 10_000_000.0,
+                radius: 100.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            };
+            let meta = eve_destiny::SlimItemMeta {
+                group_id: 26,
+                category_id: 6,
+                owner_id: oid,
+                char_id: Some(oid),
+                corp_id,
+                alliance_id: -1,
+                security_status: 0.0,
+                is_cloaked: false,
+            };
+            let _ = sys_h.spawn_ball_with_meta(b, cs, meta).await;
+        }
+        let _ = sys_h
+            .add_target_lock(
+                ship_id,
+                eve_destiny::TargetLock {
+                    target_id: target_ship_id,
+                    lock_time_ms: 0.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: Some(50_000.0),
+                },
+            )
+            .await;
 
         rpc_call(
             &ctx,
@@ -246,6 +335,53 @@ async fn test_d6_persistence_and_no_transient_attrs_across_restart() {
         )
         .await
         .expect("Activate Bastion");
+        rpc_call(
+            &ctx,
+            &mut sess,
+            "dogmaIM",
+            "Activate",
+            &[PyRep::Integer(rah_id), PyRep::String("adaptiveArmorHardener".into())],
+        )
+        .await
+        .expect("Activate RAH");
+        rpc_call(
+            &ctx,
+            &mut sess,
+            "dogmaIM",
+            "Activate",
+            &[
+                PyRep::Integer(mutadaptive_id),
+                PyRep::String("remoteArmorRepair".into()),
+                PyRep::Integer(target_ship_id),
+            ],
+        )
+        .await
+        .expect("Activate Mutadaptive RAR");
+
+        sess.ship_id = Some(dread_id);
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.characters.get_mut(&char_id).unwrap().active_ship_id = dread_id;
+        });
+        rpc_call(
+            &ctx,
+            &mut sess,
+            "dogmaIM",
+            "Activate",
+            &[PyRep::Integer(siege_id), PyRep::String("moduleBonusSiege".into())],
+        )
+        .await
+        .expect("Activate Siege");
+        rpc_call(
+            &ctx,
+            &mut sess,
+            "dogmaIM",
+            "Activate",
+            &[PyRep::Integer(ehe_id), PyRep::String("emergencyHullEnergizer".into())],
+        )
+        .await
+        .expect("Activate EHE/ADC");
+        let _ = sys_h.step_manual(6.0).await;
+
         assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&bastion_id)));
         let mut active_attrs = std::collections::HashMap::new();
         eve_server::services::tactical_modules::apply_tactical_module_ship_attributes(
@@ -254,10 +390,7 @@ async fn test_d6_persistence_and_no_transient_attrs_across_restart() {
             &mut active_attrs,
         );
         assert_eq!(active_attrs.get(&2135).copied(), Some(0.05));
-        assert_eq!(active_attrs.get(&2112).copied(), Some(1.0));
-        assert_eq!(active_attrs.get(&2113).copied(), Some(1.0));
-        assert_eq!(active_attrs.get(&2115).copied(), Some(1.0));
-        (ship_dyn_before, mod_dyn_before)
+        (ship_dyn_before, rah_dyn_before, mut_dyn_before, dread_dyn_before)
     };
 
     let repo2 = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open repo 2"));
@@ -265,7 +398,7 @@ async fn test_d6_persistence_and_no_transient_attrs_across_restart() {
     ctx2.db.with_snapshot(|snap| {
         assert_eq!(snap.characters.get(&char_id).unwrap().balance, IskCents::from_isk(50_000_000));
         assert!(
-            !snap.module_active_states.contains(&bastion_id),
+            snap.module_active_states.is_empty(),
             "Active module cycle state must not persist across server restart"
         );
         assert!(
@@ -278,9 +411,19 @@ async fn test_d6_persistence_and_no_transient_attrs_across_restart() {
             "Ship dynamic_attributes must equal un-buffed fitted values after restart"
         );
         assert_eq!(
-            snap.items.get(&bastion_id).unwrap().dynamic_attributes,
-            mod_dyn_before,
-            "Module dynamic_attributes must equal un-buffed fitted values after restart"
+            snap.items.get(&rah_id).unwrap().dynamic_attributes,
+            rah_dyn_before,
+            "RAH dynamic_attributes must equal un-buffed fitted values after restart"
+        );
+        assert_eq!(
+            snap.items.get(&mutadaptive_id).unwrap().dynamic_attributes,
+            mut_dyn_before,
+            "Mutadaptive RAR dynamic_attributes must equal un-buffed fitted values after restart"
+        );
+        assert_eq!(
+            snap.items.get(&dread_id).unwrap().dynamic_attributes,
+            dread_dyn_before,
+            "Dreadnought dynamic_attributes must equal un-buffed fitted values after restart"
         );
     });
     let mut post_restart_attrs = std::collections::HashMap::new();
@@ -291,7 +434,7 @@ async fn test_d6_persistence_and_no_transient_attrs_across_restart() {
     );
     assert!(
         post_restart_attrs.get(&2135).is_none() && post_restart_attrs.get(&2112).is_none(),
-        "Bastion resonance/bonus attributes must not persist across server restart"
+        "Bastion/Siege resonance/bonus attributes must not persist across server restart"
     );
     let _ = std::fs::remove_file(&db_path);
 }

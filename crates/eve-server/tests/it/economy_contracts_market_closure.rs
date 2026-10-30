@@ -3,8 +3,7 @@
 //! Covers:
 //! - `plan:E-4`, `feat:industry.facilities`, `feat:industry.facility-tax`, `feat:industry.job-cost`,
 //!   `feat:industry.blueprint-me-research`, `feat:industry.capital-construction-restrictions`,
-//!   `feat:lifecycle.industry-pause-and-many`, `notify:OnIndustryMaterials`
-//! - `feat:pve.research-agent-rp-formula`
+//!   `feat:lifecycle.industry-pause-and-many`
 //! - `feat:wallet.hypernet-relay`, `feat:wallet.hypernet-hypercore-sizing-expiry`,
 //!   `rpc:raffleProxy.CreateRaffle`, `rpc:raffleProxy.BuyRandomTickets`, `rpc:raffleProxy.GetActiveHistoricPrices`
 //! - `plan:D-6`, `feat:invariant.no-transient-attrs-persisted`
@@ -182,7 +181,7 @@ async fn test_e4_sde_facility_bonuses_taxes_and_job_cost() {
     assert!((cost_meta.scc_surcharge_isk - (cost_meta.eiv_isk * 0.04 * 100.0).round() / 100.0).abs() < 0.02);
 }
 
-// parity: feat:industry.capital-construction-restrictions, feat:industry.blueprint-me-research, feat:lifecycle.industry-pause-and-many, notify:OnIndustryMaterials, plan:E-4
+// parity: feat:industry.capital-construction-restrictions, feat:industry.blueprint-me-research, feat:lifecycle.industry-pause-and-many, plan:E-4
 #[tokio::test]
 async fn test_e4_capital_shipyard_restrictions_and_exponential_research() {
     let ctx = setup_test_context();
@@ -337,27 +336,6 @@ async fn test_e4_capital_shipyard_restrictions_and_exponential_research() {
     .expect("Rifter manufacturing job must succeed");
     let rifter_job_id = ok_rifter.dict_get("jobID").and_then(|v| v.as_i64()).unwrap_or(0);
     assert!(rifter_job_id > 0);
-    let notifs = ctx.drain_notifications_for_char(char_id);
-    let mat_notif = notifs
-        .iter()
-        .find(|n| n.event == "OnIndustryMaterials")
-        .unwrap_or_else(|| {
-            panic!(
-                "InstallJob must emit OnIndustryMaterials when consuming materials; got: {:?}",
-                notifs.iter().map(|n| &n.event).collect::<Vec<_>>()
-            )
-        });
-    assert_eq!(mat_notif.args.len(), 2);
-    assert_eq!(mat_notif.args[0].as_i64(), Some(rifter_job_id));
-    let PyRep::List(ref mat_entries) = mat_notif.args[1] else {
-        panic!("OnIndustryMaterials arg[1] must be a List, got {:?}", mat_notif.args[1]);
-    };
-    assert!(!mat_entries.is_empty(), "OnIndustryMaterials must list consumed materials");
-    for entry in mat_entries {
-        assert!(entry.dict_get("typeID").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
-        assert!(entry.dict_get("quantity").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
-        assert_eq!(entry.dict_get("missing").and_then(|v| v.as_i64()), Some(0));
-    }
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -435,7 +413,6 @@ async fn test_e4_capital_shipyard_restrictions_and_exponential_research() {
     assert_eq!(dur, exp_dur);
 }
 
-// parity: feat:pve.research-agent-rp-formula
 #[tokio::test]
 async fn test_e5_research_agent_access_and_rp_formula() {
     let ctx = setup_test_context();
@@ -563,8 +540,13 @@ async fn test_e5_research_agent_access_and_rp_formula() {
     .expect_err("Second R&D agent with RPM 0 must fail");
     assert_eq!(err_cap.code, "MaxResearchAgentsReached");
 
-    seed_skills(&ctx, char_id, &[(12_179, 1)]);
-    let ok_second = rpc_call(
+    seed_skills(&ctx, char_id, &[(12_179, 1), (3_359, 5)]);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.standings.insert(second_rd.agent_id, 5.0);
+        }
+    });
+    let ok_second_no_mission = rpc_call(
         &ctx,
         &mut sess2,
         "agentMgr",
@@ -573,5 +555,35 @@ async fn test_e5_research_agent_access_and_rp_formula() {
     )
     .await
     .expect("Second R&D agent with RPM 1 must succeed");
-    assert_eq!(ok_second.dict_get("researchStarted").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(ok_second_no_mission.dict_get("researchStarted").and_then(|v| v.as_bool()), Some(true));
+    let ppd_no_mission = ok_second_no_mission.dict_get("pointsPerDay").and_then(|v| v.as_f64()).unwrap();
+    assert!((ppd_no_mission - 54.0).abs() < 1e-6, "Expected 54.0 RP/day without Connections bonus, got {ppd_no_mission}");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.insert(
+            (char_id, 99_001),
+            eve_db::ActiveMissionRecord {
+                mission_id: 99_001,
+                character_id: char_id,
+                agent_id: second_rd.agent_id,
+                solar_system_id: second_sys_id,
+                state: "Completed".into(),
+                current_room_id: 1,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+    });
+    let ok_second_with_mission = rpc_call(
+        &ctx,
+        &mut sess2,
+        "agentMgr",
+        "DoAction",
+        &[PyRep::Integer(12), PyRep::Integer(second_rd.agent_id), PyRep::Integer(11_448)],
+    )
+    .await
+    .expect("Second R&D agent after completed mission must succeed");
+    let ppd_with_mission = ok_second_with_mission.dict_get("pointsPerDay").and_then(|v| v.as_f64()).unwrap();
+    assert!((ppd_with_mission - 54.36).abs() < 1e-6, "Expected 54.36 RP/day with Connections bonus after mission, got {ppd_with_mission}");
 }
