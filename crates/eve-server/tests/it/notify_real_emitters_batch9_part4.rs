@@ -9,12 +9,11 @@ use eve_db::InventoryFlag;
 use eve_proto::PyRep;
 use glam::DVec3;
 
-// parity: notify:OnFacilitiesUpdated, notify:OnIndustryMaterials, notify:OnPrimingNeededForTradeItems, notify:OnSellRepackageErrors
+// parity: notify:OnFacilitiesUpdated, notify:OnPrimingNeededForTradeItems, notify:OnSellRepackageErrors
 #[tokio::test]
 async fn notify_batch9_facilities_industry_trade_and_repackage_errors() {
     eve_testkit::attest(&[
         "notify:OnFacilitiesUpdated",
-        "notify:OnIndustryMaterials",
         "notify:OnPrimingNeededForTradeItems",
         "notify:OnSellRepackageErrors",
     ]);
@@ -125,7 +124,7 @@ async fn notify_batch9_facilities_industry_trade_and_repackage_errors() {
         .iter()
         .any(|(e, _)| e == "OnIndustryMaterials"));
 
-    // Positive: GetBlueprintData on owned blueprint emits OnIndustryMaterials
+    // Read-only GetBlueprintData on owned blueprint does NOT emit OnIndustryMaterials
     let _ = rpc(
         &ctx,
         &mut sess_a,
@@ -136,7 +135,7 @@ async fn notify_batch9_facilities_industry_trade_and_repackage_errors() {
     .await
     .expect("GetBlueprintData");
     let mat_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    assert!(mat_notifs.iter().any(|(e, _)| e == "OnIndustryMaterials"));
+    assert!(!mat_notifs.iter().any(|(e, _)| e == "OnIndustryMaterials"));
 
     // 3. OnPrimingNeededForTradeItems: Direct station trade AddItem
     ctx.db.with_mut_snapshot(|snap| {
@@ -243,7 +242,10 @@ async fn notify_batch9_facilities_industry_trade_and_repackage_errors() {
     let repack_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     let repack_args = find_notif(&repack_notifs, "OnSellRepackageErrors");
     assert_eq!(repack_args.len(), 1);
-    assert!(matches!(&repack_args[0], PyRep::Dict(entries) if !entries.is_empty()));
+    assert!(matches!(
+        &repack_args[0],
+        PyRep::Dict(entries) if entries.iter().any(|(k, v)| k.as_str() == Some("CantRepackageDamagedItem") && *v == PyRep::Integer(1))
+    ));
 
     // Negative 4b: Selling a repackaged item with invalid price (0.0) fails without emitting OnSellRepackageErrors
     let repackaged_id = 940_000_021_i64;
@@ -356,31 +358,38 @@ async fn notify_batch9_godma_and_location_cache_invalidation() {
     assert_eq!(flush_args.len(), 2);
     assert_eq!(flush_args[0], PyRep::Integer(ship_a));
 
-    // 8. OnInvalidateCacheForLocations: Bound invbroker.InvalidateLocationCache
-    // Negative 8a: Unbound InvalidateLocationCache fails
-    assert!(rpc(&ctx, &mut sess_a, "invbroker", "InvalidateLocationCache", &[])
-        .await
-        .is_err());
-
-    // Positive: Bound invbroker on JITA_STATION emits OnInvalidateCacheForLocations([JITA_STATION])
+    // 8. OnInvalidateCacheForLocations: invbroker.SetPassword on a passworded container
+    let pw_container_id = 940_000_060_i64;
+    let pw_container_type = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 448 && t.published)
+        .map(|t| t.type_id)
+        .unwrap_or(17366);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.station_id = Some(JITA_STATION);
+        }
+        snap.items.insert(
+            pw_container_id,
+            make_item(pw_container_id, pw_container_type, PILOT_A, JITA_STATION, InventoryFlag::Hangar, 1, true),
+        );
+    });
     sess_a.station_id = Some(JITA_STATION);
-    let bound_id = ctx.bind_object(&mut sess_a, "invbroker", JITA_STATION).expect("bind invbroker");
-    let _ = ctx
-        .dispatch_rpc(
-            &mut sess_a,
-            "invbroker",
-            Some(bound_id),
-            "InvalidateLocationCache",
-            &[],
-            &std::collections::HashMap::new(),
-            None,
-        )
-        .await
-        .expect("InvalidateLocationCache");
+    let _ = rpc(
+        &ctx,
+        &mut sess_a,
+        "invbroker",
+        "SetPassword",
+        &[PyRep::Integer(pw_container_id), PyRep::String("secret123".into())],
+    )
+    .await
+    .expect("SetPassword");
     let cache_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     assert_eq!(
         find_notif(&cache_notifs, "OnInvalidateCacheForLocations"),
-        &[PyRep::List(vec![PyRep::Integer(JITA_STATION)])]
+        &[PyRep::List(vec![PyRep::Integer(pw_container_id)])]
     );
 
     // 9. OnMultiEvent: dogmaIM.AddTarget & RemoveTarget

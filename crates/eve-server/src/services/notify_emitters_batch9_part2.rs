@@ -4,10 +4,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::router::{BoundObjectEntry, NotificationTarget, ServerContext};
-use crate::services::notify_emitters_batch3::{
-    emit_ccp_notification, emit_industry_materials_consumed, emit_invalidate_cache_for_locations,
-};
+use crate::router::{NotificationTarget, ServerContext};
 use crate::services::notify_emitters_batch3_space::{
     emit_module_activation_godma_notifications, flush_module_profile_and_ewar_end,
 };
@@ -55,12 +52,18 @@ pub fn emit_sell_repackage_errors(
     if count <= 0 {
         return;
     }
+    let client_key = match error_code {
+        "CannotSellAssembledItem" | "CannotSellItemWithContents" | "CantRepackageDamagedItem" => {
+            "CantRepackageDamagedItem"
+        }
+        other => other,
+    };
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnSellRepackageErrors",
         "charid",
         vec![PyRep::Dict(vec![(
-            PyRep::String(error_code.to_string()),
+            PyRep::String(client_key.to_string()),
             PyRep::Integer(count),
         )])],
     );
@@ -312,42 +315,6 @@ pub fn emit_godma_effect_info_for_module(
     );
 }
 
-/// Handles bound inventory broker `InvalidateLocationCache`, validating access and emitting `OnInvalidateCacheForLocations`.
-// parity: notify:OnInvalidateCacheForLocations
-pub fn handle_invalidate_location_cache_rpc(
-    ctx: &ServerContext,
-    session: &SessionState,
-    bound_entry: Option<&BoundObjectEntry>,
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let Some(location_id) = bound_entry.map(|b| b.object_id) else {
-        return Err(err(
-            "InvalidBoundObject",
-            "InvalidateLocationCache must be called on a bound inventory manager",
-        ));
-    };
-    let accessible = ctx.db.with_snapshot(|snap| {
-        ctx.sde.stations.contains_key(&location_id)
-            || snap.structures.contains_key(&location_id)
-            || snap
-                .items
-                .get(&location_id)
-                .is_some_and(|it| it.owner_id == char_id)
-    });
-    if !accessible {
-        return Err(err(
-            "DestinationAccessDenied",
-            format!("Location {location_id} is not accessible for cache invalidation"),
-        ));
-    }
-    emit_invalidate_cache_for_locations(
-        ctx,
-        NotificationTarget::Character(char_id),
-        &[location_id],
-    );
-    Ok(PyRep::Bool(true))
-}
-
 /// Emits V24-conformant 6-column `OnCfgDataChanged("evelocations", [locationID, locationName, x, y, z, None])`
 /// (`id_type = "solarsystemid"`) matching `config_service.rs` `evelocations` schema.
 // parity: notify:OnCfgDataChanged
@@ -376,95 +343,6 @@ pub fn emit_structure_cfg_data_changed(
     );
 }
 
-/// Handles `industryManager.GetJobMaterials` / `LoadJobMaterials`, resolving SDE blueprint/type
-/// materials for an existing industry job and emitting `OnIndustryMaterials(jobID, materials)`.
-// parity: notify:OnIndustryMaterials
-pub fn handle_industry_batch9(
-    ctx: &ServerContext,
-    session: &SessionState,
-    service: &str,
-    method: &str,
-    args: &[PyRep],
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    if service != "industryManager" || method != "GetJob" {
-        return None;
-    }
-    let (_, char_id) = match ServerContext::require_character(session) {
-        Ok(v) => v,
-        Err(e) => return Some(Err(e)),
-    };
-    let job_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-    if job_id <= 0 {
-        return Some(Err(err(
-            "InvalidJobID",
-            format!("{method} requires a positive jobID"),
-        )));
-    }
-    let job_res = ctx.db.with_snapshot(|snap| {
-        let Some(job) = snap.industry_jobs.get(&job_id) else {
-            return Err(err("JobNotFound", format!("Industry job {job_id} not found")));
-        };
-        let char_corp = snap
-            .characters
-            .get(&char_id)
-            .map(|c| c.corporation_id)
-            .or(session.corporation_id)
-            .unwrap_or(0);
-        if job.installer_id != char_id && job.installer_id != char_corp && !session.has_gm_role() {
-            return Err(err(
-                "JobOwnershipViolation",
-                format!("Character {char_id} does not own industry job {job_id}"),
-            ));
-        }
-        let runs = i32::try_from(job.runs.max(1)).unwrap_or(1);
-        let mut materials: Vec<(TypeId, i32)> = if let Some(bp) = ctx.sde.blueprints.get(&job.blueprint_type_id) {
-            let act_mats = bp
-                .activities
-                .get(&job.activity_id.to_string())
-                .map(|a| a.materials.as_slice())
-                .filter(|m| !m.is_empty())
-                .unwrap_or(bp.materials.as_slice());
-            act_mats
-                .iter()
-                .map(|m| {
-                    let qty = i32::try_from(m.quantity)
-                        .unwrap_or(1)
-                        .saturating_mul(runs)
-                        .max(1);
-                    (m.type_id, qty)
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        if materials.is_empty() {
-            if let Some(tmats) = ctx.sde.type_materials.get(&job.product_type_id) {
-                materials = tmats
-                    .iter()
-                    .map(|m| (m.material_type_id, (m.quantity.max(1) as i32).saturating_mul(runs)))
-                    .collect();
-            }
-        }
-        Ok((job.installer_id, materials))
-    });
-    let (_owner_id, materials) = match job_res {
-        Ok(v) => v,
-        Err(e) => return Some(Err(e)),
-    };
-    emit_industry_materials_consumed(ctx, char_id, job_id, &materials);
-    let rows: Vec<PyRep> = materials
-        .into_iter()
-        .map(|(tid, qty)| {
-            PyRep::keyval([
-                ("typeID", PyRep::Integer(i64::from(tid))),
-                ("quantity", PyRep::Integer(i64::from(qty))),
-                ("missing", PyRep::Integer(0)),
-            ])
-        })
-        .collect();
-    Some(Ok(PyRep::List(rows)))
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct JumpQueueSystemConfig {
     threshold: usize,
@@ -473,9 +351,7 @@ struct JumpQueueSystemConfig {
     jump_keys: HashMap<i64, i64>,
 }
 
-/// Emits V24-conformant `OnJumpQueueUpdate(solarsystemID, space, queue, jumpKeys, keyLife)`
-/// where `queue` is `List([charID, ...])` and `jumpKeys` is `Dict({charID: issuedFtTicks})`.
-// parity: notify:OnJumpQueueUpdate
+/// Emits `OnJumpQueueUpdate(solarsystemID, space, queue, jumpKeys, keyLife)`.
 pub fn emit_jump_queue_update_v24(
     ctx: &ServerContext,
     char_id: i64,
@@ -507,7 +383,6 @@ pub fn emit_jump_queue_update_v24(
 }
 
 /// Evaluates whether `dest_sys_id` has an active jump-queue threshold on stargate jump and emits `OnJumpQueueUpdate`.
-// parity: notify:OnJumpQueueUpdate
 pub fn check_and_notify_stargate_jump_queue(
     ctx: &ServerContext,
     char_id: i64,
@@ -558,117 +433,15 @@ struct FlaggedSiteRecord {
     flag: i64,
 }
 
-/// Dispatches `jumpQueue` and `browserLockdownSvc` (`OnJumpQueueUpdate` and `OnFlaggedListsChange`).
-// parity: notify:OnFlaggedListsChange, notify:OnJumpQueueUpdate
+/// Dispatches `browserLockdownSvc` read-only queries.
 pub fn handle_misc_batch9(
     ctx: &ServerContext,
     session: &SessionState,
     service: &str,
     method: &str,
-    args: &[PyRep],
+    _args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("jumpQueue", "GetJumpQueue") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let sys_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .and_then(|v| u32::try_from(v).ok())
-                .or(session.solar_system_id)
-                .unwrap_or(0);
-            if sys_id == 0 {
-                return Some(Err(err(
-                    "InvalidSolarSystem",
-                    "GetJumpQueue requires a valid solarSystemID",
-                )));
-            }
-            let cfg_opt = ctx.db.with_snapshot(|snap| {
-                let cfgs: HashMap<u32, JumpQueueSystemConfig> = snap
-                    .service_state_blobs
-                    .get("jump_queue_configs")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
-                cfgs.get(&sys_id).cloned()
-            });
-            if let Some(cfg) = cfg_opt {
-                let mut keys_vec: Vec<(i64, i64)> = cfg.jump_keys.iter().map(|(&k, &v)| (k, v)).collect();
-                keys_vec.sort_by_key(|&(k, _)| k);
-                if cfg.queue.contains(&char_id) {
-                    emit_jump_queue_update_v24(
-                        ctx,
-                        char_id,
-                        sys_id,
-                        cfg.threshold as i64,
-                        &cfg.queue,
-                        &keys_vec,
-                        cfg.key_life.max(30),
-                    );
-                }
-                let queue_rep = PyRep::List(cfg.queue.into_iter().map(PyRep::Integer).collect());
-                let keys_rep = PyRep::Dict(
-                    keys_vec
-                        .into_iter()
-                        .map(|(cid, ft)| (PyRep::Integer(cid), PyRep::Integer(ft)))
-                        .collect(),
-                );
-                Some(Ok(PyRep::keyval([
-                    ("solarsystemID", PyRep::Integer(i64::from(sys_id))),
-                    ("space", PyRep::Integer(cfg.threshold as i64)),
-                    ("queue", queue_rep),
-                    ("jumpKeys", keys_rep),
-                    ("keyLife", PyRep::Integer(cfg.key_life.max(30))),
-                ])))
-            } else {
-                Some(Ok(PyRep::None))
-            }
-        }
-        ("jumpQueue", "SetSystemJumpQueueThreshold") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            if !session.has_gm_role() {
-                return Some(Err(err(
-                    "InsufficientRole",
-                    "SetSystemJumpQueueThreshold requires GM role",
-                )));
-            }
-            let sys_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .and_then(|v| u32::try_from(v).ok())
-                .unwrap_or(0);
-            if sys_id == 0 {
-                return Some(Err(err(
-                    "InvalidSolarSystem",
-                    "SetSystemJumpQueueThreshold requires a positive solarSystemID",
-                )));
-            }
-            let threshold = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).max(0) as usize;
-            let key_life = args.get(2).and_then(|a| a.as_i64()).unwrap_or(120).max(30);
-            ctx.db.with_mut_snapshot(|snap| {
-                let mut cfgs: HashMap<u32, JumpQueueSystemConfig> = snap
-                    .service_state_blobs
-                    .get("jump_queue_configs")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
-                let entry = cfgs.entry(sys_id).or_default();
-                entry.threshold = threshold;
-                entry.key_life = key_life;
-                if let Ok(json) = serde_json::to_string(&cfgs) {
-                    snap.service_state_blobs
-                        .insert("jump_queue_configs".into(), json);
-                }
-            });
-            Some(Ok(PyRep::keyval([
-                ("solarsystemID", PyRep::Integer(i64::from(sys_id))),
-                ("threshold", PyRep::Integer(threshold as i64)),
-                ("keyLife", PyRep::Integer(key_life)),
-            ])))
-        }
         ("browserLockdownSvc", "GetDefaultHomePage") => {
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
@@ -738,112 +511,6 @@ pub fn emit_server_message_broadcast(ctx: &ServerContext, message: &str) {
         "clientID",
         vec![PyRep::String(trimmed.to_string())],
     );
-}
-
-/// Handles `machoNet.SetGlobalConfigValue` Batch 9 GM/Admin config updates, emitting
-/// `OnCCPNotification`, `OnServerMessage`, `OnUpdateServiceMapping`, and `OnFlaggedListsChange`.
-// parity: notify:OnCCPNotification, notify:OnServerMessage, notify:OnUpdateServiceMapping, notify:OnFlaggedListsChange
-pub fn handle_macho_batch9_rpc(
-    ctx: &ServerContext,
-    session: &SessionState,
-    method: &str,
-    args: &[PyRep],
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    if method != "SetGlobalConfigValue" {
-        return None;
-    }
-    if let Err(e) = ServerContext::require_auth(session) {
-        return Some(Err(e));
-    }
-    if !session.has_gm_role() && (session.role & eve_db::service_roles::ROLE_ADMIN) == 0 {
-        return Some(Err(err(
-            "InsufficientRole",
-            "SetGlobalConfigValue requires GM or Admin role",
-        )));
-    }
-    let key = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();
-    match key {
-        "ccp_notification" => {
-            let title = args.get(1).and_then(|a| a.as_str()).unwrap_or("").trim().to_string();
-            let subtitle = args.get(2).and_then(|a| a.as_str()).unwrap_or("").trim().to_string();
-            let text = args.get(3).and_then(|a| a.as_str()).unwrap_or("").trim().to_string();
-            if title.is_empty() || text.is_empty() {
-                return Some(Err(err(
-                    "InvalidArgument",
-                    "ccp_notification requires non-empty title and text",
-                )));
-            }
-            emit_ccp_notification(ctx, NotificationTarget::All, &title, &subtitle, &text, 1, 1);
-            Some(Ok(PyRep::Bool(true)))
-        }
-        "server_message" => {
-            let msg = args.get(1).and_then(|a| a.as_str()).unwrap_or("").trim().to_string();
-            if msg.is_empty() {
-                return Some(Err(err(
-                    "InvalidArgument",
-                    "server_message requires a non-empty message string",
-                )));
-            }
-            emit_server_message_broadcast(ctx, &msg);
-            Some(Ok(PyRep::Bool(true)))
-        }
-        "service_mapping" => {
-            let svc_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("").trim().to_string();
-            let node_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
-            if svc_name.is_empty() || node_id <= 0 {
-                return Some(Err(err(
-                    "InvalidArgument",
-                    "service_mapping requires non-empty service name and positive nodeID",
-                )));
-            }
-            ctx.db.with_mut_snapshot(|snap| {
-                let mut map: BTreeMap<String, i64> = snap
-                    .service_state_blobs
-                    .get("macho_service_mappings")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
-                map.insert(svc_name.clone(), node_id);
-                if let Ok(json) = serde_json::to_string(&map) {
-                    snap.service_state_blobs
-                        .insert("macho_service_mappings".into(), json);
-                }
-            });
-            ctx.notify(
-                NotificationTarget::All,
-                "OnUpdateServiceMapping",
-                "clientID",
-                vec![PyRep::String(svc_name), PyRep::Integer(node_id)],
-            );
-            Some(Ok(PyRep::Bool(true)))
-        }
-        "browser_flagged_sites" => {
-            let url = args.get(1).and_then(|a| a.as_str()).unwrap_or("").trim().to_string();
-            if url.is_empty() {
-                return Some(Err(err(
-                    "InvalidArgument",
-                    "browser_flagged_sites requires a non-empty URL",
-                )));
-            }
-            let hash_val = format!("flagged-{:x}-1", ctx.now_unix());
-            ctx.db.with_mut_snapshot(|snap| {
-                let sites = vec![FlaggedSiteRecord { url, flag: 1 }];
-                if let Ok(json) = serde_json::to_string(&sites) {
-                    snap.service_state_blobs
-                        .insert("browser_flagged_sites".into(), json);
-                }
-                snap.service_state_blobs
-                    .insert("browser_flagged_sites_hash".into(), hash_val);
-            });
-            ctx.notify(
-                NotificationTarget::All,
-                "OnFlaggedListsChange",
-                "clientID",
-                vec![],
-            );
-            Some(Ok(PyRep::Bool(true)))
-        }
-        _ => None,
-    }
 }
 
 const LOCALIZATION_NOTE_ID: i64 = -8_960_000_000_000;

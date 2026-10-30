@@ -58,7 +58,7 @@ async fn notify_batch9_milestones_redeeming_crates_and_assembly() {
         &[PyRep::Integer(1), PyRep::Real(500_000.0)]
     );
 
-    // Negative 2b: Re-running sweep does not duplicate OnLoginMilestoneAchieved
+    // Negative 2b: Re-running sweep on same day does not duplicate OnLoginMilestoneAchieved
     eve_server::services::notify_emitters_batch9::sweep_due_login_milestones_and_alpha_injectors(
         &ctx,
         future_unix + 60,
@@ -66,6 +66,16 @@ async fn notify_batch9_milestones_redeeming_crates_and_assembly() {
     assert!(!drain_all(&ctx, &mut sess_a, PILOT_A)
         .iter()
         .any(|(e, _)| e == "OnLoginMilestoneAchieved"));
+
+    // Positive 2c: Next day (+86400s) resets daily cadence and emits OnLoginMilestoneAchieved again
+    eve_server::services::notify_emitters_batch9::sweep_due_login_milestones_and_alpha_injectors(
+        &ctx,
+        future_unix + 86_400,
+    );
+    assert_eq!(
+        find_notif(&drain_all(&ctx, &mut sess_a, PILOT_A), "OnLoginMilestoneAchieved"),
+        &[PyRep::Integer(1), PyRep::Real(500_000.0)]
+    );
 
     // 3. OnRedeemingQueueUpdated
     // Negative 3a: TrashRedeemTokens with non-existent token does NOT emit OnRedeemingQueueUpdated
@@ -205,13 +215,12 @@ async fn notify_batch9_milestones_redeeming_crates_and_assembly() {
     );
 }
 
-// parity: notify:OnPasswordChanged, notify:OnPlayerStateUpdated, notify:OnServerBrainUpdated, notify:OnSubscriptionChangedServer, notify:OnSubscriptionTimeUpdateServer
+// parity: notify:OnPasswordChanged, notify:OnPlayerStateUpdated, notify:OnSubscriptionChangedServer, notify:OnSubscriptionTimeUpdateServer
 #[tokio::test]
 async fn notify_batch9_password_player_state_brain_and_subscription() {
     eve_testkit::attest(&[
         "notify:OnPasswordChanged",
         "notify:OnPlayerStateUpdated",
-        "notify:OnServerBrainUpdated",
         "notify:OnSubscriptionChangedServer",
         "notify:OnSubscriptionTimeUpdateServer",
     ]);

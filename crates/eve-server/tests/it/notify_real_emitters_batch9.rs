@@ -203,11 +203,10 @@ async fn notify_batch9_alpha_and_non_diminishing_injectors() {
     assert!(inject_notifs.iter().any(|(e, _)| e == "OnNonDiminishingInjectionsRemoved"));
 }
 
-// parity: notify:OnSkillBundleInjected, notify:OnSkillForcedRefresh, notify:OnLogonSkillsTrained, notify:OnMultipleCharactersTrainingUpdated
+// parity: notify:OnSkillForcedRefresh, notify:OnLogonSkillsTrained, notify:OnMultipleCharactersTrainingUpdated
 #[tokio::test]
 async fn notify_batch9_skill_bundles_refresh_logon_and_mct() {
     eve_testkit::attest(&[
-        "notify:OnSkillBundleInjected",
         "notify:OnSkillForcedRefresh",
         "notify:OnLogonSkillsTrained",
         "notify:OnMultipleCharactersTrainingUpdated",
@@ -262,7 +261,7 @@ async fn notify_batch9_skill_bundles_refresh_logon_and_mct() {
     .await
     .is_err());
 
-    // Positive: OpenCrate + ClaimSkillBundle with valid unlearned SDE skill injects skill and emits OnSkillBundleInjected
+    // Security: OpenCrate + ClaimSkillBundle ignores any client-supplied 3rd-arg skill list (DATA GAP: no FSD bundle skills)
     let unlearned_skill = ctx.db.with_snapshot(|snap| {
         let learned = snap.skills.get(&PILOT_A);
         ctx.sde
@@ -293,7 +292,10 @@ async fn notify_batch9_skill_bundles_refresh_logon_and_mct() {
     .await
     .expect("ClaimSkillBundle");
     let bundle_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    assert!(bundle_notifs.iter().any(|(e, a)| e == "OnSkillBundleInjected" && a.len() == 2));
+    assert!(
+        !bundle_notifs.iter().any(|(e, _)| e == "OnSkillBundleInjected"),
+        "ClaimSkillBundle must not trust client-supplied skill lists"
+    );
 
     // 5. OnSkillForcedRefresh: Obsolete skill migration on character logon/refresh
     // Negative 5a: Character with no obsolete skills does NOT emit OnSkillForcedRefresh

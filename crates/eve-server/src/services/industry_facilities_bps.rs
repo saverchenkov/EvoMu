@@ -901,25 +901,6 @@ pub fn handle_industry_facilities_bps(
                 ("sccSurchargeISK", PyRep::Real(cost_meta.scc_surcharge_isk)),
                 ("totalJobCostISK", PyRep::Real(cost_meta.total_cost_isk)),
             ]);
-            if let Some(cid) = session.character_id {
-                let consumed: Vec<(u32, i32)> = mats_rep
-                    .iter()
-                    .filter_map(|m| match m {
-                        PyRep::KeyVal(kv) => {
-                            let tid = kv.get("typeID")?.as_i64()? as u32;
-                            let qty = kv.get("quantity")?.as_i64()? as i32;
-                            Some((tid, qty))
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                crate::services::notify_emitters_batch3::emit_industry_materials_consumed(
-                    ctx,
-                    cid,
-                    bp_item_opt.as_ref().map(|i| i.item_id).unwrap_or(raw_id),
-                    &consumed,
-                );
-            }
             Some(Ok(res))
         }
 
@@ -1384,12 +1365,6 @@ pub fn handle_industry_facilities_bps(
             Some(Ok(PyRep::rowset(vec!["solarSystemID", "noOfJobs"], rows)))
         }
 
-        _ => crate::services::notify_emitters_batch9_part2::handle_industry_batch9(
-            ctx,
-            session,
-            service,
-            method,
-            args,
-        ),
+        _ => None,
     }
 }

@@ -6,13 +6,11 @@ use crate::notify_real_emitters_batch7::{
 use crate::notify_real_emitters_batch9::login_docked;
 use eve_proto::PyRep;
 
-// parity: notify:OnAllowWarUpdated, notify:OnCommunityFittingsUpdated, notify:OnContextualOfferPurchased, notify:OnNesIntroStateChanged
+// parity: notify:OnAllowWarUpdated, notify:OnNesIntroStateChanged
 #[tokio::test]
 async fn notify_batch9_diplomacy_fittings_offers_and_nes() {
     eve_testkit::attest(&[
         "notify:OnAllowWarUpdated",
-        "notify:OnCommunityFittingsUpdated",
-        "notify:OnContextualOfferPurchased",
         "notify:OnNesIntroStateChanged",
     ]);
 
@@ -81,7 +79,7 @@ async fn notify_batch9_diplomacy_fittings_offers_and_nes() {
     .await
     .is_err());
 
-    // Positive: CEO calling UpdateCorporation with allowWar=true emits OnAllowWarUpdated([corp_id, true]) to corp
+    // Positive: CEO calling UpdateCorporation with allowWar=false changes from default true -> false, persists, and emits OnAllowWarUpdated([corp_id, false])
     let _ = rpc(
         &ctx,
         &mut sess_a,
@@ -91,7 +89,7 @@ async fn notify_batch9_diplomacy_fittings_offers_and_nes() {
             PyRep::String("Desc".into()),
             PyRep::String("https://example.com".into()),
             PyRep::Real(0.05),
-            PyRep::Bool(true),
+            PyRep::Bool(false),
         ],
     )
     .await
@@ -99,8 +97,33 @@ async fn notify_batch9_diplomacy_fittings_offers_and_nes() {
     let war_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     assert_eq!(
         find_notif(&war_notifs, "OnAllowWarUpdated"),
-        &[PyRep::Integer(corp_id), PyRep::Bool(true)]
+        &[PyRep::Integer(corp_id), PyRep::Bool(false)]
     );
+    // Verify corpmgr.GetPublicInfo reflects persisted allowWar=false
+    let pub_info = rpc(&ctx, &mut sess_a, "corpmgr", "GetPublicInfo", &[PyRep::Integer(corp_id)])
+        .await
+        .expect("GetPublicInfo");
+    if let PyRep::KeyVal(kv) = pub_info {
+        assert_eq!(kv.get("allowWar"), Some(&PyRep::Bool(false)));
+    }
+    // Re-calling UpdateCorporation with same allowWar=false does NOT re-emit OnAllowWarUpdated
+    let _ = rpc(
+        &ctx,
+        &mut sess_a,
+        "corpRegistry",
+        "UpdateCorporation",
+        &[
+            PyRep::String("Desc 2".into()),
+            PyRep::String("https://example.com".into()),
+            PyRep::Real(0.05),
+            PyRep::Bool(false),
+        ],
+    )
+    .await
+    .expect("UpdateCorporation no-op allowWar");
+    assert!(!drain_all(&ctx, &mut sess_a, PILOT_A)
+        .iter()
+        .any(|(e, _)| e == "OnAllowWarUpdated"));
 
     // 2. OnCommunityFittingsUpdated
     let fit_id = 777_001_i64;
@@ -145,7 +168,7 @@ async fn notify_batch9_diplomacy_fittings_offers_and_nes() {
         .iter()
         .any(|(e, _)| e == "OnCommunityFittingsUpdated"));
 
-    // Positive: CEO deleting corp fitting emits OnCommunityFittingsUpdated
+    // Positive: CEO deleting corp fitting does NOT emit OnCommunityFittingsUpdated (corp fittings != community fittings)
     let _ = rpc(
         &ctx,
         &mut sess_a,
@@ -156,9 +179,9 @@ async fn notify_batch9_diplomacy_fittings_offers_and_nes() {
     .await
     .expect("DeleteFitting corp");
     let fit_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    assert!(fit_notifs.iter().any(|(e, _)| e == "OnCommunityFittingsUpdated"));
+    assert!(!fit_notifs.iter().any(|(e, _)| e == "OnCommunityFittingsUpdated"));
 
-    // 3. OnContextualOfferPurchased
+    // 3. TrackOfferPurchased does NOT echo OnContextualOfferPurchased
     // Negative 3a: TrackOfferPurchased with invalid offerID (<= 0) fails with InvalidOfferID
     assert!(rpc(&ctx, &mut sess_a, "contextualOfferMgr", "TrackOfferPurchased", &[PyRep::Integer(0)])
         .await
@@ -175,15 +198,12 @@ async fn notify_batch9_diplomacy_fittings_offers_and_nes() {
         .iter()
         .any(|(e, _)| e == "OnContextualOfferPurchased"));
 
-    // Positive: TrackOfferPurchased(42) emits OnContextualOfferPurchased([42, Dict{"offerID": 42}])
+    // TrackOfferPurchased(42) records telemetry without echoing OnContextualOfferPurchased
     let _ = rpc(&ctx, &mut sess_a, "contextualOfferMgr", "TrackOfferPurchased", &[PyRep::Integer(42)])
         .await
         .expect("TrackOfferPurchased");
     let offer_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    let offer_args = find_notif(&offer_notifs, "OnContextualOfferPurchased");
-    assert_eq!(offer_args.len(), 2);
-    assert_eq!(offer_args[0], PyRep::Integer(42));
-    assert!(matches!(&offer_args[1], PyRep::Dict(entries) if entries.iter().any(|(k, v)| k.as_str() == Some("offerID") && *v == PyRep::Integer(42))));
+    assert!(!offer_notifs.iter().any(|(e, _)| e == "OnContextualOfferPurchased"));
 
     // 4. OnNesIntroStateChanged
     // Negative 4a: Unauthenticated skip_nes_intro fails
@@ -209,11 +229,10 @@ async fn notify_batch9_diplomacy_fittings_offers_and_nes() {
     );
 }
 
-// parity: notify:OnOfferReceived, notify:OnIncomingAgentMessage, notify:OnIncomingTransmission, notify:OnEpicJournalChange, notify:OnDatacoreBought
+// parity: notify:OnIncomingAgentMessage, notify:OnIncomingTransmission, notify:OnEpicJournalChange, notify:OnDatacoreBought
 #[tokio::test]
 async fn notify_batch9_agents_epic_journal_and_datacores() {
     eve_testkit::attest(&[
-        "notify:OnOfferReceived",
         "notify:OnIncomingAgentMessage",
         "notify:OnIncomingTransmission",
         "notify:OnEpicJournalChange",
@@ -295,7 +314,7 @@ async fn notify_batch9_agents_epic_journal_and_datacores() {
     assert!(accept_notifs.iter().any(|(e, a)| e == "OnIncomingAgentMessage" && a.len() == 2));
     assert!(accept_notifs.iter().any(|(e, _)| e == "OnEpicJournalChange"));
 
-    // TrackOfferDelivered (contextualOfferMgr) -> emits OnOfferReceived([offerID, offerKeyVal])
+    // TrackOfferDelivered (contextualOfferMgr) -> records telemetry without echoing OnOfferReceived
     let _ = rpc(
         &ctx,
         &mut sess_a,
@@ -306,9 +325,7 @@ async fn notify_batch9_agents_epic_journal_and_datacores() {
     .await
     .expect("TrackOfferDelivered");
     let recv_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    let recv_args = find_notif(&recv_notifs, "OnOfferReceived");
-    assert_eq!(recv_args.len(), 2);
-    assert_eq!(recv_args[0], PyRep::Integer(77));
+    assert!(!recv_notifs.iter().any(|(e, _)| e == "OnOfferReceived"));
 
     // Negative 6b: TrackOfferDelivered with offerID <= 0 fails
     assert!(rpc(

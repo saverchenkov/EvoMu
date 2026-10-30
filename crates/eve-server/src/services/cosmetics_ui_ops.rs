@@ -476,9 +476,6 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         // parity: feat:ui.nes-intro
         ("nes_intro", "get_nes_intro_state") => Some(handle_nes_intro_get(ctx, session)),
         ("nes_intro", "skip_nes_intro") => Some(handle_nes_intro_skip(ctx, session)),
-        ("nes_intro", "set_nes_intro_state") => {
-            Some(crate::services::notify_emitters_batch9::handle_nes_intro_set_state(ctx, session, args))
-        }
 
         (
             "crateService",
@@ -796,11 +793,6 @@ fn handle_track_offer(ctx: &ServerContext, session: &mut SessionState, method: &
         save_cosmetics_ui_state(snap, &ext);
         Ok(PyRep::None)
     })?;
-    if method == "TrackOfferPurchased" {
-        crate::services::notify_emitters_batch3::emit_contextual_offer_purchased(ctx, char_id, offer_id);
-    } else if method == "TrackOfferDelivered" {
-        crate::services::notify_emitters_batch9::emit_offer_received(ctx, char_id, offer_id);
-    }
     Ok(PyRep::None)
 }
 

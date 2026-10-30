@@ -18,8 +18,7 @@ fn err(code: &str, msg: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError { code: code.into(), message: msg.into() }
 }
 
-/// Extracted `crateService` dispatcher emitting `OnCrateLootSpawned` on crate open / loot claim
-/// and `OnSkillBundleInjected` when claiming a skill bundle with explicit skill definitions.
+/// Extracted `crateService` dispatcher emitting `OnCrateLootSpawned` on crate open / loot claim.
 // parity: notify:OnCrateLootSpawned
 pub fn handle_crate_service(
     ctx: &ServerContext,
@@ -336,14 +335,6 @@ fn handle_crate_claim_skill_bundle(ctx: &ServerContext, session: &SessionState, 
     if crate_id <= 0 || bundle_id <= 0 {
         return Err(err("InvalidSkillBundle", "Valid opened crate and skill bundle ID required"));
     }
-    let explicit_skills: Vec<TypeId> = match args.get(2) {
-        Some(PyRep::List(items) | PyRep::Tuple(items)) => items
-            .iter()
-            .filter_map(|x| x.as_i64().and_then(|v| u32::try_from(v).ok()))
-            .filter(|tid| ctx.sde.types.get(tid).is_some_and(|t| t.category_id == 16 && t.published))
-            .collect(),
-        _ => Vec::new(),
-    };
     let session_dock = session.station_id.or(session.structure_id);
     let now_ft = ctx.now_blueos_filetime_ticks();
     let (sp_grant, injected_skills, new_sp, rep) = ctx.db.try_with_mut_snapshot(|snap| {
@@ -376,7 +367,8 @@ fn handle_crate_claim_skill_bundle(ctx: &ServerContext, session: &SessionState, 
             claimed.push(crate_id);
             snap.items.remove(&crate_id);
         }
-        let mut bundle_skills: Vec<TypeId> = spec
+        // DATA GAP: V24 crates.fsdbinary defines skillBundleID but not per-bundle skill lists.
+        let bundle_skills: Vec<TypeId> = spec
             .items
             .iter()
             .filter_map(|&(tid, _)| {
@@ -387,7 +379,6 @@ fn handle_crate_claim_skill_bundle(ctx: &ServerContext, session: &SessionState, 
                     .map(|_| tid)
             })
             .collect();
-        bundle_skills.extend(explicit_skills);
         let mut injected = 0_i64;
         if !bundle_skills.is_empty() {
             let skills_map = snap.skills.entry(char_id).or_default();

@@ -705,9 +705,6 @@ pub(crate) async fn handle_fitting_mgr(
                         "charid",
                         vec![PyRep::Integer(target_owner), PyRep::Integer(fid)],
                     );
-                    if session.corporation_id == Some(target_owner) {
-                        crate::services::notify_emitters_batch3::emit_community_fittings_updated(ctx);
-                    }
                 }
                 Some(Ok(PyRep::Bool(deleted)))
             }

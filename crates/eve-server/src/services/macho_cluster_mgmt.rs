@@ -993,11 +993,6 @@ fn handle_macho_net(
             Some(Ok(PyRep::String(active_hash)))
         }
 
-        _ => crate::services::notify_emitters_batch9_part2::handle_macho_batch9_rpc(
-            ctx,
-            session,
-            method,
-            args,
-        ),
+        _ => None,
     }
 }
