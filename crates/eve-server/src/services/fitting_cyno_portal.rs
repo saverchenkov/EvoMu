@@ -279,31 +279,24 @@ fn evaluated_attrs(
     (ship_vals, mod_vals)
 }
 
-/// Consumes `qty` units of `type_id` from items stored inside `ship_id`, prioritizing `SpecializedFuelBay` before `Cargo`.
+/// Consumes `qty` units of `type_id` from items stored inside `ship_id` (fuel bay first, then cargo).
 fn consume_from_ship(snap: &mut eve_db::WorldStateSnapshot, ship_id: i64, type_id: TypeId, qty: i64) -> Result<(), i64> {
     if qty <= 0 {
         return Ok(());
     }
-    let mut stacks: Vec<(i64, eve_db::InventoryFlag)> = snap
+    let mut stacks: Vec<(u8, i64)> = snap
         .items
         .values()
-        .filter(|i| i.location_id == ship_id && i.type_id == type_id && !matches!(i.flag as u16, 11..=34 | 92..=99 | 125..=132))
-        .map(|i| (i.item_id, i.flag))
+        .filter(|i| i.location_id == ship_id && i.type_id == type_id && !matches!(i.flag as u16, 11..=34 | 92..=99))
+        .map(|i| (if i.flag == eve_db::InventoryFlag::SpecializedFuelBay { 0 } else { 1 }, i.item_id))
         .collect();
-    stacks.sort_by_key(|&(id, flg)| {
-        let prio = match flg {
-            eve_db::InventoryFlag::SpecializedFuelBay => 0,
-            eve_db::InventoryFlag::Cargo => 1,
-            _ => 2,
-        };
-        (prio, id)
-    });
-    let available: i64 = stacks.iter().filter_map(|(id, _)| snap.items.get(id)).map(|i| i.quantity as i64).sum();
+    stacks.sort_by_key(|&(prio, id)| (prio, id));
+    let available: i64 = stacks.iter().filter_map(|&(_, id)| snap.items.get(&id)).map(|i| i.quantity as i64).sum();
     if available < qty {
         return Err(available);
     }
     let mut remaining = qty;
-    for (id, _) in stacks {
+    for (_, id) in stacks {
         if remaining == 0 {
             break;
         }
@@ -603,16 +596,35 @@ async fn relocate_ship(
         ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0)
     });
     let t = ctx.sde.types.get(&type_id);
+    let dest_handle = ctx.systems.get_or_spawn(to_sys);
+    let mut arrival_pos = pos;
+    let mut arrival_vel = DVec3::ZERO;
+    let ship_radius = old.as_ref().map(|b| b.radius).or(t.map(|t| t.radius)).unwrap_or(50.0);
+    if let Ok(dest_balls) = dest_handle.list_balls().await {
+        for sb in dest_balls {
+            let is_struct = ctx.sde.types.get(&sb.type_id).is_some_and(|st| matches!(st.category_id, 65 | 40 | 23));
+            if is_struct {
+                let min_sep = sb.radius + ship_radius + 100.0;
+                let delta = arrival_pos - sb.position;
+                let dist = delta.length();
+                if dist < min_sep {
+                    let dir = if dist > 1e-3 { delta / dist } else { DVec3::X };
+                    arrival_pos = sb.position + dir * min_sep;
+                    arrival_vel = dir * 250.0;
+                }
+            }
+        }
+    }
     let ball = Ball {
         id: ship_id,
         type_id,
-        position: pos,
-        velocity: DVec3::ZERO,
+        position: arrival_pos,
+        velocity: arrival_vel,
         max_velocity: old.as_ref().map(|b| b.max_velocity).unwrap_or(100.0),
         inertia: old.as_ref().map(|b| b.inertia).unwrap_or(1.0),
         mass: old.as_ref().map(|b| b.mass).or(t.map(|t| t.mass)).unwrap_or(1.0),
-        radius: old.as_ref().map(|b| b.radius).or(t.map(|t| t.radius)).unwrap_or(50.0),
-        speed_fraction: 0.0,
+        radius: ship_radius,
+        speed_fraction: if arrival_vel.length_squared() > 0.0 { 1.0 } else { 0.0 },
         mode: MovementMode::Stop,
     };
     let mut combat = ctx.build_ship_combat_state(char_id, ship_id, type_id);
@@ -621,7 +633,7 @@ async fn relocate_ship(
     combat.undock_invulnerable_remaining_ticks = 60;
     combat.sync_invuln_with_undock_timer = true;
     let meta = ctx.build_ship_slim_meta(char_id, type_id);
-    let dest_tick = ctx.systems.get_or_spawn(to_sys).spawn_ball_with_meta(ball, combat, meta).await.unwrap_or(0);
+    let dest_tick = dest_handle.spawn_ball_with_meta(ball, combat, meta).await.unwrap_or(0);
     crate::services::space_destiny::record_session_change_timer(
         ctx,
         char_id,
@@ -681,7 +693,10 @@ async fn caller_in_space(ctx: &ServerContext, session: &SessionState, allow_bubb
         handle.is_ball_scrambled(ship_id).await.unwrap_or(false)
     };
     if scrambled {
-        return Err(err("WarpScrambled", "Cannot jump or bridge while warp scrambled"));
+        return Err(err(
+            "WarpScrambled",
+            "Cannot jump or bridge while warp scrambled or inside a warp disruption bubble",
+        ));
     }
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
     crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "jump")?;
@@ -832,19 +847,23 @@ async fn jump_to_fleet_beacon(
         return Err(err("CannotJumpToPochven", format!("Region-wide cyno jammer prevents jump drives from entering Pochven system {target_sys}")));
     }
     if target_sys != 0 {
-        let (vals, _) = evaluated_attrs(
-            ctx,
-            char_id,
-            ship_id,
-            &[ATTR_JUMP_DRIVE_RANGE],
-            None,
-        );
+        let (vals, _) = evaluated_attrs(ctx, char_id, ship_id, &[ATTR_JUMP_DRIVE_RANGE], None);
         let dist = distance_ly(ctx, sys_id, target_sys);
         if dist > vals[0] {
             return Err(err("JumpDistanceOutOfRange", format!("Distance {dist:.3} LY exceeds jump range {:.3} LY", vals[0])));
         }
     }
-    let beacon = resolve_fleet_beacon(ctx, char_id, cyno_char, beacon_id, target_sys, is_deployable).await?;
+    let mut landed_at_star = false;
+    let beacon = match resolve_fleet_beacon(ctx, char_id, cyno_char, beacon_id, target_sys, is_deployable).await {
+        Ok(b) => b,
+        Err(e) if !is_deployable && cyno_char != 0 && target_sys != 0 && require_same_fleet(ctx, char_id, cyno_char).is_ok() => {
+            if ctx.db.with_snapshot(|s| s.characters.get(&cyno_char).is_some_and(|c| c.active_ship_id == 0 || !s.items.contains_key(&c.active_ship_id))) {
+                landed_at_star = true;
+                FleetModuleBeacon { beacon_id: 0, char_id: cyno_char, ship_id: 0, beacon_type_id: 21094, solar_system_id: target_sys, position: DVec3::ZERO, expires_at_unix: u64::MAX }
+            } else { return Err(e); }
+        }
+        Err(e) => return Err(e),
+    };
     if (31_000_000..32_000_000).contains(&beacon.solar_system_id) {
         return Err(err("JumpDriveForbiddenInWormholeSpace", format!("Jump drives cannot target wormhole system {}", beacon.solar_system_id)));
     }
@@ -885,10 +904,37 @@ async fn jump_to_fleet_beacon(
         base_consumption
     };
     let fuel_qty = (effective_consumption * dist).ceil() as i64;
+    let jdo_lvl = ctx.db.with_snapshot(|s| {
+        s.skills.get(&char_id).and_then(|sk| sk.get(&3455)).map(|r| r.level).unwrap_or(0)
+    });
+    let cap_frac = (0.95 - 0.05 * (jdo_lvl.min(5) as f64)).max(0.0);
+    let origin_sys = ctx.systems.get_or_spawn(sys_id);
+    let mut post_jump_cap = None;
+    if let Ok(Some(mut cs)) = origin_sys.get_combat_state(ship_id).await {
+        let cap_needed = cs.max_capacitor * cap_frac;
+        if cs.capacitor + 1e-4 < cap_needed {
+            return Err(err("NotEnoughCapacitor", format!("Jump requires {cap_needed:.1} GJ capacitor, ship has {:.1} GJ", cs.capacitor)));
+        }
+        cs.capacitor = (cs.capacitor - cap_needed).max(0.0);
+        post_jump_cap = Some(cs.capacitor);
+        let _ = origin_sys.set_combat_state(ship_id, cs).await;
+    }
     consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| format!("Jump requires {fuel_qty} x type {fuel_type}, ship holds {have}"))?;
-    let pos = beacon.position + DVec3::new(2_500.0, 0.0, 0.0);
+    let angle = ((ship_id as u64).wrapping_mul(2654435761) % 3600) as f64 * 0.1_f64.to_radians();
+    let pos = if landed_at_star {
+        DVec3::ZERO
+    } else {
+        beacon.position + DVec3::new(angle.cos() * 5_000.0, 0.0, angle.sin() * 5_000.0)
+    };
     let (cooldown_min, fatigue_min, bound) =
         relocate_caller(ctx, session, char_id, ship_id, sys_id, beacon.solar_system_id, pos, dist, vals[2]).await?;
+    if let Some(rem_cap) = post_jump_cap {
+        let dest_sys = ctx.systems.get_or_spawn(beacon.solar_system_id);
+        if let Ok(Some(mut dcs)) = dest_sys.get_combat_state(ship_id).await {
+            dcs.capacitor = rem_cap;
+            let _ = dest_sys.set_combat_state(ship_id, dcs).await;
+        }
+    }
     Ok(JumpOutcome { dist_ly: dist, fuel_type, fuel_qty, cooldown_min, fatigue_min, beyonce_bound_id: bound })
 }
 
@@ -1108,6 +1154,25 @@ async fn group_jump_to_fleet_beacon(
     let fuel_qty = (effective_consumption * dist).ceil() as i64;
     consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| format!("Jump requires {fuel_qty} x type {fuel_type}, ship holds {have}"))?;
 
+    let is_rorqual = ship_type.group_id == 883;
+    let is_blops = ship_type.group_id == 898;
+    let (cjpg_lvl, indy_core_active) = ctx.db.with_snapshot(|s| {
+        let lvl = s.skills.get(&char_id).and_then(|sk| sk.get(&24311)).map(|r| r.level).unwrap_or(5);
+        let core = s.items.values().any(|i| i.location_id == ship_id && s.module_active_states.contains(&i.item_id) && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 515));
+        (lvl, core)
+    });
+    if is_rorqual && indy_core_active {
+        return Err(err("IndustrialCoreActive", "Rorqual cannot conduit jump while Industrial Core is active"));
+    }
+    let max_passengers: usize = if is_blops || is_rorqual {
+        30
+    } else if matches!(ship_type.group_id, 547 | 659) {
+        let base = (5 + 5 * cjpg_lvl.min(5)) as usize;
+        if ship_type.name.contains("Command") { base * 2 } else { base }
+    } else {
+        30
+    };
+
     let members_to_jump = ctx.db.with_snapshot(|snap| {
         let Some(fid) = fleet_of(snap, char_id) else {
             return Vec::new();
@@ -1128,10 +1193,17 @@ async fn group_jump_to_fleet_beacon(
                 return None;
             }
             let ship_item = snap.items.get(&ch.active_ship_id)?;
-            let ship_type = ctx.sde.types.get(&ship_item.type_id)?;
-            let is_subcap = ship_type.category_id == 6
-                && !matches!(ship_type.group_id, 30 | 485 | 513 | 547 | 659 | 883 | 902 | 1538 | 4594);
-            if !is_subcap {
+            let pt = ctx.sde.types.get(&ship_item.type_id)?;
+            let eligible_hull = matches!(pt.group_id, 29 | 31 | 237 | 25 | 324 | 830 | 831 | 834 | 893 | 1283 | 1527 | 420 | 541 | 1305 | 1534 | 26 | 358 | 832 | 833 | 894 | 906 | 963 | 1972 | 419 | 540 | 1201 | 27 | 898 | 900 | 381);
+            let class_ok = if is_blops {
+                matches!(pt.group_id, 830 | 834 | 893 | 898 | 963 | 1202 | 1283 | 1527 | 1972)
+                    || snap.items.values().any(|i| i.location_id == ch.active_ship_id && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 330 && type_attr(ctx, t, 306) >= 1.0))
+            } else if is_rorqual {
+                matches!(pt.group_id, 463 | 543 | 941 | 1283) || pt.type_id == 32880
+            } else {
+                eligible_hull
+            };
+            if !class_ok {
                 return None;
             }
             Some((mid, ch.active_ship_id))
@@ -1141,6 +1213,9 @@ async fn group_jump_to_fleet_beacon(
     let origin_handle = ctx.systems.get_or_spawn(sys_id);
     let mut qualified_passengers = Vec::new();
     for (m_char, m_ship) in members_to_jump {
+        if qualified_passengers.len() >= max_passengers {
+            break;
+        }
         if let Ok(Some((_, ball))) = origin_handle.get_ball_snapshot(m_ship).await {
             let in_warp = matches!(ball.mode, MovementMode::Warp { .. });
             let is_scrambled = origin_handle.is_ball_scrambled(m_ship).await.unwrap_or(false);

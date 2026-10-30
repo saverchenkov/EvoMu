@@ -1047,6 +1047,13 @@ impl SystemRegistry {
                                 ) {
                                     destroyed_balls.push((bid, None));
                                 }
+                                for bid in crate::services::space_navigation_advanced::step_zarzakh_gravity_hazard_in_ballpark(
+                                    &mut ballpark,
+                                    sde_opt.as_deref(),
+                                    solar_system_id,
+                                ) {
+                                    destroyed_balls.push((bid, None));
+                                }
                                 {
                                     let step_now_unix = db_opt.as_ref().map(|db| db.clock().now_unix_secs()).unwrap_or_else(|| {
                                         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)

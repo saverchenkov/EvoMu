@@ -23,22 +23,16 @@ pub(crate) async fn handle_module_cycles(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let _ = crate::sp6_lifecycle::maybe_abort_safe_logoff_on_action(
-                ctx,
-                char_id,
-                "SAFE_LOGOFF_ABORT_MODULE",
-            );
+            let _ = crate::sp6_lifecycle::maybe_abort_safe_logoff_on_action(ctx, char_id, "SAFE_LOGOFF_ABORT_MODULE");
             let raw_module_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let effect_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("defaultEffect").to_string();
             let target_id_opt = args.get(2).and_then(|a| a.as_i64())
                 .or_else(|| args.get(1).and_then(|a| a.as_i64()))
                 .or_else(|| kwargs.get("target").and_then(|v| v.as_i64()));
             let repeat = args.get(3).and_then(|a| a.as_i64()).unwrap_or(1) as i32;
-
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "No active ship in session".into() }));
             };
-
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Cannot activate modules outside of space".into() }));
             };
@@ -787,28 +781,22 @@ pub(crate) async fn handle_module_cycles(
                 };
             let duration_ms = {
                 let d = mod_state.get_attribute(attr_ids::DURATION, &ctx.sde);
-                if d > 0.0 {
-                    d
-                } else {
+                if d > 0.0 { d } else {
                     let d_high = mod_state.get_attribute(3115, &ctx.sde);
-                    if d_high > 0.0 {
-                        d_high
-                    } else {
-                        mod_state.get_attribute(attr_ids::SPEED, &ctx.sde)
-                    }
+                    if d_high > 0.0 { d_high } else { mod_state.get_attribute(attr_ids::SPEED, &ctx.sde) }
                 }
             };
             let duration_s = if duration_ms > 0.0 { duration_ms / 1000.0 } else { 1.0 };
             let mut cap_need = mod_state.get_attribute(attr_ids::CAPACITOR_NEED, &ctx.sde);
             let speed_factor = mod_state.get_attribute(attr_ids::SPEED_FACTOR, &ctx.sde);
-            let speed_boost_factor = if mod_type.group_id != 330 && speed_factor > 0.0 { speed_factor / 100.0 } else { 0.0 };
-
+            let speed_boost_factor = if mod_type.group_id == 330 {
+                let vel_mod = mod_state.get_attribute(306, &ctx.sde);
+                if vel_mod > 0.0 && vel_mod < 1.0 { vel_mod - 1.0 } else { 0.0 }
+            } else if speed_factor > 0.0 { speed_factor / 100.0 } else { 0.0 };
             let raw_shield = mod_state.get_attribute(68, &ctx.sde);
             let raw_armor = mod_state.get_attribute(84, &ctx.sde);
             let raw_hull = mod_state.get_attribute(83, &ctx.sde);
-            let overload_mult = crate::services::fitting_cycles_overheat::compute_overload_multiplier(
-                is_overloaded, mod_type, &ctx.sde,
-            );
+            let overload_mult = crate::services::fitting_cycles_overheat::compute_overload_multiplier(is_overloaded, mod_type, &ctx.sde);
             let shield_boost_amount = if matches!(mod_type.group_id, 41 | 1697) { 0.0 } else { raw_shield * overload_mult };
             let duration_s = if shield_boost_amount > 0.0 {
                 let boost_mult = sys

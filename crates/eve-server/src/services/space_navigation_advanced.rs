@@ -415,3 +415,60 @@ pub fn process_zarzakh_gate_toll(
     }
     Ok(())
 }
+
+/// Zarzakh Jovian gravity hazard (`feat:navigation.gravity-hazard-safe-zones`):
+/// Ships in Zarzakh (`30_100_000`) outside the Jovian safe zones (stargates, The Fulcrum, Shipcaster)
+/// take periodic hull damage; inside a safe zone no hazard damage is applied.
+pub fn step_zarzakh_gravity_hazard_in_ballpark(
+    ballpark: &mut eve_destiny::Ballpark,
+    sde: Option<&eve_sde::SdeRegistry>,
+    sys_id: u32,
+) -> Vec<i64> {
+    if sys_id != 30_100_000 {
+        return Vec::new();
+    }
+    let mut safe_centers = Vec::new();
+    if let Some(sde) = sde {
+        for sg in sde.stargates().values().filter(|g| g.from_solar_system_id == 30_100_000) {
+            safe_centers.push(sg.position);
+        }
+        if let Some(st) = sde.stations.get(&60015187) {
+            safe_centers.push(st.position);
+        }
+    }
+    for b in ballpark.balls.values() {
+        let is_safe_anchor = sde
+            .and_then(|s| s.types.get(&b.type_id))
+            .is_some_and(|t| matches!(t.group_id, 10 | 15 | 4736) || t.name.contains("Shipcaster") || t.name.contains("Fulcrum"));
+        if is_safe_anchor {
+            safe_centers.push(b.position);
+        }
+    }
+    let safe_radius = 150_000.0;
+    let mut destroyed = Vec::new();
+    let ship_ids: Vec<i64> = ballpark
+        .balls
+        .values()
+        .filter(|b| {
+            sde.and_then(|s| s.types.get(&b.type_id))
+                .is_some_and(|t| t.category_id == 6)
+        })
+        .map(|b| b.id)
+        .collect();
+    for bid in ship_ids {
+        let Some(pos) = ballpark.balls.get(&bid).map(|b| b.position) else { continue };
+        if safe_centers.iter().any(|&c| pos.distance(c) <= safe_radius) {
+            continue;
+        }
+        if let Some(cs) = ballpark.combat_states.get_mut(&bid) {
+            if cs.undock_invulnerable_remaining_ticks > 0 || cs.is_tethered {
+                continue;
+            }
+            cs.structure_hp = (cs.structure_hp - 150.0).max(0.0);
+            if cs.structure_hp <= 0.0 {
+                destroyed.push(bid);
+            }
+        }
+    }
+    destroyed
+}

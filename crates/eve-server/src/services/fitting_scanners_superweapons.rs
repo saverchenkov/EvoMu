@@ -799,16 +799,9 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
             let module_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let target_id_opt = args.get(1).and_then(|a| a.as_i64());
             Some(
-                crate::services::tactical_modules::activate_superweapon_or_lance(
-                    ctx,
-                    char_id,
-                    ship_id,
-                    sys_id,
-                    module_id,
-                    method,
-                    target_id_opt,
-                )
-                .await,
+                crate::services::tactical_modules::activate_superweapon_with_args(
+                    ctx, char_id, ship_id, sys_id, module_id, method, target_id_opt, args,
+                ).await,
             )
         }
 
