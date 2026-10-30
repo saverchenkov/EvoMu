@@ -501,3 +501,4 @@ mod open_feats_and_rpcs_b7_fw;
 mod open_feats_and_rpcs_b7_part2;
 mod open_feats_and_rpcs_b7_social;
 mod open_feats_b41_part2;
+mod open_feats_batch6_closure;

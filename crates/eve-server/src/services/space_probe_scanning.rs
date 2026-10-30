@@ -967,8 +967,20 @@ async fn handle_request_scans(
     if !combat_probes.is_empty() {
         let caller_ship = session.ship_id;
         let balls = sys_handle.list_balls().await.unwrap_or_default();
+        let inhibitor_positions: Vec<DVec3> = balls
+            .iter()
+            .filter(|b| b.type_id == 33_589)
+            .map(|b| b.position)
+            .collect();
         for ball in balls {
             if Some(ball.id) == caller_ship {
+                continue;
+            }
+            if ball.type_id != 33_589
+                && inhibitor_positions
+                    .iter()
+                    .any(|pos| ball.position.distance(*pos) <= 30_000.0)
+            {
                 continue;
             }
             let Some(type_rec) = ctx.sde.types.get(&ball.type_id) else { continue };
