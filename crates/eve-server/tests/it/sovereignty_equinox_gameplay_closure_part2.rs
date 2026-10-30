@@ -24,21 +24,27 @@ use glam::DVec3;
 
 #[tokio::test]
 async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() {
-    // DATA GAP: feat:sovereignty.mercenary-den (open until real SDE tables imported)
+    // parity: feat:sovereignty.mercenary-den
     // parity: feat:sovereignty.mercenary-den-anchoring
-    // DATA GAP: feat:sovereignty.mercenary-den-development-anarchy (open until real SDE tables imported)
-    // DATA GAP: feat:sovereignty.mercenary-den-anarchy-evolution (open until real SDE tables imported)
+    // parity: feat:sovereignty.mercenary-den-development-anarchy
+    // parity: feat:sovereignty.mercenary-den-anarchy-evolution
     // DATA GAP: feat:pve.mercenary-tactical-ops (open until real SDE tables imported)
     // parity: feat:sovereignty.mercenary-den-reinforcement-loot
-    // DATA GAP: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj (open until real SDE tables imported)
-    // DATA GAP: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj (open until real SDE tables imported)
-    // DATA GAP: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj (open until real SDE tables imported)
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj
     // parity: notify:OnMercenaryDenRegistrationInvalid
     // parity: notify:OnMercenaryDenRegistrationSuccess
     // parity: notify:OnMyMercenaryDenRemoved
     eve_testkit::attest(&[
+        "feat:sovereignty.mercenary-den",
         "feat:sovereignty.mercenary-den-anchoring",
+        "feat:sovereignty.mercenary-den-development-anarchy",
+        "feat:sovereignty.mercenary-den-anarchy-evolution",
         "feat:sovereignty.mercenary-den-reinforcement-loot",
+        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj",
         "notify:OnMercenaryDenRegistrationInvalid",
         "notify:OnMercenaryDenRegistrationSuccess",
         "notify:OnMyMercenaryDenRemoved",
@@ -132,15 +138,15 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
         "MercenaryDenCapExceeded"
     );
 
-    // 2. Anarchy rises over 25h without MTO completion, siphoning 500 workforce from host Hub/Skyhook.
+    // 2. Anarchy rises over 8 days (+5/24h -> Anarchy 40, stage 3 / UI level 2), siphoning 10% of host Temperate Skyhook workforce (150 of 1,500).
     let base_wf = ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available);
-    ctx.advance_secs(25 * 3_600);
+    ctx.advance_secs(8 * 86_400);
     assert_eq!(
         rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64)).await.status_code,
         STATUS_OK
     );
     let siphoned_wf = ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available);
-    assert_eq!(siphoned_wf + 500, base_wf);
+    assert_eq!(siphoned_wf + 150, base_wf);
 
     // 3. Quasar MTO requests spawn live MTO combat target ball (`24690`), completed via live `dogmaIM.AddTarget` + `Activate`!
     assert_eq!(rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.activity.api.GetCapacityRequest", Vec::new()).await.status_code, STATUS_OK);

@@ -466,6 +466,9 @@ pub struct PersistedSovState {
     /// Sub-unit batch rate & remainder `(batch_qty, rem)` for exact 1 Hz Skyhook reagent maturity.
     #[serde(default)]
     pub skyhook_maturity_rem: HashMap<i64, (u64, u128)>,
+    /// Sub-24h elapsed seconds remainder per Mercenary Den (`den_id -> secs < 86_400`).
+    #[serde(default)]
+    pub mercenary_den_evo_rem: HashMap<i64, u64>,
     /// Last unix timestamp at which hourly planetary reagent output was harvested into a Skyhook's insecure bay.
     #[serde(default)]
     pub skyhook_last_harvest_unix: HashMap<i64, u64>,

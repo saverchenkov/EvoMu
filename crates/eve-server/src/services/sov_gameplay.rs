@@ -25,8 +25,8 @@ pub use sov_gameplay_entosis::*;
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::quasar_sov_hub::{id_field, push_notice, PendingNotices};
 use crate::services::quasar_sov_mercden::{
-    encode_evolution_simulation, push_definitions_updated_notice, refresh_activities, simulate_den,
-    MERCENARY_DEN_ABSOLUTE_MAX, TYPE_MERCENARY_DEN_MANAGEMENT,
+    encode_evolution_simulation, push_definitions_updated_notice, refresh_activities,
+    simulate_den_in_snap, MERCENARY_DEN_ABSOLUTE_MAX, TYPE_MERCENARY_DEN_MANAGEMENT,
 };
 use crate::services::sov_services::{
     emit_sov_structures_updated, TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB,
@@ -522,8 +522,8 @@ pub async fn handle_mercden_component_call(
             .unwrap_or(0.01)
             .max(1e-6);
         let max_owner_units = ((free_m3 + 1e-9) / unit_vol).floor() as u32;
-        let den_mut = snap.sov_runtime.mercenary_dens.get_mut(&den_id).expect("checked");
-        if simulate_den(den_mut, now) {
+        if simulate_den_in_snap(&mut snap.sov_runtime, den_id, now) {
+            let den_mut = snap.sov_runtime.mercenary_dens.get(&den_id).expect("checked");
             let mut n = Vec::new();
             id_field(1, den_id as u64, &mut n);
             encode_bytes_field(2, &encode_evolution_simulation(den_mut), &mut n);
@@ -534,6 +534,7 @@ pub async fn handle_mercden_component_call(
                 n,
             );
         }
+        let den_mut = snap.sov_runtime.mercenary_dens.get(&den_id).expect("checked");
         let total = den_mut.infomorphs;
         if total == 0 {
             return Err(BridgeRpcError {
@@ -635,8 +636,14 @@ pub async fn apply_mercenary_den_weapon_damage(
     let pending: PendingNotices = Arc::new(RwLock::new(Vec::new()));
     enum Outcome {
         Damaged { state: String, shield_hp: f64, hull_hp: f64, reinf_until: u64, vuln_end: u64 },
-        Destroyed { sys_id: u32, owner_cid: i64, wreck_id: i64, wreck_pos: [f64; 3], dropped_stacks: usize, dropped_qty: u32 },
+        Destroyed { sys_id: u32, owner_cid: i64, wreck_id: i64, wreck_type: u32, wreck_pos: [f64; 3], dropped_stacks: usize, dropped_qty: u32 },
     }
+    let wreck_type = ctx
+        .sde
+        .wrecks
+        .get(&TYPE_MERCENARY_DEN)
+        .copied()
+        .unwrap_or(86_175);
     let outcome = ctx.db.try_with_mut_snapshot(|snap| {
         let (mut reinf_until, mut vuln_end, _) = snap
             .sov_runtime
@@ -682,8 +689,9 @@ pub async fn apply_mercenary_den_weapon_damage(
                 shield_pct = 0;
                 st.state = "HullReinforced".into();
                 st.reinforced_until_unix = reinf_until;
-                if let Some(den_mut) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
-                    let _ = simulate_den(den_mut, now);
+                if snap.sov_runtime.mercenary_dens.contains_key(&den_id) {
+                    let _ = simulate_den_in_snap(&mut snap.sov_runtime, den_id, now);
+                    let den_mut = snap.sov_runtime.mercenary_dens.get_mut(&den_id).expect("checked");
                     den_mut.enabled = false;
                     let mut n = Vec::new();
                     id_field(1, den_id as u64, &mut n);
@@ -749,7 +757,7 @@ pub async fn apply_mercenary_den_weapon_damage(
             wreck_id,
             InventoryItemRecord {
                 item_id: wreck_id,
-                type_id: 26_561,
+                type_id: wreck_type,
                 owner_id: owner_cid.max(1),
                 location_id: i64::from(sys_id),
                 quantity: 1,
@@ -782,7 +790,7 @@ pub async fn apply_mercenary_den_weapon_damage(
                 );
             }
         }
-        Ok(Outcome::Destroyed { sys_id, owner_cid, wreck_id, wreck_pos: pos_arr, dropped_stacks, dropped_qty })
+        Ok(Outcome::Destroyed { sys_id, owner_cid, wreck_id, wreck_type, wreck_pos: pos_arr, dropped_stacks, dropped_qty })
     })?;
 
     flush_pending_quasar(ctx, &pending, now);
@@ -796,13 +804,13 @@ pub async fn apply_mercenary_den_weapon_damage(
             ("vulnerabilityEnds", PyRep::Integer(vuln_end as i64)),
             ("vulnerabilityEndsAt", PyRep::Integer(vuln_end as i64)),
         ])),
-        Outcome::Destroyed { sys_id, owner_cid, wreck_id, wreck_pos, dropped_stacks, dropped_qty } => {
+        Outcome::Destroyed { sys_id, owner_cid, wreck_id, wreck_type, wreck_pos, dropped_stacks, dropped_qty } => {
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let _ = sys_handle.remove_ball(den_id).await;
             let _ = sys_handle
                 .spawn_ball(Ball {
                     id: wreck_id,
-                    type_id: 26_561,
+                    type_id: wreck_type,
                     position: DVec3::from_array(wreck_pos),
                     velocity: DVec3::ZERO,
                     max_velocity: 0.0,
@@ -1189,8 +1197,14 @@ pub async fn handle_anchor_sov_hub_rpc(
     }
     let sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solarSystemID".into() })?;
     let ship_id = session.ship_id.unwrap_or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0)));
-    let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0);
-    if sys_sec > 0.0 || sys_id >= 31_000_000 {
+    let sys_meta = ctx.sde.solar_systems.get(&sys_id);
+    let sys_sec = sys_meta.map(|s| s.security_status).unwrap_or(1.0);
+    let is_pochven = sys_meta.is_some_and(|s| s.region_id == 10_000_070);
+    let is_npc_sov = sys_meta.is_some_and(|s| {
+        ctx.sde.constellations.get(&s.constellation_id).and_then(|c| c.faction_id).is_some()
+            || ctx.sde.regions.get(&s.region_id).and_then(|r| r.faction_id).is_some()
+    });
+    if sys_sec > 0.0 || sys_id >= 31_000_000 || sys_id == 30_100_000 || is_pochven || is_npc_sov {
         return Err(BridgeRpcError { code: "CannotAnchorSovHubOutsideNullSec".into(), message: format!("Sovereignty Hub can only be anchored in claimable null-security space (system {sys_id})") });
     }
     let (_, ship_ball) = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError { code: "DestinyQueryFailed".into(), message: e })?
@@ -1206,6 +1220,9 @@ pub async fn handle_anchor_sov_hub_rpc(
         let is_ceo = snap.corporations.get(&corp_id).is_some_and(|c| c.ceo_id == char_id);
         if !is_ceo && (roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER)) == 0 {
             return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Anchoring a Sovereignty Hub requires Director or Station Manager role".into() });
+        }
+        if snap.system_states.get(&sys_id).and_then(|s| s.sov_alliance_id).is_some_and(|aid| aid != ally_id) {
+            return Err(BridgeRpcError { code: "SovereigntyHeldByAnotherAlliance".into(), message: format!("System {sys_id} is currently claimed by another alliance") });
         }
         if snap.structures.values().any(|s| s.solar_system_id == sys_id && s.type_id == TYPE_SOVEREIGNTY_HUB && s.state != "Destroyed") {
             return Err(BridgeRpcError { code: "SovHubAlreadyPresent".into(), message: format!("System {sys_id} already has an active Sovereignty Hub") });

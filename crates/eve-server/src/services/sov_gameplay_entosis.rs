@@ -668,6 +668,7 @@ async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
                     }
                     if !defender_won {
                         let _ = ctx.systems.get_or_spawn(hub_sys).remove_ball(hub_id).await;
+                        crate::services::sov_services::emit_sovereignty_changed(ctx, hub_sys, None, None);
                     }
                     emit_sov_structures_updated(ctx, hub_sys, vec![PyRep::Integer(hub_id)]);
                 }
@@ -768,6 +769,11 @@ pub fn on_space_entity_destroyed(
     );
 }
 
+fn sov_upgrade_combat_npcs() -> &'static RwLock<std::collections::HashSet<i64>> {
+    static NPCS: std::sync::OnceLock<RwLock<std::collections::HashSet<i64>>> = std::sync::OnceLock::new();
+    NPCS.get_or_init(|| RwLock::new(std::collections::HashSet::new()))
+}
+
 /// Extended destruction hook distinguishing pre-removed specialized NPCs from unpiloted hulls.
 pub fn on_space_entity_destroyed_ext(
     ctx: &ServerContext,
@@ -780,6 +786,10 @@ pub fn on_space_entity_destroyed_ext(
     let now = ctx.now_unix();
     let pending: PendingNotices = Arc::new(RwLock::new(Vec::new()));
     let mut was_mto_npc = false;
+    let was_upg_npc = sov_upgrade_combat_npcs()
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&target_ball_id);
     let mut mto_account_change: Option<(i64, f64)> = None;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(act_key) = snap.sov_runtime.mto_site_balls.remove(&target_ball_id) {
@@ -814,7 +824,7 @@ pub fn on_space_entity_destroyed_ext(
         solar_system_id,
         target_ball_id,
         target_type_id,
-        was_mto_npc || was_tracked_npc,
+        was_mto_npc || was_tracked_npc || was_upg_npc,
     );
 }
 
@@ -1051,13 +1061,19 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
                     ("Combat", format!("Sovereign {}", t.name), [165_000.0, 25_000.0, 0.0], Vec::new())
                 } else if t.name.contains("Prospecting Array") {
                     let ores = if t.name.contains("Tritanium") {
-                        vec![1230, 1228]
+                        vec![1230, 18]
+                    } else if t.name.contains("Pyerite") {
+                        vec![1228, 1224]
+                    } else if t.name.contains("Mexallon") {
+                        vec![18, 20]
                     } else if t.name.contains("Isogen") {
-                        vec![20, 1226]
+                        vec![1227, 1229]
+                    } else if t.name.contains("Nocxium") {
+                        vec![1232, 1225]
                     } else if t.name.contains("Zydrine") {
-                        vec![19, 1229]
+                        vec![1223, 22]
                     } else if t.name.contains("Megacyte") {
-                        vec![22, 1225]
+                        vec![19, 1223]
                     } else {
                         vec![1228, 1229]
                     };
@@ -1162,6 +1178,10 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
         for off in [0i64, 1, 2] {
             let bid = base_id + off;
             let _ = sys_handle.remove_ball(bid).await;
+            sov_upgrade_combat_npcs()
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&bid);
             crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
                 rt.npc_entities.remove(&bid);
             });
@@ -1210,6 +1230,15 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
                         ctx, sys_id, base_id, nid, 37_453, 500_010, npos,
                     )
                     .await;
+                    sov_upgrade_combat_npcs()
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(nid);
+                    if let Ok(Some(mut npc_cs)) = sys_handle.get_combat_state(nid).await {
+                        npc_cs.signature_radius = 40_000.0;
+                        npc_cs.base_signature_radius = Some(40_000.0);
+                        let _ = sys_handle.set_combat_state(nid, npc_cs).await;
+                    }
                 }
             }
         } else if arch == "Data" {

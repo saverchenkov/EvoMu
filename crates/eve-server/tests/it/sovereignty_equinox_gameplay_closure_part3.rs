@@ -25,23 +25,29 @@ use glam::DVec3;
 
 #[tokio::test]
 async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_tenebrex() {
-    // DATA GAP: feat:sovereignty.sov-hub-fuel (open until real SDE tables imported)
-    // DATA GAP: feat:sovereignty.sov-power (open until real SDE tables imported)
-    // DATA GAP: feat:sovereignty.sov-workforce (open until real SDE tables imported)
-    // DATA GAP: feat:sovereignty.sov-hub-upgrades (open until real SDE tables imported)
+    // parity: feat:sovereignty.sov-hub-fuel
+    // parity: feat:sovereignty.sov-power
+    // parity: feat:sovereignty.sov-workforce
+    // parity: feat:sovereignty.sov-hub-upgrades
     // parity: feat:sovereignty.sov-upgrade-sites
     // parity: feat:sovereignty.sov-hub-hacking
     // parity: feat:sovereignty.sov-structures-flex
     // parity: feat:modules.cynosural-field-jammer-structure
-    // DATA GAP: quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj (open until real SDE tables imported)
-    // DATA GAP: quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj (open until real SDE tables imported)
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj
     // parity: notify:OnSovHubHacked
     // parity: notify:OnCynoJammerChanged
     eve_testkit::attest(&[
+        "feat:sovereignty.sov-hub-fuel",
+        "feat:sovereignty.sov-power",
+        "feat:sovereignty.sov-workforce",
+        "feat:sovereignty.sov-hub-upgrades",
         "feat:sovereignty.sov-upgrade-sites",
         "feat:sovereignty.sov-hub-hacking",
         "feat:sovereignty.sov-structures-flex",
         "feat:modules.cynosural-field-jammer-structure",
+        "quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj",
         "notify:OnSovHubHacked",
         "notify:OnCynoJammerChanged",
     ]);

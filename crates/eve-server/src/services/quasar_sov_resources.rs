@@ -42,6 +42,34 @@ fn timestamp_secs(msg: &DynamicQuasarMessage, field: u32) -> Option<u64> {
     }
 }
 
+fn encode_planet_definitions(out: &mut Vec<u8>) {
+    for &(type_id, _name, power, workforce) in PLANET_RESOURCE_TABLE.iter() {
+        let mut def_buf = Vec::new();
+        encode_id_field(1, u64::from(type_id), &mut def_buf);
+        encode_varint_field(2, power, &mut def_buf);
+        encode_varint_field(3, workforce, &mut def_buf);
+        if type_id == 12 || type_id == 2015 {
+            let reagent_type = if type_id == 12 {
+                super::sov_services::TYPE_SUPERIONIC_ICE
+            } else {
+                super::sov_services::TYPE_MAGMATIC_GAS
+            };
+            let mut r_def = Vec::new();
+            encode_id_field(1, u64::from(reagent_type), &mut r_def);
+            let mut amt = Vec::new();
+            encode_varint_field(1, 50, &mut amt);
+            encode_varint_field(2, 3_600, &mut amt);
+            encode_varint_field(3, 50, &mut amt);
+            encode_varint_field(4, 25_000, &mut amt);
+            encode_varint_field(5, 25_000, &mut amt);
+            encode_bytes_field(2, &amt, &mut r_def);
+            encode_id_field(3, u64::from(reagent_type), &mut r_def);
+            encode_bytes_field(4, &r_def, &mut def_buf);
+        }
+        encode_bytes_field(1, &def_buf, out);
+    }
+}
+
 /// Registers planetary/stellar resources and skyhook admin handlers on the gateway router.
 pub fn register_handlers(
     router: &PublicGatewayRouter,
@@ -54,28 +82,35 @@ pub fn register_handlers(
     {
         router.register_handler(
             "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsRequest",
-            Arc::new(move |_ctx, _any, _dyn_msg| {
+            Arc::new(move |_ctx, _any, dyn_msg| {
                 let mut out = Vec::new();
-                for &(type_id, _name, power, workforce) in PLANET_RESOURCE_TABLE.iter() {
-                    let mut def_buf = Vec::new();
-                    encode_id_field(1, u64::from(type_id), &mut def_buf);
-                    encode_varint_field(2, power, &mut def_buf);
-                    encode_varint_field(3, workforce, &mut def_buf);
-                    if type_id == 12 || type_id == 2015 {
-                        let reagent_type = if type_id == 12 {
-                            super::sov_services::TYPE_SUPERIONIC_ICE
-                        } else {
-                            super::sov_services::TYPE_MAGMATIC_GAS
-                        };
-                        let mut r_def = Vec::new();
-                        encode_id_field(1, u64::from(reagent_type), &mut r_def);
-                        let mut amt = Vec::new();
-                        encode_varint_field(1, 50, &mut amt);
-                        encode_varint_field(2, 3_600, &mut amt);
-                        encode_bytes_field(2, &amt, &mut r_def);
-                        encode_bytes_field(4, &r_def, &mut def_buf);
-                    }
-                    encode_bytes_field(1, &def_buf, &mut out);
+                let no_known = dyn_msg.get(2).is_some_and(|v| matches!(v, DynamicValue::Bool(true)));
+                let known_matches = !no_known
+                    && match dyn_msg.get(1) {
+                        Some(DynamicValue::Message(ver)) => {
+                            let maj = match ver.get(1) {
+                                Some(DynamicValue::Uint32(n)) => u64::from(*n),
+                                Some(DynamicValue::Uint64(n)) => *n,
+                                Some(DynamicValue::Int32(n)) => *n as u64,
+                                Some(DynamicValue::Int64(n)) => *n as u64,
+                                _ => 0,
+                            };
+                            let min = match ver.get(2) {
+                                Some(DynamicValue::Uint32(n)) => u64::from(*n),
+                                Some(DynamicValue::Uint64(n)) => *n,
+                                _ => 0,
+                            };
+                            let pat = match ver.get(3) {
+                                Some(DynamicValue::Uint32(n)) => u64::from(*n),
+                                Some(DynamicValue::Uint64(n)) => *n,
+                                _ => 0,
+                            };
+                            maj == 1 && min == 0 && pat == 0
+                        }
+                        _ => false,
+                    };
+                if !known_matches {
+                    encode_planet_definitions(&mut out);
                 }
                 let mut ver_buf = Vec::new();
                 encode_varint_field(1, 1, &mut ver_buf);
@@ -92,16 +127,29 @@ pub fn register_handlers(
     }
 
     // 2. eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionRequest
+    //    Schema: `GetDefinitionsVersionRequest { Specification version = 1; }`
+    //            `GetDefinitionsVersionResponse { repeated Definition definitions = 1; }`
     {
         router.register_handler(
             "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionRequest",
-            Arc::new(move |_ctx, _any, _dyn_msg| {
+            Arc::new(move |_ctx, _any, dyn_msg| {
+                if let Some(DynamicValue::Message(ver)) = dyn_msg.get(1) {
+                    let maj = match ver.get(1) {
+                        Some(DynamicValue::Uint32(n)) => u64::from(*n),
+                        Some(DynamicValue::Uint64(n)) => *n,
+                        Some(DynamicValue::Int32(n)) => *n as u64,
+                        Some(DynamicValue::Int64(n)) => *n as u64,
+                        _ => 0,
+                    };
+                    if maj != 0 && maj != 1 {
+                        return Err((
+                            STATUS_NOT_FOUND,
+                            format!("Unknown planet resource definitions major version {maj}"),
+                        ));
+                    }
+                }
                 let mut out = Vec::new();
-                let mut ver_buf = Vec::new();
-                encode_varint_field(1, 1, &mut ver_buf);
-                encode_varint_field(2, 0, &mut ver_buf);
-                encode_varint_field(3, 0, &mut ver_buf);
-                encode_bytes_field(1, &ver_buf, &mut out);
+                encode_planet_definitions(&mut out);
 
                 Ok(GoogleAny {
                     type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionResponse"),
@@ -125,7 +173,6 @@ pub fn register_handlers(
                     .with_snapshot(|s| s.characters.get(&cid).map(|c| c.solar_system_id))
                     .ok_or((STATUS_NOT_FOUND, format!("Character {cid} not found")))?;
                 let mut out = Vec::new();
-                let mut count = 0;
                 for cel in sde_cfg.celestials_in_system(sys_id as u32) {
                     if cel.group_id == 7 {
                         let (power, workforce) = super::quasar_sov_hub::planet_yield(cel.type_id);
@@ -139,17 +186,23 @@ pub fn register_handlers(
                             } else {
                                 super::sov_services::TYPE_MAGMATIC_GAS
                             };
-                            let mut r_def = Vec::new();
-                            encode_id_field(1, u64::from(reagent_type), &mut r_def);
-                            let mut amt = Vec::new();
-                            encode_varint_field(1, 50, &mut amt);
-                            encode_varint_field(2, 3_600, &mut amt);
-                            encode_bytes_field(2, &amt, &mut r_def);
-                            encode_bytes_field(4, &r_def, &mut cfg_buf);
+                            let mut r_cfg = Vec::new();
+                            encode_id_field(1, u64::from(reagent_type), &mut r_cfg);
+                            let mut harvest = Vec::new();
+                            encode_varint_field(1, 50, &mut harvest);
+                            encode_varint_field(2, 3_600, &mut harvest);
+                            encode_varint_field(3, 0, &mut harvest);
+                            encode_varint_field(4, 25_000, &mut harvest);
+                            encode_bytes_field(2, &harvest, &mut r_cfg);
+                            let mut maturation = Vec::new();
+                            encode_varint_field(1, 100, &mut maturation);
+                            encode_varint_field(2, 86_400, &mut maturation);
+                            encode_varint_field(3, 0, &mut maturation);
+                            encode_varint_field(4, 25_000, &mut maturation);
+                            encode_bytes_field(3, &maturation, &mut r_cfg);
+                            encode_bytes_field(4, &r_cfg, &mut cfg_buf);
                         }
                         encode_bytes_field(1, &cfg_buf, &mut out);
-                        count += 1;
-                        if count >= 8 { break; }
                     }
                 }
 

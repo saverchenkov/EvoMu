@@ -348,22 +348,27 @@ fn is_active(u: &PersistedHubUpgrade) -> bool {
 pub fn compute_hub_resources(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -> Option<HubResources> {
     let st = snap.structures.get(&hub_id)?;
     let y = system_yield(sde, st.solar_system_id);
-    // DERIVED (synthetic): Mercenary Den anarchy stage 2..=3 siphons 500 * (stage - 1) workforce/h; stage >= 4 freezes local workforce transport.
+    let celestials = sde.celestials_in_system(st.solar_system_id);
     let mut siphoned_w: u64 = 0;
-    let mut any_workforce_frozen = false;
-    for d in snap.sov_runtime.mercenary_dens.values().filter(|d| d.solar_system_id == st.solar_system_id && d.enabled) {
-        let stage = u64::from(super::quasar_sov_mercden::stage_for_level(d.anarchy_level));
-        if stage >= 4 {
-            any_workforce_frozen = true;
-        } else if stage >= 2 {
-            siphoned_w += 500 * (stage - 1);
+    for d in snap
+        .sov_runtime
+        .mercenary_dens
+        .values()
+        .filter(|d| d.solar_system_id == st.solar_system_id && d.enabled)
+    {
+        let stage = super::quasar_sov_mercden::stage_for_level(d.anarchy_level);
+        let pct = super::quasar_sov_mercden::anarchy_workforce_disruption_pct(stage);
+        if pct > 0 {
+            let host_wf = celestials
+                .iter()
+                .find(|c| c.celestial_id == d.planet_id)
+                .map(|c| planet_yield(c.type_id).1)
+                .filter(|&w| w > 0)
+                .unwrap_or_else(|| planet_yield(11).1);
+            siphoned_w += (host_wf * pct) / 100;
         }
     }
-    let effective_workforce = if any_workforce_frozen {
-        0
-    } else {
-        y.planet_workforce.saturating_sub(siphoned_w)
-    };
+    let effective_workforce = y.planet_workforce.saturating_sub(siphoned_w);
     let mut r = HubResources {
         power_local: y.stars.iter().map(|s| s.1).sum::<u64>() + y.planet_power,
         workforce_local: effective_workforce,
