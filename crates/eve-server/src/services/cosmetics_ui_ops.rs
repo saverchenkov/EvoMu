@@ -1326,14 +1326,9 @@ fn handle_crate_claim_skill_bundle(ctx: &ServerContext, session: &mut SessionSta
             ]),
         ))
     })?;
-    // DATA GAP: res:/staticdata/crates.fsdbinary only stores skillBundleID: u32; skillBundleID -> skill list definitions are server-only in modern EVE and absent from V24 client FSD, so notify:OnSkillBundleInjected remains open.
-    let notif_args = vec![PyRep::Integer(1), PyRep::Real(result.0)];
-    ctx.notify(
-        crate::router::NotificationTarget::Character(char_id),
-        "OnSkillBundleInjected",
-        "charid",
-        notif_args,
-    );
+    // DATA GAP: res:/staticdata/crates.fsdbinary only stores skillBundleID: u32; server-authored skill bundle
+    // definitions (skillBundleID -> skill list) are absent from V24 client FSD, so `OnSkillBundleInjected(numberOfSkills, sp)`
+    // is not emitted until bundle definitions exist (`notify:OnSkillBundleInjected` remains open).
     Ok(result.1)
 }
 

@@ -26,6 +26,7 @@ pub(crate) fn new_ctx() -> ServerContext {
     let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
     let ctx = ServerContext::with_sde_and_repository(sde, db);
     ctx.set_clock_paused(true);
+    ctx.set_mechanic_rng_seed(Some(42));
     ctx
 }
 
@@ -569,10 +570,17 @@ async fn notify_batch7_mining_probes_scanners_and_space() {
         .await;
     lock_target(&ctx, &mut sess_a, SYS_JITA, ship_a, pod_c).await;
     let _ = drain_all(&ctx, &mut sess_c, PILOT_C);
-    rpc(&ctx, &mut sess_a, "dogmaIM", "Activate", &[PyRep::Integer(a_gun_id), PyRep::String("projectileFired".into()), PyRep::Integer(pod_c)])
-        .await
-        .expect("fire at pod_c");
-    let pod_notifs = drain_all(&ctx, &mut sess_c, PILOT_C);
+    let mut pod_notifs = Vec::new();
+    for _ in 0..8 {
+        rpc(&ctx, &mut sess_a, "dogmaIM", "Activate", &[PyRep::Integer(a_gun_id), PyRep::String("projectileFired".into()), PyRep::Integer(pod_c)])
+            .await
+            .expect("fire at pod_c");
+        pod_notifs.extend(drain_all(&ctx, &mut sess_c, PILOT_C));
+        if pod_notifs.iter().any(|(e, _)| e == "OnMachoObjectDisconnect") {
+            break;
+        }
+        ctx.advance_secs(5);
+    }
     let disc_args = find_notif(&pod_notifs, "OnMachoObjectDisconnect");
     let macho_client_c = (1_000_000_000_000_u64 + sess_c.session_id) as i64;
     assert_eq!(disc_args, &[oid_pair[0].clone(), PyRep::Integer(macho_client_c), oid_pair[1].clone()]);

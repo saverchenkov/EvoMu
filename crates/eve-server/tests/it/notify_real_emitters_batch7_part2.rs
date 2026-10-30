@@ -349,12 +349,13 @@ async fn notify_batch7_weapons_fittings_drones_stances_jump_and_skills() {
     rpc(&ctx, &mut sess_a, "crateService", "OpenCrate", &[PyRep::Integer(crate_id)])
         .await
         .expect("OpenCrate 53533");
-    rpc(&ctx, &mut sess_a, "crateService", "ClaimSkillBundle", &[PyRep::Integer(crate_id), PyRep::Integer(39)])
+    let claim_rep = rpc(&ctx, &mut sess_a, "crateService", "ClaimSkillBundle", &[PyRep::Integer(crate_id), PyRep::Integer(39)])
         .await
         .expect("ClaimSkillBundle");
+    assert_eq!(claim_rep.dict_get("spGranted").and_then(|v| v.as_f64()), Some(25_000.0));
     let bundle_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    assert_eq!(
-        find_notif(&bundle_notifs, "OnSkillBundleInjected"),
-        &[PyRep::Integer(1), PyRep::Real(25_000.0)]
+    assert!(
+        !bundle_notifs.iter().any(|(e, _)| e == "OnSkillBundleInjected"),
+        "OnSkillBundleInjected must not be emitted with hardcoded skill count until skill bundle definitions exist"
     );
 }

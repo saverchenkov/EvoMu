@@ -320,6 +320,7 @@ pub fn handle_pi_colonies(
                 Ok(PyRep::Bool(true))
             });
             if res.is_ok() {
+                // `planetSvc.OnMajorPlanetStateUpdate(planetID, numCommandCentersChanged)` refreshes the client PI planet view on Command Center abandonment.
                 ctx.notify(
                     crate::router::NotificationTarget::Character(char_id),
                     "OnMajorPlanetStateUpdate",
@@ -1235,6 +1236,7 @@ pub fn handle_pi_colonies(
             match res {
                 Ok((cc_changed, rep)) => {
                     if cc_changed {
+                        // `planetSvc.OnMajorPlanetStateUpdate(planetID, numCommandCentersChanged)` refreshes the client PI planet view on Command Center deployment.
                         ctx.notify(
                             crate::router::NotificationTarget::Character(char_id),
                             "OnMajorPlanetStateUpdate",
