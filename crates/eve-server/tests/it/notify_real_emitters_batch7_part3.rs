@@ -313,8 +313,19 @@ async fn notify_batch7_cosmetics_petitions_mail_pi_and_escalations() {
     rpc(&ctx, &mut sess_a, "scanSvc", "EnterCombatAnomaly", &[PyRep::String(site_id.into()), PyRep::Bool(true)])
         .await
         .expect("Complete anomaly with escalation");
-    let esc_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    let esc_args = find_notif(&esc_notifs, "OnEscalatingPathMessage");
-    assert_eq!(esc_args.len(), 1);
-    assert!(esc_args[0].as_i64().unwrap_or(0) > 0);
+    let pending_esc: Vec<_> = ctx
+        .drain_notifications_for_char(PILOT_A)
+        .into_iter()
+        .filter(|n| n.event == "OnEscalatingPathMessage")
+        .collect();
+    let sess_esc: Vec<_> = sess_a
+        .drain_notifications()
+        .into_iter()
+        .filter(|(e, _)| e == "OnEscalatingPathMessage")
+        .collect();
+    assert_eq!(pending_esc.len(), 1);
+    assert_eq!(sess_esc.len(), 1);
+    assert_eq!(pending_esc[0].args.len(), 1);
+    assert!(pending_esc[0].args[0].as_i64().unwrap_or(0) > 0);
+    assert_eq!(sess_esc[0].1, pending_esc[0].args);
 }

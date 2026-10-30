@@ -151,6 +151,7 @@ async fn test_zarzakh_gate_toll_and_journal() {
     sess.solar_system_id = Some(turnur_sys);
     sess.station_id = None;
     sess.structure_id = None;
+    let turnur_beyonce = ctx.bind_object(&sess, "beyonce", turnur_sys as i64).unwrap();
     let _ = t_handle.spawn_ball(ball.clone()).await;
     ctx.advance_secs(11);
     let pirate_jump = ctx

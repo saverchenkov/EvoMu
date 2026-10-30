@@ -855,12 +855,6 @@ pub async fn advance_site_wave_or_complete(
         }
 
         session.push_notification("OnCosmicAnomalyRemoved", vec![PyRep::String(site_id.to_string())]);
-        if let Some(ref esc) = escalation_created {
-            session.push_notification(
-                "OnEscalatingPathMessage",
-                vec![PyRep::Integer(esc.instance_id)],
-            );
-        }
     }
 
     let loot_py: Vec<PyRep> = dropped_loot_items

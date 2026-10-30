@@ -408,6 +408,9 @@ async fn test_pochven_travel_conduits_filaments_and_gates() {
         }
     });
     sess.solar_system_id = Some(POCHVEN_SYS_ID);
+    let poch_beyonce = ctx
+        .bind_object(&sess, "beyonce", POCHVEN_SYS_ID as i64)
+        .expect("rebind beyonce in Otela after manual return");
     let home_gate = 50_016_520_i64; // Otela -> Kino (30001372)
     let hpos = ctx.sde.jumps.get(&home_gate).map(|j| j.position).unwrap_or(DVec3::ZERO);
     let _ = poch_handle

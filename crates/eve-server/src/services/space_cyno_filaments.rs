@@ -654,11 +654,6 @@ async fn handle_random_jump_filament(
         crate::services::combat_crimewatch::emit_crimewatch_timer_notifications(ctx, p_char, now_unix);
 
         if p_char != char_id {
-            if let Ok(mut bounds) = ctx.bound_objects.write() {
-                for bound in bounds.values_mut().filter(|b| b.character_id == p_char && b.service == "beyonce") {
-                    bound.object_id = dest_sys_id as i64;
-                }
-            }
             let sess_rep = PyRep::keyval([
                 ("charid", PyRep::Integer(p_char)),
                 ("stationid", PyRep::None),

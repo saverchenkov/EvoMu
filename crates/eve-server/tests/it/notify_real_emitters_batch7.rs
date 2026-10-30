@@ -40,78 +40,28 @@ pub(crate) async fn rpc(
     ctx.dispatch_rpc(sess, svc, None, method, args, &HashMap::new(), None).await
 }
 
-pub(crate) async fn lock_target(
-    ctx: &ServerContext,
-    sess: &mut SessionState,
-    sys_id: u32,
-    ship_id: i64,
-    target_id: i64,
-) {
-    rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)])
-        .await
-        .expect("AddTarget");
-    let _ = ctx
-        .systems
-        .get_or_spawn(sys_id)
-        .add_target_lock(
-            ship_id,
-            TargetLock {
-                target_id,
-                lock_time_ms: 100.0,
-                remaining_lock_ms: 0.0,
-                locked: true,
-                max_range_m: None,
-            },
-        )
-        .await;
+pub(crate) async fn lock_target(ctx: &ServerContext, sess: &mut SessionState, sys_id: u32, ship_id: i64, target_id: i64) {
+    rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)]).await.expect("AddTarget");
+    let lock = TargetLock { target_id, lock_time_ms: 100.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None };
+    let _ = ctx.systems.get_or_spawn(sys_id).add_target_lock(ship_id, lock).await;
 }
 
 pub(crate) fn make_item(
-    item_id: i64,
-    type_id: u32,
-    owner_id: i64,
-    location_id: i64,
-    flag: InventoryFlag,
-    quantity: i32,
-    singleton: bool,
+    item_id: i64, type_id: u32, owner_id: i64, location_id: i64, flag: InventoryFlag, quantity: i32, singleton: bool,
 ) -> InventoryItemRecord {
-    InventoryItemRecord {
-        item_id,
-        type_id,
-        owner_id,
-        location_id,
-        flag,
-        quantity,
-        singleton,
-        version: 1,
-        ..Default::default()
-    }
+    InventoryItemRecord { item_id, type_id, owner_id, location_id, flag, quantity, singleton, version: 1, ..Default::default() }
 }
 
 pub(crate) async fn login_in_space(
-    ctx: &ServerContext,
-    sid: u64,
-    user: &str,
-    pass: &str,
-    char_id: i64,
-    ship_id: i64,
-    ship_type: u32,
-    sys_id: u32,
-    pos: DVec3,
+    ctx: &ServerContext, sid: u64, user: &str, pass: &str, char_id: i64, ship_id: i64, ship_type: u32, sys_id: u32, pos: DVec3,
 ) -> SessionState {
     if char_id == PILOT_C {
         ctx.db.with_mut_snapshot(|snap| {
-            snap.accounts.insert(
-                "third".to_string(),
-                eve_db::AccountRecord {
-                    user_id: 3,
-                    username: "third".to_string(),
-                    password_token: eve_db::WorldRepository::hash_password_token("third", "third-secret"),
-                    role: eve_machonet::service_roles::ROLE_PLAYER_DEFAULT,
-                    banned_until_unix: None,
-                    ban_reason: None,
-                },
-            );
+            snap.accounts.insert("third".to_string(), eve_db::AccountRecord {
+                user_id: 3, username: "third".to_string(),
+                password_token: eve_db::WorldRepository::hash_password_token("third", "third-secret"),
+                role: eve_machonet::service_roles::ROLE_PLAYER_DEFAULT, banned_until_unix: None, ban_reason: None,
+            });
             let mut template = snap.characters[&PILOT_A].clone();
             template.character_id = PILOT_C;
             template.user_id = 3;
@@ -121,9 +71,7 @@ pub(crate) async fn login_in_space(
     }
     let mut s = SessionState::new(sid);
     common::login_pilot(ctx, &mut s, user, pass).await;
-    rpc(ctx, &mut s, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)])
-        .await
-        .expect("SelectCharacterID");
+    rpc(ctx, &mut s, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)]).await.expect("SelectCharacterID");
     ctx.db.with_mut_snapshot(|snap| {
         let template = snap.characters[&PILOT_A].clone();
         let ch = snap.characters.entry(char_id).or_insert_with(|| template);
@@ -132,10 +80,7 @@ pub(crate) async fn login_in_space(
         ch.station_id = None;
         ch.structure_id = None;
         ch.active_ship_id = ship_id;
-        snap.items.insert(
-            ship_id,
-            make_item(ship_id, ship_type, char_id, sys_id as i64, InventoryFlag::None, 1, true),
-        );
+        snap.items.insert(ship_id, make_item(ship_id, ship_type, char_id, sys_id as i64, InventoryFlag::None, 1, true));
     });
     s.solar_system_id = Some(sys_id);
     s.station_id = None;
@@ -148,39 +93,18 @@ pub(crate) async fn login_in_space(
     cs.gate_cloak_remaining_ticks = 0;
     cs.undock_invulnerable_remaining_ticks = 0;
     let slim = ctx.build_ship_slim_meta(char_id, ship_type);
-    let _ = handle
-        .spawn_ball_with_meta(
-            Ball {
-                id: ship_id,
-                type_id: ship_type,
-                position: pos,
-                velocity: DVec3::ZERO,
-                max_velocity: 300.0,
-                inertia: 1.0,
-                mass: 1_200_000.0,
-                radius: 40.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            cs,
-            slim,
-        )
-        .await;
+    let ball = Ball {
+        id: ship_id, type_id: ship_type, position: pos, velocity: DVec3::ZERO,
+        max_velocity: 300.0, inertia: 1.0, mass: 1_200_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    };
+    let _ = handle.spawn_ball_with_meta(ball, cs, slim).await;
     ctx.advance_secs(12);
     let _ = drain_all(ctx, &mut s, char_id);
     s
 }
 
-pub(crate) fn drain_all(
-    ctx: &ServerContext,
-    sess: &mut SessionState,
-    char_id: i64,
-) -> Vec<(String, Vec<PyRep>)> {
-    let mut out: Vec<(String, Vec<PyRep>)> = ctx
-        .drain_notifications_for_char(char_id)
-        .into_iter()
-        .map(|n| (n.event, n.args))
-        .collect();
+pub(crate) fn drain_all(ctx: &ServerContext, sess: &mut SessionState, char_id: i64) -> Vec<(String, Vec<PyRep>)> {
+    let mut out: Vec<_> = ctx.drain_notifications_for_char(char_id).into_iter().map(|n| (n.event, n.args)).collect();
     out.extend(sess.drain_notifications());
     out
 }
@@ -357,16 +281,9 @@ async fn notify_batch7_mining_probes_scanners_and_space() {
     let _ = pochven
         .spawn_ball_with_meta(
             Ball {
-                id: ship_a,
-                type_id: 32880,
-                position: ship_near_poch_moon,
+                id: ship_a, type_id: 32880, position: ship_near_poch_moon,
                 velocity: (moon_poch_pos - ship_near_poch_moon).normalize() * 100.0,
-                max_velocity: 300.0,
-                inertia: 1.0,
-                mass: 1_200_000.0,
-                radius: 40.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
+                max_velocity: 300.0, inertia: 1.0, mass: 1_200_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
             },
             poch_cs,
             ctx.build_ship_slim_meta(PILOT_A, 32880),
@@ -399,16 +316,8 @@ async fn notify_batch7_mining_probes_scanners_and_space() {
     let _ = jita
         .spawn_ball_with_meta(
             Ball {
-                id: ship_a,
-                type_id: 587,
-                position: DVec3::ZERO,
-                velocity: DVec3::ZERO,
-                max_velocity: 350.0,
-                inertia: 1.0,
-                mass: 1_000_000.0,
-                radius: 40.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
+                id: ship_a, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO,
+                max_velocity: 350.0, inertia: 1.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
             },
             jita_cs,
             ctx.build_ship_slim_meta(PILOT_A, 587),
@@ -513,7 +422,10 @@ async fn notify_batch7_mining_probes_scanners_and_space() {
     rpc(&ctx, &mut sess_a, "dogmaIM", "Activate", &[PyRep::Integer(a_gun_id), PyRep::String("projectileFired".into()), PyRep::Integer(ship_b)])
         .await
         .expect("fire at ship_b");
+    assert_eq!(ctx.drain_notifications_for_char(PILOT_A).iter().filter(|n| n.event == "OnDamageStateChange").count(), 1);
+    assert_eq!(sess_a.drain_notifications().iter().filter(|(e, _)| e == "OnDamageStateChange").count(), 1);
     let dmg_notifs_b = drain_all(&ctx, &mut sess_b, PILOT_B);
+    assert_eq!(dmg_notifs_b.iter().filter(|(e, _)| e == "OnDamageStateChange").count(), 1);
     let dmg_args = find_notif(&dmg_notifs_b, "OnDamageStateChange");
     assert_eq!(dmg_args.len(), 2);
     assert_eq!(dmg_args[0], PyRep::Integer(ship_b));
@@ -524,25 +436,84 @@ async fn notify_batch7_mining_probes_scanners_and_space() {
     let (sh_r, ar_r, hu_r) = (sh_tup[0].as_f64().unwrap(), ds[1].as_f64().unwrap(), ds[2].as_f64().unwrap());
     assert!((0.0..1.0).contains(&sh_r) && ar_r == 1.0 && hu_r == 1.0);
 
-    // Pod Pilot C via weapon fire with bound beyonce object -> 3-arg OnMachoObjectDisconnect
-    let bind_beyonce = ctx
-        .dispatch_rpc(
-            &mut sess_c,
-            "beyonce",
-            None,
-            "MachoBindObject",
-            &[PyRep::Tuple(vec![PyRep::Integer(SYS_JITA as i64), PyRep::Integer(6)]), PyRep::None],
-            &HashMap::new(),
-            Some("machoNet:26000"),
-        )
+    // 11. OnMachoObjectDisconnect (3-arg) across stargate jump, dock, undock, UnBind, and podding
+    async fn macho_bind(ctx: &ServerContext, sess: &mut SessionState, svc: &str, obj_id: i64) -> (u64, PyRep, PyRep) {
+        let rep = ctx
+            .dispatch_rpc(
+                sess, svc, None, "MachoBindObject",
+                &[PyRep::Tuple(vec![PyRep::Integer(obj_id), PyRep::Integer(0)]), PyRep::None],
+                &HashMap::new(), Some("machoNet:26000"),
+            )
+            .await
+            .expect("MachoBindObject");
+        let PyRep::Tuple(parts) = rep else { panic!("MachoBindObject tuple") };
+        let PyRep::SubStruct(sub_s) = &parts[0] else { panic!("SubStruct OID") };
+        let PyRep::SubStream(sub_t) = sub_s.as_ref() else { panic!("SubStream OID") };
+        let PyRep::Tuple(pair) = sub_t.as_ref() else { panic!("(oid, refID) tuple") };
+        let oid_s = pair[0].as_str().expect("oid_str");
+        assert!(oid_s.starts_with("N=888444:"));
+        assert!(pair[1].as_i64().unwrap_or(0) > 116_444_736_000_000_000);
+        let bid: u64 = oid_s.trim_start_matches("N=888444:").parse().expect("bound_id");
+        (bid, pair[0].clone(), pair[1].clone())
+    }
+    let macho_client_b = (1_000_000_000_000_u64 + sess_b.session_id) as i64;
+    ctx.advance_secs(15);
+    let (jb_bid, jb_oid, jb_ref) = macho_bind(&ctx, &mut sess_b, "beyonce", SYS_JITA as i64).await;
+    let (_js_bid, js_oid, js_ref) = macho_bind(&ctx, &mut sess_b, "scanMgr", SYS_JITA as i64).await;
+    let jump_edge = ctx
+        .sde
+        .jumps
+        .values()
+        .find(|j| j.from_solar_system_id == SYS_JITA && ctx.sde.stations.values().any(|st| st.solar_system_id == j.to_solar_system_id))
+        .expect("Jita gate to system with station")
+        .clone();
+    let gate_r = ctx.sde.types.get(&16).map(|t| t.radius).unwrap_or(14_051.0);
+    assert!(jita.set_ball_position(ship_b, jump_edge.position + DVec3::new(gate_r + 500.0, 0.0, 0.0)).await);
+    let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
+    ctx.dispatch_rpc(&mut sess_b, "beyonce", Some(jb_bid), "CmdStargateJump", &[PyRep::Integer(jump_edge.stargate_id)], &HashMap::new(), None)
         .await
-        .expect("MachoBindObject beyonce");
-    let PyRep::Tuple(bind_parts) = bind_beyonce else { panic!("MachoBindObject tuple") };
-    let PyRep::SubStruct(sub_s) = &bind_parts[0] else { panic!("SubStruct OID") };
-    let PyRep::SubStream(sub_t) = sub_s.as_ref() else { panic!("SubStream OID") };
-    let PyRep::Tuple(oid_pair) = sub_t.as_ref() else { panic!("(oid, refID) tuple") };
-    assert!(oid_pair[0].as_str().unwrap_or("").starts_with("N=888444:"));
-    assert!(oid_pair[1].as_i64().unwrap_or(0) > 116_444_736_000_000_000);
+        .expect("CmdStargateJump");
+    let _ = sess_b.drain_notifications();
+    let jump_disc: Vec<_> = ctx.drain_notifications_for_char(PILOT_B).into_iter().filter(|n| n.event == "OnMachoObjectDisconnect").map(|n| n.args).collect();
+    assert_eq!(jump_disc.len(), 2);
+    assert!(jump_disc.contains(&vec![jb_oid, PyRep::Integer(macho_client_b), jb_ref]));
+    assert!(jump_disc.contains(&vec![js_oid, PyRep::Integer(macho_client_b), js_ref]));
+
+    // Dock in destination system -> disconnects newly bound solar-system beyonce + scanMgr
+    let dest_sys = jump_edge.to_solar_system_id;
+    let dest_st = ctx.sde.stations.values().find(|st| st.solar_system_id == dest_sys).expect("dest station").clone();
+    ctx.advance_secs(12);
+    let (_db_bid, db_oid, db_ref) = macho_bind(&ctx, &mut sess_b, "beyonce", dest_sys as i64).await;
+    let (_ds_bid, ds_oid, ds_ref) = macho_bind(&ctx, &mut sess_b, "scanMgr", dest_sys as i64).await;
+    assert!(ctx.systems.get_or_spawn(dest_sys).set_ball_position(ship_b, dest_st.position + DVec3::new(1_000.0, 0.0, 0.0)).await);
+    let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
+    rpc(&ctx, &mut sess_b, "stationSvc", "Dock", &[PyRep::Integer(dest_st.station_id)]).await.expect("Dock");
+    let _ = sess_b.drain_notifications();
+    let dock_disc: Vec<_> = ctx.drain_notifications_for_char(PILOT_B).into_iter().filter(|n| n.event == "OnMachoObjectDisconnect").map(|n| n.args).collect();
+    assert!(dock_disc.contains(&vec![db_oid, PyRep::Integer(macho_client_b), db_ref]));
+    assert!(dock_disc.contains(&vec![ds_oid, PyRep::Integer(macho_client_b), ds_ref]));
+
+    // Undock from station -> disconnects station + repairSvc bound objects; UnBind -> disconnects corpRegistry
+    ctx.advance_secs(12);
+    let (_st_bid, st_oid, st_ref) = macho_bind(&ctx, &mut sess_b, "station", dest_st.station_id).await;
+    let (_rp_bid, rp_oid, rp_ref) = macho_bind(&ctx, &mut sess_b, "repairSvc", dest_st.station_id).await;
+    let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
+    rpc(&ctx, &mut sess_b, "stationSvc", "Undock", &[]).await.expect("Undock");
+    let _ = sess_b.drain_notifications();
+    let undock_disc: Vec<_> = ctx.drain_notifications_for_char(PILOT_B).into_iter().filter(|n| n.event == "OnMachoObjectDisconnect").map(|n| n.args).collect();
+    assert_eq!(undock_disc.len(), 2);
+    assert!(undock_disc.contains(&vec![st_oid, PyRep::Integer(macho_client_b), st_ref]));
+    assert!(undock_disc.contains(&vec![rp_oid, PyRep::Integer(macho_client_b), rp_ref]));
+
+    let (cr_bid, cr_oid, cr_ref) = macho_bind(&ctx, &mut sess_b, "corpRegistry", 1_000_009).await;
+    let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
+    rpc(&ctx, &mut sess_b, "corpRegistry", "UnBind", &[PyRep::Integer(cr_bid as i64)]).await.expect("UnBind");
+    let _ = sess_b.drain_notifications();
+    let unbind_disc: Vec<_> = ctx.drain_notifications_for_char(PILOT_B).into_iter().filter(|n| n.event == "OnMachoObjectDisconnect").map(|n| n.args).collect();
+    assert_eq!(unbind_disc, vec![vec![cr_oid, PyRep::Integer(macho_client_b), cr_ref]]);
+
+    // Pod Pilot C via weapon fire with bound beyonce object -> 3-arg OnMachoObjectDisconnect
+    let (_pc_bid, pc_oid, pc_ref) = macho_bind(&ctx, &mut sess_c, "beyonce", SYS_JITA as i64).await;
     let mut pod_cs = ctx.build_ship_combat_state(PILOT_C, pod_c, 670);
     pod_cs.is_cloaked = false;
     pod_cs.gate_cloak_remaining_ticks = 0;
@@ -553,16 +524,8 @@ async fn notify_batch7_mining_probes_scanners_and_space() {
     let _ = jita
         .spawn_ball_with_meta(
             Ball {
-                id: pod_c,
-                type_id: 670,
-                position: DVec3::new(2_500.0, 0.0, 0.0),
-                velocity: DVec3::ZERO,
-                max_velocity: 200.0,
-                inertia: 1.0,
-                mass: 50_000.0,
-                radius: 25.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
+                id: pod_c, type_id: 670, position: DVec3::new(2_500.0, 0.0, 0.0), velocity: DVec3::ZERO,
+                max_velocity: 200.0, inertia: 1.0, mass: 50_000.0, radius: 25.0, speed_fraction: 0.0, mode: MovementMode::Stop,
             },
             pod_cs,
             ctx.build_ship_slim_meta(PILOT_C, 670),
@@ -583,7 +546,7 @@ async fn notify_batch7_mining_probes_scanners_and_space() {
     }
     let disc_args = find_notif(&pod_notifs, "OnMachoObjectDisconnect");
     let macho_client_c = (1_000_000_000_000_u64 + sess_c.session_id) as i64;
-    assert_eq!(disc_args, &[oid_pair[0].clone(), PyRep::Integer(macho_client_c), oid_pair[1].clone()]);
+    assert_eq!(disc_args, &[pc_oid, PyRep::Integer(macho_client_c), pc_ref]);
 
     // 12. OnWormholeJumpCancel (0-arg) across out-of-range, no-destination, and polarized branches
     let wh_ball_id = 710_000_199_i64;

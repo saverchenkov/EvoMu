@@ -194,6 +194,7 @@ async fn test_crimewatch_weapons_timer_and_highsec_criminal_movement_restriction
     rpc(&ctx, &mut w_sess, "structureDocking", None, "Dock", &[PyRep::Integer(jita_struct)]).await.expect("Dock succeeds after 60s Weapons Timer expires");
     ctx.advance_virtual_clock(12);
     rpc(&ctx, &mut w_sess, "structureDocking", None, "Undock", &[]).await.expect("Undock");
+    let beyonce = ctx.bind_object(&w_sess, "beyonce", jita as i64).unwrap();
     rpc(&ctx, &mut w_sess, "beyonce", Some(beyonce), "CmdStop", &[]).await.expect("Stop after undock");
     let _ = sys_h.set_ball_position(ws_id, pos).await;
     lock_target(&ctx, &mut w_sess, jita, ds_id).await;
