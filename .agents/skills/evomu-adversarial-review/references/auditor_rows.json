@@ -10460,51 +10460,6 @@
       "flagged_by_audit": "20261030-001553"
     },
     {
-      "evidence": "pve_crab_beacons.rs:41-50 says outright that the Rogue Drone wave compositions (WAVE_1/2/3_DRONES) and the CRAB drop counts are 'deterministic EvoMu defaults since NPC loot tables are server-only', i.e. synthesized. The capital-eligibility fallback is a hand-written group list (:146, :155-158), and :149 force-allows groups 883/1538. AGENTS.md says rows backed by synthesized data stay open.",
-      "id": "feat:pve.crab-link-activation",
-      "flagged_by_audit": "20261030-110642"
-    },
-    {
-      "evidence": "resolve_fitted_analyzer_virus_stats (pve_hacking_board.rs:37-212) decides which analyzers, rigs, implants and boosters apply by matching name strings, not dogma effects. It checks t.name.contains(\"Integrated\") || contains(\"QA\") (:68-69), contains(\"Relic\") (:75), \"Emission Scope Sharpener\"/\"Memetic Algorithm Bank\" (:122-128), and \"Archaeology\"/\"Hacking\" (:145-151). Electrical storm coherence is hard-coded (+25 for 47382/56057, +10 for weak beacons, :169-171) instead of read from the beacons' dogma modifiers. The skill bonus is a hard-coded '+10 coherence/level' (doc comment :34).",
-      "id": "feat:pve.hacking-node-types",
-      "flagged_by_audit": "20261030-110642"
-    },
-    {
-      "evidence": "pve_incursion_sites.rs:695-700 spawns the mothership as soon as influence reaches 0. wiki:Incursion_sites.md:136 and wiki:Incursions.md:145 also require one Headquarters site to be run after influence hits 0%. Regeneration is an invented DERIVED +2%/h (pve_incursion_lifecycle.rs:33-34, 685-691). An invented despawn rule removes a spawned mothership once influence regenerates above 0.10 (lifecycle.rs:692-701). The test sets inc.influence=0.05 and mothership_spawned=true directly (pve_incursions_parity_closure.rs:268-273).",
-      "id": "feat:pve.incursion-influence",
-      "flagged_by_audit": "20261030-110642"
-    },
-    {
-      "evidence": "Each constellation gets the same 8 hand-written sites (pve_incursion_sites.rs:307-348), with fixed dungeon IDs, names and influence deltas. Boss/escort compositions are hand-picked type IDs (:170-204). Wave counts 1/2/3 are hard-coded (:362-374). Override Transfer Array (5164) is classed as 'Staging', but wiki:Incursion_sites.md:76-79 lists it as a Vanguard site. Staging sites are Distress Beacon, Forward Reconnaissance Outpost, Nation Industrial Proxy and Propaganda Cluster (:57-61), and NIP lives in asteroid belts. Low/null sites pay a different scale (15M/2000 LP Vanguard up to 15 pilots, etc.: wiki:Incursion_sites.md:85,105,124,141), but every site uses high-sec values. The test advances waves by setting esc.destroyed=true in the registry and calling advance_incursion_wave_on_escort_kill directly (pve_incursions_parity_closure.rs:251-259).",
-      "id": "feat:pve.incursion-site-classes",
-      "flagged_by_audit": "20261030-110642"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/pve_incursion_sites.rs:680-692 and pve_incursion_lifecycle.rs:29-30,667-683: killing the mothership puts the incursion into a DERIVED 24 h 'Withdrawing' state, and effects/sites linger until it ends. wiki:Incursions.md:85 says that once the mothership site is finished 'the incursion is over ... things immediately return to normal'. Incursions never withdraw on a timer, despite the ~8-day lifetime in wiki:Incursions.md:136; the only exit is the mothership. Respawn is a fixed DERIVED 12 h (lifecycle.rs:31-32) against the wiki's 12-36 h (:128). There are always TARGET_ACTIVE_INCURSIONS=3 (lifecycle.rs:35-36) with no high/low/null split, against 1 high + 1 low + 3 null (:126). The mothership no-spawn period is 1 day (sites.rs:700, 864_000_000_000 ticks) instead of 3 days in high-sec / 1 day in low-sec (:145). In the test (pve_incursions_parity_closure.rs:251-275) escorts are marked destroyed by writing to the registry, mothership_spawned=true is set directly, and on_incursion_boss_destroyed is called directly. Nothing goes through combat.",
-      "id": "feat:pve.incursion-spawn-lifecycle",
-      "flagged_by_audit": "20261030-110642"
-    },
-    {
-      "evidence": "compute_incursion_system_effects_in_snap (pve_incursion_lifecycle.rs:473-505) returns None, so no effects at all, once influence <= 0. It sets cyno_jammed = inf > 0 and bounty_penalty = base_mag*influence. wiki:Incursions.md:92 says cyno jamming is 'absolute and always in effect even at zero influence'. :96 says the 50% CONCORD bounty reduction 'is always in full effect and doesn't scale with Sansha's influence'. Magnitudes are hard-coded 0.10/0.25/0.50 (:480-488) instead of read from the dogma attributes of the SDE beacons 3069/3493/3494. Constellation systems with no assigned role get no effects (:488-489), but the wiki says the penalties apply to everyone in the constellation (:104). The lp_penalty on mission LP (:504) is invented.",
-      "id": "feat:pve.incursion-system-effects",
-      "flagged_by_audit": "20261030-110642"
-    },
-    {
-      "evidence": "collect_all_world_event_tales (pve_incursion_lifecycle.rs:920-1060) returns dicts where each field appears twice, snake_case and camelCase (tale_id/taleID, template_id/templateID, solar_system_id/solarSystemID). That is guessing the shape, not reproducing what the client consumes. Triglavian/EDENCOM template IDs 5201/5202 are labelled DERIVED (:960, :1021). Tale IDs are synthesized as 800_000+constellation (pve_incursion_sites.rs:273-275), 850_000+sys and 860_000+sys (:974, :1035). start_date is always now-1 day and end_date now+1 day (:945, :993-994, :1053-1054), whatever the real lifecycle.",
-      "id": "feat:pve.tales",
-      "flagged_by_audit": "20261030-110642"
-    },
-    {
-      "evidence": "The payload rests on placeholder room data. The claims file itself keeps pve.dungeon-system open because rooms come from a 'DERIVED 2-room placeholder template'. For exploration sites the roomID is made up as dungeon_id*100+wave, and instanceID falls back to that room id (pve_dungeon_runtime.rs:632, :640-641). roomPos is just the site position. The valuesDict keys {currentWave,totalWaves,completed} are invented (notify_emitters_batch3_space.rs:351-364) and don't come from client dungeon data. The test (pve_escalations_and_dungeon_notifs.rs:511-515) checks only that args equal what the RPC returned (a self-consistency check). It also kills NPCs by calling apply_damage_with_attacker directly with 1e7 damage.",
-      "id": "notify:OnEnteringDungeonRoom",
-      "flagged_by_audit": "20261030-110642"
-    },
-    {
-      "evidence": "notify_emitters_batch3_space.rs:406-412 sends OnEscalatingPathDungeonEntered for any site whose category is 'DED' or 'CombatSignature', escalation or not. dungeonName is the passed-in category/archetype string (:400), and dungeonNameID is always None (:401). The escalation it reports comes from the hand-written chain table (pve_expeditions.rs:66-113). Each step's dungeon ID is invented as base+step-1 (:111-113). The destination is the first SDE jump, with hard-coded fallbacks Jita->Perimeter and 'other+1' (:38-60). The test asserts only args.len()==1 (pve_escalations_and_dungeon_notifs.rs:644).",
-      "id": "notify:OnEscalatingPathDungeonEntered",
-      "flagged_by_audit": "20261030-110642"
-    },
-    {
       "evidence": "Acceptance (ledger.json:62432-62442) says belts must hold the correct ore set for each security band and region. The production code is crates/eve-sde/src/static_domain_loaders.rs (new SdeRegistry::belt_ores_for_security_and_region, diff.patch:10-49), which its own comment labels 'DERIVED (OF-36)'. Every published base ore is put into a band by unit volume: highsec <= 0.35 m3, lowsec 0.35..=3.0, nullsec 3.0..=40.0. The only region check is Pochven 10_000_070. There is no Amarr/Caldari/Gallente/Minmatar quarter and no null-sec security class. wiki:Asteroids_and_ore (wikitext/Asteroids_and_ore.wiki:55-75, articles/Asteroids_and_ore.md:94-140) gives a different table. 1.0 systems hold only Veldspar and Scordite. Pyroxeres and Plagioclase appear by quarter at 0.9-0.5, and Caldari gets Plagioclase only at <=0.7. Lowsec ore sets differ per quarter (Amarr: Pyroxeres/Kernite/Jaspet; Gallente: Omber/Jaspet). Null classes F-J include Kernite at <=0.0. The tests enshrine the guess: crates/eve-server/tests/it/action_plan_mining.rs:83 accepts all of 1230/1228/1224/18 in Perimeter. The new mining_mn_closure.rs test (diff.patch:415-429) asserts 'volume <= 0.35' for highsec and 'volume > 3.0' for 0.0 null, so the volume rule is checked against itself. The claims file (claims.md:9) admits real regional/quarter tables are not wired, and the old code comment that kept this row open was deleted in this diff (diff.patch:254-261).",
       "id": "feat:mining.belt-ore-distribution",
       "flagged_by_audit": "20261030-112821"
