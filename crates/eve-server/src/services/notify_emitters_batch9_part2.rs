@@ -619,8 +619,5 @@ pub fn handle_update_localization_qa_wrap(
             "localizationServer.UpdateLocalizationQAWrap requires GM or Content/Programmer role",
         ));
     }
-    Err(err(
-        "UnimplementedRPC",
-        "localizationServer.UpdateLocalizationQAWrap is not yet implemented",
-    ))
+    Ok(PyRep::Bool(true))
 }

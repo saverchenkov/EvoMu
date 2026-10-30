@@ -130,6 +130,7 @@ mod mining_survey_scanner;
 mod mining_prismaticite_scrapmetal_wh;
 mod mining_survey_scanner_part2;
 mod modules_advanced_tactical;
+mod open_feats_and_rpcs_batch2;
 mod modules_cyno_portal;
 mod modules_scanners_mutaplasmids_dbuffs;
 mod modules_ships_overheat_closure;
