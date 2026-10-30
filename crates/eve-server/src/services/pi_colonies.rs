@@ -273,10 +273,8 @@ pub fn handle_pi_colonies(
                 let schem_id = pin.schematic_id.unwrap_or(0);
                 let cycle_secs = if pin.extractor_cycle_seconds > 0 {
                     pin.extractor_cycle_seconds as i64
-                } else if (65..=135).contains(&schem_id) {
-                    1800
-                } else if schem_id > 0 {
-                    3600
+                } else if let Some(si) = ctx.sde.planet_schematics.get(&schem_id) {
+                    si.cycle_time as i64
                 } else {
                     0
                 };
@@ -949,23 +947,29 @@ pub fn handle_pi_colonies(
                                 let pin_id_raw = extract_pi_pin_id(els.get(1));
                                 let pin_id = client_to_server_pin_id.get(&pin_id_raw).copied().unwrap_or(pin_id_raw);
                                 let schem_raw = els.get(2).and_then(|v| v.as_i64()).unwrap_or(0);
-                                if !(1..=200).contains(&schem_raw) {
+                                let Some(schem_info) = u32::try_from(schem_raw)
+                                    .ok()
+                                    .and_then(|sid| ctx.sde.planet_schematics.get(&sid))
+                                else {
                                     return Err(BridgeRpcError {
                                         code: "InvalidSchematic".into(),
-                                        message: format!("Invalid planetary schematic ID {schem_raw}"),
+                                        message: format!("Unknown planetary schematic ID {schem_raw}"),
                                     });
-                                }
+                                };
                                 if let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)).cloned() {
                                     let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
                                     if let Some(p) = net.pins.iter_mut().find(|p| p.pin_id == pin_id) {
                                         let is_factory = ctx.sde.types.get(&p.type_id).is_some_and(|t| t.group_id == 1028);
-                                        if !is_factory {
+                                        if !is_factory || (!schem_info.pins.is_empty() && !schem_info.pins.contains(&p.type_id)) {
                                             return Err(BridgeRpcError {
                                                 code: "InvalidSchematic".into(),
-                                                message: format!("Pin {pin_id} (type {}) is not a processor facility", p.type_id),
+                                                message: format!(
+                                                    "Pin {pin_id} (type {}) cannot run schematic {schem_raw} ({})",
+                                                    p.type_id, schem_info.name
+                                                ),
                                             });
                                         }
-                                        p.schematic_id = Some(schem_raw as u32);
+                                        p.schematic_id = Some(schem_info.schematic_id);
                                     }
                                     save_pi_network(snap, char_id, planet_id, &net);
                                 }

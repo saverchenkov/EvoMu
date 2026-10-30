@@ -381,12 +381,12 @@ async fn test_e6_pi_extractor_expiry_and_launch_canister() {
                 PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(lp_client_id), PyRep::Integer(2544), PyRep::Real(0.30), PyRep::Real(0.30)]),
                 PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(store_pin_id), PyRep::Integer(proc_client_id), PyRep::Integer(1)]),
                 PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(proc_client_id), PyRep::Integer(lp_client_id), PyRep::Integer(1)]),
-                PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(proc_client_id), PyRep::Integer(66)]),
+                PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(proc_client_id), PyRep::Integer(121)]),
             ]),
         ],
     )
     .await
-    .expect("UserUpdateNetwork add processor, launchpad, links, and Water schematic 66");
+    .expect("UserUpdateNetwork add processor, launchpad, links, and Water schematic 121");
     let (proc_pin_id, lp_pin_id) = ctx.db.with_snapshot(|snap| {
         let net = load_pi_network(snap, P1, planet_single, 3);
         let p_id = net.pins.iter().find(|p| p.type_id == 2473).unwrap().pin_id;

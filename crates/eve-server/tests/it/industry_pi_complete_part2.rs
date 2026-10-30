@@ -214,6 +214,22 @@ async fn run_pi_full_suite() -> (Option<bool>, Option<i64>, f64, i64, i64) {
         .expect("GetResourceData");
     assert_eq!(heatmap.dict_get("numBands").and_then(|v| v.as_i64()), Some(9));
 
+    let (p1_schem_id, p1_out_tid, p1_out_qty) = ctx
+        .sde
+        .planet_schematics
+        .values()
+        .find_map(|s| {
+            let is_p1 = s.cycle_time == 1800
+                && s.pins.contains(&2492)
+                && s.types.iter().any(|t| t.is_input && t.type_id == first_p0_tid);
+            if !is_p1 {
+                return None;
+            }
+            let out = s.types.iter().find(|t| !t.is_input)?;
+            Some((s.schematic_id, out.type_id, out.quantity))
+        })
+        .expect("SDE P1 schematic for first_p0_tid");
+
     let net_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -231,8 +247,9 @@ async fn run_pi_full_suite() -> (Option<bool>, Option<i64>, f64, i64, i64) {
                     PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(101), PyRep::Integer(102), PyRep::Integer(0)]),
                     PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(102), PyRep::Integer(103), PyRep::Integer(0)]),
                     PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(103), PyRep::Integer(104), PyRep::Integer(0)]),
-                    PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(103), PyRep::Integer(65)]),
+                    PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(103), PyRep::Integer(p1_schem_id as i64)]),
                     PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(501), PyRep::List(vec![PyRep::Integer(102), PyRep::Integer(103)]), PyRep::Integer(first_p0_tid as i64), PyRep::Integer(3_000)]),
+                    PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(502), PyRep::List(vec![PyRep::Integer(103), PyRep::Integer(104)]), PyRep::Integer(p1_out_tid as i64), PyRep::Integer(p1_out_qty as i64)]),
                     PyRep::Tuple(vec![PyRep::Integer(10), PyRep::Integer(102), PyRep::Integer(first_p0_tid as i64), PyRep::Real(0.02), PyRep::Integer(3)]),
                 ]),
             ],

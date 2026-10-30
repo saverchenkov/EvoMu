@@ -247,11 +247,14 @@ pub fn dispatch_economy_route(
                 .map(|t| t.type_id as i64)
                 .collect();
             types.sort_unstable();
-            // DERIVED: sde_market_groups stores group name only (no separate description column in SDE)
+            let description = ctx
+                .sde
+                .market_group_description(mg.market_group_id)
+                .unwrap_or_default();
             let mut obj = json!({
                 "market_group_id": mg.market_group_id as i64,
                 "name": mg.name,
-                "description": mg.name,
+                "description": description,
                 "types": types,
             });
             if let Some(pid) = mg.parent_group_id {
@@ -503,11 +506,29 @@ pub fn dispatch_economy_route(
                         format!("Structure {structure_id} not found"),
                     );
                 };
-                if !character_has_structure_acl_access(snap, caller_char_id, st) {
+                if !character_has_structure_acl_access(snap, caller_char_id, st)
+                    || !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
+                        snap,
+                        structure_id,
+                        caller_char_id,
+                    )
+                {
                     return RouteExecutionResult::error(
                         403,
                         format!(
-                            "Character {caller_char_id} lacks docking/market ACL access to structure {structure_id}"
+                            "Character {caller_char_id} lacks docking ACL access to structure {structure_id}"
+                        ),
+                    );
+                }
+                if !crate::services::station_structure::structure_upwell_ops::structure_allows_market_orders(
+                    ctx,
+                    snap,
+                    structure_id,
+                ) {
+                    return RouteExecutionResult::error(
+                        403,
+                        format!(
+                            "Structure {structure_id} does not have an online Standup Market Hub I"
                         ),
                     );
                 }

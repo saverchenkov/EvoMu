@@ -684,38 +684,23 @@ pub fn extractor_overlap_factor(heads: &[(i64, f64, f64)], head_radius: f64) -> 
     (1.0 - penalty).clamp(0.25, 1.0)
 }
 
-pub fn pi_schematic_recipe(schem_id: u32, default_p0: TypeId) -> (u64, Vec<(TypeId, u64)>, TypeId, u64) {
-    // DERIVED: standard CCP PI schematic recipes across P0->P1, P1->P2, P2->P3, P3->P4
-    match schem_id {
-        65 => (1800, vec![(2308, 3_000)], 2389, 20),
-        66 => (1800, vec![(2268, 3_000)], 3645, 20),
-        67 => (1800, vec![(2309, 3_000)], 2390, 20),
-        68 => (1800, vec![(2310, 3_000)], 3683, 20),
-        71 => (1800, vec![(2287, 3_000)], 2395, 20),
-        72 => (1800, vec![(2288, 3_000)], 2396, 20),
-        73 => (1800, vec![(2267, 3_000)], 2398, 20),
-        74 => (1800, vec![(2270, 3_000)], 2399, 20),
-        75 => (1800, vec![(2272, 3_000)], 2400, 20),
-        76 => (1800, vec![(2306, 3_000)], 2401, 20),
-        77 => (1800, vec![(2307, 3_000)], 9828, 20),
-        78 => (1800, vec![(2073, 3_000)], 2393, 20),
-        79 => (1800, vec![(2286, 3_000)], 3779, 20),
-        80 => (3600, vec![(2399, 40), (2396, 40)], 2329, 5),
-        81 => (3600, vec![(2400, 40), (2398, 40)], 3828, 5),
-        82 => (3600, vec![(2401, 40), (2400, 40)], 9836, 5),
-        83 => (3600, vec![(3645, 40), (2390, 40)], 9832, 5),
-        86 => (3600, vec![(2399, 40), (2398, 40)], 3689, 5),
-        100 => (3600, vec![(2317, 10), (9832, 10)], 2344, 3),
-        101 => (3600, vec![(3697, 10), (9830, 10)], 2345, 3),
-        104 => (3600, vec![(3689, 10), (9836, 10)], 9848, 3),
-        105 => (3600, vec![(2328, 10), (9832, 10), (9836, 10)], 2349, 3),
-        112 => (3600, vec![(2354, 6), (2358, 6), (17898, 6)], 2867, 1),
-        115 => (3600, vec![(2346, 6), (9834, 6), (12836, 6)], 2870, 1),
-        116 => (3600, vec![(2345, 6), (2352, 6), (2361, 6)], 2872, 1),
-        119 => (3600, vec![(2349, 6), (2358, 6), (2367, 6)], 2875, 1),
-        s if (65..=79).contains(&s) => (1800, vec![(default_p0, 3_000)], 3645, 20),
-        _ => (3600, vec![(3645, 40)], 2329, 5),
+pub fn pi_schematic_recipe(
+    sde: &eve_sde::SdeRegistry,
+    schem_id: u32,
+) -> Option<(u64, Vec<(TypeId, u64)>, TypeId, u64)> {
+    let info = sde.planet_schematics.get(&schem_id)?;
+    let mut inputs: Vec<(TypeId, u64)> = info
+        .types
+        .iter()
+        .filter(|t| t.is_input)
+        .map(|t| (t.type_id, t.quantity))
+        .collect();
+    inputs.sort_by_key(|&(tid, _)| tid);
+    let out = info.types.iter().find(|t| !t.is_input)?;
+    if inputs.is_empty() || info.cycle_time == 0 {
+        return None;
     }
+    Some((info.cycle_time, inputs, out.type_id, out.quantity))
 }
 
 pub(crate) fn restore_blueprint_flag(bp_owner_id: i64, meta: &IndustryJobCostMeta) -> eve_db::InventoryFlag {

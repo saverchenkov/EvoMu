@@ -1294,4 +1294,62 @@ impl SdeRegistry {
         let map = SECONDARY_SUNS_CACHE.get_or_init(|| self.load_secondary_suns().unwrap_or_default());
         map.get(&solar_system_id).copied()
     }
+
+    /// Loads localized English descriptions from `res:/staticdata/marketgroups.fsdbinary`
+    /// (`descriptionID`) resolved via `res:/localizationfsd/localization_fsd_en-us.pickle`.
+    pub fn load_market_group_descriptions(&self) -> Result<HashMap<u32, String>, SdeError> {
+        let raw = self.read_fsd_static_bytes("res:/staticdata/marketgroups.fsdbinary")?;
+        if raw.len() < 56 {
+            return Ok(HashMap::new());
+        }
+        let buckets = u64_le(&raw, 48) as usize;
+        if 56 + buckets * 8 > raw.len() {
+            return Ok(HashMap::new());
+        }
+        let mut desc_ids_by_mg = Vec::new();
+        let mut needed_ids = std::collections::HashSet::new();
+        for b_idx in 0..buckets {
+            let b_off = u64_le(&raw, 56 + b_idx * 8) as usize;
+            if b_off == 0 {
+                continue;
+            }
+            let abs_off = 32 + b_off;
+            if abs_off < 8 || abs_off > raw.len() {
+                continue;
+            }
+            let n_in_bucket = u64_le(&raw, abs_off - 8) as usize;
+            for i in 0..n_in_bucket {
+                let rec = abs_off + i * 28;
+                if rec + 28 > raw.len() {
+                    break;
+                }
+                let mgid = u32_le(&raw, rec);
+                let desc_id = u32_le(&raw, rec + 4);
+                let mask = u32_le(&raw, rec + 24);
+                if (mask & 1) != 0 && desc_id > 0 {
+                    desc_ids_by_mg.push((mgid, desc_id));
+                    needed_ids.insert(desc_id);
+                }
+            }
+        }
+        let localized = self
+            .load_localized_messages_en_us(&needed_ids)
+            .unwrap_or_default();
+        let mut out = HashMap::with_capacity(desc_ids_by_mg.len());
+        for (mgid, desc_id) in desc_ids_by_mg {
+            if let Some(text) = localized.get(&desc_id) {
+                if !text.is_empty() {
+                    out.insert(mgid, text.clone());
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Returns the cached localized English description for a market group ID, if present.
+    pub fn market_group_description(&self, market_group_id: u32) -> Option<String> {
+        static MG_DESCS: std::sync::OnceLock<HashMap<u32, String>> = std::sync::OnceLock::new();
+        let map = MG_DESCS.get_or_init(|| self.load_market_group_descriptions().unwrap_or_default());
+        map.get(&market_group_id).cloned()
+    }
 }

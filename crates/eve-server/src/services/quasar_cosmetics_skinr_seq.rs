@@ -975,23 +975,26 @@ fn handle_job_initiate(
         }
     }
 
-    // Check and debit ISK fee + award Paragon EverMarks if character exists in DB
+    // Check and debit ISK fee + award Paragon EverMarks only for validated SKINR design layouts
     let fee = IskCents::from_isk(10_000);
+    let award_evermarks = !slots.is_empty() && !required_comps.is_empty();
     let mut insufficient_funds = false;
     state.db.with_mut_snapshot(|s| {
         if let Some(ch) = s.characters.get_mut(&(cid as i64)) {
             if let Some(rem) = ch.balance.checked_sub(fee) {
                 ch.balance = rem;
-                let cur = ch.loyalty_points.entry(EVERMARK_CORP_ID).or_insert(0);
-                *cur = cur.saturating_add(500);
-                crate::services::lp_store::record_lp_reward_log(
-                    s,
-                    cid as i64,
-                    EVERMARK_CORP_ID,
-                    500,
-                    "SKINR sequencing EverMarks reward".into(),
-                    0,
-                );
+                if award_evermarks {
+                    let cur = ch.loyalty_points.entry(EVERMARK_CORP_ID).or_insert(0);
+                    *cur = cur.saturating_add(500);
+                    crate::services::lp_store::record_lp_reward_log(
+                        s,
+                        cid as i64,
+                        EVERMARK_CORP_ID,
+                        500,
+                        "SKINR sequencing EverMarks reward".into(),
+                        0,
+                    );
+                }
             } else {
                 insufficient_funds = true;
             }

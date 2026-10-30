@@ -42,6 +42,8 @@ pub struct OperationSpec {
     pub operation_id: String,
     pub tags: Vec<String>,
     pub required_scopes: Vec<String>,
+    #[serde(default)]
+    pub required_roles: Vec<String>,
     pub parameters: Vec<ParameterSpec>,
     pub responses: HashMap<String, ResponseSpec>,
 }
@@ -146,6 +148,15 @@ impl OpenApiSpec {
                     }
                 }
 
+                let mut required_roles = Vec::new();
+                if let Some(roles_arr) = resolved_op.get("x-required-roles").and_then(|v| v.as_array()) {
+                    for r in roles_arr {
+                        if let Some(rs) = r.as_str() {
+                            required_roles.push(rs.to_string());
+                        }
+                    }
+                }
+
                 let mut parameters = Vec::new();
                 if let Some(param_arr) = resolved_op.get("parameters").and_then(|v| v.as_array()) {
                     for p in param_arr {
@@ -207,6 +218,7 @@ impl OpenApiSpec {
                     operation_id,
                     tags,
                     required_scopes,
+                    required_roles,
                     parameters,
                     responses,
                 });
@@ -813,6 +825,7 @@ fn make_legacy_op(method: &str, path_pattern: &str, op_id: &str, scope: Option<&
         operation_id: op_id.to_string(),
         tags: vec!["Character".to_string()],
         required_scopes: scope.map(|s| vec![s.to_string()]).unwrap_or_default(),
+        required_roles: Vec::new(),
         parameters: Vec::new(),
         responses,
     }

@@ -45,12 +45,85 @@ pub struct LPOffer {
 
 /// Load persisted LP store offers from `WorldStateSnapshot.service_state_blobs["lp_store_offers"]`.
 ///
-/// DATA GAP: NPC corporation LP store offer catalogs are server-only in modern EVE and absent from V24 client FSD (SharedCache); all 6 LP store rows remain open until authoritative data is available.
+/// DATA GAP: General NPC corporation LP store offer catalogs are server-only in modern EVE and absent
+/// from V24 client FSD (`feat:lp.lp-store-offers`), whereas Paragon (`1_000_419`) EverMarks Ship Cosmetic
+/// Emblem offers are loaded directly from V24 `res:/staticdata/shipcosmeticlicenses.fsdbinary` (`feat:wallet.evermarks`).
 pub fn load_lp_store_offers(snap: &eve_db::WorldStateSnapshot) -> Vec<LPOffer> {
     snap.service_state_blobs
         .get(LP_STORE_OFFERS_KEY)
         .and_then(|json| serde_json::from_str::<Vec<LPOffer>>(json).ok())
         .unwrap_or_default()
+}
+
+/// DERIVED: Synthesized EverMark price tiers by hull group and cosmetic type (`1` = corp, `2` = alliance).
+/// `res:/staticdata/shipcosmeticlicenses.fsdbinary` defines the published emblem offer list, while
+/// EverMark prices are server-authored (`DERIVED`).
+fn paragon_emblem_evermark_cost(ship_group_id: u32, cosmetic_type: u8) -> i64 {
+    let base = match ship_group_id {
+        25 | 31 | 237 => 750,
+        324 | 420 | 541 | 830 | 831 | 834 | 893 | 1305 | 1527 | 1534 => 1_500,
+        26 | 28 | 463 => 2_500,
+        358 | 380 | 419 | 540 | 543 | 832 | 833 | 894 | 906 | 963 | 1201 | 1202 | 1972 => 4_000,
+        27 | 513 | 941 => 7_500,
+        485 | 547 | 659 | 883 | 898 | 900 | 902 | 1538 | 4594 | 30 => 15_000,
+        _ => 2_500,
+    };
+    if cosmetic_type == 2 { (base * 5) / 3 } else { base }
+}
+
+/// Loads Paragon (`1_000_419`) Ship Cosmetic Emblem offers from
+/// `res:/staticdata/shipcosmeticlicenses.fsdbinary` (offer list from V24 SDE; EverMark prices `DERIVED`).
+pub fn paragon_sde_evermark_offers(sde: &eve_sde::SdeRegistry) -> &'static [LPOffer] {
+    static PARAGON_OFFERS: std::sync::OnceLock<Vec<LPOffer>> = std::sync::OnceLock::new();
+    PARAGON_OFFERS.get_or_init(|| {
+        let mut offers = Vec::new();
+        let Ok(rows) = sde.load_cfsd_table("res:/staticdata/shipcosmeticlicenses.fsdbinary") else {
+            return offers;
+        };
+        let get_u32 = |rec: &eve_sde::CfsdRecord, k: &str| match rec.fields.get(k) {
+            Some(eve_sde::CfsdValue::Int(i)) => u32::try_from(*i).ok(),
+            _ => None,
+        };
+        for rec in rows.values() {
+            let (Some(license_type_id), Some(ship_type_id), Some(ctype)) = (
+                get_u32(rec, "shipCosmeticLicenseTypeID"),
+                get_u32(rec, "shipTypeID"),
+                get_u32(rec, "cosmeticType"),
+            ) else {
+                continue;
+            };
+            if !sde.types.get(&license_type_id).is_some_and(|t| t.published) {
+                continue;
+            }
+            let ship_group_id = sde.types.get(&ship_type_id).map(|t| t.group_id).unwrap_or(25);
+            offers.push(LPOffer {
+                offer_id: 600_000 + i64::from(license_type_id),
+                corp_id: PARAGON_CORP_ID,
+                type_id: license_type_id,
+                quantity: 1,
+                lp_cost: paragon_emblem_evermark_cost(ship_group_id, ctype as u8),
+                isk_cost: IskCents::ZERO,
+                req_items: Vec::new(),
+                ak_cost: 0,
+                min_standing: None,
+            });
+        }
+        offers.sort_by_key(|o| o.offer_id);
+        offers
+    })
+}
+
+/// Load all available LP store offers for a corporation, including V24 SDE Paragon EverMarks offers.
+pub fn get_corp_lp_offers_with_sde(
+    sde: &eve_sde::SdeRegistry,
+    snap: &eve_db::WorldStateSnapshot,
+    corp_id: i64,
+) -> Vec<LPOffer> {
+    let mut offers = get_corp_lp_offers(snap, corp_id);
+    if offers.is_empty() && corp_id == PARAGON_CORP_ID {
+        offers.extend_from_slice(paragon_sde_evermark_offers(sde));
+    }
+    offers
 }
 
 /// Load all available LP store offers for a corporation.
@@ -329,14 +402,24 @@ fn take_offer(
 
     let all_offers = ctx.db.with_snapshot(|snap| match target_corp_id {
         Some(cid) => {
-            let corp_offers = get_corp_lp_offers(snap, cid);
+            let corp_offers = get_corp_lp_offers_with_sde(&ctx.sde, snap, cid);
             if corp_offers.is_empty() && explicit_corp_id.is_none() {
-                load_lp_store_offers(snap)
+                let mut fallback = load_lp_store_offers(snap);
+                if fallback.is_empty() {
+                    fallback.extend_from_slice(paragon_sde_evermark_offers(&ctx.sde));
+                }
+                fallback
             } else {
                 corp_offers
             }
         }
-        None => load_lp_store_offers(snap),
+        None => {
+            let mut all = load_lp_store_offers(snap);
+            if all.is_empty() {
+                all.extend_from_slice(paragon_sde_evermark_offers(&ctx.sde));
+            }
+            all
+        }
     });
     let offer = match all_offers.into_iter().find(|o| {
         o.offer_id == target_offer_id
@@ -996,7 +1079,8 @@ pub fn handle(
             let default_corp = 1_000_035; // Caldari Navy
             let target_corp = corp_id_arg.or(station_corp).unwrap_or(default_corp);
 
-            let matching = ctx.db.with_snapshot(|snap| get_corp_lp_offers(snap, target_corp));
+            let matching =
+                ctx.db.with_snapshot(|snap| get_corp_lp_offers_with_sde(&ctx.sde, snap, target_corp));
 
             let list = matching.iter().map(offer_to_pyrep).collect::<Vec<_>>();
             Some(Ok(PyRep::List(list)))
@@ -1310,8 +1394,6 @@ pub fn handle(
             }
             Some(Ok(PyRep::Dict(by_group)))
         }
-
         _ => None,
     }
 }
-

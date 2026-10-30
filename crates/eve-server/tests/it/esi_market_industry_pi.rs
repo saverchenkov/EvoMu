@@ -284,21 +284,49 @@ async fn test_esi6_market_public_and_structure_routes() {
             structure_id,
             make_structure(
                 structure_id,
-                35832,
+                35833,
                 corp_id,
                 30_000_142,
-                "Jita Trade Citadel",
+                "Jita Trade Fortizar",
             ),
+        );
+        snap.items.insert(
+            910_001,
+            InventoryItemRecord {
+                item_id: 910_001,
+                type_id: 35_892, // Standup Market Hub I
+                owner_id: corp_id,
+                location_id: structure_id,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
         );
         snap.structures.insert(
             private_structure_id,
             make_structure(
                 private_structure_id,
-                35832,
+                35833,
                 rival_corp_id,
                 30_000_142,
-                "Private Rival Citadel",
+                "Private Rival Fortizar",
             ),
+        );
+        snap.items.insert(
+            910_002,
+            InventoryItemRecord {
+                item_id: 910_002,
+                type_id: 35_892, // Standup Market Hub I
+                owner_id: rival_corp_id,
+                location_id: private_structure_id,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
         );
         snap.market_orders.clear();
         snap.market_order_meta.clear();
@@ -384,6 +412,10 @@ async fn test_esi6_market_public_and_structure_routes() {
         .get(&(first_mg_id as u32))
         .expect("SDE market group");
     assert_eq!(mg_detail["name"], json!(expected_sde_mg.name));
+    assert_eq!(
+        mg_detail["description"],
+        json!(ctx.sde.market_group_description(first_mg_id as u32).unwrap_or_default())
+    );
     assert_status(&router, "/v1/markets/groups/999999999/", None, 404);
 
     // 2. GET /v1/markets/prices/

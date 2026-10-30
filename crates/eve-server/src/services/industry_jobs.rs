@@ -228,7 +228,7 @@ pub fn handle_industry_jobs(
                         .and_then(|a| a.products.first()).map(|p| p.type_id).unwrap_or(bp.product_type_id);
                     if matches!(bp_type_id, 90274..=90282) || ctx.sde.types.get(&react_prod_tid).is_some_and(|t| t.group_id == 4932) {
                         let has_composite = snap.items.values().any(|i| {
-                            i.location_id == station_id && (164..=171).contains(&(i.flag as u16)) && matches!(i.type_id, 45537 | 35894)
+                            i.location_id == station_id && (164..=171).contains(&(i.flag as u16)) && i.type_id == 45537
                                 && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true) && i.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
                         });
                         if !has_composite {
