@@ -914,9 +914,13 @@ fn register_payment_token_and_purchase_handlers(
                 catalog.offers.into_iter().find(|o| o.id as u64 == offer_id)
             }).ok_or_else(|| (STATUS_NOT_FOUND, format!("Store offer {offer_id} not found")))?;
 
-            // DERIVED: 1 PLEX = 5 USD cents ($0.05/PLEX retail benchmark)
-            let amount_in_cents = (offer.price_plex.max(0) as u64) * 5;
-            let currency = "USD";
+            let amount_in_cents = offer.price_cents.ok_or_else(|| {
+                (
+                    STATUS_NOT_IMPLEMENTED,
+                    format!("DATA GAP: Real-money price_cents not configured for store offer {offer_id}"),
+                )
+            })?;
+            let currency = offer.currency.as_deref().unwrap_or("USD");
 
             let mut cost_bytes = Vec::new();
             encode_varint_field(1, amount_in_cents, &mut cost_bytes); // catalog_amount_in_cents
@@ -1026,6 +1030,14 @@ fn register_payment_token_and_purchase_handlers(
                     if offer.price_plex < 0 {
                         return Err(format!("{STATUS_BAD_REQUEST}:Store offer {offer_id} has invalid negative PLEX price"));
                     }
+                    let unit_cents = offer.price_cents.ok_or_else(|| {
+                        format!(
+                            "{STATUS_NOT_IMPLEMENTED}:DATA GAP: Real-money price_cents not configured for store offer {offer_id}"
+                        )
+                    })?;
+                    let amount_in_cents = (unit_cents.min(u64::from(u32::MAX)) as u32)
+                        .saturating_mul(qty);
+                    let currency = offer.currency.unwrap_or_else(|| "USD".to_string());
 
                     let mut tokens: Vec<PaymentTokenRecord> = snap
                         .service_state_blobs
@@ -1151,10 +1163,6 @@ fn register_payment_token_and_purchase_handlers(
                         omega_notice = Some(notice);
                     }
 
-                    // DERIVED: 1 PLEX = 5 USD cents ($0.05/PLEX retail benchmark)
-                    let amount_in_cents = (offer.price_plex.max(0) as u32)
-                        .saturating_mul(5)
-                        .saturating_mul(qty);
                     snap.next_entity_id += 1;
                     let rid = snap.next_entity_id as u64;
                     let mut receipts: Vec<PaymentReceiptRecord> = snap
@@ -1167,7 +1175,7 @@ fn register_payment_token_and_purchase_handlers(
                         user_id: uid,
                         offer_id: offer.id.to_string(),
                         amount_in_cents,
-                        currency: "USD".to_string(),
+                        currency,
                         timestamp_unix: now_unix,
                     });
                     if let Ok(serialized) = serde_json::to_string(&receipts) {

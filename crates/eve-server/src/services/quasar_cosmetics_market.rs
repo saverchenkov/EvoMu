@@ -16,6 +16,13 @@
 
 #![forbid(unsafe_code)]
 
+use super::quasar_cosmetics_market_types::{
+    GROUP_SHIP_SKIN_DESIGN_ELEMENT, LISTING_DURATIONS_SECS,
+};
+pub use super::quasar_cosmetics_market_types::{
+    ComponentListingRecord, CosmeticsMarketData, ListingTargetRecord, SkinListingRecord,
+    BUYER_FEES_VERSION, MAX_LISTING_PRICE_UNITS, MAX_LISTING_QUANTITY, PARAGON_CORP_ID,
+};
 use super::quasar_cosmetics_skinr::{SkinrCosmeticsState, ThirdPartySkinLicense};
 use super::quasar_social_chat::ctx_queue_notice;
 use crate::quasar_gateway::{
@@ -28,83 +35,11 @@ use eve_proto::quasar::{
     DynamicQuasarMessage, DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
-use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 const BLOB_KEY: &str = "quasar_cosmetics_market";
-/// Paragon corporation ID used for EverMark loyalty-point buyer fees.
-pub const PARAGON_CORP_ID: u64 = 1_000_419;
-/// SDE group ID for `Ship SKIN Design Element` (`sde_groups.group_id = 4726`).
-const GROUP_SHIP_SKIN_DESIGN_ELEMENT: u32 = 4726;
-/// Current Paragon Hub buyer fee schedule version string.
-pub const BUYER_FEES_VERSION: &str = "v24.01.1";
-/// Maximum allowed unit or total price in ISK or PLEX cents (`10_000_000_000_000` = 10 trillion).
-pub const MAX_LISTING_PRICE_UNITS: u64 = 10_000_000_000_000;
-/// Maximum allowed listing or purchase quantity (`10_000`).
-pub const MAX_LISTING_QUANTITY: u32 = 10_000;
-/// Standard Paragon Hub listing durations in seconds (`tradingUtil.pyj`: 1, 3, 7, 14, 30, 90 days).
-const LISTING_DURATIONS_SECS: [(u64, u64); 6] = [
-    (86_400, 100_000),
-    (259_200, 200_000),
-    (604_800, 350_000),
-    (1_209_600, 600_000),
-    (2_592_000, 1_000_000),
-    (7_776_000, 2_500_000),
-];
 
 type HandlerResult = Result<GoogleAny, (u32, String)>;
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ListingTargetRecord {
-    Public,
-    Corporation(u64),
-    Alliance(u64),
-    Character(u64),
-}
-
-impl Default for ListingTargetRecord {
-    fn default() -> Self {
-        Self::Public
-    }
-}
-
-impl ListingTargetRecord {
-    pub fn is_branded(&self) -> bool {
-        !matches!(self, Self::Public)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ComponentListingRecord {
-    pub uuid: [u8; 16],
-    pub sale_end_unix: u64,
-    pub price_isk: Option<u64>,
-    pub price_plex_cents: Option<u64>,
-    pub component_item_type_id: u32,
-    pub bundle_size: u64,
-    pub discount_percent: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct SkinListingRecord {
-    pub uuid: [u8; 16],
-    pub seller_id: u32,
-    pub created_unix: u64,
-    pub expires_unix: u64,
-    pub price_isk: Option<u64>,
-    pub price_plex_cents: Option<u64>,
-    pub skin_hex: String,
-    pub quantity: u32,
-    pub target: ListingTargetRecord,
-    pub branded: bool,
-}
-
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct CosmeticsMarketData {
-    pub component_listings: BTreeMap<String, ComponentListingRecord>,
-    pub skin_listings: BTreeMap<String, SkinListingRecord>,
-    pub next_seq: u64,
-}
 
 pub struct CosmeticsMarketState {
     db: Arc<WorldRepository>,
@@ -461,11 +396,6 @@ fn broker_fee_for(duration_secs: u64, target: &ListingTargetRecord) -> u64 {
     } else {
         base
     }
-}
-
-pub fn skin_tier_for_hex(skin_hex: &str) -> u32 {
-    let sum: u32 = skin_hex.bytes().map(u32::from).sum();
-    (sum % 5) + 1
 }
 
 fn market_get_broker_fees(

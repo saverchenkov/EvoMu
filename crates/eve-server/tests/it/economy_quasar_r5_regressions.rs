@@ -321,6 +321,8 @@ async fn test_r5_239_240_246_247_quasar_transfer_steam_omega_gift_and_entitlemen
             price_plex: 500,
             product_ids: vec![],
             targeted: false,
+            price_cents: None,
+            currency: None,
         });
         eve_server::services::quasar_payment_store_types::save_store_catalog(snap, &catalog);
     });
