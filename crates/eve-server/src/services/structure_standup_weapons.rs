@@ -295,7 +295,7 @@ pub async fn try_activate_standup_weapon(
                 .filter(|b| b.id != tid && is_hostile_to_structure(ctx, structure_id, st_corp_id, b.id))
                 .map(|b| (b.id, b.position))
                 .collect();
-            let hit_ids = vorton_arc_targets_with_cap(tid, target_ball.position, &candidates, jump_radius, 5);
+            let hit_ids = vorton_arc_targets_with_cap(tid, target_ball.position, &candidates, jump_radius, 4);
 
             let mut total_applied = 0.0_f64;
             let mut targets_hit = 0_i64;

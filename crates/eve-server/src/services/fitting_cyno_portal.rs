@@ -411,12 +411,20 @@ async fn light_cyno(
     let cft_lvl = ctx.db.with_snapshot(|s| {
         s.skills.get(&char_id).and_then(|sk| sk.get(&21611)).map(|r| r.level).unwrap_or(0)
     });
+    let ship_type_id = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0);
+    let is_industrial = type_attr(ctx, mod_type, ATTR_IS_INDUSTRIAL_CYNO) > 0.0;
     let base_fuel = if mod_vals[1] > 0.0 { mod_vals[1] } else { type_attr(ctx, mod_type, ATTR_CONSUMPTION_QUANTITY) };
-    let fuel_qty = if cft_lvl > 0 && (mod_vals[1] <= 0.0 || mod_vals[1] >= type_attr(ctx, mod_type, ATTR_CONSUMPTION_QUANTITY)) {
-        ((base_fuel * (1.0 - 0.10 * (cft_lvl as f64))).max(1.0)).ceil() as i64
+    let after_cft = if cft_lvl > 0 && (mod_vals[1] <= 0.0 || mod_vals[1] >= type_attr(ctx, mod_type, ATTR_CONSUMPTION_QUANTITY)) {
+        base_fuel * (1.0 - 0.10 * (cft_lvl as f64))
     } else {
-        base_fuel.ceil() as i64
+        base_fuel
     };
+    let after_role = if is_industrial && ship_type_id == 32880 {
+        after_cft * 0.5
+    } else {
+        after_cft
+    };
+    let fuel_qty = after_role.max(1.0).ceil() as i64;
     consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| format!("Requires {fuel_qty} x type {fuel_type}, ship holds {have}"))?;
 
     let duration_s = duration_ms / 1000.0;
@@ -757,6 +765,13 @@ async fn resolve_fleet_beacon(
     if let Some((b_id, b_type_id, b_owner, b_sys)) = item_info {
         let handle = ctx.systems.get_or_spawn(b_sys);
         let pos = handle.get_ball_snapshot(b_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(DVec3::ZERO);
+        let expires_at_unix = ctx.db.with_snapshot(|s| {
+            crate::services::mobile_deployables::read_deployable_state_snap(s)
+                .deployables
+                .get(&b_id)
+                .map(|r| r.expires_at_unix)
+                .unwrap_or(u64::MAX)
+        });
         Ok(FleetModuleBeacon {
             beacon_id: b_id,
             char_id: b_owner,
@@ -764,7 +779,7 @@ async fn resolve_fleet_beacon(
             beacon_type_id: b_type_id,
             solar_system_id: b_sys,
             position: pos,
-            expires_at_unix: u64::MAX,
+            expires_at_unix,
         })
     } else {
         Err(err("NoActiveBeacon", format!("Deployable beacon {beacon_id} in system {target_sys} is not active")))
@@ -853,23 +868,7 @@ async fn jump_to_fleet_beacon(
     let pos = beacon.position + DVec3::new(2_500.0, 0.0, 0.0);
     let (cooldown_min, fatigue_min, bound) =
         relocate_caller(ctx, session, char_id, ship_id, sys_id, beacon.solar_system_id, pos, dist, vals[2]).await?;
-    if is_deployable && matches!(beacon.beacon_type_id, 57319 | 59630) {
-        consume_single_use_mobile_cyno(ctx, beacon.solar_system_id, beacon.beacon_id).await;
-    }
     Ok(JumpOutcome { dist_ly: dist, fuel_type, fuel_qty, cooldown_min, fatigue_min, beyonce_bound_id: bound })
-}
-
-async fn consume_single_use_mobile_cyno(ctx: &ServerContext, sys_id: u32, beacon_id: i64) {
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let _ = sys_handle.remove_ball(beacon_id).await;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.remove(&beacon_id);
-        snap.item_positions.remove(&beacon_id);
-        snap.sp6_lifecycle.space_object_meta.remove(&beacon_id);
-        crate::services::mobile_deployables::write_deployable_state_snap(snap, |st| {
-            st.deployables.remove(&beacon_id);
-        });
-    });
 }
 
 /// `beyonce.CmdBridgeToFleetModuleBeacon` / `beyonce.CmdBridgeToFleetDeployableBeacon`: opens a jump portal.
@@ -1239,6 +1238,66 @@ fn jump_outcome_rep(o: &JumpOutcome, sys_id: u32) -> PyRep {
         ("jumpFatigueMinutes", PyRep::Real(o.fatigue_min)),
         ("beyonceBoundID", PyRep::Integer(o.beyonce_bound_id as i64)),
     ])
+}
+
+/// Activates a Clone Vat Bay I (`type_id == 23735`, `group_id == 815`) on a Titan or Rorqual,
+/// consuming Liquid Ozone and immobilizing the ship for the module cycle (`feat:modules.clone-vat-bay-fuel`).
+pub(crate) async fn activate_clone_vat_bay(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+) -> Result<PyRep, BridgeRpcError> {
+    let (ship_type_id, mod_type_id) = ctx.db.with_snapshot(|s| {
+        let st = s.items.get(&ship_id).map(|i| i.type_id).unwrap_or(0);
+        let mt = s.items.get(&module_id).map(|i| i.type_id).unwrap_or(0);
+        (st, mt)
+    });
+    let ship_type = ctx.sde.types.get(&ship_type_id).ok_or_else(|| err("ShipNotFound", "Ship type unknown"))?;
+    if !matches!(ship_type.group_id, 30 | 883) {
+        return Err(err("ShipCannotFitModule", "Clone Vat Bay requires a Titan or Rorqual"));
+    }
+    let mod_type = ctx.sde.types.get(&mod_type_id).ok_or_else(|| err("ModuleNotFound", "Module type unknown"))?;
+    let (_, mod_vals) = evaluated_attrs(
+        ctx,
+        char_id,
+        ship_id,
+        &[],
+        Some((module_id, &[attr_ids::DURATION, ATTR_CONSUMPTION_QUANTITY])),
+    );
+    let duration_ms = if mod_vals[0] > 0.0 {
+        mod_vals[0]
+    } else {
+        type_attr(ctx, mod_type, attr_ids::DURATION).max(300_000.0)
+    };
+    let fuel_type = {
+        let ft = type_attr(ctx, mod_type, ATTR_CONSUMPTION_TYPE) as TypeId;
+        if ft != 0 { ft } else { 16273 }
+    };
+    let fuel_qty = {
+        let q = if mod_vals[1] > 0.0 { mod_vals[1] } else { type_attr(ctx, mod_type, ATTR_CONSUMPTION_QUANTITY) };
+        (q.max(1.0)).ceil() as i64
+    };
+    consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| {
+        format!("Clone Vat Bay requires {fuel_qty} x type {fuel_type}, ship holds {have}")
+    })?;
+    let duration_s = duration_ms / 1000.0;
+    sys.add_module_cycle(self_immobilizing_cycle(ship_id, module_id, mod_type.type_id, "effects.CloneVatBay", duration_s))
+        .await
+        .map_err(|e| err("ModuleActivationFailed", e))?;
+    ctx.db.with_mut_snapshot(|s| {
+        s.module_online_states.insert(module_id, true);
+    });
+    Ok(PyRep::keyval([
+        ("moduleID", PyRep::Integer(module_id)),
+        ("shipID", PyRep::Integer(ship_id)),
+        ("active", PyRep::Bool(true)),
+        ("cloneVatBayActive", PyRep::Bool(true)),
+        ("fuelTypeID", PyRep::Integer(fuel_type as i64)),
+        ("fuelConsumed", PyRep::Integer(fuel_qty)),
+        ("durationSeconds", PyRep::Real(duration_s)),
+    ]))
 }
 
 /// RPC entry point for the cyno / jump portal surface of `beyonce`.

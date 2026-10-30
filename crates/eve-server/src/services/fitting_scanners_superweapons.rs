@@ -757,12 +757,12 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
         }
 
         // Clone Vat Bay I (`type_id == 23735`, `group_id == 815`)
-        815 => Some(Ok(PyRep::keyval([
-            ("moduleID", PyRep::Integer(module_id)),
-            ("shipID", PyRep::Integer(ship_id)),
-            ("active", PyRep::Bool(true)),
-            ("cloneVatBayActive", PyRep::Bool(true)),
-        ]))),
+        815 => Some(
+            crate::services::inventory_fitting::fitting_cyno_portal::activate_clone_vat_bay(
+                ctx, sys, char_id, ship_id, module_id,
+            )
+            .await,
+        ),
 
         _ => None,
     }

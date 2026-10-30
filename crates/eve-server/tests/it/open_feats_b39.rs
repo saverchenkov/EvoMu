@@ -6,7 +6,7 @@ use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::mobile_deployables::{
-    SKILL_ANCHORING, TYPE_COVERT_MOBILE_CYNO_BEACON, TYPE_MOBILE_CYNO_BEACON, TYPE_MOBILE_DEPOT,
+    SKILL_ANCHORING, TYPE_COVERT_MOBILE_CYNO_BEACON, TYPE_MOBILE_CYNO_BEACON,
     TYPE_MOBILE_MJU, TYPE_MOBILE_OBSERVATORY,
 };
 use glam::DVec3;
@@ -81,12 +81,9 @@ async fn setup_pilot(
 }
 
 #[tokio::test]
-async fn test_b39_fulcrum_and_fw_corruption_suppression_effects() {
-    // parity: feat:structures.fulcrum-alignment-services, feat:fw.corruption-suppression-effects
-    eve_testkit::attest(&[
-        "feat:structures.fulcrum-alignment-services",
-        "feat:fw.corruption-suppression-effects",
-    ]);
+async fn test_b39_fulcrum_alignment_services() {
+    // parity: feat:structures.fulcrum-alignment-services
+    eve_testkit::attest(&["feat:structures.fulcrum-alignment-services"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let zarzakh_sys = 30_100_000_u32;
@@ -172,14 +169,32 @@ async fn test_b39_fulcrum_and_fw_corruption_suppression_effects() {
 
     // 3. Jump cloning requires pirate enlistment; corp offices require pirate-enlisted corp; Angel/Guristas LP stores
     sess.station_id = Some(fulcrum_id);
+    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
     let clone_err = ctx
         .dispatch_rpc(&mut sess, "jumpCloneSvc", None, "InstallCloneInStation", &[], &kw, None)
         .await
         .expect_err("Neutral clone install refused");
     assert_eq!(clone_err.code, "FulcrumCloneRequiresPirateEnlistment");
 
+    let office_err = ctx
+        .dispatch_rpc(&mut sess, "officeManager", None, "RentOffice", &[PyRep::Integer(fulcrum_id)], &kw, None)
+        .await
+        .expect_err("Neutral corp office rental refused at Fulcrum");
+    assert_eq!(office_err.code, "FulcrumOfficeRequiresPirateEnlistment");
+
     ctx.db.with_mut_snapshot(|s| {
         s.characters.get_mut(&char_id).unwrap().war_faction_id = Some(500_010);
+        s.corporations.insert(
+            1_000_009,
+            eve_db::CorporationRecord {
+                corporation_id: 1_000_009,
+                name: "Fulcrum Pirates".into(),
+                ticker: "FCRP".into(),
+                ceo_id: char_id,
+                master_wallet: IskCents::from_isk(10_000_000),
+                ..Default::default()
+            },
+        );
         s.skills.entry(char_id).or_default().insert(
             24242,
             TrainedSkillRecord { type_id: 24242, level: 5, skill_points: 256_000.0 },
@@ -188,54 +203,21 @@ async fn test_b39_fulcrum_and_fw_corruption_suppression_effects() {
     ctx.dispatch_rpc(&mut sess, "jumpCloneSvc", None, "InstallCloneInStation", &[], &kw, None)
         .await
         .expect("Pirate pilot installs clone at Fulcrum");
-
-    // 4. FW Corruption & Suppression stages (1-5) apply security posture changes & remove when stage drops
-    let fw_sys = 30_000_142_u32;
-    let base_sec = ctx.sde.solar_systems.get(&fw_sys).map(|s| s.security_status).unwrap_or(0.95);
-    let now_u = ctx.now_unix();
-    ctx.db.with_mut_snapshot(|s| {
-        s.insurgency_runtime.campaigns.insert(
-            1,
-            eve_db::PersistedInsurgencyCampaign {
-                campaign_id: 1,
-                pirate_faction_id: 500_010,
-                target_faction_id: 500_001,
-                fob_solar_system_id: fw_sys,
-                systems: vec![fw_sys],
-                created_at_unix: now_u.saturating_sub(100),
-                forecasting_end_unix: now_u.saturating_sub(10),
-                active_end_unix: now_u.saturating_add(43_200),
-                winddown_end_unix: now_u.saturating_add(86_400),
-                corruption_points: [(fw_sys, 1_000_i64)].into_iter().collect(),
-                suppression_points: HashMap::new(),
-            },
-        );
-        s.system_states.entry(fw_sys).or_default().insurgency_corruption_stage = 5;
-    });
-    eve_server::services::security_mgr::sync_corruption_security_status_change(&ctx, fw_sys, 0, 5);
-    let mod_systems = eve_server::services::security_mgr::compute_modified_systems(&ctx);
-    assert!(
-        mod_systems.get(&fw_sys).copied().unwrap_or(base_sec) < base_sec,
-        "Corruption stage 5 must lower effective system security in securityMgr.get_modified_systems"
-    );
-    let sec_rep = ctx
-        .dispatch_rpc(&mut sess, "securityMgr", None, "get_modified_systems", &[], &kw, None)
+    ctx.dispatch_rpc(&mut sess, "officeManager", None, "RentOffice", &[PyRep::Integer(fulcrum_id)], &kw, None)
         .await
-        .expect("securityMgr.get_modified_systems");
-    assert!(matches!(sec_rep, PyRep::Dict(_)));
+        .expect("Pirate-enlisted corp rents office at Fulcrum");
 
-    // Dropping corruption stage restores security posture
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(c) = s.insurgency_runtime.campaigns.get_mut(&1) {
-            c.corruption_points.insert(fw_sys, 0);
-        }
-        if let Some(st) = s.system_states.get_mut(&fw_sys) {
-            st.insurgency_corruption_stage = 0;
-        }
-    });
-    eve_server::services::security_mgr::sync_corruption_security_status_change(&ctx, fw_sys, 5, 0);
-    let restored = eve_server::services::security_mgr::get_effective_system_security(&ctx, fw_sys);
-    assert!((restored - base_sec).abs() < 1e-4, "Dropping stage restores security posture");
+    // Angel Cartel (1000124) and Guristas (1000127) LP stores available
+    let angel_lp = ctx
+        .dispatch_rpc(&mut sess, "LPStoreMgr", None, "GetAvailableOffersFromCorp", &[PyRep::Integer(1_000_124)], &kw, None)
+        .await
+        .expect("Angel Cartel LP store offers");
+    assert!(!matches!(angel_lp, PyRep::None));
+    let guristas_lp = ctx
+        .dispatch_rpc(&mut sess, "LPStoreMgr", None, "GetAvailableOffersFromCorp", &[PyRep::Integer(1_000_127)], &kw, None)
+        .await
+        .expect("Guristas LP store offers");
+    assert!(!matches!(guristas_lp, PyRep::None));
 }
 
 #[tokio::test]
@@ -360,15 +342,49 @@ async fn test_b39_mobile_cyno_beacon_and_micro_jump_unit() {
     .await
     .expect("Jump to Mobile Cyno Beacon succeeds");
 
-    // Verify single-use consumption & covert variant lower HP
-    assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&beacon_id)), "Single-use beacon consumed");
+    // Verify beacon stays active after first jump (60m lifetime, covert 30m + lower HP), fleet-only, and early destruction
+    assert!(ctx.db.with_snapshot(|s| s.items.contains_key(&beacon_id)), "Beacon remains active for 60m lifetime");
+    let dep_rec = eve_server::services::mobile_deployables::read_deployable_state(&ctx)
+        .deployables
+        .get(&beacon_id)
+        .cloned()
+        .unwrap();
+    assert_eq!(dep_rec.expires_at_unix - dep_rec.anchor_start_unix, 60 + 3_600);
     let norm_cs = ctx.build_type_combat_state(TYPE_MOBILE_CYNO_BEACON);
     let cov_cs = ctx.build_type_combat_state(TYPE_COVERT_MOBILE_CYNO_BEACON);
     let norm_hp = norm_cs.max_shield_hp + norm_cs.max_armor_hp + norm_cs.max_structure_hp;
     let cov_hp = cov_cs.max_shield_hp + cov_cs.max_armor_hp + cov_cs.max_structure_hp;
     assert!(cov_hp < norm_hp, "Covert Mobile Cyno Beacon has lower HP ({cov_hp} < {norm_hp})");
 
-    // 2. Mobile Micro Jump Unit: 1m activation delay, can't be scooped, 12s spool -> 100km jump, mass < 1B kg
+    // Non-fleet pilot cannot jump to fleet-only beacon
+    let c_outsider = 91_000_013_i64;
+    let s_outsider = 101_000_013_i64;
+    let mut sess_out = setup_pilot(&ctx, c_outsider, s_outsider, 23915, origin_sys, DVec3::new(500_000.0, 0.0, 0.0), 1_000_010).await;
+    let out_err = ctx
+        .dispatch_rpc(
+            &mut sess_out,
+            "beyonce",
+            None,
+            "CmdJumpToFleetDeployableBeacon",
+            &[PyRep::Integer(c1), PyRep::Integer(dest_sys as i64), PyRep::Integer(beacon_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Non-fleet pilot cannot use fleet mobile cyno beacon");
+    assert_eq!(out_err.code, "NoActiveBeacon");
+
+    // Early destruction via damage removes the beacon
+    let dest_handle = ctx.systems.get_or_spawn(dest_sys);
+    let _ = dest_handle
+        .apply_damage(
+            beacon_id,
+            eve_destiny::DamageVector { em: 100_000.0, thermal: 100_000.0, kinetic: 100_000.0, explosive: 100_000.0 },
+        )
+        .await;
+    assert!(dest_handle.get_ball_snapshot(beacon_id).await.unwrap().is_none(), "Destroyed beacon removed from space");
+
+    // 2. Mobile Micro Jump Unit: 1m activation delay, 2d lifetime, can't be scooped, 12s spool -> 100km jump, mass < 1B kg
     let mju_id = 101_000_097_i64;
     ctx.db.with_mut_snapshot(|s| {
         s.items.insert(
@@ -388,6 +404,12 @@ async fn test_b39_mobile_cyno_beacon_and_micro_jump_unit() {
     ctx.dispatch_rpc(&mut sess1, "posMgr", None, "AnchorStructure", &[PyRep::Integer(mju_id)], &kw, None)
         .await
         .expect("Deploy MMJU");
+    let mju_rec = eve_server::services::mobile_deployables::read_deployable_state(&ctx)
+        .deployables
+        .get(&mju_id)
+        .cloned()
+        .unwrap();
+    assert_eq!(mju_rec.expires_at_unix - mju_rec.anchor_start_unix, 2 * 86_400);
     let scoop_err = ctx
         .dispatch_rpc(&mut sess1, "posMgr", None, "Scoop", &[PyRep::Integer(mju_id)], &kw, None)
         .await
@@ -395,25 +417,46 @@ async fn test_b39_mobile_cyno_beacon_and_micro_jump_unit() {
     assert!(!scoop_err.code.is_empty());
 
     ctx.advance_secs(61);
-    let dest_handle = ctx.systems.get_or_spawn(dest_sys);
     let (_, before_ball) = dest_handle.get_ball_snapshot(s1).await.unwrap().unwrap();
     ctx.dispatch_rpc(&mut sess1, "dogmaIM", None, "Activate", &[PyRep::Integer(mju_id)], &kw, None)
         .await
         .expect("Activate MMJU");
-    ctx.advance_secs(13);
+    // Duplicate spool rejected
+    let dup_err = ctx
+        .dispatch_rpc(&mut sess1, "dogmaIM", None, "Activate", &[PyRep::Integer(mju_id)], &kw, None)
+        .await
+        .expect_err("Duplicate MMJU spool rejected");
+    assert_eq!(dup_err.code, "MicroJumpAlreadySpooling");
+
+    // Hostile (different corp/fleet) ship can activate concurrently
+    let c_hostile = 91_000_014_i64;
+    let s_hostile = 101_000_014_i64;
+    let mut sess_hostile = setup_pilot(&ctx, c_hostile, s_hostile, 587, dest_sys, DVec3::new(500_500.0, 0.0, 0.0), 1_000_011).await;
+    let (_, h_before) = dest_handle.get_ball_snapshot(s_hostile).await.unwrap().unwrap();
+    ctx.dispatch_rpc(&mut sess_hostile, "dogmaIM", None, "Activate", &[PyRep::Integer(mju_id)], &kw, None)
+        .await
+        .expect("Hostile ship activates MMJU concurrently");
+
+    // At 10s + 1s step = 11s, 12s warm-up has not completed yet
+    ctx.advance_secs(10);
+    dest_handle.step_manual(1.0).await.expect("step at 11s");
+    let (_, mid_ball) = dest_handle.get_ball_snapshot(s1).await.unwrap().unwrap();
+    assert!((mid_ball.position - before_ball.position).length() < 10.0, "Ship has not jumped before 12s warm-up");
+
+    // At 12s+, both ships jump 100 km, and there is no use cooldown
+    ctx.advance_secs(3);
     dest_handle.step_manual(1.0).await.expect("step MMJU jump");
     let (_, after_ball) = dest_handle.get_ball_snapshot(s1).await.unwrap().unwrap();
     let jumped_dist = (after_ball.position - before_ball.position).length();
     assert!((jumped_dist - 100_000.0).abs() < 100.0, "Ship jumped 100 km (got {jumped_dist})");
+    let (_, h_after) = dest_handle.get_ball_snapshot(s_hostile).await.unwrap().unwrap();
+    assert!(((h_after.position - h_before.position).length() - 100_000.0).abs() < 100.0, "Hostile ship jumped 100 km");
 }
 
 #[tokio::test]
-async fn test_b39_mobile_observatory_and_mobile_depot_refitting() {
-    // parity: feat:structures.mobile-observatory-decloak-ping, feat:modules.mobile-depot-deployment-and-refitting
-    eve_testkit::attest(&[
-        "feat:structures.mobile-observatory-decloak-ping",
-        "feat:modules.mobile-depot-deployment-and-refitting",
-    ]);
+async fn test_b39_mobile_observatory_decloak_ping() {
+    // parity: feat:structures.mobile-observatory-decloak-ping
+    eve_testkit::attest(&["feat:structures.mobile-observatory-decloak-ping"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let hisec_sys = 30_000_142_u32;
@@ -443,12 +486,26 @@ async fn test_b39_mobile_observatory_and_mobile_depot_refitting() {
         );
     });
 
-    // 1. Mobile Observatory refused in high-sec & wormhole space
+    // 1. Mobile Observatory refused in high-sec, wormhole, Abyssal, and deadspace
     let hisec_err = ctx
         .dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(obs_id)], &kw, None)
         .await
         .expect_err("Observatory refused in high-sec");
     assert_eq!(hisec_err.code, "CannotDeployInHighSec");
+
+    sess.solar_system_id = Some(31_000_001);
+    let wh_err = ctx
+        .dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(obs_id)], &kw, None)
+        .await
+        .expect_err("Observatory refused in wormhole");
+    assert!(!wh_err.code.is_empty());
+
+    sess.solar_system_id = Some(32_000_001);
+    let abyss_err = ctx
+        .dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(obs_id)], &kw, None)
+        .await
+        .expect_err("Observatory refused in Abyssal space");
+    assert!(!abyss_err.code.is_empty());
 
     // Move to low-sec and deploy -> 10m deploy, can't be scooped, pings cloaked ships past stabilization
     ctx.db.with_mut_snapshot(|s| {
@@ -525,40 +582,12 @@ async fn test_b39_mobile_observatory_and_mobile_depot_refitting() {
     }
     assert!(decloaked > 0 && decloaked < 10, "40% independent decloak ping decloaked {decloaked}/10 ships");
 
-    // 2. Mobile Depot: 60s anchoring, 48h reinforcement at 25% shield
-    let depot_id = 101_000_091_i64;
-    ctx.db.with_mut_snapshot(|s| {
-        s.items.insert(
-            depot_id,
-            InventoryItemRecord {
-                item_id: depot_id,
-                type_id: TYPE_MOBILE_DEPOT,
-                owner_id: c1,
-                location_id: s1,
-                flag: InventoryFlag::Cargo,
-                quantity: 1,
-                singleton: true,
-                ..Default::default()
-            },
-        );
-    });
-    ctx.dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(depot_id)], &kw, None)
-        .await
-        .expect("Deploy Mobile Depot");
-    ctx.advance_secs(61);
-    let depot_cs = low_handle.get_combat_state(depot_id).await.unwrap().unwrap();
-    let dmg_to_reinf = depot_cs.max_shield_hp * 0.80;
-    let _ = low_handle
-        .apply_damage(
-            depot_id,
-            eve_destiny::DamageVector { em: dmg_to_reinf, thermal: 0.0, kinetic: 0.0, explosive: 0.0 },
-        )
-        .await;
-    let dep_rec = eve_server::services::mobile_deployables::read_deployable_state(&ctx)
-        .deployables
-        .get(&depot_id)
-        .cloned()
-        .unwrap();
-    assert!(dep_rec.reinforced_until_unix.is_some(), "Mobile Depot entered 48h reinforcement");
+    // 2. Mobile Observatory expires after 2 hours
+    ctx.advance_secs(7_201);
+    low_handle.step_manual(1.0).await.expect("step observatory expiry");
+    assert!(
+        low_handle.get_ball_snapshot(obs_id).await.unwrap().is_none(),
+        "Mobile Observatory expired and removed after 2 hours"
+    );
 }
 

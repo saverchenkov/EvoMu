@@ -421,9 +421,19 @@ pub(crate) fn step_cycles_and_capacitor(
                         }
                         let effective_transfer = cycle.cap_transfer_target * att;
                         if let Some((src_cap, src_max_cap)) = src_cap_info {
+                            let target_pct = if cs.max_capacitor > 0.0 {
+                                cs.capacitor / cs.max_capacitor
+                            } else {
+                                0.0
+                            };
+                            let src_pct = if src_max_cap > 0.0 {
+                                src_cap / src_max_cap
+                            } else {
+                                0.0
+                            };
                             if is_sleeper_target
                                 || cycle.nosferatu_blood_raider_override
-                                || (cs.capacitor > src_cap && cs.capacitor > 0.0)
+                                || (target_pct > src_pct && cs.capacitor > 0.0)
                             {
                                 let transferred = effective_transfer
                                     .min(if is_sleeper_target {

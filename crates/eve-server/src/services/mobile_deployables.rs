@@ -546,7 +546,8 @@ pub fn step_mobile_deployables_in_actor(
     }
 
     // 2. Clear expired reinforcement timers, process MMJU spools, and execute Mobile Observatory decloak pings
-    let mut ready_mmju_jumps: Vec<i64> = Vec::new();
+    let mut ready_mmju_jumps: Vec<(i64, [f64; 3])> = Vec::new();
+    let mut seen_mmju_ships: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut observatory_pings: Vec<i64> = Vec::new();
     db.with_mut_snapshot(|snap| {
         write_deployable_state_snap(snap, |st| {
@@ -576,7 +577,13 @@ pub fn step_mobile_deployables_in_actor(
             let mut remaining_spools = Vec::with_capacity(st.mmju_spools.len());
             for sp in st.mmju_spools.drain(..) {
                 if sp.solar_system_id == solar_system_id && now_unix >= sp.spool_complete_unix {
-                    ready_mmju_jumps.push(sp.ship_id);
+                    if seen_mmju_ships.insert(sp.ship_id) {
+                        if let Some(mju_rec) = st.deployables.get(&sp.mju_id) {
+                            if !mju_rec.is_unanchored && now_unix < mju_rec.expires_at_unix {
+                                ready_mmju_jumps.push((sp.ship_id, mju_rec.position));
+                            }
+                        }
+                    }
                 } else {
                     remaining_spools.push(sp);
                 }
@@ -585,7 +592,28 @@ pub fn step_mobile_deployables_in_actor(
         });
     });
 
-    for ship_id in ready_mmju_jumps {
+    for (ship_id, mju_pos_arr) in ready_mmju_jumps {
+        let pilot_still_in_ship = db.with_snapshot(|snap| {
+            snap.characters
+                .values()
+                .any(|c| c.active_ship_id == ship_id && c.station_id.is_none() && c.structure_id.is_none())
+        });
+        if !pilot_still_in_ship {
+            continue;
+        }
+        let mju_pos = DVec3::from_array(mju_pos_arr);
+        let ship_valid = ballpark.balls.get(&ship_id).is_some_and(|b| {
+            !matches!(b.mode, eve_destiny::MovementMode::Warp { .. })
+                && b.mass < MMJU_MAX_SHIP_MASS_KG
+                && (b.position - mju_pos).length() <= 2_500.0
+        }) && !ballpark
+            .combat_states
+            .get(&ship_id)
+            .is_some_and(|cs| cs.is_cloaked || cs.is_mwd_mjd_disabled)
+            && !ballpark.is_ball_scrambled(ship_id);
+        if !ship_valid {
+            continue;
+        }
         if let Ok(new_pos) = ballpark.micro_jump(ship_id, MMJU_JUMP_DISTANCE_M) {
             db.with_mut_snapshot(|snap| {
                 snap.item_positions.insert(ship_id, [new_pos.x, new_pos.y, new_pos.z]);
@@ -1064,6 +1092,37 @@ pub async fn handle_activate_micro_jump_unit(
                 "Ship mass {:.0} kg exceeds Mobile Micro Jump Unit limit of {:.0} kg",
                 ship_ball.mass, MMJU_MAX_SHIP_MASS_KG
             ),
+        });
+    }
+    if matches!(ship_ball.mode, eve_destiny::MovementMode::Warp { .. }) {
+        return Err(BridgeRpcError {
+            code: "ShipInWarp".into(),
+            message: "Cannot activate Mobile Micro Jump Unit while warping".into(),
+        });
+    }
+    let ship_cs = sys_handle.get_combat_state(ship_id).await.ok().flatten();
+    if ship_cs.as_ref().is_some_and(|cs| cs.is_cloaked) {
+        return Err(BridgeRpcError {
+            code: "ShipCloaked".into(),
+            message: "Cannot activate Mobile Micro Jump Unit while cloaked".into(),
+        });
+    }
+    if sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false)
+        || ship_cs.as_ref().is_some_and(|cs| cs.is_mwd_mjd_disabled)
+    {
+        return Err(BridgeRpcError {
+            code: "WarpScrambled".into(),
+            message: "Cannot activate Mobile Micro Jump Unit while warp scrambled".into(),
+        });
+    }
+    let already_spooling = read_deployable_state(ctx)
+        .mmju_spools
+        .iter()
+        .any(|sp| sp.ship_id == ship_id && sp.spool_complete_unix > now_unix);
+    if already_spooling {
+        return Err(BridgeRpcError {
+            code: "MicroJumpAlreadySpooling".into(),
+            message: "Ship is already spooling a Mobile Micro Jump Unit".into(),
         });
     }
 

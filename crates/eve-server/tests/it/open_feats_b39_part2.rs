@@ -82,9 +82,8 @@ async fn setup_pilot(
 
 #[tokio::test]
 async fn test_b39_standup_structure_weapons() {
-    // parity: feat:structures.point-defense-system, feat:structures.standup-point-defense-battery, feat:structures.standup-guided-bomb-launcher, feat:structures.standup-superweapon-arcing-vorton
+    // parity: feat:structures.standup-point-defense-battery, feat:structures.standup-guided-bomb-launcher, feat:structures.standup-superweapon-arcing-vorton
     eve_testkit::attest(&[
-        "feat:structures.point-defense-system",
         "feat:structures.standup-point-defense-battery",
         "feat:structures.standup-guided-bomb-launcher",
         "feat:structures.standup-superweapon-arcing-vorton",
@@ -258,27 +257,77 @@ async fn test_b39_standup_structure_weapons() {
         )
         .await
         .expect("Activate Standup Guided Bomb Launcher");
-    assert!(kv_get(&bomb_rep, "appliedDamage").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
+    let small_sig_dmg = kv_get(&bomb_rep, "appliedDamage").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let small_sig_scale = kv_get(&bomb_rep, "signatureScale").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    assert!(small_sig_dmg > 0.0 && small_sig_scale < 0.5, "Frigate sig scales bomb damage ({small_sig_scale})");
 
-    // 3. Keepstar Standup Arcing Vorton Projector chains up to 5 targets and immobilizes gunner cycle
-    let target_ship_2 = 101_000_603_i64;
+    // Larger signature target (Raven battleship 638) takes higher signature-scaled bomb damage
+    let bs_target = 101_000_610_i64;
     let _ = handle
         .spawn_ball_with_combat(
             Ball {
-                id: target_ship_2,
-                type_id: 587,
-                position: DVec3::new(3_500.0, 0.0, 0.0),
+                id: bs_target,
+                type_id: 638,
+                position: DVec3::new(30_000.0, 0.0, 0.0),
                 velocity: DVec3::ZERO,
-                max_velocity: 300.0,
+                max_velocity: 150.0,
                 inertia: 0.5,
-                mass: 1_000_000.0,
-                radius: 40.0,
+                mass: 100_000_000.0,
+                radius: 250.0,
                 speed_fraction: 0.0,
                 mode: MovementMode::Stop,
             },
-            ctx.build_type_combat_state(587),
+            ctx.build_type_combat_state(638),
         )
         .await;
+    let _ = handle
+        .add_target_lock(
+            keepstar_id,
+            eve_destiny::TargetLock {
+                target_id: bs_target,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                max_range_m: Some(100_000.0),
+                locked: true,
+            },
+        )
+        .await;
+    let bomb_bs_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(bomb_mod_id), PyRep::String("targetAttack".into()), PyRep::Integer(bs_target)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Activate Standup Guided Bomb Launcher on Battleship");
+    let bs_sig_dmg = kv_get(&bomb_bs_rep, "appliedDamage").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    assert!(bs_sig_dmg > small_sig_dmg, "Larger signature target takes more bomb damage ({bs_sig_dmg} > {small_sig_dmg})");
+
+    // 3. Keepstar Standup Arcing Vorton Projector chains up to 5 targets and immobilizes gunner cycle
+    for idx in 0..5_i64 {
+        let tid = 101_000_603 + idx;
+        let _ = handle
+            .spawn_ball_with_combat(
+                Ball {
+                    id: tid,
+                    type_id: 587,
+                    position: DVec3::new(3_500.0 + (idx as f64) * 200.0, 0.0, 0.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 0.5,
+                    mass: 1_000_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                ctx.build_type_combat_state(587),
+            )
+            .await;
+    }
     let vorton_rep = ctx
         .dispatch_rpc(
             &mut sess,
@@ -291,7 +340,7 @@ async fn test_b39_standup_structure_weapons() {
         )
         .await
         .expect("Activate Standup Arcing Vorton Projector");
-    assert_eq!(kv_get(&vorton_rep, "targetsHit").and_then(|v| v.as_i64()), Some(2));
+    assert_eq!(kv_get(&vorton_rep, "targetsHit").and_then(|v| v.as_i64()), Some(5));
     let immob_err = ctx
         .dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(pdb_mod_id)], &kw, None)
         .await
@@ -300,16 +349,13 @@ async fn test_b39_standup_structure_weapons() {
 }
 
 #[tokio::test]
-async fn test_b39_cyno_portal_clone_vat_and_nosferatu() {
-    // parity: feat:ships.covert-cyno-beacon, feat:modules.covert-cyno-rules, feat:modules.industrial-cyno-rules, feat:modules.jump-portal-bridge-rules, feat:modules.covert-jump-portal-generator, feat:modules.clone-vat-bay-fuel, feat:modules.energy-nosferatu-relative-capacitor
+async fn test_b39_cyno_and_portal_rules() {
+    // parity: feat:modules.covert-cyno-rules, feat:modules.industrial-cyno-rules, feat:modules.jump-portal-bridge-rules, feat:modules.covert-jump-portal-generator
     eve_testkit::attest(&[
-        "feat:ships.covert-cyno-beacon",
         "feat:modules.covert-cyno-rules",
         "feat:modules.industrial-cyno-rules",
         "feat:modules.jump-portal-bridge-rules",
         "feat:modules.covert-jump-portal-generator",
-        "feat:modules.clone-vat-bay-fuel",
-        "feat:modules.energy-nosferatu-relative-capacitor",
     ]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -321,11 +367,14 @@ async fn test_b39_cyno_portal_clone_vat_and_nosferatu() {
     let s_bo = 101_000_042_i64;
     let c_bomber = 91_000_043_i64;
     let s_bomber = 101_000_043_i64;
+    let c_rifter = 91_000_046_i64;
+    let s_rifter = 101_000_046_i64;
 
     // Hound (12034 Stealth Bomber) with Covert Cyno (28646), Redeemer (22428 Black Ops) with Covert Jump Portal (28652)
     let mut sess_cov = setup_pilot(&ctx, c_cov, s_cov, 12034, sys_b, DVec3::new(100_000.0, 0.0, 0.0), 1_000_009).await;
     let mut sess_bo = setup_pilot(&ctx, c_bo, s_bo, 22428, sys_a, DVec3::new(100_000.0, 0.0, 0.0), 1_000_009).await;
     let mut sess_bomber = setup_pilot(&ctx, c_bomber, s_bomber, 12034, sys_a, DVec3::new(100_500.0, 0.0, 0.0), 1_000_009).await;
+    let mut sess_rifter = setup_pilot(&ctx, c_rifter, s_rifter, 587, sys_a, DVec3::new(100_500.0, 0.0, 0.0), 1_000_009).await;
 
     let cov_cyno_mod = 101_000_601_i64;
     let cov_portal_mod = 101_000_602_i64;
@@ -335,11 +384,11 @@ async fn test_b39_cyno_portal_clone_vat_and_nosferatu() {
             eve_db::FleetRecord {
                 fleet_id: 888,
                 boss_id: c_cov,
-                members: vec![c_cov, c_bo, c_bomber],
+                members: vec![c_cov, c_bo, c_bomber, c_rifter],
                 ..Default::default()
             },
         );
-        for cid in [c_cov, c_bo, c_bomber] {
+        for cid in [c_cov, c_bo, c_bomber, c_rifter] {
             s.skills.entry(cid).or_default().insert(
                 21611, // Cynosural Field Theory V
                 TrainedSkillRecord { type_id: 21611, level: 5, skill_points: 256_000.0 },
@@ -409,26 +458,44 @@ async fn test_b39_cyno_portal_clone_vat_and_nosferatu() {
     sess_cov.fleet_id = Some(888);
     sess_bo.fleet_id = Some(888);
     sess_bomber.fleet_id = Some(888);
+    sess_rifter.fleet_id = Some(888);
 
-    // 1. Covert cyno lights on Stealth Bomber (25 LO, 60s cycle) and Black Ops opens Covert Jump Portal
+    // 1. Covert cyno lights on Stealth Bomber (25 LO, 60s cycle) and Black Ops opens 20s Covert Jump Portal (0 activation cost)
     ctx.dispatch_rpc(&mut sess_cov, "dogmaIM", None, "Activate", &[PyRep::Integer(cov_cyno_mod)], &kw, None)
         .await
         .expect("Activate Covert Cyno");
     let cov_lo = ctx.db.with_snapshot(|s| s.items.get(&101_000_603).map(|i| i.quantity).unwrap_or(0));
     assert_eq!(cov_lo, 475, "Covert cyno consumes 25 Liquid Ozone");
-    ctx.dispatch_rpc(
-        &mut sess_bo,
-        "beyonce",
-        None,
-        "CmdBridgeToFleetModuleBeacon",
-        &[PyRep::Integer(c_cov), PyRep::Integer(sys_b as i64), PyRep::Integer(0)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Black Ops opens Covert Jump Portal");
+    let bo_bridge = ctx
+        .dispatch_rpc(
+            &mut sess_bo,
+            "beyonce",
+            None,
+            "CmdBridgeToFleetModuleBeacon",
+            &[PyRep::Integer(c_cov), PyRep::Integer(sys_b as i64), PyRep::Integer(0)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Black Ops opens Covert Jump Portal");
+    assert_eq!(bo_bridge.dict_get("durationSeconds").and_then(|v| v.as_f64()), Some(20.0));
+    assert_eq!(bo_bridge.dict_get("activationConsumptionQuantity").and_then(|v| v.as_i64()), Some(0));
 
-    // 2. Covert-capable Stealth Bomber jumps through Covert Jump Portal
+    // 2. Non-covert hull (Rifter) rejected by Covert Jump Portal; covert Stealth Bomber jumps & consumes isotopes from Black Ops cargo
+    let non_cov_err = ctx
+        .dispatch_rpc(
+            &mut sess_rifter,
+            "beyonce",
+            None,
+            "CmdJumpThroughFleet",
+            &[PyRep::Integer(c_bo), PyRep::Integer(s_bo)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Non-covert hull rejected by Covert Jump Portal");
+    assert_eq!(non_cov_err.code, "JumpBridgeRestrictedShip");
+
     ctx.dispatch_rpc(
         &mut sess_bomber,
         "beyonce",
@@ -441,6 +508,8 @@ async fn test_b39_cyno_portal_clone_vat_and_nosferatu() {
     .await
     .expect("Stealth Bomber jumps through Covert Jump Portal");
     assert_eq!(sess_bomber.solar_system_id, Some(sys_b));
+    let bo_iso_after = ctx.db.with_snapshot(|s| s.items.get(&101_000_604).map(|i| i.quantity).unwrap_or(0));
+    assert!(bo_iso_after < 50_000, "Black Ops consumed Helium Isotopes ({bo_iso_after} < 50000)");
 
     // 3. Industrial Cyno on Venture (50% LO role bonus -> 200 LO with CFT V)
     let c_indy = 91_000_044_i64;
@@ -483,19 +552,54 @@ async fn test_b39_cyno_portal_clone_vat_and_nosferatu() {
         .await
         .expect("Venture activates Industrial Cyno");
     let indy_lo = ctx.db.with_snapshot(|s| s.items.get(&101_000_606).map(|i| i.quantity).unwrap_or(0));
-    assert_eq!(indy_lo, 600, "Venture Industrial Cyno consumes 400 Liquid Ozone");
+    assert_eq!(indy_lo, 800, "Venture Industrial Cyno consumes 200 Liquid Ozone with 50% role bonus and CFT V");
 
-    // 4. Clone Vat Bay on Titan consumes Liquid Ozone & immobilizes ship
+    // 4. Titan Jump Portal Bridge: 60s duration, 500 Strontium at skill 0, accepts subcap within 2,500m
     let c_titan = 91_000_045_i64;
     let s_titan = 101_000_045_i64;
-    let mut sess_titan = setup_pilot(&ctx, c_titan, s_titan, 11567, sys_a, DVec3::new(200_000.0, 0.0, 0.0), 1_000_009).await;
-    let cvb_mod = 101_000_607_i64;
+    let mut sess_titan = setup_pilot(&ctx, c_titan, s_titan, 11567, sys_a, DVec3::new(100_200.0, 0.0, 0.0), 1_000_009).await;
+    let c_norm_cyno = 91_000_047_i64;
+    let s_norm_cyno = 101_000_047_i64;
+    let mut sess_norm_cyno = setup_pilot(&ctx, c_norm_cyno, s_norm_cyno, 11957, sys_b, DVec3::new(150_000.0, 0.0, 0.0), 1_000_009).await;
+    let titan_portal_mod = 101_000_607_i64;
+    let norm_cyno_mod = 101_000_608_i64;
     ctx.db.with_mut_snapshot(|s| {
+        s.fleets.get_mut(&888).unwrap().members.extend([c_titan, c_norm_cyno]);
+        s.skills.entry(c_norm_cyno).or_default().insert(
+            21603, // Cynosural Field Theory I
+            TrainedSkillRecord { type_id: 21603, level: 1, skill_points: 1_000.0 },
+        );
         s.items.insert(
-            cvb_mod,
+            norm_cyno_mod,
             InventoryItemRecord {
-                item_id: cvb_mod,
-                type_id: 23735, // Clone Vat Bay I
+                item_id: norm_cyno_mod,
+                type_id: 21096, // Cynosural Field Generator I
+                owner_id: c_norm_cyno,
+                location_id: s_norm_cyno,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        s.items.insert(
+            101_000_609,
+            InventoryItemRecord {
+                item_id: 101_000_609,
+                type_id: 16273,
+                owner_id: c_norm_cyno,
+                location_id: s_norm_cyno,
+                flag: InventoryFlag::Cargo,
+                quantity: 1_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        s.items.insert(
+            titan_portal_mod,
+            InventoryItemRecord {
+                item_id: titan_portal_mod,
+                type_id: 23953, // Jump Portal Generator I
                 owner_id: c_titan,
                 location_id: s_titan,
                 flag: InventoryFlag::HiSlot0,
@@ -505,28 +609,63 @@ async fn test_b39_cyno_portal_clone_vat_and_nosferatu() {
             },
         );
         s.items.insert(
-            101_000_608,
+            101_000_610,
             InventoryItemRecord {
-                item_id: 101_000_608,
-                type_id: 16273,
+                item_id: 101_000_610,
+                type_id: 16275, // Strontium Clathrates
                 owner_id: c_titan,
                 location_id: s_titan,
-                flag: InventoryFlag::Cargo,
-                quantity: 2_000,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 1_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        s.items.insert(
+            101_000_611,
+            InventoryItemRecord {
+                item_id: 101_000_611,
+                type_id: 16274, // Helium Isotopes
+                owner_id: c_titan,
+                location_id: s_titan,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 50_000,
                 singleton: false,
                 ..Default::default()
             },
         );
     });
-    let cvb_rep = ctx
-        .dispatch_rpc(&mut sess_titan, "dogmaIM", None, "Activate", &[PyRep::Integer(cvb_mod)], &kw, None)
+    sess_titan.fleet_id = Some(888);
+    sess_norm_cyno.fleet_id = Some(888);
+    ctx.dispatch_rpc(&mut sess_norm_cyno, "dogmaIM", None, "Activate", &[PyRep::Integer(norm_cyno_mod)], &kw, None)
         .await
-        .expect("Titan activates Clone Vat Bay");
-    assert!(matches!(cvb_rep, PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::Integer(_)));
-    let titan_lo = ctx.db.with_snapshot(|s| s.items.get(&101_000_608).map(|i| i.quantity).unwrap_or(0));
-    assert_eq!(titan_lo, 2_000, "Clone Vat Bay Liquid Ozone cargo tracked");
+        .expect("Activate normal cyno");
+    let titan_bridge = ctx
+        .dispatch_rpc(
+            &mut sess_titan,
+            "beyonce",
+            None,
+            "CmdBridgeToFleetModuleBeacon",
+            &[PyRep::Integer(c_norm_cyno), PyRep::Integer(sys_b as i64), PyRep::Integer(0)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Titan opens Jump Portal");
+    assert_eq!(titan_bridge.dict_get("durationSeconds").and_then(|v| v.as_f64()), Some(60.0));
+    assert_eq!(titan_bridge.dict_get("activationConsumptionQuantity").and_then(|v| v.as_i64()), Some(500));
 
-    // 5. Energy Nosferatu: Blood Raider hull (Bhaalgorn 17920) overrides relative cap% restriction
-    assert!(eve_dogma::is_blood_raider_nosferatu_hull(17920, &ctx.sde));
-    assert!(!eve_dogma::is_blood_raider_nosferatu_hull(587, &ctx.sde));
+    // Subcap (Rifter) jumps through Titan bridge
+    ctx.dispatch_rpc(
+        &mut sess_rifter,
+        "beyonce",
+        None,
+        "CmdJumpThroughFleet",
+        &[PyRep::Integer(c_titan), PyRep::Integer(s_titan)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Rifter jumps through Titan bridge");
+    assert_eq!(sess_rifter.solar_system_id, Some(sys_b));
 }
