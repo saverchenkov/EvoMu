@@ -176,7 +176,7 @@ pub(crate) async fn handle_module_cycles(
                 })
             });
             let is_special_target = !matches!(mod_type.group_id, 1122 | 650)
-                && (matches!(mod_type.group_id, 4060 | 4500 | 4805 | 4807)
+                && (matches!(mod_type.group_id, 862 | 4060 | 4500 | 4805 | 4807)
                     || target_id_opt.is_some_and(|tid| {
                         ctx.living_world.get_convoy(tid).is_some()
                             || ctx.db.with_snapshot(|s| {
@@ -334,9 +334,8 @@ pub(crate) async fn handle_module_cycles(
                     .get(&sys_id)
                     .map(|s| s.security_status)
                     .unwrap_or(1.0);
-                let corruption_stage5 = ctx.db.with_snapshot(|snap| {
-                    snap.system_states.get(&sys_id).map(|st| st.insurgency_corruption_stage >= 5).unwrap_or(false)
-                });
+                let corruption_stage5 =
+                    crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id) >= 5;
                 if sys_sec >= 0.45 || (sys_sec > 0.0 && !corruption_stage5) {
                     return Some(Err(BridgeRpcError {
                         code: "CannotLaunchInterdictionProbeInEmpire".into(),

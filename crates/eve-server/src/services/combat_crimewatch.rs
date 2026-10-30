@@ -373,6 +373,7 @@ pub struct CombatRuntimeState {
     pub clone_soldier_cooldown_until: HashMap<u32, u64>,
     pub bounty_credited_balls: std::collections::HashSet<i64>,
     pub destroyed_npc_cache: HashMap<i64, ExtendedNpcEntity>,
+    pub ci_sentry_deployed_systems: std::collections::HashSet<u32>,
 }
 
 #[derive(Debug, Clone)]

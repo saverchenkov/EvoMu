@@ -228,6 +228,7 @@ pub fn try_spread_insurgency_from_system(
     });
     ctx.db.with_mut_snapshot(|snap| {
         let st = snap.system_states.entry(new_sys).or_default();
+        st.solar_system_id = new_sys;
         if st.fw_complex_position.is_none() {
             // DERIVED (synthetic): baseline warzone complex capture beacon coordinates at grid origin.
             st.fw_complex_position = Some([0.0, 0.0, 0.0]);
@@ -860,6 +861,7 @@ pub async fn tick_insurgency_campaigns(ctx: &ServerContext, now_unix: u64) {
                 // Ensure each covered system has documented insurgency sites (`docs/eve-wiki/Insurgency.md:77-83`).
                 for &sys in &camp.systems {
                     let st = snap.system_states.entry(sys).or_default();
+                    st.solar_system_id = sys;
                     if st.fw_complex_position.is_none() {
                         // DERIVED (synthetic): baseline warzone complex capture beacon coordinates at grid origin.
                         st.fw_complex_position = Some([0.0, 0.0, 0.0]);
@@ -1246,7 +1248,18 @@ async fn sync_insurgency_system_npcs(
             let _ = bp.goto_point(bid, next_pos);
         }
     }
-    if s_st >= 5 && !has_ci_sentry {
+    let should_deploy_ci = with_mut_combat_runtime(ctx, |rt| {
+        if s_st < 5 {
+            rt.ci_sentry_deployed_systems.remove(&sys_id);
+            false
+        } else if has_ci_sentry {
+            rt.ci_sentry_deployed_systems.insert(sys_id);
+            false
+        } else {
+            rt.ci_sentry_deployed_systems.insert(sys_id)
+        }
+    });
+    if should_deploy_ci {
         // DERIVED (synthetic): Counter-Insurgency Sentry Gun deployment offset near grid anchor.
         let _ = spawn_specialized_npc_entity(
             ctx,
@@ -1303,6 +1316,9 @@ async fn cleanup_ended_campaign_sites_and_roamers(
 
     // Despawn roaming Pirate & Enforcer NPCs in ended systems, while keeping Counter-Insurgency Sentry Guns (`79507`) until destroyed.
     let to_remove: Vec<(u32, i64)> = with_mut_combat_runtime(ctx, |rt| {
+        for &osys in &orphan_systems {
+            rt.ci_sentry_deployed_systems.remove(&osys);
+        }
         let mut out = Vec::new();
         rt.npc_entities.retain(|&bid, npc| {
             if !orphan_systems.contains(&npc.solar_system_id) || npc.type_id == 79_507 {

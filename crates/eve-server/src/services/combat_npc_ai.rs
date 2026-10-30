@@ -171,7 +171,7 @@ pub async fn spawn_specialized_npc_entity(
 ) -> i64 {
     let sde_derived = derive_npc_archetype(ctx, npc_type_id);
     let archetype = if !archetype_hint.is_empty()
-        && (sde_derived == "Pirate" || matches!(archetype_hint, "FactionPolice" | "Police"))
+        && (sde_derived == "Pirate" || matches!(archetype_hint, "FactionPolice" | "Police" | "CounterInsurgencySentry"))
     {
         archetype_hint
     } else {
@@ -253,6 +253,8 @@ pub async fn spawn_specialized_npc_entity(
         } else {
             (attr(20).unwrap_or(0.0), attr(514).unwrap_or(10_000.0), 0.0, 0.0)
         }
+    } else if npc_type_id == 79_507 {
+        (0.0, 0.0, 0.0, 0.0)
     } else {
         (attr(20).unwrap_or(-50.0), attr(514).or_else(|| attr(580)).unwrap_or(10_000.0), attr(105).unwrap_or(2.0), attr(103).or_else(|| attr(582)).unwrap_or(20_000.0))
     };
@@ -464,10 +466,9 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         let Some(mut npc) = with_combat_runtime(ctx, |rt| rt.npc_entities.get(&nid).cloned()) else {
             continue;
         };
-        let Some(npc_ball) = ball_map.get(&nid) else {
-            with_mut_combat_runtime(ctx, |rt| {
-                rt.npc_entities.remove(&nid);
-            });
+        let npc_dead = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner()).combat_states.get(&nid).is_some_and(|cs| cs.structure_hp <= 0.0);
+        let Some(npc_ball) = ball_map.get(&nid).filter(|_| !npc_dead) else {
+            with_mut_combat_runtime(ctx, |rt| { rt.npc_entities.remove(&nid); });
             continue;
         };
 
@@ -535,22 +536,15 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         }
         // Prune any targets in `aggression_threat` / `threat_table` that are no longer on grid (> 150 km),
         // warped out (`MovementMode::Warp`), lost lock (`is_cloaked`), or destroyed (`structure_hp <= 0.0`).
+        let leash_m = if npc.type_id == 79_507 { npc.optimal_range.max(500_000.0) } else { 150_000.0 };
+        let aggro_m = if npc.type_id == 79_507 { npc.optimal_range.max(500_000.0) } else { 75_000.0 };
         let valid_target = |tid: i64| -> bool {
-            let Some(tb) = ball_map.get(&tid) else {
-                return false;
-            };
-            if tb.position.distance(npc_ball.position) > 150_000.0
-                || matches!(tb.mode, MovementMode::Warp { .. })
-            {
+            let Some(tb) = ball_map.get(&tid) else { return false; };
+            if tb.position.distance(npc_ball.position) > leash_m || matches!(tb.mode, MovementMode::Warp { .. }) {
                 return false;
             }
             let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
-            if let Some(cs) = bp.combat_states.get(&tid) {
-                if cs.is_cloaked || cs.structure_hp <= 0.0 {
-                    return false;
-                }
-            }
-            true
+            !bp.combat_states.get(&tid).is_some_and(|cs| cs.is_cloaked || cs.structure_hp <= 0.0)
         };
         npc.aggression_threat.retain(|&tid, _| valid_target(tid));
         npc.threat_table.retain(|&tid, _| valid_target(tid));
@@ -558,31 +552,24 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             npc.target_id = None;
         }
 
-        // Add any hostile ships or active player drones within 75 km that pass standings aggression check
+        // Add any hostile ships or active player drones within grid aggro range that pass standings aggression check
         for (&cand_id, cand_ball) in &ball_map {
-            let is_player_drone = with_combat_runtime(ctx, |rt| {
-                rt.active_drones_in_space.contains_key(&cand_id)
-            }) || ctx.db.with_snapshot(|snap| {
-                snap.items.get(&cand_id).is_some_and(|item| {
-                    ctx.sde.types.get(&item.type_id).is_some_and(|t| {
-                        t.category_id == 18 || matches!(t.group_id, 100 | 549 | 1023)
+            let is_player_drone = with_combat_runtime(ctx, |rt| rt.active_drones_in_space.contains_key(&cand_id))
+                || ctx.db.with_snapshot(|snap| {
+                    snap.items.get(&cand_id).is_some_and(|item| {
+                        ctx.sde.types.get(&item.type_id).is_some_and(|t| t.category_id == 18 || matches!(t.group_id, 100 | 549 | 1023))
                     })
-                })
-            });
-            if cand_id == nid
-                || cand_id >= 700_000_000
-                || cand_ball.type_id == 26468
-                || (cand_ball.max_velocity <= 0.0 && !is_player_drone)
-                || !valid_target(cand_id)
+                });
+            if cand_id == nid || cand_id >= 700_000_000 || cand_ball.type_id == 26468
+                || (cand_ball.max_velocity <= 0.0 && !is_player_drone) || !valid_target(cand_id)
             {
                 continue;
             }
-            let is_other_npc = with_combat_runtime(ctx, |rt| rt.npc_entities.contains_key(&cand_id));
-            if is_other_npc {
+            if with_combat_runtime(ctx, |rt| rt.npc_entities.contains_key(&cand_id)) {
                 continue;
             }
             let dist = npc_ball.position.distance(cand_ball.position);
-            if dist > 75_000.0 {
+            if dist > aggro_m {
                 continue;
             }
             // Standings and security status check (`feat:npc.npc-standings-aggression`, `feat:npc.navy-npc`, `F-01`):
@@ -681,7 +668,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                     let s_stage = crate::services::security_mgr::insurgency_system_suppression_stage(ctx, solar_system_id);
                     s_stage < 3 || !pilot_is_pirate
                 } else if is_ci_sentry {
-                    !pilot_is_pirate && !is_criminal
+                    !pilot_is_pirate && !has_criminal_flag
                 } else if is_navy {
                     standing > -5.0 && !is_criminal
                 } else if is_police {
@@ -875,6 +862,8 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             } else if npc.archetype == "ZarzakhGateGun" {
                 bp.apply_ecm_jam(target_id, 15.0);
                 bp.clear_target_locks(target_id);
+            } else if npc.archetype == "CounterInsurgencySentry" || npc.type_id == 79_507 {
+                crate::services::security_mgr::apply_counter_insurgency_sentry_ewar(&ctx.sde, &mut bp, target_id, target_ball.radius, dist);
             }
             bp.apply_damage_to_ball(target_id, cycle_dmg);
             crate::system_actor::sync_ball_positions(

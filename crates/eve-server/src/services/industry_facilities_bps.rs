@@ -421,6 +421,9 @@ pub fn compute_canonical_system_cost_index(
     let mut sys_work: u64 = 0;
     let mut univ_work: u64 = 0;
     for j in snap.industry_jobs.values() {
+        if j.status.eq_ignore_ascii_case("Cancelled") || j.status.eq_ignore_ascii_case("Reverted") {
+            continue;
+        }
         let act_match = if activity_id == 9 { matches!(j.activity_id, 9 | 11) } else { j.activity_id == activity_id };
         if !act_match || (j.start_unix > 0 && j.start_unix < cutoff) {
             continue;

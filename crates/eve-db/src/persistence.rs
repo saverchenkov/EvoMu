@@ -246,7 +246,9 @@ impl WorldStateWalDelta {
         }
         for (id, st) in &new.system_states {
             if old.system_states.get(id) != Some(st) {
-                delta.upserted_system_states.push(st.clone());
+                let mut norm = st.clone();
+                norm.solar_system_id = *id;
+                delta.upserted_system_states.push(norm);
             }
         }
         for k in &new.committed_idempotency_keys {
@@ -738,6 +740,9 @@ impl WorldRepository {
         snap.fold_legacy_plex_balances();
         snap.reconcile_id_counters();
         snap.backfill_fw_system_occupations();
+        for (&sid, st) in &mut snap.system_states {
+            st.solar_system_id = sid;
+        }
         *fp = sqlite_store::replace_sqlite_from_snapshot(&mut conn, &snap)?;
         *guard = snap;
         Ok(())
@@ -783,6 +788,9 @@ impl WorldRepository {
         let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
         match f(&mut guard) {
             Ok(val) => {
+                for (&sid, st) in &mut guard.system_states {
+                    st.solar_system_id = sid;
+                }
                 guard.wal_seq = guard.wal_seq.saturating_add(1);
                 let need_wal_delta = self.snapshot_path.is_some();
                 let mut staged_fp = fp.clone();
@@ -867,5 +875,41 @@ mod r4_persistence_tests {
         new_limits.corp_member_limits.insert(98_000_001, 50);
         let delta_limits = WorldStateWalDelta::from_diff(&old, &new_limits);
         assert!(delta_limits.full_snapshot.is_some(), "corp_member_limits change must trigger full_snapshot");
+    }
+
+    #[test]
+    fn test_system_states_rollback_preserves_solar_system_id() {
+        let tmp_path = std::env::temp_dir().join(format!("evomu_db01_rollback_{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&tmp_path);
+        let repo = WorldRepository::open_sqlite(&tmp_path).expect("open_sqlite");
+        let sys_id = 30_045_329u32;
+        repo.with_mut_snapshot(|snap| {
+            // Even when inserted via `or_default()` (`solar_system_id: 0`), commit hydrates `solar_system_id`.
+            let st = snap.system_states.entry(sys_id).or_default();
+            st.insurgency_corruption_stage = 3;
+        });
+        assert_eq!(
+            repo.with_snapshot(|s| s.system_states[&sys_id].solar_system_id),
+            sys_id
+        );
+
+        let err_res: Result<(), String> = repo.try_with_mut_snapshot(|snap| {
+            let st = snap.system_states.get_mut(&sys_id).unwrap();
+            st.solar_system_id = 0;
+            st.insurgency_corruption_stage = 5;
+            Err("simulated transaction failure".into())
+        });
+        assert!(err_res.is_err());
+
+        repo.with_snapshot(|snap| {
+            let st = &snap.system_states[&sys_id];
+            assert_eq!(
+                st.solar_system_id, sys_id,
+                "rollback_dirty_from_sqlite must hydrate solar_system_id"
+            );
+            assert_eq!(st.insurgency_corruption_stage, 3);
+        });
+        drop(repo);
+        let _ = std::fs::remove_file(&tmp_path);
     }
 }

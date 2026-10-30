@@ -212,29 +212,42 @@ async fn test_corruption_and_suppression_per_stage_effects() {
     }
 
     // At Suppression Stage 5:
-    // (a) Corruption below Stage 5 is capped at 800 pts (Stage 4), while Counter-Insurgency Sentry Guns (79507)
-    //     stay active, deal higher volley damage, target paint (+50% sig), and ECM jam!
+    // (a) Corruption below Stage 5 is capped at 800 pts (Stage 4), while deployed physical Counter-Insurgency
+    //     Sentry Gun balls (`79507`) fire at higher SDE volley damage, target paint (+50% sig), and ECM jam!
     let (capped_c_pts, capped_c_stage) = add_system_corruption(&ctx, camp_id, front_sys, 2_000);
     assert_eq!((capped_c_pts, capped_c_stage), (800, 4), "Suppression Stage 5 caps corruption at Stage 4 (800 pts)");
-    assert!(!is_sentry_disabled_by_corruption(&ctx, front_sys), "Counter-Insurgency Sentries stay online at Suppression Stage 5");
+    assert!(!is_sentry_disabled_by_corruption(&ctx, front_sys), "Stage 4 low-sec sentries remain online");
     let ci_probe_ship = 100_000_060i64;
-    let base_cs = ctx.build_type_combat_state(621);
+    let mut base_cs = ctx.build_type_combat_state(621);
+    base_cs.shield_hp = 50_000.0;
+    base_cs.max_shield_hp = 50_000.0;
     let base_sig = base_cs.signature_radius;
     let _ = sys_h
         .spawn_ball_with_combat(make_ball(ci_probe_ship, 621, DVec3::new(10_000.0, 0.0, 0.0)), base_cs)
         .await;
-    let (eng_s5, dmg_s5) = step_sentry_gun_grid_aggression(&ctx, front_sys, pir_cid, ci_probe_ship, DVec3::ZERO, true).await;
-    assert!(eng_s5 && dmg_s5 > dmg_s0, "Counter-Insurgency Sentry Guns fire at higher SDE volley damage ({dmg_s5} > {dmg_s0})");
+    let roamer_ids: Vec<i64> = sys_h.list_balls().await.unwrap().into_iter().filter(|b| b.type_id != 79_507 && b.id != ci_probe_ship).map(|b| b.id).collect();
+    {
+        let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        for rid in roamer_ids {
+            bp.set_ball_position(rid, DVec3::new(900_000.0, 0.0, 0.0));
+        }
+    }
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&pir_cid).unwrap().active_ship_id = ci_probe_ship);
+    eve_server::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(&ctx, front_sys);
     let painted_cs = sys_h.get_combat_state(ci_probe_ship).await.unwrap().unwrap();
-    assert!((painted_cs.signature_radius - base_sig * 1.50).abs() < 1e-3, "Counter-Insurgency Sentry Guns target paint (+50% sig)");
-    assert!((painted_cs.ecm_jammed_remaining_s - 5.0).abs() < 1e-6, "Counter-Insurgency Sentry Guns apply 5.0s ECM jam within 75 km");
+    let dmg_ci = 50_000.0 - painted_cs.shield_hp;
+    assert!(dmg_ci > dmg_s0, "Physical 79507 Counter-Insurgency Sentry fires higher SDE volley ({dmg_ci} > {dmg_s0})");
+    assert!((painted_cs.signature_radius - base_sig * 1.50).abs() < 1e-3, "Counter-Insurgency Sentry Gun target paints (+50% sig)");
+    assert!((painted_cs.ecm_jammed_remaining_s - 5.0).abs() < 1e-6, "Counter-Insurgency Sentry Gun applies 5.0s ECM jam within 75 km");
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&pir_cid).unwrap().active_ship_id = pir_ship);
 
     // (b) Non-retroactive Stage 5 corruption cap: if `enemy_sys` is ALREADY at Corruption Stage 5 (`1,000` pts)
-    //     before reaching Suppression Stage 5, it is NOT clamped down to 800!
+    //     before reaching Suppression Stage 5, it is NOT clamped down to 800, and regular gate/station sentries stay disabled!
     let (_e_cpts, e_cstage) = add_system_corruption(&ctx, camp_id, enemy_sys, 1_000);
     assert_eq!((_e_cpts, e_cstage), (1_000, 5));
     let (_e_spts, e_sstage) = add_system_suppression(&ctx, camp_id, enemy_sys, 1_000);
     assert_eq!((_e_spts, e_sstage), (1_000, 5));
+    assert!(is_sentry_disabled_by_corruption(&ctx, enemy_sys), "Regular gate/station sentries stay disabled at Corruption 5 even at Suppression 5");
     let (e_after_pts, e_after_stage) = add_system_corruption(&ctx, camp_id, enemy_sys, 100);
     assert_eq!(e_after_stage, 5, "Suppression Stage 5 must not retroactively demote an existing Stage 5 system");
     assert!(e_after_pts >= 1_000);

@@ -102,17 +102,14 @@ impl<'a> std::ops::Deref for CrimeWatchReadGuard<'a> {
 }
 
 fn snapshot_corruption_stages(snap: &eve_db::WorldStateSnapshot, now_unix: u64) -> HashMap<u32, u8> {
-    let mut stages: HashMap<u32, u8> = snap
-        .system_states
-        .iter()
-        .map(|(&sid, st)| (sid, st.insurgency_corruption_stage))
-        .collect();
+    let mut stages = HashMap::new();
     for c in snap.insurgency_runtime.campaigns.values() {
         if now_unix >= c.forecasting_end_unix && now_unix < c.winddown_end_unix {
             for &sid in &c.systems {
                 let stg = crate::services::insurgency_services::insurgency_stage(
                     c.corruption_points.get(&sid).copied().unwrap_or(0),
-                );
+                )
+                .max(snap.system_states.get(&sid).map_or(0, |st| st.insurgency_corruption_stage));
                 let cur = stages.entry(sid).or_insert(0);
                 if stg > *cur {
                     *cur = stg;
@@ -445,6 +442,7 @@ impl CrimeWatchDirector {
             } else {
                 // Normal High-sec or pod kill -> Criminal flag + CONCORD response
                 st.criminal_flag_until_unix = now_unix.saturating_add(900);
+                st.suspect_flag_until_unix = 0;
                 let delay_sec = match (sys_sec * 10.0).round() as i32 {
                     10 | 9 => 6.0,
                     8 => 8.0,
@@ -464,6 +462,7 @@ impl CrimeWatchDirector {
         } else if sys_sec > 0.0 {
             if is_pod {
                 st.criminal_flag_until_unix = now_unix.saturating_add(900);
+                st.suspect_flag_until_unix = 0;
                 AggressionEvaluation::CriminalFlagTriggered {
                     concord_delay_sec: 0.0,
                     arrival_unix: now_unix,

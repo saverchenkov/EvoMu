@@ -422,3 +422,234 @@ async fn test_highsec_stage5_smartbomb_capsule_concord_and_corruption_reload_per
 
     let _ = std::fs::remove_file(&db_path);
 }
+
+#[tokio::test]
+async fn test_ci_sentry_grid_targeting_destruction_and_lowsec_sentry_separation() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let (enemy_sys, front_sys, _cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
+
+    let emp_cid = 90_000_301i64;
+    let emp_ship = 100_000_301i64;
+    let neut_cid = 90_000_302i64;
+    let neut_ship = 100_000_302i64;
+    let crim_cid = 90_000_303i64;
+    let crim_ship = 100_000_303i64;
+    let pir_cid = 90_000_304i64;
+    let pir_ship = 100_000_304i64;
+    let offgrid_pir_cid = 90_000_305i64;
+    let offgrid_pir_ship = 100_000_305i64;
+
+    let mut s_emp = register_online_pilot(
+        &ctx, 89_301, "demo", "demo-secret", emp_cid, 98_000_301, None, enemy_sys, emp_ship, 621, DVec3::new(15_000.0, 0.0, 0.0), 0,
+    )
+    .await;
+    rpc_call(&ctx, &mut s_emp, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(500_001)])
+        .await
+        .unwrap();
+
+    init_insurgency_campaign(&ctx, 701, 500_010, 500_001, front_sys, vec![front_sys, enemy_sys]);
+    let now0 = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|s| {
+        s.insurgency_runtime.campaigns.get_mut(&701).unwrap().forecasting_end_unix = now0.saturating_sub(1);
+        for (cid, sid, wf, name) in [
+            (neut_cid, neut_ship, None, "Neutral Suspect"),
+            (crim_cid, crim_ship, None, "Lowsec Criminal"),
+            (pir_cid, pir_ship, Some(500_010i64), "On-Grid Pirate"),
+            (offgrid_pir_cid, offgrid_pir_ship, Some(500_010i64), "Off-Grid Pirate"),
+        ] {
+            let mut ch = s.characters[&emp_cid].clone();
+            ch.character_id = cid;
+            ch.name = name.into();
+            ch.active_ship_id = sid;
+            ch.war_faction_id = wf;
+            s.characters.insert(cid, ch);
+            s.items.insert(
+                sid,
+                InventoryItemRecord {
+                    item_id: sid, type_id: 621, owner_id: cid, location_id: i64::from(enemy_sys),
+                    flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
+                },
+            );
+        }
+    });
+    // Reach Corruption 5 FIRST, then Suppression 5 in `enemy_sys`:
+    assert_eq!(add_system_corruption(&ctx, 701, enemy_sys, 1_000), (1_000, 5));
+    assert_eq!(eve_server::services::insurgency_services::add_system_suppression(&ctx, 701, enemy_sys, 1_000), (1_000, 5));
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+
+    let sys_h = ctx.systems.get_or_spawn(enemy_sys);
+    for (sid, pos) in [
+        (emp_ship, DVec3::new(15_000.0, 0.0, 0.0)),
+        (neut_ship, DVec3::new(20_000.0, 0.0, 0.0)),
+        (crim_ship, DVec3::new(30_000.0, 0.0, 0.0)),
+        (pir_ship, DVec3::new(120_000.0, 0.0, 0.0)),      // > 75 km (TP only, no ECM)
+        (offgrid_pir_ship, DVec3::new(900_000.0, 0.0, 0.0)), // > 500 km off-grid
+    ] {
+        let mut cs = ctx.build_type_combat_state(621);
+        cs.shield_hp = 50_000.0;
+        cs.max_shield_hp = 50_000.0;
+        let _ = sys_h.spawn_ball_with_combat(make_ball(sid, 621, pos), cs).await;
+    }
+    // Move roaming pirates/enforcers far away so we isolate `79_507` Counter-Insurgency Sentry Gun behavior:
+    let all_balls = sys_h.list_balls().await.unwrap();
+    let ci_ball_id = all_balls.iter().find(|b| b.type_id == 79_507).expect("79507 deployed").id;
+    {
+        let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        for b in all_balls.iter().filter(|b| b.id != ci_ball_id && b.id < 100_000_300) {
+            bp.set_ball_position(b.id, DVec3::new(-900_000.0, 0.0, 0.0));
+        }
+    }
+    assert!(eve_server::services::security_mgr::has_active_counter_insurgency_sentries(&ctx, enemy_sys));
+    assert!(eve_server::services::combat_npc_police::is_sentry_disabled_by_corruption(&ctx, enemy_sys));
+    assert_eq!(
+        eve_server::services::combat_crimewatch::step_sentry_gun_grid_aggression(&ctx, enemy_sys, crim_cid, crim_ship, DVec3::ZERO, true).await,
+        (false, 0.0),
+        "Regular gate/station sentries must stay disabled at Corruption 5 and never morph into 79507"
+    );
+
+    // Flag Empire militia pilot AND neutral pilot as Suspects, and `crim_cid` as Criminal:
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.trigger_suspect_flag(emp_cid, now0);
+        cw.trigger_suspect_flag(neut_cid, now0);
+        cw.get_or_create(crim_cid).criminal_flag_until_unix = now0 + 900;
+    }
+    let base_sig = ctx.build_type_combat_state(621).signature_radius;
+
+    // Step 1: `79_507` shoots closest valid target (`crim_ship` at ~30 km -> volley + TP + ECM),
+    //         while completely ignoring closer `emp_ship` (15 km Suspect) and `neut_ship` (20 km Suspect)!
+    eve_server::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(&ctx, enemy_sys);
+    let emp_cs = sys_h.get_combat_state(emp_ship).await.unwrap().unwrap();
+    let neut_cs = sys_h.get_combat_state(neut_ship).await.unwrap().unwrap();
+    let crim_cs = sys_h.get_combat_state(crim_ship).await.unwrap().unwrap();
+    assert_eq!((emp_cs.shield_hp, emp_cs.signature_radius, emp_cs.ecm_jammed_remaining_s), (50_000.0, base_sig, 0.0), "Empire Suspect must NOT be shot/painted/jammed by 79507");
+    assert_eq!((neut_cs.shield_hp, neut_cs.signature_radius, neut_cs.ecm_jammed_remaining_s), (50_000.0, base_sig, 0.0), "Neutral Suspect must NOT be shot/painted/jammed by 79507");
+    assert!(crim_cs.shield_hp < 50_000.0 && (crim_cs.signature_radius - base_sig * 1.50).abs() < 1e-3 && (crim_cs.ecm_jammed_remaining_s - 5.0).abs() < 1e-6);
+
+    // Step 2: Remove `crim_ship` so `79_507` retargets `pir_ship` at 120 km (within 250 km TP, outside 75 km ECM)
+    //         while `offgrid_pir_ship` at 900 km takes zero fire!
+    let _ = sys_h.remove_ball(crim_ship).await;
+    eve_server::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(&ctx, enemy_sys);
+    let pir_cs = sys_h.get_combat_state(pir_ship).await.unwrap().unwrap();
+    let off_cs = sys_h.get_combat_state(offgrid_pir_ship).await.unwrap().unwrap();
+    assert!(pir_cs.shield_hp < 50_000.0 && (pir_cs.signature_radius - base_sig * 1.50).abs() < 1e-3 && pir_cs.ecm_jammed_remaining_s == 0.0);
+    assert_eq!(off_cs.shield_hp, 50_000.0, "Off-grid pirate (900 km > 500 km) must not be hit by 79507");
+
+    // Step 3: Destroy `79_507` ball -> `has_active_counter_insurgency_sentries` becomes false, does not auto-respawn on tick, and stops all fire!
+    let _ = sys_h.remove_ball(ci_ball_id).await;
+    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.npc_entities.remove(&ci_ball_id);
+    });
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    assert!(!eve_server::services::security_mgr::has_active_counter_insurgency_sentries(&ctx, enemy_sys));
+    let hp_before = sys_h.get_combat_state(pir_ship).await.unwrap().unwrap().shield_hp;
+    eve_server::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(&ctx, enemy_sys);
+    assert_eq!(sys_h.get_combat_state(pir_ship).await.unwrap().unwrap().shield_hp, hp_before);
+}
+
+#[tokio::test]
+async fn test_unscoped_corruption5_rejected_lowsec_sec_loss_and_vorton_arc_notifications() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let (_enemy_sys, front_sys, _cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
+    let stale_ls_sys = 30_002_538u32; // Lowsec system NOT in any insurgency campaign
+
+    let atk_cid = 90_000_401i64;
+    let atk_ship = 100_000_401i64;
+    let vic_cid = 90_000_402i64;
+    let vic_ship = 100_000_402i64;
+    let pod_cid = 90_000_403i64;
+    let pod_ball = 100_000_403i64;
+    let npc_ball = 900_777_001i64;
+
+    // 22464 = Flycatcher (Interdictor, group 541) in `stale_ls_sys` with stale `insurgency_corruption_stage = 5`
+    let mut s_atk = register_online_pilot(
+        &ctx, 89_401, "demo", "demo-secret", atk_cid, 98_000_401, None, stale_ls_sys, atk_ship, 22_464, DVec3::ZERO, 0,
+    )
+    .await;
+    let bomb_mod = 704_001i64;
+    let bubble_mod = 704_003i64;
+    let mwd_item = 704_005i64;
+    fit_module_and_charge(&ctx, atk_cid, atk_ship, bomb_mod, 27_914, InventoryFlag::HiSlot0, Some((704_002, 27_916, 5)));
+    fit_module_and_charge(&ctx, atk_cid, atk_ship, bubble_mod, 22_782, InventoryFlag::HiSlot1, Some((704_004, 22_778, 5)));
+    ctx.db.with_mut_snapshot(|s| {
+        let st = s.system_states.entry(stale_ls_sys).or_default();
+        st.solar_system_id = stale_ls_sys;
+        st.insurgency_corruption_stage = 5; // Stale stage 5 WITHOUT an active campaign!
+        s.module_online_states.insert(bomb_mod, true);
+        s.module_online_states.insert(bubble_mod, true);
+        s.items.insert(
+            mwd_item,
+            InventoryItemRecord {
+                item_id: mwd_item, type_id: 12_198, owner_id: atk_cid, location_id: atk_ship,
+                flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default()
+            },
+        );
+        for &sk in &[3300u32, 3302, 3433, 3435, 11584, 12098, 28073, 55031, 55033, 55034] {
+            s.skills.entry(atk_cid).or_default().insert(sk, TrainedSkillRecord { type_id: sk, level: 5, skill_points: 256_000.0 });
+        }
+    });
+    ctx.invalidate_ship_fitting(atk_ship);
+
+    // CW-02(a): Stale `insurgency_corruption_stage = 5` without a covering campaign MUST reject Green-safety Bombs, Bubbles, and Mobile Warp Disruptors!
+    with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(atk_cid, SafetyLevel::Green); });
+    assert_eq!(rpc_call(&ctx, &mut s_atk, "dogmaIM", "Activate", &[PyRep::Integer(bomb_mod)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
+    with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(atk_cid, SafetyLevel::Red); });
+    assert_eq!(rpc_call(&ctx, &mut s_atk, "dogmaIM", "Activate", &[PyRep::Integer(bubble_mod)]).await.unwrap_err().code, "CannotLaunchInterdictionProbeInEmpire");
+    assert_eq!(rpc_call(&ctx, &mut s_atk, "posMgr", "AnchorStructure", &[PyRep::Integer(mwd_item)]).await.unwrap_err().code, "CantAnchorInEmpire");
+
+    // CW-02(b) & CW-03: Move to campaign-covered Lowsec `front_sys` at Corruption Stage 5 in a Skybreaker (`54731`) with Vorton Projector + Turret.
+    init_insurgency_campaign(&ctx, 702, 500_010, 500_001, front_sys, vec![front_sys]);
+    let now0 = ctx.now_unix();
+    let vorton_mod = 704_010i64;
+    let turret_mod = 704_012i64;
+    ctx.db.with_mut_snapshot(|s| {
+        s.insurgency_runtime.campaigns.get_mut(&702).unwrap().forecasting_end_unix = now0.saturating_sub(1);
+        s.characters.get_mut(&atk_cid).unwrap().solar_system_id = front_sys;
+        s.characters.get_mut(&atk_cid).unwrap().security_status = 2.0;
+        s.items.get_mut(&atk_ship).unwrap().type_id = 54_731;
+        s.items.get_mut(&atk_ship).unwrap().location_id = i64::from(front_sys);
+        for (cid, sid, tid, name) in [(vic_cid, vic_ship, 621u32, "Lowsec Ship Victim"), (pod_cid, pod_ball, 670u32, "Lowsec Pod Victim")] {
+            let mut ch = s.characters[&atk_cid].clone();
+            ch.character_id = cid;
+            ch.name = name.into();
+            ch.active_ship_id = sid;
+            ch.war_faction_id = None;
+            s.characters.insert(cid, ch);
+            s.items.insert(sid, InventoryItemRecord { item_id: sid, type_id: tid, owner_id: cid, location_id: i64::from(front_sys), flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default() });
+        }
+    });
+    fit_module_and_charge(&ctx, atk_cid, atk_ship, vorton_mod, 54_739, InventoryFlag::HiSlot2, Some((704_011, 54_769, 200)));
+    fit_module_and_charge(&ctx, atk_cid, atk_ship, turret_mod, 2_873, InventoryFlag::HiSlot3, Some((704_013, 182, 200)));
+    ctx.db.with_mut_snapshot(|s| { s.module_online_states.insert(vorton_mod, true); s.module_online_states.insert(turret_mod, true); });
+    ctx.invalidate_ship_fitting(atk_ship);
+    s_atk.solar_system_id = Some(front_sys);
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, atk_cid);
+    assert_eq!(add_system_corruption(&ctx, 702, front_sys, 1_000), (1_000, 5));
+
+    let front_h = ctx.systems.get_or_spawn(front_sys);
+    let _ = front_h.spawn_ball_with_combat(make_ball(atk_ship, 54_731, DVec3::ZERO), ctx.build_ship_combat_state(atk_cid, atk_ship, 54_731)).await;
+    let _ = front_h.spawn_ball_with_combat(make_ball(vic_ship, 621, DVec3::new(2_500.0, 0.0, 0.0)), ctx.build_type_combat_state(621)).await;
+    let _ = front_h.spawn_ball_with_combat(make_ball(npc_ball, 10_029, DVec3::new(3_000.0, 0.0, 0.0)), ctx.build_type_combat_state(10_029)).await;
+    let _ = front_h.spawn_ball_with_combat(make_ball(pod_ball, 670, DVec3::new(3_400.0, 0.0, 0.0)), ctx.build_type_combat_state(670)).await;
+    lock_ball(&ctx, front_sys, atk_ship, vic_ship).await;
+    lock_ball(&ctx, front_sys, atk_ship, npc_ball).await;
+
+    // CW-02(b): Illegal turret aggression against `vic_ship` in Lowsec Corruption 5 STILL applies security-status loss!
+    let _ = ctx.drain_notifications_for_char(atk_cid);
+    rpc_call(&ctx, &mut s_atk, "dogmaIM", "Activate", &[PyRep::Integer(turret_mod), PyRep::Integer(vic_ship)]).await.expect("Lowsec C5 turret shot");
+    let sec_after_turret = ctx.db.with_snapshot(|s| s.characters[&atk_cid].security_status);
+    assert!(sec_after_turret < 2.0, "Lowsec Corruption 5 illegal ship attack must still reduce security_status (got {sec_after_turret})");
+
+    // CW-03: Fire Vorton Projector at legal NPC primary target (`npc_ball`) whose secondary arc chains onto innocent Capsule (`pod_ball`):
+    //        must reduce `security_status` further AND emit `OnCriminalTimerUpdate` (301) + `OnSystemCriminalFlagUpdates`!
+    let _ = ctx.drain_notifications_for_char(atk_cid);
+    let v_res = rpc_call(&ctx, &mut s_atk, "dogmaIM", "Activate", &[PyRep::Integer(vorton_mod), PyRep::Integer(npc_ball)]).await.expect("Vorton on NPC arcing to pod");
+    assert!(v_res.dict_get("secondaryTargetsHit").and_then(|v| v.as_i64()).unwrap_or(0) >= 1);
+    let sec_after_vorton = ctx.db.with_snapshot(|s| s.characters[&atk_cid].security_status);
+    assert!(sec_after_vorton < sec_after_turret, "Vorton secondary arc hitting innocent Capsule must apply compute_sec_status_loss ({sec_after_vorton} < {sec_after_turret})");
+    let notifs = ctx.drain_notifications_for_char(atk_cid);
+    assert!(notifs.iter().any(|n| n.event == "OnCriminalTimerUpdate" && n.args.first() == Some(&PyRep::Integer(301))), "Vorton secondary arc must emit OnCriminalTimerUpdate(301), got {notifs:?}");
+    assert!(notifs.iter().any(|n| n.event == "OnSystemCriminalFlagUpdates"), "Vorton secondary arc must broadcast OnSystemCriminalFlagUpdates");
+}

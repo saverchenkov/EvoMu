@@ -739,6 +739,7 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                     if sys_sec > 0.0 {
                         {
                             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+                            cw.system_corruption_stages.insert(sys_id, crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id));
                             let eval = cw.handle_combat_aggression_with_pod(
                                 char_id, vcid, ship_id, sys_id, sys_sec, false, is_pod, now_unix,
                             );
@@ -806,9 +807,8 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                         .copied()
                         .unwrap_or(SafetyLevel::Red)
                 });
-                let corr_stage5 = ctx.db.with_snapshot(|s| {
-                    s.system_states.get(&sys_id).is_some_and(|st| st.insurgency_corruption_stage >= 5)
-                });
+                let corr_stage5 =
+                    crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id) >= 5;
                 if sys_sec > 0.0 && !corr_stage5 && safety == SafetyLevel::Green {
                     return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
                 }

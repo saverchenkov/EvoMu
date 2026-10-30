@@ -734,6 +734,7 @@ pub fn record_sov_system_activity(
             _ => 5,
         };
         let st = snap.system_states.entry(solar_system_id).or_default();
+        st.solar_system_id = solar_system_id;
         let prev = (st.military_index, st.industrial_index, st.strategic_index);
         st.military_index = st.military_index.max(mil);
         st.industrial_index = st.industrial_index.max(ind);

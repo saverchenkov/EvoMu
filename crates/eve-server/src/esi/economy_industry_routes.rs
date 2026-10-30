@@ -139,6 +139,11 @@ pub fn dispatch_economy_industry_route(
             let mut sys_work: BTreeMap<u32, BTreeMap<&'static str, u64>> = BTreeMap::new();
             let mut total_activity_work: BTreeMap<&'static str, u64> = BTreeMap::new();
             for j in snap.industry_jobs.values() {
+                if j.status.eq_ignore_ascii_case("Cancelled")
+                    || j.status.eq_ignore_ascii_case("Reverted")
+                {
+                    continue;
+                }
                 if j.start_unix > 0 && j.start_unix < cutoff {
                     continue;
                 }

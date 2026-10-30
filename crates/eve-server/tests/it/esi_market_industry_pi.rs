@@ -1238,6 +1238,37 @@ async fn test_esi6_industry_and_mining_routes() {
     );
     assert_eq!(obs_detail[0]["character_id"], json!(char_id));
     assert_eq!(obs_detail[0]["quantity"], json!(9_250));
+
+    // IND-01 regression: cancelling an active job via `industryManager.CancelJob` must exclude its
+    // `duration_seconds` from both `GET /v1/industry/systems/` and `map.GetIndustryCostModifier`.
+    let amarr_stn = ctx.sde.solar_systems[&30_002_187].stations[0].station_id;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.industry_jobs.insert(
+            6405,
+            IndustryJobRecord {
+                job_id: 6405, installer_id: char_id, facility_id: amarr_stn, blueprint_item_id: 100_000_011,
+                blueprint_type_id: 691, product_type_id: 587, activity_id: 1, runs: 100,
+                duration_seconds: 288_000, start_unix: now.saturating_sub(60), status: "Active".to_string(),
+            },
+        );
+    });
+    let sys_active = get_json(&router, &spec, "/v1/industry/systems/", None);
+    let sci_from = |arr: &serde_json::Value, sid: u32| -> f64 {
+        arr.as_array().unwrap().iter().find(|s| s["solar_system_id"] == json!(sid)).unwrap()["cost_indices"]
+            .as_array().unwrap().iter().find(|ci| ci["activity"] == json!("manufacturing")).unwrap()["cost_index"].as_f64().unwrap()
+    };
+    assert!((sci_from(&sys_active, 30_002_187) - 0.50).abs() < 1e-6, "Active Amarr job raises SCI to 0.50");
+    ctx.dispatch_rpc(&mut rpc_sess, "industryManager", None, "CancelJob", &[eve_proto::PyRep::Integer(6405)], &HashMap::new(), None)
+        .await
+        .expect("industryManager.CancelJob");
+    let sys_cancelled = get_json(&router, &spec, "/v1/industry/systems/", None);
+    assert!((sci_from(&sys_cancelled, 30_002_187) - 0.01).abs() < 1e-6, "Cancelled Amarr job excluded from local SCI");
+    assert!((sci_from(&sys_cancelled, 30_000_142) - 0.10_f64.sqrt()).abs() < 1e-6, "Cancelled job does not dilute Jita SCI");
+    let amarr_rpc = ctx
+        .dispatch_rpc(&mut rpc_sess, "map", None, "GetIndustryCostModifier", &[eve_proto::PyRep::Integer(30_002_187)], &HashMap::new(), None)
+        .await
+        .expect("map.GetIndustryCostModifier Amarr after cancel");
+    assert!((amarr_rpc.dict_get("manufacturing").and_then(|v| v.as_f64()).unwrap() - 0.01).abs() < 1e-9);
 }
 
 #[tokio::test]

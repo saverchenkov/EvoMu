@@ -375,17 +375,9 @@ pub async fn step_sentry_gun_grid_aggression(
         .get(&solar_system_id)
         .map(|s| s.security_status)
         .unwrap_or(0.0);
-    // In Insurgency Corruption Stage 5, low-sec (`0.0 < sec < 0.45`) sentry guns stop firing
-    // unless Counter-Insurgency Sentry Guns (`type_id = 79507`) are active.
-    let corr = crate::services::insurgency_services::insurgency_system_corruption_stage(
-        ctx,
-        solar_system_id,
-    );
-    let ci_active = crate::services::security_mgr::has_active_counter_insurgency_sentries(
-        ctx,
-        solar_system_id,
-    );
-    if sys_sec <= 0.0 || (0.0 < sys_sec && sys_sec < 0.45 && corr >= 5 && !ci_active) {
+    // In Insurgency Corruption Stage 5, regular low-sec (`0.0 < sec < 0.45`) gate/station sentry guns stop firing
+    // (`Corruption_and_Suppression.md:56`); physical `79507` Counter-Insurgency Sentries act via `combat_npc_ai` on their own grids.
+    if sys_sec <= 0.0 || crate::services::combat_npc_police::is_sentry_disabled_by_corruption(ctx, solar_system_id) {
         return (false, 0.0);
     }
 
@@ -417,37 +409,7 @@ pub async fn step_sentry_gun_grid_aggression(
 
     let mut applied = 0.0;
     if engaged && on_grid {
-        let sentry_dmg = if ci_active {
-            if let Some(ci_type) = ctx.sde.types.get(&79_507) {
-                let mult = ci_type.default_attributes.get(&64).copied().unwrap_or(5.0);
-                let em = ci_type.default_attributes.get(&114).copied().unwrap_or(25.0) * mult;
-                let exp = ci_type.default_attributes.get(&116).copied().unwrap_or(25.0) * mult;
-                let kin = ci_type.default_attributes.get(&117).copied().unwrap_or(25.0) * mult;
-                let thm = ci_type.default_attributes.get(&118).copied().unwrap_or(25.0) * mult;
-                let tp_range = ci_type.default_attributes.get(&2524).copied().unwrap_or(250_000.0);
-                let tp_sig_pct = ci_type.default_attributes.get(&554).copied().unwrap_or(50.0);
-                let ecm_range = ci_type.default_attributes.get(&2532).copied().unwrap_or(75_000.0);
-                let ecm_dur_s = ci_type.default_attributes.get(&2822).copied().unwrap_or(5_000.0) / 1_000.0;
-                if dist <= tp_range {
-                    if let Ok(Some(mut t_cs)) = sys_handle.get_combat_state(offender_ship_id).await {
-                        let base_sig = t_cs.base_signature_radius.unwrap_or_else(|| {
-                            if t_cs.signature_radius > 0.0 { t_cs.signature_radius } else { ship_ball.radius.max(35.0) }
-                        });
-                        t_cs.base_signature_radius = Some(base_sig);
-                        t_cs.signature_radius = base_sig * (1.0 + tp_sig_pct / 100.0);
-                        let _ = sys_handle.set_combat_state(offender_ship_id, t_cs).await;
-                    }
-                }
-                if dist <= ecm_range && ecm_dur_s > 0.0 {
-                    let _ = sys_handle.apply_ecm_jam(offender_ship_id, ecm_dur_s).await;
-                }
-                DamageVector::new(em, exp, kin, thm)
-            } else {
-                DamageVector::new(125.0, 125.0, 125.0, 125.0)
-            }
-        } else {
-            DamageVector::new(88.0, 88.0, 88.0, 88.0)
-        };
+        let sentry_dmg = DamageVector::new(88.0, 88.0, 88.0, 88.0);
         if let Ok(Some((dmg, _, _))) = sys_handle.apply_damage(offender_ship_id, sentry_dmg).await {
             applied = dmg;
         }
@@ -471,6 +433,41 @@ pub async fn step_sentry_gun_grid_aggression(
     });
 
     (engaged, applied)
+}
+
+/// Applies standard character security-status loss and appends a `SecStatusTransaction` on illegal PvP aggression in empire space.
+pub fn apply_illegal_pvp_sec_status_loss(
+    ctx: &ServerContext,
+    char_id: i64,
+    sys_id: u32,
+    sys_sec: f64,
+    is_pod_target: bool,
+    now_unix: u64,
+) {
+    if sys_sec <= 0.0 {
+        return;
+    }
+    let old_sec = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0));
+    let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, is_pod_target, sys_sec);
+    let new_sec = (old_sec - loss).clamp(-10.0, 10.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.security_status = new_sec;
+        }
+    });
+    with_mut_combat_runtime(ctx, |rt| {
+        rt.sec_status_transactions
+            .entry(char_id)
+            .or_default()
+            .push(SecStatusTransaction {
+                timestamp_unix: now_unix,
+                old_sec,
+                new_sec,
+                delta: new_sec - old_sec,
+                reason: if is_pod_target { "Illegal Capsule Aggression".into() } else { "Illegal Ship Aggression".into() },
+                solar_system_id: sys_id,
+            });
+    });
 }
 
 fn check_kill_right_restriction(

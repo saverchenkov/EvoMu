@@ -285,14 +285,53 @@ pub fn insurgency_suppression_web_scram_range_multiplier(ctx: &ServerContext, ch
     if is_empire { 1.10 } else { 1.0 }
 }
 
-/// Returns true if `sys_id` is at Suppression Stage 5 or has live Counter-Insurgency Sentry Guns (`79507`) in space.
+/// Returns true if `sys_id` currently has at least one live Counter-Insurgency Sentry Gun (`type_id = 79507`) ball in space.
 pub fn has_active_counter_insurgency_sentries(ctx: &ServerContext, sys_id: u32) -> bool {
-    insurgency_system_suppression_stage(ctx, sys_id) >= 5
-        || with_combat_runtime(ctx, |rt| {
-            rt.npc_entities
-                .values()
-                .any(|n| n.solar_system_id == sys_id && n.type_id == 79_507)
-        })
+    let bids: Vec<i64> = with_combat_runtime(ctx, |rt| {
+        rt.npc_entities
+            .values()
+            .filter(|n| n.solar_system_id == sys_id && n.type_id == 79_507)
+            .map(|n| n.ball_id)
+            .collect()
+    });
+    if bids.is_empty() {
+        return false;
+    }
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
+    bids.into_iter().any(|bid| {
+        bp.balls.contains_key(&bid)
+            && bp.combat_states.get(&bid).is_none_or(|cs| cs.structure_hp > 0.0)
+    })
+}
+
+/// Applies SDE-driven Target Painter (`250 km`, `+50%` sig) and ECM (`75 km`, `5.0 s`) from a live `79_507` sentry ball.
+pub fn apply_counter_insurgency_sentry_ewar(
+    sde: &eve_sde::SdeRegistry,
+    bp: &mut eve_destiny::Ballpark,
+    target_id: i64,
+    target_radius: f64,
+    dist: f64,
+) {
+    let ci_type = sde.types.get(&79_507);
+    let attr = |aid: u16, def: f64| ci_type.and_then(|t| t.default_attributes.get(&aid).copied()).unwrap_or(def);
+    let tp_range = attr(2524, 250_000.0);
+    let tp_sig_pct = attr(554, 50.0);
+    let ecm_range = attr(2532, 75_000.0);
+    let ecm_dur_s = attr(2822, 5_000.0) / 1_000.0;
+    if dist <= tp_range {
+        if let Some(t_cs) = bp.combat_states.get_mut(&target_id) {
+            let base_sig = t_cs.base_signature_radius.unwrap_or_else(|| {
+                if t_cs.signature_radius > 0.0 { t_cs.signature_radius } else { target_radius.max(35.0) }
+            });
+            t_cs.base_signature_radius = Some(base_sig);
+            t_cs.signature_radius = base_sig * (1.0 + tp_sig_pct / 100.0);
+        }
+    }
+    if dist <= ecm_range && ecm_dur_s > 0.0 {
+        bp.apply_ecm_jam(target_id, ecm_dur_s);
+        bp.clear_target_locks(target_id);
+    }
 }
 
 /// Prunes stage-gated insurgency sites in `snap` when system corruption stages drop (`docs/eve-wiki/Insurgency.md:77-83`).

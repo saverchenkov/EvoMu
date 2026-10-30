@@ -933,22 +933,28 @@ pub async fn handle_weapons(
                 let safety = with_combat_runtime(ctx, |rt| {
                     rt.safety_levels.get(&char_id).copied().unwrap_or(SafetyLevel::Red)
                 });
+                let c_stage = crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id);
+                let mut had_secondary_pvp_hit = false;
                 for arc_id in hits.into_iter().skip(1) {
                     if sys_handle.get_combat_state(arc_id).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) {
                         continue;
                     }
                     if let Ok(Some((_, arc_ball))) = sys_handle.get_ball_snapshot(arc_id).await {
                         let arc_vic_opt = ctx.db.with_snapshot(|snap| {
-                            snap.characters
-                                .values()
-                                .find(|c| c.active_ship_id == arc_id)
-                                .map(|c| c.character_id)
-                                .or_else(|| {
-                                    snap.items
-                                        .get(&arc_id)
-                                        .map(|i| i.owner_id)
-                                        .filter(|oid| snap.characters.contains_key(oid))
-                                })
+                            if snap.characters.contains_key(&arc_id) {
+                                Some(arc_id)
+                            } else {
+                                snap.characters
+                                    .values()
+                                    .find(|c| c.active_ship_id == arc_id)
+                                    .map(|c| c.character_id)
+                                    .or_else(|| {
+                                        snap.items
+                                            .get(&arc_id)
+                                            .map(|i| i.owner_id)
+                                            .filter(|oid| snap.characters.contains_key(oid))
+                                    })
+                            }
                         });
                         if let Some(vcid) = arc_vic_opt {
                             if crate::services::space_destiny::is_location_change_invulnerable(ctx, vcid, now_unix) {
@@ -1010,16 +1016,28 @@ pub async fn handle_weapons(
                                 } || with_combat_runtime(ctx, |rt| {
                                     rt.has_limited_engagement_with(vcid, char_id, now_unix)
                                 });
-                                let _ = ctx
-                                    .crimewatch
-                                    .write()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .handle_combat_aggression_with_pod(
-                                        char_id, vcid, ship_id, sys_id, sys_sec, is_legal, arc_ball.type_id == 670, now_unix,
+                                let is_arc_pod = arc_ball.type_id == 670;
+                                let is_arc_mobile = crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, arc_ball.type_id);
+                                let is_new_agg = ctx.crimewatch.read().map(|cw| cw.get_aggression(char_id, vcid, now_unix).is_none()).unwrap_or(true);
+                                {
+                                    let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+                                    cw.system_corruption_stages.insert(sys_id, c_stage);
+                                    let eff_sec = if is_arc_mobile { sys_sec.min(0.40) } else { sys_sec };
+                                    let _ = cw.handle_combat_aggression_with_pod(
+                                        char_id, vcid, ship_id, sys_id, eff_sec, is_legal, is_arc_pod, now_unix,
                                     );
+                                    cw.get_or_create(char_id).pvp_timer_until_unix = now_unix.saturating_add(900);
+                                    cw.get_or_create(vcid).pvp_timer_until_unix = now_unix.saturating_add(900);
+                                }
+                                if !is_legal && sys_sec > 0.0 && !is_arc_mobile && is_new_agg {
+                                    crate::services::combat_crimewatch::crimewatch_timers::apply_illegal_pvp_sec_status_loss(
+                                        ctx, char_id, sys_id, sys_sec, is_arc_pod, now_unix,
+                                    );
+                                }
                                 crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
                                     ctx, char_id, vcid, now_unix,
                                 );
+                                had_secondary_pvp_hit = true;
                             }
                             if arc_destroyed {
                                 super::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(
@@ -1029,6 +1047,9 @@ pub async fn handle_weapons(
                             }
                         }
                     }
+                }
+                if had_secondary_pvp_hit {
+                    crate::services::combat_crimewatch::emit_crimewatch_timer_notifications(ctx, char_id, now_unix);
                 }
                 let p_factor = missile_damage_factor(
                     target_sig,
@@ -1152,8 +1173,10 @@ pub async fn handle_weapons(
                         (anchored, secure, jetcan)
                     });
                 let is_new_agg = ctx.crimewatch.read().map(|cw| cw.get_aggression(char_id, victim_char_id, now_unix).is_none()).unwrap_or(true);
+                let c_stage = crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id);
                 {
                     let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+                    cw.system_corruption_stages.insert(sys_id, c_stage);
                     let effective_sec = if is_unanchored_jetcan {
                         sys_sec.min(0.40)
                     } else {
@@ -1210,33 +1233,10 @@ pub async fn handle_weapons(
                     ctx.notify(NotificationTarget::Character(char_id), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(victim_char_id), PyRep::Integer(timeout_ft)]);
                     ctx.notify(NotificationTarget::Character(victim_char_id), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(char_id), PyRep::Integer(timeout_ft)]);
                 }
-                let corr_stage5 = ctx.db.with_snapshot(|snap| snap.system_states.get(&sys_id).is_some_and(|st| st.insurgency_corruption_stage >= 5));
-                if !is_legal && sys_sec > 0.0 && !is_mobile_struct && is_new_agg && !(corr_stage5 && sys_sec < 0.45) {
-                    let old_sec = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0));
-                    let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, is_pod_target, sys_sec);
-                    let new_sec = (old_sec - loss).clamp(-10.0, 10.0);
-                    ctx.db.with_mut_snapshot(|snap| {
-                        if let Some(ch) = snap.characters.get_mut(&char_id) {
-                            ch.security_status = new_sec;
-                        }
-                    });
-                    with_mut_combat_runtime(ctx, |rt| {
-                        rt.sec_status_transactions
-                            .entry(char_id)
-                            .or_default()
-                            .push(SecStatusTransaction {
-                                timestamp_unix: now_unix,
-                                old_sec,
-                                new_sec,
-                                delta: new_sec - old_sec,
-                                reason: if is_pod_target {
-                                    "Illegal Capsule Aggression".into()
-                                } else {
-                                    "Illegal Ship Aggression".into()
-                                },
-                                solar_system_id: sys_id,
-                            });
-                    });
+                if !is_legal && sys_sec > 0.0 && !is_mobile_struct && is_new_agg {
+                    crate::services::combat_crimewatch::crimewatch_timers::apply_illegal_pvp_sec_status_loss(
+                        ctx, char_id, sys_id, sys_sec, is_pod_target, now_unix,
+                    );
                 }
             } else if is_upwell_target {
                 ctx.crimewatch
