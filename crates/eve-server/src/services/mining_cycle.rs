@@ -771,6 +771,14 @@ pub async fn process_mining_cycles(ctx: &ServerContext) -> Vec<MiningCycleOutcom
                 }
             };
             let stop = outcome.stop;
+            if outcome.mining_amount_m3 > 0.0 {
+                crate::services::notify_emitters_batch10::emit_ore_mined_by_other(
+                    ctx,
+                    cycle.solar_system_id,
+                    cycle.target_id,
+                    outcome.mining_amount_m3 as i64,
+                );
+            }
             outcomes.push(outcome);
             if stop.is_some() {
                 stop_module(ctx, &cycle);

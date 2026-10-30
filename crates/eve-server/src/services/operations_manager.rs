@@ -804,6 +804,7 @@ pub fn handle(
                 });
 
             let now = ctx.now_unix();
+            crate::services::notify_emitters_batch10::handle_operation_progression_event(ctx, char_id, &event_name, amount);
 
             if event_name == "set_career_path" {
                 let path_id = extra_data

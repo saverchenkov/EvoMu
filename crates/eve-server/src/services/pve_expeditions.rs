@@ -214,6 +214,31 @@ pub async fn create_escalation_expedition(
         entry.expedition_dungeon_id,
         true,
     );
+    crate::services::notify_emitters_batch10::emit_escalating_path_change(ctx, char_id);
+    crate::services::notify_emitters_batch10::emit_escalating_path_dungeon_entered(
+        ctx,
+        char_id,
+        i64::from(entry.expedition_dungeon_id),
+        &entry.expedition_name,
+        i64::from(entry.expedition_dungeon_id),
+        i64::from(entry.destination_solar_system_id),
+    );
+    crate::services::notify_emitters_batch10::emit_distribution_dungeon_entered(
+        ctx,
+        char_id,
+        i64::from(entry.expedition_dungeon_id),
+        &entry.expedition_name,
+        i64::from(entry.expedition_dungeon_id),
+        i64::from(entry.destination_solar_system_id),
+    );
+    crate::services::notify_emitters_batch10::emit_dungeon_instance_added(
+        ctx,
+        entry.destination_solar_system_id,
+        entry.instance_id,
+        i64::from(entry.expedition_dungeon_id),
+        &format!("ESC-{}", entry.instance_id),
+        1.0,
+    );
     Some(entry)
 }
 
@@ -377,6 +402,22 @@ pub async fn advance_expedition_step(
             entry.expedition_dungeon_id,
             true,
         );
+        crate::services::notify_emitters_batch10::emit_escalating_path_change(ctx, char_id);
+        crate::services::notify_emitters_batch10::emit_dungeon_completed(
+            ctx,
+            char_id,
+            i64::from(entry.expedition_dungeon_id),
+        );
+        crate::services::notify_emitters_batch10::emit_dungeon_instance_removed(
+            ctx,
+            entry.destination_solar_system_id,
+            entry.instance_id,
+            &format!("ESC-{}", entry.instance_id),
+            i64::from(entry.expedition_dungeon_id),
+        );
+    } else {
+        crate::services::notify_emitters_batch10::emit_escalating_path_change(ctx, char_id);
+        crate::services::notify_emitters_batch10::emit_dungeon_completed(ctx, char_id, instance_id);
     }
     Ok(updated)
 }

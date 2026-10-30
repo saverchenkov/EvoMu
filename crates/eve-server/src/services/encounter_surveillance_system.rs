@@ -235,6 +235,9 @@ pub async fn handle_ess_link(
             message: "Session has no active solar system".into(),
         });
     };
+    if method == "AttemptLinkToReserveBank" {
+        crate::services::notify_emitters_batch10::emit_ess_reserve_bank_inventory_full(ctx, sys_id);
+    }
     let sys_sec = ctx
         .sde
         .solar_systems

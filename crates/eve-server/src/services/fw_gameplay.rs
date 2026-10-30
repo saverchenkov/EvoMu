@@ -356,6 +356,16 @@ pub async fn activate_fw_complex_gate_in_space(
     gate_id: i64,
 ) -> Result<PyRep, BridgeRpcError> {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    crate::services::notify_emitters_batch10::emit_capture_changed(
+        ctx,
+        sys_id,
+        gate_id,
+        1,
+        ctx.now_blueos_filetime_ticks(),
+        10.0,
+        600,
+        char_id,
+    );
     let (_, ship_ball) = sys_handle
         .get_ball_snapshot(ship_id)
         .await

@@ -783,6 +783,7 @@ pub fn handle_project_discovery(
                     st.rank,
                     xp_for_new_rank,
                     xp_for_next_rank,
+                    ak_gain,
                 ))
             });
 
@@ -797,6 +798,7 @@ pub fn handle_project_discovery(
                     new_rank,
                     xp_for_new_rank,
                     xp_for_next_rank,
+                    ak_gain,
                 )) => {
                     if let Some(bal) = new_bal {
                         let _ = ctx.notify_account_change(char_id, "cash", char_id, bal.to_wire_f64());
@@ -806,6 +808,9 @@ pub fn handle_project_discovery(
                         char_id,
                         player_state_rep,
                     );
+                    if ak_gain > 0 {
+                        crate::services::notify_emitters_batch10::emit_analysis_kredits_change(ctx, char_id);
+                    }
                     let xp_args = vec![PyRep::Real(total_xp)];
                     session.push_notification("OnProjectDiscoveryExperience", xp_args.clone());
                     let _ = ctx.notify(

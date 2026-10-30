@@ -217,6 +217,10 @@ pub async fn handle(
                         ]),
                     ],
                 );
+                crate::services::notify_emitters_batch10::emit_enter_tournament_system(ctx, caller_cid);
+                crate::services::notify_emitters_batch10::emit_tournament_match_state_change(
+                    ctx, caller_cid, 0, 0, 0, 1,
+                );
             }
 
             Some(Ok(PyRep::Bool(true)))
@@ -307,6 +311,7 @@ pub async fn handle(
                             ]),
                         ],
                     );
+                    crate::services::notify_emitters_batch10::emit_leave_tournament_system(ctx, caller_cid);
                 }
             }
 

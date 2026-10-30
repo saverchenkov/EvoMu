@@ -30,6 +30,31 @@ pub(super) async fn handle_scanning_and_wormholes(
             let sys_id = session.solar_system_id.unwrap_or(30_000_142);
             let now_unix = ctx.now_unix();
             let sigs = ensure_system_signatures(ctx, sys_id).await;
+            if method == "SignalTrackerRegister" {
+                let first_sig = sigs.first().map(|s| s.signature_id.as_str()).unwrap_or("SIG-001");
+                crate::services::notify_emitters_batch10::emit_signal_tracker_full_state(
+                    ctx,
+                    char_id,
+                    sys_id,
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    true,
+                );
+                crate::services::notify_emitters_batch10::emit_cosmic_anomaly_added(
+                    ctx,
+                    sys_id,
+                    "ANO-001",
+                    1001,
+                    "Guristas Hideaway",
+                );
+                crate::services::notify_emitters_batch10::emit_cosmic_signature_added(
+                    ctx,
+                    sys_id,
+                    first_sig,
+                );
+            }
             let (anom_count, anom_rows, struct_rows) = ctx.db.with_snapshot(|snap| {
                 let a_rows: Vec<Vec<PyRep>> = snap
                     .cosmic_anomalies

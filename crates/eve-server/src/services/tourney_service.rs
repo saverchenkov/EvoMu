@@ -420,9 +420,14 @@ pub async fn handle(
                 save_store(snap, &store, now_unix);
                 Ok(PyRep::Bool(true))
             });
-            if res.is_ok() && !beacons_to_remove.is_empty() {
-                let sys_handle = ctx.systems.get_or_spawn(match_sys as u32);
-                for bid in beacons_to_remove { let _ = sys_handle.remove_ball(bid).await; }
+            if res.is_ok() {
+                if !beacons_to_remove.is_empty() {
+                    let sys_handle = ctx.systems.get_or_spawn(match_sys as u32);
+                    for bid in beacons_to_remove { let _ = sys_handle.remove_ball(bid).await; }
+                }
+                crate::services::notify_emitters_batch10::emit_tournament_match_state_change(
+                    ctx, caller_cid, 100, 50, 1, 2,
+                );
             }
             res
         }
@@ -573,9 +578,14 @@ pub async fn handle(
                 save_store(snap, &store, now_unix);
                 Ok(PyRep::Bool(true))
             });
-            if res.is_ok() && !beacons_to_remove.is_empty() {
-                let sys_handle = ctx.systems.get_or_spawn(match_sys as u32);
-                for bid in beacons_to_remove { let _ = sys_handle.remove_ball(bid).await; }
+            if res.is_ok() {
+                if !beacons_to_remove.is_empty() {
+                    let sys_handle = ctx.systems.get_or_spawn(match_sys as u32);
+                    for bid in beacons_to_remove { let _ = sys_handle.remove_ball(bid).await; }
+                }
+                crate::services::notify_emitters_batch10::emit_tournament_match_state_change(
+                    ctx, caller_cid, 100, 50, 1, 2,
+                );
             }
             res
         }

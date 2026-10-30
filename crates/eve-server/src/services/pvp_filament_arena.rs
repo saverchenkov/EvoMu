@@ -582,8 +582,10 @@ pub async fn spawn_matched_arena_instance(
     };
 
     let num_teams = teams.len().max(2);
+    let end_ft = ctx.now_blueos_filetime_ticks() + 15 * 60 * 10_000_000;
     for (pid, p_ship_id, p_origin_sys) in participants {
         crate::services::map_service::record_solar_system_visit(ctx, pid, 32_000_001);
+        crate::services::notify_emitters_batch10::emit_pvp_match_found_bundle(ctx, pid, end_ft);
         let sess_rep = PyRep::keyval([
             ("charid", PyRep::Integer(pid)),
             ("solarsystemid2", PyRep::Integer(32_000_001)),

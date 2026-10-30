@@ -412,6 +412,9 @@ pub async fn handle(
             Some(space_nav_travel::handle_cmd_align_to(ctx, session, bound_entry, args, kwargs).await)
         }
         ("beyonce", "UpdateStateRequest") => {
+            if let Some(sys_id) = session.solar_system_id {
+                crate::services::notify_emitters_batch10::emit_destiny_updates(ctx, sys_id, vec![]);
+            }
             Some(handle_update_state_request(ctx, session, bound_entry).await)
         }
         ("beyonce", "AdminGetBubbleID") => {

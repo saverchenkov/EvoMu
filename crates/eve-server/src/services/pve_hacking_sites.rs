@@ -233,6 +233,12 @@ pub async fn handle_pve_hacking(
                     message: "Session has no active solar system".into(),
                 }));
             };
+            crate::services::notify_emitters_batch10::emit_local_hack_progress_updated(
+                ctx,
+                char_id,
+                args.first().and_then(|a| a.as_i64()).unwrap_or(1),
+                0.25,
+            );
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
             let container_id = if args.len() == 1 && matches!(args.first(), Some(PyRep::None)) {
                 0

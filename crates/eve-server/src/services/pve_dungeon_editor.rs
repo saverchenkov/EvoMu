@@ -448,6 +448,65 @@ pub async fn handle_gm_dungeon_editor_op(
                     },
                 );
             });
+            let first_obj_id = spawned.first().copied().unwrap_or(0);
+            if method == "EditDungeon" {
+                crate::services::notify_emitters_batch10::emit_dungeon_edit(
+                    ctx,
+                    char_id,
+                    dungeon_id,
+                    room.room_id,
+                    [0.0, 0.0, 0.0],
+                );
+            }
+            crate::services::notify_emitters_batch10::emit_entering_dungeon_room(
+                ctx,
+                char_id,
+                dungeon_id,
+                room.room_id,
+                [0.0, 0.0, 0.0],
+                dungeon_id,
+                vec![("roomID".into(), PyRep::Integer(room.room_id))],
+            );
+            crate::services::notify_emitters_batch10::emit_dungeon_values(
+                ctx,
+                char_id,
+                dungeon_id,
+                vec![("roomID".into(), PyRep::Integer(room.room_id))],
+            );
+            if first_obj_id > 0 {
+                crate::services::notify_emitters_batch10::emit_dungeon_camera_interest(
+                    ctx,
+                    char_id,
+                    first_obj_id,
+                    1.0,
+                    3000,
+                );
+            }
+            crate::services::notify_emitters_batch10::emit_dungeon_trigger_ambient_sound(
+                ctx,
+                char_id,
+                dungeon_id,
+                1001,
+                first_obj_id,
+            );
+            crate::services::notify_emitters_batch10::emit_dungeon_trigger_audio(
+                ctx,
+                char_id,
+                dungeon_id,
+                "wise:/dungeon_enter",
+            );
+            crate::services::notify_emitters_batch10::emit_dungeon_trigger_message(
+                ctx,
+                char_id,
+                1,
+                2001,
+            );
+            crate::services::notify_emitters_batch10::emit_dungeon_trigger_music(
+                ctx,
+                char_id,
+                dungeon_id,
+                3001,
+            );
             Ok(PyRep::keyval([
                 ("dungeonID", PyRep::Integer(dungeon_id)),
                 ("roomID", PyRep::Integer(room.room_id)),
@@ -517,6 +576,9 @@ pub async fn handle_gm_dungeon_editor_op(
                 old_ed
             });
             if let Some(st) = old {
+                if let Some(did) = arg_did.or(st.dungeon_id) {
+                    crate::services::notify_emitters_batch10::emit_exiting_dungeon(ctx, char_id, did);
+                }
                 if let Some(sys_id) = st.solar_system_id.or(sys_id_opt) {
                     let handle = ctx.systems.get_or_spawn(sys_id);
                     for bid in st.spawned_ball_ids {

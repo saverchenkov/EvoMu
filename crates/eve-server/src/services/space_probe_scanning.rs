@@ -1046,6 +1046,9 @@ async fn handle_request_scans(
     let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnSystemScanStarted", "charid", vec![PyRep::Integer(ctx.now_blueos_filetime_ticks()), PyRep::Integer(4000), PyRep::List(scan_probe_ids.clone())]);
     let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnSystemScanStopped", "charid", vec![PyRep::List(scan_probe_ids), PyRep::List(rows.clone()), PyRep::List(Vec::new())]);
     let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbesIdle", "charid", vec![PyRep::List(idle_probes)]);
+    for p in &active_probes {
+        crate::services::notify_emitters_batch10::emit_probe_warp_end(ctx, char_id, p.probe_id);
+    }
 
     Some(Ok(PyRep::List(rows)))
 }
