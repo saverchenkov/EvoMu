@@ -205,6 +205,7 @@ async fn test_incursion_spawn_lifecycle_roles_and_map_rpcs() {
     assert!(sys_entries.iter().any(|e| {
         e.dict_get("solarSystemID").and_then(|v| v.as_i64()) == Some(i64::from(staging_sys))
             && e.dict_get("sceneType").and_then(|v| v.as_i64()) == Some(1)
+            && e.dict_get("templateNameID").and_then(|v| v.as_i64()) == Some(564_035)
     }));
     assert!(sys_entries.iter().any(|e| {
         e.dict_get("solarSystemID").and_then(|v| v.as_i64()) == Some(i64::from(vg_sys_list[0]))
@@ -288,6 +289,19 @@ async fn test_incursion_spawn_lifecycle_roles_and_map_rpcs() {
             .iter()
             .any(|e| e.dict_get("constellationID").and_then(|v| v.as_i64()) == Some(i64::from(target_cid))),
         "Ended incursion systems must be removed from GetSystemsInIncursions"
+    );
+    let rep_ended = ctx
+        .dispatch_rpc(&mut sess, "map", None, "GetIncursionGlobalReport", &[], &kw, None)
+        .await
+        .expect("GetIncursionGlobalReport after withdrawal");
+    let PyRep::List(reports_ended) = &rep_ended else {
+        panic!("Expected List");
+    };
+    assert!(
+        !reports_ended
+            .iter()
+            .any(|r| r.dict_get("constellationID").and_then(|v| v.as_i64()) == Some(i64::from(target_cid))),
+        "Ended incursion must be excluded from GetIncursionGlobalReport"
     );
 
     // Advance clock past 12-hour respawn cadence -> new incursion spawns
@@ -398,23 +412,33 @@ async fn test_incursion_influence_regen_mothership_unlock_and_system_effects() {
     assert_eq!(attrs_half[&263], 750.0, "25% shield penalty at 0.50 influence");
     assert_eq!(attrs_half[&64], 0.75, "25% damage penalty at 0.50 influence");
 
-    // 5. Lower influence <= 0.10 -> Mothership site unlocks; defeat Mothership -> effects removed on withdrawal
-    let ms_bid = with_pve_special_reg(&ctx, |reg| {
+    // 5. At 0.08 influence (> 0%), Mothership stays locked; dropping to 0.0 (0%) unlocks Mothership -> Mobilizing
+    let (vg2_sys, vg2_bid, second_hq_bid, ms_boss_id) = with_pve_special_reg(&ctx, |reg| {
         let inc = reg.incursions.get_mut(&target_cid).unwrap();
-        inc.influence = 0.12;
-        let second_hq = inc.sites.iter().find(|s| s.tier == "Headquarters" && !s.boss_destroyed).unwrap();
-        (second_hq.boss_npc_ball_id, inc.sites.iter().find(|s| s.tier == "Mothership").unwrap().boss_npc_ball_id)
+        inc.influence = 0.13;
+        let vg2 = inc.sites.iter().find(|s| s.tier == "Vanguard" && !s.boss_destroyed).unwrap();
+        let hq2 = inc.sites.iter().find(|s| s.tier == "Headquarters" && !s.boss_destroyed).unwrap();
+        let ms = inc.sites.iter().find(|s| s.tier == "Mothership").unwrap();
+        (vg2.solar_system_id, vg2.boss_npc_ball_id, hq2.boss_npc_ball_id, ms.boss_npc_ball_id)
     });
-    let _ = ctx.systems.get_or_spawn(hq_sys).remove_ball(ms_bid.0).await;
-    on_incursion_boss_destroyed(&ctx, hq_sys, ms_bid.0, Some(90_000_001)).await.unwrap().unwrap();
+    let _ = ctx.systems.get_or_spawn(vg2_sys).remove_ball(vg2_bid).await;
+    on_incursion_boss_destroyed(&ctx, vg2_sys, vg2_bid, Some(90_000_001)).await.unwrap().unwrap();
+    let still_locked_at_008 = with_pve_special_reg(&ctx, |reg| {
+        let inc = &reg.incursions[&target_cid];
+        (inc.influence - 0.08).abs() < 1e-6 && !inc.mothership_spawned && inc.state != "Mobilizing"
+    });
+    assert!(still_locked_at_008, "Mothership must remain locked at 8% (0.08) influence");
+
+    let _ = ctx.systems.get_or_spawn(hq_sys).remove_ball(second_hq_bid).await;
+    on_incursion_boss_destroyed(&ctx, hq_sys, second_hq_bid, Some(90_000_001)).await.unwrap().unwrap();
     let ms_unlocked = with_pve_special_reg(&ctx, |reg| {
         let inc = &reg.incursions[&target_cid];
         inc.mothership_spawned && inc.influence <= 0.0 && inc.state == "Mobilizing"
     });
     assert!(ms_unlocked, "Dropping influence to 0.0 must unlock Mothership site and enter Mobilizing");
 
-    let _ = ctx.systems.get_or_spawn(hq_sys).remove_ball(ms_bid.1).await;
-    on_incursion_boss_destroyed(&ctx, hq_sys, ms_bid.1, Some(90_000_001)).await.unwrap().unwrap();
+    let _ = ctx.systems.get_or_spawn(hq_sys).remove_ball(ms_boss_id).await;
+    on_incursion_boss_destroyed(&ctx, hq_sys, ms_boss_id, Some(90_000_001)).await.unwrap().unwrap();
     assert!(
         get_incursion_system_wide_dbuffs(&ctx, hq_sys).is_empty(),
         "Sansha system dbuffs must be removed on withdrawal"

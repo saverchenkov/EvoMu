@@ -289,13 +289,20 @@ pub fn seed_incursion_for_constellation(
     sys_list.sort_unstable();
 
     let (staging_solar_system_id, vanguard_solar_system_ids, assault_solar_system_ids, hq_solar_system_id) =
-        crate::services::pve_incursion_lifecycle::assign_constellation_system_roles(&sys_list);
+        crate::services::pve_incursion_lifecycle::assign_constellation_system_roles(
+            &ctx.sde,
+            constellation_id,
+            &sys_list,
+        );
 
     let vg_sys = vanguard_solar_system_ids[0];
     let vg_sys2 = vanguard_solar_system_ids.get(1).copied().unwrap_or(vg_sys);
     let as_sys = assault_solar_system_ids[0];
     let as_sys2 = assault_solar_system_ids.get(1).copied().unwrap_or(as_sys);
 
+    // DERIVED: High-sec Sansha Incursion site base ISK, CONCORD LP, optimal pilot caps, and influence deltas
+    // per EVE University Wiki `Incursion_sites` (Vanguard 10.395M/1,400 LP, Assault 18.2M/3,500 LP,
+    // HQ 31.5M/7,000 LP, Kundalini Manifest Mothership 63.0M/14,000 LP).
     let sites = vec![
         make_incursion_site(
             constellation_id, 5164, "Override Transfer Array (Staging)", staging_solar_system_id,
@@ -881,8 +888,22 @@ pub async fn process_incursion_site_completion_and_payout_core(
         });
     }
 
+    // DERIVED: Fleet hard-cap payout cutoff per EVE University Wiki `Incursion_sites`:
+    // Staging 5, Vanguard 15 (optimal 10), Assault 30 (optimal 20), HQ 60 (optimal 40), Mothership 120 (optimal 80).
+    // Exceeding the hard cap yields 0 ISK and 0 CONCORD LP.
+    let hard_cap = match tier.as_str() {
+        "Staging" => 5,
+        "Vanguard" => 15,
+        "Assault" => 30,
+        "Headquarters" => 60,
+        "Mothership" | "Boss" => 120,
+        _ => max_opt.saturating_mul(3) / 2,
+    };
+
     let (pilot_isk, pilot_lp, fleet_count, fleet_scale) = if verified_pilots.is_empty() {
         (0, 0, 0, 0.0)
+    } else if verified_pilots.len() > hard_cap {
+        (0, 0, verified_pilots.len(), 0.0)
     } else {
         let count = verified_pilots.len();
         let under_scale = if count < min_pilots {
@@ -890,13 +911,12 @@ pub async fn process_incursion_site_completion_and_payout_core(
         } else {
             1.0
         };
+        // DERIVED: Linear 12% per-pilot overstack decay between max_optimal_pilots and hard_cap.
         let over_pilots = count.saturating_sub(max_opt);
         let over_scale = (1.0_f64 - (over_pilots as f64) * 0.12).clamp(0.15, 1.0);
         let f_scale = (over_scale * under_scale).clamp(0.15, 1.0);
 
-        // Constellation influence scaling:
-        // As Sansha influence decreases toward 0.0, payout scales up to 100% of base value.
-        // At 1.0 influence (max Sansha control), payout penalty is up to 50% (0.50 scale).
+        // DERIVED: Constellation influence scaling (50% payout penalty at 1.0 influence, 100% at 0.0 influence).
         let influence_scale = (1.0 - (new_influence.clamp(0.0, 1.0) * 0.50)).clamp(0.50, 1.0);
         let total_scale = (f_scale * influence_scale).clamp(0.10, 1.0);
 
@@ -912,27 +932,29 @@ pub async fn process_incursion_site_completion_and_payout_core(
         matched_site_id.clone()
     };
 
-    db.with_mut_snapshot(|snap| {
-        for &pid in &verified_pilots {
-            let j_id = (snap.wallet_journal.len() as i64) + 950_000;
-            if let Some(ch) = snap.characters.get_mut(&pid) {
-                ch.balance = ch
-                    .balance
-                    .checked_add(IskCents::from_isk(pilot_isk))
-                    .unwrap_or(ch.balance);
-                let new_bal = ch.balance;
-                *ch.loyalty_points.entry(concord_corp_id).or_insert(0) += pilot_lp;
-                snap.wallet_journal.push(WalletJournalEntry {
-                    entry_id: j_id,
-                    character_id: pid,
-                    entry_type: "CorporateRewardPayout".into(),
-                    amount: IskCents::from_isk(pilot_isk),
-                    balance_after: new_bal,
-                    reason: format!("Sansha Incursion {tier} Payout ({effective_site_id})"),
-                });
+    if pilot_isk > 0 || pilot_lp > 0 {
+        db.with_mut_snapshot(|snap| {
+            for &pid in &verified_pilots {
+                let j_id = (snap.wallet_journal.len() as i64) + 950_000;
+                if let Some(ch) = snap.characters.get_mut(&pid) {
+                    ch.balance = ch
+                        .balance
+                        .checked_add(IskCents::from_isk(pilot_isk))
+                        .unwrap_or(ch.balance);
+                    let new_bal = ch.balance;
+                    *ch.loyalty_points.entry(concord_corp_id).or_insert(0) += pilot_lp;
+                    snap.wallet_journal.push(WalletJournalEntry {
+                        entry_id: j_id,
+                        character_id: pid,
+                        entry_type: "CorporateRewardPayout".into(),
+                        amount: IskCents::from_isk(pilot_isk),
+                        balance_after: new_bal,
+                        reason: format!("Sansha Incursion {tier} Payout ({effective_site_id})"),
+                    });
+                }
             }
-        }
-    });
+        });
+    }
 
     with_pve_special_reg_db(db, now_unix, |reg| {
         for &pid in &verified_pilots {
@@ -1199,12 +1221,56 @@ pub async fn handle_incursion_rpc(
             Some(Ok(PyRep::List(logs_py)))
         }
 
-        // parity: feat:pve.incursion-system
+        // parity: feat:pve.incursion-system, rpc:incursion.UpdateIncursionLPLog
         ("incursion", "UpdateIncursionLPLog") => {
-            if let Err(e) = ServerContext::require_character(session) {
-                return Some(Err(e));
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let site_filter = args.first().and_then(|a| a.as_str()).map(str::to_string);
+            let cid_filter = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .and_then(|v| u32::try_from(v).ok());
+            let now_ft = ctx.now_blueos_filetime_ticks();
+            let synced_rows = with_pve_special_reg(ctx, |reg| {
+                let Some(entries) = reg.incursion_lp_logs.get_mut(&char_id) else {
+                    return Vec::new();
+                };
+                let mut matched = Vec::new();
+                for e in entries.iter_mut() {
+                    if e.timestamp_filetime <= 0 {
+                        e.timestamp_filetime = now_ft;
+                    }
+                    let keep = if let Some(ref sf) = site_filter {
+                        e.site_id == *sf
+                    } else if let Some(cf) = cid_filter {
+                        e.constellation_id == cf
+                    } else {
+                        true
+                    };
+                    if keep {
+                        matched.push(PyRep::keyval([
+                            ("logID", PyRep::Integer(e.log_id)),
+                            ("siteID", PyRep::String(e.site_id.clone())),
+                            ("tier", PyRep::String(e.tier.clone())),
+                            ("constellationID", PyRep::Integer(e.constellation_id as i64)),
+                            ("solarSystemID", PyRep::Integer(e.solar_system_id as i64)),
+                            ("iskEarned", PyRep::Integer(e.isk_earned)),
+                            ("concordLpEarned", PyRep::Integer(e.concord_lp_earned)),
+                            ("fleetSize", PyRep::Integer(e.fleet_size as i64)),
+                            ("fleetScaleFactor", PyRep::Real(e.fleet_scale_factor)),
+                            ("timestamp", PyRep::Integer(e.timestamp_filetime)),
+                        ]));
+                    }
+                }
+                matched
+            });
+            if synced_rows.is_empty() {
+                Some(Ok(PyRep::None))
+            } else {
+                Some(Ok(PyRep::List(synced_rows)))
             }
-            Some(Ok(PyRep::None))
         }
 
         // parity: feat:pve.incursion-system, feat:pve.tales, rpc:taleMgr.GetGlobalWorldEventTales
@@ -1212,6 +1278,7 @@ pub async fn handle_incursion_rpc(
             if let Err(e) = ServerContext::require_character(session) {
                 return Some(Err(e));
             }
+            crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
             let list =
                 crate::services::pve_incursion_lifecycle::collect_all_world_event_tales(ctx, None);
             Some(Ok(PyRep::List(list)))
@@ -1222,6 +1289,7 @@ pub async fn handle_incursion_rpc(
             if let Err(e) = ServerContext::require_character(session) {
                 return Some(Err(e));
             }
+            crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
             let template_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let list = crate::services::pve_incursion_lifecycle::collect_all_world_event_tales(
                 ctx,

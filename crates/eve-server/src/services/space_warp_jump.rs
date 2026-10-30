@@ -524,14 +524,13 @@ async fn handle_cmd_warp_to_stuff(
             let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_if_needed(
                 ctx, char_id, sys_id, dest_pos,
             );
-            crate::services::pve_dungeon_runtime::on_warp_to_dungeon_pocket_if_present(
+            crate::services::pve_dungeon_runtime::on_warp_start_leave_dungeon_if_needed(
                 ctx,
                 char_id,
                 sys_id,
                 current_ball.position.to_array(),
                 dest_pos.to_array(),
-            )
-            .await;
+            );
             ctx.active_warps
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -1320,26 +1319,10 @@ async fn handle_set_session_check(
     };
     let is_valid_trigger = matches!(
         reason,
-        "login"
-            | "stargate_jump"
-            | "wormhole_jump"
-            | "jump_bridge"
-            | "jump_drive"
-            | "dock"
-            | "undock"
-            | "fleet_join"
-            | "fleet_position_change"
-            | "fleet_change"
-            | "ship_board"
-            | "ship_eject"
-            | "board_or_eject"
-            | "pod_transition"
-            | "clone_jump"
-            | "clone_swap"
-            | "corp_join"
-            | "corp_leave"
-            | "wallet_division_change"
-            | "session_change"
+        "login" | "stargate_jump" | "wormhole_jump" | "jump_bridge" | "jump_drive" | "dock"
+            | "undock" | "fleet_join" | "fleet_position_change" | "fleet_change" | "ship_board"
+            | "ship_eject" | "board_or_eject" | "pod_transition" | "clone_jump" | "clone_swap"
+            | "corp_join" | "corp_leave" | "wallet_division_change" | "session_change"
     );
     if !is_valid_trigger {
         return Err(BridgeRpcError {

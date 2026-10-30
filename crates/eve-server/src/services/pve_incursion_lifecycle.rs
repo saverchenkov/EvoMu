@@ -26,14 +26,16 @@ pub const INCURSION_EFFECT_BEACON_VANGUARD: u32 = 3069;
 pub const INCURSION_EFFECT_BEACON_ASSAULT: u32 = 3493;
 pub const INCURSION_EFFECT_BEACON_HQ: u32 = 3494;
 
-/// 24-hour withdrawal duration after the Kundalini Manifest mothership is defeated.
+// DERIVED: 24-hour withdrawal duration after the Kundalini Manifest mothership is defeated (EVE Wiki Incursions).
 pub const INCURSION_WITHDRAWAL_DURATION_SEC: u64 = 86_400;
-/// 12-hour respawn cadence after an incursion finishes withdrawing before a new constellation spawns.
+// DERIVED: 12-hour respawn cadence after an incursion finishes withdrawing before a new constellation spawns.
 pub const INCURSION_RESPAWN_CADENCE_SEC: u64 = 43_200;
-/// Sansha influence regeneration rate while sites are not run (+2% per hour).
+// DERIVED: Sansha influence regeneration rate while sites are not run (+2% per hour).
 pub const INCURSION_INFLUENCE_REGEN_PER_HOUR: f64 = 0.02;
-/// Target concurrent active Sansha incursions across New Eden.
+// DERIVED: Target concurrent active Sansha incursions across New Eden.
 pub const TARGET_ACTIVE_INCURSIONS: usize = 3;
+// DERIVED: World-event tale template ID for roaming Metaliminal Storms.
+pub const STORM_TALE_TEMPLATE_ID: i64 = 5203;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IncursionLifecycleMeta {
@@ -155,31 +157,111 @@ pub fn eligible_incursion_constellations(ctx: &ServerContext) -> Vec<(Constellat
     out
 }
 
-/// Assigns distinct Staging, Vanguard, Assault, and HQ solar system roles within a constellation.
+/// Assigns distinct Staging, Vanguard, Assault, and HQ solar system roles within a constellation
+/// by traversing the SDE intra-constellation stargate graph (`sde.jumps`):
+/// - Staging: entry/border system with external constellation gates (maximizing external gates).
+/// - HQ: deepest interior / dead-end pocket (maximizing BFS hop distance from Staging, preferring degree-1 pockets).
+/// - Vanguard: systems nearest to Staging by stargate hop distance.
+/// - Assault: intermediate deeper systems between Vanguard and HQ.
 pub fn assign_constellation_system_roles(
+    sde: &SdeRegistry,
+    constellation_id: ConstellationId,
     sys_list: &[SolarSystemId],
 ) -> (SolarSystemId, Vec<SolarSystemId>, Vec<SolarSystemId>, SolarSystemId) {
-    let stg = sys_list.first().copied().unwrap_or(30_000_140);
-    if sys_list.len() >= 6 {
-        let mut vg = vec![sys_list[1], sys_list[2]];
-        if sys_list.len() > 6 {
-            vg.extend_from_slice(&sys_list[6..]);
+    if sys_list.is_empty() {
+        return (30_000_140, vec![30_000_140], vec![30_000_140], 30_000_140);
+    }
+    let sys_set: HashSet<SolarSystemId> = sys_list.iter().copied().collect();
+    let mut intra_adj: HashMap<SolarSystemId, std::collections::BTreeSet<SolarSystemId>> = HashMap::new();
+    let mut external_gates: HashMap<SolarSystemId, usize> = HashMap::new();
+
+    for jump in sde.jumps.values() {
+        if !sys_set.contains(&jump.from_solar_system_id) {
+            continue;
         }
-        let as_s = vec![sys_list[3], sys_list[4]];
-        let hq = sys_list[5];
-        (stg, vg, as_s, hq)
+        let to_in_const = sys_set.contains(&jump.to_solar_system_id)
+            || sde
+                .solar_systems
+                .get(&jump.to_solar_system_id)
+                .is_some_and(|s| s.constellation_id == constellation_id && sys_set.contains(&s.solar_system_id));
+        if to_in_const {
+            intra_adj
+                .entry(jump.from_solar_system_id)
+                .or_default()
+                .insert(jump.to_solar_system_id);
+            intra_adj
+                .entry(jump.to_solar_system_id)
+                .or_default()
+                .insert(jump.from_solar_system_id);
+        } else {
+            *external_gates.entry(jump.from_solar_system_id).or_insert(0) += 1;
+        }
+    }
+
+    let stg = sys_list
+        .iter()
+        .copied()
+        .max_by_key(|&sid| {
+            let ext = external_gates.get(&sid).copied().unwrap_or(0);
+            let deg = intra_adj.get(&sid).map(|n| n.len()).unwrap_or(0);
+            (ext > 0, ext, std::cmp::Reverse(deg), std::cmp::Reverse(sid))
+        })
+        .unwrap_or(sys_list[0]);
+
+    let mut dist: HashMap<SolarSystemId, usize> = HashMap::with_capacity(sys_list.len());
+    dist.insert(stg, 0);
+    let mut frontier = vec![stg];
+    for _ in 0..sys_list.len() {
+        if frontier.is_empty() {
+            break;
+        }
+        let mut next = Vec::new();
+        for u in frontier {
+            let du = dist[&u];
+            if let Some(nbrs) = intra_adj.get(&u) {
+                for &v in nbrs {
+                    if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(v) {
+                        e.insert(du + 1);
+                        next.push(v);
+                    }
+                }
+            }
+        }
+        frontier = next;
+    }
+
+    let hq = sys_list
+        .iter()
+        .copied()
+        .filter(|&sid| sid != stg)
+        .max_by_key(|&sid| {
+            let d = dist.get(&sid).copied().unwrap_or(sys_list.len());
+            let deg = intra_adj.get(&sid).map(|n| n.len()).unwrap_or(0);
+            let ext = external_gates.get(&sid).copied().unwrap_or(0);
+            (d, deg == 1, std::cmp::Reverse(ext), std::cmp::Reverse(deg), sid)
+        })
+        .unwrap_or(stg);
+
+    let mut remaining: Vec<SolarSystemId> = sys_list
+        .iter()
+        .copied()
+        .filter(|&sid| sid != stg && sid != hq)
+        .collect();
+    remaining.sort_by_key(|&sid| {
+        let d = dist.get(&sid).copied().unwrap_or(sys_list.len());
+        let ext = external_gates.get(&sid).copied().unwrap_or(0);
+        (d, std::cmp::Reverse(ext), sid)
+    });
+
+    if remaining.is_empty() {
+        (stg, vec![stg], vec![hq], hq)
+    } else if remaining.len() == 1 {
+        (stg, vec![remaining[0]], vec![remaining[0]], hq)
     } else {
-        let hq = sys_list.last().copied().unwrap_or(stg);
-        let vg = if sys_list.len() > 2 {
-            vec![sys_list[1], sys_list.get(2).copied().unwrap_or(sys_list[1])]
-        } else {
-            vec![stg]
-        };
-        let as_s = if sys_list.len() > 4 {
-            vec![sys_list[3], sys_list[4]]
-        } else {
-            vec![stg]
-        };
+        let assault_count = (remaining.len() / 2).clamp(1, 2);
+        let split_at = remaining.len() - assault_count;
+        let vg = remaining[..split_at].to_vec();
+        let as_s = remaining[split_at..].to_vec();
         (stg, vg, as_s, hq)
     }
 }
@@ -718,6 +800,15 @@ pub fn register_world_event_tale(ctx: &ServerContext, tale: WorldEventTaleRecord
     })
 }
 
+fn str_dict<const N: usize>(entries: [(&str, PyRep); N]) -> PyRep {
+    PyRep::Dict(
+        entries
+            .into_iter()
+            .map(|(k, v)| (PyRep::String(k.into()), v))
+            .collect(),
+    )
+}
+
 fn build_incursion_tale_py(inc: &IncursionTaleRecord) -> PyRep {
     let mut scene_types_map: Vec<(PyRep, PyRep)> = Vec::new();
     let mut system_states: Vec<(PyRep, PyRep)> = Vec::new();
@@ -779,7 +870,7 @@ fn build_incursion_tale_py(inc: &IncursionTaleRecord) -> PyRep {
         })
         .collect();
 
-    PyRep::keyval([
+    str_dict([
         ("taleID", PyRep::Integer(inc.tale_id)),
         ("templateID", PyRep::Integer(INCURSION_TALE_TEMPLATE_ID as i64)),
         ("templateClassID", PyRep::String("worldEvents".into())),
@@ -808,7 +899,7 @@ fn build_incursion_tale_py(inc: &IncursionTaleRecord) -> PyRep {
 }
 
 /// Collects all active world event tales (Sansha Incursions, Triglavian/EDENCOM Invasions,
-/// Metaliminal Storms, and registered world events) with their live system state.
+/// Metaliminal Storms, and registered world events) as subscriptable `PyRep::Dict` entries.
 pub fn collect_all_world_event_tales(
     ctx: &ServerContext,
     template_filter: Option<i64>,
@@ -822,13 +913,14 @@ pub fn collect_all_world_event_tales(
         if template_filter.is_none() || template_filter == Some(INCURSION_TALE_TEMPLATE_ID as i64) {
             for inc in reg.incursions.values().filter(|i| i.state != "Ended") {
                 if template_filter.is_some() {
-                    out.push(PyRep::keyval([
+                    out.push(str_dict([
                         ("tale_id", PyRep::Integer(inc.tale_id)),
                         ("taleID", PyRep::Integer(inc.tale_id)),
                         ("template_id", PyRep::Integer(INCURSION_TALE_TEMPLATE_ID as i64)),
                         ("templateID", PyRep::Integer(INCURSION_TALE_TEMPLATE_ID as i64)),
                         ("solar_system_id", PyRep::Integer(inc.staging_solar_system_id as i64)),
                         ("solarSystemID", PyRep::Integer(inc.staging_solar_system_id as i64)),
+                        ("managerSolarSystemID", PyRep::Integer(inc.staging_solar_system_id as i64)),
                         ("constellationID", PyRep::Integer(inc.constellation_id as i64)),
                         ("state", PyRep::String(inc.state.clone())),
                         ("systemState", PyRep::String(inc.state.clone())),
@@ -848,7 +940,7 @@ pub fn collect_all_world_event_tales(
             }
         }
 
-        // 2. Triglavian Invasion / Minor Victory world event tales (templateID = 5201)
+        // 2. Triglavian Invasion / Minor Victory world event tales (DERIVED templateID = 5201)
         if template_filter.is_none() || template_filter == Some(5201) {
             for &sys_id in &reg.triglavian_minor_victory_systems {
                 let const_id = ctx
@@ -869,13 +961,14 @@ pub fn collect_all_world_event_tales(
                     "TriglavianMinorVictory"
                 };
                 if template_filter.is_some() {
-                    out.push(PyRep::keyval([
+                    out.push(str_dict([
                         ("tale_id", PyRep::Integer(tale_id)),
                         ("taleID", PyRep::Integer(tale_id)),
                         ("template_id", PyRep::Integer(5201)),
                         ("templateID", PyRep::Integer(5201)),
                         ("solar_system_id", PyRep::Integer(i64::from(sys_id))),
                         ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+                        ("managerSolarSystemID", PyRep::Integer(i64::from(sys_id))),
                         ("constellationID", PyRep::Integer(i64::from(const_id))),
                         ("state", PyRep::String(sys_state.into())),
                         ("systemState", PyRep::String(sys_state.into())),
@@ -884,7 +977,7 @@ pub fn collect_all_world_event_tales(
                         ("end_date", PyRep::Integer(now_ft + 864_000_000_000)),
                     ]));
                 } else {
-                    out.push(PyRep::keyval([
+                    out.push(str_dict([
                         ("taleID", PyRep::Integer(tale_id)),
                         ("templateID", PyRep::Integer(5201)),
                         ("templateClassID", PyRep::String("triglavianInvasion".into())),
@@ -908,7 +1001,7 @@ pub fn collect_all_world_event_tales(
             }
         }
 
-        // 3. EDENCOM Fortress & Minor Victory defense tales (templateID = 5202)
+        // 3. EDENCOM Fortress & Minor Victory defense tales (DERIVED templateID = 5202)
         if template_filter.is_none() || template_filter == Some(5202) {
             for (&sys_id, is_fortress) in reg
                 .edencom_fortress_systems
@@ -929,13 +1022,14 @@ pub fn collect_all_world_event_tales(
                     "EdencomMinorVictory"
                 };
                 if template_filter.is_some() {
-                    out.push(PyRep::keyval([
+                    out.push(str_dict([
                         ("tale_id", PyRep::Integer(tale_id)),
                         ("taleID", PyRep::Integer(tale_id)),
                         ("template_id", PyRep::Integer(5202)),
                         ("templateID", PyRep::Integer(5202)),
                         ("solar_system_id", PyRep::Integer(i64::from(sys_id))),
                         ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+                        ("managerSolarSystemID", PyRep::Integer(i64::from(sys_id))),
                         ("constellationID", PyRep::Integer(i64::from(const_id))),
                         ("state", PyRep::String(sys_state.into())),
                         ("systemState", PyRep::String(sys_state.into())),
@@ -943,7 +1037,7 @@ pub fn collect_all_world_event_tales(
                         ("end_date", PyRep::Integer(now_ft + 864_000_000_000)),
                     ]));
                 } else {
-                    out.push(PyRep::keyval([
+                    out.push(str_dict([
                         ("taleID", PyRep::Integer(tale_id)),
                         ("templateID", PyRep::Integer(5202)),
                         ("templateClassID", PyRep::String("edencomDefense".into())),
@@ -966,7 +1060,43 @@ pub fn collect_all_world_event_tales(
             }
         }
 
-        // 4. Registered custom world-event tales (e.g., active invasion campaigns)
+        // 4. Roaming Metaliminal Storm tales (DERIVED templateID = 5203)
+        if template_filter.is_none() || template_filter == Some(STORM_TALE_TEMPLATE_ID) {
+            for storm in &reg.roaming_storms {
+                let sys_id = storm.center_solar_system_id;
+                let const_id = ctx
+                    .sde
+                    .solar_systems
+                    .get(&sys_id)
+                    .map(|s| s.constellation_id)
+                    .unwrap_or(0);
+                let tale_id = 870_000 + i64::from(storm.storm_id);
+                let weather_name = format!("Metaliminal{:?}Storm", storm.weather);
+                let end_ft = if storm.next_move_at_sec > 0 {
+                    ((storm.next_move_at_sec + 11_644_473_600) * 10_000_000) as i64
+                } else {
+                    now_ft + 864_000_000_000
+                };
+                out.push(str_dict([
+                    ("tale_id", PyRep::Integer(tale_id)),
+                    ("taleID", PyRep::Integer(tale_id)),
+                    ("template_id", PyRep::Integer(STORM_TALE_TEMPLATE_ID)),
+                    ("templateID", PyRep::Integer(STORM_TALE_TEMPLATE_ID)),
+                    ("templateClassID", PyRep::String("metaliminalStorm".into())),
+                    ("managerSolarSystemID", PyRep::Integer(i64::from(sys_id))),
+                    ("solar_system_id", PyRep::Integer(i64::from(sys_id))),
+                    ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+                    ("locationID", PyRep::Integer(i64::from(sys_id))),
+                    ("constellationID", PyRep::Integer(i64::from(const_id))),
+                    ("state", PyRep::String(weather_name.clone())),
+                    ("systemState", PyRep::String(weather_name)),
+                    ("start_date", PyRep::Integer(now_ft - 432_000_000_000)),
+                    ("end_date", PyRep::Integer(end_ft)),
+                ]));
+            }
+        }
+
+        // 5. Registered custom world-event tales (e.g., active invasion campaigns)
         for wt in reg.world_event_tales.values() {
             if wt.state == "Ended" {
                 continue;
@@ -976,7 +1106,7 @@ pub fn collect_all_world_event_tales(
             }
             let start_ft = ((wt.start_unix + 11_644_473_600) * 10_000_000) as i64;
             let end_ft = ((wt.end_unix + 11_644_473_600) * 10_000_000) as i64;
-            out.push(PyRep::keyval([
+            out.push(str_dict([
                 ("tale_id", PyRep::Integer(wt.tale_id)),
                 ("taleID", PyRep::Integer(wt.tale_id)),
                 ("template_id", PyRep::Integer(wt.template_id)),

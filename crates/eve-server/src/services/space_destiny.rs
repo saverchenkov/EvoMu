@@ -880,10 +880,20 @@ pub(crate) async fn handle_update_state_request(
                     PyRep::Real(ship_ball.position.z),
                 ],
             );
+            crate::services::pve_dungeon_runtime::on_warp_landed_at_dungeon_pocket_if_present(
+                ctx,
+                char_id,
+                sys_id,
+                ship_ball.position.to_array(),
+            )
+            .await;
         }
     }
     if matches!(ship_ball.mode, MovementMode::Warp { .. }) {
         return Ok(PyRep::None);
+    }
+    if ctx.db.with_snapshot(|s| s.service_state_blobs.contains_key("dungeon_runtime_store")) {
+        let _ = crate::services::pve_dungeon_runtime::check_dungeon_triggers(ctx, char_id, sys_id, ship_id).await;
     }
     handle
         .push_set_state(ship_id)

@@ -578,7 +578,7 @@ pub async fn handle_second_hack_failure_explosion(
 // parity: feat:pve.hacking-failure-outcome, feat:pve.ghost-sites
 pub async fn detonate_ghost_site_with_can(
     ctx: &ServerContext,
-    session: &mut SessionState,
+    _session: &mut SessionState,
     solar_system_id: SolarSystemId,
     site_id: &str,
     failed_container_id: Option<ItemId>,
@@ -653,7 +653,6 @@ pub async fn detonate_ghost_site_with_can(
         explosive: explosive_damage,
         ..Default::default()
     };
-    let mut damaged_any = false;
     if let Ok(balls) = sys_handle.list_balls().await {
         for b in balls {
             let is_ship = ctx.db.with_snapshot(|snap| {
@@ -667,15 +666,8 @@ pub async fn detonate_ghost_site_with_can(
                 .get(&b.type_id)
                 .is_some_and(|t| t.category_id == 6);
             if is_ship && b.position.distance(blast_center) <= 10_000.0 {
-                if sys_handle.apply_damage(b.id, dmg_vec).await.is_ok() && Some(b.id) == session.ship_id {
-                    damaged_any = true;
-                }
+                let _ = sys_handle.apply_damage(b.id, dmg_vec).await;
             }
-        }
-    }
-    if !damaged_any {
-        if let Some(ship_id) = session.ship_id {
-            let _ = sys_handle.apply_damage(ship_id, dmg_vec).await;
         }
     }
 

@@ -248,9 +248,6 @@ async fn test_get_my_escalating_path_details_rpc_shape_and_sqlite_persistence() 
         // 3. Clear Combat Anomaly with force_escalate -> triggers Escalation + OnEscalatingPathChange & OnEscalatingPathMessage
         ensure_system_pve_sites_seeded(&ctx, JITA_SYS).await;
         let site_id = "PVE-ANOM-30000142-1";
-        with_pve_exploration_reg(&ctx, |reg| {
-            reg.force_escalate = true;
-        });
         let _ = sess.drain_notifications();
         let _ = ctx.drain_notifications_for_char(PILOT_1);
         let sys_h = ctx.systems.get_or_spawn(JITA_SYS);
@@ -280,6 +277,7 @@ async fn test_get_my_escalating_path_details_rpc_shape_and_sqlite_persistence() 
                     .expect("EnterCombatAnomaly wave");
                 continue;
             }
+            ctx.set_mechanic_rng_seed(Some(3));
             for nid in npcs {
                 let _ = sys_h
                     .apply_damage_with_attacker(
@@ -364,6 +362,8 @@ async fn test_get_my_escalating_path_details_rpc_shape_and_sqlite_persistence() 
             assert!(row[kv_col].dict_get("dungeonID").is_some(), "dungeon KeyVal must contain dungeonID");
             assert!(row[kv_col].dict_get("dungeonName").is_some(), "dungeon KeyVal must contain dungeonName");
         }
+        assert_eq!(row[14].dict_get("instanceID").and_then(|v| v.as_i64()), Some(inst_id));
+        assert_eq!(row[14].dict_get("solarSystemID").and_then(|v| v.as_i64()), Some(dest_sys));
         (inst_id, dest_sys, exp_did)
     };
 
@@ -466,176 +466,115 @@ async fn test_dungeon_and_escalation_room_entry_completion_and_exit_notification
     put_pilot_in_space(&ctx, &mut sess, PILOT_1, ship_id, JITA_SYS, DVec3::ZERO).await;
 
     // ------------------------------------------------------------------------
-    // Part A: Deadspace / Distribution Dungeon Lifecycle Notifications
+    // Part A: Naturally Seeded Deadspace Dungeon Lifecycle Notifications
     // ------------------------------------------------------------------------
-    let mut spawn_kw = HashMap::new();
-    spawn_kw.insert("solarSystemID".into(), PyRep::Integer(i64::from(JITA_SYS)));
-    spawn_kw.insert("dungeonID".into(), PyRep::Integer(2009));
-    spawn_kw.insert("dungeonName".into(), PyRep::String("Caldari Distribution Outpost".into()));
-    spawn_kw.insert("category".into(), PyRep::String("Deadspace".into()));
-    spawn_kw.insert("hasEntryGate".into(), PyRep::Bool(true));
-    spawn_kw.insert(
-        "position".into(),
-        PyRep::Tuple(vec![
-            PyRep::Real(450_000_000.0),
-            PyRep::Real(0.0),
-            PyRep::Real(300_000_000.0),
-        ]),
-    );
-    let inst = eve_server::services::pve_dungeon_runtime::spawn_dungeon_instance(
-        &ctx,
-        PILOT_1,
-        Some(JITA_SYS),
-        &[],
-        &spawn_kw,
-    )
-    .await
-    .expect("spawn_dungeon_instance");
+    ensure_system_pve_sites_seeded(&ctx, JITA_SYS).await;
+    let (dsg_pos, dsg_inst_id, dsg_did) = with_pve_exploration_reg(&ctx, |reg| {
+        let s = reg.sites_by_system[&JITA_SYS]
+            .iter()
+            .find(|s| s.site_id == "DSG-30000142")
+            .unwrap();
+        (s.position, s.expedition_instance_id.unwrap(), i64::from(s.dungeon_id))
+    });
+    let probes: Vec<PyRep> = (0..8)
+        .map(|_| PyRep::List(vec![PyRep::Real(dsg_pos[0]), PyRep::Real(dsg_pos[1]), PyRep::Real(dsg_pos[2])]))
+        .collect();
+    ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RequestScans", &[PyRep::Real(600_000_000_000.0), PyRep::Real(120.0), PyRep::List(probes)], &kw, None)
+        .await
+        .unwrap();
+    ctx.dispatch_rpc(&mut sess, "beyonce", None, "CmdWarpToStuff", &[PyRep::String("scan".into()), PyRep::String("DSG-30000142".into())], &kw, None)
+        .await
+        .unwrap();
+    let sys_handle = ctx.systems.get_or_spawn(JITA_SYS);
+    for _ in 0..120 {
+        let _ = sys_handle.step_manual(1.0).await;
+        if sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1.mode == MovementMode::Stop {
+            break;
+        }
+    }
+    ctx.dispatch_rpc(&mut sess, "beyonce", None, "UpdateStateRequest", &[], &kw, None).await.unwrap();
+    let inst = eve_server::services::pve_dungeon_runtime::get_dungeon_instance_state(&ctx, dsg_inst_id).unwrap();
     let entry_gate_id = inst.dict_get("entryGateBallID").and_then(|v| v.as_i64()).unwrap();
 
     // 1. Activate entry acceleration gate -> OnEnteringDungeonRoom + OnDistributionDungeonEntered
-    let sys_handle = ctx.systems.get_or_spawn(JITA_SYS);
-    let eg_pos = sys_handle.get_ball_snapshot(entry_gate_id).await.unwrap().unwrap().1.position;
-    let _ = sys_handle.set_ball_position(ship_id, eg_pos).await;
     let _ = sess.drain_notifications();
-
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
     let gate1 = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "keeper",
-            None,
-            "ActivateAccelerationGate",
-            &[PyRep::Integer(entry_gate_id)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(entry_gate_id)], &kw, None)
         .await
         .expect("Activate entry gate");
 
-    let n1 = sess.drain_notifications();
-    let enter_room_1 = n1
-        .iter()
-        .find(|(ev, _)| ev == "OnEnteringDungeonRoom")
-        .expect("OnEnteringDungeonRoom emitted on gate entry");
+    let mut n1: Vec<(String, Vec<PyRep>)> = sess.drain_notifications();
+    n1.extend(ctx.drain_notifications_for_char(PILOT_1).into_iter().map(|n| (n.event, n.args)));
+    let enter_room_1 = n1.iter().find(|(ev, _)| ev == "OnEnteringDungeonRoom").expect("OnEnteringDungeonRoom emitted");
     assert_eq!(enter_room_1.1.len(), 5);
-    assert_eq!(enter_room_1.1[0].as_i64(), Some(2009));
+    assert_eq!(enter_room_1.1[0].as_i64(), Some(dsg_did));
     assert_eq!(enter_room_1.1[1].as_i64(), Some(1));
-
-    let dist_entered = n1
-        .iter()
-        .find(|(ev, _)| ev == "OnDistributionDungeonEntered")
-        .expect("OnDistributionDungeonEntered emitted for Deadspace/Distribution dungeon");
+    let dist_entered = n1.iter().find(|(ev, _)| ev == "OnDistributionDungeonEntered").expect("OnDistributionDungeonEntered emitted");
     assert_eq!(dist_entered.1.len(), 1);
-    assert!(
-        !n1.iter().any(|(ev, _)| ev == "OnEscalatingPathDungeonEntered"),
-        "Non-escalation dungeon must not emit OnEscalatingPathDungeonEntered"
-    );
+    assert!(!n1.iter().any(|(ev, _)| ev == "OnEscalatingPathDungeonEntered"));
 
     // 2. Clear Room 1 NPCs -> unlock Room 1 gate -> enter Room 2 -> OnEnteringDungeonRoom(room 2)
-    let PyRep::List(r1_npcs) = gate1.dict_get("npcBallIDs").unwrap() else {
-        panic!();
-    };
+    let PyRep::List(r1_npcs) = gate1.dict_get("npcBallIDs").unwrap() else { panic!() };
     for nid in r1_npcs {
-        let nid_i64 = nid.as_i64().unwrap();
         let _ = sys_handle
             .apply_damage_with_attacker(
-                nid_i64,
-                DamageVector {
-                    em: 1.0e7,
-                    thermal: 1.0e7,
-                    kinetic: 1.0e7,
-                    explosive: 1.0e7,
-                },
+                nid.as_i64().unwrap(),
+                DamageVector { em: 1.0e7, thermal: 1.0e7, kinetic: 1.0e7, explosive: 1.0e7 },
                 Some(PILOT_1),
             )
             .await;
-        eve_server::services::pve_dungeon_runtime::on_dungeon_npc_killed(&ctx, JITA_SYS, nid_i64, PILOT_1).await;
     }
     let r1_gate_id = gate1.dict_get("nextGateBallID").and_then(|v| v.as_i64()).unwrap();
-    let r1_gate_pos = sys_handle.get_ball_snapshot(r1_gate_id).await.unwrap().unwrap().1.position;
-    let _ = sys_handle.set_ball_position(ship_id, r1_gate_pos).await;
+    let beyonce_oid = ctx.bind_object(&sess, "beyonce", i64::from(JITA_SYS)).unwrap();
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_oid), "CmdSetSpeedFraction", &[PyRep::Real(1.0)], &kw, None).await.unwrap();
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_oid), "CmdFollowBall", &[PyRep::Integer(r1_gate_id), PyRep::Real(500.0)], &kw, None).await.unwrap();
+    for _ in 0..60 {
+        let _ = sys_handle.step_manual(1.0).await;
+    }
     let _ = sess.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
 
     let gate2 = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "keeper",
-            None,
-            "ActivateAccelerationGate",
-            &[PyRep::Integer(r1_gate_id)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(r1_gate_id)], &kw, None)
         .await
         .expect("Activate Room 1 -> Room 2 gate");
-    let n2 = sess.drain_notifications();
-    let enter_room_2 = n2
-        .iter()
-        .find(|(ev, _)| ev == "OnEnteringDungeonRoom")
-        .expect("OnEnteringDungeonRoom emitted on Room 2 entry");
+    let mut n2 = sess.drain_notifications();
+    n2.extend(ctx.drain_notifications_for_char(PILOT_1).into_iter().map(|n| (n.event, n.args)));
+    let enter_room_2 = n2.iter().find(|(ev, _)| ev == "OnEnteringDungeonRoom").expect("OnEnteringDungeonRoom Room 2");
     assert_eq!(enter_room_2.1[1].as_i64(), Some(2));
 
-    // 3. Warping out of the dungeon pocket to Jita 4-4 emits OnExitingDungeon(dungeonID)
+    // 3. Warping out of the dungeon pocket to Jita 4-4 emits OnExitingDungeon(dungeonID) at warp start
     let _ = sess.drain_notifications();
-    ctx.dispatch_rpc(
-        &mut sess,
-        "beyonce",
-        None,
-        "CmdWarpToStuff",
-        &[PyRep::String("item".into()), PyRep::Integer(JITA_4_4_STATION)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Warp out of dungeon to station");
-    let n_exit = sess.drain_notifications();
-    let exit_notif = n_exit
-        .iter()
-        .find(|(ev, _)| ev == "OnExitingDungeon")
-        .expect("OnExitingDungeon must be emitted when warping out of active dungeon");
-    assert_eq!(exit_notif.1.len(), 1);
-    assert_eq!(exit_notif.1[0].as_i64(), Some(2009));
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
+    ctx.dispatch_rpc(&mut sess, "beyonce", None, "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(JITA_4_4_STATION)], &kw, None)
+        .await
+        .expect("Warp out of dungeon to station");
+    let mut n_exit = sess.drain_notifications();
+    n_exit.extend(ctx.drain_notifications_for_char(PILOT_1).into_iter().map(|n| (n.event, n.args)));
+    let exit_notif = n_exit.iter().find(|(ev, _)| ev == "OnExitingDungeon").expect("OnExitingDungeon emitted");
+    assert_eq!(exit_notif.1, vec![PyRep::Integer(dsg_did)]);
 
-    // 4. Killing final Room 2 NPC fires CompleteDungeon trigger -> emits OnDungeonCompleted(dungeonID)
-    let PyRep::List(r2_npcs) = gate2.dict_get("npcBallIDs").unwrap() else {
-        panic!();
-    };
+    // 4. Killing Room 2 Overseer fires CompleteDungeon trigger -> emits OnDungeonCompleted(dungeonID)
+    let PyRep::List(r2_npcs) = gate2.dict_get("npcBallIDs").unwrap() else { panic!() };
     let _ = sess.drain_notifications();
     let _ = ctx.drain_notifications_for_char(PILOT_1);
     for nid in r2_npcs {
-        let nid_i64 = nid.as_i64().unwrap();
         let _ = sys_handle
             .apply_damage_with_attacker(
-                nid_i64,
-                DamageVector {
-                    em: 1.0e7,
-                    thermal: 1.0e7,
-                    kinetic: 1.0e7,
-                    explosive: 1.0e7,
-                },
+                nid.as_i64().unwrap(),
+                DamageVector { em: 1.0e7, thermal: 1.0e7, kinetic: 1.0e7, explosive: 1.0e7 },
                 Some(PILOT_1),
             )
             .await;
-        eve_server::services::pve_dungeon_runtime::on_dungeon_npc_killed(&ctx, JITA_SYS, nid_i64, PILOT_1).await;
     }
-    let char_done_notifs = ctx.drain_notifications_for_char(PILOT_1);
-    let sess_done_notifs = sess.drain_notifications();
-    let done_args = char_done_notifs
-        .iter()
-        .find(|n| n.event == "OnDungeonCompleted")
-        .map(|n| n.args.clone())
-        .or_else(|| {
-            sess_done_notifs
-                .iter()
-                .find(|(ev, _)| ev == "OnDungeonCompleted")
-                .map(|(_, args)| args.clone())
-        })
-        .expect("OnDungeonCompleted must be emitted when dungeon finishes");
-    assert_eq!(done_args.len(), 1);
-    assert_eq!(done_args[0].as_i64(), Some(2009));
+    let mut done_notifs = sess.drain_notifications();
+    done_notifs.extend(ctx.drain_notifications_for_char(PILOT_1).into_iter().map(|n| (n.event, n.args)));
+    let done = done_notifs.iter().find(|(ev, _)| ev == "OnDungeonCompleted").expect("OnDungeonCompleted emitted");
+    assert_eq!(done.1, vec![PyRep::Integer(dsg_did)]);
 
     // ------------------------------------------------------------------------
-    // Part B: Escalation / Expedition Pocket Entry -> OnEscalatingPathDungeonEntered
+    // Part B: Escalation Warp-Arrival Entry (NOT emitted mid-warp, emitted on landing!)
     // ------------------------------------------------------------------------
     let esc = create_escalation_expedition(
         &ctx,
@@ -643,7 +582,7 @@ async fn test_dungeon_and_escalation_room_entry_completion_and_exit_notification
         JITA_SYS,
         1420,
         "Guristas Hideaway",
-        [100_000.0, 0.0, 100_000.0],
+        [80_000_000.0, 0.0, 60_000_000.0],
     )
     .await
     .expect("create_escalation_expedition");
@@ -652,6 +591,7 @@ async fn test_dungeon_and_escalation_room_entry_completion_and_exit_notification
     put_pilot_in_space(&ctx, &mut sess, PILOT_1, ship_id_dest, dest_sys, DVec3::ZERO).await;
 
     let _ = sess.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
     ctx.dispatch_rpc(
         &mut sess,
         "beyonce",
@@ -664,15 +604,36 @@ async fn test_dungeon_and_escalation_room_entry_completion_and_exit_notification
     .await
     .expect("Warp to escalation epinstance");
 
-    let n_esc = sess.drain_notifications();
+    // Immediately after CmdWarpToStuff (still in warp at origin), entry notifications MUST NOT have fired yet!
+    let mut mid_warp = sess.drain_notifications();
+    mid_warp.extend(ctx.drain_notifications_for_char(PILOT_1).into_iter().map(|n| (n.event, n.args)));
+    assert!(
+        !mid_warp.iter().any(|(ev, _)| ev == "OnEnteringDungeonRoom" || ev == "OnEscalatingPathDungeonEntered"),
+        "Dungeon entry notifications must NOT fire at warp start before warp landing"
+    );
+
+    // Step destiny ticks until warp lands, then dispatch UpdateStateRequest -> emits OnEnteringDungeonRoom + OnEscalatingPathDungeonEntered
+    let dest_handle = ctx.systems.get_or_spawn(dest_sys);
+    for _ in 0..120 {
+        let _ = dest_handle.step_manual(1.0).await;
+        if dest_handle.get_ball_snapshot(ship_id_dest).await.unwrap().unwrap().1.mode == MovementMode::Stop {
+            break;
+        }
+    }
+    ctx.dispatch_rpc(&mut sess, "beyonce", None, "UpdateStateRequest", &[], &kw, None)
+        .await
+        .expect("UpdateStateRequest on escalation landing");
+
+    let mut n_esc = sess.drain_notifications();
+    n_esc.extend(ctx.drain_notifications_for_char(PILOT_1).into_iter().map(|n| (n.event, n.args)));
     assert!(
         n_esc.iter().any(|(ev, _)| ev == "OnEnteringDungeonRoom"),
-        "Warping into escalation pocket must emit OnEnteringDungeonRoom"
+        "Landing in escalation pocket must emit OnEnteringDungeonRoom"
     );
     let esc_entered = n_esc
         .iter()
         .find(|(ev, _)| ev == "OnEscalatingPathDungeonEntered")
-        .expect("Warping into escalation pocket must emit OnEscalatingPathDungeonEntered");
+        .expect("Landing in escalation pocket must emit OnEscalatingPathDungeonEntered");
     assert_eq!(esc_entered.1.len(), 1);
     assert!(
         !n_esc.iter().any(|(ev, _)| ev == "OnDistributionDungeonEntered"),

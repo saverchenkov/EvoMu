@@ -129,9 +129,7 @@ async fn setup_space_pilot(
     sess
 }
 
-// ============================================================================
 // 1. CRAB Deployment Restrictions, Capital Link, Drone Waves & Loot Window
-// ============================================================================
 #[tokio::test]
 async fn test_crab_deployment_capital_link_drone_waves_loot_and_self_destruct() {
     // parity: feat:pve.crab-link-activation
@@ -375,9 +373,12 @@ async fn test_crab_deployment_capital_link_drone_waves_loot_and_self_destruct() 
     ctx.advance_secs(200);
     assert_eq!(with_pve_special_reg(&ctx, |reg| reg.crab_beacons[&beacon_id].waves_spawned), 3);
     ctx.advance_secs(CRAB_SCAN_DURATION_SECS - 400);
-
-    let phase_loot = with_pve_special_reg(&ctx, |reg| reg.crab_beacons[&beacon_id].phase);
-    assert_eq!(phase_loot, CrabBeaconPhase::LootRestricted);
+    assert_eq!(with_pve_special_reg(&ctx, |reg| reg.crab_beacons[&beacon_id].phase), CrabBeaconPhase::Scanning, "Live Rogue Drones jam CRAB completion");
+    for bid in with_pve_special_reg(&ctx, |reg| reg.crab_beacons[&beacon_id].wave_npc_ball_ids.clone()) {
+        let _ = lowsec_handle.remove_ball(bid).await;
+    }
+    eve_server::services::pve_crab_beacons::tick_all_crab_beacons(&ctx);
+    assert_eq!(with_pve_special_reg(&ctx, |reg| reg.crab_beacons[&beacon_id].phase), CrabBeaconPhase::LootRestricted);
 
     // 5. During 2-minute exclusive loot window: only deployer can open; non-deployer is refused
     let non_deployer_open = validate_single_item_can_be_opened(&ctx, PILOT_2, beacon_id).await;
@@ -461,12 +462,12 @@ async fn test_crab_ceq_pool_regeneration_and_system_signal_interference() {
             .await;
         if idx < 3 {
             assert!(res.is_ok(), "Activation {} within 100 CEQ cap must succeed: {res:?}", idx + 1);
+            ctx.advance_secs(CRAB_LINK_DURATION_SECS);
         } else {
             assert_eq!(res.unwrap_err().code, "InsufficientEnergy", "4th CRAB activation must be refused");
         }
     }
 
-    // 3. Advance 22 hours -> CEQ regenerates back to 100
     ctx.advance_secs(22 * 3_600);
     let energy_regen = ctx
         .dispatch_rpc(&mut sess1, "characterEnergyMgr", None, "GetMyEnergyState", &[], &kw, None)
@@ -474,8 +475,6 @@ async fn test_crab_ceq_pool_regeneration_and_system_signal_interference() {
         .expect("GetMyEnergyState after 22h");
     assert_eq!(energy_regen.dict_get("currentEnergy").and_then(|v| v.as_i64()), Some(100));
 
-    // 4. Signal Interference rises per CRAB across pilots until linking is refused at 12 CRABs,
-    // and decays back over 25 hours
     let test_sys = 30_002_905u32; // Kedama (Low-sec)
     let mut pilots: Vec<(String, i64)> = Vec::new();
     for idx in 1..=4 {

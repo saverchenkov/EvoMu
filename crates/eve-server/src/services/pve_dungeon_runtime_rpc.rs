@@ -6,15 +6,16 @@
 use crate::router::ServerContext;
 use crate::services::notify_emitters_batch3_space::emit_dungeon_progression_notifications;
 use crate::services::pve_dungeon_runtime::{
-    materialize_dungeon_room_entities, on_dungeon_approach, unix_to_filetime_ticks,
-    with_dungeon_runtime_store, DungeonNpcGroup, DungeonRuntimeInstance, DungeonRuntimeObject,
-    DungeonRuntimeRoom, DungeonTrigger, DungeonTriggerAction, DungeonTriggerKind,
-    DEFAULT_CONTAINER_TYPE_ID, GATE_ACTIVATION_RANGE_M,
+    apply_dungeon_trigger_actions, dist3, has_dungeon_runtime_store,
+    materialize_dungeon_room_entities, unix_to_filetime_ticks, with_dungeon_runtime_store,
+    DungeonNpcGroup, DungeonRuntimeInstance, DungeonRuntimeObject, DungeonRuntimeRoom,
+    DungeonTrigger, DungeonTriggerAction, DungeonTriggerKind, DEFAULT_CONTAINER_TYPE_ID,
+    GATE_ACTIVATION_RANGE_M,
 };
 use eve_destiny::MovementMode;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use eve_sde::SolarSystemId;
+use eve_sde::{SolarSystemId, TypeId};
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -456,9 +457,93 @@ fn parse_rooms_from_pyrep(
         }
     }
 
-    // Default 2-room gated deadspace dungeon derived from SDE dungeon template
-    let r1_pos = base_pos;
-    let r2_pos = [base_pos[0] + 500_000.0, base_pos[1], base_pos[2]];
+    build_sde_deadspace_rooms(ctx, 0, dungeon_id, dungeon_name, base_pos, has_entry_gate)
+}
+
+/// Resolves faction Deadspace NPC ship `TypeId`s (`(frigate_tid, cruiser_tid, commander_tid)`) from
+/// `sde.npc_spawn_groups` (`62..=86`), matching `sde.dungeons[dungeon_id].faction_id` or regional pirate faction.
+fn resolve_dungeon_faction_npc_types(
+    sde: &eve_sde::SdeRegistry,
+    sys_id: u32,
+    dungeon_id: u32,
+) -> (u32, u32, u32) {
+    let faction_id = sde
+        .dungeons
+        .get(&dungeon_id)
+        .and_then(|d| d.faction_id)
+        .unwrap_or_else(|| {
+            match crate::services::pve_exploration_seeding::pirate_faction_for_system(sde, sys_id) {
+                crate::services::pve_exploration_seeding::PirateFaction::AngelCartel => 500_011,
+                crate::services::pve_exploration_seeding::PirateFaction::BloodRaiders => 500_012,
+                crate::services::pve_exploration_seeding::PirateFaction::Sansha => 500_019,
+                crate::services::pve_exploration_seeding::PirateFaction::Serpentis => 500_020,
+                crate::services::pve_exploration_seeding::PirateFaction::Guristas => 500_010,
+            }
+        });
+    let (frig_sg, cruiser_sg, bs_sg) = match faction_id {
+        500_011 => (66u32, 64u32, 63u32), // Angel Cartel
+        500_012 => (71, 69, 68),          // Blood Raiders
+        500_019 => (81, 79, 78),          // Sansha's Nation
+        500_020 => (86, 84, 83),          // Serpentis
+        _ => (76, 74, 73),                // Guristas
+    };
+    let pick = |sg_id: u32, fallback: u32| -> u32 {
+        sde.npc_spawn_groups
+            .get(&sg_id)
+            .and_then(|g| g.npc_type_ids.first().copied())
+            .unwrap_or(fallback)
+    };
+    let difficulty = sde
+        .dungeons
+        .get(&dungeon_id)
+        .and_then(|d| d.difficulty)
+        .unwrap_or(3);
+    let frig_tid = pick(frig_sg, 16_981);
+    let cruiser_tid = pick(cruiser_sg, 16_980);
+    let boss_tid = if difficulty >= 4 {
+        pick(bs_sg, cruiser_tid)
+    } else {
+        cruiser_tid
+    };
+    (frig_tid, cruiser_tid, boss_tid)
+}
+
+// DERIVED: Server-side 2-room Deadspace pocket & trigger topology synthesized from `sde.dungeons`
+// (`faction_id`, `archetype_id`, `difficulty`) + `sde.npc_spawn_groups` (`62..=86`), since CCP
+// Tranquility room trigger graphs are server-authored and absent from client FSD static data.
+pub(crate) fn build_sde_deadspace_rooms(
+    ctx: &ServerContext,
+    sys_id: u32,
+    dungeon_id: u32,
+    dungeon_name: &str,
+    base_pos: [f64; 3],
+    has_entry_gate: bool,
+) -> Vec<DungeonRuntimeRoom> {
+    let (frig_tid, cruiser_tid, boss_tid) =
+        resolve_dungeon_faction_npc_types(&ctx.sde, sys_id, dungeon_id);
+    let (loot_tid, _) = if sys_id > 0 {
+        crate::services::pve_exploration_seeding::pirate_commander_loot_for_system(&ctx.sde, sys_id)
+    } else {
+        (19_419, "Overseer's Personal Effects")
+    };
+    let r1_mwd_editor = crate::services::pve_dungeon_editor::is_dungeon_or_room_mwd_disallowed(
+        ctx,
+        i64::from(dungeon_id),
+        Some(i64::from(dungeon_id) * 100 + 1),
+    );
+    let r2_mwd_editor = crate::services::pve_dungeon_editor::is_dungeon_or_room_mwd_disallowed(
+        ctx,
+        i64::from(dungeon_id),
+        Some(i64::from(dungeon_id) * 100 + 2),
+    );
+    let r1_pos = if has_entry_gate {
+        [base_pos[0] + 600_000.0, base_pos[1], base_pos[2]]
+    } else {
+        base_pos
+    };
+    let r2_pos = [r1_pos[0] + 600_000.0, r1_pos[1], r1_pos[2]];
+    let relay_pos = [r1_pos[0] + 2_200.0, r1_pos[1], r1_pos[2]];
+    let strongbox_pos = [r2_pos[0] + 1_500.0, r2_pos[1], r2_pos[2]];
     vec![
         DungeonRuntimeRoom {
             room_index: 1,
@@ -467,37 +552,61 @@ fn parse_rooms_from_pyrep(
             position: r1_pos,
             gate_destination_pos: [r1_pos[0] - 10_000.0, r1_pos[1], r1_pos[2]],
             gated: has_entry_gate,
-            disallow_mwd: None,
+            disallow_mwd: Some(r1_mwd_editor),
             gate_ball_id: None,
             gate_locked: true,
             objects: vec![DungeonRuntimeObject {
                 ball_id: 0,
                 type_id: 23,
                 name: "Deadspace Relay Beacon".into(),
-                position: [r1_pos[0] + 2_500.0, r1_pos[1], r1_pos[2]],
+                position: relay_pos,
                 radius: 250.0,
                 is_container: false,
                 loot_items: Vec::new(),
                 spawned: false,
             }],
-            npc_groups: vec![DungeonNpcGroup {
-                group_id: 1,
-                wave: 1,
-                npc_specs: vec![(10_043, 2)],
-                npc_ball_ids: Vec::new(),
-                spawn_immediately: true,
-                spawned: false,
-                cleared: false,
-            }],
-            triggers: vec![DungeonTrigger {
-                trigger_id: 1,
-                kind: DungeonTriggerKind::OnKill {
-                    target_npc_group: Some(1),
-                    target_ball_id: None,
+            npc_groups: vec![
+                DungeonNpcGroup {
+                    group_id: 1,
+                    wave: 1,
+                    npc_specs: vec![(frig_tid, 2)],
+                    npc_ball_ids: Vec::new(),
+                    spawn_immediately: true,
+                    spawned: false,
+                    cleared: false,
                 },
-                action: DungeonTriggerAction::UnlockGate,
-                fired: false,
-            }],
+                DungeonNpcGroup {
+                    group_id: 2,
+                    wave: 2,
+                    npc_specs: vec![(cruiser_tid, 1)],
+                    npc_ball_ids: Vec::new(),
+                    spawn_immediately: false,
+                    spawned: false,
+                    cleared: false,
+                },
+            ],
+            triggers: vec![
+                DungeonTrigger {
+                    trigger_id: 1,
+                    kind: DungeonTriggerKind::OnApproach {
+                        target_ball_id: None,
+                        target_object_index: Some(0),
+                        anchor_pos: relay_pos,
+                        radius_m: 3_500.0,
+                    },
+                    action: DungeonTriggerAction::SpawnNpcGroup(2),
+                    fired: false,
+                },
+                DungeonTrigger {
+                    trigger_id: 2,
+                    kind: DungeonTriggerKind::OnKill {
+                        target_npc_group: Some(1),
+                        target_ball_id: None,
+                    },
+                    action: DungeonTriggerAction::UnlockGate,
+                    fired: false,
+                },
+            ],
             spawned: false,
             cleared: false,
         },
@@ -508,37 +617,60 @@ fn parse_rooms_from_pyrep(
             position: r2_pos,
             gate_destination_pos: [r2_pos[0] - 10_000.0, r2_pos[1], r2_pos[2]],
             gated: true,
-            disallow_mwd: None,
+            disallow_mwd: Some(r2_mwd_editor || true),
             gate_ball_id: None,
             gate_locked: false,
             objects: vec![DungeonRuntimeObject {
                 ball_id: 0,
                 type_id: 23,
-                name: "Overseer Command Bunker".into(),
-                position: [r2_pos[0] + 3_000.0, r2_pos[1], r2_pos[2]],
+                name: "Overseer Strongbox".into(),
+                position: strongbox_pos,
                 radius: 400.0,
-                is_container: false,
-                loot_items: Vec::new(),
+                is_container: true,
+                loot_items: vec![(loot_tid, 1)],
                 spawned: false,
             }],
-            npc_groups: vec![DungeonNpcGroup {
-                group_id: 1,
-                wave: 1,
-                npc_specs: vec![(10_043, 1)],
-                npc_ball_ids: Vec::new(),
-                spawn_immediately: true,
-                spawned: false,
-                cleared: false,
-            }],
-            triggers: vec![DungeonTrigger {
-                trigger_id: 1,
-                kind: DungeonTriggerKind::OnKill {
-                    target_npc_group: Some(1),
-                    target_ball_id: None,
+            npc_groups: vec![
+                DungeonNpcGroup {
+                    group_id: 1,
+                    wave: 1,
+                    npc_specs: vec![(boss_tid, 1)],
+                    npc_ball_ids: Vec::new(),
+                    spawn_immediately: true,
+                    spawned: false,
+                    cleared: false,
                 },
-                action: DungeonTriggerAction::CompleteDungeon,
-                fired: false,
-            }],
+                DungeonNpcGroup {
+                    group_id: 2,
+                    wave: 2,
+                    npc_specs: vec![(frig_tid, 1)],
+                    npc_ball_ids: Vec::new(),
+                    spawn_immediately: false,
+                    spawned: false,
+                    cleared: false,
+                },
+            ],
+            triggers: vec![
+                DungeonTrigger {
+                    trigger_id: 1,
+                    kind: DungeonTriggerKind::OnLoot {
+                        container_ball_id: None,
+                        target_object_index: Some(0),
+                        item_type_id: None,
+                    },
+                    action: DungeonTriggerAction::SpawnNpcGroup(2),
+                    fired: false,
+                },
+                DungeonTrigger {
+                    trigger_id: 2,
+                    kind: DungeonTriggerKind::OnKill {
+                        target_npc_group: Some(1),
+                        target_ball_id: None,
+                    },
+                    action: DungeonTriggerAction::CompleteDungeon,
+                    fired: false,
+                },
+            ],
             spawned: false,
             cleared: false,
         },
@@ -630,6 +762,82 @@ fn instance_to_pyrep(inst: &DungeonRuntimeInstance) -> PyRep {
     ])
 }
 
+pub async fn spawn_sde_dungeon_runtime_instance(
+    ctx: &ServerContext,
+    owner_char_id: i64,
+    sys_id: u32,
+    dungeon_id: u32,
+    category: &str,
+    base_pos: [f64; 3],
+    has_entry_gate: bool,
+) -> Result<i64, BridgeRpcError> {
+    let existing = with_dungeon_runtime_store(ctx, |store| {
+        store.instances.values().find_map(|inst| {
+            (!inst.completed
+                && !inst.despawned
+                && inst.solar_system_id == sys_id
+                && inst.dungeon_id == dungeon_id
+                && inst.base_position == base_pos)
+                .then_some(inst.instance_id)
+        })
+    });
+    if let Some(inst_id) = existing {
+        return Ok(inst_id);
+    }
+
+    let sde_dungeon = ctx.sde.dungeons.get(&dungeon_id);
+    let dungeon_name = sde_dungeon
+        .map(|d| d.name.trim().to_string())
+        .unwrap_or_else(|| format!("Deadspace Dungeon {dungeon_id}"));
+    let editor_disallow = crate::services::pve_dungeon_editor::is_dungeon_or_room_mwd_disallowed(
+        ctx,
+        i64::from(dungeon_id),
+        None,
+    );
+    let sde_disallow = sde_dungeon
+        .is_some_and(|d| matches!(d.archetype_id, Some(3 | 4 | 6 | 8 | 24 | 51)));
+    let disallow_mwd = editor_disallow || sde_disallow || category == "Deadspace";
+    let rooms = build_sde_deadspace_rooms(
+        ctx,
+        sys_id,
+        dungeon_id,
+        &dungeon_name,
+        base_pos,
+        has_entry_gate,
+    );
+    let now = ctx.now_unix();
+    let inst_id = with_dungeon_runtime_store(ctx, |store| {
+        let id = store.next_instance_id;
+        store.next_instance_id += 1;
+        let entry_gate_pos = has_entry_gate.then_some(base_pos);
+        store.instances.insert(
+            id,
+            DungeonRuntimeInstance {
+                instance_id: id,
+                dungeon_id,
+                dungeon_name: dungeon_name.clone(),
+                category: category.to_string(),
+                archetype: dungeon_name,
+                solar_system_id: sys_id,
+                owner_char_id,
+                base_position: base_pos,
+                disallow_mwd,
+                entry_gate_ball_id: None,
+                entry_gate_pos,
+                entry_gate_locked: false,
+                current_room_index: if has_entry_gate { 0 } else { 1 },
+                rooms,
+                completed: false,
+                despawned: false,
+                created_unix: now,
+            },
+        );
+        id
+    });
+    materialize_dungeon_room_entities(ctx, sys_id, inst_id, 0).await?;
+    Ok(inst_id)
+}
+
 pub async fn spawn_dungeon_instance(
     ctx: &ServerContext,
     char_id: i64,
@@ -642,7 +850,7 @@ pub async fn spawn_dungeon_instance(
         .and_then(|v| v.as_i64())
         .and_then(|v| u32::try_from(v).ok())
         .or(default_sys_id)
-        .unwrap_or(30_000_142);
+        .ok_or_else(|| BridgeRpcError::user_error("MustBeInSpace"))?;
     let dungeon_id = kwargs
         .get("dungeonID")
         .and_then(|v| v.as_i64())
@@ -755,4 +963,142 @@ pub async fn check_dungeon_triggers(
     ship_id: i64,
 ) -> usize {
     on_dungeon_approach(ctx, char_id, sys_id, ship_id, None).await
+}
+
+/// Evaluates `OnApproach` triggers when a pilot issues an approach/orbit/goto/stop command or updates state.
+pub async fn on_dungeon_approach(
+    ctx: &ServerContext,
+    char_id: i64,
+    sys_id: SolarSystemId,
+    ship_id: i64,
+    target_id_opt: Option<i64>,
+) -> usize {
+    if !has_dungeon_runtime_store(ctx) {
+        return 0;
+    }
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some((_, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
+        return 0;
+    };
+    let ship_pos = ship_ball.position.to_array();
+
+    let mut pending_actions = Vec::new();
+    with_dungeon_runtime_store(ctx, |store| {
+        for inst in store.instances.values_mut() {
+            if inst.completed || inst.despawned || inst.solar_system_id != sys_id {
+                continue;
+            }
+            for (r_idx, room) in inst.rooms.iter_mut().enumerate() {
+                if !room.spawned {
+                    continue;
+                }
+                let mut room_actions = Vec::new();
+                for trig in &mut room.triggers {
+                    if trig.fired {
+                        continue;
+                    }
+                    if let DungeonTriggerKind::OnApproach {
+                        target_ball_id,
+                        target_object_index,
+                        anchor_pos,
+                        radius_m,
+                    } = &trig.kind
+                    {
+                        let resolved_target_ball = (*target_ball_id).or_else(|| {
+                            target_object_index
+                                .and_then(|idx| room.objects.get(idx))
+                                .map(|o| o.ball_id)
+                        });
+                        let obj_pos = resolved_target_ball
+                            .and_then(|bid| room.objects.iter().find(|o| o.ball_id == bid))
+                            .map(|o| o.position)
+                            .unwrap_or(*anchor_pos);
+                        let effective_radius = radius_m.max(2_500.0);
+                        let within_radius = dist3(ship_pos, obj_pos) <= effective_radius;
+                        let explicit_target_close = target_id_opt.is_some()
+                            && target_id_opt == resolved_target_ball
+                            && dist3(ship_pos, obj_pos) <= effective_radius.max(5_000.0);
+                        if within_radius || explicit_target_close {
+                            trig.fired = true;
+                            room_actions.push(trig.action.clone());
+                        }
+                    }
+                }
+                if !room_actions.is_empty() {
+                    pending_actions.push((inst.instance_id, r_idx, room_actions));
+                }
+            }
+        }
+    });
+
+    let mut total_fired = 0usize;
+    for (inst_id, r_idx, actions) in pending_actions {
+        total_fired +=
+            apply_dungeon_trigger_actions(ctx, sys_id, inst_id, r_idx, actions, char_id).await;
+    }
+    total_fired
+}
+
+/// Evaluates `OnLoot` triggers when an item is looted from a container/wreck in space.
+pub async fn on_dungeon_item_looted(
+    ctx: &ServerContext,
+    char_id: i64,
+    sys_id_opt: Option<SolarSystemId>,
+    container_ball_id: i64,
+    item_type_id: TypeId,
+) {
+    if !has_dungeon_runtime_store(ctx) {
+        return;
+    }
+    let mut pending_actions = Vec::new();
+
+    with_dungeon_runtime_store(ctx, |store| {
+        for inst in store.instances.values_mut() {
+            if inst.completed || inst.despawned {
+                continue;
+            }
+            if let Some(sys_id) = sys_id_opt {
+                if inst.solar_system_id != sys_id {
+                    continue;
+                }
+            }
+            for (r_idx, room) in inst.rooms.iter_mut().enumerate() {
+                if !room.spawned {
+                    continue;
+                }
+                let mut room_actions = Vec::new();
+                for trig in &mut room.triggers {
+                    if trig.fired {
+                        continue;
+                    }
+                    if let DungeonTriggerKind::OnLoot {
+                        container_ball_id: trig_cont,
+                        target_object_index,
+                        item_type_id: trig_tid,
+                    } = &trig.kind
+                    {
+                        let resolved_cont = (*trig_cont).or_else(|| {
+                            target_object_index
+                                .and_then(|idx| room.objects.get(idx))
+                                .map(|o| o.ball_id)
+                        });
+                        let cont_ok = resolved_cont.is_none_or(|cid| cid == container_ball_id);
+                        let tid_ok = trig_tid.is_none_or(|tid| tid == item_type_id);
+                        let room_has_cont = room.objects.iter().any(|o| o.ball_id == container_ball_id);
+                        if cont_ok && tid_ok && (resolved_cont.is_some() || room_has_cont) {
+                            trig.fired = true;
+                            room_actions.push(trig.action.clone());
+                        }
+                    }
+                }
+                if !room_actions.is_empty() {
+                    pending_actions.push((inst.solar_system_id, inst.instance_id, r_idx, room_actions));
+                }
+            }
+        }
+    });
+
+    for (sys_id, inst_id, r_idx, actions) in pending_actions {
+        let _ = apply_dungeon_trigger_actions(ctx, sys_id, inst_id, r_idx, actions, char_id).await;
+    }
 }

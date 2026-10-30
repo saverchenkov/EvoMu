@@ -93,6 +93,7 @@ pub mod pve_abyssal_pylons;
 pub mod pve_crab_beacons;
 pub mod pve_special_sites;
 pub mod pve_special_sites_abyssal;
+pub mod pve_special_sites_combat;
 pub mod pvp_filament_arena;
 pub mod pvp_filament_mgr;
 pub mod quasar_achievements;

@@ -113,7 +113,7 @@ pub fn expedition_dungeon_for_step(base_dungeon_id: u32, step_index: u8) -> u32 
 }
 
 pub fn roll_escalation_chance(ctx: &ServerContext) -> bool {
-    // 20% escalation roll on completion of combat anomaly/signature/DED complex
+    // DERIVED: 20% escalation roll on completion of combat anomaly/signature/DED complex.
     ctx.mechanic_rng.roll(0.20)
 }
 
@@ -192,6 +192,21 @@ pub async fn create_escalation_expedition(
     pos: [f64; 3],
 ) -> Option<EscalatingPathEntry> {
     let entry = create_escalation_expedition_core(&ctx.db, &ctx.sde, &ctx.systems, char_id, solar_system_id, source_dungeon_id, dungeon_name, pos).await?;
+    let exp_pos = [
+        -45_000_000.0 + (entry.step_index as f64) * 5_000_000.0,
+        15_000_000.0,
+        30_000_000.0,
+    ];
+    let _ = crate::services::pve_dungeon_runtime::spawn_sde_dungeon_runtime_instance(
+        ctx,
+        char_id,
+        entry.destination_solar_system_id,
+        entry.expedition_dungeon_id,
+        "Expedition",
+        exp_pos,
+        false,
+    )
+    .await;
     crate::services::notify_emitters_batch3_space::emit_escalation_created_or_advanced(
         ctx,
         char_id,
@@ -386,6 +401,35 @@ fn dungeon_kv_for_id(sde: &eve_sde::SdeRegistry, dungeon_id: u32, fallback_name:
     ])
 }
 
+fn dungeon_instance_kv_for_id(
+    sde: &eve_sde::SdeRegistry,
+    instance_id: i64,
+    solar_system_id: SolarSystemId,
+    dungeon_id: u32,
+    fallback_name: &str,
+) -> PyRep {
+    let (name, faction_id, archetype_id) = sde
+        .dungeons
+        .get(&dungeon_id)
+        .map(|d| {
+            (
+                d.name.clone(),
+                d.faction_id.map(|f| PyRep::Integer(i64::from(f))).unwrap_or(PyRep::None),
+                d.archetype_id.map(|a| PyRep::Integer(i64::from(a))).unwrap_or(PyRep::None),
+            )
+        })
+        .unwrap_or_else(|| (fallback_name.to_string(), PyRep::None, PyRep::None));
+    PyRep::keyval([
+        ("instanceID", PyRep::Integer(instance_id)),
+        ("solarSystemID", PyRep::Integer(i64::from(solar_system_id))),
+        ("dungeonID", PyRep::Integer(i64::from(dungeon_id))),
+        ("dungeonName", PyRep::String(name)),
+        ("dungeonNameID", PyRep::None),
+        ("factionID", faction_id),
+        ("archetypeID", archetype_id),
+    ])
+}
+
 pub fn get_my_escalating_path_details_rowset(ctx: &ServerContext, char_id: CharacterId) -> PyRep {
     let (active_entries, expired_instance_ids) =
         crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
@@ -448,6 +492,13 @@ pub fn get_my_escalating_path_details_rowset(ctx: &ServerContext, char_id: Chara
         .into_iter()
         .map(|e| {
             let expiry_ft = ((e.expires_at_sec as i64) + 11_644_473_600) * 10_000_000;
+            let dungeon_kv = dungeon_instance_kv_for_id(
+                &ctx.sde,
+                e.instance_id,
+                e.destination_solar_system_id,
+                e.expedition_dungeon_id,
+                &e.expedition_name,
+            );
             let dest_kv = dungeon_kv_for_id(&ctx.sde, e.expedition_dungeon_id, &e.expedition_name);
             let src_kv = dungeon_kv_for_id(&ctx.sde, e.source_dungeon_id, &e.expedition_name);
             vec![
@@ -465,7 +516,7 @@ pub fn get_my_escalating_path_details_rowset(ctx: &ServerContext, char_id: Chara
                 PyRep::Integer(e.expires_at_sec as i64),
                 PyRep::Integer(expiry_ft),
                 PyRep::Integer(i64::from(e.step_index)),
-                dest_kv.clone(),
+                dungeon_kv,
                 dest_kv,
                 src_kv,
             ]

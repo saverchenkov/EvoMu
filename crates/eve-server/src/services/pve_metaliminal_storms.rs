@@ -14,6 +14,7 @@ use eve_sde::{SdeRegistry, SolarSystemId, TypeId};
 use std::collections::{HashMap, HashSet};
 
 /// Minimum storm center movement cadence: 24 hours (`86,400s`).
+/// // DERIVED: CCP Metaliminal Storms devblog (24h–48h roaming step window; 1-jump Strong core, 2–3-jump Weak periphery).
 pub const STORM_MOVE_MIN_SECS: u64 = 24 * 3_600;
 /// Maximum storm center movement cadence: 48 hours (`172,800s`).
 pub const STORM_MOVE_MAX_SECS: u64 = 48 * 3_600;
@@ -258,23 +259,8 @@ pub fn sync_metaliminal_storm_effects_and_sites(ctx: &ServerContext) {
         }
     }
 
-    if let Ok(mut sw_st) =
-        crate::services::inventory_fitting::scanners_superweapons_state().write()
-    {
-        sw_st
-            .system_wide_effects
-            .retain(|k, v| !is_storm_beacon_type(*v) || all_storm_systems.contains(k));
-        sw_st
-            .system_wide_effect_lists
-            .retain(|k, _| all_storm_systems.contains(k));
-        for (sid, tids) in &effect_lists_by_sys {
-            if let Some(&first_tid) = tids.first() {
-                sw_st.system_wide_effects.insert(*sid, first_tid);
-            }
-            sw_st.system_wide_effect_lists.insert(*sid, tids.clone());
-        }
-    }
-
+    // Store storm weather beacons strictly in per-ServerContext `ctx.db` `snap.items`
+    // (never in process-global `scanners_superweapons_state`) so concurrent ServerContexts never leak.
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.retain(|_, it| {
             if it.flag == InventoryFlag::None && is_storm_beacon_type(it.type_id) {

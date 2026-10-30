@@ -457,3 +457,200 @@ async fn test_hacking_failure_outcomes_and_core_kill_loot_spew() {
         .expect_err("Already hacked container cannot be re-hacked");
     assert_eq!(rehack_err.code, "HackingGameAlreadyFinished");
 }
+
+// ============================================================================
+// 3. Negative Regressions: Ghost Blast >10km Zero Damage & Utility Preconditions
+// ============================================================================
+#[tokio::test]
+async fn test_ghost_blast_radius_cutoff_and_utility_range_cloak_tile_guards() {
+    // parity: feat:pve.hacking-node-types, feat:pve.hacking-failure-outcome, feat:pve.ghost-sites
+    eve_testkit::attest(&[
+        "feat:pve.hacking-node-types",
+        "feat:pve.hacking-failure-outcome",
+        "feat:pve.ghost-sites",
+    ]);
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let ship_id = 750_009_001i64;
+    let bystander_ship_id = 750_009_002i64;
+    let data_analyzer_id = 750_009_010i64;
+    let mut sess = setup_space_pilot(&ctx, 9209, PILOT_1, ship_id, TYPE_HERON, LOWSEC_SYS, DVec3::ZERO).await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            data_analyzer_id,
+            make_item(data_analyzer_id, TYPE_DATA_ANALYZER_I, PILOT_1, ship_id, InventoryFlag::MedSlot0, 1, true),
+        );
+        snap.module_online_states.insert(data_analyzer_id, true);
+    });
+
+    ensure_system_pve_sites_seeded(&ctx, LOWSEC_SYS).await;
+    let (data_can_id, data_pos, ghost_can_id, ghost_pos) = with_pve_exploration_reg(&ctx, |reg| {
+        let d = reg.sites_by_system[&LOWSEC_SYS]
+            .iter()
+            .find(|s| s.site_category == "Data" && !s.hackable_can_ids.is_empty())
+            .unwrap();
+        let g = reg.sites_by_system[&LOWSEC_SYS]
+            .iter()
+            .find(|s| s.site_category == "Ghost" && !s.hackable_can_ids.is_empty())
+            .unwrap();
+        (d.hackable_can_ids[0], d.position, g.hackable_can_ids[0], g.position)
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(LOWSEC_SYS);
+    for (cid, pos) in [(data_can_id, data_pos), (ghost_can_id, ghost_pos)] {
+        let _ = sys_handle
+            .spawn_ball(Ball {
+                id: cid,
+                type_id: 32_717,
+                position: DVec3::from_array(pos),
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 10_000.0,
+                radius: 500.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await;
+    }
+
+    // 1. Utility precondition guards: unrevealed target tile, cloaked ship, and >5km range
+    //    must all fail WITHOUT consuming the utility slot!
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::from_array(data_pos)).await;
+    ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(data_can_id)], &kw, None)
+        .await
+        .expect("StartNewGameInstance");
+    with_pve_exploration_reg(&ctx, |reg| {
+        let g = reg.hacking_games.get_mut(&(PILOT_1, data_can_id)).unwrap();
+        g.tiles = build_controlled_v24_board();
+        g.utilities = vec![
+            Some(HackingUtilityKind::KernelRot),
+            Some(HackingUtilityKind::SelfRepair),
+            None,
+        ];
+    });
+
+    // (a) Unrevealed tile 7 rejected for both UsedUtilityElement and UsedUtilityElementOnVirus; slot 0 intact
+    let unrev1 = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "hackingMgr",
+            None,
+            "UsedUtilityElement",
+            &[PyRep::Integer(data_can_id), PyRep::Integer(0), PyRep::Integer(7)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Unrevealed tile must fail UsedUtilityElement");
+    assert_eq!(unrev1.code, "TargetTileNotRevealed");
+    let unrev2 = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "hackingMgr",
+            None,
+            "UsedUtilityElementOnVirus",
+            &[PyRep::Integer(data_can_id), PyRep::Integer(0), PyRep::Integer(7)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Unrevealed tile must fail UsedUtilityElementOnVirus");
+    assert_eq!(unrev2.code, "TargetTileNotRevealed");
+    assert_eq!(
+        with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(PILOT_1, data_can_id)].utilities[0]),
+        Some(HackingUtilityKind::KernelRot),
+        "Failed target tile validation must NOT consume utility slot"
+    );
+
+    // (b) Cloaked ship rejected; slot 1 intact
+    sys_handle.try_update_combat_state(ship_id, |cs| cs.is_cloaked = true);
+    let cloak_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "hackingMgr",
+            None,
+            "UsedUtilityElementOnVirus",
+            &[PyRep::Integer(data_can_id), PyRep::Integer(1)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Cloaked ship must not activate hacking utility");
+    assert_eq!(cloak_err.code, "CannotHackWhileCloaked");
+    sys_handle.try_update_combat_state(ship_id, |cs| cs.is_cloaked = false);
+
+    // (c) Ship moved 12 km away (> 5 km Data Analyzer I range) rejected; slot 1 still intact!
+    let _ = sys_handle
+        .set_ball_position(ship_id, DVec3::from_array(data_pos) + DVec3::new(12_000.0, 0.0, 0.0))
+        .await;
+    let range_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "hackingMgr",
+            None,
+            "UsedUtilityElement",
+            &[PyRep::Integer(data_can_id), PyRep::Integer(1), PyRep::Integer(0)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Out-of-range ship must not activate hacking utility");
+    assert_eq!(range_err.code, "OutOfRange");
+    assert_eq!(
+        with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(PILOT_1, data_can_id)].utilities[1]),
+        Some(HackingUtilityKind::SelfRepair),
+        "Out-of-range utility activation must NOT consume utility slot"
+    );
+
+    // 2. Ghost Site Blast Radius Cutoff:
+    //    - Bystander ship at 25 km (> 10 km blast radius) takes ZERO damage
+    //    - Hacking ship moved to 25 km before QuitHackingAttempt ALSO takes ZERO damage (no teleport fallback!)
+    let mut bystander_cs = ctx.build_ship_combat_state(PILOT_1, bystander_ship_id, TYPE_RIFTER);
+    bystander_cs.shield_hp = 20_000.0;
+    bystander_cs.max_shield_hp = 20_000.0;
+    let _ = sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: bystander_ship_id,
+                type_id: TYPE_RIFTER,
+                position: DVec3::from_array(ghost_pos) + DVec3::new(25_000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 365.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            bystander_cs,
+        )
+        .await;
+
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::from_array(ghost_pos)).await;
+    ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(ghost_can_id)], &kw, None)
+        .await
+        .expect("Start Ghost hack");
+    // Move hacker's ship to 25 km away (> 10 km blast radius) and quit the Ghost hack -> detonates Ghost can
+    let _ = sys_handle
+        .set_ball_position(ship_id, DVec3::from_array(ghost_pos) + DVec3::new(25_000.0, 0.0, 0.0))
+        .await;
+    let shield_before = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().shield_hp;
+    ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "QuitHackingAttempt", &[PyRep::Integer(ghost_can_id)], &kw, None)
+        .await
+        .expect("Quit Ghost hack triggers detonation");
+
+    let shield_after = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().shield_hp;
+    let bystander_shield_after = sys_handle.get_combat_state(bystander_ship_id).await.unwrap().unwrap().shield_hp;
+    assert_eq!(
+        shield_after, shield_before,
+        "Hacker ship at 25 km (> 10 km blast radius) must take 0 Ghost Site detonation damage"
+    );
+    assert_eq!(
+        bystander_shield_after, 20_000.0,
+        "Bystander ship at 25 km (> 10 km blast radius) must take 0 Ghost Site detonation damage"
+    );
+}

@@ -38,7 +38,8 @@ pub const CRAB_CEQ_COST: i64 = 30;
 /// Per-CRAB Signal Interference increase (`1/12` -> refused at 12 CRABs).
 pub const CRAB_INTERFERENCE_DELTA: f64 = 1.0 / 12.0;
 
-// V24 Rogue Drone CRAB wave NPCs (`group_id = 4037`)
+// DERIVED: V24 Rogue Drone CRAB wave NPCs (`group_id = 4037`) and CRAB loot types (`60459`, `60476`, `60477`)
+// verified in `evomu_sde.sqlite`; wave composition & drop counts are deterministic EvoMu defaults since NPC loot tables are server-only.
 const WAVE_1_DRONES: &[TypeId] = &[60_255, 60_316, 60_317];
 const WAVE_2_DRONES: &[TypeId] = &[60_318, 60_331, 60_332, 60_505];
 const WAVE_3_DRONES: &[TypeId] = &[60_333, 60_506, 60_517];
@@ -140,22 +141,21 @@ pub fn is_eligible_crab_ship(sde: &SdeRegistry, beacon_type_id: TypeId, ship_typ
     }
     if beacon_type_id == TYPE_CARRIER_CRAB_BEACON {
         if let Some(tl) = sde.type_lists.get(&946) {
-            return tl.included_group_ids.contains(&ship_t.group_id)
-                || tl.included_type_ids.contains(&ship_type_id);
+            return tl.included_group_ids.contains(&ship_t.group_id);
         }
         return matches!(ship_t.group_id, 547 | 5120);
     }
     if let Some(tl) = sde.type_lists.get(&300) {
-        if tl.included_group_ids.contains(&ship_t.group_id)
-            || tl.included_type_ids.contains(&ship_type_id)
+        if tl.included_group_ids.contains(&ship_t.group_id) || matches!(ship_t.group_id, 883 | 1538)
         {
             return true;
         }
+        return false;
     }
     matches!(
         ship_t.group_id,
         30 | 485 | 547 | 659 | 883 | 4594 | 5120
-    ) || ship_type_id == 11_019
+    )
 }
 
 /// Registers a newly deployed CRAB beacon in `PveSpecialSitesRegistry`.
@@ -265,18 +265,27 @@ fn apply_crab_link_ship_effects(
             });
         }
     }
+    ctx.invalidate_ship_fitting(ship_id);
+    let base_res_opt = ctx
+        .db
+        .with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id))
+        .map(|tid| {
+            let base_cs = ctx.build_ship_combat_state(char_id, ship_id, tid);
+            (base_cs.shield_resonance, base_cs.armor_resonance, base_cs.structure_resonance)
+        });
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let mut orig_res = None;
+    let mut orig_res = base_res_opt;
     sys_handle.try_update_combat_state(ship_id, |cs| {
-        orig_res = Some((cs.shield_resonance, cs.armor_resonance, cs.structure_resonance));
-        for i in 0..4 {
-            cs.shield_resonance[i] *= 0.90;
-            cs.armor_resonance[i] *= 0.90;
-            cs.structure_resonance[i] *= 0.90;
-        }
+        let (sr, ar, hr) = orig_res.get_or_insert((
+            cs.shield_resonance,
+            cs.armor_resonance,
+            cs.structure_resonance,
+        ));
+        cs.shield_resonance = sr.map(|r| r * 0.90);
+        cs.armor_resonance = ar.map(|r| r * 0.90);
+        cs.structure_resonance = hr.map(|r| r * 0.90);
         cs.is_tethered = false;
     });
-    ctx.invalidate_ship_fitting(ship_id);
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnDbuffUpdated",
@@ -303,7 +312,16 @@ fn clear_crab_link_ship_effects(
             list.retain(|e| e.source_module_id != beacon_id);
         }
     }
-    if let Some((sr, ar, hr)) = orig_resonances {
+    ctx.invalidate_ship_fitting(ship_id);
+    let rebuilt_res = char_id_opt.and_then(|cid| {
+        ctx.db
+            .with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id))
+            .map(|tid| {
+                let base_cs = ctx.build_ship_combat_state(cid, ship_id, tid);
+                (base_cs.shield_resonance, base_cs.armor_resonance, base_cs.structure_resonance)
+            })
+    });
+    if let Some((sr, ar, hr)) = rebuilt_res.or(orig_resonances) {
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
         sys_handle.try_update_combat_state(ship_id, |cs| {
             cs.shield_resonance = sr;
@@ -311,7 +329,6 @@ fn clear_crab_link_ship_effects(
             cs.structure_resonance = hr;
         });
     }
-    ctx.invalidate_ship_fitting(ship_id);
     if let Some(cid) = char_id_opt {
         ctx.notify(
             NotificationTarget::Character(cid),
@@ -430,7 +447,39 @@ fn spawn_crab_rogue_drone_wave(ctx: &ServerContext, beacon_id: i64, wave_num: u8
     }
 }
 
-fn finalize_crab_scan_success(ctx: &ServerContext, beacon_id: i64) {
+fn prune_dead_crab_wave_drones(ctx: &ServerContext, beacon_id: i64) -> (u8, usize) {
+    let info = with_pve_special_reg(ctx, |reg| {
+        let rec = reg.crab_beacons.get(&beacon_id)?;
+        Some((rec.solar_system_id, rec.waves_spawned, rec.wave_npc_ball_ids.clone()))
+    });
+    let Some((sys_id, waves_spawned, ball_ids)) = info else {
+        return (0, 0);
+    };
+    if ball_ids.is_empty() {
+        return (waves_spawned, 0);
+    }
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let mut alive_ids = Vec::with_capacity(ball_ids.len());
+    for bid in ball_ids {
+        let mut alive = false;
+        sys_handle.try_update_combat_state(bid, |cs| {
+            alive = cs.structure_hp > 0.0;
+        });
+        if alive {
+            alive_ids.push(bid);
+        }
+    }
+    with_pve_special_reg(ctx, |reg| {
+        if let Some(rec) = reg.crab_beacons.get_mut(&beacon_id) {
+            rec.wave_npc_ball_ids = alive_ids;
+            (rec.waves_spawned, rec.wave_npc_ball_ids.len())
+        } else {
+            (0, 0)
+        }
+    })
+}
+
+fn finalize_crab_scan_success(ctx: &ServerContext, beacon_id: i64, now: u64) {
     let info = with_pve_special_reg(ctx, |reg| {
         let mut loot_ids = Vec::with_capacity(3);
         for _ in 0..3 {
@@ -442,6 +491,7 @@ fn finalize_crab_scan_success(ctx: &ServerContext, beacon_id: i64) {
             return None;
         }
         rec.phase = CrabBeaconPhase::LootRestricted;
+        rec.self_destruct_at_sec = now.saturating_add(CRAB_LOOT_EXCLUSIVE_SECS);
         let drones_to_clear = std::mem::take(&mut rec.wave_npc_ball_ids);
         let data_qty = if rec.type_id == TYPE_CARRIER_CRAB_BEACON { 10 } else { 15 };
         Some((
@@ -697,8 +747,13 @@ fn advance_single_crab_beacon(ctx: &ServerContext, beacon_id: i64, now: u64) {
         if cur.waves_spawned < 3 && now >= wave3_at {
             spawn_crab_rogue_drone_wave(ctx, beacon_id, 3);
         }
-        if now >= cur.scan_completes_at_sec {
-            finalize_crab_scan_success(ctx, beacon_id);
+        let (waves_spawned, alive_drones) = prune_dead_crab_wave_drones(ctx, beacon_id);
+        if alive_drones == 0 && waves_spawned > 0 && waves_spawned < 3 {
+            spawn_crab_rogue_drone_wave(ctx, beacon_id, waves_spawned + 1);
+        }
+        let (waves_after, alive_after) = prune_dead_crab_wave_drones(ctx, beacon_id);
+        if now >= cur.scan_completes_at_sec && waves_after >= 3 && alive_after == 0 {
+            finalize_crab_scan_success(ctx, beacon_id, now);
         }
     }
 
@@ -957,6 +1012,10 @@ pub async fn handle_crab_component_call(
 
             if !is_eligible_crab_ship(&ctx.sde, initial_rec.type_id, ship_ball.type_id) {
                 return Err(BridgeRpcError::user_error("IneligibleShipForCrabLink"));
+            }
+
+            if is_ship_crab_linked(ctx, ship_id, now) {
+                return Err(BridgeRpcError::user_error("ShipAlreadyLinkedToCrab"));
             }
 
             // Verify beacon is idle and system signal interference has capacity for another CRAB
