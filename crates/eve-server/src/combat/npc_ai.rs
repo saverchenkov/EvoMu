@@ -149,7 +149,7 @@ pub fn compute_sec_status_gain(current_sec: f64, bounty: f64) -> f64 {
     }
     let headroom = (5.0 - current_sec).max(0.0);
     let scale = (bounty / 500_000.0).clamp(0.01, 0.10);
-    (headroom * 0.01 * scale).clamp(0.001, 0.5)
+    (headroom * 0.01 * scale).clamp(0.001, 0.5).min(headroom)
 }
 
 /// In-memory runtime tracking for an active NPC combat entity in a solar system.

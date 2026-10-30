@@ -621,6 +621,17 @@ fn handle_skin_license_admin_revoke(
 // Sequencing Pricing, Durations & Job Lifecycle Handlers
 // ============================================================================
 
+fn induction_time_disc_pct(lvl: u32) -> u32 {
+    match lvl {
+        0 => 0,
+        1 => 1,
+        2 => 3,
+        3 => 6,
+        4 => 10,
+        _ => 15,
+    }
+}
+
 fn skill_discounts_and_cap(state: &SkinrCosmeticsState, cid: Option<u32>) -> (u32, u32, usize) {
     let Some(c) = cid else {
         return (0, 0, 5);
@@ -630,9 +641,14 @@ fn skill_discounts_and_cap(state: &SkinrCosmeticsState, cid: Option<u32>) -> (u3
             return (0, 0, 5);
         };
         let lvl = |sid: u32| sk_map.get(&sid).map(|sk| sk.level as u32).unwrap_or(0);
-        let price_disc = ((lvl(81044) + lvl(81045)) * 2).min(25);
-        let dur_disc = ((lvl(81040) + lvl(81041) + lvl(81042) + lvl(81043) + lvl(3395)) * 3).min(50);
-        let max_jobs = 5 + (lvl(81046) + lvl(81047)) as usize;
+        let price_disc = ((lvl(81044) + lvl(81045) + lvl(81363) + lvl(81376)) * 2).min(25);
+        let sde_ind_disc = induction_time_disc_pct(lvl(81377))
+            + induction_time_disc_pct(lvl(81372))
+            + induction_time_disc_pct(lvl(81373))
+            + induction_time_disc_pct(lvl(81374));
+        let legacy_dur_disc = (lvl(81040) + lvl(81041) + lvl(81042) + lvl(81043) + lvl(3395)) * 3;
+        let dur_disc = (sde_ind_disc + legacy_dur_disc).min(60);
+        let max_jobs = 5 + (lvl(81046) + lvl(81047) + lvl(81366) * 2 + lvl(81367) * 2) as usize;
         (price_disc, dur_disc, max_jobs)
     })
 }

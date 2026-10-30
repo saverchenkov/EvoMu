@@ -1285,10 +1285,11 @@ pub fn evaluate_and_record_remote_assistance(
         }
     });
     let Some(ben_id) = beneficiary_opt.filter(|&b| b != helper_char_id) else { return Ok(()); };
+    let ben_outlaw = ctx.db.with_snapshot(|snap| snap.characters.get(&ben_id).map(|c| c.security_status <= -4.95).unwrap_or(false));
     let (ben_criminal, ben_suspect) = {
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
         let st = cw.get_or_create(ben_id);
-        (st.is_criminal(now_unix), st.is_suspect(now_unix))
+        (st.is_criminal(now_unix), st.is_suspect(now_unix) || (ben_outlaw && sys_sec >= 0.45))
     };
     let ben_le_partners: Vec<i64> = with_combat_runtime(ctx, |rt| {
         rt.limited_engagements.get(&ben_id)
@@ -1296,7 +1297,9 @@ pub fn evaluate_and_record_remote_assistance(
             .unwrap_or_default()
     });
     let safety = with_combat_runtime(ctx, |rt| rt.safety_levels.get(&helper_char_id).copied().unwrap_or(SafetyLevel::Red));
-    if ben_criminal && sys_sec > 0.0 && matches!(safety, SafetyLevel::Green | SafetyLevel::Yellow) {
+    if ((ben_criminal && sys_sec > 0.0) || (!ben_le_partners.is_empty() && sys_sec >= 0.45))
+        && matches!(safety, SafetyLevel::Green | SafetyLevel::Yellow)
+    {
         return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
     }
     if ((ben_suspect && sys_sec > 0.0) || !ben_le_partners.is_empty()) && safety == SafetyLevel::Green {
@@ -1328,6 +1331,11 @@ pub fn evaluate_and_record_remote_assistance(
             let st = cw.get_or_create(helper_char_id);
             st.weapon_timer_until_unix = st.weapon_timer_until_unix.max(now_unix.saturating_add(60));
             st.pvp_timer_until_unix = st.pvp_timer_until_unix.max(now_unix.saturating_add(900));
+            if sys_sec >= 0.45 {
+                st.criminal_flag_until_unix = st.criminal_flag_until_unix.max(now_unix.saturating_add(900));
+            } else if sys_sec > 0.0 {
+                st.suspect_flag_until_unix = st.suspect_flag_until_unix.max(now_unix.saturating_add(900));
+            }
         }
         with_mut_combat_runtime(ctx, |rt| {
             for &pid in &ben_le_partners {

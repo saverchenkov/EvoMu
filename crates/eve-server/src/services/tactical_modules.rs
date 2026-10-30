@@ -1318,10 +1318,29 @@ pub async fn activate_command_burst(
         ships
     });
 
+    let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.0);
+    let now_unix_burst = ctx.now_unix();
     let booster_pos = sys.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(DVec3::ZERO);
     let mut affected_ships = Vec::new();
     for (member_char_id, member_ship_id) in candidate_ship_ids {
         if affected_ships.len() >= 256 { break; }
+        if sys_sec >= 0.45 && member_char_id != char_id {
+            let is_illegal_target = {
+                let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+                let st = cw.get_or_create(member_char_id);
+                st.is_criminal(now_unix_burst) || st.is_suspect(now_unix_burst)
+            } || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                rt.is_in_any_limited_engagement(member_char_id, now_unix_burst)
+            }) || ctx.db.with_snapshot(|snap| {
+                let Some(rec) = snap.characters.get(&member_char_id) else { return false; };
+                if rec.security_status <= -4.95 { return true; }
+                let rec_ent = rec.alliance_id.unwrap_or(rec.corporation_id);
+                snap.wars.values().any(|w| w.active && (w.aggressor_corp_id == rec_ent || w.defender_corp_id == rec_ent))
+            });
+            if is_illegal_target {
+                continue;
+            }
+        }
         let in_range = if member_ship_id == ship_id {
             true
         } else if let Ok(Some((_, m_ball))) = sys.get_ball_snapshot(member_ship_id).await {

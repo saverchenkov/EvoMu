@@ -424,14 +424,30 @@ fn market_get_broker_fees(
     ))
 }
 
+fn paragon_hub_skill_reductions(st: &CosmeticsMarketState, cid: u32) -> (u64, usize) {
+    st.db.with_snapshot(|s| {
+        let Some(sk_map) = s.skills.get(&(cid as i64)) else {
+            return (0, 5);
+        };
+        let lvl = |sid: u32| sk_map.get(&sid).map(|sk| sk.level as u64).unwrap_or(0);
+        // 84217 Paragon Relations, 84218 Paragon Partnership, 84220 Executive Paragon Partnership: -1% vendor fee per level each
+        let fee_reduction_pct = (lvl(84217) + lvl(84218) + lvl(84220)).min(15);
+        // 81368 Hub Promotion (+1/lvl), 81369 Hub Algorithm Optimization (+5/lvl)
+        let max_listings = 5 + (lvl(81368) + lvl(81369) * 5) as usize;
+        (fee_reduction_pct, max_listings)
+    })
+}
+
 fn market_get_tax_rate(
-    _st: &CosmeticsMarketState,
+    st: &CosmeticsMarketState,
     ctx: &AuthoritativeContext,
     msg: &DynamicQuasarMessage,
 ) -> HandlerResult {
-    let _cid = require_char(ctx)?;
+    let cid = require_char(ctx)?;
     let target = parse_listing_target(sub(msg, 1));
-    let rate_units: i64 = if target.is_branded() { 10 } else { 20 };
+    let (reduction, _) = paragon_hub_skill_reductions(st, cid);
+    let base_rate: u64 = if target.is_branded() { 10 } else { 20 };
+    let rate_units: i64 = base_rate.saturating_sub(reduction).max(1) as i64;
     let mut tr = Vec::new();
     encode_sint_field(1, rate_units, &mut tr);
     encode_sint_field(2, 0, &mut tr);
@@ -856,8 +872,20 @@ fn skin_initiate_create(
         .ok_or_else(|| (STATUS_BAD_REQUEST, "Broker fee overflows".to_string()))?;
     let now = ctx.now_unix();
 
+    let (_, max_listings) = paragon_hub_skill_reductions(st, cid);
     let tx_uuid = {
         let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
+        let active_owned = data
+            .skin_listings
+            .values()
+            .filter(|l| l.seller_id == cid && l.expires_unix > now && l.quantity > 0)
+            .count();
+        if active_owned >= max_listings {
+            return Err((
+                STATUS_PRECONDITION_FAILED,
+                format!("Maximum active Paragon Hub listings ({max_listings}) reached"),
+            ));
+        }
         let mut skinr_data = st.skinr.data.write().unwrap_or_else(|e| e.into_inner());
         let lic_key = SkinrCosmeticsState::skin_lic_key(cid, &skin_hex);
         let avail = skinr_data
@@ -1037,7 +1065,9 @@ fn skin_initiate_purchase(
         }
     };
 
-    let tax_pct: u64 = if listing.branded { 10 } else { 20 };
+    let (seller_tax_red, _) = paragon_hub_skill_reductions(st, listing.seller_id);
+    let base_tax_pct: u64 = if listing.branded { 10 } else { 20 };
+    let tax_pct: u64 = base_tax_pct.saturating_sub(seller_tax_red).max(1);
     let Some(tier_u32) = st.skin_tier_for_hex(&listing.skin_hex) else {
         rollback_listing_qty(st, &listing, quantity);
         return Err((

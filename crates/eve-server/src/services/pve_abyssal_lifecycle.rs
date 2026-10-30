@@ -483,14 +483,23 @@ pub fn evacuate_void_space_session_sync(
     ctx: &ServerContext,
     char_id: CharacterId,
     vs: &VoidSpaceSessionRecord,
-    _now_unix: u64,
+    now_unix: u64,
 ) -> SolarSystemId {
-    with_pve_special_reg(ctx, |reg| {
+    let pocket_tier = with_pve_special_reg(ctx, |reg| {
         reg.void_space_sessions.remove(&char_id);
+        reg.abyssal_pockets.get(&char_id).map(|p| p.tier)
     });
     crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
 
     let origin_sys = vs.origin_solar_system_id;
+    let origin_sec = ctx.sde.solar_systems.get(&origin_sys).map(|s| s.security_status).unwrap_or(0.0);
+    if pocket_tier.is_some_and(|t| t >= 4) && (0.45..0.75).contains(&origin_sec) {
+        ctx.crimewatch
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .trigger_suspect_flag(char_id, now_unix);
+        crate::services::combat_crimewatch::emit_crimewatch_timer_notifications(ctx, char_id, now_unix);
+    }
     let exit_pos = [
         vs.origin_position[0] + 1_000.0,
         vs.origin_position[1] + 1_000.0,
