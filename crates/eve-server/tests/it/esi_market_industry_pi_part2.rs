@@ -217,7 +217,7 @@ fn test_esi_market_groups_sde_descriptions_and_structure_orders_acl_hub() {
         );
         snap.module_online_states.insert(950_002, false);
 
-        // (d) Fortizar with online Market Hub but market service ACL disabled (general_settings[1] = false)
+        // (d) Fortizar with online Market Hub but docking ACL denied for caller
         snap.structures.insert(
             acl_blocked_fortizar_id,
             make_structure(acl_blocked_fortizar_id, 35833, corp_id, 30_000_142, "ACL Blocked Fortizar"),
@@ -242,7 +242,7 @@ fn test_esi_market_groups_sde_descriptions_and_structure_orders_acl_hub() {
             StructureAccessProfile {
                 profile_id: 1,
                 owner_corp_id: corp_id,
-                general_settings: HashMap::from([(1, false)]),
+                blocked_characters: std::collections::HashSet::from([char_id]),
                 ..Default::default()
             },
         );

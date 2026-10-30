@@ -1271,12 +1271,12 @@ async fn test_pi_colony_command_center_pins_and_links() {
             PyRep::List(vec![PyRep::Tuple(vec![
                 PyRep::Integer(8),
                 PyRep::Integer(proc_pin_id),
-                PyRep::Integer(65),
+                PyRep::Integer(121),
             ])]),
         ],
     )
     .await
-    .expect("Set valid schematic 65");
+    .expect("Set valid schematic 121 (Water)");
     let pin3_info = rpc(
         &ctx,
         &mut s1,
@@ -1287,7 +1287,7 @@ async fn test_pi_colony_command_center_pins_and_links() {
     .await
     .expect("GetPin");
     let PyRep::KeyVal(p3_kv) = pin3_info else { panic!("Expected KeyVal"); };
-    assert_eq!(p3_kv.get("schematicID"), Some(&PyRep::Integer(65)));
+    assert_eq!(p3_kv.get("schematicID"), Some(&PyRep::Integer(121)));
     assert_eq!(p3_kv.get("cycleTimeSeconds"), Some(&PyRep::Integer(1800)));
 
     let cap_err = rpc(

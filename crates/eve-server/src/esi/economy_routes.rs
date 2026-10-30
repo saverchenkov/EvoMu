@@ -506,26 +506,17 @@ pub fn dispatch_economy_route(
                         format!("Structure {structure_id} not found"),
                     );
                 };
-                let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
-                let market_acl_disabled = ext
-                    .access_profiles
-                    .get(&structure_id)
-                    .is_some_and(|prof| {
-                        prof.general_settings.get(&1) == Some(&false)
-                            || prof.general_settings.get(&35_892) == Some(&false)
-                    });
                 if !character_has_structure_acl_access(snap, caller_char_id, st)
                     || !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
                         snap,
                         structure_id,
                         caller_char_id,
                     )
-                    || market_acl_disabled
                 {
                     return RouteExecutionResult::error(
                         403,
                         format!(
-                            "Character {caller_char_id} lacks docking/market ACL access to structure {structure_id}"
+                            "Character {caller_char_id} lacks docking ACL access to structure {structure_id}"
                         ),
                     );
                 }

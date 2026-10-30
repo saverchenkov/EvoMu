@@ -122,7 +122,7 @@ async fn test_pi_sde_schematics_facility_tier_validation_and_routing() {
             .unwrap_or_else(|| panic!("missing SDE schematic for output {out_tid}"))
     };
     let water_schem = find_schem(3645);
-    let biocells_schem = find_schem(9832);
+    let coolant_schem = find_schem(9832); // 9832 = Coolant (Water + Electrolytes)
     let nanofactory_schem = find_schem(2875);
 
     // Deploy Command Center + Basic (2492) + Advanced (2494) + High-Tech (2482) + Storage (2541) + Launchpad (2543)
@@ -161,7 +161,7 @@ async fn test_pi_sde_schematics_facility_tier_validation_and_routing() {
     // Negative facility-tier & unknown schematic checks against SDE planetSchematicsPinMap
     for (pin_id, bad_schem, label) in [
         (basic_id, 999_999, "unknown schematic ID"),
-        (basic_id, biocells_schem, "P2 schematic on Basic facility"),
+        (basic_id, coolant_schem, "P2 schematic on Basic facility"),
         (adv_id, water_schem, "P1 schematic on Advanced facility"),
         (adv_id, nanofactory_schem, "P4 schematic on Advanced facility"),
         (htech_id, water_schem, "P1 schematic on High-Tech facility"),
@@ -201,7 +201,7 @@ async fn test_pi_sde_schematics_facility_tier_validation_and_routing() {
             PyRep::Integer(JITA_PLANET_ID),
             PyRep::List(vec![
                 PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(basic_id), PyRep::Integer(water_schem)]),
-                PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(adv_id), PyRep::Integer(biocells_schem)]),
+                PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(adv_id), PyRep::Integer(coolant_schem)]),
                 PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(htech_id), PyRep::Integer(nanofactory_schem)]),
             ]),
         ],

@@ -191,7 +191,7 @@ async fn test_d6_industry_pi_and_market_wallet_history_durable_across_sqlite_res
                     PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(101), PyRep::Integer(102), PyRep::Integer(0)]),
                     PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(102), PyRep::Integer(103), PyRep::Integer(0)]),
                     PyRep::Tuple(vec![PyRep::Integer(5), PyRep::Integer(102), PyRep::Integer(103), PyRep::Integer(1)]),
-                    PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(103), PyRep::Integer(65)]),
+                    PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(103), PyRep::Integer(121)]),
                     PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(501), PyRep::List(vec![PyRep::Integer(102), PyRep::Integer(103)]), PyRep::Integer(first_p0_tid), PyRep::Integer(3_000)]),
                     PyRep::Tuple(vec![PyRep::Integer(10), PyRep::Integer(102), PyRep::Integer(first_p0_tid), PyRep::Real(0.02), PyRep::Integer(3)]),
                 ]),

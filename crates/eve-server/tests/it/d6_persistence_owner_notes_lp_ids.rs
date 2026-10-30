@@ -217,7 +217,7 @@ async fn test_d3_owner_notes_persistence_market_industry_and_pi_across_sqlite_re
             cmd_link(102, 103),
             cmd_link(103, 104),
             cmd_upgrade_link(102, 103, 1),
-            cmd_schematic(103, 65),
+            cmd_schematic(103, 121),
             cmd_route(501, &[102, 103], first_p0_tid, 3_000),
             cmd_extractor_program(102, first_p0_tid, 0.02, 3),
         ];
@@ -280,7 +280,7 @@ async fn test_d3_owner_notes_persistence_market_industry_and_pi_across_sqlite_re
         let PyRep::List(pins_after) = net_after.dict_get("pins").unwrap() else { panic!("expected pins list") };
         assert_eq!(pins_after.len(), 4);
         let proc_pin = pins_after.iter().find(|p| p.dict_get("typeID").and_then(|v| v.as_i64()) == Some(GAS_BASIC_FACILITY_TYPE_ID as i64)).unwrap();
-        assert_eq!(proc_pin.dict_get("schematicID").and_then(|v| v.as_i64()), Some(65));
+        assert_eq!(proc_pin.dict_get("schematicID").and_then(|v| v.as_i64()), Some(121));
 
         let PyRep::List(links_after) = net_after.dict_get("links").unwrap() else { panic!("expected links list") };
         assert_eq!(links_after.len(), 3);
