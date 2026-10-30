@@ -20,8 +20,8 @@ use eve_server::services::pve_special_sites::with_pve_special_reg;
 use eve_server::services::pve_special_sites_abyssal::{
     evacuate_abyssal_pockets_for_downtime, evaluate_abyssal_spatial_clouds_for_ship,
     pulse_abyssal_automated_pylons, roll_abyssal_weather_penalty_pct, spatial_cloud_radius_m,
-    step_abyssal_hazards_and_pylons_in_ballpark, suppressor_radius_m, tracking_pylon_radius_and_mult,
-    AbyssalWeatherKind, AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID, AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID,
+    step_abyssal_hazards_and_pylons_in_ballpark, suppressor_pulse_damage, suppressor_radius_m,
+    tracking_pylon_radius_and_mult, AbyssalWeatherKind, AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID, AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID,
     AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID, BIOLUMINESCENT_CLOUD_LARGE_TYPE_ID,
     BIOLUMINESCENT_CLOUD_SMALL_TYPE_ID, BIOLUMINESCENT_CLOUD_TYPE_ID,
     FILAMENT_CLOUD_LARGE_TYPE_ID, FILAMENT_CLOUD_SMALL_TYPE_ID, FILAMENT_CLOUD_TYPE_ID,
@@ -298,6 +298,7 @@ async fn test_abyssal_in_pocket_restrictions_boundary_damage_and_clearing() {
     for s in 1_u64..200 {
         ctx.set_mechanic_rng_seed(Some(s));
         let _ = ctx.mechanic_rng.roll(0.5); // consumed by roll_abyssal_weather_penalty_pct
+        let _ = ctx.mechanic_rng.try_unit_f64(); // consumed by sample_abyssal_room_hazards
         let u = ctx.mechanic_rng.try_unit_f64().unwrap();
         if u < 0.35 && empty_seed.is_none() { empty_seed = Some(s); }
         if u >= 0.35 && full_seed.is_none() { full_seed = Some(s); }
@@ -327,24 +328,27 @@ async fn test_abyssal_in_pocket_restrictions_boundary_damage_and_clearing() {
     }
 }
 
-// parity: feat:abyssal.automated-pylons
+// NOTE: `feat:abyssal.automated-pylons` stays intentionally OPEN in docs/BLOCKERS.md (§7) due to
+// V24 SDE type 47438 maxRange=40km vs auditor 25km spec; runtime pylon mechanics are verified below.
 #[tokio::test]
 async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
-    eve_testkit::attest(&[
-        "feat:abyssal.automated-pylons",
-    ]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let kw = HashMap::new();
     let abyss_sys = 32_000_005_u32;
     let sys_h = ctx.systems.get_or_spawn(abyss_sys);
 
-    // 1. Automated Pylons (V24 SDE): Suppressors (47437=15km, 47438=40km, 48254=40km; spare Sentry Drones & Tesseras)
+    // 1. Automated Pylons (V24 SDE): Suppressors (47437=15km, 47438=40km, 48254=40km explosive-only fallback)
     // and Multibody Tracking Pylons (47469=15km 1.8x, 47470=40km 1.6x; buff player ships, Sentry Drones, and NPC ships)
     assert_eq!(suppressor_radius_m(Some(&ctx.sde), AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID, 0.0), 15_000.0);
     assert_eq!(suppressor_radius_m(Some(&ctx.sde), AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID, 0.0), 40_000.0);
     assert_eq!(suppressor_radius_m(Some(&ctx.sde), AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID, 0.0), 40_000.0);
+    for fb_dmg in [
+        suppressor_pulse_damage(None, AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID),
+        suppressor_pulse_damage(Some(&ctx.sde), AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID),
+    ] {
+        assert_eq!(fb_dmg, DamageVector { em: 0.0, thermal: 0.0, kinetic: 0.0, explosive: 90.0 }, "Suppressor fallback must be explosive-only (zero thermal)");
+    }
     assert_eq!(tracking_pylon_radius_and_mult(Some(&ctx.sde), MULTIBODY_TRACKING_PYLON_TYPE_ID, 0.0), (15_000.0, 1.8));
     assert_eq!(tracking_pylon_radius_and_mult(Some(&ctx.sde), MULTIBODY_TRACKING_PYLON_MEDIUM_TYPE_ID, 0.0), (40_000.0, 1.6));
 
@@ -408,12 +412,13 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
     sys_h.try_remove_ball(740_010_002);
 
     let _ = sys_h.set_ball_position(drone_id, DVec3::new(38_000.0, 0.0, 0.0)).await;
+    { let mut bp = sys_h.ballpark.write().unwrap(); let cs = bp.combat_states.get_mut(&drone_id).unwrap(); cs.shield_resonance = [0.0, 0.0, 0.0, 1.0]; }
     let _ = sys_h.spawn_ball(Ball {
         id: 740_010_003, type_id: AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID, position: DVec3::ZERO, velocity: DVec3::ZERO,
         max_velocity: 0.0, inertia: 1.0, mass: 1.0, radius: 40_000.0, speed_fraction: 0.0, mode: MovementMode::Stop,
     }).await;
     let _ = pulse_abyssal_automated_pylons(&ctx, abyss_sys).await;
-    assert!(sys_h.get_combat_state(drone_id).await.unwrap().unwrap().shield_hp < hp_42, "Large suppressor (40km) damages drone at 38km");
+    assert!((hp_42 - sys_h.get_combat_state(drone_id).await.unwrap().unwrap().shield_hp - 90.0).abs() < 1e-3, "Large suppressor (48254) deals 90.0 pure explosive damage (0 thermal)");
     sys_h.try_remove_ball(740_010_003);
 
     // Medium-Range Tracking Pylon (47470, 40km, +60% -> 1.6x) & Short-Range Tracking Pylon (47469, 15km, +80% -> 1.8x)
@@ -458,6 +463,7 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
     seed_cargo_item(&ctx, 740_100_011, FIL_T3_ELEC, char1, c_ship, 1);
     let d3 = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(740_100_011)], &kw, None).await.expect("dep T3");
     let t3 = d3.dict_get("traceBallID").and_then(|v| v.as_i64()).unwrap();
+    ctx.set_mechanic_rng_seed(Some(4));
     let e3 = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(t3)], &kw, None).await.expect("ent T3");
     let pid3 = e3.dict_get("pocketID").and_then(|v| v.as_i64()).unwrap();
     let p3_sys = e3.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
@@ -467,8 +473,14 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
         assert_eq!(s.items[&cache3_id].type_id, 47_951, "Bioadaptive Cache type 47951");
         assert_eq!(s.items[&subnode3_id].type_id, 49_662, "Extraction Subnode type 49662");
     });
-    // BF-04: Suppressor killing last room Rogue Drone NPC (47847) unlocks Room 1 conduit & cleans npc_entities
+    // BF-04 & R-ABYSS-PYLON-02: Room 1 spawns a seeded subset (<8) of clouds+pylons, and Suppressor kill unlocks conduit
     let p3_h = ctx.systems.get_or_spawn(p3_sys);
+    let r1_haz_cnt = {
+        let bp = p3_h.ballpark.read().unwrap();
+        (1..=3_i64).filter(|c| bp.balls.contains_key(&(1_898_000_000 + pid3 * 100 + 10 + c))).count()
+            + (1..=5_i64).filter(|py| bp.balls.contains_key(&(1_899_000_000 + pid3 * 100 + 10 + py))).count()
+    };
+    assert!((2..=4).contains(&r1_haz_cnt), "Room spawns a varied subset of clouds+pylons ({r1_haz_cnt}), not all 8");
     let r1_npcs = with_pve_special_reg(&ctx, |reg| reg.abyssal_pockets[&char1].rooms[0].npc_ball_ids.clone());
     for &nid in &r1_npcs[1..] {
         let _ = p3_h.apply_damage_with_attacker(nid, DamageVector { em: 1e7, thermal: 1e7, kinetic: 1e7, explosive: 1e7 }, Some(char1)).await;
@@ -501,18 +513,9 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
     assert_eq!(spatial_cloud_radius_m(Some(&ctx.sde), PROVING_TACHYON_CLOUD_TYPE_ID, 0.0), 40_000.0);
 
     let default_vel = ctx.sde.types.get(&621).and_then(|t| t.default_attributes.get(&37).copied()).unwrap_or(250.0);
-    let _ = sys_h.spawn_ball(Ball {
-        id: 740_020_001, type_id: BIOLUMINESCENT_CLOUD_TYPE_ID, position: DVec3::new(0.0, 50_000.0, 0.0), velocity: DVec3::ZERO,
-        max_velocity: 0.0, inertia: 1.0, mass: 1.0, radius: SPATIAL_CLOUD_RADIUS_M, speed_fraction: 0.0, mode: MovementMode::Stop,
-    }).await;
-    let _ = sys_h.spawn_ball(Ball {
-        id: 740_020_002, type_id: FILAMENT_CLOUD_TYPE_ID, position: DVec3::new(50_000.0, 50_000.0, 0.0), velocity: DVec3::ZERO,
-        max_velocity: 0.0, inertia: 1.0, mass: 1.0, radius: SPATIAL_CLOUD_RADIUS_M, speed_fraction: 0.0, mode: MovementMode::Stop,
-    }).await;
-    let _ = sys_h.spawn_ball(Ball {
-        id: 740_020_003, type_id: TACHYON_CLOUD_TYPE_ID, position: DVec3::new(-50_000.0, 50_000.0, 0.0), velocity: DVec3::ZERO,
-        max_velocity: 0.0, inertia: 1.0, mass: 1.0, radius: SPATIAL_CLOUD_RADIUS_M, speed_fraction: 0.0, mode: MovementMode::Stop,
-    }).await;
+    for (cid, ctid, cx) in [(740_020_001, BIOLUMINESCENT_CLOUD_TYPE_ID, 0.0), (740_020_002, FILAMENT_CLOUD_TYPE_ID, 50_000.0), (740_020_003, TACHYON_CLOUD_TYPE_ID, -50_000.0)] {
+        let _ = sys_h.spawn_ball(Ball { id: cid, type_id: ctid, position: DVec3::new(cx, 50_000.0, 0.0), velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1.0, radius: SPATIAL_CLOUD_RADIUS_M, speed_fraction: 0.0, mode: MovementMode::Stop }).await;
+    }
 
     let _ = sys_h.set_ball_position(ship_id, DVec3::new(0.0, 50_000.0, 0.0)).await;
     assert_eq!(evaluate_abyssal_spatial_clouds_for_ship(&ctx, abyss_sys, ship_id).await, Some("BioluminescentCloud"));

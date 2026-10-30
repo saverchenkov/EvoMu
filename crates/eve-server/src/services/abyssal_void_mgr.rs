@@ -91,27 +91,26 @@ pub async fn handle(
     }
     match (service, method) {
         ("abyssalMgr", "AbyssalEntranceDeployment") => {
-            if args.is_empty() {
+            if args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0).is_none() {
                 return Some(Err(BridgeRpcError {
                     code: "MissingRequiredArgument".into(),
-                    message: "AbyssalEntranceDeployment requires filament item ID".into(),
+                    message: "AbyssalEntranceDeployment requires a valid filament itemID (> 0)".into(),
                 }));
             }
             Some(crate::services::pve_special_sites::handle_abyssal_entrance_deployment(ctx, session, args).await)
         }
 
         ("abyssalMgr", "AbyssalEntranceGateActivation") => {
-            if args.is_empty() {
+            let Some(trace_id) = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
                 return Some(Err(BridgeRpcError {
                     code: "MissingRequiredArgument".into(),
-                    message: "AbyssalEntranceGateActivation requires gateID or filament itemID".into(),
+                    message: "AbyssalEntranceGateActivation requires a valid gateID or filament itemID (> 0)".into(),
                 }));
-            }
+            };
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let trace_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let trace_opt = with_pve_special_reg(ctx, |reg| reg.abyssal_traces.get(&trace_id).cloned());
             if let Some(trace) = trace_opt {
                 return Some(activate_trace(ctx, session, char_id, trace).await);
@@ -440,6 +439,22 @@ async fn activate_trace(
         base + DVec3::new(0.0, 0.0, -50_000.0),
     );
     let _ = abyss_handle.spawn_ball_with_combat(ball, cs).await;
+    if with_pve_special_reg(ctx, |reg| {
+        reg.abyssal_pockets
+            .get(&char_id)
+            .is_some_and(|p| p.rooms[0].cleared)
+    }) {
+        let r1_gate = 1_895_000_000 + pocket_id * 10 + 1;
+        let _ = abyss_handle
+            .emit_destiny_event(
+                r1_gate,
+                eve_destiny::DestinyEvent::SetBallInteractive {
+                    ball_id: r1_gate,
+                    is_interactive: true,
+                },
+            )
+            .await;
+    }
     session.solar_system_id = Some(ABYSSAL_SPACE_SYSTEM_ID);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, ABYSSAL_SPACE_SYSTEM_ID);
     emit_abyssal_entry_notifications(ctx, char_id, pocket_id, tier, remaining_sec);
@@ -542,6 +557,22 @@ async fn activate_inventory_filament(
         base + DVec3::new(0.0, 0.0, -50_000.0),
     );
     let _ = abyss_handle.spawn_ball_with_combat(ball, cs).await;
+    if with_pve_special_reg(ctx, |reg| {
+        reg.abyssal_pockets
+            .get(&char_id)
+            .is_some_and(|p| p.rooms[0].cleared)
+    }) {
+        let r1_gate = 1_895_000_000 + pocket_id * 10 + 1;
+        let _ = abyss_handle
+            .emit_destiny_event(
+                r1_gate,
+                eve_destiny::DestinyEvent::SetBallInteractive {
+                    ball_id: r1_gate,
+                    is_interactive: true,
+                },
+            )
+            .await;
+    }
     session.solar_system_id = Some(ABYSSAL_SPACE_SYSTEM_ID);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, ABYSSAL_SPACE_SYSTEM_ID);
     emit_abyssal_entry_notifications(ctx, char_id, pocket_id, tier, 1_200);

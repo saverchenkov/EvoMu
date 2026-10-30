@@ -202,6 +202,16 @@ pub async fn ensure_abyssal_room_balls_for_ctx(ctx: &ServerContext, char_id: Cha
                 max_ships,
             )
             .await;
+        } else if room.cleared {
+            let _ = sys_handle
+                .emit_destiny_event(
+                    marker_id,
+                    eve_destiny::DestinyEvent::SetBallInteractive {
+                        ball_id: marker_id,
+                        is_interactive: true,
+                    },
+                )
+                .await;
         }
     }
 }
@@ -328,25 +338,38 @@ pub async fn spawn_abyssal_room_contents(
         );
     }
 
+    let (cloud_mask, pylon_mask) = sample_abyssal_room_hazards(ctx, pocket_id, room);
     let cloud_base = 1_898_000_000 + pocket_id * 100 + (room as i64) * 10;
-    for (offset_id, cloud_tid, cpos) in [
+    for (idx, (offset_id, cloud_tid, cpos)) in [
         (1_i64, TACHYON_CLOUD_TYPE_ID, base + DVec3::new(15_000.0, 0.0, z)),
         (2_i64, BIOLUMINESCENT_CLOUD_TYPE_ID, base + DVec3::new(-15_000.0, 0.0, z)),
         (3_i64, FILAMENT_CLOUD_TYPE_ID, base + DVec3::new(0.0, 15_000.0, z)),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if !cloud_mask[idx] {
+            continue;
+        }
         let mut cball = make_site_npc_ball(cloud_base + offset_id, cloud_tid, cpos);
         cball.radius = spatial_cloud_radius_m(Some(&ctx.sde), cloud_tid, SPATIAL_CLOUD_RADIUS_M);
         let _ = sys_handle.spawn_ball(cball).await;
     }
 
     let pylon_base = 1_899_000_000 + pocket_id * 100 + (room as i64) * 10;
-    for (offset_id, pylon_tid, def_range, ppos) in [
+    for (idx, (offset_id, pylon_tid, def_range, ppos)) in [
         (1_i64, AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID, 15_000.0, base + DVec3::new(20_000.0, 20_000.0, z)),
         (2_i64, AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID, 40_000.0, base + DVec3::new(-20_000.0, 20_000.0, z)),
         (3_i64, AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID, 40_000.0, base + DVec3::new(20_000.0, -20_000.0, z)),
         (4_i64, MULTIBODY_TRACKING_PYLON_TYPE_ID, 15_000.0, base + DVec3::new(-20_000.0, -20_000.0, z)),
         (5_i64, MULTIBODY_TRACKING_PYLON_MEDIUM_TYPE_ID, 40_000.0, base + DVec3::new(-30_000.0, -30_000.0, z)),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if !pylon_mask[idx] {
+            continue;
+        }
         let mut pball = make_site_npc_ball(pylon_base + offset_id, pylon_tid, ppos);
         pball.radius = ctx
             .sde
@@ -687,15 +710,9 @@ pub async fn enter_abyssal_pocket_with_trace(
     let weather = classify_abyssal_filament(filament_type_id)
         .map(|(_, w)| w)
         .unwrap_or(AbyssalWeatherKind::Electrical);
+    let valid_trace_id = trace_ball_id.filter(|&tid| tid > 0);
     let (existing_penalty, trace_max_ships) = with_pve_special_reg(ctx, |reg| {
-        let trace_opt = if let Some(tid) = trace_ball_id {
-            reg.abyssal_traces.get(&tid)
-        } else {
-            reg.abyssal_traces
-                .values()
-                .filter(|t| t.entered_char_ids.contains(&char_id))
-                .max_by_key(|t| t.trace_ball_id)
-        };
+        let trace_opt = valid_trace_id.and_then(|tid| reg.abyssal_traces.get(&tid));
         let pen = trace_opt
             .and_then(|t| t.pocket_id)
             .and_then(|pid| {
@@ -726,17 +743,11 @@ pub async fn enter_abyssal_pocket_with_trace(
     });
     let abyssal_sys_id: SolarSystemId = 32_000_001;
     let sys_handle = ctx.systems.get_or_spawn(abyssal_sys_id);
-    let (pocket_id, room1_npcs, r1_cache, already_spawned, started_at, collapse_at, grid_offset) =
+    let (pocket_id, room1_npcs, r1_cache, already_spawned, r1_cleared, started_at, collapse_at, grid_offset) =
         with_pve_special_reg(ctx, |reg| {
-            let target_pid = if let Some(tid) = trace_ball_id {
-                reg.abyssal_traces.get(&tid).and_then(|t| t.pocket_id)
-            } else {
-                reg.abyssal_traces
-                    .values()
-                    .filter(|t| t.entered_char_ids.contains(&char_id))
-                    .max_by_key(|t| t.trace_ball_id)
-                    .and_then(|t| t.pocket_id)
-            };
+            let target_pid = valid_trace_id
+                .and_then(|tid| reg.abyssal_traces.get(&tid))
+                .and_then(|t| t.pocket_id);
             if let Some(existing) = target_pid.and_then(|pid| {
                 reg.abyssal_pockets
                     .values()
@@ -747,6 +758,7 @@ pub async fn enter_abyssal_pocket_with_trace(
                 let pid = existing.pocket_id;
                 let r1_npcs = existing.rooms[0].npc_ball_ids.clone();
                 let r1_cache = existing.rooms[0].cache_item_id;
+                let r1_done = existing.rooms[0].cleared;
                 let started = existing.started_at_sec;
                 let collapse = existing.collapse_at_sec;
                 let goffset = existing.grid_offset;
@@ -756,7 +768,7 @@ pub async fn enter_abyssal_pocket_with_trace(
                 joined.current_room = 1;
                 joined.origin_position = origin_pos;
                 joined.saved_ship_attrs = saved_attrs.clone();
-                if let Some(tid) = trace_ball_id {
+                if let Some(tid) = valid_trace_id {
                     joined.trace_ball_id = tid;
                 }
                 if !joined.fleet_ship_ids.contains(&ship_id) {
@@ -770,7 +782,7 @@ pub async fn enter_abyssal_pocket_with_trace(
                     p.ship_room.insert(ship_id, 1);
                 }
                 reg.abyssal_pockets.insert(char_id, joined);
-                return (pid, r1_npcs, r1_cache, true, started, collapse, goffset);
+                return (pid, r1_npcs, r1_cache, true, r1_done, started, collapse, goffset);
             }
 
             let mut used_slots: HashSet<i64> = HashSet::new();
@@ -811,23 +823,14 @@ pub async fn enter_abyssal_pocket_with_trace(
             let rooms: [AbyssalRoomRecord; 3] = rooms_vec.try_into().unwrap();
             let r1_npcs = rooms[0].npc_ball_ids.clone();
             let r1_cache = rooms[0].cache_item_id;
-            let trace_id = if let Some(tid) = trace_ball_id {
+            let trace_id = if let Some(tid) = valid_trace_id {
                 if let Some(t) = reg.abyssal_traces.get_mut(&tid) {
                     t.pocket_id = Some(pid);
                     t.expires_at_sec = collapse;
                 }
                 tid
             } else {
-                reg.abyssal_traces
-                    .values_mut()
-                    .filter(|t| t.pocket_id.is_none() && t.entered_char_ids.contains(&char_id))
-                    .max_by_key(|t| t.trace_ball_id)
-                    .map(|t| {
-                        t.pocket_id = Some(pid);
-                        t.expires_at_sec = collapse;
-                        t.trace_ball_id
-                    })
-                    .unwrap_or(0)
+                0
             };
             reg.abyssal_pockets.insert(
                 char_id,
@@ -858,30 +861,15 @@ pub async fn enter_abyssal_pocket_with_trace(
                     max_ships: eff_max_ships,
                 },
             );
-            (pid, r1_npcs, r1_cache, false, now, collapse, goffset)
+            (pid, r1_npcs, r1_cache, false, false, now, collapse, goffset)
         });
     crate::sp6_lifecycle::register_abyssal_session(
-        ctx,
-        char_id,
-        ship_id,
-        abyssal_sys_id,
-        origin_sys,
-        started_at,
-        collapse_at,
+        ctx, char_id, ship_id, abyssal_sys_id, origin_sys, started_at, collapse_at,
     );
     if !already_spawned {
         spawn_abyssal_room_contents(
-            ctx,
-            &sys_handle,
-            pocket_id,
-            1,
-            &room1_npcs,
-            r1_cache,
-            tier,
-            filament_type_id,
-            diff_mult,
-            0.0,
-            eff_max_ships,
+            ctx, &sys_handle, pocket_id, 1, &room1_npcs, r1_cache, tier, filament_type_id,
+            diff_mult, 0.0, eff_max_ships,
         )
         .await;
     } else {
@@ -889,17 +877,14 @@ pub async fn enter_abyssal_pocket_with_trace(
         if sys_handle.get_ball_snapshot(r1_gate).await.ok().flatten().is_none() {
             let mut conduit_cs = ctx.build_type_combat_state(abyssal_room_gate_type(1));
             conduit_cs.undock_invulnerable_remaining_ticks = 999_999;
-            let _ = sys_handle
-                .spawn_ball_with_combat(
-                    make_site_npc_ball(
-                        r1_gate,
-                        abyssal_room_gate_type(1),
-                        DVec3::from_array(grid_offset),
-                    ),
-                    conduit_cs,
-                )
-                .await;
+            let ball = make_site_npc_ball(r1_gate, abyssal_room_gate_type(1), DVec3::from_array(grid_offset));
+            let _ = sys_handle.spawn_ball_with_combat(ball, conduit_cs).await;
         }
+        let evt = eve_destiny::DestinyEvent::SetBallInteractive {
+            ball_id: r1_gate,
+            is_interactive: r1_cleared,
+        };
+        let _ = sys_handle.emit_destiny_event(r1_gate, evt).await;
     }
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -1288,7 +1273,12 @@ pub async fn handle_abyssal_entrance_deployment(
         .solar_system_id
         .ok_or_else(|| rpc_err("NoSolarSystem", "Session has no active solar system"))?;
     crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, cur_sys)?;
-    let filament_arg = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+    let Some(filament_arg) = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
+        return Err(rpc_err(
+            "MissingRequiredArgument",
+            "AbyssalEntranceDeployment requires a valid filament itemID (> 0)",
+        ));
+    };
 
     let (_iid, filament_type_id, tier, max_ships, _origin_sec, ship_pos) =
         validate_and_consume_abyssal_filaments(ctx, char_id, ship_id, cur_sys, filament_arg).await?;

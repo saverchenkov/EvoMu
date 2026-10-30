@@ -244,6 +244,7 @@ async fn test_abyssal_deadspace_mechanics_and_collapse_lifecycle() {
     assert!(has_trace, "Abyssal Trace appears in directional scanner results");
 
     // 2. Activate entrance gate into Abyssal Deadspace pocket
+    ctx.set_mechanic_rng_seed(Some(4));
     let enter_rep = ctx
         .dispatch_rpc(
             &mut sess,

@@ -55,7 +55,7 @@ async fn test_void_space_player_jump_and_gate_activation() {
             ship_id,
             eve_db::InventoryItemRecord {
                 item_id: ship_id,
-                type_id: 621, // Cerberus cruiser
+                type_id: 621, // Caracal cruiser
                 owner_id: char_id,
                 location_id: JITA_SYS_ID as i64,
                 flag: eve_db::InventoryFlag::None,
@@ -64,7 +64,27 @@ async fn test_void_space_player_jump_and_gate_activation() {
                 ..Default::default()
             },
         );
+        snap.items.insert(
+            100_000_690,
+            eve_db::InventoryItemRecord {
+                item_id: 100_000_690,
+                type_id: 2_605, // Nanofiber Internal Structure II (+maxVelocity, -agility)
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: eve_db::InventoryFlag::LoSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
     });
+    ctx.invalidate_ship_fitting(ship_id);
+    let _ = ctx.get_or_rebuild_ship_fitting(char_id, ship_id);
+    ctx.sync_character_local_chat(char_id, None, JITA_SYS_ID);
+    assert!(
+        ctx.db.with_snapshot(|s| s.chat_channels["solarsystemid2:30000142"].members.contains(&char_id)),
+        "Pilot starts in Jita Local chat before Void Space jump"
+    );
     sess.station_id = None;
     sess.structure_id = None;
     sess.solar_system_id = Some(JITA_SYS_ID);
@@ -136,8 +156,8 @@ async fn test_void_space_player_jump_and_gate_activation() {
         .expect_err("Targeting own ship must fail");
     assert_eq!(self_err.code, "InvalidTarget");
 
-    // 4b. BF-05: Non-Void Space filaments (Needlejack 53977, Pochven 56065, Abyssal 47763) and Abyssal Trace (47458) rejected
-    for (idx, non_void_tid) in [53_977_u32, 56_065, 47_763].into_iter().enumerate() {
+    // 4b. BF-05: Non-Void Space filaments (Needlejack 50057/53977, Pochven 56068/56065, Proving 56725/53965, Abyssal 47763) and Abyssal Trace (47458) rejected
+    for (idx, non_void_tid) in [50_057_u32, 53_977, 56_068, 56_065, 56_725, 53_965, 47_763].into_iter().enumerate() {
         let bad_iid = 200_000_700 + idx as i64;
         ctx.db.with_mut_snapshot(|snap| {
             snap.items.insert(bad_iid, eve_db::InventoryItemRecord {
@@ -181,8 +201,7 @@ async fn test_void_space_player_jump_and_gate_activation() {
     assert_eq!(trace_err.code, "InvalidTarget");
     jita_handle.try_remove_ball(200_000_750);
 
-    // 5. Jump via cargo filament: seed Warp Matrix Filament (SDE group 4145) in active ship cargo and move >1,000 km from Jita stations/gates
-    let _ = jita_handle.set_ball_position(ship_id, DVec3::new(0.0, 2.0e9, 0.0)).await;
+    // 5. Seed Warp Matrix Filament (62_448, SDE group 4145) and enforce < 1,000 km station & stargate ProximityRestriction
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             filament_item_id,
@@ -198,6 +217,24 @@ async fn test_void_space_player_jump_and_gate_activation() {
             },
         );
     });
+    let stn_pos = ctx.sde.stations[&60_003_760].position;
+    let _ = jita_handle.set_ball_position(ship_id, stn_pos + DVec3::new(500_000.0, 0.0, 0.0)).await;
+    let stn_prox = ctx
+        .dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(filament_item_id)], &kw, None)
+        .await
+        .expect_err("VoidSpacePlayerJump <1000km from station must fail");
+    assert_eq!(stn_prox.code, "ProximityRestriction");
+    let gate_pos = ctx.sde.jumps.values().find(|j| j.from_solar_system_id == JITA_SYS_ID).unwrap().position;
+    let _ = jita_handle.set_ball_position(ship_id, gate_pos + DVec3::new(500_000.0, 0.0, 0.0)).await;
+    let gate_prox = ctx
+        .dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(filament_item_id)], &kw, None)
+        .await
+        .expect_err("VoidSpacePlayerJump <1000km from stargate must fail");
+    assert_eq!(gate_prox.code, "ProximityRestriction");
+    assert!(ctx.db.with_snapshot(|s| s.items.contains_key(&filament_item_id)), "Proximity refusal must not consume filament");
+
+    // Move >1,000 km from Jita stations/stargates and jump
+    let _ = jita_handle.set_ball_position(ship_id, DVec3::new(0.0, 2.0e9, 0.0)).await;
 
     let _ = ctx.drain_notifications_for_char(char_id);
     let jump_rep = ctx
@@ -252,15 +289,21 @@ async fn test_void_space_player_jump_and_gate_activation() {
         "Filament must be consumed on jump"
     );
 
-    // Verify session updated to Void Space
+    // Verify session updated, Jita Local chat membership removed, and fitted Dogma kinematics preserved on Void Space ball
     assert_eq!(sess.solar_system_id, Some(VOID_SPACE_SYS_ID));
+    ctx.db.with_snapshot(|s| {
+        assert!(!s.chat_channels.get("solarsystemid2:30000142").is_some_and(|c| c.members.contains(&char_id)), "Removed from Jita Local on Void Space entry");
+        assert!(!s.chat_channels.contains_key("solarsystemid2:32000002"), "Void Space has no Local chat channel");
+    });
+    let raw_vel = ctx.sde.types[&621].default_attributes[&37];
+    let raw_in = ctx.sde.types[&621].default_attributes[&70];
+    let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).expect("fitted Caracal");
+    let (fit_vel, fit_in) = (fit.ship.get_attribute(37, &ctx.sde), fit.ship.get_attribute(70, &ctx.sde));
+    assert!((fit_vel - raw_vel).abs() > 1.0 && (fit_in - raw_in).abs() > 0.01, "Nanofiber II modifies maxVelocity & agility from raw hull");
 
-    // Verify ship ball and exit gates spawned in Void Space
     let void_handle = ctx.systems.get_or_spawn(VOID_SPACE_SYS_ID);
-    assert!(
-        void_handle.get_ball_snapshot(ship_id).await.unwrap().is_some(),
-        "Ship ball must exist in Void Space"
-    );
+    let (_, vb) = void_handle.get_ball_snapshot(ship_id).await.unwrap().expect("Ship ball must exist in Void Space");
+    assert!((vb.max_velocity - fit_vel).abs() < 1e-3 && (vb.inertia - fit_in).abs() < 1e-4, "Void Space ball preserves fitted Dogma kinematics");
     assert!(
         void_handle.get_ball_snapshot(888_001).await.unwrap().is_some(),
         "Exit gate 888001 must exist in Void Space"
@@ -273,7 +316,7 @@ async fn test_void_space_player_jump_and_gate_activation() {
         .expect("ClientIsReady");
     assert_eq!(ready_rep.dict_get("ready"), Some(&PyRep::Bool(true)));
 
-    // 7. Exit gate activation returns to origin solar system
+    // 7. Exit gate activation returns to origin solar system, restores Local chat, and preserves fitted Dogma kinematics
     let exit_rep = ctx
         .dispatch_rpc(
             &mut sess,
@@ -291,6 +334,9 @@ async fn test_void_space_player_jump_and_gate_activation() {
         Some(&PyRep::Integer(JITA_SYS_ID as i64))
     );
     assert_eq!(sess.solar_system_id, Some(JITA_SYS_ID));
+    assert!(ctx.db.with_snapshot(|s| s.chat_channels["solarsystemid2:30000142"].members.contains(&char_id)), "Restored to Jita Local chat on Void Space exit");
+    let (_, jb) = jita_handle.get_ball_snapshot(ship_id).await.unwrap().expect("Ship ball restored in Jita");
+    assert!((jb.max_velocity - fit_vel).abs() < 1e-3 && (jb.inertia - fit_in).abs() < 1e-4, "Returned Jita ball preserves fitted Dogma kinematics");
 
     // 8. Also verify V24 Warp Matrix / Void filament type 62_448 ("QA Void Filament", SDE group_id = 4145)
     //    jumps into Void Space (32_000_002) and distinguish it from Needlejack Jump Filaments (53_977, group_id = 4041)

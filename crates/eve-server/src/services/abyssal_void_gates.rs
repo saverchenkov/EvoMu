@@ -138,7 +138,7 @@ pub(crate) async fn handle_abyssal_gate_activation(
     let abyss_handle = ctx.systems.get_or_spawn(abyss_sys);
     let expected_gate_id = 1_895_000_000 + pid * 10 + (curr_room as i64);
     let alt_gate_id = 1_895_000_000 + (curr_room as i64);
-    if gate_id == 0 || (gate_id != expected_gate_id && gate_id != alt_gate_id) {
+    if gate_id <= 0 || (gate_id != expected_gate_id && gate_id != alt_gate_id) {
         return Err(BridgeRpcError {
             code: "InvalidGate".into(),
             message: format!("Gate {gate_id} is not the active transfer gate for room {curr_room}"),
@@ -222,15 +222,23 @@ pub(crate) async fn handle_abyssal_gate_activation(
         let p = reg.abyssal_pockets.get_mut(&char_id)?;
         p.current_room = next_room;
         p.ship_room.insert(ship_id, next_room);
-        let any_still_in_curr_room = reg.abyssal_pockets.values().any(|other| {
+        let bound_tid = p.trace_ball_id;
+        let eff_max = (p.max_ships.max(1)) as usize;
+        let any_pilot_at_or_before_curr = reg.abyssal_pockets.values().any(|other| {
             other.pocket_id == pid
                 && !other.completed
                 && !other.collapsed_destroyed
-                && other.current_room == curr_room
+                && other.current_room <= curr_room
         });
-        Some((already_spawned_next, any_still_in_curr_room))
+        let has_unentered_coop_slots = reg.abyssal_traces.values().any(|t| {
+            (t.pocket_id == Some(pid) || (bound_tid > 0 && t.trace_ball_id == bound_tid))
+                && (t.expires_at_sec == 0 || now_u < t.expires_at_sec)
+                && t.entered_char_ids.len() < (t.max_ships.max(1) as usize).max(eff_max)
+        });
+        let keep_curr_room_entities = any_pilot_at_or_before_curr || has_unentered_coop_slots;
+        Some((already_spawned_next, keep_curr_room_entities))
     });
-    let Some((already_spawned_next, any_still_in_curr_room)) = advance_res else {
+    let Some((already_spawned_next, keep_curr_room_entities)) = advance_res else {
         return Err(BridgeRpcError {
             code: "NotInAbyssalSpace".into(),
             message: "Abyssal pocket disappeared during gate activation".into(),
@@ -245,7 +253,17 @@ pub(crate) async fn handle_abyssal_gate_activation(
             rt.npc_entities.remove(&npc_id);
         }
     });
-    if !any_still_in_curr_room {
+    if keep_curr_room_entities {
+        let _ = abyss_handle
+            .emit_destiny_event(
+                actual_gate_id,
+                eve_destiny::DestinyEvent::SetBallInteractive {
+                    ball_id: actual_gate_id,
+                    is_interactive: true,
+                },
+            )
+            .await;
+    } else {
         let old_marker_id = 1_895_000_000 + pid * 10 + (curr_room as i64);
         abyss_handle.try_remove_ball(old_marker_id);
         let old_cache_id = 1_896_000_000 + pid * 10 + (curr_room as i64);
@@ -380,7 +398,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
     let abyss_handle = ctx.systems.get_or_spawn(pocket_sys);
     let expected_gate_id = 1_895_000_000 + pid * 10 + 3;
     let alt_gate_id = 1_895_000_000 + 3;
-    if gate_id == 0 || (gate_id != expected_gate_id && gate_id != alt_gate_id) {
+    if gate_id <= 0 || (gate_id != expected_gate_id && gate_id != alt_gate_id) {
         return Err(BridgeRpcError {
             code: "InvalidGate".into(),
             message: format!("Gate {gate_id} is not the active exit conduit for room 3"),
@@ -497,26 +515,28 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         }
     });
     if let Some(pid) = removed_pid {
-        let r3_marker_id = 1_895_000_000 + pid * 10 + 3;
-        let r3_cache_id = 1_896_000_000 + pid * 10 + 3;
-        let r3_subnode_id = r3_cache_id + 500_000;
-        abyss_handle.try_remove_ball(r3_marker_id);
-        abyss_handle.try_remove_ball(r3_cache_id);
-        abyss_handle.try_remove_ball(r3_subnode_id);
-        for c in 1..=3_i64 {
-            abyss_handle.try_remove_ball(1_898_000_000 + pid * 100 + 30 + c);
+        for r in 1..=3_i64 {
+            let marker_id = 1_895_000_000 + pid * 10 + r;
+            let cache_id = 1_896_000_000 + pid * 10 + r;
+            let subnode_id = cache_id + 500_000;
+            abyss_handle.try_remove_ball(marker_id);
+            abyss_handle.try_remove_ball(cache_id);
+            abyss_handle.try_remove_ball(subnode_id);
+            for c in 1..=3_i64 {
+                abyss_handle.try_remove_ball(1_898_000_000 + pid * 100 + r * 10 + c);
+            }
+            for py in 1..=5_i64 {
+                abyss_handle.try_remove_ball(1_899_000_000 + pid * 100 + r * 10 + py);
+            }
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.items.remove(&cache_id);
+                snap.item_positions.remove(&cache_id);
+                snap.items.remove(&subnode_id);
+                snap.item_positions.remove(&subnode_id);
+                snap.items
+                    .retain(|_, item| item.location_id != cache_id && item.location_id != subnode_id);
+            });
         }
-        for py in 1..=5_i64 {
-            abyss_handle.try_remove_ball(1_899_000_000 + pid * 100 + 30 + py);
-        }
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.items.remove(&r3_cache_id);
-            snap.item_positions.remove(&r3_cache_id);
-            snap.items.remove(&r3_subnode_id);
-            snap.item_positions.remove(&r3_subnode_id);
-            snap.items
-                .retain(|_, item| item.location_id != r3_cache_id && item.location_id != r3_subnode_id);
-        });
     }
 
     restore_abyssal_weather_dogma_modifiers(ctx, ship_id, &saved_attrs);
@@ -757,10 +777,19 @@ pub(crate) async fn handle_void_space_player_jump(
         if let Some(chan) = snap.chat_channels.get_mut(&old_chan_id) {
             chan.members.remove(&char_id);
         }
+        snap.chat_channels
+            .remove(&format!("solarsystemid2:{VOID_SPACE_SYSTEM_ID}"));
         snap.service_state_blobs
             .insert(format!("void_space_content:{char_id}"), effective_content_id.to_string());
         Ok::<(), BridgeRpcError>(())
     });
+    let _ = crate::services::quasar_social_chat::on_character_leave_local_chat(
+        &ctx.quasar_gateway,
+        &ctx.db,
+        char_id as u32,
+        cur_sys,
+        now_unix,
+    );
 
     let void_handle = ctx.systems.get_or_spawn(VOID_SPACE_SYSTEM_ID);
     for exit_gid in [888_001_i64, 888_002_i64] {

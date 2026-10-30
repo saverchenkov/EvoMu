@@ -342,6 +342,12 @@ pub async fn validate_and_consume_abyssal_filaments(
     cur_sys: SolarSystemId,
     filament_arg: i64,
 ) -> Result<(ItemId, TypeId, u8, u8, f64, DVec3), BridgeRpcError> {
+    if filament_arg <= 0 {
+        return Err(rpc_err(
+            "MissingRequiredArgument",
+            "Filament activation requires a positive filament itemID or typeID",
+        ));
+    }
     let (_ship_tid, _ship_gid, max_ships) = validate_abyssal_hull_and_capacity(ctx, ship_id)?;
     let required_filaments = max_ships as i32;
 

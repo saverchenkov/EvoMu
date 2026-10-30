@@ -552,3 +552,70 @@ async fn test_abyssal_coop_staggered_rooms_reentry_kinematics_and_pod_corpse() {
         assert_eq!(snap.items[&new_ship_id].type_id, 596, "Amarr pilot respawned in Impairor (596) faction rookie corvette");
     });
 }
+
+#[tokio::test]
+async fn test_abyssal_staggered_coop_r1_to_r2_preserves_conduit_cache_and_interactivity() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let sys_id = SYS_08_LASHESIH;
+    let (char1, char2) = (90_000_001_i64, 90_000_002_i64);
+    let (ship1, ship2) = (626_000_001_i64, 626_000_002_i64);
+    let base = DVec3::new(60_000_000.0, 2.0e9, 0.0);
+
+    // Destroyer co-op (Coercer 16236 -> maxShips == 2)
+    let mut sess1 = login_pilot_in_space(&ctx, 887_501, "demo", "demo-secret", char1, ship1, 16_236, sys_id, base).await;
+    let mut sess2 = login_pilot_in_space(&ctx, 887_502, "other", "other-secret", char2, ship2, 16_236, sys_id, base + DVec3::new(300.0, 0.0, 0.0)).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(99_501, FleetRecord { fleet_id: 99_501, boss_id: char1, members: vec![char1, char2], ..Default::default() });
+    });
+
+    // P2-2: Non-positive itemID / gateID rejected without scanning registry
+    assert_eq!(ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(0)], &kw, None).await.unwrap_err().code, "MissingRequiredArgument");
+    assert_eq!(ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(-1)], &kw, None).await.unwrap_err().code, "MissingRequiredArgument");
+
+    seed_cargo_item(&ctx, 726_100_001, FIL_T1_ELEC, char1, ship1, 2);
+    let dep = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(726_100_001)], &kw, None).await.expect("deploy destroyer trace");
+    assert_eq!(dep.dict_get("maxShips"), Some(&PyRep::Integer(2)));
+    let tr_id = dep.dict_get("traceBallID").unwrap().as_i64().unwrap();
+
+    // Pilot 1 enters Room 1, clears Room 1 NPCs, and jumps R1 -> R2 BEFORE Pilot 2 enters the trace
+    ctx.set_mechanic_rng_seed(Some(4));
+    let ent1 = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(tr_id)], &kw, None).await.expect("pilot 1 enters R1");
+    let pid = ent1.dict_get("pocketID").unwrap().as_i64().unwrap();
+    let p_sys = ent1.dict_get("solarSystemID").unwrap().as_i64().unwrap() as u32;
+    let p_h = ctx.systems.get_or_spawn(p_sys);
+    assert_eq!(ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalGateActivation", &[PyRep::Integer(0)], &kw, None).await.unwrap_err().code, "InvalidGate");
+
+    let r1_gate = 1_895_000_000 + pid * 10 + 1;
+    let r1_cache = 1_896_000_000 + pid * 10 + 1;
+    let r1_subnode = r1_cache + 500_000;
+    crate::abyssal_room_combat::destroy_room_npcs_via_damage(&ctx, char1, 0).await;
+    let g1_pos = p_h.get_ball_snapshot(r1_gate).await.unwrap().unwrap().1.position;
+    let _ = p_h.set_ball_position(ship1, g1_pos + DVec3::new(100.0, 0.0, 0.0)).await;
+    let adv1 = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalGateActivation", &[PyRep::Integer(r1_gate)], &kw, None).await.expect("pilot 1 jumps R1->R2 before pilot 2 enters");
+    assert_eq!(adv1.dict_get("room"), Some(&PyRep::Integer(2)));
+
+    // Room 1 conduit, Bioadaptive Cache + loot, Subnode, and sampled hazards MUST remain intact for Pilot 2
+    assert!(p_h.get_ball_snapshot(r1_gate).await.unwrap().is_some(), "Room 1 conduit preserved for un-entered co-op slot");
+    assert!(p_h.get_ball_snapshot(r1_cache).await.unwrap().is_some(), "Room 1 Bioadaptive Cache ball preserved");
+    assert!(p_h.get_ball_snapshot(r1_subnode).await.unwrap().is_some(), "Room 1 Extraction Subnode ball preserved");
+    ctx.db.with_snapshot(|s| {
+        assert!(s.items.contains_key(&r1_cache) && s.items.values().any(|i| i.location_id == r1_cache), "Room 1 cache DB item & loot preserved");
+        assert!(s.items.contains_key(&r1_subnode), "Room 1 subnode DB item preserved");
+    });
+
+    // Pilot 2 activates origin trace to enter Room 1 -> receives SetBallInteractive(r1_gate, true) and transits R1 -> R2
+    let ent2 = ctx.dispatch_rpc(&mut sess2, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(tr_id)], &kw, None).await.expect("pilot 2 staggered entry into R1");
+    assert_eq!(ent2.dict_get("pocketID"), Some(&PyRep::Integer(pid)));
+    let (_, obs2, _) = p_h.drain_observer_updates(ship2).await.expect("ship2 observer updates");
+    assert!(
+        obs2.iter().any(|u| matches!(*u, eve_destiny::DestinyEvent::SetBallInteractive { ball_id, is_interactive: true } if ball_id == r1_gate)),
+        "Pilot 2 receives SetBallInteractive(true) for already-cleared Room 1 conduit upon staggered entry"
+    );
+
+    let _ = p_h.set_ball_position(ship2, g1_pos + DVec3::new(150.0, 0.0, 0.0)).await;
+    let adv2 = ctx.dispatch_rpc(&mut sess2, "abyssalMgr", None, "AbyssalGateActivation", &[PyRep::Integer(r1_gate)], &kw, None).await.expect("pilot 2 jumps R1->R2 via preserved conduit");
+    assert_eq!(adv2.dict_get("room"), Some(&PyRep::Integer(2)));
+    assert!(p_h.get_ball_snapshot(r1_gate).await.unwrap().is_none(), "Room 1 conduit cleaned up once final co-op pilot advances to R2");
+}

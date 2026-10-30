@@ -95,7 +95,8 @@ pub fn suppressor_radius_m(
     }
 }
 
-/// Resolves V24 SDE pulse damage (`attr 114/116/117/118`) for Deviant Automata Suppressors.
+/// Resolves V24 SDE pulse damage (`attr 114/116/117/118`) for Deviant Automata Suppressors,
+/// with explosive-only warhead fallback when tower SDE attributes omit turret damage channels.
 pub fn suppressor_pulse_damage(
     sde_opt: Option<&eve_sde::SdeRegistry>,
     suppressor_tid: TypeId,
@@ -116,10 +117,40 @@ pub fn suppressor_pulse_damage(
     }
     eve_destiny::DamageVector {
         em: 0.0,
-        thermal: 45.0,
+        thermal: 0.0,
         kinetic: 0.0,
-        explosive: 45.0,
+        explosive: 90.0,
     }
+}
+
+/// Samples a seeded/varied subset of spatial hazard clouds (`1..=2` of `3`) and automated pylons
+/// (`1..=2` of `5`) per Abyssal room so rooms do not unconditionally spawn all 8 hazards.
+pub fn sample_abyssal_room_hazards(
+    ctx: &ServerContext,
+    pocket_id: i64,
+    room: u8,
+) -> ([bool; 3], [bool; 5]) {
+    let mut state = ctx
+        .mechanic_rng
+        .try_next_u64()
+        .unwrap_or((pocket_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+        .wrapping_add((room as u64).wrapping_mul(0x517C_C1B7_2722_0A95));
+    let draw = crate::rng::splitmix64_next(&mut state);
+    let cloud_count = 1 + ((draw & 1) as usize);
+    let c_start = ((draw >> 2) as usize) % 3;
+    let c_step = 1 + (((draw >> 5) as usize) % 2);
+    let mut clouds = [false; 3];
+    for k in 0..cloud_count {
+        clouds[(c_start + k * c_step) % 3] = true;
+    }
+    let pylon_count = 1 + (((draw >> 8) as usize) % 2);
+    let p_start = ((draw >> 11) as usize) % 5;
+    let p_step = 1 + (((draw >> 15) as usize) % 4);
+    let mut pylons = [false; 5];
+    for k in 0..pylon_count {
+        pylons[(p_start + k * p_step) % 5] = true;
+    }
+    (clouds, pylons)
 }
 
 /// Resolves V24 SDE `maxRange` (`attr 54`) and `warfareBuff1Value` (`attr 2469`) tracking multiplier
@@ -230,9 +261,32 @@ pub fn destroy_pod_and_respawn_faction_corvette_in_snap(
     );
     snap.item_positions.insert(corpse_id, death_pos);
 
-    let (home_station_id, home_sys_id, const_id, reg_id) = sde_opt
-        .map(|sde| resolve_character_home_station_and_system(snap, sde, cid))
-        .unwrap_or((60_003_760, 30_000_142, 20_000_020, 10_000_002));
+    let (home_station_id, home_sys_id, const_id, reg_id) = match sde_opt {
+        Some(sde) => resolve_character_home_station_and_system(snap, sde, cid),
+        None => snap
+            .characters
+            .get(&cid)
+            .map(|c| {
+                let st_id = if c.home_station_id > 0 {
+                    c.home_station_id
+                } else {
+                    snap.corporations
+                        .get(&c.corporation_id)
+                        .and_then(|corp| corp.hq_station_id)
+                        .or(c.station_id)
+                        .unwrap_or(0)
+                };
+                let sys_id = snap
+                    .sp6_lifecycle
+                    .abyssal_sessions
+                    .get(&cid)
+                    .map(|s| s.origin_system_id)
+                    .filter(|&s| s > 0)
+                    .unwrap_or(c.solar_system_id);
+                (st_id, sys_id, c.constellation_id, c.region_id)
+            })
+            .unwrap_or((0, 0, 0, 0)),
+    };
     let race_id = snap.characters.get(&cid).map(|c| c.race_id).unwrap_or(8);
     let corvette_type_id = sde_opt
         .and_then(|sde| sde.race(race_id))
