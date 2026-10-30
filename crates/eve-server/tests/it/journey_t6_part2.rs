@@ -1,7 +1,8 @@
-//! End-to-end integration tests for `plan:T-6` (`journey:*` parity rows, part 2: journeys 16..=29).
+//! In-process integration smoke tests for `plan:T-6` (part 2: journeys 14..=29).
+//! Note: `journey:*` ledger rows remain open until real V24 client execution via `tools/client-harness/run_journeys`.
 #![forbid(unsafe_code)]
 
-use crate::common::{login_pilot, pin_clock};
+use crate::common::{login_pilot, pin_clock, probe_scan, scan_row_field};
 use crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite;
 use eve_db::base64url_encode_no_pad;
 use eve_machonet::SessionState;
@@ -9,6 +10,7 @@ use eve_proto::quasar::{sha256_bytes, EvePublicRequest, GoogleAny, GoogleTimesta
 use eve_proto::PyRep;
 use eve_server::esi::{EsiHttpRequest, EsiRouter};
 use eve_server::router::ServerContext;
+use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -23,26 +25,65 @@ async fn rpc(
         .await
 }
 
+fn bound_id(rep: &PyRep) -> u64 {
+    match rep {
+        PyRep::Tuple(t) => t[0].as_i64().unwrap_or(0) as u64,
+        other => other.as_i64().unwrap_or(0) as u64,
+    }
+}
+
+#[tokio::test]
+async fn test_journey_14_exploration() {
+    let ctx = ServerContext::new();
+    pin_clock(&ctx);
+    let mut sess = SessionState::new(73_017);
+    login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)]).await.unwrap();
+    rpc(&ctx, &mut sess, "stationSvc", "Undock", &[PyRep::Integer(100_000_001)]).await.unwrap();
+    let scan_bind = rpc(&ctx, &mut sess, "scanMgr", "MachoBindObject", &[PyRep::Integer(30_000_142), PyRep::None]).await.unwrap();
+    let sid = bound_id(&scan_bind);
+    let dscan = ctx
+        .dispatch_rpc(&mut sess, "scanMgr", Some(sid), "DirectionalScan", &[PyRep::Real(14.3), PyRep::Real(360.0), PyRep::Tuple(vec![PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)])], &HashMap::new(), None)
+        .await
+        .unwrap();
+    assert!(!matches!(dscan, PyRep::None));
+    let rows = probe_scan(&ctx, &mut sess, DVec3::ZERO, 4.0 * 149_597_870_700.0).await;
+    assert_ne!(rows.len(), 0);
+    let cert = scan_row_field(&rows, rows[0].dict_get("signatureID").unwrap().as_str().unwrap(), "certainty");
+    assert!(!matches!(cert, PyRep::None), "certainty field present in scan row");
+}
+
+#[tokio::test]
+async fn test_journey_15_wormholes_filaments() {
+    let ctx = ServerContext::new();
+    pin_clock(&ctx);
+    let mut sess = SessionState::new(73_018);
+    login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)]).await.unwrap();
+    rpc(&ctx, &mut sess, "stationSvc", "Undock", &[PyRep::Integer(100_000_001)]).await.unwrap();
+    ctx.advance_secs(15);
+    let wh = rpc(&ctx, &mut sess, "wormholeMgr", "WormholeJump", &[PyRep::Integer(999_999)]).await;
+    assert_eq!(wh.unwrap_err().code, "WormholeNotPresent");
+}
+
 #[tokio::test]
 async fn test_journey_16_ship_loss() {
-    // parity: journey:ship_loss
-    eve_testkit::attest(&["journey:ship_loss"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let mut sess = SessionState::new(73_019);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)]).await.unwrap();
 
-    let ins = rpc(&ctx, &mut sess, "insuranceSvc", "InsureShip", &[PyRep::Integer(100_000_001), PyRep::Real(100_000.0)]).await;
-    assert_eq!(ins.is_ok(), true);
+    let ins = rpc(&ctx, &mut sess, "insuranceSvc", "InsureShip", &[PyRep::Integer(100_000_001), PyRep::Real(100_000.0)])
+        .await
+        .expect("InsureShip");
+    assert!(!matches!(ins, PyRep::None));
     let km = rpc(&ctx, &mut sess, "corpRegistry", "GetRecentKills", &[PyRep::Integer(90_000_001)]).await.unwrap();
-    assert_ne!(format!("{km:?}"), "");
+    assert!(!matches!(km, PyRep::None));
 }
 
 #[tokio::test]
 async fn test_journey_17_clones() {
-    // parity: journey:clones
-    eve_testkit::attest(&["journey:clones"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let mut sess = SessionState::new(73_020);
@@ -50,15 +91,15 @@ async fn test_journey_17_clones() {
     rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)]).await.unwrap();
 
     let state = rpc(&ctx, &mut sess, "jumpCloneSvc", "GetCloneState", &[]).await.unwrap();
-    assert_ne!(format!("{state:?}"), "");
-    let home = rpc(&ctx, &mut sess, "charMgr", "SetHomeStation", &[PyRep::Integer(60_003_760)]).await;
-    assert_eq!(home.is_ok(), true);
+    assert!(matches!(state, PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::Object { .. }));
+    rpc(&ctx, &mut sess, "charMgr", "SetHomeStation", &[PyRep::Integer(60_003_760)])
+        .await
+        .expect("SetHomeStation");
+    assert_eq!(ctx.db.get_character(90_000_001).unwrap().home_station_id, 60_003_760);
 }
 
 #[tokio::test]
 async fn test_journey_18_industry() {
-    // parity: journey:industry
-    eve_testkit::attest(&["journey:industry"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let mut sess = SessionState::new(73_021);
@@ -66,13 +107,11 @@ async fn test_journey_18_industry() {
     rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)]).await.unwrap();
 
     let jobs = rpc(&ctx, &mut sess, "industryManager", "GetJobsByOwner", &[]).await.unwrap();
-    assert_ne!(format!("{jobs:?}"), "");
+    assert!(matches!(jobs, PyRep::List(_) | PyRep::Object { .. } | PyRep::Tuple(_)));
 }
 
 #[tokio::test]
 async fn test_journey_19_planetary() {
-    // parity: journey:planetary
-    eve_testkit::attest(&["journey:planetary"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let mut sess = SessionState::new(73_022);
@@ -80,18 +119,17 @@ async fn test_journey_19_planetary() {
     rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)]).await.unwrap();
 
     let planets = rpc(&ctx, &mut sess, "planetMgr", "GetPlanetsForChar", &[]).await.unwrap();
-    assert_ne!(format!("{planets:?}"), "");
+    assert!(!matches!(planets, PyRep::None));
 }
 
 #[tokio::test]
 async fn test_journey_20_corporation() {
-    // parity: journey:corporation
-    eve_testkit::attest(&["journey:corporation"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let mut sess = SessionState::new(73_023);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)]).await.unwrap();
+    ctx.advance_secs(15);
 
     let corp = rpc(
         &ctx,
@@ -105,14 +143,18 @@ async fn test_journey_20_corporation() {
             PyRep::Real(0.05),
         ],
     )
-    .await;
-    assert_ne!(format!("{corp:?}"), "");
+    .await
+    .expect("AddCorporation");
+    let corp_id = corp
+        .as_i64()
+        .or_else(|| corp.dict_get("corporationID").and_then(|v| v.as_i64()))
+        .unwrap_or(0);
+    assert!(corp_id > 0, "AddCorporation must return positive corp_id, got {corp:?}");
+    assert_eq!(ctx.db.get_character(90_000_001).unwrap().corporation_id, corp_id);
 }
 
 #[tokio::test]
 async fn test_journey_21_fleet() {
-    // parity: journey:fleet
-    eve_testkit::attest(&["journey:fleet"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let mut sess = SessionState::new(73_024);
@@ -120,13 +162,13 @@ async fn test_journey_21_fleet() {
     rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)]).await.unwrap();
 
     let fleet = rpc(&ctx, &mut sess, "fleetObjectHandler", "CreateFleet", &[]).await.unwrap();
-    assert_ne!(format!("{fleet:?}"), "");
+    assert!(!matches!(fleet, PyRep::None));
+    let fleet_id = ctx.db.get_character(90_000_001).unwrap().fleet_id.expect("character fleet_id set");
+    assert!(fleet_id > 0);
 }
 
 #[tokio::test]
 async fn test_journey_22_structures() {
-    // parity: journey:structures
-    eve_testkit::attest(&["journey:structures"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let mut sess = SessionState::new(73_025);
@@ -134,15 +176,13 @@ async fn test_journey_22_structures() {
     rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)]).await.unwrap();
 
     let structs = rpc(&ctx, &mut sess, "structureDirectory", "GetStructures", &[]).await.unwrap();
-    assert_ne!(format!("{structs:?}"), "");
+    assert!(!matches!(structs, PyRep::None));
     let dockable = rpc(&ctx, &mut sess, "structureDirectory", "GetMyDockableStructures", &[]).await.unwrap();
-    assert_ne!(format!("{dockable:?}"), "");
+    assert!(!matches!(dockable, PyRep::None));
 }
 
 #[tokio::test]
 async fn test_journey_23_sovereignty_fw() {
-    // parity: journey:sovereignty_fw
-    eve_testkit::attest(&["journey:sovereignty_fw"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let mut sess = SessionState::new(73_026);
@@ -150,15 +190,13 @@ async fn test_journey_23_sovereignty_fw() {
     rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)]).await.unwrap();
 
     let sov = rpc(&ctx, &mut sess, "sovMgr", "GetSovStructuresInfoForSolarSystem", &[PyRep::Integer(30_000_142)]).await.unwrap();
-    assert_ne!(format!("{sov:?}"), "");
+    assert!(!matches!(sov, PyRep::None));
     let fw = rpc(&ctx, &mut sess, "facWarMgr", "GetStats_Character", &[]).await.unwrap();
-    assert_ne!(format!("{fw:?}"), "");
+    assert!(!matches!(fw, PyRep::None));
 }
 
 #[tokio::test]
 async fn test_journey_24_daily_goals_events() {
-    // parity: journey:daily_goals_events
-    eve_testkit::attest(&["journey:daily_goals_events"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let mut sess = SessionState::new(73_027);
@@ -179,14 +217,14 @@ async fn test_journey_24_daily_goals_events() {
         authoritative_context: None,
         trace_context: None,
     };
-    let rep = rpc(&ctx, &mut sess, "publicGatewaySvc", "SendRequest", &[PyRep::Bytes(req.encode_proto())]).await.unwrap();
-    assert_ne!(format!("{rep:?}"), "");
+    let rep = rpc(&ctx, &mut sess, "publicGatewaySvc", "SendRequest", &[PyRep::Bytes(req.encode_proto())])
+        .await
+        .expect("SendRequest");
+    assert!(!matches!(rep, PyRep::None));
 }
 
 #[tokio::test]
 async fn test_journey_25_cosmetics_store() {
-    // parity: journey:cosmetics_store
-    eve_testkit::attest(&["journey:cosmetics_store"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     crate::common::seed_test_nes_store_catalog(&ctx);
@@ -196,12 +234,14 @@ async fn test_journey_25_cosmetics_store() {
 
     let sub = rpc(&ctx, &mut sess, "publicGatewaySvc", "Subscribe", &[]).await.unwrap();
     assert_eq!(sub.dict_get("subscribed"), Some(&PyRep::Bool(true)));
+    let cats = rpc(&ctx, &mut sess, "storeManager", "get_categories", &[]).await.expect("get_categories");
+    assert!(matches!(cats, PyRep::List(ref l) if !l.is_empty()));
+    let prods = rpc(&ctx, &mut sess, "storeManager", "get_products", &[]).await.expect("get_products");
+    assert!(matches!(prods, PyRep::List(ref l) if !l.is_empty()));
 }
 
 #[tokio::test]
 async fn test_journey_26_mail_notifications() {
-    // parity: journey:mail_notifications
-    eve_testkit::attest(&["journey:mail_notifications"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let (mut s1, mut s2) = (SessionState::new(73_029), SessionState::new(73_030));
@@ -225,19 +265,17 @@ async fn test_journey_26_mail_notifications() {
     )
     .await
     .unwrap();
-    assert_ne!(format!("{mail:?}"), "");
+    assert!(mail.as_i64().unwrap_or(0) > 0);
     let headers = rpc(&ctx, &mut s2, "mailMgr", "GetMailHeaders", &[]).await.unwrap();
-    assert_ne!(format!("{headers:?}"), "");
+    assert!(!matches!(headers, PyRep::None));
     let notifs = rpc(&ctx, &mut s2, "notificationMgr", "GetAllNotifications", &[]).await.unwrap();
-    assert_ne!(format!("{notifs:?}"), "");
+    assert!(!matches!(notifs, PyRep::None));
     let evs = rpc(&ctx, &mut s2, "calendarMgr", "GetEventList", &[]).await.unwrap();
-    assert_ne!(format!("{evs:?}"), "");
+    assert!(!matches!(evs, PyRep::None));
 }
 
 #[tokio::test]
 async fn test_journey_27_esi_external() {
-    // parity: journey:esi_external
-    eve_testkit::attest(&["journey:esi_external"]);
     let ctx = Arc::new(ServerContext::new());
     pin_clock(&ctx);
     let verifier = "0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -273,6 +311,9 @@ async fn test_journey_27_esi_external() {
     let resp = router.handle_request(&req);
     assert_eq!(resp.status_code, 200);
     assert_ne!(resp.headers.len(), 0);
+    let body_str = std::str::from_utf8(&resp.body).expect("utf8 wallet body");
+    let wallet_val: f64 = body_str.trim().parse().expect("numeric wallet balance");
+    assert!(wallet_val > 0.0);
 
     // Missing scope enforcement
     let bad_req = EsiHttpRequest {
@@ -288,8 +329,6 @@ async fn test_journey_27_esi_external() {
 
 #[tokio::test]
 async fn test_journey_28_downtime_persistence() {
-    // parity: journey:downtime_persistence
-    eve_testkit::attest(&["journey:downtime_persistence"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let ctx2 = persist_and_reopen_sqlite(&ctx, "t6_downtime");
@@ -299,8 +338,6 @@ async fn test_journey_28_downtime_persistence() {
 
 #[tokio::test]
 async fn test_journey_29_gm_tools() {
-    // parity: journey:gm_tools
-    eve_testkit::attest(&["journey:gm_tools"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let mut player_sess = SessionState::new(73_031);
@@ -325,4 +362,10 @@ async fn test_journey_29_gm_tools() {
         let res = rpc(&ctx, &mut gm_sess, "slash", "SlashCmd", &[PyRep::String(cmd.into())]).await;
         assert!(res.is_ok(), "GM command {cmd} failed: {res:?}");
     }
+    ctx.db.with_snapshot(|snap| {
+        let has_trit = snap.items.values().any(|i| i.owner_id == 90_000_001 && i.type_id == 34 && i.quantity >= 100);
+        assert!(has_trit, "/createitem 34 100 must create Tritanium");
+        let skill_lvl = snap.skills.get(&90_000_001).and_then(|s| s.get(&3402)).map(|s| s.level).unwrap_or(0);
+        assert_eq!(skill_lvl, 5, "/giveskill 3402 5 must set skill level 5");
+    });
 }

@@ -1,7 +1,8 @@
-//! End-to-end integration tests for `plan:T-6` (`journey:*` parity rows, part 1: journeys 1..=15).
+//! In-process integration smoke tests for `plan:T-6` (part 1: journeys 1..=13).
+//! Note: `journey:*` ledger rows remain open until real V24 client execution via `tools/client-harness/run_journeys`.
 #![forbid(unsafe_code)]
 
-use crate::common::{login_pilot, pin_clock, probe_scan, scan_row_field};
+use crate::common::{login_pilot, pin_clock, probe_scan};
 use eve_db::{
     base64url_encode_no_pad, InventoryFlag, SkillQueueEntry,
 };
@@ -37,8 +38,6 @@ fn bound_id(rep: &PyRep) -> u64 {
 
 #[tokio::test]
 async fn test_journey_01_launch_login() {
-    // parity: journey:launch_login
-    eve_testkit::attest(&["journey:launch_login"]);
     let ctx = Arc::new(ServerContext::new());
     pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -110,8 +109,6 @@ async fn test_journey_01_launch_login() {
 
 #[tokio::test]
 async fn test_journey_02_create_character() {
-    // parity: journey:create_character
-    eve_testkit::attest(&["journey:create_character"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let mut sess = SessionState::new(73_002);
@@ -184,8 +181,6 @@ async fn test_journey_02_create_character() {
 
 #[tokio::test]
 async fn test_journey_03_station_ui() {
-    // parity: journey:station_ui
-    eve_testkit::attest(&["journey:station_ui"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let mut sess = SessionState::new(73_003);
@@ -222,8 +217,6 @@ async fn test_journey_03_station_ui() {
 
 #[tokio::test]
 async fn test_journey_04_fit_ship() {
-    // parity: journey:fit_ship
-    eve_testkit::attest(&["journey:fit_ship"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let mut sess = SessionState::new(73_004);
@@ -232,24 +225,26 @@ async fn test_journey_04_fit_ship() {
         .await
         .expect("SelectCharacterID");
 
-    // Buy a module on market, assemble/repackage ship, fit & online module, load ammo, save/load fitting
-    let _ = rpc(
+    // Buy a module on market, fit module, validate slot rejection, inspect Dogma, save/load fitting
+    let ord = rpc(
         &ctx,
         &mut sess,
         "marketProxy",
-        "PlaceOrder",
+        "PlaceBuyOrder",
         &[
-            PyRep::Integer(1), // buy
             PyRep::Integer(60_003_760),
             PyRep::Integer(202), // 150mm Light AutoCannon I
             PyRep::Real(5_000.0),
             PyRep::Integer(1),
-            PyRep::Integer(0),
+            PyRep::Integer(-1),
             PyRep::Integer(1),
             PyRep::Integer(14),
         ],
     )
-    .await;
+    .await
+    .expect("PlaceBuyOrder");
+    let ord_id = ord.as_i64().or_else(|| ord.dict_get("orderID").and_then(|v| v.as_i64())).unwrap_or(0);
+    assert!(ord_id > 0);
 
     let ship_id = 100_000_001i64;
     let mod_id = 100_000_003i64; // 1MN Afterburner I
@@ -309,8 +304,6 @@ async fn test_journey_04_fit_ship() {
 
 #[tokio::test]
 async fn test_journey_05_undock_navigate() {
-    // parity: journey:undock_navigate
-    eve_testkit::attest(&["journey:undock_navigate"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let mut sess = SessionState::new(73_005);
@@ -384,8 +377,6 @@ async fn test_journey_05_undock_navigate() {
 
 #[tokio::test]
 async fn test_journey_06_local_chat() {
-    // parity: journey:local_chat
-    eve_testkit::attest(&["journey:local_chat"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let (mut s1, mut s2) = (SessionState::new(73_006), SessionState::new(73_007));
@@ -394,19 +385,26 @@ async fn test_journey_06_local_chat() {
     login_pilot(&ctx, &mut s2, "other", "other-secret").await;
     rpc(&ctx, &mut s2, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_002)]).await.unwrap();
 
-    let chan = PyRep::Tuple(vec![PyRep::String("solarsystemid2".into()), PyRep::Integer(30_000_142)]);
-    let _ = rpc(&ctx, &mut s1, "LSC", "JoinChannel", &[chan.clone()]).await;
-    let _ = rpc(&ctx, &mut s2, "LSC", "JoinChannel", &[chan]).await;
-    let chan_str = PyRep::String("solarsystemid2_30000142".into());
-    let _ = rpc(&ctx, &mut s1, "LSC", "SendMessage", &[chan_str.clone(), PyRep::String("Hello Jita!".into())]).await;
-    let _ = rpc(&ctx, &mut s2, "LSC", "GetMembers", &[chan_str]).await;
-    assert_eq!(s1.solar_system_id, Some(30_000_142));
+    let chan_str = PyRep::String("solarsystemid2:30000142".into());
+    let j1 = rpc(&ctx, &mut s1, "LSC", "JoinChannel", &[chan_str.clone()]).await.expect("JoinChannel s1");
+    let j2 = rpc(&ctx, &mut s2, "LSC", "JoinChannel", &[chan_str.clone()]).await.expect("JoinChannel s2");
+    assert_eq!(j2.dict_get("memberCount"), Some(&PyRep::Integer(2)));
+    assert_eq!(j1.dict_get("channelID"), Some(&chan_str));
+    let sent = rpc(&ctx, &mut s1, "LSC", "SendMessage", &[chan_str.clone(), PyRep::String("Hello Jita!".into())])
+        .await
+        .expect("SendMessage");
+    assert!(!matches!(sent, PyRep::None));
+    let members = rpc(&ctx, &mut s2, "LSC", "GetMembers", &[chan_str]).await.expect("GetMembers");
+    assert!(!matches!(members, PyRep::None));
+    ctx.db.with_snapshot(|snap| {
+        let ch = snap.chat_channels.get("solarsystemid2:30000142").expect("local channel in db");
+        assert!(ch.members.contains(&90_000_001));
+        assert!(ch.members.contains(&90_000_002));
+    });
 }
 
 #[tokio::test]
 async fn test_journey_07_multiplayer_presence() {
-    // parity: journey:multiplayer_presence
-    eve_testkit::attest(&["journey:multiplayer_presence"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let (mut s1, mut s2) = (SessionState::new(73_008), SessionState::new(73_009));
@@ -435,8 +433,6 @@ async fn test_journey_07_multiplayer_presence() {
 
 #[tokio::test]
 async fn test_journey_08_skills_training() {
-    // parity: journey:skills_training
-    eve_testkit::attest(&["journey:skills_training"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let mut sess = SessionState::new(73_010);
@@ -457,36 +453,36 @@ async fn test_journey_08_skills_training() {
     let q = rpc(&ctx, &mut sess, "skillMgr2", "GetSkillQueue", &[]).await.unwrap();
     assert!(!matches!(q, PyRep::None));
 
-    // Attribute remap + skill plan
-    let _ = rpc(
+    // Attribute remap + attributes verification
+    rpc(
         &ctx,
         &mut sess,
         "charMgr",
         "RespecCharacter",
         &[PyRep::Integer(17), PyRep::Integer(27), PyRep::Integer(21), PyRep::Integer(17), PyRep::Integer(17)],
     )
-    .await;
-    let _ = rpc(
-        &ctx,
-        &mut sess,
-        "skillMgr2",
-        "SaveSkillPlan",
-        &[PyRep::String("T6 Plan".into()), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3402), PyRep::Integer(3)])])],
-    )
-    .await;
-    assert_eq!(ctx.now_unix(), crate::common::TEST_CLOCK_BASE_UNIX + 700);
+    .await
+    .expect("RespecCharacter");
+    let attrs = rpc(&ctx, &mut sess, "skillMgr2", "GetAttributes", &[]).await.expect("GetAttributes");
+    if let PyRep::Dict(entries) = attrs {
+        let int_val = entries.iter().find(|(k, _)| k.as_i64() == Some(165)).and_then(|(_, v)| v.as_i64());
+        let mem_val = entries.iter().find(|(k, _)| k.as_i64() == Some(166)).and_then(|(_, v)| v.as_i64());
+        assert_eq!(int_val, Some(27));
+        assert_eq!(mem_val, Some(21));
+    } else {
+        panic!("expected Dict from GetAttributes, got {attrs:?}");
+    }
 }
 
 #[tokio::test]
 async fn test_journey_09_market_trade() {
-    // parity: journey:market_trade
-    eve_testkit::attest(&["journey:market_trade"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let mut sess = SessionState::new(73_011);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)]).await.unwrap();
 
+    let bal_before = ctx.db.get_character(90_000_001).unwrap().balance.0;
     let ord = rpc(
         &ctx,
         &mut sess,
@@ -495,7 +491,7 @@ async fn test_journey_09_market_trade() {
         &[
             PyRep::Integer(60_003_760),
             PyRep::Integer(34),
-            PyRep::Real(10.0),
+            PyRep::Real(1.0),
             PyRep::Integer(100),
             PyRep::Integer(-1),
             PyRep::Integer(1),
@@ -504,18 +500,28 @@ async fn test_journey_09_market_trade() {
     )
     .await
     .expect("PlaceBuyOrder");
-    let oid = ord.as_i64().unwrap_or(1);
-    let _ = rpc(&ctx, &mut sess, "marketProxy", "ModifyCharOrder", &[PyRep::Integer(oid), PyRep::Real(9.5), PyRep::Integer(100)]).await;
-    let _ = rpc(&ctx, &mut sess, "marketProxy", "CancelCharOrder", &[PyRep::Integer(oid)]).await;
+    let oid = ord.as_i64().or_else(|| ord.dict_get("orderID").and_then(|v| v.as_i64())).unwrap_or(0);
+    assert!(oid > 0);
+    let bal_after_place = ctx.db.get_character(90_000_001).unwrap().balance.0;
+    assert!(bal_after_place < bal_before, "escrow deducted on buy order");
+    ctx.advance_secs(301);
+    rpc(&ctx, &mut sess, "marketProxy", "ModifyCharOrder", &[PyRep::Integer(oid), PyRep::Real(1.5), PyRep::Integer(100)])
+        .await
+        .expect("ModifyCharOrder");
+    let bal_after_mod = ctx.db.get_character(90_000_001).unwrap().balance.0;
+    assert!(bal_after_mod < bal_after_place, "additional escrow deducted on price increase");
+    ctx.advance_secs(301);
+    rpc(&ctx, &mut sess, "marketProxy", "CancelCharOrder", &[PyRep::Integer(oid)])
+        .await
+        .expect("CancelCharOrder");
+    let bal_after_cancel = ctx.db.get_character(90_000_001).unwrap().balance.0;
+    assert!(bal_after_cancel > bal_after_mod, "escrow refunded on cancel");
     let hist = rpc(&ctx, &mut sess, "marketProxy", "GetMarketOrderHistory", &[PyRep::Integer(10_000_002), PyRep::Integer(34)]).await.unwrap();
     assert!(!matches!(hist, PyRep::None));
-    assert!(oid > 0);
 }
 
 #[tokio::test]
 async fn test_journey_10_contracts() {
-    // parity: journey:contracts
-    eve_testkit::attest(&["journey:contracts"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let (mut s1, mut s2) = (SessionState::new(73_012), SessionState::new(73_013));
@@ -569,20 +575,27 @@ async fn test_journey_10_contracts() {
         )
         .await
         .expect("CreateContract");
-        let cid = c.as_i64().unwrap_or(1);
+        let cid = c.as_i64().or_else(|| c.dict_get("contractID").and_then(|v| v.as_i64())).unwrap_or(0);
         assert!(cid > 0);
         if ctype == 2 {
-            let _ = rpc(&ctx, &mut s2, "contractProxy", "PlaceBid", &[PyRep::Integer(cid), PyRep::Real(1_200.0)]).await;
+            rpc(&ctx, &mut s2, "contractProxy", "PlaceBid", &[PyRep::Integer(cid), PyRep::Real(1_200.0)])
+                .await
+                .expect("PlaceBid");
         } else {
-            let _ = rpc(&ctx, &mut s2, "contractProxy", "AcceptContract", &[PyRep::Integer(cid)]).await;
+            rpc(&ctx, &mut s2, "contractProxy", "AcceptContract", &[PyRep::Integer(cid)])
+                .await
+                .expect("AcceptContract");
+            if ctype == 1 {
+                ctx.db.with_snapshot(|snap| {
+                    assert_eq!(snap.items.get(&iid).unwrap().owner_id, 90_000_002);
+                });
+            }
         }
     }
 }
 
 #[tokio::test]
 async fn test_journey_11_mining_loop() {
-    // parity: journey:mining_loop
-    eve_testkit::attest(&["journey:mining_loop"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let mut sess = SessionState::new(73_014);
@@ -592,16 +605,38 @@ async fn test_journey_11_mining_loop() {
     ctx.advance_secs(15);
     rpc(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(60_003_760)]).await.unwrap();
     assert_eq!(sess.station_id, Some(60_003_760));
-    let ore_id = ctx.db.with_snapshot(|snap| {
-        snap.items.values().find(|i| i.owner_id == 90_000_001 && i.type_id == 1230).map(|i| i.item_id).unwrap_or(100_000_008)
+    let ore_id = ctx.db.with_mut_snapshot(|snap| {
+        let id = snap.next_entity_id + 1;
+        snap.next_entity_id += 1;
+        snap.items.insert(
+            id,
+            eve_db::InventoryItemRecord {
+                item_id: id,
+                type_id: 1230, // Veldspar
+                owner_id: 90_000_001,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
+                quantity: 1_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        id
     });
-    let _ = rpc(&ctx, &mut sess, "reprocessingSvc", "Reprocess", &[PyRep::Integer(ore_id)]).await;
+    let trit_before: i64 = ctx.db.with_snapshot(|snap| {
+        snap.items.values().filter(|i| i.owner_id == 90_000_001 && i.type_id == 34).map(|i| i.quantity as i64).sum()
+    });
+    rpc(&ctx, &mut sess, "reprocessingSvc", "Reprocess", &[PyRep::Integer(ore_id)])
+        .await
+        .expect("Reprocess");
+    let trit_after: i64 = ctx.db.with_snapshot(|snap| {
+        snap.items.values().filter(|i| i.owner_id == 90_000_001 && i.type_id == 34).map(|i| i.quantity as i64).sum()
+    });
+    assert!(trit_after > trit_before, "reprocessing Veldspar must credit Tritanium");
 }
 
 #[tokio::test]
 async fn test_journey_12_pve_combat() {
-    // parity: journey:pve_combat
-    eve_testkit::attest(&["journey:pve_combat"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let mut sess = SessionState::new(73_015);
@@ -614,8 +649,6 @@ async fn test_journey_12_pve_combat() {
 
 #[tokio::test]
 async fn test_journey_13_missions() {
-    // parity: journey:missions
-    eve_testkit::attest(&["journey:missions"]);
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     crate::common::seed_test_lp_store_offers(&ctx);
@@ -629,42 +662,4 @@ async fn test_journey_13_missions() {
     let st = rpc(&ctx, &mut sess, "standingMgr", "GetStandingTransactions", &[]).await.unwrap();
     assert!(!matches!(st, PyRep::None));
     assert_eq!(sess.character_id, Some(90_000_001));
-}
-
-#[tokio::test]
-async fn test_journey_14_exploration() {
-    // parity: journey:exploration
-    eve_testkit::attest(&["journey:exploration"]);
-    let ctx = ServerContext::new();
-    pin_clock(&ctx);
-    let mut sess = SessionState::new(73_017);
-    login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-    rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)]).await.unwrap();
-    rpc(&ctx, &mut sess, "stationSvc", "Undock", &[PyRep::Integer(100_000_001)]).await.unwrap();
-    let scan_bind = rpc(&ctx, &mut sess, "scanMgr", "MachoBindObject", &[PyRep::Integer(30_000_142), PyRep::None]).await.unwrap();
-    let sid = bound_id(&scan_bind);
-    let dscan = ctx
-        .dispatch_rpc(&mut sess, "scanMgr", Some(sid), "DirectionalScan", &[PyRep::Real(14.3), PyRep::Real(360.0), PyRep::Tuple(vec![PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)])], &HashMap::new(), None)
-        .await
-        .unwrap();
-    assert!(!matches!(dscan, PyRep::None));
-    let rows = probe_scan(&ctx, &mut sess, DVec3::ZERO, 4.0 * 149_597_870_700.0).await;
-    assert_ne!(rows.len(), 0);
-    let cert = scan_row_field(&rows, rows[0].dict_get("signatureID").unwrap().as_str().unwrap(), "certainty");
-    assert_ne!(format!("{cert:?}"), "");
-}
-
-#[tokio::test]
-async fn test_journey_15_wormholes_filaments() {
-    // parity: journey:wormholes_filaments
-    eve_testkit::attest(&["journey:wormholes_filaments"]);
-    let ctx = ServerContext::new();
-    pin_clock(&ctx);
-    let mut sess = SessionState::new(73_018);
-    login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-    rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)]).await.unwrap();
-    rpc(&ctx, &mut sess, "stationSvc", "Undock", &[PyRep::Integer(100_000_001)]).await.unwrap();
-    ctx.advance_secs(15);
-    let wh = rpc(&ctx, &mut sess, "wormholeMgr", "WormholeJump", &[PyRep::Integer(999_999)]).await;
-    assert_eq!(wh.unwrap_err().code, "WormholeNotPresent");
 }
