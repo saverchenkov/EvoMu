@@ -351,7 +351,7 @@ pub fn dispatch_character_mail_routes(
                 RouteExecutionResult::ok_json(json!(out), 3600)
             }))
         }
-        // Corporation LP store offers served from imported CCP Crucible catalog + dynamic overrides (`lp_store`).
+        // DATA GAP: NPC corporation LP store offer catalogs are server-only in modern EVE and absent from V24 client FSD (SharedCache); all 6 LP store rows remain open until authoritative data is available.
         ("GET", "/loyalty/stores/{corporation_id}/offers") => {
             let corp_id = match parse_path_i64(path_params, "corporation_id") {
                 Ok(v) => v,
@@ -360,8 +360,6 @@ pub fn dispatch_character_mail_routes(
             Some(ctx.db.with_snapshot(|snap| {
                 if !ctx.sde.npc_corporations.contains_key(&corp_id)
                     && !snap.corporations.contains_key(&corp_id)
-                    && crate::services::lp_store_catalog_data::static_corp_lp_offers(corp_id)
-                        .is_empty()
                 {
                     return RouteExecutionResult::error(
                         404,

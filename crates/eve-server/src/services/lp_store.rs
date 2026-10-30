@@ -45,8 +45,7 @@ pub struct LPOffer {
 
 /// Load persisted LP store offers from `WorldStateSnapshot.service_state_blobs["lp_store_offers"]`.
 ///
-/// Serves dynamic/runtime offer overrides; static CCP Crucible offers (`29,070` offers across
-/// `163` NPC corporations) live in [`crate::services::lp_store_catalog_data`].
+/// DATA GAP: NPC corporation LP store offer catalogs are server-only in modern EVE and absent from V24 client FSD (SharedCache); all 6 LP store rows remain open until authoritative data is available.
 pub fn load_lp_store_offers(snap: &eve_db::WorldStateSnapshot) -> Vec<LPOffer> {
     snap.service_state_blobs
         .get(LP_STORE_OFFERS_KEY)
@@ -56,19 +55,17 @@ pub fn load_lp_store_offers(snap: &eve_db::WorldStateSnapshot) -> Vec<LPOffer> {
 
 /// Load all available LP store offers for a corporation.
 ///
-/// Merges the imported CCP Crucible NPC LP store catalog (`29,070` offers across `163`
-/// corporations) with legacy `snap.loyalty_store_offers` and dynamic
-/// `WorldStateSnapshot.service_state_blobs["lp_store_offers"]` overrides by `(corp_id, offer_id)`.
+/// Reads dynamic offers from `WorldStateSnapshot.service_state_blobs["lp_store_offers"]`
+/// and falls back to legacy `snap.loyalty_store_offers` if present.
 pub fn get_corp_lp_offers(snap: &eve_db::WorldStateSnapshot, corp_id: i64) -> Vec<LPOffer> {
-    let mut by_offer_id: std::collections::BTreeMap<i64, LPOffer> = std::collections::BTreeMap::new();
-    for offer in crate::services::lp_store_catalog_data::static_corp_lp_offers(corp_id) {
-        by_offer_id.insert(offer.offer_id, offer.clone());
-    }
-    if let Some(legacy) = snap.loyalty_store_offers.get(&corp_id) {
-        for o in legacy {
-            by_offer_id.insert(
-                o.offer_id,
-                LPOffer {
+    let mut offers: Vec<_> = load_lp_store_offers(snap)
+        .into_iter()
+        .filter(|o| o.corp_id == corp_id)
+        .collect();
+    if offers.is_empty() {
+        if let Some(legacy) = snap.loyalty_store_offers.get(&corp_id) {
+            for o in legacy {
+                offers.push(LPOffer {
                     offer_id: o.offer_id,
                     corp_id,
                     type_id: o.type_id as eve_sde::TypeId,
@@ -82,16 +79,11 @@ pub fn get_corp_lp_offers(snap: &eve_db::WorldStateSnapshot, corp_id: i64) -> Ve
                         .map(|ri| (ri.type_id as eve_sde::TypeId, ri.quantity as i32))
                         .collect(),
                     min_standing: None,
-                },
-            );
+                });
+            }
         }
     }
-    for o in load_lp_store_offers(snap) {
-        if o.corp_id == corp_id {
-            by_offer_id.insert(o.offer_id, o);
-        }
-    }
-    by_offer_id.into_values().collect()
+    offers
 }
 
 pub fn save_lp_store_offers(snap: &mut eve_db::WorldStateSnapshot, offers: &[LPOffer]) {
@@ -337,13 +329,12 @@ fn take_offer(
 
     let all_offers = ctx.db.with_snapshot(|snap| match target_corp_id {
         Some(cid) => {
-            let mut corp_offers = get_corp_lp_offers(snap, cid);
-            if explicit_corp_id.is_none()
-                && !corp_offers.iter().any(|o| o.offer_id == target_offer_id)
-            {
-                corp_offers.extend(load_lp_store_offers(snap));
+            let corp_offers = get_corp_lp_offers(snap, cid);
+            if corp_offers.is_empty() && explicit_corp_id.is_none() {
+                load_lp_store_offers(snap)
+            } else {
+                corp_offers
             }
-            corp_offers
         }
         None => load_lp_store_offers(snap),
     });

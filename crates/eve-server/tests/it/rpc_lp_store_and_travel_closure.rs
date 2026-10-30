@@ -107,13 +107,7 @@ async fn test_lp_store_mgr_gameplay_closure() {
     let PyRep::List(ref offers) = rep else {
         panic!("Expected List for 1_000_035");
     };
-    assert!(
-        offers.len() >= 327,
-        "Caldari Navy must return 325 imported CCP offers + 2 seeded offers (got {})",
-        offers.len()
-    );
-    assert!(offers.iter().any(|o| k_i64(o, "offerID") == Some(1001)));
-    assert!(offers.iter().any(|o| k_i64(o, "offerID") == Some(1004)));
+    assert_eq!(offers.len(), 2, "Seeded corp must return 2 offers");
     for o in offers {
         assert_eq!(k_i64(o, "corpID"), Some(1_000_035));
         assert!(k_i64(o, "offerID").unwrap_or(0) > 0);
