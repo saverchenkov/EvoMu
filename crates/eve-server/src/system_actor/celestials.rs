@@ -986,7 +986,7 @@ impl SystemHandle {
 #[allow(clippy::type_complexity)]
 fn db_ballpark_map() -> &'static std::sync::Mutex<
     HashMap<
-        (usize, SolarSystemId),
+        (u64, SolarSystemId),
         (
             std::sync::Weak<RwLock<Ballpark>>,
             std::sync::Weak<RwLock<HashMap<BallId, DVec3>>>,
@@ -997,7 +997,7 @@ fn db_ballpark_map() -> &'static std::sync::Mutex<
     static MAP: std::sync::OnceLock<
         std::sync::Mutex<
             HashMap<
-                (usize, SolarSystemId),
+                (u64, SolarSystemId),
                 (
                     std::sync::Weak<RwLock<Ballpark>>,
                     std::sync::Weak<RwLock<HashMap<BallId, DVec3>>>,
@@ -1019,7 +1019,7 @@ pub(crate) fn register_db_system_ballpark(
         g.retain(|_, (bp, _, _)| bp.strong_count() > 0);
     }
     g.insert(
-        (Arc::as_ptr(db) as usize, solar_system_id),
+        (db.instance_id(), solar_system_id),
         (
             Arc::downgrade(&handle.ballpark),
             Arc::downgrade(&handle.ball_positions),
@@ -1037,7 +1037,7 @@ pub fn try_remove_ball_for_db(
     let entry = db_ballpark_map()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .get(&(Arc::as_ptr(db) as usize, solar_system_id))
+        .get(&(db.instance_id(), solar_system_id))
         .cloned();
     if let Some((bp_w, pos_w, scram_w)) = entry {
         if let (Some(bp_arc), Some(pos_arc), Some(scram_arc)) =

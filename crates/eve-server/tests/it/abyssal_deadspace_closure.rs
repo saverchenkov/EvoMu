@@ -319,28 +319,43 @@ async fn test_abyssal_entry_ship_limits_coop_and_trace_lifecycle() {
     let exp_frig_tid = ctx.sde.types.values().filter(|t| t.group_id == 1283).map(|t| t.type_id).min().expect("Expedition Frigate group 1283");
     move_pilot_to_system(&ctx, &mut sess1, char1, ship1, exp_frig_tid, sys_id, base1 + DVec3::new(2_000_000.0, 0.0, 0.0)).await;
     seed_cargo_item(&ctx, 720_100_010, FIL_T1_ELEC, char1, ship1, 3);
+    let e_fg_nofleet = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(720_100_010)], &kw, None).await.unwrap_err();
+    assert_eq!(e_fg_nofleet.code, "NotInFleet", "Fleetless Frigate filament deployment must be rejected");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&720_100_010].quantity), 3, "Filaments not consumed on NotInFleet");
+    move_pilot_to_system(&ctx, &mut sess1, char1, ship1, 16_236, sys_id, base1).await;
+    seed_cargo_item(&ctx, 720_100_020, FIL_T1_ELEC, char1, ship1, 2);
+    let e_dd_nofleet = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(720_100_020)], &kw, None).await.unwrap_err();
+    assert_eq!(e_dd_nofleet.code, "NotInFleet", "Fleetless Destroyer filament deployment must be rejected");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(99_201, FleetRecord { fleet_id: 99_201, boss_id: char1, members: vec![char1, char2, char3], ..Default::default() });
+    });
+    move_pilot_to_system(&ctx, &mut sess1, char1, ship1, exp_frig_tid, sys_id, base1 + DVec3::new(2_000_000.0, 0.0, 0.0)).await;
     let dep_exp = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(720_100_010)], &kw, None).await.expect("Expedition Frigate deploy");
     assert_eq!(dep_exp.dict_get("maxShips"), Some(&PyRep::Integer(3)), "Expedition Frigate (group 1283) allows 3-ship co-op");
 
-    // 2. Destroyer co-op: requires 2 filaments (1 rejected), allows 2 fleetmates, rejects 3rd (TraceShipLimitReached) & non-fleetmate (AccessDenied)
+    // 2. Destroyer co-op: requires 2 filaments (1 rejected), allows 2 fleetmates, rejects 3rd (TraceShipLimitReached), fleetless (NotInFleet), & wrong fleet (AccessDenied)
     move_pilot_to_system(&ctx, &mut sess1, char1, ship1, 16_236, sys_id, base1).await;
-    seed_cargo_item(&ctx, 720_100_020, FIL_T1_ELEC, char1, ship1, 1);
+    ctx.db.with_mut_snapshot(|snap| snap.items.get_mut(&720_100_020).unwrap().quantity = 1);
     let ins_dd = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(720_100_020)], &kw, None).await.unwrap_err();
     assert_eq!(ins_dd.code, "InsufficientFilamentQuantity");
 
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.get_mut(&720_100_020).unwrap().quantity = 2;
-        snap.fleets.insert(99_201, FleetRecord { fleet_id: 99_201, boss_id: char1, members: vec![char1, char2, char3], ..Default::default() });
-    });
+    ctx.db.with_mut_snapshot(|snap| snap.items.get_mut(&720_100_020).unwrap().quantity = 2);
     let dep_dd = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(720_100_020)], &kw, None).await.expect("Destroyer deploy");
     assert_eq!(dep_dd.dict_get("maxShips"), Some(&PyRep::Integer(2)));
     assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&720_100_020).map(|i| i.quantity).unwrap_or(0)), 0, "2 filaments consumed");
     let dd_trace = dep_dd.dict_get("traceBallID").and_then(|v| v.as_i64()).unwrap();
 
-    // Non-fleetmate in matching Destroyer hull gets AccessDenied; fleetmate in Frigate gets DisallowedShipType
+    // Fleetless pilot gets NotInFleet; wrong-fleet pilot gets AccessDenied; fleetmate in Frigate gets DisallowedShipType
     move_pilot_to_system(&ctx, &mut sess4, char4, ship4, 16_236, sys_id, base1 + DVec3::new(700.0, 0.0, 0.0)).await;
     let e_nonfleet = ctx.dispatch_rpc(&mut sess4, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(dd_trace)], &kw, None).await.unwrap_err();
-    assert_eq!(e_nonfleet.code, "AccessDenied");
+    assert_eq!(e_nonfleet.code, "NotInFleet");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(99_205, FleetRecord { fleet_id: 99_205, boss_id: char4, members: vec![char4], ..Default::default() });
+    });
+    let e_wrong_fleet = ctx.dispatch_rpc(&mut sess4, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(dd_trace)], &kw, None).await.unwrap_err();
+    assert_eq!(e_wrong_fleet.code, "AccessDenied");
+    ctx.db.with_mut_snapshot(|snap| { snap.fleets.remove(&99_205); });
     move_pilot_to_system(&ctx, &mut sess3, char3, ship3, 587, sys_id, base1 + DVec3::new(500.0, 0.0, 0.0)).await;
     let e_dd_wrong_hull = ctx.dispatch_rpc(&mut sess3, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(dd_trace)], &kw, None).await.unwrap_err();
     assert_eq!(e_dd_wrong_hull.code, "DisallowedShipType");
@@ -371,6 +386,7 @@ async fn test_abyssal_entry_ship_limits_coop_and_trace_lifecycle() {
         ctx.crimewatch.write().unwrap().states.remove(&cid);
     }
     ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.remove(&99_201);
         snap.fleets.insert(99_202, FleetRecord { fleet_id: 99_202, boss_id: char1, members: vec![char1, char2, char3, char4], ..Default::default() });
     });
     seed_cargo_item(&ctx, 720_100_030, FIL_T4_ELEC, char1, ship1, 3);

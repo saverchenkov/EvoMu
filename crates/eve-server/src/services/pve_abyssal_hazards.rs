@@ -333,15 +333,16 @@ pub async fn check_filament_1000km_proximity(
     Ok(())
 }
 
-/// Validates hull, readiness (no PvP/weapon/logoff timer, no warp/cloak/tether/scramble/invuln), deadspace/1,000 km proximity,
-/// `InventoryFlag::Cargo`, high-sec tier/suspect rules, and hull-class filament count (1 Cruiser, 2 Destroyer, 3 Frigate), then consumes the filaments.
+/// Validates hull, fleet membership for Frigate/Destroyer (`max_ships > 1`), readiness (no PvP/weapon/logoff timer,
+/// no warp/cloak/tether/scramble/invuln), deadspace/1,000 km proximity, `InventoryFlag::Cargo`, high-sec tier/suspect rules,
+/// and hull-class filament count (1 Cruiser, 2 Destroyer, 3 Frigate), then consumes the filaments and returns the opener's `fleet_id`.
 pub async fn validate_and_consume_abyssal_filaments(
     ctx: &ServerContext,
     char_id: CharacterId,
     ship_id: ItemId,
     cur_sys: SolarSystemId,
     filament_arg: i64,
-) -> Result<(ItemId, TypeId, u8, u8, f64, DVec3), BridgeRpcError> {
+) -> Result<(ItemId, TypeId, u8, u8, f64, DVec3, Option<i64>), BridgeRpcError> {
     if filament_arg <= 0 {
         return Err(rpc_err(
             "MissingRequiredArgument",
@@ -350,6 +351,13 @@ pub async fn validate_and_consume_abyssal_filaments(
     }
     let (_ship_tid, _ship_gid, max_ships) = validate_abyssal_hull_and_capacity(ctx, ship_id)?;
     let required_filaments = max_ships as i32;
+    let initial_fleet_id = crate::services::fleet_social::fleet_social_notify::character_active_fleet_id(ctx, char_id);
+    if max_ships > 1 && initial_fleet_id.is_none() {
+        return Err(rpc_err(
+            "NotInFleet",
+            "Frigate and destroyer Abyssal filaments can be activated only by fleet members",
+        ));
+    }
 
     crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, cur_sys)?;
 
@@ -373,42 +381,55 @@ pub async fn validate_and_consume_abyssal_filaments(
     check_filament_1000km_proximity(ctx, cur_sys, ship_pos).await?;
 
     let now_unix = ctx.now_unix();
-    let (iid, filament_type_id, tier, origin_sec, gives_suspect) = ctx.db.try_with_mut_snapshot(|snap| {
-        let found = snap
-            .items
-            .values()
-            .find(|i| {
-                i.owner_id == char_id
-                    && i.location_id == ship_id
-                    && i.flag == eve_db::InventoryFlag::Cargo
-                    && (i.item_id == filament_arg || i.type_id as i64 == filament_arg)
-                    && i.quantity >= 1
-            })
-            .map(|i| (i.item_id, i.type_id, i.quantity));
-        let Some((iid, tid, qty)) = found else {
-            return Err(rpc_err("ItemNotFound", format!("Abyssal filament {filament_arg} not found in ship cargo")));
-        };
-        if qty < required_filaments {
-            return Err(rpc_err(
-                "InsufficientFilamentQuantity",
-                format!("Entering Abyssal Deadspace in this ship class requires {required_filaments} filaments, but only {qty} found in cargo"),
-            ));
-        }
-        let Some((tier, _)) = crate::services::pve_special_sites_abyssal::classify_abyssal_filament(tid) else {
-            return Err(rpc_err("InvalidAbyssalFilament", format!("Type {tid} is not a valid Abyssal Deadspace filament")));
-        };
-        let origin_sec = ctx.sde.solar_systems.get(&cur_sys).map(|s| s.security_status).unwrap_or(0.9);
-        let gives_suspect = evaluate_highsec_abyssal_tier_policy(origin_sec, tier)?;
-        if let Some(item) = snap.items.get_mut(&iid) {
-            if item.quantity > required_filaments {
-                item.quantity -= required_filaments;
-                item.version += 1;
-            } else {
-                snap.items.remove(&iid);
+    let (iid, filament_type_id, tier, origin_sec, gives_suspect, opener_fleet_id) =
+        ctx.db.try_with_mut_snapshot(|snap| {
+            let active_fleet_id = snap
+                .fleets
+                .values()
+                .filter(|f| f.members.contains(&char_id) || f.member_details.contains_key(&char_id))
+                .map(|f| f.fleet_id)
+                .max();
+            if max_ships > 1 && active_fleet_id.is_none() {
+                return Err(rpc_err(
+                    "NotInFleet",
+                    "Frigate and destroyer Abyssal filaments can be activated only by fleet members",
+                ));
             }
-        }
-        Ok((iid, tid, tier, origin_sec, gives_suspect))
-    })?;
+            let found = snap
+                .items
+                .values()
+                .find(|i| {
+                    i.owner_id == char_id
+                        && i.location_id == ship_id
+                        && i.flag == eve_db::InventoryFlag::Cargo
+                        && (i.item_id == filament_arg || i.type_id as i64 == filament_arg)
+                        && i.quantity >= 1
+                })
+                .map(|i| (i.item_id, i.type_id, i.quantity));
+            let Some((iid, tid, qty)) = found else {
+                return Err(rpc_err("ItemNotFound", format!("Abyssal filament {filament_arg} not found in ship cargo")));
+            };
+            if qty < required_filaments {
+                return Err(rpc_err(
+                    "InsufficientFilamentQuantity",
+                    format!("Entering Abyssal Deadspace in this ship class requires {required_filaments} filaments, but only {qty} found in cargo"),
+                ));
+            }
+            let Some((tier, _)) = crate::services::pve_special_sites_abyssal::classify_abyssal_filament(tid) else {
+                return Err(rpc_err("InvalidAbyssalFilament", format!("Type {tid} is not a valid Abyssal Deadspace filament")));
+            };
+            let origin_sec = ctx.sde.solar_systems.get(&cur_sys).map(|s| s.security_status).unwrap_or(0.9);
+            let gives_suspect = evaluate_highsec_abyssal_tier_policy(origin_sec, tier)?;
+            if let Some(item) = snap.items.get_mut(&iid) {
+                if item.quantity > required_filaments {
+                    item.quantity -= required_filaments;
+                    item.version += 1;
+                } else {
+                    snap.items.remove(&iid);
+                }
+            }
+            Ok((iid, tid, tier, origin_sec, gives_suspect, active_fleet_id))
+        })?;
 
     if gives_suspect {
         ctx.crimewatch
@@ -417,7 +438,7 @@ pub async fn validate_and_consume_abyssal_filaments(
             .trigger_suspect_flag(char_id, now_unix);
     }
 
-    Ok((iid, filament_type_id, tier, max_ships, origin_sec, ship_pos))
+    Ok((iid, filament_type_id, tier, max_ships, origin_sec, ship_pos, opener_fleet_id))
 }
 
 /// Rolls the Abyssal weather penalty percentage (`30%` or `50%` for `T0..=T3`, `50%` or `70%` for `T4..=T6`).

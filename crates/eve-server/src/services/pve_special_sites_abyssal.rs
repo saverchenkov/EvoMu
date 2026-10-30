@@ -115,6 +115,8 @@ pub struct AbyssalTraceRecord {
     pub entered_char_ids: Vec<CharacterId>,
     #[serde(default)]
     pub pocket_id: Option<i64>,
+    #[serde(default)]
+    pub fleet_id: Option<i64>,
 }
 
 pub fn classify_abyssal_filament(type_id: TypeId) -> Option<(u8, AbyssalWeatherKind)> {
@@ -926,7 +928,7 @@ pub async fn handle_abyssal_entrance_deployment(
         ));
     };
 
-    let (_iid, filament_type_id, tier, max_ships, _origin_sec, ship_pos) =
+    let (_iid, filament_type_id, tier, max_ships, _origin_sec, ship_pos, opener_fleet_id) =
         validate_and_consume_abyssal_filaments(ctx, char_id, ship_id, cur_sys, filament_arg).await?;
 
     let now_unix = ctx.now_unix();
@@ -946,6 +948,7 @@ pub async fn handle_abyssal_entrance_deployment(
                 max_ships,
                 entered_char_ids: Vec::new(),
                 pocket_id: None,
+                fleet_id: opener_fleet_id,
             },
         );
         tid

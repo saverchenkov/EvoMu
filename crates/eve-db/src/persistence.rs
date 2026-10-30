@@ -295,8 +295,12 @@ impl WorldStateWalDelta {
     }
 }
 
+static NEXT_REPO_INSTANCE_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
 /// Encapsulated transactional world repository backed by SQLite (`D-3`, `D-4`).
 pub struct WorldRepository {
+    pub(crate) instance_id: u64,
     pub(crate) inner: RwLock<WorldStateSnapshot>,
     pub(crate) sqlite_conn: std::sync::Mutex<rusqlite::Connection>,
     pub(crate) sqlite_fp: std::sync::Mutex<sqlite_store::TableFingerprints>,
@@ -331,6 +335,15 @@ impl Default for WorldRepository {
 }
 
 impl WorldRepository {
+    pub(crate) fn next_instance_id() -> u64 {
+        NEXT_REPO_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Returns the process-unique monotonic instance ID of this [`WorldRepository`].
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
+    }
+
     /// Returns `true` when this repository is an ephemeral `:memory:` instance with no backing SQLite or snapshot file.
     pub fn is_ephemeral_in_memory(&self) -> bool {
         self.sqlite_path.is_none() && self.snapshot_path.is_none()
@@ -382,6 +395,7 @@ impl WorldRepository {
         let jwt_secret =
             sqlite_store::load_or_init_jwt_secret(&conn, Self::generate_random_secret_32)?;
         Ok(Self {
+            instance_id: Self::next_instance_id(),
             inner: RwLock::new(snap),
             sqlite_conn: std::sync::Mutex::new(conn),
             sqlite_fp: std::sync::Mutex::new(fp),
@@ -523,6 +537,7 @@ impl WorldRepository {
             sqlite_store::load_or_init_jwt_secret(&conn, Self::generate_random_secret_32)?;
 
         let mut repo = Self {
+            instance_id: Self::next_instance_id(),
             inner: RwLock::new(initial_snap),
             sqlite_conn: std::sync::Mutex::new(conn),
             sqlite_fp: std::sync::Mutex::new(fp),

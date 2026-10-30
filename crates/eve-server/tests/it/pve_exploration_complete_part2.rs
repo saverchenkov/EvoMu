@@ -544,8 +544,17 @@ async fn test_pve_abyssal_deadspace_pocket_gates_weather_and_tiers() {
         Some((6, AbyssalWeatherKind::Gamma))
     );
 
-    // Seed filament in ship cargo: T5 Chaotic Firestorm Filament (47899)
+    // Seed filament in ship cargo: T5 Chaotic Firestorm Filament (47899) and active fleet for Frigate deployment
     ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(
+            99_720,
+            eve_db::FleetRecord {
+                fleet_id: 99_720,
+                boss_id: 90_000_001,
+                members: vec![90_000_001],
+                ..Default::default()
+            },
+        );
         snap.items.insert(
             720_001_001,
             InventoryItemRecord {

@@ -67,10 +67,12 @@ pub(crate) fn validate_allowed_ship_hull(
 }
 
 fn is_in_trace_fleet(ctx: &ServerContext, caller_id: i64, owner_id: i64) -> bool {
+    crate::services::fleet_social::fleet_social_notify::tick_fleet_lifecycle(ctx);
     ctx.db.with_snapshot(|snap| {
-        snap.fleets
-            .values()
-            .any(|f| f.members.contains(&caller_id) && f.members.contains(&owner_id))
+        snap.fleets.values().any(|f| {
+            (f.members.contains(&caller_id) || f.member_details.contains_key(&caller_id))
+                && (f.members.contains(&owner_id) || f.member_details.contains_key(&owner_id))
+        })
     })
 }
 
@@ -339,11 +341,28 @@ async fn activate_trace(
                 message: "Solo Cruiser Abyssal trace may only be entered by its creator".into(),
             });
         }
-    } else if char_id != trace.char_id && !is_in_trace_fleet(ctx, char_id, trace.char_id) {
-        return Err(BridgeRpcError {
-            code: "AccessDenied".into(),
-            message: "Caller is neither the trace owner nor in the owner's fleet".into(),
-        });
+    } else {
+        let caller_fleet_id =
+            crate::services::fleet_social::fleet_social_notify::character_active_fleet_id(ctx, char_id);
+        let Some(caller_fid) = caller_fleet_id else {
+            return Err(BridgeRpcError {
+                code: "NotInFleet".into(),
+                message: "Frigate and destroyer Abyssal traces can be activated only by fleet members".into(),
+            });
+        };
+        if let Some(bound_fid) = trace.fleet_id {
+            if caller_fid != bound_fid {
+                return Err(BridgeRpcError {
+                    code: "AccessDenied".into(),
+                    message: "Caller is not in the fleet that opened this Abyssal trace".into(),
+                });
+            }
+        } else if char_id != trace.char_id && !is_in_trace_fleet(ctx, char_id, trace.char_id) {
+            return Err(BridgeRpcError {
+                code: "AccessDenied".into(),
+                message: "Caller is neither the trace owner nor in the owner's fleet".into(),
+            });
+        }
     }
 
     let (tier, _weather) =
@@ -487,7 +506,7 @@ async fn activate_inventory_filament(
     let cur_sys = session.solar_system_id.ok_or_else(err_no_solar_system)?;
     let ship_id = session.ship_id.ok_or_else(err_no_active_ship)?;
 
-    let (_iid, filament_type_id, tier, max_ships, origin_sec, ship_pos) =
+    let (_iid, filament_type_id, tier, max_ships, origin_sec, ship_pos, opener_fleet_id) =
         validate_and_consume_abyssal_filaments(ctx, char_id, ship_id, cur_sys, filament_arg).await?;
 
     let now_unix = ctx.now_unix();
@@ -514,6 +533,7 @@ async fn activate_inventory_filament(
                 max_ships,
                 entered_char_ids: vec![char_id],
                 pocket_id: None,
+                fleet_id: opener_fleet_id,
             },
         );
         tid

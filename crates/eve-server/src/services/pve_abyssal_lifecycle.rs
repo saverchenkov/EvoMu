@@ -306,6 +306,12 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
         ctx.systems.get_or_spawn(origin_sys).try_remove_ball(tid);
     }
 
+    let closed_abyss_systems: HashSet<SolarSystemId> = evacuated
+        .iter()
+        .map(|(_, _, abyss_sys, _, _, _)| *abyss_sys)
+        .chain(pocket_cleanups.iter().map(|(_, abyss_sys, _)| *abyss_sys))
+        .collect();
+
     for (pid, abyss_sys, npcs) in pocket_cleanups {
         let abyss_handle = ctx.systems.get_or_spawn(abyss_sys);
         for &nid in &npcs {
@@ -349,8 +355,15 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
         let mut destroyed_drones: Vec<ItemId> = Vec::new();
         crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
             rt.active_drones_in_space.retain(|&did, d| {
-                if d.owner_char_id == *cid || d.parent_ship_id == *sid {
+                if d.owner_char_id == *cid
+                    || d.original_owner_char_id == *cid
+                    || d.parent_ship_id == *sid
+                {
                     destroyed_drones.push(did);
+                    if d.drone_item_id != did {
+                        destroyed_drones.push(d.drone_item_id);
+                    }
+                    rt.active_drone_miners.remove(&did);
                     false
                 } else {
                     true
@@ -360,8 +373,22 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
         for did in &destroyed_drones {
             abyss_handle.try_remove_ball(*did);
         }
-        let ship_type = ctx.db.with_mut_snapshot(|snap| {
+        let (ship_type, extra_drone_balls) = ctx.db.with_mut_snapshot(|snap| {
+            let owned_pocket_drones: Vec<ItemId> = snap
+                .items
+                .iter()
+                .filter_map(|(&iid, item)| {
+                    (item.location_id == *abyss_sys as i64
+                        && item.owner_id == *cid
+                        && ctx.sde.types.get(&item.type_id).is_some_and(|t| t.category_id == 18))
+                    .then_some(iid)
+                })
+                .collect();
             for did in &destroyed_drones {
+                snap.items.remove(did);
+                snap.item_positions.remove(did);
+            }
+            for did in &owned_pocket_drones {
                 snap.items.remove(did);
                 snap.item_positions.remove(did);
             }
@@ -374,8 +401,14 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
                 sh.location_id = *origin_sys as i64;
             }
             snap.item_positions.insert(*sid, evacuated_pos);
-            snap.items.get(sid).map(|i| i.type_id).unwrap_or(621)
+            (
+                snap.items.get(sid).map(|i| i.type_id).unwrap_or(621),
+                owned_pocket_drones,
+            )
         });
+        for did in extra_drone_balls {
+            abyss_handle.try_remove_ball(did);
+        }
         let cs = ctx.build_ship_combat_state(*cid, *sid, ship_type);
         let ball = build_fitted_ship_space_ball(
             ctx,
@@ -390,6 +423,55 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
             .try_spawn_ball_with_meta(ball, cs, meta);
         ctx.sync_character_local_chat(*cid, Some(*abyss_sys), *origin_sys);
         crate::services::map_service::record_solar_system_visit(ctx, *cid, *origin_sys);
+    }
+    for abyss_sys in closed_abyss_systems {
+        let any_active_in_sys = with_pve_special_reg(ctx, |reg| {
+            reg.abyssal_pockets.values().any(|p| {
+                p.abyssal_solar_system_id == abyss_sys && !p.completed && !p.collapsed_destroyed
+            })
+        });
+        if any_active_in_sys {
+            continue;
+        }
+        let abyss_handle = ctx.systems.get_or_spawn(abyss_sys);
+        let mut orphaned_drone_ids: Vec<ItemId> = Vec::new();
+        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+            rt.active_drones_in_space.retain(|&did, d| {
+                if d.solar_system_id == abyss_sys {
+                    orphaned_drone_ids.push(did);
+                    if d.drone_item_id != did {
+                        orphaned_drone_ids.push(d.drone_item_id);
+                    }
+                    rt.active_drone_miners.remove(&did);
+                    false
+                } else {
+                    true
+                }
+            });
+        });
+        ctx.db.with_mut_snapshot(|snap| {
+            let item_drone_ids: Vec<ItemId> = snap
+                .items
+                .iter()
+                .filter_map(|(&iid, item)| {
+                    (item.location_id == abyss_sys as i64
+                        && ctx.sde.types.get(&item.type_id).is_some_and(|t| t.category_id == 18))
+                    .then_some(iid)
+                })
+                .collect();
+            for iid in item_drone_ids {
+                if !orphaned_drone_ids.contains(&iid) {
+                    orphaned_drone_ids.push(iid);
+                }
+            }
+            for did in &orphaned_drone_ids {
+                snap.items.remove(did);
+                snap.item_positions.remove(did);
+            }
+        });
+        for did in orphaned_drone_ids {
+            abyss_handle.try_remove_ball(did);
+        }
     }
     evacuated.len() as i64
 }

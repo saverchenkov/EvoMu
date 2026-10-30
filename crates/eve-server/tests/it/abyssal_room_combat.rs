@@ -588,16 +588,18 @@ async fn test_abyssal_hull_rules_and_timer_collapse() {
         .expect_err("T3C deployment must be disallowed");
     assert_eq!(t3c_err.code, "DisallowedShipType");
 
-    // 2. Frigate requires 3 filaments: 2 filaments is insufficient
+    // 2. Frigate requires fleet membership (NotInFleet) and 3 filaments (2 filaments is insufficient)
     sess.ship_id = Some(frig_ship);
     ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&char_id).unwrap().active_ship_id = frig_ship);
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(fil_id2)], &kw, None).await.unwrap_err().code, "NotInFleet");
+    ctx.db.with_mut_snapshot(|s| { s.fleets.insert(99_601, eve_db::FleetRecord { fleet_id: 99_601, boss_id: char_id, members: vec![char_id], ..Default::default() }); });
     let ins_err = ctx
         .dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(fil_id2)], &kw, None)
         .await
         .expect_err("Frigate with 2 filaments must be rejected");
     assert_eq!(ins_err.code, "InsufficientFilamentQuantity");
 
-    // Give 3 filaments to frigate: succeeds and consumes all 3 filaments, setting max_ships = 3
+    // Give 3 filaments to frigate: fleet member succeeds and consumes all 3 filaments, setting max_ships = 3
     ctx.db.with_mut_snapshot(|s| s.items.get_mut(&fil_id2).unwrap().quantity = 3);
     let frig_rep = ctx
         .dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(fil_id2)], &kw, None)

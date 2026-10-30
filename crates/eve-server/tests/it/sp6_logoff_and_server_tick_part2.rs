@@ -30,6 +30,15 @@ async fn test_sp7_abyssal_disconnect_20m_collapse_destroys_ship_and_pod() {
     let filament_1 = 992_000_001_i64;
     let filament_2 = 992_000_002_i64;
     ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(
+            99_730,
+            eve_db::FleetRecord {
+                fleet_id: 99_730,
+                boss_id: 90_000_001,
+                members: vec![90_000_001],
+                ..Default::default()
+            },
+        );
         snap.active_implants.entry(90_000_001).or_default().push(9_899);
         let mut f1 = sp6_item(filament_1, 56_131, 90_000_001, ship_id, InventoryFlag::Cargo, HashMap::new());
         f1.quantity = 3;
@@ -101,6 +110,17 @@ async fn test_sp7_abyssal_disconnect_20m_collapse_destroys_ship_and_pod() {
         .await;
 
     // 2. Enter a second Abyssal pocket, disconnect inside the pocket, and advance to T+1200s (20m collapse)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(
+            99_731,
+            eve_db::FleetRecord {
+                fleet_id: 99_731,
+                boss_id: 90_000_001,
+                members: vec![90_000_001],
+                ..Default::default()
+            },
+        );
+    });
     ctx.dispatch_rpc(
         &mut sess_reconnect,
         "abyssalMgr",
