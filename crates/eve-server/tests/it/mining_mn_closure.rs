@@ -19,8 +19,8 @@ use crate::common::login_pilot;
 // ============================================================================
 #[tokio::test]
 async fn test_mn01_sde_mining_static_data_and_distributions() {
-    // parity: plan:MN-01, feat:mining.static-data, feat:mining.moon-ore-types
-    eve_testkit::attest(&["plan:MN-01", "feat:mining.static-data", "feat:mining.moon-ore-types"]);
+    // parity: feat:mining.static-data, feat:mining.moon-ore-types
+    eve_testkit::attest(&["feat:mining.static-data", "feat:mining.moon-ore-types"]);
     let ctx = ServerContext::new();
     let sde = &ctx.sde;
 
@@ -73,8 +73,8 @@ async fn test_mn01_sde_mining_static_data_and_distributions() {
 // ============================================================================
 #[tokio::test]
 async fn test_mn02_asteroid_belts_as_balls_highsec_and_nullsec() {
-    // parity: plan:MN-02, feat:mining.belts-as-balls, notify:OnWarpToAsteroidBelt
-    eve_testkit::attest(&["plan:MN-02", "feat:mining.belts-as-balls", "notify:OnWarpToAsteroidBelt"]);
+    // parity: feat:mining.belts-as-balls, notify:OnWarpToAsteroidBelt
+    eve_testkit::attest(&["feat:mining.belts-as-balls", "notify:OnWarpToAsteroidBelt"]);
     let ctx = ServerContext::new();
     let mut sess = SessionState::new(9102);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -135,12 +135,12 @@ async fn test_mn02_asteroid_belts_as_balls_highsec_and_nullsec() {
 }
 
 // ============================================================================
-// 3. OF-28: OnMiningLaserFiredLocal notification & characterMiningLedger RPC
+// 3. OF-28: OnOreMined notification & characterMiningLedger RPC
 // ============================================================================
 #[tokio::test]
 async fn test_of28_mining_laser_fired_local_and_canonical_ledger_rpc() {
-    // parity: notify:OnMiningLaserFiredLocal, notify:OnOreMined, rpc:characterMiningLedger.GetCharacterLogs
-    eve_testkit::attest(&["notify:OnMiningLaserFiredLocal", "notify:OnOreMined", "rpc:characterMiningLedger.GetCharacterLogs"]);
+    // parity: notify:OnOreMined, rpc:characterMiningLedger.GetCharacterLogs
+    eve_testkit::attest(&["notify:OnOreMined", "rpc:characterMiningLedger.GetCharacterLogs"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let char_id = 90_000_001i64;
@@ -256,10 +256,6 @@ async fn test_of28_mining_laser_fired_local_and_canonical_ledger_rpc() {
 
     let notifs = ctx.drain_notifications_for_char(char_id);
     assert!(notifs.iter().any(|n| n.event == "OnOreMined"), "OnOreMined must fire");
-    assert!(
-        notifs.iter().any(|n| n.event == "OnMiningLaserFiredLocal" && n.args.is_empty()),
-        "OnMiningLaserFiredLocal must fire with 0 args"
-    );
 
     let logs = ctx.dispatch_rpc(&mut sess, "characterMiningLedger", None, "GetCharacterLogs", &[], &kw, None).await.unwrap();
     let PyRep::List(rows) = logs else { panic!("Expected List from GetCharacterLogs") };

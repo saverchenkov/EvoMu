@@ -539,12 +539,6 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
             (PyRep::String("moduleItemID".into()), PyRep::Integer(cycle.module_id)),
         ])],
     );
-    ctx.notify(
-        NotificationTarget::SolarSystem(cycle.solar_system_id),
-        "OnMiningLaserFiredLocal",
-        "solarsystemid",
-        Vec::new(),
-    );
 
     let free_after = free_units - delivered;
     let stop = if remaining == 0 {

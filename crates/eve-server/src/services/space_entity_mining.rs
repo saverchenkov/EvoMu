@@ -208,7 +208,7 @@ pub(crate) async fn handle_mine(
     if let Some((_, ast_ball)) = handle.get_ball_snapshot(asteroid_id).await.ok().flatten() {
         let surface_dist = (ship_ball.position.distance(ast_ball.position) - ship_ball.radius - ast_ball.radius).max(0.0);
         ast_surface_dist_m = surface_dist;
-        let max_range = 35_000.0;
+        let max_range = crate::services::combat_crimewatch::compute_drone_control_range(ctx, char_id, ship_id);
         if surface_dist > max_range {
             return Err(BridgeRpcError {
                 code: "OutOfRange".into(),

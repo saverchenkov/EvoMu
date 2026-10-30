@@ -175,6 +175,10 @@ pub fn populate_asteroid_belt_entities(
                 let id = ast_id_counter;
                 ast_id_counter += 1;
 
+                // DERIVED (OF-36): initial asteroid quantity/radius/mass scaling
+                // ((2,000 / unit_volume) rounded to portion size batch, radius clamp 60..2,500m,
+                // mass total_m3 * 5e7) is a derived server-side heuristic because per-belt
+                // asteroid volume/mass distributions are server-only and absent from V24 ResFiles.
                 let unit_vol = ore_type.volume.max(0.01);
                 let batch = ore_type.portion_size.max(1);
                 let raw_units = ((2_000.0 / unit_vol).round() as u64).max(batch);
