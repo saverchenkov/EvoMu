@@ -1,4 +1,4 @@
-//! Integration tests for 17 open `feat:structures.*` parity rows (Batch 38).
+//! Integration tests for open `feat:structures.*` parity rows (Batch 38, Part 1).
 
 #![forbid(unsafe_code)]
 
@@ -7,10 +7,8 @@ use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
-use eve_server::services::mining_advanced::mining_compression::compute_structure_rigged_base_yield;
-use eve_server::services::space_destiny::space_nav_travel::sync_tether;
-use eve_server::services::structure_acl_defense_rules::is_structure_immune_to_ewar;
 use eve_server::services::station_structure::structure_lifecycle as life;
+use eve_server::services::station_structure::structure_lifecycle_rpc::{handle_structure_fit_move, handle_structure_module_online};
 use eve_server::services::station_structure::structure_upwell_ops::{load_ext_state, save_ext_state};
 use glam::DVec3;
 use std::collections::HashMap;
@@ -18,7 +16,6 @@ use std::collections::HashMap;
 const OWNER: i64 = 90_000_001;
 const OTHER_PILOT: i64 = 90_000_002;
 const JITA: u32 = 30_000_142;
-const FULCRUM_STATION_ID: i64 = 60_015_187;
 
 async fn rpc(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let kw = HashMap::new();
@@ -56,6 +53,10 @@ async fn anchor_upwell(ctx: &ServerContext, sess: &mut SessionState, type_id: u3
     let char_id = sess.character_id.expect("char");
     grant(ctx, char_id, ship, type_id, InventoryFlag::Cargo, 1);
     rpc(ctx, sess, "structureDeployment", "Anchor", &[PyRep::Integer(i64::from(type_id)), PyRep::String(name.into())]).await
+}
+
+fn extract_id(rep: &PyRep) -> i64 {
+    rep.as_i64().unwrap_or_else(|| rep.dict_get("structureID").and_then(|v| v.as_i64()).expect("structureID"))
 }
 
 /// 1. `feat:structures.upwell-palatine-keepstar-limit`
@@ -107,19 +108,61 @@ async fn test_quantum_core_gate_and_anchoring_onlining_phases() {
     crate::common::pin_clock(&ctx);
     let mut sess = pilot_in_space(&ctx, 2, OWNER, "Core Gate Corp", "CORE").await;
 
+    // Verify all 8 Upwell hulls require distinct matching Quantum Cores
+    let hulls = [35832u32, 35833, 35834, 35825, 35826, 35827, 35835, 35836];
+    let mut core_ids = std::collections::HashSet::new();
+    for h in hulls {
+        let cid = life::structure_profile(&ctx, h).expect("hull profile").core_type_id.expect("core_type_id");
+        assert!(core_ids.insert(cid), "hull {h} must have a unique Quantum Core type");
+    }
+
     // 1. Deployed structure starts in AnchorVulnerable (15 min) with hull HP only
-    let res = anchor_upwell(&ctx, &mut sess, 35832, "Astrahus Alpha").await.expect("Anchor Astrahus");
-    let st_id = res.as_i64().unwrap_or_else(|| res.dict_get("structureID").and_then(|v| v.as_i64()).expect("structureID"));
+    let st_id = extract_id(&anchor_upwell(&ctx, &mut sess, 35832, "Astrahus Alpha").await.expect("Anchor Astrahus"));
+    let profile = life::structure_profile(&ctx, 35832).expect("Astrahus profile");
     let st = ctx.db.with_snapshot(|s| s.structures.get(&st_id).cloned().expect("structure"));
     assert_eq!(st.state, life::STATE_ANCHOR_VULNERABLE);
     assert_eq!(st.shield_hp, 0.0);
     assert_eq!(st.armor_hp, 0.0);
+    assert_eq!(st.hull_hp, profile.hull_hp);
 
-    // 2. Advance 15 min -> Anchoring (24 h invulnerable)
-    ctx.advance_secs(life::ANCHOR_VULNERABLE_SECS + 1);
+    // Pause while taking >= 10% of damage cap during AnchorVulnerable
+    let before_until = st.reinforced_until_unix;
+    let dmg_pause = ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        let out = life::apply_structure_damage(&ctx, snap, &mut ext, st_id, 600.0, 1.0, OTHER_PILOT, ctx.now_unix()).expect("damage");
+        save_ext_state(snap, &ext);
+        out
+    });
+    assert!(dmg_pause.repair_paused, "qualifying damage must pause AnchorVulnerable timer");
+    assert!(dmg_pause.reinforced_until_unix > before_until);
+
+    // Killable without timers during AnchorVulnerable
+    let doomed_id = 770_001;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(doomed_id, UpwellStructureRecord {
+            structure_id: doomed_id, type_id: 35832, owner_corp_id: st.owner_corp_id,
+            solar_system_id: JITA, name: "Doomed Anchor".into(), position: [0.0, 0.0, 0.0],
+            state: life::STATE_ANCHOR_VULNERABLE.into(), quantum_core_installed: false, fuel_blocks: 0,
+            shield_hp: 0.0, armor_hp: 0.0, hull_hp: 100.0, reinforced_until_unix: ctx.now_unix() + 900,
+            last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
+        });
+        let mut ext = load_ext_state(snap);
+        let out = life::apply_structure_damage(&ctx, snap, &mut ext, doomed_id, 500.0, 1.0, OTHER_PILOT, ctx.now_unix()).expect("kill");
+        save_ext_state(snap, &ext);
+        assert_eq!(out.state, life::STATE_DESTROYED);
+        assert!(out.destruction.is_some(), "structure in AnchorVulnerable must die without reinforcement timers");
+    });
+
+    // 2. Advance past AnchorVulnerable -> Anchoring (24 h invulnerable)
+    ctx.advance_secs(life::ANCHOR_VULNERABLE_SECS + 10);
     rpc(&ctx, &mut sess, "structureGuests", "GetGuests", &[PyRep::Integer(st_id)]).await.expect("sync");
     let st = ctx.db.with_snapshot(|s| s.structures.get(&st_id).cloned().expect("structure"));
     assert_eq!(st.state, life::STATE_ANCHORING);
+    let invuln_err = ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        life::apply_structure_damage(&ctx, snap, &mut ext, st_id, 500.0, 1.0, OTHER_PILOT, ctx.now_unix())
+    }).expect_err("Anchoring must be invulnerable");
+    assert_eq!(invuln_err.code, "StructureReinforcedInvulnerable");
 
     // 3. Advance 24 h -> NoCore; service module cannot be brought online without Quantum Core
     ctx.advance_secs(life::ANCHORING_SECS + 1);
@@ -127,12 +170,20 @@ async fn test_quantum_core_gate_and_anchoring_onlining_phases() {
     let st = ctx.db.with_snapshot(|s| s.structures.get(&st_id).cloned().expect("structure"));
     assert_eq!(st.state, life::STATE_NO_CORE);
 
-    let srv_id = grant(&ctx, st.owner_corp_id, st_id, 35892, InventoryFlag::ServiceSlot0, 1);
-    let online_no_core = rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(srv_id), PyRep::String("online".into())]).await;
-    assert!(online_no_core.is_err(), "service module must not online without Quantum Core");
+    let srv_id = grant(&ctx, st.owner_corp_id, st_id, 35894, InventoryFlag::ServiceSlot0, 1);
+    let online_no_core = handle_structure_module_online(&ctx, &mut sess, st_id, srv_id, true);
+    assert_eq!(online_no_core.expect_err("service module must not online without Quantum Core").code, "QuantumCoreRequired");
 
-    // 4. Install matching Astrahus Quantum Core (56201) -> Onlining (15 min) -> ShieldVulnerable (healed)
-    let profile = life::structure_profile(&ctx, 35832).expect("Astrahus profile");
+    // Wrong-hull Quantum Core (Fortizar core in Astrahus) must NOT install
+    let fortizar_core = life::structure_profile(&ctx, 35833).expect("Fortizar").core_type_id.expect("Fortizar core");
+    let wrong_core_item = grant(&ctx, st.owner_corp_id, st_id, fortizar_core, InventoryFlag::StructureDeedBay, 1);
+    rpc(&ctx, &mut sess, "structureGuests", "GetGuests", &[PyRep::Integer(st_id)]).await.expect("sync");
+    let st_still_nocore = ctx.db.with_snapshot(|s| s.structures.get(&st_id).cloned().expect("structure"));
+    assert_eq!(st_still_nocore.state, life::STATE_NO_CORE);
+    assert!(!st_still_nocore.quantum_core_installed);
+    ctx.db.with_mut_snapshot(|snap| { snap.items.remove(&wrong_core_item); });
+
+    // 4. Install matching Astrahus Quantum Core (56201) -> Onlining (15 min)
     let core_type = profile.core_type_id.expect("Astrahus core type");
     grant(&ctx, st.owner_corp_id, st_id, core_type, InventoryFlag::StructureDeedBay, 1);
     rpc(&ctx, &mut sess, "structureGuests", "GetGuests", &[PyRep::Integer(st_id)]).await.expect("sync");
@@ -140,7 +191,36 @@ async fn test_quantum_core_gate_and_anchoring_onlining_phases() {
     assert_eq!(st.state, life::STATE_ONLINING);
     assert!(st.quantum_core_installed);
 
-    ctx.advance_secs(life::ONLINING_SECS + 1);
+    // Pause while taking >= 10% of damage cap during Onlining
+    let onlining_until = st.reinforced_until_unix;
+    let online_pause = ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        let out = life::apply_structure_damage(&ctx, snap, &mut ext, st_id, 600.0, 1.0, OTHER_PILOT, ctx.now_unix()).expect("damage");
+        save_ext_state(snap, &ext);
+        out
+    });
+    assert!(online_pause.repair_paused, "qualifying damage must pause Onlining timer");
+    assert!(online_pause.reinforced_until_unix > onlining_until);
+
+    // Killable without timers during Onlining
+    let doomed_online_id = 770_002;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(doomed_online_id, UpwellStructureRecord {
+            structure_id: doomed_online_id, type_id: 35832, owner_corp_id: st.owner_corp_id,
+            solar_system_id: JITA, name: "Doomed Onlining".into(), position: [0.0, 0.0, 0.0],
+            state: life::STATE_ONLINING.into(), quantum_core_installed: true, fuel_blocks: 100,
+            shield_hp: 0.0, armor_hp: 0.0, hull_hp: 100.0, reinforced_until_unix: ctx.now_unix() + 900,
+            last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
+        });
+        let mut ext = load_ext_state(snap);
+        let out = life::apply_structure_damage(&ctx, snap, &mut ext, doomed_online_id, 500.0, 1.0, OTHER_PILOT, ctx.now_unix()).expect("kill");
+        save_ext_state(snap, &ext);
+        assert_eq!(out.state, life::STATE_DESTROYED);
+        assert!(out.destruction.is_some(), "structure in Onlining must die without reinforcement timers");
+    });
+
+    // Advance past Onlining -> ShieldVulnerable (structure, armor, and shield fully healed)
+    ctx.advance_secs(life::ONLINING_SECS + 10);
     rpc(&ctx, &mut sess, "structureGuests", "GetGuests", &[PyRep::Integer(st_id)]).await.expect("sync");
     let st = ctx.db.with_snapshot(|s| s.structures.get(&st_id).cloned().expect("structure"));
     assert_eq!(st.state, life::STATE_SHIELD_VULNERABLE);
@@ -173,18 +253,36 @@ async fn test_fitting_state_locks_and_pochven_anchoring() {
     crate::common::pin_clock(&ctx);
     let mut sess = pilot_in_space(&ctx, 3, OWNER, "Fit Lock Corp", "FLCK").await;
 
-    let res = anchor_upwell(&ctx, &mut sess, 35832, "Astrahus Fit").await.expect("Anchor");
-    let st_id = res.as_i64().unwrap_or_else(|| res.dict_get("structureID").and_then(|v| v.as_i64()).expect("structureID"));
+    let st_id = extract_id(&anchor_upwell(&ctx, &mut sess, 35832, "Astrahus Fit").await.expect("Anchor"));
     let profile = life::structure_profile(&ctx, 35832).expect("profile");
+    let mod_id = grant(&ctx, OWNER, st_id, 35894, InventoryFlag::Hangar, 1);
 
-    // Refit refused while AnchorVulnerable
-    let validate_anchoring = ctx.db.with_snapshot(|snap| {
-        let ext = load_ext_state(snap);
-        life::validate_structure_refit(&ctx, snap, &ext, st_id, ctx.now_unix())
+    // Refit refused while AnchorVulnerable -> StructureFittingLockedInState
+    let err_anchor = handle_structure_fit_move(&ctx, &mut sess, mod_id, st_id, InventoryFlag::ServiceSlot0, Some(false))
+        .expect_err("refit must be refused while AnchorVulnerable");
+    assert_eq!(err_anchor.code, "StructureFittingLockedInState");
+
+    // Refit refused while Onlining -> StructureFittingLockedInState
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&st_id) {
+            st.state = life::STATE_ONLINING.into();
+        }
     });
-    assert!(validate_anchoring.is_err(), "refit must be refused while anchoring");
+    let err_onlining = handle_structure_fit_move(&ctx, &mut sess, mod_id, st_id, InventoryFlag::ServiceSlot0, Some(false))
+        .expect_err("refit must be refused while Onlining");
+    assert_eq!(err_onlining.code, "StructureFittingLockedInState");
 
-    // Transition to ShieldVulnerable with full shields -> refit allowed
+    // Refit refused while Reinforced -> StructureFittingLockedInState
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&st_id) {
+            st.state = life::STATE_ARMOR_REINFORCED.into();
+        }
+    });
+    let err_reinf = handle_structure_fit_move(&ctx, &mut sess, mod_id, st_id, InventoryFlag::ServiceSlot0, Some(false))
+        .expect_err("refit must be refused while Reinforced");
+    assert_eq!(err_reinf.code, "StructureFittingLockedInState");
+
+    // Refit refused while Repairing -> StructureRepairingCannotRefit
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(st) = snap.structures.get_mut(&st_id) {
             st.state = life::STATE_SHIELD_VULNERABLE.into();
@@ -192,40 +290,49 @@ async fn test_fitting_state_locks_and_pochven_anchoring() {
             st.armor_hp = profile.armor_hp;
             st.hull_hp = profile.hull_hp;
         }
+        let mut ext = load_ext_state(snap);
+        ext.lifecycle.entry(st_id).or_default().repair_until_unix = Some(ctx.now_unix() + 600);
+        save_ext_state(snap, &ext);
     });
-    let validate_ok = ctx.db.with_snapshot(|snap| {
-        let ext = load_ext_state(snap);
-        life::validate_structure_refit(&ctx, snap, &ext, st_id, ctx.now_unix())
-    });
-    assert!(validate_ok.is_ok(), "refit must succeed at full shields in ShieldVulnerable");
+    let err_repairing = handle_structure_fit_move(&ctx, &mut sess, mod_id, st_id, InventoryFlag::ServiceSlot0, Some(false))
+        .expect_err("refit must be refused while repairing");
+    assert_eq!(err_repairing.code, "StructureRepairingCannotRefit");
 
-    // Damaged shields -> refit refused
+    // Refit refused while damaged / under attack -> StructureDamagedCannotRefit
     ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        ext.lifecycle.entry(st_id).or_default().repair_until_unix = None;
+        save_ext_state(snap, &ext);
         if let Some(st) = snap.structures.get_mut(&st_id) {
             st.shield_hp = profile.shield_hp * 0.85;
         }
     });
-    let validate_damaged = ctx.db.with_snapshot(|snap| {
-        let ext = load_ext_state(snap);
-        life::validate_structure_refit(&ctx, snap, &ext, st_id, ctx.now_unix())
-    });
-    assert!(validate_damaged.is_err(), "refit must be refused when shields < 100%");
+    let err_damaged = handle_structure_fit_move(&ctx, &mut sess, mod_id, st_id, InventoryFlag::ServiceSlot0, Some(false))
+        .expect_err("refit must be refused when shields < 100%");
+    assert_eq!(err_damaged.code, "StructureDamagedCannotRefit");
 
-    // Reinforced -> refit refused
+    // Transition to ShieldVulnerable with full shields -> refit succeeds
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(st) = snap.structures.get_mut(&st_id) {
             st.shield_hp = profile.shield_hp;
-            st.state = life::STATE_ARMOR_REINFORCED.into();
         }
     });
-    let validate_reinf = ctx.db.with_snapshot(|snap| {
-        let ext = load_ext_state(snap);
-        life::validate_structure_refit(&ctx, snap, &ext, st_id, ctx.now_unix())
-    });
-    assert!(validate_reinf.is_err(), "refit must be refused while reinforced");
+    let ok_refit = handle_structure_fit_move(&ctx, &mut sess, mod_id, st_id, InventoryFlag::ServiceSlot0, Some(false));
+    assert!(ok_refit.is_ok(), "refit must succeed at full shields in ShieldVulnerable: {ok_refit:?}");
 
-    // Pochven anchoring restrictions: Upwell refused, Customs Office requires >= 1.5 Triglavian standing
+    // Pochven anchoring restrictions: Upwell refused, existing ones remain, Customs Office requires >= 1.5 Triglavian standing
     let pochven_sys = ctx.sde.solar_systems.values().find(|s| s.region_id == life::POCHVEN_REGION_ID).map(|s| s.solar_system_id).expect("Pochven system");
+    let existing_poch_id = 770_099;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(existing_poch_id, UpwellStructureRecord {
+            structure_id: existing_poch_id, type_id: 35832, owner_corp_id: 98_000_001,
+            solar_system_id: pochven_sys, name: "Existing Pochven Astrahus".into(), position: [0.0, 0.0, 0.0],
+            state: life::STATE_SHIELD_VULNERABLE.into(), quantum_core_installed: true, fuel_blocks: 100,
+            shield_hp: profile.shield_hp, armor_hp: profile.armor_hp, hull_hp: profile.hull_hp,
+            reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
+        });
+    });
+
     sess.solar_system_id = Some(pochven_sys);
     let ship = sess.ship_id.expect("ship");
     ctx.db.with_mut_snapshot(|snap| {
@@ -240,6 +347,11 @@ async fn test_fitting_state_locks_and_pochven_anchoring() {
     ).await;
     let poch_upwell = anchor_upwell(&ctx, &mut sess, 35832, "Pochven Astrahus").await;
     assert_eq!(poch_upwell.expect_err("Pochven Upwell must fail").code, "AnchoringDisallowedInPochven");
+
+    // Existing Pochven Upwell structure remains intact
+    life::sync_all_structures(&ctx);
+    let poch_info = rpc(&ctx, &mut sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(existing_poch_id)]).await;
+    assert!(poch_info.is_ok(), "existing Upwell structure in Pochven must remain: {poch_info:?}");
 
     let planet_pos = ctx.sde.celestials_in_system(pochven_sys)
         .into_iter()
@@ -260,89 +372,6 @@ async fn test_fitting_state_locks_and_pochven_anchoring() {
     assert!(ok_standing.is_ok(), "Pochven POCO with >= 1.5 Trig standing should succeed: {ok_standing:?}");
 }
 
-/// 6. `feat:structures.armor-reinforce-durations`, 7. `feat:structures.hull-reinforce-durations`,
-/// 8. `feat:structures.reinforce-exit-time-rules`, 9. `feat:structures.repair-timer-pause-threshold`,
-/// 10. `feat:structures.vulnerability-repair-window`
-#[test]
-fn test_reinforce_durations_exit_rules_and_repair_timers() {
-    // parity: feat:structures.armor-reinforce-durations, feat:structures.hull-reinforce-durations, feat:structures.reinforce-exit-time-rules, feat:structures.repair-timer-pause-threshold, feat:structures.vulnerability-repair-window
-    eve_testkit::attest(&[
-        "feat:structures.armor-reinforce-durations",
-        "feat:structures.hull-reinforce-durations",
-        "feat:structures.reinforce-exit-time-rules",
-        "feat:structures.repair-timer-pause-threshold",
-        "feat:structures.vulnerability-repair-window",
-    ]);
-
-    // Armor reinforcement durations
-    assert_eq!(life::armor_reinforcement_secs(life::HullClass::Medium, life::SpaceClass::Wormhole, life::PowerState::FullPower), Some(216_000));
-    assert_eq!(life::armor_reinforcement_secs(life::HullClass::Medium, life::SpaceClass::LowNullSec, life::PowerState::FullPower), Some(302_400));
-    assert_eq!(life::armor_reinforcement_secs(life::HullClass::Medium, life::SpaceClass::HighSec, life::PowerState::FullPower), Some(388_800));
-    assert_eq!(life::armor_reinforcement_secs(life::HullClass::Medium, life::SpaceClass::WarHq, life::PowerState::FullPower), Some(86_400));
-    assert_eq!(life::armor_reinforcement_secs(life::HullClass::Large, life::SpaceClass::HighSec, life::PowerState::FullPower), Some(86_400));
-    assert_eq!(life::armor_reinforcement_secs(life::HullClass::XLarge, life::SpaceClass::LowNullSec, life::PowerState::FullPower), Some(86_400));
-    assert_eq!(life::armor_reinforcement_secs(life::HullClass::Flex, life::SpaceClass::LowNullSec, life::PowerState::FullPower), None);
-    assert_eq!(life::armor_reinforcement_secs(life::HullClass::Large, life::SpaceClass::LowNullSec, life::PowerState::Abandoned), None);
-    assert_eq!(life::armor_reinforcement_secs(life::HullClass::Large, life::SpaceClass::LowNullSec, life::PowerState::LowPower), None);
-
-    // Hull reinforcement durations
-    assert_eq!(life::hull_reinforcement_secs(life::HullClass::Large, life::SpaceClass::Wormhole, life::PowerState::FullPower), Some(129_600));
-    assert_eq!(life::hull_reinforcement_secs(life::HullClass::Large, life::SpaceClass::LowNullSec, life::PowerState::FullPower), Some(216_000));
-    assert_eq!(life::hull_reinforcement_secs(life::HullClass::XLarge, life::SpaceClass::HighSec, life::PowerState::FullPower), Some(388_800));
-    assert_eq!(life::hull_reinforcement_secs(life::HullClass::Large, life::SpaceClass::WarHq, life::PowerState::FullPower), Some(86_400));
-    assert_eq!(life::hull_reinforcement_secs(life::HullClass::Flex, life::SpaceClass::LowNullSec, life::PowerState::FullPower), Some(1_800));
-    assert_eq!(life::hull_reinforcement_secs(life::HullClass::Medium, life::SpaceClass::HighSec, life::PowerState::FullPower), None);
-    assert_eq!(life::hull_reinforcement_secs(life::HullClass::Large, life::SpaceClass::HighSec, life::PowerState::Abandoned), None);
-
-    // Exit time rules & jitter never rolling over UTC day
-    let base_exit = 1_700_006_400;
-    let jittered = life::apply_reinforce_jitter(base_exit, -10_800, 10_800);
-    assert_eq!(jittered / 86_400, base_exit / 86_400, "jitter must never roll exit to previous UTC day");
-    let late_exit = 1_700_092_000;
-    let jittered_late = life::apply_reinforce_jitter(late_exit, 10_800, 10_800);
-    assert_eq!(jittered_late / 86_400, late_exit / 86_400, "jitter must never roll exit to next UTC day");
-
-    // Repair timer durations & 10% damage cap pause threshold
-    assert_eq!(life::REPAIR_SHIELD_ARMOR_SECS, 900);
-    assert_eq!(life::REPAIR_HULL_SECS, 1_800);
-
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-    let profile = life::structure_profile(&ctx, 35832).expect("Astrahus profile");
-    let st_id = 777_001;
-    let now = ctx.now_unix();
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.structures.insert(st_id, UpwellStructureRecord {
-            structure_id: st_id, type_id: 35832, owner_corp_id: 98_000_001,
-            solar_system_id: JITA, name: "Repair Test".into(), position: [0.0, 0.0, 0.0],
-            state: life::STATE_ARMOR_VULNERABLE.into(),
-            quantum_core_installed: true, fuel_blocks: 100,
-            shield_hp: 0.0, armor_hp: profile.armor_hp * 0.5, hull_hp: profile.hull_hp,
-            reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
-        });
-    });
-
-    // Apply < 10% of armor damage cap (400 damage over 1s < 500 DPS threshold) -> does NOT pause
-    let _ = ctx.db.with_mut_snapshot(|snap| {
-        let mut ext = load_ext_state(snap);
-        let res = life::apply_structure_damage(&ctx, snap, &mut ext, st_id, 400.0, 1.0, OTHER_PILOT, now);
-        save_ext_state(snap, &ext);
-        res
-    });
-    // Advance 15 min -> repairs to 100% and returns to ShieldVulnerable
-    ctx.advance_secs(life::REPAIR_SHIELD_ARMOR_SECS + 1);
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut ext = load_ext_state(snap);
-        life::sync_structure(&ctx, snap, &mut ext, st_id, ctx.now_unix());
-        save_ext_state(snap, &ext);
-    });
-    let st = ctx.db.with_snapshot(|snap| snap.structures.get(&st_id).cloned().expect("structure"));
-    assert_eq!(st.state, life::STATE_SHIELD_VULNERABLE);
-    assert!(st.shield_hp >= profile.shield_hp);
-    assert!(st.armor_hp >= profile.armor_hp);
-    assert!(st.hull_hp >= profile.hull_hp);
-}
-
 /// 11. `feat:structures.reinforce-hour-hack-reveal` & 12. `feat:structures.ewar-immunity`
 #[tokio::test]
 async fn test_reinforce_hour_hack_reveal_and_ewar_immunity() {
@@ -355,137 +384,71 @@ async fn test_reinforce_hour_hack_reveal_and_ewar_immunity() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut sess = pilot_in_space(&ctx, 4, OWNER, "Hack Owner Corp", "HACK").await;
-    let res = anchor_upwell(&ctx, &mut sess, 35832, "Astrahus Hack").await.expect("Anchor");
-    let st_id = res.as_i64().unwrap_or_else(|| res.dict_get("structureID").and_then(|v| v.as_i64()).expect("structureID"));
+    let st_id = extract_id(&anchor_upwell(&ctx, &mut sess, 35832, "Astrahus Hack").await.expect("Anchor"));
 
-    // EWAR immunity check
-    let immune = ctx.db.with_snapshot(|snap| is_structure_immune_to_ewar(snap, st_id));
-    assert!(immune, "Upwell structure must be immune to EWAR");
+    // Spawn structure ball & hacker ship ball in Jita
+    let st_pos = ctx.db.with_snapshot(|s| DVec3::from_array(s.structures.get(&st_id).expect("st").position));
+    let jita_sys = ctx.systems.get_or_spawn(JITA);
+    let _ = jita_sys.spawn_ball(Ball {
+        id: st_id, type_id: 35832, position: st_pos, velocity: DVec3::ZERO,
+        max_velocity: 0.0, inertia: 1.0, mass: 1.0e9, radius: 1_000.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }).await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&OTHER_PILOT) {
+            ch.user_id = 1;
+        }
+    });
+    let mut hacker_sess = SessionState::new(5);
+    rpc(&ctx, &mut hacker_sess, "authentication", "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())]).await.expect("Login");
+    rpc(&ctx, &mut hacker_sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(OTHER_PILOT)]).await.expect("Select");
+    ctx.advance_secs(12);
+    rpc(&ctx, &mut hacker_sess, "structureDocking", "Undock", &[]).await.expect("Undock");
+    let hacker_ship = hacker_sess.ship_id.expect("hacker_ship");
+    jita_sys.set_ball_position(hacker_ship, st_pos + DVec3::new(900.0, 0.0, 0.0)).await;
+    let _ = jita_sys.add_target_lock(hacker_ship, eve_destiny::TargetLock {
+        target_id: st_id, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None,
+    }).await;
+
+    // EWAR immunity: activate ECM, dampener, weapon disruptor, target painter, web, warp scrambler, and energy neutralizer
+    let ewar_groups = [201u32, 208, 291, 379, 65, 52, 71];
+    for (idx, grp) in ewar_groups.into_iter().enumerate() {
+        let mod_tid = ctx.sde.types.values().find(|t| t.group_id == grp).map(|t| t.type_id).unwrap_or_else(|| panic!("missing EWAR group {grp}"));
+        let flag = InventoryFlag::from_u16(19 + idx as u16);
+        let mod_id = grant(&ctx, OTHER_PILOT, hacker_ship, mod_tid, flag, 1);
+        let act = rpc(&ctx, &mut hacker_sess, "dogmaIM", "Activate", &[PyRep::Integer(mod_id), PyRep::String("default".into()), PyRep::Integer(st_id)]).await
+            .unwrap_or_else(|e| panic!("EWAR group {grp} activate failed: {e:?}"));
+        assert_eq!(act.dict_get("immune"), Some(&PyRep::Bool(true)), "structure must be immune to EWAR group {grp}");
+        assert_eq!(act.dict_get("ewarAssistRecorded"), Some(&PyRep::Bool(false)), "EWAR group {grp} must have no effect");
+    }
 
     // Non-member cannot see reinforce hour before hack
-    let mut hacker_sess = SessionState::new(5);
-    hacker_sess.user_id = Some(OTHER_PILOT as u64);
-    hacker_sess.character_id = Some(OTHER_PILOT);
-    hacker_sess.solar_system_id = Some(JITA);
     let before = rpc(&ctx, &mut hacker_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)]).await.expect("GetStructureInfo before");
     assert_eq!(before.dict_get("reinforceHour"), Some(&PyRep::None), "reinforceHour must be hidden before hack");
 
     // Data Analyzer hack reveals reinforce hour to hacker
-    let revealed = life::record_structure_hack_reveal(&ctx, OTHER_PILOT, st_id);
-    assert!(revealed.is_some(), "hacking structure must reveal reinforce hour");
+    let _data_mod = grant(&ctx, OTHER_PILOT, hacker_ship, 22175, InventoryFlag::MedSlot7, 1);
+    let start = rpc(&ctx, &mut hacker_sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(st_id)]).await.expect("StartNewGameInstance");
+    assert_eq!(start.dict_get("status").and_then(|v| v.as_str()), Some("InProgress"));
+    let mut won = false;
+    for _pass in 0..8 {
+        for tile in 1..24 {
+            for _ in 0..5 {
+                if let Ok(step) = rpc(&ctx, &mut hacker_sess, "hackingMgr", "ClickedOnTile", &[PyRep::Integer(st_id), PyRep::Integer(tile)]).await {
+                    if step.dict_get("status").and_then(|v| v.as_str()) == Some("Won") {
+                        won = true;
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            if won { break; }
+        }
+        if won { break; }
+    }
+    assert!(won, "Data Analyzer hack must complete with Won");
+
     let after = rpc(&ctx, &mut hacker_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)]).await.expect("GetStructureInfo after");
     assert!(after.dict_get("reinforceHour").and_then(|v| v.as_i64()).is_some(), "reinforceHour must be revealed after hack");
-}
-
-/// 13. `feat:structures.tether-eligibility-and-restrictions` & 14. `feat:structures.tethering-docking-lock`
-#[tokio::test]
-async fn test_tether_eligibility_repair_and_breaking() {
-    // parity: feat:structures.tether-eligibility-and-restrictions, feat:structures.tethering-docking-lock
-    eve_testkit::attest(&[
-        "feat:structures.tether-eligibility-and-restrictions",
-        "feat:structures.tethering-docking-lock",
-    ]);
-
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-    let mut sess = pilot_in_space(&ctx, 6, OWNER, "Tether Corp", "TETH").await;
-    let res = anchor_upwell(&ctx, &mut sess, 35832, "Astrahus Tether").await.expect("Anchor");
-    let st_id = res.as_i64().unwrap_or_else(|| res.dict_get("structureID").and_then(|v| v.as_i64()).expect("structureID"));
-    let profile = life::structure_profile(&ctx, 35832).expect("profile");
-
-    // Bring structure online with Quantum Core
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(st) = snap.structures.get_mut(&st_id) {
-            st.state = life::STATE_SHIELD_VULNERABLE.into();
-            st.quantum_core_installed = true;
-            st.fuel_blocks = 100;
-            st.shield_hp = profile.shield_hp;
-            st.armor_hp = profile.armor_hp;
-            st.hull_hp = profile.hull_hp;
-        }
-    });
-
-    let ship = sess.ship_id.expect("ship");
-    let sys = ctx.systems.get_or_spawn(JITA);
-    if let Some(mut cs) = sys.get_combat_state(ship).await.ok().flatten() {
-        cs.shield_hp = cs.max_shield_hp * 0.5;
-        let _ = sys.set_combat_state(ship, cs).await;
-    }
-    sync_tether(&ctx, OWNER, JITA, ship).await;
-    let cs = sys.get_combat_state(ship).await.expect("query").expect("cs");
-    assert!(cs.is_tethered, "ship with docking rights at cored structure must tether");
-    assert!(cs.shield_hp > cs.max_shield_hp * 0.5, "tethered ship must receive passive repair");
-
-    // Move beyond 10 km docking ring + tether range -> tether breaks
-    let st_pos = ctx.db.with_snapshot(|s| s.structures.get(&st_id).map(|st| DVec3::from_array(st.position)).unwrap_or(DVec3::ZERO));
-    sys.set_ball_position(ship, st_pos + DVec3::new(500_000.0, 0.0, 0.0)).await;
-    sync_tether(&ctx, OWNER, JITA, ship).await;
-    let cs_far = sys.get_combat_state(ship).await.expect("query").expect("cs");
-    assert!(!cs_far.is_tethered, "tether must break when moving beyond docking perimeter");
-}
-
-/// 15. `feat:structures.asset-safety-recovery-delay-and-fee`,
-/// 16. `feat:structures.fulcrum-alignment-services`,
-/// 17. `feat:structures.reprocessing-rig-security-multipliers`
-#[tokio::test]
-async fn test_asset_safety_fulcrum_and_reprocessing_rigs() {
-    // parity: feat:structures.asset-safety-recovery-delay-and-fee, feat:structures.fulcrum-alignment-services, feat:structures.reprocessing-rig-security-multipliers
-    eve_testkit::attest(&[
-        "feat:structures.asset-safety-recovery-delay-and-fee",
-        "feat:structures.fulcrum-alignment-services",
-        "feat:structures.reprocessing-rig-security-multipliers",
-    ]);
-
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-    let _now = ctx.now_unix();
-
-    // 1. Asset safety: 20-day transit timer, 0.5% same-system fee, 15% cross-system fee
-    assert_eq!(life::ASSET_SAFETY_AUTO_DELIVERY_SECS, 20 * 86_400);
-
-    // 2. Fulcrum alignment services: Empire militia refused docking
-    let mut sess = SessionState::new(7);
-    sess.user_id = Some(OWNER as u64);
-    sess.character_id = Some(OWNER);
-    sess.solar_system_id = Some(JITA);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&OWNER) {
-            ch.war_faction_id = Some(500_001);
-        }
-    });
-    let empire_dock = rpc(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(FULCRUM_STATION_ID)]).await;
-    assert!(empire_dock.is_err(), "Fulcrum must refuse docking to Empire militia characters");
-
-    // 3. Reprocessing rig security multipliers: High-sec (1.0x), Low-sec (1.06x), Null/WH (1.12x)
-    let st_hi = 888_001;
-    let st_lo = 888_002;
-    let st_ns = 888_003;
-    let rig_tid = ctx.sde.types.values()
-        .find(|t| t.group_id == 1941 && t.default_attributes.get(&1547).copied() == Some(2.0))
-        .map(|t| t.type_id)
-        .expect("Standup M-Set Asteroid Ore Reprocessing rig");
-    let lowsec_sys = ctx.sde.solar_systems.values().find(|s| s.security_status > 0.0 && s.security_status < 0.45).map(|s| s.solar_system_id).expect("lowsec");
-    let nullsec_sys = ctx.sde.solar_systems.values().find(|s| s.security_status <= 0.0 && s.solar_system_id < 31_000_000).map(|s| s.solar_system_id).expect("nullsec");
-    ctx.db.with_mut_snapshot(|snap| {
-        for (id, sys_id) in [(st_hi, JITA), (st_lo, lowsec_sys), (st_ns, nullsec_sys)] {
-            snap.structures.insert(id, UpwellStructureRecord {
-                structure_id: id, type_id: 35835, owner_corp_id: 98_000_001,
-                solar_system_id: sys_id, name: "Athanor".into(), position: [0.0, 0.0, 0.0],
-                state: life::STATE_SHIELD_VULNERABLE.into(),
-                quantum_core_installed: true, fuel_blocks: 100,
-                shield_hp: 1000.0, armor_hp: 1000.0, hull_hp: 1000.0,
-                reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
-            });
-            snap.items.insert(id + 10, InventoryItemRecord {
-                item_id: id + 10, type_id: rig_tid, owner_id: 98_000_001, location_id: id,
-                flag: InventoryFlag::RigSlot0, quantity: 1, singleton: true, ..Default::default()
-            });
-        }
-    });
-    let veldspar = ctx.sde.types.get(&1230);
-    let y_hi = ctx.db.with_snapshot(|snap| compute_structure_rigged_base_yield(&ctx.sde, snap, st_hi, veldspar));
-    let y_lo = ctx.db.with_snapshot(|snap| compute_structure_rigged_base_yield(&ctx.sde, snap, st_lo, veldspar));
-    let y_ns = ctx.db.with_snapshot(|snap| compute_structure_rigged_base_yield(&ctx.sde, snap, st_ns, veldspar));
-    assert!((y_lo / y_hi - 1.06).abs() < 1e-4, "low-sec multiplier should be 1.06x: {y_lo} vs {y_hi}");
-    assert!((y_ns / y_hi - 1.12).abs() < 1e-4, "null-sec multiplier should be 1.12x: {y_ns} vs {y_hi}");
 }
