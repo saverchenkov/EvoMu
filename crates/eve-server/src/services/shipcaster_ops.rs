@@ -9,13 +9,22 @@
 //! - `shipcasterTravelMgr.CmdJumpThroughShipcaster`: launches militia ship through interstellar shipcaster to linked destination landing pad.
 
 use crate::router::ServerContext;
-use crate::services::cluster_macho_misc_services::with_misc_state;
+use crate::services::cluster_macho_misc_services::{effective_landing_pad, with_misc_state};
 use crate::system_actor::SystemHandle;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
 
 pub const SHIPCASTER_MAX_RANGE_M: f64 = 5_000.0;
+
+fn is_capital_ship_group(group_id: u32) -> bool {
+    matches!(group_id, 30 | 485 | 513 | 547 | 659 | 883 | 902 | 1538 | 4594)
+}
+
+fn is_starter_shipcaster_eligible_group(group_id: u32) -> bool {
+    // Sub-cruiser starter hulls: Frigates (25), Shuttles (31), Corvettes (237), Destroyers (420).
+    matches!(group_id, 25 | 31 | 237 | 420)
+}
 
 fn rpc_err(code: impl Into<String>, msg: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
@@ -93,10 +102,17 @@ pub(crate) async fn execute_shipcaster_jump(
 
     {
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-        if cw.get_or_create(char_id).is_weapon_timer_active(now_unix) {
+        let cw_st = cw.get_or_create(char_id);
+        if cw_st.is_weapon_timer_active(now_unix) {
             return Err(rpc_err(
                 "WeaponsTimerActive",
                 "Cannot jump through shipcaster while weapons timer is active",
+            ));
+        }
+        if cw_st.is_criminal(now_unix) {
+            return Err(rpc_err(
+                "CriminalTimerActive",
+                "Cannot jump through shipcaster while criminal flag is active",
             ));
         }
     }
@@ -211,11 +227,12 @@ pub async fn handle(
         // shipCasterLandingPadMgr: Faction Warfare Landing Pad Registry
         // --------------------------------------------------------------------
         ("shipCasterLandingPadMgr", "GetAllLandingPads") => {
+            let now_unix = ctx.now_unix();
             let pads = with_misc_state(ctx, |st| {
                 st.landing_pads
                     .iter()
                     .filter(|p| matches!(p.faction_id, 500001..=500004))
-                    .cloned()
+                    .map(|p| effective_landing_pad(p, &st.landing_pads, now_unix))
                     .collect::<Vec<_>>()
             });
             Some(Ok(PyRep::List(pads.iter().map(|p| p.to_keyval()).collect())))
@@ -226,11 +243,12 @@ pub async fn handle(
                 Some(fid) => i32::try_from(fid).unwrap_or(0),
                 None => return Some(Err(rpc_err("InvalidArguments", "GetFactionLandingPads requires factionID"))),
             };
+            let now_unix = ctx.now_unix();
             let pads = with_misc_state(ctx, |st| {
                 st.landing_pads
                     .iter()
                     .filter(|p| p.faction_id == faction_id)
-                    .map(|p| p.to_keyval())
+                    .map(|p| effective_landing_pad(p, &st.landing_pads, now_unix).to_keyval())
                     .collect::<Vec<_>>()
             });
             Some(Ok(PyRep::List(pads)))
@@ -261,18 +279,23 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let now = ctx.now_unix();
-            let has_timer = {
+            let blocked_by_timer = {
                 let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-                cw.get_or_create(char_id).is_weapon_timer_active(now)
+                let cw_st = cw.get_or_create(char_id);
+                cw_st.is_weapon_timer_active(now) || cw_st.is_criminal(now)
             };
-            if has_timer {
+            if blocked_by_timer {
                 return Some(Ok(PyRep::Bool(false)));
             }
             if let Some(ship_id) = session.ship_id {
                 let ship_type_id = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0);
+                if matches!(ship_type_id, 670 | 33328) {
+                    return Some(Ok(PyRep::Bool(false)));
+                }
                 let ship_group_id = ctx.sde.types.get(&ship_type_id).map(|t| t.group_id).unwrap_or(0);
-                // Capital ships cannot use shipcasters
-                if matches!(ship_group_id, 30 | 485 | 547 | 659 | 883 | 1538 | 4594) {
+                if is_capital_ship_group(ship_group_id)
+                    || (ship_group_id != 0 && !is_starter_shipcaster_eligible_group(ship_group_id))
+                {
                     return Some(Ok(PyRep::Bool(false)));
                 }
             }
@@ -294,9 +317,18 @@ pub async fn handle(
                 return Some(Err(rpc_err("CustomError", "CmdJumpThroughStarterShipcaster requires an active solar system")));
             };
             let ship_type_id = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0);
+            if matches!(ship_type_id, 670 | 33328) {
+                return Some(Err(rpc_err("CapsuleCannotJumpShipcaster", "Capsules cannot jump through a starter shipcaster")));
+            }
             let ship_group_id = ctx.sde.types.get(&ship_type_id).map(|t| t.group_id).unwrap_or(0);
-            if matches!(ship_group_id, 30 | 485 | 547 | 659 | 883 | 1538 | 4594) {
+            if is_capital_ship_group(ship_group_id) {
                 return Some(Err(rpc_err("CapitalShipCannotJumpShipcaster", "Capital ships cannot jump through a shipcaster")));
+            }
+            if ship_group_id != 0 && !is_starter_shipcaster_eligible_group(ship_group_id) {
+                return Some(Err(rpc_err(
+                    "ShipClassNotEligibleForStarterShipcaster",
+                    "Only corvettes, shuttles, frigates, and destroyers can use a Rookie Shipcaster",
+                )));
             }
             let target_arg = match args.first().and_then(|a| a.as_i64()) {
                 Some(id) if id > 0 => id,
@@ -339,8 +371,12 @@ pub async fn handle(
             let now = ctx.now_unix();
             {
                 let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-                if cw.get_or_create(char_id).is_weapon_timer_active(now) {
+                let cw_st = cw.get_or_create(char_id);
+                if cw_st.is_weapon_timer_active(now) {
                     return Some(Err(rpc_err("WeaponsTimerActive", "Cannot jump through starter shipcaster while weapons timer is active")));
+                }
+                if cw_st.is_criminal(now) {
+                    return Some(Err(rpc_err("CriminalTimerActive", "Cannot jump through starter shipcaster while criminal flag is active")));
                 }
             }
 
@@ -349,10 +385,16 @@ pub async fn handle(
                 return Some(Err(e));
             }
 
-            let pad = with_misc_state(ctx, |st| {
-                st.landing_pads.iter().find(|p| p.faction_id == starter_launcher.faction_id && p.solar_system_id == dest_sys).cloned()
+            let dest_launcher = with_misc_state(ctx, |st| {
+                st.launchers
+                    .iter()
+                    .find(|l| l.faction_id == starter_launcher.faction_id && l.solar_system_id == dest_sys)
+                    .cloned()
             });
-            let arrival_pos = pad.map(|p| p.position).unwrap_or(glam::DVec3::ZERO) + glam::DVec3::new(2_500.0, 0.0, 0.0);
+            let arrival_pos = dest_launcher
+                .map(|l| l.position)
+                .unwrap_or_else(|| glam::DVec3::new(200_000.0, 0.0, 0.0))
+                + glam::DVec3::new(2_500.0, 0.0, 0.0);
             if let Err(e) = execute_shipcaster_jump(ctx, session, char_id, ship_id, sys_id, dest_sys, arrival_pos).await {
                 return Some(Err(e));
             }
@@ -479,30 +521,37 @@ pub async fn handle(
                 )));
             }
 
-            if pad.solar_system_id != to_system_id {
+            let now = ctx.now_unix();
+            let effective_pad = effective_landing_pad(&pad, &pads, now);
+            if effective_pad.solar_system_id != to_system_id {
                 return Some(Err(rpc_err(
                     "InvalidDestinationSystem",
-                    format!("Landing pad {} is located in system {}, not specified destination {to_system_id}", pad.item_id, pad.solar_system_id),
+                    format!("Landing pad {} is located in system {}, not specified destination {to_system_id}", effective_pad.item_id, effective_pad.solar_system_id),
                 )));
             }
-            if !launcher.linked_pad_ids.contains(&pad.item_id) || pad.link_timestamp <= 0 {
-                return Some(Err(rpc_err(
-                    "LandingPadNotLinked",
-                    format!("Landing pad {} is not currently linked to launcher {}", pad.item_id, launcher.item_id),
-                )));
-            }
-            if !pad.is_built || pad.is_disrupted {
+            if !effective_pad.is_built || effective_pad.is_disrupted {
                 return Some(Err(rpc_err(
                     "LandingPadUnavailable",
-                    format!("Landing pad {} is not built or is disrupted", pad.item_id),
+                    format!("Landing pad {} is not built or is disrupted", effective_pad.item_id),
+                )));
+            }
+            let pad_belongs_to_launcher = launcher.linked_pad_ids.contains(&effective_pad.item_id)
+                || (launcher.faction_id > 0 && launcher.faction_id == effective_pad.faction_id);
+            if !pad_belongs_to_launcher || effective_pad.link_timestamp <= 0 {
+                return Some(Err(rpc_err(
+                    "LandingPadNotLinked",
+                    format!("Landing pad {} is not currently linked to launcher {}", effective_pad.item_id, launcher.item_id),
                 )));
             }
 
-            let now = ctx.now_unix();
             {
                 let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-                if cw.get_or_create(char_id).is_weapon_timer_active(now) {
+                let cw_st = cw.get_or_create(char_id);
+                if cw_st.is_weapon_timer_active(now) {
                     return Some(Err(rpc_err("WeaponsTimerActive", "Cannot jump through shipcaster while weapons timer is active")));
+                }
+                if cw_st.is_criminal(now) {
+                    return Some(Err(rpc_err("CriminalTimerActive", "Cannot jump through shipcaster while criminal flag is active")));
                 }
             }
 

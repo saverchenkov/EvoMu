@@ -107,7 +107,13 @@ async fn test_lp_store_mgr_gameplay_closure() {
     let PyRep::List(ref offers) = rep else {
         panic!("Expected List for 1_000_035");
     };
-    assert_eq!(offers.len(), 2, "Seeded corp must return 2 offers");
+    assert!(
+        offers.len() >= 327,
+        "Caldari Navy must return 325 imported CCP offers + 2 seeded offers (got {})",
+        offers.len()
+    );
+    assert!(offers.iter().any(|o| k_i64(o, "offerID") == Some(1001)));
+    assert!(offers.iter().any(|o| k_i64(o, "offerID") == Some(1004)));
     for o in offers {
         assert_eq!(k_i64(o, "corpID"), Some(1_000_035));
         assert!(k_i64(o, "offerID").unwrap_or(0) > 0);
@@ -379,11 +385,9 @@ async fn test_shipcaster_and_starter_travel_closure() {
         .expect("SelectCharacterID");
 
     let ship_id = 100_000_001;
-    let starter_sys: u32 = 30002800; // Haatomo starter staging linkage
-    let staging_sys: u32 = 30002813; // Tama staging system
-    let starter_launcher_id: i64 = 105_000_101;
-    let dest_pad_id: i64 = 104_000_001;
-    let warzone_sys: u32 = 30002811;
+    let starter_sys: u32 = 30000141; // Kisogo (State War Academy starter school)
+    let staging_sys: u32 = 30045324; // Onnamon (Caldari FW HQ)
+    let starter_launcher_id: i64 = 105_000_117;
 
     // 1. GetAllLandingPads
     let all_pads_rep = rpc(
@@ -398,19 +402,17 @@ async fn test_shipcaster_and_starter_travel_closure() {
     let PyRep::List(all_pads) = all_pads_rep else {
         panic!("Expected List");
     };
-    assert_eq!(all_pads.len(), 4);
+    assert_eq!(all_pads.len(), 8);
     for pad in &all_pads {
         assert!(kv_i64(pad, "itemID") > 0);
         assert!(kv_i64(pad, "solarSystemID") > 0);
         assert!(matches!(kv_i64(pad, "factionID"), 500001..=500004));
-        assert!(
-            kv_bool(pad, "isBuilt")
-                && kv_bool(pad, "isLinked")
-                && kv_bool(pad, "canBeLinked")
-        );
+        assert!(kv_bool(pad, "isBuilt") && kv_bool(pad, "canBeLinked"));
     }
 
     // 2. GetFactionLandingPads
+    let mut caldari_active_pad_id = 0_i64;
+    let mut caldari_active_warzone_sys = 0_u32;
     for fid in &[500001, 500002, 500003, 500004] {
         let fpad_rep = rpc(
             &ctx,
@@ -424,8 +426,14 @@ async fn test_shipcaster_and_starter_travel_closure() {
         let PyRep::List(fpads) = fpad_rep else {
             panic!("Expected List");
         };
-        assert_eq!(fpads.len(), 1);
+        assert_eq!(fpads.len(), 2);
         assert_eq!(kv_i64(&fpads[0], "factionID"), *fid);
+        let linked: Vec<&PyRep> = fpads.iter().filter(|p| kv_bool(p, "isLinked")).collect();
+        assert_eq!(linked.len(), 1);
+        if *fid == 500001 {
+            caldari_active_pad_id = kv_i64(linked[0], "itemID");
+            caldari_active_warzone_sys = kv_i64(linked[0], "solarSystemID") as u32;
+        }
     }
     let empty_pads = rpc(
         &ctx,
@@ -633,24 +641,24 @@ async fn test_shipcaster_and_starter_travel_closure() {
         "shipcasterTravelMgr",
         "CmdJumpThroughShipcaster",
         &[
-            PyRep::Integer(dest_pad_id),
-            PyRep::Integer(dest_pad_id),
+            PyRep::Integer(caldari_active_pad_id),
+            PyRep::Integer(caldari_active_pad_id),
             PyRep::Integer(origin_launcher_id),
         ],
     )
     .await
     .expect("CmdJumpThroughShipcaster");
     assert_eq!(jump_fw, PyRep::None);
-    assert_eq!(sess.solar_system_id, Some(warzone_sys));
+    assert_eq!(sess.solar_system_id, Some(caldari_active_warzone_sys));
 
     ctx.db.with_snapshot(|s| {
         assert_eq!(
             s.characters.get(&char_id).unwrap().solar_system_id,
-            warzone_sys
+            caldari_active_warzone_sys
         );
         assert_eq!(
             s.items.get(&ship_id).unwrap().location_id,
-            warzone_sys as i64
+            caldari_active_warzone_sys as i64
         );
     });
 }

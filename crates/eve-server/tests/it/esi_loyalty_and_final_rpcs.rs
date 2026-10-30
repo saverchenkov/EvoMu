@@ -46,32 +46,61 @@ async fn login_and_select(ctx: &ServerContext, sess: &mut SessionState, char_id:
 }
 
 #[tokio::test]
-// Note: Corporation LP store offer catalog import tracked under feat:lp.lp-store-offers
 async fn test_esi_loyalty_store_offers_route() {
     // parity: esi:GET /loyalty/stores/{corporation_id}/offers, feat:esi.loyalty.offers
+    eve_testkit::attest(&[
+        "esi:GET /loyalty/stores/{corporation_id}/offers",
+        "feat:esi.loyalty.offers",
+    ]);
     let ctx = Arc::new(ServerContext::new());
     common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
 
-    let npc_corp_id = 1_000_125i64; // CONCORD
+    let npc_corp_id = 1_000_125i64; // CONCORD (215 static CCP Crucible offers)
+    let caldari_navy_id = 1_000_035i64; // Caldari Navy (325 static CCP Crucible offers)
 
     // 1. Unknown corporation returns 404
     let not_found_req = EsiHttpRequest::new("GET", "/v1/loyalty/stores/999999999/offers/");
     let (parsed_err, _) = validate_and_json(&router, 404, &not_found_req);
     assert_eq!(parsed_err["error"], "Corporation 999999999 not found");
 
-    // 2. Known corporation with no offers returns empty array (200)
+    // 2. Unseeded CONCORD and Caldari Navy return real imported CCP Crucible catalog offers (200)
     let offers_req = EsiHttpRequest::new("GET", format!("/v1/loyalty/stores/{npc_corp_id}/offers/"));
-    let (empty_list, headers) = validate_and_json(&router, 200, &offers_req);
-    assert_eq!(empty_list, json!([]));
+    let (concord_offers, headers) = validate_and_json(&router, 200, &offers_req);
+    let concord_arr = concord_offers.as_array().expect("CONCORD offers array");
+    assert_eq!(concord_arr.len(), 215, "CONCORD must serve 215 imported CCP Crucible offers");
     assert!(headers.contains_key("ETag") || headers.contains_key("etag"));
+    let offer_221 = concord_arr
+        .iter()
+        .find(|o| o["offer_id"] == 221)
+        .expect("CONCORD offer 221 present");
+    assert_eq!(offer_221["type_id"], 3198);
+    assert_eq!(offer_221["quantity"], 1);
+    assert_eq!(offer_221["lp_cost"], 250_000);
+    assert_eq!(offer_221["isk_cost"], 250_000_000);
 
-    // 3. Seed offers via save_lp_store_offers directly
+    let cn_req = EsiHttpRequest::new("GET", format!("/v1/loyalty/stores/{caldari_navy_id}/offers/"));
+    let (cn_offers, _) = validate_and_json(&router, 200, &cn_req);
+    let cn_arr = cn_offers.as_array().expect("Caldari Navy offers array");
+    assert_eq!(cn_arr.len(), 325, "Caldari Navy must serve 325 imported CCP Crucible offers");
+    let offer_307 = cn_arr
+        .iter()
+        .find(|o| o["offer_id"] == 307)
+        .expect("Caldari Navy offer 307 (Caracal Navy Issue) present");
+    assert_eq!(offer_307["type_id"], 17_634);
+    assert_eq!(offer_307["lp_cost"], 240_000);
+    assert_eq!(offer_307["isk_cost"], 0);
+    assert_eq!(
+        offer_307["required_items"],
+        json!([{"type_id": 621, "quantity": 1}, {"type_id": 17646, "quantity": 1}])
+    );
+
+    // 3. Dynamic offers via save_lp_store_offers merge with static catalog offers
     ctx.db.with_mut_snapshot(|snap| {
         save_lp_store_offers(
             snap,
             &[LPOffer {
-                offer_id: 4001,
+                offer_id: 40_001,
                 corp_id: npc_corp_id,
                 type_id: 17_634,
                 quantity: 1,
@@ -84,12 +113,18 @@ async fn test_esi_loyalty_store_offers_route() {
         );
     });
 
-    let (offers, headers) = validate_and_json(&router, 200, &offers_req);
+    let (merged_offers, headers) = validate_and_json(&router, 200, &offers_req);
     let etag = headers.get("ETag").or_else(|| headers.get("etag")).cloned().unwrap();
+    let merged_arr = merged_offers.as_array().expect("merged CONCORD offers");
+    assert_eq!(merged_arr.len(), 216, "215 static + 1 dynamic CONCORD offer");
+    let custom_offer = merged_arr
+        .iter()
+        .find(|o| o["offer_id"] == 40_001)
+        .expect("dynamic offer 40001");
     assert_eq!(
-        offers,
-        json!([{
-            "offer_id": 4001,
+        custom_offer,
+        &json!({
+            "offer_id": 40001,
             "type_id": 17634,
             "quantity": 1,
             "lp_cost": 50000,
@@ -99,7 +134,7 @@ async fn test_esi_loyalty_store_offers_route() {
                 "type_id": 621,
                 "quantity": 1
             }]
-        }])
+        })
     );
 
     // 4. ETag caching returns 304 Not Modified
@@ -108,13 +143,13 @@ async fn test_esi_loyalty_store_offers_route() {
     let (body304, _) = validate_and_json(&router, 304, &cond_req);
     assert_eq!(body304, serde_json::Value::Null);
 
-    // 5. Offers for another corporation in lp_store_offers service blob
+    // 5. Offers for another corporation in lp_store_offers service blob merge cleanly
     let other_corp_id = 1_000_130i64;
     ctx.db.with_mut_snapshot(|snap| {
         save_lp_store_offers(
             snap,
             &[LPOffer {
-                offer_id: 5001,
+                offer_id: 50_001,
                 corp_id: other_corp_id,
                 type_id: 587,
                 quantity: 2,
@@ -128,20 +163,8 @@ async fn test_esi_loyalty_store_offers_route() {
     });
     let other_req = EsiHttpRequest::new("GET", format!("/v1/loyalty/stores/{other_corp_id}/offers/"));
     let (offers2, _) = validate_and_json(&router, 200, &other_req);
-    assert_eq!(
-        offers2,
-        json!([{
-            "offer_id": 5001,
-            "type_id": 587,
-            "quantity": 2,
-            "lp_cost": 15000,
-            "isk_cost": 100000,
-            "required_items": [{
-                "type_id": 603,
-                "quantity": 1
-            }]
-        }])
-    );
+    let offers2_arr = offers2.as_array().expect("other corp offers");
+    assert!(offers2_arr.iter().any(|o| o["offer_id"] == 50_001 && o["type_id"] == 587));
 
     // 6. Legacy fallback to snap.loyalty_store_offers is unified across ESI and LPStoreMgr
     let legacy_corp_id = 1_000_140i64;
@@ -149,7 +172,7 @@ async fn test_esi_loyalty_store_offers_route() {
         snap.loyalty_store_offers.insert(
             legacy_corp_id,
             vec![eve_db::LoyaltyStoreOfferRecord {
-                offer_id: 6001,
+                offer_id: 60_001,
                 type_id: 621,
                 quantity: 1,
                 lp_cost: 20_000,
@@ -161,17 +184,8 @@ async fn test_esi_loyalty_store_offers_route() {
     });
     let legacy_req = EsiHttpRequest::new("GET", format!("/v1/loyalty/stores/{legacy_corp_id}/offers/"));
     let (legacy_offers, _) = validate_and_json(&router, 200, &legacy_req);
-    assert_eq!(
-        legacy_offers,
-        json!([{
-            "offer_id": 6001,
-            "type_id": 621,
-            "quantity": 1,
-            "lp_cost": 20000,
-            "isk_cost": 5000000,
-            "required_items": []
-        }])
-    );
+    let legacy_arr = legacy_offers.as_array().expect("legacy corp offers");
+    assert!(legacy_arr.iter().any(|o| o["offer_id"] == 60_001 && o["type_id"] == 621));
 }
 
 #[tokio::test]

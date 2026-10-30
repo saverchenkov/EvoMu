@@ -83,8 +83,8 @@ async fn setup_docked_pilot(ctx: &ServerContext, char_id: i64, station_id: i64, 
 
 #[tokio::test]
 async fn test_lp_store_offers_browsing_and_station_corp_resolution() {
-    // DATA GAP: requires SDE/live store catalog import (feat:lp.lp-store-offers)
-    // DATA GAP: requires server-only offer catalog (rpc:LPStoreMgr.GetAvailableOffersFromCorp)
+    // parity: rpc:LPStoreMgr.GetAvailableOffersFromCorp
+    eve_testkit::attest(&["rpc:LPStoreMgr.GetAvailableOffersFromCorp"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -92,10 +92,33 @@ async fn test_lp_store_offers_browsing_and_station_corp_resolution() {
     let ship_id = 95_000_001;
     let mut sess = setup_docked_pilot(&ctx, CHAR_ID, JITA_CALDARI_STATION, ship_id).await;
 
-    // Seed test offers for Caldari Navy and Federation Navy
+    // 0. Unseeded static CCP Crucible catalog serves 325 Caldari Navy offers & 215 CONCORD offers out of the box
+    let unseeded_cn = rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[])
+        .await
+        .expect("unseeded GetAvailableOffersFromCorp at Caldari Navy station");
+    let PyRep::List(ref cn_static) = unseeded_cn else {
+        panic!("expected PyRep::List of Caldari Navy offers");
+    };
+    assert_eq!(cn_static.len(), 325, "Caldari Navy must serve 325 static CCP Crucible offers");
+    let cni_offer = cn_static
+        .iter()
+        .find(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(307))
+        .expect("Caracal Navy Issue offer 307 in static Caldari Navy catalog");
+    assert_eq!(cni_offer.dict_get("typeID").and_then(|v| v.as_i64()), Some(17_634));
+    assert_eq!(cni_offer.dict_get("lpCost").and_then(|v| v.as_i64()), Some(240_000));
+
+    let unseeded_concord = rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[PyRep::Integer(1_000_125)])
+        .await
+        .expect("unseeded CONCORD GetAvailableOffersFromCorp");
+    let PyRep::List(ref concord_static) = unseeded_concord else {
+        panic!("expected PyRep::List of CONCORD offers");
+    };
+    assert_eq!(concord_static.len(), 215, "CONCORD must serve 215 static CCP Crucible offers");
+
+    // Seed dynamic test offers for Caldari Navy and Federation Navy (merging with static catalog)
     ctx.db.with_mut_snapshot(|snap| {
         register_lp_store_offer(snap, LPOffer {
-            offer_id: 10_001,
+            offer_id: 50_001,
             corp_id: CALDARI_NAVY_CORP,
             type_id: BALLISTIC_CONTROL_TYPE_ID,
             quantity: 1,
@@ -106,7 +129,7 @@ async fn test_lp_store_offers_browsing_and_station_corp_resolution() {
             min_standing: Some(1.5),
         });
         register_lp_store_offer(snap, LPOffer {
-            offer_id: 10_002,
+            offer_id: 50_002,
             corp_id: FEDERATION_NAVY_CORP,
             type_id: CARACAL_TYPE_ID,
             quantity: 1,
@@ -118,7 +141,7 @@ async fn test_lp_store_offers_browsing_and_station_corp_resolution() {
         });
     });
 
-    // 1. Browsing with empty args while docked at Jita (Caldari Navy station) resolves Caldari Navy offers
+    // 1. Browsing with empty args while docked at Jita (Caldari Navy station) resolves merged Caldari Navy offers
     let def_rep = rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[])
         .await
         .expect("GetAvailableOffersFromCorp with station default");
@@ -126,10 +149,11 @@ async fn test_lp_store_offers_browsing_and_station_corp_resolution() {
     let PyRep::List(ref def_offers) = def_rep else {
         panic!("expected PyRep::List of offers");
     };
+    assert_eq!(def_offers.len(), 326, "325 static + 1 dynamic Caldari Navy offer");
     let caldari_offer = def_offers
         .iter()
-        .find(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(10_001))
-        .expect("offer 10001 should be present in Caldari Navy catalog");
+        .find(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(50_001))
+        .expect("offer 50001 should be present in Caldari Navy catalog");
 
     assert_eq!(caldari_offer.dict_get("corpID").and_then(|v| v.as_i64()), Some(CALDARI_NAVY_CORP));
     assert_eq!(caldari_offer.dict_get("typeID").and_then(|v| v.as_i64()), Some(BALLISTIC_CONTROL_TYPE_ID as i64));
@@ -146,7 +170,7 @@ async fn test_lp_store_offers_browsing_and_station_corp_resolution() {
     assert_eq!(req_items[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(TRITANIUM_TYPE_ID as i64));
     assert_eq!(req_items[0].dict_get("quantity").and_then(|v| v.as_i64()), Some(100));
 
-    // 2. Querying explicit corp ID 1000036 (Federation Navy) returns Federation Navy offers
+    // 2. Querying explicit corp ID 1000036 (Federation Navy) returns merged Federation Navy offers
     let fed_rep = rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[PyRep::Integer(FEDERATION_NAVY_CORP)])
         .await
         .expect("GetAvailableOffersFromCorp explicit corp");
@@ -156,8 +180,8 @@ async fn test_lp_store_offers_browsing_and_station_corp_resolution() {
     };
     let fed_offer = fed_offers
         .iter()
-        .find(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(10_002))
-        .expect("offer 10002 should be present in Federation Navy catalog");
+        .find(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(50_002))
+        .expect("offer 50002 should be present in Federation Navy catalog");
     assert_eq!(fed_offer.dict_get("corpID").and_then(|v| v.as_i64()), Some(FEDERATION_NAVY_CORP));
 
     // 3. Docking at Poinen station (Federation Navy station) resolves Federation Navy offers by default
@@ -171,7 +195,7 @@ async fn test_lp_store_offers_browsing_and_station_corp_resolution() {
     let PyRep::List(ref def_fed_offers) = def_fed_rep else {
         panic!("expected PyRep::List");
     };
-    assert!(def_fed_offers.iter().any(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(10_002)));
+    assert!(def_fed_offers.iter().any(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(50_002)));
 
     // 4. Querying an unknown corp returns an empty list
     let empty_rep = rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[PyRep::Integer(999_888_777)])
@@ -521,5 +545,78 @@ async fn test_lp_store_corporation_purchase_and_delivery() {
         assert_eq!(delivered.flag, InventoryFlag::CorpDeliveries);
         assert_eq!(delivered.type_id, BALLISTIC_CONTROL_TYPE_ID as eve_sde::TypeId);
         assert_eq!(delivered.quantity, 1);
+    });
+
+    // 4. Execute real unseeded static CCP Crucible catalog purchases (no register_lp_store_offer):
+    // - Character purchases Caldari Navy offer 307 (Caracal Navy Issue: 240,000 LP, 0 ISK, trade-ins 621 + 17646)
+    // - Corporation purchases CONCORD offer 221 (type 3198: 250,000 LP, 250M ISK, no trade-ins)
+    let concord_corp_id = 1_000_125;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+            ch.loyalty_points.insert(CALDARI_NAVY_CORP, 300_000);
+        }
+        snap.items.insert(
+            97_000_010,
+            InventoryItemRecord {
+                item_id: 97_000_010,
+                type_id: 621, // Caracal hull trade-in
+                owner_id: CHAR_ID,
+                location_id: JITA_CALDARI_STATION,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            97_000_011,
+            InventoryItemRecord {
+                item_id: 97_000_011,
+                type_id: 17_646, // Caldari Navy Caracal Nexus Chip
+                owner_id: CHAR_ID,
+                location_id: JITA_CALDARI_STATION,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let mut corp_lp = load_corp_lp_balances(snap, CORP_ID);
+        corp_lp.insert(concord_corp_id, 300_000);
+        save_corp_lp_balances(snap, CORP_ID, &corp_lp);
+        if let Some(corp) = snap.corporations.get_mut(&CORP_ID) {
+            corp.wallet_divisions[0].balance = IskCents::from_isk(300_000_000);
+        }
+    });
+
+    let cni_buy = rpc(
+        &ctx,
+        &mut sess,
+        "LPStoreMgr",
+        "TakeOfferForCharacter",
+        &[PyRep::Integer(CALDARI_NAVY_CORP), PyRep::Integer(307), PyRep::Integer(1)],
+    )
+    .await
+    .expect("TakeOfferForCharacter unseeded static offer 307");
+    assert_eq!(cni_buy.dict_get("deliveredTypeID").and_then(|v| v.as_i64()), Some(17_634));
+    assert_eq!(cni_buy.dict_get("remainingLP").and_then(|v| v.as_i64()), Some(60_000));
+
+    let concord_corp_buy = rpc(
+        &ctx,
+        &mut sess,
+        "LPStoreMgr",
+        "TakeOfferForCorporation",
+        &[PyRep::Integer(concord_corp_id), PyRep::Integer(221), PyRep::Integer(1)],
+    )
+    .await
+    .expect("TakeOfferForCorporation unseeded static CONCORD offer 221");
+    assert_eq!(concord_corp_buy.dict_get("deliveredTypeID").and_then(|v| v.as_i64()), Some(3198));
+    assert_eq!(concord_corp_buy.dict_get("remainingLP").and_then(|v| v.as_i64()), Some(50_000));
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&97_000_010) && !snap.items.contains_key(&97_000_011));
+        let corp = snap.corporations.get(&CORP_ID).unwrap();
+        assert_eq!(corp.wallet_divisions[0].balance, IskCents::from_isk(50_000_000));
     });
 }
