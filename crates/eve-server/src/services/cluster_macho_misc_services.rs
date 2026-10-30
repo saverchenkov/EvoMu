@@ -133,7 +133,7 @@ pub struct LauncherRecord {
 
 /// DERIVED: Canonical Starter Shipcaster (Rookie Shipcaster) record.
 /// Traced to authentic SDE type IDs 93968..=94018.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StarterLauncherRecord {
     pub item_id: i64,
     pub type_id: u32,
@@ -418,24 +418,11 @@ pub fn derived_starter_launchers() -> Vec<StarterLauncherRecord> {
 impl ClusterMiscRuntimeState {
     /// Deserializes previously persisted cluster miscellaneous settings from the world repository snapshot.
     pub fn from_db(db: &Arc<WorldRepository>) -> Self {
-        Self::from_db_with_sde(db, None)
-    }
-
-    /// Deserializes previously persisted cluster miscellaneous settings, deriving starter school
-    /// shipcasters from [`eve_sde::SdeRegistry::schools`] when SDE data is supplied (falling back
-    /// to [`derived_starter_launchers`] only when SDE school entries are absent).
-    pub fn from_db_with_sde(
-        db: &Arc<WorldRepository>,
-        sde: Option<&eve_sde::SdeRegistry>,
-    ) -> Self {
-        let starter_launchers = sde
-            .map(starter_launchers_from_sde)
-            .unwrap_or_else(derived_starter_launchers);
         let mut st = Self {
             char_settings: HashMap::new(),
             landing_pads: derived_landing_pads(),
             launchers: derived_launchers(),
-            starter_launchers,
+            starter_launchers: derived_starter_launchers(),
             offered_load_slots: HashMap::new(),
             system_population_caps: HashMap::new(),
             char_energy: HashMap::new(),
@@ -508,22 +495,13 @@ pub(crate) fn get_character_settings_dict(ctx: &ServerContext, char_id: i64) -> 
 }
 
 pub fn populate_shipcaster_balls(solar_system_id: u32, ballpark: &mut eve_destiny::Ballpark) {
-    populate_shipcaster_balls_from_db_with_sde(solar_system_id, ballpark, None, None);
+    populate_shipcaster_balls_from_db(solar_system_id, ballpark, None);
 }
 
 pub fn populate_shipcaster_balls_from_db(
     solar_system_id: u32,
     ballpark: &mut eve_destiny::Ballpark,
     db: Option<&Arc<WorldRepository>>,
-) {
-    populate_shipcaster_balls_from_db_with_sde(solar_system_id, ballpark, db, None);
-}
-
-pub fn populate_shipcaster_balls_from_db_with_sde(
-    solar_system_id: u32,
-    ballpark: &mut eve_destiny::Ballpark,
-    db: Option<&Arc<WorldRepository>>,
-    sde: Option<&eve_sde::SdeRegistry>,
 ) {
     let persisted = db.and_then(|repo| {
         repo.with_snapshot(|snap| {
@@ -541,10 +519,7 @@ pub fn populate_shipcaster_balls_from_db_with_sde(
         .as_ref()
         .filter(|p| !p.starter_launchers.is_empty())
         .map(|p| p.starter_launchers.clone())
-        .unwrap_or_else(|| {
-            sde.map(starter_launchers_from_sde)
-                .unwrap_or_else(derived_starter_launchers)
-        });
+        .unwrap_or_else(derived_starter_launchers);
     let pads = persisted
         .filter(|p| !p.landing_pads.is_empty())
         .map(|p| p.landing_pads)
