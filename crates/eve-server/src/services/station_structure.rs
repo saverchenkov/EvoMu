@@ -267,43 +267,88 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let raw_service_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0) as u32;
-            let station_id = args.get(1).and_then(|a| a.as_i64()).or(session.station_id).unwrap_or(60_003_760);
-            let service_id = if raw_service_id.is_power_of_two() && raw_service_id > 0 {
-                raw_service_id.trailing_zeros() + 1
-            } else {
-                raw_service_id
+            let raw_service_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            if raw_service_id <= 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "StationServiceUnavailable".into(),
+                    message: format!("Invalid station service ID {raw_service_id}"),
+                }));
+            }
+            let Some(station_id) = args
+                .get(1)
+                .and_then(|a| a.as_i64())
+                .or(session.station_id)
+                .or(session.structure_id)
+            else {
+                return Some(Err(BridgeRpcError {
+                    code: "MissingStationId".into(),
+                    message: "DoStandingCheckForStationService requires a stationID argument or active session stationID".into(),
+                }));
             };
-            let (owner_corp, owner_fac) = if let Some(st) = ctx.sde.stations.get(&station_id) {
-                if raw_service_id > 0 && !npc_station_offers_service(&ctx.sde, station_id, raw_service_id as i64) {
+            let Ok(raw_u32) = u32::try_from(raw_service_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "StationServiceUnavailable".into(),
+                    message: format!("Invalid station service ID {raw_service_id}"),
+                }));
+            };
+            const MAX_STATION_SERVICE_ID: u32 = 27;
+            let (service_id, owner_corp, owner_fac) = if let Some(st) = ctx.sde.stations.get(&station_id) {
+                let op_svcs = ctx
+                    .sde
+                    .station_operations
+                    .get(&st.operation_id)
+                    .map(|op| op.services.as_slice())
+                    .unwrap_or(&[]);
+                let resolved_sid = if raw_u32 <= MAX_STATION_SERVICE_ID {
+                    if op_svcs.contains(&raw_u32) {
+                        Some(raw_u32)
+                    } else if raw_u32 == 16 && op_svcs.contains(&5) {
+                        // Legacy EVE appConst.stationServiceReprocessingPlant bitmask (1 << 4 = 16 -> service 5)
+                        Some(5)
+                    } else {
+                        None
+                    }
+                } else if raw_u32.is_power_of_two() && raw_u32 <= (1 << (MAX_STATION_SERVICE_ID - 1)) {
+                    let bit_sid = raw_u32.trailing_zeros() + 1;
+                    op_svcs.contains(&bit_sid).then_some(bit_sid)
+                } else {
+                    None
+                };
+                let Some(sid) = resolved_sid else {
                     return Some(Err(BridgeRpcError {
                         code: "StationServiceUnavailable".into(),
                         message: format!("Station {station_id} does not offer service {raw_service_id}"),
                     }));
-                }
-                (st.owner_corporation_id, st.owner_faction_id)
+                };
+                (sid, st.owner_corporation_id, st.owner_faction_id)
             } else if let Some(struct_info) = ctx.db.with_snapshot(|s| s.structures.get(&station_id).map(|st| (st.owner_corp_id, None))) {
-                struct_info
+                let sid = if raw_u32 <= MAX_STATION_SERVICE_ID {
+                    raw_u32
+                } else if raw_u32.is_power_of_two() && raw_u32 <= (1 << (MAX_STATION_SERVICE_ID - 1)) {
+                    raw_u32.trailing_zeros() + 1
+                } else {
+                    return Some(Err(BridgeRpcError {
+                        code: "StationServiceUnavailable".into(),
+                        message: format!("Invalid station service ID {raw_service_id}"),
+                    }));
+                };
+                (sid, struct_info.0, struct_info.1)
             } else {
                 return Some(Err(BridgeRpcError {
                     code: "StationNotFound".into(),
                     message: format!("Station {station_id} not found in SDE"),
                 }));
             };
-            let (corp_st, fac_st) = ctx.db.with_snapshot(|snap| {
-                let ch = snap.characters.get(&char_id);
-                let cs = ch.and_then(|c| c.standings.get(&owner_corp).copied()).unwrap_or(0.0);
-                let fs = ch.and_then(|c| owner_fac.and_then(|fid| c.standings.get(&fid).copied())).unwrap_or(0.0);
-                (cs, fs)
-            });
-            let min_standing = if service_id == 10 || raw_service_id == 512 { 0.0 } else { -2.0 };
-            if corp_st < min_standing || fac_st < -2.0 {
-                return Some(Err(BridgeRpcError {
-                    code: "StandingTooLowForStationService".into(),
-                    message: format!(
-                        "Character {char_id} standing (corp {corp_st:.2}, faction {fac_st:.2}) is below required {min_standing:.1} for service {raw_service_id} at station {station_id}"
-                    ),
-                }));
+            if let Err(err) = crate::services::station_structure_handlers::check_station_service_standing(
+                ctx,
+                char_id,
+                station_id,
+                raw_service_id,
+                service_id,
+                owner_corp,
+                owner_fac,
+            ) {
+                return Some(Err(err));
             }
             Some(Ok(PyRep::Bool(true)))
         }
@@ -1250,22 +1295,17 @@ pub async fn handle(
     }
 }
 
-/// Returns whether an NPC station's operation provides the given station service (`sde.station_operations`).
+/// Returns whether an NPC station's operation provides the given numeric station service ID (`sde.station_operations`).
 pub fn npc_station_offers_service(sde: &eve_sde::SdeRegistry, station_id: i64, service_id: i64) -> bool {
     let Some(station) = sde.stations.get(&station_id) else {
         return false;
     };
-    let Ok(raw_u32) = u32::try_from(service_id) else {
+    let Ok(sid) = u32::try_from(service_id) else {
         return false;
-    };
-    let decoded = if raw_u32.is_power_of_two() && raw_u32 > 0 {
-        raw_u32.trailing_zeros() + 1
-    } else {
-        raw_u32
     };
     sde.station_operations
         .get(&station.operation_id)
-        .map(|op| op.services.contains(&decoded) || op.services.contains(&raw_u32))
+        .map(|op| op.services.contains(&sid))
         .unwrap_or(false)
 }
 

@@ -679,7 +679,8 @@ impl SdeRegistry {
         let ship_entries = fsd_dict_entries(&raw, m_pos, 8);
         let mut masteries_by_ship_type = HashMap::with_capacity(ship_entries.len());
         for (ship_tid, pos) in ship_entries {
-            let lvl_entries = fsd_dict_entries(&raw, pos, 8);
+            let mut lvl_entries = fsd_dict_entries(&raw, pos, 8);
+            lvl_entries.sort_by_key(|(lvl, _)| *lvl);
             let mut levels = Vec::with_capacity(lvl_entries.len());
             for (_lvl, lpos) in lvl_entries {
                 let n = u32_le(&raw, lpos) as usize;

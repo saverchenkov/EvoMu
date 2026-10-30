@@ -14,7 +14,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::formulas::apply_standing_increase;
+use crate::formulas::{apply_standing_decrease, apply_standing_increase};
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, StandingTransactionRecord};
 use eve_machonet::SessionState;
@@ -229,6 +229,22 @@ pub fn is_pirate_entity(ctx: &ServerContext, entity_id: i64) -> bool {
     false
 }
 
+pub fn is_trig_or_edencom_entity(ctx: &ServerContext, entity_id: i64) -> bool {
+    let is_te_fac = |fid: i64| matches!(fid, 500_026 | 500_027);
+    if is_te_fac(entity_id) {
+        return true;
+    }
+    if let Some(fid) = ctx.sde.npc_corporations.get(&entity_id).and_then(|c| c.faction_id) {
+        return is_te_fac(i64::from(fid));
+    }
+    if let Some(agent) = ctx.sde.agents.get(&entity_id) {
+        if let Some(fid) = ctx.sde.npc_corporations.get(&agent.corporation_id).and_then(|c| c.faction_id) {
+            return is_te_fac(i64::from(fid));
+        }
+    }
+    false
+}
+
 pub fn compute_effective_standing_breakdown(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
@@ -237,6 +253,9 @@ pub fn compute_effective_standing_breakdown(
     raw_standing: f64,
     has_entry: bool,
 ) -> (f64, f64, f64, f64) {
+    if is_trig_or_edencom_entity(ctx, entity_id) {
+        return (raw_standing.clamp(-10.0, 10.0), 0.0, 0.0, 0.0);
+    }
     let sk = snap.skills.get(&char_id);
     let conn_lvl = sk
         .and_then(|m| m.get(&SKILL_CONNECTIONS))
@@ -308,73 +327,97 @@ pub fn compute_effective_agent_standing(
     vals.into_iter().fold(-10.0_f64, f64::max)
 }
 
-pub fn static_npc_faction_standings() -> Vec<(i64, i64, f64)> {
-    vec![
-        // Caldari State (500001)
-        (500_001, 500_003, 0.5), (500_001, 500_004, -0.5), (500_001, 500_002, -0.3),
-        (500_001, 500_007, 0.4), (500_001, 500_008, 0.5), (500_001, 500_010, -0.8), (500_001, 500_019, -1.0),
-        // Minmatar Republic (500002)
-        (500_002, 500_004, 0.5), (500_002, 500_003, -0.5), (500_002, 500_001, -0.3),
-        (500_002, 500_007, -0.7), (500_002, 500_011, -0.8), (500_002, 500_015, 0.5), (500_002, 500_019, -1.0),
-        // Amarr Empire (500003)
-        (500_003, 500_001, 0.5), (500_003, 500_002, -0.5), (500_003, 500_004, -0.3),
-        (500_003, 500_007, 0.8), (500_003, 500_008, 0.7), (500_003, 500_012, -0.8), (500_003, 500_019, -1.0),
-        // Gallente Federation (500004)
-        (500_004, 500_002, 0.5), (500_004, 500_001, -0.5), (500_004, 500_003, -0.3),
-        (500_004, 500_016, 0.4), (500_004, 500_020, -0.8), (500_004, 500_019, -1.0),
-        // CONCORD Assembly (500006)
-        (500_006, 500_001, 0.5), (500_006, 500_002, 0.5), (500_006, 500_003, 0.5), (500_006, 500_004, 0.5),
-        (500_006, 500_010, -1.0), (500_006, 500_011, -1.0), (500_006, 500_012, -1.0), (500_006, 500_019, -1.0), (500_006, 500_020, -1.0),
-        // Ammatar Mandate (500007) & Khanid Kingdom (500008)
-        (500_007, 500_003, 0.8), (500_007, 500_002, -0.7), (500_008, 500_003, 0.7), (500_008, 500_001, 0.5),
-        // Pirate factions (Guristas 500010, Angel 500011, Blood Raiders 500012, Sansha 500019, Serpentis 500020)
-        (500_010, 500_001, -0.8), (500_011, 500_002, -0.8), (500_012, 500_003, -0.8), (500_019, 500_001, -1.0),
-        (500_019, 500_002, -1.0), (500_019, 500_003, -1.0), (500_019, 500_004, -1.0), (500_020, 500_004, -0.8),
-        // Triglavian Collective (500026) <-> EDENCOM (500027)
-        (500_026, 500_027, -1.0), (500_027, 500_026, -1.0),
-    ]
-}
+// SYNTHESIZED (approximated): inter-faction standing relations on EVE's `[-10.0, +10.0]` scale (secondary's view of primary).
+// Provenance: EVE Wiki `NPC_standings.md#Derived_standings` (explicitly documents Amarr -> Minmatar = -5.0,
+// Minmatar -> Amarr = -5.0, Minmatar -> Thukker = +3.0 via "+2% Minmatar -> -1% Amarr, +1% Thukker" at
+// size_factors 5.0/3.0, CONCORD <-> pirates = -10.0, Triglavian <-> EDENCOM = -10.0) and archived
+// `newedenlibrary.net/eon/faction_standings.shtml` alliance/rivalry tiers.
+// DATA GAP: V24 client SDE does not ship server-side `npccorporationstandings` / `npc_standings` tables.
+pub const SYNTHESIZED_NPC_FACTION_STANDINGS: &[(i64, i64, f64)] = &[
+    (500_001, 500_004, -5.0), (500_001, 500_003, 5.0), (500_001, 500_002, -2.0), (500_001, 500_007, 4.0), (500_001, 500_008, 5.0), (500_001, 500_010, -8.0), (500_001, 500_019, -10.0),
+    (500_002, 500_004, 5.0), (500_002, 500_003, -5.0), (500_002, 500_001, -2.0), (500_002, 500_007, -7.0), (500_002, 500_011, -8.0), (500_002, 500_015, 4.0), (500_002, 500_019, -10.0),
+    (500_003, 500_001, 5.0), (500_003, 500_002, -5.0), (500_003, 500_004, -3.0), (500_003, 500_007, 8.0), (500_003, 500_008, 7.0), (500_003, 500_012, -8.0), (500_003, 500_015, -5.0), (500_003, 500_019, -10.0),
+    (500_004, 500_002, 5.0), (500_004, 500_001, -5.0), (500_004, 500_003, -3.0), (500_004, 500_016, 4.0), (500_004, 500_017, -3.0), (500_004, 500_020, -8.0), (500_004, 500_019, -10.0),
+    (500_006, 500_001, 5.0), (500_006, 500_002, 5.0), (500_006, 500_003, 5.0), (500_006, 500_004, 5.0), (500_006, 500_009, -10.0), (500_006, 500_010, -10.0), (500_006, 500_011, -10.0), (500_006, 500_012, -10.0), (500_006, 500_013, -10.0), (500_006, 500_018, -10.0), (500_006, 500_019, -10.0), (500_006, 500_020, -10.0),
+    (500_007, 500_003, 8.0), (500_007, 500_002, -7.0), (500_008, 500_003, 7.0), (500_008, 500_001, 5.0), (500_015, 500_002, 3.0), (500_016, 500_004, 4.0),
+    (500_010, 500_001, -8.0), (500_011, 500_002, -8.0), (500_012, 500_003, -8.0), (500_020, 500_004, -8.0), (500_019, 500_001, -10.0), (500_019, 500_002, -10.0), (500_019, 500_003, -10.0), (500_019, 500_004, -10.0), (500_019, 500_014, -5.0), (500_019, 500_016, -5.0),
+    (500_026, 500_027, -10.0), (500_027, 500_026, -10.0),
+];
+pub fn static_npc_faction_standings() -> &'static [(i64, i64, f64)] { SYNTHESIZED_NPC_FACTION_STANDINGS }
+// SYNTHESIZED / DATA GAP: returns approximated inter-faction standings only (no synthesized corporation rows).
+pub fn get_sde_npc_npc_standings(_sde: &eve_sde::SdeRegistry) -> Vec<(i64, i64, f64)> { SYNTHESIZED_NPC_FACTION_STANDINGS.to_vec() }
 
-/// DERIVED: static NPC faction standings and member corporation standings.
-///
-/// DATA GAP: client SDE lacks full inter-NPC cross-standing matrix; inter-faction and member corporate standings are derived.
-pub fn get_sde_npc_npc_standings(sde: &eve_sde::SdeRegistry) -> Vec<(i64, i64, f64)> {
-    let mut standings = static_npc_faction_standings();
-    for (&corp_id, corp) in &sde.npc_corporations {
-        if let Some(fid) = corp.faction_id {
-            let fid_i64 = fid as i64;
-            standings.push((fid_i64, corp_id, 1.0));
-            standings.push((corp_id, fid_i64, 1.0));
-            match fid {
-                500001 => {
-                    standings.push((corp_id, 500004, -0.5));
-                    standings.push((corp_id, 500003, 0.5));
-                    standings.push((corp_id, 500002, -0.3));
-                    standings.push((corp_id, 1_000_035, 0.8));
-                }
-                500002 => {
-                    standings.push((corp_id, 500003, -0.5));
-                    standings.push((corp_id, 500004, 0.5));
-                    standings.push((corp_id, 500001, -0.3));
-                    standings.push((corp_id, 1_000_044, 0.8));
-                }
-                500003 => {
-                    standings.push((corp_id, 500002, -0.5));
-                    standings.push((corp_id, 500001, 0.5));
-                    standings.push((corp_id, 500004, -0.3));
-                    standings.push((corp_id, 1_000_037, 0.8));
-                }
-                500004 => {
-                    standings.push((corp_id, 500001, -0.5));
-                    standings.push((corp_id, 500002, 0.5));
-                    standings.push((corp_id, 500003, -0.3));
-                    standings.push((corp_id, 1_000_036, 0.8));
-                }
-                _ => {}
+/// Applies a primary faction standing percentage change (`fac_pct`, positive for gain or
+/// negative for loss) and, when `apply_derived` is true, propagates derived faction standings
+/// per EVE Wiki (`NPC_standings.md`):
+/// - `Inter-Faction Standing Modifier = Secondary's view of Primary * (Primary Size / Secondary Size)`
+/// - `Derived Standing % = Gain % * (Inter-Faction Standing Modifier / 10.0)`
+/// - Gains and enemy losses are capped at Secondary's standing view of Primary (`rel`).
+/// - When `fac_pct < 0.0` (faction standing loss), friends (`rel > 0.0`) receive negative derived
+///   standings while enemies (`rel < 0.0`) do not receive positive derived standings.
+pub fn apply_faction_standing_with_derived(
+    ctx: &ServerContext,
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    primary_faction_id: i64,
+    fac_pct: f64,
+    apply_derived: bool,
+    changes: &mut Vec<(i64, f64, f64)>,
+) {
+    if fac_pct.abs() <= 1e-9 {
+        return;
+    }
+    let Some(ch) = snap.characters.get_mut(&char_id) else {
+        return;
+    };
+    let cur_fac = ch.standings.get(&primary_faction_id).copied().unwrap_or(0.0);
+    let new_fac = if fac_pct >= 0.0 {
+        apply_standing_increase(cur_fac, fac_pct)
+    } else {
+        apply_standing_decrease(cur_fac, fac_pct.abs())
+    };
+    let fac_delta = new_fac - cur_fac;
+    ch.standings.insert(primary_faction_id, new_fac);
+    if fac_delta.abs() > 1e-9 {
+        changes.push((primary_faction_id, new_fac, fac_delta));
+    }
+    if !apply_derived {
+        return;
+    }
+    let primary_size = ctx.sde.factions.get(&(primary_faction_id as u32)).map_or(5.0, |f| f.size_factor);
+    if primary_size <= 0.0 {
+        return;
+    }
+    for &(secondary_f, target_f, rel) in SYNTHESIZED_NPC_FACTION_STANDINGS {
+        if target_f != primary_faction_id || rel == 0.0 {
+            continue;
+        }
+        let secondary_size = ctx.sde.factions.get(&(secondary_f as u32)).map_or(5.0, |f| f.size_factor);
+        if secondary_size <= 0.0 {
+            continue;
+        }
+        let modifier = rel * (primary_size / secondary_size);
+        let derived_pct = fac_pct * (modifier / 10.0);
+        let cur_other = ch.standings.get(&secondary_f).copied().unwrap_or(0.0);
+        let new_other = if fac_pct > 0.0 {
+            if rel > 0.0 {
+                if cur_other >= rel { cur_other } else { apply_standing_increase(cur_other, derived_pct).min(rel) }
+            } else if cur_other <= rel {
+                cur_other
+            } else {
+                apply_standing_decrease(cur_other, derived_pct.abs()).max(rel)
             }
+        } else if rel > 0.0 {
+            apply_standing_decrease(cur_other, derived_pct.abs())
+        } else {
+            cur_other
+        };
+        let d_other = new_other - cur_other;
+        if d_other.abs() > 1e-6 {
+            ch.standings.insert(secondary_f, new_other);
+            changes.push((secondary_f, new_other, d_other));
         }
     }
-    standings
 }
 
 pub fn apply_mission_completion_standings(
@@ -382,6 +425,7 @@ pub fn apply_mission_completion_standings(
     snap: &mut eve_db::WorldStateSnapshot,
     char_id: i64,
     agent_id: i64,
+    mission_id: u32,
     corp_id: i64,
     base_standing_pct: f64,
     is_storyline_or_special: bool,
@@ -409,47 +453,22 @@ pub fn apply_mission_completion_standings(
         }
     }
 
-    let faction_id = match corp_id {
-        1_000_298 => Some(500_026), // Perun Clade -> Triglavian Collective
-        1_000_299 => Some(500_027), // AEGIS -> EDENCOM
-        _ => ctx.sde.npc_corporations
-            .get(&corp_id)
-            .and_then(|c| c.faction_id)
-            .map(|f| f as i64),
-    };
+    let faction_id = ctx.sde.npc_corporations.get(&corp_id).and_then(|c| c.faction_id).map(|f| f as i64);
 
-    if scaled_pct > 0.0 {
+    if scaled_pct.abs() > 1e-9 {
         if let Some(fid) = faction_id {
-            let fac_pct = if is_storyline_or_special {
-                scaled_pct * 0.50
-            } else {
-                scaled_pct * 0.15
-            };
-            if let Some(ch) = snap.characters.get_mut(&char_id) {
-                let cur_fac = ch.standings.get(&fid).copied().unwrap_or(0.0);
-                let new_fac = apply_standing_increase(cur_fac, fac_pct);
-                let fac_delta = new_fac - cur_fac;
-                ch.standings.insert(fid, new_fac);
-                changes.push((fid, new_fac, fac_delta));
-
-                // Propagate derived standings to allied and opposing factions
-                for (src_f, dst_f, rel) in static_npc_faction_standings() {
-                    if src_f == fid {
-                        let cur_other = ch.standings.get(&dst_f).copied().unwrap_or(0.0);
-                        let new_other = if rel > 0.0 {
-                            apply_standing_increase(cur_other, fac_pct * rel * 0.5)
-                        } else {
-                            let loss_pct = (fac_pct * rel.abs() * 0.4).min(10.0);
-                            (cur_other - (cur_other + 10.0) * (loss_pct / 100.0)).clamp(-10.0, 10.0)
-                        };
-                        let d_other = new_other - cur_other;
-                        if d_other.abs() > 1e-6 {
-                            ch.standings.insert(dst_f, new_other);
-                            changes.push((dst_f, new_other, d_other));
-                        }
-                    }
-                }
-            }
+            let fac_pct = if is_storyline_or_special { scaled_pct * 0.50 } else { scaled_pct * 0.15 };
+            // Per EVE Wiki (NPC_standings.md): Epic Arc (agent_type_id == 10) missions and only the
+            // final mission of a Career Agent (agent_type_id == 12) chain suppress derived standings.
+            let agent_type = ctx.sde.agents.get(&agent_id).map_or(0, |a| a.agent_type_id);
+            let is_final_career = agent_type == 12
+                && ctx.sde.missions.get(&mission_id).is_some_and(|m| {
+                    m.title.ends_with("(10 of 10)")
+                        || m.title.ends_with("(5 of 5)")
+                        || m.title.eq_ignore_ascii_case("Song Of Birds")
+                });
+            let apply_derived = agent_type != 10 && !is_final_career;
+            apply_faction_standing_with_derived(ctx, snap, char_id, fid, fac_pct, apply_derived, &mut changes);
         }
     }
 
@@ -1242,22 +1261,14 @@ pub async fn handle_extended(
 
         ("keeper", "ActivateAccelerationGate") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let is_mission = args.first().and_then(|a| a.as_i64()).and_then(|raw_id| u32::try_from(raw_id).ok()).is_some_and(|mid| {
-                ctx.db
-                    .with_snapshot(|snap| snap.active_missions.contains_key(&(char_id, mid)))
-            });
-            if !is_mission {
+            let Some(mission_id) = args.first().and_then(|a| a.as_i64()).and_then(|raw_id| u32::try_from(raw_id).ok()).filter(|&mid| {
+                ctx.db.with_snapshot(|snap| snap.active_missions.contains_key(&(char_id, mid)))
+            }) else {
                 return None;
-            }
+            };
             if session.station_id.is_some() || session.structure_id.is_some() {
                 return Some(Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot activate dungeon acceleration gate while docked".into() }));
             }
-            let Some(raw) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError { code: "InvalidMissionId".into(), message: "mission_id argument is required".into() }));
-            };
-            let Ok(mission_id) = u32::try_from(raw) else {
-                return Some(Err(BridgeRpcError { code: "InvalidMissionId".into(), message: format!("mission_id {raw} is out of valid u32 range") }));
-            };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 // Enforce Anomic Burner frigate/small-hull gate restriction (feat:pve.anomic-burner-missions)
                 let is_burner = load_mission_meta(snap, char_id, mission_id)

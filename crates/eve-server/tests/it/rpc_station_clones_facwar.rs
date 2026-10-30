@@ -51,6 +51,17 @@ async fn rpc(
 #[tokio::test]
 async fn test_station_services_and_corp_station_mgr_parity() {
     // parity: feat:structures.npc-station-services, feat:structures.station-standing-check, rpc:corpStationMgr.DoStandingCheckForStationService, rpc:station.GetGuests, rpc:stationSvc.GetAllianceSystems, rpc:stationSvc.GetSolarSystem, rpc:stationSvc.GetStationItemBits, rpc:stationSvc.GetStationsForOwner, rpc:stationSvc.GetSystemsForAlliance
+    eve_testkit::attest(&[
+        "feat:structures.npc-station-services",
+        "feat:structures.station-standing-check",
+        "rpc:corpStationMgr.DoStandingCheckForStationService",
+        "rpc:station.GetGuests",
+        "rpc:stationSvc.GetAllianceSystems",
+        "rpc:stationSvc.GetSolarSystem",
+        "rpc:stationSvc.GetStationItemBits",
+        "rpc:stationSvc.GetStationsForOwner",
+        "rpc:stationSvc.GetSystemsForAlliance",
+    ]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
@@ -74,6 +85,7 @@ async fn test_station_services_and_corp_station_mgr_parity() {
     rpc(&ctx, &mut s2, "stationSvc", "Undock", &[])
         .await
         .expect("stationSvc.Undock PILOT2");
+    ctx.sync_session(&mut s2);
 
     // 1. station.GetGuests: returns online docked PILOT1, excludes undocked PILOT2 and offline docked pilot
     let guests_single = rpc(&ctx, &mut s1, "station", "GetGuests", &[])
@@ -266,7 +278,24 @@ async fn test_station_services_and_corp_station_mgr_parity() {
     .expect("GetAllianceSystems for unheld alliance");
     assert_eq!(unheld_sys, PyRep::List(vec![]));
 
-    // 6. corpStationMgr.DoStandingCheckForStationService
+    // 6. corpStationMgr.DoStandingCheckForStationService (V24 FSD stationstandingsrestrictions.fsdbinary)
+    // 6a. Undocked caller without explicit stationID must fail with MissingStationId (no silent Jita fallback)
+    rpc(&ctx, &mut s2, "stationSvc", "Undock", &[])
+        .await
+        .expect("stationSvc.Undock PILOT2 for undocked standing check");
+    ctx.sync_session(&mut s2);
+    let err_missing_st = rpc(
+        &ctx,
+        &mut s2,
+        "corpStationMgr",
+        "DoStandingCheckForStationService",
+        &[PyRep::Integer(65536)],
+    )
+    .await
+    .expect_err("Undocked DoStandingCheckForStationService without stationID must fail");
+    assert_eq!(err_missing_st.code, "MissingStationId");
+
+    // 6b. Empire station Jita (60003760, Caldari Navy 1000035 / Caldari State 500001) has no standing gates in V24 FSD
     let standing_ok = rpc(
         &ctx,
         &mut s1,
@@ -278,21 +307,134 @@ async fn test_station_services_and_corp_station_mgr_parity() {
     .expect("DoStandingCheckForStationService default standings");
     assert_eq!(standing_ok, PyRep::Bool(true));
 
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(c1) = snap.characters.get_mut(&PILOT1) {
-            c1.standings.insert(CORP_CALDARI_NAVY, -5.0);
-        }
-    });
-    let err_standing = rpc(
+    // 6c. Deathless Custodians station (60015187, Zarzakh - The Fulcrum, corp 1000438 has empty services {} in FSD)
+    let zarzakh_ok = rpc(
         &ctx,
         &mut s1,
         "corpStationMgr",
         "DoStandingCheckForStationService",
-        &[PyRep::Integer(65536), PyRep::Integer(STATION_JITA)],
+        &[PyRep::Integer(65536), PyRep::Integer(60_015_187)],
     )
     .await
-    .expect_err("DoStandingCheckForStationService with low standing must fail");
-    assert_eq!(err_standing.code, "StandingTooLowForStationService");
+    .expect("Deathless Custodians station service check must succeed");
+    assert_eq!(zarzakh_ok, PyRep::Bool(true));
+
+    // 6d. Triglavian Collective station (60000355, Kino VII - Perun Clade 1000293, faction 500026 in FSD):
+    // FSD gates: Fitting (17 / 65536) >= -0.05, Repair (13 / 4096) >= -0.05, Reprocessing (5 / 16) >= 3.0, Jump Clone (24 / 8388608) >= 3.0, Market (7) ungated
+    const STATION_KINO_PERUN: i64 = 60_000_355;
+    const FACTION_TRIGLAVIAN: i64 = 500_026;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c1) = snap.characters.get_mut(&PILOT1) {
+            c1.standings.insert(FACTION_TRIGLAVIAN, -0.10);
+        }
+        // Train Diplomacy V (3357) and Connections V (3359): must NOT modify Triglavian standing
+        let sk = snap.skills.entry(PILOT1).or_default();
+        sk.insert(3357, eve_db::TrainedSkillRecord { type_id: 3357, level: 5, skill_points: 256_000.0 });
+        sk.insert(3359, eve_db::TrainedSkillRecord { type_id: 3359, level: 5, skill_points: 256_000.0 });
+    });
+    let err_trig_fit = rpc(
+        &ctx,
+        &mut s1,
+        "corpStationMgr",
+        "DoStandingCheckForStationService",
+        &[PyRep::Integer(65536), PyRep::Integer(STATION_KINO_PERUN)],
+    )
+    .await
+    .expect_err("Triglavian fitting gate (-0.05) must reject -0.10 standing");
+    assert_eq!(err_trig_fit.code, "StandingTooLowForStationService");
+
+    // Ungated Market service (7) at Kino VII succeeds even at -0.10 Triglavian standing
+    let trig_mkt_ok = rpc(
+        &ctx,
+        &mut s1,
+        "corpStationMgr",
+        "DoStandingCheckForStationService",
+        &[PyRep::Integer(7), PyRep::Integer(STATION_KINO_PERUN)],
+    )
+    .await
+    .expect("Ungated market service at Triglavian station must succeed");
+    assert_eq!(trig_mkt_ok, PyRep::Bool(true));
+
+    // At exact -0.05 boundary: Fitting (65536) succeeds, but Reprocessing (16 -> service 5, gate 3.0) fails
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c1) = snap.characters.get_mut(&PILOT1) {
+            c1.standings.insert(FACTION_TRIGLAVIAN, -0.05);
+        }
+    });
+    let trig_fit_ok = rpc(
+        &ctx,
+        &mut s1,
+        "corpStationMgr",
+        "DoStandingCheckForStationService",
+        &[PyRep::Integer(65536), PyRep::Integer(STATION_KINO_PERUN)],
+    )
+    .await
+    .expect("Triglavian fitting gate (-0.05) must pass at -0.05");
+    assert_eq!(trig_fit_ok, PyRep::Bool(true));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c1) = snap.characters.get_mut(&PILOT1) {
+            c1.standings.insert(FACTION_TRIGLAVIAN, 2.99);
+        }
+    });
+    let err_trig_reproc = rpc(
+        &ctx,
+        &mut s1,
+        "corpStationMgr",
+        "DoStandingCheckForStationService",
+        &[PyRep::Integer(16), PyRep::Integer(STATION_KINO_PERUN)],
+    )
+    .await
+    .expect_err("Triglavian reprocessing gate (3.0) must reject 2.99 standing");
+    assert_eq!(err_trig_reproc.code, "StandingTooLowForStationService");
+    let err_trig_clone = rpc(
+        &ctx,
+        &mut s1,
+        "corpStationMgr",
+        "DoStandingCheckForStationService",
+        &[PyRep::Integer(24), PyRep::Integer(STATION_KINO_PERUN)],
+    )
+    .await
+    .expect_err("Triglavian jump clone gate (3.0) must reject 2.99 standing");
+    assert_eq!(err_trig_clone.code, "StandingTooLowForStationService");
+    assert!(!eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, STATION_JITA, 4));
+    let err_jita_interbus = rpc(
+        &ctx,
+        &mut s1,
+        "corpStationMgr",
+        "DoStandingCheckForStationService",
+        &[PyRep::Integer(4), PyRep::Integer(STATION_JITA)],
+    )
+    .await
+    .expect_err("Numeric service 4 (Interbus, unoffered at Jita) must not fall back to bitmask 1<<2 (service 3)");
+    assert_eq!(err_jita_interbus.code, "StationServiceUnavailable");
+
+    // At 3.00 boundary: Reprocessing (16) and Jump Clone Facility (24) both succeed
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c1) = snap.characters.get_mut(&PILOT1) {
+            c1.standings.insert(FACTION_TRIGLAVIAN, 3.0);
+        }
+    });
+    let trig_reproc_ok = rpc(
+        &ctx,
+        &mut s1,
+        "corpStationMgr",
+        "DoStandingCheckForStationService",
+        &[PyRep::Integer(16), PyRep::Integer(STATION_KINO_PERUN)],
+    )
+    .await
+    .expect("Triglavian reprocessing gate (3.0) must pass at 3.0");
+    assert_eq!(trig_reproc_ok, PyRep::Bool(true));
+    let trig_clone_ok = rpc(
+        &ctx,
+        &mut s1,
+        "corpStationMgr",
+        "DoStandingCheckForStationService",
+        &[PyRep::Integer(24), PyRep::Integer(STATION_KINO_PERUN)],
+    )
+    .await
+    .expect("Triglavian jump clone gate (3.0) must pass at 3.0");
+    assert_eq!(trig_clone_ok, PyRep::Bool(true));
 
     let err_unavailable = rpc(
         &ctx,

@@ -1161,7 +1161,7 @@ pub async fn handle(
                         let is_special = is_storyline
                             || ctx.sde.agents.get(&m_agent_id)
                                 .is_some_and(|a| matches!(a.agent_type_id, 5 | 8 | 10));
-                        let (new_st, st_changes) = apply_mission_completion_standings(ctx, snap, char_id, m_agent_id, corp_id, standing_pct, is_special);
+                        let (new_st, st_changes) = apply_mission_completion_standings(ctx, snap, char_id, m_agent_id, mission_id, corp_id, standing_pct, is_special);
 
                         if ctx.sde.agents.get(&m_agent_id)
                             .is_some_and(|a| a.agent_type_id == 10)

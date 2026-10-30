@@ -367,6 +367,7 @@ async fn test_belt_rats_clone_soldier_mordu_and_officer_spawns() {
     assert!(with_combat_runtime(&ctx, |rt| rt.npc_entities.values().any(|n| n.solar_system_id == low_sys && n.archetype == "CloneSoldier")), "Clone Soldier must respawn after 20m cooldown");
 
     // 4. True Null-Sec (`30_001_269` H-PA29, `-0.241` sec): Named Guristas Officer (`group 564`) + `meta_group 5` Officer module drop
+    // Isolate in a fresh ServerContext so HashMap iteration order across prior systems cannot shift RNG draws
     let ctx4 = ServerContext::new();
     common::pin_clock(&ctx4);
     let null_sys = 30_001_269u32;

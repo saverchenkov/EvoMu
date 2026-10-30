@@ -121,6 +121,107 @@ pub fn derive_certificate_levels(
     cert_levels
 }
 
+/// Derives ship mastery tier (`0..=5`) for `ship_type_id` from the character's derived certificate levels.
+pub fn derive_ship_mastery_level(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_type_id: u32,
+) -> u8 {
+    let Ok(bundle) = ctx.sde.load_certificates_and_masteries() else {
+        return 0;
+    };
+    let Some(levels) = bundle.masteries_by_ship_type.get(&ship_type_id) else {
+        return 0;
+    };
+    let cert_levels = derive_certificate_levels(ctx, char_id);
+    let mut mastery = 0u8;
+    for (idx, req_certs) in levels.iter().enumerate() {
+        let target_lvl = (idx as u8).saturating_add(1);
+        if req_certs.is_empty() {
+            break;
+        }
+        let all_met = req_certs
+            .iter()
+            .all(|cid| cert_levels.get(cid).copied().unwrap_or(0) >= target_lvl);
+        if all_met {
+            mastery = target_lvl;
+        } else {
+            break;
+        }
+    }
+    mastery
+}
+
+/// Returns `(certificate_ids, required_skills)` for `ship_type_id` at `req_mastery_level` (`1..=5`) from SDE.
+pub fn ship_mastery_tier_requirements(
+    ctx: &ServerContext,
+    ship_type_id: u32,
+    req_mastery_level: u8,
+) -> (Vec<u32>, Vec<(u32, u8)>) {
+    let tier_idx = (req_mastery_level.clamp(1, 5) - 1) as usize;
+    let Ok(bundle) = ctx.sde.load_certificates_and_masteries() else {
+        return (Vec::new(), Vec::new());
+    };
+    let Some(cert_ids) = bundle
+        .masteries_by_ship_type
+        .get(&ship_type_id)
+        .and_then(|lvls| lvls.get(tier_idx))
+    else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut req_map: std::collections::BTreeMap<u32, u8> = std::collections::BTreeMap::new();
+    for cid in cert_ids {
+        if let Some(cert) = bundle.certificates.get(cid) {
+            for (&sk_id, req_levels) in &cert.skill_types {
+                let req_lvl = req_levels[tier_idx];
+                if req_lvl > 0 {
+                    req_map
+                        .entry(sk_id)
+                        .and_modify(|cur| *cur = (*cur).max(req_lvl))
+                        .or_insert(req_lvl);
+                }
+            }
+        }
+    }
+    (cert_ids.clone(), req_map.into_iter().collect())
+}
+
+/// Builds the `GetMyCertificates` keyval payload for the active session character.
+pub fn get_my_certificates_pyrep(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let mut cert_map = derive_certificate_levels(ctx, char_id);
+    if session.has_gm_role()
+        || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0
+    {
+        ctx.db.with_snapshot(|snap| {
+            let state = load_certificate_state(snap, char_id);
+            for (cid, lvl) in state.certificates {
+                cert_map
+                    .entry(cid)
+                    .and_modify(|cur| *cur = (*cur).max(lvl))
+                    .or_insert(lvl);
+            }
+        });
+    }
+    let entries: Vec<(PyRep, PyRep)> = cert_map
+        .into_iter()
+        .map(|(cid, lvl)| (PyRep::Integer(cid as i64), PyRep::Integer(lvl as i64)))
+        .collect();
+    let flags_map = ctx.db.with_snapshot(|snap| load_certificate_state(snap, char_id).flags);
+    let flag_entries: Vec<(PyRep, PyRep)> = flags_map
+        .into_iter()
+        .map(|(cid, f)| (PyRep::Integer(cid as i64), PyRep::Integer(f as i64)))
+        .collect();
+    Ok(PyRep::keyval([
+        ("characterID", PyRep::Integer(char_id)),
+        ("certificates", PyRep::Dict(entries)),
+        ("certificateFlags", PyRep::Dict(flag_entries)),
+    ]))
+}
+
 /// Dispatches `certificateMgr` RPCs (`feat:skills.certificates`).
 pub fn handle(
     ctx: &ServerContext,
@@ -141,36 +242,7 @@ pub fn handle(
     };
 
     match method {
-        "GetMyCertificates" => {
-            let mut cert_map = derive_certificate_levels(ctx, char_id);
-            if session.has_gm_role()
-                || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0
-            {
-                ctx.db.with_snapshot(|snap| {
-                    let state = load_certificate_state(snap, char_id);
-                    for (cid, lvl) in state.certificates {
-                        cert_map
-                            .entry(cid)
-                            .and_modify(|cur| *cur = (*cur).max(lvl))
-                            .or_insert(lvl);
-                    }
-                });
-            }
-            let entries: Vec<(PyRep, PyRep)> = cert_map
-                .into_iter()
-                .map(|(cid, lvl)| (PyRep::Integer(cid as i64), PyRep::Integer(lvl as i64)))
-                .collect();
-            let flags_map = ctx.db.with_snapshot(|snap| load_certificate_state(snap, char_id).flags);
-            let flag_entries: Vec<(PyRep, PyRep)> = flags_map
-                .into_iter()
-                .map(|(cid, f)| (PyRep::Integer(cid as i64), PyRep::Integer(f as i64)))
-                .collect();
-            Some(Ok(PyRep::keyval([
-                ("characterID", PyRep::Integer(char_id)),
-                ("certificates", PyRep::Dict(entries)),
-                ("certificateFlags", PyRep::Dict(flag_entries)),
-            ])))
-        }
+        "GetMyCertificates" => Some(get_my_certificates_pyrep(ctx, session)),
 
         "GetCertificatesByCharacter" => {
             let target_char_id = args
@@ -265,7 +337,14 @@ pub fn handle(
         }
 
         "GetAllShipCertificateRecommendations" => {
-            let ship_type_id = args.first().and_then(|a| a.as_i64()).unwrap_or(587) as u32;
+            let Some(ship_type_id) = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .and_then(|v| u32::try_from(v).ok())
+                .filter(|&tid| tid > 0 && ctx.sde.types.contains_key(&tid))
+            else {
+                return Some(Err(BridgeRpcError::user_error("InvalidShipTypeID")));
+            };
             let mut cert_ids = Vec::new();
             if let Ok(bundle) = ctx.sde.load_certificates_and_masteries() {
                 if let Some(levels) = bundle.masteries_by_ship_type.get(&ship_type_id) {

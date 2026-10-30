@@ -248,9 +248,8 @@ impl SkillPlanManager {
             uuid[0..4].copy_from_slice(b"CERT");
             uuid[4..8].copy_from_slice(&plan_id.to_be_bytes());
 
-            let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("Certified Plan").to_string();
-            let desc_id = val.get("descriptionID").and_then(|v| v.as_u64()).unwrap_or(0);
-            let desc = format!("Certified doctrine plan (ID {desc_id})");
+            let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let category_id = val.get("careerPathID").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
 
             let mut reqs = Vec::new();
             if let Some(arr) = val.get("skillRequirements").and_then(|v| v.as_array()) {
@@ -291,8 +290,8 @@ impl SkillPlanManager {
                 owner_char_id: None,
                 owner_corp_id: None,
                 name,
-                description: desc,
-                category_id: 2,
+                description: String::new(),
+                category_id,
                 requirements: reqs,
                 milestones,
             });

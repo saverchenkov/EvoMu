@@ -63,7 +63,6 @@ async fn login_pilot_char(
 // parity: rpc:missionTrackerMgr.IsInActiveDungeonID
 // parity: rpc:missionTrackerMgr.UpdateAllMissions
 // parity: rpc:standingMgr.GetCorpStandings
-// parity: rpc:standingMgr.GetNPCNPCStandings
 // parity: rpc:standingMgr.GetStandingCompositions
 async fn test_mission_tracker_and_standing_mgr_rpcs() {
     let ctx = ServerContext::new();
@@ -158,14 +157,15 @@ async fn test_mission_tracker_and_standing_mgr_rpcs() {
         other => panic!("expected Rowset from GetCorpStandings, got {other:?}"),
     }
 
-    // 6. standingMgr.GetNPCNPCStandings: returns static inter-NPC standings
+    // 6. standingMgr.GetNPCNPCStandings: structural Rowset contract (npc-npc-standings rows remain OPEN due to V24 SDE DATA GAP)
     let npc_standings = rpc(&ctx, &mut sess, "standingMgr", "GetNPCNPCStandings", &[])
         .await
         .expect("GetNPCNPCStandings");
     match npc_standings {
         PyRep::Rowset { rows, columns, .. } => {
-            assert!(!rows.is_empty());
+            assert!(!rows.is_empty(), "GetNPCNPCStandings must return non-empty Rowset");
             assert_eq!(columns, vec!["fromID", "toID", "standing"]);
+            assert!(rows.iter().all(|r| r.len() == 3 && r[2].as_f64().is_some_and(|v| (-10.0..=10.0).contains(&v))));
         }
         other => panic!("expected Rowset from GetNPCNPCStandings, got {other:?}"),
     }

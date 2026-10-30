@@ -189,27 +189,45 @@ async fn test_feat_skills_history_events_and_obsolete_refund() {
     place_hangar_item(&ctx, 991_000_106, 40_519, char_id, 1);
     rpc(&ctx, &mut sess, "skillMgr2", "ExtractSkills", &[PyRep::Dict(vec![(PyRep::Integer(25_739), PyRep::Integer(500_000))]), PyRep::Integer(991_000_106)]).await.expect("ExtractSkills");
 
-    // 4. Event 38 (`feat:skills.skill-remove-obsolete`): legacy pre-V24 skill 999_999 migrated on SelectCharacterID after SQLite reopen
+    // 4. Event 38 (`feat:skills.skill-remove-obsolete`): real retired EVE learning skill `3374` ('Learning',
+    // reclassified in V24 SDE to group 267 / category 17 Commodity, published = false) and real unpublished SDE
+    // skill `3362` ('DED Connections', category 16, published = false) migrate on SelectCharacterID after SQLite
+    // reopen, while incomplete SDEs and unrecognized non-deprecated skill IDs (`888_888`) are never wiped.
     ctx.advance_secs(30);
     let (sp_pre_obs, free_pre_obs) = ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get_mut(&char_id).unwrap();
-        ch.skill_points += 1_500.0;
+        ch.skill_points += 10_500.0;
         let pre = (ch.skill_points, ch.free_skill_points);
-        snap.skills.entry(char_id).or_default().insert(999_999, TrainedSkillRecord { type_id: 999_999, level: 2, skill_points: 1_500.0 });
+        let sk = snap.skills.entry(char_id).or_default();
+        sk.insert(3374, TrainedSkillRecord { type_id: 3374, level: 3, skill_points: 8_000.0 });
+        sk.insert(3362, TrainedSkillRecord { type_id: 3362, level: 2, skill_points: 1_500.0 });
+        sk.insert(888_888, TrainedSkillRecord { type_id: 888_888, level: 1, skill_points: 1_000.0 });
         pre
     });
 
     drop(ctx);
     let repo2 = Arc::new(WorldRepository::open_sqlite(&db_path).expect("reopen sqlite"));
+    let mut ctx_partial = ServerContext::with_repository(repo2.clone());
+    let mut empty_sde = (*ctx_partial.sde).clone();
+    empty_sde.types.clear();
+    ctx_partial.sde = Arc::new(empty_sde);
+    assert_eq!(eve_server::services::character_skill_ops::migrate_obsolete_skills_for_character(&ctx_partial, char_id), (0, 0.0));
+    assert!(repo2.with_snapshot(|s| {
+        let sk = &s.skills[&char_id];
+        sk.contains_key(&3327) && sk.contains_key(&3374) && sk.contains_key(&3362) && sk.contains_key(&888_888)
+    }));
+
     let ctx2 = ServerContext::with_repository(repo2);
     common::pin_clock(&ctx2);
     ctx2.advance_secs(1_500);
     let mut sess2 = login_and_select(&ctx2, 1012, "hist_pilot_u", "hist-pass", char_id).await;
 
     let ch_post = ctx2.db.get_character(char_id).unwrap();
-    assert!(!ctx2.db.with_snapshot(|s| s.skills[&char_id].contains_key(&999_999)));
-    assert!((ch_post.skill_points - (sp_pre_obs - 1_500.0)).abs() < 1e-3);
-    assert!((ch_post.free_skill_points - (free_pre_obs + 1_500.0)).abs() < 1e-3);
+    assert!(!ctx2.db.with_snapshot(|s| s.skills[&char_id].contains_key(&3374)));
+    assert!(!ctx2.db.with_snapshot(|s| s.skills[&char_id].contains_key(&3362)));
+    assert!(ctx2.db.with_snapshot(|s| s.skills[&char_id].contains_key(&888_888) && s.skills[&char_id].contains_key(&3327)));
+    assert!((ch_post.skill_points - (sp_pre_obs - 9_500.0)).abs() < 1e-3);
+    assert!((ch_post.free_skill_points - (free_pre_obs + 9_500.0)).abs() < 1e-3);
     let notifs = ctx2.drain_notifications_for_char(char_id);
     assert!(notifs.iter().any(|n| n.event == "OnServerSkillsRemoved"));
     assert!(notifs.iter().any(|n| n.event == "OnFreeSkillPointsChanged"));
@@ -220,6 +238,8 @@ async fn test_feat_skills_history_events_and_obsolete_refund() {
     for expected_ev in [33, 36, 37, 38, 39] {
         assert!(ev_types.contains(&expected_ev), "Missing skill history event {expected_ev} in {ev_types:?}");
     }
+    assert!(rows.iter().any(|r| r[1].as_i64() == Some(38) && r[2].as_i64() == Some(3374)));
+    assert!(rows.iter().any(|r| r[1].as_i64() == Some(38) && r[2].as_i64() == Some(3362)));
     let _ = std::fs::remove_file(&db_path);
 }
 
@@ -262,22 +282,66 @@ async fn test_feat_skills_certificates_and_plans_and_accelerators() {
     let PyRep::List(classes) = rpc(&ctx, &mut alpha_sess, "certificateMgr", "GetCertificateClasses", &[]).await.unwrap() else { panic!("expected List") };
     assert!(!classes.is_empty());
     // rpc-lint: allow crucible legacy service certificateMgr
-    let PyRep::KeyVal(recs) = rpc(&ctx, &mut alpha_sess, "certificateMgr", "GetAllShipCertificateRecommendations", &[]).await.unwrap() else { panic!("expected KeyVal") };
+    assert_eq!(rpc(&ctx, &mut alpha_sess, "certificateMgr", "GetAllShipCertificateRecommendations", &[]).await.unwrap_err().code, "InvalidShipTypeID");
+    // rpc-lint: allow crucible legacy service certificateMgr
+    let PyRep::KeyVal(recs) = rpc(&ctx, &mut alpha_sess, "certificateMgr", "GetAllShipCertificateRecommendations", &[PyRep::Integer(587)]).await.unwrap() else { panic!("expected KeyVal") };
     assert!(!recs.is_empty());
 
     // Certificate 196 requires Science (3402) [1..=5]: starter Science IV -> cert level 4; train V -> cert level 5!
+    // Certificate 2269 requires Gas Cloud Harvesting (25544) [1..=5]: untrained -> 0; train I -> 1; train V -> 5!
     // rpc-lint: allow crucible legacy service certificateMgr
     let c_before = rpc(&ctx, &mut alpha_sess, "certificateMgr", "GetMyCertificates", &[]).await.unwrap();
     let PyRep::Dict(d_before) = c_before.dict_get("certificates").unwrap() else { panic!("expected Dict") };
     assert_eq!(d_before.iter().find(|(k, _)| k.as_i64() == Some(196)).and_then(|(_, v)| v.as_i64()), Some(4));
+    assert_eq!(d_before.iter().find(|(k, _)| k.as_i64() == Some(2269)), None, "Untrained Gas Cloud Harvesting must yield cert 2269 level 0");
+    assert_eq!(eve_server::services::character_certificates::derive_ship_mastery_level(&ctx, char_id, 587), 0);
 
-    place_hangar_item(&ctx, 991_000_202, 40_520, char_id, 1);
+    place_hangar_item(&ctx, 991_000_202, 40_520, char_id, 2);
+    rpc(&ctx, &mut alpha_sess, "skillMgr2", "InjectSkillpoints", &[PyRep::Integer(991_000_202)]).await.unwrap();
     rpc(&ctx, &mut alpha_sess, "skillMgr2", "InjectSkillpoints", &[PyRep::Integer(991_000_202)]).await.unwrap();
     rpc(&ctx, &mut alpha_sess, "skillMgr2", "ApplyFreeSkillPoints", &[PyRep::Integer(3402), PyRep::Integer(210_745)]).await.unwrap();
+    // Train prerequisite Mining (3386) IV, then inject Gas Cloud Harvesting (25544) and advance level 0 -> 1 -> 5
+    rpc(&ctx, &mut alpha_sess, "skillMgr2", "ApplyFreeSkillPoints", &[PyRep::Integer(3386), PyRep::Integer(45_255)]).await.unwrap();
+    place_hangar_item(&ctx, 991_000_204, 25_544, char_id, 1);
+    rpc(&ctx, &mut alpha_sess, "skillMgr2", "InjectSkillIntoBrain", &[PyRep::List(vec![PyRep::Integer(991_000_204)])]).await.unwrap();
+    rpc(&ctx, &mut alpha_sess, "skillMgr2", "ApplyFreeSkillPoints", &[PyRep::Integer(25_544), PyRep::Integer(250)]).await.unwrap();
+    // rpc-lint: allow crucible legacy service certificateMgr
+    let c_mid = rpc(&ctx, &mut alpha_sess, "certificateMgr", "GetMyCertificates", &[]).await.unwrap();
+    let PyRep::Dict(d_mid) = c_mid.dict_get("certificates").unwrap() else { panic!("expected Dict") };
+    assert_eq!(d_mid.iter().find(|(k, _)| k.as_i64() == Some(2269)).and_then(|(_, v)| v.as_i64()), Some(1));
+
+    rpc(&ctx, &mut alpha_sess, "skillMgr2", "ApplyFreeSkillPoints", &[PyRep::Integer(25_544), PyRep::Integer(255_750)]).await.unwrap();
     // rpc-lint: allow crucible legacy service certificateMgr
     let c_after = rpc(&ctx, &mut alpha_sess, "certificateMgr", "GetMyCertificates", &[]).await.unwrap();
     let PyRep::Dict(d_after) = c_after.dict_get("certificates").unwrap() else { panic!("expected Dict") };
     assert_eq!(d_after.iter().find(|(k, _)| k.as_i64() == Some(196)).and_then(|(_, v)| v.as_i64()), Some(5));
+    assert_eq!(d_after.iter().find(|(k, _)| k.as_i64() == Some(2269)).and_then(|(_, v)| v.as_i64()), Some(5));
+
+    // Train all Rifter (587) Mastery I prerequisite skills -> ship mastery advances 0 -> 1
+    ctx.db.with_mut_snapshot(|snap| {
+        let sk = snap.skills.entry(char_id).or_default();
+        for (stid, lvl) in [
+            (3402u32, 5u8), (3413, 1), (3417, 1), (3426, 3), (3435, 1), (3449, 2),
+            (3300, 3), (3302, 1), (3310, 1), (3311, 1), (3312, 1), (3429, 1),
+            (3318, 1), (3392, 1), (3393, 1), (3394, 1), (3327, 1),
+        ] {
+            sk.insert(stid, TrainedSkillRecord { type_id: stid, level: lvl, skill_points: 256_000.0 });
+        }
+    });
+    assert_eq!(eve_server::services::character_certificates::derive_ship_mastery_level(&ctx, char_id, 587), 1);
+    assert_eq!(rpc(&ctx, &mut alpha_sess, "dogmaIM", "GetCurrCharMasteryLevel", &[]).await.unwrap_err().code, "InvalidShipTypeID");
+    assert_eq!(rpc(&ctx, &mut alpha_sess, "dogmaIM", "GetCurrCharMasteryLevel", &[PyRep::Integer(587)]).await.unwrap().as_i64(), Some(1));
+    assert_eq!(rpc(&ctx, &mut alpha_sess, "ship", "GetCurrCharMasteryLevel", &[PyRep::Integer(587)]).await.unwrap().as_i64(), Some(1));
+    let dogma_certs = rpc(&ctx, &mut alpha_sess, "dogmaIM", "GetMyCertificates", &[]).await.unwrap();
+    let PyRep::Dict(d_dogma) = dogma_certs.dict_get("certificates").unwrap() else { panic!("expected Dict") };
+    assert_eq!(d_dogma.iter().find(|(k, _)| k.as_i64() == Some(196)).and_then(|(_, v)| v.as_i64()), Some(5));
+    let ship_certs = rpc(&ctx, &mut alpha_sess, "dogmaIM", "GetCertificatesForShipByMasteryLevel", &[PyRep::Integer(587), PyRep::Integer(1)]).await.unwrap();
+    assert_eq!(ship_certs.dict_get("masteryLevel").and_then(|v| v.as_i64()), Some(1));
+    assert!(matches!(ship_certs.dict_get("certificates"), Some(PyRep::List(l)) if !l.is_empty()));
+    let ship_reqs = rpc(&ctx, &mut alpha_sess, "ship", "GetSkillsRequiredForMasteryLevel", &[PyRep::Integer(587), PyRep::Integer(1)]).await.unwrap();
+    let PyRep::Dict(req_dict) = ship_reqs.dict_get("requiredSkills").unwrap() else { panic!("expected Dict") };
+    assert_eq!(req_dict.iter().find(|(k, _)| k.as_i64() == Some(3402)).and_then(|(_, v)| v.as_i64()), Some(1));
+    assert_eq!(req_dict.iter().find(|(k, _)| k.as_i64() == Some(3327)).and_then(|(_, v)| v.as_i64()), Some(1));
 
     // Non-GM players cannot grant certificates (R-CERT-01: AccessDenied)
     // rpc-lint: allow crucible legacy service certificateMgr
@@ -310,9 +374,24 @@ async fn test_feat_skills_certificates_and_plans_and_accelerators() {
     encode_bytes_field(2, &f2_id, &mut f2_req);
     encode_bytes_field(1, &f2_id, &mut sh_req);
     assert_eq!(quasar_rpc(&ctx, &mut ceo_sess, "eve_public.character.skill.plan.SetActiveRequest", f2_req).await.status_code, 200);
+    let active_rsp = quasar_rpc(&ctx, &mut ceo_sess, "eve_public.character.skill.plan.GetActiveRequest", Vec::new()).await;
+    assert_eq!(active_rsp.status_code, 200);
+    let active_wm = WireMessage::decode(&active_rsp.payload.unwrap().value).unwrap();
+    let active_id_wm = WireMessage::decode(active_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(active_id_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap(), &plan_uuid);
+    let active_attr_wm = WireMessage::decode(active_wm.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(active_attr_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_str(), Ok(Some("Frigate Mastery")));
+
     let shared_rsp = quasar_rpc(&ctx, &mut member_sess, "eve_public.character.skill.plan.GetSharedRequest", sh_req).await;
     assert_eq!(shared_rsp.status_code, 200);
-    assert!(!shared_rsp.payload.unwrap().value.is_empty());
+    let shared_wm = WireMessage::decode(&shared_rsp.payload.unwrap().value).unwrap();
+    let shared_attr_wm = WireMessage::decode(shared_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(shared_attr_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_str(), Ok(Some("Frigate Mastery")));
+    assert_eq!(shared_attr_wm.fields.iter().find(|f| f.field_number == 3).unwrap().value.as_str(), Ok(Some("Core combat frigate skills")));
+    let shared_req_wm = WireMessage::decode(shared_attr_wm.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_bytes().unwrap()).unwrap();
+    let shared_tid_wm = WireMessage::decode(shared_req_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(shared_tid_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_varint(), Some(3327));
+    assert_eq!(shared_req_wm.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_varint(), Some(4));
 
     // Corporation skill plans: unprivileged member gets 403 on CreateRequest, CEO creates (200), member reads via GetAllRequest (200)
     let (mut corp_attr, mut corp_val) = (Vec::new(), Vec::new());
@@ -335,6 +414,21 @@ async fn test_feat_skills_certificates_and_plans_and_accelerators() {
             .and_then(|w| w.fields.first().and_then(|id_f| id_f.value.as_bytes()).map(|u| u.starts_with(b"CERT")))
             .unwrap_or(false)
     }));
+
+    // Fetch certified SDE skill plan 33 ("AIR - Repair Systems") via `eve_public.skill.plan.GetRequest`
+    let mut cert_plan_uuid = [0u8; 16];
+    cert_plan_uuid[0..4].copy_from_slice(b"CERT");
+    cert_plan_uuid[4..8].copy_from_slice(&33u32.to_be_bytes());
+    let (mut cert_id_msg, mut cert_get_req) = (Vec::new(), Vec::new());
+    encode_bytes_field(1, &cert_plan_uuid, &mut cert_id_msg);
+    encode_bytes_field(1, &cert_id_msg, &mut cert_get_req);
+    let cert_get_rsp = quasar_rpc(&ctx, &mut ceo_sess, "eve_public.skill.plan.GetRequest", cert_get_req).await;
+    assert_eq!(cert_get_rsp.status_code, 200);
+    let cert_get_wm = WireMessage::decode(&cert_get_rsp.payload.unwrap().value).unwrap();
+    let cert_attr_wm = WireMessage::decode(cert_get_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(cert_attr_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_str(), Ok(Some("AIR - Repair Systems")));
+    let req_count = cert_attr_wm.fields.iter().filter(|f| f.field_number == 2).count();
+    assert_eq!(req_count, 3, "AIR - Repair Systems must contain 3 SDE skill requirements");
 
     // Skill Type & Category handlers against SDE (`eve.skilltype.GetRequest`, `eve.skillcategory.GetAllRequest`)
     let mut id_msg = Vec::new();
@@ -410,6 +504,10 @@ async fn test_feat_skills_certificates_and_plans_and_accelerators() {
     let mut ceo2 = login_and_select(&ctx2, 1025, "demo", "demo-secret", 90_000_001).await;
     let active_reloaded = quasar_rpc(&ctx2, &mut ceo2, "eve_public.character.skill.plan.GetActiveRequest", Vec::new()).await;
     assert_eq!(active_reloaded.status_code, 200);
-    assert!(!active_reloaded.payload.unwrap().value.is_empty());
+    let reload_wm = WireMessage::decode(&active_reloaded.payload.unwrap().value).unwrap();
+    let reload_id_wm = WireMessage::decode(reload_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(reload_id_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap(), &plan_uuid);
+    let reload_attr_wm = WireMessage::decode(reload_wm.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(reload_attr_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_str(), Ok(Some("Frigate Mastery")));
     let _ = std::fs::remove_file(&db_path);
 }

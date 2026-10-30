@@ -940,9 +940,10 @@ async fn test_rename_ship_kill_counter_ship_tree_and_masteries() {
         }
     }
     let mastery = call(&ctx, &mut s1, "dogmaIM", "GetCurrCharMasteryLevel", vec![PyRep::Integer(587)]).await.unwrap();
-    assert_eq!(int(&mastery, "masteryLevel"), 5);
+    assert_eq!(mastery.as_i64(), Some(5));
     let my_certs = call(&ctx, &mut s1, "dogmaIM", "GetMyCertificates", vec![]).await.unwrap();
-    assert_eq!(int(&my_certs, "masteryLevel"), 5);
+    let Some(PyRep::Dict(certs_dict)) = my_certs.dict_get("certificates") else { panic!("expected certificates dict") };
+    assert!(!certs_dict.is_empty());
 }
 
 #[tokio::test]
