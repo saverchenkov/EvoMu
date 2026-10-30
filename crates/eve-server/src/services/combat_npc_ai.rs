@@ -1322,6 +1322,7 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
             &["destroyHostileNPC", "entityGroupDestroyed"],
             1,
             ctx.now_unix(),
+            &ctx.quasar_gateway,
         );
         crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
             ctx,

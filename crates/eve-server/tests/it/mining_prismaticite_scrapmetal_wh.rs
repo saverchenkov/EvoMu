@@ -142,7 +142,7 @@ async fn test_mining_scrapmetal_yield_exclusions_at_npc_and_rigged_tatara() {
 
     // 2. Negative exclusion test: docked at a W-space Tatara (35836) with T2 Reprocessing Rig (46493),
     // Reprocessing V (3385), Reprocessing Efficiency V (3389), Veldspar Processing V (12195), and
-    // Zainou 'Beancounter' Reprocessing RX-804 (27170). Ore gets full bonuses (> 85%), while a
+    // Zainou 'Beancounter' Reprocessing RX-804 (27174). Ore gets full bonuses (> 75%), while a
     // module (482 Miner II) and ship (587 Rifter) STILL exclude structure, rig, security, skill, and implant bonuses (55.0%).
     let tatara_id = 1_045_000_000_701_i64;
     let corp_id = 98_000_701_i64;
@@ -182,14 +182,16 @@ async fn test_mining_scrapmetal_yield_exclusions_at_npc_and_rigged_tatara() {
         snap.items.insert(rig.item_id, rig);
 
         let sk = snap.skills.entry(char_id).or_default();
-        for sid in [3385_u32, 3389, 12195, 12196] {
+        for sid in [3385_u32, 3389, 12195, 12196, 60377] {
             sk.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
         }
-        snap.active_implants.insert(char_id, vec![27170]); // Zainou 'Beancounter' Reprocessing RX-804
+        snap.active_implants.insert(char_id, vec![27174]); // Zainou 'Beancounter' Reprocessing RX-804 (+4%)
 
         snap.items.insert(101_000_720, make_item(101_000_720, 1230, char_id, tatara_id, InventoryFlag::Hangar, 100, false));
         snap.items.insert(101_000_721, make_item(101_000_721, 482, char_id, tatara_id, InventoryFlag::Hangar, 1, false));
         snap.items.insert(101_000_722, make_item(101_000_722, 587, char_id, tatara_id, InventoryFlag::Hangar, 1, false));
+        snap.items.insert(101_000_723, make_item(101_000_723, 15331, char_id, tatara_id, InventoryFlag::Hangar, 10, false)); // Metal Scraps
+        snap.items.insert(101_000_724, make_item(101_000_724, 30497, char_id, tatara_id, InventoryFlag::Hangar, 2, false)); // Reinforced Metal Scraps
     });
     sess.station_id = None;
     sess.structure_id = Some(tatara_id);
@@ -204,7 +206,12 @@ async fn test_mining_scrapmetal_yield_exclusions_at_npc_and_rigged_tatara() {
     assert!(ore_base > 0.55, "Ore at rigged W-space Tatara must receive hull+rig+sec bonus (got {ore_base})");
     assert!(ore_yield > 0.75, "Ore yield at max skills + RX-804 + Tatara must exceed 75% (got {ore_yield})");
 
-    for (iid, label) in [(101_000_721_i64, "Miner II"), (101_000_722_i64, "Rifter")] {
+    for (iid, label) in [
+        (101_000_721_i64, "Miner II"),
+        (101_000_722_i64, "Rifter"),
+        (101_000_723_i64, "Metal Scraps"),
+        (101_000_724_i64, "Reinforced Metal Scraps"),
+    ] {
         let rep = ctx
             .dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(iid)], &kw, None)
             .await
@@ -213,7 +220,22 @@ async fn test_mining_scrapmetal_yield_exclusions_at_npc_and_rigged_tatara() {
         let yld = dict_get(&rep, "yieldRate").and_then(|v| v.as_f64()).unwrap();
         assert!((base - 0.50).abs() < 1e-6, "{label} must exclude Tatara hull/rig/sec bonus (got {base})");
         assert!((yld - 0.55).abs() < 1e-6, "{label} must exclude skills & implants and cap at 55% (got {yld})");
+        if iid == 101_000_723 {
+            let Some(PyRep::List(outs)) = dict_get(&rep, "outputs") else { panic!("expected outputs list") };
+            let trit = outs.iter().find_map(|d| (dict_get(d, "typeID")?.as_i64()? == 34).then(|| dict_get(d, "quantity")?.as_i64()).flatten()).unwrap_or(0);
+            assert_eq!(trit, 2_750, "10x Metal Scraps (5,000 base Tritanium) must yield 2,750 (<= 55%) in rigged Tatara");
+        }
     }
+
+    // Explicit REPROCESSING_SKILL_TYPE (790) = 12196.0 (Scrapmetal Processing) must also use scrapmetal formula (<= 55%)
+    ctx.db.with_snapshot(|snap| {
+        let mut explicit_scrap = ctx.sde.types.get(&15331).expect("Metal Scraps in SDE").clone();
+        explicit_scrap.default_attributes.insert(eve_sde::attr_ids::REPROCESSING_SKILL_TYPE, 12196.0);
+        let (base, yld, _) = eve_server::services::space_entity_mining::compute_reprocessing_rates_for_item(
+            &ctx.sde, snap, char_id, tatara_id, &explicit_scrap,
+        );
+        assert!((base - 0.50).abs() < 1e-6 && (yld - 0.55).abs() < 1e-6, "attr 790=12196 must cap at 55% (got {base}, {yld})");
+    });
 }
 
 #[tokio::test]

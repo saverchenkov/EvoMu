@@ -190,7 +190,7 @@ impl ServerContext {
                         let now_s = db.clock().now_unix_secs();
                         let (clr, esc, step) = crate::services::pve_exploration::handle_pve_site_npc_destruction_core(&sys, &db, &sde, &rng, &ce, sys_id, npc_id, kid, true).await;
                         if let Some(gw) = gww.upgrade() {
-                            gw.progression.achievements.on_gameplay_event_by_name(kid as u32, &["destroyHostileNPC"], 1, now_s);
+                            gw.progression.achievements.on_gameplay_event_by_name(kid as u32, &["destroyHostileNPC"], 1, now_s, &gw);
                             if clr.is_some() { gw.progression.extra.on_system_tale_encounter_completed(sys_id, 1, now_s); }
                         }
                         if let Some(pws) = pw.upgrade() { crate::services::pve_exploration::notify_pve_destruction_events(&db, &pws, &tx, kid, clr, esc, step); }

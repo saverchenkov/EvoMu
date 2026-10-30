@@ -521,7 +521,6 @@ async fn test_quasar_achievements_progression_and_claims() {
     // parity: quasar:eveProto/generated/eve_public/achievement/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/api/admin/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let (uid, cid) = (1u64, 90_000_001);

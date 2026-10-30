@@ -1315,7 +1315,7 @@ pub fn handle_industry_jobs(
                             ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(char_id as u32, 5, 1, &ctx.quasar_gateway);
                             ctx.quasar_gateway.progression.career_goals.on_gameplay_event(char_id as u32, "manufacturing", 1, &ctx.quasar_gateway);
                             ctx.quasar_gateway.progression.extra.on_campaign_gameplay_event(char_id as u32, crate::services::quasar_campaign_state::CampaignEvent { method: "ManufactureItem", type_id: Some(job.product_type_id), solar_system_id: None, faction_id: None }, 1, ctx.now_unix(), &ctx.quasar_gateway);
-                            ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["industryManufacturingJobDeliveredCount", "typeManufacturedCount"], 1, ctx.now_unix());
+                            ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["industryManufacturingJobDeliveredCount", "typeManufacturedCount"], 1, ctx.now_unix(), &ctx.quasar_gateway);
                         }
                         if method == "CompleteJob" && job.activity_id == 8 && prod_item_id == 0 {
                             return Some(Err(BridgeRpcError {

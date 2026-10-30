@@ -468,6 +468,38 @@ impl EsiRouter {
                         body: img_body,
                     };
                 }
+                p if p.starts_with("/cdn/achievements/v24.1.") && p.ends_with(".json") => {
+                    let mgr = &self.ctx.quasar_gateway.progression.achievements;
+                    let expected = format!(
+                        "/cdn/achievements/v24.1.{}/{}.json",
+                        mgr.sde_achievement_count, mgr.sde_achievement_hash
+                    );
+                    if p != expected {
+                        return self.build_error_response(
+                            &client_key,
+                            now,
+                            req_id,
+                            compat_date,
+                            404,
+                            "Achievement definition bundle not found",
+                            true,
+                        );
+                    }
+                    return self.finalize_cached_response(
+                        req,
+                        now,
+                        req_id,
+                        compat_date,
+                        remain_initial,
+                        reset_initial,
+                        200,
+                        mgr.sde_definitions_json.clone(),
+                        3600,
+                        false,
+                        false,
+                        None,
+                    );
+                }
                 _ => {}
             }
         }

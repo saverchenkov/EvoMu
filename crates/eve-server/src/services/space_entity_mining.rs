@@ -823,16 +823,20 @@ pub fn compute_reprocessing_rates_for_item(
     let char_skills = snap.skills.get(&char_id);
     let reproc_lvl = char_skills.and_then(|m| m.get(&3385)).map(|s| s.level).unwrap_or(0);
     let reproc_eff_lvl = char_skills.and_then(|m| m.get(&3389)).map(|s| s.level).unwrap_or(0);
-    let ore_proc_lvl = inv_type
+    let raw_reproc_skill = inv_type
         .default_attributes
         .get(&eve_sde::attr_ids::REPROCESSING_SKILL_TYPE)
-        .and_then(|&skill_id_f| char_skills.and_then(|m| m.get(&(skill_id_f as TypeId))).map(|s| s.level))
+        .map(|&skill_id_f| skill_id_f as TypeId);
+    let ore_proc_lvl = raw_reproc_skill
+        .filter(|&sid| sid > 0 && sid != 12196)
+        .and_then(|sid| char_skills.and_then(|m| m.get(&sid)).map(|s| s.level))
         .unwrap_or(0);
     let scrap_lvl = char_skills.and_then(|m| m.get(&12196)).map(|s| s.level).unwrap_or(0);
-    let is_ore_or_ice = inv_type.category_id == 25
-        || inv_type.group_id == 465
-        || inv_type.group_id == 4932
-        || inv_type.default_attributes.contains_key(&eve_sde::attr_ids::REPROCESSING_SKILL_TYPE);
+    let is_ore_or_ice = raw_reproc_skill != Some(12196)
+        && (inv_type.category_id == 25
+            || inv_type.group_id == 465
+            || inv_type.group_id == 4932
+            || raw_reproc_skill.is_some_and(|sid| sid > 0));
     let station_base_yield = if station_id >= 1_000_000_000_000 {
         if is_ore_or_ice {
             compute_structure_rigged_base_yield(sde, snap, station_id, Some(inv_type))
@@ -1054,6 +1058,11 @@ pub async fn handle(
                     let Some(inv_type) = ctx.sde.types.get(&item.type_id) else {
                         return Err(BridgeRpcError { code: "ItemNotReprocessable".into(), message: format!("Unknown item type {}", item.type_id) });
                     };
+                    if !ctx.sde.type_materials.get(&inv_type.type_id).is_some_and(|m| !m.is_empty())
+                        && ctx.sde.randomized_type_materials_for(inv_type.type_id).is_empty()
+                    {
+                        return Err(BridgeRpcError { code: "ItemNotReprocessable".into(), message: format!("Item type {} ({}) has no SDE typeMaterials and cannot be reprocessed", item.type_id, inv_type.name) });
+                    }
                     if item.singleton || snap.items.values().any(|child| child.location_id == item_id) {
                         return Err(BridgeRpcError { code: "ItemMustBeRepackaged".into(), message: format!("Item {item_id} must be emptied and repackaged before reprocessing") });
                     }
@@ -1195,6 +1204,7 @@ pub async fn handle(
                         &["refineOreCount", "finishedReprocessingCount", "reprocessingInput", "reprocessingOutput"],
                         batch_results.len().max(1) as u64,
                         ctx.now_unix(),
+                        &ctx.quasar_gateway,
                     );
                     // parity: notify:OnReprocessingMaterialsChanged
                     ctx.notify(

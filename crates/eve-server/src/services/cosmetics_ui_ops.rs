@@ -708,19 +708,27 @@ fn handle_achievements_get(ctx: &ServerContext, session: &mut SessionState) -> R
 }
 
 /// `UpdateClientAchievmentsAndCounters(achievementIDs, eventCounters)`: merges newly completed
-/// achievement IDs and client event counters (counters only ever increase).
+/// client-side (`is_client_achievement`) achievement IDs and client event counters (counters only ever increase).
 fn handle_achievements_update(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let ids: Vec<i64> = match args.first() {
+    let mgr = &ctx.quasar_gateway.progression.achievements;
+    let raw_ids: Vec<i64> = match args.first() {
         Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => items.iter().filter_map(|x| x.as_i64()).filter(|&v| v > 0).collect(),
         Some(PyRep::Dict(entries)) => entries.iter().filter_map(|(k, _)| k.as_i64()).filter(|&v| v > 0).collect(),
         _ => Vec::new(),
     };
+    let client_ids: Vec<u32> = raw_ids
+        .into_iter()
+        .filter_map(|id| u32::try_from(id).ok().filter(|&aid| mgr.is_client_achievement_id(aid)))
+        .collect();
     let counters: Vec<(String, i64)> = match args.get(1) {
         Some(PyRep::Dict(entries)) => entries
             .iter()
             .filter_map(|(k, v)| {
                 let key = k.as_str().map(String::from).or_else(|| k.as_i64().map(|i| i.to_string()))?;
+                if !mgr.is_client_allowed_counter_key(&key) {
+                    return None;
+                }
                 Some((key, v.as_i64()?))
             })
             .collect(),
@@ -730,7 +738,8 @@ fn handle_achievements_update(ctx: &ServerContext, session: &mut SessionState, a
     let res = ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
         let done = ext.achievements_by_char.entry(char_id).or_default();
-        for &id in &ids {
+        for &aid in &client_ids {
+            let id = i64::from(aid);
             if !done.contains(&id) {
                 done.push(id);
             }
@@ -747,32 +756,13 @@ fn handle_achievements_update(ctx: &ServerContext, session: &mut SessionState, a
         Ok(PyRep::None)
     });
     if res.is_ok() {
-        let now_unix = ctx.now_unix();
-        let mgr = &ctx.quasar_gateway.progression.achievements;
-        let mut any_marked = false;
-        for id in ids {
-            if let Ok(aid) = u32::try_from(id) {
-                if let Ok(a) = mgr.mark_completed(char_id as u32, aid, now_unix) {
-                    any_marked = true;
-                    crate::services::quasar_achievements::emit_achievement_notices(
-                        char_id as u32,
-                        a.def.id,
-                        a.def.category_id,
-                        a.progress,
-                        0,
-                        true,
-                        &[],
-                        now_unix,
-                    );
-                }
-            }
-        }
-        if any_marked {
-            mgr.save_to_db();
-        }
-        for (k, delta) in counter_deltas {
-            mgr.on_client_counter_event(char_id as u32, &k, delta, now_unix);
-        }
+        mgr.apply_client_task_completions_and_counters(
+            char_id as u32,
+            &client_ids,
+            &counter_deltas,
+            ctx.now_unix(),
+            &ctx.quasar_gateway,
+        );
     }
     res
 }

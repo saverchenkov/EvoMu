@@ -44,9 +44,9 @@ pub fn dispatch_mining_gameplay_events(ctx: &ServerContext, char_id: i64, units:
             );
         let ore_vol = ctx.sde.types.get(&ore_type_id).map(|t| t.volume).unwrap_or(0.1) * (units as f64);
         let now_unix = ctx.now_unix();
-        ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["timesMined"], 1, now_unix);
-        ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["totalMined"], units, now_unix);
-        ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["volumeMined"], ore_vol.round().max(1.0) as u64, now_unix);
+        ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["timesMined"], 1, now_unix, &ctx.quasar_gateway);
+        ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["totalMined"], units, now_unix, &ctx.quasar_gateway);
+        ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["volumeMined"], ore_vol.round().max(1.0) as u64, now_unix, &ctx.quasar_gateway);
         crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
             ctx,
             char_id,

@@ -1012,6 +1012,7 @@ impl NpcSpawnManager {
                 &["destroyHostileNPC", "entityGroupDestroyed"],
                 1,
                 ctx.now_unix(),
+                &ctx.quasar_gateway,
             );
         }
         res

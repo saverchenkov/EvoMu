@@ -108,7 +108,7 @@ async fn test_milestones_task_tracker_and_fighters() {
             None,
             "UpdateClientAchievmentsAndCounters",
             &[
-                PyRep::List(vec![PyRep::Integer(101)]),
+                PyRep::List(vec![PyRep::Integer(102)]),
                 PyRep::Dict(vec![(PyRep::String("jumps".into()), PyRep::Integer(10))]),
             ],
             &kw,
@@ -132,11 +132,11 @@ async fn test_milestones_task_tracker_and_fighters() {
         .await
         .expect("GetCompletedAchievementsAndClientEventCount");
     let completed_dict = achievements_rep.dict_get("completedDict").expect("completedDict");
-    let has_101 = match completed_dict {
-        PyRep::Dict(entries) => entries.iter().any(|(k, v)| k.as_i64() == Some(101) && v == &PyRep::Bool(true)),
+    let has_102 = match completed_dict {
+        PyRep::Dict(entries) => entries.iter().any(|(k, v)| k.as_i64() == Some(102) && v == &PyRep::Bool(true)),
         _ => false,
     };
-    assert!(has_101, "Achievement 101 should be completed in completedDict");
+    assert!(has_102, "Client achievement 102 should be completed in completedDict");
     let event_dict = achievements_rep.dict_get("eventDict").expect("eventDict");
     assert_eq!(event_dict.dict_get("jumps"), Some(&PyRep::Integer(10)));
 

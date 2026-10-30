@@ -613,15 +613,22 @@ async fn test_milestones_and_community_tracks() {
         }
     }
     assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(100)]));
+    let get_pub = crate::quasar_progression_complete::quasar_rpc(&ctx, &mut sess, "eve_public.communitytrack.api.GetRequest", encode_seq_req(tid as u64)).await;
+    assert_eq!(get_pub.status_code, 200);
+    let attr_wm = eve_proto::quasar::WireMessage::decode(eve_proto::quasar::WireMessage::decode(&get_pub.payload.unwrap().value).unwrap().fields[0].value.as_bytes().unwrap()).unwrap();
+    assert_eq!(attr_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(100), "Quasar GetRequest must also report clamped 100");
 
-    // Stopping track instance marks it inactive -> get_instance_attributes_public rejects it; restarting restores it
-    let track_id_req = encode_seq_req(tid as u64);
-    assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut gm_sess, "eve.communitytrack.api.StopRequest", track_id_req.clone()).await.status_code, 200);
+    // StopRequest, StartRequest, and SetProgressRequest resolve both track_id and template_id (1)
+    let tpl_id_req = encode_seq_req(1);
+    assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut gm_sess, "eve.communitytrack.api.StopRequest", tpl_id_req.clone()).await.status_code, 200);
     let stopped_err = rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.expect_err("inactive track must fail");
     // rpc-lint: allow error code check
     assert_eq!(stopped_err.code, "CommunityTrackInstanceNotFound");
-    assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut gm_sess, "eve.communitytrack.api.StartRequest", track_id_req).await.status_code, 200);
-    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.expect("restarted track"), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(100)]));
+    assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut gm_sess, "eve.communitytrack.api.StartRequest", tpl_id_req.clone()).await.status_code, 200);
+    let mut set_pb = tpl_id_req;
+    eve_proto::quasar::encode_varint_field(2, 75, &mut set_pb);
+    assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut gm_sess, "eve.communitytrack.admin.api.SetProgressRequest", set_pb).await.status_code, 200);
+    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.expect("restarted track"), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(75)]));
 
     // 4. communityTrackMgr.change_qa_mode: requires QA/GM privileges
     let denied = rpc(

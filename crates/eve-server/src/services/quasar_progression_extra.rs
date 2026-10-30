@@ -56,6 +56,10 @@ pub fn uuid_to_hex(u: &[u8; 16]) -> String {
     u.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+fn resolve_track_key(tracks: &HashMap<u32, CommunityTrackState>, id: u32) -> Option<u32> {
+    tracks.contains_key(&id).then_some(id).or_else(|| tracks.iter().find(|(_, e)| e.template_id == id).map(|(&k, _)| k))
+}
+
 #[derive(Default)]
 pub struct ProgressionExtraManager {
     pub community_track_templates: RwLock<HashMap<u32, CommunityTrackTemplateInfo>>,
@@ -246,23 +250,16 @@ impl ProgressionExtraManager {
     }
 
     pub fn get_community_track(&self, track_id: u32) -> Option<CommunityTrackState> {
-        self.community_tracks
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&track_id)
-            .cloned()
+        let map = self.community_tracks.read().unwrap_or_else(|e| e.into_inner());
+        resolve_track_key(&map, track_id).and_then(|k| map.get(&k).cloned())
     }
 
     pub fn add_community_progress(&self, track_id: u32, delta: u64) -> Option<CommunityTrackState> {
-        let mut map = self
-            .community_tracks
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(track) = map.get_mut(&track_id) {
-            track.current_progress = track.current_progress.saturating_add(delta);
-            return Some(track.clone());
-        }
-        None
+        let mut map = self.community_tracks.write().unwrap_or_else(|e| e.into_inner());
+        let key = resolve_track_key(&map, track_id)?;
+        let track = map.get_mut(&key)?;
+        track.current_progress = track.current_progress.saturating_add(delta).min(track.target_progress);
+        Some(track.clone())
     }
 
     pub fn record_tale_contribution(&self, tale_template_id: u32, delta: u64) -> Vec<CommunityTrackState> {
@@ -432,13 +429,13 @@ pub fn register_progression_extra_handlers(
                 })
                 .filter(|&d| d > 0)
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing or non-positive community track progress delta".into()))?;
-            let _ = mgr
+            let updated = mgr
                 .add_community_progress(tid, delta)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Community track not found".into()))?;
             mgr.save_to_db();
 
             let mut not_bytes = Vec::new();
-            encode_varint_field(1, tid as u64, &mut not_bytes);
+            encode_varint_field(1, updated.track_id as u64, &mut not_bytes);
             let notice = GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.communitytrack.api.ProgressedNotice"), value: not_bytes.clone() };
             super::quasar_social_chat::ctx_queue_notice(crate::quasar_gateway::NoticeScope::Broadcast, notice.clone(), ctx.now_unix());
             super::quasar_social_chat::ctx_queue_notice(crate::quasar_gateway::NoticeScope::Character(cid), notice, ctx.now_unix());
@@ -456,12 +453,7 @@ pub fn register_progression_extra_handlers(
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing community track Identifier".into()))?;
             let found_existing = {
                 let mut tracks = mgr.community_tracks.write().unwrap_or_else(|e| e.into_inner());
-                let resolved_key = if tracks.contains_key(&tid) {
-                    Some(tid)
-                } else {
-                    tracks.iter().find(|(_, e)| e.template_id == tid).map(|(&k, _)| k)
-                };
-                if let Some(key) = resolved_key {
+                if let Some(key) = resolve_track_key(&tracks, tid) {
                     if let Some(entry) = tracks.get_mut(&key) {
                         entry.active = true;
                     }
@@ -486,11 +478,14 @@ pub fn register_progression_extra_handlers(
             require_admin_role(ctx)?;
             let tid = extract_track_id(dyn_msg)
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing community track Identifier".into()))?;
-            let mut track = mgr
-                .get_community_track(tid)
-                .ok_or_else(|| (STATUS_NOT_FOUND, "Community track not found".into()))?;
-            track.active = false;
-            mgr.community_tracks.write().unwrap_or_else(|e| e.into_inner()).insert(tid, track);
+            {
+                let mut tracks = mgr.community_tracks.write().unwrap_or_else(|e| e.into_inner());
+                let key = resolve_track_key(&tracks, tid)
+                    .ok_or_else(|| (STATUS_NOT_FOUND, "Community track not found".into()))?;
+                if let Some(track) = tracks.get_mut(&key) {
+                    track.active = false;
+                }
+            }
             mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
         }),
@@ -513,11 +508,14 @@ pub fn register_progression_extra_handlers(
                     _ => None,
                 })
                 .unwrap_or(0);
-            let mut track = mgr
-                .get_community_track(tid)
-                .ok_or_else(|| (STATUS_NOT_FOUND, "Community track not found".into()))?;
-            track.current_progress = val.min(track.target_progress);
-            mgr.community_tracks.write().unwrap_or_else(|e| e.into_inner()).insert(tid, track);
+            {
+                let mut tracks = mgr.community_tracks.write().unwrap_or_else(|e| e.into_inner());
+                let key = resolve_track_key(&tracks, tid)
+                    .ok_or_else(|| (STATUS_NOT_FOUND, "Community track not found".into()))?;
+                if let Some(track) = tracks.get_mut(&key) {
+                    track.current_progress = val.min(track.target_progress);
+                }
+            }
             mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
         }),

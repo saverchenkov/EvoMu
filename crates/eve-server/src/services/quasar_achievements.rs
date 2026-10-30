@@ -58,6 +58,8 @@ pub struct AchievementConditionDef {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AchievementDef {
     pub id: u32,
+    #[serde(default)]
+    pub is_client_achievement: bool,
     pub category_id: u32,
     pub name: String,
     #[serde(default)]
@@ -85,9 +87,10 @@ pub fn achievement_reward_uuid(achievement_id: u32, milestone_id: u32) -> [u8; 1
 
 fn build_definitions_from_sde(
     sde: &eve_sde::SdeRegistry,
-) -> (Vec<AchievementDef>, usize, String) {
+) -> (Vec<AchievementDef>, usize, String, Vec<u8>) {
     let Ok(achs) = sde.load_achievements() else {
-        return (Vec::new(), 0, sha256_hex(b"")[..16].to_string());
+        let empty = b"[]".to_vec();
+        return (Vec::new(), 0, sha256_hex(&empty)[..16].to_string(), empty);
     };
     let events = sde
         .load_cfsd_table("res:/staticdata/achievementevents.fsdbinary")
@@ -100,7 +103,6 @@ fn build_definitions_from_sde(
         .collect();
     ids.sort_unstable();
     let count = ids.len();
-    let hash = sha256_hex(&serde_json::to_vec(&ids).unwrap_or_default())[..16].to_string();
 
     let mut defs = Vec::with_capacity(ids.len());
     for id in ids {
@@ -135,6 +137,7 @@ fn build_definitions_from_sde(
         // (`achievements.static` + `achievementevents.fsdbinary`).
         defs.push(AchievementDef {
             id,
+            is_client_achievement: info.is_client_achievement,
             category_id: 0,
             name: info.name.clone(),
             description: info.description.clone(),
@@ -147,7 +150,9 @@ fn build_definitions_from_sde(
             reward_sp: 0,
         });
     }
-    (defs, count, hash)
+    let json_bytes = serde_json::to_vec(&defs).unwrap_or_else(|_| b"[]".to_vec());
+    let hash = sha256_hex(&json_bytes)[..16].to_string();
+    (defs, count, hash, json_bytes)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -176,6 +181,7 @@ pub struct AchievementManager {
     pub category_scores: RwLock<HashMap<(u32, u32), u32>>,
     pub sde_achievement_count: usize,
     pub sde_achievement_hash: String,
+    pub sde_definitions_json: Vec<u8>,
     db: Option<Arc<WorldRepository>>,
 }
 
@@ -199,10 +205,13 @@ impl AchievementManager {
         db: Option<Arc<WorldRepository>>,
         sde: Option<Arc<eve_sde::SdeRegistry>>,
     ) -> Self {
-        let (defs, sde_achievement_count, sde_achievement_hash) = sde
+        let (defs, sde_achievement_count, sde_achievement_hash, sde_definitions_json) = sde
             .as_deref()
             .map(build_definitions_from_sde)
-            .unwrap_or_else(|| (Vec::new(), 0, sha256_hex(b"")[..16].to_string()));
+            .unwrap_or_else(|| {
+                let empty = b"[]".to_vec();
+                (Vec::new(), 0, sha256_hex(&empty)[..16].to_string(), empty)
+            });
 
         let defs_by_id: HashMap<u32, &AchievementDef> =
             defs.iter().map(|d| (d.id, d)).collect();
@@ -260,6 +269,7 @@ impl AchievementManager {
             category_scores: RwLock::new(loaded_cat_scores),
             sde_achievement_count,
             sde_achievement_hash,
+            sde_definitions_json,
             db,
         }
     }
@@ -364,6 +374,23 @@ impl AchievementManager {
     /// (`res:/staticdata/achievementevents.fsdbinary`), clamping each condition to its
     /// `target_value` so multi-condition achievements (e.g. achievement 60 requiring both
     /// `zoomIn` 138 and `zoomOut` 124) require every condition to be satisfied.
+    pub fn is_client_achievement_id(&self, id: u32) -> bool {
+        self.definitions.iter().any(|d| d.id == id && d.is_client_achievement)
+    }
+
+    pub fn is_client_allowed_counter_key(&self, key: &str) -> bool {
+        let parsed_id = key.parse::<u32>().ok();
+        let matches_cond = |d: &AchievementDef| {
+            d.conditions.iter().any(|c| {
+                (!c.event_name.is_empty() && c.event_name == key) || parsed_id == Some(c.statistic_event_id)
+            })
+        };
+        if self.definitions.iter().any(|d| d.is_client_achievement && matches_cond(d)) {
+            return true;
+        }
+        !self.definitions.iter().any(|d| !d.is_client_achievement && matches_cond(d))
+    }
+
     pub fn record_statistic_event(
         &self,
         character_id: u32,
@@ -371,14 +398,25 @@ impl AchievementManager {
         delta: u64,
         now_unix: u64,
     ) -> Vec<(CharacterAchievement, bool, Vec<u32>)> {
-        let mut map = self
-            .character_achievements
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        self.record_statistic_event_filtered(character_id, statistic_event_id, delta, now_unix, false)
+    }
+
+    fn record_statistic_event_filtered(
+        &self,
+        character_id: u32,
+        statistic_event_id: u32,
+        delta: u64,
+        now_unix: u64,
+        client_only: bool,
+    ) -> Vec<(CharacterAchievement, bool, Vec<u32>)> {
+        let mut map = self.character_achievements.write().unwrap_or_else(|e| e.into_inner());
         let list = Self::init_list(&self.definitions, &mut map, character_id);
         let mut updates = Vec::new();
 
         for a in list.iter_mut() {
+            if client_only && !a.def.is_client_achievement {
+                continue;
+            }
             let matching_conds: Vec<(u32, u64)> = a
                 .def
                 .conditions
@@ -397,13 +435,7 @@ impl AchievementManager {
                 .def
                 .conditions
                 .iter()
-                .map(|c| {
-                    a.condition_progress
-                        .get(&c.condition_id)
-                        .copied()
-                        .unwrap_or(0)
-                        .min(c.target_value)
-                })
+                .map(|c| a.condition_progress.get(&c.condition_id).copied().unwrap_or(0).min(c.target_value))
                 .sum();
             let prev_completed = a.completed;
             a.progress = a.progress.max(total_cond_progress);
@@ -421,8 +453,7 @@ impl AchievementManager {
                 a.completed = true;
                 a.completed_date = Some(now_unix);
             }
-            let just_completed = !prev_completed && a.completed;
-            updates.push((a.clone(), just_completed, new_milestones));
+            updates.push((a.clone(), !prev_completed && a.completed, new_milestones));
         }
         updates
     }
@@ -433,6 +464,7 @@ impl AchievementManager {
         event_names: &[&str],
         delta: u64,
         now_unix: u64,
+        gateway: &PublicGatewayRouter,
     ) {
         if delta == 0 || event_names.is_empty() {
             return;
@@ -446,7 +478,7 @@ impl AchievementManager {
             .collect();
         event_ids.sort_unstable();
         event_ids.dedup();
-        self.apply_statistic_event_ids(character_id, &event_ids, delta, now_unix);
+        self.apply_statistic_event_ids(character_id, &event_ids, delta, now_unix, false, gateway);
     }
 
     pub fn on_client_counter_event(
@@ -455,6 +487,7 @@ impl AchievementManager {
         key: &str,
         delta: u64,
         now_unix: u64,
+        gateway: &PublicGatewayRouter,
     ) {
         if delta == 0 {
             return;
@@ -463,13 +496,42 @@ impl AchievementManager {
         let mut event_ids: Vec<u32> = self
             .definitions
             .iter()
+            .filter(|d| d.is_client_achievement)
             .flat_map(|d| d.conditions.iter())
-            .filter(|c| c.event_name == key || parsed_id == Some(c.statistic_event_id))
+            .filter(|c| (!c.event_name.is_empty() && c.event_name == key) || parsed_id == Some(c.statistic_event_id))
             .map(|c| c.statistic_event_id)
             .collect();
         event_ids.sort_unstable();
         event_ids.dedup();
-        self.apply_statistic_event_ids(character_id, &event_ids, delta, now_unix);
+        self.apply_statistic_event_ids(character_id, &event_ids, delta, now_unix, true, gateway);
+    }
+
+    pub fn apply_client_task_completions_and_counters(
+        &self,
+        char_id: u32,
+        client_ids: &[u32],
+        counter_deltas: &[(String, u64)],
+        now_unix: u64,
+        gateway: &PublicGatewayRouter,
+    ) {
+        let mut any_marked = false;
+        for &aid in client_ids {
+            if self.is_client_achievement_id(aid) {
+                if let Ok(a) = self.mark_completed(char_id, aid, now_unix) {
+                    any_marked = true;
+                    emit_achievement_notices(char_id, a.def.id, a.def.category_id, a.progress, 0, true, &[], now_unix);
+                }
+            }
+        }
+        if any_marked {
+            self.save_to_db();
+        }
+        for (k, delta) in counter_deltas {
+            self.on_client_counter_event(char_id, k, *delta, now_unix, gateway);
+        }
+        for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
+            let _ = gateway.publish_notice(scope, payload, ts);
+        }
     }
 
     fn apply_statistic_event_ids(
@@ -478,52 +540,34 @@ impl AchievementManager {
         event_ids: &[u32],
         delta: u64,
         now_unix: u64,
+        client_only: bool,
+        gateway: &PublicGatewayRouter,
     ) {
         let mut any_changed = false;
         for &eid in event_ids {
-            let updates = self.record_statistic_event(character_id, eid, delta, now_unix);
+            let updates = self.record_statistic_event_filtered(character_id, eid, delta, now_unix, client_only);
             for (a, just_completed, milestones) in updates {
                 any_changed = true;
-                let cat_score = if a.def.category_id > 0 {
-                    self.category_score(character_id, a.def.category_id)
-                } else {
-                    0
-                };
-                emit_achievement_notices(
-                    character_id,
-                    a.def.id,
-                    a.def.category_id,
-                    a.progress,
-                    cat_score,
-                    just_completed,
-                    &milestones,
-                    now_unix,
-                );
+                let cat_score = if a.def.category_id > 0 { self.category_score(character_id, a.def.category_id) } else { 0 };
+                emit_achievement_notices(character_id, a.def.id, a.def.category_id, a.progress, cat_score, just_completed, &milestones, now_unix);
             }
         }
         if any_changed {
             self.save_to_db();
         }
+        for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
+            let _ = gateway.publish_notice(scope, payload, ts);
+        }
     }
 
-    pub fn mark_completed(
-        &self,
-        character_id: u32,
-        achievement_id: u32,
-        now_unix: u64,
-    ) -> Result<CharacterAchievement, (u32, String)> {
-        let mut map = self
-            .character_achievements
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+    pub fn mark_completed(&self, character_id: u32, achievement_id: u32, now_unix: u64) -> Result<CharacterAchievement, (u32, String)> {
+        let mut map = self.character_achievements.write().unwrap_or_else(|e| e.into_inner());
         let list = Self::init_list(&self.definitions, &mut map, character_id);
-
         for a in list.iter_mut() {
             if a.def.id == achievement_id {
                 a.progress = a.def.target;
                 for cond in &a.def.conditions {
-                    a.condition_progress
-                        .insert(cond.condition_id, cond.target_value);
+                    a.condition_progress.insert(cond.condition_id, cond.target_value);
                 }
                 a.completed = true;
                 a.completed_date = Some(now_unix);
@@ -540,17 +584,9 @@ impl AchievementManager {
         Err((STATUS_NOT_FOUND, "Achievement not found".into()))
     }
 
-    pub fn reset_achievement(
-        &self,
-        character_id: u32,
-        achievement_id: u32,
-    ) -> Result<CharacterAchievement, (u32, String)> {
-        let mut map = self
-            .character_achievements
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+    pub fn reset_achievement(&self, character_id: u32, achievement_id: u32) -> Result<CharacterAchievement, (u32, String)> {
+        let mut map = self.character_achievements.write().unwrap_or_else(|e| e.into_inner());
         let list = Self::init_list(&self.definitions, &mut map, character_id);
-
         for a in list.iter_mut() {
             if a.def.id == achievement_id {
                 a.progress = 0;
@@ -567,20 +603,15 @@ impl AchievementManager {
 
     pub fn reset_category(&self, character_id: u32, category_id: u32) {
         self.category_scores.write().unwrap_or_else(|e| e.into_inner()).remove(&(character_id, category_id));
-        let mut map = self
-            .character_achievements
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut map = self.character_achievements.write().unwrap_or_else(|e| e.into_inner());
         if let Some(list) = map.get_mut(&character_id) {
-            for a in list.iter_mut() {
-                if a.def.category_id == category_id {
-                    a.progress = 0;
-                    a.condition_progress.clear();
-                    a.completed = false;
-                    a.completed_date = None;
-                    a.reached_milestones.clear();
-                    a.unclaimed_reward_count = 0;
-                }
+            for a in list.iter_mut().filter(|a| a.def.category_id == category_id) {
+                a.progress = 0;
+                a.condition_progress.clear();
+                a.completed = false;
+                a.completed_date = None;
+                a.reached_milestones.clear();
+                a.unclaimed_reward_count = 0;
             }
         }
         drop(map);
@@ -1106,7 +1137,7 @@ pub fn register_achievement_handlers(
         Arc::new(move |_ctx, _any, _dyn| {
             let count = mgr_cdn.sde_achievement_count;
             let hash = &mgr_cdn.sde_achievement_hash;
-            let url = format!("https://resources.eveonline.com/achievements/v24.1.{count}/{hash}.json");
+            let url = format!("http://127.0.0.1:26004/cdn/achievements/v24.1.{count}/{hash}.json");
 
             let mut checkpoint = Vec::new();
             encode_string_field(1, &url, &mut checkpoint);
@@ -1117,7 +1148,8 @@ pub fn register_achievement_handlers(
             encode_varint_field(3, count as u64, &mut spec);
             encode_bytes_field(2, &spec, &mut checkpoint);
 
-            let crc_val = crate::router::cache_notifications::crc32_ieee(hash.as_bytes()) as u32;
+            let crc_val =
+                crate::router::cache_notifications::crc32_ieee(&mgr_cdn.sde_definitions_json) as u32;
             let mut crc_msg = Vec::new();
             encode_varint_field(1, crc_val as u64, &mut crc_msg);
             encode_bytes_field(3, &crc_msg, &mut checkpoint);

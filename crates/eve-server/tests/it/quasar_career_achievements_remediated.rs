@@ -349,13 +349,11 @@ async fn test_authentic_campaign_definitions_remediated() {
 async fn test_authentic_achievements_and_cdn_metadata_remediated() {
     // DATA GAP: Achievement showcase scores, category bucketing, and milestone reward amounts are server-authored CDN Checkpoint data in V24 and not present in res:/staticdata/achievements.static.
     // parity: quasar:eveProto/generated/eve_public/achievement/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/achievement/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = std::sync::Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let mut sess = build_sess(&ctx, 41_003, 90_000_012, 98_000_001);
     let reg = QuasarDescriptorRegistry::open_default().expect("open QuasarDescriptorRegistry");
@@ -415,7 +413,33 @@ async fn test_authentic_achievements_and_cdn_metadata_remediated() {
     assert_eq!(ach60_done.progress, 2, "Zooming out satisfies condition 1 (2/2)");
     assert!(ach60_done.completed, "Achievement 60 completes once both conditions are met");
 
-    // 1. CDN GetLatestRequest returns valid checkpoint metadata with patch 60 (enabled SDE count) and CRC32 IEEE
+    // Negative security test: client RPC must NOT complete or advance non-client server achievements (2, 12, 59) or server counters
+    let spoof_server_args = [
+        PyRep::List(vec![PyRep::Integer(2), PyRep::Integer(12), PyRep::Integer(59)]),
+        PyRep::Dict(vec![(PyRep::String("refineOreCount".into()), PyRep::Integer(99))]),
+    ];
+    ctx.dispatch_rpc(&mut sess, "monolithTaskTrackerMgr", None, "UpdateClientAchievmentsAndCounters", &spoof_server_args, &empty_kw, None)
+        .await
+        .expect("UpdateClientAchievmentsAndCounters spoof server achievements");
+    let post_spoof = ctx.quasar_gateway.progression.achievements.get_or_init_achievements(90_000_012);
+    for server_id in [2u32, 12, 59] {
+        let st = post_spoof.iter().find(|a| a.def.id == server_id).expect("server achievement");
+        assert!(!st.def.is_client_achievement, "SDE achievement {server_id} must have is_client_achievement == false");
+        assert_eq!(st.progress, 0, "Client RPC must not advance server achievement {server_id}");
+        assert!(!st.completed, "Client RPC must not complete server achievement {server_id}");
+    }
+    let tracker_state = ctx.dispatch_rpc(&mut sess, "monolithTaskTrackerMgr", None, "GetCompletedAchievementsAndClientEventCount", &[], &empty_kw, None)
+        .await
+        .expect("GetCompletedAchievementsAndClientEventCount after spoof");
+    let completed_dict = tracker_state.dict_get("completedDict").expect("completedDict");
+    if let PyRep::Dict(entries) = completed_dict {
+        for sid in [2i64, 12, 59] {
+            assert!(!entries.iter().any(|(k, _)| k.as_i64() == Some(sid)), "Server achievement {sid} must not appear in completedDict");
+        }
+    }
+    assert_eq!(tracker_state.dict_get("eventDict").unwrap().dict_get("refineOreCount"), None, "Server counter refineOreCount must be rejected");
+
+    // 1. CDN GetLatestRequest returns valid checkpoint metadata with patch 60 (enabled SDE count) and matching local HTTP payload CRC32
     let cdn_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.definition.api.cdn.GetLatestRequest", Vec::new(), b"cdn-01").await;
     assert_eq!(cdn_rsp.status_code, STATUS_OK);
     let cdn_payload = cdn_rsp.payload.expect("cdn payload");
@@ -426,7 +450,8 @@ async fn test_authentic_achievements_and_cdn_metadata_remediated() {
     let cp_wm = WireMessage::decode(cp_field.value.as_bytes().expect("cp bytes")).expect("decode Checkpoint");
 
     let url_str = cp_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_str().ok().flatten()).expect("url");
-    assert!(url_str.contains("v24.1.60") && url_str.contains("achievements"), "URL must reference 60 enabled achievement definitions: {url_str}");
+    let cdn_path = url_str.strip_prefix("http://127.0.0.1:26004").expect("local ESI HTTP URL");
+    assert!(cdn_path.starts_with("/cdn/achievements/v24.1.60/"), "URL must reference 60 enabled achievement definitions: {url_str}");
 
     let spec_field = cp_wm.fields.iter().find(|f| f.field_number == 2).expect("spec field");
     let spec_wm = WireMessage::decode(spec_field.value.as_bytes().expect("spec bytes")).expect("decode spec");
@@ -438,6 +463,10 @@ async fn test_authentic_achievements_and_cdn_metadata_remediated() {
     let crc_wm = WireMessage::decode(crc_field.value.as_bytes().expect("crc bytes")).expect("decode crc");
     let crc_val = crc_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()).expect("crc val");
     assert!(crc_val > 0, "CRC32 checksum must be non-zero");
+    let esi = eve_server::esi::router::EsiRouter::new(std::sync::Arc::clone(&ctx));
+    let cdn_http = esi.handle_request(&eve_server::esi::EsiHttpRequest::new("GET", cdn_path));
+    assert_eq!(cdn_http.status_code, 200, "EsiRouter must serve /cdn/achievements JSON");
+    assert_eq!(eve_server::router::cache_notifications::crc32_ieee(&cdn_http.body) as u64, crc_val, "Served JSON CRC32 must match checkpoint CRC32");
 
     // 2. eve_public.achievement.api.GetRequest -> GetResponse (V24 oneof completion) + disabled achievement excluded
     let make_ident_req = |id: u32| -> Vec<u8> {

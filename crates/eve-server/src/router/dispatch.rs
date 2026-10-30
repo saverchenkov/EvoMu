@@ -1251,33 +1251,22 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
         ctx.sde.types.get(&tid).map(|t| (t.volume.max(0.001), t.radius.max(50.0))).unwrap_or((0.001, 50.0))
     };
     let mut wh_ore_idx: usize = 0;
-    let centres: Vec<[f64; 3]> = planned
-        .iter()
-        .map(|p| match p {
-            Planned::Ore(SiteKind::Anomaly, _) => derive_system_site_position_from_sde(ctx, sys_id, 0, 4.0),
-            Planned::Ore(SiteKind::Signature, _) => derive_system_site_position_from_sde(ctx, sys_id, 1, 6.5),
-            Planned::Gas(_) | Planned::WhGas(_, _, _) => derive_system_site_position_from_sde(ctx, sys_id, 2, 8.5),
-            Planned::WhOre(_, _, _) => {
-                let idx = wh_ore_idx;
-                wh_ore_idx += 1;
-                derive_system_site_position_from_sde(ctx, sys_id, 3 + idx, 5.5 + (idx as f64) * 1.1)
-            }
-        })
-        .collect();
+    let centres: Vec<[f64; 3]> = planned.iter().map(|p| match p {
+        Planned::Ore(SiteKind::Anomaly, _) => derive_system_site_position_from_sde(ctx, sys_id, 0, 4.0),
+        Planned::Ore(SiteKind::Signature, _) => derive_system_site_position_from_sde(ctx, sys_id, 1, 6.5),
+        Planned::Gas(_) | Planned::WhGas(_, _, _) => derive_system_site_position_from_sde(ctx, sys_id, 2, 8.5),
+        Planned::WhOre(_, _, _) => {
+            let idx = wh_ore_idx;
+            wh_ore_idx += 1;
+            derive_system_site_position_from_sde(ctx, sys_id, 3 + idx, 5.5 + (idx as f64) * 1.1)
+        }
+    }).collect();
 
     let now = ctx.now_unix();
     let (newly_spawned, guard_waves, was_already_seeded) = ctx.db.with_mut_snapshot(|snap| {
-        let already_seeded = snap
-            .cosmic_anomalies
-            .get(&sys_id)
-            .is_some_and(|list| list.iter().any(|a| a.anomaly_type == "OreAnomaly"))
-            || snap.cosmic_signatures.get(&sys_id).is_some_and(|list| {
-                list.iter()
-                    .any(|s| matches!(s.sig_group.as_str(), "OreAnomaly" | "Ore" | "Gas"))
-            });
-        if already_seeded {
-            return (Vec::new(), Vec::new(), true);
-        }
+        let already_seeded = snap.cosmic_anomalies.get(&sys_id).is_some_and(|l| l.iter().any(|a| a.anomaly_type == "OreAnomaly"))
+            || snap.cosmic_signatures.get(&sys_id).is_some_and(|l| l.iter().any(|s| matches!(s.sig_group.as_str(), "OreAnomaly" | "Ore" | "Gas")));
+        if already_seeded { return (Vec::new(), Vec::new(), true); }
 
         let mut spawned = Vec::new();
         let mut guards: Vec<(i64, TypeId, DVec3)> = Vec::new();
@@ -1351,13 +1340,9 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
     });
 
     if was_already_seeded {
-        let wh_sites = ctx.db.with_snapshot(|snap| {
-            crate::services::mining_sites::collect_persisted_wormhole_guard_sites(snap, sys_id)
-        });
+        let wh_sites = ctx.db.with_snapshot(|snap| crate::services::mining_sites::collect_persisted_wormhole_guard_sites(snap, sys_id));
         crate::services::mining_sites::respawn_wormhole_ore_guards_if_missing(ctx, sys_id, &wh_sites).await;
         return;
     }
-
     crate::services::mining_sites::spawn_seeded_site_entities(ctx, sys_id, newly_spawned, guard_waves).await;
 }
-
