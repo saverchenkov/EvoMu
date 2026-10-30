@@ -183,11 +183,7 @@ async fn test_rpc_beyonce_stargate_dock_component_and_fleet_beacons() {
     seed_item(&ctx, 995_002, 85316, C1, ship_id, InventoryFlag::Cargo, 30);
     assert!(h_jita.set_ball_position(ship_id, DVec3::new(1_000.0, 0.0, 0.0)).await);
     let trade = rpc_bound(&ctx, &mut s1, "beyonce", bid_jita, "CallComponentFromClient", &[
-        PyRep::Integer(trader_id),
-        PyRep::String("itemTrader".into()),
-        PyRep::String("ProcessTrade".into()),
-        PyRep::Integer(67),
-        PyRep::Integer(1),
+        PyRep::Integer(trader_id), PyRep::String("itemTrader".into()), PyRep::String("ProcessTrade".into()), PyRep::Integer(67), PyRep::Integer(1),
     ]).await;
     assert!(matches!(trade, PyRep::Tuple(ref v) if v.first() == Some(&PyRep::Bool(true))));
 
@@ -196,7 +192,7 @@ async fn test_rpc_beyonce_stargate_dock_component_and_fleet_beacons() {
     assert_eq!(s1.station_id, Some(JITA_44));
 
     ctx.advance_virtual_clock(15);
-    rpc(&ctx, &mut s1, "stationSvc", "Undock", &[]).await;
+    rpc(&ctx, &mut s1, "stationSvc", "Undock", &[]).await; let bid_jita = ctx.bind_object(&mut s1, "beyonce", i64::from(JITA)).unwrap();
     let gate = ctx.sde.jumps.values().find(|j| j.from_solar_system_id == JITA).unwrap().clone();
     assert!(h_jita.set_ball_position(ship_id, gate.position).await);
     rpc_bound(&ctx, &mut s1, "beyonce", bid_jita, "CmdStargateJump", &[PyRep::Integer(gate.stargate_id)]).await;

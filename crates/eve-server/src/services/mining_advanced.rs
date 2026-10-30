@@ -62,6 +62,11 @@ fn structure_has_online_moon_drill(snap: &eve_db::WorldStateSnapshot, structure_
 /// Deterministically derives a 3-ore moon composition from SDE moon ore groups (`1884`, `1920..=1923`)
 /// keyed by `solar_system_id` security band and the SDE `moon_id`.
 pub(crate) fn derive_moon_ores_from_sde(sde: &eve_sde::SdeRegistry, solar_system_id: u32, moon_id: i64) -> Vec<(TypeId, f64)> {
+    let (_, _, is_shattered, _) = crate::services::space_destiny::space_docking_cloaking::system_wormhole_profile_sde(sde, solar_system_id);
+    let is_pochven = sde.solar_systems.get(&solar_system_id).is_some_and(|s| s.region_id == 10_000_070);
+    if is_shattered || is_pochven || solar_system_id == 30_100_000 {
+        return Vec::new();
+    }
     let sec = sde.solar_systems.get(&solar_system_id).map(|s| s.security_status).unwrap_or(0.0);
     let restrict_to_r4 = sec >= 0.45 || solar_system_id >= 31_000_000;
     let is_base_moon_ore = |t: &eve_sde::InvType| -> bool {

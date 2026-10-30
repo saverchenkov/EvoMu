@@ -7,8 +7,9 @@ use crate::router::cache_notifications::NotificationTarget;
 use crate::router::ServerContext;
 use crate::services::pve_abyssal_hazards::resolve_character_home_station_and_system;
 use crate::services::pvp_filament_mgr::{
-    build_character_statistics_for_event, build_leaderboard_rows_for_event, load_pvp_store,
-    save_pvp_store, PvpArenaMatchInstance, PvpFilamentStore,
+    build_character_statistics_dict_for_event, build_leaderboard_rows_dict_for_event,
+    load_pvp_store, lookup_sde_event_ids, save_pvp_store, PvpArenaMatchInstance,
+    PvpFilamentStore,
 };
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
@@ -187,25 +188,38 @@ pub fn record_proving_grounds_combat_result_in_snap(
 }
 
 pub fn notify_pvp_stats_for_pilots(ctx: &ServerContext, event_id: i64, pilots: &[i64]) {
-    let (pilot_stats, leaderboard) = ctx.db.with_snapshot(|snap| {
+    if pilots.is_empty() {
+        return;
+    }
+    let (match_type_id, schedule_id, pilot_stats, leaderboard) = ctx.db.with_snapshot(|snap| {
         let store = load_pvp_store(snap);
+        let (mt_id, sched_id) = store
+            .events
+            .iter()
+            .find(|e| e.event_id == event_id)
+            .map(|e| (e.match_type_id, e.schedule_id))
+            .unwrap_or_else(|| lookup_sde_event_ids(&ctx.sde, event_id).unwrap_or((event_id, event_id)));
         let pstats: Vec<(i64, PyRep)> = pilots
             .iter()
-            .map(|&cid| (cid, build_character_statistics_for_event(&store, event_id, cid)))
+            .map(|&cid| (cid, build_character_statistics_dict_for_event(&store, event_id, cid)))
             .collect();
-        let lb = build_leaderboard_rows_for_event(&store, event_id);
-        (pstats, lb)
+        let lb = build_leaderboard_rows_dict_for_event(&store, event_id);
+        (mt_id, sched_id, pstats, lb)
     });
-    let lb_notif = PyRep::keyval([
-        ("eventID", PyRep::Integer(event_id)),
-        ("event_id", PyRep::Integer(event_id)),
-        ("entries", PyRep::List(leaderboard)),
+    let lb_notif = PyRep::Dict(vec![
+        (PyRep::String("eventID".into()), PyRep::Integer(event_id)),
+        (PyRep::String("event_id".into()), PyRep::Integer(event_id)),
+        (PyRep::String("matchTypeID".into()), PyRep::Integer(match_type_id)),
+        (PyRep::String("scheduleID".into()), PyRep::Integer(schedule_id)),
+        (PyRep::String("entries".into()), PyRep::List(leaderboard)),
     ]);
     for (cid, stats_rep) in pilot_stats {
-        let stat_notif = PyRep::keyval([
-            ("eventID", PyRep::Integer(event_id)),
-            ("event_id", PyRep::Integer(event_id)),
-            ("statistics", stats_rep),
+        let stat_notif = PyRep::Dict(vec![
+            (PyRep::String("eventID".into()), PyRep::Integer(event_id)),
+            (PyRep::String("event_id".into()), PyRep::Integer(event_id)),
+            (PyRep::String("matchTypeID".into()), PyRep::Integer(match_type_id)),
+            (PyRep::String("scheduleID".into()), PyRep::Integer(schedule_id)),
+            (PyRep::String("statistics".into()), stats_rep),
         ]);
         ctx.notify(
             NotificationTarget::Character(cid),

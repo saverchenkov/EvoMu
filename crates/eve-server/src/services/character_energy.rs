@@ -60,7 +60,7 @@ pub fn energy_to_keyval(state: &CharacterEnergyState) -> PyRep {
 /// Retrieves or initializes the character's energy state, applying real-time regeneration.
 pub fn get_character_energy(ctx: &ServerContext, char_id: i64) -> CharacterEnergyState {
     let now_ft = unix_to_filetime(ctx.now_unix());
-    let (entry_clone, dirty) = {
+    let (entry_clone, dirty, regenerated) = {
         let mut g = ctx.cluster_misc_state.lock().unwrap();
         let had_entry = g.char_energy.contains_key(&char_id);
         let entry = g.char_energy.entry(char_id).or_insert_with(|| CharacterEnergyState {
@@ -71,23 +71,34 @@ pub fn get_character_energy(ctx: &ServerContext, char_id: i64) -> CharacterEnerg
         });
 
         let mut changed = !had_entry;
+        let mut regenerated = false;
         if entry.last_update_time > 0 && entry.recharge_rate > 0.0 {
             let elapsed_minutes = ((now_ft - entry.last_update_time).max(0) as f64) / 600_000_000.0;
             let gained = (elapsed_minutes * entry.recharge_rate).floor() as i64;
             if gained > 0 {
+                let prev = entry.current_energy;
                 entry.current_energy = (entry.current_energy + gained).min(entry.max_energy);
                 entry.last_update_time = now_ft;
                 changed = true;
+                regenerated = entry.current_energy != prev;
             }
         } else {
             entry.last_update_time = now_ft;
         }
 
-        (entry.clone(), changed)
+        (entry.clone(), changed, regenerated)
     };
 
     if dirty {
         crate::services::cluster_macho_misc_services::persist_misc_state(ctx);
+    }
+    if regenerated {
+        ctx.notify(
+            NotificationTarget::Character(char_id),
+            "OnCharacterEnergyChanged",
+            "charid",
+            vec![PyRep::Integer(char_id), energy_to_keyval(&entry_clone)],
+        );
     }
     entry_clone
 }

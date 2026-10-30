@@ -175,8 +175,6 @@ pub struct PveExplorationRegistry {
     pub structure_char_failures: HashMap<(CharacterId, ItemId), u8>,
     pub sim_clock_sec: u64,
     pub next_id_seq: i64,
-    #[serde(default)]
-    pub force_escalate: bool,
 }
 pub type HackingSiteRegistry = PveExplorationRegistry;
 const PVE_EXPLORATION_NOTE_ID: i64 = -8_200_000_000_000;
@@ -524,13 +522,7 @@ pub async fn handle_pve_site_npc_destruction_core(
                 inst_id,
             ).await.ok().flatten();
         } else if matches!(site_category.as_str(), "CombatAnomaly" | "CombatSignature" | "DED") {
-            let should_escalate = with_pve_exploration_reg_db(db, now_unix, |reg| {
-                if reg.force_escalate {
-                    true
-                } else {
-                    rng.roll(0.20)
-                }
-            });
+            let should_escalate = rng.roll(0.20);
             if should_escalate {
                 new_escalation = crate::services::pve_expeditions::create_escalation_expedition_core(
                     db,
@@ -583,13 +575,7 @@ pub fn notify_pve_destruction_events(
     }
 
     if let Some(esc) = new_escalation {
-        let args = vec![
-            PyRep::String(format!(
-                "Escalation discovered: {} in system {}",
-                esc.expedition_name, esc.destination_solar_system_id
-            )),
-            PyRep::Integer(esc.instance_id),
-        ];
+        let args = vec![PyRep::Integer(esc.instance_id)];
         let (packet, marshaled_packet) = crate::router::ServerContext::build_macho_notification_packet(
             killer_char_id,
             None,
@@ -609,19 +595,7 @@ pub fn notify_pve_destruction_events(
     }
 
     if let Some(step) = advanced_step {
-        let is_completed = step.step_index >= step.total_steps;
-        let msg = if is_completed {
-            format!("Expedition '{}' successfully completed!", step.expedition_name)
-        } else {
-            format!(
-                "Expedition progressed to Step {}/{}: {} in system {}",
-                step.step_index, step.total_steps, step.expedition_name, step.destination_solar_system_id
-            )
-        };
-        let args = vec![
-            PyRep::String(msg),
-            PyRep::Integer(step.instance_id),
-        ];
+        let args = vec![PyRep::Integer(step.instance_id)];
         let (packet, marshaled_packet) = crate::router::ServerContext::build_macho_notification_packet(
             killer_char_id,
             None,
@@ -842,10 +816,8 @@ pub async fn advance_site_wave_or_complete(
             dropped_loot_items.push((item_id, l_tid, l_qty, l_name));
         }
 
-        let should_escalate = with_pve_exploration_reg(ctx, |reg| {
-            matches!(site_category.as_str(), "CombatAnomaly" | "CombatSignature" | "DED")
-                && crate::services::pve_expeditions::roll_escalation_chance(ctx, reg)
-        });
+        let should_escalate = matches!(site_category.as_str(), "CombatAnomaly" | "CombatSignature" | "DED")
+            && crate::services::pve_expeditions::roll_escalation_chance(ctx);
 
         if should_escalate {
             escalation_created = crate::services::pve_expeditions::create_escalation_expedition(
@@ -883,19 +855,6 @@ pub async fn advance_site_wave_or_complete(
         }
 
         session.push_notification("OnCosmicAnomalyRemoved", vec![PyRep::String(site_id.to_string())]);
-        if let Some(ref esc) = escalation_created {
-            let msg = format!(
-                "Escalation discovered: {} in system {}",
-                esc.expedition_name, esc.destination_solar_system_id
-            );
-            session.push_notification(
-                "OnEscalatingPathMessage",
-                vec![
-                    PyRep::String(msg),
-                    PyRep::Integer(esc.instance_id),
-                ],
-            );
-        }
     }
 
     let loot_py: Vec<PyRep> = dropped_loot_items

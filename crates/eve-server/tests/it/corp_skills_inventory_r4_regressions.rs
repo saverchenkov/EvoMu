@@ -358,7 +358,7 @@ async fn r4_176_180_181_183_ship_bay_passwords_alsc_locks_and_container_roles() 
         user_id: 1,
         character_id: fleetmate_id,
         service: "invbroker".into(),
-        object_id: alsc_id,
+        object_id: alsc_id, oid_str: "N=888444:99991".into(), ref_id: 133_000_000_000_000_000,
     };
     ctx.bound_objects.write().unwrap().insert(99991, bound_alsc);
     let list_no_pw = ctx

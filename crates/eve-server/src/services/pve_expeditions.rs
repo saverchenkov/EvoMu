@@ -111,10 +111,7 @@ pub fn expedition_dungeon_for_step(base_dungeon_id: u32, step_index: u8) -> u32 
     base_dungeon_id + (step_index.saturating_sub(1) as u32)
 }
 
-pub fn roll_escalation_chance(ctx: &ServerContext, reg: &PveExplorationRegistry) -> bool {
-    if reg.force_escalate {
-        return true;
-    }
+pub fn roll_escalation_chance(ctx: &ServerContext) -> bool {
     // 20% escalation roll on completion of combat anomaly/signature/DED complex
     ctx.mechanic_rng.roll(0.20)
 }
@@ -198,13 +195,7 @@ pub async fn create_escalation_expedition(
         crate::router::NotificationTarget::Character(char_id),
         "OnEscalatingPathMessage",
         "charid",
-        vec![
-            PyRep::String(format!(
-                "Escalation discovered: {} in system {}",
-                entry.expedition_name, entry.destination_solar_system_id
-            )),
-            PyRep::Integer(entry.instance_id),
-        ],
+        vec![PyRep::Integer(entry.instance_id)],
     );
     Some(entry)
 }
@@ -361,23 +352,11 @@ pub async fn advance_expedition_step(
 ) -> Result<Option<EscalatingPathEntry>, BridgeRpcError> {
     let updated = advance_expedition_step_core(&ctx.db, &ctx.sde, &ctx.systems, char_id, instance_id).await?;
     if let Some(ref entry) = updated {
-        let is_completed = entry.step_index >= entry.total_steps;
-        let msg = if is_completed {
-            format!("Expedition '{}' successfully completed!", entry.expedition_name)
-        } else {
-            format!(
-                "Expedition progressed to Step {}/{}: {} in system {}",
-                entry.step_index, entry.total_steps, entry.expedition_name, entry.destination_solar_system_id
-            )
-        };
         let _ = ctx.notify(
             crate::router::NotificationTarget::Character(char_id),
             "OnEscalatingPathMessage",
             "charid",
-            vec![
-                PyRep::String(msg),
-                PyRep::Integer(entry.instance_id),
-            ],
+            vec![PyRep::Integer(entry.instance_id)],
         );
     }
     Ok(updated)

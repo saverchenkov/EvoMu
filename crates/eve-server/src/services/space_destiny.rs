@@ -211,7 +211,7 @@ fn record_session_change_timer_with_invuln(
                 location_change_invul_until,
             },
         );
-    let (change_dict, sess_rep, has_entries) = ctx.db.with_snapshot(|snap| {
+    let (change_dict, sess_rep, has_entries, active_dock_id) = ctx.db.with_snapshot(|snap| {
         let ch = snap.characters.get(&char_id);
         let station_id = ch.and_then(|c| c.station_id);
         let structure_id = ch.and_then(|c| c.structure_id);
@@ -259,33 +259,15 @@ fn record_session_change_timer_with_invuln(
             ("nextSessionChange", PyRep::Integer(expires_unix as i64)),
         ]);
         let has = !entries.is_empty();
-        (PyRep::Dict(entries), sess, has)
+        (PyRep::Dict(entries), sess, has, station_id.or(structure_id))
     });
-    if reason == "podding" {
-        let mut removed_oids = Vec::new();
-        ctx.bound_objects
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|&bid, b| {
-                if b.character_id == char_id && (b.service == "beyonce" || b.service == "scanMgr") {
-                    removed_oids.push(bid);
-                    false
-                } else {
-                    true
-                }
-            });
-        for bid in removed_oids {
-            ctx.notify(
-                crate::router::NotificationTarget::Character(char_id),
-                "OnMachoObjectDisconnect",
-                "clientID",
-                vec![
-                    PyRep::String(format!("N=1:{bid}")),
-                    PyRep::Integer(char_id),
-                    PyRep::Integer(bid as i64),
-                ],
-            );
-        }
+    if server_initiated {
+        ctx.invalidate_bound_objects_for_session_transition(
+            char_id,
+            system_id,
+            active_dock_id,
+            reason,
+        );
     }
     if reason == "board_or_eject" || !has_entries {
         return;

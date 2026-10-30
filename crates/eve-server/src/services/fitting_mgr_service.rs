@@ -432,11 +432,23 @@ pub(crate) async fn handle_fitting_mgr(
                         vec![PyRep::Integer(owner_id)],
                     );
                     if method == "SaveManyFittings" {
-                        Some(Ok(PyRep::List(
-                            saved_ids.into_iter().map(PyRep::Integer).collect(),
-                        )))
+                        let list: Vec<PyRep> = saved_ids.iter().copied().map(PyRep::Integer).collect();
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(char_id),
+                            "OnFittingAdded",
+                            "charid",
+                            vec![PyRep::Integer(owner_id), PyRep::List(list.clone())],
+                        );
+                        Some(Ok(PyRep::List(list)))
                     } else {
-                        Some(Ok(PyRep::Integer(saved_ids.first().copied().unwrap_or(0))))
+                        let fid = saved_ids.first().copied().unwrap_or(0);
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(char_id),
+                            "OnFittingAdded",
+                            "charid",
+                            vec![PyRep::Integer(owner_id), PyRep::Integer(fid)],
+                        );
+                        Some(Ok(PyRep::Integer(fid)))
                     }
                 }
                 Err(e) => Some(Err(e)),
@@ -635,9 +647,16 @@ pub(crate) async fn handle_fitting_mgr(
                     "charid",
                     vec![PyRep::Integer(target_owner)],
                 );
-                Some(Ok(PyRep::List(
-                    deleted_ids.into_iter().map(PyRep::Integer).collect(),
-                )))
+                let deleted_list: Vec<PyRep> = deleted_ids.iter().copied().map(PyRep::Integer).collect();
+                if !deleted_list.is_empty() {
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(char_id),
+                        "OnManyFittingsDeleted",
+                        "charid",
+                        vec![PyRep::Integer(target_owner), PyRep::List(deleted_list.clone())],
+                    );
+                }
+                Some(Ok(PyRep::List(deleted_list)))
             } else {
                 // Supports DeleteFitting(ownerID, fittingID) and DeleteFitting(fittingID)
                 let (owner_filter, fid) = if args.len() >= 2 {
@@ -679,6 +698,12 @@ pub(crate) async fn handle_fitting_mgr(
                         "OnFittingsUpdated",
                         "charid",
                         vec![PyRep::Integer(target_owner)],
+                    );
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(char_id),
+                        "OnFittingDeleted",
+                        "charid",
+                        vec![PyRep::Integer(target_owner), PyRep::Integer(fid)],
                     );
                 }
                 Some(Ok(PyRep::Bool(deleted)))

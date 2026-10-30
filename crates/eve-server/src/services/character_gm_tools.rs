@@ -1234,6 +1234,23 @@ pub async fn handle_gm_slash_ext(
     if cmd == "/survey" || cmd.starts_with("/survey ") {
         return crate::services::operations_manager::handle_survey_slash(ctx, cid, cmd);
     }
+    if let Some(rest) = cmd.strip_prefix("/energy ") {
+        let parts: Vec<&str> = rest.split_whitespace().collect();
+        let (target_cid, new_energy) = match parts.as_slice() {
+            [val_s] => (Some(cid), val_s.parse::<i64>().ok()),
+            [cid_s, val_s] => (cid_s.parse::<i64>().ok(), val_s.parse::<i64>().ok()),
+            _ => (None, None),
+        };
+        let (Some(target_cid), Some(energy_val)) = (target_cid.filter(|&id| id > 0), new_energy) else {
+            return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /energy [char_id] <amount>".into() }));
+        };
+        if !ctx.db.with_snapshot(|snap| snap.characters.contains_key(&target_cid)) {
+            return Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {target_cid} not found") }));
+        }
+        // DATA GAP: notify:OnCharacterEnergyChanged remains open until a V24 gameplay CEQ consumer (CRAB beacons / Mobile Phase Anchors) exists.
+        let st = crate::services::character_energy::set_character_energy(ctx, target_cid, energy_val);
+        return Some(Ok(crate::services::character_energy::energy_to_keyval(&st)));
+    }
 
     if let Some(res) = crate::services::notify_emitters_batch3::handle_batch3_gm_slash_cmd(ctx, cid, session.solar_system_id, cmd) {
         return Some(res);

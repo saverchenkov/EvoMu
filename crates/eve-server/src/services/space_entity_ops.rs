@@ -653,6 +653,12 @@ pub async fn handle(
                 session.station_id = Some(target_id);
                 session.structure_id = None;
             }
+            ctx.invalidate_bound_objects_for_session_transition(
+                char_id,
+                session.solar_system_id.unwrap_or(0),
+                Some(target_id),
+                "turbo_dock",
+            );
             Some(Ok(PyRep::keyval([
                 ("locationID", PyRep::Integer(target_id)),
                 ("docked", PyRep::Bool(true)),

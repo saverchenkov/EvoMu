@@ -180,6 +180,8 @@ impl ServerContext {
         service: &str,
         object_id: i64,
     ) {
+        let oid_str = format!("N={}:{bound_id}", eve_machonet::MACHO_PROXY_NODE_ID);
+        let ref_id = (self.now_unix() as i64 + 11_644_473_600).saturating_mul(10_000_000);
         self.bound_objects
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -192,6 +194,8 @@ impl ServerContext {
                     character_id: char_id,
                     service: service.to_string(),
                     object_id,
+                    oid_str,
+                    ref_id,
                 },
             );
     }
@@ -202,8 +206,18 @@ impl ServerContext {
     /// the JSON bridge gets the plain bound ID.
     pub fn bound_object_rep(&self, bound_id: u64, caller_trace: Option<&str>) -> PyRep {
         if caller_trace == Some("machoNet:26000") {
-            let oid_str = format!("N={}:{bound_id}", eve_machonet::MACHO_PROXY_NODE_ID);
-            let ref_id = (self.now_unix() as i64 + 11_644_473_600).saturating_mul(10_000_000);
+            let (oid_str, ref_id) = self
+                .bound_objects
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&bound_id)
+                .map(|b| (b.oid_str.clone(), b.ref_id))
+                .unwrap_or_else(|| {
+                    (
+                        format!("N={}:{bound_id}", eve_machonet::MACHO_PROXY_NODE_ID),
+                        (self.now_unix() as i64 + 11_644_473_600).saturating_mul(10_000_000),
+                    )
+                });
             PyRep::SubStruct(Box::new(PyRep::SubStream(Box::new(PyRep::Tuple(vec![
                 PyRep::ascii_bytes(oid_str),
                 PyRep::Integer(ref_id),
@@ -294,6 +308,102 @@ impl ServerContext {
         Ok(entry)
     }
 
+    fn emit_macho_object_disconnect(&self, entry: &BoundObjectEntry) {
+        if entry.character_id <= 0 {
+            return;
+        }
+        let macho_client_id =
+            1_000_000_000_000_u64.saturating_add(entry.session_id) as i64;
+        self.notify(
+            NotificationTarget::Character(entry.character_id),
+            "OnMachoObjectDisconnect",
+            "clientID",
+            vec![
+                PyRep::ascii_bytes(entry.oid_str.clone()),
+                PyRep::Integer(macho_client_id),
+                PyRep::Integer(entry.ref_id),
+            ],
+        );
+    }
+
+    /// Invalidates solar-system-scoped and station/structure-scoped bound objects for `char_id`
+    /// across location transitions (`stargate_jump`, `dock`, `undock`, `podding`, `wormhole_jump`,
+    /// `jump_drive`, `cyno_jump`, `filamentJump`, `jump_bridge`, `shipcaster`, `clone_jump`, etc.)
+    /// and emits `OnMachoObjectDisconnect(oid_str, macho_client_id, ref_id)` for each removed binding.
+    pub fn invalidate_bound_objects_for_session_transition(
+        &self,
+        char_id: i64,
+        system_id: u32,
+        active_dock_id: Option<i64>,
+        reason: &str,
+    ) {
+        if matches!(
+            reason,
+            "set_account_key"
+                | "corp_change"
+                | "fleet_change"
+                | "board_or_eject"
+                | "ship_loss"
+                | "clone_swap"
+                | "login"
+        ) {
+            return;
+        }
+        let is_docked = active_dock_id.is_some()
+            || matches!(
+                reason,
+                "dock" | "podding" | "clone_jump" | "turbo_dock" | "self_destruct_clone"
+            );
+        let is_space_jump = matches!(
+            reason,
+            "stargate_jump"
+                | "wormhole_jump"
+                | "jump_drive"
+                | "cyno_jump"
+                | "filamentJump"
+                | "filament_jump"
+                | "jump_bridge"
+                | "shipcaster"
+        );
+        let mut removed = Vec::new();
+        self.bound_objects
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|&_bid, b| {
+                if b.character_id != char_id {
+                    return true;
+                }
+                let is_solar_system_scoped = matches!(b.service.as_str(), "beyonce" | "scanMgr")
+                    || (matches!(b.service.as_str(), "keeper" | "posMgr" | "devIndexManager")
+                        && (30_000_000..=39_999_999).contains(&b.object_id));
+                let is_station_scoped = matches!(
+                    b.service.as_str(),
+                    "station"
+                        | "stationSvc"
+                        | "corpStationMgr"
+                        | "repairSvc"
+                        | "reprocessingSvc"
+                        | "insuranceSvc"
+                );
+                let invalidate = if is_solar_system_scoped {
+                    is_docked || is_space_jump || b.object_id != i64::from(system_id)
+                } else if is_station_scoped {
+                    Some(b.object_id) != active_dock_id
+                } else {
+                    false
+                };
+                if invalidate {
+                    removed.push(b.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+        for entry in &removed {
+            self.emit_macho_object_disconnect(entry);
+        }
+    }
+
     /// Releases a single bound object `bound_id` after verifying session ownership.
     pub fn release_bound_object(
         &self,
@@ -301,10 +411,14 @@ impl ServerContext {
         bound_id: u64,
     ) -> Result<(), BridgeRpcError> {
         let _ = self.verify_bound_object(session, bound_id)?;
-        self.bound_objects
+        let removed = self
+            .bound_objects
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&bound_id);
+        if let Some(entry) = removed {
+            self.emit_macho_object_disconnect(&entry);
+        }
         Ok(())
     }
 

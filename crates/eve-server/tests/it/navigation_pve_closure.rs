@@ -334,7 +334,7 @@ async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
     sess2.station_id = None;
     sess2.structure_id = None;
     sess2.ship_id = Some(ship_id_2);
-    let _ = ctx.bind_object(&mut sess2, "beyonce", start_sys as i64);
+    let old_beyonce_2 = ctx.bind_object(&mut sess2, "beyonce", start_sys as i64).expect("bind start_sys beyonce");
 
     let handle_start = ctx.systems.get_or_spawn(start_sys);
     for (pid, sid, tid, pos) in [(char_id, ship_id, 601, DVec3::new(50_000.0, 0.0, 0.0)), (char_id_2, ship_id_2, 587, DVec3::new(51_000.0, 0.0, 0.0))] {
@@ -411,16 +411,17 @@ async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
     assert!(handle_start.get_ball_snapshot(ship_id_2).await.unwrap().is_none(), "Fleetmate ball removed from start");
     assert_ne!(dest_b1.position, DVec3::new(100_000_000.0, 0.0, 0.0), "Landed near planet, not fixed coordinates");
 
-    // Verify fleetmate received OnSessionChanged notification, beyonce bound object updated, and session synchronized
+    // Verify fleetmate received OnSessionChanged + OnMachoObjectDisconnect, old beyonce invalidated, and session synchronized
     let notifs2 = ctx.drain_notifications_for_char(char_id_2);
     assert!(notifs2.iter().any(|n| n.event == "OnSessionChanged"), "Fleetmate must receive OnSessionChanged notification");
-    let bounds = ctx.bound_objects.read().unwrap();
-    let beyonce_bound = bounds.values().find(|b| b.character_id == char_id_2 && b.service == "beyonce");
-    assert_eq!(beyonce_bound.map(|b| b.object_id), Some(dest_sys as i64), "Fleetmate beyonce bound object updated to destination system");
-    drop(bounds);
+    let expected_oid = format!("N={}:{old_beyonce_2}", eve_machonet::MACHO_PROXY_NODE_ID);
+    assert!(notifs2.iter().any(|n| n.event == "OnMachoObjectDisconnect" && n.args.first().and_then(|v| v.as_str()) == Some(expected_oid.as_str())), "Fleetmate must receive OnMachoObjectDisconnect for old start_sys beyonce");
+    assert!(!ctx.bound_objects.read().unwrap().contains_key(&old_beyonce_2), "Stale start_sys beyonce removed");
 
     ctx.sync_session(&mut sess2);
     assert_eq!(sess2.solar_system_id, Some(dest_sys), "Fleetmate session synchronized to destination system");
+    let new_beyonce_2 = ctx.bind_object(&sess2, "beyonce", dest_sys as i64).expect("Fleetmate binds new beyonce in dest_sys");
+    assert_eq!(ctx.bound_objects.read().unwrap().get(&new_beyonce_2).map(|b| b.object_id), Some(dest_sys as i64));
 
     // Verify 15-minute PvP log-off timer (900s) applied to all transported pilots
     let now = ctx.now_unix();

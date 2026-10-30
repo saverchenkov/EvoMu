@@ -155,6 +155,8 @@ async fn test_tourney_setup_pairings_and_teleportation() {
             character_id: P1,
             service: "beyonce".to_string(),
             object_id: 30_000_144,
+            oid_str: format!("N=888444:{bound_oid}"),
+            ref_id: 133_000_000_000_000_000,
         },
     );
 

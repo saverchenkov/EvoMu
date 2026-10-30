@@ -726,8 +726,9 @@ pub(super) fn handle_mail_and_calendar(
             restored_ids.sort_unstable();
             restored_ids.dedup();
             if !restored_ids.is_empty() {
-                let mail_id_reps = PyRep::List(restored_ids.iter().copied().map(PyRep::Integer).collect());
-                ctx.notify(NotificationTarget::Character(char_id), "OnMailRestored", "charid", vec![mail_id_reps]);
+                let mail_id_reps: Vec<PyRep> = restored_ids.iter().copied().map(PyRep::Integer).collect();
+                ctx.notify(NotificationTarget::Character(char_id), "OnMailRestored", "charid", vec![PyRep::List(mail_id_reps.clone())]);
+                ctx.notify(NotificationTarget::Character(char_id), "OnMailUndeleted", "charid", vec![PyRep::List(mail_id_reps)]);
             }
             Some(Ok(PyRep::keyval([
                 ("restored", PyRep::Bool(!restored_ids.is_empty())),

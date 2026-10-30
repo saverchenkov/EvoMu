@@ -897,8 +897,11 @@ pub(crate) async fn handle_dogma_im(
                 if !bank.contains(&slave_id) {
                     bank.push(slave_id);
                 }
-                Ok(PyRep::None)
+                Ok(crate::services::combat_crimewatch::combat_weapons_spool::build_weapon_banks_dict(snap, ship_id))
             });
+            if let Ok(ref info) = res {
+                crate::services::combat_crimewatch::combat_weapons_spool::notify_weapon_banks_updated(ctx, char_id, ship_id, &[], info);
+            }
             Some(res)
         }
 
@@ -941,9 +944,12 @@ pub(crate) async fn handle_dogma_im(
                 if !list.contains(&new_mod_id) {
                     list.push(new_mod_id);
                 }
-                Ok(PyRep::None)
+                Ok(crate::services::combat_crimewatch::combat_weapons_spool::build_weapon_banks_dict(snap, ship_id))
             });
-            Some(res)
+            Some(res.map(|info| {
+                crate::services::combat_crimewatch::combat_weapons_spool::notify_weapon_banks_updated(ctx, char_id, ship_id, &[], &info);
+                PyRep::None
+            }))
         }
 
         ("dogmaIM", "MergeModuleGroups") | ("charFittingMgr", "MergeModuleGroups") => {
@@ -973,6 +979,7 @@ pub(crate) async fn handle_dogma_im(
                     return Err(BridgeRpcError { code: "InvalidWeaponGroup".into(), message: "Only identical high-slot weapons fitted to the ship can be merged".into() });
                 }
                 let banks = snap.weapon_banks.entry(ship_id).or_default();
+                let had_other = banks.contains_key(&other_master_id) && other_master_id != master_id;
                 let other_modules = banks.remove(&other_master_id).unwrap_or_else(|| vec![other_master_id]);
                 let master_list = banks.entry(master_id).or_insert_with(|| vec![master_id]);
                 for id in other_modules {
@@ -980,9 +987,13 @@ pub(crate) async fn handle_dogma_im(
                         master_list.push(id);
                     }
                 }
-                Ok(PyRep::None)
+                let destroyed = if had_other { vec![other_master_id] } else { Vec::new() };
+                Ok((destroyed, crate::services::combat_crimewatch::combat_weapons_spool::build_weapon_banks_dict(snap, ship_id)))
             });
-            Some(res)
+            Some(res.map(|(destroyed, info)| {
+                crate::services::combat_crimewatch::combat_weapons_spool::notify_weapon_banks_updated(ctx, char_id, ship_id, &destroyed, &info);
+                PyRep::None
+            }))
         }
 
         ("dogmaIM", "UnlinkModule") | ("charFittingMgr", "UnlinkModule") => {
@@ -996,15 +1007,21 @@ pub(crate) async fn handle_dogma_im(
                 if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
                     return Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}") });
                 }
+                let mut destroyed = Vec::new();
                 if let Some(banks) = snap.weapon_banks.get_mut(&ship_id) {
                     for list in banks.values_mut() {
                         list.retain(|&id| id != mod_id);
                     }
+                    destroyed = banks.iter().filter(|(k, v)| **k == mod_id || v.len() <= 1).map(|(k, _)| *k).collect();
+                    destroyed.sort_unstable();
                     banks.retain(|k, v| *k != mod_id && v.len() > 1);
                 }
-                Ok(PyRep::None)
+                Ok((destroyed, crate::services::combat_crimewatch::combat_weapons_spool::build_weapon_banks_dict(snap, ship_id)))
             });
-            Some(res)
+            Some(res.map(|(destroyed, info)| {
+                crate::services::combat_crimewatch::combat_weapons_spool::notify_weapon_banks_updated(ctx, char_id, ship_id, &destroyed, &info);
+                PyRep::None
+            }))
         }
 
         ("dogmaIM", "DestroyWeaponBank") | ("charFittingMgr", "DestroyWeaponBank") => {
@@ -1018,12 +1035,14 @@ pub(crate) async fn handle_dogma_im(
                 if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
                     return Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}") });
                 }
-                if let Some(banks) = snap.weapon_banks.get_mut(&ship_id) {
-                    banks.remove(&master_id);
-                }
-                Ok(PyRep::None)
+                let removed = snap.weapon_banks.get_mut(&ship_id).and_then(|b| b.remove(&master_id)).is_some();
+                let destroyed = if removed { vec![master_id] } else { Vec::new() };
+                Ok((destroyed, crate::services::combat_crimewatch::combat_weapons_spool::build_weapon_banks_dict(snap, ship_id)))
             });
-            Some(res)
+            Some(res.map(|(destroyed, info)| {
+                crate::services::combat_crimewatch::combat_weapons_spool::notify_weapon_banks_updated(ctx, char_id, ship_id, &destroyed, &info);
+                PyRep::None
+            }))
         }
 
         ("dogmaIM", "LinkAllWeapons") | ("charFittingMgr", "LinkAllWeapons") => {
@@ -1046,10 +1065,14 @@ pub(crate) async fn handle_dogma_im(
                 if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
                     return Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}") });
                 }
-                snap.weapon_banks.remove(&ship_id);
-                Ok(PyRep::None)
+                let mut destroyed: Vec<i64> = snap.weapon_banks.remove(&ship_id).map(|b| b.into_keys().collect()).unwrap_or_default();
+                destroyed.sort_unstable();
+                Ok(destroyed)
             });
-            Some(res)
+            Some(res.map(|destroyed| {
+                crate::services::combat_crimewatch::combat_weapons_spool::notify_weapon_banks_updated(ctx, char_id, ship_id, &destroyed, &PyRep::Dict(Vec::new()));
+                PyRep::None
+            }))
         }
 
         ("dogmaIM", "LoadAmmo") => {

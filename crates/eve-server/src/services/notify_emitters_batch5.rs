@@ -100,7 +100,7 @@ pub fn emit_ship_scan_completed(
     );
 }
 
-/// Emits `OnOreMined(oreType, quantity_added, quantity_removed, hasRewards, amountWasted, amountCritBonus, itemID, moduleItemID)`.
+/// Emits `OnOreMined(dataDict)` matching `OreMinedNotificationAdapter.OnOreMined(dataDict)`.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_ore_mined(
     ctx: &ServerContext,
@@ -117,16 +117,16 @@ pub fn emit_ore_mined(
         NotificationTarget::Character(char_id),
         "OnOreMined",
         "charid",
-        vec![
-            PyRep::Integer(i64::from(ore_type_id)),
-            PyRep::Integer(delivered),
-            PyRep::Integer(mined),
-            PyRep::Bool(false),
-            PyRep::Integer(wasted),
-            PyRep::Integer(crit_bonus),
-            PyRep::Integer(target_id),
-            PyRep::Integer(module_id),
-        ],
+        vec![PyRep::Dict(vec![
+            (PyRep::String("oreType".into()), PyRep::Integer(i64::from(ore_type_id))),
+            (PyRep::String("quantity_added".into()), PyRep::Integer(delivered)),
+            (PyRep::String("quantity_removed".into()), PyRep::Integer(mined)),
+            (PyRep::String("hasRewards".into()), PyRep::Bool(false)),
+            (PyRep::String("amountWasted".into()), PyRep::Integer(wasted)),
+            (PyRep::String("amountCritBonus".into()), PyRep::Integer(crit_bonus)),
+            (PyRep::String("itemID".into()), PyRep::Integer(target_id)),
+            (PyRep::String("moduleItemID".into()), PyRep::Integer(module_id)),
+        ])],
     );
 }
 

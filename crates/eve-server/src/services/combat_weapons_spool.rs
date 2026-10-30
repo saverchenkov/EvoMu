@@ -1262,13 +1262,53 @@ pub async fn step_system_entropic_spools(
     }
 }
 
+/// Builds the `{master_id: [master_id, ...]}` PyRep::Dict for a ship's weapon banks.
+pub fn build_weapon_banks_dict(snap: &eve_db::WorldStateSnapshot, ship_id: i64) -> PyRep {
+    let mut entries: Vec<(PyRep, PyRep)> = snap
+        .weapon_banks
+        .get(&ship_id)
+        .into_iter()
+        .flatten()
+        .map(|(&master, mods)| {
+            let mod_list = mods.iter().copied().map(PyRep::Integer).collect();
+            (PyRep::Integer(master), PyRep::List(mod_list))
+        })
+        .collect();
+    entries.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
+    PyRep::Dict(entries)
+}
+
+/// Emits `OnWeaponGroupDestroyed` for any dissolved weapon groups and `OnWeaponBanksChanged`.
+pub fn notify_weapon_banks_updated(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    destroyed_masters: &[i64],
+    info: &PyRep,
+) {
+    for &master_id in destroyed_masters {
+        ctx.notify(
+            crate::router::NotificationTarget::Character(char_id),
+            "OnWeaponGroupDestroyed",
+            "charid",
+            vec![PyRep::Integer(ship_id), PyRep::Integer(master_id)],
+        );
+    }
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnWeaponBanksChanged",
+        "charid",
+        vec![PyRep::Integer(ship_id), info.clone()],
+    );
+}
+
 /// Links all compatible weapon modules into banks (`charFittingMgr.LinkAllWeapons` / `dogmaIM.LinkAllWeapons`).
 pub fn handle_link_all_weapons(
     ctx: &ServerContext,
     char_id: i64,
     ship_id: i64,
 ) -> Result<PyRep, BridgeRpcError> {
-    ctx.db.try_with_mut_snapshot(|snap| {
+    let info = ctx.db.try_with_mut_snapshot(|snap| {
         if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
             return Err(BridgeRpcError {
                 code: "ShipOwnershipViolation".into(),
@@ -1288,17 +1328,15 @@ pub fn handle_link_all_weapons(
         }
         let banks = snap.weapon_banks.entry(ship_id).or_default();
         banks.clear();
-        let mut result_entries: Vec<(PyRep, PyRep)> = Vec::new();
         for (_type_id, mut mods) in by_type {
             if mods.len() >= 2 {
                 mods.sort();
                 let master = mods[0];
-                banks.insert(master, mods.clone());
-                let mod_list: Vec<PyRep> = mods.into_iter().map(PyRep::Integer).collect();
-                result_entries.push((PyRep::Integer(master), PyRep::List(mod_list)));
+                banks.insert(master, mods);
             }
         }
-        result_entries.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
-        Ok(PyRep::Dict(result_entries))
-    })
+        Ok(build_weapon_banks_dict(snap, ship_id))
+    })?;
+    notify_weapon_banks_updated(ctx, char_id, ship_id, &[], &info);
+    Ok(info)
 }

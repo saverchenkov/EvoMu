@@ -469,18 +469,15 @@ async fn test_issue_24_bound_object_context_validation_and_lifecycle_revocation(
         panic!("Expected KeyVal from Undock");
     };
     let jita_beyonce_bid = u_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
-    let jita_scan_bid = ctx.bind_object(&session, "scanMgr", 30_000_142).unwrap();
 
-    // Stale station monikers must now be rejected in space
+    // Station monikers (`station`, `repairSvc`) are revoked on Undock; station `invbroker` rejects hangar List in space
     assert_eq!(
         ctx.verify_bound_object(&session, st_bid).unwrap_err().code,
-        // rpc-lint: allow error code assertion
-        "BoundObjectOwnershipViolation"
+        "InvalidBoundObject"
     );
     assert_eq!(
         ctx.verify_bound_object(&session, rep_bid).unwrap_err().code,
-        // rpc-lint: allow error code assertion
-        "BoundObjectOwnershipViolation"
+        "InvalidBoundObject"
     );
     assert_eq!(
         ctx.dispatch_rpc(
@@ -500,6 +497,7 @@ async fn test_issue_24_bound_object_context_validation_and_lifecycle_revocation(
 
     // 3. After jumping or moving to another solar system, stale `beyonce`, `scanMgr`, and station `invbroker`
     //    monikers (including `beyonce.UpdateStateRequest`) must be rejected.
+    let jita_scan_bid = ctx.bind_object(&session, "scanMgr", 30_000_142).unwrap();
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {
             ch.solar_system_id = 30_000_144;

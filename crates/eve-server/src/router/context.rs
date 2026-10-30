@@ -26,6 +26,8 @@ pub struct BoundObjectEntry {
     pub character_id: i64,
     pub service: String,
     pub object_id: i64,
+    pub oid_str: String,
+    pub ref_id: i64,
 }
 
 static NEXT_CTX_INSTANCE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -841,23 +843,32 @@ impl ServerContext {
                             p.solar_system_id,
                             moon_id,
                         );
-                        let resources_dict = eve_proto::PyRep::Dict(
-                            composition
-                                .iter()
-                                .map(|&(tid, frac)| {
-                                    (
-                                        eve_proto::PyRep::Integer(tid as i64),
-                                        eve_proto::PyRep::Real(frac),
-                                    )
-                                })
-                                .collect(),
-                        );
-                        self.notify(
-                            crate::router::NotificationTarget::Character(p.owner_char_id),
-                            "OnMoonScanComplete",
-                            "charid",
-                            vec![eve_proto::PyRep::Integer(moon_id), resources_dict],
-                        );
+                        if composition.is_empty() {
+                            self.notify(
+                                crate::router::NotificationTarget::Character(p.owner_char_id),
+                                "OnScanNoMaterials",
+                                "charid",
+                                vec![eve_proto::PyRep::Integer(moon_id)],
+                            );
+                        } else {
+                            let resources_dict = eve_proto::PyRep::Dict(
+                                composition
+                                    .iter()
+                                    .map(|&(tid, frac)| {
+                                        (
+                                            eve_proto::PyRep::Integer(tid as i64),
+                                            eve_proto::PyRep::Real(frac),
+                                        )
+                                    })
+                                    .collect(),
+                            );
+                            self.notify(
+                                crate::router::NotificationTarget::Character(p.owner_char_id),
+                                "OnMoonScanComplete",
+                                "charid",
+                                vec![eve_proto::PyRep::Integer(moon_id), resources_dict],
+                            );
+                        }
                     }
                 }
                 self.notify(

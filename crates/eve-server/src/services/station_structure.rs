@@ -513,6 +513,7 @@ pub async fn handle(
 
             session.station_id = None;
             session.structure_id = None;
+            ctx.invalidate_bound_objects_for_session_transition(char_id, ch.solar_system_id, None, "undock");
             let sess_rep = PyRep::keyval([
                 ("userid", session.user_id.map(|u| PyRep::Integer(u as i64)).unwrap_or(PyRep::None)),
                 ("charid", PyRep::Integer(char_id)),

@@ -521,24 +521,23 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
             asteroid.type_id,
         );
     }
-    // V24 `notifications/client/oreMinedNotificationAdapter.pyj` `OnOreMined(oreType,
-    // quantity_added, quantity_removed, hasRewards, amountWasted, amountCritBonus, itemID,
-    // moduleItemID)` (argument names from the client bytecode). `hasRewards` is False: no
-    // objective rewards are attached to ordinary mining.
+    // V24 `notifications/client/oreMinedNotificationAdapter.pyj` `OnOreMined(dataDict)`
+    // reading keys `oreType`, `quantity_added`, `quantity_removed`, `hasRewards`,
+    // `amountWasted`, `amountCritBonus`, `itemID`, `moduleItemID`.
     ctx.notify(
         NotificationTarget::Character(cycle.char_id),
         "OnOreMined",
         "charid",
-        vec![
-            PyRep::Integer(i64::from(asteroid.type_id)),
-            PyRep::Integer(delivered),
-            PyRep::Integer(mined),
-            PyRep::Bool(false),
-            PyRep::Integer(residue_units),
-            PyRep::Integer(bonus_crit_units),
-            PyRep::Integer(cycle.target_id),
-            PyRep::Integer(cycle.module_id),
-        ],
+        vec![PyRep::Dict(vec![
+            (PyRep::String("oreType".into()), PyRep::Integer(i64::from(asteroid.type_id))),
+            (PyRep::String("quantity_added".into()), PyRep::Integer(delivered)),
+            (PyRep::String("quantity_removed".into()), PyRep::Integer(mined)),
+            (PyRep::String("hasRewards".into()), PyRep::Bool(false)),
+            (PyRep::String("amountWasted".into()), PyRep::Integer(residue_units)),
+            (PyRep::String("amountCritBonus".into()), PyRep::Integer(bonus_crit_units)),
+            (PyRep::String("itemID".into()), PyRep::Integer(cycle.target_id)),
+            (PyRep::String("moduleItemID".into()), PyRep::Integer(cycle.module_id)),
+        ])],
     );
 
     let free_after = free_units - delivered;

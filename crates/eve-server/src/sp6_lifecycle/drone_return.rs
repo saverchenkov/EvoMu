@@ -89,16 +89,15 @@ pub async fn handle_cmd_return_bay(
                 },
             ).await;
             let notif_args = vec![
-                PyRep::Integer(d.drone_item_id),
+                PyRep::Integer(d.ball_id),
                 PyRep::Integer(char_id),
                 PyRep::Integer(ship_id),
                 PyRep::Integer(4),
                 PyRep::Integer(d.type_id as i64),
                 PyRep::Integer(char_id),
-                PyRep::Integer(0),
+                PyRep::Integer(ship_id),
             ];
-            ctx.notify(NotificationTarget::Character(char_id), "OnDroneStateChange", "charid", notif_args.clone());
-            session.push_notification("OnDroneStateChange", notif_args);
+            ctx.notify(NotificationTarget::Character(char_id), "OnDroneStateChange", "charid", notif_args);
             continue;
         }
 
@@ -147,16 +146,15 @@ pub async fn handle_cmd_return_bay(
             },
         ).await;
         let notif_args = vec![
-            PyRep::Integer(d.drone_item_id),
+            PyRep::Integer(d.ball_id),
             PyRep::Integer(char_id),
             PyRep::Integer(ship_id),
             PyRep::Integer(0),
             PyRep::Integer(d.type_id as i64),
             PyRep::Integer(char_id),
-            PyRep::Integer(0),
+            PyRep::None,
         ];
-        ctx.notify(NotificationTarget::Character(char_id), "OnDroneStateChange", "charid", notif_args.clone());
-        session.push_notification("OnDroneStateChange", notif_args);
+        ctx.notify(NotificationTarget::Character(char_id), "OnDroneStateChange", "charid", notif_args);
 
         // Emit OnItemChange
         ctx.notify(
@@ -244,13 +242,13 @@ pub async fn step_returning_drones(ctx: &ServerContext) {
             },
         ).await;
         let notif_args = vec![
-            PyRep::Integer(d.drone_item_id),
+            PyRep::Integer(d.ball_id),
             PyRep::Integer(d.owner_char_id),
             PyRep::Integer(d.parent_ship_id),
             PyRep::Integer(0),
             PyRep::Integer(d.type_id as i64),
             PyRep::Integer(d.owner_char_id),
-            PyRep::Integer(0),
+            PyRep::None,
         ];
         ctx.notify(NotificationTarget::Character(d.owner_char_id), "OnDroneStateChange", "charid", notif_args);
 

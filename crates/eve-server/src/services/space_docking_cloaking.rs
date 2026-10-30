@@ -943,6 +943,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
     if let Some(active_timer) =
         crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None)
     {
+        ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnWormholeJumpCancel", "charid", vec![]);
         return Some(Err(BridgeRpcError {
             code: "SessionChangeInProgress".into(),
             message: format!(
@@ -1312,6 +1313,9 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
                 ("environmentalEffect", PyRep::String(env_effect.into())),
             ])))
         }
-        Err(e) => Some(Err(e)),
+        Err(e) => {
+            ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnWormholeJumpCancel", "charid", vec![]);
+            Some(Err(e))
+        }
     }
 }

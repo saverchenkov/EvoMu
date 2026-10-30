@@ -222,11 +222,11 @@ async fn test_c3_pod_death_corpse_implants_and_home_station_respawn() {
         let mut bo = ctx.bound_objects.write().unwrap_or_else(|e| e.into_inner());
         bo.insert(
             777_001,
-            BoundObjectEntry { bound_id: 777_001, session_id: 1, user_id: 1, character_id: victim_id, service: "beyonce".into(), object_id: sys_id as i64 },
+            BoundObjectEntry { bound_id: 777_001, session_id: 1, user_id: 1, character_id: victim_id, service: "beyonce".into(), object_id: sys_id as i64, oid_str: "N=888444:777001".into(), ref_id: 133_000_000_000_000_000 },
         );
         bo.insert(
             777_002,
-            BoundObjectEntry { bound_id: 777_002, session_id: 1, user_id: 1, character_id: victim_id, service: "scanMgr".into(), object_id: sys_id as i64 },
+            BoundObjectEntry { bound_id: 777_002, session_id: 1, user_id: 1, character_id: victim_id, service: "scanMgr".into(), object_id: sys_id as i64, oid_str: "N=888444:777002".into(), ref_id: 133_000_000_000_000_000 },
         );
     }
 
@@ -286,7 +286,7 @@ async fn test_c3_pod_death_corpse_implants_and_home_station_respawn() {
 
     let notifs = ctx.drain_notifications_for_char(victim_id);
     assert!(
-        notifs.iter().any(|n| n.event == "OnMachoObjectDisconnect" && n.args.len() == 3 && n.args[1] == PyRep::Integer(victim_id))
+        notifs.iter().any(|n| n.event == "OnMachoObjectDisconnect" && n.args.len() == 3 && n.args[1] == PyRep::Integer(1_000_000_000_001))
             && notifs.iter().any(|n| {
                 let s = format!("{:?}", n.args);
                 n.event == "OnSessionChanged" && s.contains("stationid") && s.contains(&home_station_id.to_string()) && s.contains("solarsystemid2") && s.contains(&respawn_ship_id.to_string())

@@ -201,9 +201,12 @@ async fn test_batch5_station_damage_crimewatch_shutdown_scanners() {
     emit_ore_mined(&ctx, P1, 1230, 390, 390, 0, 0, 9001, 7002);
     let ev_ore = events(&ctx, P1, "OnOreMined");
     assert_eq!(ev_ore.len(), 1);
-    assert_eq!(ev_ore[0].len(), 8);
-    assert_eq!(ev_ore[0][0], PyRep::Integer(1230));
-    assert_eq!(ev_ore[0][1], PyRep::Integer(390));
+    assert_eq!(ev_ore[0].len(), 1);
+    let PyRep::Dict(ref d) = ev_ore[0][0] else {
+        panic!("expected dataDict for OnOreMined, got {:?}", ev_ore[0][0]);
+    };
+    assert!(d.contains(&(PyRep::String("oreType".into()), PyRep::Integer(1230))));
+    assert!(d.contains(&(PyRep::String("quantity_added".into()), PyRep::Integer(390))));
 }
 
 #[tokio::test]

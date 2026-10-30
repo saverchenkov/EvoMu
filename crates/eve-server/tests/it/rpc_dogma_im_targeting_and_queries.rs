@@ -443,7 +443,8 @@ async fn test_dogma_im_targeting_and_queries_complete() {
     ctx.db.with_snapshot(|s| {
         assert_eq!(s.combat_crimewatch_state.drone_settings.get(&C1), Some(&(true, false)));
     });
-    assert!(s1.notifications.iter().any(|(ev, _)| ev == "OnDroneStateChange"));
+    assert!(s1.notifications.iter().any(|(ev, _)| ev == "OnDroneSettingChanged"));
+    assert!(!s1.notifications.iter().any(|(ev, _)| ev == "OnDroneStateChange"));
 
     // F-01: ChangeDroneSettings with integer keys {1275: 1, 1297: 1}
     let drone_int_res = rpc(

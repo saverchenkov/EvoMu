@@ -155,6 +155,12 @@ fn handle_petitioner(
                 "charid",
                 vec![PyRep::Integer(pet_id)],
             );
+            ctx.notify(
+                NotificationTarget::Character(cid),
+                "OnNewPetition",
+                "charid",
+                vec![PyRep::Integer(pet_id)],
+            );
             Ok(Some(PyRep::keyval([
                 ("petitionID", PyRep::Integer(pet_id)),
                 ("status", PyRep::String("open".into())),
@@ -269,7 +275,7 @@ fn handle_petitioner(
             let pet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let msg = args.get(1).and_then(|a| a.as_str()).unwrap_or("").to_string();
             let now_unix = ctx.now_unix();
-            let cnt = try_with_store(ctx, |_, store| {
+            let (cnt, mid, petitioner_cid, claimed_by) = try_with_store(ctx, |_, store| {
                 let is_gm_msg = {
                     let Some(pet) = store.petitions.get(&pet_id) else {
                         return Err(err("PetitionNotFound", format!("Petition {pet_id} not found")));
@@ -282,7 +288,7 @@ fn handle_petitioner(
                     }
                     method == "PetitioneeChat" || cid != pet.petitioner_cid
                 };
-                let mid = if is_gm_msg { store.alloc_message_id() } else { 0 };
+                let mid = store.alloc_message_id();
                 let pet = store.petitions.get_mut(&pet_id).expect("verified above");
                 pet.messages.push((cid, msg.clone(), now_unix));
                 if is_gm_msg {
@@ -293,8 +299,18 @@ fn handle_petitioner(
                 } else {
                     pet.logs.push((format!("PlayerComment:{msg}"), cid, now_unix));
                 }
-                Ok(pet.messages.len())
+                Ok((pet.messages.len(), mid, pet.petitioner_cid, pet.claimed_by))
             })?;
+            let msg_args = vec![
+                PyRep::Integer(pet_id),
+                PyRep::Integer(cid),
+                PyRep::String(msg),
+                PyRep::Integer(mid),
+            ];
+            ctx.notify(NotificationTarget::Character(petitioner_cid), "OnPetitionMessage", "charid", msg_args.clone());
+            if let Some(gm_cid) = claimed_by.filter(|&g| g != petitioner_cid) {
+                ctx.notify(NotificationTarget::Character(gm_cid), "OnPetitionMessage", "charid", msg_args);
+            }
             Ok(Some(PyRep::keyval([
                 ("petitionID", PyRep::Integer(pet_id)),
                 ("messageCount", PyRep::Integer(cnt as i64)),
@@ -342,7 +358,7 @@ fn handle_petitioner(
             req_gm(session, "ClaimPetition")?;
             let pet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let now_unix = ctx.now_unix();
-            try_with_store(ctx, |_, store| {
+            let petitioner_cid = try_with_store(ctx, |_, store| {
                 let Some(pet) = store.petitions.get_mut(&pet_id) else {
                     return Err(err("PetitionNotFound", format!("Petition {pet_id} not found")));
                 };
@@ -355,8 +371,13 @@ fn handle_petitioner(
                 pet.claimed_by = Some(cid);
                 pet.status = "claimed".into();
                 pet.logs.push(("Claimed".into(), cid, now_unix));
-                Ok(())
+                Ok(pet.petitioner_cid)
             })?;
+            let assign_args = vec![PyRep::Integer(pet_id), PyRep::Integer(cid)];
+            ctx.notify(NotificationTarget::Character(petitioner_cid), "OnAssignPetition", "charid", assign_args.clone());
+            if cid != petitioner_cid {
+                ctx.notify(NotificationTarget::Character(cid), "OnAssignPetition", "charid", assign_args);
+            }
             Ok(Some(PyRep::Integer(1)))
         }
         "UnClaimPetition" | "EscalatePetition" | "ClosePetition" => {
@@ -370,7 +391,7 @@ fn handle_petitioner(
                 .and_then(|a| a.as_str())
                 .or_else(|| args.get(2).and_then(|a| a.as_str()))
                 .unwrap_or("");
-            let st = try_with_store(ctx, |_, store| {
+            let (st, petitioner_cid, prev_claimed) = try_with_store(ctx, |_, store| {
                 let Some(pet) = store.petitions.get(&pet_id) else {
                     return Err(err("PetitionNotFound", format!("Petition {pet_id} not found")));
                 };
@@ -390,6 +411,7 @@ fn handle_petitioner(
                     None
                 };
                 let pet = store.petitions.get_mut(&pet_id).expect("verified above");
+                let prev_gm = pet.claimed_by;
                 match method {
                     "UnClaimPetition" => {
                         pet.claimed_by = None;
@@ -422,8 +444,24 @@ fn handle_petitioner(
                     }
                     _ => {}
                 }
-                Ok(pet.status.clone())
+                Ok((pet.status.clone(), pet.petitioner_cid, prev_gm))
             })?;
+            if method == "UnClaimPetition" {
+                let unassign_args = vec![PyRep::Integer(pet_id), PyRep::None];
+                ctx.notify(NotificationTarget::Character(petitioner_cid), "OnAssignPetition", "charid", unassign_args.clone());
+                if cid != petitioner_cid {
+                    ctx.notify(NotificationTarget::Character(cid), "OnAssignPetition", "charid", unassign_args);
+                }
+            } else if method == "ClosePetition" {
+                let close_args = vec![PyRep::Integer(pet_id)];
+                ctx.notify(NotificationTarget::Character(petitioner_cid), "OnClosePetition", "charid", close_args.clone());
+                if cid != petitioner_cid {
+                    ctx.notify(NotificationTarget::Character(cid), "OnClosePetition", "charid", close_args.clone());
+                }
+                if let Some(gm_cid) = prev_claimed.filter(|&g| g != petitioner_cid && g != cid) {
+                    ctx.notify(NotificationTarget::Character(gm_cid), "OnClosePetition", "charid", close_args);
+                }
+            }
             Ok(Some(PyRep::keyval([
                 ("petitionID", PyRep::Integer(pet_id)),
                 ("status", PyRep::String(st)),

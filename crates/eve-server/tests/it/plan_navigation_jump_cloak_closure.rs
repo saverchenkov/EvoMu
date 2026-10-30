@@ -621,6 +621,7 @@ async fn test_space_navigation_ansiblex_and_bastion_blocks() {
     assert_eq!(s1.station_id, Some(station_id));
 
     s1.station_id = None;
+    let bid = ctx.bind_object(&s1, "beyonce", JITA_SYSTEM as i64).unwrap();
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&PILOT_1) {
             ch.station_id = None;

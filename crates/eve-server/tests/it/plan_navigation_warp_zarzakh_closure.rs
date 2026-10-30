@@ -204,6 +204,7 @@ async fn test_space_navigation_warp_landing_supercap_docking_and_zarzakh_gates()
 
     // Undock back to space
     sess.station_id = None;
+    let bid_lowsec = ctx.bind_object(&sess, "beyonce", lowsec_sys as i64).unwrap();
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&PILOT_1) {
             ch.station_id = None;
@@ -420,6 +421,7 @@ async fn test_space_navigation_warp_landing_supercap_docking_and_zarzakh_gates()
 
     // Reset session back to Turnur for subcapital test
     sess.solar_system_id = Some(TURNUR_SYSTEM);
+    let bid_turnur = ctx.bind_object(&sess, "beyonce", TURNUR_SYSTEM as i64).unwrap();
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&PILOT_1) {
             ch.solar_system_id = TURNUR_SYSTEM;

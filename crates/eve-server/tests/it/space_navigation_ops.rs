@@ -397,10 +397,15 @@ async fn test_space_navigation_warp_dock_undock_gate() {
     let dock_rep = rpc_bound(&ctx, &mut sess, "beyonce", bid, "CmdDock", &[PyRep::Integer(JITA_44)]).await;
     assert_eq!(dock_rep.dict_get("locationID"), Some(&PyRep::Integer(JITA_44)));
     assert_eq!(sess.station_id, Some(JITA_44));
+    assert_eq!(
+        rpc_bound_err(&ctx, &mut sess, "beyonce", bid, "CmdDock", &[PyRep::Integer(JITA_44)]).await,
+        "InvalidBoundObject"
+    );
+    let bid_dock = ctx.bind_object(&mut sess, "beyonce", i64::from(JITA)).expect("bind beyonce docked");
 
     // Negative: Attempting to dock while already docked
     assert_eq!(
-        rpc_bound_err(&ctx, &mut sess, "beyonce", bid, "CmdDock", &[PyRep::Integer(JITA_44)]).await,
+        rpc_bound_err(&ctx, &mut sess, "beyonce", bid_dock, "CmdDock", &[PyRep::Integer(JITA_44)]).await,
         "AlreadyDocked"
     );
 
@@ -410,7 +415,7 @@ async fn test_space_navigation_warp_dock_undock_gate() {
             &ctx,
             &mut sess,
             "beyonce",
-            bid,
+            bid_dock,
             "CmdWarpToStuff",
             &[PyRep::String("item".into()), PyRep::Integer(gate_id), PyRep::Real(0.0)],
         )
@@ -420,21 +425,21 @@ async fn test_space_navigation_warp_dock_undock_gate() {
 
     // 5. Positive & Negative: Undock
     ctx.advance_secs(11);
-    let undock_rep = rpc_bound(&ctx, &mut sess, "beyonce", bid, "Undock", &[]).await;
+    let undock_rep = rpc_bound(&ctx, &mut sess, "beyonce", bid_dock, "Undock", &[]).await;
     assert!(undock_rep.dict_get("solarSystemID").is_some());
     assert_eq!(sess.station_id, None);
     assert_eq!(sess.solar_system_id, Some(JITA));
 
     // Negative: Undocking while session change timer is active
     assert_eq!(
-        rpc_bound_err(&ctx, &mut sess, "beyonce", bid, "Undock", &[]).await,
+        rpc_bound_err(&ctx, &mut sess, "beyonce", bid_dock, "Undock", &[]).await,
         "SessionChangeInProgress"
     );
 
     // Negative: Undocking when already in space (after session timer expires)
     ctx.advance_secs(11);
     assert_eq!(
-        rpc_bound_err(&ctx, &mut sess, "beyonce", bid, "Undock", &[]).await,
+        rpc_bound_err(&ctx, &mut sess, "beyonce", bid_dock, "Undock", &[]).await,
         "UndockFailed"
     );
 
