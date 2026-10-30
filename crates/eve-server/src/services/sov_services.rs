@@ -46,8 +46,9 @@ pub fn scale_entosis_capture_seconds(base_seconds: u64, adm: f64) -> u64 {
     ((base_seconds as f64) * adm.max(1.0)).round() as u64
 }
 
-/// Broadcasts `OnSovereigntyChanged` to all sessions and queues destiny event for the solar system.
-pub fn emit_sovereignty_changed(ctx: &ServerContext, sys_id: u32, alliance_id: Option<i64>, corp_id: Option<i64>) {
+/// Broadcasts `OnSovereigntyChanged(solarSystemID, allianceID)` (exact V24 2-arg signature)
+/// to all sessions and queues destiny event for the solar system.
+pub fn emit_sovereignty_changed(ctx: &ServerContext, sys_id: u32, alliance_id: Option<i64>, _corp_id: Option<i64>) {
     ctx.notify(
         NotificationTarget::All,
         "OnSovereigntyChanged",
@@ -55,7 +56,6 @@ pub fn emit_sovereignty_changed(ctx: &ServerContext, sys_id: u32, alliance_id: O
         vec![
             PyRep::Integer(i64::from(sys_id)),
             alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-            corp_id.map(PyRep::Integer).unwrap_or(PyRep::None),
         ],
     );
     let handle = ctx.systems.get_or_spawn(sys_id);
@@ -158,8 +158,18 @@ pub(crate) fn can_access_sov_hub_fuel(
     false
 }
 
-/// Broadcasts `OnSolarSystemSovStructuresUpdated` notification.
-pub fn emit_sov_structures_updated(ctx: &ServerContext, sys_id: u32, structs: Vec<PyRep>) {
+/// Broadcasts `OnSolarSystemSovStructuresUpdated(solarsystemID, solarSystemStructuresInfo, changes)`
+/// matching V24 `SovService.OnSolarSystemSovStructuresUpdated` (3 positional arguments: `solarsystemID`,
+/// list of `util.KeyVal` structure rows, and `dict` mapping `sourceItemID -> list` of change tags).
+pub fn emit_sov_structures_updated(ctx: &ServerContext, sys_id: u32, changed_ids: &[i64]) {
+    let structs = collect_sov_structures(ctx, sys_id);
+    let changes = PyRep::Dict(
+        changed_ids
+            .iter()
+            .copied()
+            .map(|id| (PyRep::Integer(id), PyRep::List(vec![PyRep::Integer(0)])))
+            .collect(),
+    );
     ctx.notify(
         NotificationTarget::SolarSystem(sys_id),
         "OnSolarSystemSovStructuresUpdated",
@@ -167,6 +177,7 @@ pub fn emit_sov_structures_updated(ctx: &ServerContext, sys_id: u32, structs: Ve
         vec![
             PyRep::Integer(i64::from(sys_id)),
             PyRep::List(structs),
+            changes,
         ],
     );
 }
@@ -274,7 +285,7 @@ pub fn claim_system_sovereignty(
     sys_id: u32,
     alliance_id: i64,
     corp_id: i64,
-    _hub_id: i64,
+    hub_id: i64,
 ) -> Result<(), BridgeRpcError> {
     let now = ctx.now_unix();
     ctx.db.try_with_mut_snapshot(|snap| {
@@ -299,8 +310,7 @@ pub fn claim_system_sovereignty(
     })?;
 
     emit_sovereignty_changed(ctx, sys_id, Some(alliance_id), Some(corp_id));
-    let structs = collect_sov_structures(ctx, sys_id);
-    emit_sov_structures_updated(ctx, sys_id, structs);
+    emit_sov_structures_updated(ctx, sys_id, &[hub_id]);
     ctx.notify(
         NotificationTarget::SolarSystem(sys_id),
         "OnCapitalSystemChanged",
@@ -357,7 +367,7 @@ fn collect_sov_structures(ctx: &ServerContext, sys_id: u32) -> Vec<PyRep> {
         let aid = snap.system_states.get(&sys_id).and_then(|s| s.sov_alliance_id);
         snap.structures
             .values()
-            .filter(|s| s.solar_system_id == sys_id)
+            .filter(|s| s.solar_system_id == sys_id && !s.state.eq_ignore_ascii_case("destroyed"))
             .map(|s| {
                 let vuln = snap
                     .structure_vulnerability_windows
@@ -526,7 +536,7 @@ pub async fn handle(
                 }));
             }
 
-            let destroyed_count = ctx.db.with_mut_snapshot(|snap| {
+            let destroyed_ids = ctx.db.with_mut_snapshot(|snap| {
                 let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 let skyhook_ids: Vec<i64> = snap
                     .structures
@@ -537,12 +547,11 @@ pub async fn handle(
                 for sid in &skyhook_ids {
                     snap.structures.remove(sid);
                 }
-                skyhook_ids.len()
+                skyhook_ids
             });
 
-            let structs = collect_sov_structures(ctx, sys_id);
-            emit_sov_structures_updated(ctx, sys_id, structs);
-            Some(Ok(PyRep::Integer(destroyed_count as i64)))
+            emit_sov_structures_updated(ctx, sys_id, &destroyed_ids);
+            Some(Ok(PyRep::Integer(destroyed_ids.len() as i64)))
         }
 
         ("colonyResourcesMgr", "GetMyCorporationSkyhooks") => {

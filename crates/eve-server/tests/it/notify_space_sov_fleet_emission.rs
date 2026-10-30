@@ -386,7 +386,7 @@ async fn test_sovereignty_and_enlistment_notifications() {
     });
 
     sov_services::claim_system_sovereignty(&ctx, JITA, alliance_id, corp_id, 990_001).expect("claim_system_sovereignty");
-    assert_eq!(events(&ctx, P1, "OnSovereigntyChanged"), vec![vec![PyRep::Integer(i64::from(JITA)), PyRep::Integer(alliance_id), PyRep::Integer(corp_id)]]);
+    assert_eq!(events(&ctx, P1, "OnSovereigntyChanged"), vec![vec![PyRep::Integer(i64::from(JITA)), PyRep::Integer(alliance_id)]]);
     assert_eq!(events(&ctx, P1, "OnSolarSystemSovStructuresUpdated").len(), 1);
     assert_eq!(events(&ctx, P1, "OnCapitalSystemChanged"), vec![vec![PyRep::Tuple(vec![PyRep::Integer(alliance_id), PyRep::None, PyRep::Integer(i64::from(JITA))])]] );
     assert_eq!(events(&ctx, P1, "OnSovereigntyAudioEvent").len(), 1);

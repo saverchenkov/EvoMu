@@ -26,28 +26,25 @@ use glam::DVec3;
 #[tokio::test]
 async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_tenebrex() {
     // parity: feat:sovereignty.sov-hub-fuel
-    // parity: feat:sovereignty.sov-power
-    // parity: feat:sovereignty.sov-workforce
+    // DATA GAP: feat:sovereignty.sov-power — server-only celestial power table (docs/BLOCKERS.md §7)
+    // DATA GAP: feat:sovereignty.sov-workforce — server-only celestial workforce table (docs/BLOCKERS.md §7)
     // parity: feat:sovereignty.sov-hub-upgrades
     // parity: feat:sovereignty.sov-upgrade-sites
     // parity: feat:sovereignty.sov-hub-hacking
     // parity: feat:sovereignty.sov-structures-flex
     // parity: feat:modules.cynosural-field-jammer-structure
     // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj
+    // DATA GAP: quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj — server-only star power table (docs/BLOCKERS.md §7)
     // parity: notify:OnSovHubHacked
     // parity: notify:OnCynoJammerChanged
     eve_testkit::attest(&[
         "feat:sovereignty.sov-hub-fuel",
-        "feat:sovereignty.sov-power",
-        "feat:sovereignty.sov-workforce",
         "feat:sovereignty.sov-hub-upgrades",
         "feat:sovereignty.sov-upgrade-sites",
         "feat:sovereignty.sov-hub-hacking",
         "feat:sovereignty.sov-structures-flex",
         "feat:modules.cynosural-field-jammer-structure",
         "quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj",
         "notify:OnSovHubHacked",
         "notify:OnCynoJammerChanged",
     ]);
@@ -81,6 +78,13 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
         snap.system_states.entry(neighbor_sys).or_default();
         snap.structures.insert(hub_a, structure(hub_a, CORP, null_sys, TYPE_SOVEREIGNTY_HUB));
         snap.structures.insert(hub_b, structure(hub_b, CORP, neighbor_sys, TYPE_SOVEREIGNTY_HUB));
+        for (sys, base_sh) in [(null_sys, 1_060_000_100i64), (neighbor_sys, 1_060_000_200i64)] {
+            for (idx, cel) in ctx.sde.celestials_in_system(sys).into_iter().filter(|c| c.group_id == 7).enumerate() {
+                let sh_id = base_sh + idx as i64;
+                snap.structures.insert(sh_id, structure(sh_id, CORP, sys, eve_server::services::sov_services::TYPE_ORBITAL_SKYHOOK));
+                snap.sov_runtime.skyhook_planets.insert(sh_id, cel.celestial_id);
+            }
+        }
         for (iid, tid, loc, qty) in [
             (995_001, TYPE_MAGMATIC_GAS, hub_a, 5_000),
             (995_002, TYPE_SUPERIONIC_ICE, hub_a, 5_000),
@@ -89,8 +93,7 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
             (995_005, UPGRADE_CYNOSURAL_NAVIGATION, hub_a, 1),
             (995_006, UPGRADE_CYNOSURAL_SUPPRESSION, hub_a, 1),
             (995_007, UPGRADE_ADVANCED_LOGISTICS_NETWORK, hub_a, 1),
-            (995_008, 88_227, hub_a, 1), // Power Monitoring Division 3 (+750 power)
-            (995_009, 88_229, hub_a, 1), // Workforce Mecha-Tooling 3 (+6000 workforce)
+            (995_009, 87_710, hub_a, 1), // Workforce Mecha-Tooling 1 (200 p, +5,000 wf, 8 Ice/hr)
             (995_020, TYPE_ANSIBLEX_JUMP_BRIDGE, PILOT_SHIP, 1),
             (995_021, TYPE_PHAROLUX_CYNO_BEACON, PILOT_SHIP, 1),
             (995_022, TYPE_TENEBREX_CYNO_JAMMER, PILOT_SHIP, 1),
@@ -198,7 +201,7 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
 
     let (mut exp, mut exp_cfg, mut cfg_b) = (Vec::new(), Vec::new(), id_req(1, hub_b as u64));
     encode_bytes_field(3, &idm(null_sys as u64), &mut exp);
-    encode_varint_field(2, 500, &mut exp);
+    encode_varint_field(2, 3_500, &mut exp);
     encode_bytes_field(3, &exp, &mut exp_cfg);
     encode_bytes_field(2, &exp_cfg, &mut cfg_b);
     assert_eq!(rpc(&ctx, &mut s_dir, "eve_public.sovereignty.hub.workforce.api.ConfigureRequest", cfg_b).await.status_code, STATUS_OK);
@@ -211,7 +214,7 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
     assert_eq!(rpc(&ctx, &mut s_dir, "eve_public.sovereignty.hub.workforce.api.ConfigureRequest", cfg_a).await.status_code, STATUS_OK);
 
     let wf_after = rpc(&ctx, &mut s_dir, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, hub_a as u64)).await.payload.unwrap().value;
-    assert_eq!(varint(&field(&wf_after, 2).unwrap(), 1).unwrap_or(0), base_wf_a + 500);
+    assert_eq!(varint(&field(&wf_after, 2).unwrap(), 1).unwrap_or(0), base_wf_a + 3_500);
 
     // 3. Fuel Hub, install + online upgrades, and verify Sovereign Combat + Prospecting anomalies spawn via `tick_background_cluster`!
     for (fuel_iid, amt) in [(995_001i64, 3_000u64), (995_002i64, 3_000u64)] {
@@ -221,10 +224,10 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
         assert_eq!(rpc(&ctx, &mut s_dir, "eve_public.sovereignty.hub.fuel.api.AddRequest", add).await.status_code, STATUS_OK);
     }
     let mut proc = Vec::new();
-    for iid in [995_008u64, 995_009, 995_003, 995_004, 995_005, 995_006, 995_007] {
+    for iid in [995_009u64, 995_003, 995_004, 995_005, 995_006, 995_007] {
         encode_bytes_field(1, &idm(iid), &mut proc);
     }
-    for tid in [88_227u64, 88_229, UPGRADE_MAJOR_THREAT_DETECTION as u64, UPGRADE_PROSPECTING_ARRAY as u64] {
+    for tid in [87_710u64, UPGRADE_MAJOR_THREAT_DETECTION as u64, UPGRADE_PROSPECTING_ARRAY as u64] {
         let mut cfg = Vec::new();
         encode_bytes_field(1, &idm(tid), &mut cfg);
         encode_varint_field(2, 1, &mut cfg);
@@ -338,12 +341,19 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
         );
     }
 
-    // Online Cynosural Suppression upgrade via authentic Quasar ProcessConfigurationRequest
+    // Online Cynosural Suppression upgrade (offlining Prospecting Array to stay within 1,100p / 10,000wf V24 budget)
     let mut on_proc = Vec::new();
-    let mut cfg = Vec::new();
-    encode_bytes_field(1, &idm(UPGRADE_CYNOSURAL_SUPPRESSION as u64), &mut cfg);
-    encode_varint_field(2, 1, &mut cfg);
-    encode_bytes_field(2, &cfg, &mut on_proc);
+    for (tid, online) in [
+        (87_710u64, 1u64),
+        (UPGRADE_MAJOR_THREAT_DETECTION as u64, 1),
+        (UPGRADE_PROSPECTING_ARRAY as u64, 0),
+        (UPGRADE_CYNOSURAL_SUPPRESSION as u64, 1),
+    ] {
+        let mut cfg = Vec::new();
+        encode_bytes_field(1, &idm(tid), &mut cfg);
+        encode_varint_field(2, online, &mut cfg);
+        encode_bytes_field(2, &cfg, &mut on_proc);
+    }
     encode_bytes_field(3, &idm(hub_a as u64), &mut on_proc);
     assert_eq!(rpc(&ctx, &mut s_dir, "eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationRequest", on_proc).await.status_code, STATUS_OK);
 

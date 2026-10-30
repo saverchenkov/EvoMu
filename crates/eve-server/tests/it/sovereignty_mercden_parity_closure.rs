@@ -6,7 +6,7 @@
 
 use crate::quasar_sov_equinox_hub::structure;
 use crate::sovereignty_equinox_gameplay_closure::{
-    drain_notif_events, fit_siege_artillery, lock_target_via_rpc, make_ball, open_sqlite_ctx,
+    drain_notif_events, fit_subcap_blasters, lock_target_via_rpc, make_ball, open_sqlite_ctx,
     place_ship_ball, register_online_pilot, rpc_call, set_pilot_location, step_weapon_ticks,
     temp_sqlite_path, ALLIANCE, CORP, PILOT, PILOT_SHIP,
 };
@@ -284,12 +284,21 @@ async fn test_sov_hub_anchor_claim_and_loss_notifications_parity() {
     assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&null_sys].sov_alliance_id), Some(ALLIANCE));
     let claim_notifs = ctx.drain_notifications_for_char(PILOT);
     let sov_claim = claim_notifs.iter().find(|n| n.event == "OnSovereigntyChanged").expect("claim OnSovereigntyChanged");
+    assert_eq!(sov_claim.args.len(), 2);
     assert_eq!(sov_claim.args[0].as_i64(), Some(null_sys as i64));
     assert_eq!(sov_claim.args[1].as_i64(), Some(ALLIANCE));
-    assert_eq!(
-        claim_notifs.iter().filter(|n| n.event == "OnSolarSystemSovStructuresUpdated").count(),
-        1
-    );
+    let sov_struct_claim = claim_notifs
+        .iter()
+        .find(|n| n.event == "OnSolarSystemSovStructuresUpdated")
+        .expect("claim OnSolarSystemSovStructuresUpdated");
+    assert_eq!(sov_struct_claim.args.len(), 3);
+    assert_eq!(sov_struct_claim.args[0].as_i64(), Some(null_sys as i64));
+    let PyRep::List(claim_rows) = &sov_struct_claim.args[1] else { panic!("expected List of sov structures") };
+    assert_eq!(claim_rows.len(), 1);
+    assert_eq!(claim_rows[0].dict_get("itemID").and_then(|v| v.as_i64()), Some(hub_id));
+    assert_eq!(claim_rows[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(i64::from(TYPE_SOVEREIGNTY_HUB)));
+    let PyRep::Dict(claim_changes) = &sov_struct_claim.args[2] else { panic!("expected Dict of sov structure changes") };
+    assert!(claim_changes.iter().any(|(k, _)| k.as_i64() == Some(hub_id)));
 
     // 4. Hostile Entosis capture of Sovereignty Hub + Command Nodes destroys Hub, clears sov, and emits BOTH loss notifications!
     set_pilot_location(&ctx, &mut s_hostile, null_sys, None);
@@ -364,12 +373,19 @@ async fn test_sov_hub_anchor_claim_and_loss_notifications_parity() {
     assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&null_sys].sov_alliance_id), None);
     let loss_notifs = ctx.drain_notifications_for_char(PILOT);
     let sov_loss = loss_notifs.iter().find(|n| n.event == "OnSovereigntyChanged").expect("loss OnSovereigntyChanged");
+    assert_eq!(sov_loss.args.len(), 2);
     assert_eq!(sov_loss.args[0].as_i64(), Some(null_sys as i64));
     assert_eq!(sov_loss.args[1], PyRep::None);
-    assert_eq!(
-        loss_notifs.iter().filter(|n| n.event == "OnSolarSystemSovStructuresUpdated").count(),
-        1
-    );
+    let sov_struct_loss = loss_notifs
+        .iter()
+        .find(|n| n.event == "OnSolarSystemSovStructuresUpdated")
+        .expect("loss OnSolarSystemSovStructuresUpdated");
+    assert_eq!(sov_struct_loss.args.len(), 3);
+    assert_eq!(sov_struct_loss.args[0].as_i64(), Some(null_sys as i64));
+    let PyRep::List(loss_rows) = &sov_struct_loss.args[1] else { panic!("expected List of sov structures") };
+    assert!(loss_rows.is_empty(), "destroyed Hub must be excluded from active sov structures");
+    let PyRep::Dict(loss_changes) = &sov_struct_loss.args[2] else { panic!("expected Dict of sov structure changes") };
+    assert!(loss_changes.iter().any(|(k, _)| k.as_i64() == Some(hub_id)));
 
     drop(ctx);
     let _ = std::fs::remove_file(&db_path);
@@ -428,27 +444,10 @@ async fn test_sov_dev_indices_and_adm_live_entosis_scaling_parity() {
     );
     claim_system_sovereignty(&ctx, sys_adm1, ALLIANCE, CORP, hub_adm1).expect("claim sys_adm1 at ADM 1.0");
 
-    fit_siege_artillery(&ctx, PILOT, PILOT_SHIP, 981_000);
+    fit_subcap_blasters(&ctx, PILOT, PILOT_SHIP, 981_000);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.remove(&981_004);
-        snap.items.remove(&981_005);
-        snap.module_online_states.remove(&981_004);
         snap.skills.entry(PILOT).or_default().insert(3_386, TrainedSkillRecord { type_id: 3_386, level: 5, skill_points: 256_000.0 });
-        snap.items.insert(
-            981_050,
-            InventoryItemRecord {
-                item_id: 981_050,
-                type_id: 483,
-                owner_id: PILOT,
-                location_id: PILOT_SHIP,
-                flag: InventoryFlag::HiSlot2,
-                quantity: 1,
-                singleton: true,
-                ..Default::default()
-            },
-        );
-        snap.module_online_states.insert(981_050, true);
-        for (i, flg) in [InventoryFlag::LoSlot0, InventoryFlag::LoSlot1].into_iter().enumerate() {
+        for (i, flg) in [InventoryFlag::LoSlot3, InventoryFlag::LoSlot4, InventoryFlag::LoSlot5].into_iter().enumerate() {
             let iid = 981_060 + i as i64;
             snap.items.insert(
                 iid,
@@ -465,29 +464,57 @@ async fn test_sov_dev_indices_and_adm_live_entosis_scaling_parity() {
             );
             snap.module_online_states.insert(iid, true);
         }
+        for (i, flg) in [InventoryFlag::RigSlot0, InventoryFlag::RigSlot1, InventoryFlag::RigSlot2].into_iter().enumerate() {
+            let iid = 981_070 + i as i64;
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: 31_125,
+                    owner_id: PILOT,
+                    location_id: PILOT_SHIP,
+                    flag: flg,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(iid, true);
+        }
     });
     ctx.invalidate_ship_fitting(PILOT_SHIP);
-    place_ship_ball(&ctx, sys_high, PILOT, PILOT_SHIP, 19_722, pos + DVec3::new(2_500.0, 0.0, 0.0)).await;
-    ctx.set_invention_roll_override(Some(0.50));
+    place_ship_ball(&ctx, sys_high, PILOT, PILOT_SHIP, 16_229, pos + DVec3::new(2_500.0, 0.0, 0.0)).await;
+    ctx.set_invention_roll_override(Some(0.005));
     let _ = drain_notif_events(&ctx, PILOT);
 
     for idx in 0..15i64 {
         let rat_id = 890_001 + idx;
-        let mut rat_cs = ctx.build_type_combat_state(17_005);
-        rat_cs.signature_radius = 40_000.0;
-        rat_cs.max_shield_hp = 10.0;
-        rat_cs.shield_hp = 10.0;
-        rat_cs.max_armor_hp = 10.0;
-        rat_cs.armor_hp = 10.0;
-        rat_cs.max_structure_hp = 10.0;
-        rat_cs.structure_hp = 10.0;
-        let _ = ctx.systems.get_or_spawn(sys_high).spawn_ball_with_combat(make_ball(rat_id, 17_005, pos + DVec3::new(3_500.0 + (idx as f64) * 50.0, 0.0, 0.0)), rat_cs).await;
+        let rat_cs = ctx.build_type_combat_state(17_005);
+        let _ = ctx
+            .systems
+            .get_or_spawn(sys_high)
+            .spawn_ball_with_combat(make_ball(rat_id, 17_005, pos + DVec3::new(3_500.0 + (idx as f64) * 50.0, 0.0, 0.0)), rat_cs)
+            .await;
         lock_target_via_rpc(&ctx, &mut s_def, sys_high, PILOT_SHIP, rat_id).await;
-        let gun_id = if idx % 2 == 0 { 981_000 } else { 981_002 };
-        rpc_call(&ctx, &mut s_def, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::Integer(rat_id)])
-            .await
-            .expect("kill Guristas rat");
-        step_weapon_ticks(&ctx, sys_high).await;
+        let mut killed = false;
+        for round in 0..35 {
+            for gun_id in (0..6).map(|g| 981_000 + g * 2) {
+                let res = rpc_call(&ctx, &mut s_def, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::Integer(rat_id)])
+                    .await
+                    .expect("kill Guristas rat");
+                if res.dict_get("destroyed") == Some(&PyRep::Bool(true)) {
+                    killed = true;
+                    break;
+                }
+            }
+            if killed {
+                break;
+            }
+            if round % 15 == 14 {
+                step_weapon_ticks(&ctx, sys_high).await;
+            }
+        }
+        assert!(killed, "Guristas rat {rat_id} must be destroyed by subcap blasters");
         if idx == 3 {
             assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&sys_high].military_index), 0);
         } else if idx == 4 {
@@ -502,6 +529,32 @@ async fn test_sov_dev_indices_and_adm_live_entosis_scaling_parity() {
         ctx.drain_notifications_for_char(PILOT).iter().filter(|n| n.event == "OnSolarSystemDevIndexChanged").count(),
         1
     );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship_it) = snap.items.get_mut(&PILOT_SHIP) {
+            ship_it.type_id = 19_722;
+        }
+        for id in 981_000..=981_011 {
+            snap.items.remove(&id);
+            snap.module_online_states.remove(&id);
+        }
+        snap.items.insert(
+            981_050,
+            InventoryItemRecord {
+                item_id: 981_050,
+                type_id: 483,
+                owner_id: PILOT,
+                location_id: PILOT_SHIP,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(981_050, true);
+    });
+    ctx.invalidate_ship_fitting(PILOT_SHIP);
+    place_ship_ball(&ctx, sys_high, PILOT, PILOT_SHIP, 19_722, pos + DVec3::new(2_500.0, 0.0, 0.0)).await;
 
     let rock_id = 890_050i64;
     ctx.systems

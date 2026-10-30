@@ -12,7 +12,9 @@
 #![forbid(unsafe_code)]
 
 use super::quasar_space_services::{effective_roles, get_identifier_or_int, get_int_field};
-use super::sov_services::{TYPE_MAGMATIC_GAS, TYPE_SOVEREIGNTY_HUB, TYPE_SUPERIONIC_ICE};
+use super::sov_services::{
+    TYPE_MAGMATIC_GAS, TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB, TYPE_SUPERIONIC_ICE,
+};
 use crate::quasar_gateway::{
     NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_INTERNAL_ERROR,
     STATUS_NOT_FOUND, STATUS_UNAUTHORIZED,
@@ -183,60 +185,64 @@ fn split_tier(name: &str) -> (&str, u64) {
     }
 }
 
-/// Builds the definition of an SDE Sovereignty Hub upgrade type.
-///
-/// Installation types, tiers (name suffix) and production lines come from SDE `invTypes`.
-/// DERIVED (synthetic — the client `sovereigntyupgrades` FSD table with per-type power /
-/// workforce / fuel numbers is not part of the EvoMu SDE import): costs follow a per-group,
-/// per-tier server balance table.
+/// Builds the definition of an SDE Sovereignty Hub upgrade type using CCP's V24
+/// `sovereigntyUpgrades` values (`Sovereignty.md:124-199`).
 pub fn upgrade_definition(sde: &SdeRegistry, type_id: u32) -> Option<UpgradeDefinition> {
     let t = sde.types.get(&type_id)?;
     if !t.published || !SOV_HUB_UPGRADE_GROUPS.contains(&t.group_id) {
         return None;
     }
-    let (base, tier) = split_tier(&t.name);
-    let mut d = UpgradeDefinition {
+    let (base, _) = split_tier(&t.name);
+    let (power_required, workforce_required, fuel_type, fuel_per_hour, exclusive_group, power_produced, workforce_produced) =
+        match type_id {
+            // Group 4772: Sovereignty Hub Service Infrastructure Upgrades
+            81_623 => (1_750, 17_500, TYPE_SUPERIONIC_ICE, 90, base, 0, 0),
+            81_621 => (500, 18_100, TYPE_SUPERIONIC_ICE, 25, base, 0, 0),
+            81_619 => (250, 4_500, TYPE_MAGMATIC_GAS, 205, base, 0, 0),
+            81_615 => (250, 1_500, TYPE_MAGMATIC_GAS, 205, base, 0, 0),
+            // Group 4768: Sovereignty Hub Site Detection Upgrades (all 0 reagents/hr in V24)
+            82_499 => (200, 1_800, 0, 0, base, 0, 0),
+            82_500 => (500, 3_800, 0, 0, base, 0, 0),
+            82_492 => (700, 5_400, 0, 0, base, 0, 0),
+            82_496 => (400, 2_700, 0, 0, base, 0, 0),
+            82_497 => (900, 5_400, 0, 0, base, 0, 0),
+            82_498 => (1_300, 7_300, 0, 0, base, 0, 0),
+            82_579 | 82_581 | 82_583 | 82_585 | 82_587 | 82_589 | 82_591 => {
+                (450, 6_400, 0, 0, base, 0, 0)
+            }
+            82_580 | 82_582 | 82_584 | 82_586 | 82_588 | 82_590 | 82_592 => {
+                (1_220, 12_700, 0, 0, base, 0, 0)
+            }
+            87_702 | 87_704 | 87_705 | 87_706 | 87_707 | 87_708 | 87_709 => {
+                (1_800, 18_100, 0, 0, base, 0, 0)
+            }
+            87_948 => (400, 4_000, 0, 0, base, 0, 0),
+            87_953 => (850, 8_000, 0, 0, base, 0, 0),
+            87_954 => (1_300, 12_000, 0, 0, base, 0, 0),
+            // Group 4839: Sovereignty Hub System Effect Generator Upgrades
+            87_815 | 87_949 | 87_950 | 87_951 => {
+                (200, 2_700, TYPE_MAGMATIC_GAS, 7, "SystemEffectGenerator", 0, 0)
+            }
+            // Group 4838: Sovereignty Hub Colony Resources Management Upgrades (`Sovereignty.md:36` — mutually exclusive across the group)
+            87_703 => (0, 2_500, TYPE_SUPERIONIC_ICE, 8, "ResourceManagement", 200, 0),
+            88_221 => (0, 10_000, TYPE_SUPERIONIC_ICE, 25, "ResourceManagement", 500, 0),
+            88_227 => (0, 25_000, TYPE_SUPERIONIC_ICE, 42, "ResourceManagement", 1_000, 0),
+            87_710 => (200, 0, TYPE_SUPERIONIC_ICE, 8, "ResourceManagement", 0, 5_000),
+            88_228 => (500, 0, TYPE_SUPERIONIC_ICE, 25, "ResourceManagement", 0, 10_000),
+            88_229 => (800, 0, TYPE_SUPERIONIC_ICE, 42, "ResourceManagement", 0, 15_000),
+            _ => return None,
+        };
+    Some(UpgradeDefinition {
         type_id,
-        power_required: 0,
-        workforce_required: 0,
-        fuel_type: TYPE_MAGMATIC_GAS,
-        fuel_per_hour: (5 * tier) as u32,
-        fuel_startup: (50 * tier) as u32,
-        exclusive_group: base.to_string(),
-        power_produced: 0,
-        workforce_produced: 0,
-    };
-    match t.group_id {
-        4772 => {
-            d.power_required = 250;
-            d.workforce_required = 3_000;
-            d.fuel_type = TYPE_SUPERIONIC_ICE;
-            d.fuel_per_hour = 10;
-            d.fuel_startup = 100;
-        }
-        4839 => {
-            d.power_required = 400;
-            d.workforce_required = 4_000;
-            d.fuel_per_hour = 15;
-            d.fuel_startup = 200;
-            d.exclusive_group = "SystemEffectGenerator".into();
-        }
-        4838 if base.starts_with("Power") => {
-            d.workforce_required = 500 * tier;
-            d.power_produced = 250 * tier;
-            d.fuel_type = TYPE_SUPERIONIC_ICE;
-        }
-        4838 => {
-            d.power_required = 200 * tier;
-            d.workforce_produced = 2_000 * tier;
-            d.fuel_type = TYPE_SUPERIONIC_ICE;
-        }
-        _ => {
-            d.power_required = 200 * tier;
-            d.workforce_required = 1_000 * tier;
-        }
-    }
-    Some(d)
+        power_required,
+        workforce_required,
+        fuel_type,
+        fuel_per_hour,
+        fuel_startup: 0,
+        exclusive_group: exclusive_group.to_string(),
+        power_produced,
+        workforce_produced,
+    })
 }
 
 /// All published SDE Sovereignty Hub upgrade definitions, ordered by type id.
@@ -281,14 +287,15 @@ pub fn star_power(sde: &SdeRegistry, star_type_id: u32) -> u64 {
 /// `resource.planet.api.GetAllDefinitionsRequest` and the hub resource computation.
 ///
 /// DERIVED (synthetic — the client `sovereignty resource planet definitions` table is not part of
-/// the EvoMu SDE import): Temperate / Oceanic / Barren planets yield workforce, Gas / Storm /
-/// Plasma planets yield power, Ice / Lava planets yield colony reagents instead.
+/// the EvoMu SDE import; see `docs/BLOCKERS.md` §7): Temperate / Oceanic / Barren planets yield
+/// workforce, Plasma > Storm > Gas planets yield power (`Sovereignty.md:107-110`), and Ice /
+/// Oceanic (`Superionic Ice`) plus Lava (`Magmatic Gas`) yield colony reagents via Orbital Skyhooks.
 pub const PLANET_RESOURCE_TABLE: [(u32, &str, u64, u64); 8] = [
     (11, "Temperate", 0, 1_500),
     (2014, "Oceanic", 0, 1_000),
     (2016, "Barren", 0, 500),
     (13, "Gas", 150, 0),
-    (2017, "Storm", 100, 0),
+    (2017, "Storm", 175, 0),
     (2063, "Plasma", 200, 0),
     (12, "Ice", 0, 0),
     (2015, "Lava", 0, 0),
@@ -344,75 +351,129 @@ fn is_active(u: &PersistedHubUpgrade) -> bool {
     u.online && !u.low_power
 }
 
-/// Computes hub resources from the SDE system yield, active upgrades and workforce transfers.
-pub fn compute_hub_resources(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -> Option<HubResources> {
+/// Returns `true` when `planet_id` in `sys_id` has an active, non-destroyed Orbital Skyhook (`81080`).
+pub fn is_planet_harvested_by_active_skyhook(
+    snap: &WorldStateSnapshot,
+    sys_id: u32,
+    planet_id: i64,
+) -> bool {
+    snap.sov_runtime.skyhook_planets.iter().any(|(&sh_id, &pid)| {
+        pid == planet_id
+            && snap.structures.get(&sh_id).is_some_and(|s| {
+                s.solar_system_id == sys_id
+                    && s.type_id == TYPE_ORBITAL_SKYHOOK
+                    && !s.state.eq_ignore_ascii_case("destroyed")
+            })
+            && snap
+                .sov_runtime
+                .skyhook_active
+                .get(&sh_id)
+                .copied()
+                .unwrap_or(true)
+    })
+}
+
+fn hub_local_and_base_pool(
+    snap: &WorldStateSnapshot,
+    sde: &SdeRegistry,
+    hub_id: i64,
+) -> Option<(u64, u64, u64, u64)> {
     let st = snap.structures.get(&hub_id)?;
-    let y = system_yield(sde, st.solar_system_id);
-    let celestials = sde.celestials_in_system(st.solar_system_id);
-    let mut siphoned_w: u64 = 0;
-    for d in snap
-        .sov_runtime
-        .mercenary_dens
-        .values()
-        .filter(|d| d.solar_system_id == st.solar_system_id && d.enabled)
-    {
-        let stage = super::quasar_sov_mercden::stage_for_level(d.anarchy_level);
-        let pct = super::quasar_sov_mercden::anarchy_workforce_disruption_pct(stage);
-        if pct > 0 {
-            let host_wf = celestials
-                .iter()
-                .find(|c| c.celestial_id == d.planet_id)
-                .map(|c| planet_yield(c.type_id).1)
-                .filter(|&w| w > 0)
-                .unwrap_or_else(|| planet_yield(11).1);
-            siphoned_w += (host_wf * pct) / 100;
+    let sys_id = st.solar_system_id;
+    let mut star_p = 0u64;
+    let mut harvested_p = 0u64;
+    let mut harvested_w = 0u64;
+    for c in sde.celestials_in_system(sys_id) {
+        if c.group_id == GROUP_SUN {
+            star_p += star_power(sde, c.type_id);
+        } else if c.group_id == GROUP_PLANET
+            && is_planet_harvested_by_active_skyhook(snap, sys_id, c.celestial_id)
+        {
+            let (p, mut w) = planet_yield(c.type_id);
+            if w > 0 {
+                let siphoned: u64 = snap
+                    .sov_runtime
+                    .mercenary_dens
+                    .values()
+                    .filter(|d| {
+                        d.solar_system_id == sys_id && d.enabled && d.planet_id == c.celestial_id
+                    })
+                    .map(|d| {
+                        let stage = super::quasar_sov_mercden::stage_for_level(d.anarchy_level);
+                        let pct = super::quasar_sov_mercden::anarchy_workforce_disruption_pct(stage);
+                        (w * pct) / 100
+                    })
+                    .sum();
+                w = w.saturating_sub(siphoned);
+            }
+            harvested_p += p;
+            harvested_w += w;
         }
     }
-    let effective_workforce = y.planet_workforce.saturating_sub(siphoned_w);
+    let power_local = star_p + harvested_p;
+    let workforce_local = harvested_w;
+    let imported: u64 = super::quasar_sov_workforce::imports(snap, hub_id)
+        .iter()
+        .map(|s| s.1)
+        .sum();
+    let exported = super::quasar_sov_workforce::exported_amount(snap, hub_id);
+    let base_workforce = (workforce_local + imported).saturating_sub(exported);
+    Some((power_local, workforce_local, power_local, base_workforce))
+}
+
+/// Computes hub resources from SDE star power, Orbital Skyhook planetary harvest, active upgrades, and workforce transfers.
+pub fn compute_hub_resources(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -> Option<HubResources> {
+    let (power_local, workforce_local, base_p, base_w) =
+        hub_local_and_base_pool(snap, sde, hub_id)?;
     let mut r = HubResources {
-        power_local: y.stars.iter().map(|s| s.1).sum::<u64>() + y.planet_power,
-        workforce_local: effective_workforce,
+        power_local,
+        workforce_local,
         ..Default::default()
     };
     let (mut produced_p, mut produced_w) = (0u64, 0u64);
     if let Some(h) = snap.sov_runtime.sov_hubs.get(&hub_id) {
-        for d in h.upgrades.iter().filter(|u| is_active(u)).filter_map(|u| upgrade_definition(sde, u.type_id)) {
+        for d in h
+            .upgrades
+            .iter()
+            .filter(|u| is_active(u))
+            .filter_map(|u| upgrade_definition(sde, u.type_id))
+        {
             r.power_allocated += d.power_required;
             r.workforce_allocated += d.workforce_required;
             produced_p += d.power_produced;
             produced_w += d.workforce_produced;
         }
     }
-    let imported: u64 = super::quasar_sov_workforce::imports(snap, hub_id).iter().map(|s| s.1).sum();
-    let exported = super::quasar_sov_workforce::exported_amount(snap, hub_id);
-    r.power_available = r.power_local + produced_p;
-    r.workforce_available = (r.workforce_local + produced_w + imported).saturating_sub(exported);
+    r.power_available = base_p + produced_p;
+    r.workforce_available = base_w + produced_w;
     Some(r)
 }
 
-/// Takes consumer upgrades into `low_power = true` if power or workforce is overloaded
-/// (e.g. when a Power Monitoring upgrade runs out of fuel or anarchy siphons workforce).
+/// Evaluates active upgrades strictly in priority-slot order (`0..upgrades.len()`), dropping any
+/// slot whose power/workforce demand exceeds the base pool plus output of strictly higher-priority
+/// slots into `low_power = true` (`Sovereignty.md:124`).
 pub fn enforce_hub_power_overload(snap: &mut WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -> bool {
+    let Some((_, _, mut running_p, mut running_w)) = hub_local_and_base_pool(snap, sde, hub_id)
+    else {
+        return false;
+    };
+    let Some(h) = snap.sov_runtime.sov_hubs.get_mut(&hub_id) else {
+        return false;
+    };
     let mut changed = false;
-    loop {
-        let Some(r) = compute_hub_resources(snap, sde, hub_id) else {
-            break;
-        };
-        if r.power_allocated <= r.power_available && r.workforce_allocated <= r.workforce_available {
-            break;
+    for u in &mut h.upgrades {
+        if !is_active(u) {
+            continue;
         }
-        let Some(h) = snap.sov_runtime.sov_hubs.get_mut(&hub_id) else {
-            break;
+        let Some(d) = upgrade_definition(sde, u.type_id) else {
+            continue;
         };
-        if let Some(u) = h.upgrades.iter_mut().rev().find(|u| {
-            is_active(u)
-                && upgrade_definition(sde, u.type_id)
-                    .is_some_and(|d| d.power_required > 0 || d.workforce_required > 0)
-        }) {
+        if d.power_required <= running_p && d.workforce_required <= running_w {
+            running_p = running_p - d.power_required + d.power_produced;
+            running_w = running_w - d.workforce_required + d.workforce_produced;
+        } else {
             u.low_power = true;
             changed = true;
-        } else {
-            break;
         }
     }
     changed
@@ -492,14 +553,15 @@ pub fn simulate_fuel(sde: &SdeRegistry, hub: &mut PersistedSovHubData, now: u64)
     let mut changed = false;
     for u in hub.upgrades.iter_mut().filter(|u| is_active(u)) {
         let Some(d) = upgrade_definition(sde, u.type_id) else { continue };
+        if d.fuel_type == 0 || d.fuel_per_hour == 0 {
+            continue;
+        }
         let need = u64::from(d.fuel_per_hour) * hours;
         let have = hub.fuel.entry(d.fuel_type).or_insert(0);
         if u64::from(*have) >= need {
             *have -= need as u32;
         } else {
-            if d.fuel_per_hour > 0 {
-                *have %= d.fuel_per_hour;
-            }
+            *have %= d.fuel_per_hour;
             u.low_power = true;
             changed = true;
         }
@@ -538,9 +600,11 @@ pub(crate) fn encode_definition(d: &UpgradeDefinition) -> Vec<u8> {
     id_field(1, d.type_id as u64, &mut b);
     encode_varint_field(2, d.power_required, &mut b);
     encode_varint_field(3, d.workforce_required, &mut b);
-    id_field(4, d.fuel_type as u64, &mut b);
-    encode_varint_field(5, d.fuel_per_hour as u64, &mut b);
-    encode_varint_field(6, d.fuel_startup as u64, &mut b);
+    if d.fuel_type > 0 {
+        id_field(4, d.fuel_type as u64, &mut b);
+        encode_varint_field(5, d.fuel_per_hour as u64, &mut b);
+        encode_varint_field(6, d.fuel_startup as u64, &mut b);
+    }
     encode_string_field(7, &d.exclusive_group, &mut b);
     encode_varint_field(8, d.power_produced, &mut b);
     encode_varint_field(9, d.workforce_produced, &mut b);
@@ -615,20 +679,9 @@ fn repeated(msg: &DynamicQuasarMessage, field: u32) -> Vec<&DynamicQuasarMessage
     }
 }
 
-/// Validates that the hub's active upgrades fit its power / workforce budget.
-fn check_budget(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -> Result<(), RpcError> {
-    let r = compute_hub_resources(snap, sde, hub_id).ok_or((STATUS_NOT_FOUND, format!("Sovereignty hub {hub_id} not found")))?;
-    if r.power_allocated > r.power_available {
-        return Err((STATUS_BAD_REQUEST, format!("Insufficient power: {} required, {} available", r.power_allocated, r.power_available)));
-    }
-    if r.workforce_allocated > r.workforce_available {
-        return Err((STATUS_BAD_REQUEST, format!("Insufficient workforce: {} required, {} available", r.workforce_allocated, r.workforce_available)));
-    }
-    Ok(())
-}
-
-/// Applies `ProcessConfigurationRequest` to the world: installs upgrade items, toggles online
-/// state (charging fuel startup cost), validates budgets, and returns the hub's solar system.
+/// Applies `ProcessConfigurationRequest` to the world: installs upgrade items, reorders priority
+/// slots when configured, toggles online state, transitions any overloaded lower-priority slots into
+/// `POWER_STATE_LOW` (`Sovereignty.md:38-39`), and returns the hub's solar system.
 fn process_configuration(
     snap: &mut WorldStateSnapshot,
     sde: &SdeRegistry,
@@ -639,8 +692,7 @@ fn process_configuration(
     now: u64,
 ) -> Result<u32, RpcError> {
     let sys = owned_structure(snap, caller, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?.solar_system_id;
-    let original = snap.clone_sov_hub(hub_id);
-    let mut hub = original.clone();
+    let mut hub = snap.clone_sov_hub(hub_id);
     let mut consumed = Vec::new();
     for item_id in new_items {
         let it = snap
@@ -667,26 +719,46 @@ fn process_configuration(
             .ok_or((STATUS_NOT_FOUND, format!("Upgrade type {type_id} is not installed")))?;
         if *online && !u.online {
             let d = upgrade_definition(sde, *type_id).ok_or((STATUS_BAD_REQUEST, format!("Unknown upgrade {type_id}")))?;
-            let have = hub.fuel.get(&d.fuel_type).copied().unwrap_or(0);
-            if have < d.fuel_startup.max(d.fuel_per_hour) {
-                return Err((STATUS_BAD_REQUEST, format!("Insufficient fuel type {} to online upgrade {type_id}", d.fuel_type)));
+            if d.fuel_type > 0 && (d.fuel_startup > 0 || d.fuel_per_hour > 0) {
+                let have = hub.fuel.get(&d.fuel_type).copied().unwrap_or(0);
+                if have < d.fuel_startup.max(d.fuel_per_hour) {
+                    return Err((STATUS_BAD_REQUEST, format!("Insufficient fuel type {} to online upgrade {type_id}", d.fuel_type)));
+                }
+                if d.fuel_startup > 0 {
+                    hub.fuel.insert(d.fuel_type, have - d.fuel_startup);
+                }
             }
-            hub.fuel.insert(d.fuel_type, have - d.fuel_startup);
         }
         u.online = *online;
         // A starved upgrade only leaves POWER_STATE_LOW once the bay holds an hour of its fuel.
-        let fueled = upgrade_definition(sde, *type_id)
-            .is_some_and(|d| hub.fuel.get(&d.fuel_type).copied().unwrap_or(0) >= d.fuel_per_hour);
+        let fueled = upgrade_definition(sde, *type_id).is_some_and(|d| {
+            d.fuel_type == 0
+                || d.fuel_per_hour == 0
+                || hub.fuel.get(&d.fuel_type).copied().unwrap_or(0) >= d.fuel_per_hour
+        });
         if !*online || fueled {
             u.low_power = false;
         }
+    }
+    if config.len() > 1 {
+        let mut reordered = Vec::with_capacity(hub.upgrades.len());
+        for (tid, _) in config {
+            if let Some(pos) = hub.upgrades.iter().position(|u| u.type_id == *tid) {
+                reordered.push(hub.upgrades.remove(pos));
+            }
+        }
+        reordered.append(&mut hub.upgrades);
+        hub.upgrades = reordered;
     }
     let is_hacked = snap.sov_runtime.hacked_hubs.get(&hub_id).copied().is_some_and(|until| now < until);
     if !is_hacked {
         for u in &mut hub.upgrades {
             if u.online && u.low_power {
                 if let Some(d) = upgrade_definition(sde, u.type_id) {
-                    if hub.fuel.get(&d.fuel_type).copied().unwrap_or(0) >= d.fuel_per_hour {
+                    if d.fuel_type == 0
+                        || d.fuel_per_hour == 0
+                        || hub.fuel.get(&d.fuel_type).copied().unwrap_or(0) >= d.fuel_per_hour
+                    {
                         u.low_power = false;
                     }
                 }
@@ -699,10 +771,7 @@ fn process_configuration(
         hub.last_updated_unix = now;
     }
     snap.sov_runtime.sov_hubs.insert(hub_id, hub);
-    if let Err(e) = check_budget(snap, sde, hub_id) {
-        snap.sov_runtime.sov_hubs.insert(hub_id, original);
-        return Err(e);
-    }
+    enforce_hub_power_overload(snap, sde, hub_id);
     for item_id in consumed {
         consume_items(snap, item_id, 1);
     }
@@ -813,7 +882,9 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                 })?;
                 let mut burn: BTreeMap<u32, u64> = hub.fuel.keys().map(|k| (*k, 0)).collect();
                 for d in hub.upgrades.iter().filter(|u| is_active(u)).filter_map(|u| upgrade_definition(&sde, u.type_id)) {
-                    *burn.entry(d.fuel_type).or_insert(0) += u64::from(d.fuel_per_hour);
+                    if d.fuel_type > 0 && d.fuel_per_hour > 0 {
+                        *burn.entry(d.fuel_type).or_insert(0) += u64::from(d.fuel_per_hour);
+                    }
                 }
                 let mut out = Vec::new();
                 for (fuel_type, per_hour) in burn {
@@ -846,7 +917,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                     let hub_st = snap
                         .structures
                         .get(&hub_id)
-                        .filter(|s| s.type_id == TYPE_SOVEREIGNTY_HUB && s.state != "Destroyed")
+                        .filter(|s| s.type_id == TYPE_SOVEREIGNTY_HUB && !s.state.eq_ignore_ascii_case("destroyed"))
                         .ok_or((STATUS_NOT_FOUND, format!("Sovereignty hub {hub_id} not found")))?;
                     let sys = hub_st.solar_system_id;
                     if !super::sov_services::can_access_sov_hub_fuel(
@@ -890,17 +961,35 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                         .ok_or((STATUS_BAD_REQUEST, "Hub fuel bay capacity exceeded".to_string()))?;
                     hub.fuel.insert(fuel_type, total);
                     consume_items(snap, item_id, amount as i32);
-                    let mut restored = false;
-                    for u in hub.upgrades.iter_mut().filter(|u| u.online && u.low_power) {
-                        if upgrade_definition(&sde, u.type_id).is_some_and(|d| d.fuel_type == fuel_type && total >= d.fuel_per_hour) {
-                            u.low_power = false;
-                            restored = true;
+                    let now_ts = ctx.now_unix();
+                    let is_hacked = snap
+                        .sov_runtime
+                        .hacked_hubs
+                        .get(&hub_id)
+                        .copied()
+                        .is_some_and(|until| now_ts < until);
+                    let prev_upgrades = hub.upgrades.clone();
+                    if !is_hacked {
+                        for u in hub.upgrades.iter_mut().filter(|u| u.online && u.low_power) {
+                            if upgrade_definition(&sde, u.type_id).is_some_and(|d| {
+                                d.fuel_type == 0
+                                    || d.fuel_per_hour == 0
+                                    || hub.fuel.get(&d.fuel_type).copied().unwrap_or(0) >= d.fuel_per_hour
+                            }) {
+                                u.low_power = false;
+                            }
                         }
                     }
                     if hub.last_updated_unix == 0 {
-                        hub.last_updated_unix = ctx.now_unix();
+                        hub.last_updated_unix = now_ts;
                     }
                     snap.sov_runtime.sov_hubs.insert(hub_id, hub);
+                    let _ = enforce_hub_power_overload(snap, &sde, hub_id);
+                    let restored = snap
+                        .sov_runtime
+                        .sov_hubs
+                        .get(&hub_id)
+                        .is_some_and(|h| h.upgrades != prev_upgrades);
                     if restored {
                         let mut n = Vec::new();
                         encode_bytes_field(1, &encode_hub_upgrades(&sde, hub_id, snap.sov_runtime.sov_hubs.get(&hub_id)), &mut n);
@@ -1023,43 +1112,73 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                     let sys = st.solar_system_id;
                     run_simulation(snap, &sde, &pending, hub_id, ctx.now_unix());
                     let before = hub_views(snap, &sde, &[hub_id]);
-                    let original = snap.clone_sov_hub(hub_id);
-                    let mut hub = original.clone();
+                    let prev_states: Vec<(u32, u64)> = snap
+                        .sov_runtime
+                        .sov_hubs
+                        .get(&hub_id)
+                        .map(|h| {
+                            h.upgrades
+                                .iter()
+                                .filter(|u| u.type_id != type_id)
+                                .map(|u| (u.type_id, power_state(u)))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let mut hub = snap.clone_sov_hub(hub_id);
                     let pos = hub
                         .upgrades
                         .iter()
                         .position(|u| u.type_id == type_id)
                         .ok_or((STATUS_NOT_FOUND, format!("Upgrade {type_id} is not installed in hub {hub_id}")))?;
+                    // Per `Sovereignty.md:37`, decommissioning destroys the installed upgrade without returning an item.
                     hub.upgrades.remove(pos);
-                    snap.sov_runtime.sov_hubs.insert(hub_id, hub);
-                    if let Err(e) = check_budget(snap, &sde, hub_id) {
-                        snap.sov_runtime.sov_hubs.insert(hub_id, original);
-                        return Err(e);
+                    let is_hacked = snap
+                        .sov_runtime
+                        .hacked_hubs
+                        .get(&hub_id)
+                        .copied()
+                        .is_some_and(|until| ctx.now_unix() < until);
+                    if !is_hacked {
+                        for u in &mut hub.upgrades {
+                            if u.online && u.low_power {
+                                if let Some(d) = upgrade_definition(&sde, u.type_id) {
+                                    if d.fuel_type == 0
+                                        || d.fuel_per_hour == 0
+                                        || hub.fuel.get(&d.fuel_type).copied().unwrap_or(0) >= d.fuel_per_hour
+                                    {
+                                        u.low_power = false;
+                                    }
+                                }
+                            }
+                        }
                     }
-                    let out_owner = if c.corp > 0
-                        && (c.corp != 98_000_001
-                            || snap.corporations.get(&c.corp).is_some_and(|co| co.ceo_id != c.cid))
-                    {
-                        c.corp
-                    } else {
-                        c.cid
-                    };
-                    snap.next_entity_id += 1;
-                    let item_id = snap.next_entity_id;
-                    snap.items.insert(item_id, InventoryItemRecord {
-                        item_id,
-                        type_id,
-                        owner_id: out_owner,
-                        location_id: hub_id,
-                        flag: eve_db::InventoryFlag::Hangar,
-                        quantity: 1,
-                        ..Default::default()
-                    });
+                    snap.sov_runtime.sov_hubs.insert(hub_id, hub);
+                    enforce_hub_power_overload(snap, &sde, hub_id);
+                    let next_states: Vec<(u32, u64)> = snap
+                        .sov_runtime
+                        .sov_hubs
+                        .get(&hub_id)
+                        .map(|h| h.upgrades.iter().map(|u| (u.type_id, power_state(u))).collect())
+                        .unwrap_or_default();
                     let mut n = Vec::new();
                     encode_bytes_field(1, &encode_upgrade_identifier(hub_id, type_id), &mut n);
                     id_field(2, type_id as u64, &mut n);
                     id_field(3, hub_id as u64, &mut n);
                     push_notice(&pending, sys, "eve_public.sovereignty.hub.upgrade.api.UninstalledNotice", n);
+                    if prev_states != next_states {
+                        let mut sim_n = Vec::new();
+                        encode_bytes_field(
+                            1,
+                            &encode_hub_upgrades(&sde, hub_id, snap.sov_runtime.sov_hubs.get(&hub_id)),
+                            &mut sim_n,
+                        );
+                        push_notice(
+                            &pending,
+                            sys,
+                            "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
+                            sim_n,
+                        );
+                    }
                     emit_hub_diffs(&pending, &before, &hub_views(snap, &sde, &[hub_id]));
                     Ok(())
                 })?;

@@ -276,6 +276,76 @@ pub(crate) async fn lock_target_via_rpc(
     assert!(locks.iter().any(|l| l.target_id == target_id && l.locked));
 }
 
+pub(crate) fn fit_subcap_blasters(ctx: &ServerContext, char_id: i64, ship_id: i64, base_id: i64) {
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship_it) = snap.items.get_mut(&ship_id) {
+            ship_it.type_id = 16_229; // Brutix Battlecruiser (1,125 MW PG, 435 tf CPU, 3,100 GJ cap, 7 HiSlots, 6 Turret slots, 6 LoSlots)
+        }
+        let sk = snap.skills.entry(char_id).or_default();
+        for sid in [
+            3300u32, 3304, 12211, 3310, 3311, 3312, 3315, 3316, 3317, 3318, 33097, 3426, 3413,
+        ] {
+            sk.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
+        }
+        let hi_flags = [
+            InventoryFlag::HiSlot0,
+            InventoryFlag::HiSlot1,
+            InventoryFlag::HiSlot2,
+            InventoryFlag::HiSlot3,
+            InventoryFlag::HiSlot4,
+            InventoryFlag::HiSlot5,
+        ];
+        for (i, flg) in hi_flags.into_iter().enumerate() {
+            let gun_id = base_id + (i as i64) * 2;
+            let ammo_id = gun_id + 1;
+            snap.items.insert(
+                gun_id,
+                InventoryItemRecord {
+                    item_id: gun_id,
+                    type_id: 3_146, // Heavy Neutron Blaster II (187 MW PG, 33 tf CPU, 38.4 tracking, 4.41x dmg)
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: flg,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                ammo_id,
+                InventoryItemRecord {
+                    item_id: ammo_id,
+                    type_id: 230, // Antimatter Charge M (14 kin + 10 therm = 24 base dmg)
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: flg,
+                    quantity: 500,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(gun_id, true);
+        }
+        for (i, flg) in [InventoryFlag::LoSlot0, InventoryFlag::LoSlot1, InventoryFlag::LoSlot2].into_iter().enumerate() {
+            let mod_id = base_id + 20 + (i as i64);
+            snap.items.insert(
+                mod_id,
+                InventoryItemRecord {
+                    item_id: mod_id,
+                    type_id: 10_190, // Magnetic Field Stabilizer II
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: flg,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(mod_id, true);
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+}
+
 pub(crate) fn fit_siege_artillery(ctx: &ServerContext, char_id: i64, ship_id: i64, base_id: i64) {
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ship_it) = snap.items.get_mut(&ship_id) {
@@ -329,7 +399,7 @@ pub(crate) fn find_nullsec_planets(ctx: &ServerContext) -> (u32, i64, i64, i64, 
         .sde
         .solar_systems
         .values()
-        .filter(|s| s.security_status <= 0.0 && s.solar_system_id < 31_000_000)
+        .filter(|s| eve_server::services::sov_gameplay::is_claimable_nullsec_system(&ctx.sde, s.solar_system_id))
         .map(|s| s.solar_system_id)
         .collect();
     sys_ids.sort_unstable();
@@ -349,14 +419,13 @@ pub(crate) fn find_nullsec_planets(ctx: &ServerContext) -> (u32, i64, i64, i64, 
 #[tokio::test]
 async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() {
     // parity: feat:sovereignty.skyhook-acquire
-    // parity: feat:sovereignty.sov-reagents
+    // DATA GAP: feat:sovereignty.sov-reagents — server-only planetary reagent yield table (docs/BLOCKERS.md §7)
     // parity: feat:sovereignty.skyhook-reagent-maturity
     // parity: feat:sovereignty.skyhook-theft
     // parity: notify:OnSkyhookFirstActivation
     // parity: notify:OnSkyhookCanBeHacked
     eve_testkit::attest(&[
         "feat:sovereignty.skyhook-acquire",
-        "feat:sovereignty.sov-reagents",
         "feat:sovereignty.skyhook-reagent-maturity",
         "feat:sovereignty.skyhook-theft",
         "notify:OnSkyhookFirstActivation",

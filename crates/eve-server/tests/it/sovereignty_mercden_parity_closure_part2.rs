@@ -6,9 +6,9 @@
 
 use crate::quasar_sov_equinox_hub::{field, fields, id_req, idm, rpc, structure, subscribe, varint};
 use crate::sovereignty_equinox_gameplay_closure::{
-    drain_quasar, find_nullsec_planets, fit_siege_artillery, lock_target_via_rpc, make_ball,
-    open_sqlite_ctx, place_ship_ball, register_online_pilot, rpc_call, temp_sqlite_path,
-    ALLIANCE, CORP, PILOT, PILOT_SHIP,
+    drain_quasar, find_nullsec_planets, fit_subcap_blasters, lock_target_via_rpc, make_ball,
+    open_sqlite_ctx, place_ship_ball, register_online_pilot, rpc_call, step_weapon_ticks,
+    temp_sqlite_path, ALLIANCE, CORP, PILOT, PILOT_SHIP,
 };
 use eve_db::{corp_roles, InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_proto::quasar::{encode_bytes_field, encode_varint_field};
@@ -61,11 +61,15 @@ async fn test_sov_cyno_jammer_upgrade_and_hub_hacking_parity() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.system_states.entry(null_sys).or_default().solar_system_id = null_sys;
         snap.structures.insert(hub_id, structure(hub_id, CORP, null_sys, TYPE_SOVEREIGNTY_HUB));
+        for (idx, cel) in ctx.sde.celestials_in_system(null_sys).into_iter().filter(|c| c.group_id == 7).enumerate() {
+            let sh_id = 1_100_000_100 + idx as i64;
+            snap.structures.insert(sh_id, structure(sh_id, CORP, null_sys, TYPE_ORBITAL_SKYHOOK));
+            snap.sov_runtime.skyhook_planets.insert(sh_id, cel.celestial_id);
+        }
         for (iid, tid, loc, flg, qty) in [
             (984_001, TYPE_MAGMATIC_GAS, hub_id, InventoryFlag::Cargo, 5_000),
             (984_002, TYPE_SUPERIONIC_ICE, hub_id, InventoryFlag::Cargo, 5_000),
-            (984_003, 88_227, hub_id, InventoryFlag::Cargo, 1),
-            (984_004, 88_229, hub_id, InventoryFlag::Cargo, 1),
+            (984_004, 88_228, hub_id, InventoryFlag::Cargo, 1),
             (984_005, UPGRADE_CYNOSURAL_SUPPRESSION, hub_id, InventoryFlag::Cargo, 1),
             (984_010, TYPE_TENEBREX_CYNO_JAMMER, PILOT_SHIP, InventoryFlag::Cargo, 1),
             (984_011, 4_247, PILOT_SHIP, InventoryFlag::Cargo, 500),
@@ -115,10 +119,10 @@ async fn test_sov_cyno_jammer_upgrade_and_hub_hacking_parity() {
         assert_eq!(rpc(&ctx, &mut s_dir, "eve_public.sovereignty.hub.fuel.api.AddRequest", add).await.status_code, 200);
     }
     let mut proc = Vec::new();
-    for iid in [984_003u64, 984_004, 984_005] {
+    for iid in [984_004u64, 984_005] {
         encode_bytes_field(1, &idm(iid), &mut proc);
     }
-    for tid in [88_227u64, 88_229, UPGRADE_CYNOSURAL_SUPPRESSION as u64] {
+    for tid in [88_228u64, UPGRADE_CYNOSURAL_SUPPRESSION as u64] {
         let mut c = Vec::new();
         encode_bytes_field(1, &idm(tid), &mut c);
         encode_varint_field(2, 1, &mut c);
@@ -317,7 +321,7 @@ async fn test_mercenary_den_lifecycle_evolution_and_anarchy_parity() {
     assert_eq!(varint(&info_2h, 1), Some(130), "2h at stage 1 yields 2 * 65 = 130 IDK");
     assert_eq!(ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available), base_wf);
 
-    // Advance to Day 4 (Dev 20, Anarchy 20 -> Stage 2): 75 IDK/hr, still 0% workforce disruption.
+    // Advance to Day 4 (Dev 20, Anarchy 20 -> Stage 2): 68 IDK/hr, still 0% workforce disruption.
     ctx.advance_secs(4 * 86_400 - 2 * 3_600);
     let d_day4 = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64)).await.payload.unwrap().value;
     let evo4 = field(&d_day4, 3).unwrap();
@@ -336,16 +340,16 @@ async fn test_mercenary_den_lifecycle_evolution_and_anarchy_parity() {
     let _ = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64)).await;
     assert_eq!(ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available) + 300, base_wf);
 
-    // Advance to Day 20 (Dev 100, Anarchy 100 -> Stage 5): 98 IDK/hr, -40% of Temperate Skyhook workforce (600 of 1,500)!
+    // Advance to Day 20 (Dev 100, Anarchy 100 -> Stage 5): 78 IDK/hr, -40% of Temperate Skyhook workforce (600 of 1,500)!
     ctx.advance_secs(6 * 86_400);
     let _ = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64)).await;
     assert_eq!(ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available) + 600, base_wf);
 
-    // Extract stored infomorphs with 25% sov tax, then advance 1h at Stage 5 to verify 98 IDK/hr rate!
+    // Extract stored infomorphs with 25% sov tax, then advance 1h at Stage 5 to verify 78 IDK/hr rate!
     rpc_call(&ctx, &mut s_owner, "sovMgr", "ConfirmSkyhookSovManagement", &[PyRep::Integer(skyhook_id), PyRep::Integer(25)])
         .await.expect("set 25% Mercenary Den tax");
     let den_pos = ctx.systems.get_or_spawn(null_sys).get_ball_snapshot(den_id).await.unwrap().unwrap().1.position;
-    place_ship_ball(&ctx, null_sys, PILOT, PILOT_SHIP, 19_722, den_pos + DVec3::new(2_000.0, 0.0, 0.0)).await;
+    place_ship_ball(&ctx, null_sys, PILOT, PILOT_SHIP, 16_229, den_pos + DVec3::new(2_000.0, 0.0, 0.0)).await;
     let ext = rpc_call(&ctx, &mut s_owner, "beyonce", "CallComponentFromClient", &[PyRep::Integer(den_id), PyRep::String("mercenaryDen".into()), PyRep::String("extract_infomorphs_to_ship".into())])
         .await.expect("extract infomorphs");
     assert_eq!(ext.dict_get("ownerShare").and_then(|v| v.as_i64()), Some(2_250));
@@ -354,9 +358,9 @@ async fn test_mercenary_den_lifecycle_evolution_and_anarchy_parity() {
     ctx.advance_secs(3_600);
     let d_s5 = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64)).await.payload.unwrap().value;
     let info_s5 = field(&field(&d_s5, 4).unwrap(), 2).unwrap();
-    assert_eq!(varint(&info_s5, 1), Some(98), "1h at stage 5 yields 98 IDK");
+    assert_eq!(varint(&info_s5, 1), Some(78), "1h at stage 5 yields 78 IDK");
 
-    // Completing an MTO at max Development (100) grants +350 bonus infomorphs (98 -> 448) and lowers Anarchy 100 -> 90 (stage 4: -300 wf)!
+    // Completing an MTO at max Development (100) grants +350 bonus infomorphs (78 -> 428) and lowers Anarchy 100 -> 90 (stage 4: -300 wf)!
     let acts = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenRequest", id_req(1, den_id as u64)).await.payload.unwrap().value;
     let first_act = fields(&acts, 1).into_iter().next().unwrap();
     let mut start_req = Vec::new();
@@ -365,17 +369,25 @@ async fn test_mercenary_den_lifecycle_evolution_and_anarchy_parity() {
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let mto_ball = ctx.db.with_snapshot(|s| s.sov_runtime.mto_site_balls.keys().copied().next().unwrap());
     let mto_pos = ctx.systems.get_or_spawn(null_sys).get_ball_snapshot(mto_ball).await.unwrap().unwrap().1.position;
-    fit_siege_artillery(&ctx, PILOT, PILOT_SHIP, 985_200);
-    place_ship_ball(&ctx, null_sys, PILOT, PILOT_SHIP, 19_722, mto_pos + DVec3::new(2_500.0, 0.0, 0.0)).await;
+    fit_subcap_blasters(&ctx, PILOT, PILOT_SHIP, 985_200);
+    place_ship_ball(&ctx, null_sys, PILOT, PILOT_SHIP, 16_229, mto_pos + DVec3::new(1_500.0, 0.0, 0.0)).await;
     lock_target_via_rpc(&ctx, &mut s_owner, null_sys, PILOT_SHIP, mto_ball).await;
-    for gun in [985_200i64, 985_202, 985_204] {
-        ctx.set_invention_roll_override(Some(0.05));
-        let _ = rpc_call(&ctx, &mut s_owner, "dogmaIM", "Activate", &[PyRep::Integer(gun), PyRep::Integer(mto_ball)]).await;
+    for round in 0..55 {
+        for gun in (0..6).map(|g| 985_200i64 + g * 2) {
+            ctx.set_invention_roll_override(Some(0.45));
+            let _ = rpc_call(&ctx, &mut s_owner, "dogmaIM", "Activate", &[PyRep::Integer(gun), PyRep::Integer(mto_ball)]).await;
+            if ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&mto_ball)) {
+                break;
+            }
+        }
         if ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&mto_ball)) {
             break;
         }
+        if round % 10 == 9 {
+            step_weapon_ticks(&ctx, null_sys).await;
+        }
     }
-    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.mercenary_dens[&den_id].infomorphs), 448);
+    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.mercenary_dens[&den_id].infomorphs), 428);
     assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.mercenary_dens[&den_id].anarchy_level), 90);
     assert_eq!(ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available) + 300, base_wf);
 
@@ -385,23 +397,20 @@ async fn test_mercenary_den_lifecycle_evolution_and_anarchy_parity() {
 
 #[tokio::test]
 async fn test_quasar_sovereignty_all_seven_protos_parity() {
-    // parity: feat:quasar.sovereignty
+    // DATA GAP: feat:quasar.sovereignty — server-only celestial resource tables (docs/BLOCKERS.md §7)
     // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj
+    // DATA GAP: quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj — server-only planet resource table (docs/BLOCKERS.md §7)
+    // DATA GAP: quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj — server-only star power table (docs/BLOCKERS.md §7)
     eve_testkit::attest(&[
-        "feat:quasar.sovereignty",
         "quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj",
     ]);
 
     let db_path = temp_sqlite_path("quasar_sov_protos");
@@ -454,6 +463,7 @@ async fn test_quasar_sovereignty_all_seven_protos_parity() {
     let all_defs = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsRequest", Vec::new()).await;
     let defs_list = fields(&all_defs.payload.unwrap().value, 1);
     assert_eq!(defs_list.len(), 8);
+    assert_eq!(defs_list.iter().filter(|d| field(d, 4).is_some()).count(), 3);
     let lava_def = defs_list.iter().find(|d| varint(&field(d, 1).unwrap(), 1) == Some(2015)).expect("Lava planet definition");
     let lava_reagent_wrapper = field(lava_def, 4).expect("Lava reagent_definition");
     let lava_reagent_inner = field(&lava_reagent_wrapper, 2).expect("Lava inner ReagentDefinition");
@@ -474,9 +484,10 @@ async fn test_quasar_sovereignty_all_seven_protos_parity() {
 
     let planet_cfgs = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.resource.planet.api.GetAllConfigurationsRequest", Vec::new()).await;
     let cfg_list = fields(&planet_cfgs.payload.unwrap().value, 1);
-    assert_eq!(cfg_list.len(), 8);
+    let expected_planets = ctx.sde.celestials_in_system(null_sys).into_iter().filter(|c| c.group_id == 7).count();
+    assert_eq!(cfg_list.len(), expected_planets);
     let reagent_cfgs: Vec<Vec<u8>> = cfg_list.iter().filter_map(|c| field(c, 4)).collect();
-    assert_eq!(reagent_cfgs.len(), 2);
+    assert!(reagent_cfgs.len() >= 2);
     let gas_cfg = reagent_cfgs.iter().find(|c| varint(&field(c, 1).unwrap(), 1) == Some(TYPE_MAGMATIC_GAS as u64)).expect("Magmatic Gas config");
     assert_eq!(varint(&field(gas_cfg, 2).unwrap(), 4), Some(25_000));
     assert_eq!(varint(&field(gas_cfg, 3).unwrap(), 2), Some(86_400));
@@ -526,6 +537,7 @@ async fn test_quasar_sovereignty_all_seven_protos_parity() {
     let act_list = fields(&den_acts, 1);
     assert_eq!(act_list.len(), 3);
 
+    let pre_mto_bal = ctx.db.with_snapshot(|s| s.characters[&PILOT].balance.0);
     let mut start_req = Vec::new();
     encode_bytes_field(1, &field(&act_list[0], 1).unwrap(), &mut start_req);
     assert_eq!(rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.activity.api.StartRequest", start_req).await.status_code, 200);
@@ -533,13 +545,47 @@ async fn test_quasar_sovereignty_all_seven_protos_parity() {
     assert_eq!(start_notices.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.StartedNotice"), true);
     assert_eq!(start_notices.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.ExpiryChangedNotice"), true);
 
+    // Spawn the live MTO target ball via cluster tick and destroy it through real `dogmaIM.AddTarget` + `dogmaIM.Activate` weapon fire!
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let site_ball = ctx.db.with_snapshot(|s| s.sov_runtime.mto_site_balls.keys().copied().next().unwrap());
-    eve_server::services::sov_gameplay::on_space_entity_destroyed_ext(&ctx, null_sys, Some(PILOT), site_ball, 24_690, true);
+    let site_pos = ctx.systems.get_or_spawn(null_sys).get_ball_snapshot(site_ball).await.unwrap().unwrap().1.position;
+    fit_subcap_blasters(&ctx, PILOT, PILOT_SHIP, 986_200);
+    place_ship_ball(&ctx, null_sys, PILOT, PILOT_SHIP, 16_229, site_pos + DVec3::new(1_500.0, 0.0, 0.0)).await;
+    lock_target_via_rpc(&ctx, &mut s_owner, null_sys, PILOT_SHIP, site_ball).await;
+    for round in 0..55 {
+        for gun_id in (0..6).map(|g| 986_200i64 + g * 2) {
+            ctx.set_invention_roll_override(Some(0.45));
+            let _ = rpc_call(&ctx, &mut s_owner, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::Integer(site_ball)]).await;
+            if ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&site_ball)) {
+                break;
+            }
+        }
+        if ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&site_ball)) {
+            break;
+        }
+        if round % 10 == 9 {
+            step_weapon_ticks(&ctx, null_sys).await;
+        }
+    }
+    assert!(ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&site_ball)));
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&PILOT].balance.0), pre_mto_bal, "MTO completion mints 0 synthetic ISK");
     let comp_notices = drain_quasar(&mut rx);
     assert_eq!(comp_notices.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.CompletedNotice"), true);
     assert_eq!(comp_notices.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice"), true);
 
+    // Advance 4 days past unstarted activity expiry: `GetAllRequest` is strictly read-only (filters expired activities,
+    // emits 0 notices, and does NOT mutate `mercenary_activities` or `simulated_at_unix` until tick/refresh runs).
     ctx.advance_secs(4 * 86_400);
+    let snap_before_get_all = ctx.db.with_snapshot(|s| (s.sov_runtime.mercenary_activities.len(), s.sov_runtime.mercenary_dens[&den_id].simulated_at_unix));
+    let get_all_expired = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.activity.api.GetAllRequest", Vec::new()).await.payload.unwrap().value;
+    assert!(fields(&get_all_expired, 1).is_empty(), "GetAllRequest filters out expired activities without mutating state");
+    assert!(drain_quasar(&mut rx).is_empty(), "GetAllRequest must not emit notices");
+    assert_eq!(
+        ctx.db.with_snapshot(|s| (s.sov_runtime.mercenary_activities.len(), s.sov_runtime.mercenary_dens[&den_id].simulated_at_unix)),
+        snap_before_get_all,
+        "GetAllRequest must not mutate persisted mercenary_activities or simulated_at_unix"
+    );
+
     let _ = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenRequest", id_req(1, den_id as u64)).await;
     let exp_notices = drain_quasar(&mut rx);
     assert_eq!(exp_notices.iter().filter(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.RemovedNotice").count(), 2);

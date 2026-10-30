@@ -13,7 +13,7 @@ use eve_proto::quasar::{
     GoogleAny, GoogleTimestamp, QuasarMessage, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
-use eve_server::quasar_gateway::{STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_OK};
+use eve_server::quasar_gateway::{STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_OK};
 use eve_server::router::ServerContext;
 use eve_server::services::sov_services::{TYPE_MAGMATIC_GAS, TYPE_SOVEREIGNTY_HUB};
 use std::collections::HashMap;
@@ -179,26 +179,49 @@ async fn test_equinox_hub_resources_fuel_and_upgrades_state_backed() {
     crate::common::pin_clock(&ctx);
     let mut s = sess(61_001, PILOT, CORP, JITA, corp_roles::ROLE_DIRECTOR);
     let mut rx = subscribe(&ctx, &mut s).await;
+    const STABILITY_GEN: u64 = 87_950; // Electric Stability Generator: 200 power, 2,700 workforce, 7 Magmatic Gas/hr
+    let jita_planets: Vec<i64> = ctx
+        .sde
+        .celestials_in_system(JITA)
+        .into_iter()
+        .filter(|c| c.group_id == 7)
+        .map(|c| c.celestial_id)
+        .collect();
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(HUB_A, structure(HUB_A, CORP, JITA, TYPE_SOVEREIGNTY_HUB));
         // Fuel in the pilot's active ship (pilot is in the hub's system), upgrade inside the hub,
         // plus decoy stacks left in a Jita station hangar that must not be consumable.
         for (id, ty, qty, loc) in [
             (GAS_ITEM, TYPE_MAGMATIC_GAS, 1_000, PILOT_SHIP),
-            (UPGRADE_ITEM, MINOR_THREAT_1 as u32, 1, HUB_A),
+            (UPGRADE_ITEM, STABILITY_GEN as u32, 1, HUB_A),
             (STATION_GAS, TYPE_MAGMATIC_GAS, 1_000, JITA_STATION),
-            (STATION_UPGRADE, MINOR_THREAT_1 as u32, 1, JITA_STATION),
+            (STATION_UPGRADE, STABILITY_GEN as u32, 1, JITA_STATION),
         ] {
             snap.items.insert(id, InventoryItemRecord { item_id: id, type_id: ty, owner_id: PILOT, location_id: loc, quantity: qty, ..Default::default() });
         }
     });
 
-    // Definitions enumerate SDE upgrade types.
+    // Definitions enumerate exact V24 SDE upgrade types (`Minor Threat Detection Array 1` = 200 power, 1,800 wf, 0 fuel;
+    // `Electric Stability Generator` = 200 power, 2,700 wf, 7 Magmatic Gas/hr).
     let defs = ok_payload(rpc(&ctx, &mut s, "eve_public.sovereignty.hub.upgrade.api.GetDefinitionsRequest", Vec::new()).await);
-    let def = fields(&defs, 1).into_iter().find(|d| field(d, 1).and_then(|i| varint(&i, 1)) == Some(MINOR_THREAT_1)).expect("SDE upgrade 82499");
-    assert_eq!((varint(&def, 2), varint(&def, 3)), (Some(200), Some(1_000)));
+    let def_threat = fields(&defs, 1).into_iter().find(|d| field(d, 1).and_then(|i| varint(&i, 1)) == Some(MINOR_THREAT_1)).expect("SDE upgrade 82499");
+    assert_eq!((varint(&def_threat, 2), varint(&def_threat, 3), field(&def_threat, 4)), (Some(200), Some(1_800), None));
+    let def_stab = fields(&defs, 1).into_iter().find(|d| field(d, 1).and_then(|i| varint(&i, 1)) == Some(STABILITY_GEN)).expect("SDE upgrade 87950");
+    assert_eq!((varint(&def_stab, 2), varint(&def_stab, 3)), (Some(200), Some(2_700)));
 
-    // Resources: Jita star (Sun O1, 800) + 2 Gas planets (300) power; Temperate + 3 Barren (3000) workforce.
+    // Without anchored Orbital Skyhooks, only stellar power (Jita Sun O1 = 800) is available (0 planetary power/workforce).
+    let res_no_sh = ok_payload(rpc(&ctx, &mut s, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, HUB_A as u64)).await);
+    assert_eq!(resources(&res_no_sh), (800, 0, 0, 0));
+
+    // Anchor active Orbital Skyhooks on Jita planets -> harvests +300 Gas power (total 1,100) and +3,000 workforce.
+    ctx.db.with_mut_snapshot(|snap| {
+        for (idx, pid) in jita_planets.iter().copied().enumerate() {
+            let sh_id = 1_000_000_200 + idx as i64;
+            snap.structures.insert(sh_id, structure(sh_id, CORP, JITA, eve_server::services::sov_services::TYPE_ORBITAL_SKYHOOK));
+            snap.sov_runtime.skyhook_planets.insert(sh_id, pid);
+            snap.sov_runtime.skyhook_active.insert(sh_id, true);
+        }
+    });
     let res = ok_payload(rpc(&ctx, &mut s, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, HUB_A as u64)).await);
     assert_eq!(resources(&res), (1_100, 0, 3_000, 0));
 
@@ -215,13 +238,13 @@ async fn test_equinox_hub_resources_fuel_and_upgrades_state_backed() {
     assert_eq!(field(&fuel, 1).and_then(|f| varint(&f, 2)), Some(500));
     drain(&mut rx);
 
-    // Install + online the upgrade item: consumes the item and 50 startup fuel, allocates budget.
+    // Install + online Electric Stability Generator (87950): consumes the item, allocates (200, 2,700) budget.
     let mut remote = id_req(1, STATION_UPGRADE as u64);
     encode_bytes_field(3, &idm(HUB_A as u64), &mut remote);
     assert_eq!(rpc(&ctx, &mut s, "eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationRequest", remote).await.status_code, STATUS_BAD_REQUEST, "upgrade in a station hangar is not at the hub");
     let mut proc = id_req(1, UPGRADE_ITEM as u64);
     let mut cfg = Vec::new();
-    encode_bytes_field(1, &idm(MINOR_THREAT_1), &mut cfg);
+    encode_bytes_field(1, &idm(STABILITY_GEN), &mut cfg);
     encode_varint_field(2, 1, &mut cfg);
     encode_bytes_field(2, &cfg, &mut proc);
     encode_bytes_field(3, &idm(HUB_A as u64), &mut proc);
@@ -233,14 +256,14 @@ async fn test_equinox_hub_resources_fuel_and_upgrades_state_backed() {
     assert!(has(&n, "eve_public.sovereignty.hub.api.ResourcesSimulatedNotice"));
     assert!(ctx.db.with_snapshot(|snap| !snap.items.contains_key(&UPGRADE_ITEM)));
     let res = ok_payload(rpc(&ctx, &mut s, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, HUB_A as u64)).await);
-    assert_eq!(resources(&res), (1_100, 200, 3_000, 1_000));
+    assert_eq!(resources(&res), (1_100, 200, 3_000, 2_700));
 
-    // Hourly fuel burn (5/h): 10h burns 50; 100 more hours exhausts the bay -> POWER_STATE_LOW.
+    // Hourly fuel burn (7/h): 10h burns 70; 100 more hours exhausts the bay -> POWER_STATE_LOW.
     // Reconfiguring at +59m and +118m must not reset the burn clock: one full hour still burns.
     let reconfig = || {
         let mut b = Vec::new();
         let mut c = Vec::new();
-        encode_bytes_field(1, &idm(MINOR_THREAT_1), &mut c);
+        encode_bytes_field(1, &idm(STABILITY_GEN), &mut c);
         encode_varint_field(2, 1, &mut c);
         encode_bytes_field(2, &c, &mut b);
         encode_bytes_field(3, &idm(HUB_A as u64), &mut b);
@@ -251,11 +274,11 @@ async fn test_equinox_hub_resources_fuel_and_upgrades_state_backed() {
         ok_payload(rpc(&ctx, &mut s, "eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationRequest", reconfig()).await);
     }
     let fuel = ok_payload(rpc(&ctx, &mut s, "eve_public.sovereignty.hub.fuel.api.GetRequest", id_req(1, HUB_A as u64)).await);
-    assert_eq!(field(&fuel, 1).and_then(|f| varint(&f, 2)), Some(445), "60m of the 118m elapsed burned 5 units");
+    assert_eq!(field(&fuel, 1).and_then(|f| varint(&f, 2)), Some(493), "60m of the 118m elapsed burned 7 units");
     ctx.advance_secs(36_000 - 2 * 59 * 60);
     let fuel = ok_payload(rpc(&ctx, &mut s, "eve_public.sovereignty.hub.fuel.api.GetRequest", id_req(1, HUB_A as u64)).await);
-    assert_eq!(field(&fuel, 1).and_then(|f| varint(&f, 2)), Some(400));
-    assert_eq!(field(&fuel, 1).and_then(|f| varint(&f, 3)), Some(5));
+    assert_eq!(field(&fuel, 1).and_then(|f| varint(&f, 2)), Some(430));
+    assert_eq!(field(&fuel, 1).and_then(|f| varint(&f, 3)), Some(7));
     ctx.advance_secs(360_000);
     let hu = ok_payload(rpc(&ctx, &mut s, "eve_public.sovereignty.hub.upgrade.api.GetHubUpgradesRequest", id_req(1, HUB_A as u64)).await);
     let up = field(&field(&hu, 1).unwrap(), 2).unwrap();
@@ -278,19 +301,20 @@ async fn test_equinox_hub_resources_fuel_and_upgrades_state_backed() {
     // Query installed upgrade attributes via GetRequest
     let mut ident = Vec::new();
     encode_bytes_field(1, &idm(HUB_A as u64), &mut ident);
-    encode_bytes_field(2, &idm(MINOR_THREAT_1), &mut ident);
+    encode_bytes_field(2, &idm(STABILITY_GEN), &mut ident);
     let mut get_up = Vec::new();
     encode_bytes_field(1, &ident, &mut get_up);
-    let up_resp = ok_payload(rpc(&ctx, &mut s, "eve_public.sovereignty.hub.upgrade.api.GetRequest", get_up).await);
+    let up_resp = ok_payload(rpc(&ctx, &mut s, "eve_public.sovereignty.hub.upgrade.api.GetRequest", get_up.clone()).await);
     assert!(field(&up_resp, 1).is_some());
 
-    // Uninstall returns the upgrade item and emits UninstalledNotice.
+    // Uninstall destroys the installed upgrade without returning an item and emits UninstalledNotice.
     let mut un = Vec::new();
     encode_bytes_field(1, &ident, &mut un);
     assert_eq!(rpc(&ctx, &mut no_role, "eve_public.sovereignty.hub.upgrade.api.UninstallRequest", un.clone()).await.status_code, STATUS_FORBIDDEN);
     ok_payload(rpc(&ctx, &mut s, "eve_public.sovereignty.hub.upgrade.api.UninstallRequest", un).await);
     assert!(has(&drain(&mut rx), "eve_public.sovereignty.hub.upgrade.api.UninstalledNotice"));
-    assert!(ctx.db.with_snapshot(|snap| snap.items.values().any(|i| i.type_id == MINOR_THREAT_1 as u32 && i.owner_id == PILOT && i.location_id == HUB_A)));
+    assert!(ctx.db.with_snapshot(|snap| !snap.items.values().any(|i| i.type_id == STABILITY_GEN as u32 && i.location_id == HUB_A)));
+    assert_eq!(rpc(&ctx, &mut s, "eve_public.sovereignty.hub.upgrade.api.GetRequest", get_up).await.status_code, STATUS_NOT_FOUND);
 }
 
 #[tokio::test]
@@ -308,6 +332,9 @@ async fn test_equinox_hub_workforce_transfer_network_state_backed() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(HUB_A, structure(HUB_A, CORP, JITA, TYPE_SOVEREIGNTY_HUB));
         snap.structures.insert(HUB_B, structure(HUB_B, CORP, PERIMETER, TYPE_SOVEREIGNTY_HUB));
+        snap.structures.insert(1_000_000_301, structure(1_000_000_301, CORP, JITA, eve_server::services::sov_services::TYPE_ORBITAL_SKYHOOK));
+        snap.sov_runtime.skyhook_planets.insert(1_000_000_301, 40_009_080); // Jita III (Temperate, 1,500 wf)
+        snap.sov_runtime.skyhook_active.insert(1_000_000_301, true);
     });
 
     let net = ok_payload(rpc(&ctx, &mut s, "eve_public.sovereignty.hub.workforce.api.GetNetworkableHubsRequest", id_req(1, HUB_A as u64)).await);

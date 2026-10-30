@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::{NotificationTarget, ServerContext};
-use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
+use eve_proto::{DBRowDescriptor, PyRep};
 
 /// Builds the V24 `OnDamageStateChange` 3-tuple:
 /// `((shieldRatio, shieldTauMs, timestampFt), armorRatio, structureRatio)`.
@@ -875,116 +875,6 @@ pub fn emit_fleet_jump_beacon_deployable_change(
             PyRep::Bool(active),
         ],
     );
-}
-
-/// Validates and registers an Equinox Mercenary Den (`type_id == 85_230`) during `posMgr.AnchorStructure`,
-/// emitting `OnMercenaryDenRegistrationInvalid` on failure or `OnMercenaryDenRegistrationSuccess` on success.
-pub fn validate_and_register_mercenary_den(
-    ctx: &ServerContext,
-    char_id: i64,
-    sys_id: u32,
-    sys_sec: f64,
-    item_id: i64,
-) -> Result<(), BridgeRpcError> {
-    let now_unix = ctx.now_unix();
-    let check_res = ctx.db.try_with_mut_snapshot(|snap| {
-        if sys_sec > 0.0 {
-            return Err("Mercenary Dens can only be anchored in sovereign null-security space".to_string());
-        }
-        let Some(skyhook_id) = snap
-            .structures
-            .values()
-            .find(|s| {
-                s.solar_system_id == sys_id && s.type_id == 81_080 && s.state != "destroyed"
-            })
-            .map(|s| s.structure_id)
-        else {
-            return Err("Mercenary Den requires an active Orbital Skyhook (81080) in solar system".to_string());
-        };
-        let skill_lvl = snap
-            .skills
-            .get(&char_id)
-            .and_then(|m| m.get(&85_233))
-            .map(|s| u64::from(s.level))
-            .unwrap_or(0);
-        let owned_count = snap
-            .sov_runtime
-            .mercenary_dens
-            .values()
-            .filter(|d| d.owner_char_id == char_id)
-            .count() as u64;
-        if skill_lvl == 0 || owned_count >= skill_lvl.min(5) {
-            return Err("Mercenary Den Management (85233) skill limit exceeded".to_string());
-        }
-        let planet_id = ctx
-            .sde
-            .celestials_in_system(sys_id)
-            .into_iter()
-            .find(|c| c.group_id == 7)
-            .map(|c| c.celestial_id)
-            .unwrap_or(40_000_001);
-        snap.sov_runtime.mercenary_dens.insert(
-            item_id,
-            eve_db::PersistedMercenaryDen {
-                den_id: item_id,
-                type_id: 85_230,
-                owner_char_id: char_id,
-                skyhook_id,
-                solar_system_id: sys_id,
-                planet_id,
-                enabled: true,
-                cargo_extraction_enabled: true,
-                development_level: 0,
-                anarchy_level: 0,
-                infomorphs: 0,
-                simulated_at_unix: now_unix,
-                next_activity_generation_unix: now_unix + 86_400,
-            },
-        );
-        Ok(planet_id)
-    });
-    match check_res {
-        Ok(planet_id) => {
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnMercenaryDenRegistrationSuccess",
-                "charid",
-                vec![
-                    PyRep::String("MercenaryDenRegistrationSuccess".into()),
-                    PyRep::Dict(vec![
-                        (PyRep::String("itemID".into()), PyRep::Integer(item_id)),
-                        (
-                            PyRep::String("solarSystemID".into()),
-                            PyRep::Integer(i64::from(sys_id)),
-                        ),
-                        (PyRep::String("planetID".into()), PyRep::Integer(planet_id)),
-                    ]),
-                ],
-            );
-            Ok(())
-        }
-        Err(msg) => {
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnMercenaryDenRegistrationInvalid",
-                "charid",
-                vec![
-                    PyRep::String("MercenaryDenRegistrationInvalid".into()),
-                    PyRep::Dict(vec![
-                        (PyRep::String("itemID".into()), PyRep::Integer(item_id)),
-                        (
-                            PyRep::String("solarSystemID".into()),
-                            PyRep::Integer(i64::from(sys_id)),
-                        ),
-                    ]),
-                ],
-            );
-            Err(BridgeRpcError {
-                code: "MercenaryDenRegistrationInvalid".into(),
-                message: msg.to_string(),
-            })
-        }
-    }
 }
 
 /// Emits `OnInfluenceUpdate(taleID, newInfluenceData)` across the incursion's constellation systems.

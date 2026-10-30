@@ -2,7 +2,7 @@
 
 use crate::types::IskCents;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 pub mod tuple_map_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -492,6 +492,9 @@ pub struct PersistedSovState {
     /// Constellation Command Node capture scores per reinforced Sovereignty Hub (`hub_id -> Vec<(alliance_id, score)>`).
     #[serde(default)]
     pub command_node_scores: HashMap<i64, Vec<(i64, f64)>>,
+    /// Active Sovereignty Hub Threat Detection anomaly NPC entity IDs (`ball_id`) persisted across restarts.
+    #[serde(default)]
+    pub sov_upgrade_combat_npcs: BTreeSet<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -75,7 +75,12 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let (sys_id, _, _, _, _) = crate::sovereignty_equinox_gameplay_closure::find_nullsec_planets(&ctx);
+    let mut sys_ids: Vec<u32> = ctx.sde.solar_systems.keys().copied().filter(|&id| eve_server::services::sov_gameplay::is_claimable_nullsec_system(&ctx.sde, id)).collect();
+    sys_ids.sort_unstable();
+    let sys_id = sys_ids.into_iter().find(|&sid| {
+        let y = eve_server::services::quasar_sov_hub::system_yield(&ctx.sde, sid);
+        y.stars.iter().map(|(_, p)| *p).sum::<u64>() + y.planet_power >= 900 && y.planet_workforce >= 2_500
+    }).expect("claimable nullsec system with >= 900 power and >= 2,500 workforce");
     let corp_id: i64 = 98_000_100;
     let alliance_id: i64 = 99_000_200;
     let ship_id: i64 = 100_090_001;
@@ -99,8 +104,7 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
             (990_002, sov_services::TYPE_SUPERIONIC_ICE, eve_db::InventoryFlag::Cargo, 5_000),
             (990_003, eve_server::services::sov_gameplay::UPGRADE_CYNOSURAL_SUPPRESSION, eve_db::InventoryFlag::Cargo, 1),
             (990_004, eve_server::services::sov_gameplay::UPGRADE_MAJOR_THREAT_DETECTION, eve_db::InventoryFlag::Cargo, 1),
-            (990_005, 88_227, eve_db::InventoryFlag::Cargo, 1),
-            (990_006, 88_229, eve_db::InventoryFlag::Cargo, 1),
+            (990_005, 87_710, eve_db::InventoryFlag::Cargo, 1),
             (990_200, 21_096, eve_db::InventoryFlag::HiSlot0, 1),
             (990_201, 16_273, eve_db::InventoryFlag::Cargo, 2_000),
         ] {
@@ -189,13 +193,19 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
             eve_server::quasar_gateway::STATUS_OK
         );
     }
+    ctx.db.with_mut_snapshot(|s| {
+        for (idx, cel) in ctx.sde.celestials_in_system(sys_id).into_iter().filter(|c| c.group_id == 7).enumerate() {
+            let sh_id = 1_000_000_900 + idx as i64;
+            s.structures.insert(sh_id, crate::quasar_sov_equinox_hub::structure(sh_id, corp_id, sys_id, TYPE_ORBITAL_SKYHOOK));
+            s.sov_runtime.skyhook_planets.insert(sh_id, cel.celestial_id);
+        }
+    });
     let mut proc = Vec::new();
-    for iid in [990_005u64, 990_006, 990_003, 990_004] {
+    for iid in [990_005u64, 990_003, 990_004] {
         eve_proto::quasar::encode_bytes_field(1, &crate::quasar_sov_equinox_hub::idm(iid), &mut proc);
     }
     for tid in [
-        88_227u64,
-        88_229,
+        87_710u64,
         eve_server::services::sov_gameplay::UPGRADE_CYNOSURAL_SUPPRESSION as u64,
         eve_server::services::sov_gameplay::UPGRADE_MAJOR_THREAT_DETECTION as u64,
     ] {

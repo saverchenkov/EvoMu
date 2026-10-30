@@ -43,23 +43,20 @@ fn timestamp_secs(msg: &DynamicQuasarMessage, field: u32) -> Option<u64> {
 }
 
 fn encode_planet_definitions(out: &mut Vec<u8>) {
+    // DERIVED (synthetic): server-only planetary Power/Workforce & Reagent yield tables (see docs/BLOCKERS.md §7).
+    let hourly_reagent = super::sov_gameplay::SKYHOOK_HOURLY_REAGENT_YIELD;
     for &(type_id, _name, power, workforce) in PLANET_RESOURCE_TABLE.iter() {
         let mut def_buf = Vec::new();
         encode_id_field(1, u64::from(type_id), &mut def_buf);
         encode_varint_field(2, power, &mut def_buf);
         encode_varint_field(3, workforce, &mut def_buf);
-        if type_id == 12 || type_id == 2015 {
-            let reagent_type = if type_id == 12 {
-                super::sov_services::TYPE_SUPERIONIC_ICE
-            } else {
-                super::sov_services::TYPE_MAGMATIC_GAS
-            };
+        if let Some(reagent_type) = super::sov_gameplay::planet_reagent_type(type_id) {
             let mut r_def = Vec::new();
             encode_id_field(1, u64::from(reagent_type), &mut r_def);
             let mut amt = Vec::new();
-            encode_varint_field(1, 50, &mut amt);
+            encode_varint_field(1, hourly_reagent, &mut amt);
             encode_varint_field(2, 3_600, &mut amt);
-            encode_varint_field(3, 50, &mut amt);
+            encode_varint_field(3, hourly_reagent, &mut amt);
             encode_varint_field(4, 25_000, &mut amt);
             encode_varint_field(5, 25_000, &mut amt);
             encode_bytes_field(2, &amt, &mut r_def);
@@ -180,16 +177,13 @@ pub fn register_handlers(
                         encode_id_field(1, cel.celestial_id as u64, &mut cfg_buf);
                         encode_varint_field(2, power, &mut cfg_buf);
                         encode_varint_field(3, workforce, &mut cfg_buf);
-                        if cel.type_id == 12 || cel.type_id == 2015 {
-                            let reagent_type = if cel.type_id == 12 {
-                                super::sov_services::TYPE_SUPERIONIC_ICE
-                            } else {
-                                super::sov_services::TYPE_MAGMATIC_GAS
-                            };
+                        if let Some(reagent_type) = super::sov_gameplay::planet_reagent_type(cel.type_id) {
+                            // DERIVED (synthetic): server-only planetary reagent yield table (see docs/BLOCKERS.md §7).
+                            let hourly_reagent = super::sov_gameplay::SKYHOOK_HOURLY_REAGENT_YIELD;
                             let mut r_cfg = Vec::new();
                             encode_id_field(1, u64::from(reagent_type), &mut r_cfg);
                             let mut harvest = Vec::new();
-                            encode_varint_field(1, 50, &mut harvest);
+                            encode_varint_field(1, hourly_reagent, &mut harvest);
                             encode_varint_field(2, 3_600, &mut harvest);
                             encode_varint_field(3, 0, &mut harvest);
                             encode_varint_field(4, 25_000, &mut harvest);

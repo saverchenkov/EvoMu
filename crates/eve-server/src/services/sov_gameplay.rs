@@ -107,7 +107,20 @@ pub(crate) fn ship_free_cargo_m3(
 // 1. Mercenary Den Anchoring, Component Extraction, Combat & Repair
 // =========================================================================
 
-/// Live `structureDeployment.Anchor` handler for `TYPE_MERCENARY_DEN` (`85230`).
+/// Returns `true` iff `sys_id` is claimable sovereign null-security space (excludes high/low-sec,
+/// wormholes, Zarzakh `30100000`, Pochven `10000070`, and NPC-sovereignty constellations/regions).
+pub fn is_claimable_nullsec_system(sde: &eve_sde::SdeRegistry, sys_id: u32) -> bool {
+    let Some(s) = sde.solar_systems.get(&sys_id) else {
+        return false;
+    };
+    if s.security_status > 0.0 || sys_id >= 31_000_000 || sys_id == 30_100_000 || s.region_id == 10_000_070 {
+        return false;
+    }
+    sde.constellations.get(&s.constellation_id).and_then(|c| c.faction_id).is_none()
+        && sde.regions.get(&s.region_id).and_then(|r| r.faction_id).is_none()
+}
+
+/// Live `structureDeployment.Anchor` / `posMgr.AnchorStructure` handler for `TYPE_MERCENARY_DEN` (`85230`).
 pub async fn handle_anchor_mercenary_den_rpc(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -139,20 +152,73 @@ pub async fn handle_anchor_mercenary_den_rpc(
             message: format!("Ship {ship_id} is not present in space"),
         })?;
 
-    if ctx
-        .sde
-        .solar_systems
-        .get(&sys_id)
-        .is_none_or(|s| s.security_status > 0.0 || s.solar_system_id >= 31_000_000)
-    {
+    let first_arg = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+    let notify_item_id = ctx.db.with_snapshot(|snap| {
+        if first_arg > 0 && first_arg != i64::from(TYPE_MERCENARY_DEN) {
+            first_arg
+        } else {
+            snap.items
+                .values()
+                .filter(|i| {
+                    i.owner_id == char_id
+                        && i.location_id == ship_id
+                        && i.flag == InventoryFlag::Cargo
+                        && i.type_id == TYPE_MERCENARY_DEN
+                        && i.quantity >= 1
+                })
+                .map(|i| i.item_id)
+                .min()
+                .unwrap_or(first_arg)
+        }
+    });
+    let emit_invalid = |reason: &str| {
+        ctx.notify(
+            NotificationTarget::Character(char_id),
+            "OnMercenaryDenRegistrationInvalid",
+            "charid",
+            vec![
+                PyRep::String(reason.into()),
+                PyRep::Dict(vec![(PyRep::String("itemID".into()), PyRep::Integer(notify_item_id))]),
+            ],
+        );
+    };
+    if !is_claimable_nullsec_system(&ctx.sde, sys_id) {
+        emit_invalid("SovereigntyNullsecRequired");
         return Err(BridgeRpcError {
             code: "SovereigntyNullsecRequired".into(),
-            message: "Mercenary Dens can only be anchored in sovereign nullsec".into(),
+            message: "Mercenary Dens can only be anchored in claimable sovereign nullsec".into(),
         });
     }
 
-    let explicit_skyhook_id = args.get(1).and_then(|a| a.as_i64()).filter(|&v| v > 0);
-    let explicit_planet_id = args.get(2).and_then(|a| a.as_i64()).filter(|&v| v > 0);
+    // Support both V24 `structureDeployment.Anchor` 10-arg calls (`itemID, x, z, yaw, profileID,
+    // structureName, bio, reinforceWeekday, reinforceHour, extraConfig`) and 1..=3 arg calls.
+    let (explicit_skyhook_id, explicit_planet_id, custom_xz, custom_name) = if args.len() >= 4 {
+        let extra = args.get(9);
+        let xz = args
+            .get(1)
+            .and_then(|a| a.as_f64())
+            .zip(args.get(2).and_then(|a| a.as_f64()))
+            .filter(|(x, z)| x.is_finite() && z.is_finite());
+        let name = args
+            .get(5)
+            .and_then(|a| a.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        (
+            extract_extra_var(extra, "skyhookID").filter(|&v| v > 0),
+            extract_extra_var(extra, "planetID").filter(|&v| v > 0),
+            xz,
+            name,
+        )
+    } else {
+        (
+            args.get(1).and_then(|a| a.as_i64()).filter(|&v| v > 0),
+            args.get(2).and_then(|a| a.as_i64()).filter(|&v| v > 0),
+            None,
+            None,
+        )
+    };
 
     // Resolve host Skyhook in system and measure live ship-to-Skyhook distance.
     let candidates: Vec<(i64, DVec3, Option<i64>)> = ctx.db.with_snapshot(|snap| {
@@ -161,7 +227,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
             .filter(|st| {
                 st.type_id == TYPE_ORBITAL_SKYHOOK
                     && st.solar_system_id == sys_id
-                    && st.state != "Destroyed"
+                    && !st.state.eq_ignore_ascii_case("destroyed")
                     && explicit_skyhook_id.is_none_or(|want| st.structure_id == want)
             })
             .map(|st| {
@@ -171,15 +237,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
             .collect()
     });
     if candidates.is_empty() {
-        ctx.notify(
-            NotificationTarget::Character(char_id),
-            "OnMercenaryDenRegistrationInvalid",
-            "charid",
-            vec![
-                PyRep::String("SkyhookNotFound".into()),
-                PyRep::Dict(vec![(PyRep::String("itemID".into()), PyRep::Integer(explicit_skyhook_id.unwrap_or(0)))]),
-            ],
-        );
+        emit_invalid("SkyhookNotFound");
         return Err(BridgeRpcError {
             code: "SkyhookNotFound".into(),
             message: "No active Orbital Skyhook found in this solar system".into(),
@@ -201,35 +259,23 @@ pub async fn handle_anchor_mercenary_den_rpc(
         }
     }
     let (skyhook_id, sh_pos, skyhook_planet_opt, dist_m) = chosen.expect("non-empty candidates");
-    if dist_m > MERC_DEN_MAX_SKYHOOK_DIST_M {
-        ctx.notify(
-            NotificationTarget::Character(char_id),
-            "OnMercenaryDenRegistrationInvalid",
-            "charid",
-            vec![
-                PyRep::String("MercenaryDenTooFarFromSkyhook".into()),
-                PyRep::Dict(vec![(PyRep::String("itemID".into()), PyRep::Integer(skyhook_id))]),
-            ],
-        );
+    let deploy_dist_m = custom_xz
+        .map(|(x, z)| (DVec3::new(x, sh_pos.y, z).distance(sh_pos) - 500.0).max(0.0))
+        .unwrap_or(0.0);
+    if dist_m > MERC_DEN_MAX_SKYHOOK_DIST_M || deploy_dist_m > MERC_DEN_MAX_SKYHOOK_DIST_M {
+        emit_invalid("MercenaryDenTooFarFromSkyhook");
         return Err(BridgeRpcError {
             code: "MercenaryDenTooFarFromSkyhook".into(),
             message: format!(
-                "Ship is {dist_m:.0} m from Orbital Skyhook {skyhook_id} (maximum {MERC_DEN_MAX_SKYHOOK_DIST_M:.0} m)"
+                "Ship or deployment position is {:.0} m from Orbital Skyhook {skyhook_id} (maximum {MERC_DEN_MAX_SKYHOOK_DIST_M:.0} m)",
+                dist_m.max(deploy_dist_m)
             ),
         });
     }
 
     let planet_id = match (skyhook_planet_opt, explicit_planet_id) {
         (Some(sp), Some(ep)) if sp != ep => {
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnMercenaryDenRegistrationInvalid",
-                "charid",
-                vec![
-                    PyRep::String("DenPlanetMismatch".into()),
-                    PyRep::Dict(vec![(PyRep::String("itemID".into()), PyRep::Integer(skyhook_id))]),
-                ],
-            );
+            emit_invalid("DenPlanetMismatch");
             return Err(BridgeRpcError {
                 code: "DenPlanetMismatch".into(),
                 message: format!("Planet {ep} does not match Skyhook {skyhook_id} planet {sp}"),
@@ -250,15 +296,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
         .iter()
         .any(|c| c.celestial_id == planet_id && c.type_id == 11);
     if !is_temperate {
-        ctx.notify(
-            NotificationTarget::Character(char_id),
-            "OnMercenaryDenRegistrationInvalid",
-            "charid",
-            vec![
-                PyRep::String("PlanetNotTemperate".into()),
-                PyRep::Dict(vec![(PyRep::String("itemID".into()), PyRep::Integer(skyhook_id))]),
-            ],
-        );
+        emit_invalid("PlanetNotTemperate");
         return Err(BridgeRpcError {
             code: "PlanetNotTemperate".into(),
             message: format!("Planet {planet_id} is not a Temperate planet (type 11)"),
@@ -267,7 +305,10 @@ pub async fn handle_anchor_mercenary_den_rpc(
 
     let now = ctx.now_unix();
     let pending: PendingNotices = Arc::new(RwLock::new(Vec::new()));
-    let den_pos = DVec3::new(sh_pos.x + 2_500.0, sh_pos.y, sh_pos.z);
+    let den_pos = custom_xz
+        .map(|(x, z)| DVec3::new(x, sh_pos.y, z))
+        .unwrap_or_else(|| DVec3::new(sh_pos.x + 2_500.0, sh_pos.y, sh_pos.z));
+    let den_name = custom_name.unwrap_or_else(|| format!("Mercenary Den ({char_id})"));
 
     let den_id_res = ctx.db.try_with_mut_snapshot(|snap| {
         if snap
@@ -302,20 +343,50 @@ pub async fn handle_anchor_mercenary_den_rpc(
                 ),
             });
         }
-        let item_id = snap
-            .items
+        if snap
+            .sov_runtime
+            .mercenary_dens
             .values()
-            .find(|i| {
-                i.location_id == ship_id
-                    && i.type_id == TYPE_MERCENARY_DEN
-                    && i.quantity > 0
-                    && matches!(i.flag, InventoryFlag::Cargo | InventoryFlag::Hangar | InventoryFlag::None)
-            })
-            .map(|i| i.item_id)
-            .ok_or_else(|| BridgeRpcError {
+            .any(|d| d.skyhook_id == skyhook_id)
+        {
+            return Err(BridgeRpcError {
+                code: "MercenaryDenAlreadyAnchoredOnSkyhook".into(),
+                message: format!("Orbital Skyhook {skyhook_id} already hosts a Mercenary Den"),
+            });
+        }
+        let item_id = if first_arg > 0 && first_arg != i64::from(TYPE_MERCENARY_DEN) {
+            let it = snap.items.get(&first_arg).filter(|i| i.type_id == TYPE_MERCENARY_DEN && i.quantity >= 1).ok_or_else(|| BridgeRpcError {
                 code: "MissingMercenaryDenItem".into(),
-                message: "Ship cargo does not contain a Mercenary Den (85230)".into(),
+                message: format!("Mercenary Den item {first_arg} not found"),
             })?;
+            if it.owner_id != char_id {
+                return Err(BridgeRpcError { code: "ItemOwnershipViolation".into(), message: format!("Character {char_id} does not own Mercenary Den item {first_arg}") });
+            }
+            if it.location_id != ship_id || it.flag != InventoryFlag::Cargo {
+                return Err(BridgeRpcError { code: "ItemNotInCargo".into(), message: format!("Mercenary Den item {first_arg} must be in active ship cargo") });
+            }
+            if snap.is_item_locked_in_contract_or_job(first_arg) {
+                return Err(BridgeRpcError { code: "ItemLockedInContractOrJob".into(), message: format!("Mercenary Den item {first_arg} is locked in an open contract or industry job") });
+            }
+            first_arg
+        } else {
+            snap.items
+                .values()
+                .filter(|i| {
+                    i.owner_id == char_id
+                        && i.location_id == ship_id
+                        && i.flag == InventoryFlag::Cargo
+                        && i.type_id == TYPE_MERCENARY_DEN
+                        && i.quantity >= 1
+                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                })
+                .map(|i| i.item_id)
+                .min()
+                .ok_or_else(|| BridgeRpcError {
+                    code: "MissingMercenaryDenItem".into(),
+                    message: "Ship cargo does not contain an unlocked Mercenary Den (85230)".into(),
+                })?
+        };
         if let Some(it) = snap.items.get_mut(&item_id) {
             it.quantity -= 1;
             if it.quantity <= 0 {
@@ -333,7 +404,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
                 type_id: TYPE_MERCENARY_DEN,
                 owner_corp_id: 0,
                 solar_system_id: sys_id,
-                name: format!("Mercenary Den ({char_id})"),
+                name: den_name,
                 position: pos_arr,
                 state: "ShieldVulnerable".into(),
                 quantum_core_installed: true,
@@ -375,16 +446,11 @@ pub async fn handle_anchor_mercenary_den_rpc(
     let den_id = match den_id_res {
         Ok(id) => id,
         Err(err) => {
-            if err.code == "MercenaryDenCapExceeded" {
-                ctx.notify(
-                    NotificationTarget::Character(char_id),
-                    "OnMercenaryDenRegistrationInvalid",
-                    "charid",
-                    vec![
-                        PyRep::String(err.code.clone()),
-                        PyRep::Dict(vec![(PyRep::String("itemID".into()), PyRep::Integer(skyhook_id))]),
-                    ],
-                );
+            if matches!(
+                err.code.as_str(),
+                "SovereigntyNotClaimed" | "MercenaryDenAlreadyAnchoredOnSkyhook" | "MercenaryDenCapExceeded"
+            ) {
+                emit_invalid(&err.code);
             }
             return Err(err);
         }
@@ -414,7 +480,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
             PyRep::Dict(vec![(PyRep::String("itemID".into()), PyRep::Integer(den_id))]),
         ],
     );
-    emit_sov_structures_updated(ctx, sys_id, vec![PyRep::Integer(den_id)]);
+    emit_sov_structures_updated(ctx, sys_id, &[den_id]);
     Ok(PyRep::keyval([
         ("structureID", PyRep::Integer(den_id)),
         ("denID", PyRep::Integer(den_id)),
@@ -832,7 +898,7 @@ pub async fn apply_mercenary_den_weapon_damage(
                     ],
                 );
             }
-            emit_sov_structures_updated(ctx, sys_id, vec![PyRep::Integer(den_id)]);
+            emit_sov_structures_updated(ctx, sys_id, &[den_id]);
             Ok(PyRep::keyval([
                 ("structureID", PyRep::Integer(den_id)),
                 ("state", PyRep::String("Destroyed".into())),
@@ -1197,14 +1263,7 @@ pub async fn handle_anchor_sov_hub_rpc(
     }
     let sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solarSystemID".into() })?;
     let ship_id = session.ship_id.unwrap_or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0)));
-    let sys_meta = ctx.sde.solar_systems.get(&sys_id);
-    let sys_sec = sys_meta.map(|s| s.security_status).unwrap_or(1.0);
-    let is_pochven = sys_meta.is_some_and(|s| s.region_id == 10_000_070);
-    let is_npc_sov = sys_meta.is_some_and(|s| {
-        ctx.sde.constellations.get(&s.constellation_id).and_then(|c| c.faction_id).is_some()
-            || ctx.sde.regions.get(&s.region_id).and_then(|r| r.faction_id).is_some()
-    });
-    if sys_sec > 0.0 || sys_id >= 31_000_000 || sys_id == 30_100_000 || is_pochven || is_npc_sov {
+    if !is_claimable_nullsec_system(&ctx.sde, sys_id) {
         return Err(BridgeRpcError { code: "CannotAnchorSovHubOutsideNullSec".into(), message: format!("Sovereignty Hub can only be anchored in claimable null-security space (system {sys_id})") });
     }
     let (_, ship_ball) = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError { code: "DestinyQueryFailed".into(), message: e })?
@@ -1224,13 +1283,28 @@ pub async fn handle_anchor_sov_hub_rpc(
         if snap.system_states.get(&sys_id).and_then(|s| s.sov_alliance_id).is_some_and(|aid| aid != ally_id) {
             return Err(BridgeRpcError { code: "SovereigntyHeldByAnotherAlliance".into(), message: format!("System {sys_id} is currently claimed by another alliance") });
         }
-        if snap.structures.values().any(|s| s.solar_system_id == sys_id && s.type_id == TYPE_SOVEREIGNTY_HUB && s.state != "Destroyed") {
+        if snap.structures.values().any(|s| s.solar_system_id == sys_id && s.type_id == TYPE_SOVEREIGNTY_HUB && !s.state.eq_ignore_ascii_case("destroyed")) {
             return Err(BridgeRpcError { code: "SovHubAlreadyPresent".into(), message: format!("System {sys_id} already has an active Sovereignty Hub") });
         }
-        let item_id = snap.items.values()
-            .filter(|i| (i.item_id == first_arg || first_arg == i64::from(TYPE_SOVEREIGNTY_HUB)) && i.type_id == TYPE_SOVEREIGNTY_HUB && i.location_id == ship_id && (i.owner_id == char_id || i.owner_id == corp_id) && i.quantity >= 1)
-            .map(|i| i.item_id).min()
-            .ok_or_else(|| BridgeRpcError { code: "MissingStructureItem".into(), message: "Sovereignty Hub item not found in active ship cargo".into() })?;
+        let item_id = if first_arg > 0 && first_arg != i64::from(TYPE_SOVEREIGNTY_HUB) {
+            let it = snap.items.get(&first_arg).filter(|i| i.type_id == TYPE_SOVEREIGNTY_HUB && i.quantity >= 1)
+                .ok_or_else(|| BridgeRpcError { code: "MissingStructureItem".into(), message: format!("Sovereignty Hub item {first_arg} not found") })?;
+            if it.owner_id != char_id && it.owner_id != corp_id {
+                return Err(BridgeRpcError { code: "ItemOwnershipViolation".into(), message: format!("Character {char_id} does not own Sovereignty Hub item {first_arg}") });
+            }
+            if it.location_id != ship_id || it.flag != InventoryFlag::Cargo {
+                return Err(BridgeRpcError { code: "ItemNotInCargo".into(), message: format!("Sovereignty Hub item {first_arg} must be in active ship cargo") });
+            }
+            if snap.is_item_locked_in_contract_or_job(first_arg) {
+                return Err(BridgeRpcError { code: "ItemLockedInContractOrJob".into(), message: format!("Sovereignty Hub item {first_arg} is locked in an open contract or industry job") });
+            }
+            first_arg
+        } else {
+            snap.items.values()
+                .filter(|i| i.type_id == TYPE_SOVEREIGNTY_HUB && i.location_id == ship_id && i.flag == InventoryFlag::Cargo && (i.owner_id == char_id || i.owner_id == corp_id) && i.quantity >= 1 && !snap.is_item_locked_in_contract_or_job(i.item_id))
+                .map(|i| i.item_id).min()
+                .ok_or_else(|| BridgeRpcError { code: "MissingStructureItem".into(), message: "Unlocked Sovereignty Hub item not found in active ship cargo".into() })?
+        };
         if let Some(it) = snap.items.get_mut(&item_id) {
             if it.quantity > 1 { it.quantity -= 1; } else { snap.items.remove(&item_id); }
         }

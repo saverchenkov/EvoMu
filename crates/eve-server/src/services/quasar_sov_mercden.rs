@@ -36,8 +36,9 @@ pub const INFOMORPH_UNIT_SECS: u64 = 3_600;
 pub const EVOLUTION_UNIT_SECS: u64 = 86_400;
 /// Wiki (`Mercenary_Tactical_Operation.md:26,39`): passive Development and Anarchy gain per 24h cycle.
 pub const EVOLUTION_DELTA_PER_DAY: u32 = 5;
-/// Seconds between Mercenary Tactical Operation generation passes.
-pub const ACTIVITY_GENERATION_SECS: u64 = 86_400;
+/// DERIVED (synthetic — deterministic 72h cadence matching `Mercenary_Tactical_Operation.md:14`
+/// "MTOs spawn approximately every 3 days from the time they are onlined"): seconds between MTO generation passes.
+pub const ACTIVITY_GENERATION_SECS: u64 = 3 * 86_400;
 /// Wiki (`Mercenary_Tactical_Operation.md:14`): lifetime of a generated (unstarted) operation (`3` days).
 pub const ACTIVITY_LIFETIME_SECS: u64 = 3 * 86_400;
 const MAX_LEVEL: u32 = 100;
@@ -65,14 +66,16 @@ pub fn stage_for_level(level: u32) -> u32 {
     }
 }
 
-/// Wiki (`Mercenary_Tactical_Operation.md:28-34`): hourly Infomorph Decryption Key yield by Development stage (`1..=5`: `+0%`, `+15%`, `+25%`, `+35%`, `+50%` over `65/hr` base rate).
+/// DERIVED (synthetic deterministic lower bound of each stage's `Mercenary_Tactical_Operation.md:28-34`
+/// range: `65-100`, `68-105`, `71-110`, `74-115`, `78-120` IDK/hr across stages `1..=5`; exact server
+/// per-planet formula is not in `.fsdbinary`).
 pub fn infomorphs_per_hour(dev_stage: u32) -> u32 {
     match dev_stage {
         1 => 65,
-        2 => 75,
-        3 => 81,
-        4 => 88,
-        _ => 98,
+        2 => 68,
+        3 => 71,
+        4 => 74,
+        _ => 78,
     }
 }
 
@@ -86,7 +89,8 @@ pub fn anarchy_workforce_disruption_pct(anarchy_stage: u32) -> u64 {
     }
 }
 
-/// Concurrent operations offered by a den at a development stage.
+/// DERIVED (synthetic — server-only MTO slot capacity formula is not in `.fsdbinary`):
+/// concurrent operations offered by a den at a development stage (`3..=7` across stages `1..=5`).
 pub fn activity_capacity(stage: u32) -> u32 {
     2 + stage
 }
@@ -325,17 +329,13 @@ pub(crate) fn complete_mercenary_activity_in_snap(
     a: &PersistedMercenaryActivity,
     den_id: i64,
     solar_system_id: u32,
-    now_unix: u64,
-) -> Option<(i64, f64)> {
-    let mut owner_cid = a.started_by;
+) {
     let mut applied_dev_impact = 0i32;
     let mut applied_infomorph_bonus = 0u32;
     if let Some(den_mut) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
-        if owner_cid <= 0 {
-            owner_cid = den_mut.owner_char_id;
-        }
         // Wiki (`Mercenary_Tactical_Operation.md:24`): completing an MTO increases Development
-        // by +10 points, or grants 350 bonus infomorphs if already at max level 4 (progress 100).
+        // by +10 points (or grants +350 bonus Encrypted Infomorphs into den cargo at max Development 100)
+        // and reduces Anarchy, with zero direct wallet ISK minting.
         if den_mut.development_level >= MAX_LEVEL {
             applied_infomorph_bonus = a.infomorph_bonus.max(350);
             let cap = infomorph_cargo_capacity(stage_for_level(den_mut.development_level));
@@ -348,25 +348,6 @@ pub(crate) fn complete_mercenary_activity_in_snap(
         den_mut.anarchy_level =
             (den_mut.anarchy_level as i32 + a.anarchy_impact).clamp(0, MAX_LEVEL as i32) as u32;
         push_evolution_notice(pending, den_mut);
-    }
-    // DERIVED (synthetic): ISK completion reward per Mercenary Tactical Operation.
-    let isk_reward = i64::from(a.infomorph_bonus.max(10)) * 50_000;
-    let reward_cents = eve_db::IskCents::from_isk(isk_reward);
-    let mut account_change = None;
-    if owner_cid > 0 {
-        if let Some(ch) = snap.characters.get_mut(&owner_cid) {
-            ch.balance = ch.balance.checked_add(reward_cents).unwrap_or(ch.balance);
-            let new_bal = ch.balance;
-            let _ = now_unix;
-            snap.append_journal(
-                owner_cid,
-                "MercenaryTacticalOperationReward",
-                reward_cents,
-                new_bal,
-                format!("Mercenary Tactical Operation reward at den {den_id}"),
-            );
-            account_change = Some((owner_cid, new_bal.to_wire_f64()));
-        }
     }
     let hex_key = hex(&a.uuid);
     snap.sov_runtime.mto_site_balls.retain(|&bid, v| {
@@ -387,7 +368,6 @@ pub(crate) fn complete_mercenary_activity_in_snap(
         a.anarchy_impact,
         applied_infomorph_bonus,
     );
-    account_change
 }
 
 /// Expires stale operations (including timed-out started operations without completion rewards)
@@ -626,20 +606,18 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
         );
     }
     {
-        let (db, pending) = (Arc::clone(&db), Arc::clone(&router.pending_notices));
+        let db = Arc::clone(&db);
         router.register_handler(
             "eve_public.sovereignty.mercenaryden.activity.api.GetAllRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
                 let cid = require_character(ctx)?;
-                let acts = db.with_mut_snapshot(|snap| {
+                let now = ctx.now_unix();
+                let acts = db.with_snapshot(|snap| {
                     let dens = owned_den_ids(snap, cid);
-                    for den_id in &dens {
-                        refresh_activities(snap, &pending, *den_id, ctx.now_unix());
-                    }
                     snap.sov_runtime
                         .mercenary_activities
                         .values()
-                        .filter(|a| dens.contains(&a.den_id))
+                        .filter(|a| dens.contains(&a.den_id) && a.expiry_unix > now)
                         .cloned()
                         .collect::<Vec<_>>()
                 });
