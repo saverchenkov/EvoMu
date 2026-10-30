@@ -174,7 +174,7 @@ impl ServerContext {
                 if let (Some(sys), Some(db), Some(sde)) = (sw.upgrade(), dw.upgrade(), sdw.upgrade()) {
                     let inc = crate::services::pve_incursion_sites::on_incursion_boss_destroyed_core(&sys, &db, &sde, sys_id, npc_id, killer_opt).await;
                     if let (Some(Ok(r)), Some(gw)) = (&inc, gww.upgrade()) {
-                        crate::services::pve_incursion_sites::publish_incursion_tale_stopped_if_ended(&gw, &db, r);
+                        crate::services::pve_incursion_sites::notify_incursion_site_completed(&gw, &db, sys_id, r);
                     }
                     let acct_changes = crate::services::pve_special_sites::on_special_site_npc_destroyed_core(&sys, &db, &sde, sys_id, npc_id, killer_opt).await;
                     let _ = crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_core(&sys, &db, sys_id, npc_id).await;
@@ -191,7 +191,7 @@ impl ServerContext {
                         let (clr, esc, step) = crate::services::pve_exploration::handle_pve_site_npc_destruction_core(&sys, &db, &sde, &rng, &ce, sys_id, npc_id, kid, true).await;
                         if let Some(gw) = gww.upgrade() {
                             gw.progression.achievements.on_gameplay_event_by_name(kid as u32, &["destroyHostileNPC"], 1, now_s, &gw);
-                            if clr.is_some() { gw.progression.extra.on_system_tale_encounter_completed(sys_id, 1, now_s); }
+                            if let Some(ref sid) = clr { let (cat, did) = crate::services::pve_exploration::pve_site_category_and_dungeon_id(&db, now_s, sys_id, sid); gw.progression.extra.on_system_tale_encounter_completed(sys_id, &cat, did, 1, now_s, &gw); }
                         }
                         if let Some(pws) = pw.upgrade() { crate::services::pve_exploration::notify_pve_destruction_events(&db, &pws, &tx, kid, clr, esc, step); }
                     }

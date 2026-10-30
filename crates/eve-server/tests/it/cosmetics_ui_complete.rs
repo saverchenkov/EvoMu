@@ -245,7 +245,7 @@ async fn test_ui_links_station_guests_achievements_offers_and_nes_intro() {
     };
     let empty_state = rpc(&ctx, &mut a, "monolithTaskTrackerMgr", "GetCompletedAchievementsAndClientEventCount", &[]).await.expect("initial");
     assert_eq!(empty_state, ach_dict(vec![], PyRep::Dict(vec![])));
-    let counters = |n: i64| PyRep::Dict(vec![(PyRep::String("warps".into()), PyRep::Integer(n))]);
+    let counters = |n: i64| PyRep::Dict(vec![(PyRep::String("client_openAgency".into()), PyRep::Integer(n))]);
     rpc(&ctx, &mut a, "monolithTaskTrackerMgr", "UpdateClientAchievmentsAndCounters", &[PyRep::List(vec![PyRep::Integer(102), PyRep::Integer(60)]), counters(3)]).await.expect("update");
     rpc(&ctx, &mut a, "monolithTaskTrackerMgr", "UpdateClientAchievmentsAndCounters", &[PyRep::List(vec![PyRep::Integer(102)]), counters(1)]).await.expect("update again");
     let state = rpc(&ctx, &mut a, "monolithTaskTrackerMgr", "GetCompletedAchievementsAndClientEventCount", &[]).await.expect("state");

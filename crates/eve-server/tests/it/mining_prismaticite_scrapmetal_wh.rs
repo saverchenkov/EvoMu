@@ -511,8 +511,17 @@ async fn test_mining_wormhole_ore_sites_and_sleeper_guards() {
             .into_iter()
             .map(|d| d.dungeon_name)
             .collect();
-        assert_eq!(names.len(), 11, "C{cls} Shattered must include all 11 sites: {names:?}");
+        assert_eq!(names.len(), 5, "C{cls} Shattered must have 5 non-Core + Shattered sites: {names:?}");
         assert!(names.contains(&"Shattered Debris Field"));
+        assert!(!names.iter().any(|n| n.contains("Core")), "C{cls} Shattered must exclude Core Deposits: {names:?}");
+    }
+    let test_rng = eve_server::rng::MechanicRng::seeded(0x5EED_1234);
+    for (shattered_sys, expect_core) in [(31_002_505_u32, false), (31_001_159, false), (31_002_177, true)] {
+        let cls = ctx.sde.solar_systems[&shattered_sys].wormhole_class_id.unwrap() as u8;
+        let sampled: Vec<&str> = eve_server::services::mining_sites::sample_wormhole_ore_sites_for_system(&ctx.sde, &test_rng, shattered_sys, cls)
+            .into_iter().map(|d| d.dungeon_name).collect();
+        assert!(sampled.contains(&"Shattered Debris Field"), "Shattered C{cls} {shattered_sys} must include Shattered Debris Field");
+        assert_eq!(sampled.iter().any(|n| n.contains("Core")), expect_core, "Shattered C{cls} {shattered_sys} Core deposit rule mismatch: {sampled:?}");
     }
 
     // 2. Seed representative W-space systems across C1, C3, C5, C6, and C13 Shattered;
@@ -626,17 +635,34 @@ async fn test_mining_wormhole_ore_sites_and_sleeper_guards() {
         "Seeded C5/C6 systems must sample multiple distinct Core deposits, got {seen_core_deposits:?}"
     );
 
-    // 3. Verify server restart respawns exact Sleeper guards for persisted anomalies
-    let restarted_ctx = ServerContext::with_sde_and_repository(
-        std::sync::Arc::clone(&ctx.sde),
-        std::sync::Arc::clone(&ctx.db),
-    );
+    // 3. Verify killing Sleeper guards does NOT respawn on scanSvc/scanMgr RPCs while asteroids remain,
+    // and cold server restart re-hydrates only surviving guards (keeping killed guards dead)
+    let c5_handle = ctx.systems.get_or_spawn(31_001_880);
+    let initial_guards: Vec<i64> = c5_handle.list_balls().await.unwrap().into_iter()
+        .filter(|b| eve_server::services::mining_sites::WORMHOLE_GUARD_TYPE_IDS.contains(&b.type_id))
+        .map(|b| b.id).collect();
+    assert!(initial_guards.len() >= 4, "C5 system must have initial Sleeper guards");
+    for &killed_id in &initial_guards[..2] {
+        let _ = eve_server::services::combat_crimewatch::combat_npc_ai::destroy_specialized_npc_and_queue_bounty(
+            &ctx, 31_001_880, killed_id, 90_000_001,
+        ).await;
+    }
+    let mut scan_sess = setup_session(&ctx, 90_000_001).await;
+    scan_sess.solar_system_id = Some(31_001_880);
+    let kw = HashMap::new();
+    let _ = ctx.dispatch_rpc(&mut scan_sess, "scanSvc", None, "GetSystemScanMgr", &[], &kw, None).await;
+    let _ = ctx.dispatch_rpc(&mut scan_sess, "scanMgr", None, "RequestScans", &[PyRep::List(vec![])], &kw, None).await;
+    let post_scan_count = c5_handle.list_balls().await.unwrap().iter()
+        .filter(|b| eve_server::services::mining_sites::WORMHOLE_GUARD_TYPE_IDS.contains(&b.type_id)).count();
+    assert_eq!(post_scan_count, initial_guards.len() - 2, "Scan RPCs must NOT respawn killed Sleeper guards");
+
+    let restarted_ctx = ServerContext::with_sde_and_repository(std::sync::Arc::clone(&ctx.sde), std::sync::Arc::clone(&ctx.db));
     crate::common::pin_clock(&restarted_ctx);
     eve_server::router::dispatch::seed_system_mining_sites_from_sde(&restarted_ctx, 31_001_880).await;
-    let restarted_balls = restarted_ctx.systems.get_or_spawn(31_001_880).list_balls().await.expect("list_balls after restart");
-    let guard_ball_count = restarted_balls
-        .iter()
-        .filter(|b| eve_server::services::mining_sites::WORMHOLE_GUARD_TYPE_IDS.contains(&b.type_id))
-        .count();
-    assert!(guard_ball_count > 0, "Restarted C5 system must respawn Sleeper guards for persisted anomalies");
+    let restarted_guards: Vec<i64> = restarted_ctx.systems.get_or_spawn(31_001_880).list_balls().await.unwrap().into_iter()
+        .filter(|b| eve_server::services::mining_sites::WORMHOLE_GUARD_TYPE_IDS.contains(&b.type_id)).map(|b| b.id).collect();
+    assert_eq!(restarted_guards.len(), initial_guards.len() - 2, "Restarted C5 system must re-hydrate only surviving Sleeper guards");
+    for &killed_id in &initial_guards[..2] {
+        assert!(!restarted_guards.contains(&killed_id), "Killed Sleeper guard {killed_id} must stay dead across restart");
+    }
 }

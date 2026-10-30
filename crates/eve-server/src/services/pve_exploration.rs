@@ -627,6 +627,21 @@ pub fn notify_pve_destruction_events(
     }
 }
 
+pub fn pve_site_category_and_dungeon_id(
+    db: &std::sync::Arc<eve_db::WorldRepository>,
+    now_unix: u64,
+    solar_system_id: SolarSystemId,
+    site_id: &str,
+) -> (String, u32) {
+    with_pve_exploration_reg_db(db, now_unix, |reg| {
+        reg.sites_by_system
+            .get(&solar_system_id)
+            .and_then(|l| l.iter().find(|s| s.site_id == site_id))
+            .map(|s| (s.site_category.clone(), s.dungeon_id))
+            .unwrap_or_default()
+    })
+}
+
 pub async fn handle_pve_site_npc_destruction(
     ctx: &ServerContext,
     solar_system_id: SolarSystemId,
@@ -646,8 +661,10 @@ pub async fn handle_pve_site_npc_destruction(
         false,
     ).await;
 
-    if cleared_site_id.is_some() {
-        ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(solar_system_id, 1, ctx.now_unix());
+    if let Some(ref sid) = cleared_site_id {
+        let now = ctx.now_unix();
+        let (cat, did) = pve_site_category_and_dungeon_id(&ctx.db, now, solar_system_id, sid);
+        ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(solar_system_id, &cat, did, 1, now, &ctx.quasar_gateway);
     }
     notify_pve_destruction_events(
         &ctx.db,
@@ -858,7 +875,9 @@ pub async fn advance_site_wave_or_complete(
         }
 
         session.push_notification("OnCosmicAnomalyRemoved", vec![PyRep::String(site_id.to_string())]);
-        ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(solar_system_id, 1, ctx.now_unix());
+        ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(
+            solar_system_id, &site_category, dungeon_id, 1, ctx.now_unix(), &ctx.quasar_gateway,
+        );
     }
 
     let loot_py: Vec<PyRep> = dropped_loot_items
@@ -1207,9 +1226,30 @@ pub async fn handle_pve_exploration(
                     None if method == "EnterNextDungeonRoom" => {
                         let fleet_count = args.get(1).and_then(|a| a.as_i64()).unwrap_or(5).clamp(1, 10) as usize;
                         let res = crate::services::pve_special_sites::complete_special_dungeon_instance(ctx, session, item_id, fleet_count).await;
-                        if res.is_ok() {
-                            if let Ok(sys_id) = resolve_session_system_id(ctx, session) {
-                                ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(sys_id, 1, ctx.now_unix());
+                        if let Ok(ref rep) = res {
+                            let is_done = rep.dict_get("completed").or_else(|| rep.dict_get("cleared")) == Some(&PyRep::Bool(true));
+                            if is_done {
+                                if let Ok(sys_id) = resolve_session_system_id(ctx, session) {
+                                    let cat = if (720_000..730_000).contains(&item_id) { "Triglavian" } else if (710_000..720_000).contains(&item_id) { "Homefront" } else { "DrifterHive" };
+                                    let did = rep
+                                        .dict_get("dungeonID")
+                                        .and_then(|v| v.as_i64())
+                                        .and_then(|v| u32::try_from(v).ok())
+                                        .or_else(|| {
+                                            crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+                                                reg.homefront_sites
+                                                    .get(&sys_id)
+                                                    .and_then(|l| l.iter().find(|s| s.instance_id == item_id).map(|s| s.dungeon_id))
+                                                    .or_else(|| {
+                                                        reg.triglavian_sites
+                                                            .get(&sys_id)
+                                                            .and_then(|l| l.iter().find(|s| s.instance_id == item_id).map(|s| s.dungeon_id))
+                                                    })
+                                            })
+                                        })
+                                        .unwrap_or(0);
+                                    ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(sys_id, cat, did, 1, ctx.now_unix(), &ctx.quasar_gateway);
+                                }
                             }
                         }
                         return Some(res);

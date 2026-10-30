@@ -250,6 +250,20 @@ async fn quasar_community_progression_tales_and_goals() {
     assert!(tale_stop_notifs.iter().any(|n| n.payload.as_ref().unwrap().normalized_type_name() == "eve_public.tale.api.StoppedNotice"));
     assert!(tale_stop_notifs.iter().any(|n| n.payload.as_ref().unwrap().normalized_type_name() == "eve_public.communitytrack.api.ProgressedNotice"));
     assert_eq!(ctx.quasar_gateway.progression.extra.get_community_track(tid).unwrap().current_progress, 26);
+    {
+        let mut tracks = ctx.quasar_gateway.progression.extra.community_tracks.write().unwrap();
+        tracks.get_mut(&tid).unwrap().tale_templates.push(eve_server::services::pve_incursion_sites::INCURSION_TALE_TEMPLATE_ID as u32);
+    }
+    let inc_res = eve_server::services::pve_incursion_sites::IncursionCompletionResult {
+        site_id: "INC-20000001-5158".into(), tier: "Vanguard".into(), fleet_size: 1, fleet_scale_factor: 1.0,
+        isk_per_pilot: 10_000_000, concord_lp_per_pilot: 1000, influence: 0.99,
+        state: "Mobilizing".into(), mothership_spawned: false, incursion_ended: false,
+    };
+    eve_server::services::pve_incursion_sites::notify_incursion_site_completed(&ctx.quasar_gateway, &ctx.db, 30_000_142, &inc_res);
+    assert_eq!(ctx.quasar_gateway.progression.extra.get_community_track(tid).unwrap().current_progress, 27, "Incursion site clear must increment community track once (+1), not double-count");
+    let inc_notifs = drain_notices(&mut stream_rx);
+    assert_eq!(inc_notifs.len(), 1);
+    assert_eq!(inc_notifs[0].payload.as_ref().unwrap().normalized_type_name(), "eve_public.communitytrack.api.ProgressedNotice");
     let count_after_stop = quasar_rpc(
         &ctx,
         &mut sess,

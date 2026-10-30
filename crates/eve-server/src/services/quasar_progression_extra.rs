@@ -73,6 +73,7 @@ pub struct ProgressionExtraManager {
     pub corp_state: Option<Arc<crate::services::quasar_social_corp::QuasarCorpState>>,
     pub db: Option<Arc<WorldRepository>>,
     pub sde: Option<Arc<eve_sde::SdeRegistry>>,
+    pub sde_event_tale_templates: std::collections::HashSet<u32>,
 }
 
 pub use super::quasar_campaign_state::{CampaignObjectiveRecord, CampaignRecord, CampaignTrackRecord};
@@ -125,6 +126,7 @@ impl ProgressionExtraManager {
             corp_state: None,
             db,
             sde: None,
+            sde_event_tale_templates: std::collections::HashSet::new(),
         }
     }
 
@@ -142,12 +144,14 @@ impl ProgressionExtraManager {
                 for (id_str, val) in records {
                     if let Ok(id) = id_str.parse::<u32>() {
                         let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("Community Track").to_string();
-                        let target = val.get("goal").and_then(|v| v.as_u64()).unwrap_or(100);
+                        // DERIVED: Server-configured default goal (100) when a template in community_track_templates.fsdbinary omits an explicit non-zero per-instance goal.
+                        let target = val.get("goal").and_then(|v| v.as_u64()).filter(|&g| g > 0).unwrap_or(100);
                         let tale_templates: Vec<u32> = val
                             .get("tale_templates")
                             .and_then(|v| v.as_array())
                             .map(|arr| arr.iter().filter_map(|x| x.as_u64().and_then(|n| u32::try_from(n).ok())).collect())
                             .unwrap_or_default();
+                        mgr.sde_event_tale_templates.extend(tale_templates.iter().copied());
                         templates.insert(id, CommunityTrackTemplateInfo { template_id: id, name, target_progress: target, tale_templates });
                     }
                 }
@@ -263,40 +267,27 @@ impl ProgressionExtraManager {
     }
 
     pub fn record_tale_contribution(&self, tale_template_id: u32, delta: u64) -> Vec<CommunityTrackState> {
-        let mut map = self
-            .community_tracks
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut map = self.community_tracks.write().unwrap_or_else(|e| e.into_inner());
         let mut updated = Vec::new();
         for track in map.values_mut() {
             if track.active && track.tale_templates.contains(&tale_template_id) {
-                track.current_progress = track
-                    .current_progress
-                    .saturating_add(delta)
-                    .min(track.target_progress);
+                track.current_progress = track.current_progress.saturating_add(delta).min(track.target_progress);
                 updated.push(track.clone());
             }
         }
         updated
     }
 
-    pub fn on_system_tale_encounter_completed(&self, solar_system_id: u32, delta: u64, now_unix: u64) -> Vec<CommunityTrackState> {
-        let matching_templates: Vec<u32> = self.active_tales.read().unwrap_or_else(|e| e.into_inner())
-            .values().filter(|(_, sys_id, _)| *sys_id == solar_system_id).map(|(tpl_id, _, _)| *tpl_id).collect();
-        let mut all_progressed = Vec::new();
-        for tpl_id in matching_templates {
-            all_progressed.extend(self.record_tale_contribution(tpl_id, delta));
-        }
-        if !all_progressed.is_empty() {
-            self.save_to_db();
-            for tr in &all_progressed {
-                let mut not_bytes = Vec::new();
-                encode_varint_field(1, tr.track_id as u64, &mut not_bytes);
-                let notice = GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.communitytrack.api.ProgressedNotice"), value: not_bytes };
-                ctx_queue_notice(crate::quasar_gateway::NoticeScope::Broadcast, notice, now_unix);
-            }
-        }
-        all_progressed
+    pub fn on_system_tale_encounter_completed(
+        &self,
+        solar_system_id: u32,
+        site_category: &str,
+        dungeon_id: u32,
+        delta: u64,
+        now_unix: u64,
+        gateway: &PublicGatewayRouter,
+    ) -> Vec<CommunityTrackState> {
+        notices::complete_system_tale_encounter(self, solar_system_id, site_category, dungeon_id, delta, now_unix, gateway)
     }
 }
 

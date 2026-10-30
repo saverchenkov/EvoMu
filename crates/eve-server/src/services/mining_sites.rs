@@ -620,8 +620,10 @@ pub fn resolve_wormhole_gas_site(
 }
 
 pub use super::space_mining_harvest::{
-    PhasedAsteroidFieldState, WORMHOLE_GUARD_TYPE_IDS, WORMHOLE_ORE_SITES, WormholeOreSiteDef,
-    build_wormhole_guard_wave, collect_persisted_wormhole_guard_sites, resolve_wormhole_ore_site,
+    PhasedAsteroidFieldState, WORMHOLE_GUARD_TYPE_IDS, WORMHOLE_ORE_SITES, WhOreAnomalyGuardState,
+    WormholeOreSiteDef, build_wormhole_guard_wave, collect_persisted_wormhole_guard_sites,
+    hydrate_wormhole_ore_guards_if_needed, on_wormhole_ore_guard_destroyed_db,
+    record_initial_wormhole_guard_wave, resolve_wormhole_ore_site,
     resolve_wormhole_ore_site_with_dungeon, respawn_wormhole_ore_guards_if_missing,
     sample_wormhole_ore_sites_for_system, spawn_seeded_site_entities, spawn_wormhole_ore_guards,
     wormhole_ore_sites_for_class,

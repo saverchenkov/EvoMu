@@ -566,6 +566,12 @@ async fn test_milestones_and_community_tracks() {
     };
     assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut gm_sess, "eve.tale.api.StartTaleRequest", encode_tale_req(466, Some(30_000_142))).await.status_code, 200);
     assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(0)]));
+    rpc(&ctx, &mut sess, "publicGatewaySvc", "Subscribe", &[]).await.expect("Subscribe");
+    let mut stream_rx = ctx.quasar_gateway.take_stream_receiver(sess.session_id).expect("stream");
+    while stream_rx.try_recv().is_ok() {}
+    ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(30_000_142, "Data", 999_999, 1, ctx.now_unix(), &ctx.quasar_gateway);
+    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(0)]), "mismatched Data site must not advance CombatAnomaly tale 466");
+    assert!(stream_rx.try_recv().is_err(), "mismatched site must not emit ProgressedNotice");
 
     // Non-admin pilot undocks in 30_000_142 and destroys live PvE anomaly waves via dogmaIM.Activate -> advances track (1, 0) -> (1, 1)
     assert_eq!(sess.role & eve_machonet::service_roles::ROLE_ADMIN, 0, "player session must not hold ROLE_ADMIN");
@@ -602,6 +608,16 @@ async fn test_milestones_and_community_tracks() {
         rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(sb_id)]).await.expect("Smartbomb Activate");
     }
     assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(1)]));
+    let mut progressed_tids = Vec::new();
+    while let Ok(env) = stream_rx.try_recv() {
+        if let Some(p) = env.payload.as_ref().filter(|p| p.normalized_type_name() == "eve_public.communitytrack.api.ProgressedNotice") {
+            let wm = eve_proto::quasar::WireMessage::decode(&p.value).unwrap();
+            if let Some(id) = wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()) {
+                progressed_tids.push(id);
+            }
+        }
+    }
+    assert_eq!(progressed_tids, vec![tid as u64], "live PvE clear must publish ProgressedNotice directly to subscribed gateway stream");
 
     // Verify clamping at SDE goal 100 and StopRequest/StartRequest lifecycle
     for delta in [43_u64, 105_u64] {
@@ -631,45 +647,13 @@ async fn test_milestones_and_community_tracks() {
     assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.expect("restarted track"), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(75)]));
 
     // 4. communityTrackMgr.change_qa_mode: requires QA/GM privileges
-    let denied = rpc(
-        &ctx,
-        &mut sess,
-        "communityTrackMgr",
-        "change_qa_mode",
-        &[PyRep::Bool(true)],
-    )
-    .await
-    .expect_err("regular player must be denied change_qa_mode");
+    let denied = rpc(&ctx, &mut sess, "communityTrackMgr", "change_qa_mode", &[PyRep::Bool(true)]).await.expect_err("regular player must be denied change_qa_mode");
     // rpc-lint: allow error code check
     assert_eq!(denied.code, "AccessDenied");
-
     sess.role |= eve_machonet::service_roles::ROLE_QA;
-
-    let missing_qa = rpc(&ctx, &mut sess, "communityTrackMgr", "change_qa_mode", &[])
-        .await
-        .expect_err("missing qa_mode must fail");
+    let missing_qa = rpc(&ctx, &mut sess, "communityTrackMgr", "change_qa_mode", &[]).await.expect_err("missing qa_mode must fail");
     // rpc-lint: allow error code check
     assert_eq!(missing_qa.code, "InvalidArgument");
-
-    let qa_res = rpc(
-        &ctx,
-        &mut sess,
-        "communityTrackMgr",
-        "change_qa_mode",
-        &[PyRep::Bool(true)],
-    )
-    .await
-    .expect("change_qa_mode true with QA role");
-    assert_eq!(qa_res, PyRep::Bool(true));
-
-    let qa_off = rpc(
-        &ctx,
-        &mut sess,
-        "communityTrackMgr",
-        "change_qa_mode",
-        &[PyRep::Bool(false)],
-    )
-    .await
-    .expect("change_qa_mode false");
-    assert_eq!(qa_off, PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "change_qa_mode", &[PyRep::Bool(true)]).await.expect("change_qa_mode true with QA role"), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "change_qa_mode", &[PyRep::Bool(false)]).await.expect("change_qa_mode false"), PyRep::Bool(true));
 }

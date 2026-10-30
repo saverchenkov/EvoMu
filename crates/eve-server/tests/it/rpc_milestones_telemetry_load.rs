@@ -109,7 +109,7 @@ async fn test_milestones_task_tracker_and_fighters() {
             "UpdateClientAchievmentsAndCounters",
             &[
                 PyRep::List(vec![PyRep::Integer(102)]),
-                PyRep::Dict(vec![(PyRep::String("jumps".into()), PyRep::Integer(10))]),
+                PyRep::Dict(vec![(PyRep::String("client_jumpToNextSystemInRoute".into()), PyRep::Integer(10))]),
             ],
             &kw,
             None,
@@ -138,7 +138,7 @@ async fn test_milestones_task_tracker_and_fighters() {
     };
     assert!(has_102, "Client achievement 102 should be completed in completedDict");
     let event_dict = achievements_rep.dict_get("eventDict").expect("eventDict");
-    assert_eq!(event_dict.dict_get("jumps"), Some(&PyRep::Integer(10)));
+    assert_eq!(event_dict.dict_get("client_jumpToNextSystemInRoute"), Some(&PyRep::Integer(10)));
 
     // 4. fighterMgr.CmdScoopAbandonedFighterFromSpace
     ctx.db.with_mut_snapshot(|snap| {

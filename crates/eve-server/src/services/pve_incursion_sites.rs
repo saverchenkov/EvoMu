@@ -453,6 +453,30 @@ pub fn publish_incursion_tale_stopped_if_ended(
     }
 }
 
+pub fn notify_incursion_site_completed(
+    gateway: &crate::quasar_gateway::PublicGatewayRouter,
+    db: &Arc<WorldRepository>,
+    site_sys: SolarSystemId,
+    result: &IncursionCompletionResult,
+) {
+    publish_incursion_tale_stopped_if_ended(gateway, db, result);
+    let now = db.clock().now_unix_secs();
+    let did = result
+        .site_id
+        .rsplit('-')
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(INCURSION_TALE_TEMPLATE_ID as u32);
+    gateway.progression.extra.on_system_tale_encounter_completed(
+        site_sys,
+        "Incursion",
+        did,
+        1,
+        now,
+        gateway,
+    );
+}
+
 pub async fn process_incursion_site_completion_and_payout_core(
     systems: &Arc<SystemRegistry>,
     db: &Arc<WorldRepository>,
@@ -875,14 +899,7 @@ pub async fn process_incursion_site_completion_and_payout(
     )
     .await;
     if let Ok(r) = &res {
-        publish_incursion_tale_stopped_if_ended(&ctx.quasar_gateway, &ctx.db, r);
-        ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(site_sys, 1, ctx.now_unix());
-        if r.incursion_ended {
-            let updated = ctx.quasar_gateway.progression.extra.record_tale_contribution(INCURSION_TALE_TEMPLATE_ID as u32, 1);
-            if !updated.is_empty() {
-                ctx.quasar_gateway.progression.extra.save_to_db();
-            }
-        }
+        notify_incursion_site_completed(&ctx.quasar_gateway, &ctx.db, site_sys, r);
     }
     res
 }
@@ -1035,7 +1052,7 @@ pub async fn on_incursion_boss_destroyed(
     )
     .await;
     if let Some(Ok(r)) = &res {
-        publish_incursion_tale_stopped_if_ended(&ctx.quasar_gateway, &ctx.db, r);
+        notify_incursion_site_completed(&ctx.quasar_gateway, &ctx.db, solar_system_id, r);
     }
     res
 }

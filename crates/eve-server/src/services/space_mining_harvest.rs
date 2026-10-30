@@ -476,14 +476,26 @@ pub const WORMHOLE_ORE_SITES: &[WormholeOreSiteDef] = &[
 
 // DERIVED (from eve-wiki; SDE dungeons lack wormhole class column)
 pub fn wormhole_ore_sites_for_class(wh_class: u8) -> Vec<&'static WormholeOreSiteDef> {
-    if matches!(wh_class, 12..=18) {
-        return WORMHOLE_ORE_SITES.iter().collect();
+    match wh_class {
+        1..=6 => WORMHOLE_ORE_SITES
+            .iter()
+            .filter(|d| wh_class >= d.wh_class_min && wh_class <= d.wh_class_max)
+            .collect(),
+        // C13 small-ship shattered: C1..=C3 deposits + Shattered Debris Field (no C5-C6 Core Deposits).
+        13 => WORMHOLE_ORE_SITES
+            .iter()
+            .filter(|d| (d.wh_class_min <= 3 && d.wh_class_max >= 1) || d.dungeon_name == "Shattered Debris Field")
+            .collect(),
+        // Thera (C12) and Drifter shattered (C14..=C18): non-Core C1..=C4 deposits + Shattered Debris Field.
+        12 | 14..=18 => WORMHOLE_ORE_SITES
+            .iter()
+            .filter(|d| (d.wh_class_min <= 4 && d.wh_class_max >= 1) || d.dungeon_name == "Shattered Debris Field")
+            .collect(),
+        _ => WORMHOLE_ORE_SITES
+            .iter()
+            .filter(|d| 3 >= d.wh_class_min && 3 <= d.wh_class_max)
+            .collect(),
     }
-    let eff_class = if (1..=6).contains(&wh_class) { wh_class } else { 3 };
-    WORMHOLE_ORE_SITES
-        .iter()
-        .filter(|d| eff_class >= d.wh_class_min && eff_class <= d.wh_class_max)
-        .collect()
 }
 
 pub fn resolve_wormhole_ore_site_with_dungeon(
@@ -517,9 +529,18 @@ pub fn sample_wormhole_ore_sites_for_system(
     sys_id: u32,
     wh_class: u8,
 ) -> Vec<&'static WormholeOreSiteDef> {
-    let is_shattered = matches!(wh_class, 12..=18)
-        || sde.celestials_in_system(sys_id).iter().any(|c| c.type_id == 30889);
-    let mut candidates = wormhole_ore_sites_for_class(if is_shattered { 13 } else { wh_class });
+    let has_shattered_celestial = sde.celestials_in_system(sys_id).iter().any(|c| c.type_id == 30889);
+    let is_shattered = matches!(wh_class, 12..=18) || has_shattered_celestial;
+    let mut candidates: Vec<&'static WormholeOreSiteDef> = if (1..=6).contains(&wh_class) && has_shattered_celestial {
+        let lo = wh_class.saturating_sub(1).max(1);
+        let hi = (wh_class + 1).min(6);
+        WORMHOLE_ORE_SITES
+            .iter()
+            .filter(|d| (d.wh_class_min <= hi && d.wh_class_max >= lo) || d.dungeon_name == "Shattered Debris Field")
+            .collect()
+    } else {
+        wormhole_ore_sites_for_class(wh_class)
+    };
     let target_count = candidates.len().min(4);
     let start_idx = if is_shattered {
         if let Some(pos) = candidates.iter().position(|d| d.dungeon_name == "Shattered Debris Field") {
@@ -722,33 +743,151 @@ pub async fn spawn_wormhole_ore_guards(
     }
 }
 
-pub async fn respawn_wormhole_ore_guards_if_missing(
-    ctx: &ServerContext,
-    sys_id: u32,
-    sites: &[([f64; 3], &'static crate::services::mining_sites::WormholeOreSiteDef)],
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct WhOreAnomalyGuardState {
+    pub guards_spawned: bool,
+    pub surviving_guards: Vec<(i64, eve_sde::TypeId, [f64; 3])>,
+}
+
+const WH_ORE_GUARD_STATE_KEY: &str = "wh_ore_anomaly_guards";
+
+fn load_wh_ore_guard_states(
+    snap: &eve_db::WorldStateSnapshot,
+) -> std::collections::HashMap<String, WhOreAnomalyGuardState> {
+    snap.quasar_state_blobs
+        .get(WH_ORE_GUARD_STATE_KEY)
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or_default()
+}
+
+fn save_wh_ore_guard_states(
+    snap: &mut eve_db::WorldStateSnapshot,
+    states: &std::collections::HashMap<String, WhOreAnomalyGuardState>,
 ) {
-    if sites.is_empty() {
+    if let Ok(json) = serde_json::to_string(states) {
+        snap.quasar_state_blobs.insert(WH_ORE_GUARD_STATE_KEY.into(), json);
+    }
+}
+
+pub fn record_initial_wormhole_guard_wave(
+    snap: &mut eve_db::WorldStateSnapshot,
+    anomaly_id: &str,
+    centre: [f64; 3],
+    guards: &[(eve_sde::TypeId, u32)],
+    out: &mut Vec<(i64, eve_sde::TypeId, glam::DVec3)>,
+) {
+    let start_len = out.len();
+    build_wormhole_guard_wave(&mut snap.next_entity_id, centre, guards, out);
+    let mut states = load_wh_ore_guard_states(snap);
+    let surviving_guards = out[start_len..]
+        .iter()
+        .map(|&(gid, tid, pos)| (gid, tid, pos.to_array()))
+        .collect();
+    states.insert(
+        anomaly_id.to_string(),
+        WhOreAnomalyGuardState {
+            guards_spawned: true,
+            surviving_guards,
+        },
+    );
+    save_wh_ore_guard_states(snap, &states);
+}
+
+pub fn on_wormhole_ore_guard_destroyed_db(db: &eve_db::WorldRepository, npc_ball_id: i64) {
+    let id_needle = npc_ball_id.to_string();
+    let might_match = db.with_snapshot(|snap| {
+        snap.quasar_state_blobs
+            .get(WH_ORE_GUARD_STATE_KEY)
+            .is_some_and(|raw| raw.contains(&id_needle))
+    });
+    if !might_match {
+        return;
+    }
+    db.with_mut_snapshot(|snap| {
+        let mut states = load_wh_ore_guard_states(snap);
+        let mut changed = false;
+        for st in states.values_mut() {
+            let before = st.surviving_guards.len();
+            st.surviving_guards.retain(|&(gid, _, _)| gid != npc_ball_id);
+            changed |= st.surviving_guards.len() != before;
+        }
+        if changed {
+            save_wh_ore_guard_states(snap, &states);
+        }
+    });
+}
+
+pub async fn hydrate_wormhole_ore_guards_if_needed(ctx: &ServerContext, sys_id: u32) {
+    let anoms: Vec<(String, [f64; 3], &'static WormholeOreSiteDef)> = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_anomalies
+            .get(&sys_id)
+            .map(|list| {
+                list.iter()
+                    .filter(|a| a.anomaly_type == "OreAnomaly" && !a.cleared)
+                    .filter_map(|a| {
+                        WORMHOLE_ORE_SITES
+                            .iter()
+                            .find(|def| def.dungeon_name == a.name)
+                            .map(|def| (a.anomaly_id.clone(), a.position, def))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    let unhydrated: Vec<(String, [f64; 3], &'static WormholeOreSiteDef)> = anoms
+        .into_iter()
+        .filter(|(aid, _, _)| ctx.systems.claim_wh_ore_anomaly_hydration(sys_id, aid))
+        .collect();
+    if unhydrated.is_empty() {
         return;
     }
     let handle = ctx.systems.get_or_spawn(sys_id);
     let existing = handle.list_balls().await.unwrap_or_default();
-    if existing.iter().any(|b| WORMHOLE_GUARD_TYPE_IDS.contains(&b.type_id)) {
-        return;
-    }
+    let existing_ids: std::collections::HashSet<i64> = existing.iter().map(|b| b.id).collect();
     let waves = ctx.db.with_mut_snapshot(|snap| {
+        let mut states = load_wh_ore_guard_states(snap);
+        let mut states_dirty = false;
         let mut out = Vec::new();
-        let anoms = snap.cosmic_anomalies.get(&sys_id).cloned().unwrap_or_default();
-        for &(fallback_centre, def) in sites {
-            let centre = anoms
+        for (aid, centre, def) in unhydrated {
+            if let Some(st) = states.get(&aid).filter(|st| st.guards_spawned) {
+                for &(gid, tid, pos) in &st.surviving_guards {
+                    if !existing_ids.contains(&gid) {
+                        out.push((gid, tid, glam::DVec3::from_array(pos)));
+                    }
+                }
+                continue;
+            }
+            let c_vec = glam::DVec3::from_array(centre);
+            let nearby: Vec<(i64, eve_sde::TypeId, [f64; 3])> = existing
                 .iter()
-                .find(|a| a.name == def.dungeon_name)
-                .map(|a| a.position)
-                .unwrap_or(fallback_centre);
+                .filter(|b| WORMHOLE_GUARD_TYPE_IDS.contains(&b.type_id) && b.position.distance(c_vec) <= 15_000.0)
+                .map(|b| (b.id, b.type_id, b.position.to_array()))
+                .collect();
+            if !nearby.is_empty() {
+                states.insert(aid, WhOreAnomalyGuardState { guards_spawned: true, surviving_guards: nearby });
+                states_dirty = true;
+                continue;
+            }
+            let start_len = out.len();
             build_wormhole_guard_wave(&mut snap.next_entity_id, centre, def.guards, &mut out);
+            let surviving = out[start_len..].iter().map(|&(gid, tid, p)| (gid, tid, p.to_array())).collect();
+            states.insert(aid, WhOreAnomalyGuardState { guards_spawned: true, surviving_guards: surviving });
+            states_dirty = true;
+        }
+        if states_dirty {
+            save_wh_ore_guard_states(snap, &states);
         }
         out
     });
     spawn_wormhole_ore_guards(ctx, sys_id, waves).await;
+}
+
+pub async fn respawn_wormhole_ore_guards_if_missing(
+    ctx: &ServerContext,
+    sys_id: u32,
+    _sites: &[([f64; 3], &'static crate::services::mining_sites::WormholeOreSiteDef)],
+) {
+    hydrate_wormhole_ore_guards_if_needed(ctx, sys_id).await;
 }
 
 pub async fn spawn_seeded_site_entities(
@@ -783,6 +922,23 @@ pub async fn spawn_seeded_site_entities(
                 respawn_at_tick: None,
             };
             let _ = handle.spawn_asteroid(st, ball).await;
+        }
+    }
+    if !guard_waves.is_empty() {
+        let seeded_anom_ids: Vec<String> = ctx.db.with_snapshot(|snap| {
+            let states = load_wh_ore_guard_states(snap);
+            snap.cosmic_anomalies
+                .get(&sys_id)
+                .map(|list| {
+                    list.iter()
+                        .filter(|a| a.anomaly_type == "OreAnomaly" && !a.cleared && states.contains_key(&a.anomaly_id))
+                        .map(|a| a.anomaly_id.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        for aid in seeded_anom_ids {
+            let _ = ctx.systems.claim_wh_ore_anomaly_hydration(sys_id, &aid);
         }
     }
     spawn_wormhole_ore_guards(ctx, sys_id, guard_waves).await;

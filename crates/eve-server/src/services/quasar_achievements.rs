@@ -18,7 +18,7 @@ use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, sha256_hex, DynamicValue, GoogleAny,
     GoogleTimestamp, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 pub const ACHIEVEMENTS_STATE_KEY: &str = "quasar_achievements";
@@ -87,37 +87,51 @@ pub fn achievement_reward_uuid(achievement_id: u32, milestone_id: u32) -> [u8; 1
 
 fn build_definitions_from_sde(
     sde: &eve_sde::SdeRegistry,
-) -> (Vec<AchievementDef>, usize, String, Vec<u8>) {
+) -> (Vec<AchievementDef>, HashSet<String>, usize, String, Vec<u8>) {
     let Ok(achs) = sde.load_achievements() else {
         let empty = b"[]".to_vec();
-        return (Vec::new(), 0, sha256_hex(&empty)[..16].to_string(), empty);
+        return (Vec::new(), HashSet::new(), 0, sha256_hex(&empty)[..16].to_string(), empty);
     };
     let events = sde
         .load_cfsd_table("res:/staticdata/achievementevents.fsdbinary")
         .unwrap_or_default();
-
-    let mut ids: Vec<u32> = achs
+    let server_eids: HashSet<u32> = achs
         .values()
-        .filter(|info| info.is_enabled)
-        .map(|info| info.achievement_id)
+        .filter(|i| !i.is_client_achievement)
+        .flat_map(|i| i.conditions.iter().map(|c| c.statistic_event_id))
         .collect();
+    let client_eids: HashSet<u32> = achs
+        .values()
+        .filter(|i| i.is_enabled && i.is_client_achievement)
+        .flat_map(|i| i.conditions.iter().map(|c| c.statistic_event_id))
+        .collect();
+    let mut allowed_client_keys = HashSet::new();
+    for &eid in &client_eids {
+        allowed_client_keys.insert(eid.to_string());
+    }
+    for (&eid_i64, row) in &events {
+        let Ok(eid) = u32::try_from(eid_i64) else { continue };
+        let name = row.str("name").unwrap_or("").trim();
+        if client_eids.contains(&eid) || (name.starts_with("client_") && !server_eids.contains(&eid)) {
+            allowed_client_keys.insert(eid.to_string());
+            if !name.is_empty() {
+                allowed_client_keys.insert(name.to_string());
+            }
+        }
+    }
+
+    let mut ids: Vec<u32> = achs.values().filter(|i| i.is_enabled).map(|i| i.achievement_id).collect();
     ids.sort_unstable();
     let count = ids.len();
 
     let mut defs = Vec::with_capacity(ids.len());
     for id in ids {
-        let Some(info) = achs.get(&id).filter(|info| info.is_enabled) else {
-            continue;
-        };
+        let Some(info) = achs.get(&id).filter(|info| info.is_enabled) else { continue };
         let conditions: Vec<AchievementConditionDef> = info
             .conditions
             .iter()
             .map(|c| {
-                let event_name = events
-                    .get(&i64::from(c.statistic_event_id))
-                    .and_then(|r| r.str("name"))
-                    .unwrap_or("")
-                    .to_string();
+                let event_name = events.get(&i64::from(c.statistic_event_id)).and_then(|r| r.str("name")).unwrap_or("").to_string();
                 AchievementConditionDef {
                     condition_id: c.condition_id,
                     target_value: (c.target_value as u64).max(1),
@@ -152,7 +166,7 @@ fn build_definitions_from_sde(
     }
     let json_bytes = serde_json::to_vec(&defs).unwrap_or_else(|_| b"[]".to_vec());
     let hash = sha256_hex(&json_bytes)[..16].to_string();
-    (defs, count, hash, json_bytes)
+    (defs, allowed_client_keys, count, hash, json_bytes)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -177,6 +191,7 @@ pub struct RewardClaimFilter {
 
 pub struct AchievementManager {
     pub definitions: Vec<AchievementDef>,
+    pub allowed_client_counter_keys: HashSet<String>,
     pub character_achievements: RwLock<HashMap<u32, Vec<CharacterAchievement>>>,
     pub category_scores: RwLock<HashMap<(u32, u32), u32>>,
     pub sde_achievement_count: usize,
@@ -193,9 +208,7 @@ impl Default for AchievementManager {
 
 impl AchievementManager {
     pub fn new(db: Option<Arc<WorldRepository>>) -> Self {
-        let default_sde = eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path())
-            .ok()
-            .map(Arc::new);
+        let default_sde = eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).ok().map(Arc::new);
         Self::new_with_sde(db, default_sde)
     }
 
@@ -205,16 +218,15 @@ impl AchievementManager {
         db: Option<Arc<WorldRepository>>,
         sde: Option<Arc<eve_sde::SdeRegistry>>,
     ) -> Self {
-        let (defs, sde_achievement_count, sde_achievement_hash, sde_definitions_json) = sde
+        let (defs, allowed_client_counter_keys, sde_achievement_count, sde_achievement_hash, sde_definitions_json) = sde
             .as_deref()
             .map(build_definitions_from_sde)
             .unwrap_or_else(|| {
                 let empty = b"[]".to_vec();
-                (Vec::new(), 0, sha256_hex(&empty)[..16].to_string(), empty)
+                (Vec::new(), HashSet::new(), 0, sha256_hex(&empty)[..16].to_string(), empty)
             });
 
-        let defs_by_id: HashMap<u32, &AchievementDef> =
-            defs.iter().map(|d| (d.id, d)).collect();
+        let defs_by_id: HashMap<u32, &AchievementDef> = defs.iter().map(|d| (d.id, d)).collect();
 
         let mut loaded = db
             .as_ref()
@@ -222,10 +234,7 @@ impl AchievementManager {
                 d.with_snapshot(|s| {
                     s.quasar_state_blobs
                         .get("quasar_achievements")
-                        .and_then(|json| {
-                            serde_json::from_str::<HashMap<u32, Vec<CharacterAchievement>>>(json)
-                                .ok()
-                        })
+                        .and_then(|json| serde_json::from_str::<HashMap<u32, Vec<CharacterAchievement>>>(json).ok())
                         .unwrap_or_default()
                 })
             })
@@ -265,6 +274,7 @@ impl AchievementManager {
 
         Self {
             definitions: defs,
+            allowed_client_counter_keys,
             character_achievements: RwLock::new(loaded),
             category_scores: RwLock::new(loaded_cat_scores),
             sde_achievement_count,
@@ -379,16 +389,7 @@ impl AchievementManager {
     }
 
     pub fn is_client_allowed_counter_key(&self, key: &str) -> bool {
-        let parsed_id = key.parse::<u32>().ok();
-        let matches_cond = |d: &AchievementDef| {
-            d.conditions.iter().any(|c| {
-                (!c.event_name.is_empty() && c.event_name == key) || parsed_id == Some(c.statistic_event_id)
-            })
-        };
-        if self.definitions.iter().any(|d| d.is_client_achievement && matches_cond(d)) {
-            return true;
-        }
-        !self.definitions.iter().any(|d| !d.is_client_achievement && matches_cond(d))
+        !key.is_empty() && self.allowed_client_counter_keys.contains(key)
     }
 
     pub fn record_statistic_event(

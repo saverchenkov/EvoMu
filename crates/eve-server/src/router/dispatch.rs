@@ -1312,8 +1312,8 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
                         anomaly_id: site_id.clone(), solar_system_id: sys_id, name: ore_def.dungeon_name.to_string(), anomaly_type: "OreAnomaly".into(),
                         position: centre, signal_strength: 1.0, ore_types, remaining_volume: volume, created_unix: now, lifetime_seconds: 86_400, cleared: false,
                     });
+                    crate::services::mining_sites::record_initial_wormhole_guard_wave(snap, &site_id, centre, ore_def.guards, &mut guards);
                     snap.cosmic_signatures.entry(sys_id).or_default().push(blank_sig(site_id, "OreAnomaly", ore_def.dungeon_name.to_string(), 1.0));
-                    crate::services::mining_sites::build_wormhole_guard_wave(&mut snap.next_entity_id, centre, ore_def.guards, &mut guards);
                     rocks.clone()
                 }
                 Planned::WhGas(did, name, clouds) => {
@@ -1340,8 +1340,7 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
     });
 
     if was_already_seeded {
-        let wh_sites = ctx.db.with_snapshot(|snap| crate::services::mining_sites::collect_persisted_wormhole_guard_sites(snap, sys_id));
-        crate::services::mining_sites::respawn_wormhole_ore_guards_if_missing(ctx, sys_id, &wh_sites).await;
+        crate::services::mining_sites::hydrate_wormhole_ore_guards_if_needed(ctx, sys_id).await;
         return;
     }
     crate::services::mining_sites::spawn_seeded_site_entities(ctx, sys_id, newly_spawned, guard_waves).await;

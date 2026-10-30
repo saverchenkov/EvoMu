@@ -1294,6 +1294,7 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
     );
 
     // Check if `npc_ball_id` was an encounter wave trigger (`feat:npc.npc-spawn-encounter`)
+    crate::services::space_mining_harvest::on_wormhole_ore_guard_destroyed_db(&ctx.db, npc_ball_id);
     crate::services::combat_crimewatch::combat_npc_encounters::step_encounter_wave_on_kill(ctx, solar_system_id, npc_ball_id, pos).await;
 
     // PvE exploration sites & escalations: progress waves, clear sites, roll escalations (`feat:pve.escalations`, `feat:pve.expeditions`)

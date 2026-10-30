@@ -413,10 +413,16 @@ async fn test_authentic_achievements_and_cdn_metadata_remediated() {
     assert_eq!(ach60_done.progress, 2, "Zooming out satisfies condition 1 (2/2)");
     assert!(ach60_done.completed, "Achievement 60 completes once both conditions are met");
 
-    // Negative security test: client RPC must NOT complete or advance non-client server achievements (2, 12, 59) or server counters
+    // Negative security test: client RPC must NOT complete or advance non-client server achievements (2, 12, 59) or unbounded/unknown counters
+    let oversized_key = "x".repeat(256);
     let spoof_server_args = [
         PyRep::List(vec![PyRep::Integer(2), PyRep::Integer(12), PyRep::Integer(59)]),
-        PyRep::Dict(vec![(PyRep::String("refineOreCount".into()), PyRep::Integer(99))]),
+        PyRep::Dict(vec![
+            (PyRep::String("refineOreCount".into()), PyRep::Integer(99)),
+            (PyRep::String("arbitrary_unknown_counter".into()), PyRep::Integer(42)),
+            (PyRep::String("999999".into()), PyRep::Integer(7)),
+            (PyRep::String(oversized_key.clone()), PyRep::Integer(1)),
+        ]),
     ];
     ctx.dispatch_rpc(&mut sess, "monolithTaskTrackerMgr", None, "UpdateClientAchievmentsAndCounters", &spoof_server_args, &empty_kw, None)
         .await
@@ -437,7 +443,11 @@ async fn test_authentic_achievements_and_cdn_metadata_remediated() {
             assert!(!entries.iter().any(|(k, _)| k.as_i64() == Some(sid)), "Server achievement {sid} must not appear in completedDict");
         }
     }
-    assert_eq!(tracker_state.dict_get("eventDict").unwrap().dict_get("refineOreCount"), None, "Server counter refineOreCount must be rejected");
+    let ev_dict = tracker_state.dict_get("eventDict").unwrap();
+    for bad_key in ["refineOreCount", "arbitrary_unknown_counter", "999999", oversized_key.as_str()] {
+        assert_eq!(ev_dict.dict_get(bad_key), None, "Disallowed counter key {bad_key} must be rejected");
+    }
+    assert_eq!(ev_dict.dict_get("client_mouseZoom_in"), Some(&PyRep::Integer(3)), "Valid SDE client key must persist");
 
     // 1. CDN GetLatestRequest returns valid checkpoint metadata with patch 60 (enabled SDE count) and matching local HTTP payload CRC32
     let cdn_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.definition.api.cdn.GetLatestRequest", Vec::new(), b"cdn-01").await;
