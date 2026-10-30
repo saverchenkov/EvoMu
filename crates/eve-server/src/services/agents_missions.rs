@@ -19,6 +19,7 @@ pub mod agents_missions_helpers;
 pub use agents_missions_helpers::*;
 
 use crate::router::{NotificationTarget, ServerContext};
+use crate::services::notify_emitters_batch3::emit_agent_mission_dialogue;
 use eve_db::{
     ActiveMissionRecord, InventoryFlag, InventoryItemRecord, IskCents, StandingTransactionRecord,
     WalletJournalEntry,
@@ -860,7 +861,10 @@ pub async fn handle(
                     let active_agent_id = ctx.db.with_snapshot(|snap| {
                         snap.active_missions.get(&(char_id, mission_id)).map_or(agent_id, |m| m.agent_id)
                     });
+                    let agent_type_id = ctx.sde.agents.get(&active_agent_id).map(|a| a.agent_type_id).unwrap_or(2);
+                    let mission_body = ctx.sde.missions.get(&mission_id).and_then(|m| m.content_template.as_deref()).unwrap_or("");
                     ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String("offer_accepted".into()), PyRep::Integer(active_agent_id)]);
+                    emit_agent_mission_dialogue(ctx, char_id, active_agent_id, agent_type_id, &mission_title, mission_body, false);
                     Some(Ok(PyRep::keyval([
                         ("missionID", PyRep::Integer(mission_id as i64)),
                         ("contentID", PyRep::Integer(mission_id as i64)),
@@ -1263,6 +1267,10 @@ pub async fn handle(
                             notify_standing_changes(ctx, char_id, &st_changes);
                             ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionObjectivesCompleted", "charid", vec![PyRep::Integer(active_agent_id)]);
                             ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String("completed".into()), PyRep::Integer(active_agent_id)]);
+                            let agent_type_id = ctx.sde.agents.get(&active_agent_id).map(|a| a.agent_type_id).unwrap_or(2);
+                            let mission_title = ctx.sde.missions.get(&mission_id).map(|m| m.title.clone()).unwrap_or_else(|| format!("Mission {mission_id}"));
+                            let mission_body = ctx.sde.missions.get(&mission_id).and_then(|m| m.content_template.as_deref()).unwrap_or("");
+                            emit_agent_mission_dialogue(ctx, char_id, active_agent_id, agent_type_id, &mission_title, mission_body, true);
                             Some(Ok(PyRep::keyval([
                                 ("missionID", PyRep::Integer(mission_id as i64)),
                                 ("contentID", PyRep::Integer(mission_id as i64)),

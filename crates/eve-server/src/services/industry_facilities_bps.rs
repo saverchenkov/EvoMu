@@ -260,6 +260,21 @@ pub fn load_job_cost_meta(
 
 pub use crate::services::industry_pi::industry_rigs::*;
 
+pub fn structure_sde_industry_bonuses(ctx: &ServerContext, type_id: TypeId) -> (f64, f64, f64) {
+    let Some(t) = ctx.sde.types.get(&type_id) else {
+        return (1.0, 1.0, 1.0);
+    };
+    let mat_mod = t.default_attributes.get(&2600).copied().unwrap_or(1.0);
+    let time_mod = t
+        .default_attributes
+        .get(&2602)
+        .copied()
+        .or_else(|| t.default_attributes.get(&2721).copied())
+        .unwrap_or(1.0);
+    let cost_mod = t.default_attributes.get(&2601).copied().unwrap_or(1.0);
+    (mat_mod, time_mod, cost_mod)
+}
+
 pub fn resolve_facility_modifiers_and_system(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
@@ -275,14 +290,8 @@ pub fn resolve_facility_modifiers_and_system(
             .get(&st.solar_system_id)
             .map(|sys| sys.region_id)
             .unwrap_or(10000002);
-        let (base_mat_mod, base_time_mod, cost_mod) = match st.type_id {
-            35825 => (0.99, 0.85, 0.97), // Raitaru
-            35826 => (0.99, 0.80, 0.96), // Azbel
-            35827 => (0.99, 0.70, 0.95), // Sotiyo
-            35835 => (1.00, 0.80, 0.96), // Athanor (Refinery: -20% reaction time)
-            35836 => (1.00, 0.75, 0.95), // Tatara (Refinery: -25% reaction time)
-            _ => (1.0, 1.0, 1.0),
-        };
+        let (base_mat_mod, base_time_mod, cost_mod) =
+            structure_sde_industry_bonuses(ctx, st.type_id);
         let (_, rig_time, rig_cost, _) =
             resolve_structure_rig_bonuses_full(ctx, snap, facility_id, st.solar_system_id);
         let eff_time_mod = base_time_mod * (1.0 - rig_time);
@@ -310,14 +319,8 @@ pub fn resolve_facility_modifiers_and_system(
                 .get(&sys_id)
                 .map(|sys| sys.region_id)
                 .unwrap_or(10000002);
-            let (base_mat_mod, base_time_mod, cost_mod) = match it.type_id {
-                35825 => (0.99, 0.85, 0.97),
-                35826 => (0.99, 0.80, 0.96),
-                35827 => (0.99, 0.70, 0.95),
-                35835 => (1.00, 0.80, 0.96),
-                35836 => (1.00, 0.75, 0.95),
-                _ => (1.0, 1.0, 1.0),
-            };
+            let (base_mat_mod, base_time_mod, cost_mod) =
+                structure_sde_industry_bonuses(ctx, it.type_id);
             let (_, rig_time, rig_cost, _) =
                 resolve_structure_rig_bonuses_full(ctx, snap, facility_id, sys_id);
             let eff_time_mod = base_time_mod * (1.0 - rig_time);

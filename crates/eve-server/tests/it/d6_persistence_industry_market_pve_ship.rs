@@ -210,7 +210,7 @@ async fn test_d6_industry_pi_and_market_wallet_history_durable_across_sqlite_res
         call(&ctx, &mut sess_p1, "posMgr", "ChangeStructureProvisionType", &[PyRep::Integer(athanor_id), PyRep::Integer(athanor_id), PyRep::Integer(16634)]).await.expect("ChangeStructureProvisionType");
 
         let rnd = ctx.sde.agents.values().filter(|a| a.agent_type_id == 4 && a.station_id.is_some()).min_by_key(|a| a.agent_id).cloned().expect("R&D agent");
-        ctx.db.with_mut_snapshot(|s| { if let Some(ch) = s.characters.get_mut(&P1) { ch.standings.insert(rnd.agent_id, 9.0); ch.solar_system_id = rnd.solar_system_id.unwrap(); ch.station_id = rnd.station_id; } });
+        ctx.db.with_mut_snapshot(|s| { if let Some(ch) = s.characters.get_mut(&P1) { ch.standings.insert(rnd.agent_id, 9.0); ch.solar_system_id = rnd.solar_system_id.unwrap(); ch.station_id = rnd.station_id; } let sk = s.skills.entry(P1).or_default(); for tid in [3402, 3392, 11448] { sk.insert(tid, TrainedSkillRecord { type_id: tid, level: 5, skill_points: 256_000.0 }); } });
         sess_p1.solar_system_id = rnd.solar_system_id; sess_p1.station_id = rnd.station_id; call(&ctx, &mut sess_p1, "agentMgr", "DoAction", &[PyRep::Integer(12), PyRep::Integer(rnd.agent_id), PyRep::Integer(11448)]).await.expect("StartResearch"); sess_p1.solar_system_id = Some(JITA_SYSTEM_ID); sess_p1.station_id = Some(JITA_STATION_ID); ctx.db.with_mut_snapshot(|s| { if let Some(ch) = s.characters.get_mut(&P1) { ch.solar_system_id = JITA_SYSTEM_ID; ch.station_id = Some(JITA_STATION_ID); } });
         let PyRep::Tuple(j_parts) = call(&ctx, &mut sess_p1, "agentMgr", "GetMyJournalDetails", &[]).await.expect("GetMyJournalDetails") else { panic!() };
         let PyRep::List(rnd_list_before) = &j_parts[1] else { panic!() };
