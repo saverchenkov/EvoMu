@@ -1160,6 +1160,8 @@ pub async fn handle(
                         10_000.0
                     } else if item_type.group_id == crate::services::mobile_deployables::GROUP_CRAB_BEACON {
                         1_000.0
+                    } else if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_OBSERVATORY {
+                        600_000.0
                     } else {
                         60_000.0
                     }

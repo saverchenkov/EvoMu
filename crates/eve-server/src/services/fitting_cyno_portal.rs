@@ -708,13 +708,30 @@ async fn resolve_fleet_beacon(
                 .or_else(|| s.corporations.get(&owner_id).and_then(|c| c.alliance_id));
             caller_alliance.is_some() && caller_alliance == owner_alliance
         };
+        let now_unix = ctx.now_unix();
+        let dep_state = crate::services::mobile_deployables::read_deployable_state_snap(s);
         let is_deployable_beacon = |it: &eve_db::InventoryItemRecord| {
-            let is_cyno_type = matches!(it.type_id, 56099 | 56488);
+            let is_cyno_type = matches!(it.type_id, 56099 | 56488 | 57319 | 59630);
             if !is_cyno_type {
                 return false;
             }
-            if it.flag != eve_db::InventoryFlag::None || !(30_000_000..=33_000_000).contains(&it.location_id) {
+            if !matches!(it.flag, eve_db::InventoryFlag::None | eve_db::InventoryFlag::Hangar)
+                || !(30_000_000..=33_000_000).contains(&it.location_id)
+            {
                 return false;
+            }
+            if matches!(it.type_id, 57319 | 59630) {
+                let Some(rec) = dep_state.deployables.get(&it.item_id) else {
+                    return false;
+                };
+                if rec.is_unanchored
+                    || now_unix < rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs)
+                    || now_unix >= rec.expires_at_unix
+                {
+                    return false;
+                }
+                let owner_fleet = fleet_of(s, it.owner_id);
+                return it.owner_id == char_id || (caller_fleet.is_some() && caller_fleet == owner_fleet);
             }
             if let Some(meta) = s.sp6_lifecycle.space_object_meta.get(&it.item_id) {
                 if !meta.anchor_completed && meta.anchor_start_unix.is_some() {
@@ -836,7 +853,23 @@ async fn jump_to_fleet_beacon(
     let pos = beacon.position + DVec3::new(2_500.0, 0.0, 0.0);
     let (cooldown_min, fatigue_min, bound) =
         relocate_caller(ctx, session, char_id, ship_id, sys_id, beacon.solar_system_id, pos, dist, vals[2]).await?;
+    if is_deployable && matches!(beacon.beacon_type_id, 57319 | 59630) {
+        consume_single_use_mobile_cyno(ctx, beacon.solar_system_id, beacon.beacon_id).await;
+    }
     Ok(JumpOutcome { dist_ly: dist, fuel_type, fuel_qty, cooldown_min, fatigue_min, beyonce_bound_id: bound })
+}
+
+async fn consume_single_use_mobile_cyno(ctx: &ServerContext, sys_id: u32, beacon_id: i64) {
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle.remove_ball(beacon_id).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&beacon_id);
+        snap.item_positions.remove(&beacon_id);
+        snap.sp6_lifecycle.space_object_meta.remove(&beacon_id);
+        crate::services::mobile_deployables::write_deployable_state_snap(snap, |st| {
+            st.deployables.remove(&beacon_id);
+        });
+    });
 }
 
 /// `beyonce.CmdBridgeToFleetModuleBeacon` / `beyonce.CmdBridgeToFleetDeployableBeacon`: opens a jump portal.

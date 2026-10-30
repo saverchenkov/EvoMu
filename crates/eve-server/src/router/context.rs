@@ -1184,11 +1184,11 @@ impl ServerContext {
         }
 
         let items = self.db.get_items_for_character(char_id);
-        let Some(ship_item) = items.iter().find(|i| i.item_id == ship_id) else {
-            return Err(BridgeRpcError {
-                code: "ShipNotFound".into(),
-                message: format!("Ship item {ship_id} not found for character {char_id}"),
-            });
+        let ship_item = items.iter().find(|i| i.item_id == ship_id).cloned().or_else(|| {
+            self.db.with_snapshot(|s| s.structures.contains_key(&ship_id).then(|| s.items.get(&ship_id).cloned()).flatten())
+        });
+        let Some(ship_item) = ship_item else {
+            return Err(BridgeRpcError { code: "ShipNotFound".into(), message: format!("Ship item {ship_id} not found for character {char_id}") });
         };
 
         let mut fit = ShipFittingEngine::from_sde(ship_id, ship_item.type_id, &self.sde)
@@ -1200,13 +1200,8 @@ impl ServerContext {
         for (&attr_id, &val) in &ship_item.dynamic_attributes {
             fit.ship.base_attributes.insert(attr_id, val);
         }
-
         let (online_states, active_states, active_charges) = self.db.with_snapshot(|s| {
-            (
-                s.module_online_states.clone(),
-                s.module_active_states.clone(),
-                s.module_active_charges.clone(),
-            )
+            (s.module_online_states.clone(), s.module_active_states.clone(), s.module_active_charges.clone())
         });
 
         let mut fittable_items: Vec<_> = items

@@ -92,6 +92,19 @@ pub async fn handle(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    if service == "dogmaIM"
+        && matches!(method, "Activate" | "Overload")
+        && session.structure_id.is_some()
+        && session.structure_id == session.ship_id
+    {
+        if let Some(res) = crate::services::combat_crimewatch::combat_weapons::handle_weapons(
+            ctx, session, service, method, args, kwargs,
+        )
+        .await
+        {
+            return Some(res);
+        }
+    }
     let method = if service == "dogmaIM" && method == "LaunchProbes" {
         "Activate"
     } else {
@@ -1313,6 +1326,9 @@ pub async fn handle(
 
         _ => {
             if let Some(res) = super::inventory_stacking::handle_stack_ops(ctx, session, bound_entry, service, method, args, kwargs) { return Some(res); }
+            if session.structure_id.is_some() && session.structure_id == session.ship_id {
+                if let Some(res) = crate::services::combat_crimewatch::combat_weapons::handle_weapons(ctx, session, service, method, args, kwargs).await { return Some(res); }
+            }
             if let Some(res) = handle_dogma_im(ctx, session, bound_entry, service, method, args, kwargs).await { return Some(res); }
             if let Some(res) = handle_dogma_ops(ctx, session, bound_entry, service, method, args, kwargs).await { return Some(res); }
             if let Some(res) = handle_module_cycles(ctx, session, bound_entry, service, method, args, kwargs).await { return Some(res); }

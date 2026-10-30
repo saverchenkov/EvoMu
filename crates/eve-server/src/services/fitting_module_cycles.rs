@@ -112,6 +112,9 @@ pub(crate) async fn handle_module_cycles(
                 if method == "Activate" && args.len() == 1 && raw_module_id > 0 && has_online_weapon {
                     return None;
                 }
+                if crate::services::mobile_deployables::read_deployable_state(ctx).deployables.get(&module_id).is_some_and(|d| d.group_id == crate::services::mobile_deployables::GROUP_MOBILE_MICRO_JUMP_UNIT) {
+                    return Some(crate::services::mobile_deployables::handle_activate_micro_jump_unit(ctx, session, args).await);
+                }
                 return Some(Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module {module_id} not found on ship") }));
             };
             if let Err(e) = check_module_reloading(ctx, ship_id, module_id) {
@@ -188,7 +191,7 @@ pub(crate) async fn handle_module_cycles(
                     }));
             let is_arena_pvp = is_weapon && (32_000_000..33_000_000).contains(&sys_id)
                 && ctx.db.with_snapshot(|s| crate::services::pvp_filament_mgr::load_pvp_store(s).active_matches.values().any(|m| m.active && m.arena_solar_system_id == sys_id));
-            if is_fw_pvp || is_arena_pvp || is_upwell_weapon_or_aoe || is_special_target {
+            if is_fw_pvp || is_arena_pvp || is_upwell_weapon_or_aoe || is_special_target || matches!(mod_type.group_id, 1328 | 1330 | 1333) {
                 return crate::services::combat_crimewatch::combat_weapons::handle_weapons(ctx, session, service, method, args, kwargs).await;
             }
 
@@ -1335,18 +1338,11 @@ pub(crate) async fn handle_module_cycles(
             ) {
                 Some(Ok(res))
             } else if mod_type.group_id == 49 || mod_type.default_attributes.contains_key(&197) {
-                let rep = handle_survey_scanner_activation(
-                    ctx, &sys, sys_id, char_id, ship_id, module_id, mod_type, &mod_state,
-                )
-                .await;
+                let rep = handle_survey_scanner_activation(ctx, &sys, sys_id, char_id, ship_id, module_id, mod_type, &mod_state).await;
                 Some(Ok(rep))
             } else {
                 let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
-                Some(Ok(PyRep::keyval([
-                    ("moduleID", PyRep::Integer(module_id)), ("active", PyRep::Bool(true)),
-                    ("overloaded", PyRep::Bool(false)), ("effectiveMaxVelocity", PyRep::Real(max_vel)),
-                    ("duration", PyRep::Real(duration_s)),
-                ])))
+                Some(Ok(PyRep::keyval([("moduleID", PyRep::Integer(module_id)), ("active", PyRep::Bool(true)), ("overloaded", PyRep::Bool(false)), ("effectiveMaxVelocity", PyRep::Real(max_vel)), ("duration", PyRep::Real(duration_s))])))
             }
             }
         }
