@@ -208,3 +208,32 @@ pub async fn handle_active_overload_toggle(
         ("effectiveMaxVelocity", PyRep::Real(max_vel)),
     ])
 }
+
+/// Enforces CCP in-space Nanite Repair Paste lockouts (`feat:modules.nanite-repair-paste-in-space`):
+/// a module currently being repaired cannot be activated, and no module on the ship may be overloaded
+/// while any module on the ship is undergoing active Nanite Repair Paste repair.
+pub fn check_nanite_repair_overheat_lockout(
+    sys: &SystemHandle,
+    ship_id: i64,
+    module_id: i64,
+    method: &str,
+    mod_state: eve_dogma::ModuleState,
+) -> Result<(), eve_proto::BridgeRpcError> {
+    if sys.is_module_being_nanite_repaired_sync(ship_id, module_id) {
+        return Err(eve_proto::BridgeRpcError {
+            code: "CannotActivateRepairingModule".into(),
+            message: format!(
+                "UserError: Module {module_id} cannot be activated while Nanite Repair Paste repair is in progress"
+            ),
+        });
+    }
+    if (method == "Overload" || mod_state == eve_dogma::ModuleState::Overloaded)
+        && sys.has_active_nanite_repair_sync(ship_id)
+    {
+        return Err(eve_proto::BridgeRpcError {
+            code: "CannotOverheatWhileRepairing".into(),
+            message: "UserError: Cannot overheat modules while in-space Nanite Repair Paste repair is active".into(),
+        });
+    }
+    Ok(())
+}

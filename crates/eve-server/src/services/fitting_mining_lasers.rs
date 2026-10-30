@@ -297,6 +297,16 @@ pub(crate) async fn handle_mining_and_deactivate(
                 }
             };
             let overloaded = method == "OverloadRack";
+            if overloaded
+                && session
+                    .solar_system_id
+                    .is_some_and(|sid| ctx.systems.get_or_spawn(sid).has_active_nanite_repair_sync(ship_id))
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotOverheatWhileRepairing".into(),
+                    message: "UserError: Cannot overheat modules while in-space Nanite Repair Paste repair is active".into(),
+                }));
+            }
             let mut affected_modules = Vec::new();
             for (&mid, fm) in fit.modules.iter_mut() {
                 let r_idx = match fm.flag_id {

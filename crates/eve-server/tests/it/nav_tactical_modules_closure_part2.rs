@@ -4,9 +4,13 @@
 //! and `feat:navigation.warp-scramble-propulsion-shutoff`.
 
 use crate::modules_advanced_tactical::*;
-use eve_db::InventoryFlag;
-use eve_destiny::{Ball, DVec3, MovementMode};
+use eve_db::{FleetRecord, InventoryFlag};
+use eve_destiny::{Ball, DestinyEvent, DVec3, MovementMode};
 use eve_proto::PyRep;
+use eve_server::services::insurgency_services::{
+    add_system_corruption, init_insurgency_campaign, FACTION_ANGEL_CARTEL, FORECASTING_DURATION_SECS,
+};
+use eve_server::sp6_lifecycle::handle_character_logoff_or_disconnect;
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -48,6 +52,8 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
     sys.add_warp_bubble(catch_bubble_id, DVec3::new(20_000_000.0, 0.0, 0.0), 20_000.0).await.unwrap();
     spawn_in_space(&ctx, target_char, target_ship_id, 12_729, null_sys, origin).await;
     spawn_in_space(&ctx, shuttle_char, shuttle_id, 672, null_sys, origin).await;
+    // Step 1 tick first to prove reconcile_tackle_and_bubbles preserves Shuttle passive SDE 1538 immunity!
+    sys.step_manual(1.0).await.unwrap();
 
     let b_target = ctx.bind_object(&mut target_sess, "beyonce", null_sys as i64).unwrap();
     let b_shuttle = ctx.bind_object(&mut shuttle_sess, "beyonce", null_sys as i64).unwrap();
@@ -62,7 +68,7 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
     };
     assert!((crane_catch_dest.x - 19_980_000.0).abs() < 10.0, "got {}", crane_catch_dest.x);
 
-    // Shuttle (group 31) ignores catch bubble and warps straight to 30,000 km
+    // Shuttle (group 31, SDE attr 1538 = 1.0) ignores catch bubble AND warps out from inside a bubble
     ctx.dispatch_rpc(
         &mut shuttle_sess, "beyonce", Some(b_shuttle), "CmdWarpToStuff",
         &[PyRep::String("item".into()), PyRep::Integer(dest_beacon_id), PyRep::Real(0.0)], &kw, None,
@@ -88,12 +94,64 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
     };
     assert!((crane_drag_dest.x - 30_080_000.0).abs() < 10.0, "got {}", crane_drag_dest.x);
 
+    // 1c. Capital cyno jump blocked inside bubble, while disconnect emergency logoff warp succeeds!
+    let near_null_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| {
+            s.solar_system_id != null_sys
+                && s.security_status < 0.0
+                && s.solar_system_id < 31_000_000
+                && {
+                    let pa = ctx.sde.solar_systems[&null_sys].galactic_pos_ly;
+                    let pb = s.galactic_pos_ly;
+                    let d = ((pa[0] - pb[0]).powi(2) + (pa[1] - pb[1]).powi(2) + (pa[2] - pb[2]).powi(2)).sqrt();
+                    (0.1..5.0).contains(&d)
+                }
+        })
+        .expect("nearby null-sec cyno destination")
+        .solar_system_id;
+    let cyno_char: i64 = 94_026;
+    let cyno_ship: i64 = 84_026;
+    let dread_char: i64 = 94_027;
+    let dread_ship: i64 = 84_027;
+    let mut cyno_sess = seed_pilot(&ctx, cyno_char, cyno_ship, 11_957, near_null_sys, false); // Falcon
+    let mut dread_sess = seed_pilot(&ctx, dread_char, dread_ship, 19_720, null_sys, false); // Revelation
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(
+            77_701,
+            FleetRecord { fleet_id: 77_701, boss_id: cyno_char, members: vec![cyno_char, dread_char], ..Default::default() },
+        );
+    });
+    spawn_in_space(&ctx, cyno_char, cyno_ship, 11_957, near_null_sys, DVec3::ZERO).await;
+    give_item(&ctx, 74_190, 21_096, cyno_char, cyno_ship, InventoryFlag::HiSlot0, 1);
+    give_item(&ctx, 74_191, 16_273, cyno_char, cyno_ship, InventoryFlag::Cargo, 2_000);
+    ctx.db.with_mut_snapshot(|s| { s.module_online_states.insert(74_190, true); });
+    ctx.invalidate_ship_fitting(cyno_ship);
+    let cyno_rep = rpc(&ctx, &mut cyno_sess, "dogmaIM", "Activate", vec![
+        PyRep::Integer(74_190), PyRep::String("cynosuralGeneration".into()),
+    ]).await.expect("Light cyno in near_null_sys");
+    let cyno_beacon_id = cyno_rep.dict_get("beaconID").and_then(|v| v.as_i64()).unwrap();
+
+    spawn_in_space(&ctx, dread_char, dread_ship, 19_720, null_sys, DVec3::new(30_100_000.0, 0.0, 0.0)).await;
+    give_item(&ctx, 74_192, 16_274, dread_char, dread_ship, InventoryFlag::Cargo, 50_000); // Helium Isotopes
+    let jump_blocked = rpc(&ctx, &mut dread_sess, "beyonce", "CmdJumpToFleetModuleBeacon", vec![
+        PyRep::Integer(cyno_char), PyRep::Integer(near_null_sys as i64), PyRep::Integer(cyno_beacon_id),
+    ]).await.unwrap_err();
+    assert_eq!(jump_blocked.code, "WarpScrambled", "Warp disruption bubble must block capital cyno jump");
+
+    // Disconnect emergency logoff warp inside bubble is NOT blocked when ship has no point scramble
+    let disc_entry = handle_character_logoff_or_disconnect(&ctx, dread_char)
+        .await
+        .expect("Disconnect emergency warp entry");
+    assert!(disc_entry.emergency_warp_dest.is_some(), "Bubble alone must NOT prevent disconnect emergency logoff warp");
+
     // 2. Interdiction Nullification Module (`feat:navigation.interdiction-nullification-module`)
+    let mut cruiser_sess = seed_pilot(&ctx, 94_028, 84_028, 621, 30_000_142, true); // Caracal (T1 Cruiser)
+    assert!(fit_mod(&ctx, &mut cruiser_sess, 84_028, 74_200, 58_919, 27).await.is_err(), "T1 Cruiser must not fit Interdiction Nullifier I");
     let mut bs_sess = seed_pilot(&ctx, 94_024, 84_024, 640, 30_000_142, true);
-    assert!(
-        fit_mod(&ctx, &mut bs_sess, 84_024, 74_201, 58_919, 27).await.is_err(),
-        "Battleship must not fit Interdiction Nullifier I"
-    );
+    assert!(fit_mod(&ctx, &mut bs_sess, 84_024, 74_201, 58_919, 27).await.is_err(), "Battleship must not fit Interdiction Nullifier I");
 
     let mut crane_fit_sess = seed_pilot(&ctx, target_char, target_ship_id, 12_729, 30_000_142, true);
     let pre_null_info = rpc(&ctx, &mut crane_fit_sess, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(target_ship_id)]).await.unwrap();
@@ -102,21 +160,17 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
 
     fit_mod(&ctx, &mut crane_fit_sess, target_ship_id, 74_202, 58_919, 27)
         .await.expect("Crane fits 1st Interdiction Nullifier I");
-    assert!(
-        fit_mod(&ctx, &mut crane_fit_sess, target_ship_id, 74_203, 58_919, 28).await.is_err(),
-        "maxGroupFitted=1 must reject 2nd Interdiction Nullifier"
-    );
+    assert!(fit_mod(&ctx, &mut crane_fit_sess, target_ship_id, 74_203, 58_919, 28).await.is_err(), "maxGroupFitted=1 must reject 2nd Nullifier");
     let post_null_info = rpc(&ctx, &mut crane_fit_sess, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(target_ship_id)]).await.unwrap();
-    assert!(attr_from_item_info(&post_null_info, 76) < pre_target_range, "Nullifier passive penalty reduces maxTargetRange");
-    assert!(attr_from_item_info(&post_null_info, 564) < pre_scan_res, "Nullifier passive penalty reduces scanResolution");
+    assert!(attr_from_item_info(&post_null_info, 76) < pre_target_range);
+    assert!(attr_from_item_info(&post_null_info, 564) < pre_scan_res);
 
-    // Also verify -50% droneBandwidth (1271) passive penalty on Nereus (650, group 28 Industrial with 15 Mbit/s bandwidth)
     let mut nereus_sess = seed_pilot(&ctx, 94_025, 84_025, 650, 30_000_142, true);
     let pre_ner_info = rpc(&ctx, &mut nereus_sess, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(84_025)]).await.unwrap();
     let pre_drone_bw = attr_from_item_info(&pre_ner_info, 1271);
     fit_mod(&ctx, &mut nereus_sess, 84_025, 74_204, 58_919, 27).await.expect("Nereus fits Interdiction Nullifier I");
     let post_ner_info = rpc(&ctx, &mut nereus_sess, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(84_025)]).await.unwrap();
-    assert!((attr_from_item_info(&post_ner_info, 1271) - pre_drone_bw * 0.5).abs() < 1e-3, "Nullifier passive penalty reduces droneBandwidth by 50%");
+    assert!((attr_from_item_info(&post_ner_info, 1271) - pre_drone_bw * 0.5).abs() < 1e-3);
 
     let far_beacon_id: i64 = 88_704;
     sys.spawn_ball(Ball {
@@ -141,59 +195,86 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
         &[PyRep::String("item".into()), PyRep::Integer(far_beacon_id), PyRep::Real(0.0)], &kw, None,
     ).await.expect("Active Interdiction Nullifier allows warp out of bubble");
 
-    rpc(&ctx, &mut target_sess, "dogmaIM", "Deactivate", vec![PyRep::Integer(74_202)])
-        .await.expect("Deactivate Interdiction Nullifier I");
-    let react_err = rpc(&ctx, &mut target_sess, "dogmaIM", "Activate", vec![PyRep::Integer(74_202)])
-        .await.unwrap_err();
+    rpc(&ctx, &mut target_sess, "dogmaIM", "Deactivate", vec![PyRep::Integer(74_202)]).await.unwrap();
+    let react_err = rpc(&ctx, &mut target_sess, "dogmaIM", "Activate", vec![PyRep::Integer(74_202)]).await.unwrap_err();
     assert_eq!(react_err.code, "ModuleReactivationDelay");
     sys.remove_warp_bubble(drag_bubble_id).await.unwrap();
 
-    // 3. Interdiction Sphere Probe Variants & Smartbomb Destruction (`feat:modules.interdiction-probe-variants`)
+    // 3. Interdiction Sphere Probe Variants, Security/Corruption Gates, Capacity/Reload, & Wubble (`feat:modules.interdiction-probe-variants`)
+    // 3a. Max-1 Interdiction Sphere Launcher I (`22782`, `maxGroupFitted = 1`)
+    let mut sabre_fit_sess = seed_pilot(&ctx, sabre_char, sabre_id, 22_456, 30_000_142, true);
     let launcher_id: i64 = 74_301;
-    let probe_stack_id: i64 = 74_302;
-    let smartbomb_id: i64 = 74_303;
-    let smartbomb_id_2: i64 = 74_306;
+    fit_mod(&ctx, &mut sabre_fit_sess, sabre_id, launcher_id, 22_782, 27).await.expect("Sabre fits 1st Interdiction Sphere Launcher I");
+    assert!(fit_mod(&ctx, &mut sabre_fit_sess, sabre_id, 74_399, 22_782, 28).await.is_err(), "maxGroupFitted=1 blocks 2nd launcher");
+
+    // 3b. High-sec refusal (`30_000_142`) and Low-sec (`30_002_537` Amamake) Corruption Stage 0 vs Stage 5
+    sabre_sess.station_id = None;
+    sabre_sess.solar_system_id = Some(30_000_142);
+    spawn_in_space(&ctx, sabre_char, sabre_id, 22_456, 30_000_142, DVec3::new(10_000_000.0, 0.0, 0.0)).await;
+    give_item(&ctx, 74_302, 22_778, sabre_char, sabre_id, InventoryFlag::HiSlot0, 3);
+    ctx.invalidate_ship_fitting(sabre_id);
+    let hs_err = rpc(&ctx, &mut sabre_sess, "dogmaIM", "Activate", vec![PyRep::Integer(launcher_id)]).await.unwrap_err();
+    assert_eq!(hs_err.code, "CannotLaunchInterdictionProbeInEmpire");
+
+    let low_sys: u32 = 30_002_537; // Amamake (0.4 low-sec)
+    sabre_sess.solar_system_id = Some(low_sys);
+    spawn_in_space(&ctx, sabre_char, sabre_id, 22_456, low_sys, DVec3::new(10_000_000.0, 0.0, 0.0)).await;
+    let ls_err = rpc(&ctx, &mut sabre_sess, "dogmaIM", "Activate", vec![PyRep::Integer(launcher_id)]).await.unwrap_err();
+    assert_eq!(ls_err.code, "CannotLaunchInterdictionProbeInEmpire");
+
+    init_insurgency_campaign(&ctx, 501, FACTION_ANGEL_CARTEL, 500_002, low_sys, vec![low_sys]);
+    ctx.advance_secs(FORECASTING_DURATION_SECS + 10);
+    let (_, corr_stage) = add_system_corruption(&ctx, 501, low_sys, 1_000);
+    assert_eq!(corr_stage, 5);
+    let ls_stage5 = rpc(&ctx, &mut sabre_sess, "dogmaIM", "Activate", vec![PyRep::Integer(launcher_id)])
+        .await.expect("Low-sec Corruption Stage 5 allows interdiction probe launch");
+    assert_eq!(ls_stage5.dict_get("bubbleRadius"), Some(&PyRep::Real(20_000.0)));
+    ctx.advance_secs(6);
+
+    // 3c. Move to null-sec (`null_sys`), test 15 m3 (3-probe) capacity + 60s auto-reload when last loaded probe is fired!
+    sabre_sess.solar_system_id = Some(null_sys);
     let sabre_pos = DVec3::new(50_000_000.0, 0.0, 0.0);
     spawn_in_space(&ctx, sabre_char, sabre_id, 22_456, null_sys, sabre_pos).await;
-    give_item(&ctx, launcher_id, 22_782, sabre_char, sabre_id, InventoryFlag::HiSlot0, 1);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.items.get_mut(&74_302) {
+            st.quantity = 1; // 1 probe left in launcher
+        }
+    });
+    give_item(&ctx, 74_310, 22_778, sabre_char, sabre_id, InventoryFlag::Cargo, 4); // 4 in cargo -> 3 (15 m3) auto-reloaded
+    let smartbomb_id: i64 = 74_303;
+    let smartbomb_id_2: i64 = 74_306;
+    let ab_sabre_id: i64 = 74_307;
     give_item(&ctx, smartbomb_id, 14_200, sabre_char, sabre_id, InventoryFlag::HiSlot1, 1);
     give_item(&ctx, smartbomb_id_2, 14_200, sabre_char, sabre_id, InventoryFlag::HiSlot2, 1);
-    give_item(&ctx, probe_stack_id, 22_778, sabre_char, sabre_id, InventoryFlag::HiSlot0, 3);
+    give_item(&ctx, ab_sabre_id, 439, sabre_char, sabre_id, InventoryFlag::MedSlot0, 1); // 1MN Afterburner I (439)
     ctx.db.with_mut_snapshot(|snap| {
-        snap.module_online_states.insert(launcher_id, true);
-        snap.module_online_states.insert(smartbomb_id, true);
-        snap.module_online_states.insert(smartbomb_id_2, true);
+        for &mid in &[launcher_id, smartbomb_id, smartbomb_id_2, ab_sabre_id] {
+            snap.module_online_states.insert(mid, true);
+        }
     });
     ctx.invalidate_ship_fitting(sabre_id);
 
     let p1 = rpc(&ctx, &mut sabre_sess, "dogmaIM", "Activate", vec![PyRep::Integer(launcher_id)])
-        .await.expect("Launch Warp Disrupt Probe 22778");
+        .await.expect("Launch last loaded Warp Disrupt Probe -> triggers 60s auto-reload");
     let p1_id = p1.dict_get("probeID").and_then(|v| v.as_i64()).unwrap();
-    assert_eq!(p1.dict_get("bubbleRadius"), Some(&PyRep::Real(20_000.0)));
-    assert_eq!(p1.dict_get("lifetimeSeconds"), Some(&PyRep::Real(120.0)));
-    let weap_timer = ctx.crimewatch.read().unwrap().states.get(&sabre_char).map(|s| s.weapon_timer_until_unix).unwrap_or(0);
-    assert_eq!(weap_timer, 0, "Launching interdiction probe must not create aggression");
+    assert_eq!(p1.dict_get("reloading"), Some(&PyRep::Bool(true)));
+    assert_eq!(p1.dict_get("remainingInLauncher"), Some(&PyRep::Integer(3)));
+    assert_eq!(ctx.crimewatch.read().unwrap().states.get(&sabre_char).map(|s| s.weapon_timer_until_unix).unwrap_or(0), 0);
 
-    let cadence_err = rpc(&ctx, &mut sabre_sess, "dogmaIM", "Activate", vec![PyRep::Integer(launcher_id)])
-        .await.unwrap_err();
-    assert_eq!(cadence_err.code, "ModuleReactivationDelay");
+    // At +10s (> 5s cadence, < 60s reload): blocked with ModuleIsReloading!
+    ctx.advance_secs(10);
+    let reload_err = rpc(&ctx, &mut sabre_sess, "dogmaIM", "Activate", vec![PyRep::Integer(launcher_id)]).await.unwrap_err();
+    assert_eq!(reload_err.code, "ModuleIsReloading");
 
-    let (_, probe_ball) = sys.get_ball_snapshot(p1_id).await.unwrap().expect("probe ball spawned");
-    assert_eq!(probe_ball.type_id, 22_778);
-    let probe_cs = sys.get_combat_state(p1_id).await.unwrap().unwrap();
-    assert_eq!(probe_cs.max_structure_hp, 1_000.0);
-    let lock_err = rpc(&ctx, &mut sabre_sess, "dogmaIM", "AddTarget", vec![PyRep::Integer(p1_id)])
-        .await.unwrap_err();
-    assert_eq!(lock_err.code, "InvalidTarget");
-
-    // Smartbomb AoE destroys the 1,000 HP probe (repeating pulses over 70s < 120s lifetime) and removes its bubble
+    // Smartbomb AoE destroys the 1,000 HP untargetable probe and removes its bubble
+    assert_eq!(rpc(&ctx, &mut sabre_sess, "dogmaIM", "AddTarget", vec![PyRep::Integer(p1_id)]).await.unwrap_err().code, "InvalidTarget");
     assert!(sys.is_ball_scrambled(sabre_id).await.unwrap());
     rpc(&ctx, &mut sabre_sess, "dogmaIM", "Activate", vec![
         PyRep::Integer(smartbomb_id), PyRep::String("empWave".into()), PyRep::None, PyRep::Integer(1),
-    ]).await.expect("Activate Smartbomb 1 AoE");
+    ]).await.unwrap();
     rpc(&ctx, &mut sabre_sess, "dogmaIM", "Activate", vec![
         PyRep::Integer(smartbomb_id_2), PyRep::String("empWave".into()), PyRep::None, PyRep::Integer(1),
-    ]).await.expect("Activate Smartbomb 2 AoE");
+    ]).await.unwrap();
     for _ in 0..70 {
         sys.step_manual(1.0).await.unwrap();
         ctx.advance_secs(1);
@@ -203,11 +284,36 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
     assert!(sys.get_ball_snapshot(p1_id).await.unwrap().is_none(), "Smartbomb AoE must destroy probe");
     assert!(!sys.is_ball_scrambled(sabre_id).await.unwrap(), "Destroyed probe must remove bubble");
 
-    // Stasis Webification Probe (56748: 15km radius, 30s lifetime, 3s arming, 30% web, does NOT block warp)
-    let wubble_stack_id: i64 = 74_304;
-    ctx.db.with_mut_snapshot(|snap| { snap.items.remove(&probe_stack_id); });
-    give_item(&ctx, wubble_stack_id, 56_748, sabre_char, sabre_id, InventoryFlag::HiSlot0, 5);
+    // After 60s reload completed, 3 probes (15 m3 / 5 m3) were auto-loaded from the 4-probe cargo stack (1 left in cargo)!
+    let p_reloaded = rpc(&ctx, &mut sabre_sess, "dogmaIM", "Activate", vec![PyRep::Integer(launcher_id)])
+        .await.expect("Launch after 60s auto-reload");
+    assert!(p_reloaded.dict_get("probeID").is_some());
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&74_310).map(|i| i.quantity)), Some(1), "15m3 launcher reloads max 3 of 4 probes");
+    let cadence_err = rpc(&ctx, &mut sabre_sess, "dogmaIM", "Activate", vec![PyRep::Integer(launcher_id)]).await.unwrap_err();
+    assert_eq!(cadence_err.code, "ModuleReactivationDelay");
+    ctx.advance_secs(6);
+    // Move away from p_reloaded bubble before testing Wubble
+    let wub_pos = DVec3::new(55_000_000.0, 0.0, 0.0);
+    sys.set_ball_position(sabre_id, wub_pos).await;
+
+    // 3d. Stasis Webification Probe (`56748`: SDE 15km, 30s lifetime, 2.0s arming delay, -20% speedFactor = 0.80x, composes with active AB!)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&smartbomb_id);
+        snap.items.remove(&smartbomb_id_2);
+        snap.items.retain(|_, i| !(i.location_id == sabre_id && i.flag == InventoryFlag::HiSlot0 && i.item_id != launcher_id));
+        snap.module_online_states.insert(ab_sabre_id, true);
+    });
+    give_item(&ctx, 74_304, 56_748, sabre_char, sabre_id, InventoryFlag::HiSlot0, 5);
     ctx.invalidate_ship_fitting(sabre_id);
+    sys.set_capacitor(sabre_id, 5_000.0).await.unwrap();
+
+    // Activate 1MN Afterburner II on Sabre BEFORE launching Wubble
+    rpc(&ctx, &mut sabre_sess, "dogmaIM", "Activate", vec![PyRep::Integer(ab_sabre_id)])
+        .await.expect("Activate 1MN Afterburner II on Sabre");
+    let (_, sabre_ab_ball) = sys.get_ball_snapshot(sabre_id).await.unwrap().unwrap();
+    let ab_vel = sabre_ab_ball.max_velocity;
+    assert!(ab_vel > 700.0, "Active Afterburner must boost Sabre max_velocity: got {ab_vel}");
+
     let pw = rpc(&ctx, &mut sabre_sess, "dogmaIM", "Activate", vec![PyRep::Integer(launcher_id)])
         .await.expect("Launch Stasis Webification Probe 56748");
     let pw_id = pw.dict_get("probeID").and_then(|v| v.as_i64()).unwrap();
@@ -215,22 +321,30 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
     assert_eq!(pw.dict_get("bubbleRadius"), Some(&PyRep::Real(15_000.0)));
     assert_eq!(pw.dict_get("lifetimeSeconds"), Some(&PyRep::Real(30.0)));
 
-    let (_, sabre_pre_wub) = sys.get_ball_snapshot(sabre_id).await.unwrap().unwrap();
-    let pre_wub_vel = sabre_pre_wub.max_velocity;
-    sys.step_manual(4.0).await.unwrap();
+    // At t = 1.0s (< 2.0s SDE arming delay attr 2262): NOT webbed yet!
+    sys.step_manual(1.0).await.unwrap();
+    let (_, sabre_t1) = sys.get_ball_snapshot(sabre_id).await.unwrap().unwrap();
+    assert!((sabre_t1.max_velocity - ab_vel).abs() < 1e-2, "Wubble must not web during 2.0s arming delay");
+
+    // At t = 2.0s (armed): SDE attr 20 = -20.0 -> 0.80x of AB-boosted velocity, and NOT warp scrambled!
+    sys.step_manual(1.0).await.unwrap();
     let (_, sabre_wub) = sys.get_ball_snapshot(sabre_id).await.unwrap().unwrap();
-    assert!((sabre_wub.max_velocity - pre_wub_vel * 0.70).abs() < 1e-2);
+    assert!((sabre_wub.max_velocity - ab_vel * 0.80).abs() < 1e-2, "Wubble must apply SDE 0.80x to AB velocity: got {} vs {}", sabre_wub.max_velocity, ab_vel * 0.80);
     assert!(!sys.is_ball_scrambled(sabre_id).await.unwrap());
 
-    sys.step_manual(31.0).await.unwrap();
+    // Keep capacitor topped up and step 31s past 30s Wubble lifetime -> restores FULL AB-boosted velocity!
+    for _ in 0..31 {
+        sys.set_capacitor(sabre_id, 5_000.0).await.unwrap();
+        sys.step_manual(1.0).await.unwrap();
+        ctx.advance_secs(1);
+    }
     assert!(sys.get_ball_snapshot(pw_id).await.unwrap().is_none());
     let (_, sabre_post_wub) = sys.get_ball_snapshot(sabre_id).await.unwrap().unwrap();
-    assert!((sabre_post_wub.max_velocity - pre_wub_vel).abs() < 1e-2);
+    assert!((sabre_post_wub.max_velocity - ab_vel).abs() < 1e-2, "Wubble expiry must restore active AB velocity ({ab_vel}), got {}", sabre_post_wub.max_velocity);
 
-    // Surgical Warp Disrupt Probe (34260: 10km radius, 180s lifetime)
-    let surg_stack_id: i64 = 74_305;
-    ctx.db.with_mut_snapshot(|snap| { snap.items.remove(&wubble_stack_id); });
-    give_item(&ctx, surg_stack_id, 34_260, sabre_char, sabre_id, InventoryFlag::HiSlot0, 2);
+    // 3e. Surgical Warp Disrupt Probe (34260: 10km radius, 180s lifetime)
+    ctx.db.with_mut_snapshot(|snap| { snap.items.remove(&74_304); });
+    give_item(&ctx, 74_305, 34_260, sabre_char, sabre_id, InventoryFlag::HiSlot0, 2);
     ctx.invalidate_ship_fitting(sabre_id);
     let ps = rpc(&ctx, &mut sabre_sess, "dogmaIM", "Activate", vec![PyRep::Integer(launcher_id)])
         .await.expect("Launch Surgical Warp Disrupt Probe 34260");
@@ -254,13 +368,11 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
     let char_scram: i64 = 94_032;
     let ship_scram: i64 = 84_032;
 
-    let mut sess_mjd = seed_pilot(&ctx, char_mjd, ship_mjd, 16_231, jita_sys, false); // Cyclone (BC)
-    let mut sess_scram = seed_pilot(&ctx, char_scram, ship_scram, 640, jita_sys, false); // Raven (BS)
+    let mut sess_mjd = seed_pilot(&ctx, char_mjd, ship_mjd, 16_231, jita_sys, false);
+    let mut sess_scram = seed_pilot(&ctx, char_scram, ship_scram, 640, jita_sys, false);
     let sys = ctx.systems.get_or_spawn(jita_sys);
 
-    // 1. Micro Jump Drive Spool-up, Heading Turn During Spool, Skill Reduction, Capital MJD, & Scramble Abort
-    // (`feat:navigation.micro-jump-drive-spool`)
-    // Set Micro Jump Drive Operation (4385) to L0 -> 12.0s spool-up
+    // 1. Micro Jump Drive Spool-up, Turn During Spool, Velocity/Heading Preservation, & SetBallPosition Event
     set_skill_level(&ctx, char_mjd, 4_385, 0);
     let med_mjd_id: i64 = 75_001;
     give_item(&ctx, med_mjd_id, 33_915, char_mjd, ship_mjd, InventoryFlag::MedSlot0, 1);
@@ -270,11 +382,13 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
     let mjd_origin = DVec3::new(10_000_000.0, 0.0, 0.0);
     spawn_in_space(&ctx, char_mjd, ship_mjd, 16_231, jita_sys, mjd_origin).await;
     let b_mjd = ctx.bind_object(&mut sess_mjd, "beyonce", jita_sys as i64).unwrap();
-    let (_, init_ball) = sys.get_ball_snapshot(ship_mjd).await.unwrap().unwrap();
     let init_cs = sys.get_combat_state(ship_mjd).await.unwrap().unwrap();
     let base_sig = init_cs.signature_radius;
 
-    // Initial heading +X, activate Medium MJD (33915)
+    ctx.dispatch_rpc(
+        &mut sess_mjd, "beyonce", Some(b_mjd), "CmdSetSpeedFraction",
+        &[PyRep::Real(1.0)], &kw, None,
+    ).await.unwrap();
     ctx.dispatch_rpc(
         &mut sess_mjd, "beyonce", Some(b_mjd), "CmdGotoDirection",
         &[PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)], &kw, None,
@@ -282,32 +396,36 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
     rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(med_mjd_id)])
         .await.expect("Activate Medium MJD");
 
-    // During spool-up (t = 6s < 12s): signature radius blooms +150% (2.5x), ship has NOT jumped 100 km yet
     for _ in 0..6 {
         sys.step_manual(1.0).await.unwrap();
     }
     let (_, mid_ball) = sys.get_ball_snapshot(ship_mjd).await.unwrap().unwrap();
     let mid_cs = sys.get_combat_state(ship_mjd).await.unwrap().unwrap();
-    assert!(mid_ball.position.distance(mjd_origin) < 5_000.0, "MJD must not jump before 12s spool completes");
-    assert!((mid_cs.signature_radius - base_sig * 2.5).abs() < 1.0, "MJD spool must bloom signature radius by +150%");
+    assert!(mid_ball.position.distance(mjd_origin) < 5_000.0);
+    assert!((mid_cs.signature_radius - base_sig * 2.5).abs() < 1.0);
 
-    // Turn heading to +Y mid-spool -> at t = 12s jump executes 100 km along NEW +Y heading!
+    // Turn heading toward +Y mid-spool -> at t = 12s jump executes 100 km along the turned velocity heading, emits SetBallPosition, and preserves velocity/heading!
     ctx.dispatch_rpc(
         &mut sess_mjd, "beyonce", Some(b_mjd), "CmdGotoDirection",
         &[PyRep::Real(0.0), PyRep::Real(1.0), PyRep::Real(0.0)], &kw, None,
     ).await.unwrap();
+    let mut saw_set_ball_pos = false;
     for _ in 0..6 {
-        sys.step_manual(1.0).await.unwrap();
+        let tb = sys.step_manual(1.0).await.unwrap();
+        if tb.events.iter().any(|e| matches!(e, DestinyEvent::SetBallPosition { ball_id, .. } if *ball_id == ship_mjd)) {
+            saw_set_ball_pos = true;
+        }
     }
+    assert!(saw_set_ball_pos, "Same-grid 100 km MJD jump must emit DestinyEvent::SetBallPosition");
     let (_, post_mjd_ball) = sys.get_ball_snapshot(ship_mjd).await.unwrap().unwrap();
-    assert!(
-        (post_mjd_ball.position.y - 100_000.0).abs() < 5_000.0,
-        "MJD must jump 100 km along new +Y heading after turn during spool: got {:?}",
-        post_mjd_ball.position
-    );
-    // Reactivation delay (180s) rejects immediate reactivation
-    let mjd_react_err = rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(med_mjd_id)])
-        .await.unwrap_err();
+    let jump_vec = post_mjd_ball.position - mid_ball.position;
+    assert!((jump_vec.length() - 100_000.0).abs() < 2_500.0, "MJD must jump 100 km: got {}", jump_vec.length());
+    assert!(post_mjd_ball.position.y > 40_000.0, "Turning toward +Y mid-spool must steer MJD jump into +Y: got {:?}", post_mjd_ball.position);
+    assert!(jump_vec.normalize().dot(post_mjd_ball.velocity.normalize()) > 0.98, "MJD jump must align with current ship velocity heading");
+    assert!(post_mjd_ball.velocity.y > 10.0, "Post-MJD ship must preserve +Y velocity component: got {:?}", post_mjd_ball.velocity);
+    assert!(matches!(post_mjd_ball.mode, MovementMode::GotoDirection { direction } if direction.y > 0.99));
+
+    let mjd_react_err = rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(med_mjd_id)]).await.unwrap_err();
     assert_eq!(mjd_react_err.code, "ModuleReactivationDelay");
 
     // Micro Jump Drive Operation L5 reduces spool time by 25% (12s -> 9s)
@@ -326,22 +444,21 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
         &mut sess_mjd_l5, "beyonce", Some(b_mjd_l5), "CmdGotoDirection",
         &[PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)], &kw, None,
     ).await.unwrap();
-    let act_l5 = rpc(&ctx, &mut sess_mjd_l5, "dogmaIM", "Activate", vec![PyRep::Integer(med_mjd_l5_id)])
-        .await.expect("Activate MJD with MJD Operation L5");
+    rpc(&ctx, &mut sess_mjd_l5, "dogmaIM", "Activate", vec![PyRep::Integer(med_mjd_l5_id)]).await.unwrap();
     for _ in 0..8 {
         sys.step_manual(1.0).await.unwrap();
     }
     let (_, pre9_ball) = sys.get_ball_snapshot(ship_mjd_l5).await.unwrap().unwrap();
-    assert!(pre9_ball.position.distance(l5_origin) < 5_000.0, "MJD Operation L5 must not jump before 9s: act_l5={act_l5:?}, pre9={pre9_ball:?}");
+    assert!(pre9_ball.position.distance(l5_origin) < 5_000.0);
     sys.step_manual(1.0).await.unwrap();
     let (_, l5_ball) = sys.get_ball_snapshot(ship_mjd_l5).await.unwrap().unwrap();
-    assert!((l5_ball.position.x - (l5_origin.x + 100_000.0)).abs() < 5_000.0, "MJD Operation L5 must complete jump in 9s: act_l5={act_l5:?}, l5_ball={l5_ball:?}");
+    assert!((l5_ball.position.x - (l5_origin.x + 100_000.0)).abs() < 5_000.0);
 
     // Capital Micro Jump Drive (83465) on Archon (23757) jumps 250 km
     let cap_mjd_id: i64 = 75_003;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.retain(|_, i| i.location_id != ship_mjd);
-        snap.items.get_mut(&ship_mjd).unwrap().type_id = 23_757; // Archon
+        snap.items.get_mut(&ship_mjd).unwrap().type_id = 23_757;
     });
     give_item(&ctx, cap_mjd_id, 83_465, char_mjd, ship_mjd, InventoryFlag::MedSlot0, 1);
     ctx.db.with_mut_snapshot(|snap| { snap.module_online_states.insert(cap_mjd_id, true); });
@@ -350,16 +467,19 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
     spawn_in_space(&ctx, char_mjd, ship_mjd, 23_757, jita_sys, cap_origin).await;
     sys.set_ball_position(ship_mjd, cap_origin).await;
     ctx.dispatch_rpc(
+        &mut sess_mjd, "beyonce", Some(b_mjd), "CmdSetSpeedFraction",
+        &[PyRep::Real(1.0)], &kw, None,
+    ).await.unwrap();
+    ctx.dispatch_rpc(
         &mut sess_mjd, "beyonce", Some(b_mjd), "CmdGotoDirection",
         &[PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)], &kw, None,
     ).await.unwrap();
-    rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(cap_mjd_id)])
-        .await.expect("Activate Capital MJD");
+    rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(cap_mjd_id)]).await.unwrap();
     for _ in 0..12 {
         sys.step_manual(1.0).await.unwrap();
     }
     let (_, cap_ball) = sys.get_ball_snapshot(ship_mjd).await.unwrap().unwrap();
-    assert!((cap_ball.position.x - (cap_origin.x + 250_000.0)).abs() < 5_000.0, "Capital MJD must jump 250 km");
+    assert!((cap_ball.position.x - (cap_origin.x + 250_000.0)).abs() < 5_000.0);
 
     // 2. Warp Scrambler Propulsion Shutoff vs Warp Disruptor & Afterburner (`feat:navigation.warp-scramble-propulsion-shutoff`)
     let mwd_id: i64 = 75_011;
@@ -370,14 +490,14 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.retain(|_, i| i.location_id != ship_mjd && i.location_id != ship_scram);
-        snap.items.get_mut(&ship_mjd).unwrap().type_id = 16_231; // Cyclone
-        snap.items.get_mut(&ship_scram).unwrap().type_id = 640; // Raven
+        snap.items.get_mut(&ship_mjd).unwrap().type_id = 16_231;
+        snap.items.get_mut(&ship_scram).unwrap().type_id = 640;
     });
-    give_item(&ctx, mwd_id, 5_975, char_mjd, ship_mjd, InventoryFlag::MedSlot0, 1); // 50MN MWD
-    give_item(&ctx, ab_id, 12_058, char_mjd, ship_mjd, InventoryFlag::MedSlot1, 1); // 10MN AB
+    give_item(&ctx, mwd_id, 5_975, char_mjd, ship_mjd, InventoryFlag::MedSlot0, 1);
+    give_item(&ctx, ab_id, 12_058, char_mjd, ship_mjd, InventoryFlag::MedSlot1, 1);
     give_item(&ctx, mid_spool_mjd_id, 33_915, char_mjd, ship_mjd, InventoryFlag::MedSlot2, 1);
-    give_item(&ctx, disruptor_id, 3_242, char_scram, ship_scram, InventoryFlag::MedSlot0, 1); // Warp Disruptor (1 pt)
-    give_item(&ctx, scrambler_id, 448, char_scram, ship_scram, InventoryFlag::MedSlot1, 1); // Warp Scrambler II (2 pts)
+    give_item(&ctx, disruptor_id, 3_242, char_scram, ship_scram, InventoryFlag::MedSlot0, 1);
+    give_item(&ctx, scrambler_id, 448, char_scram, ship_scram, InventoryFlag::MedSlot1, 1);
     ctx.db.with_mut_snapshot(|snap| {
         for &mid in &[mwd_id, ab_id, mid_spool_mjd_id, disruptor_id, scrambler_id] {
             snap.module_online_states.insert(mid, true);
@@ -391,63 +511,50 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
     spawn_in_space(&ctx, char_scram, ship_scram, 640, jita_sys, scram_arena + DVec3::new(3_000.0, 0.0, 0.0)).await;
     let (_, base_cyclone) = sys.get_ball_snapshot(ship_mjd).await.unwrap().unwrap();
     let base_vel = base_cyclone.max_velocity;
-    let _ = init_ball;
 
-    // Lock Cyclone from Raven
     sys.add_target_lock(ship_scram, eve_destiny::TargetLock {
         target_id: ship_mjd, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: Some(100_000.0),
     }).await.unwrap();
 
-    // Activate MWD on Cyclone -> speed boosted > 4x
-    rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(mwd_id)])
-        .await.expect("Activate 50MN MWD");
+    rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(mwd_id)]).await.unwrap();
     let (_, mwd_on_ball) = sys.get_ball_snapshot(ship_mjd).await.unwrap().unwrap();
     assert!(mwd_on_ball.max_velocity > base_vel * 4.0);
 
-    // Warp Disruptor (1 pt, group 52, non-scram) scrambles warp ONLY; MWD stays active!
     rpc(&ctx, &mut sess_scram, "dogmaIM", "Activate", vec![
         PyRep::Integer(disruptor_id), PyRep::String("warpScramble".into()), PyRep::Integer(ship_mjd), PyRep::Integer(1),
-    ]).await.expect("Activate Warp Disruptor I");
+    ]).await.unwrap();
     assert!(sys.is_ball_scrambled(ship_mjd).await.unwrap());
     let (_, under_disruptor_ball) = sys.get_ball_snapshot(ship_mjd).await.unwrap().unwrap();
-    assert!(under_disruptor_ball.max_velocity > base_vel * 4.0, "Warp Disruptor must NOT shut off active MWD");
-    rpc(&ctx, &mut sess_scram, "dogmaIM", "Deactivate", vec![PyRep::Integer(disruptor_id)])
-        .await.expect("Deactivate Warp Disruptor I");
+    assert!(under_disruptor_ball.max_velocity > base_vel * 4.0);
+    rpc(&ctx, &mut sess_scram, "dogmaIM", "Deactivate", vec![PyRep::Integer(disruptor_id)]).await.unwrap();
 
-    // Warp Scrambler II (2 pts) IMMEDIATELY shuts off active MWD, restores unboosted velocity, and blocks MWD reactivation
     rpc(&ctx, &mut sess_scram, "dogmaIM", "Activate", vec![
         PyRep::Integer(scrambler_id), PyRep::String("warpScramble".into()), PyRep::Integer(ship_mjd), PyRep::Integer(1),
-    ]).await.expect("Activate Warp Scrambler II");
+    ]).await.unwrap();
     let (_, scrammed_ball) = sys.get_ball_snapshot(ship_mjd).await.unwrap().unwrap();
-    assert!((scrammed_ball.max_velocity - base_vel).abs() < 1e-2, "Warp Scrambler must shut off MWD and restore base velocity");
-    let mwd_blocked = rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(mwd_id)])
-        .await.unwrap_err();
-    assert_eq!(mwd_blocked.code, "WarpScrambled");
+    assert!((scrammed_ball.max_velocity - base_vel).abs() < 1e-2);
+    assert_eq!(rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(mwd_id)]).await.unwrap_err().code, "WarpScrambled");
 
-    // Afterburner remains usable and active while warp scrambled (offline MWD first since maxGroupOnline=1 on propulsion)!
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_online_states.insert(mwd_id, false);
         snap.module_online_states.insert(ab_id, true);
     });
     ctx.invalidate_ship_fitting(ship_mjd);
-    rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(ab_id)])
-        .await.expect("Afterburner must activate while warp scrambled");
+    rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(ab_id)]).await.unwrap();
     sys.step_manual(2.0).await.unwrap();
     let (_, ab_scram_ball) = sys.get_ball_snapshot(ship_mjd).await.unwrap().unwrap();
-    assert!(ab_scram_ball.max_velocity > base_vel * 1.8, "Afterburner must stay active under Warp Scrambler");
+    assert!(ab_scram_ball.max_velocity > base_vel * 1.8);
     rpc(&ctx, &mut sess_mjd, "dogmaIM", "Deactivate", vec![PyRep::Integer(ab_id)]).await.unwrap();
     rpc(&ctx, &mut sess_scram, "dogmaIM", "Deactivate", vec![PyRep::Integer(scrambler_id)]).await.unwrap();
 
-    // Warp Scrambler applied MID-SPOOL aborts an active MJD before jump executes!
-    rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(mid_spool_mjd_id)])
-        .await.expect("Activate MJD before scram");
+    rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(mid_spool_mjd_id)]).await.unwrap();
     sys.step_manual(3.0).await.unwrap();
     rpc(&ctx, &mut sess_scram, "dogmaIM", "Activate", vec![
         PyRep::Integer(scrambler_id), PyRep::String("warpScramble".into()), PyRep::Integer(ship_mjd), PyRep::Integer(1),
-    ]).await.expect("Scram Cyclone mid-MJD-spool");
+    ]).await.unwrap();
     for _ in 0..8 {
         sys.step_manual(1.0).await.unwrap();
     }
     let (_, aborted_mjd_ball) = sys.get_ball_snapshot(ship_mjd).await.unwrap().unwrap();
-    assert!(aborted_mjd_ball.position.distance(scram_arena) < 5_000.0, "Warp Scrambler mid-spool must abort MJD jump");
+    assert!(aborted_mjd_ball.position.distance(scram_arena) < 5_000.0);
 }

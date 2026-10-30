@@ -1253,33 +1253,16 @@ pub fn dispatch_universe_and_nav(
             }
             let updated_wps = ctx.db.with_mut_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get_mut(&caller_id) {
-                    if clear_other_waypoints {
-                        ch.autopilot_waypoints.clear();
-                    }
-                    if add_to_beginning {
-                        ch.autopilot_waypoints.insert(0, destination_id);
-                    } else {
-                        ch.autopilot_waypoints.push(destination_id);
-                    }
+                    if clear_other_waypoints { ch.autopilot_waypoints.clear(); }
+                    if add_to_beginning { ch.autopilot_waypoints.insert(0, destination_id); } else { ch.autopilot_waypoints.push(destination_id); }
                     ch.autopilot_waypoints.clone()
                 } else {
                     Vec::new()
                 }
             });
-            crate::services::nav_warp_interdiction::sync_waypoints_to_char_settings(
-                ctx,
-                caller_id,
-                &updated_wps,
-            );
-            crate::services::notify_emitters_batch3::emit_destination_change(
-                ctx, caller_id, destination_id, clear_other_waypoints, add_to_beginning,
-            );
-            ctx.notify(
-                NotificationTarget::Character(caller_id),
-                "OnAutopilotUpdated",
-                "charid",
-                vec![],
-            );
+            crate::services::nav_warp_interdiction::sync_waypoints_to_char_settings(ctx, caller_id, &updated_wps);
+            crate::services::notify_emitters_batch3::emit_destination_change(ctx, caller_id, destination_id, clear_other_waypoints, add_to_beginning);
+            ctx.notify(NotificationTarget::Character(caller_id), "OnAutopilotUpdated", "charid", vec![]);
             RouteExecutionResult::no_content(0)
         }
 

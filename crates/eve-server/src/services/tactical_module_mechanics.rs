@@ -9,7 +9,7 @@ use crate::services::tactical_modules::{self, TacticalModulesState};
 use crate::system_actor::{ActiveModuleCycle, ActiveNaniteRepair, SystemHandle};
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository, WorldStateSnapshot};
 use eve_destiny::{Ball, BallId, Ballpark, CombatState, MovementMode, SlimItemMeta};
-use eve_dogma::FittedModule;
+use eve_dogma::{FittedModule, ShipFittingEngine};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{attr_ids, InvType, SdeRegistry};
@@ -386,6 +386,7 @@ pub async fn activate_interdiction_sphere_launcher(
         tactical_modules::register_launched_wubble_probe(
             ctx,
             probe_id,
+            probe_type_id,
             sys_id,
             ship_pos,
             bubble_radius,
@@ -609,21 +610,23 @@ pub async fn handle_repair_module_rpc(
             .sde
             .types
             .get(&m_item.type_id)
-            .map(|t| {
-                t.default_attributes
-                    .get(&1231)
-                    .copied()
-                    .filter(|&v| v > 0.0)
-                    .unwrap_or_else(|| t.volume.max(1.0))
-            })
+            .map(|t| (t.volume * 0.8).max(1.0))
             .unwrap_or(4.0);
         let sk = snap.skills.get(&char_id);
+        let thermo_lvl = sk.and_then(|m| m.get(&28164)).map(|r| r.level).unwrap_or(0);
         let op_lvl = sk.and_then(|m| m.get(&28879)).map(|r| r.level).unwrap_or(0);
         let int_lvl = sk.and_then(|m| m.get(&28880)).map(|r| r.level).unwrap_or(0);
-        Ok((active, dmg, hp, base_cost, op_lvl, int_lvl))
+        Ok((active, dmg, hp, base_cost, thermo_lvl, op_lvl, int_lvl))
     });
-    let (is_active, cur_dmg, max_hp, base_paste_cost, nanite_op_lvl, nanite_interfacing_lvl) =
-        mod_check?;
+    let (
+        is_active,
+        cur_dmg,
+        max_hp,
+        base_paste_cost,
+        thermo_lvl,
+        nanite_op_lvl,
+        nanite_interfacing_lvl,
+    ) = mod_check?;
 
     if is_active {
         return Err(BridgeRpcError {
@@ -660,6 +663,22 @@ pub async fn handle_repair_module_rpc(
         ]));
     }
 
+    if let Some(sys_id) = session.solar_system_id {
+        let sys = ctx.systems.get_or_spawn(sys_id);
+        if sys.has_active_overloaded_cycle_sync(ship_id) {
+            return Err(BridgeRpcError {
+                code: "CannotRepairWhileOverheating".into(),
+                message: "UserError: Cannot initiate in-space Nanite Repair Paste repair while modules are overheating".into(),
+            });
+        }
+        if sys.is_module_being_nanite_repaired_sync(ship_id, module_id) {
+            return Err(BridgeRpcError {
+                code: "ModuleAlreadyRepairing".into(),
+                message: format!("Module {module_id} is already undergoing Nanite Repair Paste repair"),
+            });
+        }
+    }
+
     if cur_dmg >= max_hp - 1e-6 {
         return Err(BridgeRpcError {
             code: "ModuleBurnedOut".into(),
@@ -667,12 +686,14 @@ pub async fn handle_repair_module_rpc(
         });
     }
 
-    let effective_paste_per_hp =
-        (base_paste_cost / max_hp.max(1.0)) * (1.0 - 0.05 * (nanite_op_lvl as f64));
+    // Paste cost scales with SDE module `volume` (`0.8 * volume`), Nanite Operation (`28879`, `-5%/lvl`),
+    // and Thermodynamics (`28164`, `-5%/lvl`).
+    let effective_paste_per_hp = (base_paste_cost / max_hp.max(1.0))
+        * (1.0 - 0.05 * (nanite_op_lvl.min(5) as f64))
+        * (1.0 - 0.05 * (thermo_lvl.min(5) as f64));
     let total_paste_needed =
         eve_dogma::thermodynamics::nanite_paste_required(cur_dmg, effective_paste_per_hp).max(1)
             as i32;
-    let initial_paste = 1_i32.min(total_paste_needed);
 
     ctx.db.try_with_mut_snapshot(|snap| {
         let total_avail: i32 = snap
@@ -696,11 +717,14 @@ pub async fn handle_repair_module_rpc(
                 ),
             });
         }
-        deduct_paste_from_cargo_in_snap(snap, char_id, ship_id, initial_paste);
+        deduct_paste_from_cargo_in_snap(snap, char_id, ship_id, total_paste_needed);
         Ok(())
     })?;
 
-    let repair_rate_hp_per_s = 0.67 * (1.0 + 0.20 * (nanite_interfacing_lvl as f64));
+    // Repair rate scales with Nanite Interfacing (`28880`, `+20%/lvl`) and Thermodynamics (`28164`, `+5%/lvl`).
+    let repair_rate_hp_per_s = 0.67
+        * (1.0 + 0.20 * (nanite_interfacing_lvl.min(5) as f64))
+        * (1.0 + 0.05 * (thermo_lvl.min(5) as f64));
     let duration_s = (cur_dmg / repair_rate_hp_per_s).max(1.0);
     if let Some(sys_id) = session.solar_system_id {
         let sys = ctx.systems.get_or_spawn(sys_id);
@@ -713,21 +737,16 @@ pub async fn handle_repair_module_rpc(
                 duration_s,
                 elapsed_s: 0.0,
                 total_paste_required: total_paste_needed,
-                paste_consumed_so_far: initial_paste,
+                paste_consumed_so_far: 0,
             })
             .await;
     } else {
         ctx.db.with_mut_snapshot(|snap| {
-            deduct_paste_from_cargo_in_snap(
-                snap,
-                char_id,
-                ship_id,
-                total_paste_needed.saturating_sub(initial_paste),
-            );
             if let Some(m_item) = snap.items.get_mut(&module_id) {
                 m_item.dynamic_attributes.remove(&attr_ids::DAMAGE);
             }
         });
+        ctx.invalidate_ship_fitting(ship_id);
     }
 
     ctx.notify(
@@ -739,14 +758,15 @@ pub async fn handle_repair_module_rpc(
 
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),
-        ("pasteConsumed", PyRep::Integer(initial_paste as i64)),
+        ("pasteConsumed", PyRep::Integer(total_paste_needed as i64)),
         ("totalPasteRequired", PyRep::Integer(total_paste_needed as i64)),
         ("damageToRepair", PyRep::Real(cur_dmg)),
         ("repairRateHpPerSec", PyRep::Real(repair_rate_hp_per_s)),
+        ("repairDurationSec", PyRep::Real(duration_s)),
     ]))
 }
 
-fn deduct_paste_from_cargo_in_snap(
+pub(crate) fn deduct_paste_from_cargo_in_snap(
     snap: &mut WorldStateSnapshot,
     char_id: i64,
     ship_id: i64,
@@ -791,8 +811,104 @@ fn deduct_paste_from_cargo_in_snap(
     taken_total
 }
 
-/// Advances active in-space Nanite Repair Paste jobs per tick (`dt`), deducting paste incrementally
-/// as HP is repaired and stopping early if cargo runs out (`feat:modules.nanite-repair-paste-in-space`).
+/// Refunds unconsumed Nanite Repair Paste (`type_id == 28668`) back into the ship's cargo hold
+/// when an active in-space module repair is cancelled early (`StopModuleRepair` or system jump).
+pub(crate) fn refund_paste_to_cargo_in_snap(
+    snap: &mut WorldStateSnapshot,
+    char_id: i64,
+    ship_id: i64,
+    amount: i32,
+) {
+    if amount <= 0 {
+        return;
+    }
+    let existing_stack_id = snap
+        .items
+        .values()
+        .find(|i| {
+            i.owner_id == char_id
+                && i.location_id == ship_id
+                && i.flag == InventoryFlag::Cargo
+                && i.type_id == 28668
+                && !i.singleton
+                && !snap.is_item_locked_in_contract_or_job(i.item_id)
+        })
+        .map(|i| i.item_id);
+    if let Some(pid) = existing_stack_id {
+        if let Some(p_item) = snap.items.get_mut(&pid) {
+            p_item.quantity += amount;
+            p_item.version += 1;
+        }
+    } else {
+        snap.next_entity_id += 1;
+        let new_id = snap.next_entity_id;
+        snap.items.insert(
+            new_id,
+            InventoryItemRecord {
+                item_id: new_id,
+                type_id: 28668,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: amount,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    }
+}
+
+/// Finalizes an aborted `ActiveNaniteRepair`, persisting partial damage repaired so far and
+/// refunding unconsumed Nanite Repair Paste to cargo (`feat:modules.nanite-repair-paste-in-space`).
+pub fn finalize_cancelled_nanite_repair(ctx: &ServerContext, job: &ActiveNaniteRepair) -> i32 {
+    let progress = (job.elapsed_s / job.duration_s.max(0.1)).clamp(0.0, 1.0);
+    let consumed_by_now = ((job.total_paste_required as f64) * progress)
+        .ceil()
+        .clamp(0.0, job.total_paste_required as f64) as i32;
+    let consumed_final = job.paste_consumed_so_far.max(consumed_by_now);
+    let unconsumed = job.total_paste_required.saturating_sub(consumed_final);
+    let rem_dmg = job.initial_damage_hp * (1.0 - progress).clamp(0.0, 1.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(m_item) = snap.items.get_mut(&job.module_id) {
+            if rem_dmg <= 1e-6 {
+                m_item.dynamic_attributes.remove(&attr_ids::DAMAGE);
+            } else {
+                m_item.dynamic_attributes.insert(attr_ids::DAMAGE, rem_dmg);
+            }
+        }
+        refund_paste_to_cargo_in_snap(snap, job.owner_char_id, job.ship_id, unconsumed);
+    });
+    ctx.invalidate_ship_fitting(job.ship_id);
+    unconsumed
+}
+
+/// Cancels any active in-space Nanite Repair Paste jobs when a ship jumps systems or docks,
+/// refunding unconsumed paste and notifying `OnRepairDone` (`feat:modules.nanite-repair-paste-in-space`).
+pub fn cancel_ship_nanite_repairs_on_leave_space(ctx: &ServerContext, char_id: i64, ship_id: i64) {
+    let cancelled = ctx.systems.cancel_nanite_repairs_for_ship_sync(ship_id);
+    if cancelled.is_empty() {
+        return;
+    }
+    let mut mod_ids = Vec::with_capacity(cancelled.len());
+    for job in &cancelled {
+        finalize_cancelled_nanite_repair(ctx, job);
+        mod_ids.push(PyRep::Integer(job.module_id));
+    }
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnRepairDone",
+        "charid",
+        vec![PyRep::List(mod_ids)],
+    );
+}
+
+/// Advances active in-space Nanite Repair Paste jobs per tick (`dt`), tracking incremental paste
+/// consumption proportional to elapsed repair progress (`feat:modules.nanite-repair-paste-in-space`).
 pub fn step_nanite_repairs_in_actor(
     active_nanite_repairs: &mut Vec<ActiveNaniteRepair>,
     db_opt: &Option<Arc<WorldRepository>>,
@@ -802,36 +918,18 @@ pub fn step_nanite_repairs_in_actor(
     for (idx, job) in active_nanite_repairs.iter_mut().enumerate() {
         job.elapsed_s += dt;
         let progress = (job.elapsed_s / job.duration_s.max(0.1)).clamp(0.0, 1.0);
-        let mut done = job.elapsed_s + 1e-6 >= job.duration_s;
-        let target_paste_by_now =
-            ((job.total_paste_required as f64) * progress).ceil() as i32;
-        let delta_paste = target_paste_by_now.saturating_sub(job.paste_consumed_so_far);
-        let mut effective_progress = progress;
+        let done = job.elapsed_s + 1e-6 >= job.duration_s;
+        let target_paste_by_now = ((job.total_paste_required as f64) * progress)
+            .ceil()
+            .clamp(0.0, job.total_paste_required as f64) as i32;
+        job.paste_consumed_so_far = job.paste_consumed_so_far.max(target_paste_by_now);
 
         if let Some(db_ref) = db_opt {
             db_ref.with_mut_snapshot(|snap| {
-                if delta_paste > 0 {
-                    let deducted = deduct_paste_from_cargo_in_snap(
-                        snap,
-                        job.owner_char_id,
-                        job.ship_id,
-                        delta_paste,
-                    );
-                    job.paste_consumed_so_far += deducted;
-                    if deducted < delta_paste {
-                        effective_progress = if job.total_paste_required > 0 {
-                            (job.paste_consumed_so_far as f64 / job.total_paste_required as f64)
-                                .clamp(0.0, 1.0)
-                        } else {
-                            progress
-                        };
-                        done = true;
-                    }
-                }
-                let rem_dmg = if done && effective_progress >= 1.0 - 1e-6 {
+                let rem_dmg = if done {
                     0.0
                 } else {
-                    job.initial_damage_hp * (1.0 - effective_progress).clamp(0.0, 1.0)
+                    job.initial_damage_hp * (1.0 - progress).clamp(0.0, 1.0)
                 };
                 if let Some(m_item) = snap.items.get_mut(&job.module_id) {
                     if rem_dmg <= 1e-6 {
@@ -851,61 +949,190 @@ pub fn step_nanite_repairs_in_actor(
     }
 }
 
-/// Steps passive rack heat dissipation using ship SDE `heatDissipationRateHi/Med/Low` (`1179`/`1196`/`1198`).
-pub fn step_passive_rack_heat_dissipation(
+/// Canonical ship rack heat Dogma attribute IDs: `[heatHi (1175), heatMed (1176), heatLow (1177)]`.
+pub const RACK_HEAT_ATTR_IDS: [u16; 3] = [1175, 1176, 1177];
+
+struct EvaluatedShipThermodynamics {
+    heat_gen_mult: f64,
+    diss_rates: [f64; 3],
+    att_bases: [f64; 3],
+    slot_ratio: f64,
+}
+
+fn evaluate_ship_thermodynamics(
+    ship_id: BallId,
+    sde_opt: &Option<Arc<SdeRegistry>>,
+    db_opt: &Option<Arc<WorldRepository>>,
+) -> EvaluatedShipThermodynamics {
+    let default_eval = EvaluatedShipThermodynamics {
+        heat_gen_mult: 1.0,
+        diss_rates: [0.01, 0.01, 0.01],
+        att_bases: [0.5, 0.5, 0.5],
+        slot_ratio: 1.0,
+    };
+    let (Some(sde), Some(db)) = (sde_opt.as_ref(), db_opt.as_ref()) else {
+        return default_eval;
+    };
+    db.with_snapshot(|snap| {
+        let Some(ship_item) = snap.items.get(&ship_id) else {
+            return default_eval;
+        };
+        let mut fit = ShipFittingEngine::from_sde(ship_id, ship_item.type_id, sde);
+        if let Some(sk_map) = snap.skills.get(&ship_item.owner_id) {
+            for (&skill_tid, rec) in sk_map {
+                fit.character_skills.insert(skill_tid, rec.level);
+            }
+        }
+        for (&aid, &val) in &ship_item.dynamic_attributes {
+            fit.ship.base_attributes.insert(aid, val);
+        }
+        let mut online_hi_mid_low = 0usize;
+        for it in snap.items.values().filter(|i| i.location_id == ship_id) {
+            let flag_u16 = it.flag as u16;
+            if !matches!(flag_u16, 11..=34 | 92..=94 | 125..=132) {
+                continue;
+            }
+            if !sde
+                .types
+                .get(&it.type_id)
+                .is_some_and(|t| matches!(t.category_id, 7 | 32))
+            {
+                continue;
+            }
+            let online = snap.module_online_states.get(&it.item_id).copied().unwrap_or(true);
+            let _ = fit.fit_module_with_state(it.item_id, it.type_id, flag_u16, online, sde);
+            if online && (11..=34).contains(&flag_u16) {
+                online_hi_mid_low += 1;
+            }
+        }
+        fit.recalculate_stats(sde);
+        let heat_gen_mult = fit.ship.get_attribute(1224, sde).max(0.0);
+        let diss_rates = [
+            fit.ship.get_attribute(1179, sde).max(0.0),
+            fit.ship.get_attribute(1196, sde).max(0.0),
+            fit.ship.get_attribute(1198, sde).max(0.0),
+        ];
+        let att_bases = [
+            fit.ship.get_attribute(1259, sde).clamp(0.0, 1.0),
+            fit.ship.get_attribute(1261, sde).clamp(0.0, 1.0),
+            fit.ship.get_attribute(1262, sde).clamp(0.0, 1.0),
+        ];
+        let total_slots = (fit.ship.get_attribute(14, sde).max(0.0)
+            + fit.ship.get_attribute(13, sde).max(0.0)
+            + fit.ship.get_attribute(12, sde).max(0.0))
+        .max(1.0);
+        let slot_ratio = ((online_hi_mid_low as f64) / total_slots).clamp(0.0, 1.0);
+        EvaluatedShipThermodynamics {
+            heat_gen_mult,
+            diss_rates,
+            att_bases,
+            slot_ratio,
+        }
+    })
+}
+
+fn load_persisted_rack_heat(ship_id: BallId, db_opt: &Option<Arc<WorldRepository>>) -> [f64; 3] {
+    db_opt
+        .as_ref()
+        .map(|db| {
+            db.with_snapshot(|snap| {
+                snap.items
+                    .get(&ship_id)
+                    .map(|sh| {
+                        [
+                            sh.dynamic_attributes
+                                .get(&RACK_HEAT_ATTR_IDS[0])
+                                .copied()
+                                .unwrap_or(0.0)
+                                .clamp(0.0, 1.0),
+                            sh.dynamic_attributes
+                                .get(&RACK_HEAT_ATTR_IDS[1])
+                                .copied()
+                                .unwrap_or(0.0)
+                                .clamp(0.0, 1.0),
+                            sh.dynamic_attributes
+                                .get(&RACK_HEAT_ATTR_IDS[2])
+                                .copied()
+                                .unwrap_or(0.0)
+                                .clamp(0.0, 1.0),
+                        ]
+                    })
+                    .unwrap_or([0.0; 3])
+            })
+        })
+        .unwrap_or([0.0; 3])
+}
+
+/// Integrates rack heat once per tick (`dt`) across all ships with active overloaded cycles or residual heat,
+/// using `H(t + dt) = 1 - (1 - H(t)) * exp(-dt * heatGenerationMultiplier * sum(heatAbsorbtionRateModifier))`
+/// when heating and `H(t) * exp(-dt * heatDissipationRate)` when cooling (`feat:modules.overheat-rack-heat-generation`).
+pub fn step_rack_heat_per_tick(
     ship_rack_heat: &mut HashMap<BallId, [f64; 3]>,
     active_module_cycles: &[ActiveModuleCycle],
     sde_opt: &Option<Arc<SdeRegistry>>,
     db_opt: &Option<Arc<WorldRepository>>,
     dt: f64,
 ) {
-    let ship_ids_with_heat: Vec<BallId> = ship_rack_heat.keys().copied().collect();
-    for sid in ship_ids_with_heat {
-        let diss_rates = db_opt
-            .as_ref()
-            .and_then(|db| {
-                db.with_snapshot(|snap| {
-                    snap.items.get(&sid).and_then(|sh| {
-                        sde_opt.as_ref().and_then(|sde| sde.types.get(&sh.type_id)).map(|t| {
-                            [
-                                t.default_attributes.get(&1179).copied().unwrap_or(0.01),
-                                t.default_attributes.get(&1196).copied().unwrap_or(0.01),
-                                t.default_attributes.get(&1198).copied().unwrap_or(0.01),
-                            ]
-                        })
-                    })
-                })
-            })
-            .unwrap_or([0.01, 0.01, 0.01]);
-        let Some(racks) = ship_rack_heat.get_mut(&sid) else {
-            continue;
-        };
+    if dt <= 0.0 || !dt.is_finite() {
+        return;
+    }
+    let mut ship_ids: Vec<BallId> = ship_rack_heat.keys().copied().collect();
+    for c in active_module_cycles.iter().filter(|c| c.is_overloaded) {
+        if !ship_ids.contains(&c.ship_id) {
+            ship_ids.push(c.ship_id);
+        }
+    }
+    ship_ids.sort_unstable();
+    for sid in ship_ids {
+        let eval = evaluate_ship_thermodynamics(sid, sde_opt, db_opt);
+        let persisted = load_persisted_rack_heat(sid, db_opt);
+        let racks = ship_rack_heat.entry(sid).or_insert(persisted);
+        if db_opt.is_some() {
+            *racks = persisted;
+        }
+        let mut rack_absorption_sum = [0.0_f64; 3];
+        for c in active_module_cycles
+            .iter()
+            .filter(|c| c.ship_id == sid && c.is_overloaded)
+        {
+            let r_idx = c.rack_idx.min(2);
+            let mod_abs = sde_opt
+                .as_ref()
+                .and_then(|sde| sde.types.get(&c.module_type_id))
+                .and_then(|t| t.default_attributes.get(&1180).copied())
+                .filter(|&v| v > 0.0)
+                .unwrap_or(0.01);
+            rack_absorption_sum[r_idx] += mod_abs;
+        }
         let mut changed = false;
         for (r_idx, rack_val) in racks.iter_mut().enumerate() {
-            let has_ovl = active_module_cycles
-                .iter()
-                .any(|c| c.ship_id == sid && c.rack_idx == r_idx && c.is_overloaded);
-            if !has_ovl && *rack_val > 0.0 {
-                *rack_val = eve_dogma::thermodynamics::step_rack_heat(
+            let gen_rate = rack_absorption_sum[r_idx] * eval.heat_gen_mult;
+            if gen_rate > 0.0 || *rack_val > 0.0 {
+                let next = eve_dogma::thermodynamics::step_rack_heat(
                     *rack_val,
-                    0.0,
-                    diss_rates[r_idx],
+                    gen_rate,
+                    eval.diss_rates[r_idx],
                     dt,
                 );
-                if *rack_val < 1e-6 {
-                    *rack_val = 0.0;
-                }
+                *rack_val = if next < 1e-6 && gen_rate <= 0.0 {
+                    0.0
+                } else {
+                    next
+                };
                 changed = true;
             }
         }
+        let heat_snap = *racks;
+        if heat_snap.iter().all(|&h| h == 0.0) {
+            ship_rack_heat.remove(&sid);
+        }
         if changed {
-            let heat_snap = *racks;
             if let Some(db_ref) = db_opt {
                 db_ref.with_mut_snapshot(|snap| {
                     if let Some(ship_item) = snap.items.get_mut(&sid) {
-                        ship_item.dynamic_attributes.insert(1177, heat_snap[0]);
-                        ship_item.dynamic_attributes.insert(1176, heat_snap[1]);
-                        ship_item.dynamic_attributes.insert(1175, heat_snap[2]);
+                        for (r_idx, &aid) in RACK_HEAT_ATTR_IDS.iter().enumerate() {
+                            ship_item.dynamic_attributes.insert(aid, heat_snap[r_idx]);
+                        }
                     }
                 });
             }
@@ -913,60 +1140,32 @@ pub fn step_passive_rack_heat_dissipation(
     }
 }
 
-/// Applies overheat rack heat generation (`heatGenerationMultiplier` `1224`, `heatAbsorbtionRateModifier` `1180`,
-/// `heatDissipationRate*` `1179/1196/1198`) and non-wrapping linear slot-distance heat damage propagation
-/// (`heatAttenuation*` `1259/1261/1262`, Thermodynamics `28164` `-5%/lvl`) on cycle completion.
+/// Rolls probabilistic heat damage per overloaded cycle (`P = RackHeat * (OnlineSlots / TotalSlots) * heatAttenuation^SlotDistance`)
+/// using `MechanicRng` and applies SDE `heatDamage` (`1211`) mitigated by `Thermodynamics` (`28164`, `-5%/lvl`)
+/// across online modules in the same rack without wrapping around rack edges (`feat:modules.overheat-damage-propagation`).
 #[allow(clippy::too_many_arguments)]
 pub fn apply_overheat_rack_and_damage_on_cycle(
     cycle: &ActiveModuleCycle,
-    ovl_in_rack: usize,
     ship_rack_heat: &mut HashMap<BallId, [f64; 3]>,
     sde_opt: &Option<Arc<SdeRegistry>>,
     db_opt: &Option<Arc<WorldRepository>>,
+    mechanic_rng_opt: &Option<Arc<crate::rng::MechanicRng>>,
     burned_out: &mut bool,
     burned_ship_modules: &mut Vec<(BallId, i64)>,
 ) {
     let r_idx = cycle.rack_idx.min(2);
-    let mod_absorption = sde_opt
-        .as_ref()
-        .and_then(|sde| sde.types.get(&cycle.module_type_id))
-        .and_then(|t| t.default_attributes.get(&1180).copied())
-        .filter(|&v| v > 0.0)
-        .unwrap_or(0.02);
-    let (ship_heat_mult, diss_rate, att_base) = db_opt
-        .as_ref()
-        .and_then(|db| {
-            db.with_snapshot(|snap| {
-                snap.items.get(&cycle.ship_id).and_then(|sh| {
-                    sde_opt.as_ref().and_then(|sde| sde.types.get(&sh.type_id)).map(|t| {
-                        let mult = t.default_attributes.get(&1224).copied().unwrap_or(1.0);
-                        let diss = match r_idx {
-                            0 => t.default_attributes.get(&1179).copied().unwrap_or(0.01),
-                            1 => t.default_attributes.get(&1196).copied().unwrap_or(0.01),
-                            _ => t.default_attributes.get(&1198).copied().unwrap_or(0.01),
-                        };
-                        let att = match r_idx {
-                            0 => t.default_attributes.get(&1259).copied().unwrap_or(0.5),
-                            1 => t.default_attributes.get(&1261).copied().unwrap_or(0.5),
-                            _ => t.default_attributes.get(&1262).copied().unwrap_or(0.5),
-                        };
-                        (mult, diss, att)
-                    })
-                })
-            })
-        })
-        .unwrap_or((1.0, 0.01, 0.5));
-
-    let heat_gen_rate = mod_absorption * ship_heat_mult * (ovl_in_rack.max(1) as f64) * 2.0;
-    let racks = ship_rack_heat.entry(cycle.ship_id).or_insert([0.0; 3]);
-    racks[r_idx] = eve_dogma::thermodynamics::step_rack_heat(
-        racks[r_idx],
-        heat_gen_rate,
-        diss_rate,
-        cycle.duration_s,
-    );
-    let current_rack_heat = racks[r_idx];
-    let heat_snap = *racks;
+    let eval = evaluate_ship_thermodynamics(cycle.ship_id, sde_opt, db_opt);
+    let persisted = load_persisted_rack_heat(cycle.ship_id, db_opt);
+    let current_rack_heat = ship_rack_heat
+        .get(&cycle.ship_id)
+        .map(|r| r[r_idx].max(persisted[r_idx]))
+        .unwrap_or(persisted[r_idx])
+        .clamp(0.0, 1.0);
+    if current_rack_heat <= 0.0 {
+        return;
+    }
+    let att_base = eval.att_bases[r_idx];
+    let slot_ratio = eval.slot_ratio;
 
     if let Some(db_ref) = db_opt {
         db_ref.with_mut_snapshot(|snap| {
@@ -985,94 +1184,88 @@ pub fn apply_overheat_rack_and_damage_on_cycle(
                 cycle.heat_damage_per_cycle,
                 thermo_lvl,
             );
-            if let Some(ship_item) = snap.items.get_mut(&cycle.ship_id) {
-                ship_item.dynamic_attributes.insert(1177, heat_snap[0]);
-                ship_item.dynamic_attributes.insert(1176, heat_snap[1]);
-                ship_item.dynamic_attributes.insert(1175, heat_snap[2]);
+            if eff_dmg <= 0.0 {
+                return;
             }
             let active_flag = snap
                 .items
                 .get(&cycle.module_id)
                 .map(|i| i.flag as u16)
                 .unwrap_or(0);
-            if let Some(m_item) = snap.items.get_mut(&cycle.module_id) {
-                let cur_dmg = m_item
-                    .dynamic_attributes
-                    .get(&attr_ids::DAMAGE)
-                    .copied()
-                    .unwrap_or(0.0);
-                let max_hp = m_item
-                    .dynamic_attributes
-                    .get(&attr_ids::HP_STRUCT)
-                    .copied()
-                    .unwrap_or(40.0);
-                let next_dmg = (cur_dmg + eff_dmg).min(max_hp);
-                m_item
-                    .dynamic_attributes
-                    .insert(attr_ids::DAMAGE, next_dmg);
-                if next_dmg >= max_hp - 1e-6 {
-                    *burned_out = true;
+            if !(11..=34).contains(&active_flag) {
+                return;
+            }
+            let mut rack_mods: Vec<(i64, u16, u32)> = snap
+                .items
+                .values()
+                .filter(|i| {
+                    i.location_id == cycle.ship_id
+                        && sde_opt
+                            .as_ref()
+                            .and_then(|sde| sde.types.get(&i.type_id))
+                            .map(|t| t.category_id == 7)
+                            .unwrap_or(true)
+                        && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true)
+                        && match (r_idx, i.flag as u16) {
+                            (0, 27..=34) => true,
+                            (1, 19..=26) => true,
+                            (2, 11..=18) => true,
+                            _ => false,
+                        }
+                })
+                .map(|i| (i.item_id, i.flag as u16, i.type_id))
+                .collect();
+            // Sort deterministically by slot flag so seeded RNG draws are reproducible across runs.
+            rack_mods.sort_unstable_by_key(|&(mid, flag, _)| (flag, mid));
+
+            for (mod_id, mod_flag, mod_tid) in rack_mods {
+                let slot_dist = (mod_flag as isize - active_flag as isize).unsigned_abs() as i32;
+                let damage_chance =
+                    (current_rack_heat * slot_ratio * att_base.powi(slot_dist)).clamp(0.0, 1.0);
+                let hit = damage_chance > 0.0
+                    && mechanic_rng_opt
+                        .as_ref()
+                        .map(|rng| rng.roll(damage_chance))
+                        .unwrap_or(false);
+                if !hit {
+                    continue;
                 }
-            }
-            if *burned_out {
-                snap.module_online_states.insert(cycle.module_id, false);
-                snap.module_active_states.remove(&cycle.module_id);
-            }
-            if active_flag >= 11 && current_rack_heat > 0.0 {
-                let adj_ids: Vec<(i64, u16)> = snap
-                    .items
-                    .values()
-                    .filter(|i| {
-                        i.location_id == cycle.ship_id
-                            && i.item_id != cycle.module_id
-                            && match (r_idx, i.flag as u16) {
-                                (0, 27..=34) => true,
-                                (1, 19..=26) => true,
-                                (2, 11..=18) => true,
-                                _ => false,
-                            }
-                    })
-                    .map(|i| (i.item_id, i.flag as u16))
-                    .collect();
-                let safe_att_base = if att_base > 0.0 && att_base < 1.0 {
-                    att_base
-                } else {
-                    0.5
-                };
-                for (adj_id, adj_flag) in adj_ids {
-                    let dist = (adj_flag as isize - active_flag as isize).unsigned_abs();
-                    let att =
-                        eve_dogma::thermodynamics::heat_distance_attenuation(dist, safe_att_base);
-                    let bleed_dmg = eff_dmg * current_rack_heat * att * 0.5;
-                    if bleed_dmg > 1e-4 {
-                        let mut adj_burned = false;
-                        if let Some(adj_item) = snap.items.get_mut(&adj_id) {
-                            let cur = adj_item
-                                .dynamic_attributes
-                                .get(&attr_ids::DAMAGE)
-                                .copied()
-                                .unwrap_or(0.0);
-                            let max_hp = adj_item
-                                .dynamic_attributes
-                                .get(&attr_ids::HP_STRUCT)
-                                .copied()
-                                .unwrap_or(40.0);
-                            let next = (cur + bleed_dmg).min(max_hp);
-                            adj_item
-                                .dynamic_attributes
-                                .insert(attr_ids::DAMAGE, next);
-                            if next >= max_hp - 1e-6 {
-                                adj_burned = true;
-                            }
-                        }
-                        if adj_burned {
-                            snap.module_online_states.insert(adj_id, false);
-                            snap.module_active_states.remove(&adj_id);
-                            burned_ship_modules.push((cycle.ship_id, adj_id));
-                        }
+                let default_hp = sde_opt
+                    .as_ref()
+                    .and_then(|sde| sde.types.get(&mod_tid))
+                    .and_then(|t| t.default_attributes.get(&attr_ids::HP_STRUCT).copied())
+                    .unwrap_or(40.0);
+                let mut mod_burned = false;
+                if let Some(m_item) = snap.items.get_mut(&mod_id) {
+                    let cur_dmg = m_item
+                        .dynamic_attributes
+                        .get(&attr_ids::DAMAGE)
+                        .copied()
+                        .unwrap_or(0.0);
+                    let max_hp = m_item
+                        .dynamic_attributes
+                        .get(&attr_ids::HP_STRUCT)
+                        .copied()
+                        .unwrap_or(default_hp);
+                    let next_dmg = (cur_dmg + eff_dmg).min(max_hp);
+                    m_item
+                        .dynamic_attributes
+                        .insert(attr_ids::DAMAGE, next_dmg);
+                    if next_dmg >= max_hp - 1e-6 {
+                        mod_burned = true;
+                    }
+                }
+                if mod_burned {
+                    snap.module_online_states.insert(mod_id, false);
+                    snap.module_active_states.remove(&mod_id);
+                    if mod_id == cycle.module_id {
+                        *burned_out = true;
+                    } else {
+                        burned_ship_modules.push((cycle.ship_id, mod_id));
                     }
                 }
             }
         });
     }
 }
+

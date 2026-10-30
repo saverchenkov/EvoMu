@@ -180,11 +180,19 @@ async fn test_emergency_hull_energizer_and_overheat_burnout_state() {
     assert_eq!(fit_damaged_err.code, "CannotRefitDamagedModule", "Fitting damaged EHE must fail");
 
     // 3. Heat-driven module burnout on overloaded module (`feat:modules.overheat-burnout-state`)
-    // Pre-accumulate heat damage to 38.0 / 40.0 HP on the 500MN MWD
+    // Pre-accumulate heat damage to 39.0 / 40.0 HP on the 500MN MWD and pre-heat medium rack (1176 = 0.99)
+    // with a deterministic mechanic RNG seed so a probabilistic heat hit pushes damage to 40.0 HP burnout.
+    let burnout_seed = (1u64..100_000)
+        .find(|&s| eve_server::rng::MechanicRng::seeded(s).try_unit_f64().unwrap() < 0.02)
+        .expect("deterministic heat hit seed");
+    ctx.set_mechanic_rng_seed(Some(burnout_seed));
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(m_item) = snap.items.get_mut(&mwd_mod_id) {
-            m_item.dynamic_attributes.insert(attr_ids::DAMAGE, 38.0);
+            m_item.dynamic_attributes.insert(attr_ids::DAMAGE, 39.0);
             m_item.dynamic_attributes.insert(attr_ids::HP_STRUCT, 40.0);
+        }
+        if let Some(s_item) = snap.items.get_mut(&ship_id) {
+            s_item.dynamic_attributes.insert(1176, 0.99);
         }
     });
 
@@ -194,7 +202,7 @@ async fn test_emergency_hull_energizer_and_overheat_burnout_state() {
     // Activate MWD in overload mode
     let _ = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(mwd_mod_id), PyRep::String("propulsion".into())], &kw, None).await.expect("Activate overloaded MWD");
 
-    // Step several cycles so heat damage accumulates past 100% of hitpoints (40 HP)
+    // Step cycle ticks so probabilistic heat damage rolls and burns out the module at 40 HP
     for _ in 0..15 { sys.tick().await.unwrap(); }
 
     // Verify heat-driven burnout: module immediately deactivates, goes offline, damage == max HP

@@ -242,7 +242,7 @@ async fn test_sp3_warp_to_disrupted_capacitor_cost_and_exit_invulnerability() {
     .await
     .expect("CmdWarpToStuff at 30 km minRange");
 
-    let expected_landing = station_pos - DVec3::new(min_range, 0.0, 0.0);
+    let expected_landing = station_pos - DVec3::new(2_000.0 + min_range, 0.0, 0.0);
     let mut saw_accel = false;
     let mut saw_decel_and_tested_smartbomb = false;
     for _ in 0..40 {

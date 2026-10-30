@@ -1193,6 +1193,39 @@ impl SystemHandle {
         rx.await.map_err(|_| "Solar system reply dropped".to_string())
     }
 
+    pub fn has_active_nanite_repair_sync(&self, ship_id: BallId) -> bool {
+        let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
+        st.active_nanite_repairs.iter().any(|r| r.ship_id == ship_id)
+    }
+
+    pub fn is_module_being_nanite_repaired_sync(&self, ship_id: BallId, module_id: i64) -> bool {
+        let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
+        st.active_nanite_repairs
+            .iter()
+            .any(|r| r.ship_id == ship_id && r.module_id == module_id)
+    }
+
+    pub fn has_active_overloaded_cycle_sync(&self, ship_id: BallId) -> bool {
+        let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
+        st.active_module_cycles
+            .iter()
+            .any(|c| c.ship_id == ship_id && c.is_overloaded)
+    }
+
+    pub fn cancel_nanite_repairs_for_ship_sync(&self, ship_id: BallId) -> Vec<ActiveNaniteRepair> {
+        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+        let mut cancelled = Vec::new();
+        let all = std::mem::take(&mut st.active_nanite_repairs);
+        for job in all {
+            if job.ship_id == ship_id {
+                cancelled.push(job);
+            } else {
+                st.active_nanite_repairs.push(job);
+            }
+        }
+        cancelled
+    }
+
     pub async fn record_incoming_armor_damage(
         &self,
         ship_id: BallId,

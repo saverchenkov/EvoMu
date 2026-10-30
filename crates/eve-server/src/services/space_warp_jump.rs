@@ -462,12 +462,13 @@ async fn handle_cmd_warp_to_stuff(
         anchor_pos,
     );
     let landing_dist = current_ball.position.distance(landing_pos);
-    if landing_dist < 150_000.0 {
+    let effective_warp_dist = landing_dist - min_range;
+    if effective_warp_dist < 150_000.0 {
         return Err(BridgeRpcError {
             code: "WarpDistanceTooShort".into(),
             message: format!(
                 "Cannot warp {:.1} m (minimum warp distance is 150,000 m)",
-                landing_dist
+                effective_warp_dist.max(0.0)
             ),
         });
     }
@@ -494,8 +495,7 @@ async fn handle_cmd_warp_to_stuff(
     }
 
     let warp_dir = (landing_pos - current_ball.position).normalize_or_zero();
-    let eff_min_range = min_range.min((landing_dist - 150_000.0).max(0.0));
-    let mut dest_pos = landing_pos - warp_dir * eff_min_range;
+    let mut dest_pos = landing_pos - warp_dir * min_range;
     let requested_dist_m = current_ball.position.distance(dest_pos);
 
     let (base_warp_cap_need, sde_max_cap) = ctx
@@ -1181,7 +1181,9 @@ async fn handle_dock(
             message: "Cannot dock while ship is still in warp".into(),
         });
     }
-    let dist = ball.position.distance(target_pos);
+    let dist = (ball.position.distance(target_pos)
+        - crate::services::nav_warp_interdiction::STATION_DOCKING_RING_STANDOFF_M)
+        .max(0.0);
     if dist > 2_500.0 {
         return Err(BridgeRpcError {
             code: "OutsideDockingPerimeter".into(),

@@ -271,8 +271,9 @@ pub(super) fn ensure_default_slim_meta(
 pub(super) fn build_tick_broadcast(
     solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
-    events: Vec<DestinyEvent>,
+    mut events: Vec<DestinyEvent>,
 ) -> TickBroadcast {
+    events.append(&mut ballpark.pending_events);
     let observer_events = ballpark.drain_all_observer_events();
     let stamp = ballpark.current_tick as u32;
     let mut observer_updates_pyrep = BTreeMap::new();

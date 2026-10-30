@@ -601,7 +601,12 @@ impl Ballpark {
                 return true;
             }
         }
-        if !self.is_ball_bubble_immune(ball_id) {
+        if !self.is_ball_bubble_immune(ball_id)
+            && !self
+                .combat_states
+                .get(&ball_id)
+                .is_some_and(|cs| cs.is_emergency_warping)
+        {
             if let Some(ball) = self.balls.get(&ball_id) {
                 if self.warp_bubble_mgr.is_scrambled_at(ball.position) {
                     return true;
@@ -1055,7 +1060,20 @@ impl Ballpark {
             let stay_in_old = old_gid
                 .and_then(|gid| self.grids.get(&gid))
                 .is_some_and(|g| g.contains(new_position));
-            if !stay_in_old {
+            let pos_ev = DestinyEvent::SetBallPosition {
+                ball_id,
+                position: new_position.to_array(),
+            };
+            self.pending_events.push(pos_ev.clone());
+            if stay_in_old {
+                if let Some(gid) = old_gid {
+                    self.queue_event_for_grid_observers(gid, None, &pos_ev);
+                }
+            } else {
+                self.observer_events
+                    .entry(ball_id)
+                    .or_default()
+                    .push(pos_ev);
                 let old_members: Vec<BallId> = old_gid
                     .and_then(|gid| self.grids.get(&gid))
                     .map(|g| {

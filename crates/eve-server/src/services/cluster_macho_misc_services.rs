@@ -825,8 +825,12 @@ pub async fn handle(
             }
 
             if key == "waypoints" {
-                crate::services::nav_warp_interdiction::sync_waypoints_from_char_settings(ctx, char_id, &val);
-                return Some(Ok(PyRep::Bool(true)));
+                return Some(
+                    crate::services::nav_warp_interdiction::sync_waypoints_from_char_settings(
+                        ctx, char_id, &val,
+                    )
+                    .map(|()| PyRep::Bool(true)),
+                );
             }
 
             let insert_res = with_misc_state(ctx, |st| {

@@ -714,7 +714,9 @@ pub async fn handle(
             if is_structure && handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
                 return Some(Err(BridgeRpcError { code: "ShipWarpScrambled".into(), message: "Cannot dock at an Upwell structure while ship is warp scrambled".into() }));
             }
-            let dist = ball.position.distance(target_pos);
+            let dist = (ball.position.distance(target_pos)
+                - crate::services::nav_warp_interdiction::STATION_DOCKING_RING_STANDOFF_M)
+                .max(0.0);
             if dist > 2_500.0 {
                 return Some(Err(BridgeRpcError {
                     code: "OutsideDockingPerimeter".into(),

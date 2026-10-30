@@ -311,6 +311,14 @@ impl SystemRegistry {
         handles
     }
 
+    pub fn cancel_nanite_repairs_for_ship_sync(&self, ship_id: BallId) -> Vec<ActiveNaniteRepair> {
+        let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
+        guard
+            .values()
+            .flat_map(|h| h.cancel_nanite_repairs_for_ship_sync(ship_id))
+            .collect()
+    }
+
     /// Records that PvE special-site ball `ball_id` has been spawned in `solar_system_id`.
     /// Returns `true` only the first time, so destroyed site NPCs are never re-spawned.
     pub fn claim_special_site_ball(&self, solar_system_id: SolarSystemId, ball_id: i64) -> bool {
@@ -488,6 +496,9 @@ impl SystemRegistry {
                                     };
                                     cs.base_signature_radius = Some(base);
                                 }
+                                if sde_opt.as_ref().and_then(|s| s.types.get(&ball.type_id)?.default_attributes.get(&1538).copied()).unwrap_or(0.0) >= 1.0 {
+                                    cs.is_interdiction_nullified = true;
+                                }
                                 ballpark.add_ball(ball);
                                 ballpark.combat_states.insert(ball_id, cs);
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
@@ -516,6 +527,9 @@ impl SystemRegistry {
                                             .unwrap_or(ball.radius.max(35.0))
                                     };
                                     cs.base_signature_radius = Some(base);
+                                }
+                                if sde_opt.as_ref().and_then(|s| s.types.get(&ball.type_id)?.default_attributes.get(&1538).copied()).unwrap_or(0.0) >= 1.0 {
+                                    cs.is_interdiction_nullified = true;
                                 }
                                 ballpark.set_ball_slim_meta(ball_id, slim_meta);
                                 ballpark.add_ball(ball);
@@ -1064,7 +1078,7 @@ impl SystemRegistry {
                                     &mut ballpark, active_module_cycles, pending_anchoring_disruptors,
                                     active_nanite_repairs, ship_rack_heat, rah_incoming_damage,
                                     &base_scramble_strengths, &base_core_strengths, &sde_opt, &db_opt,
-                                    tactical_state, pending_cycle_actions, dt, deact_guard.as_ref(),
+                                    mechanic_rng_opt, tactical_state, pending_cycle_actions, dt, deact_guard.as_ref(),
                                 );
                                 if let Some(db) = db_opt.as_ref() {
                                     for &(target_ball_id, _) in &destroyed_balls {
@@ -1305,11 +1319,13 @@ impl SystemRegistry {
                                                 } else {
                                                     c.speed_boost_factor /= ovl_bonus;
                                                 }
-                                                if let (Some(orig_v), Some(ball)) = (
-                                                    c.original_max_velocity,
-                                                    ballpark.balls.get_mut(&ship_id),
-                                                ) {
-                                                    ball.max_velocity = orig_v * (1.0 + c.speed_boost_factor);
+                                                if let Some(orig_v) = c.original_max_velocity {
+                                                    let new_v = orig_v * (1.0 + c.speed_boost_factor);
+                                                    if let Some(bv) = ballpark.base_webbed_max_velocity.get_mut(&ship_id) {
+                                                        *bv = new_v;
+                                                    } else if let Some(ball) = ballpark.balls.get_mut(&ship_id) {
+                                                        ball.max_velocity = new_v;
+                                                    }
                                                 }
                                             }
                                             let rep_bonus = sde_opt
@@ -1337,6 +1353,14 @@ impl SystemRegistry {
                                         c.is_overloaded = is_overloaded;
                                         updated = true;
                                     }
+                                }
+                                if updated {
+                                    reconcile_tackle_and_bubbles(
+                                        &mut ballpark,
+                                        active_module_cycles,
+                                        &base_scramble_strengths,
+                                        &base_core_strengths,
+                                    );
                                 }
                                 let _ = reply.send(updated);
                             }

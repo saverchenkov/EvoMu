@@ -74,6 +74,10 @@ pub(crate) fn reconcile_tackle_and_bubbles(
         let nullified_by_mod = active_module_cycles
             .iter()
             .any(|c| c.ship_id == ball_id && c.grants_interdiction_nullification);
+        let nullified_by_hull = ballpark
+            .ball_slim_meta
+            .get(&ball_id)
+            .is_some_and(|m| m.group_id == 31);
 
         if let Some(cs) = ballpark.combat_states.get_mut(&ball_id) {
             let lance_scram = if cs.lance_disrupted_remaining_s > 0.0 { 100 } else { 0 };
@@ -87,7 +91,7 @@ pub(crate) fn reconcile_tackle_and_bubbles(
             if ewar_immune {
                 cs.ecm_jammed_remaining_s = 0.0;
             }
-            if nullified_by_mod {
+            if nullified_by_mod || nullified_by_hull {
                 cs.is_interdiction_nullified = true;
             }
         }
@@ -124,9 +128,14 @@ pub(crate) fn reconcile_tackle_and_bubbles(
         }
     }
 
-    // 5. Reconcile stacking-penalized target velocity modifiers (Stasis Webifier / Heavy Stasis Grappler)
+    // 5. Reconcile stacking-penalized target velocity modifiers (Stasis Webifier / Heavy Stasis Grappler / Stasis Webification Probe)
+    let wubble_mults =
+        crate::services::tactical_modules::active_wubble_multipliers_for_ballpark(ballpark);
     let mut webbed_targets: std::collections::BTreeSet<BallId> =
         ballpark.base_webbed_max_velocity.keys().copied().collect();
+    for &tid in wubble_mults.keys() {
+        webbed_targets.insert(tid);
+    }
     for c in active_module_cycles.iter() {
         if c.target_velocity_multiplier.is_some() {
             if let Some(tid) = c.target_id {
@@ -141,7 +150,7 @@ pub(crate) fn reconcile_tackle_and_bubbles(
         let mut penalties: Vec<f64> = if target_ewar_immune {
             Vec::new()
         } else {
-            active_module_cycles
+            let mut p_vec: Vec<f64> = active_module_cycles
                 .iter()
                 .filter_map(|c| {
                     if c.target_id == Some(tid) {
@@ -150,7 +159,11 @@ pub(crate) fn reconcile_tackle_and_bubbles(
                         None
                     }
                 })
-                .collect()
+                .collect();
+            if let Some(&wm) = wubble_mults.get(&tid) {
+                p_vec.push((1.0 - wm).max(0.0));
+            }
+            p_vec
         };
         if penalties.is_empty() {
             if let Some(base_v) = ballpark.base_webbed_max_velocity.remove(&tid) {

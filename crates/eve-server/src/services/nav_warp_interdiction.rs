@@ -13,6 +13,12 @@ use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 use std::collections::HashMap;
 
+/// Docking perimeter landing standoff (`2,000 m`, inside the `2,500 m` `CmdDock` docking perimeter).
+pub const STATION_DOCKING_RING_STANDOFF_M: f64 = 2_000.0;
+
+/// Per-pilot reactivation cooldown (`300 s` = 5 min) after consuming a Warp Vector Data item.
+pub const WARP_VECTOR_COOLDOWN_SECS: u64 = 300;
+
 /// Mirrors `CharacterRecord.autopilot_waypoints` into `CharacterSettingsSvc` (`"waypoints"`),
 /// removing the key when empty so fresh characters retain an empty settings dictionary.
 pub fn sync_waypoints_to_char_settings(ctx: &ServerContext, char_id: i64, waypoints: &[i64]) {
@@ -33,13 +39,28 @@ pub fn sync_waypoints_to_char_settings(ctx: &ServerContext, char_id: i64, waypoi
 }
 
 /// Syncs `CharacterRecord.autopilot_waypoints` when a client saves `"waypoints"` via `charMgr.SaveCharacterSetting`.
-pub fn sync_waypoints_from_char_settings(ctx: &ServerContext, char_id: i64, val: &PyRep) {
+pub fn sync_waypoints_from_char_settings(
+    ctx: &ServerContext,
+    char_id: i64,
+    val: &PyRep,
+) -> Result<(), BridgeRpcError> {
     let parsed: Vec<i64> = match val {
-        PyRep::List(items) | PyRep::Tuple(items) => items
-            .iter()
-            .filter_map(|v| v.as_i64())
-            .filter(|&id| id > 0)
-            .collect(),
+        PyRep::List(items) | PyRep::Tuple(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                let dest_id = item.as_i64().unwrap_or(0);
+                if !is_valid_waypoint_destination(ctx, dest_id) {
+                    return Err(BridgeRpcError {
+                        code: "InvalidDestination".into(),
+                        message: format!(
+                            "Destination {dest_id} is not a known solar system, station, or structure"
+                        ),
+                    });
+                }
+                out.push(dest_id);
+            }
+            out
+        }
         _ => Vec::new(),
     };
     ctx.db.with_mut_snapshot(|snap| {
@@ -48,6 +69,13 @@ pub fn sync_waypoints_from_char_settings(ctx: &ServerContext, char_id: i64, val:
         }
     });
     sync_waypoints_to_char_settings(ctx, char_id, &parsed);
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnAutopilotUpdated",
+        "charid",
+        vec![],
+    );
+    Ok(())
 }
 
 /// Reconciles `CharacterRecord.autopilot_waypoints` and `char_settings["waypoints"]` on character login.
@@ -72,7 +100,7 @@ pub fn sync_waypoints_on_login(ctx: &ServerContext, char_id: i64) {
         let wps: Vec<i64> = items
             .iter()
             .filter_map(|v| v.as_i64())
-            .filter(|&id| id > 0)
+            .filter(|&id| is_valid_waypoint_destination(ctx, id))
             .collect();
         if !wps.is_empty() {
             ctx.db.with_mut_snapshot(|snap| {
@@ -121,178 +149,12 @@ pub fn is_valid_waypoint_destination(ctx: &ServerContext, dest_id: i64) -> bool 
         || ctx.db.with_snapshot(|snap| snap.structures.contains_key(&dest_id))
 }
 
-/// Handles `map.SetWaypoint`, `map.SetWaypoints`, `map.RemoveWaypointIfFirst`, `map.ClearWaypoints`, and `map.GetWaypoints`.
-pub fn handle_map_waypoint_rpc(
-    ctx: &ServerContext,
-    session: &SessionState,
-    method: &str,
-    args: &[PyRep],
-    kwargs: &HashMap<String, PyRep>,
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    match method {
-        "SetWaypoint" => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let dest_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            if !is_valid_waypoint_destination(ctx, dest_id) {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidDestination".into(),
-                    message: format!("Destination {dest_id} is not a known solar system, station, or structure"),
-                }));
-            }
-            let clear_other = args
-                .get(1)
-                .and_then(|a| a.as_bool())
-                .or_else(|| kwargs.get("clearOtherWaypoints").and_then(|v| v.as_bool()))
-                .unwrap_or(true);
-            let first = args
-                .get(2)
-                .and_then(|a| a.as_bool())
-                .or_else(|| kwargs.get("first").and_then(|v| v.as_bool()))
-                .unwrap_or(false);
-
-            let updated_wps = ctx.db.with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    if clear_other {
-                        ch.autopilot_waypoints.clear();
-                    }
-                    if first {
-                        ch.autopilot_waypoints.insert(0, dest_id);
-                    } else {
-                        ch.autopilot_waypoints.push(dest_id);
-                    }
-                    ch.autopilot_waypoints.clone()
-                } else {
-                    Vec::new()
-                }
-            });
-            sync_waypoints_to_char_settings(ctx, char_id, &updated_wps);
-            crate::services::notify_emitters_batch3::emit_destination_change(
-                ctx,
-                char_id,
-                dest_id,
-                clear_other,
-                first,
-            );
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnAutopilotUpdated",
-                "charid",
-                vec![],
-            );
-            Some(Ok(PyRep::List(
-                updated_wps.into_iter().map(PyRep::Integer).collect(),
-            )))
-        }
-        "SetWaypoints" => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let items: Vec<i64> = match args.first() {
-                Some(PyRep::List(v) | PyRep::Tuple(v)) => {
-                    v.iter().filter_map(|x| x.as_i64()).collect()
-                }
-                _ => Vec::new(),
-            };
-            for &dest_id in &items {
-                if !is_valid_waypoint_destination(ctx, dest_id) {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidDestination".into(),
-                        message: format!(
-                            "Destination {dest_id} is not a known solar system, station, or structure"
-                        ),
-                    }));
-                }
-            }
-            ctx.db.with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.autopilot_waypoints = items.clone();
-                }
-            });
-            sync_waypoints_to_char_settings(ctx, char_id, &items);
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnAutopilotUpdated",
-                "charid",
-                vec![],
-            );
-            Some(Ok(PyRep::List(
-                items.into_iter().map(PyRep::Integer).collect(),
-            )))
-        }
-        "RemoveWaypointIfFirst" => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let dest_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let updated_wps = ctx.db.with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    if ch.autopilot_waypoints.first().copied() == Some(dest_id) {
-                        ch.autopilot_waypoints.remove(0);
-                    }
-                    ch.autopilot_waypoints.clone()
-                } else {
-                    Vec::new()
-                }
-            });
-            sync_waypoints_to_char_settings(ctx, char_id, &updated_wps);
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnAutopilotUpdated",
-                "charid",
-                vec![],
-            );
-            Some(Ok(PyRep::List(
-                updated_wps.into_iter().map(PyRep::Integer).collect(),
-            )))
-        }
-        "ClearWaypoints" => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            ctx.db.with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.autopilot_waypoints.clear();
-                }
-            });
-            sync_waypoints_to_char_settings(ctx, char_id, &[]);
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnAutopilotUpdated",
-                "charid",
-                vec![],
-            );
-            Some(Ok(PyRep::List(Vec::new())))
-        }
-        "GetWaypoints" => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let wps = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .get(&char_id)
-                    .map(|c| c.autopilot_waypoints.clone())
-                    .unwrap_or_default()
-            });
-            Some(Ok(PyRep::List(
-                wps.into_iter().map(PyRep::Integer).collect(),
-            )))
-        }
-        _ => None,
-    }
-}
-
 /// Computes the exact warp landing point for `target_id` in `sys_id` (`feat:navigation.warp-landing-points`):
 /// - Planets (`group 7`) and Moons (`group 8`): `2,500 m` outside celestial surface radius along approach vector.
 /// - Stars (`group 6`): `100,000 m` outside star corona radius along approach vector.
 /// - Stargates (`group 10` / `sde.jumps`): stargate perimeter (`gate_radius`) along approach vector (`0 m` from jump activation radius).
-/// - Stations, Upwell Structures, Asteroid Belts (`group 9`), Bookmarks, Signatures, Anomalies: exact anchor position.
+/// - NPC Stations (`sde.stations`) and Upwell Structures (`snap.structures`): docking ring perimeter (`2,000 m` along approach vector, inside `2,500 m` `CmdDock` range).
+/// - Asteroid Belts (`group 9`), Bookmarks, Signatures, Anomalies: exact anchor position.
 pub fn resolve_warp_landing_point(
     ctx: &ServerContext,
     sys_id: u32,
@@ -318,6 +180,19 @@ pub fn resolve_warp_landing_point(
             .filter(|&r| r > 0.0)
             .unwrap_or(14_051.0);
         return anchor_pos - dir * gate_radius;
+    }
+    if ctx
+        .sde
+        .stations
+        .get(&target_id)
+        .is_some_and(|st| st.solar_system_id == sys_id)
+        || ctx.db.with_snapshot(|snap| {
+            snap.structures
+                .get(&target_id)
+                .is_some_and(|st| st.solar_system_id == sys_id && st.state != "Destroyed")
+        })
+    {
+        return anchor_pos - dir * STATION_DOCKING_RING_STANDOFF_M;
     }
     if let Some(cel) = ctx
         .sde
@@ -452,19 +327,38 @@ pub async fn handle_use_warp_vector(
             });
         }
 
+        let now_unix = ctx.now_unix_secs();
+        let cd_until: u64 = ctx.db.with_snapshot(|snap| {
+            snap.service_state_blobs
+                .get("warp_vector_cooldown_until")
+                .and_then(|s| serde_json::from_str::<HashMap<i64, u64>>(s).ok())
+                .and_then(|m| m.get(&char_id).copied())
+                .unwrap_or(0)
+        });
+        if cd_until > now_unix {
+            return Err(BridgeRpcError {
+                code: "WarpVectorCooldown".into(),
+                message: format!(
+                    "Warp vector reactivation cooldown active for {} s",
+                    cd_until - now_unix
+                ),
+            });
+        }
+
         let max_star_dist = vec_item
             .dynamic_attributes
             .get(&5432)
             .copied()
             .or_else(|| mod_t.default_attributes.get(&5432).copied())
             .unwrap_or(1_496_000_000_000.0);
-        if let Some(star) = ctx
+        let star_opt = ctx
             .sde
             .celestials_in_system(sys_id)
             .into_iter()
-            .find(|c| c.group_id == 6)
-        {
-            let star_dist = ship_ball.position.distance(star.position);
+            .find(|c| c.group_id == 6);
+        let star_pos = star_opt.as_ref().map(|c| c.position).unwrap_or(DVec3::ZERO);
+        if star_opt.is_some() {
+            let star_dist = ship_ball.position.distance(star_pos);
             if star_dist > max_star_dist {
                 return Err(BridgeRpcError {
                     code: "WarpVectorTooFarFromStar".into(),
@@ -495,8 +389,27 @@ pub async fn handle_use_warp_vector(
             .or_else(|| mod_t.default_attributes.get(&5431).copied())
             .unwrap_or(0.0);
         let delta = DVec3::new(dx, dy, dz);
-        let dist_m = delta.length();
-        if !delta.is_finite() || dist_m < 150_000.0 {
+        if !delta.is_finite() {
+            return Err(BridgeRpcError {
+                code: "InvalidArgument".into(),
+                message: "Warp vector coordinates must be finite".into(),
+            });
+        }
+        let mut dest_pos = star_pos + delta;
+        if let Some(sys_radius) = ctx
+            .sde
+            .solar_systems
+            .get(&sys_id)
+            .map(|s| s.radius)
+            .filter(|&r| r > 0.0)
+        {
+            let rel = dest_pos - star_pos;
+            if rel.length() > sys_radius {
+                dest_pos = star_pos + rel.normalize_or_zero() * sys_radius;
+            }
+        }
+        let dist_m = ship_ball.position.distance(dest_pos);
+        if dist_m < 150_000.0 {
             return Err(BridgeRpcError {
                 code: "WarpDistanceTooShort".into(),
                 message: format!(
@@ -506,7 +419,6 @@ pub async fn handle_use_warp_vector(
             });
         }
 
-        let dest_pos = ship_ball.position + delta;
         let warp_speed =
             crate::services::space_destiny::compute_ship_warp_speed_au_s(ctx, ship_ball.type_id);
         let warp_mode = MovementMode::new_warp(ship_ball.position, dest_pos, warp_speed);
@@ -519,6 +431,16 @@ pub async fn handle_use_warp_vector(
             })?;
 
         let remaining_qty = ctx.db.with_mut_snapshot(|snap| {
+            let mut cd_map: HashMap<i64, u64> = snap
+                .service_state_blobs
+                .get("warp_vector_cooldown_until")
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
+            cd_map.insert(char_id, now_unix.saturating_add(WARP_VECTOR_COOLDOWN_SECS));
+            if let Ok(json) = serde_json::to_string(&cd_map) {
+                snap.service_state_blobs
+                    .insert("warp_vector_cooldown_until".into(), json);
+            }
             let mut rem = 0;
             if let Some(it) = snap.items.get_mut(&target_id) {
                 it.quantity = (it.quantity - 1).max(0);

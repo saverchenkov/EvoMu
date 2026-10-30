@@ -92,6 +92,7 @@ pub(crate) fn step_cycles_and_capacitor(
     base_core_strengths: &HashMap<BallId, i32>,
     sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    mechanic_rng_opt: &Option<Arc<crate::rng::MechanicRng>>,
     tactical_state: &std::sync::RwLock<crate::services::tactical_modules::TacticalModulesState>,
     pending_cycle_actions: &mut Vec<PendingCycleAction>,
     dt: f64,
@@ -112,8 +113,9 @@ pub(crate) fn step_cycles_and_capacitor(
         dt,
     );
 
-    // Exponential rack heat dissipation using ship SDE dissipation rates (`feat:modules.overheat-rack-heat-generation`)
-    crate::services::tactical_module_mechanics::step_passive_rack_heat_dissipation(
+    // Per-tick rack heat generation (`sum(heatAbsorbtionRateModifier)` * evaluated `heatGenerationMultiplier`)
+    // and passive exponential dissipation (`feat:modules.overheat-rack-heat-generation`)
+    crate::services::tactical_module_mechanics::step_rack_heat_per_tick(
         ship_rack_heat,
         active_module_cycles,
         sde_opt,
@@ -202,14 +204,6 @@ pub(crate) fn step_cycles_and_capacitor(
             for (rank, mid) in mods.into_iter().enumerate() {
                 cap_remote_rep_ranks.insert((tid, mid), rank);
             }
-        }
-    }
-
-    // Count overloaded modules per (ship_id, rack_idx)
-    let mut overloaded_counts: HashMap<(BallId, usize), usize> = HashMap::new();
-    for c in active_module_cycles.iter() {
-        if c.is_overloaded {
-            *overloaded_counts.entry((c.ship_id, c.rack_idx)).or_insert(0) += 1;
         }
     }
 
@@ -509,17 +503,12 @@ pub(crate) fn step_cycles_and_capacitor(
                 }
             }
             if cycle.is_overloaded {
-                let ovl_in_rack = overloaded_counts
-                    .get(&(cycle.ship_id, cycle.rack_idx))
-                    .copied()
-                    .unwrap_or(1)
-                    .max(1);
                 crate::services::tactical_module_mechanics::apply_overheat_rack_and_damage_on_cycle(
                     cycle,
-                    ovl_in_rack,
                     ship_rack_heat,
                     sde_opt,
                     db_opt,
+                    mechanic_rng_opt,
                     &mut burned_out,
                     &mut burned_ship_modules,
                 );
@@ -1192,7 +1181,7 @@ impl SystemHandle {
         let mut destroyed = step_cycles_and_capacitor(
             &mut bp, active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
-            sde_opt, db_opt, tactical_state, pending_cycle_actions, dt, deact_hook_guard.as_ref(),
+            sde_opt, db_opt, mechanic_rng_opt, tactical_state, pending_cycle_actions, dt, deact_hook_guard.as_ref(),
         );
         destroyed.extend(sup_dead.into_iter().chain(pg_dead).map(|bid| (bid, None)));
         let zk_dead = crate::services::space_navigation_advanced::step_zarzakh_gravity_hazard_in_ballpark(
