@@ -9508,16 +9508,6 @@
       "flagged_by_audit": "20261028-141019"
     },
     {
-      "evidence": "The test (crates/eve-server/tests/it/mining_survey_scanner.rs:855-882) asserts only that one Prismaticite batch yields one output of group 18. It doesn't test Unrefined Mineral reactions (Compressed Prismaticite plus gases), the Standup Composite Reactor requirement, or reprocessing of Unrefined Minerals. The quantities come from an invented equal-ISK formula, 524_288 / base_price (crates/eve-server/src/services/space_entity_mining.rs:806-857, labelled DERIVED), although the code comment itself says CCP ships randomizedTypeMaterials.",
-      "id": "feat:mining.prismaticite-reprocessing-and-unrefined-reactions",
-      "flagged_by_audit": "20261026-153450"
-    },
-    {
-      "evidence": "The test never exercises the formula or the exclusions. crates/eve-server/tests/it/mining_survey_scanner.rs:850-852 reads yieldRate with .unwrap_or(0.0) and asserts only mod_yield <= 0.55, which still passes if the field is missing or 0. There is no assertion of base x (1 + 0.02 x Scrapmetal Processing), no Scrapmetal skill set, and no check that structure, rig, security-band or implant bonuses are excluded. The code path at space_entity_mining.rs:916 is therefore untested against the acceptance text.",
-      "id": "feat:mining.scrapmetal-yield-exclusions",
-      "flagged_by_audit": "20261026-153450"
-    },
-    {
       "evidence": "crates/eve-server/src/services/mining_sites.rs:624-701 defines a static `WORMHOLE_ORE_SITES` table and `resolve_wormhole_ore_site` (which only checks `sde.types.contains_key`), but `seed_system_mining_sites_from_sde` in crates/eve-server/src/router/dispatch.rs:1237-1245 only seeds `WORMHOLE_GAS_SITES` and never seeds `WORMHOLE_ORE_SITES` or spawns Sleeper rat waves on proximity/timer; the sole tagged test in crates/eve-server/tests/it/mining_survey_scanner.rs:889-911 only calls `resolve_wormhole_ore_site(&ctx.sde, site)` in a loop without spawning sites or NPC waves.",
       "id": "feat:mining.wormhole-ore-sites",
       "flagged_by_audit": "20261028-141019"
@@ -9731,11 +9721,6 @@
       "evidence": "crates/eve-server/src/services/repair_service.rs:76-91 rejects quotes and repairs with StructureServiceOffline whenever the structure is LowPower or NotOperational. Per wiki:Upwell_structure.md:203-208 the repair shop is always available and needs only a core, not a service module or fuel. The test asserts the opposite: crates/eve-server/tests/it/plan_upwell_structures_closure_part2.rs:210-212 expects GetRepairQuotes and RepairItemsInStructure to fail with StructureServiceOffline in LowPower. The per-HP cost is an invented formula, max(1, base_price*0.0125/max_hp) with made-up defaults of 10_000 ISK and 100/40 HP (repair_service.rs:36-46). It comes from no client or static data, and the acceptance text requires the cost to be based on base item value and missing HP.",
       "id": "feat:structures.repairshop-service-quotes-and-restoration",
       "flagged_by_audit": "20261028-092521"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/campaigns_and_milestones.rs:898-954 treats the client's instance_id as the FSD template id. An unknown instance that has stored points falls back to an arbitrary first template, templates.values().next() (:925-930). Progress is read from the community_track_points blob, which no gameplay path feeds. The test crates/eve-server/tests/it/rpc_campaigns_and_telemetry.rs:554-558 writes 150 points straight into that blob before asserting the clamp to 100 (:568-571). So 'live community track instances' (lifecycle, contributions) are not modelled; the test exercises an injected fixture.",
-      "id": "feat:ui.community-track",
-      "flagged_by_audit": "20261026-151210"
     },
     {
       "evidence": "crates/eve-server/src/services/lookup_svc.rs:419-452 LookupWarableCorporationsOrAlliances is a plain name/ticker filter over player corps (id >= 98M) and all alliances. It never checks whether a war can be declared on the target: it doesn't exclude the caller's own corp or alliance, NPC-allied entities or corps that can't be war-decced. The test crates/eve-server/tests/it/rpc_core_services_batch.rs:25-54, :300-318 seeds corp 98_000_001, whose only member and CEO is the logged-in demo pilot 90_000_001, and asserts that this corp and its own alliance are returned as 'warable'. That is the opposite of the expected behaviour, so the acceptance clause is never really exercised.",
@@ -10182,11 +10167,6 @@
       "evidence": "crates/eve-server/tests/it/rpc_missing_batch3_tests.rs:476-512: reading zsystem/SP-Allowed-Extensions returns a hardcoded string, and the test asserts it contains 'txt' and 'csv'. The 3-argument form echoes back the value it was given ('CustomTestVal'). So it's a constant or echo, not real config data.",
       "id": "rpc:cache.Setting",
       "flagged_by_audit": "20261028-093759"
-    },
-    {
-      "evidence": "This is the same code already flagged under feat:ui.community-track. crates/eve-server/src/services/campaigns_and_milestones.rs:925-935 treats the client instance_id as the FSD template id. An unknown instance with stored points falls back to an arbitrary templates.values().next() (:931). Progress comes from the community_track_points blob, which no gameplay path writes. The tagged test (rpc_campaigns_and_telemetry.rs:554-571) writes 150 points straight into that blob and asserts the clamp to 100. No live community-track instance lifecycle exists.",
-      "id": "rpc:communityTrackMgr.get_instance_attributes_public",
-      "flagged_by_audit": "20261026-162943"
     },
     {
       "evidence": "crates/eve-server/src/services/fleet_social_scanning.rs:910-939 fabricates and inserts a hardcoded fixture escalation `(800_001, \"DED 4/10 Sansha Command Complex\", 30_000_144, now_unix + 86_400)` into `st.escalations` whenever a character has no escalations on `dungeonExplorationMgr.GetMyEscalatingPathDetails`, and crates/eve-server/tests/it/fleet_social_scanning.rs:922-940 only asserts that this auto-seeded fixture is non-empty rather[...].",
