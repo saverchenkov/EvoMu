@@ -776,18 +776,10 @@ pub(crate) async fn handle_dogma_ops(
             let setting_args = vec![PyRep::Bool(aggressive), PyRep::Bool(focus_fire)];
             ctx.notify(
                 NotificationTarget::Character(char_id),
-                "OnDroneStateChange",
-                "charid",
-                setting_args.clone(),
-            );
-            session.push_notification("OnDroneStateChange", setting_args.clone());
-            ctx.notify(
-                NotificationTarget::Character(char_id),
                 "OnDroneSettingChanged",
                 "charid",
-                setting_args.clone(),
+                setting_args,
             );
-            session.push_notification("OnDroneSettingChanged", setting_args);
 
             let active_drones = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
                 rt.active_drones_in_space
@@ -797,22 +789,22 @@ pub(crate) async fn handle_dogma_ops(
                     .collect::<Vec<_>>()
             });
             for d in active_drones {
+                let target_rep = d.target_id.map(PyRep::Integer).unwrap_or(PyRep::None);
                 let notif_args = vec![
-                    PyRep::Integer(d.drone_item_id),
+                    PyRep::Integer(d.ball_id),
                     PyRep::Integer(char_id),
                     PyRep::Integer(d.parent_ship_id),
                     PyRep::Integer(d.activity_state as i64),
                     PyRep::Integer(d.type_id as i64),
                     PyRep::Integer(char_id),
-                    PyRep::Integer(d.target_id.unwrap_or(0)),
+                    target_rep,
                 ];
                 ctx.notify(
                     NotificationTarget::Character(char_id),
                     "OnDroneStateChange",
                     "charid",
-                    notif_args.clone(),
+                    notif_args,
                 );
-                session.push_notification("OnDroneStateChange", notif_args);
             }
 
             Some(Ok(PyRep::None))

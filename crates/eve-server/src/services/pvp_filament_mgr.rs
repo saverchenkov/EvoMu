@@ -171,6 +171,13 @@ pub fn ensure_events_from_sde(sde: &eve_sde::SdeRegistry, store: &mut PvpFilamen
     }
 }
 
+pub fn lookup_sde_event_ids(sde: &eve_sde::SdeRegistry, event_id: i64) -> Option<(i64, i64)> {
+    load_sde_pvp_events(sde)
+        .into_iter()
+        .find(|e| e.event_id == event_id)
+        .map(|e| (e.match_type_id, e.schedule_id))
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PvpFilamentMatchSpec {
     fleet_size: usize,
@@ -381,6 +388,70 @@ pub fn build_leaderboard_rows_for_event(store: &PvpFilamentStore, event_id: i64)
             ])
         })
         .collect()
+}
+
+pub fn build_leaderboard_rows_dict_for_event(store: &PvpFilamentStore, event_id: i64) -> Vec<PyRep> {
+    let stats_map = get_stats_source(store, event_id);
+    let mut rows: Vec<(i64, (i64, i64, i64, i64, f64))> = stats_map
+        .iter()
+        .filter_map(|(&cid, &st)| (st.0 > 0 || st.1 > 0 || st.2 > 0 || st.3 > 0).then_some((cid, st)))
+        .collect();
+    rows.sort_by(|(cid_a, a), (cid_b, b)| {
+        b.2.cmp(&a.2)
+            .then_with(|| b.0.cmp(&a.0))
+            .then_with(|| b.3.cmp(&a.3))
+            .then_with(|| b.4.total_cmp(&a.4))
+            .then_with(|| cid_a.cmp(cid_b))
+    });
+    rows.into_iter()
+        .take(100)
+        .enumerate()
+        .map(|(idx, (cid, (wins, losses, score, _k, _d)))| {
+            PyRep::Dict(vec![
+                (PyRep::String("character_id".into()), PyRep::Integer(cid)),
+                (PyRep::String("rank".into()), PyRep::Integer((idx + 1) as i64)),
+                (PyRep::String("score".into()), PyRep::Integer(score)),
+                (PyRep::String("wins".into()), PyRep::Integer(wins)),
+                (PyRep::String("losses".into()), PyRep::Integer(losses)),
+                (PyRep::String("draws".into()), PyRep::Integer(0)),
+            ])
+        })
+        .collect()
+}
+
+pub fn build_character_statistics_dict_for_event(
+    store: &PvpFilamentStore,
+    event_id: i64,
+    char_id: i64,
+) -> PyRep {
+    let stats_map = get_stats_source(store, event_id);
+    let (w, l, s, k, d) = stats_map.get(&char_id).copied().unwrap_or((0, 0, 0, 0, 0.0));
+    let mut rows: Vec<(i64, (i64, i64, i64, i64, f64))> = stats_map
+        .iter()
+        .filter_map(|(&cid, &st)| (st.0 > 0 || st.1 > 0 || st.2 > 0 || st.3 > 0).then_some((cid, st)))
+        .collect();
+    rows.sort_by(|(cid_a, a), (cid_b, b)| {
+        b.2.cmp(&a.2)
+            .then_with(|| b.0.cmp(&a.0))
+            .then_with(|| b.3.cmp(&a.3))
+            .then_with(|| b.4.total_cmp(&a.4))
+            .then_with(|| cid_a.cmp(cid_b))
+    });
+    let rank = rows
+        .iter()
+        .position(|(cid, _)| *cid == char_id)
+        .map(|idx| (idx + 1) as i64)
+        .unwrap_or(0);
+    PyRep::Dict(vec![
+        (PyRep::String("character_id".into()), PyRep::Integer(char_id)),
+        (PyRep::String("rank".into()), PyRep::Integer(rank)),
+        (PyRep::String("score".into()), PyRep::Integer(s)),
+        (PyRep::String("wins".into()), PyRep::Integer(w)),
+        (PyRep::String("losses".into()), PyRep::Integer(l)),
+        (PyRep::String("draws".into()), PyRep::Integer(0)),
+        (PyRep::String("kills".into()), PyRep::Integer(k)),
+        (PyRep::String("damageDealt".into()), PyRep::Real(d)),
+    ])
 }
 
 pub fn build_character_statistics(store: &PvpFilamentStore, char_id: i64) -> PyRep {
@@ -1004,17 +1075,6 @@ pub async fn handle(
                 let store = load_pvp_store(snap);
                 build_leaderboard_rows_for_event(&store, event_id)
             });
-            let lb_notif = PyRep::keyval([
-                ("eventID", PyRep::Integer(event_id)),
-                ("event_id", PyRep::Integer(event_id)),
-                ("entries", PyRep::List(entries.clone())),
-            ]);
-            ctx.notify(
-                crate::router::NotificationTarget::Character(char_id),
-                "OnPVPFilamentsLeaderboard",
-                "charid",
-                vec![lb_notif],
-            );
             Some(Ok(PyRep::List(entries)))
         }
 
@@ -1029,17 +1089,6 @@ pub async fn handle(
                 let store = load_pvp_store(snap);
                 build_character_statistics_for_event(&store, event_id, target_cid)
             });
-            let notif = PyRep::keyval([
-                ("eventID", PyRep::Integer(event_id)),
-                ("event_id", PyRep::Integer(event_id)),
-                ("statistics", stats.clone()),
-            ]);
-            ctx.notify(
-                crate::router::NotificationTarget::Character(char_id),
-                "OnPVPFilamentsCharacterStatistics",
-                "charid",
-                vec![notif],
-            );
             Some(Ok(stats))
         }
 

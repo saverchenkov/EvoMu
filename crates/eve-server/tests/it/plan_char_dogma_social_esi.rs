@@ -223,7 +223,13 @@ async fn test_plan_dg6_ammo_and_weapon_grouping() {
         .dispatch_rpc(&mut sess, "dogmaIM", None, "LinkWeapons", &[PyRep::Integer(ship_id), PyRep::Integer(t1_id), PyRep::Integer(t2_id)], &kw, None)
         .await
         .expect("LinkWeapons");
-    assert_eq!(link_rep, PyRep::None);
+    assert_eq!(
+        link_rep,
+        PyRep::Dict(vec![(
+            PyRep::Integer(t1_id),
+            PyRep::List(vec![PyRep::Integer(t1_id), PyRep::Integer(t2_id)]),
+        )]),
+    );
 
     let bank_size = ctx.db.with_snapshot(|s| s.weapon_banks.get(&ship_id).and_then(|b| b.get(&t1_id)).map(Vec::len));
     assert_eq!(bank_size, Some(2), "Linked weapon bank must contain 2 modules");

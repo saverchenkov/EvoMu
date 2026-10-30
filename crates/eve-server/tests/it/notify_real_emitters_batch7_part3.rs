@@ -307,9 +307,8 @@ async fn notify_batch7_cosmetics_petitions_mail_pi_and_escalations() {
         .await
         .expect("EnterCombatAnomaly wave 2");
     clear_wave(&ctx, site_id).await;
-    with_pve_exploration_reg(&ctx, |reg| {
-        reg.force_escalate = true;
-    });
+    // Seed 3 gives SplitMix64 first draw 0.1135 < 0.20 (natural 20% escalation roll)
+    ctx.set_mechanic_rng_seed(Some(3));
     let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
     rpc(&ctx, &mut sess_a, "scanSvc", "EnterCombatAnomaly", &[PyRep::String(site_id.into()), PyRep::Bool(true)])
         .await

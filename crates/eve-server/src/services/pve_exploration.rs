@@ -175,8 +175,6 @@ pub struct PveExplorationRegistry {
     pub structure_char_failures: HashMap<(CharacterId, ItemId), u8>,
     pub sim_clock_sec: u64,
     pub next_id_seq: i64,
-    #[serde(default)]
-    pub force_escalate: bool,
 }
 pub type HackingSiteRegistry = PveExplorationRegistry;
 const PVE_EXPLORATION_NOTE_ID: i64 = -8_200_000_000_000;
@@ -524,13 +522,7 @@ pub async fn handle_pve_site_npc_destruction_core(
                 inst_id,
             ).await.ok().flatten();
         } else if matches!(site_category.as_str(), "CombatAnomaly" | "CombatSignature" | "DED") {
-            let should_escalate = with_pve_exploration_reg_db(db, now_unix, |reg| {
-                if reg.force_escalate {
-                    true
-                } else {
-                    rng.roll(0.20)
-                }
-            });
+            let should_escalate = rng.roll(0.20);
             if should_escalate {
                 new_escalation = crate::services::pve_expeditions::create_escalation_expedition_core(
                     db,
@@ -824,10 +816,8 @@ pub async fn advance_site_wave_or_complete(
             dropped_loot_items.push((item_id, l_tid, l_qty, l_name));
         }
 
-        let should_escalate = with_pve_exploration_reg(ctx, |reg| {
-            matches!(site_category.as_str(), "CombatAnomaly" | "CombatSignature" | "DED")
-                && crate::services::pve_expeditions::roll_escalation_chance(ctx, reg)
-        });
+        let should_escalate = matches!(site_category.as_str(), "CombatAnomaly" | "CombatSignature" | "DED")
+            && crate::services::pve_expeditions::roll_escalation_chance(ctx);
 
         if should_escalate {
             escalation_created = crate::services::pve_expeditions::create_escalation_expedition(

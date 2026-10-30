@@ -110,10 +110,8 @@ async fn test_pve_escalation_npc_destruction_triggers_expedition() {
     // Seed PvE combat anomaly / signature sites
     ensure_system_pve_sites_seeded(&ctx, sys_id).await;
 
-    // Force escalation guarantee on completion
-    with_pve_exploration_reg(&ctx, |reg| {
-        reg.force_escalate = true;
-    });
+    // Seed 3 gives SplitMix64 first draw 0.1135 < 0.20 (natural 20% escalation roll)
+    ctx.set_mechanic_rng_seed(Some(3));
 
     // Find a combat site with active NPC balls
     let (site_id, active_balls) = with_pve_exploration_reg(&ctx, |reg| {
@@ -129,6 +127,7 @@ async fn test_pve_escalation_npc_destruction_triggers_expedition() {
 
     // Destroy all wave NPCs to trigger site completion and escalation roll
     for npc_ball_id in active_balls {
+        ctx.set_mechanic_rng_seed(Some(3));
         destroy_specialized_npc_and_queue_bounty(&ctx, sys_id, npc_ball_id, char_id).await;
     }
 
@@ -143,6 +142,7 @@ async fn test_pve_escalation_npc_destruction_triggers_expedition() {
         match remaining {
             Some(balls) if !balls.is_empty() => {
                 for b in balls {
+                    ctx.set_mechanic_rng_seed(Some(3));
                     destroy_specialized_npc_and_queue_bounty(&ctx, sys_id, b, char_id).await;
                 }
             }

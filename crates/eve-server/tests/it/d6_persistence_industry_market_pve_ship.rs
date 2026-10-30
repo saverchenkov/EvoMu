@@ -375,7 +375,7 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         let w2 = call(&ctx, &mut sess_p1, "keeper", "EnterNextDungeonRoom", &[PyRep::String("PVE-ANOM-30000142-1".into())]).await.expect("Wave 1 -> 2");
         let w2_balls: Vec<i64> = match w2.dict_get("activeNpcBallIDs") { Some(PyRep::List(l)) => l.iter().filter_map(|b| b.as_i64()).collect(), _ => vec![] };
         unspawn_balls(&ctx, &mut sess_p1, &w2_balls).await;
-        eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| reg.force_escalate = true);
+        ctx.set_mechanic_rng_seed(Some(3));
         let w_done = call(&ctx, &mut sess_p1, "keeper", "EnterNextDungeonRoom", &[PyRep::String("PVE-ANOM-30000142-1".into())]).await.expect("Complete anomaly");
         assert_eq!(w_done.dict_get("escalated").and_then(|v| v.as_bool()), Some(true));
 

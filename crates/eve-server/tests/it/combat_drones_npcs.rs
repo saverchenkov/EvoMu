@@ -42,6 +42,7 @@ async fn setup_pilot_session(
     pos: DVec3,
 ) -> SessionState {
     ctx.db.with_mut_snapshot(|snap| {
+        snap.accounts.insert(format!("pilot_{user_id}"), eve_db::AccountRecord { user_id, username: format!("pilot_{user_id}"), password_token: String::new(), role: 0, banned_until_unix: None, ban_reason: None });
         snap.characters.insert(
             char_id,
             CharacterRecord {
@@ -128,12 +129,12 @@ async fn setup_pilot_session(
         )
         .await;
 
-    let mut sess = SessionState::default();
+    let mut sess = SessionState::new(user_id);
     sess.user_id = Some(user_id);
     sess.character_id = Some(char_id);
     sess.ship_id = Some(ship_id);
     sess.solar_system_id = Some(solar_system_id);
-    sess.station_id = None;
+    let _ = ctx.db.acquire_online_lock(user_id, sess.session_id, Some(char_id), true, ctx.now_unix());
     sess
 }
 
@@ -579,9 +580,9 @@ async fn test_c7_drone_lifecycle_bandwidth_control_range_sentries_salvage_logi_e
     };
     assert_eq!(launched_balls.len(), 3);
     assert!(
-        sess.notifications
+        ctx.drain_notifications_for_char(char_id)
             .iter()
-            .any(|(ev, _)| ev == "OnDroneStateChange"),
+            .any(|n| n.event == "OnDroneStateChange"),
         "ship.LaunchDrones must emit OnDroneStateChange"
     );
 

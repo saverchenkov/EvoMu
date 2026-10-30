@@ -186,7 +186,9 @@ pub(crate) async fn handle_module_cycles(
                                     .is_some_and(|t| matches!(t.group_id, 340 | 448 | 4644))
                             })
                     }));
-            if is_fw_pvp || is_upwell_weapon_or_aoe || is_special_target {
+            let is_arena_pvp = is_weapon && (32_000_000..33_000_000).contains(&sys_id)
+                && ctx.db.with_snapshot(|s| crate::services::pvp_filament_mgr::load_pvp_store(s).active_matches.values().any(|m| m.active && m.arena_solar_system_id == sys_id));
+            if is_fw_pvp || is_arena_pvp || is_upwell_weapon_or_aoe || is_special_target {
                 return crate::services::combat_crimewatch::combat_weapons::handle_weapons(ctx, session, service, method, args, kwargs).await;
             }
 

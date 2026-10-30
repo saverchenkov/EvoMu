@@ -130,16 +130,53 @@ async fn notify_batch7_weapons_fittings_drones_stances_jump_and_skills() {
         _ => panic!("expected List from LaunchDrones"),
     };
     assert!(launched_ball_id > 0);
-    let drone_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    let drone_args = find_notif(&drone_notifs, "OnDroneStateChange");
+    let wire_drone_notifs = sess_a.drain_notifications();
+    let ctx_drone_notifs = ctx.drain_notifications_for_char(PILOT_A);
+    let wire_drone_events: Vec<&[PyRep]> = wire_drone_notifs
+        .iter()
+        .filter(|(ev, _)| ev == "OnDroneStateChange")
+        .map(|(_, args)| args.as_slice())
+        .collect();
+    assert_eq!(wire_drone_events.len(), 1, "LaunchDrones must push exactly one OnDroneStateChange to session");
+    assert_eq!(
+        ctx_drone_notifs.iter().filter(|n| n.event == "OnDroneStateChange").count(),
+        1,
+        "LaunchDrones must enqueue exactly one OnDroneStateChange in ctx"
+    );
+    let drone_args = wire_drone_events[0];
     assert_eq!(drone_args.len(), 7);
-    assert_eq!(drone_args[0], PyRep::Integer(drone_id));
+    assert_eq!(drone_args[0], PyRep::Integer(launched_ball_id));
     assert_eq!(drone_args[1], PyRep::Integer(PILOT_A));
     assert_eq!(drone_args[2], PyRep::Integer(ship_a));
     assert_eq!(drone_args[3], PyRep::Integer(0));
     assert_eq!(drone_args[4], PyRep::Integer(2454));
     assert_eq!(drone_args[5], PyRep::Integer(PILOT_A));
-    assert_eq!(drone_args[6], PyRep::Integer(0));
+    assert_eq!(drone_args[6], PyRep::None);
+
+    rpc(
+        &ctx,
+        &mut sess_a,
+        "dogmaIM",
+        "ChangeDroneSettings",
+        &[PyRep::Dict(vec![
+            (PyRep::String("aggressive".into()), PyRep::Bool(true)),
+            (PyRep::String("focusFire".into()), PyRep::Bool(false)),
+        ])],
+    )
+    .await
+    .expect("ChangeDroneSettings");
+    let wire_setting_notifs = sess_a.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(PILOT_A);
+    assert_eq!(find_notif(&wire_setting_notifs, "OnDroneSettingChanged"), &[PyRep::Bool(true), PyRep::Bool(false)]);
+    let post_setting_drone_events: Vec<&[PyRep]> = wire_setting_notifs
+        .iter()
+        .filter(|(ev, _)| ev == "OnDroneStateChange")
+        .map(|(_, args)| args.as_slice())
+        .collect();
+    assert_eq!(post_setting_drone_events.len(), 1);
+    assert_eq!(post_setting_drone_events[0].len(), 7);
+    assert_eq!(post_setting_drone_events[0][0], PyRep::Integer(launched_ball_id));
+    assert_eq!(post_setting_drone_events[0][6], PyRep::None);
 
     // 7. OnStanceActive (2-arg) via shipStanceMgr.SetShipStance on Confessor (34317)
     ctx.db.with_mut_snapshot(|snap| {

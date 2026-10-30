@@ -111,10 +111,7 @@ pub fn expedition_dungeon_for_step(base_dungeon_id: u32, step_index: u8) -> u32 
     base_dungeon_id + (step_index.saturating_sub(1) as u32)
 }
 
-pub fn roll_escalation_chance(ctx: &ServerContext, reg: &PveExplorationRegistry) -> bool {
-    if reg.force_escalate {
-        return true;
-    }
+pub fn roll_escalation_chance(ctx: &ServerContext) -> bool {
     // 20% escalation roll on completion of combat anomaly/signature/DED complex
     ctx.mechanic_rng.roll(0.20)
 }
