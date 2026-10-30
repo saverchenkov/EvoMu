@@ -167,22 +167,40 @@ pub fn dispatch_economy_industry_route(
                 *sys_work.entry(sid).or_default().entry(activity).or_insert(0) += work;
                 *total_activity_work.entry(activity).or_insert(0) += work;
             }
-            let out: Vec<Value> = sys_work
+            let all_sids: std::collections::BTreeSet<u32> = ctx
+                .sde
+                .solar_systems
+                .keys()
+                .copied()
+                .chain(sys_work.keys().copied())
+                .collect();
+            let activities = [
+                "manufacturing",
+                "researching_time_efficiency",
+                "researching_material_efficiency",
+                "copying",
+                "invention",
+                "reaction",
+            ];
+            let out: Vec<Value> = all_sids
                 .into_iter()
-                .map(|(sid, acts)| {
-                    let cost_indices: Vec<Value> = acts
-                        .into_iter()
-                        .filter_map(|(activity, work)| {
+                .map(|sid| {
+                    let acts = sys_work.get(&sid);
+                    let cost_indices: Vec<Value> = activities
+                        .iter()
+                        .map(|&activity| {
                             let total = total_activity_work.get(activity).copied().unwrap_or(0);
-                            if total == 0 {
-                                return None;
-                            }
-                            // Canonical CCP industry system cost index: sqrt(system_work / universe_work)
-                            let cost_index = ((work as f64) / (total as f64)).sqrt();
-                            Some(json!({
+                            let work = acts.and_then(|m| m.get(activity).copied()).unwrap_or(0);
+                            // 28-day rolling industry system cost index (`sqrt(system_work / universe_work)`, `0.0` when idle)
+                            let cost_index = if total == 0 || work == 0 {
+                                0.0
+                            } else {
+                                ((work as f64) / (total as f64)).sqrt()
+                            };
+                            json!({
                                 "activity": activity,
                                 "cost_index": cost_index,
-                            }))
+                            })
                         })
                         .collect();
                     json!({

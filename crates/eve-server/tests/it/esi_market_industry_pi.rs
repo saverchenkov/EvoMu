@@ -1123,6 +1123,11 @@ async fn test_esi6_industry_and_mining_routes() {
 
     let systems = get_json(&router, &spec, "/v1/industry/systems/", None);
     let sys_arr = systems.as_array().unwrap();
+    assert_eq!(
+        sys_arr.len(),
+        ctx.sde.solar_systems.len(),
+        "GET /industry/systems must return cost indices for every SDE solar system"
+    );
     let jita_sys = sys_arr
         .iter()
         .find(|s| s["solar_system_id"] == json!(30_000_142))
@@ -1148,6 +1153,18 @@ async fn test_esi6_industry_and_mining_routes() {
         .expect("Perimeter manufacturing index");
     let perim_val = perim_ci["cost_index"].as_f64().unwrap();
     assert!((perim_val - 0.5).abs() < 1e-6, "Perimeter cost index must match sqrt(0.25) = 0.5");
+
+    let idle_sys = sys_arr
+        .iter()
+        .find(|s| s["solar_system_id"] == json!(30_002_187)) // Amarr (no jobs seeded)
+        .expect("Amarr idle industry cost indices");
+    let idle_mfg = idle_sys["cost_indices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|ci| ci["activity"] == json!("manufacturing"))
+        .expect("Amarr manufacturing index");
+    assert_eq!(idle_mfg["cost_index"], json!(0.0), "Systems without recent jobs report 0.0 cost_index");
 
     let char_jobs = get_json(
         &router,

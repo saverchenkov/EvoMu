@@ -34,7 +34,7 @@ pub(crate) struct EwarCapitalPrep {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn prepare_ewar_and_capital_module(
     ctx: &ServerContext,
-    sys: &crate::system_actor::SystemHandle, _sys_id: u32,
+    sys: &crate::system_actor::SystemHandle, sys_id: u32,
     char_id: i64,
     ship_id: i64,
     ship_group_id: u32,
@@ -349,6 +349,9 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                             message: "Cannot activate warp disruptor/scrambler on self".into(),
                         }));
                     }
+                    let scram_eval = eve_dogma::eval_warp_scrambler_effects(&[&mod_state], &[0.0], &ctx.sde);
+                    warp_scramble_points = scram_eval.scramble_strength.max(1);
+                    disables_target_mwd_mjd = scram_eval.blocks_mwd;
                     let mut max_range = mod_state.get_attribute(attr_ids::MAX_RANGE, &ctx.sde);
                     if max_range <= 0.0 {
                         max_range = mod_type.default_attributes.get(&54).copied().unwrap_or(20_000.0);
@@ -359,6 +362,11 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                     if is_overloaded && !has_cat5_overload {
                         let ov_bonus = mod_type.default_attributes.get(&1208).copied().unwrap_or(20.0);
                         max_range *= 1.0 + ov_bonus / 100.0;
+                    }
+                    if disables_target_mwd_mjd {
+                        max_range *= crate::services::security_mgr::insurgency_suppression_web_scram_range_multiplier(
+                            ctx, char_id, sys_id,
+                        );
                     }
                     if let (Ok(Some((_, ship_ball))), Ok(Some((_, target_ball)))) = (
                         sys.get_ball_snapshot(ship_id).await,
@@ -374,9 +382,6 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                             }));
                         }
                     }
-                    let scram_eval = eve_dogma::eval_warp_scrambler_effects(&[&mod_state], &[0.0], &ctx.sde);
-                    warp_scramble_points = scram_eval.scramble_strength.max(1);
-                    disables_target_mwd_mjd = scram_eval.blocks_mwd;
                 }
 
                 // SDE attribute `3265` (`activationRequiresActiveIndustrialCore`, e.g. Shipboard Compressors `group_id == 4174`):
@@ -519,6 +524,15 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         let mut max_range = mod_state.get_attribute(attr_ids::MAX_RANGE, &ctx.sde);
                         if max_range <= 0.0 {
                             max_range = mod_type.default_attributes.get(&54).copied().unwrap_or(10_000.0);
+                        }
+                        if mod_type.group_id == 65 {
+                            let web_range_mult = crate::services::security_mgr::insurgency_suppression_web_scram_range_multiplier(
+                                ctx, char_id, sys_id,
+                            );
+                            if web_range_mult > 1.0 {
+                                max_range *= web_range_mult;
+                                proj_mod_state.base_attributes.insert(54, max_range);
+                            }
                         }
                         let falloff = mod_state
                             .get_attribute(2044, &ctx.sde)

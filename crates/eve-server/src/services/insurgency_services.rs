@@ -377,7 +377,7 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
         let s_stage = insurgency_stage(c.suppression_points.get(&sys_id).copied().unwrap_or(0));
         let eff_pts = if s_stage >= 3 && points > 0 { ((points as f64) * 0.70).round() as i64 } else { points };
         let new_pts = (*p + eff_pts).max(0);
-        *p = if s_stage >= 5 { new_pts.min(800) } else { new_pts };
+        *p = if s_stage >= 5 && prev_stage < 5 { new_pts.min(800) } else { new_pts };
         let s = insurgency_stage(*p);
         (*p, prev_stage, s, c.pirate_faction_id, active, in_act)
     });
@@ -1128,6 +1128,8 @@ async fn evaluate_system_fw_complex_tick(
             let n_pilots = pilot_cids.len().max(1) as i64;
             let lp_each = total_lp_awarded / n_pilots;
             for &(cid, pfid) in &pilot_cids {
+                let mult = crate::services::security_mgr::insurgency_suppression_empire_lp_multiplier(ctx, sys_id, pfid);
+                let final_lp = ((lp_each as f64) * mult).round() as i64;
                 if let Some(ch) = snap.characters.get_mut(&cid) {
                     let militia_corp = ctx
                         .sde
@@ -1136,7 +1138,7 @@ async fn evaluate_system_fw_complex_tick(
                         .and_then(|f| f.militia_corporation_id)
                         .map(|c| c as i64)
                         .unwrap_or(pfid);
-                    *ch.loyalty_points.entry(militia_corp).or_insert(0) += lp_each;
+                    *ch.loyalty_points.entry(militia_corp).or_insert(0) += final_lp;
                 }
             }
             let mut new_sys_contested = None;

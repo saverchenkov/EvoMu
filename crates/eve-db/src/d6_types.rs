@@ -271,6 +271,8 @@ pub struct PersistedFwState {
     #[serde(default)]
     pub battlefield_participants: HashMap<i64, Vec<i64>>,
     #[serde(default)]
+    pub battlefield_pilot_seconds: HashMap<i64, HashMap<i64, u64>>,
+    #[serde(default)]
     pub battlefield_waves: HashMap<i64, u32>,
     #[serde(default)]
     pub battlefield_respawn_unix: HashMap<u32, u64>,

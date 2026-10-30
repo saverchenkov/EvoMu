@@ -385,14 +385,14 @@ pub fn is_concord_suppressed_in_system(ctx: &ServerContext, solar_system_id: Sol
     crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, solar_system_id) >= 5
 }
 
-/// Returns whether gate and station sentry guns are disabled in the solar system (Insurgency Corruption Stage 3+ in low-sec, unless Suppression Stage 5+).
+/// Returns whether gate and station sentry guns are disabled in the solar system
+/// (Insurgency Corruption Stage 5 in low-sec, unless Counter-Insurgency Sentry Guns are active).
 pub fn is_sentry_disabled_by_corruption(ctx: &ServerContext, solar_system_id: SolarSystemId) -> bool {
     let sys_sec = ctx.sde.solar_systems.get(&solar_system_id).map(|s| s.security_status).unwrap_or(0.0);
-    let supp = crate::services::security_mgr::insurgency_system_suppression_stage(ctx, solar_system_id);
     0.0 < sys_sec
         && sys_sec < 0.45
-        && crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, solar_system_id) >= 3
-        && supp < 5
+        && crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, solar_system_id) >= 5
+        && !crate::services::security_mgr::has_active_counter_insurgency_sentries(ctx, solar_system_id)
 }
 
 /// Returns whether Empire Navy / Faction Police patrols are suppressed (Insurgency Corruption Stage 2+).

@@ -930,7 +930,8 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
                 _ => 15_000,
             };
             let (status, _, _, _) = get_system_frontline_rules(ctx, sys_id);
-            let total_lp = calculate_fw_lp_reward(base_lp, status);
+            let supp_lp_mult = crate::services::security_mgr::insurgency_suppression_empire_lp_multiplier(ctx, sys_id, first_fac);
+            let total_lp = ((calculate_fw_lp_reward(base_lp, status) as f64) * supp_lp_mult).round() as i64;
             let per_pilot_lp = total_lp / (present.len().max(1) as i64);
             let lp_corp = militia_lp_corp_id(&ctx.sde, first_fac);
             let net_adv = (my_adv - their_adv).max(0.0);
@@ -1116,6 +1117,10 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
         if all_on_grid.is_empty() {
             continue;
         }
+        let last_step = ctx.db.with_snapshot(|s| {
+            s.fw_runtime.complex_last_step_unix.get(&bf_id).copied().unwrap_or(now_unix)
+        });
+        let dt = now_unix.saturating_sub(last_step).max(1);
         let mut zones = [0i64; 3];
         for zi in 0..3 {
             let zpos_cel = DVec3::from_array(sys_zones[zi]);
@@ -1136,6 +1141,10 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
         let enemy_held = zones.iter().filter(|&&z| z == enemy_fac).count();
         if occ_held == enemy_held {
             ctx.db.with_mut_snapshot(|snap| {
+                let sec_map = snap.fw_runtime.battlefield_pilot_seconds.entry(bf_id).or_default();
+                for &(cid, _) in &all_on_grid {
+                    *sec_map.entry(cid).or_insert(0) += dt;
+                }
                 snap.fw_runtime.battlefield_zones.insert(bf_id, zones);
                 snap.fw_runtime.complex_last_step_unix.insert(bf_id, now_unix);
             });
@@ -1151,19 +1160,25 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
             .filter(|&&(_, f)| f == lead_fac)
             .map(|&(cid, _)| cid)
             .collect();
-        winning_pilots.sort_unstable();
-        let last_step = ctx.db.with_snapshot(|s| {
-            s.fw_runtime.complex_last_step_unix.get(&bf_id).copied().unwrap_or(now_unix)
-        });
-        let dt = now_unix.saturating_sub(last_step).max(1);
         let (occ_adv, att_adv) = ctx
             .db
             .with_snapshot(|s| s.fw_runtime.system_advantage.get(&sys_id).copied())
             .unwrap_or((0.0, 0.0));
         let (my_adv, their_adv) = if lead_fac == occ_fac { (occ_adv, att_adv) } else { (att_adv, occ_adv) };
         let speed_mult = calculate_capture_speed_multiplier(my_adv, their_adv);
+        // DERIVED (synthetic): baseline 900s (15 min) full-zone Battlefield capture timer.
         let delta_pct = ((dt as f64) * (net_held as f64) * speed_mult / 900.0 * 100.0).clamp(0.1, 100.0);
         let done_bf = ctx.db.with_mut_snapshot(|snap| {
+            let sec_map = snap.fw_runtime.battlefield_pilot_seconds.entry(bf_id).or_default();
+            for &(cid, _) in &all_on_grid {
+                *sec_map.entry(cid).or_insert(0) += dt;
+            }
+            // Rank winning pilots by cumulative time contributed on the Battlefield grid (`Faction_warfare.md:221`).
+            winning_pilots.sort_by(|a, b| {
+                let a_sec = sec_map.get(a).copied().unwrap_or(0);
+                let b_sec = sec_map.get(b).copied().unwrap_or(0);
+                b_sec.cmp(&a_sec).then_with(|| a.cmp(b))
+            });
             snap.fw_runtime.complex_last_step_unix.insert(bf_id, now_unix);
             let Some(pos) = snap
                 .fw_runtime
@@ -1207,16 +1222,20 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
         });
         if done_bf {
             let n = winning_pilots.len().max(1);
-            let per_pilot_lp = if n <= BATTLEFIELD_MAX_FULL_PAYOUT_PILOTS {
+            let raw_per_pilot_lp = if n <= BATTLEFIELD_MAX_FULL_PAYOUT_PILOTS {
                 BATTLEFIELD_MAX_PILOT_LP
             } else {
                 (BATTLEFIELD_MAX_PILOT_LP * (BATTLEFIELD_MAX_FULL_PAYOUT_PILOTS as i64)) / (n as i64)
             };
+            let supp_lp_mult = crate::services::security_mgr::insurgency_suppression_empire_lp_multiplier(ctx, sys_id, lead_fac);
+            let per_pilot_lp = ((raw_per_pilot_lp as f64) * supp_lp_mult).round() as i64;
             let lp_corp = militia_lp_corp_id(&ctx.sde, lead_fac);
             let per_pilot_vp = (2_000 / (n as i64)).max(1);
             let cleanup_npcs = ctx.db.with_mut_snapshot(|snap| {
+                snap.fw_runtime.battlefield_pilot_seconds.remove(&bf_id);
                 for &cid in winning_pilots.iter().take(BATTLEFIELD_MAX_FULL_PAYOUT_PILOTS) {
                     let social_lvl = snap.skills.get(&cid).and_then(|m| m.get(&3355u32)).map(|s| s.level.min(5)).unwrap_or(0);
+                    // DERIVED (synthetic): baseline 0.15 raw standing gain before Social skill multiplier.
                     let scaled_st = 0.15 * (1.0 + 0.05 * (social_lvl as f64));
                     if let Some(ch) = snap.characters.get_mut(&cid) {
                         let cur_fac_st = ch.standings.get(&lead_fac).copied().unwrap_or(0.0);

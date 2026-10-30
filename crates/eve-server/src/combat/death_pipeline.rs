@@ -168,6 +168,14 @@ pub fn execute_death_pipeline_sync_inner(
         230_000.0
     };
 
+    let drop_threshold = crate::services::security_mgr::insurgency_pvp_loot_drop_threshold(
+        ctx,
+        sys_id,
+        attacker_char_id,
+        victim_char_id,
+        is_self_destruct,
+    );
+
     let (
         wreck_item_id,
         dropped_ids,
@@ -321,14 +329,6 @@ pub fn execute_death_pipeline_sync_inner(
         let mut dropped_km = Vec::new();
         let mut destroyed_km = Vec::new();
         let mut items_isk = 0.0;
-
-        let is_pochven = ctx
-            .sde
-            .solar_systems
-            .get(&sys_id)
-            .map(|s| s.region_id == 10_000_070)
-            .unwrap_or(false);
-        let drop_threshold = if is_pochven { 0.60 } else { 0.50 };
 
         for iid in child_item_ids {
             let Some(item_snap) = snap.items.get(&iid).cloned() else {

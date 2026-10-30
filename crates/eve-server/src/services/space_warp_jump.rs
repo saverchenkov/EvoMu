@@ -11,7 +11,7 @@ use glam::DVec3;
 use std::collections::HashMap;
 
 use super::{
-    check_session_change_timer_active, compute_ship_warp_speed_au_s,
+    check_session_change_timer_active, compute_pilot_warp_speed_au_s,
     record_session_change_timer, sync_ship_cloak_and_mjfg_from_fitting,
     wormhole_item_id_for_signature, AU_IN_METERS,
 };
@@ -475,7 +475,7 @@ async fn handle_cmd_warp_to_stuff(
         );
     }
 
-    let warp_speed = compute_ship_warp_speed_au_s(ctx, current_ball.type_id);
+    let warp_speed = compute_pilot_warp_speed_au_s(ctx, char_id, sys_id, current_ball.type_id);
     let mode = MovementMode::new_warp(current_ball.position, dest_pos, warp_speed);
     if !is_covert_cloaked {
         let _ = handle.break_gate_cloak(ship_id).await;
