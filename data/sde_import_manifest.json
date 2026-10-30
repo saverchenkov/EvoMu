@@ -42,6 +42,7 @@
     "sde_solar_systems": 8490,
     "sde_space_components": 11238,
     "sde_stargates": 13978,
+    "sde_stars": 8089,
     "sde_station_operations": 69,
     "sde_station_services": 27,
     "sde_stations": 5210,
@@ -56,7 +57,7 @@
       "cdn_relative_path": "f7/f781e479bccfd00e_9bfa3342a109a5a30b7523af734daee5",
       "md5": "9bfa3342a109a5a30b7523af734daee5",
       "byte_size": 44737417,
-      "format": "Pickle/Binary",
+      "format": "Pickle (protocol 0)",
       "record_count": 305231
     },
     {
@@ -64,7 +65,7 @@
       "cdn_relative_path": "2c/2c3038b3c38e91a1_7a753c9da2eeca4dcc7cf0c6655aaae0",
       "md5": "7a753c9da2eeca4dcc7cf0c6655aaae0",
       "byte_size": 40753078,
-      "format": "Pickle/Binary",
+      "format": "Pickle (protocol 0)",
       "record_count": 308657
     },
     {
@@ -72,7 +73,7 @@
       "cdn_relative_path": "68/68766cf9c7eb3001_07b96ab4740f9b89347549f432a09228",
       "md5": "07b96ab4740f9b89347549f432a09228",
       "byte_size": 44059431,
-      "format": "Pickle/Binary",
+      "format": "Pickle (protocol 0)",
       "record_count": 305229
     },
     {
@@ -80,7 +81,7 @@
       "cdn_relative_path": "4a/4a0f5fe70b667169_eac42d7449d6083400e4da35ee998a03",
       "md5": "eac42d7449d6083400e4da35ee998a03",
       "byte_size": 46429727,
-      "format": "Pickle/Binary",
+      "format": "Pickle (protocol 0)",
       "record_count": 305234
     },
     {
@@ -88,7 +89,7 @@
       "cdn_relative_path": "9f/9f056f7130bc9bf8_2bafd91c1bc13ff34c615e5536baa74a",
       "md5": "2bafd91c1bc13ff34c615e5536baa74a",
       "byte_size": 1711389,
-      "format": "Pickle/Binary",
+      "format": "Pickle (protocol 0)",
       "record_count": 7452
     },
     {
@@ -96,7 +97,7 @@
       "cdn_relative_path": "82/82afc4ce93a0dc14_f401a04fc2313a2090e836d726245bec",
       "md5": "f401a04fc2313a2090e836d726245bec",
       "byte_size": 86414823,
-      "format": "Pickle/Binary",
+      "format": "Pickle (protocol 0)",
       "record_count": 305234
     },
     {
@@ -104,7 +105,7 @@
       "cdn_relative_path": "f5/f5467fdb71de5d33_dc47cdaba73e5d3d58c2ba748fabe71a",
       "md5": "dc47cdaba73e5d3d58c2ba748fabe71a",
       "byte_size": 71125744,
-      "format": "Pickle/Binary",
+      "format": "Pickle (protocol 0)",
       "record_count": 305231
     },
     {
@@ -112,7 +113,7 @@
       "cdn_relative_path": "79/79a473897ae5f3b0_ee8726670ad947c75d7048f30acc9b35",
       "md5": "ee8726670ad947c75d7048f30acc9b35",
       "byte_size": 3344947,
-      "format": "Pickle/Binary",
+      "format": "Pickle (protocol 0)",
       "record_count": 4
     },
     {
@@ -120,7 +121,7 @@
       "cdn_relative_path": "4c/4c56e191aaa0e618_baede863986025489fe8970f0ab38ee5",
       "md5": "baede863986025489fe8970f0ab38ee5",
       "byte_size": 153500626,
-      "format": "Pickle/Binary",
+      "format": "Pickle (protocol 0)",
       "record_count": 305234
     },
     {
@@ -128,7 +129,7 @@
       "cdn_relative_path": "87/87bfc3b6eab5e5d3_468af73100512587c6eab7ea5a1528ca",
       "md5": "468af73100512587c6eab7ea5a1528ca",
       "byte_size": 61334886,
-      "format": "Pickle/Binary",
+      "format": "Pickle (protocol 0)",
       "record_count": 305235
     },
     {
@@ -160,7 +161,7 @@
       "cdn_relative_path": "52/52aa9d2bb7c9b6c3_0bc063a1b83ae2834f1d9fd3ef1f8a38",
       "md5": "0bc063a1b83ae2834f1d9fd3ef1f8a38",
       "byte_size": 7854,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 68
     },
     {
@@ -216,7 +217,7 @@
       "cdn_relative_path": "51/5129461fccd30475_37125cf3e730bd50495239a6cda04879",
       "md5": "37125cf3e730bd50495239a6cda04879",
       "byte_size": 3974962,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 40928
     },
     {
@@ -224,7 +225,7 @@
       "cdn_relative_path": "56/56135192ce1df942_1fae79ec0c78e7682b8ec1309af2dec7",
       "md5": "1fae79ec0c78e7682b8ec1309af2dec7",
       "byte_size": 91153,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 1221
     },
     {
@@ -232,7 +233,7 @@
       "cdn_relative_path": "3f/3f555d74faee466f_8f9f9b1e28c0670a443b630c6408c590",
       "md5": "8f9f9b1e28c0670a443b630c6408c590",
       "byte_size": 96712,
-      "format": "Pickle/Binary",
+      "format": "Pickle (protocol 2)",
       "record_count": 3974
     },
     {
@@ -288,7 +289,7 @@
       "cdn_relative_path": "c5/c5b749387d56555f_d7128aa3e2572d1372afecf6d819f5b8",
       "md5": "d7128aa3e2572d1372afecf6d819f5b8",
       "byte_size": 131702,
-      "format": "Pickle/Binary",
+      "format": "Pickle (protocol 2)",
       "record_count": 1715
     },
     {
@@ -296,7 +297,7 @@
       "cdn_relative_path": "b1/b1cdddf09f0c7cfe_1352c0194023fdd015ec6123bdee6cea",
       "md5": "1352c0194023fdd015ec6123bdee6cea",
       "byte_size": 18455,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 166
     },
     {
@@ -304,7 +305,7 @@
       "cdn_relative_path": "5b/5b05ef4feeb6e553_9807224845f886a08d8da797ca121d9c",
       "md5": "9807224845f886a08d8da797ca121d9c",
       "byte_size": 754,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 7
     },
     {
@@ -312,7 +313,7 @@
       "cdn_relative_path": "19/191f6d893742b1ae_80c2635242d5cee2cd63bb54f9b0a9d9",
       "md5": "80c2635242d5cee2cd63bb54f9b0a9d9",
       "byte_size": 9394,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 547
     },
     {
@@ -320,7 +321,7 @@
       "cdn_relative_path": "b8/b8efe23150d6f26f_4da9229279bd4f27d35cd244598b440c",
       "md5": "4da9229279bd4f27d35cd244598b440c",
       "byte_size": 20178,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 1221
     },
     {
@@ -344,7 +345,7 @@
       "cdn_relative_path": "a8/a8ae8f1d778dfd07_5a4326db67028b6cf56e9df3ec90d560",
       "md5": "5a4326db67028b6cf56e9df3ec90d560",
       "byte_size": 161213,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 2
     },
     {
@@ -480,7 +481,7 @@
       "cdn_relative_path": "dc/dc4537f14a470d58_c776a184212daafc1e61ba1d1ab785c6",
       "md5": "c776a184212daafc1e61ba1d1ab785c6",
       "byte_size": 1340,
-      "format": "Pickle/Binary",
+      "format": "FSD Schema (YAML text)",
       "record_count": 4
     },
     {
@@ -488,7 +489,7 @@
       "cdn_relative_path": "f5/f5d54e32f23ee5df_3e823eedee3555ba314029c22bdfba10",
       "md5": "3e823eedee3555ba314029c22bdfba10",
       "byte_size": 135948,
-      "format": "SQLite3",
+      "format": "FSD Static (external .schema)",
       "record_count": 1184
     },
     {
@@ -608,7 +609,7 @@
       "cdn_relative_path": "d5/d5253e6ff4a2df5b_8ed318cffe6d5b1983ee5ea2c84dae6b",
       "md5": "8ed318cffe6d5b1983ee5ea2c84dae6b",
       "byte_size": 1517,
-      "format": "Pickle/Binary",
+      "format": "FSD Schema (YAML text)",
       "record_count": 4
     },
     {
@@ -616,7 +617,7 @@
       "cdn_relative_path": "e9/e9bad7ecd80e0d2c_fb291004ed6c80d8373b53391f0fd9c6",
       "md5": "fb291004ed6c80d8373b53391f0fd9c6",
       "byte_size": 317606,
-      "format": "SQLite3",
+      "format": "FSD Static (external .schema)",
       "record_count": 4223
     },
     {
@@ -680,7 +681,7 @@
       "cdn_relative_path": "95/95650c82aea077eb_033f8112da73bd30a482e6a9a8ee1ec7",
       "md5": "033f8112da73bd30a482e6a9a8ee1ec7",
       "byte_size": 182032,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 2036
     },
     {
@@ -712,7 +713,7 @@
       "cdn_relative_path": "8b/8bb48b7947ab7ea7_4ef3848576ee65c37fce2f483859c55a",
       "md5": "4ef3848576ee65c37fce2f483859c55a",
       "byte_size": 2619,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 4
     },
     {
@@ -720,7 +721,7 @@
       "cdn_relative_path": "5f/5f2973e92a3191b1_cc8169e8fbc5c9b5f6bc2e138d41181f",
       "md5": "cc8169e8fbc5c9b5f6bc2e138d41181f",
       "byte_size": 6738,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 4
     },
     {
@@ -776,7 +777,7 @@
       "cdn_relative_path": "66/66dae4782388f4d1_c8b6d8793008779b495dafcf88ae7595",
       "md5": "c8b6d8793008779b495dafcf88ae7595",
       "byte_size": 968,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 8
     },
     {
@@ -784,7 +785,7 @@
       "cdn_relative_path": "3c/3c57682eb33ab10a_4e2c9c1feed3a0a9724e494688be16e5",
       "md5": "4e2c9c1feed3a0a9724e494688be16e5",
       "byte_size": 3869,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 72
     },
     {
@@ -824,7 +825,7 @@
       "cdn_relative_path": "c1/c10f44d1ce306124_b55d2c3320b5cf290d797a8f189b00a1",
       "md5": "b55d2c3320b5cf290d797a8f189b00a1",
       "byte_size": 63,
-      "format": "Pickle/Binary",
+      "format": "FSD Schema (YAML text)",
       "record_count": 3
     },
     {
@@ -832,7 +833,7 @@
       "cdn_relative_path": "26/26fb3354a09a654b_346fbb14c8ea54c681a876d0a6cbe27c",
       "md5": "346fbb14c8ea54c681a876d0a6cbe27c",
       "byte_size": 92,
-      "format": "SQLite3",
+      "format": "FSD Static (external .schema)",
       "record_count": 22
     },
     {
@@ -856,7 +857,7 @@
       "cdn_relative_path": "59/5931efb3ede7c85f_cfb897bbf828bf286069bd78caa366e8",
       "md5": "cfb897bbf828bf286069bd78caa366e8",
       "byte_size": 1958,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 83
     },
     {
@@ -936,7 +937,7 @@
       "cdn_relative_path": "1a/1ac8dd4d3c719375_28a606d1706d89e74eac9627776dbbf4",
       "md5": "28a606d1706d89e74eac9627776dbbf4",
       "byte_size": 1114,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 21
     },
     {
@@ -1008,7 +1009,7 @@
       "cdn_relative_path": "be/be19906f46baf67b_f367b13a63d72c8f0996640650c64aaf",
       "md5": "f367b13a63d72c8f0996640650c64aaf",
       "byte_size": 939,
-      "format": "Pickle/Binary",
+      "format": "FSD Schema (YAML text)",
       "record_count": 3
     },
     {
@@ -1016,7 +1017,7 @@
       "cdn_relative_path": "cf/cf4829ec2741484c_ee3d12afbd4c05d628e0fb497aec990c",
       "md5": "ee3d12afbd4c05d628e0fb497aec990c",
       "byte_size": 454289,
-      "format": "SQLite3",
+      "format": "FSD Static (external .schema)",
       "record_count": 6989
     },
     {
@@ -1024,7 +1025,7 @@
       "cdn_relative_path": "7b/7b0ffe28ecdd847c_00f9d98b246c5c80f11cc6a15acb0314",
       "md5": "00f9d98b246c5c80f11cc6a15acb0314",
       "byte_size": 4772,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 45
     },
     {
@@ -1032,7 +1033,7 @@
       "cdn_relative_path": "77/7720ad06644c124a_e04d46f1623cbd9d95cbe396740a34a1",
       "md5": "e04d46f1623cbd9d95cbe396740a34a1",
       "byte_size": 5773406,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 481068
     },
     {
@@ -1232,7 +1233,7 @@
       "cdn_relative_path": "2c/2ca016d009870be6_7ccd58c48605109b492fa98dee34f0d3",
       "md5": "7ccd58c48605109b492fa98dee34f0d3",
       "byte_size": 24674,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 1120
     },
     {
@@ -1272,7 +1273,7 @@
       "cdn_relative_path": "a0/a057c0dcdeca3386_7209c6fc6f30a30ed6ea2ff7ec1908fb",
       "md5": "7209c6fc6f30a30ed6ea2ff7ec1908fb",
       "byte_size": 4892,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 44
     },
     {
@@ -1280,7 +1281,7 @@
       "cdn_relative_path": "43/430e26349e9d74c6_ba6e2f099c8421e441093c4947f8038f",
       "md5": "ba6e2f099c8421e441093c4947f8038f",
       "byte_size": 1302,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 14
     },
     {
@@ -1328,7 +1329,7 @@
       "cdn_relative_path": "32/32a12daa100b47f7_babc6a072c8e31fbebb91d994e386730",
       "md5": "babc6a072c8e31fbebb91d994e386730",
       "byte_size": 1606,
-      "format": "Pickle/Binary",
+      "format": "FSD Schema (YAML text)",
       "record_count": 4
     },
     {
@@ -1336,7 +1337,7 @@
       "cdn_relative_path": "a7/a74cde5df2632168_923dafe7fcfcf122b65e55bfe4974298",
       "md5": "923dafe7fcfcf122b65e55bfe4974298",
       "byte_size": 55704,
-      "format": "SQLite3",
+      "format": "FSD Static (external .schema)",
       "record_count": 114
     },
     {
@@ -1400,7 +1401,7 @@
       "cdn_relative_path": "24/24474807f98fc1b3_72547dc56a2cf7b5f813c6f04695a54b",
       "md5": "72547dc56a2cf7b5f813c6f04695a54b",
       "byte_size": 4231,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 66
     },
     {
@@ -1504,7 +1505,7 @@
       "cdn_relative_path": "e5/e5b0e5113c1cbb71_93b6f9285d2c7757f0c1a9292213c845",
       "md5": "93b6f9285d2c7757f0c1a9292213c845",
       "byte_size": 594,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 0
     },
     {
@@ -1552,7 +1553,7 @@
       "cdn_relative_path": "33/33c83a8c56c485e6_2ddb08422c48a5a0b7eabcece1e2fcf0",
       "md5": "2ddb08422c48a5a0b7eabcece1e2fcf0",
       "byte_size": 92396316,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 8490
     },
     {
@@ -1584,7 +1585,7 @@
       "cdn_relative_path": "2e/2edadfca55978bdf_a9831434566044a0d64837669f38e3ba",
       "md5": "a9831434566044a0d64837669f38e3ba",
       "byte_size": 2165420,
-      "format": "Pickle/Binary",
+      "format": "Pickle (protocol 2)",
       "record_count": 4
     },
     {
@@ -1624,7 +1625,7 @@
       "cdn_relative_path": "1a/1a31efa2cdd92948_9e8ab2ea8cf0826c28a0eff4795c3433",
       "md5": "9e8ab2ea8cf0826c28a0eff4795c3433",
       "byte_size": 3210,
-      "format": "Pickle/Binary",
+      "format": "FSD Schema (YAML text)",
       "record_count": 4
     },
     {
@@ -1632,7 +1633,7 @@
       "cdn_relative_path": "89/893086ea542ec98f_040b16dee14ada60b51dbc0cc5560606",
       "md5": "040b16dee14ada60b51dbc0cc5560606",
       "byte_size": 1906081,
-      "format": "SQLite3",
+      "format": "FSD Static (external .schema)",
       "record_count": 8490
     },
     {
@@ -1656,7 +1657,7 @@
       "cdn_relative_path": "a7/a7048f8eb5a56a96_7e21f34b429d98dcb5a140e64301cd93",
       "md5": "7e21f34b429d98dcb5a140e64301cd93",
       "byte_size": 3199,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 51
     },
     {
@@ -1752,7 +1753,7 @@
       "cdn_relative_path": "3e/3ea8ef56a0e4ccc0_bd053df953208b60f5ec6d2b298be731",
       "md5": "bd053df953208b60f5ec6d2b298be731",
       "byte_size": 15756,
-      "format": "SQLite3",
+      "format": "FSD Static (pickled schema header)",
       "record_count": 294
     }
   ]

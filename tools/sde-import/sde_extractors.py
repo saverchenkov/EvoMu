@@ -324,7 +324,15 @@ for tid, tm in typemats_raw.iteritems():
     if tm.materials:
         for m in tm.materials:
             mats.append({'material_type_id': int(m.materialTypeID), 'quantity': int(m.quantity)})
-    type_materials.append({'type_id': int(tid), 'materials': mats})
+    rand_mats = []
+    if getattr(tm, 'randomizedMaterials', None):
+        for rm in tm.randomizedMaterials:
+            rand_mats.append({
+                'material_type_id': int(rm.materialTypeID),
+                'quantity_min': int(rm.quantityMin),
+                'quantity_max': int(rm.quantityMax),
+            })
+    type_materials.append({'type_id': int(tid), 'materials': mats, 'randomized_materials': rand_mats})
 
 # 3. Map: regions, constellations, systems, jumps, solarsystemcontent (stargates & planets)
 regions_raw = load_static_with_schema('regions')

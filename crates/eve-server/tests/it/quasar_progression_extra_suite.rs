@@ -144,27 +144,15 @@ async fn quasar_achievements_categories_scores_and_claims() {
         .iter()
         .find(|f| f.field_number == 1)
         .and_then(|f| f.value.as_varint());
-    assert!(total_score.unwrap_or(0) > 0, "Character score should be > 0");
+    assert_eq!(total_score.unwrap_or(0), 0, "DATA GAP: score is 0 without CDN checkpoints");
 
-    let unclaimed_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.achievement.reward.api.GetUnclaimedRequest",
-        Vec::new(),
-    )
-    .await;
+    let unclaimed_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.reward.api.GetUnclaimedRequest", Vec::new()).await;
     assert_eq!(unclaimed_rsp.status_code, STATUS_OK);
 
     let mut claim_bytes = Vec::new();
-    eve_proto::quasar::encode_varint_field(3, 1, &mut claim_bytes); // all_rewards = true
-    let claim_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.achievement.reward.api.ClaimRequest",
-        claim_bytes,
-    )
-    .await;
-    assert_eq!(claim_rsp.status_code, STATUS_OK, "claim_rsp failed: {}", claim_rsp.status_message);
+    eve_proto::quasar::encode_varint_field(3, 1, &mut claim_bytes);
+    let claim_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.reward.api.ClaimRequest", claim_bytes).await;
+    assert_eq!(claim_rsp.status_code, eve_server::quasar_gateway::STATUS_PRECONDITION_FAILED);
 
     let reset_rsp = quasar_rpc(
         &ctx,
@@ -211,7 +199,13 @@ async fn quasar_community_progression_tales_and_goals() {
         .take_stream_receiver(sess.session_id)
         .expect("take_stream_receiver");
 
-    let track_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.communitytrack.api.GetRequest", make_sequential_id_request(1)).await;
+    // Unactivated SDE template 1 is not pre-populated as an active instance
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.communitytrack.api.GetRequest", make_sequential_id_request(1)).await.status_code, 404);
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.communitytrack.api.StartRequest", make_sequential_id_request(1)).await.status_code, STATUS_OK);
+    let tid = ctx.quasar_gateway.progression.extra.community_tracks.read().unwrap().values().find(|t| t.template_id == 1).map(|t| t.track_id).expect("activated track instance");
+    assert_ne!(tid, 1, "active track instance ID must differ from template_id");
+
+    let track_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.communitytrack.api.GetRequest", make_sequential_id_request(tid)).await;
     assert_eq!(track_rsp.status_code, STATUS_OK, "track_rsp failed: {}", track_rsp.status_message);
     assert_eq!(track_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve_public.communitytrack.api.GetResponse");
     let track_wm = WireMessage::decode(&track_rsp.payload.unwrap().value).expect("decode track GetResponse");
@@ -220,72 +214,56 @@ async fn quasar_community_progression_tales_and_goals() {
     assert_eq!(track_def_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()), Some(1));
     assert_eq!(track_attr_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()).unwrap_or(0), 0);
 
-    let def_rsp = quasar_rpc(&ctx, &mut sess, "eve.communitytrack.api.GetRequest", make_sequential_id_request(1)).await;
+    let def_rsp = quasar_rpc(&ctx, &mut sess, "eve.communitytrack.api.GetRequest", make_sequential_id_request(tid)).await;
     assert_eq!(def_rsp.status_code, STATUS_OK);
     assert_eq!(def_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve.communitytrack.api.GetResponse");
 
-    let mut add_prog_req = make_sequential_id_request(1);
+    let mut add_prog_req = make_sequential_id_request(tid);
     eve_proto::quasar::encode_varint_field(2, 25, &mut add_prog_req);
     let prog_rsp = quasar_rpc(&ctx, &mut sess, "eve.communitytrack.api.AddProgressRequest", add_prog_req).await;
     assert_eq!(prog_rsp.status_code, STATUS_OK);
-    let track_after_wm = WireMessage::decode(&quasar_rpc(&ctx, &mut sess, "eve_public.communitytrack.api.GetRequest", make_sequential_id_request(1)).await.payload.unwrap().value).unwrap();
+    let track_after_wm = WireMessage::decode(&quasar_rpc(&ctx, &mut sess, "eve_public.communitytrack.api.GetRequest", make_sequential_id_request(tid)).await.payload.unwrap().value).unwrap();
     let track_after_attr = WireMessage::decode(track_after_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
     assert_eq!(track_after_attr.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(25));
 
     let notifs = drain_notices(&mut stream_rx);
     assert!(!notifs.is_empty(), "Track notice should be emitted");
-    assert_eq!(
-        notifs[0].payload.as_ref().unwrap().normalized_type_name(),
-        "eve_public.communitytrack.api.ProgressedNotice"
-    );
+    assert_eq!(notifs[0].payload.as_ref().unwrap().normalized_type_name(), "eve_public.communitytrack.api.ProgressedNotice");
 
-    let start_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve.tale.api.StartTaleRequest",
-        make_tale_start(1, 30_000_142),
-    )
-    .await;
+    // Starting Vanguard Nemesis tale 466 emits StartedNotice only (does not advance track); stopping advances track once (+1 -> 26)
+    let start_rsp = quasar_rpc(&ctx, &mut sess, "eve.tale.api.StartTaleRequest", make_tale_start(466, 30_000_142)).await;
     assert_eq!(start_rsp.status_code, STATUS_OK);
     let tale_start_notifs = drain_notices(&mut stream_rx);
     assert_eq!(tale_start_notifs.len(), 1, "StartedNotice should be emitted");
-    assert_eq!(
-        tale_start_notifs[0].payload.as_ref().unwrap().normalized_type_name(),
-        "eve_public.tale.api.StartedNotice"
-    );
+    assert_eq!(tale_start_notifs[0].payload.as_ref().unwrap().normalized_type_name(), "eve_public.tale.api.StartedNotice");
+    assert_eq!(ctx.quasar_gateway.progression.extra.get_community_track(tid).unwrap().current_progress, 25);
 
-    let count_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve.tale.api.GetActiveTalesCountRequest",
-        Vec::new(),
-    )
-    .await;
+    let count_rsp = quasar_rpc(&ctx, &mut sess, "eve.tale.api.GetActiveTalesCountRequest", Vec::new()).await;
     assert_eq!(count_rsp.status_code, STATUS_OK);
-    assert_eq!(
-        count_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve.tale.api.GetActiveTalesCountResponse"
-    );
     let count_wm = WireMessage::decode(&count_rsp.payload.unwrap().value).expect("decode count response");
-    assert_eq!(
-        count_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()),
-        Some(1)
-    );
+    assert_eq!(count_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()), Some(1));
 
-    let stop_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve.tale.api.StopTalesRequest",
-        make_sequential_id_request(1),
-    )
-    .await;
+    let stop_rsp = quasar_rpc(&ctx, &mut sess, "eve.tale.api.StopTalesRequest", make_sequential_id_request(466)).await;
     assert_eq!(stop_rsp.status_code, STATUS_OK);
     let tale_stop_notifs = drain_notices(&mut stream_rx);
-    assert_eq!(tale_stop_notifs.len(), 1, "StoppedNotice should be emitted");
-    assert_eq!(
-        tale_stop_notifs[0].payload.as_ref().unwrap().normalized_type_name(),
-        "eve_public.tale.api.StoppedNotice"
-    );
+    assert_eq!(tale_stop_notifs.len(), 2, "ProgressedNotice + StoppedNotice should be emitted on StopTalesRequest");
+    assert!(tale_stop_notifs.iter().any(|n| n.payload.as_ref().unwrap().normalized_type_name() == "eve_public.tale.api.StoppedNotice"));
+    assert!(tale_stop_notifs.iter().any(|n| n.payload.as_ref().unwrap().normalized_type_name() == "eve_public.communitytrack.api.ProgressedNotice"));
+    assert_eq!(ctx.quasar_gateway.progression.extra.get_community_track(tid).unwrap().current_progress, 26);
+    {
+        let mut tracks = ctx.quasar_gateway.progression.extra.community_tracks.write().unwrap();
+        tracks.get_mut(&tid).unwrap().tale_templates.push(eve_server::services::pve_incursion_sites::INCURSION_TALE_TEMPLATE_ID as u32);
+    }
+    let inc_res = eve_server::services::pve_incursion_sites::IncursionCompletionResult {
+        site_id: "INC-20000001-5158".into(), tier: "Vanguard".into(), fleet_size: 1, fleet_scale_factor: 1.0,
+        isk_per_pilot: 10_000_000, concord_lp_per_pilot: 1000, influence: 0.99,
+        state: "Mobilizing".into(), mothership_spawned: false, incursion_ended: false,
+    };
+    eve_server::services::pve_incursion_sites::notify_incursion_site_completed(&ctx.quasar_gateway, &ctx.db, 30_000_142, &inc_res);
+    assert_eq!(ctx.quasar_gateway.progression.extra.get_community_track(tid).unwrap().current_progress, 27, "Incursion site clear must increment community track once (+1), not double-count");
+    let inc_notifs = drain_notices(&mut stream_rx);
+    assert_eq!(inc_notifs.len(), 1);
+    assert_eq!(inc_notifs[0].payload.as_ref().unwrap().normalized_type_name(), "eve_public.communitytrack.api.ProgressedNotice");
     let count_after_stop = quasar_rpc(
         &ctx,
         &mut sess,
@@ -593,7 +571,7 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
     assert_eq!(call_req(&ctx, &session, "eve_public.achievement.api.admin.CompleteRequest", make_id_request(2), true).status_code, STATUS_OK);
     let mut claim_bytes = Vec::new();
     eve_proto::quasar::encode_varint_field(3, 1, &mut claim_bytes);
-    assert_eq!(call_req(&ctx, &session, "eve_public.achievement.reward.api.ClaimRequest", claim_bytes, true).status_code, STATUS_OK);
+    assert_eq!(call_req(&ctx, &session, "eve_public.achievement.reward.api.ClaimRequest", claim_bytes, true).status_code, eve_server::quasar_gateway::STATUS_PRECONDITION_FAILED);
 
     // 5. Mutate Tales, Career Goals, and Corp Skill Plans before reload
     assert_eq!(call_req(&ctx, &session, "eve.tale.api.StartTaleRequest", make_tale_start(42, 30_000_142), true).status_code, STATUS_OK);
@@ -642,7 +620,8 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
     let r_ach = call_req(&ctx_reloaded, &session, "eve_public.achievement.api.GetRequest", make_id_request(2), true);
     assert_eq!(r_ach.status_code, STATUS_OK, "Achievement GetRequest failed");
     let ach_wm = WireMessage::decode(&r_ach.payload.as_ref().unwrap().value).expect("decode ach");
-    assert_eq!(ach_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(0), "Achievement 2 must be completed");
+    assert!(ach_wm.fields.iter().any(|f| f.field_number == 1), "Achievement 2 must have completed_date set");
+    assert!(ach_wm.fields.iter().all(|f| f.field_number != 2), "Achievement 2 must not emit not_completed when completed");
 
     let r_career = call_req(&ctx_reloaded, &session, "eve_public.app.eveonline.career.goal.GetAllRequest", Vec::new(), true);
     assert_eq!(r_career.status_code, STATUS_OK, "Career GetAllRequest failed");

@@ -8,10 +8,11 @@ use crate::quasar_gateway::{
     STATUS_FORBIDDEN,
 };
 use super::quasar_achievements::{
-    emit_achievement_notices, encode_uuid_ident, AchievementManager,
+    emit_achievement_notices, encode_uuid_ident, extract_u32_ident, extract_u64_val,
+    AchievementManager,
 };
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, DynamicValue, GoogleAny, GoogleEmpty, QuasarMessage,
+    encode_bytes_field, encode_varint_field, GoogleAny, GoogleEmpty, QuasarMessage,
     TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::sync::Arc;
@@ -120,37 +121,18 @@ pub fn register_achievement_admin_handlers(
         let Some(cid) = ctx.effective_character_id() else {
             return Err((STATUS_FORBIDDEN, "Active character required".into()));
         };
-        let aid = dyn_msg
-            .get(1)
-            .and_then(|v| match v {
-                DynamicValue::Uint32(u) => Some(*u),
-                DynamicValue::Int32(i) => Some(*i as u32),
-                DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Bytes(b) if b.len() >= 4 => {
-                        let mut arr = [0u8; 4];
-                        arr.copy_from_slice(&b[b.len() - 4..]);
-                        Some(u32::from_be_bytes(arr))
-                    }
-                    _ => None,
-                }),
-                DynamicValue::Bytes(b) if b.len() >= 4 => {
-                    let mut arr = [0u8; 4];
-                    arr.copy_from_slice(&b[b.len() - 4..]);
-                    Some(u32::from_be_bytes(arr))
-                }
-                _ => None,
-            })
-            .unwrap_or(2);
-        let delta = dyn_msg
-            .get(2)
-            .and_then(|v| match v {
-                DynamicValue::Uint64(u) => Some(*u),
-                DynamicValue::Int64(i) => Some(*i as u64),
-                _ => None,
-            })
-            .unwrap_or(1);
+        let aid = match dyn_msg.get(1) {
+            None => 2,
+            Some(v) => extract_u32_ident(v)
+                .filter(|&id| id > 0)
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid achievement ID".into()))?,
+        };
+        let delta = match dyn_msg.get(2) {
+            None => 1,
+            Some(v) => extract_u64_val(v)
+                .filter(|&d| d > 0)
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid progress delta".into()))?,
+        };
 
         let outcome = mgr_prog.add_progress(cid, aid, delta, ctx.now_unix());
         mgr_prog.save_to_db();
@@ -179,29 +161,12 @@ pub fn register_achievement_admin_handlers(
         let Some(cid) = ctx.effective_character_id() else {
             return Err((STATUS_FORBIDDEN, "Active character required".into()));
         };
-        let aid = dyn_msg
-            .get(1)
-            .and_then(|v| match v {
-                DynamicValue::Uint32(u) => Some(*u),
-                DynamicValue::Int32(i) => Some(*i as u32),
-                DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Bytes(b) if b.len() >= 4 => {
-                        let mut arr = [0u8; 4];
-                        arr.copy_from_slice(&b[b.len() - 4..]);
-                        Some(u32::from_be_bytes(arr))
-                    }
-                    _ => None,
-                }),
-                DynamicValue::Bytes(b) if b.len() >= 4 => {
-                    let mut arr = [0u8; 4];
-                    arr.copy_from_slice(&b[b.len() - 4..]);
-                    Some(u32::from_be_bytes(arr))
-                }
-                _ => None,
-            })
-            .unwrap_or(2);
+        let aid = match dyn_msg.get(1) {
+            None => 2,
+            Some(v) => extract_u32_ident(v)
+                .filter(|&id| id > 0)
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid achievement ID".into()))?,
+        };
         let ach = mgr_comp.mark_completed(cid, aid, ctx.now_unix())?;
         mgr_comp.save_to_db();
 
@@ -234,24 +199,12 @@ pub fn register_achievement_admin_handlers(
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let aid = dyn_msg
-                .get(1)
-                .and_then(|v| match v {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                        DynamicValue::Uint32(u) => Some(*u),
-                        DynamicValue::Int32(i) => Some(*i as u32),
-                        DynamicValue::Bytes(b) if b.len() >= 4 => {
-                            let mut arr = [0u8; 4];
-                            arr.copy_from_slice(&b[b.len() - 4..]);
-                            Some(u32::from_be_bytes(arr))
-                        }
-                        _ => None,
-                    }),
-                    _ => None,
-                })
-                .unwrap_or(2);
+            let aid = match dyn_msg.get(1) {
+                None => 2,
+                Some(v) => extract_u32_ident(v)
+                    .filter(|&id| id > 0)
+                    .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid achievement ID".into()))?,
+            };
             let _ = mgr.reset_achievement(cid, aid)?;
             mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
@@ -281,23 +234,11 @@ pub fn register_achievement_admin_handlers(
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let cat_id = dyn_msg.get(1).and_then(|v| match v {
-                DynamicValue::Uint32(u) => Some(*u),
-                DynamicValue::Int32(i) => Some(*i as u32),
-                DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Bytes(b) if b.len() >= 4 => {
-                        let mut arr = [0u8; 4];
-                        arr.copy_from_slice(&b[b.len() - 4..]);
-                        Some(u32::from_be_bytes(arr))
-                    }
-                    _ => None,
-                }),
-                _ => None,
-            })
-            .filter(|&id| id > 0)
-            .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing category identifier".into()))?;
+            let cat_id = dyn_msg
+                .get(1)
+                .and_then(extract_u32_ident)
+                .filter(|&id| id > 0)
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing category identifier".into()))?;
             mgr_cat_reset.reset_category(cid, cat_id);
 
             let mut cat_prog = Vec::new();

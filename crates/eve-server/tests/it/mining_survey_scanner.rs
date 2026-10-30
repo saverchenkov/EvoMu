@@ -790,12 +790,12 @@ async fn test_mining_crystal_tier_ore_compatibility_and_loading_rules() {
 }
 
 // ====================================================================
-// Test 4: Reprocessing Curves, Scrapmetal & Prismaticite
+// Test 4: NPC Reprocessing Equipment & Standing Tax Curve
 // ====================================================================
 #[tokio::test]
-async fn test_mining_reprocessing_curves_scrapmetal_and_prismaticite() {
-    // parity: feat:mining.npc-reprocessing-equipment-and-tax-curve, feat:mining.scrapmetal-yield-exclusions, feat:mining.prismaticite-reprocessing-and-unrefined-reactions
-    eve_testkit::attest(&["feat:mining.npc-reprocessing-equipment-and-tax-curve", "feat:mining.scrapmetal-yield-exclusions", "feat:mining.prismaticite-reprocessing-and-unrefined-reactions"]);
+async fn test_mining_npc_reprocessing_equipment_and_tax_curve() {
+    // parity: feat:mining.npc-reprocessing-equipment-and-tax-curve
+    eve_testkit::attest(&["feat:mining.npc-reprocessing-equipment-and-tax-curve"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
@@ -825,83 +825,20 @@ async fn test_mining_reprocessing_curves_scrapmetal_and_prismaticite() {
     let quote_high = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "GetQuotes", &[], &kw, None).await.expect("GetQuotes standing 6.67");
     let tax_high = get_dict_val(&quote_high, "stationTaxRate").and_then(|v| v.as_f64()).unwrap_or(1.0);
     assert!((tax_high - 0.0).abs() < 1e-6, "Tax rate at 6.67 standing must be 0%");
-
-    // 2. Scrapmetal yield exclusions: module reprocessing caps at 55%
-    let mod_id = 100_000_870;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            mod_id,
-            InventoryItemRecord {
-                item_id: mod_id,
-                type_id: 482, // Miner II
-                owner_id: char_id,
-                location_id: station_id,
-                flag: InventoryFlag::Hangar,
-                quantity: 1,
-                singleton: false,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-    });
-    let mod_reproc = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(mod_id)], &kw, None).await.expect("Reprocess module");
-    let mod_yield = get_dict_val(&mod_reproc, "yieldRate").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    assert!(mod_yield <= 0.55 + 1e-6, "Scrapmetal yield cannot exceed 55% at 50% facility");
-
-    // 3. Prismaticite reprocessing: yields 1 of the 8 standard minerals
-    let prism_id = 100_000_871;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            prism_id,
-            InventoryItemRecord {
-                item_id: prism_id,
-                type_id: 90041, // Prismaticite
-                owner_id: char_id,
-                location_id: station_id,
-                flag: InventoryFlag::Hangar,
-                quantity: 100,
-                singleton: false,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-    });
-    let prism_reproc = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(prism_id)], &kw, None).await.expect("Reprocess Prismaticite");
-    let PyRep::List(prism_outputs) = get_dict_val(&prism_reproc, "outputs").expect("Prismaticite outputs list") else { panic!() };
-    assert_eq!(prism_outputs.len(), 1, "Prismaticite batch must reprocess into exactly 1 mineral type");
-    let out_tid = get_dict_val(&prism_outputs[0], "typeID").and_then(|v| v.as_i64()).unwrap() as u32;
-    assert!(ctx.sde.types.get(&out_tid).is_some_and(|t| t.group_id == 18), "Prismaticite output must be a mineral");
-
 }
 
 // ====================================================================
-// Test 5: Wormhole Sites, Phased Asteroids & Market/Goals
+// Test 5: Phased Asteroids & Market/Goals
 // ====================================================================
 #[tokio::test]
-async fn test_mining_wormhole_sites_phased_fields_and_market_goals() {
-    // parity: feat:mining.wormhole-ore-sites, feat:mining.phased-asteroid-field-lifecycle, feat:mining.mobile-phase-anchor, feat:mining.mining-market, feat:mining.mining-goals
-    eve_testkit::attest(&["feat:mining.wormhole-ore-sites", "feat:mining.phased-asteroid-field-lifecycle", "feat:mining.mobile-phase-anchor", "feat:mining.mining-market", "feat:mining.mining-goals"]);
+async fn test_mining_phased_fields_and_market_goals() {
+    // parity: feat:mining.phased-asteroid-field-lifecycle, feat:mining.mobile-phase-anchor, feat:mining.mining-market, feat:mining.mining-goals
+    eve_testkit::attest(&["feat:mining.phased-asteroid-field-lifecycle", "feat:mining.mobile-phase-anchor", "feat:mining.mining-market", "feat:mining.mining-goals"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
 
-    // 1. Wormhole Ore Sites: Perimeter, Frontier, and Core Deposits
-    use eve_server::services::mining_sites::{WORMHOLE_ORE_SITES, resolve_wormhole_ore_site, PhasedAsteroidFieldState};
-    assert_eq!(WORMHOLE_ORE_SITES.len(), 6);
-    for def in WORMHOLE_ORE_SITES {
-        let ores = resolve_wormhole_ore_site(&ctx.sde, def).expect("W-space site ores must exist in SDE");
-        assert!(!ores.is_empty());
-        assert!(def.guard_npc_count > 0, "W-space site must be guarded by Sleepers");
-    }
-
-    // 2. Phased Asteroid Field Lifecycle & Mobile Phase Anchor
+    // 1. Phased Asteroid Field Lifecycle & Mobile Phase Anchor
+    use eve_server::services::mining_sites::PhasedAsteroidFieldState;
     let mut field = PhasedAsteroidFieldState::new("SIG-001".to_string(), 30000142);
     assert!(!field.beacon_spawned);
     assert_eq!(field.mining_efficiency(), 0.10, "Phased-out asteroids yield 10% efficiency");
@@ -926,7 +863,7 @@ async fn test_mining_wormhole_sites_phased_fields_and_market_goals() {
     assert!(field.collapsed);
     assert_eq!(field.mining_efficiency(), 0.0);
 
-    // 3. Mining Market: Ore, Mineral, Compressed Ore types tradeable with correct volume
+    // 2. Mining Market: Ore, Mineral, Compressed Ore types tradeable with correct volume
     for (tid, expected_vol) in [
         (1230u32, 0.10_f64),  // Veldspar
         (34u32, 0.01_f64),    // Tritanium
@@ -937,7 +874,7 @@ async fn test_mining_wormhole_sites_phased_fields_and_market_goals() {
         assert!((t.volume - expected_vol).abs() < 1e-4, "Type {tid} volume mismatch");
     }
 
-    // 4. Mining Goals: Server queries actual ledger records, never client-supplied progress
+    // 3. Mining Goals: Server queries actual ledger records, never client-supplied progress
     let char_id = 90_000_001i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.mining_ledger.push(MiningLedgerRecord {

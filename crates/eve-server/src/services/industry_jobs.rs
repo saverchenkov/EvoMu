@@ -224,6 +224,20 @@ pub fn handle_industry_jobs(
                             ),
                         });
                     }
+                    let react_prod_tid = bp.activities.get("reaction").or_else(|| bp.activities.get("9"))
+                        .and_then(|a| a.products.first()).map(|p| p.type_id).unwrap_or(bp.product_type_id);
+                    if matches!(bp_type_id, 90274..=90282) || ctx.sde.types.get(&react_prod_tid).is_some_and(|t| t.group_id == 4932) {
+                        let has_composite = snap.items.values().any(|i| {
+                            i.location_id == station_id && (164..=171).contains(&(i.flag as u16)) && matches!(i.type_id, 45537 | 35894)
+                                && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true) && i.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
+                        });
+                        if !has_composite {
+                            return Err(BridgeRpcError {
+                                code: "CompositeReactorRequired".into(),
+                                message: format!("Unrefined Mineral reaction formula {bp_type_id} requires an online Standup Composite Reactor I (45537) at facility {station_id}"),
+                            });
+                        }
+                    }
                 }
                 if !is_structure_industry_service_online(snap, station_id, activity_id) {
                     return Err(BridgeRpcError {
@@ -1301,6 +1315,7 @@ pub fn handle_industry_jobs(
                             ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(char_id as u32, 5, 1, &ctx.quasar_gateway);
                             ctx.quasar_gateway.progression.career_goals.on_gameplay_event(char_id as u32, "manufacturing", 1, &ctx.quasar_gateway);
                             ctx.quasar_gateway.progression.extra.on_campaign_gameplay_event(char_id as u32, crate::services::quasar_campaign_state::CampaignEvent { method: "ManufactureItem", type_id: Some(job.product_type_id), solar_system_id: None, faction_id: None }, 1, ctx.now_unix(), &ctx.quasar_gateway);
+                            ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["industryManufacturingJobDeliveredCount", "typeManufacturedCount"], 1, ctx.now_unix(), &ctx.quasar_gateway);
                         }
                         if method == "CompleteJob" && job.activity_id == 8 && prod_item_id == 0 {
                             return Some(Err(BridgeRpcError {

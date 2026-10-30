@@ -42,6 +42,11 @@ pub fn dispatch_mining_gameplay_events(ctx: &ServerContext, char_id: i64, units:
                 ctx.now_unix(),
                 &ctx.quasar_gateway,
             );
+        let ore_vol = ctx.sde.types.get(&ore_type_id).map(|t| t.volume).unwrap_or(0.1) * (units as f64);
+        let now_unix = ctx.now_unix();
+        ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["timesMined"], 1, now_unix, &ctx.quasar_gateway);
+        ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["totalMined"], units, now_unix, &ctx.quasar_gateway);
+        ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["volumeMined"], ore_vol.round().max(1.0) as u64, now_unix, &ctx.quasar_gateway);
         crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
             ctx,
             char_id,
@@ -351,5 +356,651 @@ pub fn tick_all_ice_belt_respawns_sync(ctx: &ServerContext) {
     });
     for sys_id in sys_ids {
         tick_ice_belt_respawn_sync(ctx, sys_id);
+    }
+}
+
+const fn wh_row(type_id: eve_sde::TypeId, total_units: i64) -> super::mining_sites::OreQuantityRow {
+    super::mining_sites::OreQuantityRow {
+        selector: super::mining_sites::OreSelector::Type(type_id),
+        total_units,
+    }
+}
+
+/// Guarded W-space ore anomaly definition.
+///
+/// DERIVED (from eve-wiki; SDE dungeons lack wormhole class column): wormhole class bands
+/// (`wh_class_min..=wh_class_max`) and Sleeper guard waves are transcribed from EVE University
+/// wiki deposit articles, while asteroid type layouts and counts come from SDE `sde_dungeons`
+/// and `sde_dungeon_asteroid_counts`.
+#[derive(Debug, Clone, Copy)]
+pub struct WormholeOreSiteDef {
+    pub dungeon_name: &'static str,
+    pub wh_class_min: u8,
+    pub wh_class_max: u8,
+    pub rows: &'static [super::mining_sites::OreQuantityRow],
+    pub guards: &'static [(eve_sde::TypeId, u32)],
+    pub source: &'static str,
+}
+
+// DERIVED (from eve-wiki; SDE dungeons lack wormhole class column)
+pub const WORMHOLE_ORE_SITES: &[WormholeOreSiteDef] = &[
+    WormholeOreSiteDef {
+        dungeon_name: "Ordinary Perimeter Deposit",
+        wh_class_min: 1,
+        wh_class_max: 6,
+        rows: &[wh_row(46678, 10_000), wh_row(46676, 20_000), wh_row(46679, 20_000), wh_row(46683, 200_000), wh_row(46684, 200_000), wh_row(46686, 1_620_000)],
+        guards: &[(30209, 3), (30210, 2)],
+        source: "eve-wiki/articles/Ordinary_Perimeter_Deposit.md:25-37",
+    },
+    WormholeOreSiteDef {
+        dungeon_name: "Common Perimeter Deposit",
+        wh_class_min: 1,
+        wh_class_max: 6,
+        rows: &[wh_row(46678, 20_000), wh_row(46676, 30_000), wh_row(46679, 40_000), wh_row(46683, 300_000), wh_row(46684, 300_000), wh_row(46686, 520_000)],
+        guards: &[(30209, 5)],
+        source: "eve-wiki/articles/Common_Perimeter_Deposit.md:24-35",
+    },
+    WormholeOreSiteDef {
+        dungeon_name: "Unexceptional Frontier Deposit",
+        wh_class_min: 1,
+        wh_class_max: 6,
+        rows: &[wh_row(46678, 30_000), wh_row(46676, 50_000), wh_row(46679, 60_000), wh_row(46683, 400_000), wh_row(46684, 400_000)],
+        guards: &[(30211, 1), (30209, 2), (30210, 2)],
+        source: "eve-wiki/articles/Unexceptional_Frontier_Deposit.md:26-38",
+    },
+    WormholeOreSiteDef {
+        dungeon_name: "Average Frontier Deposit",
+        wh_class_min: 1,
+        wh_class_max: 6,
+        rows: &[wh_row(46678, 30_000), wh_row(46676, 39_999), wh_row(46679, 450_000), wh_row(46683, 300_000), wh_row(46684, 300_000), wh_row(46686, 700_000)],
+        guards: &[(30209, 3), (30200, 1)],
+        source: "eve-wiki/articles/Average_Frontier_Deposit.md:27-39",
+    },
+    WormholeOreSiteDef {
+        dungeon_name: "Isolated Core Deposit",
+        wh_class_min: 5,
+        wh_class_max: 6,
+        rows: &[wh_row(46678, 36_000), wh_row(46676, 48_000), wh_row(46679, 72_000), wh_row(46683, 720_000), wh_row(46684, 720_000)],
+        guards: &[(30201, 1), (30209, 2)],
+        source: "eve-wiki/articles/Isolated_Core_Deposit.md:26-37",
+    },
+    WormholeOreSiteDef {
+        dungeon_name: "Rarified Core Deposit",
+        wh_class_min: 5,
+        wh_class_max: 6,
+        rows: &[wh_row(46678, 100_000), wh_row(46676, 160_000), wh_row(46679, 200_000), wh_row(46683, 1_200_000), wh_row(46684, 1_000_000), wh_row(46686, 960_000)],
+        guards: &[(30196, 1), (30206, 2)],
+        source: "eve-wiki/articles/Rarified_Core_Deposit.md:30-42",
+    },
+    WormholeOreSiteDef {
+        dungeon_name: "Uncommon Core Deposit",
+        wh_class_min: 5,
+        wh_class_max: 6,
+        rows: &[wh_row(46678, 40_000), wh_row(46676, 60_000), wh_row(46679, 70_000), wh_row(46683, 590_000), wh_row(46684, 600_000), wh_row(46686, 500_000)],
+        guards: &[(30202, 1), (30210, 2)],
+        source: "eve-wiki/articles/Uncommon_Core_Deposit.md:26-38",
+    },
+    WormholeOreSiteDef {
+        dungeon_name: "Unusual Core Deposit",
+        wh_class_min: 5,
+        wh_class_max: 6,
+        rows: &[wh_row(46678, 70_000), wh_row(46676, 100_000), wh_row(46679, 120_000), wh_row(46683, 800_000), wh_row(46684, 800_000)],
+        guards: &[(30200, 2)],
+        source: "eve-wiki/articles/Unusual_Core_Deposit.md:24-34",
+    },
+    WormholeOreSiteDef {
+        dungeon_name: "Infrequent Core Deposit",
+        wh_class_min: 5,
+        wh_class_max: 6,
+        rows: &[wh_row(46678, 50_000), wh_row(46676, 70_000), wh_row(46679, 90_000), wh_row(46683, 400_000), wh_row(46684, 400_000), wh_row(46686, 868_000)],
+        guards: &[(30203, 2)],
+        source: "eve-wiki/articles/Infrequent_Core_Deposit.md:25-36",
+    },
+    WormholeOreSiteDef {
+        dungeon_name: "Exceptional Core Deposit",
+        wh_class_min: 5,
+        wh_class_max: 6,
+        rows: &[wh_row(46678, 80_000), wh_row(46676, 120_000), wh_row(46679, 160_000), wh_row(46683, 1_000_000), wh_row(46684, 1_000_000), wh_row(46686, 1_530_000)],
+        guards: &[(30196, 1)],
+        source: "eve-wiki/articles/Exceptional_Core_Deposit.md:29-40",
+    },
+    WormholeOreSiteDef {
+        dungeon_name: "Shattered Debris Field",
+        wh_class_min: 12,
+        wh_class_max: 18,
+        rows: &[wh_row(46678, 250_000), wh_row(46676, 460_000), wh_row(46679, 200_000), wh_row(46683, 383_730), wh_row(46686, 1_631_280)],
+        guards: &[(30212, 2), (30203, 1)],
+        source: "eve-wiki/articles/Shattered_Debris_Field.md:26-41",
+    },
+];
+
+// DERIVED (from eve-wiki; SDE dungeons lack wormhole class column)
+pub fn wormhole_ore_sites_for_class(wh_class: u8) -> Vec<&'static WormholeOreSiteDef> {
+    match wh_class {
+        1..=6 => WORMHOLE_ORE_SITES
+            .iter()
+            .filter(|d| wh_class >= d.wh_class_min && wh_class <= d.wh_class_max)
+            .collect(),
+        // C13 small-ship shattered: C1..=C3 deposits + Shattered Debris Field (no C5-C6 Core Deposits).
+        13 => WORMHOLE_ORE_SITES
+            .iter()
+            .filter(|d| (d.wh_class_min <= 3 && d.wh_class_max >= 1) || d.dungeon_name == "Shattered Debris Field")
+            .collect(),
+        // Thera (C12) and Drifter shattered (C14..=C18): non-Core C1..=C4 deposits + Shattered Debris Field.
+        12 | 14..=18 => WORMHOLE_ORE_SITES
+            .iter()
+            .filter(|d| (d.wh_class_min <= 4 && d.wh_class_max >= 1) || d.dungeon_name == "Shattered Debris Field")
+            .collect(),
+        _ => WORMHOLE_ORE_SITES
+            .iter()
+            .filter(|d| 3 >= d.wh_class_min && 3 <= d.wh_class_max)
+            .collect(),
+    }
+}
+
+pub fn resolve_wormhole_ore_site_with_dungeon(
+    sde: &eve_sde::SdeRegistry,
+    def: &WormholeOreSiteDef,
+) -> Result<(u32, Vec<(eve_sde::TypeId, i64)>), String> {
+    let site_def = super::mining_sites::OreSiteDef {
+        dungeon_name: def.dungeon_name,
+        kind: super::mining_sites::SiteKind::Anomaly,
+        band: super::mining_sites::SiteBand::NullSec,
+        rows: def.rows,
+        source: def.source,
+    };
+    let resolved = super::mining_sites::resolve_ore_site(sde, &site_def)?;
+    Ok((
+        resolved.dungeon_id,
+        resolved.asteroids.into_iter().map(|a| (a.type_id, a.units)).collect(),
+    ))
+}
+
+pub fn resolve_wormhole_ore_site(
+    sde: &eve_sde::SdeRegistry,
+    def: &WormholeOreSiteDef,
+) -> Result<Vec<(eve_sde::TypeId, i64)>, String> {
+    resolve_wormhole_ore_site_with_dungeon(sde, def).map(|(_, rocks)| rocks)
+}
+
+pub fn sample_wormhole_ore_sites_for_system(
+    sde: &eve_sde::SdeRegistry,
+    rng: &crate::rng::MechanicRng,
+    sys_id: u32,
+    wh_class: u8,
+) -> Vec<&'static WormholeOreSiteDef> {
+    let has_shattered_celestial = sde.celestials_in_system(sys_id).iter().any(|c| c.type_id == 30889);
+    let is_shattered = matches!(wh_class, 12..=18) || has_shattered_celestial;
+    let mut candidates: Vec<&'static WormholeOreSiteDef> = if (1..=6).contains(&wh_class) && has_shattered_celestial {
+        let lo = wh_class.saturating_sub(1).max(1);
+        let hi = (wh_class + 1).min(6);
+        WORMHOLE_ORE_SITES
+            .iter()
+            .filter(|d| (d.wh_class_min <= hi && d.wh_class_max >= lo) || d.dungeon_name == "Shattered Debris Field")
+            .collect()
+    } else {
+        wormhole_ore_sites_for_class(wh_class)
+    };
+    let target_count = candidates.len().min(4);
+    let start_idx = if is_shattered {
+        if let Some(pos) = candidates.iter().position(|d| d.dungeon_name == "Shattered Debris Field") {
+            candidates.swap(0, pos);
+            1
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+    for i in start_idx..target_count {
+        let rem = candidates.len() - i;
+        let pick = i + ((rng.try_next_u64().unwrap_or(0) as usize) % rem);
+        candidates.swap(i, pick);
+    }
+    candidates.truncate(target_count);
+    candidates
+}
+
+pub fn collect_persisted_wormhole_guard_sites(
+    snap: &eve_db::WorldStateSnapshot,
+    sys_id: u32,
+) -> Vec<([f64; 3], &'static WormholeOreSiteDef)> {
+    snap.cosmic_anomalies
+        .get(&sys_id)
+        .map(|anoms| {
+            anoms
+                .iter()
+                .filter(|a| a.anomaly_type == "OreAnomaly" && !a.cleared)
+                .filter_map(|a| {
+                    WORMHOLE_ORE_SITES
+                        .iter()
+                        .find(|def| def.dungeon_name == a.name)
+                        .map(|def| (a.position, def))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Resolves total reprocessable base materials across `portions` batches from SDE
+/// `sde_type_materials` (`type_materials` for fixed-output items; `randomized_type_materials`
+/// for Prismaticite `90041`/`90307` and Unrefined Minerals `90283..=90298`, rolling each
+/// batch independently and accumulating per-mineral base quantities).
+pub fn resolve_reprocessable_materials_for_portions(
+    sde: &eve_sde::SdeRegistry,
+    inv_type: &eve_sde::InvType,
+    item_id: i64,
+    next_entity_id: i64,
+    rng_bits: u64,
+    portions: i32,
+    deterministic_quote: bool,
+) -> Option<Vec<eve_sde::TypeMaterialEntry>> {
+    if let Some(mats) = sde.type_materials.get(&inv_type.type_id).filter(|m| !m.is_empty()) {
+        let p = portions.max(0) as u64;
+        return Some(
+            mats.iter()
+                .map(|m| eve_sde::TypeMaterialEntry {
+                    material_type_id: m.material_type_id,
+                    quantity: m.quantity.saturating_mul(p),
+                })
+                .collect(),
+        );
+    }
+    let rand_mats = sde.randomized_type_materials_for(inv_type.type_id);
+    if rand_mats.is_empty() {
+        return None;
+    }
+    let total_batches = portions.max(0) as usize;
+    if total_batches == 0 {
+        return Some(Vec::new());
+    }
+    let sim_batches = total_batches.min(10_000);
+    let mut totals = vec![0_u64; rand_mats.len()];
+    let base_seed = (item_id as u64)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(next_entity_id as u64)
+        ^ rng_bits;
+    for batch_idx in 0..sim_batches {
+        let (idx, qty) = if deterministic_quote {
+            let idx = if rand_mats.len() == 1 {
+                0
+            } else {
+                (item_id.unsigned_abs() as usize).wrapping_add(batch_idx) % rand_mats.len()
+            };
+            let entry = &rand_mats[idx];
+            let lo = entry.quantity_min.min(entry.quantity_max);
+            let hi = entry.quantity_min.max(entry.quantity_max);
+            (idx, lo + (hi - lo) / 2)
+        } else {
+            let mut s = base_seed.wrapping_add((batch_idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            s = (s ^ (s >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            s = (s ^ (s >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            s ^= s >> 31;
+            let idx = if rand_mats.len() == 1 { 0 } else { (s as usize) % rand_mats.len() };
+            let entry = &rand_mats[idx];
+            let lo = entry.quantity_min.min(entry.quantity_max);
+            let hi = entry.quantity_min.max(entry.quantity_max);
+            let qty = if lo == hi {
+                lo
+            } else {
+                let qty_roll = s.rotate_left(31).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                lo + (qty_roll % (hi - lo + 1))
+            };
+            (idx, qty)
+        };
+        totals[idx] = totals[idx].saturating_add(qty);
+    }
+    let mut out = Vec::new();
+    for (entry, sum) in rand_mats.iter().zip(totals.into_iter()) {
+        if sum == 0 {
+            continue;
+        }
+        let scaled = if total_batches > sim_batches {
+            ((u128::from(sum) * (total_batches as u128)) / (sim_batches as u128)) as u64
+        } else {
+            sum
+        };
+        out.push(eve_sde::TypeMaterialEntry {
+            material_type_id: entry.material_type_id,
+            quantity: scaled,
+        });
+    }
+    Some(out)
+}
+
+pub fn resolve_reprocessable_materials(
+    sde: &eve_sde::SdeRegistry,
+    inv_type: &eve_sde::InvType,
+    item_id: i64,
+    next_entity_id: i64,
+    rng_bits: u64,
+    deterministic_quote: bool,
+) -> Option<Vec<eve_sde::TypeMaterialEntry>> {
+    resolve_reprocessable_materials_for_portions(
+        sde,
+        inv_type,
+        item_id,
+        next_entity_id,
+        rng_bits,
+        1,
+        deterministic_quote,
+    )
+}
+
+pub const WORMHOLE_GUARD_TYPE_IDS: &[eve_sde::TypeId] =
+    &[30209, 30210, 30211, 30212, 30200, 30201, 30202, 30203, 30206, 30196];
+
+pub fn build_wormhole_guard_wave(
+    next_entity_id: &mut i64,
+    centre: [f64; 3],
+    guards: &[(eve_sde::TypeId, u32)],
+    out: &mut Vec<(i64, eve_sde::TypeId, glam::DVec3)>,
+) {
+    let total: u32 = guards.iter().map(|&(_, c)| c).sum();
+    let mut idx: u32 = 0;
+    for &(npc_tid, count) in guards {
+        for _ in 0..count {
+            *next_entity_id += 1;
+            let angle = (idx as f64) * std::f64::consts::TAU / (total.max(1) as f64);
+            idx += 1;
+            out.push((
+                *next_entity_id,
+                npc_tid,
+                glam::DVec3::new(centre[0] + angle.cos() * 4_500.0, centre[1] + 500.0, centre[2] + angle.sin() * 4_500.0),
+            ));
+        }
+    }
+}
+
+pub async fn spawn_wormhole_ore_guards(
+    ctx: &ServerContext,
+    sys_id: u32,
+    guard_waves: Vec<(i64, eve_sde::TypeId, glam::DVec3)>,
+) {
+    if guard_waves.is_empty() {
+        return;
+    }
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    for (gid, npc_tid, gpos) in guard_waves {
+        let npc_rec = ctx.sde.types.get(&npc_tid);
+        let npc_rad = npc_rec.map(|t| t.radius.max(25.0)).unwrap_or(45.0);
+        let npc_mass = npc_rec.map(|t| t.mass.max(10_000.0)).unwrap_or(1_200_000.0);
+        let max_vel = npc_rec
+            .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::MAX_VELOCITY))
+            .copied()
+            .unwrap_or(320.0);
+        // DERIVED: Sleeper NPC types lack dogma attr 70 (agility) in SDE; default 1.0 matches space_destiny.rs.
+        let inertia = npc_rec
+            .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::AGILITY))
+            .copied()
+            .unwrap_or(1.0);
+        let ball = eve_destiny::Ball {
+            id: gid, type_id: npc_tid, position: gpos, velocity: glam::DVec3::ZERO,
+            max_velocity: max_vel, inertia, mass: npc_mass, radius: npc_rad,
+            speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
+        };
+        let _ = handle.spawn_ball_with_combat(ball, ctx.build_type_combat_state(npc_tid)).await;
+    }
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct WhOreAnomalyGuardState {
+    pub guards_spawned: bool,
+    pub surviving_guards: Vec<(i64, eve_sde::TypeId, [f64; 3])>,
+}
+
+const WH_ORE_GUARD_STATE_KEY: &str = "wh_ore_anomaly_guards";
+
+fn load_wh_ore_guard_states(
+    snap: &eve_db::WorldStateSnapshot,
+) -> std::collections::HashMap<String, WhOreAnomalyGuardState> {
+    snap.quasar_state_blobs
+        .get(WH_ORE_GUARD_STATE_KEY)
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or_default()
+}
+
+fn save_wh_ore_guard_states(
+    snap: &mut eve_db::WorldStateSnapshot,
+    states: &std::collections::HashMap<String, WhOreAnomalyGuardState>,
+) {
+    if let Ok(json) = serde_json::to_string(states) {
+        snap.quasar_state_blobs.insert(WH_ORE_GUARD_STATE_KEY.into(), json);
+    }
+}
+
+pub fn record_initial_wormhole_guard_wave(
+    snap: &mut eve_db::WorldStateSnapshot,
+    anomaly_id: &str,
+    centre: [f64; 3],
+    guards: &[(eve_sde::TypeId, u32)],
+    out: &mut Vec<(i64, eve_sde::TypeId, glam::DVec3)>,
+) {
+    let start_len = out.len();
+    build_wormhole_guard_wave(&mut snap.next_entity_id, centre, guards, out);
+    let mut states = load_wh_ore_guard_states(snap);
+    let surviving_guards = out[start_len..]
+        .iter()
+        .map(|&(gid, tid, pos)| (gid, tid, pos.to_array()))
+        .collect();
+    states.insert(
+        anomaly_id.to_string(),
+        WhOreAnomalyGuardState {
+            guards_spawned: true,
+            surviving_guards,
+        },
+    );
+    save_wh_ore_guard_states(snap, &states);
+}
+
+pub fn on_wormhole_ore_guard_destroyed_db(db: &eve_db::WorldRepository, npc_ball_id: i64) {
+    let id_needle = npc_ball_id.to_string();
+    let might_match = db.with_snapshot(|snap| {
+        snap.quasar_state_blobs
+            .get(WH_ORE_GUARD_STATE_KEY)
+            .is_some_and(|raw| raw.contains(&id_needle))
+    });
+    if !might_match {
+        return;
+    }
+    db.with_mut_snapshot(|snap| {
+        let mut states = load_wh_ore_guard_states(snap);
+        let mut changed = false;
+        for st in states.values_mut() {
+            let before = st.surviving_guards.len();
+            st.surviving_guards.retain(|&(gid, _, _)| gid != npc_ball_id);
+            changed |= st.surviving_guards.len() != before;
+        }
+        if changed {
+            save_wh_ore_guard_states(snap, &states);
+        }
+    });
+}
+
+pub async fn hydrate_wormhole_ore_guards_if_needed(ctx: &ServerContext, sys_id: u32) {
+    let anoms: Vec<(String, [f64; 3], &'static WormholeOreSiteDef)> = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_anomalies
+            .get(&sys_id)
+            .map(|list| {
+                list.iter()
+                    .filter(|a| a.anomaly_type == "OreAnomaly" && !a.cleared)
+                    .filter_map(|a| {
+                        WORMHOLE_ORE_SITES
+                            .iter()
+                            .find(|def| def.dungeon_name == a.name)
+                            .map(|def| (a.anomaly_id.clone(), a.position, def))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    let unhydrated: Vec<(String, [f64; 3], &'static WormholeOreSiteDef)> = anoms
+        .into_iter()
+        .filter(|(aid, _, _)| ctx.systems.claim_wh_ore_anomaly_hydration(sys_id, aid))
+        .collect();
+    if unhydrated.is_empty() {
+        return;
+    }
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let existing = handle.list_balls().await.unwrap_or_default();
+    let existing_ids: std::collections::HashSet<i64> = existing.iter().map(|b| b.id).collect();
+    let waves = ctx.db.with_mut_snapshot(|snap| {
+        let mut states = load_wh_ore_guard_states(snap);
+        let mut states_dirty = false;
+        let mut out = Vec::new();
+        for (aid, centre, def) in unhydrated {
+            if let Some(st) = states.get(&aid).filter(|st| st.guards_spawned) {
+                for &(gid, tid, pos) in &st.surviving_guards {
+                    if !existing_ids.contains(&gid) {
+                        out.push((gid, tid, glam::DVec3::from_array(pos)));
+                    }
+                }
+                continue;
+            }
+            let c_vec = glam::DVec3::from_array(centre);
+            let nearby: Vec<(i64, eve_sde::TypeId, [f64; 3])> = existing
+                .iter()
+                .filter(|b| WORMHOLE_GUARD_TYPE_IDS.contains(&b.type_id) && b.position.distance(c_vec) <= 15_000.0)
+                .map(|b| (b.id, b.type_id, b.position.to_array()))
+                .collect();
+            if !nearby.is_empty() {
+                states.insert(aid, WhOreAnomalyGuardState { guards_spawned: true, surviving_guards: nearby });
+                states_dirty = true;
+                continue;
+            }
+            let start_len = out.len();
+            build_wormhole_guard_wave(&mut snap.next_entity_id, centre, def.guards, &mut out);
+            let surviving = out[start_len..].iter().map(|&(gid, tid, p)| (gid, tid, p.to_array())).collect();
+            states.insert(aid, WhOreAnomalyGuardState { guards_spawned: true, surviving_guards: surviving });
+            states_dirty = true;
+        }
+        if states_dirty {
+            save_wh_ore_guard_states(snap, &states);
+        }
+        out
+    });
+    spawn_wormhole_ore_guards(ctx, sys_id, waves).await;
+}
+
+pub async fn respawn_wormhole_ore_guards_if_missing(
+    ctx: &ServerContext,
+    sys_id: u32,
+    _sites: &[([f64; 3], &'static crate::services::mining_sites::WormholeOreSiteDef)],
+) {
+    hydrate_wormhole_ore_guards_if_needed(ctx, sys_id).await;
+}
+
+pub async fn spawn_seeded_site_entities(
+    ctx: &ServerContext,
+    sys_id: u32,
+    newly_spawned: Vec<(i64, u32, u64, f64, f64, glam::DVec3)>,
+    guard_waves: Vec<(i64, u32, glam::DVec3)>,
+) {
+    if !newly_spawned.is_empty() {
+        let handle = ctx.systems.get_or_spawn(sys_id);
+        for (aid, tid, units, uvol, rad, pos) in newly_spawned {
+            let ball = eve_destiny::Ball {
+                id: aid,
+                type_id: tid,
+                position: pos,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 50_000.0,
+                radius: rad,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            };
+            let st = crate::system_actor::AsteroidState {
+                asteroid_id: aid,
+                belt_id: 0,
+                type_id: tid,
+                initial_units: units,
+                remaining_units: units,
+                unit_volume: uvol,
+                depleted: false,
+                respawn_at_tick: None,
+            };
+            let _ = handle.spawn_asteroid(st, ball).await;
+        }
+    }
+    if !guard_waves.is_empty() {
+        let seeded_anom_ids: Vec<String> = ctx.db.with_snapshot(|snap| {
+            let states = load_wh_ore_guard_states(snap);
+            snap.cosmic_anomalies
+                .get(&sys_id)
+                .map(|list| {
+                    list.iter()
+                        .filter(|a| a.anomaly_type == "OreAnomaly" && !a.cleared && states.contains_key(&a.anomaly_id))
+                        .map(|a| a.anomaly_id.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        for aid in seeded_anom_ids {
+            let _ = ctx.systems.claim_wh_ore_anomaly_hydration(sys_id, &aid);
+        }
+    }
+    spawn_wormhole_ore_guards(ctx, sys_id, guard_waves).await;
+}
+
+/// Phased Asteroid Field site lifecycle (`feat:mining.phased-asteroid-field-lifecycle`, `feat:mining.mobile-phase-anchor`).
+#[derive(Debug, Clone)]
+pub struct PhasedAsteroidFieldState {
+    pub signature_id: String,
+    pub solar_system_id: u32,
+    pub progress: f64,
+    pub beacon_spawned: bool,
+    pub collapsed: bool,
+    pub phased_in: bool,
+    pub mobile_phase_anchor_energy: u32,
+}
+
+impl PhasedAsteroidFieldState {
+    pub fn new(signature_id: String, solar_system_id: u32) -> Self {
+        Self {
+            signature_id,
+            solar_system_id,
+            progress: 0.1,
+            beacon_spawned: false,
+            collapsed: false,
+            phased_in: false,
+            mobile_phase_anchor_energy: 0,
+        }
+    }
+
+    pub fn advance_fracture(&mut self, delta_progress: f64) {
+        self.progress = (self.progress + delta_progress).min(1.0);
+        if self.progress >= 0.5 {
+            self.beacon_spawned = true;
+        }
+        if self.progress >= 1.0 {
+            self.collapsed = true;
+            self.phased_in = false;
+        }
+    }
+
+    pub fn connect_industrial_command_ship(&mut self, ship_type_id: eve_sde::TypeId) -> bool {
+        let energy = match ship_type_id {
+            28352 => 100, // Rorqual
+            28606 => 50,  // Orca
+            42244 => 35,  // Porpoise
+            _ => 0,
+        };
+        self.mobile_phase_anchor_energy += energy;
+        if self.mobile_phase_anchor_energy >= 100 && !self.collapsed {
+            self.phased_in = true;
+        }
+        self.phased_in
+    }
+
+    pub fn mining_efficiency(&self) -> f64 {
+        if self.collapsed {
+            0.0
+        } else if self.phased_in {
+            1.0
+        } else {
+            0.10
+        }
     }
 }

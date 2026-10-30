@@ -11,13 +11,14 @@
 
 use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
+    STATUS_PRECONDITION_FAILED,
 };
-use eve_db::{IskCents, WorldRepository};
+use eve_db::WorldRepository;
 use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, sha256_hex, DynamicValue, GoogleAny,
-    GoogleEmpty, GoogleTimestamp, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
+    GoogleTimestamp, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 pub const ACHIEVEMENTS_STATE_KEY: &str = "quasar_achievements";
@@ -46,165 +47,156 @@ where
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AchievementConditionDef {
+    pub condition_id: u32,
+    pub target_value: u64,
+    pub statistic_event_id: u32,
+    #[serde(default)]
+    pub event_name: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AchievementDef {
     pub id: u32,
+    #[serde(default)]
+    pub is_client_achievement: bool,
     pub category_id: u32,
     pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub notification_text: String,
     pub target: u64,
     pub score: u32,
     pub milestone_targets: Vec<u64>,
+    #[serde(default)]
+    pub conditions: Vec<AchievementConditionDef>,
     #[serde(default, deserialize_with = "deserialize_i64_or_f64")]
     pub reward_isk: i64,
     #[serde(default, deserialize_with = "deserialize_i64_or_f64")]
     pub reward_sp: i64,
 }
 
-/// Returns the authentic English name for an SDE achievement (res:/staticdata/achievements.static).
-pub fn authentic_achievement_name(id: u32) -> &'static str {
-    match id {
-        2 => "Mine Ore",
-        3 => "Ore Hoarder",
-        4 => "Super miner",
-        9 => "Travel to a new star system",
-        10 => "Dock in the station",
-        12 => "Destroy your target",
-        13 => "Contact a Career Agent",
-        14 => "Request a mission",
-        15 => "Complete a mission",
-        16 => "Warp to the station",
-        17 => "Buying from the market",
-        18 => "Selling your stuff",
-        19 => "Start Skill Training",
-        20 => "Accept a mission",
-        23 => "Manual piloting",
-        24 => "Undocking your ship",
-        25 => "Activate mining laser",
-        26 => "Lock an asteroid",
-        27 => "Lock target on the enemy",
-        28 => "Orbit one of the hostiles",
-        29 => "Orbit an asteroid",
-        30 => "Store items in the station",
-        31 => "Loot a wreck",
-        32 => "Fit a Module",
-        36 => "Fire your weapon",
-        37 => "Fill cargo with ore",
-        38 => "Find and approach the enemy",
-        39 => "Inject a New Skill",
-        41 => "Ship Exploded",
-        42 => "Capsule Destroyed",
-        43 => "Open the Star Map",
-        44 => "Set Destination to a Career Agent",
-        45 => "Jump to next system on the route",
-        46 => "Activate ship's autopilot",
-        47 => "Unfit a module",
-        48 => "Fit a high slot module",
-        49 => "Fit a mid slot module",
-        50 => "Fit a low slot module",
-        51 => "Load Charges",
-        52 => "Start a Private Conversation",
-        53 => "Chat in Local",
-        54 => "Send mail",
-        55 => "Use Salvager on a Wreck",
-        56 => "Reprocess",
-        57 => "Join a Capsuleer Corporation",
-        58 => "Start a Manufacturing Job",
-        59 => "Reprocess ore",
-        60 => "Zooming the camera",
-        61 => "Moving the camera",
-        62 => "Add a Contact",
-        63 => "Scout out the area",
-        64 => "Return view to ship",
-        65 => "Acquire New Ship",
-        66 => "Activate New Ship",
-        70 => "Complete a Manufacturing Job",
-        71 => "Recover Salvage Successfully",
-        72 => "Visit a Cosmic Anomaly",
-        73 => "Use Corporation Search",
-        74 => "Installing a blueprint",
-        75 => "Launch Probes",
-        76 => "Find a Site with Probes",
-        77 => "Fit a Probe Launcher",
-        78 => "Jump Through a Wormhole",
-        79 => "Save the Location of a Wormhole",
-        81 => "Contact a Career Agent",
-        93 => "Destroy the remaining hostiles",
-        94 => "Loot the rest of the wrecks",
-        102 => "Open the Agency window",
-        _ => "AIR Achievement",
-    }
+pub fn achievement_reward_uuid(achievement_id: u32, milestone_id: u32) -> [u8; 16] {
+    let mut uuid = [0u8; 16];
+    uuid[0..4].copy_from_slice(b"ACHR");
+    uuid[8..12].copy_from_slice(&achievement_id.to_be_bytes());
+    uuid[12..16].copy_from_slice(&milestone_id.to_be_bytes());
+    uuid
 }
 
-/// Returns the authentic condition target value from SDE (res:/staticdata/achievements.static).
-pub fn authentic_achievement_target(id: u32) -> u32 {
-    match id {
-        2 => 3,
-        3 => 2000,
-        4 => 50,
-        93 | 94 => 6,
-        102 => 1,
-        _ => 1,
+fn build_definitions_from_sde(
+    sde: &eve_sde::SdeRegistry,
+) -> (Vec<AchievementDef>, HashSet<String>, usize, String, Vec<u8>) {
+    let Ok(achs) = sde.load_achievements() else {
+        let empty = b"[]".to_vec();
+        return (Vec::new(), HashSet::new(), 0, sha256_hex(&empty)[..16].to_string(), empty);
+    };
+    let events = sde
+        .load_cfsd_table("res:/staticdata/achievementevents.fsdbinary")
+        .unwrap_or_default();
+    let server_eids: HashSet<u32> = achs
+        .values()
+        .filter(|i| !i.is_client_achievement)
+        .flat_map(|i| i.conditions.iter().map(|c| c.statistic_event_id))
+        .collect();
+    let client_eids: HashSet<u32> = achs
+        .values()
+        .filter(|i| i.is_enabled && i.is_client_achievement)
+        .flat_map(|i| i.conditions.iter().map(|c| c.statistic_event_id))
+        .collect();
+    let mut allowed_client_keys = HashSet::new();
+    for &eid in &client_eids {
+        allowed_client_keys.insert(eid.to_string());
     }
-}
-
-/// DERIVED: Authentic AIR achievement definitions based on the 68 SDE achievements
-/// (res:/staticdata/achievements.static). Category bucketing, completion targets, score values,
-/// milestone tiers, and rewards are synthesized server-side per AGENTS.md rules.
-pub fn default_achievement_definitions() -> Vec<AchievementDef> {
-    const SDE_ACHIEVEMENT_IDS: &[u32] = &[
-        2, 3, 4, 9, 10, 12, 13, 14, 15, 16, 17, 18, 19, 20, 23, 24, 25, 26, 27, 28,
-        29, 30, 31, 32, 36, 37, 38, 39, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51,
-        52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 70, 71, 72, 73,
-        74, 75, 76, 77, 78, 79, 81, 93, 94, 102,
-    ];
-    SDE_ACHIEVEMENT_IDS
-        .iter()
-        .map(|&id| {
-            let target = authentic_achievement_target(id) as u64;
-            let name = authentic_achievement_name(id);
-            // DERIVED: Career category bucketing, score points, milestone tiers, and reward amounts
-            // are derived server-side per AGENTS.md provenance rules.
-            let cat_id = match id {
-                2 | 3 | 4 | 25 | 29 | 37 | 56 | 58 | 59 | 70 | 71 | 74 => 2, // Industry / Mining
-                9 | 10 | 16 | 23 | 24 | 43 | 44 | 45 | 46 | 60 | 61 | 64 | 75 | 76 | 77 | 78 | 79 => 1, // Exploration / Navigation
-                12 | 26 | 27 | 28 | 31 | 36 | 38 | 41 | 42 | 55 | 63 | 93 | 94 => 3, // Enforcer / Combat
-                _ => 4, // Soldier / Career / Social
-            };
-            let score = match target {
-                1 => 10,
-                2..=10 => 25,
-                11..=100 => 50,
-                _ => 100,
-            };
-            AchievementDef {
-                id,
-                category_id: cat_id,
-                name: name.to_string(),
-                target,
-                score,
-                milestone_targets: if target > 1 { vec![1, target / 2, target] } else { vec![1] },
-                reward_isk: (score as i64) * 10_000,
-                reward_sp: (score as i64) * 25,
+    for (&eid_i64, row) in &events {
+        let Ok(eid) = u32::try_from(eid_i64) else { continue };
+        let name = row.str("name").unwrap_or("").trim();
+        if client_eids.contains(&eid) || (name.starts_with("client_") && !server_eids.contains(&eid)) {
+            allowed_client_keys.insert(eid.to_string());
+            if !name.is_empty() {
+                allowed_client_keys.insert(name.to_string());
             }
-        })
-        .collect()
+        }
+    }
+
+    let mut ids: Vec<u32> = achs.values().filter(|i| i.is_enabled).map(|i| i.achievement_id).collect();
+    ids.sort_unstable();
+    let count = ids.len();
+
+    let mut defs = Vec::with_capacity(ids.len());
+    for id in ids {
+        let Some(info) = achs.get(&id).filter(|info| info.is_enabled) else { continue };
+        let conditions: Vec<AchievementConditionDef> = info
+            .conditions
+            .iter()
+            .map(|c| {
+                let event_name = events.get(&i64::from(c.statistic_event_id)).and_then(|r| r.str("name")).unwrap_or("").to_string();
+                AchievementConditionDef {
+                    condition_id: c.condition_id,
+                    target_value: (c.target_value as u64).max(1),
+                    statistic_event_id: c.statistic_event_id,
+                    event_name,
+                }
+            })
+            .collect();
+        let target = if conditions.is_empty() {
+            (info.target_value as u64).max(1)
+        } else {
+            conditions.iter().map(|c| c.target_value).sum::<u64>().max(1)
+        };
+
+        // DATA GAP: Career category assignment, score points, milestone tiers, and ISK/SP rewards
+        // are server-authored CDN Checkpoint data in V24 and not present in local client FSD
+        // (`achievements.static` + `achievementevents.fsdbinary`).
+        defs.push(AchievementDef {
+            id,
+            is_client_achievement: info.is_client_achievement,
+            category_id: 0,
+            name: info.name.clone(),
+            description: info.description.clone(),
+            notification_text: info.notification_text.clone(),
+            target,
+            score: 0,
+            milestone_targets: Vec::new(),
+            conditions,
+            reward_isk: 0,
+            reward_sp: 0,
+        });
+    }
+    let json_bytes = serde_json::to_vec(&defs).unwrap_or_else(|_| b"[]".to_vec());
+    let hash = sha256_hex(&json_bytes)[..16].to_string();
+    (defs, allowed_client_keys, count, hash, json_bytes)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CharacterAchievement {
     pub def: AchievementDef,
     pub progress: u64,
+    #[serde(default)]
+    pub condition_progress: HashMap<u32, u64>,
     pub completed: bool,
     pub completed_date: Option<u64>,
     pub reached_milestones: Vec<u32>,
     pub unclaimed_reward_count: u32,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RewardClaimFilter {
+    pub achievement_id: Option<u32>,
+    pub category_id: Option<u32>,
+    pub milestone_id: Option<u32>,
+    pub selected_reward_uuids: Option<Vec<[u8; 16]>>,
+}
+
 pub struct AchievementManager {
     pub definitions: Vec<AchievementDef>,
+    pub allowed_client_counter_keys: HashSet<String>,
     pub character_achievements: RwLock<HashMap<u32, Vec<CharacterAchievement>>>,
     pub category_scores: RwLock<HashMap<(u32, u32), u32>>,
     pub sde_achievement_count: usize,
     pub sde_achievement_hash: String,
+    pub sde_definitions_json: Vec<u8>,
     db: Option<Arc<WorldRepository>>,
 }
 
@@ -216,96 +208,80 @@ impl Default for AchievementManager {
 
 impl AchievementManager {
     pub fn new(db: Option<Arc<WorldRepository>>) -> Self {
-        let defs = default_achievement_definitions();
-        let loaded = db.as_ref().map(|d| {
-            d.with_snapshot(|s| {
-                s.quasar_state_blobs
-                    .get("quasar_achievements")
-                    .and_then(|json| serde_json::from_str::<HashMap<u32, Vec<CharacterAchievement>>>(json).ok())
-                    .unwrap_or_default()
-            })
-        }).unwrap_or_default();
-        let loaded_cat_scores = db.as_ref().map(|d| {
-            d.with_snapshot(|s| {
-                s.quasar_state_blobs
-                    .get("quasar_achievement_cat_scores")
-                    .and_then(|json| serde_json::from_str::<HashMap<String, u32>>(json).ok())
-                    .map(|map| {
-                        map.into_iter()
-                            .filter_map(|(k, v)| {
-                                let mut parts = k.split(':');
-                                let c = parts.next()?.parse::<u32>().ok()?;
-                                let cat = parts.next()?.parse::<u32>().ok()?;
-                                Some(((c, cat), v))
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            })
-        }).unwrap_or_default();
-
-        Self {
-            definitions: defs,
-            character_achievements: RwLock::new(loaded),
-            category_scores: RwLock::new(loaded_cat_scores),
-            sde_achievement_count: 68,
-            sde_achievement_hash: "6b74c14cac4e3001".to_string(),
-            db,
-        }
+        let default_sde = eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).ok().map(Arc::new);
+        Self::new_with_sde(db, default_sde)
     }
 
-    /// DERIVED: Instantiates AchievementManager from SDE, strictly populating only the 68 SDE
-    /// achievement definitions (res:/staticdata/achievements.static). Category bucketing,
-    /// completion targets, score values, milestone tiers, and ISK/SP rewards are derived/synthesized
-    /// server-side per AGENTS.md provenance rules.
+    /// Instantiates AchievementManager from SDE (`res:/staticdata/achievements.static`,
+    /// `res:/staticdata/achievementevents.fsdbinary`, and `res:/localizationfsd/localization_fsd_en-us.pickle`).
     pub fn new_with_sde(
         db: Option<Arc<WorldRepository>>,
         sde: Option<Arc<eve_sde::SdeRegistry>>,
     ) -> Self {
-        let mut mgr = Self::new(db);
-        if let Some(sde) = sde {
-            if let Ok(achs) = sde.load_achievements() {
-                // Clear any synthetic definitions to strictly populate only the 68 SDE achievement definitions
-                mgr.definitions.clear();
-                mgr.sde_achievement_count = achs.len();
-                let mut ids: Vec<u32> = achs.keys().copied().collect();
-                ids.sort();
-                mgr.sde_achievement_hash = sha256_hex(&serde_json::to_vec(&ids).unwrap_or_default())[..16].to_string();
+        let (defs, allowed_client_counter_keys, sde_achievement_count, sde_achievement_hash, sde_definitions_json) = sde
+            .as_deref()
+            .map(build_definitions_from_sde)
+            .unwrap_or_else(|| {
+                let empty = b"[]".to_vec();
+                (Vec::new(), HashSet::new(), 0, sha256_hex(&empty)[..16].to_string(), empty)
+            });
 
-                // Parse authentic achievement fields (name, target_value) from SDE (res:/staticdata/achievements.static).
-                // DERIVED: Category bucketing, score values, milestone tiers, and ISK/SP reward amounts
-                // for the 68 SDE achievements are derived server-side per AGENTS.md provenance rules,
-                // mapping SDE achievement IDs to canonical career categories and reward tiers.
-                for &id in &ids {
-                    let ach_info = achs.get(&id);
-                    let target = ach_info.map(|a| a.target_value as u64).filter(|&t| t > 0).unwrap_or(1);
-                    let name = authentic_achievement_name(id);
-                    let cat_id = match id {
-                        2 | 3 | 4 | 25 | 29 | 37 | 56 | 58 | 59 | 70 | 71 | 74 => 2, // Industry / Mining
-                        9 | 10 | 16 | 23 | 24 | 43 | 44 | 45 | 46 | 60 | 61 | 64 | 75 | 76 | 77 | 78 | 79 => 1, // Exploration / Navigation
-                        12 | 26 | 27 | 28 | 31 | 36 | 38 | 41 | 42 | 55 | 63 | 93 | 94 => 3, // Enforcer / Combat
-                        _ => 4, // Soldier / Career / Social
-                    };
-                    let score = match target {
-                        1 => 10,
-                        2..=10 => 25,
-                        11..=100 => 50,
-                        _ => 100,
-                    };
-                    mgr.definitions.push(AchievementDef {
-                        id,
-                        category_id: cat_id,
-                        name: name.to_string(),
-                        target,
-                        score,
-                        milestone_targets: if target > 1 { vec![1, target / 2, target] } else { vec![1] },
-                        reward_isk: (score as i64) * 10_000,
-                        reward_sp: (score as i64) * 25,
-                    });
+        let defs_by_id: HashMap<u32, &AchievementDef> = defs.iter().map(|d| (d.id, d)).collect();
+
+        let mut loaded = db
+            .as_ref()
+            .map(|d| {
+                d.with_snapshot(|s| {
+                    s.quasar_state_blobs
+                        .get("quasar_achievements")
+                        .and_then(|json| serde_json::from_str::<HashMap<u32, Vec<CharacterAchievement>>>(json).ok())
+                        .unwrap_or_default()
+                })
+            })
+            .unwrap_or_default();
+
+        if !defs_by_id.is_empty() {
+            for list in loaded.values_mut() {
+                for a in list.iter_mut() {
+                    if let Some(fresh_def) = defs_by_id.get(&a.def.id) {
+                        a.def = (*fresh_def).clone();
+                    }
                 }
             }
         }
-        mgr
+
+        let loaded_cat_scores = db
+            .as_ref()
+            .map(|d| {
+                d.with_snapshot(|s| {
+                    s.quasar_state_blobs
+                        .get("quasar_achievement_cat_scores")
+                        .and_then(|json| serde_json::from_str::<HashMap<String, u32>>(json).ok())
+                        .map(|map| {
+                            map.into_iter()
+                                .filter_map(|(k, v)| {
+                                    let mut parts = k.split(':');
+                                    let c = parts.next()?.parse::<u32>().ok()?;
+                                    let cat = parts.next()?.parse::<u32>().ok()?;
+                                    Some(((c, cat), v))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                })
+            })
+            .unwrap_or_default();
+
+        Self {
+            definitions: defs,
+            allowed_client_counter_keys,
+            character_achievements: RwLock::new(loaded),
+            category_scores: RwLock::new(loaded_cat_scores),
+            sde_achievement_count,
+            sde_achievement_hash,
+            sde_definitions_json,
+            db,
+        }
     }
 
     pub fn save_to_db(&self) {
@@ -325,13 +301,18 @@ impl AchievementManager {
         }
     }
 
-    fn init_list<'a>(defs: &[AchievementDef], map: &'a mut HashMap<u32, Vec<CharacterAchievement>>, character_id: u32) -> &'a mut Vec<CharacterAchievement> {
+    fn init_list<'a>(
+        defs: &[AchievementDef],
+        map: &'a mut HashMap<u32, Vec<CharacterAchievement>>,
+        character_id: u32,
+    ) -> &'a mut Vec<CharacterAchievement> {
         map.entry(character_id).or_insert_with(|| {
             defs.iter()
                 .cloned()
                 .map(|def| CharacterAchievement {
                     def,
                     progress: 0,
+                    condition_progress: HashMap::new(),
                     completed: false,
                     completed_date: None,
                     reached_milestones: Vec::new(),
@@ -371,6 +352,12 @@ impl AchievementManager {
             if a.def.id == achievement_id {
                 let prev_completed = a.completed;
                 a.progress = a.progress.saturating_add(delta);
+                let mut rem = a.progress;
+                for cond in &a.def.conditions {
+                    let take = rem.min(cond.target_value);
+                    a.condition_progress.insert(cond.condition_id, take);
+                    rem = rem.saturating_sub(take);
+                }
 
                 let mut new_milestones = Vec::new();
                 for (idx, target) in a.def.milestone_targets.iter().enumerate() {
@@ -393,21 +380,196 @@ impl AchievementManager {
         None
     }
 
-    pub fn mark_completed(
+    /// Advances all achievements listening to the given SDE `statistic_event_id`
+    /// (`res:/staticdata/achievementevents.fsdbinary`), clamping each condition to its
+    /// `target_value` so multi-condition achievements (e.g. achievement 60 requiring both
+    /// `zoomIn` 138 and `zoomOut` 124) require every condition to be satisfied.
+    pub fn is_client_achievement_id(&self, id: u32) -> bool {
+        self.definitions.iter().any(|d| d.id == id && d.is_client_achievement)
+    }
+
+    pub fn is_client_allowed_counter_key(&self, key: &str) -> bool {
+        !key.is_empty() && self.allowed_client_counter_keys.contains(key)
+    }
+
+    pub fn record_statistic_event(
         &self,
         character_id: u32,
-        achievement_id: u32,
+        statistic_event_id: u32,
+        delta: u64,
         now_unix: u64,
-    ) -> Result<CharacterAchievement, (u32, String)> {
-        let mut map = self
-            .character_achievements
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        let list = Self::init_list(&self.definitions, &mut map, character_id);
+    ) -> Vec<(CharacterAchievement, bool, Vec<u32>)> {
+        self.record_statistic_event_filtered(character_id, statistic_event_id, delta, now_unix, false)
+    }
 
+    fn record_statistic_event_filtered(
+        &self,
+        character_id: u32,
+        statistic_event_id: u32,
+        delta: u64,
+        now_unix: u64,
+        client_only: bool,
+    ) -> Vec<(CharacterAchievement, bool, Vec<u32>)> {
+        let mut map = self.character_achievements.write().unwrap_or_else(|e| e.into_inner());
+        let list = Self::init_list(&self.definitions, &mut map, character_id);
+        let mut updates = Vec::new();
+
+        for a in list.iter_mut() {
+            if client_only && !a.def.is_client_achievement {
+                continue;
+            }
+            let matching_conds: Vec<(u32, u64)> = a
+                .def
+                .conditions
+                .iter()
+                .filter(|c| c.statistic_event_id == statistic_event_id)
+                .map(|c| (c.condition_id, c.target_value))
+                .collect();
+            if matching_conds.is_empty() {
+                continue;
+            }
+            for (cid, c_target) in matching_conds {
+                let entry = a.condition_progress.entry(cid).or_insert(0);
+                *entry = entry.saturating_add(delta).min(c_target);
+            }
+            let total_cond_progress: u64 = a
+                .def
+                .conditions
+                .iter()
+                .map(|c| a.condition_progress.get(&c.condition_id).copied().unwrap_or(0).min(c.target_value))
+                .sum();
+            let prev_completed = a.completed;
+            a.progress = a.progress.max(total_cond_progress);
+
+            let mut new_milestones = Vec::new();
+            for (idx, target) in a.def.milestone_targets.iter().enumerate() {
+                let m_id = (idx + 1) as u32;
+                if a.progress >= *target && !a.reached_milestones.contains(&m_id) {
+                    a.reached_milestones.push(m_id);
+                    a.unclaimed_reward_count += 1;
+                    new_milestones.push(m_id);
+                }
+            }
+            if a.progress >= a.def.target && !a.completed {
+                a.completed = true;
+                a.completed_date = Some(now_unix);
+            }
+            updates.push((a.clone(), !prev_completed && a.completed, new_milestones));
+        }
+        updates
+    }
+
+    pub fn on_gameplay_event_by_name(
+        &self,
+        character_id: u32,
+        event_names: &[&str],
+        delta: u64,
+        now_unix: u64,
+        gateway: &PublicGatewayRouter,
+    ) {
+        if delta == 0 || event_names.is_empty() {
+            return;
+        }
+        let mut event_ids: Vec<u32> = self
+            .definitions
+            .iter()
+            .flat_map(|d| d.conditions.iter())
+            .filter(|c| event_names.contains(&c.event_name.as_str()))
+            .map(|c| c.statistic_event_id)
+            .collect();
+        event_ids.sort_unstable();
+        event_ids.dedup();
+        self.apply_statistic_event_ids(character_id, &event_ids, delta, now_unix, false, gateway);
+    }
+
+    pub fn on_client_counter_event(
+        &self,
+        character_id: u32,
+        key: &str,
+        delta: u64,
+        now_unix: u64,
+        gateway: &PublicGatewayRouter,
+    ) {
+        if delta == 0 {
+            return;
+        }
+        let parsed_id = key.parse::<u32>().ok();
+        let mut event_ids: Vec<u32> = self
+            .definitions
+            .iter()
+            .filter(|d| d.is_client_achievement)
+            .flat_map(|d| d.conditions.iter())
+            .filter(|c| (!c.event_name.is_empty() && c.event_name == key) || parsed_id == Some(c.statistic_event_id))
+            .map(|c| c.statistic_event_id)
+            .collect();
+        event_ids.sort_unstable();
+        event_ids.dedup();
+        self.apply_statistic_event_ids(character_id, &event_ids, delta, now_unix, true, gateway);
+    }
+
+    pub fn apply_client_task_completions_and_counters(
+        &self,
+        char_id: u32,
+        client_ids: &[u32],
+        counter_deltas: &[(String, u64)],
+        now_unix: u64,
+        gateway: &PublicGatewayRouter,
+    ) {
+        let mut any_marked = false;
+        for &aid in client_ids {
+            if self.is_client_achievement_id(aid) {
+                if let Ok(a) = self.mark_completed(char_id, aid, now_unix) {
+                    any_marked = true;
+                    emit_achievement_notices(char_id, a.def.id, a.def.category_id, a.progress, 0, true, &[], now_unix);
+                }
+            }
+        }
+        if any_marked {
+            self.save_to_db();
+        }
+        for (k, delta) in counter_deltas {
+            self.on_client_counter_event(char_id, k, *delta, now_unix, gateway);
+        }
+        for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
+            let _ = gateway.publish_notice(scope, payload, ts);
+        }
+    }
+
+    fn apply_statistic_event_ids(
+        &self,
+        character_id: u32,
+        event_ids: &[u32],
+        delta: u64,
+        now_unix: u64,
+        client_only: bool,
+        gateway: &PublicGatewayRouter,
+    ) {
+        let mut any_changed = false;
+        for &eid in event_ids {
+            let updates = self.record_statistic_event_filtered(character_id, eid, delta, now_unix, client_only);
+            for (a, just_completed, milestones) in updates {
+                any_changed = true;
+                let cat_score = if a.def.category_id > 0 { self.category_score(character_id, a.def.category_id) } else { 0 };
+                emit_achievement_notices(character_id, a.def.id, a.def.category_id, a.progress, cat_score, just_completed, &milestones, now_unix);
+            }
+        }
+        if any_changed {
+            self.save_to_db();
+        }
+        for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
+            let _ = gateway.publish_notice(scope, payload, ts);
+        }
+    }
+
+    pub fn mark_completed(&self, character_id: u32, achievement_id: u32, now_unix: u64) -> Result<CharacterAchievement, (u32, String)> {
+        let mut map = self.character_achievements.write().unwrap_or_else(|e| e.into_inner());
+        let list = Self::init_list(&self.definitions, &mut map, character_id);
         for a in list.iter_mut() {
             if a.def.id == achievement_id {
                 a.progress = a.def.target;
+                for cond in &a.def.conditions {
+                    a.condition_progress.insert(cond.condition_id, cond.target_value);
+                }
                 a.completed = true;
                 a.completed_date = Some(now_unix);
                 for (idx, _) in a.def.milestone_targets.iter().enumerate() {
@@ -423,20 +585,13 @@ impl AchievementManager {
         Err((STATUS_NOT_FOUND, "Achievement not found".into()))
     }
 
-    pub fn reset_achievement(
-        &self,
-        character_id: u32,
-        achievement_id: u32,
-    ) -> Result<CharacterAchievement, (u32, String)> {
-        let mut map = self
-            .character_achievements
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+    pub fn reset_achievement(&self, character_id: u32, achievement_id: u32) -> Result<CharacterAchievement, (u32, String)> {
+        let mut map = self.character_achievements.write().unwrap_or_else(|e| e.into_inner());
         let list = Self::init_list(&self.definitions, &mut map, character_id);
-
         for a in list.iter_mut() {
             if a.def.id == achievement_id {
                 a.progress = 0;
+                a.condition_progress.clear();
                 a.completed = false;
                 a.completed_date = None;
                 a.reached_milestones.clear();
@@ -449,19 +604,15 @@ impl AchievementManager {
 
     pub fn reset_category(&self, character_id: u32, category_id: u32) {
         self.category_scores.write().unwrap_or_else(|e| e.into_inner()).remove(&(character_id, category_id));
-        let mut map = self
-            .character_achievements
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut map = self.character_achievements.write().unwrap_or_else(|e| e.into_inner());
         if let Some(list) = map.get_mut(&character_id) {
-            for a in list.iter_mut() {
-                if a.def.category_id == category_id {
-                    a.progress = 0;
-                    a.completed = false;
-                    a.completed_date = None;
-                    a.reached_milestones.clear();
-                    a.unclaimed_reward_count = 0;
-                }
+            for a in list.iter_mut().filter(|a| a.def.category_id == category_id) {
+                a.progress = 0;
+                a.condition_progress.clear();
+                a.completed = false;
+                a.completed_date = None;
+                a.reached_milestones.clear();
+                a.unclaimed_reward_count = 0;
             }
         }
         drop(map);
@@ -482,6 +633,7 @@ impl AchievementManager {
         if let Some(list) = map.get_mut(&character_id) {
             for a in list.iter_mut() {
                 a.progress = 0;
+                a.condition_progress.clear();
                 a.completed = false;
                 a.completed_date = None;
                 a.reached_milestones.clear();
@@ -498,18 +650,23 @@ impl AchievementManager {
         self.save_to_db();
     }
 
-    pub fn claim_rewards(
+    pub fn claim_rewards(&self, character_id: u32, db: &WorldRepository) -> u32 {
+        self.claim_rewards_filtered(character_id, db, &RewardClaimFilter::default())
+    }
+
+    pub fn claim_rewards_filtered(
         &self,
         character_id: u32,
         db: &WorldRepository,
+        filter: &RewardClaimFilter,
     ) -> u32 {
+        // DATA GAP: Achievement reward payouts require server CDN checkpoint definitions;
+        // never mint fabricated ISK, free SP, or wallet journal entries.
         let mut map = self
             .character_achievements
             .write()
             .unwrap_or_else(|e| e.into_inner());
         let mut total_claimed = 0u32;
-        let mut total_isk = 0i64;
-        let mut total_sp = 0i64;
         let mut taken: Vec<(u32, u32)> = Vec::new();
         {
             let Some(list) = map.get_mut(&character_id) else {
@@ -517,55 +674,71 @@ impl AchievementManager {
             };
 
             for a in list.iter_mut() {
-                if a.unclaimed_reward_count > 0 {
-                    let count = a.unclaimed_reward_count;
+                if a.unclaimed_reward_count == 0 {
+                    continue;
+                }
+                if let Some(req_aid) = filter.achievement_id {
+                    if a.def.id != req_aid {
+                        continue;
+                    }
+                }
+                if let Some(req_cid) = filter.category_id {
+                    if a.def.category_id != req_cid {
+                        continue;
+                    }
+                }
+                let unclaimed_ms: Vec<u32> = if !a.reached_milestones.is_empty() {
+                    a.reached_milestones
+                        .iter()
+                        .rev()
+                        .take(a.unclaimed_reward_count as usize)
+                        .copied()
+                        .rev()
+                        .collect()
+                } else {
+                    (1..=a.unclaimed_reward_count).collect()
+                };
+                let matched_count = unclaimed_ms
+                    .iter()
+                    .filter(|&&m_id| {
+                        let ms_ok = filter.milestone_id.is_none_or(|req_mid| req_mid == m_id);
+                        let sel_ok = filter.selected_reward_uuids.as_ref().is_none_or(|uuids| {
+                            let target_uuid = achievement_reward_uuid(a.def.id, m_id);
+                            uuids.iter().any(|u| *u == target_uuid)
+                        });
+                        ms_ok && sel_ok
+                    })
+                    .count() as u32;
+                let count = matched_count.min(a.unclaimed_reward_count);
+                if count > 0 {
                     total_claimed += count;
-                    total_isk += (count as i64) * a.def.reward_isk;
-                    total_sp += (count as i64) * a.def.reward_sp;
                     taken.push((a.def.id, count));
-                    a.unclaimed_reward_count = 0;
+                    a.unclaimed_reward_count -= count;
                 }
             }
         }
 
         if total_claimed > 0 {
-            let json_state = match serde_json::to_string(&*map) {
-                Ok(j) => j,
-                Err(_) => {
-                    if let Some(list) = map.get_mut(&character_id) {
-                        for (ach_id, count) in taken {
-                            if let Some(a) = list.iter_mut().find(|a| a.def.id == ach_id) {
-                                a.unclaimed_reward_count = a.unclaimed_reward_count.saturating_add(count);
-                            }
+            let Ok(json_state) = serde_json::to_string(&*map) else {
+                if let Some(list) = map.get_mut(&character_id) {
+                    for (ach_id, count) in taken {
+                        if let Some(a) = list.iter_mut().find(|a| a.def.id == ach_id) {
+                            a.unclaimed_reward_count = a.unclaimed_reward_count.saturating_add(count);
                         }
                     }
-                    return 0;
                 }
+                return 0;
             };
 
-            let isk_cents = IskCents::from_isk(total_isk);
-            let credited = db.try_with_mut_snapshot(|snap| -> Result<(), ()> {
-                let ch = snap.characters.get_mut(&(character_id as i64)).ok_or(())?;
-                let new_bal = ch.balance.checked_add(isk_cents).ok_or(())?;
-                ch.balance = new_bal;
-                ch.free_skill_points += total_sp as f64;
-                let balance_after = ch.balance;
+            let persisted = db
+                .try_with_mut_snapshot(|snap| -> Result<(), ()> {
+                    snap.quasar_state_blobs
+                        .insert(ACHIEVEMENTS_STATE_KEY.to_string(), json_state);
+                    Ok(())
+                })
+                .is_ok();
 
-                snap.next_entity_id += 1;
-                let entry_id = snap.next_entity_id;
-                snap.wallet_journal.push(eve_db::WalletJournalEntry {
-                    entry_id,
-                    character_id: character_id as i64,
-                    entry_type: "achievement_reward".to_string(),
-                    amount: isk_cents,
-                    balance_after,
-                    reason: "AIR achievement rewards claimed".to_string(),
-                });
-                snap.quasar_state_blobs.insert(ACHIEVEMENTS_STATE_KEY.to_string(), json_state);
-                Ok(())
-            }).is_ok();
-
-            if !credited {
+            if !persisted {
                 if let Some(list) = map.get_mut(&character_id) {
                     for (ach_id, count) in taken {
                         if let Some(a) = list.iter_mut().find(|a| a.def.id == ach_id) {
@@ -703,6 +876,43 @@ pub(crate) fn emit_achievement_notices(
     }
 }
 
+pub(crate) fn extract_u32_ident(val: &DynamicValue) -> Option<u32> {
+    match val {
+        DynamicValue::Uint32(u) => Some(*u),
+        DynamicValue::Uint64(u) => u32::try_from(*u).ok(),
+        DynamicValue::Int32(i) => u32::try_from(*i).ok(),
+        DynamicValue::Int64(i) => u32::try_from(*i).ok(),
+        DynamicValue::Message(m) => m.get(1).and_then(|inner| match inner {
+            DynamicValue::Uint32(u) => Some(*u),
+            DynamicValue::Uint64(u) => u32::try_from(*u).ok(),
+            DynamicValue::Int32(i) => u32::try_from(*i).ok(),
+            DynamicValue::Int64(i) => u32::try_from(*i).ok(),
+            DynamicValue::Bytes(b) if b.len() >= 4 => {
+                let mut arr = [0u8; 4];
+                arr.copy_from_slice(&b[b.len() - 4..]);
+                Some(u32::from_be_bytes(arr))
+            }
+            _ => None,
+        }),
+        DynamicValue::Bytes(b) if b.len() >= 4 => {
+            let mut arr = [0u8; 4];
+            arr.copy_from_slice(&b[b.len() - 4..]);
+            Some(u32::from_be_bytes(arr))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn extract_u64_val(val: &DynamicValue) -> Option<u64> {
+    match val {
+        DynamicValue::Uint64(u) => Some(*u),
+        DynamicValue::Uint32(u) => Some(u64::from(*u)),
+        DynamicValue::Int64(i) => u64::try_from(*i).ok(),
+        DynamicValue::Int32(i) => u64::try_from(*i).ok(),
+        _ => None,
+    }
+}
+
 pub fn register_achievement_handlers(
     router: &PublicGatewayRouter,
     db: Arc<WorldRepository>,
@@ -716,23 +926,7 @@ pub fn register_achievement_handlers(
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let aid_opt = dyn_msg
-                .get(1)
-                .and_then(|v| match v {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                        DynamicValue::Uint32(u) => Some(*u),
-                        DynamicValue::Int32(i) => Some(*i as u32),
-                        DynamicValue::Bytes(b) if b.len() >= 4 => {
-                            let mut arr = [0u8; 4];
-                            arr.copy_from_slice(&b[b.len() - 4..]);
-                            Some(u32::from_be_bytes(arr))
-                        }
-                        _ => None,
-                    }),
-                    _ => None,
-                });
+            let aid_opt = dyn_msg.get(1).and_then(extract_u32_ident);
             let aid = match aid_opt {
                 Some(id) if id > 0 => {
                     if !mgr.definitions.iter().any(|d| d.id == id) {
@@ -751,19 +945,28 @@ pub fn register_achievement_handlers(
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Achievement not found".into()))?;
 
             let mut out = Vec::new();
-            if let Some(ts) = a.completed_date {
+            if a.completed {
                 let ts_proto = GoogleTimestamp {
-                    seconds: ts as i64,
+                    seconds: a.completed_date.unwrap_or(1_700_000_000) as i64,
                     nanos: 0,
                 };
                 encode_bytes_field(1, &ts_proto.encode_proto(), &mut out);
+            } else {
+                encode_varint_field(2, 1, &mut out); // not_completed = true (mutually exclusive oneof with completed_date)
             }
-            encode_varint_field(2, if a.completed { 0 } else { 1 }, &mut out); // not_completed
             encode_varint_field(3, a.progress, &mut out); // progress_value
 
+            let ts_proto = GoogleTimestamp {
+                seconds: a.completed_date.unwrap_or(1_700_000_000) as i64,
+                nanos: 0,
+            };
+            let ts_bytes = ts_proto.encode_proto();
+            let pts_per_ms = a.def.score / (a.def.milestone_targets.len().max(1) as u32);
             for m_id in &a.reached_milestones {
                 let mut rm = Vec::new();
                 encode_uuid_ident(1, *m_id, &mut rm);
+                encode_bytes_field(2, &ts_bytes, &mut rm);
+                encode_varint_field(3, pts_per_ms as u64, &mut rm);
                 encode_bytes_field(5, &rm, &mut out);
             }
 
@@ -784,21 +987,7 @@ pub fn register_achievement_handlers(
             };
             let cat_id = dyn_msg
                 .get(1)
-                .and_then(|v| match v {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                        DynamicValue::Uint32(u) => Some(*u),
-                        DynamicValue::Int32(i) => Some(*i as u32),
-                        DynamicValue::Bytes(b) if b.len() >= 4 => {
-                            let mut arr = [0u8; 4];
-                            arr.copy_from_slice(&b[b.len() - 4..]);
-                            Some(u32::from_be_bytes(arr))
-                        }
-                        _ => None,
-                    }),
-                    _ => None,
-                })
+                .and_then(extract_u32_ident)
                 .filter(|&id| id > 0)
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing category identifier".into()))?;
             let score = mgr.category_score(cid, cat_id);
@@ -821,24 +1010,13 @@ pub fn register_achievement_handlers(
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let target_cid = dyn_msg
-                .get(1)
-                .and_then(|v| match v {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Uint64(u) => Some(*u as u32),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Int64(i) => Some(*i as u32),
-                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                        DynamicValue::Uint32(u) => Some(*u),
-                        DynamicValue::Uint64(u) => Some(*u as u32),
-                        DynamicValue::Int32(i) => Some(*i as u32),
-                        DynamicValue::Int64(i) => Some(*i as u32),
-                        _ => None,
-                    }),
-                    _ => None,
-                })
-                .filter(|id| *id > 0)
-                .unwrap_or(cid);
+            let target_cid = match dyn_msg.get(1) {
+                None => cid,
+                Some(DynamicValue::Message(m)) if m.get(1).is_none() => cid,
+                Some(v) => extract_u32_ident(v)
+                    .filter(|&id| id > 0)
+                    .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid character identifier".into()))?,
+            };
 
             let score = mgr_sc.total_character_score(target_cid);
             let mut out = Vec::new();
@@ -864,10 +1042,31 @@ pub fn register_achievement_handlers(
             let mut out = Vec::new();
             for a in &achievements {
                 if a.unclaimed_reward_count > 0 {
-                    let mut rew = Vec::new();
-                    encode_varint_field(1, a.def.id as u64, &mut rew);
-                    encode_varint_field(2, a.unclaimed_reward_count as u64, &mut rew);
-                    encode_bytes_field(1, &rew, &mut out);
+                    let ms_ids: Vec<u32> = if !a.reached_milestones.is_empty() {
+                        a.reached_milestones
+                            .iter()
+                            .rev()
+                            .take(a.unclaimed_reward_count as usize)
+                            .copied()
+                            .rev()
+                            .collect()
+                    } else {
+                        (1..=a.unclaimed_reward_count).collect()
+                    };
+                    for m_id in ms_ids {
+                        let mut src = Vec::new();
+                        encode_uuid_ident(1, a.def.id, &mut src);
+                        encode_uuid_ident(2, m_id, &mut src);
+
+                        let rew_uuid = achievement_reward_uuid(a.def.id, m_id);
+                        let mut rew_ident = Vec::new();
+                        encode_bytes_field(1, &rew_uuid, &mut rew_ident);
+
+                        let mut rew = Vec::new();
+                        encode_bytes_field(1, &src, &mut rew);
+                        encode_bytes_field(3, &rew_ident, &mut rew);
+                        encode_bytes_field(1, &rew, &mut out);
+                    }
                 }
             }
             Ok(GoogleAny {
@@ -884,13 +1083,51 @@ pub fn register_achievement_handlers(
     let db_claim = Arc::clone(&db);
     router.register_handler(
         "eve_public.achievement.reward.api.ClaimRequest",
-        Arc::new(move |ctx, _any, _dyn| {
-            let Some(cid) = ctx.effective_character_id() else {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let Some(_cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let _ = mgr.claim_rewards(cid, &db_claim);
-            mgr.save_to_db();
-            Ok(GoogleEmpty.to_any())
+            let mut filter = RewardClaimFilter::default();
+            if let Some(DynamicValue::Message(src)) = dyn_msg.get(1) {
+                if let Some(v) = src.get(1) {
+                    filter.achievement_id = Some(
+                        extract_u32_ident(v)
+                            .filter(|&id| id > 0)
+                            .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid achievement identifier".into()))?,
+                    );
+                }
+                if let Some(v) = src.get(2) {
+                    filter.milestone_id = Some(
+                        extract_u32_ident(v)
+                            .filter(|&id| id > 0)
+                            .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid milestone identifier".into()))?,
+                    );
+                }
+            } else if let Some(DynamicValue::Message(src)) = dyn_msg.get(2) {
+                if let Some(v) = src.get(1) {
+                    filter.category_id = Some(
+                        extract_u32_ident(v)
+                            .filter(|&id| id > 0)
+                            .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid category identifier".into()))?,
+                    );
+                }
+                if let Some(v) = src.get(2) {
+                    filter.milestone_id = Some(
+                        extract_u32_ident(v)
+                            .filter(|&id| id > 0)
+                            .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid milestone identifier".into()))?,
+                    );
+                }
+            }
+            // DATA GAP: Achievement reward payouts require server CDN checkpoint definitions
+            // (not shipped in local client FSD `achievements.static`). Fail closed without
+            // minting ISK, free SP, or wallet journal entries.
+            let _ = (&mgr, &db_claim, &filter);
+            Err((
+                STATUS_PRECONDITION_FAILED,
+                "DATA GAP: Achievement reward payouts require server CDN checkpoint definitions"
+                    .into(),
+            ))
         }),
     );
 
@@ -901,7 +1138,7 @@ pub fn register_achievement_handlers(
         Arc::new(move |_ctx, _any, _dyn| {
             let count = mgr_cdn.sde_achievement_count;
             let hash = &mgr_cdn.sde_achievement_hash;
-            let url = format!("https://resources.eveonline.com/achievements/v24.1.{count}/{hash}.json");
+            let url = format!("http://127.0.0.1:26004/cdn/achievements/v24.1.{count}/{hash}.json");
 
             let mut checkpoint = Vec::new();
             encode_string_field(1, &url, &mut checkpoint);
@@ -912,7 +1149,8 @@ pub fn register_achievement_handlers(
             encode_varint_field(3, count as u64, &mut spec);
             encode_bytes_field(2, &spec, &mut checkpoint);
 
-            let crc_val = crate::router::cache_notifications::crc32_ieee(hash.as_bytes()) as u32;
+            let crc_val =
+                crate::router::cache_notifications::crc32_ieee(&mgr_cdn.sde_definitions_json) as u32;
             let mut crc_msg = Vec::new();
             encode_varint_field(1, crc_val as u64, &mut crc_msg);
             encode_bytes_field(3, &crc_msg, &mut checkpoint);
@@ -957,21 +1195,7 @@ pub fn register_achievement_handlers(
         Arc::new(move |ctx, _any, dyn_msg| {
             let cat_id = dyn_msg
                 .get(1)
-                .and_then(|v| match v {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                        DynamicValue::Uint32(u) => Some(*u),
-                        DynamicValue::Int32(i) => Some(*i as u32),
-                        DynamicValue::Bytes(b) if b.len() >= 4 => {
-                            let mut arr = [0u8; 4];
-                            arr.copy_from_slice(&b[b.len() - 4..]);
-                            Some(u32::from_be_bytes(arr))
-                        }
-                        _ => None,
-                    }),
-                    _ => None,
-                })
+                .and_then(extract_u32_ident)
                 .filter(|&id| id > 0)
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing category identifier".into()))?;
             let score = ctx
@@ -1047,10 +1271,28 @@ pub fn register_achievement_handlers(
             let mut out = Vec::new();
             for a in &achievements {
                 if a.unclaimed_reward_count > 0 {
-                    let mut rew = Vec::new();
-                    encode_varint_field(1, a.def.id as u64, &mut rew);
-                    encode_varint_field(2, a.unclaimed_reward_count as u64, &mut rew);
-                    encode_bytes_field(1, &rew, &mut out);
+                    let ms_ids: Vec<u32> = if !a.reached_milestones.is_empty() {
+                        a.reached_milestones
+                            .iter()
+                            .rev()
+                            .take(a.unclaimed_reward_count as usize)
+                            .copied()
+                            .rev()
+                            .collect()
+                    } else {
+                        (1..=a.unclaimed_reward_count).collect()
+                    };
+                    for m_id in ms_ids {
+                        let mut src = Vec::new();
+                        encode_uuid_ident(1, a.def.id, &mut src);
+                        encode_uuid_ident(2, m_id, &mut src);
+                        let mut rew_ident = Vec::new();
+                        encode_bytes_field(1, &achievement_reward_uuid(a.def.id, m_id), &mut rew_ident);
+                        let mut rew = Vec::new();
+                        encode_bytes_field(1, &src, &mut rew);
+                        encode_bytes_field(3, &rew_ident, &mut rew);
+                        encode_bytes_field(1, &rew, &mut out);
+                    }
                 }
             }
             Ok(GoogleAny {
@@ -1070,24 +1312,13 @@ pub fn register_achievement_handlers(
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let target_cid = dyn_msg
-                .get(1)
-                .and_then(|v| match v {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Uint64(u) => Some(*u as u32),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Int64(i) => Some(*i as u32),
-                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                        DynamicValue::Uint32(u) => Some(*u),
-                        DynamicValue::Uint64(u) => Some(*u as u32),
-                        DynamicValue::Int32(i) => Some(*i as u32),
-                        DynamicValue::Int64(i) => Some(*i as u32),
-                        _ => None,
-                    }),
-                    _ => None,
-                })
-                .filter(|id| *id > 0)
-                .unwrap_or(cid);
+            let target_cid = match dyn_msg.get(1) {
+                None => cid,
+                Some(DynamicValue::Message(m)) if m.get(1).is_none() => cid,
+                Some(v) => extract_u32_ident(v)
+                    .filter(|&id| id > 0)
+                    .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid character identifier".into()))?,
+            };
             let score = mgr.total_character_score(target_cid);
             let mut out = Vec::new();
             encode_varint_field(1, score as u64, &mut out);

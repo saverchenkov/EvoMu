@@ -1074,48 +1074,52 @@ fn handle_community_track_get_attributes(
 
     let templates = get_sde_community_tracks(&ctx.sde);
 
-    ctx.db.with_snapshot(|snap| {
-        let quasar_tracks = snap
-            .quasar_state_blobs
-            .get("quasar_community_tracks")
-            .and_then(|json| {
-                serde_json::from_str::<
-                    HashMap<u32, crate::services::quasar_progression_extra::CommunityTrackState>,
-                >(json)
-                .ok()
-            })
-            .unwrap_or_default();
-
-        let track = quasar_tracks
-            .get(&track_uid)
-            .filter(|t| t.active)
-            .ok_or_else(|| {
-                err(
-                    "CommunityTrackInstanceNotFound",
-                    format!("Active community track instance {instance_id} not found"),
-                )
-            })?;
-
-        let template_id = i64::from(track.template_id);
-
-        let template = templates.get(&template_id).ok_or_else(|| {
+    let track = ctx
+        .db
+        .with_snapshot(|snap| {
+            snap.quasar_state_blobs
+                .get("quasar_community_tracks")
+                .and_then(|json| {
+                    serde_json::from_str::<
+                        HashMap<u32, crate::services::quasar_progression_extra::CommunityTrackState>,
+                    >(json)
+                    .ok()
+                })
+                .and_then(|map| map.get(&track_uid).cloned())
+        })
+        .or_else(|| {
+            ctx.quasar_gateway
+                .progression
+                .extra
+                .get_community_track(track_uid)
+        })
+        .filter(|t| t.active)
+        .ok_or_else(|| {
             err(
                 "CommunityTrackInstanceNotFound",
-                format!(
-                    "Community track instance {instance_id} (template {template_id}) not found in SDE community_track_templates"
-                ),
+                format!("Active community track instance {instance_id} not found"),
             )
         })?;
 
-        let raw_progress = i64::try_from(track.current_progress).unwrap_or(i64::MAX);
-        let progress = raw_progress.clamp(0, i64::from(template.goal));
+    let template_id = i64::from(track.template_id);
 
-        // 2-tuple (fsd_identifier, progress) per V24 communitytracks/client/repository.pyj:114.
-        Ok(PyRep::Tuple(vec![
-            PyRep::Integer(template.template_id),
-            PyRep::Integer(progress),
-        ]))
-    })
+    let template = templates.get(&template_id).ok_or_else(|| {
+        err(
+            "CommunityTrackInstanceNotFound",
+            format!(
+                "Community track instance {instance_id} (template {template_id}) not found in SDE community_track_templates"
+            ),
+        )
+    })?;
+
+    let raw_progress = i64::try_from(track.current_progress).unwrap_or(i64::MAX);
+    let progress = raw_progress.clamp(0, i64::from(template.goal));
+
+    // 2-tuple (fsd_identifier, progress) per V24 communitytracks/client/repository.pyj:114.
+    Ok(PyRep::Tuple(vec![
+        PyRep::Integer(template.template_id),
+        PyRep::Integer(progress),
+    ]))
 }
 
 fn handle_community_track_change_qa_mode(

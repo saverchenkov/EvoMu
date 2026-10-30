@@ -538,13 +538,12 @@ async fn test_q3_vendors_and_fulfillment() {
 
 #[tokio::test]
 async fn test_q3_legal_pii_cdn_localization() {
-    // parity: quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj, quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj
     eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = std::sync::Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
     let mut session = SessionState::new(2_011);
@@ -579,16 +578,20 @@ async fn test_q3_legal_pii_cdn_localization() {
         .decode_dynamic("eve_public.achievement.definition.api.cdn.GetLatestResponse", &payload.value)
         .expect("decode GetLatestResponse");
     if let Some(eve_proto::quasar::DynamicValue::Message(cp)) = dyn_cdn.get(1) {
-        if let Some(eve_proto::quasar::DynamicValue::String(url)) = cp.get(1) {
-            assert!(url.contains("achievements"), "URL should contain achievements, got {url}");
-        } else {
+        let Some(eve_proto::quasar::DynamicValue::String(url)) = cp.get(1) else {
             panic!("Expected url string in checkpoint");
-        }
+        };
+        let path = url.strip_prefix("http://127.0.0.1:26004").expect("local ESI HTTP URL");
+        assert!(path.starts_with("/cdn/achievements/v24.1.60/"), "unexpected path {path}");
+        let esi = eve_server::esi::router::EsiRouter::new(std::sync::Arc::clone(&ctx));
+        let cdn_http = esi.handle_request(&eve_server::esi::EsiHttpRequest::new("GET", path));
+        assert_eq!(cdn_http.status_code, 200, "EsiRouter must serve achievement JSON bundle");
+        assert_eq!(cdn_http.body, ctx.quasar_gateway.progression.achievements.sde_definitions_json);
         if let Some(eve_proto::quasar::DynamicValue::Message(ver)) = cp.get(2) {
             match ver.get(3) {
-                Some(eve_proto::quasar::DynamicValue::Uint32(p)) => assert_eq!(*p, 68),
-                Some(eve_proto::quasar::DynamicValue::Uint64(p)) => assert_eq!(*p, 68),
-                other => panic!("Expected patch 68 in version, got {other:?}"),
+                Some(eve_proto::quasar::DynamicValue::Uint32(p)) => assert_eq!(*p, 60),
+                Some(eve_proto::quasar::DynamicValue::Uint64(p)) => assert_eq!(*p, 60),
+                other => panic!("Expected patch 60 in version, got {other:?}"),
             }
         } else {
             panic!("Expected version in checkpoint");

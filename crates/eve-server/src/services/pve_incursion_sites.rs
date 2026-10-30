@@ -453,6 +453,30 @@ pub fn publish_incursion_tale_stopped_if_ended(
     }
 }
 
+pub fn notify_incursion_site_completed(
+    gateway: &crate::quasar_gateway::PublicGatewayRouter,
+    db: &Arc<WorldRepository>,
+    site_sys: SolarSystemId,
+    result: &IncursionCompletionResult,
+) {
+    publish_incursion_tale_stopped_if_ended(gateway, db, result);
+    let now = db.clock().now_unix_secs();
+    let did = result
+        .site_id
+        .rsplit('-')
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(INCURSION_TALE_TEMPLATE_ID as u32);
+    gateway.progression.extra.on_system_tale_encounter_completed(
+        site_sys,
+        "Incursion",
+        did,
+        1,
+        now,
+        gateway,
+    );
+}
+
 pub async fn process_incursion_site_completion_and_payout_core(
     systems: &Arc<SystemRegistry>,
     db: &Arc<WorldRepository>,
@@ -875,7 +899,7 @@ pub async fn process_incursion_site_completion_and_payout(
     )
     .await;
     if let Ok(r) = &res {
-        publish_incursion_tale_stopped_if_ended(&ctx.quasar_gateway, &ctx.db, r);
+        notify_incursion_site_completed(&ctx.quasar_gateway, &ctx.db, site_sys, r);
     }
     res
 }
@@ -1028,7 +1052,7 @@ pub async fn on_incursion_boss_destroyed(
     )
     .await;
     if let Some(Ok(r)) = &res {
-        publish_incursion_tale_stopped_if_ended(&ctx.quasar_gateway, &ctx.db, r);
+        notify_incursion_site_completed(&ctx.quasar_gateway, &ctx.db, solar_system_id, r);
     }
     res
 }
@@ -1156,11 +1180,28 @@ pub async fn handle_incursion_rpc(
                 return Some(Err(e));
             }
             let template_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            if template_id != 5158 {
-                return Some(Ok(PyRep::List(vec![])));
-            }
             let now_sec = ctx.now_unix();
             let now_ft = ((now_sec + 11_644_473_600) * 10_000_000) as i64;
+            if template_id != 5158 {
+                let extra_tales: Vec<PyRep> = {
+                    let tales = ctx.quasar_gateway.progression.extra.active_tales.read().unwrap_or_else(|e| e.into_inner());
+                    tales
+                        .iter()
+                        .filter(|(_, (tpl_id, _, _))| (*tpl_id as i64) == template_id)
+                        .map(|(&tale_id, &(tpl_id, sys_id, started))| {
+                            let start_ft = ((started + 11_644_473_600) * 10_000_000) as i64;
+                            PyRep::keyval([
+                                ("tale_id", PyRep::Integer(tale_id as i64)),
+                                ("template_id", PyRep::Integer(tpl_id as i64)),
+                                ("solar_system_id", PyRep::Integer(sys_id as i64)),
+                                ("start_date", PyRep::Integer(start_ft)),
+                                ("end_date", PyRep::Integer(now_ft + 864_000_000_000)),
+                            ])
+                        })
+                        .collect()
+                };
+                return Some(Ok(PyRep::List(extra_tales)));
+            }
             let list = with_pve_special_reg(ctx, |reg| {
                 reg.incursions
                     .values()

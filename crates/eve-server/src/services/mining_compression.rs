@@ -1292,7 +1292,7 @@ pub fn compute_structure_rigged_base_yield(
             Some(ty) => {
                 let is_ice = ty.group_id == 465 || ty.group_id == 4033;
                 let is_moon = matches!(ty.group_id, 1884 | 1920..=1923);
-                let is_ast = (ty.category_id == 25 || ty.group_id == 4932) && !is_ice && !is_moon;
+                let is_ast = (ty.category_id == 25 || ty.group_id == 4915) && !is_ice && !is_moon;
                 match rig_t.group_id {
                     1941 => is_ast, 1942 => is_ice, 1943 => is_moon, 1944 | 1945 => is_ast || is_ice || is_moon, _ => false,
                 }
@@ -1307,40 +1307,7 @@ pub fn compute_structure_rigged_base_yield(
     best_rig_yield.unwrap_or(unrigged)
 }
 
-/// DERIVED: CCP stores Prismaticite & Unrefined Mineral outputs in `randomizedTypeMaterials` rather than
-/// `sde_type_materials`; equal-ISK batch quantities (`524,288 ISK / base_price` per 100 units) are
-/// derived from each SDE mineral's `base_price` (`34..=40`, `11399`).
-pub fn resolve_reprocessable_materials(
-    sde: &SdeRegistry,
-    inv_type: &InvType,
-    item_id: i64,
-    next_entity_id: i64,
-    rng_bits: u64,
-    deterministic_quote: bool,
-) -> Option<Vec<eve_sde::TypeMaterialEntry>> {
-    if let Some(mats) = sde.type_materials.get(&inv_type.type_id).filter(|m| !m.is_empty()) {
-        return Some(mats.clone());
-    }
-    let mut standard_minerals: Vec<&InvType> = sde.types.values().filter(|t| t.group_id == 18 && t.published && t.type_id <= 11399 && t.base_price > 0.0).collect();
-    standard_minerals.sort_by_key(|t| t.type_id);
-    if standard_minerals.is_empty() { return None; }
-    if inv_type.group_id == 4932 {
-        let mineral_name = inv_type.name.strip_prefix("Unrefined ")?;
-        let min_t = standard_minerals.into_iter().find(|t| t.name == mineral_name)?;
-        let qty = (524_288.0 / min_t.base_price.max(2.0)).round().max(1.0) as u64;
-        return Some(vec![eve_sde::TypeMaterialEntry { material_type_id: min_t.type_id, quantity: qty }]);
-    }
-    if inv_type.group_id == 4915 || matches!(inv_type.type_id, 90041 | 90307) {
-        let idx = if deterministic_quote {
-            (item_id.unsigned_abs() as usize) % standard_minerals.len()
-        } else {
-            let seed = (item_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(next_entity_id as u64) ^ rng_bits;
-            (seed as usize) % standard_minerals.len()
-        };
-        let min_t = standard_minerals[idx];
-        let qty = (524_288.0 / min_t.base_price.max(2.0)).round().max(1.0) as u64;
-        return Some(vec![eve_sde::TypeMaterialEntry { material_type_id: min_t.type_id, quantity: qty }]);
-    }
-    None
-}
+pub use crate::services::space_mining_harvest::{
+    resolve_reprocessable_materials, resolve_reprocessable_materials_for_portions,
+};
 

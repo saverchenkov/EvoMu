@@ -264,7 +264,8 @@ def run_import(
         CREATE VIEW IF NOT EXISTS sde_effects AS SELECT * FROM sde_dogma_effects;
         CREATE TABLE sde_type_materials (
             type_id INTEGER PRIMARY KEY,
-            materials_json TEXT NOT NULL
+            materials_json TEXT NOT NULL,
+            randomized_materials_json TEXT NOT NULL
         );
         CREATE TABLE sde_blueprints (
             blueprint_type_id INTEGER PRIMARY KEY,
@@ -694,9 +695,13 @@ def run_import(
         )
 
         conn.executemany(
-            "INSERT INTO sde_type_materials VALUES (?, ?)",
+            "INSERT INTO sde_type_materials VALUES (?, ?, ?)",
             [
-                (tm["type_id"], json.dumps(tm["materials"], separators=(",", ":")))
+                (
+                    tm["type_id"],
+                    json.dumps(tm["materials"], separators=(",", ":")),
+                    json.dumps(tm.get("randomized_materials", []), separators=(",", ":")),
+                )
                 for tm in fsd_data["type_materials"]
             ],
         )

@@ -665,10 +665,21 @@ fn handle_station_get_guests(ctx: &ServerContext, session: &mut SessionState) ->
 
 fn handle_achievements_get(ctx: &ServerContext, session: &mut SessionState) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    let quasar_done: Vec<i64> = ctx
+        .quasar_gateway
+        .progression
+        .achievements
+        .get_or_init_achievements(char_id as u32)
+        .into_iter()
+        .filter(|a| a.completed)
+        .map(|a| a.def.id as i64)
+        .collect();
     ctx.db.with_snapshot(|snap| {
         let ext = load_cosmetics_ui_state(snap);
         let mut done = ext.achievements_by_char.get(&char_id).cloned().unwrap_or_default();
+        done.extend(quasar_done);
         done.sort_unstable();
+        done.dedup();
         let mut counters: Vec<(String, i64)> = ext.achievement_counters_by_char.get(&char_id).cloned().unwrap_or_default().into_iter().collect();
         counters.sort();
         // `monolithTaskTrackerSvc.FetchMyAchievementStatus`
@@ -697,40 +708,63 @@ fn handle_achievements_get(ctx: &ServerContext, session: &mut SessionState) -> R
 }
 
 /// `UpdateClientAchievmentsAndCounters(achievementIDs, eventCounters)`: merges newly completed
-/// achievement IDs and client event counters (counters only ever increase).
+/// client-side (`is_client_achievement`) achievement IDs and client event counters (counters only ever increase).
 fn handle_achievements_update(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let ids: Vec<i64> = match args.first() {
+    let mgr = &ctx.quasar_gateway.progression.achievements;
+    let raw_ids: Vec<i64> = match args.first() {
         Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => items.iter().filter_map(|x| x.as_i64()).filter(|&v| v > 0).collect(),
         Some(PyRep::Dict(entries)) => entries.iter().filter_map(|(k, _)| k.as_i64()).filter(|&v| v > 0).collect(),
         _ => Vec::new(),
     };
+    let client_ids: Vec<u32> = raw_ids
+        .into_iter()
+        .filter_map(|id| u32::try_from(id).ok().filter(|&aid| mgr.is_client_achievement_id(aid)))
+        .collect();
     let counters: Vec<(String, i64)> = match args.get(1) {
         Some(PyRep::Dict(entries)) => entries
             .iter()
             .filter_map(|(k, v)| {
                 let key = k.as_str().map(String::from).or_else(|| k.as_i64().map(|i| i.to_string()))?;
+                if !mgr.is_client_allowed_counter_key(&key) {
+                    return None;
+                }
                 Some((key, v.as_i64()?))
             })
             .collect(),
         _ => Vec::new(),
     };
-    ctx.db.try_with_mut_snapshot(|snap| {
+    let mut counter_deltas: Vec<(String, u64)> = Vec::new();
+    let res = ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
         let done = ext.achievements_by_char.entry(char_id).or_default();
-        for id in ids {
+        for &aid in &client_ids {
+            let id = i64::from(aid);
             if !done.contains(&id) {
                 done.push(id);
             }
         }
         let ctr = ext.achievement_counters_by_char.entry(char_id).or_default();
         for (k, v) in counters {
-            let slot = ctr.entry(k).or_insert(0);
-            *slot = (*slot).max(v);
+            let slot = ctr.entry(k.clone()).or_insert(0);
+            if v > *slot {
+                counter_deltas.push((k, (v - *slot) as u64));
+                *slot = v;
+            }
         }
         save_cosmetics_ui_state(snap, &ext);
         Ok(PyRep::None)
-    })
+    });
+    if res.is_ok() {
+        mgr.apply_client_task_completions_and_counters(
+            char_id as u32,
+            &client_ids,
+            &counter_deltas,
+            ctx.now_unix(),
+            &ctx.quasar_gateway,
+        );
+    }
+    res
 }
 
 /// `contextualOfferMgr.Track*(offerID)`: client telemetry; the server records the event.

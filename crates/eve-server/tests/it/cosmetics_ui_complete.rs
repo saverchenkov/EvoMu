@@ -245,13 +245,13 @@ async fn test_ui_links_station_guests_achievements_offers_and_nes_intro() {
     };
     let empty_state = rpc(&ctx, &mut a, "monolithTaskTrackerMgr", "GetCompletedAchievementsAndClientEventCount", &[]).await.expect("initial");
     assert_eq!(empty_state, ach_dict(vec![], PyRep::Dict(vec![])));
-    let counters = |n: i64| PyRep::Dict(vec![(PyRep::String("warps".into()), PyRep::Integer(n))]);
-    rpc(&ctx, &mut a, "monolithTaskTrackerMgr", "UpdateClientAchievmentsAndCounters", &[PyRep::List(vec![PyRep::Integer(202), PyRep::Integer(101)]), counters(3)]).await.expect("update");
-    rpc(&ctx, &mut a, "monolithTaskTrackerMgr", "UpdateClientAchievmentsAndCounters", &[PyRep::List(vec![PyRep::Integer(202)]), counters(1)]).await.expect("update again");
+    let counters = |n: i64| PyRep::Dict(vec![(PyRep::String("client_openAgency".into()), PyRep::Integer(n))]);
+    rpc(&ctx, &mut a, "monolithTaskTrackerMgr", "UpdateClientAchievmentsAndCounters", &[PyRep::List(vec![PyRep::Integer(102), PyRep::Integer(60)]), counters(3)]).await.expect("update");
+    rpc(&ctx, &mut a, "monolithTaskTrackerMgr", "UpdateClientAchievmentsAndCounters", &[PyRep::List(vec![PyRep::Integer(102)]), counters(1)]).await.expect("update again");
     let state = rpc(&ctx, &mut a, "monolithTaskTrackerMgr", "GetCompletedAchievementsAndClientEventCount", &[]).await.expect("state");
-    assert_eq!(state, ach_dict(vec![101, 202], counters(3)));
+    assert_eq!(state, ach_dict(vec![60, 102], counters(3)));
     let b_state = rpc(&ctx, &mut b, "monolithTaskTrackerMgr", "GetCompletedAchievementsAndClientEventCount", &[]).await.expect("B state");
-    assert_eq!(b_state, ach_dict(vec![], PyRep::Dict(vec![])), "achievements are per character");
+    assert_eq!(b_state, ach_dict(vec![24], PyRep::Dict(vec![])), "achievements are per character (b only has its own station undock achievement 24)");
 
     // Contextual offer tracking calls are accepted and recorded.
     for m in ["TrackOfferSeen", "TrackOfferBuyPress", "TrackOfferPurchased", "TrackOfferDelivered", "TrackOfferPurchasedSeen", "TrackOfferClosed"] {

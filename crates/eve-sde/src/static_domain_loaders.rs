@@ -81,6 +81,13 @@ pub struct CertificatesBundle {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AchievementConditionInfo {
+    pub condition_id: u32,
+    pub target_value: u32,
+    pub statistic_event_id: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AchievementInfo {
     pub achievement_id: u32,
     pub is_client_achievement: bool,
@@ -88,7 +95,11 @@ pub struct AchievementInfo {
     pub name_id: u32,
     pub description_id: u32,
     pub notification_text_id: u32,
+    pub name: String,
+    pub description: String,
+    pub notification_text: String,
     pub target_value: u32,
+    pub conditions: Vec<AchievementConditionInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -197,6 +208,64 @@ fn fsd_str(buf: &[u8], pos: usize) -> String {
     std::str::from_utf8(&buf[pos + 4..pos + 4 + len])
         .expect("FSD UTF-8 string")
         .to_string()
+}
+
+fn decode_pickle_unicode_escape(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    let mut raw_buf: Vec<u8> = Vec::new();
+    let flush_raw = |buf: &mut Vec<u8>, dst: &mut String| {
+        if !buf.is_empty() {
+            dst.push_str(&String::from_utf8_lossy(buf));
+            buf.clear();
+        }
+    };
+    let read_hex = |it: &mut std::iter::Copied<std::slice::Iter<'_, u8>>, n: usize| -> Option<u32> {
+        let mut val = 0u32;
+        for _ in 0..n {
+            let d = (it.next()? as char).to_digit(16)?;
+            val = (val << 4) | d;
+        }
+        Some(val)
+    };
+    let mut iter = bytes.iter().copied();
+    for _ in 0..bytes.len() {
+        let Some(b) = iter.next() else { break };
+        if b != b'\\' {
+            raw_buf.push(b);
+            continue;
+        }
+        flush_raw(&mut raw_buf, &mut out);
+        match iter.next() {
+            Some(b'\\') => out.push('\\'),
+            Some(b'\'') => out.push('\''),
+            Some(b'"') => out.push('"'),
+            Some(b'n') => out.push('\n'),
+            Some(b'r') => out.push('\r'),
+            Some(b't') => out.push('\t'),
+            Some(b'x') => {
+                if let Some(ch) = read_hex(&mut iter, 2).and_then(char::from_u32) {
+                    out.push(ch);
+                }
+            }
+            Some(b'u') => {
+                if let Some(ch) = read_hex(&mut iter, 4).and_then(char::from_u32) {
+                    out.push(ch);
+                }
+            }
+            Some(b'U') => {
+                if let Some(ch) = read_hex(&mut iter, 8).and_then(char::from_u32) {
+                    out.push(ch);
+                }
+            }
+            Some(other) => {
+                out.push('\\');
+                out.push(other as char);
+            }
+            None => out.push('\\'),
+        }
+    }
+    flush_raw(&mut raw_buf, &mut out);
+    out
 }
 
 fn fsd_dict_entries(buf: &[u8], pos: usize, item_size: usize) -> Vec<(u32, usize)> {
@@ -696,31 +765,179 @@ impl SdeRegistry {
         })
     }
 
-    /// Loads `res:/staticdata/achievements.static` (`68` achievements).
+    /// Loads `res:/staticdata/achievements.static` (`68` achievements) with FSD optional-field
+    /// bitfield decoding, `simpleConditions` sub-dictionaries, and localized English strings
+    /// from `res:/localizationfsd/localization_fsd_en-us.pickle`.
     pub fn load_achievements(&self) -> Result<HashMap<u32, AchievementInfo>, SdeError> {
         let raw = self.read_fsd_static_bytes("res:/staticdata/achievements.static")?;
         let sch_len = u32_le(&raw, 0) as usize;
-        Ok(fsd_dict_entries(&raw, 4 + sch_len, 8)
+        let entries = fsd_dict_entries(&raw, 4 + sch_len, 8);
+
+        let mut parsed_rows = Vec::with_capacity(entries.len());
+        let mut needed_msg_ids = std::collections::HashSet::new();
+
+        for (k, pos) in entries {
+            if raw.len() < pos + 14 {
+                continue;
+            }
+            let achievement_id = u32_le(&raw, pos);
+            let is_client_achievement = raw[pos + 4] != 0;
+            let is_enabled = raw[pos + 5] != 0;
+            let bitfield = u32_le(&raw, pos + 6);
+            let n_opt = bitfield.count_ones() as usize;
+            let offsets_start = pos + 14;
+            let var_base = offsets_start + n_opt * 4;
+            if raw.len() < var_base {
+                continue;
+            }
+
+            let mut opt_idx = 0usize;
+            let mut read_opt_pos = |bit: u32| -> Option<usize> {
+                if (bitfield & bit) == 0 {
+                    return None;
+                }
+                let rel_off = u32_le(&raw, offsets_start + opt_idx * 4) as usize;
+                opt_idx += 1;
+                Some(var_base + rel_off)
+            };
+
+            let name_id = read_opt_pos(0x01)
+                .filter(|&p| raw.len() >= p + 4)
+                .map(|p| u32_le(&raw, p))
+                .unwrap_or(0);
+            let description_id = read_opt_pos(0x02)
+                .filter(|&p| raw.len() >= p + 4)
+                .map(|p| u32_le(&raw, p))
+                .unwrap_or(0);
+            let notification_text_id = read_opt_pos(0x04)
+                .filter(|&p| raw.len() >= p + 4)
+                .map(|p| u32_le(&raw, p))
+                .unwrap_or(0);
+
+            if name_id > 0 {
+                needed_msg_ids.insert(name_id);
+            }
+            if description_id > 0 {
+                needed_msg_ids.insert(description_id);
+            }
+            if notification_text_id > 0 {
+                needed_msg_ids.insert(notification_text_id);
+            }
+
+            let mut conditions = Vec::new();
+            if let Some(sc_pos) = read_opt_pos(0x08).filter(|&p| raw.len() >= p + 8) {
+                let mut cond_entries = fsd_dict_entries(&raw, sc_pos, 8);
+                cond_entries.sort_by_key(|(cid, _)| *cid);
+                for (condition_id, cond_pos) in cond_entries {
+                    if raw.len() >= cond_pos + 20 {
+                        conditions.push(AchievementConditionInfo {
+                            condition_id,
+                            target_value: u32_le(&raw, cond_pos),
+                            statistic_event_id: u32_le(&raw, cond_pos + 16),
+                        });
+                    }
+                }
+            }
+            let target_value = conditions
+                .iter()
+                .map(|c| c.target_value)
+                .sum::<u32>()
+                .max(1);
+
+            parsed_rows.push((
+                k,
+                achievement_id,
+                is_client_achievement,
+                is_enabled,
+                name_id,
+                description_id,
+                notification_text_id,
+                target_value,
+                conditions,
+            ));
+        }
+
+        let localized = self
+            .load_localized_messages_en_us(&needed_msg_ids)
+            .unwrap_or_default();
+
+        Ok(parsed_rows
             .into_iter()
-            .map(|(k, pos)| {
-                let name_id = if raw.len() >= pos + 34 { u32_le(&raw, pos + 30) } else { 0 };
-                let description_id = if raw.len() >= pos + 38 { u32_le(&raw, pos + 34) } else { 0 };
-                let notification_text_id = if raw.len() >= pos + 42 { u32_le(&raw, pos + 38) } else { 0 };
-                let target_value = if raw.len() >= pos + 50 { u32_le(&raw, pos + 46) } else { 1 };
-                (
+            .map(
+                |(
                     k,
-                    AchievementInfo {
-                        achievement_id: u32_le(&raw, pos),
-                        is_client_achievement: raw[pos + 4] != 0,
-                        is_enabled: raw[pos + 5] != 0,
-                        name_id,
-                        description_id,
-                        notification_text_id,
-                        target_value,
-                    },
-                )
-            })
+                    achievement_id,
+                    is_client_achievement,
+                    is_enabled,
+                    name_id,
+                    description_id,
+                    notification_text_id,
+                    target_value,
+                    conditions,
+                )| {
+                    let name = localized
+                        .get(&name_id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("Achievement {achievement_id}"));
+                    let description = localized.get(&description_id).cloned().unwrap_or_default();
+                    let notification_text = localized
+                        .get(&notification_text_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    (
+                        k,
+                        AchievementInfo {
+                            achievement_id,
+                            is_client_achievement,
+                            is_enabled,
+                            name_id,
+                            description_id,
+                            notification_text_id,
+                            name,
+                            description,
+                            notification_text,
+                            target_value,
+                            conditions,
+                        },
+                    )
+                },
+            )
             .collect())
+    }
+
+    fn load_localized_messages_en_us(
+        &self,
+        needed_ids: &std::collections::HashSet<u32>,
+    ) -> Result<HashMap<u32, String>, SdeError> {
+        if needed_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let raw_loc =
+            self.read_fsd_static_bytes("res:/localizationfsd/localization_fsd_en-us.pickle")?;
+        let mut out = HashMap::with_capacity(needed_ids.len());
+        let lines: Vec<&[u8]> = raw_loc.split(|&b| b == b'\n').collect();
+        for pair in lines.windows(2) {
+            let Some(id_bytes) = pair[0].strip_prefix(b"sI") else {
+                continue;
+            };
+            let Ok(id_str) = std::str::from_utf8(id_bytes) else {
+                continue;
+            };
+            let Ok(msg_id) = id_str.parse::<u32>() else {
+                continue;
+            };
+            if !needed_ids.contains(&msg_id) {
+                continue;
+            }
+            let Some(val_bytes) = pair[1].strip_prefix(b"(V") else {
+                continue;
+            };
+            out.insert(msg_id, decode_pickle_unicode_escape(val_bytes));
+            if out.len() == needed_ids.len() {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     /// Loads `res:/staticdata/landmarks.static` (`45` universe landmarks).

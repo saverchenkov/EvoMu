@@ -182,6 +182,7 @@ pub async fn handle_npc_destroyed_in_space(
     killer_char_id: Option<i64>,
 ) {
     let killer = killer_char_id.unwrap_or(0);
+    crate::services::space_mining_harvest::on_wormhole_ore_guard_destroyed_db(db, killed_ball_id);
 
     // 1. Advance encounter waves if killed_ball_id belongs to an active encounter
     let triggered_info: Option<(u32, u32, Vec<u32>, DVec3)> = {
@@ -670,6 +671,7 @@ pub async fn populate_npc_wreck_on_turret_kill(
     }
 
     step_encounter_wave_on_kill(ctx, solar_system_id, npc_ball_id, pos).await;
+    crate::services::space_mining_harvest::on_wormhole_ore_guard_destroyed_db(&ctx.db, npc_ball_id);
     crate::services::pve_exploration::handle_pve_site_npc_destruction(
         ctx,
         solar_system_id,

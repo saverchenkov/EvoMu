@@ -455,6 +455,10 @@ async fn test_info_gathering_telemetry_rpcs() {
 // parity: rpc:communityTrackMgr.get_instance_attributes_public
 // parity: feat:ui.community-track
 async fn test_milestones_and_community_tracks() {
+    eve_testkit::attest(&[
+        "rpc:communityTrackMgr.get_instance_attributes_public",
+        "feat:ui.community-track",
+    ]);
     let ctx = ServerContext::new();
 
     let mut sess = login_pilot_char(&ctx, 31_005, "demo", "demo-secret", PILOT_1).await;
@@ -519,149 +523,137 @@ async fn test_milestones_and_community_tracks() {
     assert_eq!(claim_err.code, "UnimplementedRPC");
 
     // 3. communityTrackMgr.get_instance_attributes_public: backed by community_track_templates.fsdbinary
-    let missing_track = rpc(
-        &ctx,
-        &mut sess,
-        "communityTrackMgr",
-        "get_instance_attributes_public",
-        &[],
-    )
-    .await
-    .expect_err("missing instance_id must fail");
-    // rpc-lint: allow error code check
-    assert_eq!(missing_track.code, "InvalidArgument");
-
-    let invalid_track = rpc(
-        &ctx,
-        &mut sess,
-        "communityTrackMgr",
-        "get_instance_attributes_public",
-        &[PyRep::Integer(-5)],
-    )
-    .await
-    .expect_err("negative instance_id must fail");
-    // rpc-lint: allow error code check
-    assert_eq!(invalid_track.code, "InvalidInstanceID");
-
-    let unknown_track = rpc(
-        &ctx,
-        &mut sess,
-        "communityTrackMgr",
-        "get_instance_attributes_public",
-        &[PyRep::Integer(9999)],
-    )
-    .await
-    .expect_err("unrecognized community track instance must fail");
-    // rpc-lint: allow error code check
-    assert_eq!(unknown_track.code, "CommunityTrackInstanceNotFound");
-
-    // Template 1 ("Vanguard Nemesis Event", goal 100) in community_track_templates.fsdbinary
-    let track_attrs = rpc(
-        &ctx,
-        &mut sess,
-        "communityTrackMgr",
-        "get_instance_attributes_public",
-        &[PyRep::Integer(1)],
-    )
-    .await
-    .expect("get_instance_attributes_public for SDE template 1");
-    let PyRep::Tuple(track_tuple) = track_attrs else {
-        panic!("expected 2-tuple from get_instance_attributes_public");
-    };
-    assert_eq!(track_tuple.len(), 2);
-    assert_eq!(track_tuple[0].as_i64(), Some(1));
-    assert_eq!(track_tuple[1].as_i64(), Some(0));
-
-    // Advance community track 1 via Quasar eve.communitytrack.api.AddProgressRequest (+45, then +105 clamped to SDE goal 100)
-    sess.role |= eve_machonet::service_roles::ROLE_ADMIN;
-    for delta in [45_u64, 105_u64] {
-        let (mut add_pb, mut id_pb) = (Vec::new(), Vec::new());
-        eve_proto::quasar::encode_varint_field(1, 1, &mut id_pb);
-        eve_proto::quasar::encode_bytes_field(1, &id_pb, &mut add_pb);
-        eve_proto::quasar::encode_varint_field(2, delta, &mut add_pb);
-        let rsp = crate::quasar_progression_complete::quasar_rpc(
-            &ctx,
-            &mut sess,
-            "eve.communitytrack.api.AddProgressRequest",
-            add_pb,
-        )
-        .await;
-        assert_eq!(rsp.status_code, 200);
-        if delta == 45 {
-            let mid_attrs = rpc(
-                &ctx,
-                &mut sess,
-                "communityTrackMgr",
-                "get_instance_attributes_public",
-                &[PyRep::Integer(1)],
-            )
+    for (args, expected_code) in [
+        (vec![], "InvalidArgument"),
+        (vec![PyRep::Integer(-5)], "InvalidInstanceID"),
+        (vec![PyRep::Integer(9999)], "CommunityTrackInstanceNotFound"),
+        (vec![PyRep::Integer(1)], "CommunityTrackInstanceNotFound"),
+    ] {
+        let err = rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &args)
             .await
-            .expect("get_instance_attributes_public mid progress");
-            assert_eq!(
-                mid_attrs,
-                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(45)])
-            );
+            .expect_err("invalid or inactive track instance must fail");
+        // rpc-lint: allow error code check
+        assert_eq!(err.code, expected_code);
+    }
+
+    let encode_seq_req = |id_val: u64| -> Vec<u8> {
+        let (mut req, mut id_pb) = (Vec::new(), Vec::new());
+        eve_proto::quasar::encode_varint_field(1, id_val, &mut id_pb);
+        eve_proto::quasar::encode_bytes_field(1, &id_pb, &mut req);
+        req
+    };
+    let mut gm_sess = crate::quasar_progression_complete::build_sess(31_099, 90_000_002, 98_000_001);
+    gm_sess.user_id = Some(2);
+    gm_sess.role |= eve_machonet::service_roles::ROLE_ADMIN;
+    assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut gm_sess, "eve.communitytrack.api.StartRequest", encode_seq_req(1)).await.status_code, 200);
+    // Calling StartRequest(1) a second time must be idempotent and never allocate a duplicate active instance 10_002
+    assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut gm_sess, "eve.communitytrack.api.StartRequest", encode_seq_req(1)).await.status_code, 200);
+    let dup_err = rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(10_002)]).await.expect_err("duplicate instance must not exist");
+    // rpc-lint: allow error code check
+    assert_eq!(dup_err.code, "CommunityTrackInstanceNotFound");
+    let tid = 10_001_i64;
+    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(0)]));
+
+    // Event scheduler starts Vanguard Nemesis tale 466 in 30_000_142; starting alone does not advance track
+    let encode_tale_req = |spawn_tpl: u64, sys_id: Option<u64>| -> Vec<u8> {
+        let mut req = encode_seq_req(spawn_tpl);
+        if let Some(sid) = sys_id {
+            let mut sys_pb = Vec::new();
+            eve_proto::quasar::encode_varint_field(1, sid, &mut sys_pb);
+            eve_proto::quasar::encode_bytes_field(2, &sys_pb, &mut req);
+        }
+        req
+    };
+    assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut gm_sess, "eve.tale.api.StartTaleRequest", encode_tale_req(466, Some(30_000_142))).await.status_code, 200);
+    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(0)]));
+    rpc(&ctx, &mut sess, "publicGatewaySvc", "Subscribe", &[]).await.expect("Subscribe");
+    let mut stream_rx = ctx.quasar_gateway.take_stream_receiver(sess.session_id).expect("stream");
+    while stream_rx.try_recv().is_ok() {}
+    ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(30_000_142, "Data", 999_999, 1, ctx.now_unix(), &ctx.quasar_gateway);
+    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(0)]), "mismatched Data site must not advance CombatAnomaly tale 466");
+    assert!(stream_rx.try_recv().is_err(), "mismatched site must not emit ProgressedNotice");
+
+    // Non-admin pilot undocks in 30_000_142 and destroys live PvE anomaly waves via dogmaIM.Activate -> advances track (1, 0) -> (1, 1)
+    assert_eq!(sess.role & eve_machonet::service_roles::ROLE_ADMIN, 0, "player session must not hold ROLE_ADMIN");
+    rpc(&ctx, &mut sess, "stationSvc", "Undock", &[]).await.expect("Undock non-admin pilot");
+    let ship_id = sess.ship_id.expect("active ship after undock");
+    let sb_id = 910_003_001_i64;
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(sb_id, eve_db::InventoryItemRecord { item_id: sb_id, type_id: 3993, owner_id: PILOT_1, location_id: ship_id, flag: InventoryFlag::HiSlot1, quantity: 1, singleton: true, ..Default::default() });
+        s.module_online_states.insert(sb_id, true);
+    });
+    let active_tales = rpc(&ctx, &mut sess, "taleMgr", "get_active_tales_by_template", &[PyRep::Integer(466)]).await.expect("get_active_tales_by_template");
+    assert!(matches!(&active_tales, PyRep::List(items) if items.len() == 1), "non-admin pilot sees active tale 466");
+    let anoms = rpc(&ctx, &mut sess, "scanSvc", "GetCombatAnomalyInstances", &[PyRep::Integer(30_000_142)]).await.expect("GetCombatAnomalyInstances");
+    let site_id = match &anoms {
+        PyRep::List(items) => items.iter().find_map(|it| field(it, "siteID").as_str().map(String::from)).expect("combat anomaly in 30_000_142"),
+        other => panic!("expected anomaly list, got {other:?}"),
+    };
+    let sys_handle = ctx.systems.get_or_spawn(30_000_142);
+    for _ in 0..24 {
+        let wave_bids: Vec<i64> = match rpc(&ctx, &mut sess, "scanSvc", "GetCombatAnomalyInstances", &[PyRep::Integer(30_000_142)]).await.unwrap() {
+            PyRep::List(items) => items.into_iter().find(|it| field(it, "siteID").as_str() == Some(&site_id))
+                .map(|it| if let PyRep::List(l) = field(&it, "activeNpcBallIDs") { l.iter().filter_map(|v| v.as_i64()).collect() } else { Vec::new() }).unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        if wave_bids.is_empty() { break; }
+        if let Ok(Some((_, npc_ball))) = sys_handle.get_ball_snapshot(wave_bids[0]).await {
+            sys_handle.set_ball_position(ship_id, npc_ball.position).await;
+        }
+        if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
+            cs.capacitor = 10_000.0;
+            let _ = sys_handle.set_combat_state(ship_id, cs).await;
+        }
+        ctx.advance_secs(20);
+        rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(sb_id)]).await.expect("Smartbomb Activate");
+    }
+    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(1)]));
+    let mut progressed_tids = Vec::new();
+    while let Ok(env) = stream_rx.try_recv() {
+        if let Some(p) = env.payload.as_ref().filter(|p| p.normalized_type_name() == "eve_public.communitytrack.api.ProgressedNotice") {
+            let wm = eve_proto::quasar::WireMessage::decode(&p.value).unwrap();
+            if let Some(id) = wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()) {
+                progressed_tids.push(id);
+            }
         }
     }
-    sess.role &= !eve_machonet::service_roles::ROLE_ADMIN;
-    let clamped_attrs = rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(1)])
-        .await
-        .expect("get_instance_attributes_public clamped to SDE goal");
-    assert_eq!(clamped_attrs, PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(100)]));
+    assert_eq!(progressed_tids, vec![tid as u64], "live PvE clear must publish ProgressedNotice directly to subscribed gateway stream");
 
-    // Stopping track 1 marks it inactive -> get_instance_attributes_public rejects it; restarting restores it
-    sess.role |= eve_machonet::service_roles::ROLE_ADMIN;
-    let (mut tid_pb, mut track_id_req) = (Vec::new(), Vec::new());
-    eve_proto::quasar::encode_varint_field(1, 1, &mut tid_pb);
-    eve_proto::quasar::encode_bytes_field(1, &tid_pb, &mut track_id_req);
-    assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut sess, "eve.communitytrack.api.StopRequest", track_id_req.clone()).await.status_code, 200);
-    let stopped_err = rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(1)]).await.expect_err("inactive track must fail");
+    // Verify clamping at SDE goal 100 and StopRequest/StartRequest lifecycle
+    for delta in [43_u64, 105_u64] {
+        let mut add_pb = encode_seq_req(tid as u64);
+        eve_proto::quasar::encode_varint_field(2, delta, &mut add_pb);
+        assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut gm_sess, "eve.communitytrack.api.AddProgressRequest", add_pb).await.status_code, 200);
+        if delta == 43 {
+            assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(44)]));
+        }
+    }
+    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(100)]));
+    let get_pub = crate::quasar_progression_complete::quasar_rpc(&ctx, &mut sess, "eve_public.communitytrack.api.GetRequest", encode_seq_req(tid as u64)).await;
+    assert_eq!(get_pub.status_code, 200);
+    let attr_wm = eve_proto::quasar::WireMessage::decode(eve_proto::quasar::WireMessage::decode(&get_pub.payload.unwrap().value).unwrap().fields[0].value.as_bytes().unwrap()).unwrap();
+    assert_eq!(attr_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(100), "Quasar GetRequest must also report clamped 100");
+
+    // StopRequest, StartRequest, and SetProgressRequest resolve both track_id and template_id (1)
+    let tpl_id_req = encode_seq_req(1);
+    assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut gm_sess, "eve.communitytrack.api.StopRequest", tpl_id_req.clone()).await.status_code, 200);
+    let stopped_err = rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.expect_err("inactive track must fail");
     // rpc-lint: allow error code check
     assert_eq!(stopped_err.code, "CommunityTrackInstanceNotFound");
-    assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut sess, "eve.communitytrack.api.StartRequest", track_id_req).await.status_code, 200);
-    sess.role &= !eve_machonet::service_roles::ROLE_ADMIN;
-    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(1)]).await.expect("restarted track"), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(100)]));
+    assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut gm_sess, "eve.communitytrack.api.StartRequest", tpl_id_req.clone()).await.status_code, 200);
+    let mut set_pb = tpl_id_req;
+    eve_proto::quasar::encode_varint_field(2, 75, &mut set_pb);
+    assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut gm_sess, "eve.communitytrack.admin.api.SetProgressRequest", set_pb).await.status_code, 200);
+    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.expect("restarted track"), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(75)]));
 
     // 4. communityTrackMgr.change_qa_mode: requires QA/GM privileges
-    let denied = rpc(
-        &ctx,
-        &mut sess,
-        "communityTrackMgr",
-        "change_qa_mode",
-        &[PyRep::Bool(true)],
-    )
-    .await
-    .expect_err("regular player must be denied change_qa_mode");
+    let denied = rpc(&ctx, &mut sess, "communityTrackMgr", "change_qa_mode", &[PyRep::Bool(true)]).await.expect_err("regular player must be denied change_qa_mode");
     // rpc-lint: allow error code check
     assert_eq!(denied.code, "AccessDenied");
-
     sess.role |= eve_machonet::service_roles::ROLE_QA;
-
-    let missing_qa = rpc(&ctx, &mut sess, "communityTrackMgr", "change_qa_mode", &[])
-        .await
-        .expect_err("missing qa_mode must fail");
+    let missing_qa = rpc(&ctx, &mut sess, "communityTrackMgr", "change_qa_mode", &[]).await.expect_err("missing qa_mode must fail");
     // rpc-lint: allow error code check
     assert_eq!(missing_qa.code, "InvalidArgument");
-
-    let qa_res = rpc(
-        &ctx,
-        &mut sess,
-        "communityTrackMgr",
-        "change_qa_mode",
-        &[PyRep::Bool(true)],
-    )
-    .await
-    .expect("change_qa_mode true with QA role");
-    assert_eq!(qa_res, PyRep::Bool(true));
-
-    let qa_off = rpc(
-        &ctx,
-        &mut sess,
-        "communityTrackMgr",
-        "change_qa_mode",
-        &[PyRep::Bool(false)],
-    )
-    .await
-    .expect("change_qa_mode false");
-    assert_eq!(qa_off, PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "change_qa_mode", &[PyRep::Bool(true)]).await.expect("change_qa_mode true with QA role"), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "change_qa_mode", &[PyRep::Bool(false)]).await.expect("change_qa_mode false"), PyRep::Bool(true));
 }

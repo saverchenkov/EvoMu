@@ -31,6 +31,15 @@ use std::sync::{Arc, RwLock};
 // ============================================================================
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CommunityTrackTemplateInfo {
+    pub template_id: u32,
+    pub name: String,
+    pub target_progress: u64,
+    #[serde(default)]
+    pub tale_templates: Vec<u32>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CommunityTrackState {
     pub track_id: u32,
     #[serde(default)]
@@ -39,14 +48,21 @@ pub struct CommunityTrackState {
     pub target_progress: u64,
     pub current_progress: u64,
     pub active: bool,
+    #[serde(default)]
+    pub tale_templates: Vec<u32>,
 }
 
 pub fn uuid_to_hex(u: &[u8; 16]) -> String {
     u.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+fn resolve_track_key(tracks: &HashMap<u32, CommunityTrackState>, id: u32) -> Option<u32> {
+    tracks.contains_key(&id).then_some(id).or_else(|| tracks.iter().find(|(_, e)| e.template_id == id).map(|(&k, _)| k))
+}
+
 #[derive(Default)]
 pub struct ProgressionExtraManager {
+    pub community_track_templates: RwLock<HashMap<u32, CommunityTrackTemplateInfo>>,
     pub community_tracks: RwLock<HashMap<u32, CommunityTrackState>>,
     /// Admin-started tales: tale_id -> (spawn_template_id, solar_system_id, started_at_unix).
     pub active_tales: RwLock<HashMap<u32, (u32, u32, u64)>>,
@@ -57,6 +73,7 @@ pub struct ProgressionExtraManager {
     pub corp_state: Option<Arc<crate::services::quasar_social_corp::QuasarCorpState>>,
     pub db: Option<Arc<WorldRepository>>,
     pub sde: Option<Arc<eve_sde::SdeRegistry>>,
+    pub sde_event_tale_templates: std::collections::HashSet<u32>,
 }
 
 pub use super::quasar_campaign_state::{CampaignObjectiveRecord, CampaignRecord, CampaignTrackRecord};
@@ -99,6 +116,7 @@ impl ProgressionExtraManager {
         }).unwrap_or((None, None, None, None, None, None));
 
         Self {
+            community_track_templates: RwLock::new(HashMap::new()),
             community_tracks: RwLock::new(tracks_loaded.unwrap_or_default()),
             active_tales: RwLock::new(tales_loaded.unwrap_or_default()),
             generic_goals: RwLock::new(goals_loaded.unwrap_or_default()),
@@ -108,6 +126,7 @@ impl ProgressionExtraManager {
             corp_state: None,
             db,
             sde: None,
+            sde_event_tale_templates: std::collections::HashSet::new(),
         }
     }
 
@@ -121,28 +140,39 @@ impl ProgressionExtraManager {
         mgr.sde = sde.clone();
         if let Some(sde) = sde {
             if let Ok(records) = sde.load_cfsd_nested("res:/staticdata/community_track_templates.fsdbinary") {
+                let mut templates = mgr.community_track_templates.write().unwrap_or_else(|e| e.into_inner());
+                for (id_str, val) in records {
+                    if let Ok(id) = id_str.parse::<u32>() {
+                        let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("Community Track").to_string();
+                        // DERIVED: Server-configured default goal (100) when a template in community_track_templates.fsdbinary omits an explicit non-zero per-instance goal.
+                        let target = val.get("goal").and_then(|v| v.as_u64()).filter(|&g| g > 0).unwrap_or(100);
+                        let tale_templates: Vec<u32> = val
+                            .get("tale_templates")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| arr.iter().filter_map(|x| x.as_u64().and_then(|n| u32::try_from(n).ok())).collect())
+                            .unwrap_or_default();
+                        mgr.sde_event_tale_templates.extend(tale_templates.iter().copied());
+                        templates.insert(id, CommunityTrackTemplateInfo { template_id: id, name, target_progress: target, tale_templates });
+                    }
+                }
                 let mut tracks = mgr.community_tracks.write().unwrap_or_else(|e| e.into_inner());
+                let had_persisted = !tracks.is_empty();
                 for t in tracks.values_mut() {
                     if t.template_id == 0 {
                         t.template_id = t.track_id;
                     }
-                }
-                for (id_str, val) in records {
-                    if let Ok(id) = id_str.parse::<u32>() {
-                        let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("Community Track").to_string();
-                        let target = val.get("goal").and_then(|v| v.as_u64()).unwrap_or(100);
-                        tracks.entry(id).or_insert(CommunityTrackState {
-                            track_id: id,
-                            template_id: id,
-                            name,
-                            target_progress: target,
-                            current_progress: 0,
-                            active: true,
-                        });
+                    if t.tale_templates.is_empty() {
+                        if let Some(tpl) = templates.get(&t.template_id) {
+                            t.tale_templates = tpl.tale_templates.clone();
+                        }
                     }
                 }
+                drop(tracks);
+                drop(templates);
+                if had_persisted {
+                    mgr.save_to_db();
+                }
             }
-            mgr.save_to_db();
         }
         mgr
     }
@@ -191,24 +221,73 @@ impl ProgressionExtraManager {
         }
     }
 
+    pub fn activate_community_track(&self, template_id: u32) -> Result<CommunityTrackState, (u32, String)> {
+        let templates = self.community_track_templates.read().unwrap_or_else(|e| e.into_inner());
+        let tpl = templates
+            .get(&template_id)
+            .ok_or_else(|| (STATUS_NOT_FOUND, format!("Community track template {template_id} not found")))?
+            .clone();
+        let max_tpl = templates.keys().copied().max().unwrap_or(0);
+        drop(templates);
+        let mut tracks = self.community_tracks.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = tracks.values_mut().find(|e| e.template_id == template_id) {
+            existing.active = true;
+            let state = existing.clone();
+            drop(tracks);
+            self.save_to_db();
+            return Ok(state);
+        }
+        let track_id = tracks.keys().copied().max().unwrap_or(10_000).max(max_tpl).saturating_add(1);
+        let state = CommunityTrackState {
+            track_id,
+            template_id,
+            name: tpl.name,
+            target_progress: tpl.target_progress,
+            current_progress: 0,
+            active: true,
+            tale_templates: tpl.tale_templates,
+        };
+        tracks.insert(track_id, state.clone());
+        drop(tracks);
+        self.save_to_db();
+        Ok(state)
+    }
+
     pub fn get_community_track(&self, track_id: u32) -> Option<CommunityTrackState> {
-        self.community_tracks
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&track_id)
-            .cloned()
+        let map = self.community_tracks.read().unwrap_or_else(|e| e.into_inner());
+        resolve_track_key(&map, track_id).and_then(|k| map.get(&k).cloned())
     }
 
     pub fn add_community_progress(&self, track_id: u32, delta: u64) -> Option<CommunityTrackState> {
-        let mut map = self
-            .community_tracks
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(track) = map.get_mut(&track_id) {
-            track.current_progress = track.current_progress.saturating_add(delta);
-            return Some(track.clone());
+        let mut map = self.community_tracks.write().unwrap_or_else(|e| e.into_inner());
+        let key = resolve_track_key(&map, track_id)?;
+        let track = map.get_mut(&key)?;
+        track.current_progress = track.current_progress.saturating_add(delta).min(track.target_progress);
+        Some(track.clone())
+    }
+
+    pub fn record_tale_contribution(&self, tale_template_id: u32, delta: u64) -> Vec<CommunityTrackState> {
+        let mut map = self.community_tracks.write().unwrap_or_else(|e| e.into_inner());
+        let mut updated = Vec::new();
+        for track in map.values_mut() {
+            if track.active && track.tale_templates.contains(&tale_template_id) {
+                track.current_progress = track.current_progress.saturating_add(delta).min(track.target_progress);
+                updated.push(track.clone());
+            }
         }
-        None
+        updated
+    }
+
+    pub fn on_system_tale_encounter_completed(
+        &self,
+        solar_system_id: u32,
+        site_category: &str,
+        dungeon_id: u32,
+        delta: u64,
+        now_unix: u64,
+        gateway: &PublicGatewayRouter,
+    ) -> Vec<CommunityTrackState> {
+        notices::complete_system_tale_encounter(self, solar_system_id, site_category, dungeon_id, delta, now_unix, gateway)
     }
 }
 
@@ -250,21 +329,18 @@ pub fn register_progression_extra_handlers(
     // 1. Community Track Handlers
     // ------------------------------------------------------------------------
     let extract_track_id = |dyn_msg: &DynamicQuasarMessage| -> Option<u32> {
+        let parse_u32 = |v: &DynamicValue| match v {
+            DynamicValue::Uint32(u) => Some(*u),
+            DynamicValue::Int32(i) => u32::try_from(*i).ok(),
+            DynamicValue::Uint64(u) => u32::try_from(*u).ok(),
+            DynamicValue::Int64(i) => u32::try_from(*i).ok(),
+            _ => None,
+        };
         dyn_msg
             .get(1)
             .and_then(|v| match v {
-                DynamicValue::Uint32(u) => Some(*u),
-                DynamicValue::Int32(i) => Some(*i as u32),
-                DynamicValue::Uint64(u) => Some(*u as u32),
-                DynamicValue::Int64(i) => Some(*i as u32),
-                DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Uint64(u) => Some(*u as u64 as u32),
-                    DynamicValue::Int64(i) => Some(*i as u32),
-                    _ => None,
-                }),
-                _ => None,
+                DynamicValue::Message(m) => m.get(1).and_then(parse_u32),
+                other => parse_u32(other),
             })
             .filter(|&id| id != 0)
     };
@@ -344,13 +420,13 @@ pub fn register_progression_extra_handlers(
                 })
                 .filter(|&d| d > 0)
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing or non-positive community track progress delta".into()))?;
-            let _ = mgr
+            let updated = mgr
                 .add_community_progress(tid, delta)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Community track not found".into()))?;
             mgr.save_to_db();
 
             let mut not_bytes = Vec::new();
-            encode_varint_field(1, tid as u64, &mut not_bytes);
+            encode_varint_field(1, updated.track_id as u64, &mut not_bytes);
             let notice = GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.communitytrack.api.ProgressedNotice"), value: not_bytes.clone() };
             super::quasar_social_chat::ctx_queue_notice(crate::quasar_gateway::NoticeScope::Broadcast, notice.clone(), ctx.now_unix());
             super::quasar_social_chat::ctx_queue_notice(crate::quasar_gateway::NoticeScope::Character(cid), notice, ctx.now_unix());
@@ -366,14 +442,22 @@ pub fn register_progression_extra_handlers(
             require_admin_role(ctx)?;
             let tid = extract_track_id(dyn_msg)
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing community track Identifier".into()))?;
-            {
+            let found_existing = {
                 let mut tracks = mgr.community_tracks.write().unwrap_or_else(|e| e.into_inner());
-                let entry = tracks
-                    .get_mut(&tid)
-                    .ok_or_else(|| (STATUS_NOT_FOUND, "Community track not found".into()))?;
-                entry.active = true;
+                if let Some(key) = resolve_track_key(&tracks, tid) {
+                    if let Some(entry) = tracks.get_mut(&key) {
+                        entry.active = true;
+                    }
+                    true
+                } else {
+                    false
+                }
+            };
+            if found_existing {
+                mgr.save_to_db();
+            } else {
+                mgr.activate_community_track(tid)?;
             }
-            mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -385,11 +469,14 @@ pub fn register_progression_extra_handlers(
             require_admin_role(ctx)?;
             let tid = extract_track_id(dyn_msg)
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing community track Identifier".into()))?;
-            let mut track = mgr
-                .get_community_track(tid)
-                .ok_or_else(|| (STATUS_NOT_FOUND, "Community track not found".into()))?;
-            track.active = false;
-            mgr.community_tracks.write().unwrap_or_else(|e| e.into_inner()).insert(tid, track);
+            {
+                let mut tracks = mgr.community_tracks.write().unwrap_or_else(|e| e.into_inner());
+                let key = resolve_track_key(&tracks, tid)
+                    .ok_or_else(|| (STATUS_NOT_FOUND, "Community track not found".into()))?;
+                if let Some(track) = tracks.get_mut(&key) {
+                    track.active = false;
+                }
+            }
             mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
         }),
@@ -412,11 +499,14 @@ pub fn register_progression_extra_handlers(
                     _ => None,
                 })
                 .unwrap_or(0);
-            let mut track = mgr
-                .get_community_track(tid)
-                .ok_or_else(|| (STATUS_NOT_FOUND, "Community track not found".into()))?;
-            track.current_progress = val.min(track.target_progress);
-            mgr.community_tracks.write().unwrap_or_else(|e| e.into_inner()).insert(tid, track);
+            {
+                let mut tracks = mgr.community_tracks.write().unwrap_or_else(|e| e.into_inner());
+                let key = resolve_track_key(&tracks, tid)
+                    .ok_or_else(|| (STATUS_NOT_FOUND, "Community track not found".into()))?;
+                if let Some(track) = tracks.get_mut(&key) {
+                    track.current_progress = val.min(track.target_progress);
+                }
+            }
             mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
         }),
@@ -480,10 +570,20 @@ pub fn register_progression_extra_handlers(
                 let ids: Vec<u32> = tales.iter().filter(|(_, t)| t.0 == template_id).map(|(id, _)| *id).collect();
                 ids.into_iter().filter_map(|id| tales.remove(&id).map(|t| (id, t.1))).collect()
             };
-            if !stopped.is_empty() {
-                mgr.save_to_db();
-            }
             let now = ctx.now_unix();
+            if !stopped.is_empty() {
+                let progressed = mgr.record_tale_contribution(template_id, stopped.len() as u64);
+                mgr.save_to_db();
+                for tr in progressed {
+                    let mut not_bytes = Vec::new();
+                    encode_varint_field(1, tr.track_id as u64, &mut not_bytes);
+                    let notice = GoogleAny {
+                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.communitytrack.api.ProgressedNotice"),
+                        value: not_bytes,
+                    };
+                    ctx_queue_notice(crate::quasar_gateway::NoticeScope::Broadcast, notice, now);
+                }
+            }
             for (tale_id, system_id) in stopped {
                 ctx_queue_notice(
                     notices::tale_scope(),
@@ -1224,123 +1324,4 @@ pub fn register_progression_extra_handlers(
     super::quasar_campaign_handlers::register_campaign_handlers(router, Arc::clone(&manager));
 }
 
-fn format_opportunity_id_value(v: &DynamicValue) -> String {
-    match v {
-        DynamicValue::String(s) => s.clone(),
-        DynamicValue::Bytes(b) => b.iter().map(|x| format!("{x:02x}")).collect(),
-        DynamicValue::Uint64(u) => u.to_string(),
-        DynamicValue::Int64(i) => i.to_string(),
-        DynamicValue::Uint32(u) => u.to_string(),
-        DynamicValue::Int32(i) => i.to_string(),
-        DynamicValue::Bool(b) => b.to_string(),
-        DynamicValue::Enum(e) => e.to_string(),
-        DynamicValue::Message(m) => m
-            .fields
-            .iter()
-            .map(|(k, fv)| format!("{k}={}", format_opportunity_id_value(fv)))
-            .collect::<Vec<_>>()
-            .join(","),
-        DynamicValue::Repeated(items) => items
-            .iter()
-            .map(format_opportunity_id_value)
-            .collect::<Vec<_>>()
-            .join(","),
-        other => format!("{other:?}"),
-    }
-}
-
-/// Consumes client-published `eve_public.opportunity.api.{Viewed,Tracked,Untracked,Completed,Discovered}`
-/// events from `publicGatewaySvc.PublishEvent` / `PublishEventPayload`, updates live achievement/goal
-/// progression state, and queues progression notices to the character's subscribed session.
-pub fn handle_opportunity_event(
-    manager: &crate::services::quasar_progression::ProgressionManagers,
-    descriptors: &eve_proto::quasar::QuasarDescriptorRegistry,
-    session: &eve_machonet::SessionState,
-    any: &GoogleAny,
-    now_unix: u64,
-) {
-    let event_name = eve_proto::quasar::QuasarDescriptorRegistry::normalize_type_name(&any.type_url);
-    if !matches!(
-        event_name,
-        "eve_public.opportunity.api.Viewed"
-            | "eve_public.opportunity.api.Tracked"
-            | "eve_public.opportunity.api.Untracked"
-            | "eve_public.opportunity.api.Completed"
-            | "eve_public.opportunity.api.Discovered"
-    ) {
-        return;
-    }
-    let Some(cid) = session.character_id.filter(|&c| c > 0).map(|c| c as u32) else { return };
-    let Ok(dyn_msg) = descriptors.decode_dynamic(&any.type_url, &any.value) else { return };
-    let mut delta = 1u64;
-    let opp_key = if event_name.ends_with(".Discovered") {
-        let Some(DynamicValue::Message(disc_opp)) = dyn_msg.get(1) else { return };
-        if let Some(amt) = disc_opp.get(2).and_then(|v| match v {
-            DynamicValue::Uint64(u) if *u > 0 => Some(*u),
-            DynamicValue::Int64(i) if *i > 0 => Some(*i as u64),
-            _ => None,
-        }) {
-            delta = amt;
-        }
-        let tag = match disc_opp.get(1) {
-            Some(DynamicValue::Message(m)) => match m.get(1) {
-                Some(DynamicValue::String(s)) if !s.trim().is_empty() => s.clone(),
-                Some(DynamicValue::Uint64(v)) if *v > 0 => v.to_string(),
-                Some(DynamicValue::Int64(v)) if *v > 0 => v.to_string(),
-                _ => String::new(),
-            },
-            Some(DynamicValue::String(s)) => s.clone(),
-            _ => String::new(),
-        };
-        if tag.is_empty() { return; }
-        format!("discovered:{tag}")
-    } else {
-        if let Some(DynamicValue::Message(ch_msg)) = dyn_msg.get(1) {
-            let req_cid = match ch_msg.get(1) {
-                Some(DynamicValue::Uint64(v)) => Some(*v as u32),
-                Some(DynamicValue::Int64(v)) if *v > 0 => Some(*v as u32),
-                Some(DynamicValue::Uint32(v)) => Some(*v),
-                Some(DynamicValue::Int32(v)) if *v > 0 => Some(*v as u32),
-                _ => None,
-            };
-            if req_cid.filter(|&c| c > 0).is_some_and(|rc| rc != cid) { return; }
-        }
-        let Some(DynamicValue::Message(opp_msg)) = dyn_msg.get(2) else { return };
-        let Some(variant_num) = (1u32..=8).find(|&f| opp_msg.get(f).is_some()) else { return };
-        let Some(variant_val) = opp_msg.get(variant_num) else { return };
-        let id_str = format_opportunity_id_value(variant_val);
-        if id_str.is_empty() { return; }
-        format!("v{variant_num}:{id_str}")
-    };
-    if let Some((ach, done, ms)) = manager.achievements.add_progress(cid, 102, delta, now_unix) {
-        manager.achievements.save_to_db();
-        let cat_score = manager.achievements.category_score(cid, ach.def.category_id);
-        crate::services::quasar_achievements::emit_achievement_notices(cid, ach.def.id, ach.def.category_id, ach.progress, cat_score, done, &ms, now_unix);
-    }
-    if let Some(ref db) = manager.extra.db {
-        db.with_mut_snapshot(|snap| {
-            let mut state: serde_json::Value = snap.quasar_state_blobs.get("quasar_opportunities").and_then(|j| serde_json::from_str(j).ok()).unwrap_or_else(|| serde_json::json!({}));
-            if !state.is_object() { state = serde_json::json!({}); }
-            if let Some(obj) = state.as_object_mut() {
-                let ch_entry = obj.entry(cid.to_string()).or_insert_with(|| serde_json::json!({"tracked": [], "history": []}));
-                if event_name.ends_with(".Tracked") {
-                    if let Some(arr) = ch_entry.get_mut("tracked").and_then(|v| v.as_array_mut()) {
-                        if !arr.iter().any(|x| x.as_str() == Some(&opp_key)) {
-                            if arr.len() >= 256 { arr.remove(0); }
-                            arr.push(serde_json::Value::String(opp_key.clone()));
-                        }
-                    }
-                } else if event_name.ends_with(".Untracked") {
-                    if let Some(arr) = ch_entry.get_mut("tracked").and_then(|v| v.as_array_mut()) {
-                        arr.retain(|x| x.as_str() != Some(&opp_key));
-                    }
-                }
-                if let Some(hist) = ch_entry.get_mut("history").and_then(|v| v.as_array_mut()) {
-                    if hist.len() >= 256 { hist.remove(0); }
-                    hist.push(serde_json::json!({"event": event_name, "key": opp_key}));
-                }
-            }
-            snap.quasar_state_blobs.insert("quasar_opportunities".into(), state.to_string());
-        });
-    }
-}
+pub use super::quasar_goal_tale_notices::handle_opportunity_event;

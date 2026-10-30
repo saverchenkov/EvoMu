@@ -94,60 +94,27 @@ pub struct ServerContext {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct ModuleCooldownEntry {
-    pub recorded_unix_f64: f64,
-    pub delay_s: f64,
-    pub solar_system_id: Option<u32>,
-    pub recorded_sys_sim_s: f64,
-}
+pub struct ModuleCooldownEntry { pub recorded_unix_f64: f64, pub delay_s: f64, pub solar_system_id: Option<u32>, pub recorded_sys_sim_s: f64 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ActiveFighterSquadron {
-    pub ball_id: i64,
-    pub item_id: i64,
-    pub type_id: u32,
-    pub owner_char_id: i64,
-    pub parent_ship_id: i64,
-    pub tube_index: usize,
-    pub squadron_size: u32,
-    pub target_id: Option<i64>,
-    pub is_abandoned: bool,
-    pub mwd_active: bool,
+    pub ball_id: i64, pub item_id: i64, pub type_id: u32, pub owner_char_id: i64, pub parent_ship_id: i64,
+    pub tube_index: usize, pub squadron_size: u32, pub target_id: Option<i64>, pub is_abandoned: bool, pub mwd_active: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ActiveScannerProbe {
-    pub probe_id: i64,
-    pub probe_type_id: u32,
-    pub owner_char_id: i64,
-    pub ship_id: i64,
-    pub launcher_module_id: i64,
-    pub solar_system_id: u32,
-    pub position: [f64; 3],
-    pub destination: [f64; 3],
-    pub range_step: i32,
-    pub scan_range_m: f64,
-    pub base_sensor_strength: f64,
-    pub max_flight_time_s: f64,
-    pub launched_at_unix: u64,
-    pub state: i32,
+    pub probe_id: i64, pub probe_type_id: u32, pub owner_char_id: i64, pub ship_id: i64, pub launcher_module_id: i64,
+    pub solar_system_id: u32, pub position: [f64; 3], pub destination: [f64; 3], pub range_step: i32,
+    pub scan_range_m: f64, pub base_sensor_strength: f64, pub max_flight_time_s: f64, pub launched_at_unix: u64, pub state: i32,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ActiveMoonSurveyProbe {
-    pub probe_id: i64,
-    pub probe_type_id: u32,
-    pub owner_char_id: i64,
-    pub solar_system_id: u32,
-    pub hit_moon_id: Option<i64>,
-    pub arrival_unix_secs: u64,
+    pub probe_id: i64, pub probe_type_id: u32, pub owner_char_id: i64, pub solar_system_id: u32, pub hit_moon_id: Option<i64>, pub arrival_unix_secs: u64,
 }
 
-impl Default for ServerContext {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+impl Default for ServerContext { fn default() -> Self { Self::new() } }
 
 impl ServerContext {
     /// Initializes a `ServerContext` with the provided `WorldRepository` and `SdeRegistry`, and seeds NPC regional markets.
@@ -207,7 +174,7 @@ impl ServerContext {
                 if let (Some(sys), Some(db), Some(sde)) = (sw.upgrade(), dw.upgrade(), sdw.upgrade()) {
                     let inc = crate::services::pve_incursion_sites::on_incursion_boss_destroyed_core(&sys, &db, &sde, sys_id, npc_id, killer_opt).await;
                     if let (Some(Ok(r)), Some(gw)) = (&inc, gww.upgrade()) {
-                        crate::services::pve_incursion_sites::publish_incursion_tale_stopped_if_ended(&gw, &db, r);
+                        crate::services::pve_incursion_sites::notify_incursion_site_completed(&gw, &db, sys_id, r);
                     }
                     let acct_changes = crate::services::pve_special_sites::on_special_site_npc_destroyed_core(&sys, &db, &sde, sys_id, npc_id, killer_opt).await;
                     let _ = crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_core(&sys, &db, sys_id, npc_id).await;
@@ -220,10 +187,13 @@ impl ServerContext {
                         crate::services::combat_npc_encounters::handle_npc_destroyed_in_space(&sys, &db, &sde, &ce, sys_id, npc_id, killer_opt).await;
                     }
                     if let (Some(rng), Some(ce), Some(kid)) = (rw.upgrade(), cew.upgrade(), killer_opt) {
+                        let now_s = db.clock().now_unix_secs();
                         let (clr, esc, step) = crate::services::pve_exploration::handle_pve_site_npc_destruction_core(&sys, &db, &sde, &rng, &ce, sys_id, npc_id, kid, true).await;
-                        if let Some(pws) = pw.upgrade() {
-                            crate::services::pve_exploration::notify_pve_destruction_events(&db, &pws, &tx, kid, clr, esc, step);
+                        if let Some(gw) = gww.upgrade() {
+                            gw.progression.achievements.on_gameplay_event_by_name(kid as u32, &["destroyHostileNPC"], 1, now_s, &gw);
+                            if let Some(ref sid) = clr { let (cat, did) = crate::services::pve_exploration::pve_site_category_and_dungeon_id(&db, now_s, sys_id, sid); gw.progression.extra.on_system_tale_encounter_completed(sys_id, &cat, did, 1, now_s, &gw); }
                         }
+                        if let Some(pws) = pw.upgrade() { crate::services::pve_exploration::notify_pve_destruction_events(&db, &pws, &tx, kid, clr, esc, step); }
                     }
                     if let Some(sh_info) = crate::services::insurgency_services::on_insurgency_stronghold_destroyed_core(&sys, &db, sys_id, npc_id, killer_opt).await {
                         crate::services::insurgency_services::notify_stronghold_destruction(

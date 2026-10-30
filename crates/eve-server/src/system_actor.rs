@@ -71,6 +71,9 @@ pub struct SystemRegistry {
     /// PvE special-site balls (system, ball id) already spawned once into this registry's ballparks.
     /// Runtime-only (lives and dies with the ballparks), so no sentinel ball is needed in space.
     special_site_spawned_balls: std::sync::Mutex<std::collections::HashSet<(SolarSystemId, i64)>>,
+    /// Wormhole ore anomalies (system, anomaly_id) whose initial Sleeper guard wave has been hydrated
+    /// in this registry's ballparks, preventing player scan RPCs from respawning killed guards.
+    hydrated_wh_ore_anomalies: std::sync::Mutex<std::collections::HashSet<(SolarSystemId, String)>>,
     pub tactical_state: Arc<RwLock<crate::services::tactical_modules::TacticalModulesState>>,
 }
 
@@ -93,6 +96,7 @@ impl SystemRegistry {
             module_deactivation_hook: Arc::new(RwLock::new(None)),
             system_step_hook: Arc::new(RwLock::new(None)),
             special_site_spawned_balls: std::sync::Mutex::new(std::collections::HashSet::new()),
+            hydrated_wh_ore_anomalies: std::sync::Mutex::new(std::collections::HashSet::new()),
             tactical_state: Arc::new(RwLock::new(Default::default())),
         }
     }
@@ -109,6 +113,7 @@ impl SystemRegistry {
             module_deactivation_hook: Arc::new(RwLock::new(None)),
             system_step_hook: Arc::new(RwLock::new(None)),
             special_site_spawned_balls: std::sync::Mutex::new(std::collections::HashSet::new()),
+            hydrated_wh_ore_anomalies: std::sync::Mutex::new(std::collections::HashSet::new()),
             tactical_state: Arc::new(RwLock::new(Default::default())),
         }
     }
@@ -125,6 +130,7 @@ impl SystemRegistry {
             module_deactivation_hook: Arc::new(RwLock::new(None)),
             system_step_hook: Arc::new(RwLock::new(None)),
             special_site_spawned_balls: std::sync::Mutex::new(std::collections::HashSet::new()),
+            hydrated_wh_ore_anomalies: std::sync::Mutex::new(std::collections::HashSet::new()),
             tactical_state: Arc::new(RwLock::new(Default::default())),
         }
     }
@@ -268,18 +274,30 @@ impl SystemRegistry {
     }
 
     pub fn active_system_handles(&self) -> Vec<(SolarSystemId, SystemHandle)> {
-        self.systems
+        let mut handles: Vec<(SolarSystemId, SystemHandle)> = self
+            .systems
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
             .map(|(&id, h)| (id, h.clone()))
-            .collect()
+            .collect();
+        handles.sort_by_key(|(id, _)| *id);
+        handles
     }
 
     /// Records that PvE special-site ball `ball_id` has been spawned in `solar_system_id`.
     /// Returns `true` only the first time, so destroyed site NPCs are never re-spawned.
     pub fn claim_special_site_ball(&self, solar_system_id: SolarSystemId, ball_id: i64) -> bool {
         self.special_site_spawned_balls.lock().unwrap_or_else(|e| e.into_inner()).insert((solar_system_id, ball_id))
+    }
+
+    /// Marks wormhole ore `anomaly_id` in `solar_system_id` as hydrated for this ballpark registry.
+    /// Returns `true` only on first hydration so player scan RPCs never respawn killed Sleeper guards.
+    pub fn claim_wh_ore_anomaly_hydration(&self, solar_system_id: SolarSystemId, anomaly_id: &str) -> bool {
+        self.hydrated_wh_ore_anomalies
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((solar_system_id, anomaly_id.to_string()))
     }
 
     /// Spawns or retrieves a running Solar System Actor for `solar_system_id`.

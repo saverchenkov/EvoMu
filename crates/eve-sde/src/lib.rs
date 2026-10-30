@@ -253,6 +253,10 @@ pub struct TypeMaterialEntry {
     pub quantity: u64,
 }
 
+/// Static definition of a randomized material range (`Prismaticite`, `Unrefined *` minerals) from `typematerials.fsdbinary`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RandomizedMaterialEntry { pub material_type_id: TypeId, pub quantity_min: u64, pub quantity_max: u64 }
+
 /// Static definition of a Dogma attribute (`dgmAttributeTypes`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DogmaAttributeType {
@@ -891,6 +895,8 @@ pub struct SdeRegistry {
     pub dungeon_gas_types: HashMap<u32, Vec<TypeId>>,
     #[serde(default)]
     pub type_materials: HashMap<TypeId, Vec<TypeMaterialEntry>>,
+    #[serde(default)]
+    pub randomized_type_materials: HashMap<TypeId, Vec<RandomizedMaterialEntry>>,
     pub dynamic_item_attributes: HashMap<TypeId, MutaplasmidInfo>,
     pub space_components_by_type: HashMap<TypeId, Vec<String>>,
     pub missions: HashMap<u32, MissionTemplate>,
@@ -1065,9 +1071,8 @@ impl SdeRegistry {
     pub fn dogma_attribute(&self, attr_id: AttributeId) -> Option<&DogmaAttributeType> { self.attributes.get(&attr_id) }
     pub fn dogma_effects(&self) -> &HashMap<EffectId, DogmaEffectType> { &self.effects }
     pub fn dogma_effect(&self, effect_id: EffectId) -> Option<&DogmaEffectType> { self.effects.get(&effect_id) }
-    pub fn type_materials_for(&self, type_id: TypeId) -> &[TypeMaterialEntry] {
-        self.type_materials.get(&type_id).map(Vec::as_slice).unwrap_or(&[])
-    }
+    pub fn type_materials_for(&self, type_id: TypeId) -> &[TypeMaterialEntry] { self.type_materials.get(&type_id).map(Vec::as_slice).unwrap_or(&[]) }
+    pub fn randomized_type_materials_for(&self, type_id: TypeId) -> &[RandomizedMaterialEntry] { self.randomized_type_materials.get(&type_id).map(Vec::as_slice).unwrap_or(&[]) }
     pub fn blueprint(&self, bp_type_id: TypeId) -> Option<&BlueprintInfo> { self.blueprints.get(&bp_type_id) }
     pub fn solar_system(&self, solar_system_id: SolarSystemId) -> Option<&SolarSystem> { self.solar_systems.get(&solar_system_id) }
     pub fn stargates(&self) -> &HashMap<i64, StargateJump> { &self.jumps }
