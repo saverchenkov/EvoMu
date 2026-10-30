@@ -386,6 +386,9 @@ pub async fn handle(
     args: &[PyRep],
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    if let Some(res) = super::browser_lockdown::handle(ctx, session, service, method, args, _kwargs) {
+        return Some(res);
+    }
     match (service, method) {
         // parity: feat:pve.login-campaign, rpc:loginCampaignManager.get_client_campaign_state
         ("loginCampaignManager", "get_client_campaign_state") => {

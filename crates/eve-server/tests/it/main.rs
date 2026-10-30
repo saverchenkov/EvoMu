@@ -481,3 +481,7 @@ mod open_feats_b36_part5;
 mod notify_b36_closure;
 mod open_feats_and_rpcs_w34_closure;
 mod notify_w34_closure;
+mod open_feats_batch6_closure;
+mod open_feats_batch6_part2_closure;
+mod esi_b6_closure;
+mod open_feats_and_rpcs_b7;
