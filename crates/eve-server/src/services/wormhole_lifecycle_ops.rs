@@ -1150,6 +1150,22 @@ pub fn build_static_replacement_wormhole(
     Some(rep)
 }
 
+/// Remaining lifetime threshold (`< 15h` = `54,000 s`) below which an unmaterialized destination
+/// `K162` exit signature & wormhole ball automatically materialize during periodic sweeps.
+pub const K162_MATERIALIZE_REMAINING_SECS: u64 = 15 * 3_600;
+
+/// Returns `true` if `sig` is an uncollapsed non-`K162` wormhole whose remaining lifetime has
+/// dropped below `15h` (`54,000 s`) prior to full expiration.
+pub fn should_materialize_k162_by_lifetime(sig: &CosmicSignatureRecord, now_unix: u64) -> bool {
+    sig.sig_group == "Wormhole"
+        && !sig.collapsed
+        && !sig.signature_id.starts_with("K162-")
+        && sig.lifetime_seconds > 0
+        && now_unix < sig.created_unix.saturating_add(sig.lifetime_seconds)
+        && sig.lifetime_seconds.saturating_sub(now_unix.saturating_sub(sig.created_unix))
+            < K162_MATERIALIZE_REMAINING_SECS
+}
+
 /// Returns `true` if the destination K162 signature (`K162-<orig_sig_id>`) has materialized in `dest_sys`.
 pub fn is_k162_materialized_in_snap(
     snap: &eve_db::WorldStateSnapshot,
@@ -1162,9 +1178,9 @@ pub fn is_k162_materialized_in_snap(
         .is_some_and(|list| list.iter().any(|s| s.signature_id == k162_id && !s.collapsed))
 }
 
-/// Materializes `K162-<orig_sig_id>` in `dest_sys` when a ship first jumps through `parent_sig`
-/// (`feat:navigation.wormhole-k162-exit-materialization`). Returns `(exit_ball_id, sig_record, ball_pos)`
-/// if newly materialized.
+/// Materializes `K162-<orig_sig_id>` in `dest_sys` when a ship first jumps through `parent_sig` or
+/// when remaining lifetime drops below `15h` (`54,000 s`) (`feat:navigation.wormhole-k162-exit-materialization`).
+/// Returns `(exit_ball_id, sig_record, ball_pos)` if newly materialized.
 pub fn materialize_k162_exit_in_snap(
     ctx: &ServerContext,
     snap: &mut eve_db::WorldStateSnapshot,
@@ -1281,13 +1297,7 @@ pub async fn ensure_drifter_kspace_guards(
     for (idx, npc_tid) in [34_495_u32, 34_561_u32].into_iter().enumerate() {
         let gid = wh_ball_id.saturating_add(10 + idx as i64);
         guard_ids.push(gid);
-        if sys_handle
-            .get_ball_snapshot(gid)
-            .await
-            .ok()
-            .flatten()
-            .is_some()
-        {
+        if sys_handle.get_ball_snapshot(gid).await.ok().flatten().is_some() {
             continue;
         }
         let g_pos = wh_pos + DVec3::new(3_000.0 + (idx as f64) * 2_000.0, 0.0, 0.0);
@@ -1295,23 +1305,13 @@ pub async fn ensure_drifter_kspace_guards(
         let attr = |aid: u16| sde_type.and_then(|t| t.default_attributes.get(&aid).copied());
         let rof_s = (attr(51).unwrap_or(5_000.0) / 1_000.0).max(1.0);
         let dmg_m = attr(64).unwrap_or(16.0) / rof_s;
-        let _ = sys_handle
-            .spawn_ball_with_combat(
-                Ball {
-                    id: gid,
-                    type_id: npc_tid,
-                    position: g_pos,
-                    velocity: DVec3::ZERO,
-                    max_velocity: attr(37).unwrap_or(3_500.0),
-                    inertia: 1.0,
-                    mass: sde_type.map(|t| t.mass).unwrap_or(10_900_000.0),
-                    radius: sde_type.map(|t| t.radius).unwrap_or(350.0),
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                ctx.build_type_combat_state(npc_tid),
-            )
-            .await;
+        let _ = sys_handle.spawn_ball_with_combat(Ball {
+            id: gid, type_id: npc_tid, position: g_pos, velocity: DVec3::ZERO,
+            max_velocity: attr(37).unwrap_or(3_500.0), inertia: 1.0,
+            mass: sde_type.map(|t| t.mass).unwrap_or(10_900_000.0),
+            radius: sde_type.map(|t| t.radius).unwrap_or(350.0),
+            speed_fraction: 0.0, mode: MovementMode::Stop,
+        }, ctx.build_type_combat_state(npc_tid)).await;
         crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
             rt.npc_entities.insert(gid, crate::services::combat_crimewatch::ExtendedNpcEntity {
                 ball_id: gid, type_id: npc_tid, faction_id: 500_024, archetype: "Drifter".into(),

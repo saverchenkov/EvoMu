@@ -435,8 +435,9 @@ pub async fn ensure_system_signatures_and_anomalies(
                 let _ =
                     ensure_drifter_kspace_guards(ctx, sys_id, sig, wh_item_id, ball_pos).await;
             }
-            // Destination K162 exit balls only materialize once a ship first jumps through
-            // (or when a Pochven wormhole is scanned to 1.0 from Pochven, or for Drifter K-space beacons).
+            // Destination K162 exit balls materialize once a ship first jumps through,
+            // when remaining lifetime drops below 15h (54,000 s), when a Pochven wormhole
+            // is scanned to 1.0 from Pochven, or for Drifter K-space beacons.
             if !sig.signature_id.starts_with("K162-") {
                 if let Some(&(exit_pos, exit_type_id)) = materialized_exits.get(&sig.signature_id) {
                     if let Some(dest_sys) = sig.destination_system_id {
@@ -479,26 +480,35 @@ async fn sweep_expired_wormholes(
     filter_sys: Option<SolarSystemId>,
     now_unix: u64,
 ) {
-    let has_expired = ctx.db.with_snapshot(|snap| {
+    let has_work = ctx.db.with_snapshot(|snap| {
         snap.cosmic_signatures.iter().any(|(&sys_id, list)| {
             list.iter().any(|sig| {
-                sig.sig_group == "Wormhole"
+                let matches_scope = filter_sys.is_none_or(|t| {
+                    sys_id == t || sig.destination_system_id == Some(t)
+                });
+                matches_scope
+                    && sig.sig_group == "Wormhole"
                     && !sig.collapsed
                     && sig.lifetime_seconds > 0
-                    && now_unix >= sig.created_unix.saturating_add(sig.lifetime_seconds)
-                    && filter_sys.is_none_or(|t| {
-                        sys_id == t || sig.destination_system_id == Some(t)
-                    })
+                    && (now_unix >= sig.created_unix.saturating_add(sig.lifetime_seconds)
+                        || (!is_pochven_wormhole(&ctx.sde, sig)
+                            && should_materialize_k162_by_lifetime(sig, now_unix)
+                            && sig.destination_system_id.is_some_and(|d| {
+                                !is_k162_materialized_in_snap(snap, d, &sig.signature_id)
+                            })))
             })
         })
     });
-    if !has_expired {
+    if !has_work {
         return;
     }
 
     let mut expired_balls_to_despawn: Vec<(SolarSystemId, i64)> = Vec::new();
     let mut new_wormholes_to_spawn: Vec<(SolarSystemId, CosmicSignatureRecord)> = Vec::new();
+    let mut k162_to_materialize: Vec<(SolarSystemId, i64, CosmicSignatureRecord, DVec3)> =
+        Vec::new();
     let mut collapsed_parents: Vec<CosmicSignatureRecord> = Vec::new();
+    let mut parents_to_materialize_k162: Vec<CosmicSignatureRecord> = Vec::new();
     let mut sig_deltas: Vec<(SolarSystemId, Vec<CosmicSignatureRecord>, Vec<String>)> = Vec::new();
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -558,6 +568,11 @@ async fn sweep_expired_wormholes(
                     let orig_id = sig.signature_id.trim_start_matches("K162-");
                     let exit_id = wormhole_exit_item_id_for_signature(sys_id, orig_id);
                     expired_balls_to_despawn.push((sys_id, exit_id));
+                } else if matches_scope
+                    && !is_pochven_wormhole(&ctx.sde, sig)
+                    && should_materialize_k162_by_lifetime(sig, now_unix)
+                {
+                    parents_to_materialize_k162.push(sig.clone());
                 }
             }
             if !spawned_replacements.is_empty() || !removed_ids.is_empty() {
@@ -567,6 +582,16 @@ async fn sweep_expired_wormholes(
         }
         for parent in &collapsed_parents {
             sync_k162_mirror_in_snap(snap, parent);
+        }
+        for parent in &parents_to_materialize_k162 {
+            if let Some(dest_sys) = parent.destination_system_id {
+                if let Some((k_exit_id, k_rec, k_pos)) =
+                    materialize_k162_exit_in_snap(ctx, snap, parent, dest_sys)
+                {
+                    sig_deltas.push((dest_sys, vec![k_rec.clone()], Vec::new()));
+                    k162_to_materialize.push((dest_sys, k_exit_id, k_rec, k_pos));
+                }
+            }
         }
     });
 
@@ -578,6 +603,25 @@ async fn sweep_expired_wormholes(
     for (b_sys, b_id) in expired_balls_to_despawn {
         let h = ctx.systems.get_or_spawn(b_sys);
         let _ = h.remove_ball(b_id).await;
+    }
+    for (d_sys, k_exit_id, k_rec, k_pos) in k162_to_materialize {
+        let dh = ctx.systems.get_or_spawn(d_sys);
+        if dh.get_ball_snapshot(k_exit_id).await.ok().flatten().is_none() {
+            let _ = dh
+                .spawn_ball(Ball {
+                    id: k_exit_id,
+                    type_id: k_rec.wormhole_type_id.unwrap_or(26_272),
+                    position: k_pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 1.0,
+                    mass: k_rec.remaining_mass_kg.max(1.0),
+                    radius: 1500.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Rigid,
+                })
+                .await;
+        }
     }
     for (sys_id, rep) in new_wormholes_to_spawn {
         let new_wh_id = wormhole_item_id_for_signature(sys_id, &rep.signature_id);
@@ -744,6 +788,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
     let mut collapsed_sig_delta: Option<(SolarSystemId, String)> = None;
     let mut collapsed_mirror_delta: Option<(SolarSystemId, String)> = None;
     let mut k162_to_materialize: Option<(SolarSystemId, i64, CosmicSignatureRecord, DVec3)> = None;
+    let mut fallback_exit_pos: Option<DVec3> = None;
 
     let res = ctx.db.try_with_mut_snapshot(|snap| {
         // Resolve canonical parent signature even if jumping via materialized `K162-<orig_id>` string or `exit_wh_id`.
@@ -1001,11 +1046,33 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
 
         // Materialize destination K162 signature on first jump through (`feat:navigation.wormhole-k162-exit-materialization`)
         if !is_reverse_exit_jump && !is_collapsed && !parent_snapshot.signature_id.starts_with("K162-") {
-            if let Some((k_exit_id, k_rec, k_pos)) =
+            if let Some((k_exit_id, k_rec, _k_pos)) =
                 materialize_k162_exit_in_snap(ctx, snap, &parent_snapshot, dest_sys)
             {
-                k162_to_materialize = Some((dest_sys, k_exit_id, k_rec, k_pos));
+                let exit_ball_pos = pochven_wormhole_ball_position(&ctx.sde, &k_rec);
+                fallback_exit_pos = Some(exit_ball_pos);
+                k162_to_materialize = Some((dest_sys, k_exit_id, k_rec, exit_ball_pos));
             }
+        }
+        if fallback_exit_pos.is_none() {
+            fallback_exit_pos = if is_reverse_exit_jump {
+                Some(pochven_wormhole_ball_position(&ctx.sde, &parent_snapshot))
+            } else {
+                snap.cosmic_signatures
+                    .get(&dest_sys)
+                    .and_then(|l| l.iter().find(|s| s.signature_id == format!("K162-{sig_id_str}")))
+                    .map(|k_rec| pochven_wormhole_ball_position(&ctx.sde, k_rec))
+                    .or_else(|| {
+                        Some(DVec3::from_array(
+                            pick_system_celestial_position(
+                                ctx,
+                                dest_sys,
+                                (exit_wh_id as u32).wrapping_add(1),
+                            )
+                            .0,
+                        ))
+                    })
+            };
         }
         sync_k162_mirror_in_snap(snap, &parent_snapshot);
 
@@ -1121,8 +1188,27 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
                 system_wormhole_profile_sde(&ctx.sde, dest_sys_id);
 
             let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
+            let exit_wh_pos = new_handle
+                .get_ball_snapshot(exit_wh_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, b)| b.position)
+                .or(fallback_exit_pos)
+                .unwrap_or_else(|| {
+                    DVec3::from_array(
+                        pick_system_celestial_position(
+                            ctx,
+                            dest_sys_id,
+                            (exit_wh_id as u32).wrapping_add(1),
+                        )
+                        .0,
+                    )
+                });
             let mut new_ball = current_ball;
-            new_ball.position = DVec3::new(10_000.0, 0.0, 0.0);
+            // Spawn arriving ship on grid within ~5 km (2,200 m from center, outside the 1,500 m
+            // wormhole sphere and within the 2,500 m jump-in/return-transit radius) of the exit wormhole.
+            new_ball.position = exit_wh_pos + DVec3::new(2_200.0, 0.0, 0.0);
             new_ball.velocity = DVec3::ZERO;
             new_ball.speed_fraction = 0.0;
             new_ball.mode = MovementMode::Stop;

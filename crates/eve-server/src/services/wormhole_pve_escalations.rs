@@ -1068,12 +1068,15 @@ pub fn process_wormhole_sites_on_downtime(ctx: &ServerContext) -> usize {
             .combat_ephemeral
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        for (sys_id, bid) in all_removed_balls.iter().chain(removed_ast_balls.iter()) {
+        for (_, bid) in all_removed_balls.iter().chain(removed_ast_balls.iter()) {
             rt.npc_entities.remove(bid);
-            let sys_handle = ctx.systems.get_or_spawn(*sys_id);
-            let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-            let _ = bp.remove_ball(*bid);
         }
+    }
+
+    for (sys_id, bid) in all_removed_balls.iter().chain(removed_ast_balls.iter()) {
+        let sys_handle = ctx.systems.get_or_spawn(*sys_id);
+        let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        let _ = bp.remove_ball(*bid);
     }
 
     for (sys_id, ids) in per_sys_removed_ids {

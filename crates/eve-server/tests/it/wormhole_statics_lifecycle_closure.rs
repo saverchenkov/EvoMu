@@ -426,7 +426,34 @@ async fn test_wormhole_statics_decay_stages_respawn_and_k162_materialization() {
     );
 
     // Advance +13h (total +14h): 16h wormhole has 2h remaining (<4h -> reaching end of natural lifetime)
+    // and both 16h (2h remaining) and 24h (10h remaining) are now <15h remaining lifetime, so their
+    // destination K162 signatures & exit balls materialize on the SystemActor tick without any ship transit,
+    // while 36h (22h remaining) and 48h (34h remaining) remain unmaterialized (>= 15h).
     ctx.advance_secs(13 * 3_600);
+    let _ = ctx.systems.get_or_spawn(decay_sys).step_manual(1.0).await;
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            is_k162_materialized_in_snap(snap, decay_dest, "WND-DEC-16H"),
+            "16h wormhole at 2h remaining (<15h) must materialize K162 without ship transit"
+        );
+        assert!(
+            is_k162_materialized_in_snap(snap, decay_dest, "WND-DEC-24H"),
+            "24h wormhole at 10h remaining (<15h) must materialize K162 without ship transit"
+        );
+        assert!(
+            !is_k162_materialized_in_snap(snap, decay_dest, "WND-DEC-36H"),
+            "36h wormhole at 22h remaining (>=15h) must NOT materialize K162 yet"
+        );
+        assert!(
+            !is_k162_materialized_in_snap(snap, decay_dest, "WST-DEC-48H"),
+            "48h wormhole at 34h remaining (>=15h) must NOT materialize K162 yet"
+        );
+    });
+    let k16_exit_id = wormhole_exit_item_id_for_signature(decay_dest, "WND-DEC-16H");
+    assert!(
+        ctx.systems.get_or_spawn(decay_dest).get_ball_snapshot(k16_exit_id).await.unwrap().is_some(),
+        "Destination exit wormhole ball must spawn when remaining lifetime drops below 15h"
+    );
     let info_16_eol = ctx
         .dispatch_rpc(&mut sess, "wormholeMgr", None, "GetWormholePolarization", &[PyRep::String("WND-DEC-16H".into())], &kw, None)
         .await
@@ -540,4 +567,96 @@ async fn test_wormhole_statics_decay_stages_respawn_and_k162_materialization() {
         !ctx.db.with_snapshot(|snap| is_k162_materialized_in_snap(snap, new_c3_dest, &rep_c3_static.signature_id)),
         "Respawned static's exit K162 must start unmaterialized"
     );
+}
+
+// parity: feat:navigation.wormhole-k162-exit-materialization
+#[tokio::test]
+async fn test_k162_materializes_below_15h_remaining_lifetime_without_transit() {
+    eve_testkit::attest(&["feat:navigation.wormhole-k162-exit-materialization"]);
+    let ctx = ctx_with_real_sde();
+    let origin_sys = 31_001_510_u32;
+    let dest_sys = 31_001_511_u32;
+    let now0 = ctx.now_unix();
+    let orig_sig_id = "WST-K162-15H";
+    let k162_sig_id = format!("K162-{orig_sig_id}");
+    let exit_wh_id = wormhole_exit_item_id_for_signature(dest_sys, orig_sig_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cosmic_signatures.insert(
+            origin_sys,
+            vec![CosmicSignatureRecord {
+                signature_id: orig_sig_id.into(),
+                solar_system_id: origin_sys,
+                sig_group: "Wormhole".into(),
+                type_name: "Wormhole X877".into(),
+                position: [12_000_000_000.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                wormhole_type_id: Some(30_699),
+                destination_system_id: Some(dest_sys),
+                created_unix: now0,
+                lifetime_seconds: 24 * 3_600,
+                max_mass_kg: 2_000_000_000.0,
+                remaining_mass_kg: 2_000_000_000.0,
+                max_jump_mass_kg: 375_000_000.0,
+                collapsed: false,
+            }],
+        );
+    });
+
+    // At +9h elapsed (exact 15h = 54,000 s remaining), K162 must remain unmaterialized prior to transit
+    ctx.advance_secs(9 * 3_600);
+    let _ = ctx.systems.get_or_spawn(origin_sys).step_manual(1.0).await;
+    assert!(
+        !ctx.db.with_snapshot(|snap| is_k162_materialized_in_snap(snap, dest_sys, orig_sig_id)),
+        "K162 must NOT materialize at exact 15h (54,000 s) remaining lifetime"
+    );
+    assert!(
+        ctx.systems.get_or_spawn(dest_sys).get_ball_snapshot(exit_wh_id).await.unwrap().is_none(),
+        "Destination exit wormhole ball must NOT exist at >= 15h remaining lifetime"
+    );
+
+    // Advance 1s past 15h remaining (53,999 s < 54,000 s): sweep materializes K162 signature & exit ball
+    ctx.advance_secs(1);
+    let _ = ctx.systems.get_or_spawn(origin_sys).step_manual(1.0).await;
+    let _ = ctx.systems.get_or_spawn(origin_sys).step_manual(1.0).await;
+
+    let k162_recs: Vec<CosmicSignatureRecord> = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_signatures
+            .get(&dest_sys)
+            .map(|l| l.iter().filter(|s| s.signature_id == k162_sig_id && !s.collapsed).cloned().collect())
+            .unwrap_or_default()
+    });
+    assert_eq!(k162_recs.len(), 1, "K162 signature must materialize once when remaining < 15h without ship transit");
+    let exit_ball = ctx
+        .systems
+        .get_or_spawn(dest_sys)
+        .get_ball_snapshot(exit_wh_id)
+        .await
+        .unwrap()
+        .expect("Destination exit wormhole ball must materialize when remaining < 15h");
+    assert_eq!(exit_ball.1.position, DVec3::from_array(k162_recs[0].position));
+
+    // Verify materialized K162 signature is probeable in dest_sys without any ship having jumped through
+    let mut sess = setup_pilot_in_space(
+        &ctx,
+        920_002,
+        90_000_001,
+        dest_sys,
+        610_000_002,
+        621,
+        DVec3::from_array(k162_recs[0].position) + DVec3::new(10_000.0, 0.0, 0.0),
+        11_300_000.0,
+    )
+    .await;
+    let scan_rows = common::probe_scan(
+        &ctx,
+        &mut sess,
+        DVec3::from_array(k162_recs[0].position),
+        0.25 * 149_597_870_700.0,
+    )
+    .await;
+    let strength = common::scan_row_field(&scan_rows, &k162_sig_id, "signalStrength")
+        .as_f64()
+        .unwrap_or(0.0);
+    assert!(strength >= 1.0, "Auto-materialized K162 signature must be probeable to 1.0, got {strength}");
 }

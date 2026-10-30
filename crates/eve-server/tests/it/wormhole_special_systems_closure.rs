@@ -241,12 +241,17 @@ async fn test_small_ship_standard_shattered_drifter_and_thera_systems() {
     let c13_dest_sys = hic_ok.dict_get("destinationSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
     let c13_exit_id = hic_ok.dict_get("exitWormholeID").and_then(|v| v.as_i64()).unwrap();
     let c13_exit_pos = ctx.systems.get_or_spawn(c13_dest_sys).get_ball_snapshot(c13_exit_id).await.unwrap().unwrap().1.position;
+    let arrived_pos = ctx.systems.get_or_spawn(c13_dest_sys).get_ball_snapshot(hic_ship_id).await.unwrap().unwrap().1.position;
+    let arrival_dist = arrived_pos.distance(c13_exit_pos);
+    assert!(
+        arrival_dist <= 6_000.0,
+        "Arriving ship must spawn within ~5 km of exit wormhole (got {arrival_dist:.1} m)"
+    );
     let base_devoter_armor = ctx.build_ship_combat_state(char_id, hic_ship_id, 12017).max_armor_hp;
 
     ctx.advance_secs(315);
     let _ = ctx.systems.get_or_spawn(c13_dest_sys).step_manual(31.0).await;
     fit_and_activate_zpme(&ctx, &mut sess, char_id, hic_ship_id, 620_000_052).await;
-    let _ = ctx.systems.get_or_spawn(c13_dest_sys).set_ball_position(hic_ship_id, c13_exit_pos + DVec3::new(300.0, 0.0, 0.0)).await;
     let jump_into_c13 = ctx
         .dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(c13_exit_id)], &kw, None)
         .await
