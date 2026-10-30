@@ -121,6 +121,7 @@ pub struct ActiveModuleCycle {
     /// Maximum effective range in meters for targeted modules (`plan:DG-4`).
     /// Deactivates module cycle if target moves outside this range.
     pub max_effective_range_m: Option<f64>,
+    pub lance_beam_dir: Option<DVec3>,
 }
 
 #[derive(Debug, Clone)]

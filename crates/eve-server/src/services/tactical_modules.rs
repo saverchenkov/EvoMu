@@ -53,7 +53,7 @@ pub struct TacticalModulesState {
     pub tsb_self_penalty_until: HashMap<(usize, i64), u64>,
 }
 
-fn db_key_of(ctx: &ServerContext) -> usize { ctx.instance_id as usize }
+fn db_key_of(ctx: &ServerContext) -> usize { db_ptr_key(&ctx.db) }
 pub(crate) fn db_ptr_key(db: &Arc<eve_db::WorldRepository>) -> usize { Arc::as_ptr(db) as usize }
 
 /// Returns `Err` if `ship_id` is under a Disruptive Lance 300s caster lock, 60s victim debuff, or active Entosis Link cycle.
@@ -798,13 +798,9 @@ pub async fn activate_superweapon_with_args(
     let all_balls = sys.list_balls().await.unwrap_or_default();
     let ship_ball = all_balls.iter().find(|b| b.id == ship_id).cloned();
     let ship_pos = ship_ball.as_ref().map(|b| b.position).unwrap_or(DVec3::ZERO);
-    let is_cone = action_method == "ActivateSlashModule" && (mod_type.type_id == 40633 || mod_type.name.contains("Bosonic"));
-    let is_spatial = action_method == "ActivateSlashModule" && (mod_type.type_id == 40634 || mod_type.name.contains("GTFO") || mod_type.name.contains("Gravitational"));
-    let is_multipoint = action_method == "ActivateSlashModule" && (mod_type.type_id == 40632 || mod_type.name.contains("Reaper"));
-    let is_slash = action_method == "ActivateSlashModule" && !is_cone && !is_spatial && !is_multipoint;
-    let is_aoe = is_slash || is_cone || is_spatial || is_multipoint;
+    let is_slash = action_method == "ActivateSlashModule";
 
-    let single_target_ball = if !is_aoe {
+    let single_target_ball = if !is_slash {
         let Some(tid) = target_id_opt else {
             return Err(BridgeRpcError { code: "TargetRequired".into(), message: "Single-point Doomsday requires a targetID".into() });
         };
@@ -867,133 +863,37 @@ pub async fn activate_superweapon_with_args(
     let total_raw_damage = dmg_vec.em + dmg_vec.thermal + dmg_vec.kinetic + dmg_vec.explosive;
 
     let mut hit_targets = Vec::new();
-    let mut teleported_targets = Vec::new();
     let default_fwd = ship_ball
         .as_ref()
         .map(|b| if b.velocity.length_squared() > 1e-4 { b.velocity.normalize() } else { DVec3::X })
         .unwrap_or(DVec3::X);
 
     if is_slash {
-        // Titan Lance Doomsday (`superWeaponMgr.ActivateSlashModule`): 300km directional linear beam
+        // Titan Lance Doomsday (`superWeaponMgr.ActivateSlashModule`): 300km directional beam after 15s warmup
         let beam_dir = parse_vec3_arg(args.get(1))
             .map(|v| if v.length_squared() > 1e-4 { v.normalize() } else { default_fwd })
             .unwrap_or(default_fwd);
-        let beam_len = 300_000.0;
-        let beam_radius = 20_000.0;
-        for b in all_balls {
-            if b.id != ship_id && (is_combatant_ship_or_entity_ball(Some(&ctx.sde), Some(&ctx.db), b.id, b.type_id) || (b.id >= 1_895_000_000 && b.id < 1_900_000_000)) {
-                let to_b = b.position - ship_pos;
-                let along = to_b.dot(beam_dir);
-                let perp = (to_b - beam_dir * along).length();
-                if along > 0.0 && along <= beam_len && perp <= beam_radius {
-                    let (app, destroyed) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys, sys_id, char_id, b.id, dmg_vec, 10.0, now_unix).await.ok().flatten().map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
-                    crate::services::combat_crimewatch::record_killmail_assist_action(ctx, b.id, char_id, ship_type_id, mod_type_id, app, false, now_unix);
-                    if destroyed {
-                        crate::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(ctx, sys_id, char_id, b.id, b.type_id, b.position, now_unix).await;
-                    }
-                    hit_targets.push(b.id);
-                }
-            }
-        }
         let db_key = db_key_of(ctx);
-        {
-            let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-            st.lance_caster_lock_until.insert((db_key, ship_id), now_unix + 300);
-            for &vid in &hit_targets {
-                st.lance_victim_debuff_until.insert((db_key, vid), now_unix + 300);
-            }
-        }
-    } else if is_cone {
-        // Bosonic Field Generator (`superWeaponMgr.ActivateConeModule`): directional cone, damage over 10 ticks, immobilize + tether-block
-        let cone_dir = parse_vec3_arg(args.get(1))
-            .map(|v| if v.length_squared() > 1e-4 { v.normalize() } else { default_fwd })
-            .unwrap_or(default_fwd);
-        let cone_range = 120_000.0;
-        let cos_half_angle = 30.0_f64.to_radians().cos();
-        let tick_count = 10;
-        let tick_dmg = DamageVector::new(
-            dmg_vec.em / tick_count as f64,
-            dmg_vec.thermal / tick_count as f64,
-            dmg_vec.kinetic / tick_count as f64,
-            dmg_vec.explosive / tick_count as f64,
-        );
-        for b in all_balls {
-            if b.id != ship_id && is_combatant_ship_or_entity_ball(Some(&ctx.sde), Some(&ctx.db), b.id, b.type_id) {
-                let to_b = b.position - ship_pos;
-                let dist = to_b.length();
-                if dist > 0.0 && dist <= cone_range && (to_b / dist).dot(cone_dir) >= cos_half_angle {
-                    let mut total_app = 0.0;
-                    for _ in 0..tick_count {
-                        let (app, destroyed) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys, sys_id, char_id, b.id, tick_dmg, 10.0, now_unix).await.ok().flatten().map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
-                        total_app += app;
-                        if destroyed {
-                            crate::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(ctx, sys_id, char_id, b.id, b.type_id, b.position, now_unix).await;
-                            break;
-                        }
-                    }
-                    crate::services::combat_crimewatch::record_killmail_assist_action(ctx, b.id, char_id, ship_type_id, mod_type_id, total_app, false, now_unix);
-                    hit_targets.push(b.id);
-                }
-            }
-        }
-        let db_key = db_key_of(ctx);
-        ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner()).lance_caster_lock_until.insert((db_key, ship_id), now_unix + 300);
-        let _ = sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
-            ship_id,
-            module_id,
-            module_type_id: mod_type_id,
-            owner_char_id: Some(char_id),
-            effect_name: "superWeapon".into(),
-            repeat: 1,
-            duration_s: 30.0,
-            immobilize_self: true,
-            self_disallow_assistance: true,
-            ..Default::default()
-        }).await;
-    } else if is_spatial {
-        // GTFO Doomsday (`superWeaponMgr.ActivateSpatialModule`): teleport ships in target sphere to random point in system
-        let sphere_center = parse_vec3_arg(args.get(1))
-            .or_else(|| target_id_opt.and_then(|tid| all_balls.iter().find(|b| b.id == tid).map(|b| b.position)))
-            .unwrap_or(ship_pos + default_fwd * 50_000.0);
-        let sphere_radius = 25_000.0;
-        for b in all_balls {
-            if b.id != ship_id && is_combatant_ship_or_entity_ball(Some(&ctx.sde), Some(&ctx.db), b.id, b.type_id) {
-                if (b.position - sphere_center).length() <= sphere_radius {
-                    let seed = (now_unix as u64).wrapping_mul(6364136223846793005).wrapping_add(b.id as u64);
-                    let angle = ((seed % 3600) as f64) * 0.1_f64.to_radians();
-                    let dist = 150_000.0 + ((seed >> 16) % 250_000) as f64;
-                    let new_pos = ship_pos + DVec3::new(angle.cos() * dist, ((seed >> 32) % 40_000) as f64 - 20_000.0, angle.sin() * dist);
-                    let _ = sys.set_ball_position(b.id, new_pos).await;
-                    teleported_targets.push(b.id);
-                    hit_targets.push(b.id);
-                }
-            }
-        }
-        let db_key = db_key_of(ctx);
-        ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner()).lance_caster_lock_until.insert((db_key, ship_id), now_unix + 300);
-    } else if is_multipoint {
-        // Reaper Doomsday (`superWeaponMgr.ActivateMultiPointModule`): sweep beam path between start and end points
-        let start_pt = parse_vec3_arg(args.get(1)).unwrap_or(ship_pos + DVec3::new(40_000.0, -20_000.0, 0.0));
-        let end_pt = parse_vec3_arg(args.get(2)).unwrap_or(ship_pos + DVec3::new(40_000.0, 20_000.0, 0.0));
-        let seg = end_pt - start_pt;
-        let seg_len_sq = seg.length_squared().max(1.0);
-        let beam_radius = 15_000.0;
-        for b in all_balls {
-            if b.id != ship_id && is_combatant_ship_or_entity_ball(Some(&ctx.sde), Some(&ctx.db), b.id, b.type_id) {
-                let t = ((b.position - start_pt).dot(seg) / seg_len_sq).clamp(0.0, 1.0);
-                let closest = start_pt + seg * t;
-                if (b.position - closest).length() <= beam_radius {
-                    let (app, destroyed) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys, sys_id, char_id, b.id, dmg_vec, 10.0, now_unix).await.ok().flatten().map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
-                    crate::services::combat_crimewatch::record_killmail_assist_action(ctx, b.id, char_id, ship_type_id, mod_type_id, app, false, now_unix);
-                    if destroyed {
-                        crate::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(ctx, sys_id, char_id, b.id, b.type_id, b.position, now_unix).await;
-                    }
-                    hit_targets.push(b.id);
-                }
-            }
-        }
-        let db_key = db_key_of(ctx);
-        ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner()).lance_caster_lock_until.insert((db_key, ship_id), now_unix + 300);
+        ctx.tactical_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .lance_caster_lock_until
+            .insert((db_key, ship_id), now_unix + 300);
+        let _ = sys
+            .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+                ship_id,
+                module_id,
+                module_type_id: mod_type_id,
+                owner_char_id: Some(char_id),
+                effect_name: "superWeaponLanceWarmup".into(),
+                repeat: 0,
+                duration_s: 15.0,
+                immobilize_self: true,
+                damage_vector: dmg_vec,
+                lance_beam_dir: Some(beam_dir),
+                ..Default::default()
+            })
+            .await;
     } else if let Some(tb) = single_target_ball {
         let (app, destroyed) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys, sys_id, char_id, tb.id, dmg_vec, 10.0, now_unix).await?.map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
         crate::services::combat_crimewatch::record_killmail_assist_action(ctx, tb.id, char_id, ship_type_id, mod_type_id, app, false, now_unix);
@@ -1012,14 +912,59 @@ pub async fn activate_superweapon_with_args(
 
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)), ("shipID", PyRep::Integer(ship_id)), ("slashMode", PyRep::Bool(is_slash)),
-        ("totalDamageApplied", PyRep::Real(total_raw_damage)), ("fuelConsumed", PyRep::Integer(consumed_fuel as i64)),
-        ("warmupSeconds", PyRep::Real(if is_slash { 15.0 } else if is_cone { 5.0 } else { 0.0 })),
-        ("tickCount", PyRep::Integer(if is_cone { 10 } else { 1 })),
-        ("immobilizeSeconds", PyRep::Real(30.0)), ("jumpBlockSeconds", PyRep::Real(300.0)),
+        ("totalDamageApplied", PyRep::Real(if is_slash { 0.0 } else { total_raw_damage })),
+        ("fuelConsumed", PyRep::Integer(consumed_fuel as i64)),
+        ("warmupSeconds", PyRep::Real(if is_slash { 15.0 } else { 0.0 })),
+        ("tickCount", PyRep::Integer(1)),
+        ("immobilizeSeconds", PyRep::Real(15.0)), ("jumpBlockSeconds", PyRep::Real(300.0)),
         ("jumpWarpSuppressionSeconds", PyRep::Real(if is_slash { 300.0 } else { 0.0 })),
         ("hitTargetIDs", PyRep::List(hit_targets.into_iter().map(PyRep::Integer).collect())),
-        ("teleportedTargetIDs", PyRep::List(teleported_targets.into_iter().map(PyRep::Integer).collect())),
     ]))
+}
+
+pub(crate) fn fire_lance_warmup_in_ballpark(
+    ballpark: &mut eve_destiny::Ballpark,
+    cycle: &crate::system_actor::ActiveModuleCycle,
+    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    tactical_state: &std::sync::RwLock<TacticalModulesState>,
+    destroyed_balls: &mut Vec<(i64, Option<i64>)>,
+) {
+    let Some(ship_pos) = ballpark.balls.get(&cycle.ship_id).map(|b| b.position) else { return };
+    let beam_dir = cycle.lance_beam_dir.unwrap_or(DVec3::X);
+    let beam_len = 300_000.0;
+    let beam_radius = 20_000.0;
+    let candidates: Vec<(i64, u32, DVec3)> = ballpark
+        .balls
+        .values()
+        .filter(|b| b.id != cycle.ship_id && is_combatant_ship_or_entity_ball(sde_opt.as_ref(), db_opt.as_ref(), b.id, b.type_id))
+        .map(|b| (b.id, b.type_id, b.position))
+        .collect();
+    let mut hit_ids = Vec::new();
+    for (bid, _tid, bpos) in candidates {
+        let to_b = bpos - ship_pos;
+        let along = to_b.dot(beam_dir);
+        let perp = (to_b - beam_dir * along).length();
+        if along > 0.0 && along <= beam_len && perp <= beam_radius {
+            if let Some((_, destroyed, _)) = ballpark.apply_damage_to_ball(bid, cycle.damage_vector) {
+                if destroyed {
+                    destroyed_balls.push((bid, cycle.owner_char_id));
+                }
+            }
+            if let Some(v_cs) = ballpark.combat_states.get_mut(&bid) {
+                v_cs.warp_scramble_strength = v_cs.warp_scramble_strength.max(100);
+            }
+            hit_ids.push(bid);
+        }
+    }
+    if let Some(db) = db_opt.as_ref() {
+        let db_key = std::sync::Arc::as_ptr(db) as usize;
+        let now_unix = db.clock().now_unix_secs();
+        let mut st = tactical_state.write().unwrap_or_else(|e| e.into_inner());
+        for vid in hit_ids {
+            st.lance_victim_debuff_until.insert((db_key, vid), now_unix + 300);
+        }
+    }
 }
 
 /// Handles Entosis Link (`group 1313`) activation, warm-up cycle, and contest rules.
