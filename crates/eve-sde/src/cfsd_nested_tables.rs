@@ -346,6 +346,22 @@ impl SdeRegistry {
         self.load_cfsd_nested("res:/staticdata/operationtasks.fsdbinary")
     }
 
+    // parity: sde:res:/staticdata/challengeconditions.fsdbinary, sde:res:/staticdata/challengeevents.fsdbinary, sde:res:/staticdata/challenges.fsdbinary
+    /// Decodes `res:/staticdata/challengeconditions.fsdbinary` (`T-2`).
+    pub fn challenge_conditions(&self) -> Result<BTreeMap<String, Value>, SdeError> {
+        self.load_cfsd_nested("res:/staticdata/challengeconditions.fsdbinary")
+    }
+
+    /// Decodes `res:/staticdata/challengeevents.fsdbinary` (`T-2`).
+    pub fn challenge_events(&self) -> Result<BTreeMap<String, Value>, SdeError> {
+        self.load_cfsd_nested("res:/staticdata/challengeevents.fsdbinary")
+    }
+
+    /// Decodes `res:/staticdata/challenges.fsdbinary` (`T-2`).
+    pub fn challenges(&self) -> Result<BTreeMap<String, Value>, SdeError> {
+        self.load_cfsd_nested("res:/staticdata/challenges.fsdbinary")
+    }
+
     /// Loads the 46 activity IDs from `res:/staticdata/newactivities.fsdbinary` (`stride = 88`).
     pub fn load_new_activity_ids(&self) -> Result<std::collections::BTreeSet<i64>, SdeError> {
         const RES_PATH: &str = "res:/staticdata/newactivities.fsdbinary";

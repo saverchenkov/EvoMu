@@ -154,28 +154,7 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
         "Must populate at least 4 default seasonal challenges"
     );
 
-    // 5. feat:pve.seasons-challenges: Progress from client events
-    ctx.db.with_mut_snapshot(|s| {
-        let mut defs = eve_server::services::season_manager::default_seasonal_challenge_definitions();
-        defs.push(eve_server::services::season_manager::SeasonalChallengeDef {
-            challenge_id: 2001,
-            season_id: 1,
-            event_type: "client".into(),
-            title: "Client Event".into(),
-            description: "Test client event".into(),
-            points: 10,
-            max_progress: 10,
-            client_event_driven: true,
-            reward_type_id: 0,
-            reward_quantity: 0,
-            is_dormant: false,
-        });
-        s.service_state_blobs.insert(
-            "season_manager:challenge_definitions".into(),
-            serde_json::to_string(&defs).unwrap(),
-        );
-    });
-
+    // 5. feat:pve.seasons-challenges: Progress from real V24 client_lookAtObject challenge (274)
     let kw = HashMap::new();
     let pce_res = ctx
         .dispatch_rpc(
@@ -183,7 +162,7 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
             "seasonManager",
             None,
             "process_client_event",
-            &[PyRep::Integer(2001), PyRep::Integer(1)],
+            &[PyRep::Integer(274), PyRep::Integer(1)],
             &kw,
             None,
         )
@@ -191,15 +170,15 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
         .expect("process_client_event progress");
     assert_eq!(pce_res, PyRep::None);
 
-    let ch_2001 = rpc(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(2001)])
+    let ch_274 = rpc(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(274)])
         .await
-        .expect("get_challenge 2001");
-    assert_eq!(ch_2001.dict_get("progress").and_then(|v| v.as_i64()), Some(1));
+        .expect("get_challenge 274");
+    assert_eq!(ch_274.dict_get("progress").and_then(|v| v.as_i64()), Some(1));
 
     // 6. feat:pve.seasons-challenges: Challenge expiration and automatic refresh
-    let exp_date = rpc(&ctx, &mut sess, "seasonManager", "get_challenge_expiration_date", &[PyRep::Integer(1001)])
+    let exp_date = rpc(&ctx, &mut sess, "seasonManager", "get_challenge_expiration_date", &[PyRep::Integer(274)])
         .await
-        .expect("get_challenge_expiration_date 1001");
+        .expect("get_challenge_expiration_date 274");
     let exp_ticks = match exp_date {
         PyRep::Integer(t) => t,
         other => panic!("expected Integer expiration ticks, got {other:?}"),
@@ -209,9 +188,9 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
     // Simulate expiration: set expiration_date to the past in character season state
     ctx.db.with_mut_snapshot(|snap| {
         let mut st = load_season_state_from_blobs(snap, PILOT_1);
-        if let Some(ch) = st.challenges.get_mut(&1001) {
+        if let Some(ch) = st.challenges.get_mut(&274) {
             ch.expiration_date = 100; // past timestamp
-            ch.progress = 50;
+            ch.progress = 2;
         }
         save_season_state_to_blobs(snap, PILOT_1, &st);
     });
@@ -222,38 +201,40 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
         .expect("refill challenges post-expiration");
     assert!(matches!(refilled, PyRep::List(_)));
 
-    let ch_1001_refreshed = rpc(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(1001)])
+    let ch_274_refreshed = rpc(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(274)])
         .await
-        .expect("get_challenge 1001 refreshed");
-    let new_exp = ch_1001_refreshed.dict_get("expirationDate").and_then(|v| v.as_i64()).unwrap_or(0);
+        .expect("get_challenge 274 refreshed");
+    let new_exp = ch_274_refreshed.dict_get("expirationDate").and_then(|v| v.as_i64()).unwrap_or(0);
     assert!(
         new_exp > now_ft,
         "Expired challenge must be refreshed with future expiration date"
     );
 
     // 7. feat:pve.seasons-challenges: Claiming challenge rewards grants rewards and season points
-    // Mark challenge 1002 completed and ready to claim
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut st = load_season_state_from_blobs(snap, PILOT_1);
-        if let Some(ch) = st.challenges.get_mut(&1002) {
-            ch.completed = true;
-            ch.progress = ch.max_progress;
-            ch.claimed = false;
-        }
-        save_season_state_to_blobs(snap, PILOT_1, &st);
-    });
+    // Complete real V24 client_lookAtObject challenge 274 (max_progress = 4, points = 40)
+    ctx.dispatch_rpc(
+        &mut sess,
+        "seasonManager",
+        None,
+        "process_client_event",
+        &[PyRep::Integer(274), PyRep::Integer(4)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("complete challenge 274");
 
-    let claim_res = rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1002)])
+    let claim_res = rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(274)])
         .await
-        .expect("claim_challenge_rewards 1002");
+        .expect("claim_challenge_rewards 274");
     assert_eq!(claim_res.dict_get("claimed").and_then(|v| v.as_bool()), Some(true));
     assert_eq!(claim_res.dict_get("rewardGranted").and_then(|v| v.as_bool()), Some(true));
 
     let pts = claim_res.dict_get("seasonPoints").and_then(|v| v.as_i64()).unwrap_or(0);
-    assert!(pts >= 50, "Season points must increase after claiming challenge 1002");
+    assert!(pts >= 40, "Season points must increase after claiming challenge 274");
 
     // Repeat claim of already claimed challenge must fail
-    let repeat_err = rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1002)])
+    let repeat_err = rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(274)])
         .await;
     assert!(repeat_err.is_err(), "repeat claim_challenge_rewards must fail");
 

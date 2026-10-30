@@ -90,6 +90,8 @@ pub fn save_season_state_to_blobs(snap: &mut eve_db::WorldStateSnapshot, char_id
     }
 }
 
+pub use super::season_fsd::*;
+
 /// Challenge keyvals for `st`, sorted by challenge ID.
 fn sorted_challenge_keyvals(st: &CharacterSeasonState) -> Vec<PyRep> {
     let mut list: Vec<_> = st.challenges.values().collect();
@@ -104,9 +106,19 @@ where
     ctx.db.with_snapshot(|snap| {
         let mut st = load_season_state_from_blobs(snap, char_id);
         let now_ft = ctx.now_blueos_filetime_ticks();
-        let defs = load_challenge_definitions(snap);
-        ensure_character_challenges(&mut st, &defs, snap, char_id, now_ft);
-        sync_character_challenges(&mut st, snap, char_id);
+        let catalog = load_seasons_catalog(snap, &ctx.sde, now_ft);
+        let season_end_ft = catalog
+            .get(&st.selected_season_id)
+            .or_else(|| catalog.values().next())
+            .map(|c| c.end_time_ft)
+            .unwrap_or(now_ft + 30 * 86_400 * 10_000_000);
+        let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
+        let max_active = catalog
+            .get(&st.selected_season_id)
+            .map(|c| c.max_active_challenges as usize)
+            .unwrap_or(4);
+        ensure_character_challenges_with_limit(&mut st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
+        sync_character_challenges_with_defs(&mut st, &defs, snap, char_id);
         f(&st, snap)
     })
 }
@@ -140,359 +152,6 @@ fn challenge_to_keyval(c: &CharacterChallenge, season_points: i64) -> PyRep {
     ])
 }
 
-/// Structured definition of a seasonal challenge template.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SeasonalChallengeDef {
-    pub challenge_id: i64,
-    pub season_id: i64,
-    pub event_type: String,
-    pub title: String,
-    pub description: String,
-    pub points: i64,
-    pub max_progress: i64,
-    pub client_event_driven: bool,
-    pub reward_type_id: u32,
-    pub reward_quantity: i32,
-    #[serde(default)]
-    pub is_dormant: bool,
-}
-
-impl SeasonalChallengeDef {
-    pub fn to_character_challenge(&self, season_id: i64, now_ft: i64) -> CharacterChallenge {
-        let expiration_date = now_ft + 7 * 86_400 * 10_000_000;
-        CharacterChallenge {
-            challenge_id: self.challenge_id,
-            season_id,
-            title: self.title.clone(),
-            description: self.description.clone(),
-            points: self.points,
-            progress: 0,
-            max_progress: self.max_progress,
-            completed: false,
-            claimed: false,
-            is_dormant: self.is_dormant,
-            expiration_date,
-            client_event_driven: self.client_event_driven,
-            reward_type_id: self.reward_type_id,
-            reward_quantity: self.reward_quantity,
-            baseline_progress: 0,
-        }
-    }
-}
-
-pub const SEASON_CONFIG_KEY: &str = "season_manager:season_configuration";
-pub const SEASONS_CATALOG_KEY: &str = "season_manager:seasons";
-pub const SEASON_LOOT_TABLES_KEY: &str = "season_manager:loot_tables";
-
-/// Season definition loaded from `res:/staticdata/seasonselection.fsdbinary`,
-/// `res:/staticdata/community_track_templates.fsdbinary`, and
-/// `res:/staticdata/seasonalcampaignsloginrewards.fsdbinary` (or persisted operator configuration).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SeasonConfig {
-    pub season_id: i64,
-    pub template_id: i64,
-    pub max_active_challenges: i64,
-    pub max_season_points: i64,
-    pub season_name: String,
-    pub title_message_id: i64,
-    pub description_message_id: i64,
-    pub hint_message_id: i64,
-    pub large_selection_title_id: i64,
-    pub navigation_card_picture_path: String,
-    pub background_no_logo: String,
-    pub start_time_ft: i64,
-    pub end_time_ft: i64,
-    pub multiple_season_running: bool,
-}
-
-impl Default for SeasonConfig {
-    fn default() -> Self {
-        Self {
-            season_id: 1,
-            template_id: 1,
-            max_active_challenges: 4,
-            max_season_points: 100,
-            season_name: "Crimson Harvest".into(),
-            title_message_id: 583_333,
-            description_message_id: 583_334,
-            hint_message_id: 583_335,
-            large_selection_title_id: 583_380,
-            navigation_card_picture_path: "res:/UI/Texture/classes/agency/navigationCards/CrimsonHarvest2026_Agency_Navicons_400x666.png".into(),
-            background_no_logo: "res:/UI/Texture/classes/NewFeatureNotify/triglavianInvasion.png".into(),
-            start_time_ft: 133_700_000_000_000_000,
-            end_time_ft: 133_730_240_000_000_000,
-            multiple_season_running: false,
-        }
-    }
-}
-
-/// DATA GAP: Seasonal challenge definitions and live season schedule are server-only and not present in V24 client FSD.
-/// Builds the default season catalog from `res:/staticdata/seasonselection.fsdbinary`,
-/// `res:/staticdata/community_track_templates.fsdbinary`, and
-/// `res:/staticdata/seasonalcampaignsloginrewards.fsdbinary` using the server's `SdeRegistry`.
-pub fn default_fsd_seasons(
-    sde: &eve_sde::SdeRegistry,
-    init_start_ft: i64,
-) -> std::collections::BTreeMap<i64, SeasonConfig> {
-    let mut out = std::collections::BTreeMap::new();
-    let sel = sde
-        .load_cfsd_nested("res:/staticdata/seasonselection.fsdbinary")
-        .unwrap_or_default();
-    let nav_path = sel
-        .get("navigation_card_picture_path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("res:/UI/Texture/classes/agency/navigationCards/CrimsonHarvest2026_Agency_Navicons_400x666.png")
-        .to_string();
-    let title_id = sel.get("seasonSelectionTitleID").and_then(|v| v.as_i64()).unwrap_or(583_333);
-    let desc_id = sel.get("seasonSelectionDescriptionID").and_then(|v| v.as_i64()).unwrap_or(583_334);
-    let hint_id = sel.get("seasonSelectionHintID").and_then(|v| v.as_i64()).unwrap_or(583_335);
-    let large_title_id = sel
-        .get("agencyLargeSeasonSelectionTitleID")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(583_380);
-
-    let base_start_ft: i64 = init_start_ft;
-    let base_end_ft: i64 = base_start_ft + 30 * 86_400 * 10_000_000;
-    let max_ch = default_seasonal_challenge_definitions()
-        .iter()
-        .filter(|d| !d.is_dormant)
-        .count()
-        .max(1) as i64;
-
-    if let Ok(tracks) = sde.load_cfsd_nested("res:/staticdata/community_track_templates.fsdbinary") {
-        for (id_str, val) in tracks {
-            if let Ok(sid) = id_str.parse::<i64>() {
-                let sname = val.get("name").and_then(|v| v.as_str()).unwrap_or("Crimson Harvest").to_string();
-                let goal_pts = val.get("goal").and_then(|v| v.as_i64()).unwrap_or(100);
-                out.insert(
-                    sid,
-                    SeasonConfig {
-                        season_id: sid,
-                        template_id: sid,
-                        max_active_challenges: max_ch,
-                        max_season_points: goal_pts,
-                        season_name: sname,
-                        title_message_id: title_id,
-                        description_message_id: desc_id,
-                        hint_message_id: hint_id,
-                        large_selection_title_id: large_title_id,
-                        navigation_card_picture_path: nav_path.clone(),
-                        background_no_logo: nav_path.clone(),
-                        start_time_ft: base_start_ft,
-                        end_time_ft: base_end_ft,
-                        multiple_season_running: false,
-                    },
-                );
-            }
-        }
-    }
-
-    if let Ok(campaigns) = sde.load_cfsd_nested("res:/staticdata/seasonalcampaignsloginrewards.fsdbinary") {
-        let mut camp_list: Vec<(i64, serde_json::Value)> = campaigns
-            .into_iter()
-            .filter_map(|(k, v)| k.parse::<i64>().ok().map(|id| (id, v)))
-            .collect();
-        camp_list.sort_by_key(|(id, _)| *id);
-        for (idx, (cid, val)) in camp_list.into_iter().enumerate() {
-            let cname_id = val.get("campaignName").and_then(|v| v.as_i64()).unwrap_or(title_id);
-            let bg = val
-                .get("windowHeaderBackground")
-                .and_then(|v| v.as_str())
-                .unwrap_or(nav_path.as_str())
-                .to_string();
-            let cfg = SeasonConfig {
-                season_id: cid,
-                template_id: cid,
-                max_active_challenges: max_ch,
-                max_season_points: 1_000,
-                season_name: format!("Seasonal Campaign {cid}"),
-                title_message_id: cname_id,
-                description_message_id: desc_id,
-                hint_message_id: hint_id,
-                large_selection_title_id: large_title_id,
-                navigation_card_picture_path: nav_path.clone(),
-                background_no_logo: bg,
-                start_time_ft: base_start_ft,
-                end_time_ft: base_end_ft,
-                multiple_season_running: true,
-            };
-            out.insert(cid, cfg.clone());
-            // DERIVED: Map ordinal season IDs 2..=4 when not present in community_track_templates.
-            let ordinal_sid = (idx as i64) + 2;
-            if ordinal_sid <= 4 && !out.contains_key(&ordinal_sid) {
-                let mut alias_cfg = cfg;
-                alias_cfg.season_id = ordinal_sid;
-                out.insert(ordinal_sid, alias_cfg);
-            }
-        }
-    }
-    out
-}
-
-pub fn load_seasons_catalog(
-    snap: &eve_db::WorldStateSnapshot,
-    sde: &eve_sde::SdeRegistry,
-    init_start_ft: i64,
-) -> std::collections::BTreeMap<i64, SeasonConfig> {
-    let mut catalog = if let Some(json) = snap.service_state_blobs.get(SEASONS_CATALOG_KEY) {
-        serde_json::from_str::<std::collections::BTreeMap<i64, SeasonConfig>>(json)
-            .unwrap_or_else(|_| default_fsd_seasons(sde, init_start_ft))
-    } else {
-        default_fsd_seasons(sde, init_start_ft)
-    };
-    if let Some(json) = snap.service_state_blobs.get(SEASON_CONFIG_KEY) {
-        if let Ok(cfg) = serde_json::from_str::<SeasonConfig>(json) {
-            let mut merged = catalog.get(&cfg.season_id).cloned().unwrap_or_default();
-            merged.season_id = cfg.season_id;
-            merged.max_active_challenges = cfg.max_active_challenges;
-            if cfg.max_season_points > 0 {
-                merged.max_season_points = cfg.max_season_points;
-            }
-            if !cfg.season_name.is_empty() {
-                merged.season_name = cfg.season_name;
-            }
-            if cfg.end_time_ft > merged.end_time_ft {
-                merged.start_time_ft = cfg.start_time_ft;
-                merged.end_time_ft = cfg.end_time_ft;
-            }
-            catalog.insert(merged.season_id, merged.clone());
-            catalog.insert(1, merged);
-        }
-    }
-    catalog
-}
-
-pub fn load_season_config(snap: &eve_db::WorldStateSnapshot) -> SeasonConfig {
-    if let Some(json) = snap.service_state_blobs.get(SEASON_CONFIG_KEY) {
-        if let Ok(cfg) = serde_json::from_str::<SeasonConfig>(json) {
-            return cfg;
-        }
-    }
-    SeasonConfig::default()
-}
-
-pub const SEASONAL_CHALLENGES_CONFIG_KEY: &str = "season_manager:challenge_definitions";
-
-/// DATA GAP: Seasonal challenge definitions and live season schedule are server-only and not present in V24 client FSD.
-// SYNTHETIC: Fallback seasonal challenge definitions used when SEASONAL_CHALLENGES_CONFIG_KEY is not populated.
-pub fn default_seasonal_challenge_definitions() -> Vec<SeasonalChallengeDef> {
-    vec![
-        SeasonalChallengeDef {
-            challenge_id: 1001,
-            season_id: 1,
-            event_type: "totalMined".into(),
-            title: "Mining".into(),
-            description: "Player mined X volume of ore".into(),
-            points: 25,
-            max_progress: 1000,
-            client_event_driven: false,
-            reward_type_id: 47_952,
-            reward_quantity: 1,
-            is_dormant: false,
-        },
-        SeasonalChallengeDef {
-            challenge_id: 1002,
-            season_id: 1,
-            event_type: "destroyHostileNPC".into(),
-            title: "Combat".into(),
-            description: "An enemy NPC ship just got killed".into(),
-            points: 50,
-            max_progress: 5,
-            client_event_driven: false,
-            reward_type_id: 0,
-            reward_quantity: 0,
-            is_dormant: false,
-        },
-        SeasonalChallengeDef {
-            challenge_id: 1003,
-            season_id: 1,
-            event_type: "hackingMiniGameWon".into(),
-            title: "Exploration".into(),
-            description: "Complete exploration relic and data sites".into(),
-            points: 30,
-            max_progress: 3,
-            client_event_driven: false,
-            reward_type_id: 0,
-            reward_quantity: 0,
-            is_dormant: false,
-        },
-        SeasonalChallengeDef {
-            challenge_id: 1004,
-            season_id: 1,
-            event_type: "industryJobsCompleted".into(),
-            title: "Industry".into(),
-            description: "Complete manufacturing jobs at industrial facilities".into(),
-            points: 40,
-            max_progress: 2,
-            client_event_driven: false,
-            reward_type_id: 47_952,
-            reward_quantity: 1,
-            is_dormant: false,
-        },
-    ]
-}
-
-/// Decodes authentic reward crate loot tables from `res:/staticdata/crates.fsdbinary`.
-pub fn fsd_crate_loot_tables(
-    sde: &eve_sde::SdeRegistry,
-) -> &'static std::collections::BTreeMap<u32, Vec<(u32, i64, f64)>> {
-    static LOOT_TABLES: std::sync::OnceLock<std::collections::BTreeMap<u32, Vec<(u32, i64, f64)>>> =
-        std::sync::OnceLock::new();
-    LOOT_TABLES.get_or_init(|| {
-        let mut map: std::collections::BTreeMap<u32, Vec<(u32, i64, f64)>> =
-            std::collections::BTreeMap::new();
-        if let Ok(cfsd) = sde.load_cfsd_nested("res:/staticdata/crates.fsdbinary") {
-            for (_k, v) in cfsd {
-                let Some(type_id) = v.get("typeID").and_then(|t| t.as_u64()).map(|t| t as u32) else {
-                    continue;
-                };
-                let mut entries = Vec::new();
-                if let Some(list) = v.get("fixedLootItems").and_then(|l| l.as_array()) {
-                    for item_val in list {
-                        if let Some(tid) = item_val.as_u64().map(|n| n as u32) {
-                            if sde.types.contains_key(&tid) {
-                                entries.push((tid, 1_i64, 1.0_f64));
-                            }
-                        }
-                    }
-                }
-                if entries.is_empty() {
-                    if let Some(fits) = v.get("fittings").and_then(|f| f.as_array()) {
-                        if !fits.is_empty() {
-                            if let Some(crate_type) = sde.types.get(&type_id) {
-                                let name_lower = crate_type.name.to_lowercase();
-                                if let Some(ship) = sde
-                                    .types
-                                    .values()
-                                    .filter(|t| t.category_id == 6 && t.published && name_lower.contains(&t.name.to_lowercase()))
-                                    .max_by_key(|t| t.name.len())
-                                {
-                                    entries.push((ship.type_id, 1_i64, 1.0_f64));
-                                }
-                            }
-                        }
-                    }
-                }
-                if !entries.is_empty() {
-                    map.insert(type_id, entries);
-                }
-            }
-        }
-        map
-    })
-}
-
-pub fn load_challenge_definitions(snap: &eve_db::WorldStateSnapshot) -> Vec<SeasonalChallengeDef> {
-    if let Some(json) = snap.service_state_blobs.get(SEASONAL_CHALLENGES_CONFIG_KEY) {
-        if let Ok(defs) = serde_json::from_str::<Vec<SeasonalChallengeDef>>(json) {
-            if !defs.is_empty() {
-                return defs;
-            }
-        }
-    }
-    default_seasonal_challenge_definitions()
-}
 
 pub fn default_challenge(ch_id: i64, season_id: i64, now_ft: i64) -> CharacterChallenge {
     if let Some(def) = default_seasonal_challenge_definitions().into_iter().find(|d| d.challenge_id == ch_id) {
@@ -564,6 +223,44 @@ pub fn get_current_activity_count(
     }
 }
 
+pub fn ensure_character_challenges_with_limit(
+    st: &mut CharacterSeasonState,
+    defs: &[SeasonalChallengeDef],
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    now_ft: i64,
+    season_end_ft: i64,
+    max_active: usize,
+) {
+    let def_map: HashMap<i64, &SeasonalChallengeDef> = defs.iter().map(|d| (d.challenge_id, d)).collect();
+    for (cid, existing) in st.challenges.iter_mut() {
+        if existing.expiration_date > 0 && now_ft >= existing.expiration_date {
+            if let Some(def) = def_map.get(cid) {
+                let mut fresh = def.to_character_challenge_with_end(st.selected_season_id, now_ft, season_end_ft);
+                fresh.baseline_progress = get_current_activity_count(&def.event_type, snap, char_id);
+                *existing = fresh;
+            }
+        }
+    }
+    let mut active_count = st
+        .challenges
+        .values()
+        .filter(|c| !c.is_dormant && !c.claimed)
+        .count();
+    for def in defs {
+        if active_count >= max_active {
+            break;
+        }
+        if def.is_dormant || st.challenges.contains_key(&def.challenge_id) {
+            continue;
+        }
+        let mut ch = def.to_character_challenge_with_end(st.selected_season_id, now_ft, season_end_ft);
+        ch.baseline_progress = get_current_activity_count(&def.event_type, snap, char_id);
+        st.challenges.insert(def.challenge_id, ch);
+        active_count += 1;
+    }
+}
+
 pub fn ensure_character_challenges(
     st: &mut CharacterSeasonState,
     defs: &[SeasonalChallengeDef],
@@ -571,19 +268,15 @@ pub fn ensure_character_challenges(
     char_id: i64,
     now_ft: i64,
 ) {
-    for def in defs {
-        if let Some(existing) = st.challenges.get_mut(&def.challenge_id) {
-            if existing.expiration_date > 0 && now_ft >= existing.expiration_date {
-                let mut fresh = def.to_character_challenge(st.selected_season_id, now_ft);
-                fresh.baseline_progress = get_current_activity_count(&def.event_type, snap, char_id);
-                *existing = fresh;
-            }
-        } else {
-            let mut ch = def.to_character_challenge(st.selected_season_id, now_ft);
-            ch.baseline_progress = get_current_activity_count(&def.event_type, snap, char_id);
-            st.challenges.insert(def.challenge_id, ch);
-        }
-    }
+    ensure_character_challenges_with_limit(
+        st,
+        defs,
+        snap,
+        char_id,
+        now_ft,
+        now_ft + 30 * 86_400 * 10_000_000,
+        4,
+    );
 }
 
 pub fn ensure_challenges_with_defs(st: &mut CharacterSeasonState, defs: &[SeasonalChallengeDef], now_ft: i64) {
@@ -599,12 +292,12 @@ pub fn ensure_challenges(st: &mut CharacterSeasonState, now_ft: i64) {
     ensure_challenges_with_defs(st, &defs, now_ft);
 }
 
-pub fn sync_character_challenges(
+pub fn sync_character_challenges_with_defs(
     st: &mut CharacterSeasonState,
+    defs: &[SeasonalChallengeDef],
     snap: &eve_db::WorldStateSnapshot,
     char_id: i64,
 ) {
-    let defs = load_challenge_definitions(snap);
     let def_map: HashMap<i64, &SeasonalChallengeDef> = defs.iter().map(|d| (d.challenge_id, d)).collect();
     for ch in st.challenges.values_mut() {
         let Some(def) = def_map.get(&ch.challenge_id) else {
@@ -619,6 +312,15 @@ pub fn sync_character_challenges(
             }
         }
     }
+}
+
+pub fn sync_character_challenges(
+    st: &mut CharacterSeasonState,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+) {
+    let defs = load_challenge_definitions(snap);
+    sync_character_challenges_with_defs(st, &defs, snap, char_id);
 }
 
 pub fn get_character_challenges_for_quasar(
@@ -691,13 +393,12 @@ pub fn handle_season_manager(
                 if let Some(cfg) = catalog.get(&st.selected_season_id) {
                     return cfg.max_active_challenges;
                 }
-                let defs = load_challenge_definitions(snap);
-                defs.iter().filter(|d| !d.is_dormant).count().max(1) as i64
+                let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
+                defs.iter().filter(|d| !d.is_dormant).count().min(4).max(1) as i64
             });
             Some(Ok(PyRep::Integer(max_ch)))
         }
         ("seasonManager", "get_season_end_time") => {
-            // DATA GAP: requires server-only season schedule and challenges (rpc:seasonManager.get_season_end_time)
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -721,7 +422,6 @@ pub fn handle_season_manager(
             Some(Ok(end_ft_opt.map(PyRep::Integer).unwrap_or(PyRep::None)))
         }
         ("seasonManager", "select_season") => {
-            // DATA GAP: requires server-only season schedule and challenges (rpc:seasonManager.select_season)
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -754,7 +454,7 @@ pub fn handle_season_manager(
                 snap.service_state_blobs
                     .insert(format!("active_season:{char_id}"), season_id.to_string());
 
-                let defs = load_challenge_definitions(snap);
+                let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
                 let season_data_kv = season_config_to_keyval(&active_cfg, &defs);
                 let character_progress_kv = PyRep::keyval([
                     ("character_id", PyRep::Integer(char_id)),
@@ -793,7 +493,6 @@ pub fn handle_season_manager(
             }
         }
         ("seasonManager", "get_season_data_for_character") => {
-            // DATA GAP: requires server-only season schedule and challenges (rpc:seasonManager.get_season_data_for_character)
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -808,7 +507,7 @@ pub fn handle_season_manager(
                         snap.service_state_blobs.insert(SEASONS_CATALOG_KEY.into(), json);
                     }
                 }
-                let defs = load_challenge_definitions(snap);
+                let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
                 let active: Vec<&SeasonConfig> = catalog
                     .values()
                     .filter(|cfg| cfg.end_time_ft > now_ft)
@@ -839,9 +538,20 @@ pub fn handle_season_manager(
                 Err(e) => return Some(Err(e)),
             };
             let res = with_season_state(ctx, char_id, |st, snap| {
-                let defs = load_challenge_definitions(snap);
-                ensure_character_challenges(st, &defs, snap, char_id, ctx.now_blueos_filetime_ticks());
-                sync_character_challenges(st, snap, char_id);
+                let now_ft = ctx.now_blueos_filetime_ticks();
+                let catalog = load_seasons_catalog(snap, &ctx.sde, now_ft);
+                let season_end_ft = catalog
+                    .get(&st.selected_season_id)
+                    .or_else(|| catalog.values().next())
+                    .map(|c| c.end_time_ft)
+                    .unwrap_or(now_ft + 30 * 86_400 * 10_000_000);
+                let max_active = catalog
+                    .get(&st.selected_season_id)
+                    .map(|c| c.max_active_challenges as usize)
+                    .unwrap_or(4);
+                let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
+                ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
+                sync_character_challenges_with_defs(st, &defs, snap, char_id);
                 Ok(sorted_challenge_keyvals(st))
             });
             match res {
@@ -854,15 +564,33 @@ pub fn handle_season_manager(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let ch_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1001);
-            let res = read_character_season_state(ctx, char_id, |st, _snap| {
+            let Some(ch_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "ChallengeNotFound".into(),
+                    message: "get_challenge requires a challenge ID".into(),
+                }));
+            };
+            let res = read_character_season_state(ctx, char_id, |st, snap| {
                 if let Some(c) = st.challenges.get(&ch_id) {
                     Ok(challenge_to_keyval(c, st.season_points))
                 } else {
-                    Err(BridgeRpcError {
-                        code: "ChallengeNotFound".into(),
-                        message: format!("Challenge {ch_id} not found"),
-                    })
+                    let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
+                    if let Some(def) = defs.iter().find(|d| d.challenge_id == ch_id) {
+                        let now_ft = ctx.now_blueos_filetime_ticks();
+                        let catalog = load_seasons_catalog(snap, &ctx.sde, now_ft);
+                        let season_end_ft = catalog
+                            .get(&st.selected_season_id)
+                            .or_else(|| catalog.values().next())
+                            .map(|c| c.end_time_ft)
+                            .unwrap_or(now_ft + 30 * 86_400 * 10_000_000);
+                        let ch = def.to_character_challenge_with_end(st.selected_season_id, now_ft, season_end_ft);
+                        Ok(challenge_to_keyval(&ch, st.season_points))
+                    } else {
+                        Err(BridgeRpcError {
+                            code: "ChallengeNotFound".into(),
+                            message: format!("Challenge {ch_id} not found"),
+                        })
+                    }
                 }
             });
             Some(res)
@@ -875,15 +603,18 @@ pub fn handle_season_manager(
             let ch_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let res = read_character_season_state(ctx, char_id, |st, snap| {
                 if let Some(c) = st.challenges.get(&ch_id) {
-                    let defs = load_challenge_definitions(snap);
-                    let def_dormant = defs.iter().find(|d| d.challenge_id == ch_id).map(|d| d.is_dormant).unwrap_or(false);
-                    let is_dormant = c.is_dormant || def_dormant || (c.completed && !c.claimed);
+                    let is_dormant = c.is_dormant || (c.completed && !c.claimed);
                     Ok(PyRep::Bool(is_dormant))
                 } else {
-                    Err(BridgeRpcError {
-                        code: "ChallengeNotFound".into(),
-                        message: format!("Challenge {ch_id} not found"),
-                    })
+                    let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
+                    if let Some(def) = defs.iter().find(|d| d.challenge_id == ch_id) {
+                        Ok(PyRep::Bool(def.is_dormant))
+                    } else {
+                        Err(BridgeRpcError {
+                            code: "ChallengeNotFound".into(),
+                            message: format!("Challenge {ch_id} not found"),
+                        })
+                    }
                 }
             });
             Some(res)
@@ -894,14 +625,27 @@ pub fn handle_season_manager(
                 Err(e) => return Some(Err(e)),
             };
             let ch_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let res = read_character_season_state(ctx, char_id, |st, _snap| {
+            let res = read_character_season_state(ctx, char_id, |st, snap| {
                 if let Some(c) = st.challenges.get(&ch_id) {
                     Ok(PyRep::Integer(c.expiration_date))
                 } else {
-                    Err(BridgeRpcError {
-                        code: "ChallengeNotFound".into(),
-                        message: format!("Challenge {ch_id} not found"),
-                    })
+                    let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
+                    if let Some(def) = defs.iter().find(|d| d.challenge_id == ch_id) {
+                        let now_ft = ctx.now_blueos_filetime_ticks();
+                        let catalog = load_seasons_catalog(snap, &ctx.sde, now_ft);
+                        let season_end_ft = catalog
+                            .get(&st.selected_season_id)
+                            .or_else(|| catalog.values().next())
+                            .map(|c| c.end_time_ft)
+                            .unwrap_or(now_ft + 30 * 86_400 * 10_000_000);
+                        let ch = def.to_character_challenge_with_end(st.selected_season_id, now_ft, season_end_ft);
+                        Ok(PyRep::Integer(ch.expiration_date))
+                    } else {
+                        Err(BridgeRpcError {
+                            code: "ChallengeNotFound".into(),
+                            message: format!("Challenge {ch_id} not found"),
+                        })
+                    }
                 }
             });
             Some(res)
@@ -927,7 +671,8 @@ pub fn handle_season_manager(
             }
             let amount_opt = kwargs
                 .get("amount")
-                .and_then(|v| v.as_i64());
+                .and_then(|v| v.as_i64())
+                .or_else(|| args.get(1).and_then(|v| v.as_i64()));
             let amount = amount_opt.unwrap_or(1);
             if amount <= 0 {
                 return Some(Err(BridgeRpcError {
@@ -937,9 +682,16 @@ pub fn handle_season_manager(
             }
             let _extra_data = kwargs.get("extra_data");
             let res = with_season_state(ctx, char_id, |st, snap| {
-                let defs = load_challenge_definitions(snap);
-                ensure_character_challenges(st, &defs, snap, char_id, ctx.now_blueos_filetime_ticks());
-                sync_character_challenges(st, snap, char_id);
+                let now_ft = ctx.now_blueos_filetime_ticks();
+                let catalog = load_seasons_catalog(snap, &ctx.sde, now_ft);
+                let season_end_ft = catalog
+                    .get(&st.selected_season_id)
+                    .or_else(|| catalog.values().next())
+                    .map(|c| c.end_time_ft)
+                    .unwrap_or(now_ft + 30 * 86_400 * 10_000_000);
+                let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
+                ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, 4);
+                sync_character_challenges_with_defs(st, &defs, snap, char_id);
                 let ch_id = if let Some(id) = arg0_int {
                     id
                 } else {
@@ -955,14 +707,28 @@ pub fn handle_season_manager(
                         });
                     }
                 };
-                let Some(ch) = st.challenges.get_mut(&ch_id) else {
-                    return Err(BridgeRpcError {
-                        code: "ChallengeNotFound".into(),
-                        message: "Challenge not found".into(),
-                    });
-                };
-                let def = defs.iter().find(|d| d.challenge_id == ch_id);
-                let is_client_driven = def.map(|d| d.client_event_driven).unwrap_or(ch.client_event_driven);
+                let def_opt = defs.iter().find(|d| d.challenge_id == ch_id);
+                if !st.challenges.contains_key(&ch_id) {
+                    if let Some(def) = def_opt {
+                        if !def.client_event_driven {
+                            return Err(BridgeRpcError {
+                                code: "InvalidChallengeEvent".into(),
+                                message: "Server-side activity challenge cannot be progressed via client events".into(),
+                            });
+                        }
+                        st.challenges.insert(
+                            ch_id,
+                            def.to_character_challenge_with_end(st.selected_season_id, now_ft, season_end_ft),
+                        );
+                    } else {
+                        return Err(BridgeRpcError {
+                            code: "ChallengeNotFound".into(),
+                            message: "Challenge not found".into(),
+                        });
+                    }
+                }
+                let ch = st.challenges.get_mut(&ch_id).expect("challenge present");
+                let is_client_driven = def_opt.map(|d| d.client_event_driven).unwrap_or(ch.client_event_driven);
 
                 if !is_client_driven {
                     return Err(BridgeRpcError {
@@ -994,7 +760,12 @@ pub fn handle_season_manager(
                 Err(e) => return Some(Err(e)),
             };
             let session_dock = session.station_id.or(session.structure_id);
-            let ch_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1002);
+            let Some(ch_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "ChallengeNotFound".into(),
+                    message: "claim_challenge_rewards requires a challenge ID".into(),
+                }));
+            };
             let res = with_season_state(ctx, char_id, |st, snap| {
                 let target_location = session_dock
                     .or_else(|| {
@@ -1003,9 +774,25 @@ pub fn handle_season_manager(
                             .and_then(|c| c.station_id.or(c.structure_id))
                     })
                     .ok_or_else(|| BridgeRpcError::user_error("MustBeDocked"))?;
-                let defs = load_challenge_definitions(snap);
-                ensure_character_challenges(st, &defs, snap, char_id, ctx.now_blueos_filetime_ticks());
-                sync_character_challenges(st, snap, char_id);
+                let now_ft = ctx.now_blueos_filetime_ticks();
+                let catalog = load_seasons_catalog(snap, &ctx.sde, now_ft);
+                let season_end_ft = catalog
+                    .get(&st.selected_season_id)
+                    .or_else(|| catalog.values().next())
+                    .map(|c| c.end_time_ft)
+                    .unwrap_or(now_ft + 30 * 86_400 * 10_000_000);
+                let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
+                ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, 4);
+                let def_opt = defs.iter().find(|d| d.challenge_id == ch_id).cloned();
+                if !st.challenges.contains_key(&ch_id) {
+                    if let Some(ref def) = def_opt {
+                        st.challenges.insert(
+                            ch_id,
+                            def.to_character_challenge_with_end(st.selected_season_id, now_ft, season_end_ft),
+                        );
+                    }
+                }
+                sync_character_challenges_with_defs(st, &defs, snap, char_id);
                 let Some(ch) = st.challenges.get_mut(&ch_id) else {
                     return Err(BridgeRpcError {
                         code: "ChallengeNotFound".into(),
@@ -1027,16 +814,32 @@ pub fn handle_season_manager(
                 ch.completed = true;
                 ch.claimed = true;
                 let (prev_pts, reward_pts, season_id) = (st.season_points, ch.points, st.selected_season_id);
+                let (r_tid, r_qty, client_driven) = (ch.reward_type_id, ch.reward_quantity, ch.client_event_driven);
                 st.season_points += reward_pts;
                 let pts = st.season_points;
+                if let Some(ref def) = def_opt {
+                    if def.isk_awarded > 0 {
+                        if let Some(char_rec) = snap.characters.get_mut(&char_id) {
+                            char_rec.balance.0 += eve_db::IskCents::from_isk(def.isk_awarded).0;
+                        }
+                    }
+                    if let Some(next_id) = def.next_challenge {
+                        if let Some(next_def) = defs.iter().find(|d| d.challenge_id == next_id) {
+                            let mut next_ch = next_def.to_character_challenge_with_end(st.selected_season_id, now_ft, season_end_ft);
+                            next_ch.is_dormant = false;
+                            next_ch.baseline_progress = get_current_activity_count(&next_def.event_type, snap, char_id);
+                            st.challenges.insert(next_id, next_ch);
+                        }
+                    }
+                }
                 let is_omega = snap.characters.get(&char_id).map(|c| c.clone_grade >= 2).unwrap_or(false);
-                let delivered_rep = if !ch.client_event_driven && ch.reward_type_id > 0 && ch.reward_quantity > 0 {
+                let delivered_rep = if !client_driven && r_tid > 0 && r_qty > 0 {
                     snap.next_entity_id += 1;
                     let reward_item_id = snap.next_entity_id;
                     snap.items.insert(reward_item_id, eve_db::InventoryItemRecord {
-                        item_id: reward_item_id, type_id: ch.reward_type_id, owner_id: char_id,
+                        item_id: reward_item_id, type_id: r_tid, owner_id: char_id,
                         location_id: target_location, flag: eve_db::InventoryFlag::Hangar,
-                        quantity: ch.reward_quantity, singleton: false, ..Default::default()
+                        quantity: r_qty, singleton: false, ..Default::default()
                     });
                     PyRep::Integer(reward_item_id)
                 } else {
@@ -1302,15 +1105,21 @@ pub fn handle_season_manager(
                 return Some(Err(e));
             }
             let res = with_season_state(ctx, char_id, |st, snap| {
-                let defs = default_seasonal_challenge_definitions();
+                let now_ft = ctx.now_blueos_filetime_ticks();
+                let defs = fsd_challenge_definitions(&ctx.sde).to_vec();
                 if let Ok(json) = serde_json::to_string(&defs) {
                     snap.service_state_blobs.insert(SEASONAL_CHALLENGES_CONFIG_KEY.into(), json);
                 }
-                let seasons = default_fsd_seasons(&ctx.sde, ctx.now_blueos_filetime_ticks());
+                let seasons = default_fsd_seasons(&ctx.sde, now_ft);
+                let season_end_ft = seasons
+                    .get(&st.selected_season_id)
+                    .or_else(|| seasons.values().next())
+                    .map(|c| c.end_time_ft)
+                    .unwrap_or(now_ft + 30 * 86_400 * 10_000_000);
                 if let Ok(json) = serde_json::to_string(&seasons) {
                     snap.service_state_blobs.insert(SEASONS_CATALOG_KEY.into(), json);
                 }
-                ensure_character_challenges(st, &defs, snap, char_id, ctx.now_blueos_filetime_ticks());
+                ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, 4);
                 Ok(())
             });
             match res {
