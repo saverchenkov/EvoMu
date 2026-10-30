@@ -421,7 +421,8 @@ pub fn compute_canonical_system_cost_index(
     let mut sys_work: u64 = 0;
     let mut univ_work: u64 = 0;
     for j in snap.industry_jobs.values() {
-        if j.activity_id != activity_id || (j.start_unix > 0 && j.start_unix < cutoff) {
+        let act_match = if activity_id == 9 { matches!(j.activity_id, 9 | 11) } else { j.activity_id == activity_id };
+        if !act_match || (j.start_unix > 0 && j.start_unix < cutoff) {
             continue;
         }
         let job_sys = resolve_facility_modifiers_and_system(ctx, snap, j.facility_id).map(|m| m.2);

@@ -102,26 +102,64 @@ pub fn handle_security_mgr_call(
     }
 }
 
+/// Snapshot-local variant of [`insurgency_system_suppression_stage`] for callers already holding `ctx.db`.
+pub fn insurgency_system_suppression_stage_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    now: u64,
+    sys_id: u32,
+) -> u8 {
+    let mut stage = 0u8;
+    let mut covered = false;
+    for c in snap.insurgency_runtime.campaigns.values() {
+        if c.systems.contains(&sys_id) && now >= c.forecasting_end_unix && now < c.winddown_end_unix {
+            covered = true;
+            stage = stage.max(crate::services::insurgency_services::insurgency_stage(
+                c.suppression_points.get(&sys_id).copied().unwrap_or(0),
+            ));
+        }
+    }
+    if covered {
+        stage.max(snap.system_states.get(&sys_id).map_or(0, |st| st.insurgency_suppression_stage))
+    } else {
+        0
+    }
+}
+
 /// Returns the active Insurgency suppression stage (`0..=5`) for `sys_id`, or `0` outside active/winddown campaigns.
 pub fn insurgency_system_suppression_stage(ctx: &ServerContext, sys_id: u32) -> u8 {
     let now = ctx.now_unix();
-    ctx.db.with_snapshot(|snap| {
-        let mut stage = 0u8;
-        let mut covered = false;
-        for c in snap.insurgency_runtime.campaigns.values() {
-            if c.systems.contains(&sys_id) && now >= c.forecasting_end_unix && now < c.winddown_end_unix {
-                covered = true;
-                stage = stage.max(crate::services::insurgency_services::insurgency_stage(
-                    c.suppression_points.get(&sys_id).copied().unwrap_or(0),
-                ));
-            }
-        }
-        if covered {
-            stage.max(snap.system_states.get(&sys_id).map_or(0, |st| st.insurgency_suppression_stage))
-        } else {
-            0
-        }
-    })
+    ctx.db.with_snapshot(|snap| insurgency_system_suppression_stage_in_snap(snap, now, sys_id))
+}
+
+/// Emits `OnSecurityModified` when a system enters or exits Corruption Stage 5 (`LAWLESS`, `0.0` effective security)
+/// unless overridden in `CombatRuntimeState.modified_system_securities`.
+pub fn sync_corruption_security_status_change(
+    ctx: &ServerContext,
+    sys_id: u32,
+    old_stage: u8,
+    new_stage: u8,
+) {
+    let was_lawless = old_stage >= 5;
+    let is_lawless = new_stage >= 5;
+    if was_lawless == is_lawless {
+        return;
+    }
+    let has_override = with_combat_runtime(ctx, |rt| {
+        rt.modified_system_securities.contains_key(&sys_id)
+    });
+    if has_override {
+        return;
+    }
+    let new_sec = if is_lawless {
+        0.0
+    } else {
+        ctx.sde
+            .solar_systems
+            .get(&sys_id)
+            .map(|s| s.security_status)
+            .unwrap_or(0.0)
+    };
+    crate::services::combat_crimewatch::crimewatch_timers::update_system_security_status(ctx, sys_id, new_sec);
 }
 
 /// Published Corruption Stage 1–5 PvP loot drop probability (`0.50` base + `0.075 * stage` for pirate militia killers).
@@ -182,17 +220,30 @@ pub fn insurgency_suppression_bounty_and_sec_multiplier(ctx: &ServerContext, sys
     1.0 + 0.05 * f64::from(s_stage.min(5))
 }
 
-/// Published Suppression Stage 2–5 `+5%/stage` FW LP multiplier for Empire militia (`1.05..=1.20` at stages `2..=5`).
-pub fn insurgency_suppression_empire_lp_multiplier(ctx: &ServerContext, sys_id: u32, faction_id: i64) -> f64 {
+/// Snapshot-local variant of [`insurgency_suppression_empire_lp_multiplier`] for callers already holding `ctx.db`.
+pub fn insurgency_suppression_empire_lp_multiplier_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    now_unix: u64,
+    sys_id: u32,
+    faction_id: i64,
+) -> f64 {
     if !is_empire_militia_faction(faction_id) {
         return 1.0;
     }
-    let s_stage = insurgency_system_suppression_stage(ctx, sys_id);
+    let s_stage = insurgency_system_suppression_stage_in_snap(snap, now_unix, sys_id);
     if s_stage >= 2 {
         1.0 + 0.05 * f64::from(s_stage.min(5) - 1)
     } else {
         1.0
     }
+}
+
+/// Published Suppression Stage 2–5 `+5%/stage` FW LP multiplier for Empire militia (`1.05..=1.20` at stages `2..=5`).
+pub fn insurgency_suppression_empire_lp_multiplier(ctx: &ServerContext, sys_id: u32, faction_id: i64) -> f64 {
+    let now = ctx.now_unix();
+    ctx.db.with_snapshot(|snap| {
+        insurgency_suppression_empire_lp_multiplier_in_snap(snap, now, sys_id, faction_id)
+    })
 }
 
 /// Published Suppression Stage 4–5 `+10%` Stasis Webifier & Warp Scrambler optimal range multiplier for Empire militia.

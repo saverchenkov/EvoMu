@@ -32,9 +32,7 @@ use eve_server::services::space_destiny::{compute_pilot_warp_speed_au_s, compute
 use glam::DVec3;
 
 fn lookup_modified_sec(rep: &PyRep, sys_id: u32) -> Option<f64> {
-    let PyRep::Dict(entries) = rep else {
-        panic!("expected Dict from securityMgr.get_modified_systems, got {rep:?}");
-    };
+    let PyRep::Dict(entries) = rep else { panic!("expected Dict from securityMgr.get_modified_systems, got {rep:?}") };
     entries.iter().find_map(|(k, v)| match (k, v) {
         (PyRep::Integer(id), PyRep::Real(sec)) if *id == i64::from(sys_id) => Some(*sec),
         _ => None,
@@ -43,9 +41,7 @@ fn lookup_modified_sec(rep: &PyRep, sys_id: u32) -> Option<f64> {
 
 fn active_sites_in_sys(ctx: &ServerContext, sys_id: u32) -> Vec<String> {
     ctx.db.with_snapshot(|s| {
-        s.insurgency_runtime
-            .insurgency_instances
-            .iter()
+        s.insurgency_runtime.insurgency_instances.iter()
             .filter(|i| i.solar_system_id == sys_id && !i.completed)
             .map(|i| i.site_type.clone())
             .collect()
@@ -55,9 +51,7 @@ fn active_sites_in_sys(ctx: &ServerContext, sys_id: u32) -> Vec<String> {
 fn fast_forward_secs(ctx: &ServerContext, secs: u64) {
     ctx.clock().advance_secs(secs);
     let cur = ctx.now_unix_secs();
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert("__server_now_unix".into(), cur.to_string());
-    });
+    ctx.db.with_mut_snapshot(|snap| { snap.service_state_blobs.insert("__server_now_unix".into(), cur.to_string()); });
 }
 
 #[tokio::test]
@@ -107,6 +101,8 @@ async fn test_corruption_and_suppression_per_stage_effects() {
     // 1. Corruption Stages 1..=5: PvP loot drop bonus (+7.5%/stage), Faction Police suppression (2+),
     //    documented sites, roaming Pirate NPCs (2+), +2 AU/s pirate warp speed (4+), and Stage 5 LAWLESS.
     let base_pir_warp = compute_ship_warp_speed_au_s(&ctx, 621);
+    let base_front_sec = ctx.sde.solar_systems[&front_sys].security_status;
+    ctx.drain_notifications_for_char(emp_cid);
     for stage in 1u8..=5 {
         let (_pts, cur_st) = add_system_corruption(&ctx, camp_id, front_sys, 200);
         assert_eq!(cur_st, stage);
@@ -144,6 +140,8 @@ async fn test_corruption_and_suppression_per_stage_effects() {
         assert!((compute_pilot_warp_speed_au_s(&ctx, pir_cid, front_sys, 621) - expected_warp).abs() < 1e-6);
         assert!((compute_pilot_warp_speed_au_s(&ctx, emp_cid, front_sys, 621) - base_pir_warp).abs() < 1e-6);
     }
+    let sec_up = ctx.drain_notifications_for_char(emp_cid);
+    assert!(sec_up.iter().any(|n| n.event == "OnSecurityModified" && n.args == vec![PyRep::Integer(i64::from(front_sys)), PyRep::Real(-base_front_sec), PyRep::Real(0.0)]));
 
     // Stage 5 lowsec sentry disabling verified on grid aggression:
     let sys_h = ctx.systems.get_or_spawn(front_sys);
@@ -164,6 +162,8 @@ async fn test_corruption_and_suppression_per_stage_effects() {
     assert!(active_sites_in_sys(&ctx, front_sys).contains(&"IceRefineryHeist".into()), "Stage 3 restores IceRefineryHeist");
     let mod_drop3 = rpc_call(&ctx, &mut s_emp, "securityMgr", "get_modified_systems", &[]).await.unwrap();
     assert_eq!(lookup_modified_sec(&mod_drop3, front_sys), None, "Dropping below Stage 5 restores normal security");
+    let sec_down = ctx.drain_notifications_for_char(emp_cid);
+    assert!(sec_down.iter().any(|n| n.event == "OnSecurityModified" && n.args == vec![PyRep::Integer(i64::from(front_sys)), PyRep::Real(0.0), PyRep::Real(base_front_sec)]));
 
     let (_pts_drop0, st_drop0) = add_system_corruption(&ctx, camp_id, front_sys, -500);
     assert_eq!(st_drop0, 0);
@@ -462,7 +462,7 @@ async fn test_insurgency_live_gameplay_and_highsec_stage5() {
     let pir_ship = 100_000_072i64;
     let vic_cid = 90_000_073i64;
     let vic_ship = 100_000_073i64;
-    let hs_sys = 30_045_324u32; // Onnamon (0.62 Highsec)
+    let hs_sys = 30_045_324u32; // Onnamon (0.5555 Highsec)
     assert!(ctx.sde.solar_systems.get(&hs_sys).unwrap().security_status >= 0.45);
     let helper_cid = 90_000_077i64;
     let helper_ship = 100_000_077i64;

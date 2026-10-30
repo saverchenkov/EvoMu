@@ -985,6 +985,7 @@ async fn test_esi6_industry_and_mining_routes() {
     let char_id = 90_000_001_i64;
     let corp_id = 98_000_631_i64;
     let struct_id = 1_030_000_631_001_i64;
+    let dodixie_stn = ctx.sde.solar_systems[&30_002_659].stations[0].station_id;
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -1050,6 +1051,22 @@ async fn test_esi6_industry_and_mining_routes() {
                 duration_seconds: 7_200,
                 start_unix: now.saturating_sub(35 * 86_400), // 35 days old: outside 28-day rolling window
                 status: "Delivered".to_string(),
+            },
+        );
+        snap.industry_jobs.insert(
+            6404,
+            IndustryJobRecord {
+                job_id: 6404,
+                installer_id: 99_999_999, // non-corp installer
+                facility_id: dodixie_stn, // Dodixie (30_002_659): 57,600s = 80% of 72,000s universe work -> clamped to 0.50
+                blueprint_item_id: 100_000_010,
+                blueprint_type_id: 691,
+                product_type_id: 587,
+                activity_id: 1,
+                runs: 1,
+                duration_seconds: 57_600,
+                start_unix: now.saturating_sub(600),
+                status: "Active".to_string(),
             },
         );
         snap.mining_ledger.push(MiningLedgerRecord {
@@ -1123,48 +1140,37 @@ async fn test_esi6_industry_and_mining_routes() {
 
     let systems = get_json(&router, &spec, "/v1/industry/systems/", None);
     let sys_arr = systems.as_array().unwrap();
-    assert_eq!(
-        sys_arr.len(),
-        ctx.sde.solar_systems.len(),
-        "GET /industry/systems must return cost indices for every SDE solar system"
-    );
-    let jita_sys = sys_arr
-        .iter()
-        .find(|s| s["solar_system_id"] == json!(30_000_142))
-        .expect("Jita industry cost indices");
-    let jita_ci = jita_sys["cost_indices"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|ci| ci["activity"] == json!("manufacturing"))
-        .expect("Jita manufacturing index");
-    let jita_val = jita_ci["cost_index"].as_f64().unwrap();
-    assert!((jita_val - 0.75_f64.sqrt()).abs() < 1e-6, "Jita cost index must match sqrt(0.75) (~0.866)");
+    assert_eq!(sys_arr.len(), ctx.sde.solar_systems.len(), "GET /industry/systems must cover all SDE systems");
+    let sci_for = |sid: u32, act: &str| -> f64 {
+        sys_arr.iter().find(|s| s["solar_system_id"] == json!(sid)).unwrap()["cost_indices"]
+            .as_array().unwrap().iter().find(|ci| ci["activity"] == json!(act)).unwrap()["cost_index"].as_f64().unwrap()
+    };
+    assert!((sci_for(30_000_142, "manufacturing") - 0.10_f64.sqrt()).abs() < 1e-6, "Jita SCI = sqrt(7200/72000)");
+    assert!((sci_for(30_000_144, "manufacturing") - 0.10_f64.sqrt()).abs() < 1e-6, "Perimeter SCI = sqrt(7200/72000)");
+    assert!((sci_for(30_002_659, "manufacturing") - 0.50).abs() < 1e-6, "Dodixie SCI clamped at 0.50");
+    assert!((sci_for(30_002_187, "manufacturing") - 0.01).abs() < 1e-6, "Idle Amarr SCI = 0.01 floor");
 
-    let perim_sys = sys_arr
-        .iter()
-        .find(|s| s["solar_system_id"] == json!(30_000_144))
-        .expect("Perimeter industry cost indices");
-    let perim_ci = perim_sys["cost_indices"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|ci| ci["activity"] == json!("manufacturing"))
-        .expect("Perimeter manufacturing index");
-    let perim_val = perim_ci["cost_index"].as_f64().unwrap();
-    assert!((perim_val - 0.5).abs() < 1e-6, "Perimeter cost index must match sqrt(0.25) = 0.5");
-
-    let idle_sys = sys_arr
-        .iter()
-        .find(|s| s["solar_system_id"] == json!(30_002_187)) // Amarr (no jobs seeded)
-        .expect("Amarr idle industry cost indices");
-    let idle_mfg = idle_sys["cost_indices"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|ci| ci["activity"] == json!("manufacturing"))
-        .expect("Amarr manufacturing index");
-    assert_eq!(idle_mfg["cost_index"], json!(0.0), "Systems without recent jobs report 0.0 cost_index");
+    // Verify exact parity with `map.GetIndustryCostModifier` RPC across active, clamped, and idle systems:
+    let mut rpc_sess = eve_machonet::SessionState::new(9910);
+    rpc_sess.user_id = Some(1);
+    rpc_sess.character_id = Some(char_id);
+    for sid in [30_000_142u32, 30_000_144, 30_002_659, 30_002_187] {
+        let rep = ctx
+            .dispatch_rpc(&mut rpc_sess, "map", None, "GetIndustryCostModifier", &[eve_proto::PyRep::Integer(i64::from(sid))], &HashMap::new(), None)
+            .await
+            .expect("map.GetIndustryCostModifier");
+        for (rpc_k, esi_k) in [
+            ("manufacturing", "manufacturing"),
+            ("research_te", "researching_time_efficiency"),
+            ("research_me", "researching_material_efficiency"),
+            ("copying", "copying"),
+            ("invention", "invention"),
+            ("reaction", "reaction"),
+        ] {
+            let Some(eve_proto::PyRep::Real(rpc_v)) = rep.dict_get(rpc_k) else { panic!("missing {rpc_k} in {rep:?}") };
+            assert!((sci_for(sid, esi_k) - rpc_v).abs() < 1e-9, "ESI/RPC SCI mismatch for sys {sid} {esi_k}");
+        }
+    }
 
     let char_jobs = get_json(
         &router,

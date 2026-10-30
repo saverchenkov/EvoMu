@@ -332,10 +332,9 @@ pub async fn handle_npc_destroyed_in_space(
         rt.npc_entities.remove(&killed_ball_id)
     };
     if let Some(npc) = npc_opt {
+        let now = db.now_unix_secs();
         let s_stage = db.with_snapshot(|snap| {
-            snap.system_states
-                .get(&solar_system_id)
-                .map_or(0, |st| st.insurgency_suppression_stage)
+            crate::services::security_mgr::insurgency_system_suppression_stage_in_snap(snap, now, solar_system_id)
         });
         let supp_mult = 1.0 + 0.05 * f64::from(s_stage.min(5));
         let eff_bounty = npc.bounty_isk * supp_mult;

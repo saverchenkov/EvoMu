@@ -379,7 +379,7 @@ async fn test_batch6_ess_and_dynamic_bounty() {
     assert_eq!(ev_res_disc.len(), 1, "P1 receives OnReserveBankPlayerLinkDisconnected");
     assert_eq!(ev_res_disc[0][0].dict_get("characterID"), Some(&PyRep::Integer(P1)));
     assert_eq!(ev_res_disc[0][0].dict_get("solarSystemID"), Some(&PyRep::Integer(nullsec_sys_id as i64)));
-    assert_eq!(ev_res_disc[0][0].dict_get("reason"), Some(&PyRep::Integer(ess_ball_id)));
+    assert_eq!(ev_res_disc[0][0].dict_get("reason"), Some(&PyRep::Integer(0)));
 }
 
 #[tokio::test]

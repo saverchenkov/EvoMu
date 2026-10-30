@@ -1030,6 +1030,56 @@ pub async fn tick_insurgency_campaigns(ctx: &ServerContext, now_unix: u64) {
     }
 }
 
+fn select_insurgency_roamer_type(
+    ctx: &ServerContext,
+    group_id: u32,
+    faction_filter: Option<u32>,
+    tier: usize,
+    total_tiers: usize,
+) -> Option<u32> {
+    let mut candidates: Vec<(u64, u64, u32)> = ctx
+        .sde
+        .types
+        .values()
+        .filter(|t| {
+            t.group_id == group_id
+                && t.faction_id.is_some()
+                && faction_filter.is_none_or(|fid| t.faction_id == Some(fid))
+        })
+        .map(|t| {
+            let hp = t.default_attributes.get(&263).copied().unwrap_or(0.0)
+                + t.default_attributes.get(&265).copied().unwrap_or(0.0)
+                + t.default_attributes.get(&9).copied().unwrap_or(0.0);
+            let bounty = t.default_attributes.get(&481).copied().unwrap_or(0.0);
+            (hp.round() as u64, bounty.round() as u64, t.type_id)
+        })
+        .collect();
+    candidates.sort_unstable();
+    if candidates.is_empty() {
+        return None;
+    }
+    let idx = (tier.min(total_tiers) * (candidates.len() - 1)) / total_tiers.max(1);
+    Some(candidates[idx].2)
+}
+
+fn system_roamer_waypoints(ctx: &ServerContext, sys_id: u32) -> Vec<DVec3> {
+    let mut celestials = ctx.sde.celestials_in_system(sys_id);
+    celestials.sort_by_key(|c| c.celestial_id);
+    let mut wps: Vec<DVec3> = celestials
+        .into_iter()
+        .filter(|c| matches!(c.group_id, 7 | 8 | 9 | 10 | 15))
+        .take(6)
+        .map(|c| c.position)
+        .collect();
+    if wps.len() < 2 {
+        // DERIVED (synthetic): fallback patrol grid waypoints around system origin when SDE celestials < 2.
+        wps.push(DVec3::new(12_000.0, 0.0, 4_000.0));
+        wps.push(DVec3::new(-12_000.0, 0.0, 4_000.0));
+        wps.push(DVec3::new(0.0, 0.0, -14_000.0));
+    }
+    wps
+}
+
 async fn sync_insurgency_system_npcs(
     ctx: &ServerContext,
     pirate_fac: i64,
@@ -1043,92 +1093,146 @@ async fn sync_insurgency_system_npcs(
 
     let desired_pirate: Option<u32> = if c_st < 2 {
         None
-    } else if pirate_fac == FACTION_ANGEL_CARTEL {
-        Some(match c_st {
-            2 => 79_320, // Angel Lookout Dramiel
-            3 => 79_327, // Angel Lookout Cynabal
-            _ => 79_330, // Zohar's Chosen Cynabal
-        })
     } else {
-        Some(match c_st {
-            2 => 79_348, // Guristas Lookout Worm
-            3 => 79_352, // Guristas Lookout Gila
-            _ => 79_360, // Hakuzosu's Steelscale Gila
-        })
+        select_insurgency_roamer_type(
+            ctx,
+            4637,
+            Some(pirate_fac as u32),
+            usize::from(c_st - 2),
+            3,
+        )
     };
 
-    let desired_enforcer: Option<u32> = match s_st {
-        0..=2 => None,
-        3 => Some(79_387), // Upwell Safeguard Garmur
-        _ => Some(79_390), // Upwell Safeguard Orthrus
+    let desired_enforcer: Option<u32> = if s_st < 3 {
+        None
+    } else {
+        select_insurgency_roamer_type(ctx, 4638, None, usize::from(s_st - 3), 2)
     };
 
-    let (stale_balls, has_pirate, has_enforcer, has_ci_sentry) = with_mut_combat_runtime(ctx, |rt| {
-        let mut stale = Vec::new();
-        let mut hp = false;
-        let mut he = false;
-        let mut hs = false;
-        for (&bid, npc) in &rt.npc_entities {
-            if npc.solar_system_id != sys_id {
-                continue;
-            }
-            if npc.type_id == 79_507 {
-                hs = true;
-                continue;
-            }
-            let gid = ctx.sde.types.get(&npc.type_id).map(|t| t.group_id).unwrap_or(0);
-            if gid == 4637 {
-                if desired_pirate == Some(npc.type_id) {
-                    hp = true;
-                } else {
-                    stale.push(bid);
+    let (stale_balls, has_pirate, has_enforcer, has_ci_sentry, idle_roamers) =
+        with_mut_combat_runtime(ctx, |rt| {
+            let mut stale = Vec::new();
+            let mut hp = false;
+            let mut he = false;
+            let mut hs = false;
+            let mut idle = Vec::new();
+            for (&bid, npc) in &rt.npc_entities {
+                if npc.solar_system_id != sys_id {
+                    continue;
                 }
-            } else if gid == 4638 {
-                if desired_enforcer == Some(npc.type_id) {
-                    he = true;
-                } else {
-                    stale.push(bid);
+                if npc.type_id == 79_507 {
+                    hs = true;
+                    continue;
+                }
+                let gid = ctx.sde.types.get(&npc.type_id).map(|t| t.group_id).unwrap_or(0);
+                if gid == 4637 {
+                    if desired_pirate == Some(npc.type_id) {
+                        hp = true;
+                        if npc.target_id.is_none() {
+                            idle.push((bid, true, npc.spawn_position));
+                        }
+                    } else {
+                        stale.push(bid);
+                    }
+                } else if gid == 4638 {
+                    if desired_enforcer == Some(npc.type_id) {
+                        he = true;
+                        if npc.target_id.is_none() {
+                            idle.push((bid, false, npc.spawn_position));
+                        }
+                    } else {
+                        stale.push(bid);
+                    }
                 }
             }
-        }
-        for &bid in &stale {
-            rt.npc_entities.remove(&bid);
-        }
-        (stale, hp, he, hs)
-    });
+            for &bid in &stale {
+                rt.npc_entities.remove(&bid);
+            }
+            (stale, hp, he, hs, idle)
+        });
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     for bid in stale_balls {
         let _ = sys_handle.remove_ball(bid).await;
     }
 
+    let waypoints = system_roamer_waypoints(ctx, sys_id);
+    // DERIVED (synthetic): patrol offsets near celestial/grid anchors so Pirate and Enforcer roamers do not overlap at exact origin.
+    let pirate_offset = DVec3::new(12_000.0, 0.0, 4_000.0);
+    let enforcer_offset = DVec3::new(-12_000.0, 0.0, 4_000.0);
+
+    if !idle_roamers.is_empty() {
+        let mut moved_positions = Vec::new();
+        {
+            let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
+            for (bid, is_pir, cur_anchor) in idle_roamers {
+                let offset = if is_pir { pirate_offset } else { enforcer_offset };
+                let cur_idx = waypoints
+                    .iter()
+                    .position(|w| (*w + offset).distance(cur_anchor) < 5_000.0)
+                    .unwrap_or(0);
+                let next_idx = (cur_idx + 1) % waypoints.len();
+                let follow_idx = (next_idx + 1) % waypoints.len();
+                let next_pos = waypoints[next_idx] + offset;
+                let follow_pos = waypoints[follow_idx] + offset;
+                if bp.set_ball_position(bid, next_pos) {
+                    let _ = bp.goto_point(bid, follow_pos);
+                    moved_positions.push((bid, next_pos));
+                }
+            }
+            crate::system_actor::sync_ball_positions(
+                &bp,
+                &sys_handle.ball_positions,
+                &sys_handle.scrambled_balls,
+            );
+        }
+        if !moved_positions.is_empty() {
+            with_mut_combat_runtime(ctx, |rt| {
+                for (bid, pos) in moved_positions {
+                    if let Some(npc) = rt.npc_entities.get_mut(&bid) {
+                        npc.spawn_position = pos;
+                    }
+                }
+            });
+        }
+    }
+
     if let Some(tid) = desired_pirate {
         if !has_pirate {
-            let _ = spawn_specialized_npc_entity(
+            let spawn_pos = waypoints[0] + pirate_offset;
+            let next_pos = waypoints[1 % waypoints.len()] + pirate_offset;
+            let bid = spawn_specialized_npc_entity(
                 ctx,
                 sys_id,
                 tid,
                 "InsurgencyPirateRoamer",
                 pirate_fac as u32,
-                DVec3::new(12_000.0, 0.0, 4_000.0),
+                spawn_pos,
             )
             .await;
+            let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
+            let _ = bp.goto_point(bid, next_pos);
         }
     }
     if let Some(tid) = desired_enforcer {
         if !has_enforcer {
-            let _ = spawn_specialized_npc_entity(
+            let spawn_pos = waypoints[0] + enforcer_offset;
+            let next_pos = waypoints[1 % waypoints.len()] + enforcer_offset;
+            let bid = spawn_specialized_npc_entity(
                 ctx,
                 sys_id,
                 tid,
                 "InsurgencyEnforcer",
                 empire_fac as u32,
-                DVec3::new(-12_000.0, 0.0, 4_000.0),
+                spawn_pos,
             )
             .await;
+            let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
+            let _ = bp.goto_point(bid, next_pos);
         }
     }
     if s_st >= 5 && !has_ci_sentry {
+        // DERIVED (synthetic): Counter-Insurgency Sentry Gun deployment offset near grid anchor.
         let _ = spawn_specialized_npc_entity(
             ctx,
             sys_id,

@@ -325,6 +325,53 @@ impl CrimeWatchDirector {
         self.handle_combat_aggression_with_pod(character_id, victim_char_id, ship_id, sys_id, sys_sec, is_legal, false, now_unix)
     }
 
+    /// Evaluates criminal remote assistance to a Criminal beneficiary in High-sec (`sys_sec >= 0.45`):
+    /// grants Weapon (60s), PvP (15m), and Criminal (15m) timers and schedules CONCORD response even at
+    /// Insurgency Corruption Stage 5 (`Corruption_and_Suppression.md:55`), without marking a pod kill.
+    pub fn handle_criminal_remote_assistance(
+        &mut self,
+        helper_char_id: i64,
+        beneficiary_char_id: i64,
+        helper_ship_id: i64,
+        sys_id: u32,
+        sys_sec: f64,
+        now_unix: u64,
+    ) -> AggressionEvaluation {
+        self.aggression_mgr.record_aggression(
+            helper_char_id,
+            beneficiary_char_id,
+            sys_id,
+            false,
+            false,
+            now_unix,
+        );
+        let st = self.get_or_create(helper_char_id);
+        st.weapon_timer_until_unix = now_unix.saturating_add(60);
+        st.pvp_timer_until_unix = now_unix.saturating_add(900);
+        st.criminal_flag_until_unix = now_unix.saturating_add(900);
+        if sys_sec >= 0.45 {
+            let delay_sec = match (sys_sec * 10.0).round() as i32 {
+                10 | 9 => 6.0,
+                8 => 8.0,
+                7 => 11.0,
+                6 => 14.0,
+                5 => 19.0,
+                _ => concord_response_delay_sec(sys_sec),
+            };
+            let arrival_unix = now_unix.saturating_add(delay_sec.ceil() as u64);
+            st.pending_concord_arrival = Some((sys_id, arrival_unix, helper_ship_id, beneficiary_char_id));
+            AggressionEvaluation::CriminalFlagTriggered {
+                concord_delay_sec: delay_sec,
+                arrival_unix,
+            }
+        } else {
+            AggressionEvaluation::CriminalFlagTriggered {
+                concord_delay_sec: 0.0,
+                arrival_unix: now_unix,
+            }
+        }
+    }
+
     /// Evaluates combat aggression against another pilot with pod/capsule awareness:
     /// - High-sec unprovoked attack against ship (`sys_sec >= 0.45`):
     ///   - Stage 5 corruption (Highsec Only): Suspect flag, no criminal timer or CONCORD response.

@@ -1173,7 +1173,8 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
             for &(cid, _) in &all_on_grid {
                 *sec_map.entry(cid).or_insert(0) += dt;
             }
-            // Rank winning pilots by cumulative time contributed on the Battlefield grid (`Faction_warfare.md:221`).
+            // DERIVED (synthetic): Faction_warfare.md:209 documents full LP payout for up to 30 pilots;
+            // ranking winning pilots by cumulative time on the Battlefield grid and applying the same 30-pilot cap to standing awards is derived.
             winning_pilots.sort_by(|a, b| {
                 let a_sec = sec_map.get(a).copied().unwrap_or(0);
                 let b_sec = sec_map.get(b).copied().unwrap_or(0);

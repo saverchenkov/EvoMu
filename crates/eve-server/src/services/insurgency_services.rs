@@ -288,12 +288,15 @@ pub fn end_insurgency_campaign(ctx: &ServerContext, campaign_id: i64) {
     if let Some(c) = removed {
         let now = ctx.now_unix();
         for sys in &c.systems {
-            ctx.db.with_mut_snapshot(|snap| {
+            let prev_c = ctx.db.with_mut_snapshot(|snap| {
+                let prev = snap.system_states.get(sys).map_or(0, |st| st.insurgency_corruption_stage);
                 if let Some(st) = snap.system_states.get_mut(sys) {
                     st.insurgency_corruption_stage = 0;
                     st.insurgency_suppression_stage = 0;
                 }
+                prev.max(c.corruption_points.get(sys).copied().map(insurgency_stage).unwrap_or(0))
             });
+            crate::services::security_mgr::sync_corruption_security_status_change(ctx, *sys, prev_c, 0);
             ctx.notify(
                 NotificationTarget::SolarSystem(*sys),
                 "OnInsurgencyCampaignEndingForLocation",
@@ -377,7 +380,7 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
         let s_stage = insurgency_stage(c.suppression_points.get(&sys_id).copied().unwrap_or(0));
         let eff_pts = if s_stage >= 3 && points > 0 { ((points as f64) * 0.70).round() as i64 } else { points };
         let new_pts = (*p + eff_pts).max(0);
-        *p = if s_stage >= 5 && prev_stage < 5 { new_pts.min(800) } else { new_pts };
+        *p = if s_stage >= 5 && prev_stage < 5 { new_pts.min((*p).max(800)) } else { new_pts };
         let s = insurgency_stage(*p);
         (*p, prev_stage, s, c.pirate_faction_id, active, in_act)
     });
@@ -386,6 +389,7 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
         snap.system_states.entry(sys_id).or_default().insurgency_corruption_stage = stage;
         crate::services::security_mgr::prune_ineligible_insurgency_sites_in_snap(snap, sys_id);
     });
+    crate::services::security_mgr::sync_corruption_security_status_change(ctx, sys_id, old_stage, stage);
 
     if in_active_phase && stage >= 3 && old_stage < 3 {
         let _ = crate::services::fw_gameplay::try_spread_insurgency_from_system(ctx, campaign_id, sys_id);
@@ -1128,13 +1132,10 @@ async fn evaluate_system_fw_complex_tick(
             let n_pilots = pilot_cids.len().max(1) as i64;
             let lp_each = total_lp_awarded / n_pilots;
             for &(cid, pfid) in &pilot_cids {
-                let mult = crate::services::security_mgr::insurgency_suppression_empire_lp_multiplier(ctx, sys_id, pfid);
+                let mult = crate::services::security_mgr::insurgency_suppression_empire_lp_multiplier_in_snap(snap, ctx.now_unix(), sys_id, pfid);
                 let final_lp = ((lp_each as f64) * mult).round() as i64;
                 if let Some(ch) = snap.characters.get_mut(&cid) {
-                    let militia_corp = ctx
-                        .sde
-                        .factions
-                        .get(&(pfid as u32))
+                    let militia_corp = ctx.sde.factions.get(&(pfid as u32))
                         .and_then(|f| f.militia_corporation_id)
                         .map(|c| c as i64)
                         .unwrap_or(pfid);

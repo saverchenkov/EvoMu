@@ -170,6 +170,7 @@ mod fw_warzone_insurgency_closure_part2;
 mod fw_warzone_insurgency_closure_part3;
 mod fw_warzone_insurgency_closure_part4;
 mod fw_warzone_insurgency_closure_part5;
+mod fw_warzone_insurgency_closure_part6;
 mod sovereignty_equinox_gameplay_closure;
 mod sovereignty_equinox_gameplay_closure_part2;
 mod sovereignty_equinox_gameplay_closure_part3;

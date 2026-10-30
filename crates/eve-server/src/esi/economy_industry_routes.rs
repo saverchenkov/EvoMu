@@ -139,7 +139,7 @@ pub fn dispatch_economy_industry_route(
             let mut sys_work: BTreeMap<u32, BTreeMap<&'static str, u64>> = BTreeMap::new();
             let mut total_activity_work: BTreeMap<&'static str, u64> = BTreeMap::new();
             for j in snap.industry_jobs.values() {
-                if j.start_unix < cutoff {
+                if j.start_unix > 0 && j.start_unix < cutoff {
                     continue;
                 }
                 let Some(sid) = ctx
@@ -160,7 +160,8 @@ pub fn dispatch_economy_industry_route(
                     9 | 11 => "reaction",
                     _ => continue,
                 };
-                let work = u64::from(j.runs).saturating_mul(j.duration_seconds);
+                // Canonical System Cost Index (`compute_canonical_system_cost_index`): aggregates job duration_seconds over 28d.
+                let work = j.duration_seconds;
                 if work == 0 {
                     continue;
                 }
@@ -191,11 +192,11 @@ pub fn dispatch_economy_industry_route(
                         .map(|&activity| {
                             let total = total_activity_work.get(activity).copied().unwrap_or(0);
                             let work = acts.and_then(|m| m.get(activity).copied()).unwrap_or(0);
-                            // 28-day rolling industry system cost index (`sqrt(system_work / universe_work)`, `0.0` when idle)
-                            let cost_index = if total == 0 || work == 0 {
-                                0.0
+                            // Matches `compute_canonical_system_cost_index` (`sqrt(system_work / universe_work).clamp(0.001, 0.50)`, `0.01` when idle).
+                            let cost_index = if total > 0 && work > 0 {
+                                ((work as f64) / (total as f64)).sqrt().clamp(0.001, 0.50)
                             } else {
-                                ((work as f64) / (total as f64)).sqrt()
+                                0.01
                             };
                             json!({
                                 "activity": activity,

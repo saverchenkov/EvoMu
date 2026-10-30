@@ -3197,7 +3197,7 @@
   },
   "notify:OnClientContactChangeOnBlockContacts": {
     "disposition": "dead_client_code",
-    "evidence": "Zero handlers in V24 client bytecode (client_expectations.json notify.OnClientContactChangeOnBlockContacts); dead client code."
+    "evidence": "eve/client/script/ui/shared/killRights.pyj KillRightsEntry.__notifyevents__ lists 'OnClientContactChangeOnBlockContacts' alongside 'OnBlockContacts', but KillRightsEntry only implements OnBlockContacts(self, contactIDs) and has zero method definition or emitter anywhere in V24 client bytecode."
   },
   "notify:OnClientEvent_MarketItemReceived": {
     "disposition": "client_local",
@@ -3205,10 +3205,10 @@
   },
   "notify:OnCollapsed": {
     "disposition": "dead_client_code",
-    "evidence": "Zero handlers in V24 client bytecode (client_expectations.json notify.OnCollapsed); dead client code."
+    "evidence": "eve/client/script/ui/shared/fleet/fleet.pyj MyFleetPanel.__notifyevents__ lists 'OnCollapsed' without defining MyFleetPanel.OnCollapsed; all other OnCollapsed methods (carbonui/control/window.pyj, carbonui/window/stack.pyj, treeViewEntry.pyj) are local CarbonUI widget collapse callbacks rather than server notifications."
   },
   "notify:OnSkyhookCanBeHacked": {
     "disposition": "dead_client_code",
-    "evidence": "Zero handlers in V24 client bytecode (client_expectations.json notify.OnSkyhookCanBeHacked); dead client code."
+    "evidence": "spacecomponents/client/ui/link_with_ship/state/ready.pyj Ready.__notifyevents__ lists 'OnSkyhookCanBeHacked' with zero handler method defined on Ready or its base class; Skyhook reagent theft vulnerability uses SkyhookVulnerabilityChangeController and OnSkyhookSiloDamageUpdated instead."
   }
 }

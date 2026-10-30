@@ -1264,8 +1264,7 @@ pub fn evaluate_and_record_remote_assistance(
     }
     if ben_criminal && sys_sec > 0.0 {
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-        let _ = cw.handle_combat_aggression_with_pod(helper_char_id, ben_id, helper_ship_id, sys_id, sys_sec, false, true, now_unix);
-        cw.get_or_create(helper_char_id).criminal_flag_until_unix = now_unix.saturating_add(900);
+        let _ = cw.handle_criminal_remote_assistance(helper_char_id, ben_id, helper_ship_id, sys_id, sys_sec, now_unix);
         drop(cw);
         let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[helper_char_id], &[], &[]);
     } else if ben_suspect && sys_sec > 0.0 {
