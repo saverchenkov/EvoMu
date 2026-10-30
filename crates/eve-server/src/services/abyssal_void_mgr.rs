@@ -66,14 +66,13 @@ pub(crate) fn validate_allowed_ship_hull(
     Ok((tid, gid))
 }
 
-fn is_owner_or_same_fleet(ctx: &ServerContext, caller_id: i64, owner_id: i64) -> bool {
-    if caller_id == owner_id {
-        return true;
-    }
+fn is_in_trace_fleet(ctx: &ServerContext, caller_id: i64, owner_id: i64) -> bool {
+    crate::services::fleet_social::fleet_social_notify::tick_fleet_lifecycle(ctx);
     ctx.db.with_snapshot(|snap| {
-        snap.fleets
-            .values()
-            .any(|f| f.members.contains(&caller_id) && f.members.contains(&owner_id))
+        snap.fleets.values().any(|f| {
+            (f.members.contains(&caller_id) || f.member_details.contains_key(&caller_id))
+                && (f.members.contains(&owner_id) || f.member_details.contains_key(&owner_id))
+        })
     })
 }
 
@@ -85,29 +84,35 @@ pub async fn handle(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    if let Some(restricted) =
+        crate::services::pve_special_sites_abyssal::check_abyssal_in_pocket_rpc_restrictions(
+            session, service, method, args,
+        )
+    {
+        return Some(restricted);
+    }
     match (service, method) {
         ("abyssalMgr", "AbyssalEntranceDeployment") => {
-            if args.is_empty() {
+            if args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0).is_none() {
                 return Some(Err(BridgeRpcError {
                     code: "MissingRequiredArgument".into(),
-                    message: "AbyssalEntranceDeployment requires filament item ID".into(),
+                    message: "AbyssalEntranceDeployment requires a valid filament itemID (> 0)".into(),
                 }));
             }
             Some(crate::services::pve_special_sites::handle_abyssal_entrance_deployment(ctx, session, args).await)
         }
 
         ("abyssalMgr", "AbyssalEntranceGateActivation") => {
-            if args.is_empty() {
+            let Some(trace_id) = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
                 return Some(Err(BridgeRpcError {
                     code: "MissingRequiredArgument".into(),
-                    message: "AbyssalEntranceGateActivation requires gateID or filament itemID".into(),
+                    message: "AbyssalEntranceGateActivation requires a valid gateID or filament itemID (> 0)".into(),
                 }));
-            }
+            };
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let trace_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let trace_opt = with_pve_special_reg(ctx, |reg| reg.abyssal_traces.get(&trace_id).cloned());
             if let Some(trace) = trace_opt {
                 return Some(activate_trace(ctx, session, char_id, trace).await);
@@ -264,8 +269,15 @@ async fn activate_trace(
     }
 
     let now_u = ctx.now_unix();
+    let fallback_ttl = if trace.pocket_id.is_some() {
+        1_200
+    } else {
+        crate::services::pve_special_sites_abyssal::UNENTERED_GATE_LIFETIME_SEC
+    };
     if (trace.expires_at_sec > 0 && now_u >= trace.expires_at_sec)
-        || (trace.expires_at_sec == 0 && trace.created_unix > 0 && now_u >= trace.created_unix + 1_200)
+        || (trace.expires_at_sec == 0
+            && trace.created_unix > 0
+            && now_u >= trace.created_unix + fallback_ttl)
     {
         with_pve_special_reg(ctx, |reg| {
             reg.abyssal_traces.remove(&trace.trace_ball_id);
@@ -278,6 +290,20 @@ async fn activate_trace(
     }
 
     let sys_handle = ctx.systems.get_or_spawn(cur_sys);
+    if let Ok(Some(cs)) = sys_handle.get_combat_state(ship_id).await {
+        if cs.is_cloaked {
+            return Err(BridgeRpcError {
+                code: "ShipIsCloaked".into(),
+                message: "Cannot activate Abyssal entrance trace while cloaked".into(),
+            });
+        }
+        if cs.is_tethered {
+            return Err(BridgeRpcError {
+                code: "ShipIsTethered".into(),
+                message: "Cannot activate Abyssal entrance trace while tethered".into(),
+            });
+        }
+    }
     let ship_pos = if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
         ball.position
     } else {
@@ -298,51 +324,83 @@ async fn activate_trace(
         });
     }
 
-    if !is_owner_or_same_fleet(ctx, char_id, trace.char_id) {
-        return Err(BridgeRpcError {
-            code: "AccessDenied".into(),
-            message: "Caller is neither the trace owner nor in the owner's fleet".into(),
-        });
-    }
-
+    let eff_cap = if trace.max_ships == 0 { 1 } else { trace.max_ships };
     let (_, _, hull_cap) = validate_abyssal_hull_and_capacity(ctx, ship_id)?;
-    if hull_cap != trace.max_ships {
+    if hull_cap != eff_cap {
         return Err(BridgeRpcError {
             code: "DisallowedShipType".into(),
             message: format!(
-                "Trace requires ship class capacity {}, but activating ship has capacity {}",
-                trace.max_ships, hull_cap
+                "Trace requires ship class capacity {eff_cap}, but activating ship has capacity {hull_cap}"
             ),
         });
     }
-    let eff_cap = trace.max_ships;
-
-    let cap_exceeded = with_pve_special_reg(ctx, |reg| {
-        if let Some(t) = reg.abyssal_traces.get_mut(&trace.trace_ball_id) {
-            if !t.entered_char_ids.contains(&char_id) && t.entered_char_ids.len() >= eff_cap as usize {
-                return true;
-            }
-            if !t.entered_char_ids.contains(&char_id) {
-                t.entered_char_ids.push(char_id);
-            }
+    if eff_cap == 1 {
+        if char_id != trace.char_id {
+            return Err(BridgeRpcError {
+                code: "AccessDenied".into(),
+                message: "Solo Cruiser Abyssal trace may only be entered by its creator".into(),
+            });
         }
-        false
-    });
-    if cap_exceeded {
-        return Err(BridgeRpcError {
-            code: "TraceShipLimitReached".into(),
-            message: format!("Abyssal trace ship limit ({eff_cap}) reached for this hull class"),
-        });
+    } else {
+        let caller_fleet_id =
+            crate::services::fleet_social::fleet_social_notify::character_active_fleet_id(ctx, char_id);
+        let Some(caller_fid) = caller_fleet_id else {
+            return Err(BridgeRpcError {
+                code: "NotInFleet".into(),
+                message: "Frigate and destroyer Abyssal traces can be activated only by fleet members".into(),
+            });
+        };
+        if let Some(bound_fid) = trace.fleet_id {
+            if caller_fid != bound_fid {
+                return Err(BridgeRpcError {
+                    code: "AccessDenied".into(),
+                    message: "Caller is not in the fleet that opened this Abyssal trace".into(),
+                });
+            }
+        } else if char_id != trace.char_id && !is_in_trace_fleet(ctx, char_id, trace.char_id) {
+            return Err(BridgeRpcError {
+                code: "AccessDenied".into(),
+                message: "Caller is neither the trace owner nor in the owner's fleet".into(),
+            });
+        }
     }
 
-    let (tier, weather) =
+    let (tier, _weather) =
         crate::services::pve_special_sites::classify_abyssal_filament(trace.filament_type_id)
             .unwrap_or((1, crate::services::pve_special_sites::AbyssalWeatherKind::Electrical));
-    let penalty_pct = match tier {
-        0 | 1 => 30.0,
-        2 | 3 => 50.0,
-        _ => 70.0,
-    };
+    let origin_sec = ctx
+        .sde
+        .solar_systems
+        .get(&cur_sys)
+        .map(|s| s.security_status)
+        .unwrap_or(0.9);
+    let gives_suspect =
+        crate::services::pve_special_sites_abyssal::evaluate_highsec_abyssal_tier_policy(
+            origin_sec, tier,
+        )?;
+
+    let entry_check = with_pve_special_reg(ctx, |reg| {
+        if let Some(t) = reg.abyssal_traces.get_mut(&trace.trace_ball_id) {
+            if t.entered_char_ids.contains(&char_id) {
+                return Err(BridgeRpcError {
+                    code: "TraceAlreadyEntered".into(),
+                    message: "Pilot has already entered this Abyssal entrance trace".into(),
+                });
+            }
+            if t.entered_char_ids.len() >= eff_cap as usize {
+                return Err(BridgeRpcError {
+                    code: "TraceShipLimitReached".into(),
+                    message: format!(
+                        "Abyssal trace ship limit ({eff_cap}) reached for this hull class"
+                    ),
+                });
+            }
+            t.entered_char_ids.push(char_id);
+        }
+        Ok(())
+    });
+    entry_check?;
+
     if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
         ctx.db.with_mut_snapshot(|snap| {
             snap.item_positions
@@ -351,14 +409,21 @@ async fn activate_trace(
     }
 
     let entry_now = ctx.now_unix();
+    if gives_suspect {
+        ctx.crimewatch
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .trigger_suspect_flag(char_id, entry_now);
+    }
     let (pocket_id, room1_npcs) =
-        crate::services::pve_special_sites::enter_abyssal_pocket_for_character(
+        crate::services::pve_special_sites_abyssal::enter_abyssal_pocket_with_trace(
             ctx,
             session,
             char_id,
             trace.filament_type_id,
             tier,
             cur_sys,
+            Some(trace.trace_ball_id),
         )
         .await;
     let remaining_sec = with_pve_special_reg(ctx, |reg| {
@@ -380,30 +445,35 @@ async fn activate_trace(
         .db
         .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(621));
     let mut cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type);
-    let mut max_vel = 250.0;
-    let mut opt_range = 20_000.0;
-    crate::services::pve_special_sites_abyssal::apply_abyssal_weather_to_combat_and_nav(
-        weather,
-        penalty_pct,
-        50.0,
-        &mut cs,
-        &mut max_vel,
-        &mut opt_range,
-    );
+    for r in cs.shield_resonance.iter_mut().chain(cs.armor_resonance.iter_mut()).chain(cs.structure_resonance.iter_mut()) {
+        *r = r.clamp(0.0, 1.0);
+    }
+    cs.capacitor_recharge_time_ms = cs.capacitor_recharge_time_ms.max(1_000.0);
     let base = DVec3::from_array(pocket_grid_offset(ctx, pocket_id));
-    let ball = eve_destiny::Ball {
-        id: ship_id,
-        type_id: ship_type,
-        position: base + DVec3::new(0.0, 0.0, -10_000.0),
-        velocity: DVec3::ZERO,
-        max_velocity: max_vel,
-        inertia: 0.5,
-        mass: 1_000_000.0,
-        radius: 50.0,
-        speed_fraction: 0.0,
-        mode: eve_destiny::MovementMode::Stop,
-    };
+    let ball = crate::services::pve_abyssal_pylons::build_fitted_ship_space_ball(
+        ctx,
+        char_id,
+        ship_id,
+        ship_type,
+        base + DVec3::new(0.0, 0.0, -50_000.0),
+    );
     let _ = abyss_handle.spawn_ball_with_combat(ball, cs).await;
+    if with_pve_special_reg(ctx, |reg| {
+        reg.abyssal_pockets
+            .get(&char_id)
+            .is_some_and(|p| p.rooms[0].cleared)
+    }) {
+        let r1_gate = 1_895_000_000 + pocket_id * 10 + 1;
+        let _ = abyss_handle
+            .emit_destiny_event(
+                r1_gate,
+                eve_destiny::DestinyEvent::SetBallInteractive {
+                    ball_id: r1_gate,
+                    is_interactive: true,
+                },
+            )
+            .await;
+    }
     session.solar_system_id = Some(ABYSSAL_SPACE_SYSTEM_ID);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, ABYSSAL_SPACE_SYSTEM_ID);
     emit_abyssal_entry_notifications(ctx, char_id, pocket_id, tier, remaining_sec);
@@ -414,7 +484,7 @@ async fn activate_trace(
         ("originSolarSystemID", PyRep::Integer(cur_sys as i64)),
         ("filamentTypeID", PyRep::Integer(trace.filament_type_id as i64)),
         ("tier", PyRep::Integer(tier as i64)),
-        ("suspectFlagOnExit", PyRep::Bool(tier >= 4)),
+        ("suspectFlagOnExit", PyRep::Bool(gives_suspect)),
         ("currentRoom", PyRep::Integer(1)),
         ("timerSeconds", PyRep::Integer(remaining_sec)),
         (
@@ -436,17 +506,8 @@ async fn activate_inventory_filament(
     let cur_sys = session.solar_system_id.ok_or_else(err_no_solar_system)?;
     let ship_id = session.ship_id.ok_or_else(err_no_active_ship)?;
 
-    let (_iid, filament_type_id, tier, max_ships, _origin_sec, ship_pos) =
+    let (_iid, filament_type_id, tier, max_ships, origin_sec, ship_pos, opener_fleet_id) =
         validate_and_consume_abyssal_filaments(ctx, char_id, ship_id, cur_sys, filament_arg).await?;
-
-    let weather = crate::services::pve_special_sites::classify_abyssal_filament(filament_type_id)
-        .map(|(_, w)| w)
-        .unwrap_or(crate::services::pve_special_sites::AbyssalWeatherKind::Electrical);
-    let penalty_pct = match tier {
-        0 | 1 => 30.0,
-        2 | 3 => 50.0,
-        _ => 70.0,
-    };
 
     let now_unix = ctx.now_unix();
     let origin_handle = ctx.systems.get_or_spawn(cur_sys);
@@ -472,6 +533,7 @@ async fn activate_inventory_filament(
                 max_ships,
                 entered_char_ids: vec![char_id],
                 pocket_id: None,
+                fleet_id: opener_fleet_id,
             },
         );
         tid
@@ -485,13 +547,14 @@ async fn activate_inventory_filament(
         .await;
 
     let (pocket_id, room1_npcs) =
-        crate::services::pve_special_sites::enter_abyssal_pocket_for_character(
+        crate::services::pve_special_sites_abyssal::enter_abyssal_pocket_with_trace(
             ctx,
             session,
             char_id,
             filament_type_id,
             tier,
             cur_sys,
+            Some(trace_ball_id),
         )
         .await;
 
@@ -501,33 +564,43 @@ async fn activate_inventory_filament(
         .db
         .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(621));
     let mut cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type);
-    let mut max_vel = 250.0;
-    let mut opt_range = 20_000.0;
-    crate::services::pve_special_sites_abyssal::apply_abyssal_weather_to_combat_and_nav(
-        weather,
-        penalty_pct,
-        50.0,
-        &mut cs,
-        &mut max_vel,
-        &mut opt_range,
-    );
+    for r in cs.shield_resonance.iter_mut().chain(cs.armor_resonance.iter_mut()).chain(cs.structure_resonance.iter_mut()) {
+        *r = r.clamp(0.0, 1.0);
+    }
+    cs.capacitor_recharge_time_ms = cs.capacitor_recharge_time_ms.max(1_000.0);
     let base = DVec3::from_array(pocket_grid_offset(ctx, pocket_id));
-    let ball = eve_destiny::Ball {
-        id: ship_id,
-        type_id: ship_type,
-        position: base + DVec3::new(0.0, 0.0, -10_000.0),
-        velocity: DVec3::ZERO,
-        max_velocity: max_vel,
-        inertia: 0.5,
-        mass: 1_000_000.0,
-        radius: 50.0,
-        speed_fraction: 0.0,
-        mode: eve_destiny::MovementMode::Stop,
-    };
+    let ball = crate::services::pve_abyssal_pylons::build_fitted_ship_space_ball(
+        ctx,
+        char_id,
+        ship_id,
+        ship_type,
+        base + DVec3::new(0.0, 0.0, -50_000.0),
+    );
     let _ = abyss_handle.spawn_ball_with_combat(ball, cs).await;
+    if with_pve_special_reg(ctx, |reg| {
+        reg.abyssal_pockets
+            .get(&char_id)
+            .is_some_and(|p| p.rooms[0].cleared)
+    }) {
+        let r1_gate = 1_895_000_000 + pocket_id * 10 + 1;
+        let _ = abyss_handle
+            .emit_destiny_event(
+                r1_gate,
+                eve_destiny::DestinyEvent::SetBallInteractive {
+                    ball_id: r1_gate,
+                    is_interactive: true,
+                },
+            )
+            .await;
+    }
     session.solar_system_id = Some(ABYSSAL_SPACE_SYSTEM_ID);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, ABYSSAL_SPACE_SYSTEM_ID);
     emit_abyssal_entry_notifications(ctx, char_id, pocket_id, tier, 1_200);
+    let gives_suspect =
+        crate::services::pve_special_sites_abyssal::evaluate_highsec_abyssal_tier_policy(
+            origin_sec, tier,
+        )
+        .unwrap_or(false);
 
     Ok(PyRep::keyval([
         ("pocketID", PyRep::Integer(pocket_id)),
@@ -535,7 +608,7 @@ async fn activate_inventory_filament(
         ("originSolarSystemID", PyRep::Integer(cur_sys as i64)),
         ("filamentTypeID", PyRep::Integer(filament_type_id as i64)),
         ("tier", PyRep::Integer(tier as i64)),
-        ("suspectFlagOnExit", PyRep::Bool(tier >= 4)),
+        ("suspectFlagOnExit", PyRep::Bool(gives_suspect)),
         ("currentRoom", PyRep::Integer(1)),
         ("timerSeconds", PyRep::Integer(1_200)),
         ("traceBallID", PyRep::Integer(trace_ball_id)),

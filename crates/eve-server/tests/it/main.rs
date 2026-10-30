@@ -5,6 +5,9 @@
 
 mod common;
 mod abyssal_and_void_space_suite;
+mod abyssal_deadspace_closure;
+mod abyssal_deadspace_closure_part2;
+mod abyssal_deadspace_closure_part3;
 mod abyssal_room_combat;
 mod account_admin_complete;
 mod account_features_parity;

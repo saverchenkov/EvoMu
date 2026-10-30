@@ -593,6 +593,7 @@ impl WorldRepository {
                 .expect("initialize per-deployment JWT signing secret");
 
         let mut repo = Self {
+            instance_id: Self::next_instance_id(),
             inner: RwLock::new(initial_snap),
             sqlite_conn: std::sync::Mutex::new(conn),
             sqlite_fp: std::sync::Mutex::new(fp),

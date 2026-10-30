@@ -22,7 +22,7 @@ const PILOT_B: i64 = 90_000_002;
 const SYS_JITA: u32 = 30_000_142;
 const JITA_STATION: i64 = 60_003_760;
 const EXPERT_SYSTEM_TYPE_ID: u32 = 57_203;
-const FILAMENT_TYPE_ID: u32 = 47_763;
+const FILAMENT_TYPE_ID: u32 = 56_134; // Tranquil Firestorm Filament (T0, group 1979)
 
 fn make_item(
     item_id: i64,
@@ -536,7 +536,7 @@ async fn notify_batch2_probe_scanning_abyssal_and_void_space() {
     assert_eq!(find_notif(&abyss_out_notifs, "OnAbyssalLocationExited"), &[]);
 
     // 6. Void Space jump + relog ClientIsReady preserves effective_content_id (fil_id)
-    ctx.advance_secs(12);
+    ctx.db.with_mut_snapshot(|s| s.items.get_mut(&fil_id).unwrap().type_id = 62_448); ctx.advance_secs(12);
     rpc(&ctx, &mut sess, "voidSpaceMgr", "VoidSpacePlayerJump", &[PyRep::Integer(fil_id), PyRep::Integer(777_001)]).await.expect("VoidSpacePlayerJump");
     let void_in_notifs = drain_all(&ctx, &mut sess, PILOT_A);
     assert_eq!(find_notif(&void_in_notifs, "OnVoidSpaceEntered")[0].dict_get("content_id").and_then(|v| v.as_i64()), Some(fil_id));
@@ -573,7 +573,7 @@ async fn notify_batch2_void_exit_seasons_expert_systems_and_node_graphs() {
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&PILOT_A) { ch.clone_grade = 2; }
         if let Some(ch) = snap.characters.get_mut(&PILOT_B) { ch.clone_grade = 1; ch.station_id = Some(JITA_STATION); }
-        snap.items.insert(fil_id, make_item(fil_id, FILAMENT_TYPE_ID, PILOT_A, ship_id, InventoryFlag::Cargo, 2, false));
+        snap.items.insert(fil_id, make_item(fil_id, 62_448, PILOT_A, ship_id, InventoryFlag::Cargo, 2, false));
         snap.items.insert(es_item_id, make_item(es_item_id, EXPERT_SYSTEM_TYPE_ID, PILOT_A, JITA_STATION, InventoryFlag::Hangar, 1, false));
         let mut defs = eve_server::services::season_manager::default_seasonal_challenge_definitions();
         defs.push(SeasonalChallengeDef {

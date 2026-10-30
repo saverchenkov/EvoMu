@@ -463,7 +463,7 @@ async fn test_abyssal_deployment_and_weather_audit() {
     let ship_id = 910_000_103i64;
     let filament_item_id = 920_000_103i64;
     let filament_type_id = 47763u32; // Calm Firestorm Filament (tier 1)
-    let cur_sys = 30_000_142u32;
+    let cur_sys = 30_000_002u32; // Lashesih (0.8 high-sec)
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c) = snap.characters.get_mut(&char_id) {

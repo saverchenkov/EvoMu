@@ -956,7 +956,7 @@ impl SystemRegistry {
                                 sync_player_slim_items(&mut ballpark, &db_opt);
                                 let events = ballpark.step(dt);
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
-                                let destroyed_balls = step_cycles_and_capacitor(
+                                let mut destroyed_balls = step_cycles_and_capacitor(
                                     &mut ballpark, active_module_cycles, pending_anchoring_disruptors,
                                     active_nanite_repairs, ship_rack_heat, rah_incoming_damage,
                                     &base_scramble_strengths, &base_core_strengths, &sde_opt, &db_opt,
@@ -969,12 +969,14 @@ impl SystemRegistry {
                                         );
                                     }
                                 }
-                                crate::services::pve_special_sites_abyssal::step_abyssal_hazards_and_pylons_in_ballpark(
+                                for bid in crate::services::pve_special_sites_abyssal::step_abyssal_hazards_and_pylons_in_ballpark(
                                     &mut ballpark,
                                     sde_opt.as_deref(),
                                     db_opt.as_ref(),
                                     solar_system_id,
-                                );
+                                ) {
+                                    destroyed_balls.push((bid, None));
+                                }
                                 {
                                     let step_now_unix = db_opt.as_ref().map(|db| db.clock().now_unix_secs()).unwrap_or_else(|| {
                                         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
@@ -1240,6 +1242,9 @@ impl SystemRegistry {
         let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = guard.get(&solar_system_id) {
             return existing.clone();
+        }
+        if let Some(ref db) = self.db {
+            register_db_system_ballpark(db, solar_system_id, &handle);
         }
         guard.insert(solar_system_id, handle.clone());
         handle

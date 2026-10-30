@@ -18,7 +18,7 @@ use eve_server::router::ServerContext;
 use std::collections::HashMap;
 
 const PILOT_ID: i64 = 90_000_001;
-const SYS_JITA: u32 = 30_000_142;
+const SYS_JITA: u32 = 30_000_002; // Lashesih (0.8 high-sec, allows T1 filaments cleanly)
 const SHIP_ID: i64 = 100_000_001;
 const FILAMENT_TYPE: u32 = 47763; // Calm Firestorm Filament (group 1979)
 
@@ -499,8 +499,9 @@ async fn test_void_space_jump_lifecycle_and_gate_activation() {
     assert_eq!(r_gate.code, "InvalidTarget");
     ctx.systems.get_or_spawn(SYS_JITA).try_remove_ball(700_003);
     ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&fil_item_id).unwrap().type_id = 62_448;
         snap.items.insert(1_300_000_999, eve_db::InventoryItemRecord { item_id: 1_300_000_999, type_id: 621, owner_id: PILOT_ID, location_id: SHIP_ID, flag: InventoryFlag::Cargo, quantity: 1, ..Default::default() });
-        snap.items.insert(1_300_000_998, eve_db::InventoryItemRecord { item_id: 1_300_000_998, type_id: FILAMENT_TYPE, owner_id: PILOT_ID, location_id: SHIP_ID, flag: InventoryFlag::Hangar, quantity: 1, ..Default::default() });
+        snap.items.insert(1_300_000_998, eve_db::InventoryItemRecord { item_id: 1_300_000_998, type_id: 62_448, owner_id: PILOT_ID, location_id: SHIP_ID, flag: InventoryFlag::Hangar, quantity: 1, ..Default::default() });
     });
     let r_fil = ctx.dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(1_300_000_999)], &kw, None).await.unwrap_err();
     assert_eq!(r_fil.code, "InvalidTarget");
@@ -517,7 +518,7 @@ async fn test_void_space_jump_lifecycle_and_gate_activation() {
     let jita_handle = ctx.systems.get_or_spawn(SYS_JITA);
     let gate_ball = eve_destiny::Ball {
         id: 700_001,
-        type_id: 47_956,
+        type_id: 82_139,
         position: glam::DVec3::new(10_500.0, 0.0, 0.0),
         velocity: glam::DVec3::ZERO,
         max_velocity: 0.0,

@@ -727,6 +727,21 @@ pub async fn finalize_cycle_destroyed_npcs(ctx: &ServerContext, solar_system_id:
                 })
             })
             .unwrap_or(0);
+        if (32_000_000..=32_999_999).contains(&solar_system_id) {
+            let mut dropped = Vec::new();
+            let _ = populate_npc_wreck_on_turret_kill(
+                ctx,
+                solar_system_id,
+                npc.ball_id,
+                npc.type_id,
+                npc.spawn_position,
+                0,
+                killer_char_id,
+                &mut dropped,
+            )
+            .await;
+            continue;
+        }
         let wreck_tid = ctx.sde.wrecks.get(&npc.type_id).copied().unwrap_or_else(|| {
             match npc.archetype.as_str() {
                 "Drifter" => 37531,

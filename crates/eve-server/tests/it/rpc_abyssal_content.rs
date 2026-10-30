@@ -20,7 +20,7 @@ use std::collections::HashMap;
 const PILOT1: i64 = 90_000_001;
 const SYS_JITA: u32 = 30_000_142;
 const SHIP_ID: i64 = 100_000_001;
-const FILAMENT_TYPE: u32 = 47763; // Calm Firestorm Filament
+const FILAMENT_TYPE: u32 = 56134; // Tranquil Firestorm Filament (T0)
 const ERR_UNIMPLEMENTED: &str = concat!("Unimplemented", "RPC");
 
 async fn setup_pilot_in_space(

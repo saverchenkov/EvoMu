@@ -302,6 +302,12 @@ pub async fn handle(
                     message: "Session has no active solar system".into(),
                 }));
             };
+            if (32_000_000..=32_999_999).contains(&sys_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotWarpInAbyssalSpace".into(),
+                    message: "Bookmarks and warp navigation are disabled inside Abyssal Deadspace".into(),
+                }));
+            }
             if sys_id == 30_100_000 {
                 return Some(Err(BridgeRpcError::user_error("DunBlacklistCannotWarp")));
             }

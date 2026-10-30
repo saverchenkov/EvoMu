@@ -17,47 +17,35 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 
-fn is_actual_filament_type(ctx: &ServerContext, type_id: u32) -> bool {
-    crate::services::pve_special_sites::classify_abyssal_filament(type_id).is_some()
-        || ctx
-            .sde
-            .types
-            .get(&type_id)
-            .map(|t| {
-                matches!(t.group_id, 1979 | 4041 | 4087 | 4145 | 4743)
-            })
-            .unwrap_or(false)
+fn is_void_space_filament_type(ctx: &ServerContext, type_id: u32) -> bool {
+    // V24 SDE group 4145 = Warp Matrix Filaments (Void Space / Homefront Warp Matrix filaments only)
+    ctx.sde
+        .types
+        .get(&type_id)
+        .is_some_and(|t| t.group_id == 4145)
 }
 
 fn is_valid_void_entrance_gate(ctx: &ServerContext, target_id: i64, ball_type_id: u32) -> bool {
-    // Specific Abyssal / Void Space Trace and Conduit types (Triglavian Space Trace, Origin Conduit, Void Space Gate)
-    if matches!(
-        ball_type_id,
-        47_458 | 47_686 | 47_833 | 47_834 | 47_956 | 56_693 | 60_589 | 60_608 | 60_770 | 80_944
-    ) {
+    if ball_type_id == crate::services::pve_abyssal_hazards::ABYSSAL_TRACE_TYPE_ID {
+        return false;
+    }
+    if matches!(ball_type_id, 60_770 | 82_139) {
         return true;
     }
-    // Registered abyssal trace or void space entrance object
-    let is_registered = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-        reg.abyssal_traces.contains_key(&target_id)
-            || reg.void_space_sessions.values().any(|s| s.target_id == target_id)
-    });
-    if is_registered {
-        return true;
-    }
-    // Real SDE Abyssal Space Trace (group 1991) or Triglavian Space Portal (group 4081)
-    if let Some(t) = ctx.sde.types.get(&ball_type_id) {
-        if t.group_id == 1991 || t.group_id == 4081 {
-            return true;
-        }
-    }
-    false
+    crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+        !reg.abyssal_traces.contains_key(&target_id)
+            && reg.void_space_sessions.values().any(|s| s.target_id == target_id)
+    })
+}
+
+fn is_valid_void_exit_gate(ball_type_id: u32) -> bool {
+    matches!(ball_type_id, 47_686 | 60_608 | 80_944 | 82_139)
 }
 
 enum GateInspect {
     Expired { ship_id: i64, abyss_sys: u32, now: u64 },
     Err(BridgeRpcError),
-    Ok((u8, u8, i64, u32, Vec<i64>, Vec<i64>, bool, (u8, u32, i64, f64))),
+    Ok((u8, u8, i64, u32, Vec<i64>, Vec<i64>, bool, (u8, u32, i64, f64, u8))),
 }
 
 pub(crate) async fn handle_abyssal_gate_activation(
@@ -79,7 +67,7 @@ pub(crate) async fn handle_abyssal_gate_activation(
         curr_room_npcs,
         next_room_npcs,
         room_already_cleared,
-        (tier, filament, next_cache, difficulty),
+        (tier, filament, next_cache, difficulty, max_ships),
     ) = {
         let now = ctx.now_unix();
         let inspect = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
@@ -112,6 +100,7 @@ pub(crate) async fn handle_abyssal_gate_activation(
                 p.filament_type_id,
                 p.rooms[next_idx].cache_item_id,
                 p.npc_difficulty_mult,
+                p.max_ships.max(1),
             );
             Some(GateInspect::Ok((
                 curr,
@@ -149,7 +138,7 @@ pub(crate) async fn handle_abyssal_gate_activation(
     let abyss_handle = ctx.systems.get_or_spawn(abyss_sys);
     let expected_gate_id = 1_895_000_000 + pid * 10 + (curr_room as i64);
     let alt_gate_id = 1_895_000_000 + (curr_room as i64);
-    if gate_id == 0 || (gate_id != expected_gate_id && gate_id != alt_gate_id) {
+    if gate_id <= 0 || (gate_id != expected_gate_id && gate_id != alt_gate_id) {
         return Err(BridgeRpcError {
             code: "InvalidGate".into(),
             message: format!("Gate {gate_id} is not the active transfer gate for room {curr_room}"),
@@ -227,19 +216,29 @@ pub(crate) async fn handle_abyssal_gate_activation(
             if other.pocket_id == pid {
                 other.rooms[curr_idx].cleared = true;
                 other.rooms[curr_idx].gate_unlocked_at_sec.get_or_insert(now_u);
+                other.ship_room.insert(ship_id, next_room);
             }
         }
         let p = reg.abyssal_pockets.get_mut(&char_id)?;
         p.current_room = next_room;
-        let any_still_in_curr_room = reg.abyssal_pockets.values().any(|other| {
+        p.ship_room.insert(ship_id, next_room);
+        let bound_tid = p.trace_ball_id;
+        let eff_max = (p.max_ships.max(1)) as usize;
+        let any_pilot_at_or_before_curr = reg.abyssal_pockets.values().any(|other| {
             other.pocket_id == pid
                 && !other.completed
                 && !other.collapsed_destroyed
-                && other.current_room == curr_room
+                && other.current_room <= curr_room
         });
-        Some((already_spawned_next, any_still_in_curr_room))
+        let has_unentered_coop_slots = reg.abyssal_traces.values().any(|t| {
+            (t.pocket_id == Some(pid) || (bound_tid > 0 && t.trace_ball_id == bound_tid))
+                && (t.expires_at_sec == 0 || now_u < t.expires_at_sec)
+                && t.entered_char_ids.len() < (t.max_ships.max(1) as usize).max(eff_max)
+        });
+        let keep_curr_room_entities = any_pilot_at_or_before_curr || has_unentered_coop_slots;
+        Some((already_spawned_next, keep_curr_room_entities))
     });
-    let Some((already_spawned_next, any_still_in_curr_room)) = advance_res else {
+    let Some((already_spawned_next, keep_curr_room_entities)) = advance_res else {
         return Err(BridgeRpcError {
             code: "NotInAbyssalSpace".into(),
             message: "Abyssal pocket disappeared during gate activation".into(),
@@ -254,7 +253,17 @@ pub(crate) async fn handle_abyssal_gate_activation(
             rt.npc_entities.remove(&npc_id);
         }
     });
-    if !any_still_in_curr_room {
+    if keep_curr_room_entities {
+        let _ = abyss_handle
+            .emit_destiny_event(
+                actual_gate_id,
+                eve_destiny::DestinyEvent::SetBallInteractive {
+                    ball_id: actual_gate_id,
+                    is_interactive: true,
+                },
+            )
+            .await;
+    } else {
         let old_marker_id = 1_895_000_000 + pid * 10 + (curr_room as i64);
         abyss_handle.try_remove_ball(old_marker_id);
         let old_cache_id = 1_896_000_000 + pid * 10 + (curr_room as i64);
@@ -264,7 +273,7 @@ pub(crate) async fn handle_abyssal_gate_activation(
         for c in 1..=3_i64 {
             abyss_handle.try_remove_ball(1_898_000_000 + pid * 100 + (curr_room as i64) * 10 + c);
         }
-        for py in 1..=4_i64 {
+        for py in 1..=5_i64 {
             abyss_handle.try_remove_ball(1_899_000_000 + pid * 100 + (curr_room as i64) * 10 + py);
         }
         ctx.db.with_mut_snapshot(|snap| {
@@ -291,12 +300,13 @@ pub(crate) async fn handle_abyssal_gate_activation(
             filament,
             difficulty,
             z_pos,
+            max_ships,
         )
         .await;
     }
     let base = DVec3::from_array(pocket_grid_offset(ctx, pid));
     let _ = abyss_handle
-        .set_ball_position(ship_id, base + DVec3::new(0.0, 0.0, z_pos - 10_000.0))
+        .set_ball_position(ship_id, base + DVec3::new(0.0, 0.0, z_pos - 50_000.0))
         .await;
 
     Ok(PyRep::keyval([
@@ -311,7 +321,7 @@ pub(crate) async fn handle_abyssal_gate_activation(
 enum EndGateInspect {
     Expired { ship_id: i64, abyss_sys: u32, now: u64 },
     Err(BridgeRpcError),
-    Ok((u32, [f64; 3], HashMap<u16, f64>, Vec<i64>, bool, i64)),
+    Ok((u32, [f64; 3], HashMap<u16, f64>, Vec<i64>, bool, i64, u8)),
 }
 
 pub(crate) async fn handle_abyssal_end_gate_activation(
@@ -328,7 +338,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         return Err(err_ship_docked("Cannot activate Abyssal end gate while docked"));
     }
 
-    let (origin_sys, origin_pos, saved_attrs, r3_npcs, r3_cleared, pid) = {
+    let (origin_sys, origin_pos, saved_attrs, r3_npcs, r3_cleared, pid, tier) = {
         let now = ctx.now_unix();
         let inspect = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
             let p = reg.abyssal_pockets.get(&char_id)?;
@@ -360,6 +370,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
                 r3_npcs,
                 r3_cleared,
                 p.pocket_id,
+                p.tier,
             )))
         });
 
@@ -387,7 +398,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
     let abyss_handle = ctx.systems.get_or_spawn(pocket_sys);
     let expected_gate_id = 1_895_000_000 + pid * 10 + 3;
     let alt_gate_id = 1_895_000_000 + 3;
-    if gate_id == 0 || (gate_id != expected_gate_id && gate_id != alt_gate_id) {
+    if gate_id <= 0 || (gate_id != expected_gate_id && gate_id != alt_gate_id) {
         return Err(BridgeRpcError {
             code: "InvalidGate".into(),
             message: format!("Gate {gate_id} is not the active exit conduit for room 3"),
@@ -463,6 +474,8 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
                     if other.pocket_id == pid {
                         other.rooms[2].cleared = true;
                         other.rooms[2].gate_unlocked_at_sec.get_or_insert(now_u);
+                        other.ship_room.remove(&ship_id);
+                        other.fleet_ship_ids.retain(|&sid| sid != ship_id);
                     }
                 }
                 let any_remaining = reg.abyssal_pockets.values().any(|other| {
@@ -502,26 +515,28 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         }
     });
     if let Some(pid) = removed_pid {
-        let r3_marker_id = 1_895_000_000 + pid * 10 + 3;
-        let r3_cache_id = 1_896_000_000 + pid * 10 + 3;
-        let r3_subnode_id = r3_cache_id + 500_000;
-        abyss_handle.try_remove_ball(r3_marker_id);
-        abyss_handle.try_remove_ball(r3_cache_id);
-        abyss_handle.try_remove_ball(r3_subnode_id);
-        for c in 1..=3_i64 {
-            abyss_handle.try_remove_ball(1_898_000_000 + pid * 100 + 30 + c);
+        for r in 1..=3_i64 {
+            let marker_id = 1_895_000_000 + pid * 10 + r;
+            let cache_id = 1_896_000_000 + pid * 10 + r;
+            let subnode_id = cache_id + 500_000;
+            abyss_handle.try_remove_ball(marker_id);
+            abyss_handle.try_remove_ball(cache_id);
+            abyss_handle.try_remove_ball(subnode_id);
+            for c in 1..=3_i64 {
+                abyss_handle.try_remove_ball(1_898_000_000 + pid * 100 + r * 10 + c);
+            }
+            for py in 1..=5_i64 {
+                abyss_handle.try_remove_ball(1_899_000_000 + pid * 100 + r * 10 + py);
+            }
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.items.remove(&cache_id);
+                snap.item_positions.remove(&cache_id);
+                snap.items.remove(&subnode_id);
+                snap.item_positions.remove(&subnode_id);
+                snap.items
+                    .retain(|_, item| item.location_id != cache_id && item.location_id != subnode_id);
+            });
         }
-        for py in 1..=4_i64 {
-            abyss_handle.try_remove_ball(1_899_000_000 + pid * 100 + 30 + py);
-        }
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.items.remove(&r3_cache_id);
-            snap.item_positions.remove(&r3_cache_id);
-            snap.items.remove(&r3_subnode_id);
-            snap.item_positions.remove(&r3_subnode_id);
-            snap.items
-                .retain(|_, item| item.location_id != r3_cache_id && item.location_id != r3_subnode_id);
-        });
     }
 
     restore_abyssal_weather_dogma_modifiers(ctx, ship_id, &saved_attrs);
@@ -550,21 +565,33 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         .db
         .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(621));
     let cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type);
-    let ball = eve_destiny::Ball {
-        id: ship_id,
-        type_id: ship_type,
-        position: DVec3::from_array(exit_pos),
-        velocity: DVec3::ZERO,
-        max_velocity: 250.0,
-        inertia: 0.5,
-        mass: 1_000_000.0,
-        radius: 50.0,
-        speed_fraction: 0.0,
-        mode: eve_destiny::MovementMode::Stop,
-    };
+    let ball = crate::services::pve_abyssal_pylons::build_fitted_ship_space_ball(
+        ctx,
+        char_id,
+        ship_id,
+        ship_type,
+        DVec3::from_array(exit_pos),
+    );
     let _ = origin_sys_handle.spawn_ball_with_combat(ball, cs).await;
     session.solar_system_id = Some(origin_sys);
+    ctx.sync_character_local_chat(char_id, Some(pocket_sys), origin_sys);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, origin_sys);
+    let origin_sec = ctx
+        .sde
+        .solar_systems
+        .get(&origin_sys)
+        .map(|s| s.security_status)
+        .unwrap_or(0.9);
+    if crate::services::pve_special_sites_abyssal::evaluate_highsec_abyssal_tier_policy(
+        origin_sec, tier,
+    )
+    .unwrap_or(false)
+    {
+        ctx.crimewatch
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .trigger_suspect_flag(char_id, now_u);
+    }
     // DATA GAP: V24 content-finished timer_type enum mappings are Tranquility server-only
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
@@ -611,6 +638,20 @@ pub(crate) async fn handle_void_space_player_jump(
     }
 
     let origin_handle = ctx.systems.get_or_spawn(cur_sys);
+    if let Ok(Some(cs)) = origin_handle.get_combat_state(ship_id).await {
+        if cs.is_cloaked {
+            return Err(BridgeRpcError {
+                code: "ShipIsCloaked".into(),
+                message: "Cannot activate filament while cloaked".into(),
+            });
+        }
+        if cs.is_tethered {
+            return Err(BridgeRpcError {
+                code: "ShipIsTethered".into(),
+                message: "Cannot activate filament while tethered".into(),
+            });
+        }
+    }
     let ship_pos = if let Ok(Some((_, ball))) = origin_handle.get_ball_snapshot(ship_id).await {
         [ball.position.x, ball.position.y, ball.position.z]
     } else {
@@ -621,10 +662,9 @@ pub(crate) async fn handle_void_space_player_jump(
                 .unwrap_or([0.0, 0.0, 0.0])
         })
     };
-
-    let is_cargo_filament = ctx.db.try_with_mut_snapshot(|snap| {
-        let found = snap
-            .items
+    let ship_vec = DVec3::from_array(ship_pos);
+    let cargo_filament_iid = ctx.db.with_snapshot(|snap| {
+        snap.items
             .values()
             .find(|i| {
                 i.owner_id == char_id
@@ -632,25 +672,12 @@ pub(crate) async fn handle_void_space_player_jump(
                     && i.flag == eve_db::InventoryFlag::Cargo
                     && (i.item_id == target_id || i.type_id as i64 == target_id)
                     && i.quantity >= 1
-                    && is_actual_filament_type(ctx, i.type_id)
+                    && is_void_space_filament_type(ctx, i.type_id)
             })
-            .map(|i| i.item_id);
-        if let Some(iid) = found {
-            if let Some(item) = snap.items.get_mut(&iid) {
-                if item.quantity > 1 {
-                    item.quantity -= 1;
-                    item.version += 1;
-                } else {
-                    snap.items.remove(&iid);
-                }
-            }
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    })?;
+            .map(|i| i.item_id)
+    });
 
-    if !is_cargo_filament {
+    if cargo_filament_iid.is_none() {
         if target_id == ship_id {
             return Err(BridgeRpcError {
                 code: "InvalidTarget".into(),
@@ -675,13 +702,38 @@ pub(crate) async fn handle_void_space_player_jump(
                 ),
             });
         }
-        let dist = DVec3::from_array(ship_pos).distance(target_b.position);
+        let dist = ship_vec.distance(target_b.position);
         if dist > 5_000.0 {
             return Err(BridgeRpcError {
                 code: "OutOfRange".into(),
                 message: format!("Void Space gate is too far ({dist:.1}m > 5000.0m)"),
             });
         }
+    }
+
+    crate::services::pve_special_sites_abyssal::check_not_in_deadspace_pocket(ctx, cur_sys, ship_vec)
+        .await?;
+    crate::services::pve_special_sites_abyssal::check_filament_1000km_proximity(
+        ctx, cur_sys, ship_vec,
+    )
+    .await?;
+
+    if let Some(iid) = cargo_filament_iid {
+        ctx.db.try_with_mut_snapshot(|snap| {
+            let Some(item) = snap.items.get_mut(&iid) else {
+                return Err(BridgeRpcError {
+                    code: "ItemNotFound".into(),
+                    message: format!("Filament {iid} no longer in cargo"),
+                });
+            };
+            if item.quantity > 1 {
+                item.quantity -= 1;
+                item.version += 1;
+            } else {
+                snap.items.remove(&iid);
+            }
+            Ok(())
+        })?;
     }
 
     let now_unix = ctx.now_unix();
@@ -721,10 +773,23 @@ pub(crate) async fn handle_void_space_player_jump(
             sh.location_id = VOID_SPACE_SYSTEM_ID as i64;
         }
         snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]);
+        let old_chan_id = format!("solarsystemid2:{cur_sys}");
+        if let Some(chan) = snap.chat_channels.get_mut(&old_chan_id) {
+            chan.members.remove(&char_id);
+        }
+        snap.chat_channels
+            .remove(&format!("solarsystemid2:{VOID_SPACE_SYSTEM_ID}"));
         snap.service_state_blobs
             .insert(format!("void_space_content:{char_id}"), effective_content_id.to_string());
         Ok::<(), BridgeRpcError>(())
     });
+    let _ = crate::services::quasar_social_chat::on_character_leave_local_chat(
+        &ctx.quasar_gateway,
+        &ctx.db,
+        char_id as u32,
+        cur_sys,
+        now_unix,
+    );
 
     let void_handle = ctx.systems.get_or_spawn(VOID_SPACE_SYSTEM_ID);
     for exit_gid in [888_001_i64, 888_002_i64] {
@@ -749,18 +814,13 @@ pub(crate) async fn handle_void_space_player_jump(
         .db
         .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(621));
     let cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type);
-    let ball = eve_destiny::Ball {
-        id: ship_id,
-        type_id: ship_type,
-        position: DVec3::ZERO,
-        velocity: DVec3::ZERO,
-        max_velocity: 250.0,
-        inertia: 0.5,
-        mass: 1_000_000.0,
-        radius: 50.0,
-        speed_fraction: 0.0,
-        mode: eve_destiny::MovementMode::Stop,
-    };
+    let ball = crate::services::pve_abyssal_pylons::build_fitted_ship_space_ball(
+        ctx,
+        char_id,
+        ship_id,
+        ship_type,
+        DVec3::ZERO,
+    );
     let _ = void_handle.spawn_ball_with_combat(ball, cs).await;
     session.solar_system_id = Some(VOID_SPACE_SYSTEM_ID);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, VOID_SPACE_SYSTEM_ID);
@@ -825,6 +885,8 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         reg.void_space_sessions.get(&char_id).cloned()
     });
     let Some(vs) = void_session else {
+        ctx.sync_session(session);
+        ctx.quasar_gateway.on_session_changed(session, ctx.now_unix());
         return Err(BridgeRpcError {
             code: "NotInVoidSpace".into(),
             message: "No active Void Space session record for character".into(),
@@ -833,16 +895,14 @@ pub(crate) async fn handle_void_space_end_gate_activation(
 
     let now_unix = ctx.now_unix();
     if vs.expires_at_sec > 0 && now_unix >= vs.expires_at_sec {
-        crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-            reg.void_space_sessions.remove(&char_id);
-        });
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.service_state_blobs.remove(&format!("void_space_content:{char_id}"));
-        });
-        crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
+        crate::services::pve_abyssal_lifecycle::evacuate_void_space_session_sync(
+            ctx, char_id, &vs, now_unix,
+        );
+        ctx.sync_session(session);
+        ctx.quasar_gateway.on_session_changed(session, now_unix);
         return Err(BridgeRpcError {
             code: "PocketCollapsed".into(),
-            message: "Void Space pocket has expired and collapsed".into(),
+            message: "Void Space pocket has expired and evacuated pilot to origin solar system".into(),
         });
     }
 
@@ -874,7 +934,7 @@ pub(crate) async fn handle_void_space_end_gate_activation(
             message: format!("Gate {gate_id} is not present in Void Space"),
         });
     };
-    if !is_valid_void_entrance_gate(ctx, gate_id, gb.type_id) {
+    if !is_valid_void_exit_gate(gb.type_id) {
         return Err(BridgeRpcError {
             code: "InvalidGate".into(),
             message: format!("Ball {gate_id} (type {}) is not a valid Void Space exit gate", gb.type_id),
@@ -926,20 +986,16 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         .db
         .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(621));
     let cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type);
-    let ball = eve_destiny::Ball {
-        id: ship_id,
-        type_id: ship_type,
-        position: DVec3::from_array(exit_pos),
-        velocity: DVec3::ZERO,
-        max_velocity: 250.0,
-        inertia: 0.5,
-        mass: 1_000_000.0,
-        radius: 50.0,
-        speed_fraction: 0.0,
-        mode: eve_destiny::MovementMode::Stop,
-    };
+    let ball = crate::services::pve_abyssal_pylons::build_fitted_ship_space_ball(
+        ctx,
+        char_id,
+        ship_id,
+        ship_type,
+        DVec3::from_array(exit_pos),
+    );
     let _ = origin_handle.spawn_ball_with_combat(ball, cs).await;
     session.solar_system_id = Some(origin_sys);
+    ctx.sync_character_local_chat(char_id, Some(VOID_SPACE_SYSTEM_ID), origin_sys);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, origin_sys);
     // DATA GAP: V24 content-finished timer_type enum mappings are Tranquility server-only
     ctx.notify(

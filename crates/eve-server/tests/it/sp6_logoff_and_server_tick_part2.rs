@@ -30,11 +30,20 @@ async fn test_sp7_abyssal_disconnect_20m_collapse_destroys_ship_and_pod() {
     let filament_1 = 992_000_001_i64;
     let filament_2 = 992_000_002_i64;
     ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(
+            99_730,
+            eve_db::FleetRecord {
+                fleet_id: 99_730,
+                boss_id: 90_000_001,
+                members: vec![90_000_001],
+                ..Default::default()
+            },
+        );
         snap.active_implants.entry(90_000_001).or_default().push(9_899);
-        let mut f1 = sp6_item(filament_1, 47_765, 90_000_001, ship_id, InventoryFlag::Cargo, HashMap::new());
+        let mut f1 = sp6_item(filament_1, 56_131, 90_000_001, ship_id, InventoryFlag::Cargo, HashMap::new());
         f1.quantity = 3;
         f1.singleton = false;
-        let mut f2 = sp6_item(filament_2, 47_765, 90_000_001, ship_id, InventoryFlag::Cargo, HashMap::new());
+        let mut f2 = sp6_item(filament_2, 56_131, 90_000_001, ship_id, InventoryFlag::Cargo, HashMap::new());
         f2.quantity = 3;
         f2.singleton = false;
         snap.items.insert(filament_1, f1);
@@ -101,6 +110,17 @@ async fn test_sp7_abyssal_disconnect_20m_collapse_destroys_ship_and_pod() {
         .await;
 
     // 2. Enter a second Abyssal pocket, disconnect inside the pocket, and advance to T+1200s (20m collapse)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(
+            99_731,
+            eve_db::FleetRecord {
+                fleet_id: 99_731,
+                boss_id: 90_000_001,
+                members: vec![90_000_001],
+                ..Default::default()
+            },
+        );
+    });
     ctx.dispatch_rpc(
         &mut sess_reconnect,
         "abyssalMgr",
@@ -120,7 +140,7 @@ async fn test_sp7_abyssal_disconnect_20m_collapse_destroys_ship_and_pod() {
     ctx.advance_secs(1_199);
     assert!(ctx.db.with_snapshot(|s| s.items.contains_key(&ship_id)));
 
-    // At T+1200s (20m00s), the Abyssal pocket collapses, destroying ship + capsule and respawning pilot at home station in a rookie corvette (`606`)
+    // At T+1200s (20m00s), the Abyssal pocket collapses, destroying ship + capsule and respawning pilot at home station in their race rookie corvette (`588` Reaper)
     ctx.advance_secs(1);
 
     // Log the pilot back in (`SelectCharacterID`) after clock advance with no Abyssal RPC calls
@@ -137,7 +157,7 @@ async fn test_sp7_abyssal_disconnect_20m_collapse_destroys_ship_and_pod() {
         assert!(snap.active_implants.get(&90_000_001).is_none_or(|m| m.is_empty()));
         let ch = &snap.characters[&90_000_001];
         assert_eq!(ch.station_id, Some(ch.home_station_id));
-        assert_eq!(snap.items[&ch.active_ship_id].type_id, 606);
+        assert_eq!(snap.items[&ch.active_ship_id].type_id, 588);
         let pocket_kms: Vec<_> = snap.killmails.values()
             .filter(|km| km.victim_character_id == 90_000_001 && km.solar_system_id == 32_000_001)
             .collect();

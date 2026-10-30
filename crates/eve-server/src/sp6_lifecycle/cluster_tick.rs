@@ -607,6 +607,27 @@ fn execute_due_abyssal_collapse_sync(
     sess: &AbyssalPersistedSession,
     now_unix: u64,
 ) {
+    if sess.pocket_system_id == crate::services::abyssal_void_mgr::VOID_SPACE_SYSTEM_ID {
+        let vs = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+            reg.void_space_sessions.remove(&sess.char_id)
+        })
+        .unwrap_or(crate::services::pve_special_sites::VoidSpaceSessionRecord {
+            char_id: sess.char_id,
+            ship_id: sess.ship_id,
+            origin_solar_system_id: sess.origin_system_id,
+            origin_position: [0.0, 0.0, 0.0],
+            target_id: 0,
+            entered_unix: sess.entered_unix,
+            expires_at_sec: sess.collapse_at_unix,
+        });
+        crate::services::pve_abyssal_lifecycle::evacuate_void_space_session_sync(
+            ctx,
+            sess.char_id,
+            &vs,
+            now_unix,
+        );
+        return;
+    }
     crate::services::pve_special_sites_abyssal::collapse_abyssal_pocket_and_pod_pilot_at(
         ctx,
         sess.char_id,
@@ -939,7 +960,8 @@ pub fn on_advance_secs(ctx: &ServerContext, _prev_unix: u64, secs: u64) {
         execute_due_abyssal_collapse_sync(ctx, &ab, now_unix);
     }
 
-    // 6b. Despawn expired un-entered Abyssal trace balls and clear expired Zarzakh gate locks.
+    // 6b. Sweep expired Void Space sessions, despawn expired un-entered Abyssal trace balls, and clear expired Zarzakh gate locks.
+    crate::services::pve_abyssal_lifecycle::sweep_expired_void_space_sessions_sync(ctx, now_unix);
     let expired_traces: Vec<(u32, i64)> =
         crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
             let mut out = Vec::new();
@@ -1273,6 +1295,9 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
                 let tick = handle.ballpark.read().map(|b| b.current_tick).unwrap_or(0);
                 mgr.step_ai_sync(ctx, sys_id, tick, 1.0);
             }
+        }
+        if (32_000_000..=32_999_999).contains(&sys_id) {
+            crate::services::pve_special_sites_abyssal::prune_out_of_bounds_abyssal_probes(ctx, sys_id);
         }
         let _ = crate::services::insurgency_services::step_system_insurgency_tick(ctx, sys_id).await;
         let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::step_wreck_and_jetcan_decay(

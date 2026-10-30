@@ -925,57 +925,23 @@ impl NpcSpawnManager {
                 now_unix,
             );
 
-            // Spawn physical NPC wreck item (26557)
-            snap.next_entity_id += 1;
-            let wreck_id = snap.next_entity_id;
-            crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
-                snap, wreck_id, now_unix, true,
-            );
-            snap.items.insert(
-                wreck_id,
-                InventoryItemRecord {
-                    item_id: wreck_id,
-                    type_id: 26557,
-                    owner_id: killer_char_id,
-                    location_id: sys_id as i64,
-                    flag: InventoryFlag::Cargo,
-                    quantity: 1,
-                    singleton: true,
-                    version: 1,
-                    dynamic_attributes: HashMap::new(),
-                    source_mutaplasmid_id: None,
-                    insured_payout_isk: 0.0,
-                    is_blueprint_copy: false,
-                    blueprint_runs_remaining: None,
-                },
-            );
-            snap.item_positions.insert(
-                wreck_id,
-                [entity.spawn_pos.x, entity.spawn_pos.y, entity.spawn_pos.z],
-            );
-
-            // Populate NPC loot table drops inside the wreck item (feat:npc.npc-loot)
-            let ammo_type_id = match entity.faction_id {
-                500010 | 500001 => 204, // Scourge Heavy Missile
-                500012 | 500019 | 500003 => 178, // Radio S
-                500020 | 500004 => 230, // Antimatter Charge S
-                500011 | 500002 => 213, // Phased Plasma S
-                _ => 212, // Iron Charge S
-            };
-            let loot_drops = [(15331, 10), (ammo_type_id, 100)];
-            for &(lid_type, lid_qty) in &loot_drops {
+            if !(32_000_000..=32_999_999).contains(&sys_id) {
+                // Spawn physical NPC wreck item (26557)
                 snap.next_entity_id += 1;
-                let lid = snap.next_entity_id;
+                let wreck_id = snap.next_entity_id;
+                crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
+                    snap, wreck_id, now_unix, true,
+                );
                 snap.items.insert(
-                    lid,
+                    wreck_id,
                     InventoryItemRecord {
-                        item_id: lid,
-                        type_id: lid_type,
+                        item_id: wreck_id,
+                        type_id: 26557,
                         owner_id: killer_char_id,
-                        location_id: wreck_id,
+                        location_id: sys_id as i64,
                         flag: InventoryFlag::Cargo,
-                        quantity: lid_qty,
-                        singleton: false,
+                        quantity: 1,
+                        singleton: true,
                         version: 1,
                         dynamic_attributes: HashMap::new(),
                         source_mutaplasmid_id: None,
@@ -984,6 +950,42 @@ impl NpcSpawnManager {
                         blueprint_runs_remaining: None,
                     },
                 );
+                snap.item_positions.insert(
+                    wreck_id,
+                    [entity.spawn_pos.x, entity.spawn_pos.y, entity.spawn_pos.z],
+                );
+
+                // Populate NPC loot table drops inside the wreck item (feat:npc.npc-loot)
+                let ammo_type_id = match entity.faction_id {
+                    500010 | 500001 => 204, // Scourge Heavy Missile
+                    500012 | 500019 | 500003 => 178, // Radio S
+                    500020 | 500004 => 230, // Antimatter Charge S
+                    500011 | 500002 => 213, // Phased Plasma S
+                    _ => 212, // Iron Charge S
+                };
+                let loot_drops = [(15331, 10), (ammo_type_id, 100)];
+                for &(lid_type, lid_qty) in &loot_drops {
+                    snap.next_entity_id += 1;
+                    let lid = snap.next_entity_id;
+                    snap.items.insert(
+                        lid,
+                        InventoryItemRecord {
+                            item_id: lid,
+                            type_id: lid_type,
+                            owner_id: killer_char_id,
+                            location_id: wreck_id,
+                            flag: InventoryFlag::Cargo,
+                            quantity: lid_qty,
+                            singleton: false,
+                            version: 1,
+                            dynamic_attributes: HashMap::new(),
+                            source_mutaplasmid_id: None,
+                            insured_payout_isk: 0.0,
+                            is_blueprint_copy: false,
+                            blueprint_runs_remaining: None,
+                        },
+                    );
+                }
             }
 
             Ok::<_, String>(bounty)

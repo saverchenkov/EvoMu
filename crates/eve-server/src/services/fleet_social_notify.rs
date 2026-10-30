@@ -150,8 +150,9 @@ pub fn character_active_fleet_id(ctx: &ServerContext, char_id: i64) -> Option<i6
     ctx.db.with_snapshot(|snap| {
         snap.fleets
             .values()
-            .find(|f| f.members.contains(&char_id) || f.member_details.contains_key(&char_id))
+            .filter(|f| f.members.contains(&char_id) || f.member_details.contains_key(&char_id))
             .map(|f| f.fleet_id)
+            .max()
     })
 }
 

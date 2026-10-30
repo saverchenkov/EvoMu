@@ -199,7 +199,11 @@ fn handle_chat_rpc(
                     explicit_arg.filter(|s| !s.starts_with("solarsystemid2:")).map(|s| s.to_string()).unwrap_or_else(|| format!("solarsystemid2:{sys_id}"))
                 };
                 let corp_chan = format!("corpid:{corp_id}");
-                let mut target_chans = vec![local_id.clone(), corp_chan];
+                let mut target_chans = if (32_000_000..=32_999_999).contains(&sys_id) && method != "EnsureResourceWarsChannelExists" {
+                    vec![corp_chan]
+                } else {
+                    vec![local_id.clone(), corp_chan]
+                };
                 if let Some(aid) = alliance_id {
                     target_chans.push(format!("allianceid:{aid}"));
                 }
@@ -518,6 +522,9 @@ fn handle_chat_rpc(
                 }
             };
             let chan_id = chan_id_owned.as_str();
+            if crate::services::pve_special_sites_abyssal::is_abyssal_local_channel_disabled(chan_id, session.solar_system_id) {
+                return Some(Err(BridgeRpcError { code: "LocalChannelDisabledInAbyssalSpace".into(), message: "Local chat channel is disabled inside Abyssal Deadspace".into() }));
+            }
             let password_arg = args.get(1).and_then(|a| a.as_str());
             let motd_arg = args.get(2).and_then(|a| a.as_str()).unwrap_or("");
 
@@ -646,6 +653,9 @@ fn handle_chat_rpc(
             let Some(chan_id) = args.first().and_then(|a| a.as_str()) else {
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "SendMessage requires channelID string".into() }));
             };
+            if crate::services::pve_special_sites_abyssal::is_abyssal_local_channel_disabled(chan_id, session.solar_system_id) {
+                return Some(Err(BridgeRpcError { code: "LocalChannelDisabledInAbyssalSpace".into(), message: "Local chat channel is disabled inside Abyssal Deadspace".into() }));
+            }
             let text = args.get(1).and_then(|a| a.as_str()).unwrap_or("o7");
             if text.is_empty() || text.chars().count() > 2_000 {
                 return Some(Err(BridgeRpcError { code: "InvalidChatMessageLength".into(), message: "Chat message must be 1..=2000 characters".into() }));

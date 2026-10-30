@@ -212,6 +212,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 }
             };
 
+            if (32_000_000..=32_999_999).contains(&sys_id) {
+                return Err((STATUS_FORBIDDEN, "Local chat is disabled in Abyssal Deadspace".into()));
+            }
             let (member_bytes_list, _) = get_solar_system_members(
                 &db_mem,
                 Some(&subs_mem),
@@ -288,6 +291,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             };
 
             let sys_id = caller_sys;
+            if (32_000_000..=32_999_999).contains(&sys_id) {
+                return Err((STATUS_FORBIDDEN, "Local chat is disabled in Abyssal Deadspace".into()));
+            }
 
             let is_wh = is_wormhole_system(sys_id);
             if is_wh {

@@ -1237,19 +1237,17 @@ impl SystemHandle {
         respawn_due_asteroids(&mut bp, asteroids, asteroid_templates, sde_opt, db_opt);
         sync_player_slim_items(&mut bp, db_opt);
         let events = bp.step(dt);
-        crate::services::pve_special_sites_abyssal::step_abyssal_hazards_and_pylons_in_ballpark(
-            &mut bp,
-            sde_opt.as_deref(),
-            db_opt.as_ref(),
-            self.solar_system_id,
+        let sup_dead = crate::services::pve_special_sites_abyssal::step_abyssal_hazards_and_pylons_in_ballpark(
+            &mut bp, sde_opt.as_deref(), db_opt.as_ref(), self.solar_system_id,
         );
         let hook_guard = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
         let deact_hook_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
-        let destroyed = step_cycles_and_capacitor(
+        let mut destroyed = step_cycles_and_capacitor(
             &mut bp, active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
             sde_opt, db_opt, tactical_state, pending_cycle_actions, dt, deact_hook_guard.as_ref(),
         );
+        destroyed.extend(sup_dead.into_iter().map(|bid| (bid, None)));
         for &(target_ball_id, owner_char_id) in &destroyed {
             if let Some(db) = db_opt.as_ref() {
                 crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark(

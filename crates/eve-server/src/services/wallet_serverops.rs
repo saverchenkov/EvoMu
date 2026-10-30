@@ -240,18 +240,18 @@ pub fn assign_or_reinforce_system_node(ctx: &ServerContext, solar_system_id: u32
 }
 
 /// Executes the 11:00 UTC cluster downtime cycle and daily maintenance jobs (`feat:serverops.downtime`, `feat:serverops.daily-jobs`).
-pub fn run_daily_downtime_and_jobs(ctx: &ServerContext) -> HashMap<String, i64> {
-    let now = ctx.now_unix();
-    let seconds_in_day = now % 86_400;
-    let is_1100_utc_window = (11 * 3_600..11 * 3_600 + 900).contains(&seconds_in_day);
+pub fn run_daily_downtime_and_jobs(ctx: &ServerContext) -> HashMap<String, i64> { run_daily_downtime_and_jobs_inner(ctx, false) }
+pub fn run_daily_downtime_and_jobs_forced(ctx: &ServerContext) -> HashMap<String, i64> { run_daily_downtime_and_jobs_inner(ctx, true) }
 
+fn run_daily_downtime_and_jobs_inner(ctx: &ServerContext, force_abyssal_evac: bool) -> HashMap<String, i64> {
+    let now = ctx.now_unix();
+    let is_1100_utc_window = (11 * 3_600..11 * 3_600 + 900).contains(&(now % 86_400));
     let expired_raffles = sweep_expired_raffles(ctx) as i64;
     let auto_paid_bills = process_due_automatic_bills(ctx) as i64;
-    let evacuated_abyssal = crate::services::pve_special_sites::evacuate_abyssal_pockets_for_downtime(ctx);
+    let evacuated_abyssal = if is_1100_utc_window || force_abyssal_evac { crate::services::pve_special_sites::evacuate_abyssal_pockets_for_downtime(ctx) } else { 0 };
     crate::services::fleet_social::fleet_social_notify::prune_offline_fleets_and_channels(ctx);
     // parity: feat:lifecycle.wreck-downtime, feat:lifecycle.mission-downtime-respawn, plan:SP-7
-    let (npc_wrecks_cleaned, mission_npcs_respawned) =
-        crate::sp6_lifecycle::cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx);
+    let (npc_wrecks_cleaned, mission_npcs_respawned) = crate::sp6_lifecycle::cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx);
 
     let (replenished_asteroids, expired_order_list, expired_contracts, sov_decayed) =
         ctx.db.with_mut_snapshot(|snap| {

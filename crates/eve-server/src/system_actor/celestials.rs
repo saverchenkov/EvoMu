@@ -982,3 +982,71 @@ impl SystemHandle {
         rx.await.map_err(|_| "Solar system reply dropped".to_string())
     }
 }
+
+#[allow(clippy::type_complexity)]
+fn db_ballpark_map() -> &'static std::sync::Mutex<
+    HashMap<
+        (u64, SolarSystemId),
+        (
+            std::sync::Weak<RwLock<Ballpark>>,
+            std::sync::Weak<RwLock<HashMap<BallId, DVec3>>>,
+            std::sync::Weak<RwLock<std::collections::HashSet<BallId>>>,
+        ),
+    >,
+> {
+    static MAP: std::sync::OnceLock<
+        std::sync::Mutex<
+            HashMap<
+                (u64, SolarSystemId),
+                (
+                    std::sync::Weak<RwLock<Ballpark>>,
+                    std::sync::Weak<RwLock<HashMap<BallId, DVec3>>>,
+                    std::sync::Weak<RwLock<std::collections::HashSet<BallId>>>,
+                ),
+            >,
+        >,
+    > = std::sync::OnceLock::new();
+    MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+pub(crate) fn register_db_system_ballpark(
+    db: &Arc<eve_db::WorldRepository>,
+    solar_system_id: SolarSystemId,
+    handle: &SystemHandle,
+) {
+    let mut g = db_ballpark_map().lock().unwrap_or_else(|e| e.into_inner());
+    if g.len() > 256 {
+        g.retain(|_, (bp, _, _)| bp.strong_count() > 0);
+    }
+    g.insert(
+        (db.instance_id(), solar_system_id),
+        (
+            Arc::downgrade(&handle.ballpark),
+            Arc::downgrade(&handle.ball_positions),
+            Arc::downgrade(&handle.scrambled_balls),
+        ),
+    );
+}
+
+/// Synchronously removes `ball_id` from `solar_system_id`'s `Ballpark` if spawned for `db`.
+pub fn try_remove_ball_for_db(
+    db: &Arc<eve_db::WorldRepository>,
+    solar_system_id: SolarSystemId,
+    ball_id: BallId,
+) {
+    let entry = db_ballpark_map()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&(db.instance_id(), solar_system_id))
+        .cloned();
+    if let Some((bp_w, pos_w, scram_w)) = entry {
+        if let (Some(bp_arc), Some(pos_arc), Some(scram_arc)) =
+            (bp_w.upgrade(), pos_w.upgrade(), scram_w.upgrade())
+        {
+            let mut bp = bp_arc.write().unwrap_or_else(|e| e.into_inner());
+            let _ = bp.remove_ball(ball_id);
+            super::sync_ball_positions(&bp, &pos_arc, &scram_arc);
+        }
+    }
+}
+

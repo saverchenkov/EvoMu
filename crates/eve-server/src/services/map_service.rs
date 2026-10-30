@@ -76,6 +76,15 @@ pub fn handle(
     if let Err(e) = ServerContext::require_auth(session) {
         return Some(Err(e));
     }
+    if session
+        .solar_system_id
+        .is_some_and(|s| (32_000_000..=32_999_999).contains(&s))
+    {
+        return Some(Err(BridgeRpcError {
+            code: "MapDisabledInAbyssalSpace".into(),
+            message: "Star map queries are disabled inside Abyssal Deadspace".into(),
+        }));
+    }
 
     let _now_unix = ctx.now_unix();
 
