@@ -433,73 +433,10 @@ pub struct IncursionCompletionResult {
 /// as the incursion tale's spawn-template identifier in `taleMgr` results and tale notices.
 pub const INCURSION_TALE_TEMPLATE_ID: u64 = 5158;
 
-/// Publishes `eve_public.tale.api.StartedNotice` / `StoppedNotice` for an incursion tale.
-pub fn publish_incursion_tale_notice(
-    gateway: &crate::quasar_gateway::PublicGatewayRouter,
-    started: bool,
-    tale_id: i64,
-    staging_solar_system_id: SolarSystemId,
-    now_unix: u64,
-) {
-    use crate::services::quasar_goal_tale_notices as notices;
-    let payload = notices::tale_lifecycle(
-        started,
-        tale_id.max(0) as u64,
-        INCURSION_TALE_TEMPLATE_ID,
-        staging_solar_system_id as u64,
-    );
-    let _ = gateway.publish_notice(notices::tale_scope(), payload, now_unix);
-}
-
-/// When a site completion ended its incursion (mothership defeated), announces the tale stop.
-pub fn publish_incursion_tale_stopped_if_ended(
-    gateway: &crate::quasar_gateway::PublicGatewayRouter,
-    db: &Arc<WorldRepository>,
-    result: &IncursionCompletionResult,
-) {
-    if !result.incursion_ended {
-        return;
-    }
-    let now = db.clock().now_unix_secs();
-    let ended = with_pve_special_reg_db(db, now, |reg| {
-        reg.incursions
-            .values_mut()
-            .find(|inc| inc.sites.iter().any(|s| s.site_id == result.site_id))
-            .filter(|inc| !inc.tale_stop_published)
-            .map(|inc| {
-                // Claimed under the registry lock: only the first caller for this end publishes.
-                inc.tale_stop_published = true;
-                (inc.tale_id, inc.staging_solar_system_id)
-            })
-    });
-    if let Some((tale_id, staging)) = ended {
-        publish_incursion_tale_notice(gateway, false, tale_id, staging, now);
-    }
-}
-
-pub fn notify_incursion_site_completed(
-    gateway: &crate::quasar_gateway::PublicGatewayRouter,
-    db: &Arc<WorldRepository>,
-    site_sys: SolarSystemId,
-    result: &IncursionCompletionResult,
-) {
-    publish_incursion_tale_stopped_if_ended(gateway, db, result);
-    let now = db.clock().now_unix_secs();
-    let did = result
-        .site_id
-        .rsplit('-')
-        .next()
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(INCURSION_TALE_TEMPLATE_ID as u32);
-    gateway.progression.extra.on_system_tale_encounter_completed(
-        site_sys,
-        "Incursion",
-        did,
-        1,
-        now,
-        gateway,
-    );
-}
+pub use crate::services::pve_incursion_lifecycle::{
+    notify_incursion_site_completed, publish_incursion_tale_notice,
+    publish_incursion_tale_stopped_if_ended,
+};
 
 pub async fn process_incursion_site_completion_and_payout_core(
     systems: &Arc<SystemRegistry>,

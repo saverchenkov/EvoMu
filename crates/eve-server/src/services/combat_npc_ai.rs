@@ -1317,34 +1317,11 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
     )
     .await;
 
-    if killer_char_id > 0 {
-        ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(
-            killer_char_id as u32,
-            1,
-            1,
-            &ctx.quasar_gateway,
-        );
-        ctx.quasar_gateway.progression.career_goals.on_gameplay_event(
-            killer_char_id as u32,
-            "combat",
-            1,
-            &ctx.quasar_gateway,
-        );
-        ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(
-            killer_char_id as u32,
-            &["destroyHostileNPC", "entityGroupDestroyed"],
-            1,
-            ctx.now_unix(),
-            &ctx.quasar_gateway,
-        );
-        crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
-            ctx,
-            killer_char_id,
-            &["DamageNPCShips", "DestroyNPCShips"],
-            1,
-            npc_type_id.map(|t| t as i64),
-        );
-    }
+    crate::services::combat_crimewatch::combat_npc_encounters::record_npc_kill_progression(
+        ctx,
+        killer_char_id,
+        npc_type_id,
+    );
 
     (wreck_id, effective_bounty, dropped_types)
 }

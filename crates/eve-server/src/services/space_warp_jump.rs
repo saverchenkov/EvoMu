@@ -525,11 +525,7 @@ async fn handle_cmd_warp_to_stuff(
                 ctx, char_id, sys_id, dest_pos,
             );
             crate::services::pve_dungeon_runtime::on_warp_start_leave_dungeon_if_needed(
-                ctx,
-                char_id,
-                sys_id,
-                current_ball.position.to_array(),
-                dest_pos.to_array(),
+                ctx, char_id, sys_id, current_ball.position.to_array(), dest_pos.to_array(),
             );
             ctx.active_warps
                 .lock()
@@ -827,10 +823,7 @@ async fn handle_cmd_stargate_jump(
         )
         .await;
     crate::services::notify_emitters_batch3_space::emit_exiting_dungeon_on_warp_if_present(
-        ctx,
-        char_id,
-        old_sys,
-        current_ball.position.to_array(),
+        ctx, char_id, old_sys, current_ball.position.to_array(),
     );
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, old_sys);
     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {

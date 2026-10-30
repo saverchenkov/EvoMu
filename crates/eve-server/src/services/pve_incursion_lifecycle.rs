@@ -8,7 +8,7 @@
 use crate::router::ServerContext;
 use crate::services::pve_incursion_sites::{
     derive_incursion_site_position, make_incursion_site, make_site_npc_ball,
-    publish_incursion_tale_notice, seed_incursion_for_constellation, ConstellationId,
+    seed_incursion_for_constellation, ConstellationId,
     IncursionNpcSpawn, IncursionSiteEntry, IncursionSystemEffects, IncursionTaleRecord,
     INCURSION_TALE_TEMPLATE_ID,
 };
@@ -923,7 +923,7 @@ pub fn collect_all_world_event_tales(
 ) -> Vec<PyRep> {
     let now_sec = ctx.now_unix();
     let now_ft = ((now_sec + 11_644_473_600) * 10_000_000) as i64;
-    with_pve_special_reg(ctx, |reg| {
+    let mut out = with_pve_special_reg(ctx, |reg| {
         let mut out = Vec::new();
 
         // 1. Sansha Incursion tales (templateID = 5158)
@@ -1144,5 +1144,111 @@ pub fn collect_all_world_event_tales(
         }
 
         out
-    })
+    });
+
+    // 6. Quasar active_tales started via eve.tale.api.StartTaleRequest
+    let extra_tales = ctx
+        .quasar_gateway
+        .progression
+        .extra
+        .active_tales
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    for (&tale_id, &(tpl_id, sys_id, started)) in extra_tales.iter() {
+        if template_filter.is_some() && template_filter != Some(i64::from(tpl_id)) {
+            continue;
+        }
+        let start_ft = ((started + 11_644_473_600) * 10_000_000) as i64;
+        let const_id = ctx
+            .sde
+            .solar_systems
+            .get(&sys_id)
+            .map(|s| s.constellation_id)
+            .unwrap_or(0);
+        out.push(str_dict([
+            ("tale_id", PyRep::Integer(i64::from(tale_id))),
+            ("taleID", PyRep::Integer(i64::from(tale_id))),
+            ("template_id", PyRep::Integer(i64::from(tpl_id))),
+            ("templateID", PyRep::Integer(i64::from(tpl_id))),
+            ("managerSolarSystemID", PyRep::Integer(i64::from(sys_id))),
+            ("solar_system_id", PyRep::Integer(i64::from(sys_id))),
+            ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+            ("locationID", PyRep::Integer(i64::from(sys_id))),
+            ("constellationID", PyRep::Integer(i64::from(const_id))),
+            ("state", PyRep::String("Active".into())),
+            ("systemState", PyRep::String("Active".into())),
+            ("start_date", PyRep::Integer(start_ft)),
+            ("end_date", PyRep::Integer(now_ft + 864_000_000_000)),
+        ]));
+    }
+
+    out
+}
+
+/// Publishes `eve_public.tale.api.StartedNotice` / `StoppedNotice` for an incursion tale.
+pub fn publish_incursion_tale_notice(
+    gateway: &crate::quasar_gateway::PublicGatewayRouter,
+    started: bool,
+    tale_id: i64,
+    staging_solar_system_id: SolarSystemId,
+    now_unix: u64,
+) {
+    use crate::services::quasar_goal_tale_notices as notices;
+    let payload = notices::tale_lifecycle(
+        started,
+        tale_id.max(0) as u64,
+        INCURSION_TALE_TEMPLATE_ID,
+        staging_solar_system_id as u64,
+    );
+    let _ = gateway.publish_notice(notices::tale_scope(), payload, now_unix);
+}
+
+/// When a site completion ended its incursion (mothership defeated), announces the tale stop.
+pub fn publish_incursion_tale_stopped_if_ended(
+    gateway: &crate::quasar_gateway::PublicGatewayRouter,
+    db: &Arc<WorldRepository>,
+    result: &crate::services::pve_incursion_sites::IncursionCompletionResult,
+) {
+    if !result.incursion_ended {
+        return;
+    }
+    let now = db.clock().now_unix_secs();
+    let ended = crate::services::pve_special_sites::with_pve_special_reg_db(db, now, |reg| {
+        reg.incursions
+            .values_mut()
+            .find(|inc| inc.sites.iter().any(|s| s.site_id == result.site_id))
+            .filter(|inc| !inc.tale_stop_published)
+            .map(|inc| {
+                // Claimed under the registry lock: only the first caller for this end publishes.
+                inc.tale_stop_published = true;
+                (inc.tale_id, inc.staging_solar_system_id)
+            })
+    });
+    if let Some((tale_id, staging)) = ended {
+        publish_incursion_tale_notice(gateway, false, tale_id, staging, now);
+    }
+}
+
+pub fn notify_incursion_site_completed(
+    gateway: &crate::quasar_gateway::PublicGatewayRouter,
+    db: &Arc<WorldRepository>,
+    site_sys: SolarSystemId,
+    result: &crate::services::pve_incursion_sites::IncursionCompletionResult,
+) {
+    publish_incursion_tale_stopped_if_ended(gateway, db, result);
+    let now = db.clock().now_unix_secs();
+    let did = result
+        .site_id
+        .rsplit('-')
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(INCURSION_TALE_TEMPLATE_ID as u32);
+    gateway.progression.extra.on_system_tale_encounter_completed(
+        site_sys,
+        "Incursion",
+        did,
+        1,
+        now,
+        gateway,
+    );
 }
