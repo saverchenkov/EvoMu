@@ -881,6 +881,10 @@ pub async fn handle_character_logoff_or_disconnect(
     // or under an active Weapons timer (`feat:account.logout`, `plan:SP-6`).
     let emergency_warp_dest = if !is_scrambled && weap_until <= now_unix {
         let dest = compute_emergency_warp_destination(current_pos, char_id, ship_id);
+        if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
+            cs.is_emergency_warping = true;
+            let _ = sys_handle.set_combat_state(ship_id, cs).await;
+        }
         let _ = sys_handle
             .set_movement_mode(ship_id, MovementMode::new_warp(current_pos, dest, warp_speed_au_s))
             .await;

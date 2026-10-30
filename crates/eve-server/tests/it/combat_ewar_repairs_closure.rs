@@ -5,8 +5,9 @@ use crate::common;
 use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, CombatState, DVec3, MovementMode};
 use eve_dogma::{
-    eval_energy_neutralizer, eval_energy_nosferatu_with_hull, eval_scripted_sensor_dampener,
-    eval_scripted_tracking_disruptor, eval_target_painters_sig_radius, is_blood_raider_nosferatu_hull, DogmaItemState,
+    eval_energy_neutralizer, eval_energy_nosferatu_relative, eval_energy_nosferatu_with_hull,
+    eval_scripted_sensor_dampener, eval_scripted_tracking_disruptor,
+    eval_target_painters_sig_radius, is_blood_raider_nosferatu_hull, DogmaItemState,
 };
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
@@ -255,12 +256,13 @@ async fn test_combat_ewar_and_capacitor_warfare_closure() {
     let s_cap_abs = sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor;
     assert!(v_cap_abs < 400.0 && s_cap_abs > 500.0, "Nosferatu must drain on relative % (80% > 25%) even when target GJ (400) < self GJ (500): got victim={v_cap_abs}, self={s_cap_abs}");
 
-    // Blood Raider hull dynamically derived from SDE attributes/effects overrides target_cap > self_cap:
+    // Blood Raider hull dynamically derived from SDE attributes/effects overrides target_cap_pct > self_cap_pct:
     let nos_item = DogmaItemState::from_sde(nos_id, 530, &ctx.sde);
     assert!(!is_blood_raider_nosferatu_hull(640, &ctx.sde), "Raven is not Blood Raider");
     assert!(is_blood_raider_nosferatu_hull(17920, &ctx.sde), "Bhaalgorn is Blood Raider (nosOverride attr 1945)");
     assert_eq!(eval_energy_nosferatu_with_hull(&nos_item, 1_000.0, 500.0, 1000.0, 400.0, false, &ctx.sde).actual_transferred, 0.0);
     assert!(eval_energy_nosferatu_with_hull(&nos_item, 1_000.0, 500.0, 1000.0, 400.0, true, &ctx.sde).actual_transferred > 0.0);
+    assert!(eval_energy_nosferatu_relative(&nos_item, 0.0, 500.0, 2_000.0, 400.0, 500.0, false, &ctx.sde).actual_transferred > 0.0);
 
     // Standard hull cannot drain when target % (40%) < source % (80%), even if target GJ (1200) > source GJ (800):
     let mut s_cs_std = sys.get_combat_state(ship_id).await.unwrap().unwrap();
@@ -273,7 +275,6 @@ async fn test_combat_ewar_and_capacitor_warfare_closure() {
     v_cs_std.max_capacitor = 3_000.0;
     v_cs_std.capacitor = 1_200.0; // 40%
     sys.set_combat_state(victim_id, v_cs_std).await.unwrap();
-
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[
         PyRep::Integer(nos_id), PyRep::String("energyNosferatuFalloff".into()), PyRep::Integer(victim_id), PyRep::Integer(0),
     ], &kw, None).await.expect("Activate Nosferatu on standard hull when target % < self %");
@@ -290,6 +291,9 @@ async fn test_combat_ewar_and_capacitor_warfare_closure() {
     ship_cs_br.max_capacitor = 1000.0;
     ship_cs_br.capacitor = 800.0;
     sys.set_combat_state(ship_id, ship_cs_br).await.unwrap();
+    let mut v_cs_br = sys.get_combat_state(victim_id).await.unwrap().unwrap();
+    v_cs_br.capacitor_recharge_time_ms = 0.0; v_cs_br.max_capacitor = 3_000.0; v_cs_br.capacitor = 1_200.0;
+    sys.set_combat_state(victim_id, v_cs_br).await.unwrap();
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[
         PyRep::Integer(nos_id), PyRep::String("energyNosferatuFalloff".into()), PyRep::Integer(victim_id), PyRep::Integer(0),
     ], &kw, None).await.expect("Activate Nosferatu on Blood Raider Bhaalgorn (17920)");

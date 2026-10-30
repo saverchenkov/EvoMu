@@ -670,6 +670,12 @@ impl SystemRegistry {
                                 let _ = reply.send(populated);
                             }
                             SystemCommand::RemoveBall { ball_id, reply } => {
+                                crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
+                                    &mut ballpark,
+                                    &db_opt,
+                                    tactical_state,
+                                    ball_id,
+                                );
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                 remove_all_ship_module_cycles(
                                     &mut ballpark,
@@ -993,6 +999,14 @@ impl SystemRegistry {
                                         entry[2] += damage.kinetic;
                                         entry[3] += damage.explosive;
                                     }
+                                    if destroyed {
+                                        crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
+                                            &mut ballpark,
+                                            &db_opt,
+                                            tactical_state,
+                                            ball_id,
+                                        );
+                                    }
                                     if let (Some(db), Some(cs)) = (&db_opt, ballpark.combat_states.get(&ball_id)) {
                                         crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, cs);
                                     }
@@ -1054,6 +1068,12 @@ impl SystemRegistry {
                                 );
                                 if let Some(db) = db_opt.as_ref() {
                                     for &(target_ball_id, _) in &destroyed_balls {
+                                        crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
+                                            &mut ballpark,
+                                            &db_opt,
+                                            tactical_state,
+                                            target_ball_id,
+                                        );
                                         crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark(
                                             &mut ballpark, db, solar_system_id, target_ball_id,
                                         );
@@ -1156,10 +1176,36 @@ impl SystemRegistry {
                             }
                             SystemCommand::RemoveTargetLock { source_id, target_id, reply } => {
                                 let removed = ballpark.remove_target_lock(source_id, target_id);
+                                if removed {
+                                    let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
+                                    on_target_unlocked_in_actor(
+                                        &mut ballpark,
+                                        active_module_cycles,
+                                        &base_scramble_strengths,
+                                        &base_core_strengths,
+                                        &db_opt,
+                                        source_id,
+                                        Some(target_id),
+                                        deact_guard.as_ref(),
+                                    );
+                                }
                                 let _ = reply.send(removed);
                             }
                             SystemCommand::ClearTargetLocks { source_id, reply } => {
                                 let count = ballpark.clear_target_locks(source_id);
+                                if count > 0 {
+                                    let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
+                                    on_target_unlocked_in_actor(
+                                        &mut ballpark,
+                                        active_module_cycles,
+                                        &base_scramble_strengths,
+                                        &base_core_strengths,
+                                        &db_opt,
+                                        source_id,
+                                        None,
+                                        deact_guard.as_ref(),
+                                    );
+                                }
                                 let _ = reply.send(count);
                             }
                             SystemCommand::SetCapacitor { ball_id, capacitor, reply } => {
@@ -1246,6 +1292,48 @@ impl SystemRegistry {
                                 let mut updated = false;
                                 for c in active_module_cycles.iter_mut() {
                                     if c.ship_id == ship_id && c.module_id == module_id {
+                                        if c.is_overloaded != is_overloaded {
+                                            if c.speed_boost_factor > 0.0 {
+                                                let ovl_bonus = sde_opt
+                                                    .as_ref()
+                                                    .and_then(|sde| sde.types.get(&c.module_type_id))
+                                                    .and_then(|t| t.default_attributes.get(&1223).copied())
+                                                    .map(|pct| 1.0 + pct / 100.0)
+                                                    .unwrap_or(1.50);
+                                                if is_overloaded {
+                                                    c.speed_boost_factor *= ovl_bonus;
+                                                } else {
+                                                    c.speed_boost_factor /= ovl_bonus;
+                                                }
+                                                if let (Some(orig_v), Some(ball)) = (
+                                                    c.original_max_velocity,
+                                                    ballpark.balls.get_mut(&ship_id),
+                                                ) {
+                                                    ball.max_velocity = orig_v * (1.0 + c.speed_boost_factor);
+                                                }
+                                            }
+                                            let rep_bonus = sde_opt
+                                                .as_ref()
+                                                .and_then(|sde| sde.types.get(&c.module_type_id))
+                                                .and_then(|t| t.default_attributes.get(&1223).copied())
+                                                .map(|pct| 1.0 + pct / 100.0)
+                                                .unwrap_or(1.20);
+                                            if is_overloaded {
+                                                c.shield_boost_amount *= rep_bonus;
+                                                c.armor_repair_amount *= rep_bonus;
+                                                c.hull_repair_amount *= rep_bonus;
+                                                c.remote_shield_amount *= rep_bonus;
+                                                c.remote_armor_amount *= rep_bonus;
+                                                c.remote_hull_amount *= rep_bonus;
+                                            } else {
+                                                c.shield_boost_amount /= rep_bonus;
+                                                c.armor_repair_amount /= rep_bonus;
+                                                c.hull_repair_amount /= rep_bonus;
+                                                c.remote_shield_amount /= rep_bonus;
+                                                c.remote_armor_amount /= rep_bonus;
+                                                c.remote_hull_amount /= rep_bonus;
+                                            }
+                                        }
                                         c.is_overloaded = is_overloaded;
                                         updated = true;
                                     }

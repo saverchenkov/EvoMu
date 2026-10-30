@@ -568,6 +568,7 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
                     .and_then(|tid| ctx.sde.types.get(&tid))
                     .is_some_and(|t| {
                         t.group_id == 1202
+                            || t.default_attributes.get(&188).copied().unwrap_or(0.0) >= 1.0
                             || t.default_attributes.get(&1886).copied().unwrap_or(0.0) >= 1.0
                     })
             };

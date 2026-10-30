@@ -100,6 +100,12 @@ pub fn handle(
 
     let _now_unix = ctx.now_unix();
 
+    if let Some(wp_res) =
+        crate::services::nav_warp_interdiction::handle_map_waypoint_rpc(ctx, session, method, args, _kwargs)
+    {
+        return Some(wp_res);
+    }
+
     match (service, method) {
         ("map", "GetBeaconCount") => {
             // V24 MapFilterCynosuralFields unpacks per-system 2-tuples `(module_beacon_count, structure_beacon_count)`.

@@ -1,7 +1,8 @@
 //! Target-lock management, ECM jam/burst application, and grid bubble observer queries for [`Ballpark`].
 
-use crate::{Ball, BallId, Ballpark, DestinyEvent, MovementMode, TargetLock};
-use std::collections::BTreeMap;
+use crate::{Ball, BallId, Ballpark, DestinyEvent, MovementMode, TargetLock, WarpPhase};
+use glam::DVec3;
+use std::collections::{BTreeMap, BTreeSet};
 
 impl Ballpark {
     pub fn add_target_lock(&mut self, source_id: BallId, lock: TargetLock) -> bool {
@@ -233,5 +234,188 @@ impl Ballpark {
                     || (b.position - observer.position).length_squared() <= r2
             })
             .collect()
+    }
+
+    /// Resolves elastic collision bounce physics (`Destiny::Ball::Collision`, `SP-4`, `feat:navigation.collision-bumping`),
+    /// separates overlapping objects, knocks aligning ships off alignment, and broadcasts `SetBallPosition`/`SetBallVelocity`.
+    pub(crate) fn step_collision_bumping(&mut self) {
+        let ball_keys: Vec<BallId> = self.balls.keys().copied().collect();
+        let mut collision_events = Vec::new();
+        let mut bumped_dynamic_ids = BTreeSet::new();
+        let restitution = 0.8;
+
+        for i in 0..ball_keys.len() {
+            let id_a = ball_keys[i];
+            let is_static_a = self.is_static_ball(id_a)
+                || matches!(self.balls[&id_a].mode, MovementMode::Miniball);
+
+            for j in (i + 1)..ball_keys.len() {
+                let id_b = ball_keys[j];
+                let is_static_b = self.is_static_ball(id_b)
+                    || matches!(self.balls[&id_b].mode, MovementMode::Miniball);
+
+                if is_static_a && is_static_b {
+                    continue;
+                }
+                let mb_parent_a = self.miniball_states.get(&id_a).map(|m| m.parent_id);
+                let mb_parent_b = self.miniball_states.get(&id_b).map(|m| m.parent_id);
+                if mb_parent_a == Some(id_b)
+                    || mb_parent_b == Some(id_a)
+                    || (mb_parent_a.is_some() && mb_parent_a == mb_parent_b)
+                {
+                    continue;
+                }
+                if matches!(
+                    self.balls[&id_a].mode,
+                    MovementMode::Field | MovementMode::Mushroom
+                ) || matches!(
+                    self.balls[&id_b].mode,
+                    MovementMode::Field | MovementMode::Mushroom
+                ) {
+                    continue;
+                }
+                let group_a = self.ball_group_ids.get(&id_a).copied().unwrap_or(0);
+                let group_b = self.ball_group_ids.get(&id_b).copied().unwrap_or(0);
+                if matches!(
+                    group_a,
+                    6 | 7 | 8 | 9 | 10 | 15 | 1404..=1410 | 1657 | 2016 | 2017
+                ) || matches!(
+                    group_b,
+                    6 | 7 | 8 | 9 | 10 | 15 | 1404..=1410 | 1657 | 2016 | 2017
+                ) {
+                    continue;
+                }
+                if self.combat_states.get(&id_a).is_some_and(|cs| {
+                    let mut c = cs.clone();
+                    c.sync_action_breaks();
+                    c.gate_cloak_remaining_ticks > 0 || c.is_cloaked
+                }) || self.combat_states.get(&id_b).is_some_and(|cs| {
+                    let mut c = cs.clone();
+                    c.sync_action_breaks();
+                    c.gate_cloak_remaining_ticks > 0 || c.is_cloaked
+                }) {
+                    continue;
+                }
+
+                let (pos_a, rad_a, mass_a, vel_a) = {
+                    let b = &self.balls[&id_a];
+                    (b.position, b.radius, b.mass.max(1.0), b.velocity)
+                };
+                let (pos_b, rad_b, mass_b, vel_b) = {
+                    let b = &self.balls[&id_b];
+                    (b.position, b.radius, b.mass.max(1.0), b.velocity)
+                };
+                if rad_a > 50_000.0 || rad_b > 50_000.0 {
+                    continue;
+                }
+
+                let delta = pos_a - pos_b;
+                let dist = delta.length();
+                let min_dist = rad_a + rad_b;
+                if matches!(self.balls[&id_a].mode, MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning)
+                    || matches!(self.balls[&id_b].mode, MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning)
+                {
+                    continue;
+                }
+
+                if dist < min_dist {
+                    let normal = if dist > 1e-4 {
+                        delta / dist
+                    } else {
+                        DVec3::X
+                    };
+                    let overlap = min_dist - dist;
+                    let v_rel = (vel_a - vel_b).dot(normal);
+
+                    if !is_static_a && !is_static_b {
+                        if v_rel < 0.0 {
+                            let total_inv_mass = (1.0 / mass_a) + (1.0 / mass_b);
+                            let impulse = -(1.0 + restitution) * v_rel / total_inv_mass;
+                            if let Some(ba) = self.balls.get_mut(&id_a) {
+                                ba.velocity += normal * (impulse / mass_a);
+                            }
+                            if let Some(bb) = self.balls.get_mut(&id_b) {
+                                bb.velocity -= normal * (impulse / mass_b);
+                            }
+                        }
+                        let total_mass = mass_a + mass_b;
+                        if let Some(ba) = self.balls.get_mut(&id_a) {
+                            ba.position += normal * (overlap * (mass_b / total_mass));
+                        }
+                        if let Some(bb) = self.balls.get_mut(&id_b) {
+                            bb.position -= normal * (overlap * (mass_a / total_mass));
+                        }
+                        bumped_dynamic_ids.insert(id_a);
+                        bumped_dynamic_ids.insert(id_b);
+                    } else if !is_static_a && is_static_b {
+                        if v_rel < 0.0 {
+                            if let Some(ba) = self.balls.get_mut(&id_a) {
+                                ba.velocity -= normal * ((1.0 + restitution) * v_rel);
+                            }
+                        }
+                        if let Some(ba) = self.balls.get_mut(&id_a) {
+                            ba.position += normal * overlap;
+                        }
+                        bumped_dynamic_ids.insert(id_a);
+                    } else if is_static_a && !is_static_b {
+                        if v_rel < 0.0 {
+                            if let Some(bb) = self.balls.get_mut(&id_b) {
+                                bb.velocity += normal * ((1.0 + restitution) * v_rel);
+                            }
+                        }
+                        if let Some(bb) = self.balls.get_mut(&id_b) {
+                            bb.position -= normal * overlap;
+                        }
+                        bumped_dynamic_ids.insert(id_b);
+                    }
+
+                    collision_events.push((id_a, id_b));
+                }
+            }
+        }
+
+        for (id_a, id_b) in collision_events {
+            self.pending_events.push(DestinyEvent::Collision {
+                ball_a: id_a,
+                ball_b: id_b,
+            });
+        }
+
+        for bumped_id in bumped_dynamic_ids {
+            if let Some(b) = self.balls.get_mut(&bumped_id) {
+                if let MovementMode::Warp {
+                    origin,
+                    destination,
+                    warp_speed_au_s,
+                    ..
+                } = b.mode
+                {
+                    b.mode = MovementMode::Warp {
+                        origin: b.position,
+                        destination,
+                        warp_speed_au_s,
+                        total_distance: (destination - b.position)
+                            .length()
+                            .max((destination - origin).length()),
+                        phase: WarpPhase::Aligning,
+                        elapsed_warp_time: 0.0,
+                    };
+                }
+                let pos_ev = DestinyEvent::SetBallPosition {
+                    ball_id: bumped_id,
+                    position: b.position.to_array(),
+                };
+                let vel_ev = DestinyEvent::SetBallVelocity {
+                    ball_id: bumped_id,
+                    velocity: b.velocity.to_array(),
+                };
+                self.pending_events.push(pos_ev.clone());
+                self.pending_events.push(vel_ev.clone());
+                if let Some(&gid) = self.ball_grid_ids.get(&bumped_id) {
+                    self.queue_event_for_grid_observers(gid, None, &pos_ev);
+                    self.queue_event_for_grid_observers(gid, None, &vel_ev);
+                }
+            }
+        }
     }
 }

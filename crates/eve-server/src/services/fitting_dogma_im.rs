@@ -509,6 +509,16 @@ pub(crate) async fn handle_dogma_im(
                 return Some(Err(e));
             }
             let sys = ctx.systems.get_or_spawn(sys_id);
+            if crate::services::tactical_module_mechanics::is_untargetable_interdiction_probe(
+                ctx, &sys, target_id,
+            )
+            .await
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidTarget".into(),
+                    message: "Interdiction probes cannot be targeted directly; use area-of-effect weapons".into(),
+                }));
+            }
             let is_upwell_target = target_id >= 1_000_000_000_000
                 || ctx.db.with_snapshot(|s| s.structures.contains_key(&target_id));
             if is_upwell_target {

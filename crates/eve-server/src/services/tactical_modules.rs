@@ -52,6 +52,9 @@ pub struct TacticalModulesState {
     pub active_wubble_debuffs: HashMap<(usize, i64), ActiveWubbleDebuff>,
     pub tsb_self_penalty_until: HashMap<(usize, i64), u64>,
     pub clone_vat_bay_activated_ships: std::collections::HashSet<(usize, i64)>,
+    pub active_interdiction_probes: HashMap<(usize, i64), super::tactical_module_mechanics::ActiveInterdictionProbe>,
+    pub launcher_last_fire: HashMap<(usize, i64), super::tactical_module_mechanics::LauncherFireStamp>,
+    pub system_sim_time_s: HashMap<(usize, u32), f64>,
 }
 
 pub fn is_clone_vat_bay_active_required(ctx: &ServerContext, ship_id: i64) -> bool {

@@ -105,32 +105,21 @@ pub(crate) fn step_cycles_and_capacitor(
         tactical_state,
         dt,
     );
+    crate::services::tactical_module_mechanics::step_interdiction_probes_lifetime(
+        ballpark,
+        db_opt,
+        tactical_state,
+        dt,
+    );
 
-    // Exponential rack heat dissipation when no modules in a rack are overloaded (`feat:dogma.heat-rack-thermodynamics`)
-    let ship_ids_with_heat: Vec<BallId> = ship_rack_heat.keys().copied().collect();
-    for sid in ship_ids_with_heat {
-        let Some(racks) = ship_rack_heat.get_mut(&sid) else { continue };
-        let mut changed = false;
-        for (r_idx, rack_val) in racks.iter_mut().enumerate() {
-            let has_ovl = active_module_cycles.iter().any(|c| c.ship_id == sid && c.rack_idx == r_idx && c.is_overloaded);
-            if !has_ovl && *rack_val > 0.0 {
-                *rack_val = eve_dogma::thermodynamics::step_rack_heat(*rack_val, 0.0, 0.01, dt);
-                if *rack_val < 1e-6 { *rack_val = 0.0; }
-                changed = true;
-            }
-        }
-        if changed {
-            let heat_snap = *racks;
-            if let Some(db_ref) = db_opt {
-                db_ref.with_mut_snapshot(|snap| {
-                    let entry = snap.transient_item_attributes.entry(sid).or_default();
-                    entry.insert(1177, heat_snap[0]);
-                    entry.insert(1176, heat_snap[1]);
-                    entry.insert(1175, heat_snap[2]);
-                });
-            }
-        }
-    }
+    // Exponential rack heat dissipation using ship SDE dissipation rates (`feat:modules.overheat-rack-heat-generation`)
+    crate::services::tactical_module_mechanics::step_passive_rack_heat_dissipation(
+        ship_rack_heat,
+        active_module_cycles,
+        sde_opt,
+        db_opt,
+        dt,
+    );
 
     // Upwell structure tethering gradually repairs fitted module heat damage (including burned-out modules, leaving them offline) (`feat:modules.nanite-repair-paste-in-space`)
     // DERIVED: 2.0 HP/s gradual tether heat-damage repair rate (Overheating.md:151 'heat damage ... is slowly repaired')
@@ -241,6 +230,29 @@ pub(crate) fn step_cycles_and_capacitor(
             if target_ball.is_none() || target_warping || out_of_range {
                 finished_indices.push(idx);
                 continue;
+            }
+            if cycle.target_velocity_multiplier.is_some() {
+                if let (Some(sb), Some(tb), Some(sde)) = (source_ball, target_ball, sde_opt.as_ref()) {
+                    if let Some(mt) = sde.types.get(&cycle.module_type_id).filter(|t| t.group_id == 1672) {
+                        let dist = (sb.position - tb.position).length();
+                        let opt = mt.default_attributes.get(&54).copied().unwrap_or(1_000.0);
+                        let fo = mt
+                            .default_attributes
+                            .get(&2044)
+                            .copied()
+                            .or_else(|| mt.default_attributes.get(&158).copied())
+                            .unwrap_or(8_000.0);
+                        let raw_sf = mt.default_attributes.get(&20).copied().unwrap_or(-80.0);
+                        let att = eve_dogma::compute_falloff_attenuation(dist, opt, fo);
+                        let eff_sf = if dist <= opt + 3.0 * fo.max(1.0) {
+                            raw_sf * att
+                        } else {
+                            0.0
+                        };
+                        cycle.target_velocity_multiplier =
+                            Some((1.0 + eff_sf / 100.0).clamp(0.05, 1.0));
+                    }
+                }
             }
         }
         cycle.elapsed_s += dt;
@@ -502,117 +514,15 @@ pub(crate) fn step_cycles_and_capacitor(
                     .copied()
                     .unwrap_or(1)
                     .max(1);
-                let racks = ship_rack_heat.entry(cycle.ship_id).or_insert([0.0; 3]);
-                let r_idx = cycle.rack_idx.min(2);
-                racks[r_idx] = eve_dogma::thermodynamics::step_rack_heat(
-                    racks[r_idx],
-                    0.04 * (ovl_in_rack as f64),
-                    0.01,
-                    cycle.duration_s,
+                crate::services::tactical_module_mechanics::apply_overheat_rack_and_damage_on_cycle(
+                    cycle,
+                    ovl_in_rack,
+                    ship_rack_heat,
+                    sde_opt,
+                    db_opt,
+                    &mut burned_out,
+                    &mut burned_ship_modules,
                 );
-                let current_rack_heat = racks[r_idx];
-                let heat_snap = *racks;
-                if let Some(db_ref) = db_opt {
-                    db_ref.with_mut_snapshot(|snap| {
-                        let owner_id = snap
-                            .items
-                            .get(&cycle.ship_id)
-                            .map(|i| i.owner_id)
-                            .unwrap_or(0);
-                        let thermo_lvl = snap
-                            .skills
-                            .get(&owner_id)
-                            .and_then(|sk| sk.get(&28164))
-                            .map(|r| r.level)
-                            .unwrap_or(0);
-                        let eff_dmg = eve_dogma::thermodynamics::effective_heat_damage(
-                            cycle.heat_damage_per_cycle,
-                            thermo_lvl,
-                        );
-                        let entry = snap.transient_item_attributes.entry(cycle.ship_id).or_default();
-                        entry.insert(1177, heat_snap[0]);
-                        entry.insert(1176, heat_snap[1]);
-                        entry.insert(1175, heat_snap[2]);
-                        let active_flag = snap
-                            .items
-                            .get(&cycle.module_id)
-                            .map(|i| i.flag as u16)
-                            .unwrap_or(0);
-                        if let Some(m_item) = snap.items.get_mut(&cycle.module_id) {
-                            let cur_dmg = m_item
-                                .dynamic_attributes
-                                .get(&eve_sde::attr_ids::DAMAGE)
-                                .copied()
-                                .unwrap_or(0.0);
-                            let max_hp = m_item
-                                .dynamic_attributes
-                                .get(&eve_sde::attr_ids::HP_STRUCT)
-                                .copied()
-                                .unwrap_or(40.0);
-                            let next_dmg = (cur_dmg + eff_dmg).min(max_hp);
-                            m_item
-                                .dynamic_attributes
-                                .insert(eve_sde::attr_ids::DAMAGE, next_dmg);
-                            if next_dmg >= max_hp - 1e-6 {
-                                burned_out = true;
-                            }
-                        }
-                        if burned_out {
-                            snap.module_online_states.insert(cycle.module_id, false);
-                            snap.module_active_states.remove(&cycle.module_id);
-                        }
-                        // Slot-distance-attenuated heat bleed onto adjacent modules in the same rack
-                        if active_flag >= 11 && current_rack_heat > 0.0 {
-                            let adj_ids: Vec<(i64, u16)> = snap
-                                .items
-                                .values()
-                                .filter(|i| {
-                                    i.location_id == cycle.ship_id
-                                        && i.item_id != cycle.module_id
-                                        && match (r_idx, i.flag as u16) {
-                                            (0, 27..=34) => true,
-                                            (1, 19..=26) => true,
-                                            (2, 11..=18) => true,
-                                            _ => false,
-                                        }
-                                })
-                                .map(|i| (i.item_id, i.flag as u16))
-                                .collect();
-                            for (adj_id, adj_flag) in adj_ids {
-                                let dist = (adj_flag as isize - active_flag as isize).unsigned_abs();
-                                let att = eve_dogma::thermodynamics::heat_distance_attenuation(dist, 0.5);
-                                let bleed_dmg = eff_dmg * current_rack_heat * att * 0.5;
-                                if bleed_dmg > 1e-4 {
-                                    let mut adj_burned = false;
-                                    if let Some(adj_item) = snap.items.get_mut(&adj_id) {
-                                        let cur = adj_item
-                                            .dynamic_attributes
-                                            .get(&eve_sde::attr_ids::DAMAGE)
-                                            .copied()
-                                            .unwrap_or(0.0);
-                                        let max_hp = adj_item
-                                            .dynamic_attributes
-                                            .get(&eve_sde::attr_ids::HP_STRUCT)
-                                            .copied()
-                                            .unwrap_or(40.0);
-                                        let next = (cur + bleed_dmg).min(max_hp);
-                                        adj_item
-                                            .dynamic_attributes
-                                            .insert(eve_sde::attr_ids::DAMAGE, next);
-                                        if next >= max_hp - 1e-6 {
-                                            adj_burned = true;
-                                        }
-                                    }
-                                    if adj_burned {
-                                        snap.module_online_states.insert(adj_id, false);
-                                        snap.module_active_states.remove(&adj_id);
-                                        burned_ship_modules.push((cycle.ship_id, adj_id));
-                                    }
-                                }
-                            }
-                        }
-                    });
-                }
             }
 
             // 4. Weapon ammo & T2/Faction/Mining crystal volatility damage (`feat:modules.t2-crystal-volatility-destruction`)
@@ -1045,19 +955,14 @@ pub(crate) fn step_cycles_and_capacitor(
 
 pub(crate) fn cleanup_removed_module_cycle(ballpark: &mut Ballpark, removed: &ActiveModuleCycle, db_opt: &Option<Arc<eve_db::WorldRepository>>) {
     if let Some(orig_v) = removed.original_max_velocity {
-        if let Some(ball) = ballpark.balls.get_mut(&removed.ship_id) {
+        if let Some(bv) = ballpark.base_webbed_max_velocity.get_mut(&removed.ship_id) {
+            *bv = orig_v;
+        } else if let Some(ball) = ballpark.balls.get_mut(&removed.ship_id) {
             ball.max_velocity = orig_v;
         }
         if removed.effect_name.starts_with("cloaking") {
             if let Some(cs) = ballpark.combat_states.get_mut(&removed.ship_id) {
                 cs.cloak_original_max_velocity = None;
-            }
-        }
-    }
-    if let Some(orig_tv) = removed.target_original_max_velocity {
-        if let Some(tid) = removed.target_id {
-            if let Some(t_ball) = ballpark.balls.get_mut(&tid) {
-                t_ball.max_velocity = orig_tv;
             }
         }
     }
@@ -1296,6 +1201,12 @@ impl SystemHandle {
         destroyed.extend(zk_dead.into_iter().map(|bid| (bid, None)));
         let mut death_futs = Vec::new();
         for &(target_ball_id, owner_char_id) in &destroyed {
+            crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
+                &mut bp,
+                db_opt,
+                tactical_state,
+                target_ball_id,
+            );
             if let Some(db) = db_opt.as_ref() {
                 crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark(&mut bp, db, self.solar_system_id, target_ball_id);
             }

@@ -336,6 +336,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                     }
                 }
 
+<<<<<<< HEAD
                 // Micro Jump Drive / Field Generator (`group_id == 1189 | 1533 | 4769`)
                 if is_mjd {
                     let mut allowed_groups = Vec::new();
@@ -610,10 +611,10 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         let att = eve_dogma::compute_falloff_attenuation(distance_m, max_range, falloff);
                         let raw_sf = mod_state.get_attribute(20, &ctx.sde);
                         let eff_sf = if mod_type.group_id == 1672 {
-                            // Heavy Stasis Grappler (`feat:modules.heavy-stasis-grappler-falloff`):
-                            // Decays across optimal (1 km) and falloffEffectiveness (8-10 km) down to a -15% floor
+                            // Heavy Stasis Grappler (`feat:modules.stasis-grappler-mechanics`):
+                            // Full speedFactor within optimal (1 km), decaying across falloffEffectiveness (8-15 km) to 0%
                             if distance_m <= max_range + 3.0 * falloff.max(1.0) {
-                                (raw_sf * att).min(-15.0)
+                                raw_sf * att
                             } else {
                                 0.0
                             }
@@ -727,10 +728,30 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                             remote_shield_amount = mod_state.get_attribute(68, &ctx.sde) * ov_m * rr_imp_m;
                         }
                         325 | 2018 | 1698 => {
-                            remote_armor_amount = mod_state.get_attribute(84, &ctx.sde) * ov_m * rr_imp_m;
                             if mod_type.group_id == 2018 {
-                                mutadaptive_spool_step = mod_type.default_attributes.get(&2796).copied().unwrap_or(0.10);
-                                mutadaptive_spool_max = mod_type.default_attributes.get(&2797).copied().unwrap_or(1.50);
+                                let base_state = if m.dynamic_attribute_overrides.contains_key(&84) {
+                                    let mut clean_fit = fit.clone();
+                                    if let Some(fm) = clean_fit.modules.get_mut(&module_id) {
+                                        fm.dynamic_attribute_overrides.remove(&84);
+                                    }
+                                    clean_fit.build_effective_module_state(
+                                        module_id,
+                                        m.type_id,
+                                        is_overloaded,
+                                        &ctx.sde,
+                                    )
+                                } else {
+                                    mod_state.clone()
+                                };
+                                remote_armor_amount =
+                                    base_state.get_attribute(84, &ctx.sde) * ov_m * rr_imp_m;
+                                mutadaptive_spool_step =
+                                    mod_type.default_attributes.get(&2796).copied().unwrap_or(0.10);
+                                mutadaptive_spool_max =
+                                    mod_type.default_attributes.get(&2797).copied().unwrap_or(1.50);
+                            } else {
+                                remote_armor_amount =
+                                    mod_state.get_attribute(84, &ctx.sde) * ov_m * rr_imp_m;
                             }
                         }
                         585 => {

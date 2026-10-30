@@ -620,6 +620,7 @@ pub(crate) fn persist_misc_state(ctx: &ServerContext) {
 
 /// Returns the dictionary of saved character UI settings for consumption by `charMgr.GetCharacterSettings`.
 pub(crate) fn get_character_settings_dict(ctx: &ServerContext, char_id: i64) -> PyRep {
+    crate::services::nav_warp_interdiction::sync_waypoints_on_login(ctx, char_id);
     with_misc_state(ctx, |st| {
         let settings = st.char_settings.get(&char_id).cloned().unwrap_or_default();
         let entries: Vec<(PyRep, PyRep)> = settings
@@ -823,6 +824,11 @@ pub async fn handle(
                 return Some(Err(rpc_err("CustomError", "Setting value exceeds maximum allowed size")));
             }
 
+            if key == "waypoints" {
+                crate::services::nav_warp_interdiction::sync_waypoints_from_char_settings(ctx, char_id, &val);
+                return Some(Ok(PyRep::Bool(true)));
+            }
+
             let insert_res = with_misc_state(ctx, |st| {
                 let user_settings = st.char_settings.entry(char_id).or_default();
                 if !user_settings.contains_key(key) && user_settings.len() >= MAX_SETTINGS_PER_CHAR {
@@ -848,6 +854,13 @@ pub async fn handle(
             let Some(key) = args.first().and_then(|v| v.as_str()).filter(|s| !s.is_empty()) else {
                 return Some(Err(rpc_err("CustomError", "DeleteCharacterSetting requires a non-empty setting key")));
             };
+            if key == "waypoints" {
+                ctx.db.with_mut_snapshot(|snap| {
+                    if let Some(ch) = snap.characters.get_mut(&char_id) {
+                        ch.autopilot_waypoints.clear();
+                    }
+                });
+            }
             let _ = with_misc_state(ctx, |st| {
                 st.char_settings
                     .get_mut(&char_id)

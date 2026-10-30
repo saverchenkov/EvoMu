@@ -159,22 +159,23 @@ pub struct EnergyNosferatuResult {
     pub target_new_cap: f64,
 }
 
-/// Evaluates energy nosferatu capacitor vampire transfer with range falloff and absolute GJ rule (`feat:combat.nosferatu-drain-cap`).
+/// Evaluates energy nosferatu capacitor vampire transfer with range falloff and relative capacitor % rule (`feat:combat.nosferatu-drain-cap`, `feat:modules.energy-nosferatu-relative-capacitor`).
 pub fn eval_energy_nosferatu(
     module: &DogmaItemState,
     distance: f64,
     source_current_cap: f64,
     source_max_cap: f64,
     target_current_cap: f64,
-    _target_max_cap: f64,
+    target_max_cap: f64,
     sde: &SdeRegistry,
 ) -> EnergyNosferatuResult {
-    eval_energy_nosferatu_with_hull(
+    eval_energy_nosferatu_relative(
         module,
         distance,
         source_current_cap,
         source_max_cap,
         target_current_cap,
+        target_max_cap,
         false,
         sde,
     )
@@ -232,14 +233,16 @@ pub fn is_blood_raider_nosferatu_hull(ship_type_id: TypeId, sde: &SdeRegistry) -
     false
 }
 
-/// Evaluates Energy Nosferatu capacitor vampire transfer with range falloff, absolute GJ comparison
-/// (`target_current_cap > source_current_cap`), and Blood Raider hull override (`feat:combat.nosferatu-drain-cap`).
-pub fn eval_energy_nosferatu_with_hull(
+/// Evaluates Energy Nosferatu capacitor vampire transfer with range falloff, relative capacitor percentage comparison
+/// (`target_cap / target_max > source_cap / source_max`), and Blood Raider hull override (`feat:combat.nosferatu-drain-cap`, `feat:modules.energy-nosferatu-relative-capacitor`).
+#[allow(clippy::too_many_arguments)]
+pub fn eval_energy_nosferatu_relative(
     module: &DogmaItemState,
     distance: f64,
     source_current_cap: f64,
     source_max_cap: f64,
     target_current_cap: f64,
+    target_max_cap: f64,
     blood_raider_override: bool,
     sde: &SdeRegistry,
 ) -> EnergyNosferatuResult {
@@ -247,7 +250,9 @@ pub fn eval_energy_nosferatu_with_hull(
     let optimal = module.get_attribute(attr_ids::MAX_RANGE, sde);
     let falloff = get_module_falloff(module, sde);
     let falloff_factor = compute_falloff_with_cutoff(distance, optimal, falloff);
-    let can_drain = blood_raider_override || target_current_cap > source_current_cap;
+    let src_pct = source_current_cap / source_max_cap.max(1e-9);
+    let tgt_pct = target_current_cap / target_max_cap.max(1e-9);
+    let can_drain = blood_raider_override || tgt_pct > src_pct;
     let actual_transferred = if can_drain {
         (nominal_transfer * falloff_factor)
             .min(target_current_cap.max(0.0))
@@ -262,6 +267,28 @@ pub fn eval_energy_nosferatu_with_hull(
         source_new_cap: (source_current_cap + actual_transferred).min(source_max_cap),
         target_new_cap: (target_current_cap - actual_transferred).max(0.0),
     }
+}
+
+/// Evaluates Energy Nosferatu capacitor vampire transfer with range falloff and Blood Raider hull override (`feat:combat.nosferatu-drain-cap`).
+pub fn eval_energy_nosferatu_with_hull(
+    module: &DogmaItemState,
+    distance: f64,
+    source_current_cap: f64,
+    source_max_cap: f64,
+    target_current_cap: f64,
+    blood_raider_override: bool,
+    sde: &SdeRegistry,
+) -> EnergyNosferatuResult {
+    eval_energy_nosferatu_relative(
+        module,
+        distance,
+        source_current_cap,
+        source_max_cap,
+        target_current_cap,
+        source_max_cap,
+        blood_raider_override,
+        sde,
+    )
 }
 
 /// Evaluates effective signature radius from base signature and a slice of falloff-attenuated

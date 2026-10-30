@@ -260,6 +260,12 @@ pub struct CombatState {
     /// Capacitor recorded on the previous 1 Hz step to detect MJFG activation on Command Destroyers.
     #[serde(default)]
     pub last_step_capacitor: Option<f64>,
+    /// True when a Capital Micro Jump Field Generator (`83485`) is active on a Capital ship.
+    #[serde(default)]
+    pub is_capital_mjfg: bool,
+    /// True during a disconnect emergency warp so warp bubbles do not block or catch logoff warps (`feat:navigation.warp-bubble-drag-and-catch`).
+    #[serde(default)]
+    pub is_emergency_warping: bool,
     /// Active turret tracking speed multiplier (e.g., Abyssal Multibody Tracking Pylon `1.8`).
     #[serde(default = "default_one_f64")]
     pub tracking_speed_multiplier: f64,
@@ -319,6 +325,8 @@ impl Default for CombatState {
             mjfg_spool_remaining_s: 0.0,
             mjfg_original_sig_radius: None,
             last_step_capacitor: None,
+            is_capital_mjfg: false,
+            is_emergency_warping: false,
             tracking_speed_multiplier: 1.0,
             shield_boost_multiplier: 1.0,
             rng_state: default_combat_rng_state(),
@@ -694,6 +702,14 @@ pub enum DestinyEvent {
         ball_id: BallId,
         radius: f64,
     },
+    SetBallPosition {
+        ball_id: BallId,
+        position: [f64; 3],
+    },
+    SetBallVelocity {
+        ball_id: BallId,
+        velocity: [f64; 3],
+    },
     AddBalls {
         balls: Vec<Ball>,
     },
@@ -999,6 +1015,7 @@ pub struct Ballpark {
     pub ball_harmonics: BTreeMap<BallId, i32>,
     #[serde(default)]
     pub ball_wormhole_stages: BTreeMap<BallId, (i64, f64)>,
+    pub base_webbed_max_velocity: BTreeMap<BallId, f64>,
 }
 
 impl Ballpark {

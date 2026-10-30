@@ -76,6 +76,7 @@ impl Ballpark {
             formation_states: BTreeMap::new(),
             ball_harmonics: BTreeMap::new(),
             ball_wormhole_stages: BTreeMap::new(),
+            base_webbed_max_velocity: BTreeMap::new(),
         }
     }
 
@@ -437,6 +438,7 @@ impl Ballpark {
         self.miniball_states.remove(&ball_id);
         self.formation_states.remove(&ball_id);
         self.ball_harmonics.remove(&ball_id);
+        self.base_webbed_max_velocity.remove(&ball_id);
         self.target_locks.remove(&ball_id);
         for locks in self.target_locks.values_mut() {
             locks.retain(|l| l.target_id != ball_id);
@@ -583,18 +585,23 @@ impl Ballpark {
         }
     }
 
+    /// Returns `true` when `ball_id` is immune to warp disruption bubbles (Shuttles `group 31` or active Interdiction Nullifier).
+    pub fn is_ball_bubble_immune(&self, ball_id: BallId) -> bool {
+        self.ball_group_ids.get(&ball_id) == Some(&31)
+            || self
+                .combat_states
+                .get(&ball_id)
+                .map(|cs| cs.is_interdiction_nullified)
+                .unwrap_or(false)
+    }
+
     pub fn is_ball_scrambled(&self, ball_id: BallId) -> bool {
-        let is_nullified = self
-            .combat_states
-            .get(&ball_id)
-            .map(|cs| cs.is_interdiction_nullified)
-            .unwrap_or(false);
         if let Some(cs) = self.combat_states.get(&ball_id) {
             if cs.is_warp_scrambled() {
                 return true;
             }
         }
-        if !is_nullified {
+        if !self.is_ball_bubble_immune(ball_id) {
             if let Some(ball) = self.balls.get(&ball_id) {
                 if self.warp_bubble_mgr.is_scrambled_at(ball.position) {
                     return true;
@@ -615,6 +622,15 @@ impl Ballpark {
 
     /// Deploys an interdiction sphere (e.g. from an interdictor probe or HIC bubble) (`feat:modules.interdiction-sphere`).
     pub fn add_interdiction_sphere(&mut self, id: BallId, position: DVec3, radius: f64) -> bool {
+        let r = radius.max(1.0);
+        if let Some(existing) = self.balls.get_mut(&id) {
+            existing.position = position;
+            existing.radius = r;
+            existing.mode = MovementMode::Field;
+            self.warp_bubble_mgr
+                .add_bubble(WarpBubble::new(id, position, r));
+            return true;
+        }
         let ball = Ball {
             id,
             type_id: 22634, // Warp Disruption Probe / Interdiction Sphere
@@ -623,7 +639,7 @@ impl Ballpark {
             max_velocity: 0.0,
             inertia: 1.0,
             mass: 10_000.0,
-            radius: radius.max(1.0),
+            radius: r,
             speed_fraction: 0.0,
             mode: MovementMode::Field,
         };
@@ -906,6 +922,7 @@ impl Ballpark {
     pub fn deactivate_cloak(&mut self, ball_id: BallId) -> bool {
         let mut was_cloaked = false;
         let mut was_gate_cloak = false;
+        let mut restored_max_vel = None;
         if let Some(cs) = self.combat_states.get_mut(&ball_id) {
             if cs.is_cloaked || cs.gate_cloak_remaining_ticks > 0 {
                 was_cloaked = true;
@@ -914,8 +931,16 @@ impl Ballpark {
                 cs.is_covert_cloak = false;
                 cs.gate_cloak_remaining_ticks = 0;
                 cs.cloak_stabilization_remaining_s = 0.0;
+                restored_max_vel = cs.cloak_original_max_velocity.take();
                 if !was_gate_cloak && cs.cloak_configured_targeting_delay_s > 0.0 {
                     cs.decloak_targeting_delay_remaining_s = cs.cloak_configured_targeting_delay_s;
+                }
+            }
+        }
+        if let Some(orig_v) = restored_max_vel {
+            if let Some(ball) = self.balls.get_mut(&ball_id) {
+                if orig_v > 0.0 {
+                    ball.max_velocity = orig_v;
                 }
             }
         }
@@ -1169,7 +1194,18 @@ impl Ballpark {
 
         // Reject warp if scrambled or cloaked with a non-covert cloaking device (`feat:modules.cloak-prototype`, `feat:modules.covert-ops-cloak`)
         if matches!(mode, MovementMode::Warp { .. }) {
-            if self.is_ball_scrambled(ball_id) {
+            let is_emergency_warp = self
+                .combat_states
+                .get(&ball_id)
+                .is_some_and(|cs| cs.is_emergency_warping);
+            let is_scrambled = if is_emergency_warp {
+                self.combat_states
+                    .get(&ball_id)
+                    .is_some_and(|cs| cs.is_warp_scrambled())
+            } else {
+                self.is_ball_scrambled(ball_id)
+            };
+            if is_scrambled {
                 return Err(
                     "WarpScrambled: Warp drive disabled by warp disruption/scrambler effect"
                         .to_string(),
@@ -1192,12 +1228,8 @@ impl Ballpark {
                 ..
             } = mode
             {
-                let is_nullified = self
-                    .combat_states
-                    .get(&ball_id)
-                    .map(|cs| cs.is_interdiction_nullified)
-                    .unwrap_or(false);
-                if !is_nullified {
+                let bubble_immune = self.is_ball_bubble_immune(ball_id) || is_emergency_warp;
+                if !bubble_immune {
                     if let Some((_bid, intercept_pos)) =
                         self.warp_bubble_mgr.check_interception(origin, *destination)
                     {

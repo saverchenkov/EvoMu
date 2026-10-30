@@ -454,13 +454,20 @@ async fn handle_cmd_warp_to_stuff(
     )
     .await?;
 
-    let warp_dist = current_ball.position.distance(anchor_pos);
-    if warp_dist < 150_000.0 {
+    let landing_pos = crate::services::nav_warp_interdiction::resolve_warp_landing_point(
+        ctx,
+        sys_id,
+        target_id,
+        current_ball.position,
+        anchor_pos,
+    );
+    let landing_dist = current_ball.position.distance(landing_pos);
+    if landing_dist < 150_000.0 {
         return Err(BridgeRpcError {
             code: "WarpDistanceTooShort".into(),
             message: format!(
                 "Cannot warp {:.1} m (minimum warp distance is 150,000 m)",
-                warp_dist
+                landing_dist
             ),
         });
     }
@@ -486,8 +493,9 @@ async fn handle_cmd_warp_to_stuff(
             cs_check.is_cloaked && cs_check.is_covert_cloak && cs_check.gate_cloak_remaining_ticks == 0;
     }
 
-    let warp_dir = (anchor_pos - current_ball.position).normalize_or_zero();
-    let mut dest_pos = anchor_pos - warp_dir * min_range;
+    let warp_dir = (landing_pos - current_ball.position).normalize_or_zero();
+    let eff_min_range = min_range.min((landing_dist - 150_000.0).max(0.0));
+    let mut dest_pos = landing_pos - warp_dir * eff_min_range;
     let requested_dist_m = current_ball.position.distance(dest_pos);
 
     let (base_warp_cap_need, sde_max_cap) = ctx
@@ -911,6 +919,11 @@ async fn handle_cmd_stargate_jump(
     session.station_id = None;
     session.structure_id = None;
     crate::services::map_service::record_solar_system_jump(ctx, char_id, dest_sys_id);
+    crate::services::nav_warp_interdiction::advance_waypoints_on_arrival(
+        ctx,
+        char_id,
+        dest_sys_id as i64,
+    );
     let _ = crate::services::combat_npc_police::check_and_spawn_faction_police(ctx, dest_sys_id).await;
     ctx.quasar_gateway.on_session_changed(session, now_unix);
     if let Some(expiry) = zarzakh_lock_expiry {
@@ -1197,6 +1210,9 @@ async fn handle_dock(
                 session.structure_id = None;
             }
             record_session_change_timer(ctx, char_id, now_unix, sys_id, cur_tick, "dock");
+            crate::services::nav_warp_interdiction::advance_waypoints_on_arrival(
+                ctx, char_id, dock_id,
+            );
             ctx.quasar_gateway.on_session_changed(session, now_unix);
             ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["dockInStation"], 1, now_unix, &ctx.quasar_gateway);
             Ok(PyRep::keyval([

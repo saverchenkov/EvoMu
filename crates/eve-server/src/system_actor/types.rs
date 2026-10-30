@@ -129,11 +129,14 @@ pub struct ActiveModuleCycle {
 pub struct ActiveNaniteRepair {
     pub char_id: CharacterId,
     pub ship_id: BallId,
+    pub owner_char_id: i64,
     pub module_id: i64,
     pub initial_damage_hp: f64,
     pub paste_reserved: i32,
     pub duration_s: f64,
     pub elapsed_s: f64,
+    pub total_paste_required: i32,
+    pub paste_consumed_so_far: i32,
 }
 
 #[derive(Debug, Clone)]

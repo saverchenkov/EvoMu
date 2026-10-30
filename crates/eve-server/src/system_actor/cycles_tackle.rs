@@ -100,7 +100,7 @@ pub(crate) fn reconcile_tackle_and_bubbles(
         let is_target_scrambled = ballpark.is_ball_scrambled(ship_id)
             || ballpark.combat_states.get(&ship_id).is_some_and(|cs| cs.is_mwd_mjd_disabled);
         let stop_mwd_or_mjd = active_module_cycles[idx].is_mwd_or_mjd
-            && (mwd_disabled_targets.contains(&ship_id) || is_target_scrambled);
+            && mwd_disabled_targets.contains(&ship_id);
         let stop_mjd_from_scram = active_module_cycles[idx].mjd_jump_distance_m.is_some()
             && is_target_scrambled;
         if stop_mwd_or_mjd || stop_mjd_from_scram {
@@ -121,6 +121,93 @@ pub(crate) fn reconcile_tackle_and_bubbles(
             ball.velocity = DVec3::ZERO;
             ball.speed_fraction = 0.0;
             ball.mode = MovementMode::Stop;
+        }
+    }
+
+    // 5. Reconcile stacking-penalized target velocity modifiers (Stasis Webifier / Heavy Stasis Grappler)
+    let mut webbed_targets: std::collections::BTreeSet<BallId> =
+        ballpark.base_webbed_max_velocity.keys().copied().collect();
+    for c in active_module_cycles.iter() {
+        if c.target_velocity_multiplier.is_some() {
+            if let Some(tid) = c.target_id {
+                webbed_targets.insert(tid);
+            }
+        }
+    }
+    for tid in webbed_targets {
+        let target_ewar_immune = active_module_cycles
+            .iter()
+            .any(|c| c.ship_id == tid && c.self_ewar_immune);
+        let mut penalties: Vec<f64> = if target_ewar_immune {
+            Vec::new()
+        } else {
+            active_module_cycles
+                .iter()
+                .filter_map(|c| {
+                    if c.target_id == Some(tid) {
+                        c.target_velocity_multiplier.map(|m| (1.0 - m).max(0.0))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        if penalties.is_empty() {
+            if let Some(base_v) = ballpark.base_webbed_max_velocity.remove(&tid) {
+                if let Some(t_ball) = ballpark.balls.get_mut(&tid) {
+                    t_ball.max_velocity = base_v;
+                }
+            }
+        } else {
+            penalties.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+            let mut combined_mult = 1.0_f64;
+            for (rank, p) in penalties.into_iter().enumerate() {
+                let sp = (-((rank as f64) / 2.67).powi(2)).exp();
+                combined_mult *= (1.0 - p * sp).clamp(0.01, 1.0);
+            }
+            if let Some(t_ball) = ballpark.balls.get_mut(&tid) {
+                let base_v = *ballpark
+                    .base_webbed_max_velocity
+                    .entry(tid)
+                    .or_insert(t_ball.max_velocity);
+                t_ball.max_velocity = base_v * combined_mult;
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn on_target_unlocked_in_actor(
+    ballpark: &mut Ballpark,
+    active_module_cycles: &mut Vec<ActiveModuleCycle>,
+    base_scramble_strengths: &HashMap<BallId, i32>,
+    base_core_strengths: &HashMap<BallId, i32>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    source_id: BallId,
+    target_id_opt: Option<BallId>,
+    deactivation_hook: Option<&ModuleDeactivationHook>,
+) {
+    let mut removed_cycles = Vec::new();
+    for idx in (0..active_module_cycles.len()).rev() {
+        let matches_target = match target_id_opt {
+            Some(tid) => active_module_cycles[idx].target_id == Some(tid),
+            None => active_module_cycles[idx].target_id.is_some(),
+        };
+        if active_module_cycles[idx].ship_id == source_id && matches_target {
+            let removed = active_module_cycles.swap_remove(idx);
+            cleanup_removed_module_cycle(ballpark, &removed, db_opt);
+            removed_cycles.push(removed);
+        }
+    }
+    if !removed_cycles.is_empty() {
+        reconcile_tackle_and_bubbles(
+            ballpark,
+            active_module_cycles,
+            base_scramble_strengths,
+            base_core_strengths,
+        );
+        for removed in &removed_cycles {
+            emit_cycle_deactivation(removed, ballpark, db_opt, deactivation_hook);
         }
     }
 }
@@ -241,7 +328,12 @@ pub(crate) fn handle_add_module_cycle(
             ball.max_velocity *= vel_mult;
         }
     } else if cycle.speed_boost_factor.abs() > 1e-9 {
-        if let Some(ball) = ballpark.balls.get_mut(&cycle.ship_id) {
+        if let Some(bv) = ballpark.base_webbed_max_velocity.get_mut(&cycle.ship_id) {
+            if cycle.original_max_velocity.is_none() {
+                cycle.original_max_velocity = Some(*bv);
+                *bv *= 1.0 + cycle.speed_boost_factor;
+            }
+        } else if let Some(ball) = ballpark.balls.get_mut(&cycle.ship_id) {
             if cycle.original_max_velocity.is_none() {
                 let is_cloak_cycle = cycle.effect_name.starts_with("cloaking");
                 let active_cloak_mult = active_module_cycles
@@ -280,19 +372,6 @@ pub(crate) fn handle_add_module_cycle(
         if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
             cycle.original_signature_radius = Some(cs.signature_radius);
             cs.signature_radius *= sig_mult;
-        }
-    }
-    if let Some(tgt_vel_mult) = cycle.target_velocity_multiplier {
-        if let Some(target_id) = cycle.target_id {
-            let target_ewar_immune = active_module_cycles
-                .iter()
-                .any(|c| c.ship_id == target_id && c.self_ewar_immune);
-            if !target_ewar_immune {
-                if let Some(t_ball) = ballpark.balls.get_mut(&target_id) {
-                    cycle.target_original_max_velocity = Some(t_ball.max_velocity);
-                    t_ball.max_velocity *= tgt_vel_mult;
-                }
-            }
         }
     }
     if cycle.is_adc {

@@ -330,97 +330,22 @@ pub(crate) async fn handle_module_cycles(
 
             // Interdiction Sphere Launcher (`group_id == 589`, e.g., `Interdiction Sphere Launcher I` `22782`)
             if mod_type.group_id == 589 {
-                if sys_id == 30_100_000 && mod_type.default_attributes.get(&5561).copied().unwrap_or(0.0) > 0.0 {
-                    return Some(Err(BridgeRpcError::user_error("ModuleDisallowedInHazardSystem")));
-                }
-                let sys_sec = ctx
-                    .sde
-                    .solar_systems
-                    .get(&sys_id)
-                    .map(|s| s.security_status)
-                    .unwrap_or(1.0);
-                let corruption_stage5 =
-                    crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id) >= 5;
-                if sys_sec >= 0.45 || (sys_sec > 0.0 && !corruption_stage5) {
-                    return Some(Err(BridgeRpcError {
-                        code: "CannotLaunchInterdictionProbeInEmpire".into(),
-                        message: format!(
-                            "Interdiction sphere probes can only be launched in null-sec or wormhole space (system {sys_id} security {sys_sec:.2} > 0.0)"
-                        ),
-                    }));
-                }
-                let ship_group_id = ctx
-                    .sde
-                    .types
-                    .get(&fit.ship.type_id)
-                    .map(|t| t.group_id)
-                    .unwrap_or(0);
-                if ship_group_id != 541 {
-                    return Some(Err(BridgeRpcError { code: "InvalidShipGroup".into(), message: "Interdiction Sphere Launcher can only be activated on Interdictors (group 541)".into() }));
-                }
-                let loaded_charge_opt = ctx.db.with_snapshot(|snap| {
-                    snap.items
-                        .values()
-                        .find(|i| {
-                            i.location_id == ship_id
-                                && (i.flag as u16) == m.flag_id
-                                && i.item_id != module_id
-                                && i.quantity > 0
-                                && ctx.sde.types.get(&i.type_id).is_some_and(|t| matches!(t.group_id, 548 | 4088))
-                        })
-                        .map(|i| (i.item_id, i.type_id))
-                });
-                let Some((charge_item_id, probe_type_id)) = loaded_charge_opt else {
-                    return Some(Err(BridgeRpcError { code: "NoProbesLoaded".into(), message: "Interdiction Sphere Launcher has no Warp Disrupt Probe loaded".into() }));
-                };
-
-                let (probe_id, remaining_in_launcher) = ctx.db.with_mut_snapshot(|snap| {
-                    let mut rem = 0;
-                    if let Some(ci) = snap.items.get_mut(&charge_item_id) {
-                        ci.quantity = (ci.quantity - 1).max(0);
-                        rem = ci.quantity;
-                    }
-                    if rem == 0 {
-                        snap.items.remove(&charge_item_id);
-                    }
-                    snap.next_entity_id += 1;
-                    (snap.next_entity_id, rem)
-                });
-                if remaining_in_launcher == 0 {
-                    ctx.invalidate_ship_fitting(ship_id);
-                }
-
-                let probe_sde = ctx.sde.types.get(&probe_type_id);
-                let is_wubble_probe = probe_type_id == 56748 || probe_sde.is_some_and(|t| t.group_id == 4088);
-                let bubble_radius = probe_sde
-                    .and_then(|t| t.default_attributes.get(&103).copied().or_else(|| t.default_attributes.get(&99).copied()))
-                    .unwrap_or(if is_wubble_probe { 10_000.0 } else { 20_000.0 });
-                let ship_pos = sys
-                    .get_ball_snapshot(ship_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|(_, b)| b.position)
-                    .unwrap_or(DVec3::ZERO);
-
-                if is_wubble_probe {
-                    crate::services::tactical_modules::register_launched_wubble_probe(
-                        ctx, probe_id, sys_id, ship_pos, bubble_radius,
-                    );
-                } else if let Err(e) = sys.add_interdiction_sphere(probe_id, ship_pos, bubble_radius).await {
-                    return Some(Err(BridgeRpcError { code: "SystemActorError".into(), message: e }));
-                }
-
-                // V24 client derives `OnModuleActivated` from `OnGodmaShipEffect` (active=1).
-                let _ = ctx.notify_module_effect_started(char_id, ship_id, module_id, m.type_id, Some(effect_name.as_str()), target_id_opt);
-                return Some(Ok(PyRep::keyval([
-                    ("moduleID", PyRep::Integer(module_id)),
-                    ("launcherID", PyRep::Integer(module_id)),
-                    ("probeID", PyRep::Integer(probe_id)),
-                    ("probeTypeID", PyRep::Integer(probe_type_id as i64)),
-                    ("bubbleRadius", PyRep::Real(bubble_radius)),
-                    ("remainingInLauncher", PyRep::Integer(remaining_in_launcher as i64)),
-                ])));
+                return Some(
+                    crate::services::tactical_module_mechanics::activate_interdiction_sphere_launcher(
+                        ctx,
+                        &sys,
+                        sys_id,
+                        char_id,
+                        ship_id,
+                        fit.ship.type_id,
+                        module_id,
+                        &m,
+                        mod_type,
+                        effect_name.as_str(),
+                        target_id_opt,
+                    )
+                    .await,
+                );
             }
 
             // Survey Probe Launcher (`group_id == 1226`, `33270` Survey Probe Launcher I, `33272` Survey Probe Launcher II)
@@ -630,11 +555,27 @@ pub(crate) async fn handle_module_cycles(
             }
 
             {
+                let in_db_active = ctx.db.with_snapshot(|s| s.module_active_states.contains(&module_id));
+                let in_actor_cycle = sys.has_module_cycle(ship_id, module_id).await;
+                let mut m_effective_state = m.state;
+                if !in_db_active
+                    && !in_actor_cycle
+                    && matches!(
+                        m_effective_state,
+                        eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
+                    )
+                {
+                    m_effective_state = eve_dogma::ModuleState::Online;
+                    if let Some(fm) = fit.modules.get_mut(&module_id) {
+                        fm.state = eve_dogma::ModuleState::Online;
+                    }
+                    ctx.store_ship_fitting(ship_id, fit.clone());
+                }
                 let already_active = matches!(
-                    m.state,
+                    m_effective_state,
                     eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
-                ) || ctx.db.with_snapshot(|s| s.module_active_states.contains(&module_id))
-                    || sys.has_module_cycle(ship_id, module_id).await;
+                ) || in_db_active
+                    || in_actor_cycle;
                 if method == "Overload"
                     && (already_active
                         || (target_id_opt.is_none()
@@ -670,6 +611,16 @@ pub(crate) async fn handle_module_cycles(
                     }));
                 }
                 if let Some(target_id) = target_id_opt {
+                    if crate::services::tactical_module_mechanics::is_untargetable_interdiction_probe(
+                        ctx, &sys, target_id,
+                    )
+                    .await
+                    {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidTarget".into(),
+                            message: "Interdiction probes cannot be targeted directly; use area-of-effect weapons".into(),
+                        }));
+                    }
                     if target_id == ship_id && matches!(mod_type.group_id, 41 | 325 | 2018 | 585 | 67 | 1697 | 1698 | 52 | 65 | 68 | 71 | 201 | 208 | 291 | 379 | 1672) {
                         return Some(Err(BridgeRpcError {
                             code: "CannotActivateOnSelf".into(),
@@ -751,7 +702,11 @@ pub(crate) async fn handle_module_cycles(
                 }
                 if is_mwd_or_mjd {
                     if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-                        if cs.is_mwd_mjd_disabled || (is_mjd && cs.is_warp_scrambled()) {
+                        if cs.is_mwd_mjd_disabled
+                            || (is_mjd
+                                && (cs.is_warp_scrambled()
+                                    || sys.is_ball_scrambled(ship_id).await.unwrap_or(false)))
+                        {
                             return Some(Err(BridgeRpcError { code: "WarpScrambled".into(), message: "Cannot activate Microwarpdrive or Micro Jump Drive while warp scrambled".into() }));
                         }
                     }
@@ -928,7 +883,11 @@ pub(crate) async fn handle_module_cycles(
                 _ => 2,
             };
             let heat_damage_per_cycle = {
-                let hd = mod_state.get_attribute(1211, &ctx.sde);
+                let mut pre_thermo = mod_state.clone();
+                pre_thermo
+                    .modifiers
+                    .retain(|m| m.effect_id != Some(3196) && m.source_item_id != 28164);
+                let hd = pre_thermo.get_attribute(1211, &ctx.sde);
                 if hd > 0.0 { hd } else { 3.4 }
             };
 
@@ -1292,8 +1251,11 @@ pub(crate) async fn handle_module_cycles(
                 }
             }
             ctx.store_ship_fitting(ship_id, fit.clone());
-            if mod_type.group_id == 330 {
-                crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
+            if mod_type.group_id == 330 || m.type_id == 83485 {
+                crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(
+                    ctx, char_id, sys_id, ship_id,
+                )
+                .await;
             }
 
             // V24 client derives `OnModuleActivated` from `OnGodmaShipEffect` (active=1).

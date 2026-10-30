@@ -520,3 +520,6 @@ mod open_feats_ships_pve_b5;
 mod open_feats_and_rpcs_batch2_part2;
 mod quasar_b2_closure;
 mod notify_p7_sp1_sp2_closure;
+mod nav_tactical_modules_closure;
+mod nav_tactical_modules_closure_part2;
+mod nav_tactical_modules_closure_part3;
