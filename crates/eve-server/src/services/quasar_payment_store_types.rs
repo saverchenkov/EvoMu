@@ -217,6 +217,10 @@ pub struct StoreOffer {
     pub price_plex: i64,
     pub product_ids: Vec<u32>,
     pub targeted: bool,
+    #[serde(default)]
+    pub price_cents: Option<u64>,
+    #[serde(default)]
+    pub currency: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -785,6 +789,8 @@ pub fn register_plex_vault_extra_handlers(router: &PublicGatewayRouter, db: Arc<
                     price_plex,
                     product_ids,
                     targeted,
+                    price_cents: None,
+                    currency: None,
                 });
                 save_store_catalog(snap, &catalog);
                 if !tags.is_empty() {

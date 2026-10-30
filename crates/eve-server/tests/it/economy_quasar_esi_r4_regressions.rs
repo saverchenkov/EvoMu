@@ -350,6 +350,8 @@ async fn test_r4_190_plex_store_validates_recipient_before_deducting_plex_and_al
                 price_plex: 100,
                 product_ids: vec![9001],
                 targeted: false,
+                price_cents: None,
+                currency: None,
             },
         );
         catalog.offers.push(
@@ -361,6 +363,8 @@ async fn test_r4_190_plex_store_validates_recipient_before_deducting_plex_and_al
                 price_plex: 0,
                 product_ids: vec![9001],
                 targeted: false,
+                price_cents: None,
+                currency: None,
             },
         );
         eve_server::services::quasar_payment_store_types::save_store_catalog(snap, &catalog);

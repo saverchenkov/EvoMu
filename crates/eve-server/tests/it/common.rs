@@ -90,6 +90,8 @@ pub fn seed_test_nes_store_catalog(ctx: &ServerContext) {
                     price_plex: 500,
                     product_ids: vec![101],
                     targeted: false,
+                    price_cents: Some(1_999),
+                    currency: Some("USD".into()),
                 },
                 StoreOffer {
                     id: 1002,
@@ -99,6 +101,8 @@ pub fn seed_test_nes_store_catalog(ctx: &ServerContext) {
                     price_plex: 110,
                     product_ids: vec![102],
                     targeted: false,
+                    price_cents: Some(499),
+                    currency: Some("USD".into()),
                 },
                 StoreOffer {
                     id: 1003,
@@ -108,6 +112,8 @@ pub fn seed_test_nes_store_catalog(ctx: &ServerContext) {
                     price_plex: 140,
                     product_ids: vec![103],
                     targeted: false,
+                    price_cents: Some(699),
+                    currency: Some("USD".into()),
                 },
                 StoreOffer {
                     id: 1004,
@@ -117,6 +123,8 @@ pub fn seed_test_nes_store_catalog(ctx: &ServerContext) {
                     price_plex: 75,
                     product_ids: vec![104],
                     targeted: false,
+                    price_cents: Some(399),
+                    currency: Some("USD".into()),
                 },
                 StoreOffer {
                     id: 2001,
@@ -126,6 +134,8 @@ pub fn seed_test_nes_store_catalog(ctx: &ServerContext) {
                     price_plex: 450,
                     product_ids: vec![101],
                     targeted: true,
+                    price_cents: Some(1_799),
+                    currency: Some("USD".into()),
                 },
                 StoreOffer {
                     id: 3001,
@@ -135,6 +145,8 @@ pub fn seed_test_nes_store_catalog(ctx: &ServerContext) {
                     price_plex: 120,
                     product_ids: vec![103],
                     targeted: true,
+                    price_cents: Some(599),
+                    currency: Some("USD".into()),
                 },
             ],
         };
