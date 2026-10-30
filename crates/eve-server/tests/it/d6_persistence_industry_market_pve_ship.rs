@@ -383,10 +383,11 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         let _ = ctx.systems.get_or_spawn(30_000_142).set_ball_position(sess_p1.ship_id.unwrap(), glam::DVec3::from_array(cpos) + glam::DVec3::new(500.0, 0.0, 0.0)).await;
         call(&ctx, &mut sess_p1, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(1_870_014_200)]).await.expect("StartNewGameInstance");
         call(&ctx, &mut sess_p1, "map", "GetIncursionGlobalReport", &[]).await.expect("GetIncursionGlobalReport");
-        let (vg_sys, vg_bid, vg_pos) = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
+        let (vg_sys, vg_sid, vg_pos) = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
             let s = reg.incursions[&20_000_020].sites.iter().find(|s| s.tier == "Vanguard").unwrap();
-            (s.solar_system_id, s.boss_npc_ball_id, s.position)
+            (s.solar_system_id, s.site_id.clone(), s.position)
         });
+        let vg_bid = crate::common::clear_incursion_site_escort_waves(&ctx, vg_sys, &vg_sid).await;
         sess_p1.solar_system_id = Some(vg_sys);
         let s1 = ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&P1).unwrap().solar_system_id = vg_sys; s.characters[&P1].active_ship_id });
         let _ = ctx.systems.get_or_spawn(vg_sys).spawn_ball(eve_server::services::pve_incursion_sites::make_site_npc_ball(s1, 587, vg_pos)).await;
@@ -446,10 +447,10 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         assert!(!format!("{anoms_cache:?}").contains("2134") && format!("{anoms_cache:?}").contains("1215"));
 
         let esc_list = call(&ctx, &mut sess_p1, "dungeonExplorationMgr", "GetMyEscalatingPathDetails", &[]).await.expect("GetMyEscalatingPathDetails");
-        let PyRep::List(escs) = &esc_list else { panic!("Expected List") };
-        assert_eq!(escs.len(), 1);
-        assert_eq!(escs[0].dict_get("sourceDungeonID").and_then(|v| v.as_i64()), Some(2134));
-        assert_eq!(escs[0].dict_get("dungeonID").and_then(|v| v.as_i64()), Some(2403));
+        let PyRep::Rowset { columns: esc_cols, rows: esc_rows } = &esc_list else { panic!("Expected Rowset, got {esc_list:?}") };
+        assert_eq!(esc_rows.len(), 1);
+        let col = |name: &str| esc_cols.iter().position(|c| c == name).unwrap();
+        assert_eq!((esc_rows[0][col("sourceDungeonID")].as_i64(), esc_rows[0][col("dungeonID")].as_i64()), (Some(2134), Some(2403)));
         let bms = call(&ctx, &mut sess_p1, "bookmark", "GetBookmarks", &[]).await.expect("GetBookmarks");
         let bm_dbg = format!("{bms:?}");
         assert!(bm_dbg.contains("Data Site Bookmark") && bm_dbg.contains("-32000000.0") && bm_dbg.contains("Escalation:"));
@@ -503,7 +504,7 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         let PyRep::Rowset { rows: exp_sig_rows, .. } = &sigs_exp else { panic!("Expected Rowset") };
         assert!(exp_sig_rows.is_empty(), "Expired cosmic signatures must despawn after 24h");
         let esc_exp = call(&ctx, &mut sess_p1, "dungeonExplorationMgr", "GetMyEscalatingPathDetails", &[]).await.expect("GetMyEscalatingPathDetails at +90,000s");
-        assert_eq!(esc_exp, PyRep::List(vec![]), "Expired escalations must despawn after 24h");
+        assert!(matches!(esc_exp, PyRep::Rowset { ref rows, .. } if rows.is_empty()), "Expired escalations must despawn after 24h: {esc_exp:?}");
     }
     let _ = std::fs::remove_file(&path);
 }

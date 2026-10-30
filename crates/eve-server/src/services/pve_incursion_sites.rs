@@ -122,15 +122,21 @@ pub struct IncursionLPLogEntry {
     pub timestamp_filetime: i64,
 }
 
+pub use crate::services::pve_incursion_lifecycle::*;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IncursionSystemEffects {
     pub constellation_id: ConstellationId,
+    pub effect_type_id: u32,
     pub influence: f64,
     pub cyno_jammed: bool,
     pub shield_penalty: f64,
     pub armor_penalty: f64,
     pub capacitor_penalty: f64,
     pub damage_penalty: f64,
+    pub resistance_penalty: f64,
+    pub bounty_penalty: f64,
+    pub lp_penalty: f64,
 }
 
 pub fn get_sansha_encounter_composition(
@@ -213,7 +219,8 @@ pub fn make_incursion_site(
     locked_until_low_influence: bool,
     position: DVec3,
 ) -> IncursionSiteEntry {
-    let boss_npc_ball_id = 1_896_000_000 + ((const_id % 10_000) as i64) * 100 + (dungeon_id as i64);
+    let boss_npc_ball_id =
+        1_896_000_000 + ((const_id % 10_000) as i64) * 100_000_000 + ((dungeon_id % 10_000) as i64) * 10_000;
     let (boss_type_id, escort_spawns) = get_sansha_encounter_composition(boss_npc_ball_id, dungeon_id, tier);
     IncursionSiteEntry {
         site_id: format!("INC-{const_id}-{dungeon_id}"),
@@ -282,26 +289,21 @@ pub fn seed_incursion_for_constellation(
         .collect();
     sys_list.sort_unstable();
 
-    let stg = sys_list.first().copied().unwrap_or(30_000_140);
-    let hq = sys_list.last().copied().unwrap_or(stg);
-    let vg = if sys_list.len() > 2 {
-        vec![sys_list[1], sys_list.get(2).copied().unwrap_or(sys_list[1])]
-    } else {
-        vec![stg]
-    };
-    let as_s = if sys_list.len() > 4 {
-        vec![sys_list[3], sys_list[4]]
-    } else {
-        vec![stg]
-    };
     let (staging_solar_system_id, vanguard_solar_system_ids, assault_solar_system_ids, hq_solar_system_id) =
-        (stg, vg, as_s, hq);
+        crate::services::pve_incursion_lifecycle::assign_constellation_system_roles(
+            &ctx.sde,
+            constellation_id,
+            &sys_list,
+        );
 
     let vg_sys = vanguard_solar_system_ids[0];
     let vg_sys2 = vanguard_solar_system_ids.get(1).copied().unwrap_or(vg_sys);
     let as_sys = assault_solar_system_ids[0];
     let as_sys2 = assault_solar_system_ids.get(1).copied().unwrap_or(as_sys);
 
+    // DERIVED: High-sec Sansha Incursion site base ISK, CONCORD LP, optimal pilot caps, and influence deltas
+    // per EVE University Wiki `Incursion_sites` (Vanguard 10.395M/1,400 LP, Assault 18.2M/3,500 LP,
+    // HQ 31.5M/7,000 LP, Kundalini Manifest Mothership 63.0M/14,000 LP).
     let sites = vec![
         make_incursion_site(
             constellation_id, 5164, "Override Transfer Array (Staging)", staging_solar_system_id,
@@ -345,6 +347,33 @@ pub fn seed_incursion_for_constellation(
         ),
     ];
 
+    let now_sec = crate::services::pve_special_sites::spec_now_sec(reg);
+    reg.incursion_lifecycle.insert(
+        constellation_id,
+        crate::services::pve_incursion_lifecycle::IncursionLifecycleMeta {
+            spawned_at_sec: now_sec,
+            last_site_completed_sec: now_sec,
+            last_regen_sec: now_sec,
+            withdraw_until_sec: None,
+            ended_at_sec: None,
+        },
+    );
+    for s in &sites {
+        reg.incursion_site_waves.insert(
+            s.site_id.clone(),
+            crate::services::pve_incursion_lifecycle::IncursionSiteWaveMeta {
+                current_wave: 1,
+                total_waves: if s.tier == "Mothership" {
+                    1
+                } else if s.tier == "Staging" {
+                    2
+                } else {
+                    3
+                },
+            },
+        );
+    }
+
     reg.incursions.insert(
         constellation_id,
         IncursionTaleRecord {
@@ -366,27 +395,23 @@ pub fn seed_incursion_for_constellation(
     );
 }
 
+pub fn get_incursion_effects_for_system_in_snap(
+    sde: &eve_sde::SdeRegistry,
+    snap: &eve_db::WorldStateSnapshot,
+    solar_system_id: SolarSystemId,
+) -> Option<IncursionSystemEffects> {
+    crate::services::pve_incursion_lifecycle::compute_incursion_system_effects_in_snap(
+        sde,
+        snap,
+        solar_system_id,
+    )
+}
+
 pub fn get_incursion_effects_for_system(
     ctx: &ServerContext,
     solar_system_id: SolarSystemId,
 ) -> Option<IncursionSystemEffects> {
-    let const_id = ctx.sde.solar_systems.get(&solar_system_id).map(|s| s.constellation_id)?;
-    with_pve_special_reg(ctx, |reg| {
-        let inc = reg.incursions.get(&const_id)?;
-        if inc.influence <= 0.0 || inc.state == "Ended" {
-            return None;
-        }
-        let inf = inc.influence;
-        Some(IncursionSystemEffects {
-            constellation_id: const_id,
-            influence: inf,
-            cyno_jammed: inf > 0.0,
-            shield_penalty: 0.50 * inf,
-            armor_penalty: 0.50 * inf,
-            capacitor_penalty: 0.50 * inf,
-            damage_penalty: 0.50 * inf,
-        })
-    })
+    crate::services::pve_incursion_lifecycle::compute_incursion_system_effects(ctx, solar_system_id)
 }
 
 #[derive(Debug, Clone)]
@@ -409,73 +434,10 @@ pub struct IncursionCompletionResult {
 /// as the incursion tale's spawn-template identifier in `taleMgr` results and tale notices.
 pub const INCURSION_TALE_TEMPLATE_ID: u64 = 5158;
 
-/// Publishes `eve_public.tale.api.StartedNotice` / `StoppedNotice` for an incursion tale.
-pub fn publish_incursion_tale_notice(
-    gateway: &crate::quasar_gateway::PublicGatewayRouter,
-    started: bool,
-    tale_id: i64,
-    staging_solar_system_id: SolarSystemId,
-    now_unix: u64,
-) {
-    use crate::services::quasar_goal_tale_notices as notices;
-    let payload = notices::tale_lifecycle(
-        started,
-        tale_id.max(0) as u64,
-        INCURSION_TALE_TEMPLATE_ID,
-        staging_solar_system_id as u64,
-    );
-    let _ = gateway.publish_notice(notices::tale_scope(), payload, now_unix);
-}
-
-/// When a site completion ended its incursion (mothership defeated), announces the tale stop.
-pub fn publish_incursion_tale_stopped_if_ended(
-    gateway: &crate::quasar_gateway::PublicGatewayRouter,
-    db: &Arc<WorldRepository>,
-    result: &IncursionCompletionResult,
-) {
-    if !result.incursion_ended {
-        return;
-    }
-    let now = db.clock().now_unix_secs();
-    let ended = with_pve_special_reg_db(db, now, |reg| {
-        reg.incursions
-            .values_mut()
-            .find(|inc| inc.sites.iter().any(|s| s.site_id == result.site_id))
-            .filter(|inc| !inc.tale_stop_published)
-            .map(|inc| {
-                // Claimed under the registry lock: only the first caller for this end publishes.
-                inc.tale_stop_published = true;
-                (inc.tale_id, inc.staging_solar_system_id)
-            })
-    });
-    if let Some((tale_id, staging)) = ended {
-        publish_incursion_tale_notice(gateway, false, tale_id, staging, now);
-    }
-}
-
-pub fn notify_incursion_site_completed(
-    gateway: &crate::quasar_gateway::PublicGatewayRouter,
-    db: &Arc<WorldRepository>,
-    site_sys: SolarSystemId,
-    result: &IncursionCompletionResult,
-) {
-    publish_incursion_tale_stopped_if_ended(gateway, db, result);
-    let now = db.clock().now_unix_secs();
-    let did = result
-        .site_id
-        .rsplit('-')
-        .next()
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(INCURSION_TALE_TEMPLATE_ID as u32);
-    gateway.progression.extra.on_system_tale_encounter_completed(
-        site_sys,
-        "Incursion",
-        did,
-        1,
-        now,
-        gateway,
-    );
-}
+pub use crate::services::pve_incursion_lifecycle::{
+    notify_incursion_site_completed, publish_incursion_tale_notice,
+    publish_incursion_tale_stopped_if_ended,
+};
 
 pub async fn process_incursion_site_completion_and_payout_core(
     systems: &Arc<SystemRegistry>,
@@ -491,7 +453,7 @@ pub async fn process_incursion_site_completion_and_payout_core(
     let now_ft = ((now_unix + 11_644_473_600) * 10_000_000) as i64;
     let incursion_found = with_pve_special_reg_db(db, now_unix, |reg| {
         for (&cid, inc) in reg.incursions.iter_mut() {
-            if inc.state == "Ended" {
+            if inc.state == "Ended" || inc.state == "Withdrawing" {
                 continue;
             }
             for site in &mut inc.sites {
@@ -519,6 +481,23 @@ pub async fn process_incursion_site_completion_and_payout_core(
                                 ));
                             }
                         }
+                    }
+                    if let Some(wm) = reg.incursion_site_waves.get(&site.site_id) {
+                        if wm.current_wave < wm.total_waves {
+                            return Err(rpc_err(
+                                "IncursionSiteNpcsRemaining",
+                                format!(
+                                    "Incursion site {} is on wave {}/{}; clear all waves before site completion",
+                                    site.site_id, wm.current_wave, wm.total_waves
+                                ),
+                            ));
+                        }
+                    }
+                    if site.escort_spawns.iter().any(|e| !e.destroyed) {
+                        return Err(rpc_err(
+                            "IncursionSiteNpcsRemaining",
+                            format!("Incursion site {} escort NPCs are still alive", site.site_id),
+                        ));
                     }
                     if !site.boss_destroyed {
                         return Err(rpc_err(
@@ -649,35 +628,72 @@ pub async fn process_incursion_site_completion_and_payout_core(
     // with 0 ISK / 0 LP payout so the site does not stall without a boss ball in space!
 
     let step_res = with_pve_special_reg_db(db, now_unix, |reg| {
+        let sim_now = crate::services::pve_special_sites::spec_now_sec(reg);
         let inc = reg.incursions.get_mut(&target_cid).unwrap();
         let site_idx = inc
             .sites
             .iter()
             .position(|s| s.site_id == matched_site_id)
             .unwrap();
-        if !inc.sites[site_idx].boss_destroyed {
+        if !inc.sites[site_idx].boss_destroyed
+            || reg
+                .incursion_site_waves
+                .get(&inc.sites[site_idx].site_id)
+                .is_some_and(|w| w.current_wave < w.total_waves)
+            || inc.sites[site_idx].escort_spawns.iter().any(|e| !e.destroyed)
+        {
             return None;
         }
         inc.sites[site_idx].boss_destroyed = false;
         inc.sites[site_idx].killer_char_id = None;
         inc.sites[site_idx].killer_fleet_id = None;
         inc.sites[site_idx].completed_count += 1;
-        let (b_isk, b_lp, min_pilots, opt, s_tier, delta, b_tid) = (
+        let stale_escorts: Vec<i64> = inc.sites[site_idx]
+            .escort_spawns
+            .iter()
+            .filter(|e| !e.destroyed)
+            .map(|e| e.npc_ball_id)
+            .collect();
+        let (b_isk, b_lp, min_pilots, opt, s_tier, delta, s_did) = (
             inc.sites[site_idx].base_isk,
             inc.sites[site_idx].base_concord_lp,
             inc.sites[site_idx].min_pilots,
             inc.sites[site_idx].max_optimal_pilots,
             inc.sites[site_idx].tier.clone(),
             inc.sites[site_idx].influence_delta,
-            inc.sites[site_idx].boss_type_id,
+            inc.sites[site_idx].dungeon_id,
         );
+        let meta = reg
+            .incursion_lifecycle
+            .entry(target_cid)
+            .or_insert_with(|| crate::services::pve_incursion_lifecycle::IncursionLifecycleMeta {
+                spawned_at_sec: sim_now,
+                last_site_completed_sec: sim_now,
+                last_regen_sec: sim_now,
+                withdraw_until_sec: None,
+                ended_at_sec: None,
+            });
+        meta.last_site_completed_sec = sim_now;
+        meta.last_regen_sec = sim_now;
+
         let (next_boss_ball, ms_to_spawn) = if s_tier == "Mothership" {
             inc.influence = 0.0;
             inc.mothership_defeated = true;
-            inc.state = "Ended".into();
+            inc.state = "Withdrawing".into();
+            inc.lockout_until_filetime = Some(
+                now_ft
+                    + (crate::services::pve_incursion_lifecycle::INCURSION_WITHDRAWAL_DURATION_SEC
+                        as i64)
+                        * 10_000_000,
+            );
+            meta.withdraw_until_sec = Some(
+                sim_now
+                    + crate::services::pve_incursion_lifecycle::INCURSION_WITHDRAWAL_DURATION_SEC,
+            );
             (None, None)
         } else {
-            inc.influence = (inc.influence - delta).max(0.0);
+            let next_inf = (inc.influence - delta).max(0.0);
+            inc.influence = if next_inf <= 1e-6 { 0.0 } else { next_inf };
             let ms = if inc.influence <= 0.0 && !inc.mothership_spawned {
                 inc.mothership_spawned = true;
                 inc.state = "Mobilizing".into();
@@ -691,12 +707,25 @@ pub async fn process_incursion_site_completion_and_payout_core(
             };
             inc.sites[site_idx].boss_npc_ball_id += 1_000;
             let next_boss_bid = inc.sites[site_idx].boss_npc_ball_id;
-            let escorts = inc.sites[site_idx].escort_spawns.iter_mut().enumerate().map(|(i, esc)| {
-                esc.npc_ball_id = next_boss_bid * 10 + (i as i64) + 1;
-                esc.destroyed = false;
-                (esc.npc_ball_id, esc.type_id, esc.offset)
-            }).collect::<Vec<_>>();
-            (Some((next_boss_bid, b_tid, escorts)), ms)
+            let (next_b_tid, fresh_escorts) =
+                get_sansha_encounter_composition(next_boss_bid, s_did, &s_tier);
+            inc.sites[site_idx].boss_type_id = next_b_tid;
+            let escorts: Vec<(i64, u32, [f64; 3])> = fresh_escorts
+                .iter()
+                .map(|e| (e.npc_ball_id, e.type_id, e.offset))
+                .collect();
+            inc.sites[site_idx].escort_spawns = fresh_escorts;
+            let has_wave_tracker = reg.incursion_site_waves.contains_key(&inc.sites[site_idx].site_id);
+            if has_wave_tracker {
+                reg.incursion_site_waves.insert(
+                    inc.sites[site_idx].site_id.clone(),
+                    crate::services::pve_incursion_lifecycle::IncursionSiteWaveMeta {
+                        current_wave: 1,
+                        total_waves: if s_tier == "Staging" { 2 } else { 3 },
+                    },
+                );
+            }
+            (Some((next_boss_bid, next_b_tid, escorts, !has_wave_tracker)), ms)
         };
         Some((
             b_isk,
@@ -710,6 +739,7 @@ pub async fn process_incursion_site_completion_and_payout_core(
             inc.mothership_defeated,
             next_boss_ball,
             ms_to_spawn,
+            stale_escorts,
         ))
     });
 
@@ -732,16 +762,23 @@ pub async fn process_incursion_site_completion_and_payout_core(
         incursion_ended,
         next_boss_ball,
         ms_to_spawn,
+        stale_escorts,
     ) = step_res;
 
-    if let Some((new_bid, new_tid, new_escorts)) = next_boss_ball {
-        systems.claim_special_site_ball(target_sys, new_bid);
-        let _ = sys_handle
-            .spawn_ball_with_combat(
-                make_site_npc_ball(new_bid, new_tid, site_pos),
-                crate::services::pve_special_sites::build_special_site_npc_combat_state(sde, new_tid),
-            )
-            .await;
+    for bid in stale_escorts {
+        let _ = sys_handle.remove_ball(bid).await;
+    }
+
+    if let Some((new_bid, new_tid, new_escorts, spawn_boss_now)) = next_boss_ball {
+        if spawn_boss_now {
+            systems.claim_special_site_ball(target_sys, new_bid);
+            let _ = sys_handle
+                .spawn_ball_with_combat(
+                    make_site_npc_ball(new_bid, new_tid, site_pos),
+                    crate::services::pve_special_sites::build_special_site_npc_combat_state(sde, new_tid),
+                )
+                .await;
+        }
         for (esc_bid, esc_tid, esc_offset) in new_escorts {
             systems.claim_special_site_ball(target_sys, esc_bid);
             let esc_pos = site_pos + DVec3::new(esc_offset[0], esc_offset[1], esc_offset[2]);
@@ -776,21 +813,69 @@ pub async fn process_incursion_site_completion_and_payout_core(
     }
 
     if incursion_ended {
-        let escort_bids: Vec<i64> = with_pve_special_reg_db(db, now_unix, |reg| {
-            reg.incursions.get(&target_cid).map(|inc| {
-                inc.sites.iter()
-                    .filter(|s| s.solar_system_id == target_sys)
-                    .flat_map(|s| s.escort_spawns.iter().map(|e| e.npc_ball_id))
-                    .collect()
-            }).unwrap_or_default()
-        });
+        let (escort_bids, const_systems): (Vec<i64>, Vec<SolarSystemId>) =
+            with_pve_special_reg_db(db, now_unix, |reg| {
+                reg.incursions
+                    .get(&target_cid)
+                    .map(|inc| {
+                        let bids = inc
+                            .sites
+                            .iter()
+                            .filter(|s| s.solar_system_id == target_sys)
+                            .flat_map(|s| s.escort_spawns.iter().map(|e| e.npc_ball_id))
+                            .collect();
+                        let mut sys_ids = vec![inc.staging_solar_system_id, inc.hq_solar_system_id];
+                        sys_ids.extend_from_slice(&inc.vanguard_solar_system_ids);
+                        sys_ids.extend_from_slice(&inc.assault_solar_system_ids);
+                        (bids, sys_ids)
+                    })
+                    .unwrap_or_default()
+            });
         for bid in escort_bids {
             let _ = sys_handle.remove_ball(bid).await;
         }
+        db.with_mut_snapshot(|snap| {
+            let stale: Vec<i64> = snap
+                .items
+                .iter()
+                .filter_map(|(&iid, item)| {
+                    if matches!(
+                        item.type_id,
+                        crate::services::pve_incursion_lifecycle::INCURSION_EFFECT_BEACON_VANGUARD
+                            | crate::services::pve_incursion_lifecycle::INCURSION_EFFECT_BEACON_ASSAULT
+                            | crate::services::pve_incursion_lifecycle::INCURSION_EFFECT_BEACON_HQ
+                    ) && u32::try_from(item.location_id)
+                        .is_ok_and(|sid| const_systems.contains(&sid))
+                    {
+                        Some(iid)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for iid in stale {
+                snap.items.remove(&iid);
+                snap.item_positions.remove(&iid);
+            }
+        });
     }
+
+    // DERIVED: Fleet hard-cap payout cutoff per EVE University Wiki `Incursion_sites`:
+    // Staging 5, Vanguard 15 (optimal 10), Assault 30 (optimal 20), HQ 60 (optimal 40), Mothership 120 (optimal 80).
+    // Exceeding the hard cap yields 0 ISK and 0 CONCORD LP.
+    let hard_cap = match tier.as_str() {
+        "Staging" => 5,
+        "Vanguard" => 15,
+        "Assault" => 30,
+        "Headquarters" => 60,
+        "Mothership" | "Boss" => 120,
+        _ => max_opt.saturating_mul(3) / 2,
+    };
 
     let (pilot_isk, pilot_lp, fleet_count, fleet_scale) = if verified_pilots.is_empty() {
         (0, 0, 0, 0.0)
+    } else if verified_pilots.len() > hard_cap {
+        (0, 0, verified_pilots.len(), 0.0)
     } else {
         let count = verified_pilots.len();
         let under_scale = if count < min_pilots {
@@ -798,13 +883,12 @@ pub async fn process_incursion_site_completion_and_payout_core(
         } else {
             1.0
         };
+        // DERIVED: Linear 12% per-pilot overstack decay between max_optimal_pilots and hard_cap.
         let over_pilots = count.saturating_sub(max_opt);
         let over_scale = (1.0_f64 - (over_pilots as f64) * 0.12).clamp(0.15, 1.0);
         let f_scale = (over_scale * under_scale).clamp(0.15, 1.0);
 
-        // Constellation influence scaling:
-        // As Sansha influence decreases toward 0.0, payout scales up to 100% of base value.
-        // At 1.0 influence (max Sansha control), payout penalty is up to 50% (0.50 scale).
+        // DERIVED: Constellation influence scaling (50% payout penalty at 1.0 influence, 100% at 0.0 influence).
         let influence_scale = (1.0 - (new_influence.clamp(0.0, 1.0) * 0.50)).clamp(0.50, 1.0);
         let total_scale = (f_scale * influence_scale).clamp(0.10, 1.0);
 
@@ -820,27 +904,29 @@ pub async fn process_incursion_site_completion_and_payout_core(
         matched_site_id.clone()
     };
 
-    db.with_mut_snapshot(|snap| {
-        for &pid in &verified_pilots {
-            let j_id = (snap.wallet_journal.len() as i64) + 950_000;
-            if let Some(ch) = snap.characters.get_mut(&pid) {
-                ch.balance = ch
-                    .balance
-                    .checked_add(IskCents::from_isk(pilot_isk))
-                    .unwrap_or(ch.balance);
-                let new_bal = ch.balance;
-                *ch.loyalty_points.entry(concord_corp_id).or_insert(0) += pilot_lp;
-                snap.wallet_journal.push(WalletJournalEntry {
-                    entry_id: j_id,
-                    character_id: pid,
-                    entry_type: "CorporateRewardPayout".into(),
-                    amount: IskCents::from_isk(pilot_isk),
-                    balance_after: new_bal,
-                    reason: format!("Sansha Incursion {tier} Payout ({effective_site_id})"),
-                });
+    if pilot_isk > 0 || pilot_lp > 0 {
+        db.with_mut_snapshot(|snap| {
+            for &pid in &verified_pilots {
+                let j_id = (snap.wallet_journal.len() as i64) + 950_000;
+                if let Some(ch) = snap.characters.get_mut(&pid) {
+                    ch.balance = ch
+                        .balance
+                        .checked_add(IskCents::from_isk(pilot_isk))
+                        .unwrap_or(ch.balance);
+                    let new_bal = ch.balance;
+                    *ch.loyalty_points.entry(concord_corp_id).or_insert(0) += pilot_lp;
+                    snap.wallet_journal.push(WalletJournalEntry {
+                        entry_id: j_id,
+                        character_id: pid,
+                        entry_type: "CorporateRewardPayout".into(),
+                        amount: IskCents::from_isk(pilot_isk),
+                        balance_after: new_bal,
+                        reason: format!("Sansha Incursion {tier} Payout ({effective_site_id})"),
+                    });
+                }
             }
-        }
-    });
+        });
+    }
 
     with_pve_special_reg_db(db, now_unix, |reg| {
         for &pid in &verified_pilots {
@@ -963,6 +1049,14 @@ pub fn mark_incursion_boss_destroyed(
                     if site.locked_until_low_influence && (inc.influence > 0.0 || !inc.mothership_spawned) {
                         return false;
                     }
+                    if reg
+                        .incursion_site_waves
+                        .get(&site.site_id)
+                        .is_some_and(|w| w.current_wave < w.total_waves)
+                        || site.escort_spawns.iter().any(|e| !e.destroyed)
+                    {
+                        return false;
+                    }
                     site.boss_destroyed = true;
                     site.killer_char_id = None;
                     site.killer_fleet_id = None;
@@ -995,17 +1089,41 @@ pub async fn on_incursion_boss_destroyed_core(
                 if site.solar_system_id == solar_system_id && site.boss_npc_ball_id == npc_ball_id {
                     let locked = site.locked_until_low_influence && (inc.influence > 0.0 || !inc.mothership_spawned);
                     if locked {
-                        return Some((site.site_id.clone(), true, false));
+                        return Some((site.site_id.clone(), true, false, false, None));
+                    }
+                    let earlier_waves_pending = reg
+                        .incursion_site_waves
+                        .get(&site.site_id)
+                        .is_some_and(|w| w.current_wave < w.total_waves);
+                    if earlier_waves_pending {
+                        return Some((site.site_id.clone(), false, false, true, None));
                     }
                     site.boss_destroyed = true;
                     site.killer_char_id = killer_char_id;
                     site.killer_fleet_id = killer_fleet_id;
-                    return Some((site.site_id.clone(), false, false));
+                    if site.escort_spawns.iter().any(|e| !e.destroyed) {
+                        return Some((site.site_id.clone(), false, false, true, None));
+                    }
+                    return Some((site.site_id.clone(), false, false, false, killer_char_id));
                 }
                 for esc in &mut site.escort_spawns {
                     if site.solar_system_id == solar_system_id && esc.npc_ball_id == npc_ball_id {
                         esc.destroyed = true;
-                        return Some((site.site_id.clone(), false, true));
+                        let waves_done = reg
+                            .incursion_site_waves
+                            .get(&site.site_id)
+                            .is_none_or(|w| w.current_wave >= w.total_waves);
+                        let all_escorts_dead = site.escort_spawns.iter().all(|e| e.destroyed);
+                        if site.boss_destroyed && waves_done && all_escorts_dead {
+                            return Some((
+                                site.site_id.clone(),
+                                false,
+                                false,
+                                false,
+                                site.killer_char_id.or(killer_char_id),
+                            ));
+                        }
+                        return Some((site.site_id.clone(), false, true, false, None));
                     }
                 }
             }
@@ -1013,14 +1131,28 @@ pub async fn on_incursion_boss_destroyed_core(
         None
     });
 
-    let (site_id, is_locked, is_escort) = site_found?;
+    let (site_id, is_locked, is_escort, waves_pending, completion_killer_opt) = site_found?;
     if is_locked {
         return Some(Err(rpc_err(
             "MothershipSiteLocked",
             "Mothership HQ site is locked while Sansha influence > 0.0",
         )));
     }
+    if waves_pending {
+        return Some(Err(rpc_err(
+            "IncursionSiteNpcsRemaining",
+            format!("Incursion site {site_id} escort waves must be cleared before boss kill"),
+        )));
+    }
     if is_escort {
+        crate::services::pve_incursion_lifecycle::advance_incursion_wave_on_escort_kill(
+            systems,
+            db,
+            sde,
+            solar_system_id,
+            &site_id,
+        )
+        .await;
         return None;
     }
     Some(
@@ -1030,7 +1162,7 @@ pub async fn on_incursion_boss_destroyed_core(
             sde,
             solar_system_id,
             &site_id,
-            killer_char_id,
+            completion_killer_opt.or(killer_char_id),
         )
         .await,
     )
@@ -1099,124 +1231,80 @@ pub async fn handle_incursion_rpc(
             Some(Ok(PyRep::List(logs_py)))
         }
 
-        // parity: feat:pve.incursion-system
+        // parity: feat:pve.incursion-system, rpc:incursion.UpdateIncursionLPLog
         ("incursion", "UpdateIncursionLPLog") => {
-            if let Err(e) = ServerContext::require_character(session) {
-                return Some(Err(e));
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let site_filter = args.first().and_then(|a| a.as_str()).map(str::to_string);
+            let cid_filter = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .and_then(|v| u32::try_from(v).ok());
+            let now_ft = ctx.now_blueos_filetime_ticks();
+            let synced_rows = with_pve_special_reg(ctx, |reg| {
+                let Some(entries) = reg.incursion_lp_logs.get_mut(&char_id) else {
+                    return Vec::new();
+                };
+                let mut matched = Vec::new();
+                for e in entries.iter_mut() {
+                    if e.timestamp_filetime <= 0 {
+                        e.timestamp_filetime = now_ft;
+                    }
+                    let keep = if let Some(ref sf) = site_filter {
+                        e.site_id == *sf
+                    } else if let Some(cf) = cid_filter {
+                        e.constellation_id == cf
+                    } else {
+                        true
+                    };
+                    if keep {
+                        matched.push(PyRep::keyval([
+                            ("logID", PyRep::Integer(e.log_id)),
+                            ("siteID", PyRep::String(e.site_id.clone())),
+                            ("tier", PyRep::String(e.tier.clone())),
+                            ("constellationID", PyRep::Integer(e.constellation_id as i64)),
+                            ("solarSystemID", PyRep::Integer(e.solar_system_id as i64)),
+                            ("iskEarned", PyRep::Integer(e.isk_earned)),
+                            ("concordLpEarned", PyRep::Integer(e.concord_lp_earned)),
+                            ("fleetSize", PyRep::Integer(e.fleet_size as i64)),
+                            ("fleetScaleFactor", PyRep::Real(e.fleet_scale_factor)),
+                            ("timestamp", PyRep::Integer(e.timestamp_filetime)),
+                        ]));
+                    }
+                }
+                matched
+            });
+            if synced_rows.is_empty() {
+                Some(Ok(PyRep::None))
+            } else {
+                Some(Ok(PyRep::List(synced_rows)))
             }
-            Some(Ok(PyRep::None))
         }
 
-        // parity: feat:pve.incursion-system, rpc:taleMgr.GetGlobalWorldEventTales
+        // parity: feat:pve.incursion-system, feat:pve.tales, rpc:taleMgr.GetGlobalWorldEventTales
         ("taleMgr", "GetGlobalWorldEventTales") => {
             if let Err(e) = ServerContext::require_character(session) {
                 return Some(Err(e));
             }
-            let list = with_pve_special_reg(ctx, |reg| {
-                reg.incursions
-                    .values()
-                    .map(|inc| {
-                        let mut scene_types_map: Vec<(PyRep, PyRep)> = Vec::new();
-                        scene_types_map.push((PyRep::Integer(inc.staging_solar_system_id as i64), PyRep::String("incursionStaging".into())));
-                        for &v_sys in &inc.vanguard_solar_system_ids {
-                            scene_types_map.push((PyRep::Integer(v_sys as i64), PyRep::String("incursionLightInfestation".into())));
-                        }
-                        for &a_sys in &inc.assault_solar_system_ids {
-                            scene_types_map.push((PyRep::Integer(a_sys as i64), PyRep::String("incursionMediumInfestation".into())));
-                        }
-                        scene_types_map.push((PyRep::Integer(inc.hq_solar_system_id as i64), PyRep::String("incursionHeavyInfestation".into())));
-
-                        let sites_py: Vec<PyRep> = inc
-                            .sites
-                            .iter()
-                            .map(|s| {
-                                let available = !s.locked_until_low_influence || inc.mothership_spawned;
-                                PyRep::keyval([
-                                    ("siteID", PyRep::String(s.site_id.clone())),
-                                    ("dungeonID", PyRep::Integer(s.dungeon_id as i64)),
-                                    ("dungeonName", PyRep::String(s.dungeon_name.clone())),
-                                    ("solarSystemID", PyRep::Integer(s.solar_system_id as i64)),
-                                    ("tier", PyRep::String(s.tier.clone())),
-                                    ("minPilots", PyRep::Integer(s.min_pilots as i64)),
-                                    ("maxOptimalPilots", PyRep::Integer(s.max_optimal_pilots as i64)),
-                                    ("baseIsk", PyRep::Integer(s.base_isk)),
-                                    ("baseConcordLP", PyRep::Integer(s.base_concord_lp)),
-                                    ("bossNpcBallID", PyRep::Integer(s.boss_npc_ball_id)),
-                                    ("available", PyRep::Bool(available)),
-                                ])
-                            })
-                            .collect();
-
-                        PyRep::keyval([
-                            ("taleID", PyRep::Integer(inc.tale_id)),
-                            ("templateID", PyRep::Integer(5158)),
-                            ("templateClassID", PyRep::String("worldEvents".into())),
-                            ("managerSolarSystemID", PyRep::Integer(inc.staging_solar_system_id as i64)),
-                            ("solar_system_id", PyRep::Integer(inc.staging_solar_system_id as i64)),
-                            ("locationID", PyRep::Integer(inc.staging_solar_system_id as i64)),
-                            ("constellationID", PyRep::Integer(inc.constellation_id as i64)),
-                            ("constellationName", PyRep::String(inc.constellation_name.clone())),
-                            ("influence", PyRep::Real(inc.influence)),
-                            ("state", PyRep::String(inc.state.clone())),
-                            ("aggressorFactionID", PyRep::Integer(500_019)),
-                            ("templateNameID", PyRep::Integer(564035)),
-                            ("templateDescriptionID", PyRep::Integer(564036)),
-                            ("endTime", PyRep::Integer(inc.lockout_until_filetime.unwrap_or(0))),
-                            ("hasFinalEncounter", PyRep::Bool(inc.mothership_spawned && !inc.mothership_defeated)),
-                            ("mothershipSpawned", PyRep::Bool(inc.mothership_spawned)),
-                            ("mothershipDefeated", PyRep::Bool(inc.mothership_defeated)),
-                            ("sceneTypesByLocationID", PyRep::Dict(scene_types_map)),
-                            ("sites", PyRep::List(sites_py)),
-                        ])
-                    })
-                    .collect::<Vec<_>>()
-            });
+            crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
+            let list =
+                crate::services::pve_incursion_lifecycle::collect_all_world_event_tales(ctx, None);
             Some(Ok(PyRep::List(list)))
         }
 
-        // parity: feat:pve.incursion-system, rpc:taleMgr.get_active_tales_by_template
+        // parity: feat:pve.incursion-system, feat:pve.tales, rpc:taleMgr.get_active_tales_by_template
         ("taleMgr", "get_active_tales_by_template") => {
             if let Err(e) = ServerContext::require_character(session) {
                 return Some(Err(e));
             }
+            crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
             let template_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let now_sec = ctx.now_unix();
-            let now_ft = ((now_sec + 11_644_473_600) * 10_000_000) as i64;
-            if template_id != 5158 {
-                let extra_tales: Vec<PyRep> = {
-                    let tales = ctx.quasar_gateway.progression.extra.active_tales.read().unwrap_or_else(|e| e.into_inner());
-                    tales
-                        .iter()
-                        .filter(|(_, (tpl_id, _, _))| (*tpl_id as i64) == template_id)
-                        .map(|(&tale_id, &(tpl_id, sys_id, started))| {
-                            let start_ft = ((started + 11_644_473_600) * 10_000_000) as i64;
-                            PyRep::keyval([
-                                ("tale_id", PyRep::Integer(tale_id as i64)),
-                                ("template_id", PyRep::Integer(tpl_id as i64)),
-                                ("solar_system_id", PyRep::Integer(sys_id as i64)),
-                                ("start_date", PyRep::Integer(start_ft)),
-                                ("end_date", PyRep::Integer(now_ft + 864_000_000_000)),
-                            ])
-                        })
-                        .collect()
-                };
-                return Some(Ok(PyRep::List(extra_tales)));
-            }
-            let list = with_pve_special_reg(ctx, |reg| {
-                reg.incursions
-                    .values()
-                    .filter(|inc| inc.state != "Ended")
-                    .map(|inc| {
-                        PyRep::keyval([
-                            ("tale_id", PyRep::Integer(inc.tale_id)),
-                            ("template_id", PyRep::Integer(template_id)),
-                            ("solar_system_id", PyRep::Integer(inc.staging_solar_system_id as i64)),
-                            ("start_date", PyRep::Integer(now_ft - 864_000_000_000)),
-                            ("end_date", PyRep::Integer(inc.lockout_until_filetime.unwrap_or(now_ft + 864_000_000_000))),
-                        ])
-                    })
-                    .collect::<Vec<_>>()
-            });
+            let list = crate::services::pve_incursion_lifecycle::collect_all_world_event_tales(
+                ctx,
+                Some(template_id),
+            );
             Some(Ok(PyRep::List(list)))
         }
 

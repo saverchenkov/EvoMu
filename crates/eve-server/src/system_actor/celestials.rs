@@ -332,6 +332,27 @@ impl SystemHandle {
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
     }
 
+    pub fn try_spawn_ball_with_combat(&self, ball: Ball, combat_state: CombatState) {
+        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        let ball_id = ball.id;
+        if bp.balls.contains_key(&ball_id) {
+            let _ = bp.remove_ball(ball_id);
+        }
+        bp.add_ball(ball);
+        bp.combat_states.insert(ball_id, combat_state);
+        super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+    }
+
+    pub fn try_update_combat_state<F: FnOnce(&mut CombatState)>(&self, ball_id: BallId, f: F) -> bool {
+        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(cs) = bp.combat_states.get_mut(&ball_id) {
+            f(cs);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn try_add_mobile_warp_disruptor(&self, id: BallId, position: DVec3, radius: f64) {
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
         bp.add_mobile_warp_disruptor(id, position, radius);

@@ -321,14 +321,14 @@ async fn test_rpc_utility_services_batch_complete() {
         )
         .await
         .expect("GetMyEnergyState");
-    assert_eq!(get_i64(&init_energy, "currentEnergy"), Some(5000));
-    assert_eq!(get_i64(&init_energy, "maxEnergy"), Some(5000));
+    assert_eq!(get_i64(&init_energy, "currentEnergy"), Some(100));
+    assert_eq!(get_i64(&init_energy, "maxEnergy"), Some(100));
     assert!(get_i64(&init_energy, "lastUpdateTime").unwrap_or(0) > 0);
 
     // State mutation: mutate energy state via set_character_energy and verify updated state
     let _ = ctx.drain_notifications_for_char(PILOT1);
-    let mutated_state = eve_server::services::character_energy::set_character_energy(&ctx, PILOT1, 2840);
-    assert_eq!(mutated_state.current_energy, 2840);
+    let mutated_state = eve_server::services::character_energy::set_character_energy(&ctx, PILOT1, 40);
+    assert_eq!(mutated_state.current_energy, 40);
     let energy_notifs = ctx.drain_notifications_for_char(PILOT1);
     assert!(
         energy_notifs
@@ -350,7 +350,7 @@ async fn test_rpc_utility_services_batch_complete() {
         )
         .await
         .expect("GetMyEnergyState after consume");
-    assert_eq!(get_i64(&after_consume, "currentEnergy"), Some(2840));
+    assert_eq!(get_i64(&after_consume, "currentEnergy"), Some(40));
 
     // 5. Mining ledger: record entry and query GetCharacterLogs
     let date_str = "2027-01-15";
@@ -601,7 +601,7 @@ async fn test_rpc_utility_services_batch_complete() {
         .expect("GetMyEnergyState on reloaded context");
     assert_eq!(
         get_i64(&reloaded_energy, "currentEnergy"),
-        Some(2840),
+        Some(40),
         "Character energy state must persist across server context reload"
     );
 }

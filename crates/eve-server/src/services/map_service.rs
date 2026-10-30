@@ -321,9 +321,18 @@ pub fn handle(
             crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
             let now_ft = ctx.now_blueos_filetime_ticks();
             let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+                let now_sec = crate::services::pve_special_sites::spec_now_sec(reg);
                 reg.incursions
                     .values()
+                    .filter(|inc| inc.state != "Ended")
                     .map(|inc| {
+                        let withdraw_ft = inc.lockout_until_filetime.unwrap_or(0);
+                        let grace_time_ft = reg
+                            .incursion_lifecycle
+                            .get(&inc.constellation_id)
+                            .and_then(|m| m.withdraw_until_sec)
+                            .map(|wu| (wu.saturating_sub(now_sec) as i64) * 10_000_000)
+                            .unwrap_or_else(|| withdraw_ft.saturating_sub(now_ft).max(0));
                         PyRep::keyval([
                             ("taleID", PyRep::Integer(inc.tale_id)),
                             ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
@@ -335,8 +344,9 @@ pub fn handle(
                             ("hasBoss", PyRep::Bool(inc.mothership_spawned && !inc.mothership_defeated)),
                             ("factionID", PyRep::Integer(500_019)),
                             ("decayRate", PyRep::Real(0.02)),
-                            ("graceTime", PyRep::Integer(0)),
+                            ("graceTime", PyRep::Integer(grace_time_ft)),
                             ("lastUpdated", PyRep::Integer(now_ft)),
+                            ("withdrawTime", PyRep::Integer(withdraw_ft)),
                             ("rewardGroupID", PyRep::Integer(inc.tale_id)),
                         ])
                     })
@@ -465,13 +475,14 @@ pub fn handle(
                     if inc.state == "Ended" {
                         continue;
                     }
-                    // Staging (sceneType 1)
+                    // Staging (sceneType 1); templateNameID 564035 = "Sansha's Nation Incursion"
                     out.push(PyRep::keyval([
                         ("locationID", PyRep::Integer(i64::from(inc.staging_solar_system_id))),
                         ("solarSystemID", PyRep::Integer(i64::from(inc.staging_solar_system_id))),
                         ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
                         ("sceneType", PyRep::Integer(1)),
-                        ("templateNameID", PyRep::Integer(inc.tale_id)),
+                        ("state", PyRep::String(inc.state.clone())),
+                        ("templateNameID", PyRep::Integer(564_035)),
                     ]));
                     // Vanguard (sceneType 2)
                     for &sys_id in &inc.vanguard_solar_system_ids {
@@ -480,7 +491,8 @@ pub fn handle(
                             ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
                             ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
                             ("sceneType", PyRep::Integer(2)),
-                            ("templateNameID", PyRep::Integer(inc.tale_id)),
+                            ("state", PyRep::String(inc.state.clone())),
+                            ("templateNameID", PyRep::Integer(564_035)),
                         ]));
                     }
                     // Assault (sceneType 3)
@@ -490,7 +502,8 @@ pub fn handle(
                             ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
                             ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
                             ("sceneType", PyRep::Integer(3)),
-                            ("templateNameID", PyRep::Integer(inc.tale_id)),
+                            ("state", PyRep::String(inc.state.clone())),
+                            ("templateNameID", PyRep::Integer(564_035)),
                         ]));
                     }
                     // HQ (sceneType 4)
@@ -499,7 +512,8 @@ pub fn handle(
                         ("solarSystemID", PyRep::Integer(i64::from(inc.hq_solar_system_id))),
                         ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
                         ("sceneType", PyRep::Integer(4)),
-                        ("templateNameID", PyRep::Integer(inc.tale_id)),
+                        ("state", PyRep::String(inc.state.clone())),
+                        ("templateNameID", PyRep::Integer(564_035)),
                     ]));
                 }
                 out

@@ -214,13 +214,14 @@ async fn test_pve_expedition_multi_step_progression_and_rpcs() {
         .expect("GetMyEscalatingPathDetails RPC should succeed");
 
     match details_rep {
-        PyRep::List(list) => {
-            assert_eq!(list.len(), 1);
-            let item = &list[0];
-            assert_eq!(item.dict_get("instanceID"), Some(&PyRep::Integer(inst_id)));
-            assert_eq!(item.dict_get("stepIndex"), Some(&PyRep::Integer(1)));
+        PyRep::Rowset { columns, rows } => {
+            assert_eq!(rows.len(), 1);
+            let inst_idx = columns.iter().position(|c| c == "instanceID").unwrap();
+            let step_idx = columns.iter().position(|c| c == "stepIndex").unwrap();
+            assert_eq!(rows[0][inst_idx], PyRep::Integer(inst_id));
+            assert_eq!(rows[0][step_idx], PyRep::Integer(1));
         }
-        _ => panic!("Expected list return from GetMyEscalatingPathDetails"),
+        _ => panic!("Expected Rowset return from GetMyEscalatingPathDetails"),
     }
 
     // Query scanSvc.GetEscalatingPathDungeonsEntered RPC

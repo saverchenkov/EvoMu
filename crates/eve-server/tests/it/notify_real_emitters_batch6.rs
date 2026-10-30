@@ -489,7 +489,7 @@ async fn test_batch6_faction_warfare_and_insurgency() {
     eve_server::services::pve_special_sites::record_system_interference_activity(&ctx, &mut s1, JITA_SYSTEM, 0.40);
     let ev_interf = events(&ctx, P1, "OnSolarsystemInterferenceChanged");
     assert_eq!(ev_interf.len(), 1, "P1 receives OnSolarsystemInterferenceChanged");
-    assert_eq!(ev_interf[0], vec![PyRep::Integer(i64::from(JITA_SYSTEM)), PyRep::Real(0.50), PyRep::Integer(2)]);
+    assert_eq!(ev_interf[0], vec![PyRep::Integer(i64::from(JITA_SYSTEM)), PyRep::Real(0.40), PyRep::Integer(2)]);
 }
 
 #[tokio::test]

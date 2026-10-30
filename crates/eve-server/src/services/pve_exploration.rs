@@ -100,6 +100,7 @@ pub enum HackingNodeKind {
     Antivirus,
     RestorationNode,
     VirusSuppressor,
+    UtilitySubsystem,
     DataCache,
 }
 
@@ -553,6 +554,18 @@ pub fn notify_pve_destruction_events(
     let mut to_send = Vec::new();
 
     if let Some(site_id) = cleared_site_id {
+        let cleared_did_opt = db.with_snapshot(|snap| {
+            snap.owner_notes
+                .get(&PVE_EXPLORATION_NOTE_ID)
+                .and_then(|note| serde_json::from_str::<PveExplorationRegistry>(&note.note).ok())
+                .and_then(|reg| {
+                    reg.sites_by_system
+                        .values()
+                        .flatten()
+                        .find(|s| s.site_id == site_id)
+                        .map(|s| s.dungeon_id)
+                })
+        });
         crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_site_removed_with_db(
             db, pending_notifications, notify_tx, &site_id,
         );
@@ -572,49 +585,107 @@ pub fn notify_pve_destruction_events(
             marshaled_packet,
             created_filetime: now_ft,
         });
+        if let Some(did) = cleared_did_opt {
+            let d_args = vec![PyRep::Integer(i64::from(did))];
+            let (d_pkt, d_mpkt) = crate::router::ServerContext::build_macho_notification_packet(
+                killer_char_id,
+                None,
+                "OnDungeonCompleted",
+                "charid",
+                d_args.clone(),
+            );
+            to_send.push(crate::router::cache_notifications::PendingMachoNotification {
+                recipient_char_id: killer_char_id,
+                event: "OnDungeonCompleted".to_string(),
+                id_type: "charid".to_string(),
+                args: d_args,
+                packet: d_pkt,
+                marshaled_packet: d_mpkt,
+                created_filetime: now_ft,
+            });
+        }
     }
 
-    if let Some(esc) = new_escalation {
-        let args = vec![PyRep::Integer(esc.instance_id)];
-        let (packet, marshaled_packet) = crate::router::ServerContext::build_macho_notification_packet(
+    let mut fleet_to_send: Vec<(i64, crate::router::cache_notifications::PendingMachoNotification)> = Vec::new();
+    if let Some(ref esc) = new_escalation {
+        let fleet_info = db.with_snapshot(|snap| {
+            let fid = snap.characters.get(&killer_char_id).and_then(|c| c.fleet_id)?;
+            if fid <= 0 {
+                return None;
+            }
+            let members = snap
+                .fleets
+                .get(&fid)
+                .map(|fl| fl.members.clone())
+                .unwrap_or_default();
+            Some((fid, members))
+        });
+        if let Some((fid, members)) = fleet_info {
+            let f_args = vec![
+                PyRep::Integer(killer_char_id),
+                PyRep::Integer(i64::from(esc.expedition_dungeon_id)),
+            ];
+            let (f_pkt, f_mpkt) = crate::router::ServerContext::build_macho_notification_packet(
+                fid,
+                None,
+                "OnFleetEscalatingPathMessage",
+                "fleetid",
+                f_args.clone(),
+            );
+            for member_id in members {
+                fleet_to_send.push((
+                    member_id,
+                    crate::router::cache_notifications::PendingMachoNotification {
+                        recipient_char_id: member_id,
+                        event: "OnFleetEscalatingPathMessage".to_string(),
+                        id_type: "fleetid".to_string(),
+                        args: f_args.clone(),
+                        packet: f_pkt.clone(),
+                        marshaled_packet: f_mpkt.clone(),
+                        created_filetime: now_ft,
+                    },
+                ));
+            }
+        }
+    }
+
+    for esc in [new_escalation, advanced_step].into_iter().flatten() {
+        let (chg_pkt, chg_mpkt) = crate::router::ServerContext::build_macho_notification_packet(
+            killer_char_id,
+            None,
+            "OnEscalatingPathChange",
+            "charid",
+            vec![],
+        );
+        to_send.push(crate::router::cache_notifications::PendingMachoNotification {
+            recipient_char_id: killer_char_id,
+            event: "OnEscalatingPathChange".to_string(),
+            id_type: "charid".to_string(),
+            args: vec![],
+            packet: chg_pkt,
+            marshaled_packet: chg_mpkt,
+            created_filetime: now_ft,
+        });
+        let msg_args = vec![PyRep::Integer(esc.instance_id)];
+        let (msg_pkt, msg_mpkt) = crate::router::ServerContext::build_macho_notification_packet(
             killer_char_id,
             None,
             "OnEscalatingPathMessage",
             "charid",
-            args.clone(),
+            msg_args.clone(),
         );
         to_send.push(crate::router::cache_notifications::PendingMachoNotification {
             recipient_char_id: killer_char_id,
             event: "OnEscalatingPathMessage".to_string(),
             id_type: "charid".to_string(),
-            args,
-            packet,
-            marshaled_packet,
+            args: msg_args,
+            packet: msg_pkt,
+            marshaled_packet: msg_mpkt,
             created_filetime: now_ft,
         });
     }
 
-    if let Some(step) = advanced_step {
-        let args = vec![PyRep::Integer(step.instance_id)];
-        let (packet, marshaled_packet) = crate::router::ServerContext::build_macho_notification_packet(
-            killer_char_id,
-            None,
-            "OnEscalatingPathMessage",
-            "charid",
-            args.clone(),
-        );
-        to_send.push(crate::router::cache_notifications::PendingMachoNotification {
-            recipient_char_id: killer_char_id,
-            event: "OnEscalatingPathMessage".to_string(),
-            id_type: "charid".to_string(),
-            args,
-            packet,
-            marshaled_packet,
-            created_filetime: now_ft,
-        });
-    }
-
-    if !to_send.is_empty() {
+    if !to_send.is_empty() || !fleet_to_send.is_empty() {
         let mut queues = pending_notifications.write().unwrap_or_else(|e| e.into_inner());
         let q = queues.entry(killer_char_id).or_default();
         for notif in to_send {
@@ -623,6 +694,14 @@ pub fn notify_pve_destruction_events(
             }
             q.push(notif.clone());
             let _ = notify_tx.send((killer_char_id, notif));
+        }
+        for (member_id, notif) in fleet_to_send {
+            let mq = queues.entry(member_id).or_default();
+            if mq.len() >= 256 {
+                mq.remove(0);
+            }
+            mq.push(notif.clone());
+            let _ = notify_tx.send((member_id, notif));
         }
     }
 }
@@ -675,6 +754,13 @@ pub async fn handle_pve_site_npc_destruction(
         new_escalation,
         advanced_step,
     );
+    crate::services::pve_dungeon_runtime::on_dungeon_npc_killed(
+        ctx,
+        solar_system_id,
+        npc_ball_id,
+        killer_char_id,
+    )
+    .await;
 }
 
 // parity: feat:pve.combat-anomalies, feat:pve.ded-complexes, feat:pve.escalations, feat:pve.expeditions, feat:pve.wormhole-sites
@@ -878,6 +964,12 @@ pub async fn advance_site_wave_or_complete(
         ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(
             solar_system_id, &site_category, dungeon_id, 1, ctx.now_unix(), &ctx.quasar_gateway,
         );
+        ctx.notify(
+            crate::router::NotificationTarget::Character(char_id),
+            "OnDungeonCompleted",
+            "charid",
+            vec![PyRep::Integer(i64::from(dungeon_id))],
+        );
     }
 
     let loot_py: Vec<PyRep> = dropped_loot_items
@@ -926,95 +1018,6 @@ fn resolve_session_system_id(
             code: "NotInSpace".into(),
             message: "Action requires an active solar system session".into(),
         })
-}
-
-async fn validate_and_advance_pve_site_room(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    sys_id: SolarSystemId,
-    raw_site_id: &str,
-) -> Result<PyRep, BridgeRpcError> {
-    let mut site_id = raw_site_id.to_string();
-    let (rating_to_check, sleeper_info, site_pos_opt, canonical_site_id) = with_pve_exploration_reg(ctx, |reg| {
-        // Same site predicate as `advance_site_wave_or_complete`, so a `str(dungeon_id)` alias resolves to
-        // the same site and goes through the same hull / proximity / Sleeper-cache checks.
-        let site = reg.sites_by_system.get(&sys_id).and_then(|l| {
-            l.iter().find(|s| s.site_id == site_id || s.dungeon_id.to_string() == site_id)
-        });
-        // Hull rating is always the server-side site rating; clients cannot override it.
-        let r = site.and_then(|s| s.ded_rating);
-        let s_info = site.and_then(|s| {
-            if s.site_category == "SleeperCache" {
-                let tier = crate::services::pve_sleeper_caches::sleeper_cache_tier_for_dungeon(s.dungeon_id)
-                    .unwrap_or(crate::services::pve_sleeper_caches::SleeperCacheTier::Standard);
-                Some((tier, s.sleeper_rift_stabilized, s.clone()))
-            } else {
-                None
-            }
-        });
-        let pos = site.map(|s| s.position);
-        (r, s_info, pos, site.map(|s| s.site_id.clone()))
-    });
-    if let Some(cid) = canonical_site_id {
-        site_id = cid;
-    }
-
-    if let Some(rating) = rating_to_check {
-        let ship = session.ship_id.and_then(|sid| {
-            ctx.db.with_snapshot(|snap| {
-                snap.items.get(&sid).and_then(|item| ctx.sde.types.get(&item.type_id).map(|t| (item.type_id, t.mass)))
-            })
-        });
-        let Some((ship_tid, mass)) = ship else {
-            return Err(BridgeRpcError {
-                code: "ShipNotFound".into(),
-                message: "Acceleration gate activation requires an active ship item with an SDE hull type".into(),
-            });
-        };
-        crate::services::pve_exploration_sites::check_ded_gate_ship_allowed(&ctx.sde, rating, ship_tid, mass)?;
-    }
-    // DED acceleration gates sit at the site's warp-in position; the pilot's ship ball must be within 2,500 m.
-    if let (Some(site_pos), Some(_)) = (site_pos_opt, rating_to_check) {
-        let ship_pos = match session.ship_id {
-            Some(sid) => ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(sid).await.ok().flatten().map(|(_, b)| b.position),
-            None => None,
-        };
-        let Some(ship_pos) = ship_pos else {
-            return Err(BridgeRpcError {
-                code: "NotInSpace".into(),
-                message: "Acceleration gate activation requires the pilot's ship in space".into(),
-            });
-        };
-        let dist = ship_pos.distance(glam::DVec3::from_array(site_pos));
-        if dist > 2_500.0 {
-            return Err(BridgeRpcError {
-                code: "GateOutOfRange".into(),
-                message: format!("Pilot is {dist:.1}m from acceleration gate; must be within 2,500m to activate"),
-            });
-        }
-    }
-
-    if let Some((tier, stabilized, site_clone)) = sleeper_info {
-        let (grp, mass) = session
-            .ship_id
-            .and_then(|sid| {
-                ctx.db.with_snapshot(|snap| {
-                    snap.items
-                        .get(&sid)
-                        .and_then(|item| ctx.sde.types.get(&item.type_id))
-                        .map(|t| (t.group_id, t.mass))
-                })
-            })
-            .unwrap_or((25, 1_000_000.0));
-        crate::services::pve_sleeper_caches::validate_sleeper_cache_passage(
-            tier, stabilized, grp, mass,
-        )?;
-        crate::services::pve_sleeper_caches::apply_sleeper_hazard_damage_if_active(
-            ctx, session, sys_id, &site_clone,
-        ).await;
-    }
-
-    advance_site_wave_or_complete(ctx, session, sys_id, &site_id).await
 }
 
 pub async fn handle_pve_exploration(
@@ -1093,32 +1096,17 @@ pub async fn handle_pve_exploration(
                 .unwrap_or_else(|| format!("PVE-ANOM-{sys_id}-1"));
             let advance_wave = args.get(1).and_then(|a| a.as_bool()).unwrap_or(false);
             if advance_wave {
-                return Some(validate_and_advance_pve_site_room(ctx, session, sys_id, &site_id).await);
+                return Some(
+                    crate::services::pve_expeditions::validate_and_advance_pve_site_room(
+                        ctx, session, sys_id, &site_id,
+                    )
+                    .await,
+                );
             }
-            let res = with_pve_exploration_reg(ctx, |reg| {
-                let Some(site) = reg
-                    .sites_by_system
-                    .get(&sys_id)
-                    .and_then(|l| l.iter().find(|s| s.site_id == site_id))
-                else {
-                    return Err(BridgeRpcError {
-                        code: "AnomalyNotFound".into(),
-                        message: format!("Combat anomaly {site_id} not found"),
-                    });
-                };
-                Ok(PyRep::keyval([
-                    ("siteID", PyRep::String(site.site_id.clone())),
-                    ("dungeonID", PyRep::Integer(site.dungeon_id as i64)),
-                    ("dungeonName", PyRep::String(site.dungeon_name.clone())),
-                    ("currentWave", PyRep::Integer(site.current_wave as i64)),
-                    ("totalWaves", PyRep::Integer(site.total_waves as i64)),
-                    (
-                        "activeNpcBallIDs",
-                        PyRep::List(site.active_npc_ball_ids.iter().copied().map(PyRep::Integer).collect()),
-                    ),
-                ]))
-            });
-            Some(res)
+            let char_id = session.character_id.unwrap_or(0);
+            Some(crate::services::pve_expeditions::enter_combat_anomaly_site(
+                ctx, char_id, sys_id, &site_id,
+            ))
         }
 
         // parity: feat:pve.ded-complexes, feat:pve.sleeper-caches
@@ -1206,6 +1194,16 @@ pub async fn handle_pve_exploration(
         | ("beyonce", "ActivateAccelerationGate")
         | ("keeper", "EnterNextDungeonRoom") => {
             if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
+            if let Ok(sys) = resolve_session_system_id(ctx, session) {
+                if let Some(res) =
+                    crate::services::pve_dungeon_runtime::try_activate_dungeon_runtime_gate(
+                        ctx, session, sys, args,
+                    )
+                    .await
+                {
+                    return Some(res);
+                }
+            }
             let mut site_id = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
             if let Some(item_id) = args.first().and_then(|a| a.as_i64()) {
                 // Integer argument: a DED acceleration gate ball in the pilot's system resolves to its site;
@@ -1276,7 +1274,12 @@ pub async fn handle_pve_exploration(
                 return Some(res);
             }
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
-            Some(validate_and_advance_pve_site_room(ctx, session, sys_id, &site_id).await)
+            Some(
+                crate::services::pve_expeditions::validate_and_advance_pve_site_room(
+                    ctx, session, sys_id, &site_id,
+                )
+                .await,
+            )
         }
 
         // parity: feat:pve.sleeper-caches, feat:pve.ded-complexes
@@ -1313,15 +1316,17 @@ pub async fn handle_pve_exploration(
             Some(res)
         }
 
-        // parity: feat:pve.escalations, feat:pve.expeditions
+        // parity: feat:pve.escalations, feat:pve.expeditions, rpc:dungeonExplorationMgr.GetMyEscalatingPathDetails
         ("dungeonExplorationMgr", "GetMyEscalatingPathDetails")
         | ("scanSvc", "GetMyEscalatingPathDetails")
         | ("dungeonExplorationMgr", "GetEscalations") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let entries = with_pve_exploration_reg(ctx, |reg| {
-                crate::services::pve_expeditions::get_my_escalating_path_details(reg, char_id)
-            });
-            Some(Ok(PyRep::List(entries)))
+            if !args.is_empty() {
+                return Some(Err(BridgeRpcError::user_error("InvalidArguments")));
+            }
+            Some(Ok(
+                crate::services::pve_expeditions::get_my_escalating_path_details_rowset(ctx, char_id),
+            ))
         }
 
         // parity: feat:pve.escalations, feat:pve.expeditions

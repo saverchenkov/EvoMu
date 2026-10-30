@@ -126,8 +126,8 @@ async fn test_metaliminal_storms_roaming_dogma_effects_and_sites() {
     });
     assert!(has_volatile_ice, "Core storm system must spawn bonus Fresh Volatile Ice Field (9042)");
 
-    // 4. Advance clock by 3600s: storms roam along connected stargates
-    advance_pve_special_clock(&ctx, 3_600);
+    // 4. Advance clock by 48h (172,800s): storms roam 1 jump along connected nullsec stargates
+    advance_pve_special_clock(&ctx, 172_800);
 
     let storms_rep_after = ctx
         .dispatch_rpc(

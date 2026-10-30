@@ -276,7 +276,8 @@ async fn test_pve_incursion_multiwave_fleet_payout_and_influence() {
         })
         .collect();
 
-    // Kill boss in space with attacker attribution
+    // Kill boss in space with attacker attribution after clearing escort waves
+    crate::common::clear_incursion_site_escort_waves(&ctx, vg_sys_id, &site_id).await;
     let (_, dead, _) = vg_sys.apply_damage_with_attacker(
         boss_bid,
         DamageVector { em: 100_000.0, thermal: 100_000.0, kinetic: 100_000.0, explosive: 100_000.0 },
@@ -302,10 +303,8 @@ async fn test_pve_incursion_multiwave_fleet_payout_and_influence() {
     assert!(!logs.is_empty());
     assert_eq!(logs[0].dict_get("iskEarned").and_then(|v| v.as_i64()), Some(5_457_375));
 
-    // Next wave boss respawned
-    let next_boss_bid = with_pve_special_reg(&ctx, |reg| {
-        reg.incursions[&target_cid].sites.iter().find(|s| s.site_id == site_id).unwrap().boss_npc_ball_id
-    });
+    // Next wave boss respawned once escort waves clear
+    let next_boss_bid = crate::common::clear_incursion_site_escort_waves(&ctx, vg_sys_id, &site_id).await;
     assert!(vg_sys.get_ball_snapshot(next_boss_bid).await.unwrap().is_some());
 
     // Double payout race concurrency protection
@@ -351,9 +350,7 @@ async fn test_pve_incursion_mothership_hq_unlock_and_conclusion() {
     hq_sys.set_ball_position(710_002_003, hq_pos).await;
 
     for _wave in 0..4 {
-        let hq_boss_bid = with_pve_special_reg(&ctx, |reg| {
-            reg.incursions[&target_cid].sites.iter().find(|s| s.site_id == hq_site_id).unwrap().boss_npc_ball_id
-        });
+        let hq_boss_bid = crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys_id, &hq_site_id).await;
         assert!(hq_sys.get_ball_snapshot(hq_boss_bid).await.unwrap().is_some());
         let (_, dead, _) = hq_sys.apply_damage_with_attacker(
             hq_boss_bid,
@@ -364,10 +361,10 @@ async fn test_pve_incursion_mothership_hq_unlock_and_conclusion() {
     }
 
     // Mothership unlocks and spawns
-    let (inf_after_hq, ms_spawned, ms_boss_bid, ms_pos) = with_pve_special_reg(&ctx, |reg| {
+    let (inf_after_hq, ms_spawned, ms_site_id, ms_boss_bid, ms_pos) = with_pve_special_reg(&ctx, |reg| {
         let inc = &reg.incursions[&target_cid];
         let ms = inc.sites.iter().find(|s| s.tier == "Mothership").unwrap();
-        (inc.influence, inc.mothership_spawned, ms.boss_npc_ball_id, ms.position)
+        (inc.influence, inc.mothership_spawned, ms.site_id.clone(), ms.boss_npc_ball_id, ms.position)
     });
     assert_eq!(inf_after_hq, 0.0);
     assert!(ms_spawned);
@@ -386,7 +383,8 @@ async fn test_pve_incursion_mothership_hq_unlock_and_conclusion() {
         assert_eq!(e_snap.1.type_id, *e_tid);
     }
 
-    // Kill The Kundalini Manifest in space
+    // Kill The Kundalini Manifest in space after clearing escorts
+    crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys_id, &ms_site_id).await;
     hq_sys.set_ball_position(710_002_003, ms_pos).await;
     let pre_ms_bal = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance.0);
     let (_, ms_dead, _) = hq_sys.apply_damage_with_attacker(
@@ -396,12 +394,12 @@ async fn test_pve_incursion_mothership_hq_unlock_and_conclusion() {
     ).await.unwrap().unwrap();
     assert!(ms_dead);
 
-    // Verify conclusion
+    // Verify conclusion (enters Withdrawing on timer after mothership dies)
     let (final_state, ms_defeated) = with_pve_special_reg(&ctx, |reg| {
         let inc = &reg.incursions[&target_cid];
         (inc.state.clone(), inc.mothership_defeated)
     });
-    assert_eq!(final_state, "Ended");
+    assert_eq!(final_state, "Withdrawing");
     assert!(ms_defeated);
 
     // Escorts removed from space

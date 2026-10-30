@@ -803,3 +803,39 @@ pub async fn finalize_cycle_destroyed_npcs(ctx: &ServerContext, solar_system_id:
     }
 }
 
+pub fn record_npc_kill_progression(
+    ctx: &ServerContext,
+    killer_char_id: i64,
+    npc_type_id: Option<eve_sde::TypeId>,
+) {
+    if killer_char_id <= 0 {
+        return;
+    }
+    ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(
+        killer_char_id as u32,
+        1,
+        1,
+        &ctx.quasar_gateway,
+    );
+    ctx.quasar_gateway.progression.career_goals.on_gameplay_event(
+        killer_char_id as u32,
+        "combat",
+        1,
+        &ctx.quasar_gateway,
+    );
+    ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(
+        killer_char_id as u32,
+        &["destroyHostileNPC", "entityGroupDestroyed"],
+        1,
+        ctx.now_unix(),
+        &ctx.quasar_gateway,
+    );
+    crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
+        ctx,
+        killer_char_id,
+        &["DamageNPCShips", "DestroyNPCShips"],
+        1,
+        npc_type_id.map(|t| t as i64),
+    );
+}
+

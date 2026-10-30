@@ -1137,6 +1137,22 @@ pub async fn handle_wrecks_killmails(
                     PyRep::List(looted_ids.iter().copied().map(PyRep::Integer).collect()),
                 ],
             );
+            let looted_types: Vec<u32> = ctx.db.with_snapshot(|snap| {
+                looted_ids
+                    .iter()
+                    .filter_map(|lid| snap.items.get(lid).map(|it| it.type_id))
+                    .collect()
+            });
+            for ltid in looted_types {
+                crate::services::pve_dungeon_runtime::on_dungeon_item_looted(
+                    ctx,
+                    char_id,
+                    Some(sys_id),
+                    wreck_id,
+                    ltid,
+                )
+                .await;
+            }
             if remaining_ids.is_empty() && wreck_item.type_id == 23 {
                 let _ = despawn_empty_jetcan_if_needed(ctx, Some(sys_id), wreck_id).await;
             }

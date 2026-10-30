@@ -33,6 +33,8 @@ pub(crate) struct ScannersSuperweaponsState {
     pub ship_dbuffs: HashMap<(u64, i64), Vec<ActiveDbuffEntry>>,
     /// Active system-wide effect beacon `type_id` per `solar_system_id`
     pub system_wide_effects: HashMap<u32, u32>,
+    /// All active overlapping system-wide effect beacon `type_id`s per `solar_system_id`
+    pub system_wide_effect_lists: HashMap<u32, Vec<u32>>,
     /// Active hacking minigame state per target `container_id`
     pub hacking_states: HashMap<i64, HackingSessionState>,
     /// Active hacking target `container_id` per `character_id`
@@ -132,6 +134,22 @@ pub(crate) fn get_aggregated_ship_dbuffs(
         }
     }
     // Include system-wide weather/storm (`group_id == 1975` / `920`) `warfareBuff*` dbuffs in the ship's solar system
+    let sys_id_opt: Option<u32> = ctx.db.with_snapshot(|snap| {
+        let ship = snap.items.get(&ship_id)?;
+        u32::try_from(ship.location_id)
+            .ok()
+            .filter(|s| ctx.sde.solar_systems.contains_key(s))
+            .or_else(|| snap.characters.get(&ship.owner_id).map(|c| c.solar_system_id))
+    });
+    if let Some(sys_id) = sys_id_opt {
+        for (dbuff_id, val) in crate::services::pve_incursion_lifecycle::get_incursion_system_wide_dbuffs(ctx, sys_id) {
+            if val.abs() > 1e-9 {
+                let slot = by_id.entry(dbuff_id).or_insert_with(|| (Vec::new(), now_unix + 3600));
+                slot.0.push(val);
+                slot.1 = slot.1.max(now_unix + 3600);
+            }
+        }
+    }
     let sys_tids: Vec<u32> = ctx.db.with_snapshot(|snap| {
         let Some(ship) = snap.items.get(&ship_id) else {
             return Vec::new();
@@ -155,14 +173,19 @@ pub(crate) fn get_aggregated_ship_dbuffs(
             })
             .map(|i| i.type_id)
             .collect();
-        if let Some(&eff_tid) = scanners_superweapons_state()
+        let sw_guard = scanners_superweapons_state()
             .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .system_wide_effects
-            .get(&sys_id)
-        {
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(&eff_tid) = sw_guard.system_wide_effects.get(&sys_id) {
             if !tids.contains(&eff_tid) {
                 tids.push(eff_tid);
+            }
+        }
+        if let Some(eff_list) = sw_guard.system_wide_effect_lists.get(&sys_id) {
+            for &eff_tid in eff_list {
+                if !tids.contains(&eff_tid) {
+                    tids.push(eff_tid);
+                }
             }
         }
         tids
@@ -279,53 +302,66 @@ pub fn apply_active_dbuffs_and_system_effects_to_ship_attrs(
             let cur_dmg = attrs.get(&64).copied().unwrap_or(1.0);
             attrs.insert(64, cur_dmg * (1.0 - inc_eff.damage_penalty).max(0.01));
         }
-        let eff_tid_opt = scanners_superweapons_state()
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .system_wide_effects
-            .get(&sys_id)
-            .copied()
-            .or_else(|| {
-                ctx.db.with_snapshot(|snap| {
-                    snap.items
-                        .values()
-                        .find(|i| {
-                            i.location_id == sys_id as i64
-                                && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 920)
-                        })
-                        .map(|i| i.type_id)
+        let mut snap_eff_items: Vec<(i64, TypeId)> = ctx.db.with_snapshot(|snap| {
+            snap.items
+                .values()
+                .filter(|i| {
+                    i.location_id == sys_id as i64
+                        && (matches!(i.type_id, 47378..=47392)
+                            || ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 920))
                 })
-            })
-            .or_else(|| {
-                eve_dogma::resolve_system_wormhole_phenomenon(&ctx.sde, sys_id, None)
-                    .map(|(_, _, _, eff_tid)| eff_tid)
-            });
-        if let Some(eff_tid) = eff_tid_opt {
+                .map(|i| (i.item_id, i.type_id))
+                .collect()
+        });
+        snap_eff_items.sort_unstable_by_key(|&(iid, _)| iid);
+        let eff_tids: Vec<TypeId> = if !snap_eff_items.is_empty() {
+            snap_eff_items.into_iter().map(|(_, tid)| tid).collect()
+        } else {
+            let sw = scanners_superweapons_state().read().unwrap_or_else(|e| e.into_inner());
+            sw.system_wide_effect_lists
+                .get(&sys_id)
+                .map(|v| {
+                    v.iter()
+                        .copied()
+                        .filter(|&t| !(47378..=47392).contains(&t))
+                        .collect::<Vec<_>>()
+                })
+                .filter(|v| !v.is_empty())
+                .or_else(|| {
+                    sw.system_wide_effects
+                        .get(&sys_id)
+                        .copied()
+                        .filter(|&t| !(47378..=47392).contains(&t))
+                        .map(|t| vec![t])
+                })
+                .or_else(|| {
+                    eve_dogma::resolve_system_wormhole_phenomenon(&ctx.sde, sys_id, None)
+                        .map(|(_, _, _, eff_tid)| vec![eff_tid])
+                })
+                .unwrap_or_default()
+        };
+        if !eff_tids.is_empty() {
             let (target_cat_id, is_npc_or_sleeper, ship_type_id_opt) = ctx.db.with_snapshot(|snap| {
-                if let Some(item) = snap.items.get(&ship_id) {
-                    let cat = ctx.sde.types.get(&item.type_id).map(|t| t.category_id).unwrap_or(6);
-                    let is_npc = cat == 11 || (item.owner_id > 0 && item.owner_id < 10_000);
-                    (cat, is_npc, Some(item.type_id))
-                } else {
-                    (6, false, None)
-                }
+                snap.items
+                    .get(&ship_id)
+                    .map(|item| {
+                        let cat = ctx.sde.types.get(&item.type_id).map(|t| t.category_id).unwrap_or(6);
+                        (cat, cat == 11 || (item.owner_id > 0 && item.owner_id < 10_000), Some(item.type_id))
+                    })
+                    .unwrap_or((6, false, None))
             });
             if target_cat_id == 6 && !is_npc_or_sleeper {
-                if let Some(ship_tid) = ship_type_id_opt {
-                    if let Some(ship_type) = ctx.sde.types.get(&ship_tid) {
-                        for (&aid, &val) in &ship_type.default_attributes {
-                            attrs.entry(aid).or_insert(val);
-                        }
+                if let Some(ship_type) = ship_type_id_opt.and_then(|tid| ctx.sde.types.get(&tid)) {
+                    for (&aid, &val) in &ship_type.default_attributes {
+                        attrs.entry(aid).or_insert(val);
                     }
                 }
             }
-            eve_dogma::apply_wormhole_phenomenon_to_attributes(
-                &ctx.sde,
-                eff_tid,
-                target_cat_id,
-                is_npc_or_sleeper,
-                attrs,
-            );
+            for eff_tid in eff_tids {
+                eve_dogma::apply_wormhole_phenomenon_to_attributes(
+                    &ctx.sde, eff_tid, target_cat_id, is_npc_or_sleeper, attrs,
+                );
+            }
         }
     }
     crate::services::tactical_modules::apply_tactical_module_ship_attributes(ctx, ship_id, attrs);

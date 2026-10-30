@@ -33,6 +33,8 @@ pub struct DungeonEditorRoom {
     pub room_name: String,
     pub dungeon_id: i64,
     pub objects: Vec<DungeonRoomObject>,
+    #[serde(default)]
+    pub disallow_mwd: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -48,6 +50,8 @@ pub struct GmActiveEditorState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DungeonEditorStore {
     pub rooms_by_dungeon: BTreeMap<i64, Vec<DungeonEditorRoom>>,
+    #[serde(default)]
+    pub dungeon_disallow_mwd: BTreeMap<i64, bool>,
     pub active_editors: BTreeMap<i64, GmActiveEditorState>,
     pub next_custom_room_id: i64,
     pub next_custom_object_id: i64,
@@ -57,11 +61,67 @@ impl Default for DungeonEditorStore {
     fn default() -> Self {
         Self {
             rooms_by_dungeon: BTreeMap::new(),
+            dungeon_disallow_mwd: BTreeMap::new(),
             active_editors: BTreeMap::new(),
             next_custom_room_id: 9_000_001,
             next_custom_object_id: 1_965_000_001,
         }
     }
+}
+
+pub fn set_dungeon_disallow_mwd(ctx: &ServerContext, dungeon_id: i64, disallow: bool) {
+    with_dungeon_editor_store(ctx, |store| {
+        store.dungeon_disallow_mwd.insert(dungeon_id, disallow);
+    });
+}
+
+pub fn set_room_disallow_mwd(ctx: &ServerContext, room_id: i64, disallow: bool) -> bool {
+    with_dungeon_editor_store(ctx, |store| {
+        for rooms in store.rooms_by_dungeon.values_mut() {
+            if let Some(r) = rooms.iter_mut().find(|r| r.room_id == room_id) {
+                r.disallow_mwd = disallow;
+                return true;
+            }
+        }
+        false
+    })
+}
+
+pub fn get_dungeon_or_room_mwd_override(
+    ctx: &ServerContext,
+    dungeon_id: i64,
+    room_id_opt: Option<i64>,
+) -> Option<bool> {
+    with_dungeon_editor_store(ctx, |store| {
+        if let Some(rid) = room_id_opt {
+            if let Some(rooms) = store.rooms_by_dungeon.get(&dungeon_id) {
+                if let Some(r) = rooms.iter().find(|r| r.room_id == rid) {
+                    return Some(r.disallow_mwd);
+                }
+            }
+        }
+        store.dungeon_disallow_mwd.get(&dungeon_id).copied()
+    })
+}
+
+pub fn is_dungeon_or_room_mwd_disallowed(
+    ctx: &ServerContext,
+    dungeon_id: i64,
+    room_id_opt: Option<i64>,
+) -> bool {
+    with_dungeon_editor_store(ctx, |store| {
+        if store.dungeon_disallow_mwd.get(&dungeon_id).copied().unwrap_or(false) {
+            return true;
+        }
+        if let Some(rid) = room_id_opt {
+            if let Some(rooms) = store.rooms_by_dungeon.get(&dungeon_id) {
+                if rooms.iter().any(|r| r.room_id == rid && r.disallow_mwd) {
+                    return true;
+                }
+            }
+        }
+        false
+    })
 }
 
 /// Seeds default rooms strictly from SDE `dungeon_asteroids` and `dungeon_gas_types` tables.
@@ -104,6 +164,7 @@ pub fn build_default_rooms_for_sde_dungeon(
                     room_name: format!("{} - Room {}", d.name, r_idx + 1),
                     dungeon_id: did as i64,
                     objects,
+                    disallow_mwd: false,
                 }
             })
             .collect();
@@ -134,6 +195,7 @@ pub fn build_default_rooms_for_sde_dungeon(
             room_name: d.name.clone(),
             dungeon_id: did as i64,
             objects,
+            disallow_mwd: false,
         }];
     }
 
@@ -474,6 +536,10 @@ pub async fn handle_gm_dungeon_editor_op(
             let room_name = kw_or_arg_str(args, kwargs, 1, &["roomName", "name"])
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| "New Room".to_string());
+            let disallow_mwd = kwargs
+                .get("disallowMWD")
+                .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|n| n != 0)))
+                .unwrap_or(false);
             let new_room = with_dungeon_editor_store(ctx, |store| {
                 let rid = store.next_custom_room_id;
                 store.next_custom_room_id += 1;
@@ -482,6 +548,7 @@ pub async fn handle_gm_dungeon_editor_op(
                     room_name: room_name.clone(),
                     dungeon_id,
                     objects: Vec::new(),
+                    disallow_mwd,
                 };
                 store.rooms_by_dungeon.entry(dungeon_id).or_default().push(room.clone());
                 room
@@ -490,6 +557,7 @@ pub async fn handle_gm_dungeon_editor_op(
                 ("roomID", PyRep::Integer(new_room.room_id)),
                 ("roomName", PyRep::String(new_room.room_name)),
                 ("dungeonID", PyRep::Integer(new_room.dungeon_id)),
+                ("disallowMWD", PyRep::Bool(new_room.disallow_mwd)),
             ]))
         }
         "SaveRoom" => {
@@ -498,12 +566,18 @@ pub async fn handle_gm_dungeon_editor_op(
             let new_name = kw_or_arg_str(args, kwargs, 1, &["roomName", "newName", "name"])
                 .filter(|s| !s.trim().is_empty())
                 .ok_or_else(|| BridgeRpcError::user_error("RoomNameRequired"))?;
+            let disallow_mwd_opt = kwargs
+                .get("disallowMWD")
+                .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|n| n != 0)));
             let dungeon_id = find_room_dungeon_id(ctx, room_id)
                 .ok_or_else(|| BridgeRpcError::user_error("RoomNotFound"))?;
             let updated = with_dungeon_editor_store(ctx, |store| {
                 let rooms = store.rooms_by_dungeon.get_mut(&dungeon_id)?;
                 let r = rooms.iter_mut().find(|r| r.room_id == room_id)?;
                 r.room_name = new_name.clone();
+                if let Some(flag) = disallow_mwd_opt {
+                    r.disallow_mwd = flag;
+                }
                 Some(r.clone())
             })
             .ok_or_else(|| BridgeRpcError::user_error("RoomNotFound"))?;
@@ -511,6 +585,7 @@ pub async fn handle_gm_dungeon_editor_op(
                 ("roomID", PyRep::Integer(updated.room_id)),
                 ("roomName", PyRep::String(updated.room_name)),
                 ("dungeonID", PyRep::Integer(updated.dungeon_id)),
+                ("disallowMWD", PyRep::Bool(updated.disallow_mwd)),
             ]))
         }
         "DeleteGroup" => {

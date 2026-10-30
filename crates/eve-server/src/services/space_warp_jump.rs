@@ -248,18 +248,29 @@ async fn handle_cmd_warp_to_stuff(
             };
             resolved_pos = Some(pos);
         }
-        "mission" | "dungeon" | "location" => {
-            resolved_pos = ctx.db.with_snapshot(|snap| {
-                if snap.active_missions.values().any(|m| {
-                    m.character_id == char_id
-                        && m.solar_system_id == sys_id
-                        && m.state == "Accepted"
-                        && (target_id == m.mission_id as i64 || target_id == m.agent_id as i64)
-                }) {
-                    return Some(DVec3::new(250_000_000.0, 0.0, 250_000_000.0));
-                }
-                None
-            });
+        "mission" | "dungeon" | "location" | "epinstance" => {
+            resolved_pos =
+                crate::services::pve_dungeon_runtime::resolve_deadspace_or_escalation_warp_target(
+                    ctx,
+                    char_id,
+                    sys_id,
+                    stuff_type,
+                    target_id,
+                    target_str_opt,
+                )?;
+            if resolved_pos.is_none() && stuff_type != "epinstance" {
+                resolved_pos = ctx.db.with_snapshot(|snap| {
+                    if snap.active_missions.values().any(|m| {
+                        m.character_id == char_id
+                            && m.solar_system_id == sys_id
+                            && m.state == "Accepted"
+                            && (target_id == m.mission_id as i64 || target_id == m.agent_id as i64)
+                    }) {
+                        return Some(DVec3::new(250_000_000.0, 0.0, 250_000_000.0));
+                    }
+                    None
+                });
+            }
         }
         "char" | "fleet" => {
             if let Some(fid) = session.fleet_id {
@@ -377,6 +388,16 @@ async fn handle_cmd_warp_to_stuff(
             ),
         });
     };
+
+    let preview_dir = (anchor_pos - current_ball.position).normalize_or_zero();
+    let preview_dest = anchor_pos - preview_dir * min_range;
+    crate::services::pve_dungeon_runtime::check_deadspace_warp_allowed(
+        ctx,
+        sys_id,
+        current_ball.position.to_array(),
+        anchor_pos.to_array(),
+        preview_dest.to_array(),
+    )?;
 
     let warp_dist = current_ball.position.distance(anchor_pos);
     if warp_dist < 150_000.0 {
@@ -502,6 +523,9 @@ async fn handle_cmd_warp_to_stuff(
             crate::sp6_lifecycle::abandon_drones_on_warp_sync(ctx, char_id, ship_id, sys_id);
             let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_if_needed(
                 ctx, char_id, sys_id, dest_pos,
+            );
+            crate::services::pve_dungeon_runtime::on_warp_start_leave_dungeon_if_needed(
+                ctx, char_id, sys_id, current_ball.position.to_array(), dest_pos.to_array(),
             );
             ctx.active_warps
                 .lock()
@@ -798,6 +822,9 @@ async fn handle_cmd_stargate_jump(
             },
         )
         .await;
+    crate::services::notify_emitters_batch3_space::emit_exiting_dungeon_on_warp_if_present(
+        ctx, char_id, old_sys, current_ball.position.to_array(),
+    );
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, old_sys);
     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
         rt.authorized_shipping_storage.retain(|&(_, c)| c != char_id);
@@ -1133,6 +1160,12 @@ async fn handle_dock(
     }
     match ctx.db.dock_character(char_id, dock_id, is_structure) {
         Ok(_) => {
+            crate::services::notify_emitters_batch3_space::emit_exiting_dungeon_on_warp_if_present(
+                ctx,
+                char_id,
+                sys_id,
+                ball.position.to_array(),
+            );
             deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
             crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, sys_id);
             let _ = handle.accept_docking(ship_id, dock_id, target_pos).await;
@@ -1279,26 +1312,10 @@ async fn handle_set_session_check(
     };
     let is_valid_trigger = matches!(
         reason,
-        "login"
-            | "stargate_jump"
-            | "wormhole_jump"
-            | "jump_bridge"
-            | "jump_drive"
-            | "dock"
-            | "undock"
-            | "fleet_join"
-            | "fleet_position_change"
-            | "fleet_change"
-            | "ship_board"
-            | "ship_eject"
-            | "board_or_eject"
-            | "pod_transition"
-            | "clone_jump"
-            | "clone_swap"
-            | "corp_join"
-            | "corp_leave"
-            | "wallet_division_change"
-            | "session_change"
+        "login" | "stargate_jump" | "wormhole_jump" | "jump_bridge" | "jump_drive" | "dock"
+            | "undock" | "fleet_join" | "fleet_position_change" | "fleet_change" | "ship_board"
+            | "ship_eject" | "board_or_eject" | "pod_transition" | "clone_jump" | "clone_swap"
+            | "corp_join" | "corp_leave" | "wallet_division_change" | "session_change"
     );
     if !is_valid_trigger {
         return Err(BridgeRpcError {

@@ -23,6 +23,8 @@ pub use crate::services::pve_incursion_sites::*;
 pub use crate::services::pve_homefront_sites::*;
 pub use crate::services::pve_metaliminal_storms::*;
 pub use crate::services::pve_special_sites_abyssal::*;
+pub use crate::services::pve_special_sites_combat::*;
+pub use crate::services::pve_crab_beacons::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HomefrontSiteRecord {
@@ -111,6 +113,12 @@ pub struct PveSpecialSitesRegistry {
     #[serde(skip)] pub balls_spawned: bool,
     pub incursions: HashMap<ConstellationId, IncursionTaleRecord>,
     #[serde(default)]
+    pub incursion_lifecycle: HashMap<ConstellationId, crate::services::pve_incursion_lifecycle::IncursionLifecycleMeta>,
+    #[serde(default)]
+    pub incursion_site_waves: HashMap<String, crate::services::pve_incursion_lifecycle::IncursionSiteWaveMeta>,
+    #[serde(default)]
+    pub world_event_tales: HashMap<i64, crate::services::pve_incursion_lifecycle::WorldEventTaleRecord>,
+    #[serde(default)]
     pub incursion_lp_logs: HashMap<CharacterId, Vec<IncursionLPLogEntry>>,
     #[serde(default)]
     pub abyssal_pockets: HashMap<CharacterId, AbyssalPocketSession>,
@@ -134,6 +142,8 @@ pub struct PveSpecialSitesRegistry {
     pub triglavian_minor_victory_systems: Vec<SolarSystemId>,
     #[serde(default)]
     pub interference_by_system: HashMap<SolarSystemId, SystemInterferenceRecord>,
+    #[serde(default)]
+    pub crab_beacons: HashMap<i64, crate::services::pve_crab_beacons::CrabBeaconRecord>,
     #[serde(default)]
     pub sim_clock_sec: u64,
     #[serde(default)]
@@ -176,13 +186,27 @@ pub fn with_pve_special_reg_db<R>(
                     if inc.state == "Ended" {
                         snap.incursions.remove(&cid);
                     } else {
+                        let mut infested = vec![inc.staging_solar_system_id];
+                        for &s in &inc.vanguard_solar_system_ids {
+                            if !infested.contains(&s) {
+                                infested.push(s);
+                            }
+                        }
+                        for &s in &inc.assault_solar_system_ids {
+                            if !infested.contains(&s) {
+                                infested.push(s);
+                            }
+                        }
+                        if !infested.contains(&inc.hq_solar_system_id) {
+                            infested.push(inc.hq_solar_system_id);
+                        }
                         snap.incursions.insert(
                             cid,
                             eve_db::IncursionRecord {
                                 constellation_id: cid,
                                 faction_id: 500_019,
                                 has_boss: inc.mothership_spawned && !inc.mothership_defeated,
-                                infested_solar_systems: vec![inc.staging_solar_system_id, inc.hq_solar_system_id],
+                                infested_solar_systems: infested,
                                 influence: inc.influence,
                                 staging_solar_system_id: inc.staging_solar_system_id,
                                 state: inc.state.to_lowercase(),
@@ -240,47 +264,11 @@ pub fn advance_pve_special_clock(ctx: &ServerContext, delta_sec: u64) {
             advance_roaming_storms(ctx, reg, delta_sec);
         }
     });
-    sync_metaliminal_storm_effects_and_sites(ctx);
-}
-
-pub fn record_system_interference_activity(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    solar_system_id: SolarSystemId,
-    activity_delta: f64,
-) {
-    ensure_special_sites_initialized(ctx);
-    let delta = activity_delta.clamp(0.0, 1.0);
-    let now_sec = ctx.now_unix();
-    let (level, old_band, new_band) = with_pve_special_reg(ctx, |reg| {
-        let entry = reg.interference_by_system.entry(solar_system_id).or_insert(SystemInterferenceRecord {
-            solar_system_id, interference_level: 0.10, band: 1, last_updated_sec: now_sec,
-        });
-        if entry.last_updated_sec > 0 && now_sec > entry.last_updated_sec {
-            let elapsed = now_sec - entry.last_updated_sec;
-            let decay = (elapsed as f64) * 0.001;
-            entry.interference_level = (entry.interference_level - decay).max(0.10);
-        }
-        let prev = entry.band;
-        if delta > 0.0 {
-            entry.interference_level = (entry.interference_level + delta).clamp(0.0, 1.0);
-        }
-        entry.band = if entry.interference_level >= 0.70 { 3 } else if entry.interference_level >= 0.35 { 2 } else { 1 };
-        entry.last_updated_sec = now_sec;
-        (entry.interference_level, prev, entry.band)
-    });
-    if new_band != old_band {
-        session.push_notification(
-            "OnSolarsystemInterferenceChanged",
-            vec![PyRep::Integer(solar_system_id as i64), PyRep::Real(level), PyRep::Integer(new_band as i64)],
-        );
-        ctx.notify(
-            crate::router::NotificationTarget::SolarSystem(solar_system_id),
-            "OnSolarsystemInterferenceChanged",
-            "solarsystemid",
-            vec![PyRep::Integer(solar_system_id as i64), PyRep::Real(level), PyRep::Integer(new_band as i64)],
-        );
+    crate::services::pve_crab_beacons::tick_all_crab_beacons(ctx);
+    if delta_sec > 0 {
+        crate::services::pve_incursion_lifecycle::advance_incursion_lifecycles(ctx);
     }
+    sync_metaliminal_storm_effects_and_sites(ctx);
 }
 
 fn empire_navy_ships(empire_fac: u32) -> (u32, u32, u32) {
@@ -367,58 +355,8 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
         }
         reg.initialized = true;
 
-        // DERIVED: SDE-filtered non-starter low/high-sec incursion constellations
-        // Filter candidate constellations by checking their systems in SDE:
-        // average security in 0.1..=0.8, not belonging to starter/school bloodlines or trade hubs (20000020).
-        let trade_hubs: &[ConstellationId] = &[20_000_020];
-        let starter_corps: std::collections::HashSet<i64> = ctx
-            .sde
-            .schools
-            .values()
-            .map(|s| s.corporation_id as i64)
-            .chain(ctx.sde.bloodlines.values().map(|b| b.corporation_id as i64))
-            .collect();
-        let starter_systems: std::collections::HashSet<SolarSystemId> = ctx
-            .sde
-            .schools
-            .values()
-            .map(|s| s.solar_system_id)
-            .chain(ctx.sde.stations.values().filter(|st| starter_corps.contains(&(st.owner_corporation_id as i64))).map(|st| st.solar_system_id))
-            .filter(|&id| id > 0)
-            .collect();
-        let starter_constellations: std::collections::HashSet<ConstellationId> = ctx
-            .sde
-            .solar_systems
-            .values()
-            .filter(|s| starter_systems.contains(&s.solar_system_id))
-            .map(|s| s.constellation_id)
-            .collect();
-
-        let mut eligible_constellations: Vec<(ConstellationId, f64)> = ctx
-            .sde
-            .constellations
-            .keys()
-            .copied()
-            .filter(|cid| !trade_hubs.contains(cid) && !starter_constellations.contains(cid))
-            .filter_map(|cid| {
-                let sys: Vec<_> = ctx
-                    .sde
-                    .solar_systems
-                    .values()
-                    .filter(|s| s.constellation_id == cid)
-                    .collect();
-                if sys.is_empty() {
-                    return None;
-                }
-                let avg_sec = sys.iter().map(|s| s.security_status).sum::<f64>() / (sys.len() as f64);
-                if (0.1..=0.8).contains(&avg_sec) {
-                    Some((cid, avg_sec))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        eligible_constellations.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.0.cmp(&b.0)));
+        let eligible_constellations =
+            crate::services::pve_incursion_lifecycle::eligible_incursion_constellations(ctx);
         for &(cid, _) in eligible_constellations.iter().take(3) {
             seed_incursion_for_constellation(ctx, reg, cid);
         }
@@ -513,6 +451,7 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
     for (tale_id, staging) in started_tales {
         crate::services::pve_incursion_sites::publish_incursion_tale_notice(ctx.quasar_gateway.as_ref(), true, tale_id, staging, ctx.now_unix());
     }
+    crate::services::pve_incursion_lifecycle::sync_incursion_system_effect_beacons(ctx);
     sync_metaliminal_storm_effects_and_sites(ctx);
 }
 
@@ -588,7 +527,7 @@ pub(crate) fn build_special_site_npc_combat_state(
     }
 }
 
-fn deposit_loot_into_ship_or_container_in_snapshot(
+pub(crate) fn deposit_loot_into_ship_or_container_in_snapshot(
     snap: &mut eve_db::WorldStateSnapshot,
     sde: &eve_sde::SdeRegistry,
     char_id: i64,
@@ -684,12 +623,18 @@ pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
     let (general_to_spawn, hf_to_spawn, trig_to_spawn) = with_pve_special_reg(ctx, |reg| {
         let mut g_list = Vec::new();
         for inc in reg.incursions.values() {
-            if inc.state == "Ended" { continue; }
+            if inc.state == "Ended" || inc.state == "Withdrawing" { continue; }
             for s in &inc.sites {
                 if s.locked_until_low_influence && (inc.influence > 0.0 || !inc.mothership_spawned) {
                     continue;
                 }
-                g_list.push((s.solar_system_id, s.boss_npc_ball_id, s.boss_type_id, s.position));
+                let on_final_wave = reg
+                    .incursion_site_waves
+                    .get(&s.site_id)
+                    .is_none_or(|w| w.current_wave >= w.total_waves);
+                if on_final_wave {
+                    g_list.push((s.solar_system_id, s.boss_npc_ball_id, s.boss_type_id, s.position));
+                }
                 for esc in &s.escort_spawns {
                     if !esc.destroyed {
                         let esc_pos = s.position + DVec3::new(esc.offset[0], esc.offset[1], esc.offset[2]);
@@ -1220,13 +1165,13 @@ pub async fn handle_pve_special_sites(
             let now_sec = ctx.now_unix();
             let (level, band, changed_from) = with_pve_special_reg(ctx, |reg| {
                 let entry = reg.interference_by_system.entry(sys_id).or_insert(SystemInterferenceRecord {
-                    solar_system_id: sys_id, interference_level: 0.10, band: 1, last_updated_sec: now_sec,
+                    solar_system_id: sys_id, interference_level: 0.0, band: 1, last_updated_sec: now_sec,
                 });
                 let mut changed = None;
                 if entry.last_updated_sec > 0 && now_sec > entry.last_updated_sec {
                     let elapsed = now_sec - entry.last_updated_sec;
-                    let decay = (elapsed as f64) * 0.001;
-                    entry.interference_level = (entry.interference_level - decay).max(0.10);
+                    let decay = (elapsed as f64) / INTERFERENCE_DECAY_WINDOW_SECS;
+                    entry.interference_level = (entry.interference_level - decay).max(0.0);
                     let old_b = entry.band;
                     entry.band = if entry.interference_level >= 0.70 { 3 } else if entry.interference_level >= 0.35 { 2 } else { 1 };
                     entry.last_updated_sec = now_sec;
@@ -1251,11 +1196,14 @@ pub async fn handle_pve_special_sites(
             }
 
             let band_label = match band { 1 => "Low", 2 => "Medium", _ => "High" };
+            let crab_remaining = (((1.0 + 1e-6 - level).max(0.0)) / crate::services::pve_crab_beacons::CRAB_INTERFERENCE_DELTA).floor() as i64;
             let local_state = PyRep::keyval([
                 ("solarSystemID", PyRep::Integer(sys_id as i64)),
                 ("interferenceLevel", PyRep::Real(level)),
+                ("interferencePct", PyRep::Real(level * 100.0)),
                 ("interferenceBand", PyRep::Integer(band as i64)),
                 ("bandLabel", PyRep::String(band_label.into())),
+                ("crabActivationsRemaining", PyRep::Integer(crab_remaining)),
             ]);
             if method == "GetAllInterferenceBands" {
                 let entries: Vec<(PyRep, PyRep)> = with_pve_special_reg(ctx, |reg| {
@@ -1279,291 +1227,4 @@ pub async fn handle_pve_special_sites(
 
         _ => None,
     }
-}
-
-
-
-pub fn get_drifter_hive_for_system(
-    ctx: &ServerContext,
-    sys_id: SolarSystemId,
-) -> Option<DrifterHiveRecord> {
-    with_pve_special_reg(ctx, |reg| reg.drifter_hives.get(&sys_id).cloned())
-}
-
-pub fn get_all_drifter_hives(
-    ctx: &ServerContext,
-) -> Vec<DrifterHiveRecord> {
-    with_pve_special_reg(ctx, |reg| reg.drifter_hives.values().cloned().collect())
-}
-
-pub fn notify_special_site_account_changes(
-    db: &eve_db::WorldRepository,
-    pending_notifications: &std::sync::RwLock<std::collections::HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>>,
-    notify_tx: &tokio::sync::broadcast::Sender<(i64, crate::router::cache_notifications::PendingMachoNotification)>,
-    changes: &[(i64, f64)],
-) {
-    if changes.is_empty() {
-        return;
-    }
-    let now_ft = db.clock().now_blueos_filetime_ticks();
-    for &(char_id, new_balance_isk) in changes {
-        let args = vec![
-            PyRep::String("cash".into()),
-            PyRep::Integer(char_id),
-            PyRep::Real(new_balance_isk),
-        ];
-        let (packet, marshaled_packet) = crate::router::ServerContext::build_macho_notification_packet(
-            char_id,
-            None,
-            "OnAccountChange",
-            "charid",
-            args.clone(),
-        );
-        let notif = crate::router::cache_notifications::PendingMachoNotification {
-            recipient_char_id: char_id,
-            event: "OnAccountChange".into(),
-            id_type: "charid".into(),
-            args,
-            packet,
-            marshaled_packet,
-            created_filetime: now_ft,
-        };
-        if let Ok(mut map) = pending_notifications.write() {
-            map.entry(char_id).or_default().push(notif.clone());
-        }
-        let _ = notify_tx.send((char_id, notif));
-    }
-}
-
-pub async fn on_special_site_npc_destroyed_core(
-    _systems: &Arc<crate::system_actor::SystemRegistry>,
-    db: &Arc<WorldRepository>,
-    _sde: &Arc<eve_sde::SdeRegistry>,
-    solar_system_id: SolarSystemId,
-    npc_ball_id: i64,
-    killer_char_id: Option<CharacterId>,
-) -> Vec<(CharacterId, f64)> {
-    let now_sec = db.clock().now_unix_secs();
-    let mut acct_changes = Vec::new();
-
-    // 0. Check Homefront sites when destroyed with attacker attribution in space
-    if let Some(cid) = killer_char_id {
-        let fleet_pilots: Vec<CharacterId> = db.with_snapshot(|snap| {
-            let fleet_id = snap.characters.get(&cid).and_then(|c| c.fleet_id);
-            if let Some(fid) = fleet_id {
-                let mut members: Vec<CharacterId> = snap
-                    .characters
-                    .values()
-                    .filter(|c| {
-                        c.fleet_id == Some(fid)
-                            && c.solar_system_id == solar_system_id
-                            && c.station_id.is_none()
-                            && c.structure_id.is_none()
-                    })
-                    .map(|c| c.character_id)
-                    .collect();
-                if !members.contains(&cid) {
-                    members.push(cid);
-                }
-                members.sort_unstable();
-                members
-            } else {
-                vec![cid]
-            }
-        });
-        let fleet_count = fleet_pilots.len().max(1);
-        let hf_res = with_pve_special_reg_db(db, now_sec, |reg| {
-            if let Some(list) = reg.homefront_sites.get_mut(&solar_system_id) {
-                for site in list.iter_mut() {
-                    if site.boss_npc_ball_id == npc_ball_id && !site.completed {
-                        let mult = if fleet_count == site.optimal_fleet_size {
-                            1.0
-                        } else if fleet_count < site.optimal_fleet_size {
-                            (fleet_count as f64) / (site.optimal_fleet_size as f64)
-                        } else {
-                            0.75
-                        };
-                        let reward_paid = ((site.base_pilot_isk as f64) * mult).round() as i64;
-                        site.completed = true;
-                        site.reward_paid_isk = reward_paid;
-                        return Some((site.dungeon_name.clone(), reward_paid));
-                    }
-                }
-            }
-            None
-        });
-        if let Some((dungeon_name, reward_paid)) = hf_res {
-            db.with_mut_snapshot(|snap| {
-                for &pid in &fleet_pilots {
-                    if let Some(ch) = snap.characters.get_mut(&pid) {
-                        ch.balance = ch.balance.checked_add(IskCents::from_isk(reward_paid)).unwrap_or(ch.balance);
-                        let new_bal = ch.balance;
-                        acct_changes.push((pid, new_bal.to_wire_f64()));
-                        snap.append_journal(
-                            pid,
-                            "CorporateRewardPayout",
-                            IskCents::from_isk(reward_paid),
-                            new_bal,
-                            format!("Homefront Operation Payout ({dungeon_name})"),
-                        );
-                    }
-                }
-            });
-            return acct_changes;
-        }
-    }
-
-    // 1. Check Triglavian sites
-    let mut trig_escorts_to_remove = Vec::new();
-    let trig_res = with_pve_special_reg_db(db, now_sec, |reg| {
-        let mut found = None;
-        if let Some(list) = reg.triglavian_sites.get_mut(&solar_system_id) {
-            for site in list.iter_mut() {
-                if site.boss_npc_ball_id == npc_ball_id && !site.completed {
-                    site.completed = true;
-                    trig_escorts_to_remove = site.escort_ball_ids.clone();
-                    let (g_fac, l_fac) = if site.faction_owner_id == 500_027 {
-                        (500_026_i64, 500_027_i64)
-                    } else {
-                        (500_027_i64, 500_026_i64)
-                    };
-                    found = Some((site.instance_id, site.base_isk, site.survey_db_drop, g_fac, l_fac));
-                    break;
-                }
-            }
-        }
-        found.map(|(inst_id, base_isk, survey_db_drop, g_fac, l_fac)| {
-            reg.next_seq += 1;
-            let loot_id = 1_899_500_000 + reg.next_seq;
-            (inst_id, base_isk, survey_db_drop, g_fac, l_fac, loot_id)
-        })
-    });
-
-    if let Some((_inst_id, base_isk, db_drop, g_fac, l_fac, loot_id)) = trig_res {
-        if !trig_escorts_to_remove.is_empty() {
-            let sys_handle = _systems.get_or_spawn(solar_system_id);
-            for ebid in trig_escorts_to_remove {
-                sys_handle.try_remove_ball(ebid);
-            }
-        }
-        if let Some(cid) = killer_char_id {
-            let spawned_cid = db.with_mut_snapshot(|snap| {
-                let j_id = (snap.wallet_journal.len() as i64) + 965_000;
-                let mut ship_id = 0;
-                if let Some(ch) = snap.characters.get_mut(&cid) {
-                    let g = ch.standings.entry(g_fac).or_insert(0.0);
-                    *g = (*g + 0.15).clamp(-10.0, 10.0);
-                    let l = ch.standings.entry(l_fac).or_insert(0.0);
-                    *l = (*l - 0.15).clamp(-10.0, 10.0);
-                    ch.balance = ch.balance.checked_add(IskCents::from_isk(base_isk)).unwrap_or(ch.balance);
-                    let new_bal = ch.balance;
-                    acct_changes.push((cid, new_bal.to_wire_f64()));
-                    ship_id = ch.active_ship_id;
-                    snap.wallet_journal.push(eve_db::WalletJournalEntry {
-                        entry_id: j_id,
-                        character_id: cid,
-                        entry_type: "CorporateRewardPayout".into(),
-                        amount: IskCents::from_isk(base_isk),
-                        balance_after: new_bal,
-                        reason: "Triglavian Site Payout".into(),
-                    });
-                }
-                deposit_loot_into_ship_or_container_in_snapshot(
-                    snap,
-                    _sde,
-                    cid,
-                    solar_system_id,
-                    ship_id,
-                    &[(loot_id, 48_121, db_drop as i32)],
-                )
-            });
-            if let Some(container_id) = spawned_cid {
-                let sys_handle = _systems.get_or_spawn(solar_system_id);
-                let _ = sys_handle.spawn_ball(make_site_npc_ball(container_id, 23, DVec3::new(10_500.0, 0.0, 0.0))).await;
-            }
-        }
-        return acct_changes;
-    }
-
-    // 2. Check Drifter Hives
-    let drifter_res = with_pve_special_reg_db(db, now_sec, |reg| {
-        let mut spawn_next = None;
-        let mut hive_loot = None;
-        if let Some(hive) = reg.drifter_hives.get_mut(&solar_system_id) {
-            if hive.warden_npc_ball_id == npc_ball_id && !hive.cleared {
-                hive.cleared = true;
-                hive.current_room = hive.total_rooms;
-                if let Some(r) = hive.rooms.iter_mut().find(|r| r.room_index == hive.total_rooms) {
-                    r.cleared = true;
-                    if !r.destroyed_npc_ball_ids.contains(&npc_ball_id) {
-                        r.destroyed_npc_ball_ids.push(npc_ball_id);
-                    }
-                }
-                hive_loot = Some(hive.element_type_id);
-            } else if !hive.cleared {
-                let cur_room_idx = hive.current_room;
-                if let Some(r) = hive.rooms.iter_mut().find(|r| r.room_index == cur_room_idx && !r.cleared) {
-                    if r.npc_ball_ids.contains(&npc_ball_id) {
-                        if !r.destroyed_npc_ball_ids.contains(&npc_ball_id) {
-                            r.destroyed_npc_ball_ids.push(npc_ball_id);
-                        }
-                        let wave_cleared = r.npc_ball_ids.iter().all(|bid| r.destroyed_npc_ball_ids.contains(bid));
-                        if wave_cleared {
-                            r.cleared = true;
-                            hive.current_room += 1;
-                            let next_room_idx = hive.current_room;
-                            if let Some(next_r) = hive.rooms.iter().find(|nr| nr.room_index == next_room_idx).cloned() {
-                                spawn_next = Some(next_r);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        (spawn_next, hive_loot.map(|elem_tid| {
-            reg.next_seq += 1;
-            let elem_id = 1_899_000_000 + reg.next_seq;
-            reg.next_seq += 1;
-            let blue_id = 1_899_100_000 + reg.next_seq;
-            (elem_tid, elem_id, blue_id)
-        }))
-    });
-
-    // Abyssal Bioadaptive Cache destroyed: wreck + loot transfer
-    crate::services::pve_special_sites_abyssal::on_abyssal_cache_destroyed_core(_systems, db, solar_system_id, npc_ball_id, killer_char_id).await;
-
-    let (spawn_next, hive_loot) = drifter_res;
-    if let Some(next_room) = spawn_next {
-        let sys_handle = _systems.get_or_spawn(solar_system_id);
-        for (&bid, &tid) in next_room.npc_ball_ids.iter().zip(&next_room.npc_type_ids) {
-            _systems.claim_special_site_ball(solar_system_id, bid);
-            let cs = build_special_site_npc_combat_state(_sde, tid);
-            let _ = sys_handle.spawn_ball_with_combat(make_site_npc_ball(bid, tid, DVec3::new(10_000.0, 0.0, 0.0)), cs).await;
-        }
-        if next_room.beacon_ball_id != 0 {
-            _systems.claim_special_site_ball(solar_system_id, next_room.beacon_ball_id);
-            let _ = sys_handle.spawn_ball(make_site_npc_ball(next_room.beacon_ball_id, 42_538, DVec3::new(12_000.0, 0.0, 0.0))).await;
-        }
-    }
-
-    if let Some((elem_tid, elem_id, blue_id)) = hive_loot {
-        if let Some(cid) = killer_char_id {
-            let spawned_cid = db.with_mut_snapshot(|snap| {
-                let ship_id = snap.characters.get(&cid).map(|c| c.active_ship_id).unwrap_or(0);
-                deposit_loot_into_ship_or_container_in_snapshot(
-                    snap,
-                    _sde,
-                    cid,
-                    solar_system_id,
-                    ship_id,
-                    &[(elem_id, elem_tid, 1), (blue_id, 30_745, 5)],
-                )
-            });
-            if let Some(container_id) = spawned_cid {
-                let sys_handle = _systems.get_or_spawn(solar_system_id);
-                let _ = sys_handle.spawn_ball(make_site_npc_ball(container_id, 23, DVec3::new(10_500.0, 0.0, 0.0))).await;
-            }
-        }
-    }
-    acct_changes
 }

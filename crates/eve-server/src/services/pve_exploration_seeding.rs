@@ -378,6 +378,59 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
         ..Default::default()
     });
 
+    // 2b. Multi-room Deadspace Combat Signature backed by live DungeonRuntimeInstance + SDE dungeon
+    let (dsg_did, dsg_fallback_name) = match pirate_faction_for_system(&ctx.sde, solar_system_id) {
+        PirateFaction::Guristas => (98u32, "Guristas Scout Outpost"),
+        PirateFaction::BloodRaiders => (106, "Mul-Zatah Monastery"),
+        PirateFaction::Sansha => (110, "Sansha's Command Relay Outpost"),
+        PirateFaction::Serpentis => (119, "Serpentis Phi-Outpost"),
+        PirateFaction::AngelCartel => (59, "Angel Military Operations Complex"),
+    };
+    let dsg_name = ctx
+        .sde
+        .dungeons
+        .get(&dsg_did)
+        .map(|d| d.name.trim().to_string())
+        .unwrap_or_else(|| dsg_fallback_name.to_string());
+    let dsg_sig_id = format!("DSG-{solar_system_id}");
+    let dsg_pos = [68_000_000.0, -34_000_000.0, 26_000_000.0];
+    let dsg_instance_id = crate::services::pve_dungeon_runtime::spawn_sde_dungeon_runtime_instance(
+        ctx,
+        0,
+        solar_system_id,
+        dsg_did,
+        "Deadspace",
+        dsg_pos,
+        true,
+    )
+    .await;
+    new_sigs.push(make_sig_record(
+        dsg_sig_id.clone(),
+        solar_system_id,
+        "Combat",
+        dsg_name.clone(),
+        dsg_pos,
+        now,
+    ));
+    sites.push(PveSiteInstance {
+        site_id: dsg_sig_id,
+        dungeon_id: dsg_did,
+        dungeon_name: dsg_name,
+        solar_system_id,
+        site_category: "Deadspace".into(),
+        position: dsg_pos,
+        probe_required: true,
+        current_room: 1,
+        total_rooms: 2,
+        current_wave: 1,
+        total_waves: 2,
+        npc_guards_spawned: true,
+        created_unix: now,
+        lifetime_seconds: 86_400,
+        expedition_instance_id: dsg_instance_id.ok(),
+        ..Default::default()
+    });
+
     // 3. Data, Relic, Ghost & Sleeper Cache Signatures
     let guarded = wh_class.is_some() || true_sec <= 0.0;
     let (gho_did, gho_name) = ghost_site_dungeon_for_system(&ctx.sde, solar_system_id, true_sec, wh_class);

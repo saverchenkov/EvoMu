@@ -98,7 +98,8 @@ pub async fn sync_tether(ctx: &ServerContext, char_id: i64, sys_id: u32, ship_id
     let immobilizing_disallow = crate::services::space_navigation_advanced::check_immobilizing_module_active(
         ctx, ship_id, "tether",
     )
-    .is_err();
+    .is_err()
+        || crate::services::pve_crab_beacons::is_ship_crab_linked(ctx, ship_id, now);
     let (anchors, disallow_active, is_piloted) = ctx.db.with_snapshot(|snap| {
         let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
         let piloted = char_id > 0
@@ -268,11 +269,16 @@ pub(crate) async fn handle_cmd_goto_point(
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let handle = ctx.systems.get_or_spawn(sys_id);
     let _ = handle.break_gate_cloak(ship_id).await;
-    handle
+    let res = handle
         .goto_point(ship_id, DVec3::new(x, y, z))
         .await
         .map(|tick| PyRep::Integer(tick as i64))
-        .map_err(|e| err("DestinyCommandFailed", e))
+        .map_err(|e| err("DestinyCommandFailed", e))?;
+    let _ = crate::services::pve_dungeon_runtime::on_dungeon_approach(
+        ctx, char_id, sys_id, ship_id, None,
+    )
+    .await;
+    Ok(res)
 }
 
 /// Jump-drive plan for one jump (`feat:navigation.jump-drive`).
@@ -660,14 +666,19 @@ pub(crate) async fn handle_cmd_stop(
         });
     };
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    handle
+    let res = handle
         .set_movement_mode(ship_id, MovementMode::Stop)
         .await
         .map(|tick| PyRep::Integer(tick as i64))
         .map_err(|e| BridgeRpcError {
             code: "DestinyCommandFailed".into(),
             message: e,
-        })
+        })?;
+    let _ = crate::services::pve_dungeon_runtime::on_dungeon_approach(
+        ctx, char_id, sys_id, ship_id, None,
+    )
+    .await;
+    Ok(res)
 }
 
 pub(crate) async fn handle_cmd_set_speed_fraction(
@@ -790,14 +801,23 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
     };
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let _ = handle.break_gate_cloak(ship_id).await;
-    handle
+    let res = handle
         .set_movement_mode(ship_id, mode)
         .await
         .map(|tick| PyRep::Integer(tick as i64))
         .map_err(|e| BridgeRpcError {
             code: "DestinyCommandFailed".into(),
             message: e,
-        })
+        })?;
+    let _ = crate::services::pve_dungeon_runtime::on_dungeon_approach(
+        ctx,
+        char_id,
+        sys_id,
+        ship_id,
+        Some(target_id),
+    )
+    .await;
+    Ok(res)
 }
 
 pub(crate) async fn handle_cmd_align_to(
@@ -880,14 +900,23 @@ pub(crate) async fn handle_cmd_align_to(
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let _ = handle.break_gate_cloak(ship_id).await;
     let _ = handle.set_speed_fraction(ship_id, 1.0).await;
-    handle
+    let res = handle
         .set_movement_mode(ship_id, MovementMode::GotoDirection { direction })
         .await
         .map(|tick| PyRep::Integer(tick as i64))
         .map_err(|e| BridgeRpcError {
             code: "DestinyCommandFailed".into(),
             message: e,
-        })
+        })?;
+    let _ = crate::services::pve_dungeon_runtime::on_dungeon_approach(
+        ctx,
+        char_id,
+        sys_id,
+        ship_id,
+        (target_id > 0).then_some(target_id),
+    )
+    .await;
+    Ok(res)
 }
 
 pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(

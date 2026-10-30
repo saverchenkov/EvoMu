@@ -257,8 +257,9 @@ async fn test_pve_incursion_payout_fleet_and_influence_scaling() {
         })
         .collect();
 
-    // Kill boss with attributed damage from pilot 90_000_001
+    // Kill boss with attributed damage from pilot 90_000_001 after clearing escort waves
     // Server-side death hook automatically handles site wave completion & payout without keeper RPC
+    crate::common::clear_incursion_site_escort_waves(&ctx, vg_sys_id, &site_id).await;
     let (_, dead, _) = vg_sys.apply_damage_with_attacker(
         boss_bid,
         DamageVector { em: 100_000.0, thermal: 100_000.0, kinetic: 100_000.0, explosive: 100_000.0 },
@@ -299,7 +300,8 @@ async fn test_pve_incursion_payout_fleet_and_influence_scaling() {
     assert_eq!(logs[0].dict_get("concordLpEarned").and_then(|v| v.as_i64()), Some(735));
     assert_eq!(logs[0].dict_get("fleetSize").and_then(|v| v.as_i64()), Some(5));
 
-    // Next wave boss must have cleanly respawned
+    // Next wave boss must have cleanly respawned once escort waves clear
+    crate::common::clear_incursion_site_escort_waves(&ctx, vg_sys_id, &site_id).await;
     let (next_boss_bid, wave_count) = with_pve_special_reg(&ctx, |reg| {
         let s = reg.incursions[&target_cid].sites.iter().find(|s| s.site_id == site_id).unwrap();
         (s.boss_npc_ball_id, s.completed_count)
@@ -377,9 +379,7 @@ async fn test_pve_incursion_mothership_multiwave_and_conclusion() {
     // Each HQ completion drops influence by delta (0.25)
     // 4 completions drop 1.0 -> 0.0
     for wave in 0..4 {
-        let hq_boss_bid = with_pve_special_reg(&ctx, |reg| {
-            reg.incursions[&target_cid].sites.iter().find(|s| s.site_id == hq_site_id).unwrap().boss_npc_ball_id
-        });
+        let hq_boss_bid = crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys_id, &hq_site_id).await;
         assert!(hq_sys.get_ball_snapshot(hq_boss_bid).await.unwrap().is_some());
         let (_, dead, _) = hq_sys.apply_damage_with_attacker(
             hq_boss_bid,
@@ -390,10 +390,10 @@ async fn test_pve_incursion_mothership_multiwave_and_conclusion() {
     }
 
     // Now influence is 0.0; Mothership unlocks and spawns!
-    let (inf_after_hq, ms_spawned, ms_boss_bid) = with_pve_special_reg(&ctx, |reg| {
+    let (inf_after_hq, ms_spawned, ms_site_id, ms_boss_bid) = with_pve_special_reg(&ctx, |reg| {
         let inc = &reg.incursions[&target_cid];
         let ms = inc.sites.iter().find(|s| s.tier == "Mothership").unwrap();
-        (inc.influence, inc.mothership_spawned, ms.boss_npc_ball_id)
+        (inc.influence, inc.mothership_spawned, ms.site_id.clone(), ms.boss_npc_ball_id)
     });
     assert_eq!(inf_after_hq, 0.0, "Constellation influence must reach 0.0");
     assert!(ms_spawned, "Mothership encounter must unlock when influence reaches 0.0");
@@ -413,7 +413,8 @@ async fn test_pve_incursion_mothership_multiwave_and_conclusion() {
         assert_eq!(e_snap.1.type_id, *e_tid, "Escort ball type ID must match authentic Sansha type");
     }
 
-    // Move player ship to Mothership site grid and kill The Kundalini Manifest
+    // Move player ship to Mothership site grid, clear escorts, and kill The Kundalini Manifest
+    crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys_id, &ms_site_id).await;
     hq_sys.set_ball_position(710_001_005, ms_pos).await;
     let pre_ms_bal = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance.0);
     let pre_ms_lp = ctx.db.with_snapshot(|s| s.characters[&90_000_001].loyalty_points.get(&1_000_125).copied().unwrap_or(0));
@@ -425,13 +426,13 @@ async fn test_pve_incursion_mothership_multiwave_and_conclusion() {
     ).await.unwrap().unwrap();
     assert!(ms_dead, "The Kundalini Manifest must be destroyed");
 
-    // Verify incursion conclusion state
+    // Verify incursion conclusion state (enters Withdrawing on a timer after mothership dies)
     let (final_inf, final_state, ms_defeated) = with_pve_special_reg(&ctx, |reg| {
         let inc = &reg.incursions[&target_cid];
         (inc.influence, inc.state.clone(), inc.mothership_defeated)
     });
     assert_eq!(final_inf, 0.0);
-    assert_eq!(final_state, "Ended", "Incursion state must be Ended upon defeating mothership");
+    assert_eq!(final_state, "Withdrawing", "Incursion state must be Withdrawing upon defeating mothership");
     assert!(ms_defeated, "mothership_defeated must be true");
 
     // Verify escorts cleared from space
@@ -472,6 +473,7 @@ async fn test_pve_incursion_concurrency_and_aoe_progression() {
     let p1_ship_id = 710_001_006;
     let mut p1_sess = create_in_space_session(&ctx, 8109, 90_000_001, vg_sys_id, p1_ship_id, 587).await;
     vg_sys.set_ball_position(p1_ship_id, site_pos).await;
+    crate::common::clear_incursion_site_escort_waves(&ctx, vg_sys_id, &site_id).await;
     vg_sys.set_ball_position(boss_bid, site_pos + DVec3::new(100.0, 0.0, 0.0)).await;
 
     // 1. Double payout race concurrency protection (NF-INC-RACE-01)
@@ -494,9 +496,7 @@ async fn test_pve_incursion_concurrency_and_aoe_progression() {
     assert!(final_balance > initial_balance, "Pilot must receive exactly one payout");
 
     // 2. Smartbomb AoE Boss Destruction (NF-INC-AOE-ID-FILTER-01)
-    let next_boss_bid = with_pve_special_reg(&ctx, |reg| {
-        reg.incursions[&target_cid].sites.iter().find(|s| s.site_id == site_id).unwrap().boss_npc_ball_id
-    });
+    let next_boss_bid = crate::common::clear_incursion_site_escort_waves(&ctx, vg_sys_id, &site_id).await;
     vg_sys.set_ball_position(next_boss_bid, site_pos + DVec3::new(100.0, 0.0, 0.0)).await;
 
     let smartbomb_id = 202_005;
@@ -516,13 +516,13 @@ async fn test_pve_incursion_concurrency_and_aoe_progression() {
     ).await.expect("Smartbomb Activate");
     assert!(matches!(sb_res, PyRep::Dict(_) | PyRep::KeyVal(_)));
 
-    let (count1, next_boss2) = with_pve_special_reg(&ctx, |r| {
-        let s = r.incursions[&target_cid].sites.iter().find(|s| s.site_id == site_id).unwrap();
-        (s.completed_count, s.boss_npc_ball_id)
+    let count1 = with_pve_special_reg(&ctx, |r| {
+        r.incursions[&target_cid].sites.iter().find(|s| s.site_id == site_id).unwrap().completed_count
     });
     assert_eq!(count1, 2, "Smartbomb AoE boss destruction must advance wave");
 
     // 3. Synchronous weapon cycle destruction (NF-INC-CYCLE-ASYNC-01)
+    let next_boss2 = crate::common::clear_incursion_site_escort_waves(&ctx, vg_sys_id, &site_id).await;
     vg_sys.set_ball_position(next_boss2, site_pos + DVec3::new(100.0, 0.0, 0.0)).await;
     let mut cs2 = vg_sys.get_combat_state(next_boss2).await.unwrap().unwrap();
     cs2.shield_hp = 0.0; cs2.armor_hp = 0.0; cs2.structure_hp = 1.0;

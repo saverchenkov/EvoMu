@@ -301,16 +301,18 @@ async fn incursion_tale_notices_follow_seeding_and_mothership_defeat() {
         (*cid, inc.tale_id as u64, inc.staging_solar_system_id as u64, inc.hq_solar_system_id)
     });
     let hq = ctx.systems.get_or_spawn(hq_sys);
-    let boss_of = |tier: &'static str| {
-        with_pve_special_reg(&ctx, |reg| reg.incursions[&cid].sites.iter().find(|s| s.tier == tier).unwrap().boss_npc_ball_id)
+    let site_of = |tier: &'static str| {
+        with_pve_special_reg(&ctx, |reg| reg.incursions[&cid].sites.iter().find(|s| s.tier == tier).unwrap().site_id.clone())
     };
     let dmg = DamageVector { em: 100_000.0, thermal: 100_000.0, kinetic: 100_000.0, explosive: 100_000.0 };
     for _ in 0..4 {
-        let (_, dead, _) = hq.apply_damage_with_attacker(boss_of("Headquarters"), dmg, Some(90_000_001)).await.unwrap().unwrap();
+        let hq_bid = crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys, &site_of("Headquarters")).await;
+        let (_, dead, _) = hq.apply_damage_with_attacker(hq_bid, dmg, Some(90_000_001)).await.unwrap().unwrap();
         assert!(dead);
     }
     assert!(drain(&mut rx, "eve_public.tale").is_empty(), "the tale keeps running until the mothership dies");
-    let (_, dead, _) = hq.apply_damage_with_attacker(boss_of("Mothership"), dmg, Some(90_000_001)).await.unwrap().unwrap();
+    let ms_bid = crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys, &site_of("Mothership")).await;
+    let (_, dead, _) = hq.apply_damage_with_attacker(ms_bid, dmg, Some(90_000_001)).await.unwrap().unwrap();
     assert!(dead);
     let stopped = drain(&mut rx, "eve_public.tale");
     assert_eq!(stopped.len(), 1);

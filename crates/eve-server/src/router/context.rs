@@ -195,6 +195,7 @@ impl ServerContext {
                         }
                         if let Some(pws) = pw.upgrade() { crate::services::pve_exploration::notify_pve_destruction_events(&db, &pws, &tx, kid, clr, esc, step); }
                     }
+                    crate::services::pve_dungeon_runtime::on_dungeon_npc_killed_core(&sys, &db, &sde, pw.upgrade().as_deref(), Some(&tx), sys_id, npc_id, killer_opt.unwrap_or(0)).await;
                     if let Some(sh_info) = crate::services::insurgency_services::on_insurgency_stronghold_destroyed_core(&sys, &db, sys_id, npc_id, killer_opt).await {
                         crate::services::insurgency_services::notify_stronghold_destruction(
                             &db,
@@ -239,6 +240,7 @@ impl ServerContext {
                     }
                     crate::services::combat_weapons_spool::step_system_entropic_spools(&ctx, sys_id, dt).await;
                     crate::services::inventory_fitting::execute_pending_cycle_actions(&ctx, sys_id).await;
+                    crate::services::pve_crab_beacons::tick_crab_beacons_in_system(&ctx, sys_id).await;
                 }
             })
         }));
@@ -705,6 +707,7 @@ impl ServerContext {
         });
         if secs > 0 {
             crate::sp6_lifecycle::on_advance_secs(self, prev_unix, secs);
+            crate::services::pve_special_sites::on_server_clock_advanced(self, secs);
             crate::services::mining_advanced::tick_all_metenox_moon_drills(
                 self,
                 prev_unix,

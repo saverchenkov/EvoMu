@@ -127,11 +127,13 @@ async fn test_pve_combat_anomalies_waves_and_escalations() {
 
     // 4. Query dungeonExplorationMgr.GetMyEscalatingPathDetails & GetEscalatingPathDungeonsEntered
     let esc_rep = ctx.dispatch_rpc(&mut sess, "dungeonExplorationMgr", None, "GetMyEscalatingPathDetails", &[], &kw, None).await.expect("GetMyEscalatingPathDetails");
-    let PyRep::List(esc_list) = &esc_rep else { panic!("Expected List from GetMyEscalatingPathDetails") };
-    assert!(!esc_list.is_empty(), "Active escalation must be returned in journal");
-    let first_esc = &esc_list[0];
-    assert!(first_esc.dict_get("destinationSolarSystemID").is_some());
-    assert_eq!(first_esc.dict_get("stepIndex").and_then(|v| v.as_i64()), Some(1));
+    let PyRep::Rowset { columns: esc_cols, rows: esc_rows } = &esc_rep else { panic!("Expected Rowset from GetMyEscalatingPathDetails") };
+    assert!(!esc_rows.is_empty(), "Active escalation must be returned in journal");
+    let first_esc = &esc_rows[0];
+    let dest_sys_idx = esc_cols.iter().position(|c| c == "destinationSolarSystemID").unwrap();
+    let step_idx = esc_cols.iter().position(|c| c == "stepIndex").unwrap();
+    assert!(matches!(first_esc[dest_sys_idx], PyRep::Integer(_)));
+    assert_eq!(first_esc[step_idx].as_i64(), Some(1));
 
     let entered_rep = ctx.dispatch_rpc(&mut sess, "dungeonExplorationMgr", None, "GetEscalatingPathDungeonsEntered", &[], &kw, None).await.expect("GetEscalatingPathDungeonsEntered");
     let PyRep::List(entered_list) = &entered_rep else { panic!("Expected List") };
@@ -239,7 +241,7 @@ async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
     let loc_before = sb_list[0].dict_get("locationID").and_then(|v| v.as_i64()).expect("locationID");
     let scene_type = sb_list[0].dict_get("sceneType").and_then(|v| v.as_i64()).expect("sceneType");
     assert!(scene_type == 1 || scene_type == 4, "sceneType must match client expectations (1 or 4)");
-    advance_pve_special_clock(&ctx, 3_600);
+    advance_pve_special_clock(&ctx, 48 * 3_600);
     let storms_after = ctx.dispatch_rpc(&mut sess, "map", None, "GetAllRoamingWeatherSystems", &[], &kw, None).await.expect("GetAllRoamingWeatherSystems after clock step");
     let PyRep::List(sa_list) = &storms_after else { panic!("Expected List") };
     let loc_after = sa_list[0].dict_get("locationID").and_then(|v| v.as_i64()).expect("locationID after");
