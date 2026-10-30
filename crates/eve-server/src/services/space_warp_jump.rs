@@ -526,9 +526,6 @@ async fn handle_cmd_warp_to_stuff(
                     PyRep::Real(warp_speed),
                 ],
             );
-            if let Some(belt_id) = target_belt_id {
-                let _ = ctx.notify_warp_to_asteroid_belt(char_id, belt_id);
-            }
             ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["timesWarped"], 1, ctx.now_unix(), &ctx.quasar_gateway);
             Ok(PyRep::Integer(tick as i64))
         }

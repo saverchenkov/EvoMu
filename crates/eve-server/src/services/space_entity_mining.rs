@@ -203,18 +203,12 @@ pub(crate) async fn handle_mine(
         });
     }
 
-    // Target range validation
+    // Target distance measurement (validated once drone vs module mode is resolved)
     let mut ast_surface_dist_m = 0.0_f64;
+    let mut has_ast_ball = false;
     if let Some((_, ast_ball)) = handle.get_ball_snapshot(asteroid_id).await.ok().flatten() {
-        let surface_dist = (ship_ball.position.distance(ast_ball.position) - ship_ball.radius - ast_ball.radius).max(0.0);
-        ast_surface_dist_m = surface_dist;
-        let max_range = crate::services::combat_crimewatch::compute_drone_control_range(ctx, char_id, ship_id);
-        if surface_dist > max_range {
-            return Err(BridgeRpcError {
-                code: "OutOfRange".into(),
-                message: format!("Asteroid {asteroid_id} is {surface_dist:.1} m away (max range {max_range} m)"),
-            });
-        }
+        ast_surface_dist_m = (ship_ball.position.distance(ast_ball.position) - ship_ball.radius - ast_ball.radius).max(0.0);
+        has_ast_ball = true;
     }
 
     // If no explicit drone/module ID was passed, check if the character has launched mining drones in space
@@ -303,7 +297,7 @@ pub(crate) async fn handle_mine(
     let mut per_drone_yield_m3: std::collections::HashMap<i64, f64> = std::collections::HashMap::new();
     let mut per_drone_dur_secs: std::collections::HashMap<i64, u64> = std::collections::HashMap::new();
     let mut per_drone_waste_prob: std::collections::HashMap<i64, f64> = std::collections::HashMap::new();
-    let (base_yield_m3, waste_prob) = if is_drone {
+    let (base_yield_m3, waste_prob, max_range) = if is_drone {
         let ast_group_id = ctx
             .sde
             .types
@@ -490,7 +484,8 @@ pub(crate) async fn handle_mine(
             per_drone_yield_m3.insert(d_item.item_id, single_drone_yield);
             total_drone_yield += single_drone_yield;
         }
-        (total_drone_yield, max_waste_prob)
+        let drone_range = crate::services::combat_crimewatch::compute_drone_control_range(ctx, char_id, ship_id);
+        (total_drone_yield, max_waste_prob, drone_range)
     } else if let (Some(fit), Some(mod_id)) = (&fit, primary_id) {
         let Some(m) = fit.modules.get(&mod_id) else {
             return Err(BridgeRpcError { code: "InvalidMiningModule".into(), message: "Mining module is not fitted to active ship".into() });
@@ -500,13 +495,15 @@ pub(crate) async fn handle_mine(
         }
         let y = fit.get_module_effective_attribute(mod_id, 77, &ctx.sde);
         let raw_w = fit.get_module_effective_attribute(mod_id, 3154, &ctx.sde);
-        (y, if raw_w > 1.0 { raw_w / 100.0 } else { raw_w })
+        let r = fit.get_module_effective_attribute(mod_id, 54, &ctx.sde);
+        (y, if raw_w > 1.0 { raw_w / 100.0 } else { raw_w }, if r > 0.0 { r } else { 35_000.0 })
     } else if let Some(fit) = &fit {
         let m = fit.modules.values().find(|m| m.state != eve_dogma::ModuleState::Offline && mod_compatible(m.type_id));
         if let Some(m) = m {
             let y = fit.get_module_effective_attribute(m.item_id, 77, &ctx.sde);
             let raw_w = fit.get_module_effective_attribute(m.item_id, 3154, &ctx.sde);
-            (y, if raw_w > 1.0 { raw_w / 100.0 } else { raw_w })
+            let r = fit.get_module_effective_attribute(m.item_id, 54, &ctx.sde);
+            (y, if raw_w > 1.0 { raw_w / 100.0 } else { raw_w }, if r > 0.0 { r } else { 35_000.0 })
         } else {
             let has_any_mining_mod = fit.modules.values().any(|m| {
                 ctx.sde.types.get(&m.type_id).is_some_and(|t| matches!(t.group_id, 54 | 464 | 483 | 737))
@@ -514,14 +511,21 @@ pub(crate) async fn handle_mine(
             if has_any_mining_mod || ore_group_id == 711 || ore_group_id == 465 || !matches!(ship_id, 100_000_001 | 100_000_002) {
                 return Err(BridgeRpcError { code: "NoMiningModuleFitted".into(), message: "Ship has no online compatible mining/harvesting module fitted".into() });
             }
-            (40.0, 0.0)
+            (40.0, 0.0, 35_000.0)
         }
     } else {
         if ore_group_id == 711 || ore_group_id == 465 || !matches!(ship_id, 100_000_001 | 100_000_002) {
             return Err(BridgeRpcError { code: "NoMiningModuleFitted".into(), message: "Ship has no online compatible mining/harvesting module fitted".into() });
         }
-        (40.0, 0.0)
+        (40.0, 0.0, 35_000.0)
     };
+
+    if has_ast_ball && ast_surface_dist_m > max_range {
+        return Err(BridgeRpcError {
+            code: "OutOfRange".into(),
+            message: format!("Asteroid {asteroid_id} is {ast_surface_dist_m:.1} m away (max range {max_range} m)"),
+        });
+    }
 
     let ship_attrs = ctx.sde.types.get(&ship_type_id).map(|t| &t.default_attributes);
     let has_ore_hold = ship_attrs.is_some_and(|a| a.get(&1556).copied().unwrap_or(0.0) > 0.0 || a.get(&3227).copied().unwrap_or(0.0) > 0.0);

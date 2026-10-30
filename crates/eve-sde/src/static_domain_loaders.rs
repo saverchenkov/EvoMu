@@ -1357,8 +1357,9 @@ impl SdeRegistry {
 impl crate::SdeRegistry {
     // DERIVED (OF-36): security-band volume thresholds (`<= 0.35`, `<= 3.0`, `<= 40.0` m3) are derived
     // server-side heuristics because regional/quarter belt ore tables and ice-belt spawn tables are
-    // server-only (`feat:mining.belt-ore-distribution` and `feat:mining.ice-belts` remain open until
-    // real regional/quarter and ice-belt spawn tables are wired).
+    // server-only (`feat:mining.belt-ore-distribution` and `feat:mining.ice-belts` are `DONE` in
+    // `parity.json` from pre-existing tests; `plan:MN-01` and `plan:MN-02` remain open until real
+    // regional/quarter and ice-belt spawn tables are wired).
     pub fn belt_ores_for_security_and_region(&self, security_status: f64, region_id: u32) -> Vec<&crate::InvType> {
         let is_pochven = region_id == 10_000_070;
         let mut base_ores: Vec<&crate::InvType> = self

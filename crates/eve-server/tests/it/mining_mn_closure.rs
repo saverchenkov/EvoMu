@@ -19,8 +19,6 @@ use crate::common::login_pilot;
 // ============================================================================
 #[tokio::test]
 async fn test_mn01_sde_mining_static_data_and_distributions() {
-    // parity: feat:mining.static-data, feat:mining.moon-ore-types
-    eve_testkit::attest(&["feat:mining.static-data", "feat:mining.moon-ore-types"]);
     let ctx = ServerContext::new();
     let sde = &ctx.sde;
 
@@ -73,8 +71,8 @@ async fn test_mn01_sde_mining_static_data_and_distributions() {
 // ============================================================================
 #[tokio::test]
 async fn test_mn02_asteroid_belts_as_balls_highsec_and_nullsec() {
-    // parity: feat:mining.belts-as-balls, notify:OnWarpToAsteroidBelt
-    eve_testkit::attest(&["feat:mining.belts-as-balls", "notify:OnWarpToAsteroidBelt"]);
+    // parity: feat:mining.belts-as-balls
+    eve_testkit::attest(&["feat:mining.belts-as-balls"]);
     let ctx = ServerContext::new();
     let mut sess = SessionState::new(9102);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -104,7 +102,7 @@ async fn test_mn02_asteroid_belts_as_balls_highsec_and_nullsec() {
         "0.0 system must spawn null-sec ores"
     );
 
-    // Undock in Perimeter and warp to an asteroid belt -> OnWarpToAsteroidBelt fires
+    // Undock in Perimeter and warp to an asteroid belt -> OnWarpStarted fires (OnWarpToAsteroidBelt is client_local)
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {
             ch.solar_system_id = 30_000_144;
@@ -131,7 +129,8 @@ async fn test_mn02_asteroid_belts_as_balls_highsec_and_nullsec() {
     .await
     .expect("CmdWarpToStuff to Perimeter belt");
     let notifs = ctx.drain_notifications_for_char(90_000_001);
-    assert!(notifs.iter().any(|n| n.event == "OnWarpToAsteroidBelt"));
+    assert!(notifs.iter().any(|n| n.event == "OnWarpStarted"));
+    assert!(!notifs.iter().any(|n| n.event == "OnWarpToAsteroidBelt"));
 }
 
 // ============================================================================
@@ -283,8 +282,8 @@ async fn test_of28_mining_laser_fired_local_and_canonical_ledger_rpc() {
 // ============================================================================
 #[tokio::test]
 async fn test_mn09_mining_drones_ore_hold_delivery_and_range_check() {
-    // parity: plan:MN-09, feat:drones.mining-drones, feat:mining.mining-drones-yield, rpc:entity.CmdMineRepeatedly
-    eve_testkit::attest(&["plan:MN-09", "feat:drones.mining-drones", "feat:mining.mining-drones-yield", "rpc:entity.CmdMineRepeatedly"]);
+    // parity: plan:MN-09, feat:drones.mining-drones, rpc:entity.CmdMineRepeatedly
+    eve_testkit::attest(&["plan:MN-09", "feat:drones.mining-drones", "rpc:entity.CmdMineRepeatedly"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let char_id = 90_000_001i64;
@@ -362,7 +361,7 @@ async fn test_mn09_mining_drones_ore_hold_delivery_and_range_check() {
         .await
         .expect("ship.LaunchDrones 2 Mining Drone Is");
 
-    // Out-of-range asteroid (> 20 km default drone control range) must be rejected
+    // Out-of-range asteroid at 25 km (> 20 km default drone control range, < 35 km legacy limit) must be rejected
     let far_ast_id = 750_999_002i64;
     jita.spawn_asteroid(
         AsteroidState {
@@ -378,7 +377,7 @@ async fn test_mn09_mining_drones_ore_hold_delivery_and_range_check() {
         Ball {
             id: far_ast_id,
             type_id: 1230,
-            position: ship_ball.position + DVec3::new(100_000.0, 0.0, 0.0),
+            position: ship_ball.position + DVec3::new(25_000.0, 0.0, 0.0),
             velocity: DVec3::ZERO,
             max_velocity: 0.0,
             inertia: 0.0,

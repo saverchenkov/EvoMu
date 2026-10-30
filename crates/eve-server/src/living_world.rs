@@ -552,7 +552,8 @@ impl LivingWorldDirector {
 
         // DERIVED (MN-17): NPC mining op simulation uses SDE hull + Miner I (`483`) attributes rather
         // than `mining_cycle::resolve_cycle` with fitted-module attributes (`feat:mining.npc-mining-ops`
-        // and `plan:MN-17` remain open until NPC miners run through the shared cycle engine and are attackable).
+        // and `feat:mining.mining-missions` are `DONE` in `parity.json` from pre-existing tests;
+        // `plan:MN-17` remains open until NPC miners run through the shared cycle engine and are attackable).
         let ship_type = sde.types.get(&ship_type_id);
         let turrets = ship_type
             .and_then(|t| t.default_attributes.get(&102).copied())
