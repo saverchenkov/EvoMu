@@ -115,8 +115,8 @@ async fn test_skin_licences_activation_listing_and_timed_expiry() {
     });
     let activated = take_notifications(&mut sess, "OnSkinLicenseActivated");
     assert_eq!(activated, vec![
-        vec![PyRep::Integer(i64::from(perm_lic)), PyRep::Integer(i64::from(perm.duration))],
-        vec![PyRep::Integer(i64::from(timed_lic)), PyRep::Integer(i64::from(timed.duration))],
+        vec![PyRep::Integer(i64::from(perm.skin_id)), PyRep::Integer(char_id)],
+        vec![PyRep::Integer(i64::from(timed.skin_id)), PyRep::Integer(char_id)],
     ]);
 
     // Listing: both owned licences with expiry (None = permanent).
@@ -144,7 +144,14 @@ async fn test_skin_licences_activation_listing_and_timed_expiry() {
     ctx.advance_virtual_clock(120);
     let after_end = skin_rows(&rpc(&ctx, &mut sess, "shipCosmeticsMgr", "GetLicencedSkins", &[]).await.expect("after end"));
     assert_eq!(after_end, vec![(i64::from(perm.skin_id), None)]);
-    assert_eq!(take_notifications(&mut sess, "OnSkinLicenseRemoved"), vec![vec![PyRep::Integer(i64::from(timed.skin_id))]]);
+    assert_eq!(
+        take_notifications(&mut sess, "OnSkinLicenseRemoved"),
+        vec![vec![
+            PyRep::Integer(i64::from(timed.skin_id)),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(i64::from(ship_type)),
+        ]]
+    );
     ctx.db.with_snapshot(|snap| assert_eq!(snap.applied_ship_skins.get(&ship_id), None, "ship reverts to the default skin"));
     let reapply = rpc(&ctx, &mut sess, "shipCosmeticsMgr", "ApplySkinToShip", &[PyRep::Integer(i64::from(ship_type)), PyRep::Integer(i64::from(timed_lic))]).await.expect_err("expired");
     assert_eq!(reapply.code, "SkinNotLicensed");

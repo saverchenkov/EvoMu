@@ -841,23 +841,32 @@ impl ServerContext {
                             p.solar_system_id,
                             moon_id,
                         );
-                        let resources_dict = eve_proto::PyRep::Dict(
-                            composition
-                                .iter()
-                                .map(|&(tid, frac)| {
-                                    (
-                                        eve_proto::PyRep::Integer(tid as i64),
-                                        eve_proto::PyRep::Real(frac),
-                                    )
-                                })
-                                .collect(),
-                        );
-                        self.notify(
-                            crate::router::NotificationTarget::Character(p.owner_char_id),
-                            "OnMoonScanComplete",
-                            "charid",
-                            vec![eve_proto::PyRep::Integer(moon_id), resources_dict],
-                        );
+                        if composition.is_empty() {
+                            self.notify(
+                                crate::router::NotificationTarget::Character(p.owner_char_id),
+                                "OnScanNoMaterials",
+                                "charid",
+                                vec![eve_proto::PyRep::Integer(moon_id)],
+                            );
+                        } else {
+                            let resources_dict = eve_proto::PyRep::Dict(
+                                composition
+                                    .iter()
+                                    .map(|&(tid, frac)| {
+                                        (
+                                            eve_proto::PyRep::Integer(tid as i64),
+                                            eve_proto::PyRep::Real(frac),
+                                        )
+                                    })
+                                    .collect(),
+                            );
+                            self.notify(
+                                crate::router::NotificationTarget::Character(p.owner_char_id),
+                                "OnMoonScanComplete",
+                                "charid",
+                                vec![eve_proto::PyRep::Integer(moon_id), resources_dict],
+                            );
+                        }
                     }
                 }
                 self.notify(

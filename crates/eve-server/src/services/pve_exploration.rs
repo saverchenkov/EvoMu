@@ -583,13 +583,7 @@ pub fn notify_pve_destruction_events(
     }
 
     if let Some(esc) = new_escalation {
-        let args = vec![
-            PyRep::String(format!(
-                "Escalation discovered: {} in system {}",
-                esc.expedition_name, esc.destination_solar_system_id
-            )),
-            PyRep::Integer(esc.instance_id),
-        ];
+        let args = vec![PyRep::Integer(esc.instance_id)];
         let (packet, marshaled_packet) = crate::router::ServerContext::build_macho_notification_packet(
             killer_char_id,
             None,
@@ -609,19 +603,7 @@ pub fn notify_pve_destruction_events(
     }
 
     if let Some(step) = advanced_step {
-        let is_completed = step.step_index >= step.total_steps;
-        let msg = if is_completed {
-            format!("Expedition '{}' successfully completed!", step.expedition_name)
-        } else {
-            format!(
-                "Expedition progressed to Step {}/{}: {} in system {}",
-                step.step_index, step.total_steps, step.expedition_name, step.destination_solar_system_id
-            )
-        };
-        let args = vec![
-            PyRep::String(msg),
-            PyRep::Integer(step.instance_id),
-        ];
+        let args = vec![PyRep::Integer(step.instance_id)];
         let (packet, marshaled_packet) = crate::router::ServerContext::build_macho_notification_packet(
             killer_char_id,
             None,
@@ -884,16 +866,9 @@ pub async fn advance_site_wave_or_complete(
 
         session.push_notification("OnCosmicAnomalyRemoved", vec![PyRep::String(site_id.to_string())]);
         if let Some(ref esc) = escalation_created {
-            let msg = format!(
-                "Escalation discovered: {} in system {}",
-                esc.expedition_name, esc.destination_solar_system_id
-            );
             session.push_notification(
                 "OnEscalatingPathMessage",
-                vec![
-                    PyRep::String(msg),
-                    PyRep::Integer(esc.instance_id),
-                ],
+                vec![PyRep::Integer(esc.instance_id)],
             );
         }
     }

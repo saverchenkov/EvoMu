@@ -599,11 +599,12 @@ pub(crate) async fn handle_module_cycles(
                     crate::router::NotificationTarget::Character(char_id),
                     "OnNewMoonProbe",
                     "charid",
-                    vec![
-                        PyRep::Integer(probe_id),
-                        PyRep::Integer(probe_type_id as i64),
-                        PyRep::Integer(hit_moon_id.unwrap_or(0)),
-                    ],
+                    vec![PyRep::keyval([
+                        ("probeID", PyRep::Integer(probe_id)),
+                        ("typeID", PyRep::Integer(probe_type_id as i64)),
+                        ("moonID", hit_moon_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                        ("expiry", PyRep::Integer(arrival_unix_secs as i64)),
+                    ])],
                 );
 
                 return Some(Ok(PyRep::keyval([

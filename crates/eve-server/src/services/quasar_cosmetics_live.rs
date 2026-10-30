@@ -1084,7 +1084,8 @@ pub fn activate_ship_emblem_license(
         any(&format!("{pkg}.GrantedNotice"), notice_bytes),
         ctx.now_unix(),
     );
-    session.push_notification("OnSkinLicenseActivated", vec![PyRep::Integer(i64::from(license_type_id)), PyRep::Integer(-1)]);
+    let act_args = vec![PyRep::Integer(i64::from(license_type_id)), PyRep::Integer(char_id)];
+    ctx.notify(NotificationTarget::Character(char_id), "OnSkinLicenseActivated", "charid", act_args);
     Ok(PyRep::keyval([
         ("characterID", PyRep::Integer(char_id)),
         ("skinID", PyRep::Integer(i64::from(license_type_id))),

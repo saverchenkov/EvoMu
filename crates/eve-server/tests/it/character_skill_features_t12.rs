@@ -360,9 +360,9 @@ async fn test_skills_nondiminishing_injector() {
     let free_sp = ctx.db.with_snapshot(|snap| snap.characters.get(&90_000_001).unwrap().free_skill_points);
     assert_eq!(free_sp, 25_000.0);
 
-    // Verify notifications OnNonDiminishingInjectionsUsed(43630, 1) and OnFreeSkillPointsChanged
+    // Verify notifications OnNonDiminishingInjectionsUsed(1) and OnFreeSkillPointsChanged
     let notifs = ctx.drain_notifications_for_char(90_000_001);
-    assert!(notifs.iter().any(|n| n.event == "OnNonDiminishingInjectionsUsed" && n.args == vec![PyRep::Integer(43630), PyRep::Integer(1)]));
+    assert!(notifs.iter().any(|n| n.event == "OnNonDiminishingInjectionsUsed" && n.args == vec![PyRep::Integer(1)]));
     assert!(notifs.iter().any(|n| n.event == "OnFreeSkillPointsChanged" && n.args == vec![PyRep::Real(25_000.0)]));
 
     // Verify available counts decremented: {43630: 1, 42523: 1}

@@ -935,7 +935,7 @@ pub fn inject_skillpoints(
     let current_ship = session.ship_id;
     let now_ft = ctx.now_blueos_filetime_ticks();
 
-    let (yielded, new_free_sp, is_non_dim, consumed_type_id) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (yielded, new_free_sp, is_non_dim, _consumed_type_id) = ctx.db.try_with_mut_snapshot(|snap| {
         let ch = snap.characters.get(&char_id).cloned().ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
@@ -1025,7 +1025,7 @@ pub fn inject_skillpoints(
             NotificationTarget::Character(char_id),
             "OnNonDiminishingInjectionsUsed",
             "charid",
-            vec![PyRep::Integer(consumed_type_id as i64), PyRep::Integer(1)],
+            vec![PyRep::Integer(1)],
         );
     }
 

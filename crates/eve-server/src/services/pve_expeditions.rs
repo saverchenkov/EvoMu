@@ -198,13 +198,7 @@ pub async fn create_escalation_expedition(
         crate::router::NotificationTarget::Character(char_id),
         "OnEscalatingPathMessage",
         "charid",
-        vec![
-            PyRep::String(format!(
-                "Escalation discovered: {} in system {}",
-                entry.expedition_name, entry.destination_solar_system_id
-            )),
-            PyRep::Integer(entry.instance_id),
-        ],
+        vec![PyRep::Integer(entry.instance_id)],
     );
     Some(entry)
 }
@@ -361,23 +355,11 @@ pub async fn advance_expedition_step(
 ) -> Result<Option<EscalatingPathEntry>, BridgeRpcError> {
     let updated = advance_expedition_step_core(&ctx.db, &ctx.sde, &ctx.systems, char_id, instance_id).await?;
     if let Some(ref entry) = updated {
-        let is_completed = entry.step_index >= entry.total_steps;
-        let msg = if is_completed {
-            format!("Expedition '{}' successfully completed!", entry.expedition_name)
-        } else {
-            format!(
-                "Expedition progressed to Step {}/{}: {} in system {}",
-                entry.step_index, entry.total_steps, entry.expedition_name, entry.destination_solar_system_id
-            )
-        };
         let _ = ctx.notify(
             crate::router::NotificationTarget::Character(char_id),
             "OnEscalatingPathMessage",
             "charid",
-            vec![
-                PyRep::String(msg),
-                PyRep::Integer(entry.instance_id),
-            ],
+            vec![PyRep::Integer(entry.instance_id)],
         );
     }
     Ok(updated)

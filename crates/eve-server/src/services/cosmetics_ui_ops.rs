@@ -108,9 +108,9 @@ pub fn record_skin_license_activation(snap: &mut WorldStateSnapshot, char_id: i6
 }
 
 /// Removes expired timed licences for `char_id`, strips them from `licensed_skins`, and
-/// reverts any of the character's ships wearing them to the default skin. Returns the
-/// expired SKIN IDs so the caller can push `OnSkinLicenseRemoved` after releasing the lock.
-pub fn purge_expired_skins_for_char(snap: &mut WorldStateSnapshot, char_id: i64, now_unix: u64) -> Vec<u32> {
+/// reverts any of the character's ships wearing them to the default skin. Returns `(skin_id, ship_id_or_0, ship_type_or_0)`
+/// tuples so the caller can emit `OnSkinLicenseRemoved(skinID, itemID, typeID)` after releasing the lock.
+pub fn purge_expired_skins_for_char(snap: &mut WorldStateSnapshot, char_id: i64, now_unix: u64) -> Vec<(u32, i64, u32)> {
     let mut ext = load_cosmetics_ui_state(snap);
     let mut expired: Vec<SkinLicenseEntry> = Vec::new();
     if let Some(entries) = ext.skin_license_entries.get_mut(&char_id) {
@@ -129,20 +129,42 @@ pub fn purge_expired_skins_for_char(snap: &mut WorldStateSnapshot, char_id: i64,
     if let Some(lics) = snap.licensed_skins.get_mut(&char_id) {
         lics.retain(|id| !removed_ids.contains(id));
     }
-    let char_ships: Vec<i64> = snap.items.values().filter(|i| i.owner_id == char_id).map(|i| i.item_id).collect();
-    for sid in char_ships {
-        if snap.applied_ship_skins.get(&sid).map(|applied| removed_ids.contains(applied)).unwrap_or(false) {
-            snap.applied_ship_skins.remove(&sid);
+    let char_ships: Vec<(i64, u32)> = snap.items.values().filter(|i| i.owner_id == char_id).map(|i| (i.item_id, i.type_id)).collect();
+    let mut cleared_ships: Vec<(u32, i64, u32)> = Vec::new();
+    for (sid, stype) in char_ships {
+        if let Some(applied_id) = snap.applied_ship_skins.get(&sid).copied() {
+            if let Some(entry) = expired.iter().find(|e| e.skin_id == applied_id || e.license_type_id == applied_id) {
+                snap.applied_ship_skins.remove(&sid);
+                cleared_ships.push((entry.skin_id, sid, stype));
+            }
         }
     }
     save_cosmetics_ui_state(snap, &ext);
-    expired.into_iter().map(|e| e.skin_id).collect()
+    let mut out = Vec::new();
+    for e in expired {
+        let mut matched = false;
+        for &(sk, sid, stype) in &cleared_ships {
+            if sk == e.skin_id {
+                out.push((sk, sid, stype));
+                matched = true;
+            }
+        }
+        if !matched {
+            out.push((e.skin_id, 0, 0));
+        }
+    }
+    out
 }
 
-/// Pushes `OnSkinLicenseRemoved` for every expired SKIN (call outside any snapshot lock).
-pub fn notify_skins_removed(session: &mut SessionState, expired: &[u32]) {
-    for &skin_id in expired {
-        session.push_notification("OnSkinLicenseRemoved", vec![PyRep::Integer(i64::from(skin_id))]);
+/// Pushes `OnSkinLicenseRemoved(skinID, itemID, typeID)` for every expired SKIN (call outside any snapshot lock).
+pub fn notify_skins_removed(ctx: &ServerContext, char_id: i64, _session: &mut SessionState, expired: &[(u32, i64, u32)]) {
+    for &(skin_id, item_id, type_id) in expired {
+        let args = vec![
+            PyRep::Integer(i64::from(skin_id)),
+            if item_id > 0 { PyRep::Integer(item_id) } else { PyRep::None },
+            if type_id > 0 { PyRep::Integer(i64::from(type_id)) } else { PyRep::None },
+        ];
+        ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnSkinLicenseRemoved", "charid", args);
     }
 }
 
@@ -220,15 +242,16 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
                 list.push(lic_info.skin_id);
             }
             let exp = record_skin_license_activation(snap, char_id, requested_skin_id, lic_info.skin_id, lic_info.duration, ctx.now_unix());
-            Ok((requested_skin_id, exp))
+            Ok((lic_info.skin_id, exp))
         });
         return match res {
             Ok((skin_id, exp_opt)) => {
-                session.push_notification("OnSkinLicenseActivated", vec![PyRep::Integer(skin_id as i64), PyRep::Integer(lic_info.duration as i64)]);
+                let act_args = vec![PyRep::Integer(i64::from(skin_id)), PyRep::Integer(char_id)];
+                ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnSkinLicenseActivated", "charid", act_args);
                 Some(Ok(PyRep::keyval([
                     ("characterID", PyRep::Integer(char_id)),
-                    ("skinID", PyRep::Integer(skin_id as i64)),
-                    ("skinHashID", PyRep::Integer(skin_id as i64)),
+                    ("skinID", PyRep::Integer(i64::from(skin_id))),
+                    ("skinHashID", PyRep::Integer(i64::from(skin_id))),
                     ("durationDays", PyRep::Integer(lic_info.duration as i64)),
                     ("expiresAtUnix", exp_opt.map(|u| PyRep::Integer(u as i64)).unwrap_or(PyRep::None)),
                     ("licensed", PyRep::Bool(true)),
@@ -275,7 +298,7 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
             });
             return match res {
                 Ok((target_ship, prev_skin, expired)) => {
-                    notify_skins_removed(session, &expired);
+                    notify_skins_removed(ctx, char_id, session, &expired);
                     session.push_notification("OnCurrentShipSkinChange", vec![PyRep::Integer(target_ship), PyRep::None]);
                     crate::services::quasar_cosmetics_live::broadcast_ship_skin_cosmetic_change(ctx, char_id, target_ship, ship_type_id, prev_skin, None).await;
                     crate::services::quasar_cosmetics_live::publish_ship_skin_set(&ctx.quasar_gateway, &ctx.db, &ctx.sde, target_ship, now_unix);
@@ -344,7 +367,7 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         });
         return match res {
             Ok((active_ship, skin_id, prev_skin, expired)) => {
-                notify_skins_removed(session, &expired);
+                notify_skins_removed(ctx, char_id, session, &expired);
                 session.push_notification("OnCurrentShipSkinChange", vec![PyRep::Integer(active_ship), PyRep::Integer(skin_id as i64)]);
                 crate::services::quasar_cosmetics_live::broadcast_ship_skin_cosmetic_change(ctx, char_id, active_ship, ship_type_id, prev_skin, Some(skin_id)).await;
                 // Quasar ship SKIN state (`eve_public.cosmetic.ship.api.SetNotice`) for observers.
@@ -497,7 +520,7 @@ fn handle_get_licensed_skins(ctx: &ServerContext, session: &mut SessionState, sh
         }
         Ok::<_, BridgeRpcError>((rows, expired))
     })?;
-    notify_skins_removed(session, &expired);
+    notify_skins_removed(ctx, char_id, session, &expired);
     Ok(PyRep::List(rows))
 }
 
@@ -1250,7 +1273,7 @@ fn handle_crate_claim_skill_bundle(ctx: &ServerContext, session: &mut SessionSta
         return Err(err("InvalidSkillBundle", "Valid opened crate and skill bundle ID required"));
     }
     let session_dock = session.station_id.or(session.structure_id);
-    ctx.db.try_with_mut_snapshot(|snap| {
+    let result = ctx.db.try_with_mut_snapshot(|snap| {
         let _dock_loc = snap
             .characters
             .get(&char_id)
@@ -1293,12 +1316,23 @@ fn handle_crate_claim_skill_bundle(ctx: &ServerContext, session: &mut SessionSta
         ch.free_skill_points += sp_grant;
         let new_sp = ch.free_skill_points;
         save_cosmetics_ui_state(snap, &ext);
-        Ok(PyRep::keyval([
-            ("crateID", PyRep::Integer(crate_id)),
-            ("skillBundleID", PyRep::Integer(bundle_id)),
-            ("spGranted", PyRep::Real(sp_grant)),
-            ("freeSkillPoints", PyRep::Real(new_sp)),
-        ]))
-    })
+        Ok((
+            sp_grant,
+            PyRep::keyval([
+                ("crateID", PyRep::Integer(crate_id)),
+                ("skillBundleID", PyRep::Integer(bundle_id)),
+                ("spGranted", PyRep::Real(sp_grant)),
+                ("freeSkillPoints", PyRep::Real(new_sp)),
+            ]),
+        ))
+    })?;
+    let notif_args = vec![PyRep::Integer(1), PyRep::Real(result.0)];
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnSkillBundleInjected",
+        "charid",
+        notif_args,
+    );
+    Ok(result.1)
 }
 

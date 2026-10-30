@@ -316,16 +316,16 @@ async fn test_mn04_venture_miner_i_cycles_deliver_exact_sde_yield_until_hold_ful
     assert_eq!(mined_notes.len(), 3);
     assert_eq!(
         mined_notes[0].args,
-        vec![
-            PyRep::Integer(i64::from(VELDSPAR)),
-            PyRep::Integer(per_cycle),
-            PyRep::Integer(per_cycle),
-            PyRep::Bool(false),
-            PyRep::Integer(0),
-            PyRep::Integer(0),
-            PyRep::Integer(rock_a),
-            PyRep::Integer(laser),
-        ]
+        vec![PyRep::Dict(vec![
+            (PyRep::String("oreType".into()), PyRep::Integer(i64::from(VELDSPAR))),
+            (PyRep::String("quantity_added".into()), PyRep::Integer(per_cycle)),
+            (PyRep::String("quantity_removed".into()), PyRep::Integer(per_cycle)),
+            (PyRep::String("hasRewards".into()), PyRep::Bool(false)),
+            (PyRep::String("amountWasted".into()), PyRep::Integer(0)),
+            (PyRep::String("amountCritBonus".into()), PyRep::Integer(0)),
+            (PyRep::String("itemID".into()), PyRep::Integer(rock_a)),
+            (PyRep::String("moduleItemID".into()), PyRep::Integer(laser)),
+        ])]
     );
 
     // 2) Critical success (seeded mechanic RNG, miningCritChance 0.01): the hold gains
