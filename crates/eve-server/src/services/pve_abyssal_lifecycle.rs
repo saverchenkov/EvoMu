@@ -251,6 +251,7 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
             SolarSystemId,
             [f64; 3],
             HashMap<AttributeId, f64>,
+            u8,
         )>,
         Vec<(i64, SolarSystemId, Vec<i64>)>,
         Vec<(SolarSystemId, i64)>,
@@ -270,6 +271,7 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
                     p.origin_solar_system_id,
                     p.origin_position,
                     p.saved_ship_attrs.clone(),
+                    p.tier,
                 ));
                 if p.trace_ball_id > 0 {
                     bound_by_pid.insert(p.pocket_id, (p.origin_solar_system_id, p.trace_ball_id));
@@ -309,7 +311,7 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
 
     let closed_abyss_systems: HashSet<SolarSystemId> = evacuated
         .iter()
-        .map(|(_, _, abyss_sys, _, _, _)| *abyss_sys)
+        .map(|(_, _, abyss_sys, _, _, _, _)| *abyss_sys)
         .chain(pocket_cleanups.iter().map(|(_, abyss_sys, _)| *abyss_sys))
         .collect();
 
@@ -347,7 +349,7 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
         }
     }
 
-    for (cid, sid, abyss_sys, origin_sys, origin_pos, saved_attrs) in &evacuated {
+    for (cid, sid, abyss_sys, origin_sys, origin_pos, saved_attrs, tier) in &evacuated {
         restore_abyssal_weather_dogma_modifiers(ctx, *sid, saved_attrs);
         crate::sp6_lifecycle::clear_abyssal_session(ctx, *cid);
         let evacuated_pos = random_offset_around_trace_origin(ctx, *origin_pos);
@@ -424,6 +426,24 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
             .try_spawn_ball_with_meta(ball, cs, meta);
         ctx.sync_character_local_chat(*cid, Some(*abyss_sys), *origin_sys);
         crate::services::map_service::record_solar_system_visit(ctx, *cid, *origin_sys);
+        let origin_sec = ctx
+            .sde
+            .solar_systems
+            .get(origin_sys)
+            .map(|s| s.security_status)
+            .unwrap_or(0.9);
+        if crate::services::pve_special_sites_abyssal::evaluate_highsec_abyssal_tier_policy(
+            origin_sec, *tier,
+        )
+        .unwrap_or(false)
+        {
+            let now_u = ctx.now_unix();
+            ctx.crimewatch
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .trigger_suspect_flag(*cid, now_u);
+            crate::services::combat_crimewatch::emit_crimewatch_timer_notifications(ctx, *cid, now_u);
+        }
     }
     for abyss_sys in closed_abyss_systems {
         let any_active_in_sys = with_pve_special_reg(ctx, |reg| {
@@ -483,23 +503,14 @@ pub fn evacuate_void_space_session_sync(
     ctx: &ServerContext,
     char_id: CharacterId,
     vs: &VoidSpaceSessionRecord,
-    now_unix: u64,
+    _now_unix: u64,
 ) -> SolarSystemId {
-    let pocket_tier = with_pve_special_reg(ctx, |reg| {
+    with_pve_special_reg(ctx, |reg| {
         reg.void_space_sessions.remove(&char_id);
-        reg.abyssal_pockets.get(&char_id).map(|p| p.tier)
     });
     crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
 
     let origin_sys = vs.origin_solar_system_id;
-    let origin_sec = ctx.sde.solar_systems.get(&origin_sys).map(|s| s.security_status).unwrap_or(0.0);
-    if pocket_tier.is_some_and(|t| t >= 4) && (0.45..0.75).contains(&origin_sec) {
-        ctx.crimewatch
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .trigger_suspect_flag(char_id, now_unix);
-        crate::services::combat_crimewatch::emit_crimewatch_timer_notifications(ctx, char_id, now_unix);
-    }
     let exit_pos = [
         vs.origin_position[0] + 1_000.0,
         vs.origin_position[1] + 1_000.0,

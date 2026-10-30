@@ -1330,13 +1330,17 @@ pub async fn activate_command_burst(
                 let st = cw.get_or_create(member_char_id);
                 st.is_criminal(now_unix_burst) || st.is_suspect(now_unix_burst)
             } || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                rt.is_in_any_limited_engagement(member_char_id, now_unix_burst)
+                rt.limited_engagements.get(&member_char_id).is_some_and(|m| {
+                    m.iter().any(|(&pid, &exp)| pid != char_id && now_unix_burst <= exp)
+                })
             }) || ctx.db.with_snapshot(|snap| {
-                let Some(rec) = snap.characters.get(&member_char_id) else { return false; };
-                if rec.security_status <= -4.95 { return true; }
-                let rec_ent = rec.alliance_id.unwrap_or(rec.corporation_id);
-                snap.wars.values().any(|w| w.active && (w.aggressor_corp_id == rec_ent || w.defender_corp_id == rec_ent))
-            });
+                snap.characters.get(&member_char_id).is_some_and(|rec| rec.security_status <= -4.95)
+            }) || crate::services::combat_crimewatch::crimewatch_timers::is_war_interference_assistance(
+                ctx,
+                char_id,
+                member_char_id,
+                now_unix_burst,
+            );
             if is_illegal_target {
                 continue;
             }

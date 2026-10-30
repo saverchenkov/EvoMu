@@ -99,15 +99,7 @@ pub fn evaluate_remote_assistance_legality(
     let rec_in_le = with_combat_runtime(ctx, |rt| {
         rt.is_in_any_limited_engagement(recipient_char_id, now_unix)
     });
-    let rec_in_war = ctx.db.with_snapshot(|snap| {
-        let Some(rec) = snap.characters.get(&recipient_char_id) else {
-            return false;
-        };
-        let rec_ent = rec.alliance_id.unwrap_or(rec.corporation_id);
-        snap.wars.values().any(|w| {
-            w.active && (w.aggressor_corp_id == rec_ent || w.defender_corp_id == rec_ent)
-        })
-    });
+    let rec_in_war = is_war_interference_assistance(ctx, helper_char_id, recipient_char_id, now_unix);
     let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
     let rec_state = cw.get_or_create(recipient_char_id).clone();
     let rec_is_criminal = rec_state.is_criminal(now_unix);
@@ -1149,10 +1141,7 @@ pub async fn handle_crimewatch(
                 }
                 Ok((tid, tier, origin_sec))
             });
-            let (filament_type_id, tier, origin_sec) = match resolved { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            if tier >= 4 && (0.45..0.75).contains(&origin_sec) {
-                ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).trigger_suspect_flag(char_id, now_unix);
-            }
+            let (filament_type_id, tier, _origin_sec) = match resolved { Ok(v) => v, Err(e) => return Some(Err(e)) };
             crate::sp6_lifecycle::register_abyssal_session(
                 ctx, char_id, ship_id, 32_000_001, origin_sys, now_unix, now_unix.saturating_add(1_200),
             );
@@ -1174,6 +1163,24 @@ pub async fn handle_crimewatch(
 
         _ => None,
     }
+}
+
+pub(crate) fn is_war_interference_assistance(ctx: &ServerContext, helper_char_id: i64, beneficiary_char_id: i64, now_unix: u64) -> bool {
+    ctx.db.with_snapshot(|snap| {
+        let (Some(helper), Some(ben)) = (snap.characters.get(&helper_char_id), snap.characters.get(&beneficiary_char_id)) else { return false; };
+        let (h_ent, b_ent) = (helper.alliance_id.unwrap_or(helper.corporation_id), ben.alliance_id.unwrap_or(ben.corporation_id));
+        snap.wars.values().any(|w| {
+            if !w.active || (!w.mutual && now_unix < w.started_unix.saturating_add(86_400)) { return false; }
+            if snap.war_state.wars.get(&w.war_id).and_then(|m| m.finish_at_unix).is_some_and(|f| now_unix >= f) { return false; }
+            let is_agg = |ent: i64, corp: i64| w.aggressor_corp_id == ent || w.aggressor_corp_id == corp;
+            let is_def_or_ally = |ent: i64, corp: i64| {
+                w.defender_corp_id == ent || w.defender_corp_id == corp
+                    || snap.war_state.negotiations.iter().any(|n| n.war_id == w.war_id && n.kind == eve_db::PersistedNegKind::Ally && n.status == "Accepted" && now_unix >= n.effective_unix.unwrap_or(0) && (n.from_corp == ent || n.from_corp == corp))
+            };
+            (is_agg(b_ent, ben.corporation_id) && !is_agg(h_ent, helper.corporation_id))
+                || (is_def_or_ally(b_ent, ben.corporation_id) && !is_def_or_ally(h_ent, helper.corporation_id))
+        })
+    })
 }
 
 /// Evaluates ship safety, triggers 60s Weapons Timer, applies CrimeWatch Suspect/Criminal/CONCORD/PvP
@@ -1296,16 +1303,18 @@ pub fn evaluate_and_record_remote_assistance(
             .map(|m| m.iter().filter(|&(&pid, &exp)| pid != helper_char_id && now_unix <= exp).map(|(&pid, _)| pid).collect())
             .unwrap_or_default()
     });
+    let war_interference = is_war_interference_assistance(ctx, helper_char_id, ben_id, now_unix);
+    let third_party_interference = !ben_le_partners.is_empty() || war_interference;
     let safety = with_combat_runtime(ctx, |rt| rt.safety_levels.get(&helper_char_id).copied().unwrap_or(SafetyLevel::Red));
-    if ((ben_criminal && sys_sec > 0.0) || (!ben_le_partners.is_empty() && sys_sec >= 0.45))
+    if ((ben_criminal && sys_sec > 0.0) || (third_party_interference && sys_sec >= 0.45))
         && matches!(safety, SafetyLevel::Green | SafetyLevel::Yellow)
     {
         return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
     }
-    if ((ben_suspect && sys_sec > 0.0) || !ben_le_partners.is_empty()) && safety == SafetyLevel::Green {
+    if ((ben_suspect && sys_sec > 0.0) || (third_party_interference && sys_sec > 0.0)) && safety == SafetyLevel::Green {
         return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
     }
-    if ben_criminal && sys_sec > 0.0 {
+    if (ben_criminal && sys_sec > 0.0) || (third_party_interference && sys_sec >= 0.45) {
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
         let _ = cw.handle_criminal_remote_assistance(helper_char_id, ben_id, helper_ship_id, sys_id, sys_sec, now_unix);
         drop(cw);
@@ -1313,30 +1322,24 @@ pub fn evaluate_and_record_remote_assistance(
         if ctx.db.with_snapshot(|snap| snap.characters.get(&helper_char_id).map(|c| c.solar_system_id)) != Some(sys_id) {
             let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[], &[], &[helper_char_id]);
         }
-    } else if ben_suspect && sys_sec > 0.0 {
+    } else if (ben_suspect || third_party_interference) && sys_sec > 0.0 {
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
         let st = cw.get_or_create(helper_char_id);
-        st.weapon_timer_until_unix = now_unix.saturating_add(60);
-        st.pvp_timer_until_unix = now_unix.saturating_add(900);
-        st.suspect_flag_until_unix = now_unix.saturating_add(900);
+        st.weapon_timer_until_unix = st.weapon_timer_until_unix.max(now_unix.saturating_add(60));
+        st.pvp_timer_until_unix = st.pvp_timer_until_unix.max(now_unix.saturating_add(900));
+        st.suspect_flag_until_unix = st.suspect_flag_until_unix.max(now_unix.saturating_add(900));
         drop(cw);
         emit_crimewatch_timer_notifications(ctx, helper_char_id, now_unix);
         if ctx.db.with_snapshot(|snap| snap.characters.get(&helper_char_id).map(|c| c.solar_system_id)) != Some(sys_id) {
             let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[], &[helper_char_id], &[]);
         }
+    } else if third_party_interference {
+        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+        let st = cw.get_or_create(helper_char_id);
+        st.weapon_timer_until_unix = st.weapon_timer_until_unix.max(now_unix.saturating_add(60));
+        st.pvp_timer_until_unix = st.pvp_timer_until_unix.max(now_unix.saturating_add(900));
     }
     if !ben_le_partners.is_empty() {
-        {
-            let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-            let st = cw.get_or_create(helper_char_id);
-            st.weapon_timer_until_unix = st.weapon_timer_until_unix.max(now_unix.saturating_add(60));
-            st.pvp_timer_until_unix = st.pvp_timer_until_unix.max(now_unix.saturating_add(900));
-            if sys_sec >= 0.45 {
-                st.criminal_flag_until_unix = st.criminal_flag_until_unix.max(now_unix.saturating_add(900));
-            } else if sys_sec > 0.0 {
-                st.suspect_flag_until_unix = st.suspect_flag_until_unix.max(now_unix.saturating_add(900));
-            }
-        }
         with_mut_combat_runtime(ctx, |rt| {
             for &pid in &ben_le_partners {
                 rt.add_limited_engagement(helper_char_id, pid, now_unix);
