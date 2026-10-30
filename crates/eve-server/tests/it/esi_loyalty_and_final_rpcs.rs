@@ -46,7 +46,7 @@ async fn login_and_select(ctx: &ServerContext, sess: &mut SessionState, char_id:
 }
 
 #[tokio::test]
-// Note: Corporation LP store offer catalog import tracked under feat:lp.lp-store-offers
+// DATA GAP: NPC corporation LP store offer catalogs are server-only in modern EVE and absent from V24 client FSD (SharedCache); all 6 LP store rows remain open until authoritative data is available.
 async fn test_esi_loyalty_store_offers_route() {
     // parity: esi:GET /loyalty/stores/{corporation_id}/offers, feat:esi.loyalty.offers
     let ctx = Arc::new(ServerContext::new());

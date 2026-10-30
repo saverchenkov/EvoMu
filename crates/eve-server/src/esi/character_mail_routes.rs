@@ -351,7 +351,7 @@ pub fn dispatch_character_mail_routes(
                 RouteExecutionResult::ok_json(json!(out), 3600)
             }))
         }
-        // Note: Corporation LP store offer catalog import tracked under feat:lp.lp-store-offers; ESI endpoint served via unified lp_store.
+        // DATA GAP: NPC corporation LP store offer catalogs are server-only in modern EVE and absent from V24 client FSD (SharedCache); all 6 LP store rows remain open until authoritative data is available.
         ("GET", "/loyalty/stores/{corporation_id}/offers") => {
             let corp_id = match parse_path_i64(path_params, "corporation_id") {
                 Ok(v) => v,

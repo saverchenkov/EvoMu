@@ -83,6 +83,7 @@ async fn setup_docked_pilot(ctx: &ServerContext, char_id: i64, station_id: i64, 
 
 #[tokio::test]
 async fn test_lp_store_offers_browsing_and_station_corp_resolution() {
+    // DATA GAP: NPC corporation LP store offer catalogs are server-only in modern EVE and absent from V24 client FSD (SharedCache); all 6 LP store rows remain open until authoritative data is available
     // DATA GAP: requires SDE/live store catalog import (feat:lp.lp-store-offers)
     // DATA GAP: requires server-only offer catalog (rpc:LPStoreMgr.GetAvailableOffersFromCorp)
 

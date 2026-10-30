@@ -43,6 +43,7 @@ pub mod fleet_social;
 pub mod fw_enlistment;
 pub mod fw_gameplay;
 pub mod fw_services;
+pub mod hypernet_raffle_ops;
 pub mod implant_plugging;
 pub mod ingamereport_ops;
 pub mod industry_pi;
