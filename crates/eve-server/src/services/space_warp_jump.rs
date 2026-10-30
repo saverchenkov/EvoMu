@@ -869,6 +869,7 @@ async fn handle_cmd_stargate_jump(
         ctx, char_id, old_sys, current_ball.position.to_array(),
     );
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, old_sys);
+    crate::services::map_service::record_system_jump(ctx, dest_sys_id);
     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
         rt.authorized_shipping_storage.retain(|&(_, c)| c != char_id);
     });
