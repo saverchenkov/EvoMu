@@ -364,6 +364,7 @@ mod crimewatch_drones_closure_part2;
 mod ships_modules_closure;
 mod ess_reserve_main_concurrency;
 mod mining_structures_sov_r5_regressions;
+mod mining_mn_closure;
 mod skills_fitting_corp_r5_regressions;
 mod combat_fighters_insurance_bounties_part2;
 mod combat_npc_crimewatch_part2;

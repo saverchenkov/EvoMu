@@ -148,6 +148,7 @@ pub fn populate_system_celestials(
 }
 
 /// Populates asteroid belt entities (Veldspar, Scordite, Pyroxeres, etc.) around asteroid belt celestials (`SP-4`, `MN-01`).
+/// Uses `SdeRegistry::belt_ores_for_system` (DERIVED OF-36 security-band volume heuristic).
 pub fn populate_asteroid_belt_entities(
     ballpark: &mut Ballpark,
     solar_system_id: SolarSystemId,
@@ -161,63 +162,23 @@ pub fn populate_asteroid_belt_entities(
     };
     let mut ast_id_counter = 750_000_000i64 + sys_offset;
 
-    let Some(sys) = sde.solar_systems.get(&solar_system_id) else {
+    if sde.solar_systems.get(&solar_system_id).is_none() {
         return states;
-    };
-    let sec = sys.security_status;
-    let is_pochven = sys.region_id == 10_000_070;
+    }
+    let band_ores = sde.belt_ores_for_system(solar_system_id);
 
-    let mut base_ores: Vec<&eve_sde::InvType> = sde
-        .types
-        .values()
-        .filter(|t| {
-            t.category_id == 25
-                && t.published
-                && ((450..=469).contains(&t.group_id) || (4029..=4031).contains(&t.group_id))
-                && t.group_id != 465
-                && sde.groups.get(&t.group_id).is_some_and(|g| g.name == t.name)
-        })
-        .collect();
-    base_ores.sort_by(|a, b| {
-        a.volume
-            .partial_cmp(&b.volume)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.type_id.cmp(&b.type_id))
-    });
-
-    // DERIVED (OF-36 / R57-P1-2): security-band volume thresholds (highsec >= 0.45: <= 0.35 m3,
-    // lowsec 0.05..0.45: 0.35..=3.0 m3 including Hedbergite 21, nullsec < 0.05: 3.0..=40.0 m3
-    // including Mercoxit 11396, Pochven region 10000070: groups 4029..=4031 Bezdnacine/Rakovene/Talassonite)
-    // and initial asteroid quantity/radius/mass scaling ((2,000 / unit_volume) rounded to portion size batch,
-    // radius clamp 60..2,500m, mass total_m3 * 5e7) are derived server-side heuristics
-    // because regional belt ore tables are server-only and not present in V24 client ResFiles.
-    // `feat:mining.belt-ore-distribution` and `feat:mining.ice-belts` remain open until
-    // regional/ice spawn tables are wired.
     for cel in sde.celestials_in_system(solar_system_id) {
         if cel.group_id == 9 {
             let belt_pos = cel.position;
-            let band_ores: Vec<&eve_sde::InvType> = base_ores
-                .iter()
-                .copied()
-                .filter(|t| {
-                    if is_pochven {
-                        (4029..=4031).contains(&t.group_id)
-                    } else if (4029..=4031).contains(&t.group_id) {
-                        false
-                    } else if sec >= 0.45 {
-                        t.volume <= 0.35
-                    } else if sec >= 0.05 {
-                        t.volume > 0.35 && t.volume <= 3.0
-                    } else {
-                        t.volume > 3.0 && t.volume <= 40.0
-                    }
-                })
-                .collect();
 
             for (idx, ore_type) in band_ores.iter().enumerate() {
                 let id = ast_id_counter;
                 ast_id_counter += 1;
 
+                // DERIVED (OF-36): initial asteroid quantity/radius/mass scaling
+                // ((2,000 / unit_volume) rounded to portion size batch, radius clamp 60..2,500m,
+                // mass total_m3 * 5e7) is a derived server-side heuristic because per-belt
+                // asteroid volume/mass distributions are server-only and absent from V24 ResFiles.
                 let unit_vol = ore_type.volume.max(0.01);
                 let batch = ore_type.portion_size.max(1);
                 let raw_units = ((2_000.0 / unit_vol).round() as u64).max(batch);

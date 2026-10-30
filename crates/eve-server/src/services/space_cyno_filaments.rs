@@ -62,10 +62,6 @@ pub(crate) async fn handle(
             Some(crate::services::space_entity_mining::handle_mine(ctx, session, bound_entry, args).await)
         }
 
-        ("charMiningLedger", "GetMiningLedger") | ("charMiningLedger", "GetLedger") => {
-            Some(handle_get_mining_ledger(ctx, session))
-        }
-
         _ => None,
     }
 }
@@ -1179,17 +1175,6 @@ async fn handle_cone_scan(
         }
     }
     Some(Ok(PyRep::List(matches)))
-}
-
-fn handle_get_mining_ledger(ctx: &ServerContext, session: &SessionState) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let items: Vec<PyRep> = ctx.db.get_mining_ledger(char_id).into_iter().map(|r| {
-        PyRep::keyval([
-            ("date", PyRep::String(r.date)), ("solarSystemID", PyRep::Integer(r.solar_system_id as i64)),
-            ("typeID", PyRep::Integer(r.type_id as i64)), ("quantity", PyRep::Integer(r.quantity as i64)),
-        ])
-    }).collect();
-    Ok(PyRep::List(items))
 }
 
 async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {

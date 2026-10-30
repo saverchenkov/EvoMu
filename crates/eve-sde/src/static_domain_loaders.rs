@@ -1353,3 +1353,53 @@ impl SdeRegistry {
         map.get(&market_group_id).cloned()
     }
 }
+
+impl crate::SdeRegistry {
+    // DERIVED (OF-36): security-band volume thresholds (`<= 0.35`, `<= 3.0`, `<= 40.0` m3) are derived
+    // server-side heuristics because regional/quarter belt ore tables and ice-belt spawn tables are
+    // server-only (`feat:mining.belt-ore-distribution` and `feat:mining.ice-belts` are `DONE` in
+    // `parity.json` from pre-existing tests; `plan:MN-01` and `plan:MN-02` remain open until real
+    // regional/quarter and ice-belt spawn tables are wired).
+    pub fn belt_ores_for_security_and_region(&self, security_status: f64, region_id: u32) -> Vec<&crate::InvType> {
+        let is_pochven = region_id == 10_000_070;
+        let mut base_ores: Vec<&crate::InvType> = self
+            .types
+            .values()
+            .filter(|t| {
+                t.category_id == 25
+                    && t.published
+                    && ((450..=469).contains(&t.group_id) || (4029..=4031).contains(&t.group_id))
+                    && t.group_id != 465
+                    && self.groups.get(&t.group_id).is_some_and(|g| g.name == t.name)
+            })
+            .filter(|t| {
+                if is_pochven {
+                    (4029..=4031).contains(&t.group_id)
+                } else if (4029..=4031).contains(&t.group_id) {
+                    false
+                } else if security_status >= 0.45 {
+                    t.volume <= 0.35
+                } else if security_status >= 0.05 {
+                    t.volume > 0.35 && t.volume <= 3.0
+                } else {
+                    t.volume > 3.0 && t.volume <= 40.0
+                }
+            })
+            .collect();
+        base_ores.sort_by(|a, b| {
+            a.volume
+                .partial_cmp(&b.volume)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.type_id.cmp(&b.type_id))
+        });
+        base_ores
+    }
+
+    /// Returns the base asteroid ore types eligible to spawn in belts for `solar_system_id` (`MN-01`, `MN-02`).
+    pub fn belt_ores_for_system(&self, solar_system_id: crate::SolarSystemId) -> Vec<&crate::InvType> {
+        let Some(sys) = self.solar_systems.get(&solar_system_id) else {
+            return Vec::new();
+        };
+        self.belt_ores_for_security_and_region(sys.security_status, sys.region_id)
+    }
+}
