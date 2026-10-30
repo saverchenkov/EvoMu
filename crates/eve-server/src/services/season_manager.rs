@@ -300,6 +300,9 @@ pub fn sync_character_challenges_with_defs(
 ) {
     let def_map: HashMap<i64, &SeasonalChallengeDef> = defs.iter().map(|d| (d.challenge_id, d)).collect();
     for ch in st.challenges.values_mut() {
+        if ch.is_dormant {
+            continue;
+        }
         let Some(def) = def_map.get(&ch.challenge_id) else {
             continue;
         };
@@ -399,6 +402,8 @@ pub fn handle_season_manager(
             Some(Ok(PyRep::Integer(max_ch)))
         }
         ("seasonManager", "get_season_end_time") => {
+            // DATA GAP: live season schedule timestamps are server-only; catalog seeds a 30-day
+            // window from init_start_ft when unconfigured (rpc:seasonManager.get_season_end_time)
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -422,6 +427,8 @@ pub fn handle_season_manager(
             Some(Ok(end_ft_opt.map(PyRep::Integer).unwrap_or(PyRep::None)))
         }
         ("seasonManager", "select_season") => {
+            // DATA GAP: live season schedule and ordinal season aliases 2..=4 are server-derived
+            // when not configured in service_state_blobs (rpc:seasonManager.select_season)
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -493,6 +500,8 @@ pub fn handle_season_manager(
             }
         }
         ("seasonManager", "get_season_data_for_character") => {
+            // DATA GAP: live season schedule, max_active_challenges=4, and campaign
+            // max_season_points=1000 are server-derived when unconfigured (rpc:seasonManager.get_season_data_for_character)
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -689,17 +698,24 @@ pub fn handle_season_manager(
                     .or_else(|| catalog.values().next())
                     .map(|c| c.end_time_ft)
                     .unwrap_or(now_ft + 30 * 86_400 * 10_000_000);
+                let max_active = catalog
+                    .get(&st.selected_season_id)
+                    .or_else(|| catalog.values().next())
+                    .map(|c| c.max_active_challenges.max(1) as usize)
+                    .unwrap_or(4);
                 let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
-                ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, 4);
+                ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
                 sync_character_challenges_with_defs(st, &defs, snap, char_id);
                 let ch_id = if let Some(id) = arg0_int {
                     id
                 } else {
                     let s = arg0_str.unwrap();
-                    if let Some(d) = defs.iter().find(|d| d.event_type == s || d.title == s) {
-                        d.challenge_id
-                    } else if let Some(c) = st.challenges.values().find(|c| c.title == s) {
+                    if let Some(c) = st.challenges.values().find(|c| !c.is_dormant && c.title == s) {
                         c.challenge_id
+                    } else if let Some(d) = defs.iter().find(|d| d.event_type == s && st.challenges.get(&d.challenge_id).is_some_and(|c| !c.is_dormant)) {
+                        d.challenge_id
+                    } else if let Some(d) = defs.iter().find(|d| d.event_type == s || d.title == s) {
+                        d.challenge_id
                     } else {
                         return Err(BridgeRpcError {
                             code: "ChallengeNotFound".into(),
@@ -708,26 +724,24 @@ pub fn handle_season_manager(
                     }
                 };
                 let def_opt = defs.iter().find(|d| d.challenge_id == ch_id);
-                if !st.challenges.contains_key(&ch_id) {
-                    if let Some(def) = def_opt {
-                        if !def.client_event_driven {
-                            return Err(BridgeRpcError {
-                                code: "InvalidChallengeEvent".into(),
-                                message: "Server-side activity challenge cannot be progressed via client events".into(),
-                            });
-                        }
-                        st.challenges.insert(
-                            ch_id,
-                            def.to_character_challenge_with_end(st.selected_season_id, now_ft, season_end_ft),
-                        );
-                    } else {
+                let Some(ch) = st.challenges.get_mut(&ch_id) else {
+                    if def_opt.is_some_and(|d| !d.client_event_driven) {
                         return Err(BridgeRpcError {
-                            code: "ChallengeNotFound".into(),
-                            message: "Challenge not found".into(),
+                            code: "InvalidChallengeEvent".into(),
+                            message: "Server-side activity challenge cannot be progressed via client events".into(),
                         });
                     }
+                    return Err(BridgeRpcError {
+                        code: "ChallengeNotFound".into(),
+                        message: "Challenge not found".into(),
+                    });
+                };
+                if ch.is_dormant {
+                    return Err(BridgeRpcError {
+                        code: "ChallengeDormant".into(),
+                        message: "Dormant challenge cannot be progressed".into(),
+                    });
                 }
-                let ch = st.challenges.get_mut(&ch_id).expect("challenge present");
                 let is_client_driven = def_opt.map(|d| d.client_event_driven).unwrap_or(ch.client_event_driven);
 
                 if !is_client_driven {
@@ -737,7 +751,8 @@ pub fn handle_season_manager(
                     });
                 }
                 let was_completed = ch.completed;
-                ch.progress = ch.progress.saturating_add(amount).min(ch.max_progress);
+                let step = amount.min(1);
+                ch.progress = ch.progress.saturating_add(step).min(ch.max_progress);
                 if ch.progress >= ch.max_progress {
                     ch.completed = true;
                 }
@@ -781,17 +796,14 @@ pub fn handle_season_manager(
                     .or_else(|| catalog.values().next())
                     .map(|c| c.end_time_ft)
                     .unwrap_or(now_ft + 30 * 86_400 * 10_000_000);
+                let max_active = catalog
+                    .get(&st.selected_season_id)
+                    .or_else(|| catalog.values().next())
+                    .map(|c| c.max_active_challenges.max(1) as usize)
+                    .unwrap_or(4);
                 let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
-                ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, 4);
+                ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
                 let def_opt = defs.iter().find(|d| d.challenge_id == ch_id).cloned();
-                if !st.challenges.contains_key(&ch_id) {
-                    if let Some(ref def) = def_opt {
-                        st.challenges.insert(
-                            ch_id,
-                            def.to_character_challenge_with_end(st.selected_season_id, now_ft, season_end_ft),
-                        );
-                    }
-                }
                 sync_character_challenges_with_defs(st, &defs, snap, char_id);
                 let Some(ch) = st.challenges.get_mut(&ch_id) else {
                     return Err(BridgeRpcError {
@@ -799,6 +811,12 @@ pub fn handle_season_manager(
                         message: "Challenge not found".into(),
                     });
                 };
+                if ch.is_dormant {
+                    return Err(BridgeRpcError {
+                        code: "ChallengeDormant".into(),
+                        message: "Dormant challenge cannot be claimed".into(),
+                    });
+                }
                 if ch.claimed {
                     return Err(BridgeRpcError {
                         code: "ChallengeAlreadyClaimed".into(),
@@ -820,7 +838,12 @@ pub fn handle_season_manager(
                 if let Some(ref def) = def_opt {
                     if def.isk_awarded > 0 {
                         if let Some(char_rec) = snap.characters.get_mut(&char_id) {
-                            char_rec.balance.0 += eve_db::IskCents::from_isk(def.isk_awarded).0;
+                            char_rec.balance = eve_db::IskCents(
+                                char_rec
+                                    .balance
+                                    .0
+                                    .saturating_add(eve_db::IskCents::from_isk(def.isk_awarded).0),
+                            );
                         }
                     }
                     if let Some(next_id) = def.next_challenge {
@@ -1116,10 +1139,15 @@ pub fn handle_season_manager(
                     .or_else(|| seasons.values().next())
                     .map(|c| c.end_time_ft)
                     .unwrap_or(now_ft + 30 * 86_400 * 10_000_000);
+                let max_active = seasons
+                    .get(&st.selected_season_id)
+                    .or_else(|| seasons.values().next())
+                    .map(|c| c.max_active_challenges.max(1) as usize)
+                    .unwrap_or(4);
                 if let Ok(json) = serde_json::to_string(&seasons) {
                     snap.service_state_blobs.insert(SEASONS_CATALOG_KEY.into(), json);
                 }
-                ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, 4);
+                ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
                 Ok(())
             });
             match res {

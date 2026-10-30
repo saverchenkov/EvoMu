@@ -580,7 +580,7 @@ async fn notify_batch2_void_exit_seasons_expert_systems_and_node_graphs() {
         snap.items.insert(fil_id, make_item(fil_id, 62_448, PILOT_A, ship_id, InventoryFlag::Cargo, 2, false));
         snap.items.insert(es_item_id, make_item(es_item_id, EXPERT_SYSTEM_TYPE_ID, PILOT_A, JITA_STATION, InventoryFlag::Hangar, 1, false));
         let mut defs = eve_server::services::season_manager::default_seasonal_challenge_definitions();
-        defs.push(SeasonalChallengeDef {
+        defs.insert(0, SeasonalChallengeDef {
             challenge_id: 1_005, season_id: 1, event_type: "ui_onboarding_step".into(),
             title: "Onboarding".into(), description: "Complete two client onboarding steps".into(),
             points: 20, max_progress: 2, client_event_driven: true, reward_type_id: 0, reward_quantity: 0, is_dormant: false, ..Default::default()

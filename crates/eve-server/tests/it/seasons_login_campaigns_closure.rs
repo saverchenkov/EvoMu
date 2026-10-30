@@ -211,7 +211,8 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
     );
 
     // 7. feat:pve.seasons-challenges: Claiming challenge rewards grants rewards and season points
-    // Complete real V24 client_lookAtObject challenge 274 (max_progress = 4, points = 40)
+    // Complete real V24 client_lookAtObject challenge 274 (max_progress = 4, points = 40).
+    // Per-event increment is capped to 1 even if client supplies amount = 4.
     ctx.dispatch_rpc(
         &mut sess,
         "seasonManager",
@@ -222,7 +223,29 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
         None,
     )
     .await
-    .expect("complete challenge 274");
+    .expect("capped client event 1");
+    let ch_274_capped = rpc(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(274)])
+        .await
+        .expect("get_challenge 274 capped");
+    assert_eq!(
+        ch_274_capped.dict_get("progress").and_then(|v| v.as_i64()),
+        Some(1),
+        "Client-supplied amount=4 must be capped to 1 per event"
+    );
+
+    for _ in 0..3 {
+        ctx.dispatch_rpc(
+            &mut sess,
+            "seasonManager",
+            None,
+            "process_client_event",
+            &[PyRep::Integer(274), PyRep::Integer(1)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("progress challenge 274");
+    }
 
     let claim_res = rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(274)])
         .await
@@ -237,6 +260,64 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
     let repeat_err = rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(274)])
         .await;
     assert!(repeat_err.is_err(), "repeat claim_challenge_rewards must fail");
+
+    // Negative trust checks: dormant, unassigned starter, and locked chain step claims must fail
+    // with no change to ISK or items.
+    let (dormant_id, unassigned_starter_id, unassigned_client_id) = ctx.db.with_snapshot(|snap| {
+        let st = load_season_state_from_blobs(snap, PILOT_1);
+        let defs = eve_server::services::season_manager::fsd_challenge_definitions(&ctx.sde);
+        let dormant = defs.iter().find(|d| d.is_dormant && d.challenge_id != 2743).unwrap().challenge_id;
+        let unassigned_starter = defs
+            .iter()
+            .find(|d| !d.is_dormant && !st.challenges.contains_key(&d.challenge_id))
+            .unwrap()
+            .challenge_id;
+        let unassigned_client = defs
+            .iter()
+            .filter(|d| d.client_event_driven && !st.challenges.contains_key(&d.challenge_id))
+            .nth(1)
+            .unwrap()
+            .challenge_id;
+        (dormant, unassigned_starter, unassigned_client)
+    });
+    let (isk_before, items_before) = ctx.db.with_snapshot(|snap| {
+        (
+            snap.characters.get(&PILOT_1).map(|c| c.balance.0).unwrap_or(0),
+            snap.items.len(),
+        )
+    });
+    assert!(
+        rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(dormant_id)])
+            .await
+            .is_err(),
+        "Claiming a dormant challenge must fail"
+    );
+    assert!(
+        rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(unassigned_starter_id)])
+            .await
+            .is_err(),
+        "Claiming an unassigned starter challenge must fail"
+    );
+    assert!(
+        rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(2743)])
+            .await
+            .is_err(),
+        "Claiming a chain step whose predecessor is unclaimed must fail"
+    );
+    assert!(
+        rpc(&ctx, &mut sess, "seasonManager", "process_client_event", &[PyRep::Integer(unassigned_client_id), PyRep::Integer(1)])
+            .await
+            .is_err(),
+        "Progressing an unassigned client-driven challenge must fail"
+    );
+    let (isk_after, items_after) = ctx.db.with_snapshot(|snap| {
+        (
+            snap.characters.get(&PILOT_1).map(|c| c.balance.0).unwrap_or(0),
+            snap.items.len(),
+        )
+    });
+    assert_eq!(isk_after, isk_before, "Rejected claims must not alter ISK");
+    assert_eq!(items_after, items_before, "Rejected claims must not mint items");
 
     // 8. feat:pve.seasons-challenges: Claim career goal reward (claim_goal_reward)
     // Pre-populate completed career goal in npe_progress

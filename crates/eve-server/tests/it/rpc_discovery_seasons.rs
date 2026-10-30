@@ -382,10 +382,13 @@ async fn test_season_manager_rpc_suite() {
     assert!(rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(297)]).await.is_err());
 
     // Real V24 item-reward & chained challenge 2724 (reward type_id 92391 x 15, next_challenge 2743)
+    // Locked chain step 2743 must fail to claim before predecessor 2724 is claimed.
+    assert!(rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(2743)]).await.is_err());
     ctx.db.with_mut_snapshot(|s| {
         let mut st = eve_server::services::season_manager::load_season_state_from_blobs(s, P1);
         let def2724 = eve_server::services::season_manager::fsd_challenge_definitions(&ctx.sde).iter().find(|d| d.challenge_id == 2724).unwrap().clone();
         let mut ch2724 = def2724.to_character_challenge(st.selected_season_id, ctx.now_blueos_filetime_ticks());
+        ch2724.is_dormant = false;
         ch2724.progress = 1;
         ch2724.completed = true;
         st.challenges.insert(2724, ch2724);
@@ -422,7 +425,7 @@ async fn test_season_manager_rpc_suite() {
     let pce_kw = HashMap::from([("amount".into(), PyRep::Integer(2)), ("extra_data".into(), PyRep::Dict(vec![]))]);
     ctx.dispatch_rpc(&mut p1, "seasonManager", None, "process_client_event", &[PyRep::Integer(274)], &pce_kw, None).await.expect("canonical kwargs pce");
     let ch274 = rpc(&ctx, &mut p1, "seasonManager", "get_challenge", &[PyRep::Integer(274)]).await.expect("get_challenge 274");
-    assert_eq!(ch274.dict_get("progress").and_then(|v| v.as_i64()), Some(3));
+    assert_eq!(ch274.dict_get("progress").and_then(|v| v.as_i64()), Some(2));
 
     // 13. Character-specific challenge tracking & SQLite persistence across restart
     ctx.db.with_mut_snapshot(|s| {
@@ -449,7 +452,7 @@ async fn test_season_manager_rpc_suite() {
 
     let mut p1_reloaded = select(&ctx_reloaded, 61_091, "demo", "demo-secret", P1).await;
     let ch274_reloaded = rpc(&ctx_reloaded, &mut p1_reloaded, "seasonManager", "get_challenge", &[PyRep::Integer(274)]).await.expect("p1 get_challenge 274");
-    assert_eq!(ch274_reloaded.dict_get("progress").and_then(|v| v.as_i64()), Some(3), "P1 challenge 274 progress must survive SQLite reload");
+    assert_eq!(ch274_reloaded.dict_get("progress").and_then(|v| v.as_i64()), Some(2), "P1 challenge 274 progress must survive SQLite reload");
 
     let ch297_reloaded = rpc(&ctx_reloaded, &mut p1_reloaded, "seasonManager", "get_challenge", &[PyRep::Integer(297)]).await.expect("p1 get_challenge 297");
     assert_eq!(ch297_reloaded.dict_get("claimed").and_then(|v| v.as_bool()), Some(true), "P1 challenge 297 claimed state must survive SQLite reload");

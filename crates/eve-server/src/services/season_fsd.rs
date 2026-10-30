@@ -75,6 +75,9 @@ impl SeasonalChallengeDef {
 /// Season definition loaded from `res:/staticdata/seasonselection.fsdbinary`,
 /// `res:/staticdata/community_track_templates.fsdbinary`, and
 /// `res:/staticdata/seasonalcampaignsloginrewards.fsdbinary` (or persisted operator configuration).
+///
+/// DATA GAP: Live season schedule (start/end timestamps) and `max_active_challenges` cap are
+/// server-only and not present in V24 client FSD.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SeasonConfig {
@@ -139,6 +142,8 @@ pub fn default_fsd_seasons(
         .and_then(|v| v.as_i64())
         .unwrap_or(583_380);
 
+    // DATA GAP: V24 FSD ships no live season start/end schedule or active-challenge cap;
+    // synthesize a 30-day window from init_start_ft and a default cap of 4.
     let base_start_ft: i64 = init_start_ft;
     let base_end_ft: i64 = base_start_ft + 30 * 86_400 * 10_000_000;
     let max_ch = 4_i64;
@@ -184,6 +189,8 @@ pub fn default_fsd_seasons(
                 .and_then(|v| v.as_str())
                 .unwrap_or(nav_path.as_str())
                 .to_string();
+            // DERIVED: seasonalcampaignsloginrewards.fsdbinary has no point-track goal or plain-text name;
+            // derive a 1,000-point cap and label from the campaign ID.
             let cfg = SeasonConfig {
                 season_id: cid,
                 template_id: cid,
@@ -201,6 +208,7 @@ pub fn default_fsd_seasons(
                 multiple_season_running: true,
             };
             out.insert(cid, cfg.clone());
+            // DERIVED: Map ordinal season IDs 2..=4 when not present in community_track_templates.
             let ordinal_sid = (idx as i64) + 2;
             if ordinal_sid <= 4 && !out.contains_key(&ordinal_sid) {
                 let mut alias_cfg = cfg;
@@ -312,6 +320,8 @@ pub fn fsd_challenge_definitions(sde: &eve_sde::SdeRegistry) -> &'static [Season
                     .unwrap_or(0) as i32;
                 let client_event_driven = event_type.starts_with("client_");
                 let is_dormant = !active_start || next_targets.contains(&cid);
+                // DERIVED: challenges.fsdbinary has no per-season binding or localized text table in FSD;
+                // default season_id to 1 and format title from category, challenge ID, and message ID.
                 SeasonalChallengeDef {
                     challenge_id: cid,
                     season_id: 1,
