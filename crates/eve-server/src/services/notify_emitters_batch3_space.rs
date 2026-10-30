@@ -435,19 +435,23 @@ pub fn emit_exiting_dungeon_on_warp_if_present(
     sys_id: u32,
     ship_pos: [f64; 3],
 ) {
-    let found_did = crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
-        reg.sites_by_system.get(&sys_id).and_then(|sites| {
-            sites
-                .iter()
-                .find(|s| {
-                    let dx = s.position[0] - ship_pos[0];
-                    let dy = s.position[1] - ship_pos[1];
-                    let dz = s.position[2] - ship_pos[2];
-                    (dx * dx + dy * dy + dz * dz).sqrt() <= 150_000.0
+    let found_did =
+        crate::services::pve_dungeon_runtime::find_active_dungeon_id_at_position(ctx, sys_id, ship_pos)
+            .or_else(|| {
+                crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
+                    reg.sites_by_system.get(&sys_id).and_then(|sites| {
+                        sites
+                            .iter()
+                            .find(|s| {
+                                let dx = s.position[0] - ship_pos[0];
+                                let dy = s.position[1] - ship_pos[1];
+                                let dz = s.position[2] - ship_pos[2];
+                                (dx * dx + dy * dy + dz * dz).sqrt() <= 150_000.0
+                            })
+                            .map(|s| s.dungeon_id)
+                    })
                 })
-                .map(|s| s.dungeon_id)
-        })
-    });
+            });
     if let Some(dungeon_id) = found_did {
         ctx.notify(
             NotificationTarget::Character(char_id),

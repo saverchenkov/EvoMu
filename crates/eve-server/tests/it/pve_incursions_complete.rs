@@ -425,13 +425,13 @@ async fn test_pve_incursion_mothership_multiwave_and_conclusion() {
     ).await.unwrap().unwrap();
     assert!(ms_dead, "The Kundalini Manifest must be destroyed");
 
-    // Verify incursion conclusion state
+    // Verify incursion conclusion state (enters Withdrawing on a timer after mothership dies)
     let (final_inf, final_state, ms_defeated) = with_pve_special_reg(&ctx, |reg| {
         let inc = &reg.incursions[&target_cid];
         (inc.influence, inc.state.clone(), inc.mothership_defeated)
     });
     assert_eq!(final_inf, 0.0);
-    assert_eq!(final_state, "Ended", "Incursion state must be Ended upon defeating mothership");
+    assert_eq!(final_state, "Withdrawing", "Incursion state must be Withdrawing upon defeating mothership");
     assert!(ms_defeated, "mothership_defeated must be true");
 
     // Verify escorts cleared from space

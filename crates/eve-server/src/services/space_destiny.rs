@@ -791,6 +791,10 @@ pub(crate) async fn handle_update_state_request(
         return Ok(PyRep::None);
     };
     sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
+    let _ = crate::services::pve_dungeon_runtime::on_dungeon_approach(
+        ctx, char_id, sys_id, ship_id, None,
+    )
+    .await;
     let handle = ctx.systems.get_or_spawn(sys_id);
     let ship_ball = match handle
         .get_ball_snapshot(ship_id)
@@ -971,6 +975,15 @@ async fn handle_call_component_from_client(
     })?;
     let comp_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("");
     let comp_method = args.get(2).and_then(|a| a.as_str()).unwrap_or("");
+    if comp_name == "crabBeacon"
+        || (comp_name == "linkWithShip"
+            && crate::services::pve_crab_beacons::is_crab_beacon_item(ctx, trader_id))
+    {
+        return crate::services::pve_crab_beacons::handle_crab_component_call(
+            ctx, session, sys_id, char_id, ship_id, trader_id, comp_name, comp_method, args,
+        )
+        .await;
+    }
     if matches!(comp_name, "linkWithShip" | "orbitalSkyhook") {
         return crate::services::sov_gameplay::handle_skyhook_component_call(
             ctx, session, sys_id, char_id, ship_id, trader_id, comp_name, comp_method, args,

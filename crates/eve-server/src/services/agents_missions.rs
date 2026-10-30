@@ -1103,6 +1103,11 @@ pub async fn handle(
                             .as_ref().and_then(|mt| mt.bonus_expiry_unix)
                             .is_none_or(|bexp| now <= bexp);
                         let bonus_paid = if bonus_granted { bonus_reward } else { 0 };
+                        let char_sys = snap.characters.get(&char_id).map(|c| c.solar_system_id).unwrap_or(0);
+                        let lp_mult = crate::services::pve_special_sites::get_incursion_effects_for_system_in_snap(&ctx.sde, snap, char_sys)
+                            .map(|e| (1.0 - e.lp_penalty).clamp(0.0, 1.0))
+                            .unwrap_or(1.0);
+                        let effective_lp = ((lp_reward.max(0) as f64) * lp_mult).round() as i64;
 
                         if let Some(ch) = snap.characters.get_mut(&char_id) {
                             let reward_cents = IskCents::from_isk(isk_reward);
@@ -1138,13 +1143,13 @@ pub async fn handle(
                             }
 
                             let lp_entry = ch.loyalty_points.entry(corp_id).or_insert(0);
-                            *lp_entry = lp_entry.saturating_add(lp_reward.max(0));
+                            *lp_entry = lp_entry.saturating_add(effective_lp);
                         }
                         crate::services::lp_store::record_lp_reward_log(
                             snap,
                             char_id,
                             corp_id,
-                            lp_reward.max(0),
+                            effective_lp,
                             format!("Mission {mission_id} (agent {m_agent_id})"),
                             now,
                         );

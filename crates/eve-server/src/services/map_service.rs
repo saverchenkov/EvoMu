@@ -337,6 +337,7 @@ pub fn handle(
                             ("decayRate", PyRep::Real(0.02)),
                             ("graceTime", PyRep::Integer(0)),
                             ("lastUpdated", PyRep::Integer(now_ft)),
+                            ("withdrawTime", PyRep::Integer(inc.lockout_until_filetime.unwrap_or(0))),
                             ("rewardGroupID", PyRep::Integer(inc.tale_id)),
                         ])
                     })
@@ -471,6 +472,7 @@ pub fn handle(
                         ("solarSystemID", PyRep::Integer(i64::from(inc.staging_solar_system_id))),
                         ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
                         ("sceneType", PyRep::Integer(1)),
+                        ("state", PyRep::String(inc.state.clone())),
                         ("templateNameID", PyRep::Integer(inc.tale_id)),
                     ]));
                     // Vanguard (sceneType 2)
@@ -480,6 +482,7 @@ pub fn handle(
                             ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
                             ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
                             ("sceneType", PyRep::Integer(2)),
+                            ("state", PyRep::String(inc.state.clone())),
                             ("templateNameID", PyRep::Integer(inc.tale_id)),
                         ]));
                     }
@@ -490,6 +493,7 @@ pub fn handle(
                             ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
                             ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
                             ("sceneType", PyRep::Integer(3)),
+                            ("state", PyRep::String(inc.state.clone())),
                             ("templateNameID", PyRep::Integer(inc.tale_id)),
                         ]));
                     }
@@ -499,6 +503,7 @@ pub fn handle(
                         ("solarSystemID", PyRep::Integer(i64::from(inc.hq_solar_system_id))),
                         ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
                         ("sceneType", PyRep::Integer(4)),
+                        ("state", PyRep::String(inc.state.clone())),
                         ("templateNameID", PyRep::Integer(inc.tale_id)),
                     ]));
                 }

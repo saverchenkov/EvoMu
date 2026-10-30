@@ -33,6 +33,8 @@ pub(crate) struct ScannersSuperweaponsState {
     pub ship_dbuffs: HashMap<(u64, i64), Vec<ActiveDbuffEntry>>,
     /// Active system-wide effect beacon `type_id` per `solar_system_id`
     pub system_wide_effects: HashMap<u32, u32>,
+    /// All active overlapping system-wide effect beacon `type_id`s per `solar_system_id`
+    pub system_wide_effect_lists: HashMap<u32, Vec<u32>>,
     /// Active hacking minigame state per target `container_id`
     pub hacking_states: HashMap<i64, HackingSessionState>,
     /// Active hacking target `container_id` per `character_id`
@@ -132,6 +134,22 @@ pub(crate) fn get_aggregated_ship_dbuffs(
         }
     }
     // Include system-wide weather/storm (`group_id == 1975` / `920`) `warfareBuff*` dbuffs in the ship's solar system
+    let sys_id_opt: Option<u32> = ctx.db.with_snapshot(|snap| {
+        let ship = snap.items.get(&ship_id)?;
+        u32::try_from(ship.location_id)
+            .ok()
+            .filter(|s| ctx.sde.solar_systems.contains_key(s))
+            .or_else(|| snap.characters.get(&ship.owner_id).map(|c| c.solar_system_id))
+    });
+    if let Some(sys_id) = sys_id_opt {
+        for (dbuff_id, val) in crate::services::pve_incursion_lifecycle::get_incursion_system_wide_dbuffs(ctx, sys_id) {
+            if val.abs() > 1e-9 {
+                let slot = by_id.entry(dbuff_id).or_insert_with(|| (Vec::new(), now_unix + 3600));
+                slot.0.push(val);
+                slot.1 = slot.1.max(now_unix + 3600);
+            }
+        }
+    }
     let sys_tids: Vec<u32> = ctx.db.with_snapshot(|snap| {
         let Some(ship) = snap.items.get(&ship_id) else {
             return Vec::new();
@@ -155,14 +173,19 @@ pub(crate) fn get_aggregated_ship_dbuffs(
             })
             .map(|i| i.type_id)
             .collect();
-        if let Some(&eff_tid) = scanners_superweapons_state()
+        let sw_guard = scanners_superweapons_state()
             .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .system_wide_effects
-            .get(&sys_id)
-        {
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(&eff_tid) = sw_guard.system_wide_effects.get(&sys_id) {
             if !tids.contains(&eff_tid) {
                 tids.push(eff_tid);
+            }
+        }
+        if let Some(eff_list) = sw_guard.system_wide_effect_lists.get(&sys_id) {
+            for &eff_tid in eff_list {
+                if !tids.contains(&eff_tid) {
+                    tids.push(eff_tid);
+                }
             }
         }
         tids

@@ -799,6 +799,14 @@ pub(crate) async fn handle_multi_add(
     let mut despawn_set = HashSet::new();
     for (old_cont, item_id, it_tid, it_qty) in old_containers {
         fitting_containers_ships::record_container_take_log(ctx, char_id, item_id, it_tid, it_qty, old_cont);
+        crate::services::pve_dungeon_runtime::on_dungeon_item_looted(
+            ctx,
+            char_id,
+            session.solar_system_id,
+            old_cont,
+            it_tid,
+        )
+        .await;
         despawn_set.insert(old_cont);
     }
     for &(item_id, it_tid, it_qty) in &moved {
@@ -878,6 +886,14 @@ pub(crate) fn evaluate_space_wreck_or_jetcan_loot(
     char_id: i64,
     src_item: &eve_db::InventoryItemRecord,
 ) -> Result<(bool, bool), BridgeRpcError> {
+    if let Some(allowed) = crate::services::pve_crab_beacons::check_crab_loot_access(
+        ctx,
+        src_item.location_id,
+        char_id,
+        false,
+    )? {
+        return Ok((allowed, false));
+    }
     let now_unix = ctx.now_unix_secs();
     let info = ctx.db.with_snapshot(|snap| {
         let ch_sys = snap
@@ -972,6 +988,12 @@ pub(super) async fn handle_get_container_contents(
         .get("password")
         .and_then(|v| v.as_str())
         .or_else(|| args.get(1).and_then(|a| a.as_str()));
+    crate::services::pve_crab_beacons::check_crab_loot_access(
+        ctx,
+        container_id,
+        char_id,
+        session.has_gm_role(),
+    )?;
     {
         let mut st = fitting_containers_ships::read_container_ship_state(ctx);
         if let Some(req_pw) = st.container_passwords.get(&container_id).cloned() {
@@ -1086,12 +1108,18 @@ pub(super) fn handle_list(
             }
         }
     }
+    crate::services::pve_crab_beacons::check_crab_loot_access(
+        ctx,
+        bound_loc_id,
+        char_id,
+        session.has_gm_role(),
+    )?;
     let unit_check: Result<bool, BridgeRpcError> = ctx.db.with_snapshot(|snap| {
         if let Some(it) = snap.items.get(&bound_loc_id) {
             let cat = ctx.sde.types.get(&it.type_id).map(|t| t.category_id).unwrap_or(0);
             let grp = ctx.sde.types.get(&it.type_id).map(|t| t.group_id).unwrap_or(0);
             let is_personal = cat == 22 || grp == 340;
-            let is_unit = cat == 22 || matches!(grp, 12 | 340 | 448 | 649) || it.type_id == 23;
+            let is_unit = cat == 22 || matches!(grp, 12 | 340 | 448 | 649 | 4137) || it.type_id == 23;
             let is_fleet_auth = !is_personal
                 && snap.fleets.values().any(|f| f.members.contains(&char_id) && f.members.contains(&it.owner_id))
                 && crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {

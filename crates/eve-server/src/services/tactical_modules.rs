@@ -89,6 +89,12 @@ pub fn check_ship_navigation_lock(ctx: &ServerContext, ship_id: i64, action: &st
             message: format!("Cannot {action} while linked to an Orbital Skyhook Reagent Silo"),
         });
     }
+    if crate::services::pve_crab_beacons::is_ship_crab_linked(ctx, ship_id, now_unix) {
+        return Err(BridgeRpcError {
+            code: "CrabLinkActive".into(),
+            message: format!("Cannot {action} while linked to a CONCORD Rogue Analysis Beacon"),
+        });
+    }
     Ok(())
 }
 

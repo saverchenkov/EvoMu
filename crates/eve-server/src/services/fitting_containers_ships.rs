@@ -102,7 +102,15 @@ pub(crate) fn write_container_ship_state<R>(
 }
 
 pub(crate) fn is_container_group(group_id: u32, type_id: TypeId) -> bool {
-    type_id == 23 || matches!(group_id, 12 | 340 | 448 | 649 | crate::services::mobile_deployables::GROUP_MOBILE_DEPOT)
+    type_id == 23
+        || matches!(
+            group_id,
+            12 | 340
+                | 448
+                | 649
+                | crate::services::mobile_deployables::GROUP_MOBILE_DEPOT
+                | crate::services::mobile_deployables::GROUP_CRAB_BEACON
+        )
 }
 
 /// Computes unit volume of an inventory item, respecting packaged hull/container volumes when `!item.singleton`.
@@ -456,6 +464,9 @@ pub(crate) fn validate_container_and_bay_move(
         Some((src_loc, src_cont.flag as i64, src_cont.location_id, cont_corp, char_corp, src_grp, src_cont.owner_id))
     });
     if let Some((src_loc, src_cont_flag, src_cont_station, cont_corp, char_corp, src_grp, src_cont_owner)) = src_cont_info {
+        if src_grp == crate::services::mobile_deployables::GROUP_CRAB_BEACON {
+            crate::services::pve_crab_beacons::check_crab_loot_access(ctx, src_loc, char_id, false)?;
+        }
         if src_grp == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
             if src_cont_owner != char_id {
                 return Err(BridgeRpcError { code: "OwnershipViolation".into(), message: "Only the owner may take items from this Mobile Depot".into() });
@@ -532,6 +543,9 @@ pub(crate) fn validate_container_and_bay_move(
 
         // Moving into a Container (`group 12 | 340 | 448 | 649`, jetcan `23`, or Mobile Depot `1246`)
         if is_container_group(dest_type.group_id, dest_type.type_id) {
+            if dest_type.group_id == crate::services::mobile_deployables::GROUP_CRAB_BEACON {
+                return Err(BridgeRpcError::user_error("CannotPutItemsInCrabBeacon"));
+            }
             if dest_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
                 if dest_item.owner_id != char_id {
                     return Err(BridgeRpcError { code: "OwnershipViolation".into(), message: "Only the owner may store items in this Mobile Depot".into() });
@@ -732,7 +746,9 @@ pub async fn validate_single_item_can_be_opened(
             message: format!("Item {item_id} (type {item_type_id}) is not a container"),
         });
     }
-    if (grp == 1246 || grp == 1250) && owner_id != char_id {
+    if grp == crate::services::mobile_deployables::GROUP_CRAB_BEACON {
+        crate::services::pve_crab_beacons::check_crab_loot_access(ctx, item_id, char_id, false)?;
+    } else if (grp == 1246 || grp == 1250) && owner_id != char_id {
         return Err(BridgeRpcError {
             code: "OwnershipViolation".into(),
             message: "Only the owner may access this structure's inventory".into(),

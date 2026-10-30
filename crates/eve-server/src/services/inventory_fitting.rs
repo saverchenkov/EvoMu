@@ -1093,6 +1093,14 @@ pub async fn handle(
                         });
                     } else if orig_source_loc_id != new_loc && orig_source_loc_id > 0 {
                         fitting_containers_ships::record_container_take_log(ctx, char_id, item_id, moved_tid, moved_qty, orig_source_loc_id);
+                        crate::services::pve_dungeon_runtime::on_dungeon_item_looted(
+                            ctx,
+                            char_id,
+                            session.solar_system_id,
+                            orig_source_loc_id,
+                            moved_tid,
+                        )
+                        .await;
                     }
                     if looted_foreign_jetcan {
                         super::inventory_stacking::apply_space_loot_suspect_flag(ctx, session, char_id);
@@ -1204,6 +1212,14 @@ pub async fn handle(
                             updated.quantity,
                             orig_source_loc_id,
                         );
+                        crate::services::pve_dungeon_runtime::on_dungeon_item_looted(
+                            ctx,
+                            char_id,
+                            session.solar_system_id,
+                            orig_source_loc_id,
+                            updated.type_id,
+                        )
+                        .await;
                     }
                     write_container_ship_state(ctx, |st| {
                         if let Some((cid, entry)) = pending_alsc_take {

@@ -239,6 +239,7 @@ impl ServerContext {
                     }
                     crate::services::combat_weapons_spool::step_system_entropic_spools(&ctx, sys_id, dt).await;
                     crate::services::inventory_fitting::execute_pending_cycle_actions(&ctx, sys_id).await;
+                    crate::services::pve_crab_beacons::tick_crab_beacons_in_system(&ctx, sys_id).await;
                 }
             })
         }));
@@ -705,6 +706,7 @@ impl ServerContext {
         });
         if secs > 0 {
             crate::sp6_lifecycle::on_advance_secs(self, prev_unix, secs);
+            crate::services::pve_special_sites::on_server_clock_advanced(self, secs);
             crate::services::mining_advanced::tick_all_metenox_moon_drills(
                 self,
                 prev_unix,

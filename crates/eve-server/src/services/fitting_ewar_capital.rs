@@ -49,6 +49,19 @@ pub(crate) async fn prepare_ewar_and_capital_module(
     is_mjd: bool,
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<EwarCapitalPrep, BridgeRpcError>> {
+                if is_mwd {
+                    if let Ok(Some((_, sb))) = sys.get_ball_snapshot(ship_id).await {
+                        if let Err(e) =
+                            crate::services::pve_dungeon_runtime::check_deadspace_mwd_allowed(
+                                ctx,
+                                _sys_id,
+                                sb.position.to_array(),
+                            )
+                        {
+                            return Some(Err(e));
+                        }
+                    }
+                }
                 let mut warp_scramble_points = 0i32;
                 let mut disables_target_mwd_mjd = false;
                 let mut warp_core_stab_bonus = 0i32;

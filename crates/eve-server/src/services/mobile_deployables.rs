@@ -19,6 +19,7 @@ pub const GROUP_MOBILE_DEPOT: u32 = 1246;
 pub const GROUP_MOBILE_TRACTOR: u32 = 1250;
 pub const GROUP_MOBILE_MICRO_JUMP_UNIT: u32 = 1276;
 pub const GROUP_MOBILE_CYNO_BEACON: u32 = 4093;
+pub const GROUP_CRAB_BEACON: u32 = 4137;
 pub const GROUP_MOBILE_WARP_DISRUPTOR: u32 = 361;
 pub const CATEGORY_DEPLOYABLE: u32 = 22;
 
@@ -173,11 +174,11 @@ pub fn is_mobile_structure(sde: &SdeRegistry, type_id: u32) -> bool {
 }
 
 /// Checks if a mobile structure can be scooped back into cargo.
-/// Mobile Micro Jump Units (group 1276) and Cyno Beacons (group 4093) cannot be scooped.
+/// Mobile Micro Jump Units (group 1276), Cyno Beacons (group 4093), and CRAB Beacons (group 4137) cannot be scooped.
 pub fn can_deployable_be_scooped(group_id: u32) -> bool {
     !matches!(
         group_id,
-        GROUP_MOBILE_MICRO_JUMP_UNIT | GROUP_MOBILE_CYNO_BEACON
+        GROUP_MOBILE_MICRO_JUMP_UNIT | GROUP_MOBILE_CYNO_BEACON | GROUP_CRAB_BEACON
     )
 }
 
@@ -213,12 +214,15 @@ pub fn check_mobile_deployment_restrictions(
         });
     }
 
-    // 2. Mobile Cyno Beacon fleet requirement
+    // 2. Mobile Cyno Beacon fleet requirement & CRAB Beacon low/null security requirement
     if group_id == GROUP_MOBILE_CYNO_BEACON && session.fleet_id.is_none() {
         return Err(BridgeRpcError {
             code: "MustBeInFleet".into(),
             message: "Deploying a Mobile Cynosural Beacon requires active fleet membership".into(),
         });
+    }
+    if group_id == GROUP_CRAB_BEACON {
+        crate::services::pve_crab_beacons::validate_crab_deployment_system(&ctx.sde, sys_id)?;
     }
 
     // 3. Stargate distance check (>= 50 km)
@@ -340,8 +344,20 @@ pub fn register_mobile_deployable(
                 CYNO_BEACON_DURATION_SECS
             }
         }
+        GROUP_CRAB_BEACON => crate::services::pve_crab_beacons::CRAB_BEACON_IDLE_LIFETIME_SECS,
         _ => 2 * 86_400,
     };
+
+    if group_id == GROUP_CRAB_BEACON {
+        crate::services::pve_crab_beacons::register_crab_beacon(
+            ctx,
+            item_id,
+            type_id,
+            owner_id,
+            solar_system_id,
+            position,
+        );
+    }
 
     write_deployable_state(ctx, |st| {
         let damaged = st.damaged_items.remove(&item_id);

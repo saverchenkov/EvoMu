@@ -985,7 +985,10 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
     let effective_bounty = if solar_system_id >= 31_000_000 || archetype == "Sleeper" {
         0.0
     } else {
-        bounty_isk
+        let inc_mult = crate::services::pve_special_sites::get_incursion_effects_for_system(ctx, solar_system_id)
+            .map(|e| (1.0 - e.bounty_penalty).clamp(0.0, 1.0))
+            .unwrap_or(1.0);
+        bounty_isk * inc_mult
     };
 
     if effective_bounty > 0.0 && killer_char_id > 0 {
@@ -1304,6 +1307,15 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
         npc_ball_id,
         killer_char_id,
     ).await;
+
+    // Multi-room dungeon runtime triggers (`OnKill`, gate unlocks, wave spawns, completion) (`feat:pve.dungeon-system`)
+    crate::services::pve_dungeon_runtime::on_dungeon_npc_killed(
+        ctx,
+        solar_system_id,
+        npc_ball_id,
+        killer_char_id,
+    )
+    .await;
 
     if killer_char_id > 0 {
         ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(

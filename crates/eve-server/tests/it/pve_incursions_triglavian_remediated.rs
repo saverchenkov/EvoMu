@@ -396,12 +396,12 @@ async fn test_pve_incursion_mothership_hq_unlock_and_conclusion() {
     ).await.unwrap().unwrap();
     assert!(ms_dead);
 
-    // Verify conclusion
+    // Verify conclusion (enters Withdrawing on timer after mothership dies)
     let (final_state, ms_defeated) = with_pve_special_reg(&ctx, |reg| {
         let inc = &reg.incursions[&target_cid];
         (inc.state.clone(), inc.mothership_defeated)
     });
-    assert_eq!(final_state, "Ended");
+    assert_eq!(final_state, "Withdrawing");
     assert!(ms_defeated);
 
     // Escorts removed from space
