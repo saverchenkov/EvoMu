@@ -50,6 +50,16 @@ pub struct IndustryJobCostMeta {
     pub blueprint_original_flag: Option<eve_db::InventoryFlag>,
     #[serde(default)]
     pub consumed_materials: Vec<(TypeId, i32)>,
+    #[serde(default)]
+    pub blueprint_location_id: i64,
+    #[serde(default)]
+    pub output_location_id: i64,
+    #[serde(default)]
+    pub location_id: i64,
+    #[serde(default)]
+    pub completed_unix: Option<u64>,
+    #[serde(default)]
+    pub completed_character_id: Option<i64>,
 }
 
 /// Checks whether an Upwell structure's industry/reaction service is online and fueled (`feat:industry.job-pause-on-service-offline`, `feat:structures.service-industry`).

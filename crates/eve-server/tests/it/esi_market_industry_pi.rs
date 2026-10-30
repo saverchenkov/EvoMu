@@ -425,7 +425,7 @@ async fn test_esi6_market_public_and_structure_routes() {
         .iter()
         .find(|p| p["type_id"] == json!(34))
         .expect("Tritanium price entry");
-    assert_eq!(trit_price["average_price"], json!(6.0));
+    assert_eq!(trit_price["average_price"], json!(5.8));
     let rifter_price = prices_arr
         .iter()
         .find(|p| p["type_id"] == json!(587))

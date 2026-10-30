@@ -628,7 +628,11 @@ impl EsiRouter {
                         true,
                     );
                 };
-                let mut required_role_mask = eve_db::corp_roles::ROLE_DIRECTOR;
+                let mut required_role_mask = eve_db::corp_roles::ROLE_DIRECTOR
+                    | required_corp_roles_for_route(
+                        matched.operation.method.as_str(),
+                        matched.operation.path_pattern.as_str(),
+                    );
                 for role_name in &op.required_roles {
                     required_role_mask |= match role_name.as_str() {
                         "Director" => eve_db::corp_roles::ROLE_DIRECTOR,
@@ -645,6 +649,7 @@ impl EsiRouter {
                         .characters
                         .get(&claims.character_id)
                         .map(|c| c.corporation_id);
+                    let allowed_mask = required_role_mask;
                     let has_role = snap
                         .corporations
                         .get(&path_corp_id)
@@ -655,7 +660,7 @@ impl EsiRouter {
                                     .get(&claims.character_id)
                                     .copied()
                                     .unwrap_or(0)
-                                    & required_role_mask)
+                                    & allowed_mask)
                                     != 0
                         })
                         .unwrap_or(false)
@@ -664,7 +669,7 @@ impl EsiRouter {
                             .get(&(path_corp_id, claims.character_id))
                             .map(|r| {
                                 ((r.roles | r.roles_at_hq | r.roles_at_base | r.roles_at_other)
-                                    & required_role_mask)
+                                    & allowed_mask)
                                     != 0
                             })
                             .unwrap_or(false);
@@ -963,5 +968,29 @@ fn hex_val(b: u8) -> Option<u8> {
         b'a'..=b'f' => Some(b - b'a' + 10),
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
+    }
+}
+
+fn required_corp_roles_for_route(method: &str, path_pattern: &str) -> u64 {
+    use eve_db::corp_roles::*;
+    match (method, path_pattern) {
+        ("GET", "/corporation/{corporation_id}/mining/extractions")
+        | ("GET", "/corporations/{corporation_id}/structures") => ROLE_STATION_MANAGER,
+        ("GET", "/corporation/{corporation_id}/mining/observers")
+        | ("GET", "/corporation/{corporation_id}/mining/observers/{observer_id}") => {
+            ROLE_ACCOUNTANT
+        }
+        ("GET", "/corporations/{corporation_id}/orders")
+        | ("GET", "/corporations/{corporation_id}/orders/history") => {
+            ROLE_ACCOUNTANT | ROLE_TRADER
+        }
+        ("GET", "/corporations/{corporation_id}/industry/jobs")
+        | ("GET", "/corporations/{corporation_id}/facilities") => ROLE_FACTORY_MANAGER,
+        ("GET", "/corporations/{corporation_id}/wallets")
+        | ("GET", "/corporations/{corporation_id}/wallets/{division}/journal")
+        | ("GET", "/corporations/{corporation_id}/wallets/{division}/transactions") => {
+            ROLE_ACCOUNTANT | ROLE_JUNIOR_ACCOUNTANT
+        }
+        _ => ROLE_DIRECTOR,
     }
 }

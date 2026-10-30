@@ -907,11 +907,9 @@ pub fn handle_industry_jobs(
                 }
 
                 if let Some(bp_mut) = snap.items.get_mut(&bp_iid) {
-                    cost_meta.blueprint_original_flag =
-                        Some(bp_mut.flag).filter(|f| *f != InventoryFlag::Locked);
-                    bp_mut.singleton = true;
-                    bp_mut.flag = InventoryFlag::Locked;
-                    bp_mut.version += 1;
+                    cost_meta.blueprint_original_flag = Some(bp_mut.flag).filter(|f| *f != InventoryFlag::Locked);
+                    cost_meta.blueprint_location_id = bp_mut.location_id; cost_meta.output_location_id = bp_mut.location_id; cost_meta.location_id = bp_mut.location_id;
+                    bp_mut.singleton = true; bp_mut.flag = InventoryFlag::Locked; bp_mut.version += 1;
                 }
 
                 snap.industry_jobs.insert(
@@ -1184,9 +1182,8 @@ pub fn handle_industry_jobs(
                             }
                             return Ok(Ok((0, 0, job)));
                         }
-                        if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) {
-                            j_mut.status = "Delivered".into();
-                        }
+                        if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) { j_mut.status = "Delivered".into(); }
+                        let mut done_meta = meta.clone(); done_meta.completed_unix = Some(now_unix); done_meta.completed_character_id = Some(char_id); save_job_cost_meta(snap, job_id, &done_meta);
                         snap.next_entity_id += 1;
                         let bpc_item_id = snap.next_entity_id;
                         let out_me = if meta.invented_runs > 0 { meta.invented_me } else { 2.0 };
@@ -1222,9 +1219,8 @@ pub fn handle_industry_jobs(
                         return Ok(Ok((bpc_item_id, t2_bpc_type_id, job)));
                     }
 
-                    if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) {
-                        j_mut.status = "Delivered".into();
-                    }
+                    if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) { j_mut.status = "Delivered".into(); }
+                    let mut done_meta = meta.clone(); done_meta.completed_unix = Some(now_unix); done_meta.completed_character_id = Some(char_id); save_job_cost_meta(snap, job_id, &done_meta);
 
                     let mut parent_dyn_attrs = HashMap::new();
                     let mut remove_consumed_bpc = false;

@@ -89,6 +89,7 @@ mod economy_quasar_esi_r4_regressions;
 mod economy_quasar_r5_regressions;
 mod esi;
 mod esi_corp_alliance;
+mod esi_corp_market_industry_closure;
 mod esi_fittings_war_killmails;
 mod esi_corp_governance;
 mod esi_fleets;
