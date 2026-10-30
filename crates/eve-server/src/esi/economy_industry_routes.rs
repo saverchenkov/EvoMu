@@ -134,9 +134,19 @@ pub fn dispatch_economy_industry_route(
         })),
 
         ("GET", "/industry/systems") => Some(ctx.db.with_snapshot(|snap| {
+            let now_unix = ctx.now_unix();
+            let cutoff = now_unix.saturating_sub(28 * 86_400);
             let mut sys_work: BTreeMap<u32, BTreeMap<&'static str, u64>> = BTreeMap::new();
             let mut total_activity_work: BTreeMap<&'static str, u64> = BTreeMap::new();
             for j in snap.industry_jobs.values() {
+                if j.status.eq_ignore_ascii_case("Cancelled")
+                    || j.status.eq_ignore_ascii_case("Reverted")
+                {
+                    continue;
+                }
+                if j.start_unix > 0 && j.start_unix < cutoff {
+                    continue;
+                }
                 let Some(sid) = ctx
                     .sde
                     .stations
@@ -155,29 +165,48 @@ pub fn dispatch_economy_industry_route(
                     9 | 11 => "reaction",
                     _ => continue,
                 };
-                let work = u64::from(j.runs).saturating_mul(j.duration_seconds);
+                // Canonical System Cost Index (`compute_canonical_system_cost_index`): aggregates job duration_seconds over 28d.
+                let work = j.duration_seconds;
                 if work == 0 {
                     continue;
                 }
                 *sys_work.entry(sid).or_default().entry(activity).or_insert(0) += work;
                 *total_activity_work.entry(activity).or_insert(0) += work;
             }
-            let out: Vec<Value> = sys_work
+            let all_sids: std::collections::BTreeSet<u32> = ctx
+                .sde
+                .solar_systems
+                .keys()
+                .copied()
+                .chain(sys_work.keys().copied())
+                .collect();
+            let activities = [
+                "manufacturing",
+                "researching_time_efficiency",
+                "researching_material_efficiency",
+                "copying",
+                "invention",
+                "reaction",
+            ];
+            let out: Vec<Value> = all_sids
                 .into_iter()
-                .map(|(sid, acts)| {
-                    let cost_indices: Vec<Value> = acts
-                        .into_iter()
-                        .filter_map(|(activity, work)| {
+                .map(|sid| {
+                    let acts = sys_work.get(&sid);
+                    let cost_indices: Vec<Value> = activities
+                        .iter()
+                        .map(|&activity| {
                             let total = total_activity_work.get(activity).copied().unwrap_or(0);
-                            if total == 0 {
-                                return None;
-                            }
-                            // DERIVED: CCP industry system cost index is the system's share of total universe work for that activity
-                            let cost_index = (work as f64) / (total as f64);
-                            Some(json!({
+                            let work = acts.and_then(|m| m.get(activity).copied()).unwrap_or(0);
+                            // Matches `compute_canonical_system_cost_index` (`sqrt(system_work / universe_work).clamp(0.001, 0.50)`, `0.01` when idle).
+                            let cost_index = if total > 0 && work > 0 {
+                                ((work as f64) / (total as f64)).sqrt().clamp(0.001, 0.50)
+                            } else {
+                                0.01
+                            };
+                            json!({
                                 "activity": activity,
                                 "cost_index": cost_index,
-                            }))
+                            })
                         })
                         .collect();
                     json!({

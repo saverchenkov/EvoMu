@@ -548,7 +548,8 @@ pub async fn handle_ess_link(
             super::notify_emitters_batch6::emit_main_bank_player_hack_success(ctx, char_id, sys_id, link_id);
             super::notify_emitters_batch6::emit_main_bank_player_link_disconnected(ctx, char_id, sys_id, "Completed", link_id);
         } else {
-            super::notify_emitters_batch6::emit_reserve_bank_player_link_disconnected(ctx, char_id, sys_id, link_id);
+            // V24 `dynamicresources.common.ess.const.UNLINKED_MANUAL = 0` (`unlink_reason_description(0) -> None`, normal completion disconnect)
+            super::notify_emitters_batch6::emit_reserve_bank_player_link_disconnected(ctx, char_id, sys_id, 0);
         }
         let (post_main, post_reserve) = ctx.db.with_snapshot(|snap| {
             snap.system_states

@@ -774,12 +774,14 @@ pub async fn handle_ship_or_npc_destruction(
                 .unwrap_or(0.0)
         };
         if bounty > 0.0 {
+            let supp_mult = crate::services::security_mgr::insurgency_suppression_bounty_and_sec_multiplier(ctx, sys_id);
+            let eff_bounty = bounty * supp_mult;
             with_mut_combat_runtime(ctx, |rt| {
                 let _ = rt.destroyed_npc_cache.remove(&target_ball_id);
                 if attacker_char_id > 0 && rt.bounty_credited_balls.insert(target_ball_id) {
                     *rt.pending_bounty_ticks
                         .entry((sys_id, attacker_char_id))
-                        .or_insert(0.0) += bounty;
+                        .or_insert(0.0) += eff_bounty;
                 }
             });
             let old_sec = ctx.db.with_snapshot(|snap| {
@@ -789,7 +791,7 @@ pub async fn handle_ship_or_npc_destruction(
                     .unwrap_or(0.0)
             });
             if old_sec < 5.0 {
-                let gain = crate::combat::npc_ai::compute_sec_status_gain(old_sec, bounty);
+                let gain = crate::combat::npc_ai::compute_sec_status_gain(old_sec, bounty) * supp_mult;
                 let new_sec = (old_sec + gain).min(5.0).clamp(-10.0, 10.0);
                 ctx.db.with_mut_snapshot(|snap| {
                     if let Some(ch) = snap.characters.get_mut(&attacker_char_id) {

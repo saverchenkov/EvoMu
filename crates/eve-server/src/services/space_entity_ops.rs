@@ -403,7 +403,7 @@ pub async fn handle(
                         let _ = handle.set_combat_state(ship_id, cs_check).await;
                     }
                 }
-                let warp_speed = crate::services::space_destiny::compute_ship_warp_speed_au_s(ctx, ball.type_id);
+                let warp_speed = crate::services::space_destiny::compute_pilot_warp_speed_au_s(ctx, char_id, sys_id, ball.type_id);
                 let warp_dir = (dest - cur_pos).normalize_or_zero();
                 let requested_dist_m = dist;
                 let (base_warp_cap_need, sde_max_cap) = ctx

@@ -32,6 +32,9 @@ pub async fn evaluate_faction_police_response(
     char_id: i64,
     ship_id: i64,
 ) -> (bool, bool, bool) {
+    if crate::services::combat_npc_police::is_faction_police_suppressed(ctx, solar_system_id) {
+        return (false, true, false);
+    }
     let sys_sec = ctx
         .sde
         .solar_systems
@@ -372,12 +375,9 @@ pub async fn step_sentry_gun_grid_aggression(
         .get(&solar_system_id)
         .map(|s| s.security_status)
         .unwrap_or(0.0);
-    // In Insurgency Corruption Stage 3+, low-sec (`0.0 < sec < 0.45`) sentry guns are disabled
-    let corr = crate::services::insurgency_services::insurgency_system_corruption_stage(
-        ctx,
-        solar_system_id,
-    );
-    if sys_sec <= 0.0 || (0.0 < sys_sec && sys_sec < 0.45 && corr >= 3) {
+    // In Insurgency Corruption Stage 5, regular low-sec (`0.0 < sec < 0.45`) gate/station sentry guns stop firing
+    // (`Corruption_and_Suppression.md:56`); physical `79507` Counter-Insurgency Sentries act via `combat_npc_ai` on their own grids.
+    if sys_sec <= 0.0 || crate::services::combat_npc_police::is_sentry_disabled_by_corruption(ctx, solar_system_id) {
         return (false, 0.0);
     }
 
@@ -433,6 +433,41 @@ pub async fn step_sentry_gun_grid_aggression(
     });
 
     (engaged, applied)
+}
+
+/// Applies standard character security-status loss and appends a `SecStatusTransaction` on illegal PvP aggression in empire space.
+pub fn apply_illegal_pvp_sec_status_loss(
+    ctx: &ServerContext,
+    char_id: i64,
+    sys_id: u32,
+    sys_sec: f64,
+    is_pod_target: bool,
+    now_unix: u64,
+) {
+    if sys_sec <= 0.0 {
+        return;
+    }
+    let old_sec = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0));
+    let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, is_pod_target, sys_sec);
+    let new_sec = (old_sec - loss).clamp(-10.0, 10.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.security_status = new_sec;
+        }
+    });
+    with_mut_combat_runtime(ctx, |rt| {
+        rt.sec_status_transactions
+            .entry(char_id)
+            .or_default()
+            .push(SecStatusTransaction {
+                timestamp_unix: now_unix,
+                old_sec,
+                new_sec,
+                delta: new_sec - old_sec,
+                reason: if is_pod_target { "Illegal Capsule Aggression".into() } else { "Illegal Ship Aggression".into() },
+                solar_system_id: sys_id,
+            });
+    });
 }
 
 fn check_kill_right_restriction(
@@ -1044,24 +1079,8 @@ pub async fn handle_crimewatch(
         ("bountyProxy", _) => handle_bounty_proxy(ctx, session, service, method, args),
 
 
-        ("securityMgr", "get_modified_systems") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let mut sec_map: HashMap<u32, f64> = with_combat_runtime(ctx, |rt| {
-                rt.modified_system_securities.clone()
-            });
-            ctx.db.with_snapshot(|snap| {
-                for (&sid, st) in &snap.system_states {
-                    if st.insurgency_corruption_stage >= 5 {
-                        // Havoc Pirate Insurgency Stage 5 sets effective system security to lawless (0.0)
-                        sec_map.insert(sid, 0.0);
-                    }
-                }
-            });
-            let entries = sec_map.into_iter().map(|(sid, sec)| (PyRep::Integer(sid as i64), PyRep::Real(sec))).collect();
-            Some(Ok(PyRep::Dict(entries)))
+        ("securityMgr", method) => {
+            crate::services::security_mgr::handle_security_mgr_call(ctx, session, method, args)
         }
 
         ("abyssal_content_manager", "ActivateAbyssalKey") => {
@@ -1160,8 +1179,12 @@ pub fn evaluate_and_record_pvp_aggression(
         let effective_sec = if is_unanchored_jetcan { sys_sec.min(0.40) } else { sys_sec };
         if !is_legal {
             let safety = with_combat_runtime(ctx, |rt| rt.safety_levels.get(&attacker_char_id).copied().unwrap_or(SafetyLevel::Red));
-            let would_be_criminal = effective_sec >= 0.45 || (sys_sec > 0.0 && is_pod_target)
-                || is_anchored_cont || (is_secure_cont && sys_sec >= 0.45);
+            let concord_suppressed = !is_pod_target
+                && crate::services::combat_npc_police::is_concord_suppressed_in_system(ctx, sys_id);
+            let would_be_criminal = (effective_sec >= 0.45 && !concord_suppressed)
+                || (sys_sec > 0.0 && is_pod_target)
+                || is_anchored_cont
+                || (is_secure_cont && sys_sec >= 0.45);
             let would_be_suspect = !would_be_criminal && effective_sec > 0.0;
             if safety == SafetyLevel::Green && (would_be_criminal || would_be_suspect) {
                 return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
@@ -1170,8 +1193,10 @@ pub fn evaluate_and_record_pvp_aggression(
                 return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
             }
         }
+        let c_stage = crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id);
         {
             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+            cw.system_corruption_stages.insert(sys_id, c_stage);
             let _ = cw.handle_combat_aggression_with_pod(attacker_char_id, vcid, attacker_ship_id, sys_id, effective_sec, is_legal, is_pod_target, now_unix);
             cw.get_or_create(attacker_char_id).pvp_timer_until_unix = now_unix.saturating_add(900);
             cw.get_or_create(vcid).pvp_timer_until_unix = now_unix.saturating_add(900);
@@ -1245,10 +1270,12 @@ pub fn evaluate_and_record_remote_assistance(
     }
     if ben_criminal && sys_sec > 0.0 {
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-        let _ = cw.handle_combat_aggression(helper_char_id, ben_id, helper_ship_id, sys_id, sys_sec, false, now_unix);
-        cw.get_or_create(helper_char_id).criminal_flag_until_unix = now_unix.saturating_add(900);
+        let _ = cw.handle_criminal_remote_assistance(helper_char_id, ben_id, helper_ship_id, sys_id, sys_sec, now_unix);
         drop(cw);
-        let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[helper_char_id], &[], &[]);
+        emit_crimewatch_timer_notifications(ctx, helper_char_id, now_unix);
+        if ctx.db.with_snapshot(|snap| snap.characters.get(&helper_char_id).map(|c| c.solar_system_id)) != Some(sys_id) {
+            let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[], &[], &[helper_char_id]);
+        }
     } else if ben_suspect && sys_sec > 0.0 {
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
         let st = cw.get_or_create(helper_char_id);
@@ -1256,7 +1283,10 @@ pub fn evaluate_and_record_remote_assistance(
         st.pvp_timer_until_unix = now_unix.saturating_add(900);
         st.suspect_flag_until_unix = now_unix.saturating_add(900);
         drop(cw);
-        let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[], &[helper_char_id], &[]);
+        emit_crimewatch_timer_notifications(ctx, helper_char_id, now_unix);
+        if ctx.db.with_snapshot(|snap| snap.characters.get(&helper_char_id).map(|c| c.solar_system_id)) != Some(sys_id) {
+            let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[], &[helper_char_id], &[]);
+        }
     }
     if !ben_le_partners.is_empty() {
         {

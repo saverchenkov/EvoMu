@@ -864,7 +864,8 @@ impl NpcSpawnManager {
             .remove(&npc_ball_id)
             .ok_or_else(|| format!("NPC ball {npc_ball_id} not tracked by spawn manager"))?;
 
-        let bounty = entity.bounty_isk;
+        let supp_mult = crate::services::security_mgr::insurgency_suppression_bounty_and_sec_multiplier(ctx, sys_id);
+        let bounty = entity.bounty_isk * supp_mult;
 
         // Record respawn cooldown: 20 minutes (1,200 seconds)
         let until = now_unix.saturating_add(1_200);
@@ -888,7 +889,7 @@ impl NpcSpawnManager {
             // Credit dynamic bounty to killer's wallet and increase security status (feat:crimewatch.sec-status-gain)
             if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
                 ch.balance = ch.balance.checked_add(bounty_cents).unwrap_or(ch.balance);
-                let gain = compute_sec_status_gain(ch.security_status, bounty);
+                let gain = compute_sec_status_gain(ch.security_status, entity.bounty_isk) * supp_mult;
                 ch.security_status = (ch.security_status + gain).min(5.0);
             }
 

@@ -312,6 +312,16 @@ pub fn compute_ship_warp_speed_au_s(ctx: &ServerContext, ship_type_id: u32) -> f
     }
 }
 
+pub fn compute_pilot_warp_speed_au_s(
+    ctx: &ServerContext,
+    char_id: i64,
+    sys_id: u32,
+    ship_type_id: u32,
+) -> f64 {
+    compute_ship_warp_speed_au_s(ctx, ship_type_id)
+        + crate::services::security_mgr::insurgency_pirate_warp_bonus_au_s(ctx, char_id, sys_id)
+}
+
 pub(crate) use space_nav_travel::sync_ship_cloak_and_mjfg_from_fitting;
 
 pub async fn handle(

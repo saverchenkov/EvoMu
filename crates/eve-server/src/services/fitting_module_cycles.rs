@@ -176,7 +176,7 @@ pub(crate) async fn handle_module_cycles(
                 })
             });
             let is_special_target = !matches!(mod_type.group_id, 1122 | 650)
-                && (matches!(mod_type.group_id, 4060 | 4500 | 4805 | 4807)
+                && (matches!(mod_type.group_id, 862 | 4060 | 4500 | 4805 | 4807)
                     || target_id_opt.is_some_and(|tid| {
                         ctx.living_world.get_convoy(tid).is_some()
                             || ctx.db.with_snapshot(|s| {
@@ -334,9 +334,8 @@ pub(crate) async fn handle_module_cycles(
                     .get(&sys_id)
                     .map(|s| s.security_status)
                     .unwrap_or(1.0);
-                let corruption_stage5 = ctx.db.with_snapshot(|snap| {
-                    snap.system_states.get(&sys_id).map(|st| st.insurgency_corruption_stage >= 5).unwrap_or(false)
-                });
+                let corruption_stage5 =
+                    crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id) >= 5;
                 if sys_sec >= 0.45 || (sys_sec > 0.0 && !corruption_stage5) {
                     return Some(Err(BridgeRpcError {
                         code: "CannotLaunchInterdictionProbeInEmpire".into(),
@@ -1190,7 +1189,12 @@ pub(crate) async fn handle_module_cycles(
                 crystal_volatility_chance,
                 crystal_volatility_damage,
                 max_effective_range_m: if target_id_opt.is_some() {
-                    let opt_range = mod_state.get_attribute(attr_ids::MAX_RANGE, &ctx.sde);
+                    let mut opt_range = mod_state.get_attribute(attr_ids::MAX_RANGE, &ctx.sde);
+                    if mod_type.group_id == 65 || disables_target_mwd_mjd {
+                        opt_range *= crate::services::security_mgr::insurgency_suppression_web_scram_range_multiplier(
+                            ctx, char_id, sys_id,
+                        );
+                    }
                     let falloff = eve_dogma::get_module_falloff(&mod_state, &ctx.sde);
                     let eff = if opt_range > 0.0 {
                         opt_range + 3.0 * falloff.max(0.0)
@@ -1205,15 +1209,8 @@ pub(crate) async fn handle_module_cycles(
 
             if let Err(e) = sys.add_module_cycle(cycle).await {
                 ctx.remove_projected_ewar_by_module(module_id);
-                let code = if e.contains("WarpScrambled") {
-                    "WarpScrambled"
-                } else {
-                    "NotEnoughCapacitor"
-                };
-                return Some(Err(BridgeRpcError {
-                    code: code.into(),
-                    message: e,
-                }));
+                let code = if e.contains("WarpScrambled") { "WarpScrambled" } else { "NotEnoughCapacitor" };
+                return Some(Err(BridgeRpcError { code: code.into(), message: e }));
             }
 
             if let Err(e) = evaluate_module_cycle_aggression_or_assistance(
@@ -1318,26 +1315,13 @@ pub(crate) async fn handle_module_cycles(
             }
 
             if let Some(res) = build_specialized_module_result(
-                method,
-                &fit,
-                ctx,
-                module_id,
-                mod_type,
-                hic_bubble_radius_m,
-                warp_scramble_points,
-                active_burst_charge_tid,
+                method, &fit, ctx, module_id, mod_type,
+                hic_bubble_radius_m, warp_scramble_points, active_burst_charge_tid,
             ) {
                 Some(Ok(res))
             } else if mod_type.group_id == 49 || mod_type.default_attributes.contains_key(&197) {
                 let rep = handle_survey_scanner_activation(
-                    ctx,
-                    &sys,
-                    sys_id,
-                    char_id,
-                    ship_id,
-                    module_id,
-                    mod_type,
-                    &mod_state,
+                    ctx, &sys, sys_id, char_id, ship_id, module_id, mod_type, &mod_state,
                 )
                 .await;
                 Some(Ok(rep))

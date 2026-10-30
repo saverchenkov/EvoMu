@@ -567,11 +567,17 @@ pub fn award_fw_kill_lp(
     sys_id: u32,
     victim_ship_value_isk: f64,
 ) -> i64 {
-    let status = ctx.db.with_snapshot(|snap| {
-        compute_system_frontline_status(ctx, snap, sys_id)
+    let (status, killer_fac_opt) = ctx.db.with_snapshot(|snap| {
+        (
+            compute_system_frontline_status(ctx, snap, sys_id),
+            snap.characters.get(&killer_char_id).and_then(|c| c.war_faction_id),
+        )
     });
     let base_lp = (victim_ship_value_isk * 0.0001).clamp(100.0, 50_000.0) as i64;
-    let final_lp = calculate_fw_lp_reward(base_lp, status);
+    let supp_lp_mult = killer_fac_opt
+        .map(|fid| crate::services::security_mgr::insurgency_suppression_empire_lp_multiplier(ctx, sys_id, fid))
+        .unwrap_or(1.0);
+    let final_lp = ((calculate_fw_lp_reward(base_lp, status) as f64) * supp_lp_mult).round() as i64;
 
     let now_u = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {

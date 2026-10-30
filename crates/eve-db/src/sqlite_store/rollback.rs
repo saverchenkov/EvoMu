@@ -607,8 +607,10 @@ pub fn rollback_dirty_from_sqlite(
                     |r| r.get(0),
                 )
                 .map_err(|e| e.to_string())?;
-            snap.system_states
-                .insert(id, serde_json::from_str(&js).map_err(|e| e.to_string())?);
+            let mut st: SystemDynamicState =
+                serde_json::from_str(&js).map_err(|e| e.to_string())?;
+            st.solar_system_id = id;
+            snap.system_states.insert(id, st);
         }
     }
 

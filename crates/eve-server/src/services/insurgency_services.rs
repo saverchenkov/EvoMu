@@ -93,8 +93,8 @@ pub fn build_campaign_snapshot_for_system(c: &InsurgencyCampaign, sys_id: u32, n
     let (phase, end_time) = get_campaign_phase_and_timer(c, now);
     let c_pts = c.corruption_points.get(&sys_id).copied().unwrap_or(0);
     let s_pts = c.suppression_points.get(&sys_id).copied().unwrap_or(0);
-    let c_stage = if c_pts == 0 { 0 } else { ((c_pts as f64 / 200.0).ceil() as u8).clamp(1, 5) };
-    let s_stage = if s_pts == 0 { 0 } else { ((s_pts as f64 / 200.0).ceil() as u8).clamp(1, 5) };
+    let c_stage = insurgency_stage(c_pts);
+    let s_stage = insurgency_stage(s_pts);
     let is_fob = c.fob_solar_system_id == sys_id;
     let s5 = c.suppression_points.values().filter(|&&pts| insurgency_stage(pts) >= 5).count();
     let sys_reps: Vec<PyRep> = c.systems.iter().map(|&s| PyRep::Integer(i64::from(s))).collect();
@@ -191,8 +191,8 @@ pub fn init_insurgency_campaign(
     };
     let pos = [100_000.0, 0.0, 50_000.0];
     ctx.db.with_mut_snapshot(|snap| {
-        for sys in &systems {
-            snap.system_states.entry(*sys).or_default();
+        for &sys in &systems {
+            snap.system_states.entry(sys).or_default().solar_system_id = sys;
         }
         if !snap.items.contains_key(&stronghold_id) {
             snap.items.insert(stronghold_id, eve_db::InventoryItemRecord {
@@ -288,12 +288,16 @@ pub fn end_insurgency_campaign(ctx: &ServerContext, campaign_id: i64) {
     if let Some(c) = removed {
         let now = ctx.now_unix();
         for sys in &c.systems {
-            ctx.db.with_mut_snapshot(|snap| {
+            let prev_c = ctx.db.with_mut_snapshot(|snap| {
+                let prev = snap.system_states.get(sys).map_or(0, |st| st.insurgency_corruption_stage);
                 if let Some(st) = snap.system_states.get_mut(sys) {
                     st.insurgency_corruption_stage = 0;
                     st.insurgency_suppression_stage = 0;
                 }
+                prev.max(c.corruption_points.get(sys).copied().map(insurgency_stage).unwrap_or(0))
             });
+            ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).system_corruption_stages.insert(*sys, 0);
+            crate::services::security_mgr::sync_corruption_security_status_change(ctx, *sys, prev_c, 0);
             ctx.notify(
                 NotificationTarget::SolarSystem(*sys),
                 "OnInsurgencyCampaignEndingForLocation",
@@ -366,22 +370,30 @@ pub fn insurgency_system_corruption_stage(ctx: &ServerContext, sys_id: u32) -> u
 /// Advances corruption points in a system and updates corruption stage (1..5).
 pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32, points: i64) -> (i64, u8) {
     let now = ctx.now_unix();
-    let (pts, old_stage, stage, pirate_faction, campaign_active, in_active_phase) = with_insurgency_runtime(ctx, |rt| {
+    let (old_pts, pts, old_stage, stage, pirate_faction, campaign_active, in_active_phase) = with_insurgency_runtime(ctx, |rt| {
         let Some(c) = rt.campaigns.get_mut(&campaign_id) else {
-            return (0, 0, 0, FACTION_GURISTAS, false, false);
+            return (0, 0, 0, 0, FACTION_GURISTAS, false, false);
         };
         let active = now < c.winddown_end_unix;
         let in_act = now >= c.forecasting_end_unix && now < c.active_end_unix;
         let p = c.corruption_points.entry(sys_id).or_insert(0);
-        let prev_stage = insurgency_stage(*p);
-        *p = (*p + points).max(0);
-        let s = insurgency_stage(*p);
-        (*p, prev_stage, s, c.pirate_faction_id, active, in_act)
+        let prev_pts = *p;
+        let prev_stage = insurgency_stage(prev_pts);
+        let s_stage = insurgency_stage(c.suppression_points.get(&sys_id).copied().unwrap_or(0));
+        let eff_pts = if s_stage >= 3 && points > 0 { ((points as f64) * 0.70).round() as i64 } else { points };
+        let new_pts = (prev_pts + eff_pts).max(0);
+        *p = if s_stage >= 5 && prev_stage < 5 { new_pts.min(prev_pts.max(800)) } else { new_pts };
+        (prev_pts, *p, prev_stage, insurgency_stage(*p), c.pirate_faction_id, active, in_act)
     });
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.system_states.entry(sys_id).or_default().insurgency_corruption_stage = stage;
+        let st = snap.system_states.entry(sys_id).or_default();
+        st.solar_system_id = sys_id;
+        st.insurgency_corruption_stage = stage;
+        crate::services::security_mgr::prune_ineligible_insurgency_sites_in_snap(snap, sys_id);
     });
+    ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).system_corruption_stages.insert(sys_id, stage);
+    crate::services::security_mgr::sync_corruption_security_status_change(ctx, sys_id, old_stage, stage);
 
     if in_active_phase && stage >= 3 && old_stage < 3 {
         let _ = crate::services::fw_gameplay::try_spread_insurgency_from_system(ctx, campaign_id, sys_id);
@@ -390,18 +402,11 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
     emit_campaign_updated(ctx, sys_id, campaign_id, stage);
 
     // Broadcast Quasar IncreasedNotice when corruption increases, or SetNotice when adjusted downwards
-    let old_pts = (pts - points).max(0);
     if campaign_active && pts != old_pts {
-        let (notice_type, q_payload) = if points > 0 && pts > old_pts {
-            (
-                "eve_public.pirate.corruption.api.IncreasedNotice",
-                encode_pirate_increased_notice(sys_id, old_pts as u64, pts as u64),
-            )
+        let (notice_type, q_payload) = if pts > old_pts {
+            ("eve_public.pirate.corruption.api.IncreasedNotice", encode_pirate_increased_notice(sys_id, old_pts as u64, pts as u64))
         } else {
-            (
-                "eve_public.pirate.corruption.api.SetNotice",
-                encode_pirate_progress_notice(sys_id, pts as u64, 1000),
-            )
+            ("eve_public.pirate.corruption.api.SetNotice", encode_pirate_progress_notice(sys_id, pts as u64, 1000))
         };
         let _ = ctx.quasar_gateway.publish_notice(
             NoticeScope::SolarSystem(sys_id),
@@ -447,7 +452,10 @@ pub fn add_system_suppression(ctx: &ServerContext, campaign_id: i64, sys_id: u32
     });
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.system_states.entry(sys_id).or_default().insurgency_suppression_stage = stage;
+        let st = snap.system_states.entry(sys_id).or_default();
+        st.solar_system_id = sys_id;
+        st.insurgency_suppression_stage = stage;
+        crate::services::security_mgr::prune_ineligible_insurgency_sites_in_snap(snap, sys_id);
     });
 
     emit_campaign_updated(ctx, sys_id, campaign_id, stage);
@@ -1123,15 +1131,14 @@ async fn evaluate_system_fw_complex_tick(
             let n_pilots = pilot_cids.len().max(1) as i64;
             let lp_each = total_lp_awarded / n_pilots;
             for &(cid, pfid) in &pilot_cids {
+                let mult = crate::services::security_mgr::insurgency_suppression_empire_lp_multiplier_in_snap(snap, ctx.now_unix(), sys_id, pfid);
+                let final_lp = ((lp_each as f64) * mult).round() as i64;
                 if let Some(ch) = snap.characters.get_mut(&cid) {
-                    let militia_corp = ctx
-                        .sde
-                        .factions
-                        .get(&(pfid as u32))
+                    let militia_corp = ctx.sde.factions.get(&(pfid as u32))
                         .and_then(|f| f.militia_corporation_id)
                         .map(|c| c as i64)
                         .unwrap_or(pfid);
-                    *ch.loyalty_points.entry(militia_corp).or_insert(0) += lp_each;
+                    *ch.loyalty_points.entry(militia_corp).or_insert(0) += final_lp;
                 }
             }
             let mut new_sys_contested = None;

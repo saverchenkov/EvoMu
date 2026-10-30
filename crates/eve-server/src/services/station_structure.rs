@@ -1059,7 +1059,7 @@ pub async fn handle(
                 .get(&sys_id)
                 .map(|s| s.security_status)
                 .unwrap_or(1.0);
-            let corr5 = ctx.db.with_snapshot(|s| s.system_states.get(&sys_id).is_some_and(|st| st.insurgency_corruption_stage >= 5));
+            let corr5 = crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id) >= 5;
             if item_type.group_id == 361 && (sys_sec >= 0.45 || (sys_sec > 0.0 && !corr5)) {
                 return Some(Err(BridgeRpcError {
                     code: "CantAnchorInEmpire".into(),
