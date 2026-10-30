@@ -10,11 +10,11 @@ use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 
-const PILOT_1: i64 = 90_000_001;
-const PILOT_2: i64 = 90_000_002;
+pub(crate) const PILOT_1: i64 = 90_000_001;
+pub(crate) const PILOT_2: i64 = 90_000_002;
 const JITA_STATION: i64 = 60_003_760;
 
-async fn select_pilot(
+pub(crate) async fn select_pilot(
     ctx: &ServerContext,
     session_id: u64,
     username: &str,
@@ -38,7 +38,7 @@ async fn select_pilot(
     sess
 }
 
-async fn rpc(
+pub(crate) async fn rpc(
     ctx: &ServerContext,
     sess: &mut SessionState,
     service: &str,
@@ -49,7 +49,7 @@ async fn rpc(
         .await
 }
 
-fn field(rep: &PyRep, key: &str) -> PyRep {
+pub(crate) fn field(rep: &PyRep, key: &str) -> PyRep {
     match rep {
         PyRep::KeyVal(map) => map.get(key).cloned().unwrap_or(PyRep::None),
         PyRep::Dict(entries) => entries
@@ -61,7 +61,7 @@ fn field(rep: &PyRep, key: &str) -> PyRep {
     }
 }
 
-fn rowset_rows(rep: &PyRep) -> Vec<Vec<PyRep>> {
+pub(crate) fn rowset_rows(rep: &PyRep) -> Vec<Vec<PyRep>> {
     match rep {
         PyRep::Rowset { rows, .. } => rows.clone(),
         PyRep::List(items) => items
@@ -172,7 +172,12 @@ async fn test_b22_contracts_blueprints_and_plastic_wrap_break() {
     let PyRep::List(found_contracts) = search else {
         panic!("expected list from SearchContracts");
     };
-    assert!(found_contracts.iter().any(|c| field(c, "contractID") == PyRep::Integer(ie_cid)));
+    let found_ie = found_contracts
+        .iter()
+        .find(|c| field(c, "contractID") == PyRep::Integer(ie_cid))
+        .expect("ItemExchange contract in SearchContracts");
+    assert_eq!(field(found_ie, "title"), PyRep::String("BPO + BPC + Abyssal".into()));
+    assert_eq!(field(found_ie, "type"), PyRep::String("ItemExchange".into()));
 
     // Accept contract and verify singleton metadata preserved on transferred items
     rpc(&ctx, &mut sess2, "contractProxy", "AcceptContract", &[PyRep::Integer(ie_cid)])
@@ -355,18 +360,44 @@ async fn test_b22_corp_settings_mail_and_structure_defaults() {
     let restricted_send = rpc(
         &ctx,
         &mut sess2,
-        "mailSvc",
+        "mailMgr",
         "SendMail",
         &[
-            PyRep::List(vec![PyRep::Integer(corp_id)]),
+            PyRep::List(Vec::new()),
+            PyRep::None,
+            PyRep::Integer(corp_id),
             PyRep::String("Corp Spam".into()),
             PyRep::String("Hello everyone".into()),
+            PyRep::None,
+            PyRep::None,
         ],
     )
     .await;
-    assert!(restricted_send.is_err(), "Non-authorised member must be blocked from sending corp-wide mail");
+    assert_eq!(
+        restricted_send.unwrap_err().code,
+        "CorpMailRestricted",
+        "Non-authorised member must be blocked with CorpMailRestricted"
+    );
 
-    // 3. Accept structures setting
+    rpc(
+        &ctx,
+        &mut sess1,
+        "mailMgr",
+        "SendMail",
+        &[
+            PyRep::List(Vec::new()),
+            PyRep::None,
+            PyRep::Integer(corp_id),
+            PyRep::String("CEO Announcement".into()),
+            PyRep::String("Important corp update".into()),
+            PyRep::None,
+            PyRep::None,
+        ],
+    )
+    .await
+    .expect("CEO must be allowed to send restricted corp mail");
+
+    // 3. Accept structures setting + transfer rejection/acceptance
     rpc(
         &ctx,
         &mut sess1,
@@ -429,242 +460,48 @@ async fn test_b22_corp_settings_mail_and_structure_defaults() {
         let (hour, _) = s.structure_vulnerability_windows.get(&st_id).copied().expect("vuln window");
         assert_eq!(hour, 21, "Newly deployed corp structure must adopt corp default reinforce hour 21");
     });
-}
 
-#[tokio::test]
-async fn test_b22_corp_governance_shares_dividends_ceo_divisions_autokick() {
-    // parity: feat:corporation.ceo-resign, feat:corporation.corp-division-names, feat:corporation.dividends, feat:corporation.pending-auto-kick, feat:corporation.share-transfer
-    eve_testkit::attest(&[
-        "feat:corporation.ceo-resign",
-        "feat:corporation.corp-division-names",
-        "feat:corporation.dividends",
-        "feat:corporation.pending-auto-kick",
-        "feat:corporation.share-transfer",
-    ]);
-
-    let ctx = ServerContext::new();
-    let mut sess1 = select_pilot(&ctx, 72_201, "demo", "demo-secret", PILOT_1).await;
-    let mut sess2 = select_pilot(&ctx, 72_202, "other", "other-secret", PILOT_2).await;
-
-    let created = rpc(
+    // Transfer to a corporation with accept_structures = false must be rejected
+    let target_corp_id = 98_999_001;
+    ctx.db.with_mut_snapshot(|s| {
+        let mut target_corp = s.corporations.get(&corp_id).unwrap().clone();
+        target_corp.corporation_id = target_corp_id;
+        target_corp.name = "Refusing Corp".into();
+        s.corporations.insert(target_corp_id, target_corp);
+        let gov = s.corp_governance.entry(target_corp_id).or_default();
+        gov.accept_structures_set = true;
+        gov.accept_structures = false;
+    });
+    let reject_xfer = rpc(
         &ctx,
         &mut sess1,
-        "corpRegistry",
-        "AddCorporation",
-        &[
-            PyRep::String("Sovereign Syndicate".into()),
-            PyRep::String("SVRN".into()),
-            PyRep::Real(0.05),
-        ],
-    )
-    .await
-    .expect("AddCorporation");
-    let corp_id = field(&created, "corporationID").as_i64().unwrap();
-
-    ctx.db.with_mut_snapshot(|s| {
-        let corp = s.corporations.get_mut(&corp_id).unwrap();
-        corp.members.insert(PILOT_2);
-        corp.ensure_wallet_divisions();
-        corp.master_wallet = IskCents::from_f64_isk(10_000_000.0);
-        corp.wallet_divisions[0].balance = IskCents::from_f64_isk(10_000_000.0);
-        s.characters.get_mut(&PILOT_2).unwrap().corporation_id = corp_id;
-        s.characters.get_mut(&PILOT_2).unwrap().balance = IskCents::ZERO;
-    });
-
-    // 1. Division names
-    let deny_div = rpc(
-        &ctx,
-        &mut sess2,
-        "corpRegistry",
-        "UpdateDivisionNames",
-        &[PyRep::Integer(1), PyRep::String("Hack".into()), PyRep::String("HackW".into())],
+        "beyonce",
+        "CmdTransferCorpAssetOwnership",
+        &[PyRep::Integer(st_id), PyRep::Integer(target_corp_id)],
     )
     .await;
-    assert!(deny_div.is_err(), "Non-director cannot rename divisions");
-
-    rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "UpdateDivisionNames",
-        &[PyRep::Integer(1), PyRep::String("Armory".into()), PyRep::String("Treasury".into())],
-    )
-    .await
-    .expect("UpdateDivisionNames");
-    let divs = rpc(&ctx, &mut sess1, "corpRegistry", "GetDivisionNames", &[PyRep::Integer(corp_id)])
-        .await
-        .expect("GetDivisionNames");
-    assert_eq!(field(&divs, "division1"), PyRep::String("Armory".into()));
-    assert_eq!(field(&divs, "walletDivision1"), PyRep::String("Treasury".into()));
-
-    // 2. Share transfers & shareholder queries
-    rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "MoveCompanyShares",
-        &[PyRep::Integer(corp_id), PyRep::Integer(PILOT_2), PyRep::Integer(400)],
-    )
-    .await
-    .expect("MoveCompanyShares");
-    let sh_rep = rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(PILOT_2)])
-        .await
-        .expect("GetSharesByShareholder");
-    assert!(!rowset_rows(&sh_rep).is_empty());
-
-    // 3. PayoutDividend (per-share)
-    rpc(&ctx, &mut sess1, "corpRegistry", "PayoutDividend", &[PyRep::Bool(true), PyRep::Real(1_000_000.0), PyRep::Integer(1)])
-        .await
-        .expect("PayoutDividend");
-    ctx.db.with_snapshot(|s| {
-        assert!(s.characters[&PILOT_2].balance.raw_cents() > 0, "Shareholder must receive dividend");
-    });
-
-    // 4. Pending auto-kick when member is in space
-    ctx.advance_secs(12);
-    ctx.db.with_mut_snapshot(|s| {
-        let ch = s.characters.get_mut(&PILOT_2).unwrap();
-        ch.station_id = None;
-        ch.structure_id = None;
-    });
-    rpc(&ctx, &mut sess1, "corpRegistry", "KickOutMember", &[PyRep::Integer(PILOT_2)])
-        .await
-        .expect("KickOutMember queued");
-    let pending = rpc(&ctx, &mut sess1, "corpRegistry", "GetPendingAutoKicks", &[])
-        .await
-        .expect("GetPendingAutoKicks");
-    assert!(rowset_rows(&pending).iter().any(|r| r.first() == Some(&PyRep::Integer(PILOT_2))));
-
-    let executed = eve_server::services::fleet_social::execute_pending_auto_kicks_on_downtime(&ctx);
-    assert!(executed >= 1);
-    ctx.db.with_snapshot(|s| {
-        assert!(!s.corporations[&corp_id].members.contains(&PILOT_2));
-    });
-
-    // 5. CEO resignation
-    let resign = rpc(&ctx, &mut sess1, "corpRegistry", "ResignFromCEO", &[])
-        .await
-        .expect("ResignFromCEO");
-    assert_eq!(field(&resign, "newCeoID"), PyRep::Integer(0));
-    ctx.db.with_snapshot(|s| {
-        assert_eq!(s.corporations[&corp_id].ceo_id, 0);
-    });
-}
-
-#[tokio::test]
-async fn test_b22_corp_projects_and_npc_corp_rules() {
-    // parity: feat:corporation.corp-project-close-expiry, feat:corporation.corp-project-contribution-methods, feat:corporation.corp-project-reward-pool, feat:corporation.npc-corp-placement-rules, feat:corporation.npc-corp-tax-rate
-    eve_testkit::attest(&[
-        "feat:corporation.corp-project-close-expiry",
-        "feat:corporation.corp-project-contribution-methods",
-        "feat:corporation.corp-project-reward-pool",
-        "feat:corporation.npc-corp-placement-rules",
-        "feat:corporation.npc-corp-tax-rate",
-    ]);
-
-    let ctx = ServerContext::new();
-    let mut sess1 = select_pilot(&ctx, 72_301, "demo", "demo-secret", PILOT_1).await;
-    let mut sess2 = select_pilot(&ctx, 72_302, "other", "other-secret", PILOT_2).await;
-
-    let created = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "AddCorporation",
-        &[
-            PyRep::String("Helios Extraction".into()),
-            PyRep::String("HLOS".into()),
-            PyRep::Real(0.05),
-        ],
-    )
-    .await
-    .expect("AddCorporation");
-    let corp_id = field(&created, "corporationID").as_i64().unwrap();
-
-    ctx.db.with_mut_snapshot(|s| {
-        let corp = s.corporations.get_mut(&corp_id).unwrap();
-        corp.members.insert(PILOT_2);
-        corp.ensure_wallet_divisions();
-        corp.master_wallet = IskCents::from_f64_isk(10_000_000.0);
-        corp.wallet_divisions[0].balance = IskCents::from_f64_isk(10_000_000.0);
-        s.characters.get_mut(&PILOT_2).unwrap().corporation_id = corp_id;
-        s.characters.get_mut(&PILOT_2).unwrap().balance = IskCents::ZERO;
-    });
-
-    // 1. Corp project reward pool + contribution methods + close/refund
-    let create_proj = rpc(
-        &ctx,
-        &mut sess1,
-        "corporationSvc",
-        "CreateGoalSubmit",
-        &[
-            PyRep::String("Mine Veldspar".into()),
-            PyRep::Integer(100),
-            PyRep::Real(10_000.0),
-            PyRep::String("MineMaterials".into()),
-            PyRep::Bool(false),
-            PyRep::Integer(1),
-            PyRep::Integer(50),
-            PyRep::Integer(86_400),
-        ],
-    )
-    .await
-    .expect("CreateGoalSubmit");
-    let pid = field(&create_proj, "projectID").as_i64().unwrap();
-
-    // Server-observed mining harvest advances project & pays reward
-    eve_server::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
-        &ctx,
-        PILOT_2,
-        &["MineMaterials"],
-        10,
-        None,
+    assert_eq!(
+        reject_xfer.unwrap_err().code,
+        "CorpDoesNotAcceptStructures",
+        "Structure transfer to corp with accept_structures=false must be rejected"
     );
     ctx.db.with_snapshot(|s| {
-        assert_eq!(s.corp_projects[&pid].current_quantity, 10);
-        assert_eq!(s.characters[&PILOT_2].balance.raw_cents(), 100_000_00);
+        assert_eq!(s.structures[&st_id].owner_corp_id, corp_id);
     });
-
-    // Close project and verify remaining escrow (900,000 ISK) refunded
-    let bal_before_close = ctx.db.with_snapshot(|s| s.corporations[&corp_id].wallet_divisions[0].balance.raw_cents());
-    rpc(&ctx, &mut sess1, "corporationSvc", "CloseCorpProject", &[PyRep::Integer(pid)])
-        .await
-        .expect("CloseCorpProject");
-    ctx.db.with_snapshot(|s| {
-        let bal_after_close = s.corporations[&corp_id].wallet_divisions[0].balance.raw_cents();
-        assert_eq!(bal_after_close - bal_before_close, 900_000_00);
-    });
-
-    // 2. NPC corp placement rules & 11% NPC corp tax rate
-    let npc_app = rpc(
-        &ctx,
-        &mut sess2,
-        "corpRegistry",
-        "InsertApplication",
-        &[PyRep::Integer(1_000_006), PyRep::String("Join NPC".into())],
-    )
-    .await;
-    assert!(npc_app.is_err(), "Cannot apply to NPC corporation");
 
     ctx.db.with_mut_snapshot(|s| {
-        s.characters.get_mut(&PILOT_2).unwrap().corporation_id = 1_000_006;
+        s.corp_governance.get_mut(&target_corp_id).unwrap().accept_structures = true;
     });
-    let sys_id = 30000142;
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.insert((sys_id, PILOT_2), 50_000.0);
-    });
-    let (small_net, _, _) = eve_server::services::combat_npc_encounters::flush_npc_bounty_tick(&ctx, sys_id, PILOT_2, 0.0);
-    assert!((small_net - 67_500.0).abs() < 1e-3, "Bounty under 100k ISK must be tax-exempt");
-
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.insert((sys_id, PILOT_2), 1_000_000.0);
-    });
-    let (large_net, _, _) = eve_server::services::combat_npc_encounters::flush_npc_bounty_tick(&ctx, sys_id, PILOT_2, 0.0);
-    assert!((large_net - 1_201_500.0).abs() < 1e-3, "11% NPC corp tax must apply above 100k ISK threshold");
+    rpc(
+        &ctx,
+        &mut sess1,
+        "beyonce",
+        "CmdTransferCorpAssetOwnership",
+        &[PyRep::Integer(st_id), PyRep::Integer(target_corp_id)],
+    )
+    .await
+    .expect("Structure transfer must succeed when target corp accepts structures");
     ctx.db.with_snapshot(|s| {
-        assert!(
-            s.wallet_journal.iter().any(|j| j.character_id == PILOT_2 && j.entry_type == "bounty_prize_corporation_tax" && j.amount.raw_cents() == -148_500_00),
-            "Wallet journal must record 11% NPC corp tax deduction"
-        );
+        assert_eq!(s.structures[&st_id].owner_corp_id, target_corp_id);
     });
 }
