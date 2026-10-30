@@ -1294,8 +1294,14 @@ pub fn register_progression_extra_handlers(
                 return Err((STATUS_BAD_REQUEST, "Missing character ID".into()));
             }
             let challenges = if let Some(ref db) = mgr.db {
+                let now_ft = db.clock().now_blueos_filetime_ticks();
                 db.with_snapshot(|snap| {
-                    crate::services::season_manager::get_character_challenges_for_quasar(snap, char_id)
+                    crate::services::season_manager::get_character_challenges_for_quasar(
+                        snap,
+                        mgr.sde.as_deref(),
+                        now_ft,
+                        char_id,
+                    )
                 })
             } else {
                 Vec::new()

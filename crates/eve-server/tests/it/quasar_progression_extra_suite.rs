@@ -586,7 +586,7 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
     assert_eq!(sp_req.status_code, STATUS_OK, "Skill plan CreateRequest failed: {}", sp_req.status_message);
 
     let mut ch_state = eve_server::services::season_manager::CharacterSeasonState::default();
-    eve_server::services::season_manager::ensure_challenges(&mut ch_state, 133_000_000_000_000_000);
+    eve_server::services::season_manager::ensure_challenges(&mut ch_state, ctx.now_blueos_filetime_ticks());
     if let Some(c) = ch_state.challenges.get_mut(&297) { c.progress = 3; }
     ctx.db.with_mut_snapshot(|s| {
         eve_server::services::season_manager::save_season_state_to_blobs(s, 90_000_106, &ch_state);

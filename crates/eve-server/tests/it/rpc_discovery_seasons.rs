@@ -290,9 +290,11 @@ async fn test_season_manager_rpc_suite() {
     let err_comp = rpc(&ctx, &mut p1, "seasonManager", "complete_challenge_for_character_id", &[PyRep::Integer(1003)]).await;
     assert!(err_comp.is_err());
 
-    // 1. get_max_active_challenges (SYNTHETIC default config, overridable via the state blob)
+    // 1. get_max_active_challenges (SYNTHETIC default config, overridable via the state blob; negative clamped to 1)
     let max_ch = rpc(&ctx, &mut p1, "seasonManager", "get_max_active_challenges", &[]).await.expect("get_max_active_challenges");
     assert_eq!(max_ch, PyRep::Integer(4));
+    ctx.db.with_mut_snapshot(|s| s.service_state_blobs.insert("season_manager:season_configuration".into(), r#"{"season_id":2,"max_active_challenges":-5,"max_season_points":1000}"#.into()));
+    assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "get_max_active_challenges", &[]).await.unwrap(), PyRep::Integer(1));
     ctx.db.with_mut_snapshot(|s| s.service_state_blobs.insert("season_manager:season_configuration".into(), r#"{"season_id":2,"max_active_challenges":6,"max_season_points":1000}"#.into()));
     assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "get_max_active_challenges", &[]).await.unwrap(), PyRep::Integer(6));
 
@@ -329,10 +331,11 @@ async fn test_season_manager_rpc_suite() {
     assert_eq!(season_data.dict_get("agencyLargeSeasonSelectionTitleID").and_then(|v| v.as_i64()), Some(583_380));
     assert_eq!(season_data.dict_get("end_time").and_then(|v| v.as_i64()), Some(end_ft));
 
-    // 5. fill_up_and_return_challenges_for_character (loads real V24 challenges from challenges.fsdbinary)
+    // 5. fill_up_and_return_challenges_for_character (returns Dict keyed by challenge_id from challenges.fsdbinary)
     let filled = rpc(&ctx, &mut p1, "seasonManager", "fill_up_and_return_challenges_for_character", &[]).await.expect("fill_up_and_return_challenges");
-    let PyRep::List(ch_list) = filled else { panic!("expected List of challenges") };
-    assert_eq!(ch_list.len(), 6);
+    let PyRep::Dict(ch_dict) = filled else { panic!("expected Dict of challenges keyed by challenge_id, got {filled:?}") };
+    assert_eq!(ch_dict.len(), 6);
+    assert!(ch_dict.iter().all(|(k, v)| k.as_i64() == v.dict_get("challengeID").and_then(|c| c.as_i64())));
 
     // 6. get_challenge (rejects missing/unknown challenge ID; returns real V24 challenge 297 destroyHostileNPC)
     assert!(rpc(&ctx, &mut p1, "seasonManager", "get_challenge", &[]).await.is_err());
@@ -378,21 +381,35 @@ async fn test_season_manager_rpc_suite() {
     // Real V24 item-reward & chained challenge 2724 (reward type_id 92391 x 15, next_challenge 2743)
     // Locked chain step 2743 must fail to claim before predecessor 2724 is claimed.
     assert!(rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(2743)]).await.is_err());
-    // Unit-level shortcut: seed completed chain predecessor 2724 directly in state to exercise item-reward delivery and chain unlock 2724 -> 2743.
+    // Unit-level shortcut: seed completed chain predecessor 2724 and existing dormant 2743 in state to exercise item-reward OnItemChange and baseline_progress snapshot on chain unlock 2724 -> 2743.
     ctx.db.with_mut_snapshot(|s| {
+        s.mining_ledger.push(eve_db::MiningLedgerRecord { character_id: P1, solar_system_id: 30000142, type_id: 1230, quantity: 500, date: "2026-01-01".into(), timestamp_unix: 1_704_067_200 });
+        s.service_state_blobs.insert(format!("hacking_wins:{P1}"), "3".into());
         let mut st = eve_server::services::season_manager::load_season_state_from_blobs(s, P1);
-        let def2724 = eve_server::services::season_manager::fsd_challenge_definitions(&ctx.sde).iter().find(|d| d.challenge_id == 2724).unwrap().clone();
+        let defs = eve_server::services::season_manager::fsd_challenge_definitions(&ctx.sde);
+        let def2724 = defs.iter().find(|d| d.challenge_id == 2724).unwrap().clone();
+        let def2743 = defs.iter().find(|d| d.challenge_id == 2743).unwrap().clone();
         let mut ch2724 = def2724.to_character_challenge(st.selected_season_id, ctx.now_blueos_filetime_ticks());
         ch2724.is_dormant = false;
         ch2724.progress = 1;
         ch2724.completed = true;
         st.challenges.insert(2724, ch2724);
+        let mut ch2743 = def2743.to_character_challenge(st.selected_season_id, ctx.now_blueos_filetime_ticks());
+        ch2743.is_dormant = true;
+        ch2743.baseline_progress = 0;
+        st.challenges.insert(2743, ch2743);
         eve_server::services::season_manager::save_season_state_to_blobs(s, P1, &st);
     });
+    let _ = ctx.drain_notifications_for_char(P1);
     let claim_2724 = rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(2724)]).await.expect("claim ch 2724");
     let reward_item_id = claim_2724.dict_get("deliveredItemID").and_then(|v| v.as_i64()).expect("deliveredItemID");
     assert!(ctx.db.with_snapshot(|s| s.items.get(&reward_item_id).is_some_and(|it| it.type_id == 92391 && it.quantity == 15)));
+    assert!(ctx.drain_notifications_for_char(P1).iter().any(|n| n.event == "OnItemChange" && n.args.first().and_then(|a| a.dict_get("itemID")).and_then(|v| v.as_i64()) == Some(reward_item_id)));
     assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "challenge_is_dormant", &[PyRep::Integer(2743)]).await.expect("unlocked 2743"), PyRep::Bool(false));
+    let ch2743_after = rpc(&ctx, &mut p1, "seasonManager", "get_challenge", &[PyRep::Integer(2743)]).await.expect("get_challenge 2743");
+    assert_eq!(ch2743_after.dict_get("progress").and_then(|v| v.as_i64()), Some(0), "unlocking existing dormant 2743 must snapshot baseline_progress");
+    let prog_rep = rpc(&ctx, &mut p1, "seasonManager", "get_character_progress_by_character_id", &[]).await.expect("get_character_progress_by_character_id");
+    assert_eq!(prog_rep.dict_get("current_reward_index").and_then(|v| v.as_i64()), Some(2));
 
     // BF-SEASON-TRUST-01: Exploration challenge 239 (hackingMiniGameWon) rejects client event progress; progress via server state
     let err_client_239 = rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(239), PyRep::Integer(1)]).await;
@@ -416,9 +433,12 @@ async fn test_season_manager_rpc_suite() {
 
     // 12. process_client_event on real V24 client_lookAtObject challenge 274 (max_progress=4, points=40)
     assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[]).await.unwrap_err().code, "ChallengeNotFound"); // rpc-lint: allow error code assertion
+    assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::String("untrackedClientEvent".into())]).await.expect("benign untracked event_name"), PyRep::None);
     assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(274), PyRep::Integer(1)]).await.expect("client-driven progress"), PyRep::None);
-    let pce_kw = HashMap::from([("amount".into(), PyRep::Integer(2)), ("extra_data".into(), PyRep::Dict(vec![]))]);
-    ctx.dispatch_rpc(&mut p1, "seasonManager", None, "process_client_event", &[PyRep::Integer(274)], &pce_kw, None).await.expect("canonical kwargs pce");
+    let def274 = eve_server::services::season_manager::fsd_challenge_definitions(&ctx.sde).iter().find(|d| d.challenge_id == 274).unwrap();
+    let valid_ed: Vec<(PyRep, PyRep)> = def274.event_conditions.iter().filter_map(|(k, vals)| vals.first().map(|&v| (PyRep::String(k.clone()), PyRep::Integer(v)))).collect();
+    let pce_kw = HashMap::from([("amount".into(), PyRep::Integer(2)), ("extra_data".into(), PyRep::Dict(valid_ed))]);
+    ctx.dispatch_rpc(&mut p1, "seasonManager", None, "process_client_event", &[PyRep::String(def274.event_type.clone())], &pce_kw, None).await.expect("canonical event_name + kwargs pce");
     let ch274 = rpc(&ctx, &mut p1, "seasonManager", "get_challenge", &[PyRep::Integer(274)]).await.expect("get_challenge 274");
     assert_eq!(ch274.dict_get("progress").and_then(|v| v.as_i64()), Some(2));
 

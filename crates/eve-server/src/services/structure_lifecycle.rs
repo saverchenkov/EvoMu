@@ -1050,6 +1050,7 @@ pub fn sync_all_structures(ctx: &ServerContext) -> Vec<(i64, DisposalOutcome)> {
         let mut ids: Vec<i64> = snap.structures.keys().copied().collect();
         ids.sort_unstable();
         let mut ext = load_ext_state(snap);
+        super::structure_upwell_ops::apply_pending_profile_applications(&mut ext, now);
         let mut gone = Vec::new();
         let mut released = Vec::new();
         for id in ids {

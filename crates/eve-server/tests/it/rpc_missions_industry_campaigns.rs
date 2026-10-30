@@ -311,7 +311,20 @@ async fn test_industry_and_campaign_mgr_rpcs() {
         .expect("claim_reward repeat returns None");
     assert_eq!(login_claim_repeat, PyRep::None);
 
-    // 6. seasonalLoginCampaignManager.get_active_campaign: returns SDE seasonal campaign 2323 info 4-tuple
+    // 6. seasonalLoginCampaignManager.get_active_campaign: schedule SDE seasonal campaign 2323 via GM slash command
+    let mut gm_sess = SessionState::new(28_099);
+    gm_sess.user_id = Some(999);
+    gm_sess.character_id = Some(PILOT_1);
+    gm_sess.role = eve_machonet::service_roles::ROLE_GMH;
+    rpc(
+        &ctx,
+        &mut gm_sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/campaign seasonal 2323 30 11:00:00".into())],
+    )
+    .await
+    .expect("GM schedule seasonal campaign 2323");
     let seasonal_active = rpc(
         &ctx,
         &mut sess,
@@ -325,7 +338,8 @@ async fn test_industry_and_campaign_mgr_rpcs() {
         panic!("expected Tuple from get_active_campaign");
     };
     assert_eq!(seasonal_tuple[0].as_i64(), Some(2323));
-    assert!(seasonal_tuple[3].as_i64().unwrap_or(0) > 0);
+    assert_eq!(seasonal_tuple[2].as_str(), Some("11:00:00"));
+    assert_eq!(seasonal_tuple[3].as_i64(), Some(30));
 
     // 7. seasonalLoginCampaignManager.claim_reward: delivers SDE seasonal reward (87900 + 49809) and returns Bool
     let seasonal_claim = rpc(
@@ -382,7 +396,20 @@ async fn test_docked_login_reward_does_not_enqueue_redeem_token() {
     let pilot_id: i64 = PILOT_1;
     let mut sess = login_pilot_char(&ctx, 28_006, "demo", "demo-secret", pilot_id).await;
 
-    // 1. Claim login reward while docked
+    // 1. Schedule SDE campaign 2323 and claim login reward while docked
+    let mut gm_sess = SessionState::new(28_098);
+    gm_sess.user_id = Some(999);
+    gm_sess.character_id = Some(pilot_id);
+    gm_sess.role = eve_machonet::service_roles::ROLE_GMH;
+    rpc(
+        &ctx,
+        &mut gm_sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/campaign seasonal 2323 30 11:00:00".into())],
+    )
+    .await
+    .expect("GM schedule seasonal campaign 2323");
     assert!(sess.station_id.is_some());
     let init_items = ctx.db.with_snapshot(|s| s.items.len());
     let seasonal_claim = rpc(

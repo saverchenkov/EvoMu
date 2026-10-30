@@ -32,8 +32,8 @@ pub async fn handle(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    // Upwell lifecycle timers are evaluated lazily before any structure RPC is served.
-    if service.starts_with("structure") {
+    // Upwell lifecycle timers and delayed profile applications are evaluated lazily before structure RPCs.
+    if service.starts_with("structure") || service == "ownerGroupManager" {
         structure_lifecycle::sync_all_structures(ctx);
     }
     match (service, method) {

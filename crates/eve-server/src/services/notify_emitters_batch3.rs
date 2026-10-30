@@ -837,6 +837,81 @@ pub fn handle_batch3_gm_slash_cmd(
                 ("enrolled", PyRep::Bool(true)),
             ])))
         }
+        "/campaign" if parts.get(1).is_some_and(|s| s.eq_ignore_ascii_case("seasonal")) => {
+            use crate::services::campaigns_and_milestones::{
+                format_turnover_hms, get_sde_login_campaigns, parse_turnover_hms,
+                DEFAULT_SEASONAL_TURNOVER_SECS,
+            };
+            use crate::services::cosmetics_ui_ops::{
+                load_cosmetics_ui_state, save_cosmetics_ui_state, SeasonalCampaignSchedule,
+            };
+            if parts.get(2).is_some_and(|s| s.eq_ignore_ascii_case("off") || s.eq_ignore_ascii_case("stop")) {
+                ctx.db.with_mut_snapshot(|snap| {
+                    let mut ext = load_cosmetics_ui_state(snap);
+                    ext.active_seasonal_schedule = None;
+                    ext.active_seasonal_campaign_id = None;
+                    save_cosmetics_ui_state(snap, &ext);
+                });
+                emit_campaign_enrollment_changed(ctx, caller_cid);
+                return Some(Ok(PyRep::keyval([("active", PyRep::Bool(false))])));
+            }
+            let Some(campaign_id) = parts.get(2).and_then(|s| s.parse::<i64>().ok()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSlashArguments".into(),
+                    message: "Usage: /campaign seasonal <campaign_id|off> [duration_days] [HH:MM:SS]".into(),
+                }));
+            };
+            if !get_sde_login_campaigns(&ctx.sde).contains_key(&campaign_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "CampaignNotFound".into(),
+                    message: format!("Seasonal campaign {campaign_id} not found in SDE seasonalcampaignsloginrewards"),
+                }));
+            }
+            let duration_days = match parts.get(3) {
+                Some(raw) => match raw.parse::<u64>().ok().filter(|d| (1..=365).contains(d)) {
+                    Some(d) => d,
+                    None => {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidSlashArguments".into(),
+                            message: "duration_days must be in 1..=365".into(),
+                        }))
+                    }
+                },
+                None => 30,
+            };
+            let turnover_secs = match parts.get(4) {
+                Some(hms) => match parse_turnover_hms(hms) {
+                    Some(secs) => secs,
+                    None => {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidSlashArguments".into(),
+                            message: "turnover time must match HH:MM:SS".into(),
+                        }))
+                    }
+                },
+                None => DEFAULT_SEASONAL_TURNOVER_SECS,
+            };
+            let now = ctx.now_unix();
+            let end_unix = now.saturating_add(duration_days * 86_400);
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut ext = load_cosmetics_ui_state(snap);
+                ext.active_seasonal_campaign_id = Some(campaign_id);
+                ext.active_seasonal_schedule = Some(SeasonalCampaignSchedule {
+                    campaign_id,
+                    start_unix: now,
+                    end_unix,
+                    turnover_secs,
+                });
+                save_cosmetics_ui_state(snap, &ext);
+            });
+            emit_campaign_enrollment_changed(ctx, caller_cid);
+            Some(Ok(PyRep::keyval([
+                ("campaignID", PyRep::Integer(campaign_id)),
+                ("startUnix", PyRep::Integer(now as i64)),
+                ("endUnix", PyRep::Integer(end_unix as i64)),
+                ("turnoverTime", PyRep::String(format_turnover_hms(turnover_secs))),
+            ])))
+        }
         "/shutdown" if parts.get(1).is_some_and(|s| s.eq_ignore_ascii_case("cancel")) => {
             let label = parts
                 .get(2)

@@ -223,7 +223,22 @@ async fn test_login_and_seasonal_campaigns() {
         assert!(s.items.values().any(|it| it.owner_id == PILOT_1 && it.type_id == 29_266));
     });
 
-    // 3. seasonalLoginCampaignManager.get_active_campaign: returns 4-tuple with Proleptic Gregorian date ordinal
+    // 3. seasonalLoginCampaignManager.get_active_campaign: (None, None, None, None) before GM schedules an SDE seasonal campaign
+    let inactive_seasonal = rpc(&ctx, &mut sess, "seasonalLoginCampaignManager", "get_active_campaign", &[])
+        .await
+        .expect("inactive seasonal get_active_campaign");
+    assert_eq!(
+        inactive_seasonal,
+        PyRep::Tuple(vec![PyRep::None, PyRep::None, PyRep::None, PyRep::None])
+    );
+    let mut gm_sess = SessionState::new(31_099);
+    gm_sess.user_id = Some(999);
+    gm_sess.character_id = Some(PILOT_1);
+    gm_sess.role = eve_machonet::service_roles::ROLE_GMH;
+    rpc(&ctx, &mut gm_sess, "slash", "SlashCmd", &[PyRep::String("/campaign seasonal 2323 30 11:00:00".into())])
+        .await
+        .expect("GM schedule seasonal campaign 2323");
+
     let seasonal_active = rpc(
         &ctx,
         &mut sess,
@@ -241,15 +256,13 @@ async fn test_login_and_seasonal_campaigns() {
         seasonal_tuple[0].as_i64(),
         Some(DEFAULT_SEASONAL_CAMPAIGN_ID)
     );
-    let start_date_ordinal = seasonal_tuple[1].as_i64().expect("start_date_ordinal");
+    let end_date_ordinal = seasonal_tuple[1].as_i64().expect("end_date_ordinal");
     assert!(
-        start_date_ordinal >= GREGORIAN_EPOCH_ORDINAL,
-        "start_date_ordinal must be a proleptic Gregorian ordinal (>= 719,163)"
+        end_date_ordinal >= GREGORIAN_EPOCH_ORDINAL,
+        "end_date_ordinal must be a proleptic Gregorian ordinal (>= 719,163)"
     );
-    // end_date_str is derived from end_unix 1_850_000_000 (2028-08-16 00:53:20 UTC)
-    assert_eq!(seasonal_tuple[2].as_str(), Some("2028-08-16 00:53:20"));
-    let days_remaining = seasonal_tuple[3].as_i64().expect("days_remaining");
-    assert!(days_remaining > 0, "days remaining must be dynamic > 0");
+    assert_eq!(seasonal_tuple[2].as_str(), Some("11:00:00"));
+    assert_eq!(seasonal_tuple[3].as_i64(), Some(30));
 
     // 4. seasonalLoginCampaignManager.get_claim_history: initially empty Dict
     let history_pre = rpc(
@@ -287,6 +300,12 @@ async fn test_login_and_seasonal_campaigns() {
                 && it.flag == InventoryFlag::Hangar
                 && it.type_id == 87_900
         }));
+        assert!(s.items.values().any(|it| {
+            it.owner_id == PILOT_1
+                && it.location_id == home_station_id
+                && it.flag == InventoryFlag::Hangar
+                && it.type_id == 49_809
+        }));
     });
 
     // Duplicate seasonal claim on same day must fail
@@ -302,7 +321,7 @@ async fn test_login_and_seasonal_campaigns() {
     // rpc-lint: allow error code check
     assert_eq!(repeat_seasonal_err.code, "SeasonalRewardAlreadyClaimedToday");
 
-    // History now has 1 entry with Gregorian date ordinal key and delivered SDE item IDs
+    // History now has 1 entry `{date_ordinal: CLONE_STATE_OMEGA (1)}` per V24 `seasonalLoginCampaignService.pyj`
     let history_post = rpc(
         &ctx,
         &mut sess,
@@ -316,18 +335,13 @@ async fn test_login_and_seasonal_campaigns() {
         panic!("expected Dict from get_claim_history post");
     };
     assert_eq!(hist_entries_post.len(), 1);
-    let (key_rep, claim_data) = &hist_entries_post[0];
+    let (key_rep, claim_grade) = &hist_entries_post[0];
     let key_ordinal = key_rep.as_i64().expect("date ordinal key");
     assert!(
         key_ordinal >= GREGORIAN_EPOCH_ORDINAL,
         "claim_history key must be Gregorian date ordinal"
     );
-    assert_eq!(
-        field(claim_data, "campaign_id").as_i64(),
-        Some(DEFAULT_SEASONAL_CAMPAIGN_ID)
-    );
-    assert_eq!(field(claim_data, "alpha_type_id").as_i64(), Some(87_900));
-    assert_eq!(field(claim_data, "omega_type_id").as_i64(), Some(49_809));
+    assert_eq!(claim_grade.as_i64(), Some(1));
 }
 
 #[tokio::test]
