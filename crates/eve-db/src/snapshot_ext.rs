@@ -471,7 +471,6 @@ pub struct PlanetaryRouteRecord {
     #[serde(default)]
     pub waypoints: Vec<i64>,
 }
-
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlanetaryColonyLayoutRecord {
     pub pins: Vec<PlanetaryPinRecord>,
@@ -558,7 +557,6 @@ pub struct ChatChannelAclRecord {
     #[serde(default)]
     pub muted_until: HashMap<i64, (u64, String)>,
 }
-
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WorldStateSnapshot {
     pub next_entity_id: i64,
@@ -577,6 +575,7 @@ pub struct WorldStateSnapshot {
     pub jump_clones: HashMap<i64, Vec<JumpCloneRecord>>,
     pub active_implants: HashMap<i64, Vec<TypeId>>,
     pub items: HashMap<i64, InventoryItemRecord>,
+    #[serde(skip, default)] pub transient_item_attributes: HashMap<i64, HashMap<AttributeId, f64>>,
     pub saved_fittings: HashMap<i64, SavedFittingRecord>,
     pub market_orders: HashMap<i64, MarketOrderRecord>,
     pub wallet_journal: Vec<WalletJournalEntry>,

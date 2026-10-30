@@ -284,10 +284,9 @@ pub(crate) fn handle_add_module_cycle(
         }
         if let Some(db_ref) = db_opt {
             db_ref.with_mut_snapshot(|snap| {
-                if let Some(s_item) = snap.items.get_mut(&cycle.ship_id) {
-                    for aid in [267, 268, 269, 270, 271, 272, 273, 274, 109, 110, 111, 112] {
-                        s_item.dynamic_attributes.insert(aid, 0.25);
-                    }
+                let entry = snap.transient_item_attributes.entry(cycle.ship_id).or_default();
+                for aid in [267, 268, 269, 270, 271, 272, 273, 274, 109, 110, 111, 112] {
+                    entry.insert(aid, 0.25);
                 }
             });
         }
@@ -299,12 +298,11 @@ pub(crate) fn handle_add_module_cycle(
         }
         if let Some(db_ref) = db_opt {
             db_ref.with_mut_snapshot(|snap| {
-                if let Some(s_item) = snap.items.get_mut(&cycle.ship_id) {
-                    s_item.dynamic_attributes.insert(113, ehe_res[0]);
-                    s_item.dynamic_attributes.insert(111, ehe_res[1]);
-                    s_item.dynamic_attributes.insert(109, ehe_res[2]);
-                    s_item.dynamic_attributes.insert(110, ehe_res[3]);
-                }
+                let entry = snap.transient_item_attributes.entry(cycle.ship_id).or_default();
+                entry.insert(113, ehe_res[0]);
+                entry.insert(111, ehe_res[1]);
+                entry.insert(109, ehe_res[2]);
+                entry.insert(110, ehe_res[3]);
             });
         }
     }
@@ -314,15 +312,13 @@ pub(crate) fn handle_add_module_cycle(
         }
         if let Some(db_ref) = db_opt {
             db_ref.with_mut_snapshot(|snap| {
-                if let Some(m_item) = snap.items.get_mut(&cycle.module_id) {
-                    for aid in 267..=270 {
-                        m_item.dynamic_attributes.insert(aid, 0.85);
-                    }
+                let m_entry = snap.transient_item_attributes.entry(cycle.module_id).or_default();
+                for aid in 267..=270 {
+                    m_entry.insert(aid, 0.85);
                 }
-                if let Some(s_item) = snap.items.get_mut(&cycle.ship_id) {
-                    for aid in 267..=270 {
-                        s_item.dynamic_attributes.insert(aid, 0.85);
-                    }
+                let s_entry = snap.transient_item_attributes.entry(cycle.ship_id).or_default();
+                for aid in 267..=270 {
+                    s_entry.insert(aid, 0.85);
                 }
             });
         }
