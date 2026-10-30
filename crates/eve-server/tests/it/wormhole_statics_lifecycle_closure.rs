@@ -399,7 +399,7 @@ async fn test_wormhole_statics_decay_stages_respawn_and_k162_materialization() {
 
     let slim_48_early = ctx.systems.get_or_spawn(decay_sys).get_ball_slim_item(wh48_ent).await.unwrap().expect("slim 48h");
     let slim_16_early = ctx.systems.get_or_spawn(decay_sys).get_ball_slim_item(wh16_ent).await.unwrap().expect("slim 16h");
-    assert_eq!(slim_48_early.dict_get("wormholeAge"), Some(&PyRep::Integer(1)));
+    assert_eq!(slim_48_early.dict_get("wormholeAge"), Some(&PyRep::Integer(0)));
     assert_eq!(slim_48_early.dict_get("wormholeSize"), Some(&PyRep::Real(1.0)));
     assert_eq!(slim_16_early.dict_get("wormholeAge"), Some(&PyRep::Integer(1)));
 

@@ -168,12 +168,7 @@ pub async fn ensure_system_signatures_and_anomalies(
                 None => true,
                 Some(existing) => {
                     !existing.is_empty()
-                        && existing.iter().all(|s| {
-                            s.collapsed
-                                || s.signature_id.starts_with("K162-")
-                                || (s.lifetime_seconds > 0
-                                    && now_unix >= s.created_unix.saturating_add(s.lifetime_seconds))
-                        })
+                        && existing.iter().all(|s| s.signature_id.starts_with("K162-"))
                 }
             };
             let list = snap.cosmic_signatures.entry(sys_id).or_default();
@@ -684,18 +679,22 @@ pub fn compute_wormhole_stages(
     now_unix: u64,
 ) -> (&'static str, f64, &'static str, i64, bool) {
     let elapsed = now_unix.saturating_sub(wh.created_unix);
+    let remaining_seconds = wh.lifetime_seconds.saturating_sub(elapsed);
     let lifetime_pct = if wh.lifetime_seconds == 0 || elapsed >= wh.lifetime_seconds {
         0.0
     } else {
-        (wh.lifetime_seconds - elapsed) as f64 / wh.lifetime_seconds as f64
+        remaining_seconds as f64 / wh.lifetime_seconds as f64
     };
-    let (lifetime_stage, wormhole_age) = if lifetime_pct <= 0.0 {
-        ("Collapsed_Expired", 3)
-    } else if lifetime_pct < 0.25 {
-        ("ReachingEndOfLifetime", 2)
-    } else {
-        ("Healthy", 1)
-    };
+    let (lifetime_stage, wormhole_age) =
+        if wh.collapsed || wh.lifetime_seconds == 0 || elapsed >= wh.lifetime_seconds || remaining_seconds == 0 {
+            ("Collapsed_Expired", 3)
+        } else if remaining_seconds < 4 * 3_600 {
+            ("ReachingEndOfLifetime", 2)
+        } else if remaining_seconds <= 24 * 3_600 {
+            ("Healthy", 1)
+        } else {
+            ("BeginningToDecay", 0)
+        };
 
     let mass_pct = if wh.max_mass_kg > 0.0 {
         wh.remaining_mass_kg / wh.max_mass_kg

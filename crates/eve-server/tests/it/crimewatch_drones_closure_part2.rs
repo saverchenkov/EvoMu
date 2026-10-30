@@ -147,6 +147,27 @@ async fn test_crimewatch_weapons_timer_and_highsec_criminal_movement_restriction
     let mut w_sess = spawn_pilot(&ctx, 920, w_id, 1_000_009, ws_id, 587, jita, DVec3::ZERO).await;
     let mut d_sess = spawn_pilot(&ctx, 921, d_id, 1_000_010, ds_id, 587, jita, DVec3::ZERO).await;
     let _ = rpc(&ctx, &mut w_sess, "scanMgr", None, "GetSystemScanMgr", &[]).await.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        let sigs = snap.cosmic_signatures.entry(jita).or_default();
+        if !sigs.iter().any(|s| s.sig_group == "Wormhole") {
+            sigs.push(eve_db::CosmicSignatureRecord {
+                signature_id: "JMM-142".into(),
+                solar_system_id: jita,
+                sig_group: "Wormhole".into(),
+                type_name: "Unstable Wormhole (K162)".into(),
+                position: [149_597_870_700.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                wormhole_type_id: Some(26_272),
+                destination_system_id: Some(31_000_005),
+                created_unix: ctx.now_unix(),
+                lifetime_seconds: 86_400,
+                max_mass_kg: 2_000_000_000.0,
+                remaining_mass_kg: 2_000_000_000.0,
+                max_jump_mass_kg: 375_000_000.0,
+                collapsed: false,
+            });
+        }
+    });
     let (wh_sig, wh_pos) = ctx.db.with_snapshot(|snap| {
         let sig = snap.cosmic_signatures[&jita].iter().find(|s| s.sig_group == "Wormhole").unwrap();
         (sig.signature_id.clone(), sig.position)

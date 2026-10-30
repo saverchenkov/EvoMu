@@ -207,9 +207,50 @@ async fn test_small_ship_standard_shattered_drifter_and_thera_systems() {
             let life = sites.first().map(|s| s.lifetime_seconds).unwrap_or(0);
             (sites.len(), min_c, max_c, life)
         });
-    assert!(c13_site_count >= 8, "C13 spawns more sites than normal W-space, got {c13_site_count}");
+    let normal_c2 = 31_000_500_u32;
+    let (normal_c2_cls, _, normal_c2_shattered, _) = system_wormhole_profile_sde(&ctx.sde, normal_c2);
+    assert!((1..=3).contains(&normal_c2_cls) && !normal_c2_shattered);
+    let _ = ensure_system_signatures_and_anomalies(&ctx, normal_c2).await;
+    let _ = ensure_system_pve_sites_seeded(&ctx, normal_c2).await;
+    let normal_site_count = with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system.get(&normal_c2).map(|s| s.len()).unwrap_or(0)
+    });
+    let c13_sig_count = ctx.db.with_snapshot(|s| {
+        s.cosmic_signatures
+            .get(&c13_sys)
+            .map(|l| l.iter().filter(|sig| !sig.signature_id.starts_with("K162-")).count())
+            .unwrap_or(0)
+    });
+    assert!(
+        c13_site_count > normal_site_count,
+        "C13 must spawn more sites than normal C1-C3 W-space ({c13_site_count} vs {normal_site_count})"
+    );
+    assert!(
+        c13_sig_count >= 10,
+        "C13 must spawn elevated signature count (got {c13_sig_count})"
+    );
     assert_eq!((c13_min_cls, c13_max_cls), (1, 3), "C13 spawns C1-C3 sites");
     assert_eq!(c13_life, 14_400, "C13 sites respawn every 4h (14400s)");
+
+    // Frigate (Rifter 587, 1.067M kg) and Destroyer (Thrasher 16242, 1.55M kg) admitted directly
+    let frig_ship_id = 620_000_015_i64;
+    place_ship(&ctx, &mut sess, char_id, c13_sys, frig_ship_id, 587, c13_wh_pos, 1_067_000.0).await;
+    ctx.advance_secs(15);
+    let frig_rep = ctx
+        .dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(c13_wh_id)], &kw, None)
+        .await
+        .expect("Frigate must be admitted to small-ship wormhole");
+    assert_eq!(frig_rep.dict_get("success").and_then(|v| v.as_bool()), Some(true));
+
+    ctx.advance_secs(315);
+    let dest_ship_id = 620_000_016_i64;
+    place_ship(&ctx, &mut sess, char_id, c13_sys, dest_ship_id, 16_242, c13_wh_pos, 1_550_000.0).await;
+    let dest_rep = ctx
+        .dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(c13_wh_id)], &kw, None)
+        .await
+        .expect("Destroyer must be admitted to small-ship wormhole");
+    assert_eq!(dest_rep.dict_get("success").and_then(|v| v.as_bool()), Some(true));
+    ctx.advance_secs(315);
 
     // Cruiser (Caracal 621, 11.3M kg) rejected
     place_ship(&ctx, &mut sess, char_id, c13_sys, ship_id, 621, c13_wh_pos, 11_300_000.0).await;
@@ -539,9 +580,7 @@ async fn test_small_ship_standard_shattered_drifter_and_thera_systems() {
     // 4. Thera NPC Stations (31000005)
     let thera_sys = 31_000_005_u32;
     let thera_stations: Vec<i64> = ctx.sde.stations.values().filter(|st| st.solar_system_id == thera_sys).map(|st| st.station_id).collect();
-    if !thera_stations.is_empty() {
-        assert_eq!(thera_stations.len(), 4, "Thera (31000005) has 4 Sisters of EVE NPC stations");
-    }
+    assert_eq!(thera_stations.len(), 4, "Thera (31000005) has 4 Sisters of EVE NPC stations");
     let _ = ensure_system_signatures_and_anomalies(&ctx, thera_sys).await;
     let thera_sigs = ctx.db.with_snapshot(|s| s.cosmic_signatures.get(&thera_sys).cloned().unwrap_or_default());
     let has_kspace_conn = thera_sigs.iter().any(|s| s.destination_system_id.is_some_and(|d| d < 31_000_000));
@@ -572,4 +611,11 @@ async fn test_small_ship_standard_shattered_drifter_and_thera_systems() {
         .await
         .expect("jumpCloneSvc.GetStationCloneState in Thera");
     assert_ne!(clone_state, PyRep::None, "Thera station exposes clone bay state");
+
+    sess.region_id = ctx.sde.solar_systems.get(&thera_sys).map(|s| s.region_id);
+    let station_asks = ctx
+        .dispatch_rpc(&mut sess, "marketProxy", None, "GetStationAsks", &[], &kw, None)
+        .await
+        .expect("marketProxy.GetStationAsks in Thera");
+    assert_ne!(station_asks, PyRep::None, "Thera station exposes market service");
 }
