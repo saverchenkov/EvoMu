@@ -93,8 +93,8 @@ pub fn build_campaign_snapshot_for_system(c: &InsurgencyCampaign, sys_id: u32, n
     let (phase, end_time) = get_campaign_phase_and_timer(c, now);
     let c_pts = c.corruption_points.get(&sys_id).copied().unwrap_or(0);
     let s_pts = c.suppression_points.get(&sys_id).copied().unwrap_or(0);
-    let c_stage = if c_pts == 0 { 0 } else { ((c_pts as f64 / 200.0).ceil() as u8).clamp(1, 5) };
-    let s_stage = if s_pts == 0 { 0 } else { ((s_pts as f64 / 200.0).ceil() as u8).clamp(1, 5) };
+    let c_stage = insurgency_stage(c_pts);
+    let s_stage = insurgency_stage(s_pts);
     let is_fob = c.fob_solar_system_id == sys_id;
     let s5 = c.suppression_points.values().filter(|&&pts| insurgency_stage(pts) >= 5).count();
     let sys_reps: Vec<PyRep> = c.systems.iter().map(|&s| PyRep::Integer(i64::from(s))).collect();
@@ -191,8 +191,8 @@ pub fn init_insurgency_campaign(
     };
     let pos = [100_000.0, 0.0, 50_000.0];
     ctx.db.with_mut_snapshot(|snap| {
-        for sys in &systems {
-            snap.system_states.entry(*sys).or_default();
+        for &sys in &systems {
+            snap.system_states.entry(sys).or_default().solar_system_id = sys;
         }
         if !snap.items.contains_key(&stronghold_id) {
             snap.items.insert(stronghold_id, eve_db::InventoryItemRecord {
@@ -387,7 +387,9 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
     });
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.system_states.entry(sys_id).or_default().insurgency_corruption_stage = stage;
+        let st = snap.system_states.entry(sys_id).or_default();
+        st.solar_system_id = sys_id;
+        st.insurgency_corruption_stage = stage;
         crate::services::security_mgr::prune_ineligible_insurgency_sites_in_snap(snap, sys_id);
     });
     ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).system_corruption_stages.insert(sys_id, stage);
@@ -450,7 +452,9 @@ pub fn add_system_suppression(ctx: &ServerContext, campaign_id: i64, sys_id: u32
     });
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.system_states.entry(sys_id).or_default().insurgency_suppression_stage = stage;
+        let st = snap.system_states.entry(sys_id).or_default();
+        st.solar_system_id = sys_id;
+        st.insurgency_suppression_stage = stage;
         crate::services::security_mgr::prune_ineligible_insurgency_sites_in_snap(snap, sys_id);
     });
 

@@ -101,6 +101,42 @@ impl<'a> std::ops::Deref for CrimeWatchReadGuard<'a> {
     }
 }
 
+fn snapshot_corruption_stages(snap: &eve_db::WorldStateSnapshot, now_unix: u64) -> HashMap<u32, u8> {
+    let mut stages: HashMap<u32, u8> = snap
+        .system_states
+        .iter()
+        .map(|(&sid, st)| (sid, st.insurgency_corruption_stage))
+        .collect();
+    for c in snap.insurgency_runtime.campaigns.values() {
+        if now_unix >= c.forecasting_end_unix && now_unix < c.winddown_end_unix {
+            for &sid in &c.systems {
+                let stg = crate::services::insurgency_services::insurgency_stage(
+                    c.corruption_points.get(&sid).copied().unwrap_or(0),
+                );
+                let cur = stages.entry(sid).or_insert(0);
+                if stg > *cur {
+                    *cur = stg;
+                }
+            }
+        }
+    }
+    stages
+}
+
+fn persist_corruption_stage_diffs(
+    snap: &mut eve_db::WorldStateSnapshot,
+    orig_stages: &HashMap<u32, u8>,
+    new_stages: &HashMap<u32, u8>,
+) {
+    for (&sid, &stg) in new_stages {
+        if orig_stages.get(&sid) != Some(&stg) {
+            let entry = snap.system_states.entry(sid).or_default();
+            entry.solar_system_id = sid;
+            entry.insurgency_corruption_stage = stg;
+        }
+    }
+}
+
 impl CrimeWatchLock {
     pub fn new(db: std::sync::Arc<eve_db::WorldRepository>) -> Self {
         Self {
@@ -138,21 +174,20 @@ impl CrimeWatchLock {
 
     pub fn with_mut_crimewatch<R>(&self, f: impl FnOnce(&mut CrimeWatchDirector) -> R) -> R {
         let _guard = self.lock.write().unwrap_or_else(|e| e.into_inner());
+        let now_unix = self.db.now_unix_secs();
         self.db.with_mut_snapshot(|snap| {
+            let orig_stages = snapshot_corruption_stages(snap, now_unix);
             let mut dir = CrimeWatchDirector {
                 states: std::mem::take(&mut snap.crimewatch_states),
                 aggression_mgr: AggressionManager {
                     records: std::mem::take(&mut snap.crimewatch_aggressions),
                 },
-                system_corruption_stages: snap
-                    .system_states
-                    .iter()
-                    .map(|(&sid, st)| (sid, st.insurgency_corruption_stage))
-                    .collect(),
+                system_corruption_stages: orig_stages.clone(),
             };
             let out = f(&mut dir);
             snap.crimewatch_states = dir.states;
             snap.crimewatch_aggressions = dir.aggression_mgr.records;
+            persist_corruption_stage_diffs(snap, &orig_stages, &dir.system_corruption_stages);
             out
         })
     }
@@ -162,21 +197,20 @@ impl CrimeWatchLock {
         f: impl FnOnce(&mut CrimeWatchDirector) -> Result<R, E>,
     ) -> Result<R, E> {
         let _guard = self.lock.write().unwrap_or_else(|e| e.into_inner());
+        let now_unix = self.db.now_unix_secs();
         self.db.try_with_mut_snapshot(|snap| {
+            let orig_stages = snapshot_corruption_stages(snap, now_unix);
             let mut dir = CrimeWatchDirector {
                 states: std::mem::take(&mut snap.crimewatch_states),
                 aggression_mgr: AggressionManager {
                     records: std::mem::take(&mut snap.crimewatch_aggressions),
                 },
-                system_corruption_stages: snap
-                    .system_states
-                    .iter()
-                    .map(|(&sid, st)| (sid, st.insurgency_corruption_stage))
-                    .collect(),
+                system_corruption_stages: orig_stages.clone(),
             };
             let res = f(&mut dir);
             snap.crimewatch_states = dir.states;
             snap.crimewatch_aggressions = dir.aggression_mgr.records;
+            persist_corruption_stage_diffs(snap, &orig_stages, &dir.system_corruption_stages);
             res
         })
     }
@@ -185,14 +219,12 @@ impl CrimeWatchLock {
         &self,
     ) -> Result<CrimeWatchReadGuard<'_>, std::sync::PoisonError<CrimeWatchReadGuard<'_>>> {
         let guard = self.lock.read().unwrap_or_else(|e| e.into_inner());
+        let now_unix = self.db.now_unix_secs();
         let (states, records, stages) = self.db.with_snapshot(|s| {
             (
                 s.crimewatch_states.clone(),
                 s.crimewatch_aggressions.clone(),
-                s.system_states
-                    .iter()
-                    .map(|(&sid, st)| (sid, st.insurgency_corruption_stage))
-                    .collect(),
+                snapshot_corruption_stages(s, now_unix),
             )
         });
         Ok(CrimeWatchReadGuard {
@@ -209,14 +241,12 @@ impl CrimeWatchLock {
         &self,
     ) -> Result<CrimeWatchWriteGuard<'_>, std::sync::PoisonError<CrimeWatchWriteGuard<'_>>> {
         let guard = self.lock.write().unwrap_or_else(|e| e.into_inner());
+        let now_unix = self.db.now_unix_secs();
         let (states, records, stages) = self.db.with_snapshot(|s| {
             (
                 s.crimewatch_states.clone(),
                 s.crimewatch_aggressions.clone(),
-                s.system_states
-                    .iter()
-                    .map(|(&sid, st)| (sid, st.insurgency_corruption_stage))
-                    .collect(),
+                snapshot_corruption_stages(s, now_unix),
             )
         });
         Ok(CrimeWatchWriteGuard {
@@ -224,6 +254,7 @@ impl CrimeWatchLock {
             db: &self.db,
             orig_states: states.clone(),
             orig_records: records.clone(),
+            orig_stages: stages.clone(),
             director: CrimeWatchDirector {
                 states,
                 aggression_mgr: AggressionManager { records },
@@ -238,6 +269,7 @@ pub struct CrimeWatchWriteGuard<'a> {
     db: &'a std::sync::Arc<eve_db::WorldRepository>,
     orig_states: HashMap<i64, CharacterCrimeWatchState>,
     orig_records: HashMap<(i64, i64), AggressionRecord>,
+    orig_stages: HashMap<u32, u8>,
     director: CrimeWatchDirector,
 }
 
@@ -258,12 +290,16 @@ impl<'a> Drop for CrimeWatchWriteGuard<'a> {
     fn drop(&mut self) {
         if self.director.states != self.orig_states
             || self.director.aggression_mgr.records != self.orig_records
+            || self.director.system_corruption_stages != self.orig_stages
         {
             let states = std::mem::take(&mut self.director.states);
             let aggs = std::mem::take(&mut self.director.aggression_mgr.records);
+            let stages = std::mem::take(&mut self.director.system_corruption_stages);
+            let orig_stages = &self.orig_stages;
             self.db.with_mut_snapshot(|snap| {
                 snap.crimewatch_states = states;
                 snap.crimewatch_aggressions = aggs;
+                persist_corruption_stage_diffs(snap, orig_stages, &stages);
             });
         }
     }

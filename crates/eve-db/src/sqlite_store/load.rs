@@ -535,15 +535,17 @@ pub fn load_snapshot_from_sqlite(
 
     {
         let mut stmt = conn
-            .prepare("SELECT record_json FROM system_states")
+            .prepare("SELECT solar_system_id, record_json FROM system_states")
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map([], |r| r.get::<_, String>(0))
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
             .map_err(|e| e.to_string())?;
         for r in rows {
-            let js = r.map_err(|e| e.to_string())?;
-            let st: SystemDynamicState = serde_json::from_str(&js).map_err(|e| e.to_string())?;
-            snap.system_states.insert(st.solar_system_id, st);
+            let (sid, js) = r.map_err(|e| e.to_string())?;
+            let mut st: SystemDynamicState = serde_json::from_str(&js).map_err(|e| e.to_string())?;
+            let sys_id = sid as SolarSystemId;
+            st.solar_system_id = sys_id;
+            snap.system_states.insert(sys_id, st);
         }
     }
 

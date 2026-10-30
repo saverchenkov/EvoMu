@@ -737,20 +737,16 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                 let mut concord_triggered = false;
                 for (vcid, is_pod) in illegal_capsuleer_hits {
                     if sys_sec > 0.0 {
-                        if sys_sec >= 0.45 {
-                            concord_triggered = true;
-                        }
                         {
                             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-                            let _ = cw.handle_combat_aggression(
-                                char_id,
-                                vcid,
-                                ship_id,
-                                sys_id,
-                                sys_sec,
-                                false,
-                                now_unix,
+                            let eval = cw.handle_combat_aggression_with_pod(
+                                char_id, vcid, ship_id, sys_id, sys_sec, false, is_pod, now_unix,
                             );
+                            if sys_sec >= 0.45
+                                && matches!(eval, crate::combat::crimewatch::AggressionEvaluation::CriminalFlagTriggered { .. })
+                            {
+                                concord_triggered = true;
+                            }
                             if sys_sec < 0.45 && is_pod {
                                 let st = cw.get_or_create(char_id);
                                 st.criminal_flag_until_unix = now_unix.saturating_add(900);

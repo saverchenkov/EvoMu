@@ -57,35 +57,11 @@ async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
 
     // Place ships well away from initial celestial patrol anchors until targeting checks
     let mut s_emp = register_online_pilot(
-        &ctx,
-        88_001,
-        "demo",
-        "demo-secret",
-        emp_cid,
-        98_000_081,
-        None,
-        front_sys,
-        emp_ship,
-        639,
-        DVec3::new(900_000.0, 900_000.0, 0.0),
-        0,
-    )
-    .await;
+        &ctx, 88_001, "demo", "demo-secret", emp_cid, 98_000_081, None, front_sys, emp_ship, 639, DVec3::new(900_000.0, 900_000.0, 0.0), 0,
+    ).await;
     let mut s_pir = register_online_pilot(
-        &ctx,
-        88_002,
-        "demo2",
-        "demo2-secret",
-        pir_cid,
-        98_000_082,
-        None,
-        front_sys,
-        pir_ship,
-        621,
-        DVec3::new(910_000.0, 900_000.0, 0.0),
-        0,
-    )
-    .await;
+        &ctx, 88_002, "demo2", "demo2-secret", pir_cid, 98_000_082, None, front_sys, pir_ship, 621, DVec3::new(910_000.0, 900_000.0, 0.0), 0,
+    ).await;
     ctx.db.with_mut_snapshot(|s| {
         let mut neu_ch = s.characters[&emp_cid].clone();
         neu_ch.character_id = neu_cid;
@@ -94,58 +70,21 @@ async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
         neu_ch.active_ship_id = neu_ship;
         neu_ch.war_faction_id = None;
         s.characters.insert(neu_cid, neu_ch);
-        s.items.insert(
-            neu_ship,
-            InventoryItemRecord {
-                item_id: neu_ship,
-                type_id: 621,
-                owner_id: neu_cid,
-                location_id: i64::from(front_sys),
-                flag: InventoryFlag::None,
-                quantity: 1,
-                singleton: true,
-                ..Default::default()
-            },
-        );
+        s.items.insert(neu_ship, InventoryItemRecord {
+            item_id: neu_ship, type_id: 621, owner_id: neu_cid, location_id: i64::from(front_sys),
+            flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
+        });
     });
     let sys_h = ctx.systems.get_or_spawn(front_sys);
-    let _ = sys_h
-        .spawn_ball(make_ball(
-            neu_ship,
-            621,
-            DVec3::new(920_000.0, 900_000.0, 0.0),
-        ))
-        .await;
+    let _ = sys_h.spawn_ball(make_ball(neu_ship, 621, DVec3::new(920_000.0, 900_000.0, 0.0))).await;
 
-    rpc_call(
-        &ctx,
-        &mut s_emp,
-        "fwCharacterEnlistmentMgr",
-        "CreateMyDirectEnlistment",
-        &[PyRep::Integer(500_001)],
-    )
-    .await
-    .expect("enlist Caldari");
-    rpc_call(
-        &ctx,
-        &mut s_pir,
-        "fwCharacterEnlistmentMgr",
-        "CreateMyDirectEnlistment",
-        &[PyRep::Integer(500_010)],
-    )
-    .await
-    .expect("enlist Guristas");
+    rpc_call(&ctx, &mut s_emp, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(500_001)])
+        .await.expect("enlist Caldari");
+    rpc_call(&ctx, &mut s_pir, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(500_010)])
+        .await.expect("enlist Guristas");
 
     // Seed campaign and enter Active phase
-    let _ = rpc_call(
-        &ctx,
-        &mut s_emp,
-        "dungeonInstanceCacheMgr",
-        "GetFactionWarfareInstances",
-        &[],
-    )
-    .await
-    .unwrap();
+    let _ = rpc_call(&ctx, &mut s_emp, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await.unwrap();
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let (camp_id, pirate_fac) = ctx.db.with_snapshot(|s| {
         let (&cid, c) = s.insurgency_runtime.campaigns.iter().next().unwrap();
@@ -230,7 +169,10 @@ async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
             flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
         });
     });
-    let _ = sys_h.spawn_ball(make_ball(rival_pir_ship, 621, DVec3::new(930_000.0, 900_000.0, 0.0))).await;
+    let mut rival_cs = ctx.build_type_combat_state(621);
+    rival_cs.shield_hp = 500_000.0;
+    rival_cs.max_shield_hp = 500_000.0;
+    let _ = sys_h.spawn_ball_with_combat(make_ball(rival_pir_ship, 621, DVec3::new(930_000.0, 900_000.0, 0.0)), rival_cs).await;
     assert_eq!(insurgency_pirate_warp_bonus_au_s(&ctx, rival_pir_cid, front_sys), 0.0, "Rival pirate receives no +2.0 AU/s warp bonus");
     assert_eq!(insurgency_pirate_warp_bonus_au_s(&ctx, pir_cid, front_sys), 2.0, "Aligned pirate receives +2.0 AU/s warp bonus");
     assert_eq!(insurgency_pvp_loot_drop_threshold(&ctx, front_sys, rival_pir_cid, emp_cid, false), 0.50, "Rival pirate receives no PvP loot bonus");
@@ -311,34 +253,54 @@ async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
             .unwrap();
         (n.ball_id, n.spawn_position)
     });
-    // Enforcer stays neutral to Empire militia, neutral, and rival non-campaign pirate pilots, and attacks aligned Pirate militia!
+    // Enforcer stays neutral to Empire militia & neutral pilots, and engages ALL pirate militias (`500_010` and `500_011`)!
     {
         let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
         bp.set_ball_position(emp_ship, enf_pos + DVec3::new(10_000.0, 0.0, 0.0));
         bp.set_ball_position(neu_ship, enf_pos + DVec3::new(12_000.0, 0.0, 0.0));
-        bp.set_ball_position(rival_pir_ship, enf_pos + DVec3::new(13_000.0, 0.0, 0.0));
-        bp.set_ball_position(pir_ship, enf_pos + DVec3::new(900_000.0, 0.0, 0.0));
+        bp.set_ball_position(rival_pir_ship, enf_pos + DVec3::new(900_000.0, 0.0, 0.0));
+        bp.set_ball_position(pir_ship, enf_pos + DVec3::new(910_000.0, 0.0, 0.0));
     }
     step_extended_npc_ai_sync(&ctx, front_sys);
     with_combat_runtime(&ctx, |rt| {
-        let n = &rt.npc_entities[&enf_bid];
         assert_eq!(
-            n.target_id, None,
-            "InsurgencyEnforcer must remain neutral to Empire, neutral, and rival non-campaign pirate pilots"
+            rt.npc_entities[&enf_bid].target_id, None,
+            "InsurgencyEnforcer must remain neutral to Empire and neutral pilots"
         );
     });
     {
         let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        bp.set_ball_position(rival_pir_ship, enf_pos + DVec3::new(13_000.0, 0.0, 0.0));
+    }
+    step_extended_npc_ai_sync(&ctx, front_sys);
+    with_combat_runtime(&ctx, |rt| {
+        assert_eq!(
+            rt.npc_entities[&enf_bid].target_id,
+            Some(rival_pir_ship),
+            "InsurgencyEnforcer must engage rival pirate militia (`500_011` / `500_010`) at Suppression >= 3"
+        );
+    });
+    {
+        let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        bp.set_ball_position(rival_pir_ship, enf_pos + DVec3::new(900_000.0, 0.0, 0.0));
         bp.set_ball_position(pir_ship, enf_pos + DVec3::new(14_000.0, 0.0, 0.0));
     }
     step_extended_npc_ai_sync(&ctx, front_sys);
     with_combat_runtime(&ctx, |rt| {
-        let n = &rt.npc_entities[&enf_bid];
-        assert_eq!(
-            n.target_id,
-            Some(pir_ship),
-            "InsurgencyEnforcer must attack Pirate-aligned pilot at Suppression >= 3"
-        );
+        assert_eq!(rt.npc_entities[&enf_bid].target_id, Some(pir_ship), "InsurgencyEnforcer must engage campaign pirate militia at Suppression >= 3");
+    });
+    let (ci_bid, ci_pos) = with_combat_runtime(&ctx, |rt| {
+        let ci = rt.npc_entities.values().find(|n| n.solar_system_id == front_sys && n.type_id == 79_507).expect("CI Sentry 79507");
+        (ci.ball_id, ci.spawn_position)
+    });
+    {
+        let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        bp.set_ball_position(pir_ship, ci_pos + DVec3::new(900_000.0, 0.0, 0.0));
+        bp.set_ball_position(rival_pir_ship, ci_pos + DVec3::new(8_000.0, 0.0, 0.0));
+    }
+    step_extended_npc_ai_sync(&ctx, front_sys);
+    with_combat_runtime(&ctx, |rt| {
+        assert_eq!(rt.npc_entities[&ci_bid].target_id, Some(rival_pir_ship), "Counter-Insurgency Sentry Gun must engage rival pirate militia");
     });
 
     // 5. Despawn when Corruption drops < 2 and Suppression drops < 3:

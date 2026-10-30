@@ -162,8 +162,8 @@ pub fn sync_corruption_security_status_change(
     crate::services::combat_crimewatch::crimewatch_timers::update_system_security_status(ctx, sys_id, new_sec);
 }
 
-/// Returns true if `char_id` is enlisted in the pirate militia leading the active/winddown insurgency in `sys_id`
-/// (falling back to any pirate militia faction only if `sys_id` has no covering campaign record in `snap`).
+/// Returns true if `char_id` is enlisted in the pirate militia leading an active/winddown insurgency in `sys_id`
+/// (returning `false` if no active/winddown campaign covers `sys_id`).
 pub fn is_pilot_aligned_with_insurgency_pirate_in_snap(
     snap: &eve_db::WorldStateSnapshot,
     now: u64,
@@ -186,7 +186,7 @@ pub fn is_pilot_aligned_with_insurgency_pirate_in_snap(
             }
         }
     }
-    if any_covering { matches_pirate } else { true }
+    if any_covering { matches_pirate } else { false }
 }
 
 /// Returns true if `char_id` is aligned with the leading pirate faction of the active insurgency in `sys_id`.

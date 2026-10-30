@@ -533,8 +533,10 @@ pub async fn handle_weapons(
                                 .unwrap_or(SafetyLevel::Red)
                         });
                         let is_pod_target = target_ball.type_id == 670;
-                        let would_be_criminal = sys_sec >= 0.45 || (sys_sec > 0.0 && is_pod_target);
-                        let would_be_suspect = sys_sec > 0.0 && sys_sec < 0.45 && !is_pod_target;
+                        let concord_suppressed = !is_pod_target
+                            && crate::services::combat_npc_police::is_concord_suppressed_in_system(ctx, sys_id);
+                        let would_be_criminal = (sys_sec >= 0.45 && !concord_suppressed) || (sys_sec > 0.0 && is_pod_target);
+                        let would_be_suspect = !would_be_criminal && sys_sec > 0.0;
                         if (safety == SafetyLevel::Green && (would_be_criminal || would_be_suspect))
                             || (safety == SafetyLevel::Yellow && would_be_criminal)
                         {
@@ -964,8 +966,10 @@ pub async fn handle_weapons(
                                 });
                                 if !is_legal {
                                     let is_pod = arc_ball.type_id == 670;
-                                    let would_be_crim = sys_sec >= 0.45 || (sys_sec > 0.0 && is_pod);
-                                    let would_be_susp = sys_sec > 0.0 && sys_sec < 0.45 && !is_pod;
+                                    let concord_suppressed = !is_pod
+                                        && crate::services::combat_npc_police::is_concord_suppressed_in_system(ctx, sys_id);
+                                    let would_be_crim = (sys_sec >= 0.45 && !concord_suppressed) || (sys_sec > 0.0 && is_pod);
+                                    let would_be_susp = !would_be_crim && sys_sec > 0.0;
                                     if (safety == SafetyLevel::Green && (would_be_crim || would_be_susp))
                                         || (safety == SafetyLevel::Yellow && would_be_crim)
                                     {
@@ -983,14 +987,7 @@ pub async fn handle_weapons(
                         );
                         if let Some((arc_app, arc_destroyed, _)) =
                             crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
-                                ctx,
-                                &sys_handle,
-                                sys_id,
-                                char_id,
-                                arc_id,
-                                base_dmg.scaled(arc_factor),
-                                cycle_secs,
-                                now_unix,
+                                ctx, &sys_handle, sys_id, char_id, arc_id, base_dmg.scaled(arc_factor), cycle_secs, now_unix,
                             )
                             .await
                             .ok()
@@ -998,25 +995,11 @@ pub async fn handle_weapons(
                         {
                             vorton_secondary_targets.push(arc_id);
                             record_killmail_assist_action(
-                                ctx,
-                                arc_id,
-                                char_id,
-                                attacker_ball.type_id,
-                                m.type_id,
-                                arc_app,
-                                false,
-                                now_unix,
+                                ctx, arc_id, char_id, attacker_ball.type_id, m.type_id, arc_app, false, now_unix,
                             );
                             if let Some(vcid) = arc_vic_opt.filter(|&v| v != char_id) {
                                 record_killmail_assist_action(
-                                    ctx,
-                                    vcid,
-                                    char_id,
-                                    attacker_ball.type_id,
-                                    m.type_id,
-                                    arc_app,
-                                    false,
-                                    now_unix,
+                                    ctx, vcid, char_id, attacker_ball.type_id, m.type_id, arc_app, false, now_unix,
                                 );
                                 let is_legal = ctx.db.with_snapshot(|snap| {
                                     is_legal_war_or_suspect_target(snap, char_id, vcid, now_unix)
@@ -1031,14 +1014,8 @@ pub async fn handle_weapons(
                                     .crimewatch
                                     .write()
                                     .unwrap_or_else(|e| e.into_inner())
-                                    .handle_combat_aggression(
-                                        char_id,
-                                        vcid,
-                                        ship_id,
-                                        sys_id,
-                                        sys_sec,
-                                        is_legal,
-                                        now_unix,
+                                    .handle_combat_aggression_with_pod(
+                                        char_id, vcid, ship_id, sys_id, sys_sec, is_legal, arc_ball.type_id == 670, now_unix,
                                     );
                                 crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
                                     ctx, char_id, vcid, now_unix,
@@ -1046,13 +1023,7 @@ pub async fn handle_weapons(
                             }
                             if arc_destroyed {
                                 super::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(
-                                    ctx,
-                                    sys_id,
-                                    char_id,
-                                    arc_id,
-                                    arc_ball.type_id,
-                                    arc_ball.position,
-                                    now_unix,
+                                    ctx, sys_id, char_id, arc_id, arc_ball.type_id, arc_ball.position, now_unix,
                                 )
                                 .await;
                             }

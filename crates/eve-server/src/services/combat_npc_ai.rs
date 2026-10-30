@@ -655,6 +655,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                     cw.states.get(&cid).map(|st| st.is_criminal(now_unix))
                 }).unwrap_or(false);
                 let is_criminal = is_low_sec_criminal || has_criminal_flag;
+                let pilot_is_pirate = war_faction_id.is_some_and(crate::services::security_mgr::is_pirate_militia_faction);
                 let pilot_is_campaign_pirate = crate::services::security_mgr::is_pilot_aligned_with_insurgency_pirate(
                     ctx, solar_system_id, cid,
                 );
@@ -678,9 +679,9 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                     c_stage < 2 || pilot_is_same_pirate
                 } else if is_insurgency_enforcer {
                     let s_stage = crate::services::security_mgr::insurgency_system_suppression_stage(ctx, solar_system_id);
-                    s_stage < 3 || !pilot_is_campaign_pirate
+                    s_stage < 3 || !pilot_is_pirate
                 } else if is_ci_sentry {
-                    !pilot_is_campaign_pirate && !is_criminal
+                    !pilot_is_pirate && !is_criminal
                 } else if is_navy {
                     standing > -5.0 && !is_criminal
                 } else if is_police {
