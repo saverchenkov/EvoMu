@@ -9162,6 +9162,7 @@
     "destiny:OnDockingAccepted",
     "notify:OnAmmoInBankChanged",
     "notify:OnChargeLoadedToModule",
+    "notify:OnClearFetchedData",
     "notify:OnClientEvent_MarketItemReceived",
     "notify:OnClientNodeGraphMessage",
     "notify:OnClientNodeGraphUpdate",
@@ -9169,9 +9170,11 @@
     "notify:OnDungeonInstanceRemoved",
     "notify:OnFlaggedListsChange",
     "notify:OnMultiEvent",
+    "notify:OnNotificationUndeleted",
     "notify:OnOperationReplayed",
     "notify:OnProbeWarpEnd",
     "notify:OnProvingGroundsMatchFound",
+    "notify:OnRecommendationsChanged",
     "notify:OnSkyhookCanBeHacked",
     "notify:OnStartClientNodeGraph",
     "notify:OnStopAllClientNodeGraphs",
@@ -9587,11 +9590,6 @@
       "evidence": "data/air_career_goals.json and crates/eve-server/src/services/quasar_career_goals.rs use DERIVED career goal UUIDs ([67, 71, ...]) and message ID offsets because individual career goal definitions are served dynamically by live Quasar and not shipped in V24 client FSD.",
       "id": "feat:pve.air-career-program",
       "flagged_by_audit": "20261026-170000"
-    },
-    {
-      "evidence": "Newly tagged in crates/eve-server/tests/it/quasar_daily_goals_remediation.rs:92-375. Production pool: crates/eve-server/src/services/quasar_daily_goals.rs build_sde_daily_goal_templates (diff.patch:658-732) is a hard-coded list of 5 goals (KillNPC, MineOre, ScanSignature, SpaceJump, ManufactureItem). Their targets (25/2000/5/10/1), 500,000 ISK and 5,000 SP rewards, and 2,500 EverMark / 100,000 ISK completion costs are all labelled DERIVED (diff.patch:660-673); only the localization message IDs come from contributionmethods.fsdbinary. There is no rotation: every character gets the same 5 goals every day, and ensure_character_daily_goals_with_templates only resets progress. Under AGENTS.md, rows backed by synthesized data stay open. The test asserts the invented payout exactly: after_isk == initial + 1,500,000 ISK and SP + 15,000 (quasar_daily_goals_remediation.rs:365-366). It also bypasses gameplay. The manufacturing goal inserts an IndustryJobRecord straight into snap.industry_jobs (:237-268) instead of going through industryManager.InstallJob. The NPC-kill goal calls the internal helpers spawn_specialized_npc_entity / destroy_specialized_npc_and_queue_bounty (:283-298). The SpaceJump goal is never exercised, and the reset test calls add_progress directly (:404-407).",
-      "id": "feat:pve.daily-goals",
-      "flagged_by_audit": "20261030-090248"
     },
     {
       "evidence": "crates/eve-server/src/services/pve_special_sites.rs:439-476 is a hand-written table: 5 hives with invented room names ('Perimeter Approach', 'Assembler Chamber', 'Hive Sanctuary'), fixed NPC types per room and synthetic ball IDs (1_898_000_000 + did*100). The 'Sentinel Hive' is placed in 31_000_005, which this codebase itself treats as Thera (space_docking_cloaking.rs K162 -> Thera 31_000_005). The reward is a fixed 1 element plus 5x type 30745 placed into cargo (:924-933). NPC HP is clamped to at most 10,000 (:526-540), far below Drifter battleship HP. None of this comes from client dungeon data.",
@@ -10380,6 +10378,131 @@
       "evidence": "crates/eve-server/src/services/wallet_services_ext.rs:260-285 serves quasar_payment_store::read_store_catalog, which is empty in production unless populated by common::seed_test_nes_store_catalog (already FLAGGED_FAKE on feat:wallet.nes-store and quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj). Tested only against that seeded fixture in crates/eve-server/tests/it/rpc_store_cosmetics.rs:58-96.",
       "id": "rpc:storeManager.get_products",
       "flagged_by_audit": "20261028-193006"
+    },
+    {
+      "evidence": "crates/eve-server/src/esi/router.rs:619-675 enforces hardcoded ROLE_DIRECTOR (1) instead of OpenAPI's Station_Manager role (rejecting Station Managers with 403), crates/eve-server/src/esi/sample_routes.rs:390-526 (is_operation_implemented) omits /corporation/{corporation_id}/mining/extractions, and crates/eve-server/tests/it/esi_market_industry_pi.rs:1002-1007, 1213-1244 tests only ROLE_DIRECTOR.",
+      "id": "esi:GET /corporation/{corporation_id}/mining/extractions",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
+      "evidence": "crates/eve-server/src/esi/router.rs:619-675 enforces hardcoded ROLE_DIRECTOR (1) instead of OpenAPI's Accountant role (rejecting Accountants with 403), crates/eve-server/src/esi/sample_routes.rs:390-526 omits /corporation/{corporation_id}/mining/observers from is_operation_implemented, and crates/eve-server/tests/it/esi_market_industry_pi.rs:1002-1007, 1246-1270 tests only ROLE_DIRECTOR.",
+      "id": "esi:GET /corporation/{corporation_id}/mining/observers",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
+      "evidence": "crates/eve-server/src/esi/router.rs:619-675 enforces hardcoded ROLE_DIRECTOR (1) instead of OpenAPI's Accountant role (rejecting Accountants with 403), crates/eve-server/src/esi/sample_routes.rs:390-526 omits /corporation/{corporation_id}/mining/observers/{observer_id} from is_operation_implemented, and crates/eve-server/tests/it/esi_market_industry_pi.rs:1002-1007, 1271-1305 tests only ROLE_DIRECTOR.",
+      "id": "esi:GET /corporation/{corporation_id}/mining/observers/{observer_id}",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
+      "evidence": "crates/eve-server/src/esi/router.rs:619-675 enforces hardcoded ROLE_DIRECTOR (1) instead of OpenAPI's Station_Manager role (rejecting Station Managers with 403), crates/eve-server/src/esi/sample_routes.rs:390-526 omits /corporations/{corporation_id}/customs_offices from is_operation_implemented, and crates/eve-server/tests/it/esi_market_industry_pi.rs:1344-1350, 1480-1522 tests only ROLE_DIRECTOR.",
+      "id": "esi:GET /corporations/{corporation_id}/customs_offices",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
+      "evidence": "crates/eve-server/src/esi/router.rs:619-675 enforces a hardcoded blanket ROLE_DIRECTOR (1) gate across every {corporation_id} ESI route instead of OpenAPI's Accountant / Junior_Accountant / Trader roles, rejecting non-Director role holders with 403; crates/eve-server/tests/it/esi_market_industry_pi.rs:148-155, 207-244 tests only a ROLE_DIRECTOR caller.",
+      "id": "esi:GET /corporations/{corporation_id}/orders",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
+      "evidence": "crates/eve-server/src/esi/router.rs:619-675 enforces a hardcoded blanket ROLE_DIRECTOR (1) gate instead of OpenAPI's Accountant / Junior_Accountant / Trader roles, rejecting non-Director role holders with 403; crates/eve-server/tests/it/esi_market_industry_pi.rs:148-155, 245-268 tests only a ROLE_DIRECTOR caller.",
+      "id": "esi:GET /corporations/{corporation_id}/orders/history",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
+      "evidence": "crates/eve-server/src/esi/economy_routes.rs:250-258 (// DERIVED: sde_market_groups stores group name only (no separate description column in SDE)) echoes mg.name into \"description\": mg.name instead of importing descriptionID from res:/staticdata/marketgroups.fsdbinary, and the tagged test (crates/eve-server/tests/it/esi_market_industry_pi.rs:374-388) never asserts \"description\", \"types\", or \"parent_group_id\".",
+      "id": "esi:GET /markets/groups/{market_group_id}",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
+      "evidence": "crates/eve-server/src/esi/economy_routes.rs:500-514 checks only character_has_structure_acl_access (docking ACL in crates/eve-server/src/esi/universe_routes.rs:45-86) without verifying that an online Standup Market Hub service module is fitted or checking market-service ACL access; in crates/eve-server/tests/it/esi_market_industry_pi.rs:284-302, 470-503, a bare Astrahus (35832) with zero fitted/online Market Hub module returns 200 OK.",
+      "id": "esi:GET /markets/structures/{structure_id}",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
+      "evidence": "Closed by GET /corporation/{corporation_id}/mining/extractions behind the hardcoded ROLE_DIRECTOR gate in crates/eve-server/src/esi/router.rs:619-675 (rejecting Station_Manager role holders with 403), omitted from is_operation_implemented in crates/eve-server/src/esi/sample_routes.rs:390-526, and tested only with ROLE_DIRECTOR in crates/eve-server/tests/it/esi_market_industry_pi.rs:1002-1007, 1213-1244.",
+      "id": "feat:esi.industry.corp-extractions",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
+      "evidence": "Closed by GET /corporation/{corporation_id}/mining/observers and /{observer_id} behind the hardcoded ROLE_DIRECTOR gate in crates/eve-server/src/esi/router.rs:619-675 (rejecting Accountant role holders with 403), omitted from is_operation_implemented in crates/eve-server/src/esi/sample_routes.rs:390-526, and tested only with ROLE_DIRECTOR in crates/eve-server/tests/it/esi_market_industry_pi.rs:1002-1007, 1246-1305.",
+      "id": "feat:esi.industry.corp-observers",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
+      "evidence": "Closed by GET /corporations/{corporation_id}/orders and /orders/history behind the blanket ROLE_DIRECTOR-only check in crates/eve-server/src/esi/router.rs:619-675 (rejecting Accountant, Junior_Accountant, and Trader role holders with 403) and tested only with ROLE_DIRECTOR in crates/eve-server/tests/it/esi_market_industry_pi.rs:148-155, 207-268.",
+      "id": "feat:esi.market.corp-orders",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
+      "evidence": "Closed by GET /markets/groups/{market_group_id} in crates/eve-server/src/esi/economy_routes.rs:250-258 (labelled // DERIVED), which copies mg.name into \"description\" instead of reading the SDE market group description from res:/staticdata/marketgroups.fsdbinary; crates/eve-server/tests/it/esi_market_industry_pi.rs:365-391 omits value assertions on \"description\", \"types\", and \"parent_group_id\".",
+      "id": "feat:esi.market.groups",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
+      "evidence": "Closed by GET /markets/structures/{structure_id} in crates/eve-server/src/esi/economy_routes.rs:500-514 and tested in crates/eve-server/tests/it/esi_market_industry_pi.rs:284-302, 470-503 on a bare Astrahus (35832) with no online Standup Market Hub service module and no market-service ACL check.",
+      "id": "feat:esi.market.structure-orders",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
+      "evidence": "Closed by GET /corporations/{corporation_id}/customs_offices behind the hardcoded ROLE_DIRECTOR gate in crates/eve-server/src/esi/router.rs:619-675 (rejecting Station_Manager role holders with 403), omitted from is_operation_implemented in crates/eve-server/src/esi/sample_routes.rs:390-526, and tested only with ROLE_DIRECTOR in crates/eve-server/tests/it/esi_market_industry_pi.rs:1344-1350, 1480-1522.",
+      "id": "feat:esi.planetary-interaction.customs",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/industry_pi.rs:687-719 (pi_schematic_recipe, labelled // DERIVED) ignores ctx.sde.planet_schematics (already imported in SdeRegistry, cf. crates/eve-server/src/esi/sample_routes.rs:1059) and hardcodes a 26-arm match where (65..=79) maps every P1 schematic to 3000 default_p0 -> 20x Water (3645) and _ => (3600, vec![(3645, 40)], 2329, 5) (:717) turns ~42 P2/P3/P4 schematics into 40x Water -> 5x Biocells; meanwhile GetPin in crates/eve-server/src/services/pi_colonies.rs:276-281 hardcodes if (65..=135).contains(&schem_id) { 1800 } (reporting 30m cycle time for 60m P2/P3/P4 schematics). Tagged tests (crates/eve-server/tests/it/industry_pi_complete_part2.rs:234 and crates/eve-server/tests/it/economy_industry_pi_extended_part2.rs:490-559) cherry-pick only hardcoded schematic IDs (65, 66, 83, 119).",
+      "id": "feat:pi.factory-cycles",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/industry_pi.rs:687-719 (pi_schematic_recipe, labelled // DERIVED) uses a hand-written lookup table instead of reading SDE schematic input/output type quantities (planetschematicspinmap / planetschematicstypemap): schematics 67..=79 all consume default_p0 to produce Water (3645), and ~42 P2/P3/P4 schematics hit the _ wildcard (:717, 40x Water -> 5x Biocells). Tagged test crates/eve-server/tests/it/economy_industry_pi_extended_part2.rs:490-559 exercises only cherry-picked hardcoded IDs 66, 83, and 119.",
+      "id": "feat:pi.schematic-input-output-routing",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
+      "evidence": "pve_crab_beacons.rs:41-50 says outright that the Rogue Drone wave compositions (WAVE_1/2/3_DRONES) and the CRAB drop counts are 'deterministic EvoMu defaults since NPC loot tables are server-only', i.e. synthesized. The capital-eligibility fallback is a hand-written group list (:146, :155-158), and :149 force-allows groups 883/1538. AGENTS.md says rows backed by synthesized data stay open.",
+      "id": "feat:pve.crab-link-activation",
+      "flagged_by_audit": "20261030-110642"
+    },
+    {
+      "evidence": "resolve_fitted_analyzer_virus_stats (pve_hacking_board.rs:37-212) decides which analyzers, rigs, implants and boosters apply by matching name strings, not dogma effects. It checks t.name.contains(\"Integrated\") || contains(\"QA\") (:68-69), contains(\"Relic\") (:75), \"Emission Scope Sharpener\"/\"Memetic Algorithm Bank\" (:122-128), and \"Archaeology\"/\"Hacking\" (:145-151). Electrical storm coherence is hard-coded (+25 for 47382/56057, +10 for weak beacons, :169-171) instead of read from the beacons' dogma modifiers. The skill bonus is a hard-coded '+10 coherence/level' (doc comment :34).",
+      "id": "feat:pve.hacking-node-types",
+      "flagged_by_audit": "20261030-110642"
+    },
+    {
+      "evidence": "pve_incursion_sites.rs:695-700 spawns the mothership as soon as influence reaches 0. wiki:Incursion_sites.md:136 and wiki:Incursions.md:145 also require one Headquarters site to be run after influence hits 0%. Regeneration is an invented DERIVED +2%/h (pve_incursion_lifecycle.rs:33-34, 685-691). An invented despawn rule removes a spawned mothership once influence regenerates above 0.10 (lifecycle.rs:692-701). The test sets inc.influence=0.05 and mothership_spawned=true directly (pve_incursions_parity_closure.rs:268-273).",
+      "id": "feat:pve.incursion-influence",
+      "flagged_by_audit": "20261030-110642"
+    },
+    {
+      "evidence": "Each constellation gets the same 8 hand-written sites (pve_incursion_sites.rs:307-348), with fixed dungeon IDs, names and influence deltas. Boss/escort compositions are hand-picked type IDs (:170-204). Wave counts 1/2/3 are hard-coded (:362-374). Override Transfer Array (5164) is classed as 'Staging', but wiki:Incursion_sites.md:76-79 lists it as a Vanguard site. Staging sites are Distress Beacon, Forward Reconnaissance Outpost, Nation Industrial Proxy and Propaganda Cluster (:57-61), and NIP lives in asteroid belts. Low/null sites pay a different scale (15M/2000 LP Vanguard up to 15 pilots, etc.: wiki:Incursion_sites.md:85,105,124,141), but every site uses high-sec values. The test advances waves by setting esc.destroyed=true in the registry and calling advance_incursion_wave_on_escort_kill directly (pve_incursions_parity_closure.rs:251-259).",
+      "id": "feat:pve.incursion-site-classes",
+      "flagged_by_audit": "20261030-110642"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/pve_incursion_sites.rs:680-692 and pve_incursion_lifecycle.rs:29-30,667-683: killing the mothership puts the incursion into a DERIVED 24 h 'Withdrawing' state, and effects/sites linger until it ends. wiki:Incursions.md:85 says that once the mothership site is finished 'the incursion is over ... things immediately return to normal'. Incursions never withdraw on a timer, despite the ~8-day lifetime in wiki:Incursions.md:136; the only exit is the mothership. Respawn is a fixed DERIVED 12 h (lifecycle.rs:31-32) against the wiki's 12-36 h (:128). There are always TARGET_ACTIVE_INCURSIONS=3 (lifecycle.rs:35-36) with no high/low/null split, against 1 high + 1 low + 3 null (:126). The mothership no-spawn period is 1 day (sites.rs:700, 864_000_000_000 ticks) instead of 3 days in high-sec / 1 day in low-sec (:145). In the test (pve_incursions_parity_closure.rs:251-275) escorts are marked destroyed by writing to the registry, mothership_spawned=true is set directly, and on_incursion_boss_destroyed is called directly. Nothing goes through combat.",
+      "id": "feat:pve.incursion-spawn-lifecycle",
+      "flagged_by_audit": "20261030-110642"
+    },
+    {
+      "evidence": "compute_incursion_system_effects_in_snap (pve_incursion_lifecycle.rs:473-505) returns None, so no effects at all, once influence <= 0. It sets cyno_jammed = inf > 0 and bounty_penalty = base_mag*influence. wiki:Incursions.md:92 says cyno jamming is 'absolute and always in effect even at zero influence'. :96 says the 50% CONCORD bounty reduction 'is always in full effect and doesn't scale with Sansha's influence'. Magnitudes are hard-coded 0.10/0.25/0.50 (:480-488) instead of read from the dogma attributes of the SDE beacons 3069/3493/3494. Constellation systems with no assigned role get no effects (:488-489), but the wiki says the penalties apply to everyone in the constellation (:104). The lp_penalty on mission LP (:504) is invented.",
+      "id": "feat:pve.incursion-system-effects",
+      "flagged_by_audit": "20261030-110642"
+    },
+    {
+      "evidence": "collect_all_world_event_tales (pve_incursion_lifecycle.rs:920-1060) returns dicts where each field appears twice, snake_case and camelCase (tale_id/taleID, template_id/templateID, solar_system_id/solarSystemID). That is guessing the shape, not reproducing what the client consumes. Triglavian/EDENCOM template IDs 5201/5202 are labelled DERIVED (:960, :1021). Tale IDs are synthesized as 800_000+constellation (pve_incursion_sites.rs:273-275), 850_000+sys and 860_000+sys (:974, :1035). start_date is always now-1 day and end_date now+1 day (:945, :993-994, :1053-1054), whatever the real lifecycle.",
+      "id": "feat:pve.tales",
+      "flagged_by_audit": "20261030-110642"
+    },
+    {
+      "evidence": "The payload rests on placeholder room data. The claims file itself keeps pve.dungeon-system open because rooms come from a 'DERIVED 2-room placeholder template'. For exploration sites the roomID is made up as dungeon_id*100+wave, and instanceID falls back to that room id (pve_dungeon_runtime.rs:632, :640-641). roomPos is just the site position. The valuesDict keys {currentWave,totalWaves,completed} are invented (notify_emitters_batch3_space.rs:351-364) and don't come from client dungeon data. The test (pve_escalations_and_dungeon_notifs.rs:511-515) checks only that args equal what the RPC returned (a self-consistency check). It also kills NPCs by calling apply_damage_with_attacker directly with 1e7 damage.",
+      "id": "notify:OnEnteringDungeonRoom",
+      "flagged_by_audit": "20261030-110642"
+    },
+    {
+      "evidence": "notify_emitters_batch3_space.rs:406-412 sends OnEscalatingPathDungeonEntered for any site whose category is 'DED' or 'CombatSignature', escalation or not. dungeonName is the passed-in category/archetype string (:400), and dungeonNameID is always None (:401). The escalation it reports comes from the hand-written chain table (pve_expeditions.rs:66-113). Each step's dungeon ID is invented as base+step-1 (:111-113). The destination is the first SDE jump, with hard-coded fallbacks Jita->Perimeter and 'other+1' (:38-60). The test asserts only args.len()==1 (pve_escalations_and_dungeon_notifs.rs:644).",
+      "id": "notify:OnEscalatingPathDungeonEntered",
+      "flagged_by_audit": "20261030-110642"
     }
   ]
 }
