@@ -1258,7 +1258,12 @@ pub async fn activate_command_burst(
     let candidate_ship_ids: Vec<(i64, i64)> = ctx.db.with_snapshot(|snap| {
         let mut fleet_chars = vec![char_id];
         for fl in snap.fleets.values().filter(|fl| fl.members.contains(&char_id)) {
-            for &m_id in &fl.members { if !fleet_chars.contains(&m_id) { fleet_chars.push(m_id); } }
+            for &m_id in &fl.members {
+                if !fleet_chars.contains(&m_id) && (fl.member_details.is_empty() || super::fleet_social::is_in_fleet_boost_scope(fl, char_id, m_id)) {
+                    fleet_chars.push(m_id);
+                }
+            }
+        }
         }
         let mut ships: Vec<(i64, i64)> = fleet_chars.into_iter().filter_map(|cid| {
             let ch = snap.characters.get(&cid)?;

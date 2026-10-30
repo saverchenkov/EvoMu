@@ -61,6 +61,7 @@ pub mod lookup_svc;
 pub mod macho_cluster_mgmt;
 pub mod mail_notify;
 pub mod map_service;
+pub mod mining_b33;
 pub mod market_contracts;
 pub mod market_price_history;
 pub mod market_trading;

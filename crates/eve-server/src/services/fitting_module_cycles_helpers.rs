@@ -141,6 +141,8 @@ pub(crate) async fn handle_survey_scanner_activation(
             .or_else(|| mod_type.default_attributes.get(&54).copied())
             .unwrap_or(15_000.0);
     }
+    scan_range *= crate::services::mining_cycle::dbuff_multiplier(ctx, ship_id, mod_type, 197)
+        * crate::services::mining_cycle::dbuff_multiplier(ctx, ship_id, mod_type, 54);
     let mut ship_pos = DVec3::ZERO;
     if let Ok(Some((_, ship_ball))) = sys.get_ball_snapshot(ship_id).await {
         ship_pos = ship_ball.position;

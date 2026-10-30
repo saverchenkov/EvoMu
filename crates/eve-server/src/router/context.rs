@@ -68,6 +68,8 @@ pub struct ServerContext {
     pub module_reactivation_cooldowns: Arc<RwLock<HashMap<(i64, i64, u32), ModuleCooldownEntry>>>,
     /// Repeating mining-module cycles keyed by module item ID (`MN-04`).
     pub mining_cycles: RwLock<HashMap<i64, crate::services::mining_cycle::ActiveMiningCycle>>,
+    /// Active Phased Asteroid Fields keyed by solar system ID (`MN-08`).
+    pub phased_asteroid_fields: RwLock<HashMap<u32, crate::services::space_mining_harvest::PhasedAsteroidFieldState>>,
     pub crimewatch: crate::combat::crimewatch::CrimeWatchLock,
     pub(crate) combat_ephemeral: Arc<RwLock<crate::services::combat_crimewatch::CombatRuntimeState>>,
     pub tactical_state: Arc<RwLock<crate::services::tactical_modules::TacticalModulesState>>,
@@ -316,6 +318,7 @@ impl ServerContext {
             mechanic_rng,
             module_reactivation_cooldowns,
             mining_cycles: RwLock::new(HashMap::new()),
+            phased_asteroid_fields: RwLock::new(HashMap::new()),
             crimewatch,
             combat_ephemeral,
             tactical_state,

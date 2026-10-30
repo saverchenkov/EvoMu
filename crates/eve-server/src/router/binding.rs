@@ -1154,6 +1154,7 @@ impl ServerContext {
             mechanic_rng,
             module_reactivation_cooldowns,
             mining_cycles: std::sync::RwLock::new(std::collections::HashMap::new()),
+            phased_asteroid_fields: std::sync::RwLock::new(std::collections::HashMap::new()),
             crimewatch,
             combat_ephemeral,
             tactical_state,

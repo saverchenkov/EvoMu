@@ -176,7 +176,7 @@ pub fn can_harvest(module: &InvType, kind: MiningKind, target: &InvType) -> bool
     let target_skill = target.default_attributes.get(&attr::REQUIRED_SKILL_1).map(|v| v.round() as u32);
     match kind {
         MiningKind::Asteroid => {
-            target.category_id == ASTEROID_CATEGORY
+            (target.category_id == ASTEROID_CATEGORY || matches!(target.group_id, 4915 | 4918))
                 && target_skill.is_some_and(|s| required_skills(module).contains(&s))
         }
         MiningKind::Gas => target.category_id != ASTEROID_CATEGORY && target_skill.is_none() && target.volume > 0.0,
@@ -199,7 +199,7 @@ struct CycleEnv {
 /// Optimization: duration and capacitorNeed of modules requiring Mining/Ice/Gas Harvesting).
 /// Values are aggregated per dbuff by the collection's `aggregateMode`. Applied on top of the
 /// fitting engine's result as a separate modifier source (DERIVED ordering).
-fn dbuff_multiplier(ctx: &ServerContext, ship_id: i64, module: &InvType, attr_id: u16) -> f64 {
+pub fn dbuff_multiplier(ctx: &ServerContext, ship_id: i64, module: &InvType, attr_id: u16) -> f64 {
     let skills = required_skills(module);
     let now = ctx.now_unix_secs();
     crate::services::inventory_fitting::get_aggregated_ship_dbuffs(ctx, ship_id, now)
@@ -209,7 +209,8 @@ fn dbuff_multiplier(ctx: &ServerContext, ship_id: i64, module: &InvType, attr_id
             let hits = coll
                 .location_required_skill_modifiers
                 .iter()
-                .any(|m| m.attribute_id == attr_id && skills.contains(&m.skill_id));
+                .any(|m| m.attribute_id == attr_id && skills.contains(&m.skill_id))
+                || coll.location_modifiers.contains(&attr_id);
             (hits && coll.operation == "PostPercent").then_some(1.0 + value / 100.0)
         })
         .product()
@@ -429,7 +430,8 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
     };
     let (fit, crystal) = cycle_fit(ctx, cycle.char_id, cycle.ship_id, cycle.module_id, asteroid.type_id)?;
     let eff = |a: u16| module_attr(ctx, &fit, cycle.ship_id, cycle.module_id, a);
-    let amount_m3 = eff(attr::MINING_AMOUNT);
+    let amount_m3 = eff(attr::MINING_AMOUNT)
+        * super::mining_b33::phased_field_efficiency_for_ore(ctx, cycle.solar_system_id, asteroid.type_id);
     let unit_volume = ore.volume.max(1e-6);
     let (flag, capacity) = destination_hold(ctx, &fit, ore);
     let used: f64 = ctx.db.with_snapshot(|s| {
