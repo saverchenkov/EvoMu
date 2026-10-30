@@ -9238,11 +9238,6 @@
       "flagged_by_audit": "20261029-182230"
     },
     {
-      "evidence": "crates/eve-server/src/esi/economy_industry_routes.rs:136-190 computes cost_index = (work as f64) / (total as f64) (:175-176, labelled DERIVED) across all-time snap.industry_jobs without filtering to the 28-day rolling window or applying EVE's square-root System Cost Index formula (sqrt(system_work_hours / universe_work_hours), wiki:Manufacturing), and omits solar systems without seeded jobs. crates/eve-server/tests/it/esi_market_industry_pi.rs:1007-1038, 1108-1128 asserts the linear 0.75 and 0.25 run shares.",
-      "id": "esi:GET /industry/systems",
-      "flagged_by_audit": "20261028-193006"
-    },
-    {
       "evidence": "crates/eve-server/tests/it/esi_loyalty_and_final_rpcs.rs:50-175 and crates/eve-server/src/services/lp_store.rs:50-58 \u2014 Just like rpc:LPStoreMgr.GetAvailableOffersFromCorp (already flagged in auditor_rows.json -> fake_done), the server has no imported NPC corporation LP store offer catalog (lp_store.rs:50-58 notes 'DATA GAP: LP store corporation offer catalog is server-only and not present in V24 client FSD'). Calling GET /loyalty/stores/{corporation_id}/offers for an unseeded NPC corporation like CONCORD (1000125) returns an empty array [] (esi_loyalty_and_final_rpcs.rs:64-66), and the test only observes non-empty offers by manually seeding synthetic fixtures via save_lp_store_offers (lines 70-85).",
       "id": "esi:GET /loyalty/stores/{corporation_id}/offers",
       "flagged_by_audit": "20261028-144025"
@@ -9383,11 +9378,6 @@
       "flagged_by_audit": "20261029-182230"
     },
     {
-      "evidence": "Closed by the same GET /industry/systems handler (crates/eve-server/src/esi/economy_industry_routes.rs:136-190) and test (crates/eve-server/tests/it/esi_market_industry_pi.rs:959, 972, 1108-1128) that compute linear all-time work / total (0.75 and 0.25) instead of EVE's 28-day rolling System Cost Index formula (wiki:Manufacturing).",
-      "id": "feat:esi.industry.systems",
-      "flagged_by_audit": "20261028-193006"
-    },
-    {
       "evidence": "crates/eve-server/tests/it/esi_loyalty_and_final_rpcs.rs:50-175 and crates/eve-server/src/services/lp_store.rs:50-58 \u2014 Tagged in the same test as esi:GET /loyalty/stores/{corporation_id}/offers; no NPC corporation LP store offer table is imported from static data, so unseeded NPC corporations return [] until the test injects synthetic fixtures via save_lp_store_offers (esi_loyalty_and_final_rpcs.rs:70-85).",
       "id": "feat:esi.loyalty.offers",
       "flagged_by_audit": "20261028-144025"
@@ -9416,11 +9406,6 @@
       "evidence": "The handler is crates/eve-server/src/services/fleet_social_finder_tactical.rs:984-1040. It routes fleetProxy/fleetObjectHandler/fleetMgr SetTargetTag, TagTarget and ClearTargetTags, each behind `rpc-lint: allow auditor acceptance text`. None of these names is in the V24 rpc_service_catalog: no fleet service has a 'Tag' candidate method. It emits the invented notification OnFleetTargetTagChanged, which is not in client_notifications.json. It accepts any string as a tag (no A-Z/1-9 validation), never checks that the target is locked or on grid, and never clears tags when the target is destroyed. The test crates/eve-server/tests/it/fleet_tactical_movement_closure.rs:469-495 tags a nonexistent entity 999001 and only checks that the reply echoes targetID and tag back.",
       "id": "feat:fleet.target-tagging",
       "flagged_by_audit": "20261029-125319"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/fw_gameplay.rs:348-361 fakes Battlefield NPC waves by spawning a single inert `MovementMode::Rigid` ball (`type_id: 37_453`, `max_velocity: 0.0`, no `NpcSpawnManager` or `combat_states` entry, unable to move or attack) only on the first tick (`if ticks == 1`). crates/eve-server/src/services/fw_gameplay.rs:436-438 uses a hardcoded synthetic capture rate (`// DERIVED (synthetic): 20% Battlefield capture progress per held zone per tick`) so the entire Battlefield completes in 2 background ticks (crates/eve-server/tests/it/fw_warzone_insurgency_closure.rs:297-299), and completion at lines 459-468 awards no faction/corporation standing.",
-      "id": "feat:fw.battlefield-capture-rules",
-      "flagged_by_audit": "20261028-152236"
     },
     {
       "evidence": "crates/eve-server/src/services/fw_gameplay_insurgency.rs:29-30, 336-392, 433-434 and crates/eve-server/src/services/insurgency_services.rs:344-348 evaluate campaign Corruption/Suppression Stage-5 victory, Ambition modifier transitions, payouts, and post-surrender I-Hub unlock on top of the synthesized 200-points-per-stage formula (:344-348), synthesized lp_award * 100 ISK payout (:433-434, labelled DERIVED (synthetic)), and fixed SURRENDER_IHUB_VULNERABILITY_DELAY_SECS = 25 * 3_600 (:29-30, :388-391) instead of 24h + 1 daily downtime (wiki:Insurgency), for which feat:fw.insurgency-contribution-payout and feat:quasar.pirate are already FLAGGED_FAKE. Tested in crates/eve-server/tests/it/fw_warzone_insurgency_closure_part4.rs:22-35, 85-163.",
@@ -9466,11 +9451,6 @@
       "evidence": "industry_jobs.rs:377 treats `matches!(fac_type_id, 35826|35827|35833|35834)` (any Azbel, Sotiyo, Fortizar or Keepstar) as capital-capable with no Standup Capital Shipyard fitted. wiki:Manufacturing:241 requires the shipyard module. Freighters (group 513) and jump freighters (902) are on the high-sec capital ban list at :365-376, but wiki:Manufacturing:237 says freighters and the Orca can be built in any facility. Test economy_industry_pi_extended.rs:449-571 never tries a low- or null-sec structure without a capital service.",
       "id": "feat:industry.capital-construction-restrictions",
       "flagged_by_audit": "20261029-100543"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/industry_facilities_bps.rs:433-438 computes the in-game system cost index as an invented `(0.01 + 0.01 * industrial_index).clamp(0.001, 0.50)`, using the sovereignty industrial index from system_states (default 4). wiki:Manufacturing:84-89 gives the cost index as sqrt(system work hours / universe work hours over the past 28 days). The same invented formula is served to the client in build_facility_pyrep (:505-510, systemCostIndex), and it contradicts the separate linear work-share formula behind esi:GET /industry/systems (economy_industry_routes.rs:175-176, already flagged). Neither is the live formula.",
-      "id": "feat:industry.cost-index",
-      "flagged_by_audit": "20261029-093338"
     },
     {
       "evidence": "crates/eve-server/src/services/industry_facilities_bps.rs:278-285 and :313-320 hand-type the engineering-complex and refinery bonuses as a match on type id: Raitaru 0.99/0.85/0.97, Azbel 0.99/0.80/0.96, Sotiyo 0.99/0.70/0.95, Athanor 1.00/0.80/0.96, Tatara 1.00/0.75/0.95. They are not read from the structure types' dogma attributes in the SDE. The Athanor gets an invented -20% reaction time and a 4% cost bonus. NPC stations get fixed 1.0/1.0/1.0 (:343-345). The facility rows served to the client (build_facility_pyrep :538-559) carry these synthesized multipliers.",
