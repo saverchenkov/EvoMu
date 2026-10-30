@@ -21,12 +21,24 @@ fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     }
 }
 
+fn err_map_disabled_in_abyssal() -> BridgeRpcError {
+    rpc_err(
+        "MapDisabledInAbyssalSpace",
+        "Star map queries are disabled inside Abyssal Deadspace",
+    )
+}
+
 /// Spatial hazard cloud types in Abyssal pockets (SDE group 1971).
 pub const TACHYON_CLOUD_TYPE_ID: TypeId = 80_876; // Small Tachyon Cloud (SDE group 1971)
 pub const PROVING_TACHYON_CLOUD_TYPE_ID: TypeId = 64_896; // Large Proving Tachyon Cloud
+pub const BIOLUMINESCENT_CLOUD_SMALL_TYPE_ID: TypeId = 47_439; // Small Bioluminescence Cloud
 pub const BIOLUMINESCENT_CLOUD_TYPE_ID: TypeId = 47_440; // Medium Bioluminescence Cloud
+pub const BIOLUMINESCENT_CLOUD_LARGE_TYPE_ID: TypeId = 47_441; // Large Bioluminescence Cloud
+pub const FILAMENT_CLOUD_SMALL_TYPE_ID: TypeId = 47_620; // Small Filament Cloud
 pub const FILAMENT_CLOUD_TYPE_ID: TypeId = 47_472; // Medium Filament Cloud
+pub const FILAMENT_CLOUD_LARGE_TYPE_ID: TypeId = 47_473; // Large Filament Cloud
 pub const SPATIAL_CLOUD_RADIUS_M: f64 = 15_000.0;
+pub const ABYSSAL_ROOM_BOUNDARY_RADIUS_M: f64 = 75_000.0;
 
 /// Automated pylon types in Abyssal pockets (SDE group 1981).
 pub const MULTIBODY_TRACKING_PYLON_TYPE_ID: TypeId = 47_469; // Short-Range Multibody Tracking Pylon
@@ -104,7 +116,143 @@ pub fn validate_abyssal_hull_and_capacity(
     Ok((ship_type_id, ship_group_id, max_ships))
 }
 
-/// Enforces the 1,000 km (`1_000_000.0 m`) filament activation proximity rule against stargates, stations, and structures.
+/// Evaluates high-sec Abyssal filament tier eligibility and whether a 15-minute Suspect flag applies.
+/// - `1.0` & `0.9` (`>= 0.85`): T0 only (`Ok(false)`), T1+ rejected (`FilamentDisallowedInHighSec`).
+/// - `0.8` (`0.75..0.85`): T0..=T3 clean (`Ok(false)`), T4..=T6 Suspect (`Ok(true)`).
+/// - `0.7` (`0.65..0.75`): T0..=T4 clean (`Ok(false)`), T5..=T6 Suspect (`Ok(true)`).
+/// - `0.6` (`0.55..0.65`): T0..=T5 clean (`Ok(false)`), T6 Suspect (`Ok(true)`).
+/// - `0.5` & low/null/WH (`< 0.55`): T0..=T6 clean (`Ok(false)`).
+pub fn evaluate_highsec_abyssal_tier_policy(origin_sec: f64, tier: u8) -> Result<bool, BridgeRpcError> {
+    if origin_sec >= 0.85 {
+        if tier >= 1 {
+            return Err(rpc_err(
+                "FilamentDisallowedInHighSec",
+                "Only Tranquil (T0) Abyssal filaments may be activated in 0.9 - 1.0 high-security systems",
+            ));
+        }
+        return Ok(false);
+    }
+    if origin_sec >= 0.75 {
+        return Ok(tier >= 4);
+    }
+    if origin_sec >= 0.65 {
+        return Ok(tier >= 5);
+    }
+    if origin_sec >= 0.55 {
+        return Ok(tier >= 6);
+    }
+    Ok(false)
+}
+
+/// Rejects filament activation inside Abyssal Deadspace (`32_000_000..=32_999_999`) or an active DED/deadspace pocket.
+pub async fn check_not_in_deadspace_pocket(
+    ctx: &ServerContext,
+    cur_sys: SolarSystemId,
+    ship_pos: DVec3,
+) -> Result<(), BridgeRpcError> {
+    if (32_000_000..=32_999_999).contains(&cur_sys) {
+        return Err(rpc_err(
+            "CannotActivateFilamentInDeadspace",
+            "Cannot activate filament while inside Abyssal or Void deadspace",
+        ));
+    }
+    let near_deadspace_gate = crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
+        reg.sites_by_system.get(&cur_sys).is_some_and(|sites| {
+            sites.iter().any(|s| {
+                (s.site_category == "Combat" || s.ded_rating.is_some())
+                    && s.gate_ball_id.is_some()
+                    && DVec3::from_array(s.position).distance(ship_pos) < 250_000.0
+            })
+        })
+    });
+    if near_deadspace_gate {
+        return Err(rpc_err(
+            "CannotActivateFilamentInDeadspace",
+            "Cannot activate filament while inside a deadspace pocket",
+        ));
+    }
+    let sys_handle = ctx.systems.get_or_spawn(cur_sys);
+    if let Ok(balls) = sys_handle.list_balls().await {
+        for b in balls {
+            let is_accel_gate = ctx
+                .sde
+                .types
+                .get(&b.type_id)
+                .is_some_and(|t| t.group_id == 366);
+            if is_accel_gate && b.position.distance(ship_pos) < 250_000.0 {
+                return Err(rpc_err(
+                    "CannotActivateFilamentInDeadspace",
+                    "Cannot activate filament near a deadspace acceleration gate",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Returns `true` if `sys_id` is an Abyssal or Void deadspace system (`32_000_000..=32_999_999`).
+pub fn is_abyssal_system(sys_id: u32) -> bool {
+    (32_000_000..=32_999_999).contains(&sys_id)
+}
+
+/// Returns `true` if `chan_id` targets a disabled Abyssal Deadspace local chat channel.
+pub fn is_abyssal_local_channel_disabled(chan_id: &str, session_sys: Option<u32>) -> bool {
+    let rest_opt = chan_id
+        .strip_prefix("solarsystemid2:")
+        .or_else(|| chan_id.strip_prefix("solarsystemid2_"))
+        .or_else(|| chan_id.strip_prefix("solarsystemid_"));
+    if let Some(rest) = rest_opt {
+        if let Ok(sid) = rest.trim().parse::<u32>() {
+            if is_abyssal_system(sid) {
+                return true;
+            }
+        }
+    }
+    session_sys.is_some_and(is_abyssal_system)
+        && (chan_id.eq_ignore_ascii_case("local")
+            || chan_id.starts_with("solarsystemid2:")
+            || chan_id.starts_with("solarsystemid2_")
+            || chan_id.starts_with("solarsystemid_"))
+}
+
+/// Blocks restricted RPCs (star map, D-scan, Local chat) while a pilot is inside Abyssal Deadspace.
+pub fn check_abyssal_in_pocket_rpc_restrictions(
+    session: &eve_machonet::SessionState,
+    service: &str,
+    method: &str,
+    args: &[eve_proto::PyRep],
+) -> Option<Result<eve_proto::PyRep, BridgeRpcError>> {
+    if !session.solar_system_id.is_some_and(is_abyssal_system) {
+        return None;
+    }
+    if service == "map" {
+        return Some(Err(err_map_disabled_in_abyssal()));
+    }
+    if matches!(service, "scanMgr" | "scanSvc") && matches!(method, "DirectionalScan" | "ConeScan") {
+        return Some(Err(BridgeRpcError::user_error("CannotDscanInThisSystem")));
+    }
+    let is_lsc_method = (service == "LSC" || service.eq_ignore_ascii_case("lsc"))
+        && matches!(method, "JoinChannel" | "SendMessage");
+    let is_xmpp_method = service == "XmppChatMgr"
+        && matches!(method, "AddCharacterToChannel" | "SendMessage");
+    if is_lsc_method || is_xmpp_method {
+        let chan_opt = match args.first() {
+            Some(eve_proto::PyRep::String(s)) => Some(s.as_str()),
+            Some(eve_proto::PyRep::List(l) | eve_proto::PyRep::Tuple(l)) => l.first().and_then(|x| x.as_str()),
+            _ => None,
+        };
+        if chan_opt.is_some_and(|c| is_abyssal_local_channel_disabled(c, session.solar_system_id)) {
+            return Some(Err(rpc_err(
+                "LocalChannelDisabledInAbyssalSpace",
+                "Local chat channel is disabled inside Abyssal Deadspace",
+            )));
+        }
+    }
+    None
+}
+
+/// Enforces the 1,000 km (`1_000_000.0 m`) filament activation proximity rule against stargates, stations,
+/// structures, celestials, mobile depots/deployables, and existing Abyssal traces.
 pub async fn check_filament_1000km_proximity(
     ctx: &ServerContext,
     cur_sys: SolarSystemId,
@@ -145,18 +293,36 @@ pub async fn check_filament_1000km_proximity(
             format!("Cannot activate filament within 1,000 km of structure {sid} ({d:.0} m)"),
         ));
     }
+    let too_close_trace = with_pve_special_reg(ctx, |reg| {
+        reg.abyssal_traces
+            .values()
+            .filter(|t| t.origin_solar_system_id == cur_sys)
+            .find_map(|t| {
+                let d = DVec3::from_array(t.position).distance(ship_pos);
+                (d < FILAMENT_PROXIMITY_RESTRICTION_RANGE_M).then_some((t.trace_ball_id, d))
+            })
+    });
+    if let Some((tid, d)) = too_close_trace {
+        return Err(rpc_err(
+            "FilamentProximityRestriction",
+            format!("Cannot activate filament within 1,000 km of Abyssal trace {tid} ({d:.0} m)"),
+        ));
+    }
     let sys_handle = ctx.systems.get_or_spawn(cur_sys);
     if let Ok(balls) = sys_handle.list_balls().await {
         for b in balls {
-            let is_restricted_celestial = ctx.sde.types.get(&b.type_id).is_some_and(|t| {
-                matches!(t.category_id, 3 | 65) || t.group_id == 10
-            });
-            if is_restricted_celestial {
+            let is_restricted_obj = b.type_id == ABYSSAL_TRACE_TYPE_ID
+                || crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, b.type_id)
+                || ctx.sde.types.get(&b.type_id).is_some_and(|t| {
+                    matches!(t.category_id, 3 | 22 | 65)
+                        || matches!(t.group_id, 10 | 1246 | 1991)
+                });
+            if is_restricted_obj {
                 let d = b.position.distance(ship_pos);
                 if d < FILAMENT_PROXIMITY_RESTRICTION_RANGE_M {
                     return Err(rpc_err(
                         "FilamentProximityRestriction",
-                        format!("Cannot activate filament within 1,000 km of celestial {} ({d:.0} m)", b.id),
+                        format!("Cannot activate filament within 1,000 km of object {} ({d:.0} m)", b.id),
                     ));
                 }
             }
@@ -165,8 +331,8 @@ pub async fn check_filament_1000km_proximity(
     Ok(())
 }
 
-/// Validates hull, readiness (no PvP/weapon timer, no warp/cloak/tether/scramble), 1,000 km proximity,
-/// `InventoryFlag::Cargo`, and hull-class filament count (1 Cruiser, 2 Destroyer, 3 Frigate), then consumes the filaments.
+/// Validates hull, readiness (no PvP/weapon/logoff timer, no warp/cloak/tether/scramble/invuln), deadspace/1,000 km proximity,
+/// `InventoryFlag::Cargo`, high-sec tier/suspect rules, and hull-class filament count (1 Cruiser, 2 Destroyer, 3 Frigate), then consumes the filaments.
 pub async fn validate_and_consume_abyssal_filaments(
     ctx: &ServerContext,
     char_id: CharacterId,
@@ -195,10 +361,11 @@ pub async fn validate_and_consume_abyssal_filaments(
         DVec3::from_array(p)
     };
 
+    check_not_in_deadspace_pocket(ctx, cur_sys, ship_pos).await?;
     check_filament_1000km_proximity(ctx, cur_sys, ship_pos).await?;
 
     let now_unix = ctx.now_unix();
-    let (iid, filament_type_id, tier, origin_sec) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (iid, filament_type_id, tier, origin_sec, gives_suspect) = ctx.db.try_with_mut_snapshot(|snap| {
         let found = snap
             .items
             .values()
@@ -223,12 +390,7 @@ pub async fn validate_and_consume_abyssal_filaments(
             return Err(rpc_err("InvalidAbyssalFilament", format!("Type {tid} is not a valid Abyssal Deadspace filament")));
         };
         let origin_sec = ctx.sde.solar_systems.get(&cur_sys).map(|s| s.security_status).unwrap_or(0.9);
-        if tier >= 4 && origin_sec >= 0.75 {
-            return Err(rpc_err(
-                "FilamentDisallowedInHighSec",
-                "Activating high-tier (T4-T6) Abyssal filaments is blocked in 0.8 - 1.0 high-security systems",
-            ));
-        }
+        let gives_suspect = evaluate_highsec_abyssal_tier_policy(origin_sec, tier)?;
         if let Some(item) = snap.items.get_mut(&iid) {
             if item.quantity > required_filaments {
                 item.quantity -= required_filaments;
@@ -237,10 +399,10 @@ pub async fn validate_and_consume_abyssal_filaments(
                 snap.items.remove(&iid);
             }
         }
-        Ok((iid, tid, tier, origin_sec))
+        Ok((iid, tid, tier, origin_sec, gives_suspect))
     })?;
 
-    if tier >= 4 && (0.45..0.75).contains(&origin_sec) {
+    if gives_suspect {
         ctx.crimewatch
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -406,17 +568,33 @@ pub fn restore_abyssal_weather_dogma_modifiers(
     });
 }
 
+fn is_spatial_hazard_cloud_type(tid: TypeId) -> bool {
+    matches!(
+        tid,
+        TACHYON_CLOUD_TYPE_ID
+            | PROVING_TACHYON_CLOUD_TYPE_ID
+            | BIOLUMINESCENT_CLOUD_SMALL_TYPE_ID
+            | BIOLUMINESCENT_CLOUD_TYPE_ID
+            | BIOLUMINESCENT_CLOUD_LARGE_TYPE_ID
+            | FILAMENT_CLOUD_SMALL_TYPE_ID
+            | FILAMENT_CLOUD_TYPE_ID
+            | FILAMENT_CLOUD_LARGE_TYPE_ID
+    )
+}
+
 fn cloud_modifiers_for_type(cloud_tid: Option<TypeId>) -> (f64, f64, f64, f64, f64, Option<&'static str>) {
     match cloud_tid {
         Some(TACHYON_CLOUD_TYPE_ID | PROVING_TACHYON_CLOUD_TYPE_ID) => {
             (4.0, 0.5, 4.0, 1.0, 1.0, Some("TachyonCloud"))
         }
-        Some(BIOLUMINESCENT_CLOUD_TYPE_ID) => {
-            (1.0, 4.0, 1.0, 1.0, 1.0, Some("BioluminescentCloud"))
-        }
-        Some(FILAMENT_CLOUD_TYPE_ID) => {
-            (1.0, 1.25, 1.0, 0.6, 1.5, Some("FilamentCloud"))
-        }
+        Some(
+            BIOLUMINESCENT_CLOUD_SMALL_TYPE_ID
+            | BIOLUMINESCENT_CLOUD_TYPE_ID
+            | BIOLUMINESCENT_CLOUD_LARGE_TYPE_ID,
+        ) => (1.0, 4.0, 1.0, 1.0, 1.0, Some("BioluminescentCloud")),
+        Some(
+            FILAMENT_CLOUD_SMALL_TYPE_ID | FILAMENT_CLOUD_TYPE_ID | FILAMENT_CLOUD_LARGE_TYPE_ID,
+        ) => (1.0, 1.25, 1.0, 0.6, 1.5, Some("FilamentCloud")),
         _ => (1.0, 1.0, 1.0, 1.0, 1.0, None),
     }
 }
@@ -459,10 +637,7 @@ pub async fn evaluate_abyssal_spatial_clouds_for_ship(
     for b in &balls {
         let cloud_pocket = (b.id >= 1_898_000_000).then_some((b.id - 1_898_000_000) / 100);
         if (cloud_pocket.is_none() || cloud_pocket == ship_pocket)
-            && matches!(
-                b.type_id,
-                TACHYON_CLOUD_TYPE_ID | PROVING_TACHYON_CLOUD_TYPE_ID | BIOLUMINESCENT_CLOUD_TYPE_ID | FILAMENT_CLOUD_TYPE_ID
-            )
+            && is_spatial_hazard_cloud_type(b.type_id)
             && ship_ball.position.distance(b.position) < b.radius.max(SPATIAL_CLOUD_RADIUS_M)
         {
             active_cloud = Some(b.type_id);
@@ -490,6 +665,14 @@ pub async fn evaluate_abyssal_spatial_clouds_for_ship(
         let _ = sys_handle.set_combat_state(ship_id, cs).await;
     }
     label
+}
+
+fn is_suppressor_target_type(t: &eve_sde::InvType) -> bool {
+    matches!(t.category_id, 8 | 18 | 87) || matches!(t.group_id, 1997 | 4037 | 297)
+}
+
+fn is_tracking_pylon_beneficiary(t: &eve_sde::InvType) -> bool {
+    t.category_id == 6 || t.group_id == 1982 || t.group_id == 640 || t.group_id == 100
 }
 
 /// Pulses automated pylons in `sys_id`, applying Automata Suppressor AoE damage and Multibody Tracking Pylon `tracking_speed_multiplier`.
@@ -527,8 +710,11 @@ pub async fn pulse_abyssal_automated_pylons(
             AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID => suppressors.push((py_pocket, b.position, 15_000.0)),
             AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID => suppressors.push((py_pocket, b.position, 25_000.0)),
             AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID => suppressors.push((py_pocket, b.position, 40_000.0)),
-            MULTIBODY_TRACKING_PYLON_TYPE_ID | MULTIBODY_TRACKING_PYLON_MEDIUM_TYPE_ID => {
+            MULTIBODY_TRACKING_PYLON_TYPE_ID => {
                 tracking_pylons.push((py_pocket, b.position, b.radius.max(20_000.0)));
+            }
+            MULTIBODY_TRACKING_PYLON_MEDIUM_TYPE_ID => {
+                tracking_pylons.push((py_pocket, b.position, b.radius.max(30_000.0)));
             }
             _ => {}
         }
@@ -542,9 +728,7 @@ pub async fn pulse_abyssal_automated_pylons(
             .get(&b.id)
             .copied()
             .or_else(|| (60_000_000..100_000_000).contains(&b.id).then_some(b.id / 100));
-        let is_missile_or_drone = matches!(t.category_id, 8 | 18);
-        let is_rogue_drone_frigate = matches!(t.group_id, 1997 | 4037 | 297);
-        if is_missile_or_drone || is_rogue_drone_frigate {
+        if is_suppressor_target_type(t) {
             for &(spocket, spos, srange) in &suppressors {
                 if (spocket.is_none() || b_pocket.is_none() || spocket == b_pocket) && b.position.distance(spos) <= srange {
                     let dmg = eve_destiny::DamageVector { em: 0.0, thermal: 0.0, kinetic: 0.0, explosive: 250.0 };
@@ -554,8 +738,7 @@ pub async fn pulse_abyssal_automated_pylons(
             }
         }
 
-        let is_ship_or_sentry = t.category_id == 6 || t.group_id == 1982 || t.group_id == 640;
-        if is_ship_or_sentry {
+        if is_tracking_pylon_beneficiary(t) {
             let in_tracking_pylon = tracking_pylons
                 .iter()
                 .any(|&(ppocket, ppos, prange)| (ppocket.is_none() || b_pocket.is_none() || ppocket == b_pocket) && b.position.distance(ppos) <= prange);
@@ -574,7 +757,49 @@ pub async fn pulse_abyssal_automated_pylons(
     (damaged_count, tracking_buffed_count)
 }
 
-/// Real-time 1 Hz tick evaluation of Abyssal hazard clouds and automated pylons in `solar_system_id == 32_000_001`.
+fn boundary_ticks_store() -> &'static std::sync::Mutex<HashMap<i64, u32>> {
+    static STORE: std::sync::OnceLock<std::sync::Mutex<HashMap<i64, u32>>> = std::sync::OnceLock::new();
+    STORE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Removes active scanner probes that have strayed beyond the 75 km Abyssal pocket boundary.
+pub fn prune_out_of_bounds_abyssal_probes(ctx: &ServerContext, sys_id: SolarSystemId) {
+    if !(32_000_001..=32_999_999).contains(&sys_id) {
+        return;
+    }
+    let room_centers: HashMap<CharacterId, DVec3> = with_pve_special_reg(ctx, |reg| {
+        reg.abyssal_pockets
+            .values()
+            .filter(|p| !p.completed && !p.collapsed_destroyed)
+            .map(|p| {
+                let z = (p.current_room.saturating_sub(1) as f64) * 50_000.0;
+                (p.character_id, DVec3::from_array(p.grid_offset) + DVec3::new(0.0, 0.0, z))
+            })
+            .collect()
+    });
+    let mut removed_probes = Vec::new();
+    if let Ok(mut probes) = ctx.active_scanner_probes.write() {
+        probes.retain(|&pid, pr| {
+            if pr.solar_system_id != sys_id {
+                return true;
+            }
+            let center = room_centers.get(&pr.owner_char_id).copied().unwrap_or(DVec3::ZERO);
+            let outside = DVec3::from_array(pr.position).distance(center) > ABYSSAL_ROOM_BOUNDARY_RADIUS_M;
+            if outside {
+                removed_probes.push(pid);
+            }
+            !outside
+        });
+    }
+    if !removed_probes.is_empty() {
+        let handle = ctx.systems.get_or_spawn(sys_id);
+        for pid in removed_probes {
+            handle.try_remove_ball(pid);
+        }
+    }
+}
+
+/// Real-time 1 Hz tick evaluation of Abyssal hazard clouds, automated pylons, force-decloak, and 75 km boundary damage in `32_000_001..=32_999_999`.
 pub fn step_abyssal_hazards_and_pylons_in_ballpark(
     ballpark: &mut eve_destiny::Ballpark,
     sde_opt: Option<&eve_sde::SdeRegistry>,
@@ -585,16 +810,33 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
         return;
     }
     let mut pocket_by_ship: HashMap<i64, i64> = HashMap::new();
+    let mut room_center_by_ship: HashMap<i64, DVec3> = HashMap::new();
+    let mut room_center_by_char: HashMap<i64, DVec3> = HashMap::new();
+    let mut pocket_npc_ids: HashSet<i64> = HashSet::new();
     let mut arena_ships: HashSet<i64> = HashSet::new();
     let mut active_clouds: HashMap<i64, TypeId> = HashMap::new();
+    let mut boundary_ticks: HashMap<i64, u32> = boundary_ticks_store()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     if let Some(db) = db_opt {
         let _ = db.try_with_mut_snapshot(|snap| -> Result<(), ()> {
             if let Some(blob) = snap.service_state_blobs.get("incursions_state") {
                 if let Ok(reg) = serde_json::from_str::<crate::services::pve_special_sites::PveSpecialSitesRegistry>(blob) {
                     for p in reg.abyssal_pockets.values().filter(|p| !p.completed && !p.collapsed_destroyed) {
+                        let z = (p.current_room.saturating_sub(1) as f64) * 50_000.0;
+                        let center = DVec3::from_array(p.grid_offset) + DVec3::new(0.0, 0.0, z);
                         pocket_by_ship.insert(p.ship_id, p.pocket_id);
+                        room_center_by_ship.insert(p.ship_id, center);
+                        room_center_by_char.insert(p.character_id, center);
                         for &sid in &p.fleet_ship_ids {
                             pocket_by_ship.insert(sid, p.pocket_id);
+                            room_center_by_ship.insert(sid, center);
+                        }
+                        for r in &p.rooms {
+                            for &nid in &r.npc_ball_ids {
+                                pocket_npc_ids.insert(nid);
+                            }
                         }
                     }
                 }
@@ -609,6 +851,13 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
             }
             if let Some(cblob) = snap.service_state_blobs.get("abyssal_active_clouds") {
                 active_clouds = serde_json::from_str(cblob).unwrap_or_default();
+            }
+            if let Some(bblob) = snap.service_state_blobs.get("abyssal_boundary_ticks") {
+                if let Ok(db_ticks) = serde_json::from_str::<HashMap<i64, u32>>(bblob) {
+                    for (k, v) in db_ticks {
+                        boundary_ticks.entry(k).or_insert(v);
+                    }
+                }
             }
             Ok(())
         });
@@ -625,14 +874,20 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
             b.type_id,
             AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID | AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID | AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID
         ) {
+            let def_r = match b.type_id {
+                AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID => 15_000.0,
+                AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID => 25_000.0,
+                _ => 40_000.0,
+            };
             let s_range = sde_opt
                 .and_then(|s| s.types.get(&b.type_id))
                 .and_then(|t| t.default_attributes.get(&54).copied())
                 .filter(|&r| r > 0.0)
-                .unwrap_or(b.radius.max(15_000.0));
+                .unwrap_or_else(|| if b.radius > 1_000.0 { b.radius } else { def_r });
             suppressors.push((py_pocket, b.position, s_range));
         } else if matches!(b.type_id, MULTIBODY_TRACKING_PYLON_TYPE_ID | MULTIBODY_TRACKING_PYLON_MEDIUM_TYPE_ID) {
-            tracking_pylons.push((py_pocket, b.position, b.radius.max(20_000.0)));
+            let def_r = if b.type_id == MULTIBODY_TRACKING_PYLON_MEDIUM_TYPE_ID { 30_000.0 } else { 20_000.0 };
+            tracking_pylons.push((py_pocket, b.position, b.radius.max(def_r)));
         }
     }
 
@@ -647,9 +902,7 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
                 .copied()
                 .or_else(|| (60_000_000..100_000_000).contains(&bid).then_some(bid / 100));
             let sde_type = sde_opt.and_then(|sde| sde.types.get(&b.type_id));
-            let is_missile_or_drone = sde_type.is_some_and(|t| matches!(t.category_id, 8 | 18));
-            let is_rogue_drone_frigate = sde_type.is_some_and(|t| matches!(t.group_id, 1997 | 4037 | 297));
-            if is_missile_or_drone || is_rogue_drone_frigate {
+            if sde_type.is_some_and(is_suppressor_target_type) {
                 for &(spocket, spos, srange) in &suppressors {
                     if (spocket.is_none() || b_pocket.is_none() || spocket == b_pocket) && b.position.distance(spos) <= srange {
                         damages.push((
@@ -666,7 +919,7 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
         }
     }
 
-    // Apply or clear Multibody Tracking Pylon tracking_speed_multiplier on ships and NPCs
+    // Apply or clear Multibody Tracking Pylon tracking_speed_multiplier on ships, sentry drones, and NPCs, and enforce no-cloak
     let ship_ids: Vec<i64> = ballpark
         .balls
         .keys()
@@ -676,9 +929,19 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
 
     for &sid in &ship_ids {
         let Some(b) = ballpark.balls.get(&sid) else { continue };
+        if let Some(cs) = ballpark.combat_states.get_mut(&sid) {
+            if cs.is_cloaked {
+                cs.is_cloaked = false;
+            }
+        }
+        if let Some(sm) = ballpark.ball_slim_meta.get_mut(&sid) {
+            if sm.is_cloaked {
+                sm.is_cloaked = false;
+            }
+        }
         let is_ship_or_sentry = sde_opt
             .and_then(|s| s.types.get(&b.type_id))
-            .map(|t| t.category_id == 6 || t.group_id == 1982 || t.group_id == 640)
+            .map(is_tracking_pylon_beneficiary)
             .unwrap_or(true);
         if !is_ship_or_sentry {
             continue;
@@ -696,12 +959,312 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
         }
     }
 
+    // Spherical 75 km room boundary damage on player ships, capsules, and probes
+    let boundary_candidates: Vec<(i64, TypeId, DVec3, bool, bool)> = ballpark
+        .balls
+        .iter()
+        .filter_map(|(&bid, b)| {
+            if ballpark.is_static_ball(bid)
+                || arena_ships.contains(&bid)
+                || bid >= 1_895_000_000
+                || pocket_npc_ids.contains(&bid)
+                || (60_000_000..100_000_000).contains(&bid)
+            {
+                return None;
+            }
+            let is_pod = b.type_id == 670;
+            let sde_t = sde_opt.and_then(|s| s.types.get(&b.type_id));
+            let is_probe = sde_t.is_some_and(|t| t.group_id == 479);
+            let is_ship = !is_pod
+                && sde_t
+                    .map(|t| t.category_id == 6)
+                    .unwrap_or_else(|| {
+                        pocket_by_ship.contains_key(&bid)
+                            || ballpark.ball_slim_meta.get(&bid).is_some_and(|m| m.char_id.is_some())
+                            || ballpark.combat_states.contains_key(&bid)
+                    });
+            if is_pod || is_probe || is_ship {
+                Some((bid, b.type_id, b.position, is_probe, is_pod))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut boundary_destroyed: Vec<(i64, TypeId, DVec3, bool, bool, u32)> = Vec::new();
+    for (bid, b_type, b_pos, is_probe, is_pod) in boundary_candidates {
+        let center = room_center_by_ship
+            .get(&bid)
+            .copied()
+            .or_else(|| {
+                ballpark
+                    .ball_slim_meta
+                    .get(&bid)
+                    .and_then(|m| room_center_by_char.get(&m.owner_id).copied())
+            })
+            .unwrap_or(DVec3::ZERO);
+        if b_pos.distance(center) <= ABYSSAL_ROOM_BOUNDARY_RADIUS_M {
+            boundary_ticks.remove(&bid);
+            continue;
+        }
+        let ticks = boundary_ticks.entry(bid).or_insert(0);
+        *ticks += 1;
+        let t_count = *ticks;
+        let scale = 1.0 + 0.5 * ((t_count as f64) - 1.0);
+        let per_type = 250.0 * scale;
+        if let Some(cs) = ballpark.combat_states.get_mut(&bid) {
+            let raw_hull_dmg = per_type
+                * (cs.structure_resonance[0]
+                    + cs.structure_resonance[1]
+                    + cs.structure_resonance[2]
+                    + cs.structure_resonance[3]);
+            cs.structure_hp = (cs.structure_hp - raw_hull_dmg).max(0.0);
+            if cs.structure_hp <= 0.0 {
+                boundary_ticks.remove(&bid);
+                boundary_destroyed.push((bid, b_type, b_pos, is_probe, is_pod, t_count));
+            }
+        } else if is_probe {
+            boundary_ticks.remove(&bid);
+            boundary_destroyed.push((bid, b_type, b_pos, true, false, t_count));
+        }
+    }
+
+    for (bid, b_type, b_pos, is_probe, is_pod, t_count) in boundary_destroyed {
+        let owner_hint = ballpark
+            .ball_slim_meta
+            .get(&bid)
+            .map(|m| m.owner_id)
+            .unwrap_or(0);
+        ballpark.remove_ball(bid);
+        if is_probe {
+            if let Some(db) = db_opt {
+                db.with_mut_snapshot(|snap| {
+                    snap.items.remove(&bid);
+                    snap.item_positions.remove(&bid);
+                });
+            }
+            continue;
+        }
+        if is_pod {
+            if let Some(db) = db_opt {
+                let now_u = db.clock().now_unix_secs();
+                crate::sp6_lifecycle::with_mut_sp6_state(db, |st, snap| {
+                    let cid = snap
+                        .items
+                        .get(&bid)
+                        .map(|i| i.owner_id)
+                        .filter(|&o| o > 0)
+                        .or_else(|| {
+                            snap.characters
+                                .values()
+                                .find(|c| c.active_ship_id == bid)
+                                .map(|c| c.character_id)
+                        })
+                        .unwrap_or(owner_hint);
+                    snap.items.remove(&bid);
+                    snap.item_positions.remove(&bid);
+                    st.ship_combat_hp.remove(&bid);
+                    if cid > 0 {
+                        st.abyssal_sessions.remove(&cid);
+                        if let Some(blob) = snap.service_state_blobs.get("incursions_state").cloned() {
+                            if let Ok(mut reg) = serde_json::from_str::<crate::services::pve_special_sites::PveSpecialSitesRegistry>(&blob) {
+                                if let Some(p) = reg.abyssal_pockets.get_mut(&cid) {
+                                    p.collapsed_destroyed = true;
+                                    p.completed = true;
+                                }
+                                if let Ok(js) = serde_json::to_string(&reg) {
+                                    snap.service_state_blobs.insert("incursions_state".into(), js);
+                                }
+                            }
+                        }
+                        let (home_station_id, home_sys_id, const_id, reg_id) = sde_opt
+                            .map(|sde| resolve_character_home_station_and_system(snap, sde, cid))
+                            .unwrap_or((60_003_760, 30_000_142, 20_000_020, 10_000_002));
+                        snap.next_entity_id += 1;
+                        let corvette_id = snap.next_entity_id;
+                        snap.items.insert(
+                            corvette_id,
+                            eve_db::InventoryItemRecord {
+                                item_id: corvette_id,
+                                type_id: 606,
+                                owner_id: cid,
+                                location_id: home_station_id,
+                                flag: eve_db::InventoryFlag::Hangar,
+                                quantity: 1,
+                                singleton: true,
+                                version: 1,
+                                ..Default::default()
+                            },
+                        );
+                        if let Some(ch) = snap.characters.get_mut(&cid) {
+                            ch.active_ship_id = corvette_id;
+                            ch.station_id = Some(home_station_id);
+                            ch.structure_id = None;
+                            ch.solar_system_id = home_sys_id;
+                            ch.constellation_id = const_id;
+                            ch.region_id = reg_id;
+                            ch.version += 1;
+                            ch.system_epoch += 1;
+                        }
+                        snap.next_entity_id += 1;
+                        let kid = snap.next_entity_id;
+                        snap.record_killmail(
+                            eve_db::KillmailRecord {
+                                kill_id: kid,
+                                victim_character_id: cid,
+                                attacker_character_id: 0,
+                                attacker_corp_id: 1_000_298,
+                                solar_system_id,
+                                ship_type_id: 670,
+                                total_value_isk: 1_000.0,
+                                ..Default::default()
+                            },
+                            now_u,
+                        );
+                    }
+                });
+            }
+            continue;
+        }
+        // Player ship destroyed by boundary: eject capsule at out-of-bounds position
+        let (cap_id, owner_cid) = if let Some(db) = db_opt {
+            let now_u = db.clock().now_unix_secs();
+            crate::sp6_lifecycle::with_mut_sp6_state(db, |st, snap| {
+                let cid = snap
+                    .items
+                    .get(&bid)
+                    .map(|i| i.owner_id)
+                    .filter(|&o| o > 0)
+                    .or_else(|| {
+                        snap.characters
+                            .values()
+                            .find(|c| c.active_ship_id == bid)
+                            .map(|c| c.character_id)
+                    })
+                    .unwrap_or(owner_hint);
+                let base_price = sde_opt
+                    .and_then(|sde| sde.types.get(&b_type))
+                    .map(|t| t.base_price)
+                    .unwrap_or(250_000.0);
+                snap.items.remove(&bid);
+                snap.item_positions.remove(&bid);
+                snap.module_online_states.remove(&bid);
+                st.ship_combat_hp.remove(&bid);
+                snap.items.retain(|_, it| it.location_id != bid);
+                snap.next_entity_id += 1;
+                let cap_id = snap.next_entity_id;
+                snap.items.insert(
+                    cap_id,
+                    eve_db::InventoryItemRecord {
+                        item_id: cap_id,
+                        type_id: 670,
+                        owner_id: cid,
+                        location_id: solar_system_id as i64,
+                        flag: eve_db::InventoryFlag::None,
+                        quantity: 1,
+                        singleton: true,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+                snap.item_positions.insert(cap_id, [b_pos.x, b_pos.y, b_pos.z]);
+                if cid > 0 {
+                    if let Some(ch) = snap.characters.get_mut(&cid) {
+                        ch.active_ship_id = cap_id;
+                        ch.version += 1;
+                        ch.system_epoch += 1;
+                    }
+                    if let Some(blob) = snap.service_state_blobs.get("incursions_state").cloned() {
+                        if let Ok(mut reg) = serde_json::from_str::<crate::services::pve_special_sites::PveSpecialSitesRegistry>(&blob) {
+                            if let Some(p) = reg.abyssal_pockets.get_mut(&cid) {
+                                p.ship_id = cap_id;
+                                if !p.fleet_ship_ids.contains(&cap_id) {
+                                    p.fleet_ship_ids.push(cap_id);
+                                }
+                            }
+                            if let Ok(js) = serde_json::to_string(&reg) {
+                                snap.service_state_blobs.insert("incursions_state".into(), js);
+                            }
+                        }
+                    }
+                    snap.next_entity_id += 1;
+                    let kid = snap.next_entity_id;
+                    snap.record_killmail(
+                        eve_db::KillmailRecord {
+                            kill_id: kid,
+                            victim_character_id: cid,
+                            attacker_character_id: 0,
+                            attacker_corp_id: 1_000_298,
+                            solar_system_id,
+                            ship_type_id: b_type,
+                            total_value_isk: base_price,
+                            ..Default::default()
+                        },
+                        now_u,
+                    );
+                }
+                (cap_id, cid)
+            })
+        } else {
+            (bid.saturating_add(900_000_000), owner_hint)
+        };
+        if let Some(&center) = room_center_by_ship.get(&bid) {
+            room_center_by_ship.insert(cap_id, center);
+        }
+        boundary_ticks.insert(cap_id, t_count);
+        let cap_cs = eve_destiny::CombatState {
+            shield_hp: 0.0,
+            max_shield_hp: 0.0,
+            armor_hp: 0.0,
+            max_armor_hp: 0.0,
+            structure_hp: 100.0,
+            max_structure_hp: 100.0,
+            ..Default::default()
+        };
+        ballpark.add_ball(eve_destiny::Ball {
+            id: cap_id,
+            type_id: 670,
+            position: b_pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 200.0,
+            inertia: 0.2,
+            mass: 1_000.0,
+            radius: 15.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        });
+        ballpark.combat_states.insert(cap_id, cap_cs);
+        ballpark.set_ball_slim_meta(
+            cap_id,
+            eve_destiny::SlimItemMeta {
+                group_id: 29,
+                category_id: 6,
+                owner_id: owner_cid,
+                char_id: (owner_cid > 0).then_some(owner_cid),
+                corp_id: -1,
+                alliance_id: -1,
+                security_status: 0.0,
+                is_cloaked: false,
+            },
+        );
+    }
+
+    boundary_ticks.retain(|bid, _| ballpark.balls.contains_key(bid));
+    *boundary_ticks_store()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = boundary_ticks.clone();
+    if let Some(db) = db_opt {
+        if let Ok(json) = serde_json::to_string(&boundary_ticks) {
+            let _ = db.try_with_mut_snapshot(|snap| -> Result<(), ()> {
+                snap.service_state_blobs.insert("abyssal_boundary_ticks".into(), json);
+                Ok(())
+            });
+        }
+    }
+
     let mut clouds: Vec<(Option<i64>, TypeId, DVec3, f64)> = Vec::new();
     for (&bid, b) in &ballpark.balls {
-        if matches!(
-            b.type_id,
-            TACHYON_CLOUD_TYPE_ID | PROVING_TACHYON_CLOUD_TYPE_ID | BIOLUMINESCENT_CLOUD_TYPE_ID | FILAMENT_CLOUD_TYPE_ID
-        ) {
+        if is_spatial_hazard_cloud_type(b.type_id) {
             let c_pocket = (bid >= 1_898_000_000).then_some((bid - 1_898_000_000) / 100);
             let c_range = sde_opt
                 .and_then(|s| s.types.get(&b.type_id))

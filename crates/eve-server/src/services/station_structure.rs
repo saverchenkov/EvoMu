@@ -1011,6 +1011,14 @@ pub async fn handle(
                 }));
             }
             let is_mobile = crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, item.type_id);
+            if (32_000_000..=32_999_999).contains(&sys_id)
+                && (is_mobile || matches!(item_type.category_id, 22 | 65) || item_type.group_id == 1246)
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotDeployInAbyssalSpace".into(),
+                    message: "Mobile depots and deployable structures cannot be anchored inside Abyssal Deadspace".into(),
+                }));
+            }
             if is_mobile && item.location_id != ship_id {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidItemLocation".into(),
@@ -1110,6 +1118,14 @@ pub async fn handle(
             };
 
             let is_mobile = crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, item.type_id);
+            if (32_000_000..=32_999_999).contains(&sys_id)
+                && (is_mobile || matches!(item_type.category_id, 22 | 65) || item_type.group_id == 1246)
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotDeployInAbyssalSpace".into(),
+                    message: "Mobile depots and deployable structures cannot be anchored inside Abyssal Deadspace".into(),
+                }));
+            }
             if is_mobile {
                 if let Err(e) = crate::services::mobile_deployables::check_mobile_deployment_restrictions(
                     ctx,

@@ -143,7 +143,7 @@ async fn test_abyssal_deadspace_mechanics_and_collapse_lifecycle() {
     .await
     .expect("SelectCharacterID");
 
-    let origin_sys = 30_000_142_u32; // Jita
+    let origin_sys = 30_000_002_u32; // Lashesih (0.8 high-sec)
     let ship_id = 100_000_015_i64;
     let filament_id = 100_000_016_i64;
     let fil_type = 47_765_u32; // Calm Electrical Filament
@@ -270,7 +270,7 @@ async fn test_abyssal_deadspace_mechanics_and_collapse_lifecycle() {
         snap.items.insert(fil2, eve_db::InventoryItemRecord { item_id: fil2, type_id: fil_type, owner_id: char2, location_id: ship2, flag: InventoryFlag::Cargo, quantity: 1, singleton: false, ..Default::default() });
     });
     sess2.solar_system_id = Some(origin_sys); sess2.station_id = None; sess2.structure_id = None; sess2.ship_id = Some(ship2);
-    let _ = origin_handle.spawn_ball_with_combat(eve_destiny::Ball { id: ship2, type_id: 621, position: glam::DVec3::new(50_000.0, 0.0, 0.0), velocity: glam::DVec3::ZERO, max_velocity: 250.0, inertia: 0.5, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop }, ctx.build_ship_combat_state(char2, ship2, 621)).await;
+    let _ = origin_handle.spawn_ball_with_combat(eve_destiny::Ball { id: ship2, type_id: 621, position: glam::DVec3::new(2_000_000.0, 0.0, 0.0), velocity: glam::DVec3::ZERO, max_velocity: 250.0, inertia: 0.5, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop }, ctx.build_ship_combat_state(char2, ship2, 621)).await;
     let dep2 = ctx.dispatch_rpc(&mut sess2, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(fil2)], &kw, None).await.expect("Deploy 2");
     let tr2 = dep2.dict_get("traceBallID").and_then(|v| v.as_i64()).unwrap();
     ctx.dispatch_rpc(&mut sess2, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(tr2)], &kw, None).await.expect("Enter 2");
@@ -431,7 +431,7 @@ async fn test_abyssal_hull_rules_and_timer_collapse() {
     .await
     .expect("SelectCharacterID");
 
-    let origin_sys = 30_000_142_u32; // Jita
+    let origin_sys = 30_000_002_u32; // Lashesih (0.8 high-sec)
     let fil_type = 47761_u32; // Calm Exotic Filament
     let fil_id1 = 100_000_201_i64;
     let fil_id2 = 100_000_202_i64;
@@ -564,11 +564,11 @@ async fn test_abyssal_hull_rules_and_timer_collapse() {
     sess.solar_system_id = Some(origin_sys);
     sess.ship_id = Some(t3c_ship);
     let origin_handle = ctx.systems.get_or_spawn(origin_sys);
-    for (sid, tid) in [(t3c_ship, 29990), (frig_ship, 587), (flag_ship, 45534), (cruiser_ship, 621)] {
+    for (sid, tid, x) in [(t3c_ship, 29990, 100.0), (frig_ship, 587, 100.0), (flag_ship, 45534, 2_000_000.0), (cruiser_ship, 621, 4_000_000.0)] {
         let b = eve_destiny::Ball {
             id: sid,
             type_id: tid,
-            position: glam::DVec3::new(100.0, 0.0, 0.0),
+            position: glam::DVec3::new(x, 0.0, 0.0),
             velocity: glam::DVec3::ZERO,
             max_velocity: 250.0,
             inertia: 0.5,
@@ -610,12 +610,13 @@ async fn test_abyssal_hull_rules_and_timer_collapse() {
     // 3. Cruiser cannot enter a 3-ship frigate trace (capacity class mismatch)
     sess.ship_id = Some(cruiser_ship);
     ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&char_id).unwrap().active_ship_id = cruiser_ship);
+    let _ = origin_handle.set_ball_position(cruiser_ship, glam::DVec3::new(600.0, 0.0, 0.0)).await;
     let mismatch_err = ctx
         .dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(frig_trace_id)], &kw, None)
         .await
         .expect_err("Cruiser entering frigate trace must be rejected");
     assert_eq!(mismatch_err.code, "DisallowedShipType");
-
+    let _ = origin_handle.set_ball_position(cruiser_ship, glam::DVec3::new(4_000_000.0, 0.0, 0.0)).await;
     // 4. Flag Cruiser (group 1972) classified as Cruiser: solo run (1 ship, 1 filament)
     sess.ship_id = Some(flag_ship);
     ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&char_id).unwrap().active_ship_id = flag_ship);
@@ -624,7 +625,6 @@ async fn test_abyssal_hull_rules_and_timer_collapse() {
         .await
         .expect("Flag cruiser deployment with 1 filament");
     assert_eq!(flag_rep.dict_get("maxShips").and_then(|v| v.as_i64()), Some(1));
-
     // 5. Cruiser deploys and enters pocket; test timer collapse with zero insurance payout
     sess.ship_id = Some(cruiser_ship);
     ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&char_id).unwrap().active_ship_id = cruiser_ship);

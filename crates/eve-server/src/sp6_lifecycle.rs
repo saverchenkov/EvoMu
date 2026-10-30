@@ -319,7 +319,7 @@ pub fn has_active_pvp_timer(ctx: &ServerContext, char_id: i64, now_unix: u64) ->
 }
 
 /// Blocks Abyssal, Noise/Signal, and Proving Grounds filaments while under an active 15m PvP timer
-/// (`feat:crimewatch.pvp-logoff-timer-renewal`).
+/// or an active safe-logoff countdown (`feat:crimewatch.pvp-logoff-timer-renewal`, `feat:pve.abyssal-activation-restrictions`).
 pub fn require_no_pvp_timer_for_filament(
     ctx: &ServerContext,
     char_id: i64,
@@ -330,6 +330,17 @@ pub fn require_no_pvp_timer_for_filament(
             code: "PvpTimerActive".into(),
             message: "Cannot activate filament while a 15-minute Capsuleer Log-Off (PvP) timer is active"
                 .into(),
+        });
+    }
+    let has_safe_logoff = with_sp6_state(&ctx.db, |st| {
+        st.safe_logoffs
+            .get(&char_id)
+            .is_some_and(|e| !e.completed && now_unix < e.complete_at_unix)
+    });
+    if has_safe_logoff {
+        return Err(BridgeRpcError {
+            code: "LogoffTimerActive".into(),
+            message: "Cannot activate filament while a safe-logoff countdown timer is active".into(),
         });
     }
     Ok(())
@@ -386,6 +397,12 @@ pub fn require_ship_ready_for_filament_jump(
                 return Err(BridgeRpcError {
                     code: "WarpScrambled".into(),
                     message: "Cannot activate filament while warp scrambled".into(),
+                });
+            }
+            if cs.is_warp_exit_invulnerable() || cs.gate_cloak_remaining_ticks > 0 {
+                return Err(BridgeRpcError {
+                    code: "ShipInvulnerable".into(),
+                    message: "Cannot activate filament while session-change or warp-exit invulnerability is active".into(),
                 });
             }
         }

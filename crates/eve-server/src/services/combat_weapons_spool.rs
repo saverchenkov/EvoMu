@@ -251,6 +251,8 @@ pub async fn handle_ship_or_npc_destruction(
         }))
     });
     let is_pod_target = target_ball.type_id == 670;
+    let is_abyssal_npc_or_cache =
+        (32_000_000..=32_999_999).contains(&sys_id) && victim_char_opt.is_none();
     let victim_id = victim_char_opt.unwrap_or(target_ball_id);
     let wreck_owner_id = if victim_char_opt.is_some() { victim_id } else { attacker_char_id };
     let wreck_type_id = ctx.sde.wrecks.get(&target_ball.type_id).copied().unwrap_or_else(|| {
@@ -285,9 +287,9 @@ pub async fn handle_ship_or_npc_destruction(
     let mut destroyed_entries = Vec::new();
     let mut escape_frigate_id: Option<i64> = None;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.next_entity_id += 1;
-        generated_wreck_id = snap.next_entity_id;
-        if !is_pod_target {
+        if !is_pod_target && !is_abyssal_npc_or_cache {
+            snap.next_entity_id += 1;
+            generated_wreck_id = snap.next_entity_id;
             crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
                 snap,
                 generated_wreck_id,
@@ -502,7 +504,7 @@ pub async fn handle_ship_or_npc_destruction(
     });
 
     let _ = sys_handle.remove_ball(target_ball_id).await;
-    if !is_pod_target && generated_wreck_id > 0 {
+    if !is_pod_target && !is_abyssal_npc_or_cache && generated_wreck_id > 0 {
         let _ = sys_handle
             .spawn_ball_with_meta(
                 eve_destiny::Ball {
@@ -714,6 +716,14 @@ pub async fn handle_ship_or_npc_destruction(
         );
     } else {
         if (32_000_000..33_000_000).contains(&sys_id) {
+            crate::services::pve_special_sites_abyssal::on_abyssal_cache_destroyed_core(
+                &ctx.systems,
+                &ctx.db,
+                sys_id,
+                target_ball_id,
+                (attacker_char_id > 0).then_some(attacker_char_id),
+            )
+            .await;
             crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_core(
                 &ctx.systems,
                 &ctx.db,

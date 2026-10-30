@@ -297,14 +297,38 @@ async fn test_pve_abyssal_gates_and_tiers_complete() {
         snap.items.insert(t4_fil_item_id, rec(t4_fil_item_id, fil_type_t4));
     });
 
-    // 2. High-sec restriction: T4-T6 filaments blocked in high security space (Jita = 0.95 sec)
+    // 2. High-sec restriction: T4-T6 filaments blocked in 0.9 high security space (Jita = 0.95 sec)
     let t4_deploy_err = ctx
         .dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(t4_fil_item_id)], &kw, None)
         .await
         .expect_err("T4 filament deployment in Jita must fail");
     assert_eq!(t4_deploy_err.code, "FilamentDisallowedInHighSec");
 
-    // 3. Deploy T1 Calm Electrical filament in Jita -> spawns trace
+    // Move pilot to 0.8 high-sec (Lashesih = 30000002) where T1 and T3 filaments are allowed cleanly
+    let sys_08 = 30_000_002_u32;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_ABYSS) {
+            ch.solar_system_id = sys_08;
+        }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = sys_08 as i64;
+        }
+    });
+    sess.solar_system_id = Some(sys_08);
+    let _ = ctx.systems.get_or_spawn(sys_08).spawn_ball(eve_destiny::Ball {
+        id: ship_id,
+        type_id: 621,
+        position: glam::DVec3::ZERO,
+        velocity: glam::DVec3::ZERO,
+        max_velocity: 250.0,
+        inertia: 0.5,
+        mass: 1_000_000.0,
+        radius: 50.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    }).await;
+
+    // 3. Deploy T1 Calm Electrical filament in 0.8 high-sec -> spawns trace
     let deploy_rep = ctx
         .dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(t1_fil_item_id)], &kw, None)
         .await
@@ -397,13 +421,13 @@ async fn test_pve_abyssal_gates_and_tiers_complete() {
         .expect_err("End gate invalid ID");
     assert_eq!(bad_exit.code, "InvalidGate");
 
-    // 7. AbyssalEndGateActivation exits Abyssal Deadspace and returns ship to Jita
+    // 7. AbyssalEndGateActivation exits Abyssal Deadspace and returns ship to origin system
     let exit_rep = ctx
         .dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEndGateActivation", &[PyRep::Integer(1_895_000_003)], &kw, None)
         .await
         .expect("AbyssalEndGateActivation");
-    assert_eq!(exit_rep.dict_get("solarSystemID"), Some(&PyRep::Integer(SYS_JITA as i64)));
-    assert_eq!(sess.solar_system_id, Some(SYS_JITA));
+    assert_eq!(exit_rep.dict_get("solarSystemID"), Some(&PyRep::Integer(sys_08 as i64)));
+    assert_eq!(sess.solar_system_id, Some(sys_08));
 
     // Verify pocket is cleaned up from active registry on exit
     assert!(!with_pve_special_reg(&ctx, |reg| reg.abyssal_pockets.contains_key(&PILOT_ABYSS)));
@@ -445,7 +469,7 @@ async fn test_pve_abyssal_gates_and_tiers_complete() {
     crate::abyssal_room_combat::destroy_room_npcs_via_damage(&ctx, PILOT_ABYSS, 2).await;
 
     let exit3_rep = ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEndGateActivation", &[PyRep::Integer(1_895_000_000 + t3_pid * 10 + 3)], &kw, None).await.expect("T3 AbyssalEndGateActivation");
-    assert_eq!(exit3_rep.dict_get("solarSystemID"), Some(&PyRep::Integer(SYS_JITA as i64)));
+    assert_eq!(exit3_rep.dict_get("solarSystemID"), Some(&PyRep::Integer(sys_08 as i64)));
     assert!(!with_pve_special_reg(&ctx, |reg| reg.abyssal_pockets.contains_key(&PILOT_ABYSS)));
 }
 

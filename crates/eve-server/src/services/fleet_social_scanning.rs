@@ -373,7 +373,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                     message: "Session has no active solar system".into(),
                 }));
             };
-            if sys_id == 30_100_000 {
+            if sys_id == 30_100_000 || (32_000_000..=32_999_999).contains(&sys_id) {
                 return Some(Err(BridgeRpcError::user_error("CannotDscanInThisSystem")));
             }
             let scan_angle = args

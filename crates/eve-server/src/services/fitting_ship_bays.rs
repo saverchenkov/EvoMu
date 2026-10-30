@@ -514,6 +514,9 @@ pub(crate) async fn ship_drop(
             if !is_deployable_item(&ctx.sde, it.type_id) {
                 return Err(err("UserError", format!("Item {iid} (type {}) is not a deployable item", it.type_id)));
             }
+            if (32_000_000..=32_999_999).contains(&sys_id) {
+                return Err(err("CannotDeployInAbyssalSpace", "Deployables and mobile structures cannot be launched inside Abyssal Deadspace"));
+            }
             if let Some(t) = ctx.sde.types.get(&it.type_id) {
                 if t.category_id == 6 {
                     return Err(err("UserError", format!("Ship {iid} cannot be dropped as a deployable")));

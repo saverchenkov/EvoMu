@@ -66,10 +66,7 @@ pub(crate) fn validate_allowed_ship_hull(
     Ok((tid, gid))
 }
 
-fn is_owner_or_same_fleet(ctx: &ServerContext, caller_id: i64, owner_id: i64) -> bool {
-    if caller_id == owner_id {
-        return true;
-    }
+fn is_in_trace_fleet(ctx: &ServerContext, caller_id: i64, owner_id: i64) -> bool {
     ctx.db.with_snapshot(|snap| {
         snap.fleets
             .values()
@@ -85,6 +82,13 @@ pub async fn handle(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    if let Some(restricted) =
+        crate::services::pve_special_sites_abyssal::check_abyssal_in_pocket_rpc_restrictions(
+            session, service, method, args,
+        )
+    {
+        return Some(restricted);
+    }
     match (service, method) {
         ("abyssalMgr", "AbyssalEntranceDeployment") => {
             if args.is_empty() {
@@ -298,26 +302,36 @@ async fn activate_trace(
         });
     }
 
-    if !is_owner_or_same_fleet(ctx, char_id, trace.char_id) {
+    let eff_cap = if trace.max_ships == 0 { 1 } else { trace.max_ships };
+    let (_, _, hull_cap) = validate_abyssal_hull_and_capacity(ctx, ship_id)?;
+    if hull_cap != eff_cap {
+        return Err(BridgeRpcError {
+            code: "DisallowedShipType".into(),
+            message: format!(
+                "Trace requires ship class capacity {eff_cap}, but activating ship has capacity {hull_cap}"
+            ),
+        });
+    }
+    if eff_cap == 1 {
+        if char_id != trace.char_id {
+            return Err(BridgeRpcError {
+                code: "AccessDenied".into(),
+                message: "Solo Cruiser Abyssal trace may only be entered by its creator".into(),
+            });
+        }
+    } else if char_id != trace.char_id && !is_in_trace_fleet(ctx, char_id, trace.char_id) {
         return Err(BridgeRpcError {
             code: "AccessDenied".into(),
             message: "Caller is neither the trace owner nor in the owner's fleet".into(),
         });
     }
 
-    let (_, _, hull_cap) = validate_abyssal_hull_and_capacity(ctx, ship_id)?;
-    if hull_cap != trace.max_ships {
-        return Err(BridgeRpcError {
-            code: "DisallowedShipType".into(),
-            message: format!(
-                "Trace requires ship class capacity {}, but activating ship has capacity {}",
-                trace.max_ships, hull_cap
-            ),
-        });
-    }
-    let eff_cap = trace.max_ships;
-
     let cap_exceeded = with_pve_special_reg(ctx, |reg| {
+        for (tid, t) in reg.abyssal_traces.iter_mut() {
+            if *tid != trace.trace_ball_id {
+                t.entered_char_ids.retain(|&cid| cid != char_id);
+            }
+        }
         if let Some(t) = reg.abyssal_traces.get_mut(&trace.trace_ball_id) {
             if !t.entered_char_ids.contains(&char_id) && t.entered_char_ids.len() >= eff_cap as usize {
                 return true;
@@ -338,6 +352,16 @@ async fn activate_trace(
     let (tier, weather) =
         crate::services::pve_special_sites::classify_abyssal_filament(trace.filament_type_id)
             .unwrap_or((1, crate::services::pve_special_sites::AbyssalWeatherKind::Electrical));
+    let origin_sec = ctx
+        .sde
+        .solar_systems
+        .get(&cur_sys)
+        .map(|s| s.security_status)
+        .unwrap_or(0.9);
+    let gives_suspect =
+        crate::services::pve_special_sites_abyssal::evaluate_highsec_abyssal_tier_policy(
+            origin_sec, tier,
+        )?;
     let penalty_pct = match tier {
         0 | 1 => 30.0,
         2 | 3 => 50.0,
@@ -351,6 +375,12 @@ async fn activate_trace(
     }
 
     let entry_now = ctx.now_unix();
+    if gives_suspect {
+        ctx.crimewatch
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .trigger_suspect_flag(char_id, entry_now);
+    }
     let (pocket_id, room1_npcs) =
         crate::services::pve_special_sites::enter_abyssal_pocket_for_character(
             ctx,
@@ -394,7 +424,7 @@ async fn activate_trace(
     let ball = eve_destiny::Ball {
         id: ship_id,
         type_id: ship_type,
-        position: base + DVec3::new(0.0, 0.0, -10_000.0),
+        position: base + DVec3::new(0.0, 0.0, -50_000.0),
         velocity: DVec3::ZERO,
         max_velocity: max_vel,
         inertia: 0.5,
@@ -414,7 +444,7 @@ async fn activate_trace(
         ("originSolarSystemID", PyRep::Integer(cur_sys as i64)),
         ("filamentTypeID", PyRep::Integer(trace.filament_type_id as i64)),
         ("tier", PyRep::Integer(tier as i64)),
-        ("suspectFlagOnExit", PyRep::Bool(tier >= 4)),
+        ("suspectFlagOnExit", PyRep::Bool(gives_suspect)),
         ("currentRoom", PyRep::Integer(1)),
         ("timerSeconds", PyRep::Integer(remaining_sec)),
         (
@@ -436,7 +466,7 @@ async fn activate_inventory_filament(
     let cur_sys = session.solar_system_id.ok_or_else(err_no_solar_system)?;
     let ship_id = session.ship_id.ok_or_else(err_no_active_ship)?;
 
-    let (_iid, filament_type_id, tier, max_ships, _origin_sec, ship_pos) =
+    let (_iid, filament_type_id, tier, max_ships, origin_sec, ship_pos) =
         validate_and_consume_abyssal_filaments(ctx, char_id, ship_id, cur_sys, filament_arg).await?;
 
     let weather = crate::services::pve_special_sites::classify_abyssal_filament(filament_type_id)
@@ -515,7 +545,7 @@ async fn activate_inventory_filament(
     let ball = eve_destiny::Ball {
         id: ship_id,
         type_id: ship_type,
-        position: base + DVec3::new(0.0, 0.0, -10_000.0),
+        position: base + DVec3::new(0.0, 0.0, -50_000.0),
         velocity: DVec3::ZERO,
         max_velocity: max_vel,
         inertia: 0.5,
@@ -528,6 +558,11 @@ async fn activate_inventory_filament(
     session.solar_system_id = Some(ABYSSAL_SPACE_SYSTEM_ID);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, ABYSSAL_SPACE_SYSTEM_ID);
     emit_abyssal_entry_notifications(ctx, char_id, pocket_id, tier, 1_200);
+    let gives_suspect =
+        crate::services::pve_special_sites_abyssal::evaluate_highsec_abyssal_tier_policy(
+            origin_sec, tier,
+        )
+        .unwrap_or(false);
 
     Ok(PyRep::keyval([
         ("pocketID", PyRep::Integer(pocket_id)),
@@ -535,7 +570,7 @@ async fn activate_inventory_filament(
         ("originSolarSystemID", PyRep::Integer(cur_sys as i64)),
         ("filamentTypeID", PyRep::Integer(filament_type_id as i64)),
         ("tier", PyRep::Integer(tier as i64)),
-        ("suspectFlagOnExit", PyRep::Bool(tier >= 4)),
+        ("suspectFlagOnExit", PyRep::Bool(gives_suspect)),
         ("currentRoom", PyRep::Integer(1)),
         ("timerSeconds", PyRep::Integer(1_200)),
         ("traceBallID", PyRep::Integer(trace_ball_id)),

@@ -22,7 +22,7 @@ const PILOT_B: i64 = 90_000_002;
 const SYS_JITA: u32 = 30_000_142;
 const JITA_STATION: i64 = 60_003_760;
 const EXPERT_SYSTEM_TYPE_ID: u32 = 57_203;
-const FILAMENT_TYPE_ID: u32 = 47_763;
+const FILAMENT_TYPE_ID: u32 = 56_134; // Tranquil Firestorm Filament (T0, group 1979)
 
 fn make_item(
     item_id: i64,

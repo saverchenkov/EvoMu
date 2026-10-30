@@ -31,10 +31,10 @@ async fn test_sp7_abyssal_disconnect_20m_collapse_destroys_ship_and_pod() {
     let filament_2 = 992_000_002_i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.active_implants.entry(90_000_001).or_default().push(9_899);
-        let mut f1 = sp6_item(filament_1, 47_765, 90_000_001, ship_id, InventoryFlag::Cargo, HashMap::new());
+        let mut f1 = sp6_item(filament_1, 56_131, 90_000_001, ship_id, InventoryFlag::Cargo, HashMap::new());
         f1.quantity = 3;
         f1.singleton = false;
-        let mut f2 = sp6_item(filament_2, 47_765, 90_000_001, ship_id, InventoryFlag::Cargo, HashMap::new());
+        let mut f2 = sp6_item(filament_2, 56_131, 90_000_001, ship_id, InventoryFlag::Cargo, HashMap::new());
         f2.quantity = 3;
         f2.singleton = false;
         snap.items.insert(filament_1, f1);

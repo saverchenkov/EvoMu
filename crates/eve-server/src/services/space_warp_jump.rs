@@ -115,6 +115,12 @@ async fn handle_cmd_warp_to_stuff(
         });
     }
     let sys_id = resolve_bound_or_session_sys(bound_entry, session)?;
+    if (32_000_000..=32_999_999).contains(&sys_id) {
+        return Err(BridgeRpcError {
+            code: "CannotWarpInAbyssalSpace".into(),
+            message: "Warp navigation is disabled inside Abyssal Deadspace".into(),
+        });
+    }
     let Some(ship_id) = session.ship_id else {
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),

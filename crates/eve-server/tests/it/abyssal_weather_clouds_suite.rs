@@ -427,7 +427,7 @@ async fn test_abyssal_trace_scanning_and_fleet_entry() {
     // parity: feat:navigation.abyssal-trace-collapse, feat:navigation.filament-abyssal
     let ctx = ServerContext::new();
     let kw = HashMap::new();
-    let origin_sys = 30_000_142_u32; // Jita
+    let origin_sys = 30_000_002_u32; // Lashesih (0.8 high-sec)
     let char1 = 90_000_001_i64;
     let char2 = 90_000_002_i64;
     let ship1 = 100_000_001_i64;
@@ -467,9 +467,9 @@ async fn test_abyssal_trace_scanning_and_fleet_entry() {
     sess2.solar_system_id = Some(origin_sys); sess2.ship_id = Some(ship2); sess2.station_id = None; sess2.structure_id = None;
 
     let origin_handle = ctx.systems.get_or_spawn(origin_sys);
-    for sid in [ship1, ship2] {
+    for (sid, x) in [(ship1, 100.0), (ship2, 2_000_000.0)] {
         let b = Ball {
-            id: sid, type_id: 587, position: DVec3::new(100.0, 0.0, 0.0), velocity: DVec3::ZERO,
+            id: sid, type_id: 587, position: DVec3::new(x, 0.0, 0.0), velocity: DVec3::ZERO,
             max_velocity: 250.0, inertia: 0.5, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop,
         };
         let _ = origin_handle.spawn_ball(b).await;
@@ -522,6 +522,7 @@ async fn test_abyssal_trace_scanning_and_fleet_entry() {
     }
 
     ctx.advance_secs(300);
+    let _ = origin_handle.set_ball_position(ship2, DVec3::new(600.0, 0.0, 0.0)).await;
     let enter2 = ctx.dispatch_rpc(&mut sess2, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(trace_id)], &kw, None).await.expect("Char 2 joins fleet Abyssal pocket");
     assert_eq!(enter2.dict_get("pocketID").and_then(|v| v.as_i64()), Some(pocket_id));
     let rem_timer = enter2.dict_get("timerSeconds").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -565,7 +566,7 @@ async fn test_abyssal_timer_collapse_and_pod_death() {
     // parity: feat:abyssal.timer-collapse-death, feat:navigation.filament-abyssal
     let ctx = ServerContext::new();
     let kw = HashMap::new();
-    let origin_sys = 30_000_142_u32; // Jita
+    let origin_sys = 30_000_002_u32; // Lashesih (0.8 high-sec)
     let amarr_station = 60_008_494_i64; // Amarr VIII (system 30002187)
     let (char_id, char2_id) = (90_000_001_i64, 90_000_002_i64);
     let (ship_id, ship2_id, fil_id) = (100_000_001_i64, 100_000_002_i64, 100_000_121_i64);
@@ -599,10 +600,17 @@ async fn test_abyssal_timer_collapse_and_pod_death() {
     sess2.solar_system_id = Some(origin_sys); sess2.ship_id = Some(ship2_id); sess2.station_id = None; sess2.structure_id = None;
 
     let origin_handle = ctx.systems.get_or_spawn(origin_sys);
-    let jita_44_pos = ctx.sde.stations.get(&60_003_760).map(|s| s.position).unwrap_or(DVec3::ZERO);
-    // RF-05: Within 1,000 km of Jita 4-4 station -> AbyssalEntranceDeployment rejected!
+    let prox_anchor_pos = ctx
+        .sde
+        .stations
+        .values()
+        .find(|s| s.solar_system_id == origin_sys)
+        .map(|s| s.position)
+        .or_else(|| ctx.sde.stargates().values().find(|g| g.from_solar_system_id == origin_sys).map(|g| g.position))
+        .unwrap_or(DVec3::ZERO);
+    // RF-05: Within 1,000 km of station/stargate -> AbyssalEntranceDeployment rejected!
     let _ = origin_handle.spawn_ball(Ball {
-        id: ship_id, type_id: 587, position: jita_44_pos + DVec3::new(500.0, 0.0, 0.0), velocity: DVec3::ZERO,
+        id: ship_id, type_id: 587, position: prox_anchor_pos + DVec3::new(500.0, 0.0, 0.0), velocity: DVec3::ZERO,
         max_velocity: 250.0, inertia: 0.5, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop,
     }).await;
     let prox_err = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(fil_id)], &kw, None)

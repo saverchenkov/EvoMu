@@ -850,6 +850,12 @@ pub(crate) async fn handle_cmd_align_to(
         });
     };
     let target_pos_opt = if let Some(bm_id) = bookmark_id {
+        if (32_000_000..=32_999_999).contains(&sys_id) {
+            return Err(BridgeRpcError {
+                code: "CannotWarpInAbyssalSpace".into(),
+                message: "Bookmarks and warp navigation are disabled inside Abyssal Deadspace".into(),
+            });
+        }
         if sys_id == 30_100_000 {
             return Err(BridgeRpcError::user_error("DunBlacklistCannotWarp"));
         }
@@ -940,7 +946,8 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
     let cloak_before = cs.is_cloaked;
     let ship_type_id = db_ship_type_id.unwrap_or(ball.type_id);
 
-    if let Some((cloak_item_id, cloak_type_id)) = active_cloak {
+    let in_abyssal = (32_000_000..=32_999_999).contains(&sys_id);
+    if let Some((cloak_item_id, cloak_type_id)) = active_cloak.filter(|_| !in_abyssal) {
         let is_covert = ctx
             .sde
             .types
@@ -997,7 +1004,7 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
             cs.cloak_configured_targeting_delay_s = targeting_delay_s;
             cs_changed = true;
         }
-    } else if cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0 {
+    } else if cs.is_cloaked && (cs.gate_cloak_remaining_ticks == 0 || in_abyssal) {
         cs.is_cloaked = false;
         cs.is_covert_cloak = false;
         cs.cloak_stabilization_remaining_s = 0.0;

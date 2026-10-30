@@ -1274,6 +1274,9 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
                 mgr.step_ai_sync(ctx, sys_id, tick, 1.0);
             }
         }
+        if (32_000_000..=32_999_999).contains(&sys_id) {
+            crate::services::pve_special_sites_abyssal::prune_out_of_bounds_abyssal_probes(ctx, sys_id);
+        }
         let _ = crate::services::insurgency_services::step_system_insurgency_tick(ctx, sys_id).await;
         let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::step_wreck_and_jetcan_decay(
             ctx, sys_id, now_unix,

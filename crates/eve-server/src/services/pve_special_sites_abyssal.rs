@@ -60,6 +60,10 @@ pub struct AbyssalRoomRecord {
     pub gate_unlocked_at_sec: Option<u64>,
 }
 
+fn default_one() -> u8 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AbyssalPocketSession {
     pub pocket_id: i64,
@@ -88,6 +92,8 @@ pub struct AbyssalPocketSession {
     pub trace_ball_id: i64,
     #[serde(default)]
     pub fleet_ship_ids: Vec<ItemId>,
+    #[serde(default = "default_one")]
+    pub max_ships: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,10 +177,10 @@ pub async fn ensure_abyssal_room_balls_for_ctx(ctx: &ServerContext, char_id: Cha
             p.pocket_id,
             p.current_room,
             p.rooms[r_idx].clone(),
-            (p.tier, p.filament_type_id, p.npc_difficulty_mult),
+            (p.tier, p.filament_type_id, p.npc_difficulty_mult, p.max_ships.max(1)),
         ))
     });
-    if let Some((sys_id, pid, room_num, room, (tier, filament, diff))) = info {
+    if let Some((sys_id, pid, room_num, room, (tier, filament, diff, max_ships))) = info {
         let marker_id = 1_895_000_000 + pid * 10 + (room_num as i64);
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
         if matches!(sys_handle.get_ball_snapshot(marker_id).await, Ok(None)) {
@@ -191,6 +197,7 @@ pub async fn ensure_abyssal_room_balls_for_ctx(ctx: &ServerContext, char_id: Cha
                 filament,
                 diff,
                 z,
+                max_ships,
             )
             .await;
         }
@@ -232,6 +239,7 @@ pub async fn spawn_abyssal_room_contents(
     filament_type_id: TypeId,
     difficulty_mult: f64,
     z: f64,
+    max_ships: u8,
 ) {
     let base = DVec3::from_array(pocket_grid_offset(ctx, pocket_id));
     let marker_id = 1_895_000_000 + pocket_id * 10 + (room as i64);
@@ -328,7 +336,7 @@ pub async fn spawn_abyssal_room_contents(
     let pylon_base = 1_899_000_000 + pocket_id * 100 + (room as i64) * 10;
     for (offset_id, pylon_tid, def_range, ppos) in [
         (1_i64, AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID, 15_000.0, base + DVec3::new(20_000.0, 20_000.0, z)),
-        (2_i64, AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID, 40_000.0, base + DVec3::new(-20_000.0, 20_000.0, z)),
+        (2_i64, AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID, 25_000.0, base + DVec3::new(-20_000.0, 20_000.0, z)),
         (3_i64, AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID, 40_000.0, base + DVec3::new(20_000.0, -20_000.0, z)),
         (4_i64, MULTIBODY_TRACKING_PYLON_TYPE_ID, 15_000.0, base + DVec3::new(-20_000.0, -20_000.0, z)),
     ] {
@@ -359,12 +367,16 @@ pub async fn spawn_abyssal_room_contents(
 
     let subnode_id = cache_item_id + 500_000;
     let subnode_pos = base + DVec3::new(5_000.0, -5_000.0, z);
-    let subnode_ball = make_site_npc_ball(subnode_id, EXTRACTION_SUBNODE_TYPE_ID, subnode_pos);
-    let _ = sys_handle.spawn_ball_with_combat(subnode_ball, cache_cs).await;
+    if tier >= 1 {
+        let subnode_ball = make_site_npc_ball(subnode_id, EXTRACTION_SUBNODE_TYPE_ID, subnode_pos);
+        let _ = sys_handle.spawn_ball_with_combat(subnode_ball, cache_cs).await;
+    }
 
     let sys_id = sys_handle.solar_system_id as i64;
     let mutaplasmid_tid = abyssal_mutaplasmid_for_tier(tier);
     let condensate_qty = 5 + (tier as i32) * 5;
+    let loot_mult = i32::from(max_ships.max(1));
+    let subnode_has_loot = tier >= 1 && ctx.mechanic_rng.try_unit_f64().unwrap_or(0.5) >= 0.35;
     ctx.db.with_mut_snapshot(|snap| {
         if snap.items.contains_key(&cache_item_id) {
             return;
@@ -383,26 +395,29 @@ pub async fn spawn_abyssal_room_contents(
         snap.items.insert(cache_item_id, rec(cache_item_id, BIOADAPTIVE_CACHE_TYPE_ID, sys_id, 1, true));
         snap.item_positions.insert(cache_item_id, [cache_pos.x, cache_pos.y, cache_pos.z]);
         for (type_id, qty) in [
-            (TRIGLAVIAN_SURVEY_DATABASE_TYPE_ID, 1 + tier as i32),
-            (filament_type_id, 1),
-            (mutaplasmid_tid, 1),
-            (ZERO_POINT_CONDENSATE_TYPE_ID, condensate_qty),
+            (TRIGLAVIAN_SURVEY_DATABASE_TYPE_ID, (1 + tier as i32) * loot_mult),
+            (filament_type_id, loot_mult),
+            (mutaplasmid_tid, loot_mult),
+            (ZERO_POINT_CONDENSATE_TYPE_ID, condensate_qty * loot_mult),
         ] {
             snap.next_entity_id += 1;
             let loot_id = snap.next_entity_id;
             snap.items.insert(loot_id, rec(loot_id, type_id, cache_item_id, qty, false));
         }
 
-        snap.items.insert(subnode_id, rec(subnode_id, EXTRACTION_SUBNODE_TYPE_ID, sys_id, 1, true));
-        snap.item_positions.insert(subnode_id, [subnode_pos.x, subnode_pos.y, subnode_pos.z]);
-        for (type_id, qty) in [
-            (TRIGLAVIAN_SURVEY_DATABASE_TYPE_ID, 1 + tier as i32),
-            (mutaplasmid_tid, 1),
-            (ZERO_POINT_CONDENSATE_TYPE_ID, condensate_qty),
-        ] {
-            snap.next_entity_id += 1;
-            let loot_id = snap.next_entity_id;
-            snap.items.insert(loot_id, rec(loot_id, type_id, subnode_id, qty, false));
+        if tier >= 1 {
+            snap.items.insert(subnode_id, rec(subnode_id, EXTRACTION_SUBNODE_TYPE_ID, sys_id, 1, true));
+            snap.item_positions.insert(subnode_id, [subnode_pos.x, subnode_pos.y, subnode_pos.z]);
+            if subnode_has_loot {
+                for (type_id, qty) in [
+                    (TRIGLAVIAN_SURVEY_DATABASE_TYPE_ID, (1 + tier as i32) * loot_mult),
+                    (ZERO_POINT_CONDENSATE_TYPE_ID, (condensate_qty / 2).max(1) * loot_mult),
+                ] {
+                    snap.next_entity_id += 1;
+                    let loot_id = snap.next_entity_id;
+                    snap.items.insert(loot_id, rec(loot_id, type_id, subnode_id, qty, false));
+                }
+            }
         }
     });
 }
@@ -601,7 +616,7 @@ pub async fn on_abyssal_cache_destroyed_core(
 ) {
     let is_cache = db.with_snapshot(|snap| {
         snap.items.get(&ball_id).is_some_and(|i| {
-            matches!(i.type_id, BIOADAPTIVE_CACHE_TYPE_ID | EXTRACTION_SUBNODE_TYPE_ID)
+            matches!(i.type_id, BIOADAPTIVE_CACHE_TYPE_ID | EXTRACTION_SUBNODE_TYPE_ID | 49_661)
                 && i.location_id == solar_system_id as i64
         })
     });
@@ -653,6 +668,9 @@ pub async fn enter_abyssal_pocket_for_character(
     origin_sys: SolarSystemId,
 ) -> (i64, Vec<i64>) {
     let ship_id = session.ship_id.unwrap_or(100_000_002);
+    let ship_max_ships = validate_abyssal_hull_and_capacity(ctx, ship_id)
+        .map(|(_, _, m)| m)
+        .unwrap_or(1);
     let weather = classify_abyssal_filament(filament_type_id)
         .map(|(_, w)| w)
         .unwrap_or(AbyssalWeatherKind::Electrical);
@@ -683,7 +701,8 @@ pub async fn enter_abyssal_pocket_for_character(
             if let Some(existing) = reg
                 .abyssal_traces
                 .values()
-                .find(|t| t.entered_char_ids.contains(&char_id))
+                .filter(|t| t.entered_char_ids.contains(&char_id))
+                .max_by_key(|t| t.trace_ball_id)
                 .and_then(|t| t.pocket_id)
                 .and_then(|pid| {
                     reg.abyssal_pockets
@@ -790,6 +809,7 @@ pub async fn enter_abyssal_pocket_for_character(
                     collapsed_destroyed: false,
                     trace_ball_id: trace_id,
                     fleet_ship_ids: vec![ship_id],
+                    max_ships: ship_max_ships,
                 },
             );
             (pid, r1_npcs, r1_cache, false, now, collapse, goffset)
@@ -815,6 +835,7 @@ pub async fn enter_abyssal_pocket_for_character(
             filament_type_id,
             diff_mult,
             0.0,
+            ship_max_ships,
         )
         .await;
     } else {
@@ -842,6 +863,11 @@ pub async fn enter_abyssal_pocket_for_character(
         if let Some(it) = snap.items.get_mut(&ship_id) {
             it.location_id = abyssal_sys_id as i64;
         }
+        let old_chan_id = format!("solarsystemid2:{origin_sys}");
+        if let Some(chan) = snap.chat_channels.get_mut(&old_chan_id) {
+            chan.members.remove(&char_id);
+        }
+        snap.chat_channels.remove(&format!("solarsystemid2:{abyssal_sys_id}"));
     });
     session.solar_system_id = Some(abyssal_sys_id);
     (pocket_id, room1_npcs)
@@ -1101,7 +1127,7 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
 }
 
 pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
-    let evacuated: Vec<(CharacterId, ItemId, SolarSystemId, [f64; 3], HashMap<AttributeId, f64>)> =
+    let evacuated: Vec<(CharacterId, ItemId, SolarSystemId, SolarSystemId, [f64; 3], HashMap<AttributeId, f64>)> =
         with_pve_special_reg(ctx, |reg| {
             let mut out = Vec::new();
             for p in reg.abyssal_pockets.values_mut() {
@@ -1110,6 +1136,7 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
                     out.push((
                         p.character_id,
                         p.ship_id,
+                        p.abyssal_solar_system_id,
                         p.origin_solar_system_id,
                         p.origin_position,
                         p.saved_ship_attrs.clone(),
@@ -1118,11 +1145,31 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
             }
             out
         });
-    for (cid, sid, origin_sys, origin_pos, saved_attrs) in &evacuated {
+    for (cid, sid, abyss_sys, origin_sys, origin_pos, saved_attrs) in &evacuated {
         restore_abyssal_weather_dogma_modifiers(ctx, *sid, saved_attrs);
         crate::sp6_lifecycle::clear_abyssal_session(ctx, *cid);
         let evacuated_pos = random_offset_around_trace_origin(ctx, *origin_pos);
+        let abyss_handle = ctx.systems.get_or_spawn(*abyss_sys);
+        abyss_handle.try_remove_ball(*sid);
+        let mut destroyed_drones: Vec<ItemId> = Vec::new();
+        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+            rt.active_drones_in_space.retain(|&did, d| {
+                if d.owner_char_id == *cid || d.parent_ship_id == *sid {
+                    destroyed_drones.push(did);
+                    false
+                } else {
+                    true
+                }
+            });
+        });
+        for did in &destroyed_drones {
+            abyss_handle.try_remove_ball(*did);
+        }
         ctx.db.with_mut_snapshot(|snap| {
+            for did in &destroyed_drones {
+                snap.items.remove(did);
+                snap.item_positions.remove(did);
+            }
             if let Some(ch) = snap.characters.get_mut(cid) {
                 ch.solar_system_id = *origin_sys;
             }
@@ -1131,6 +1178,7 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
             }
             snap.item_positions.insert(*sid, evacuated_pos);
         });
+        ctx.sync_character_local_chat(*cid, Some(*abyss_sys), *origin_sys);
     }
     evacuated.len() as i64
 }
@@ -1231,6 +1279,7 @@ pub async fn handle_abyssal_entrance_deployment(
     let cur_sys = session
         .solar_system_id
         .ok_or_else(|| rpc_err("NoSolarSystem", "Session has no active solar system"))?;
+    crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, cur_sys)?;
     let filament_arg = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
 
     let (_iid, filament_type_id, tier, max_ships, _origin_sec, ship_pos) =

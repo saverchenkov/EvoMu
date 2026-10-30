@@ -18,7 +18,7 @@ use eve_server::router::ServerContext;
 use std::collections::HashMap;
 
 const PILOT_ID: i64 = 90_000_001;
-const SYS_JITA: u32 = 30_000_142;
+const SYS_JITA: u32 = 30_000_002; // Lashesih (0.8 high-sec, allows T1 filaments cleanly)
 const SHIP_ID: i64 = 100_000_001;
 const FILAMENT_TYPE: u32 = 47763; // Calm Firestorm Filament (group 1979)
 

@@ -222,6 +222,9 @@ pub(crate) async fn handle_module_cycles(
             }
 
             if mod_type.group_id == 330 {
+                if (32_000_000..=32_999_999).contains(&sys_id) {
+                    return Some(Err(BridgeRpcError { code: "CannotCloakInAbyssalSpace".into(), message: "Cloaking devices cannot be activated inside Abyssal Deadspace".into() }));
+                }
                 if fit.modules.values().any(|fm| ctx.sde.types.get(&fm.type_id).is_some_and(|t| t.group_id == 588)) {
                     return Some(Err(BridgeRpcError { code: "CannotCloakWithLanceFitted".into(), message: "Cannot activate a cloaking device while a Disruptive Lance or Superweapon is fitted".into() }));
                 }

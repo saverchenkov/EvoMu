@@ -292,6 +292,12 @@ pub(super) async fn handle_fleet_ops(
                 Err(e) => return Some(Err(e)),
             };
 
+            if (32_000_000..=32_999_999).contains(&sys_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotWarpInAbyssalSpace".into(),
+                    message: "Bookmarks and warp navigation are disabled inside Abyssal Deadspace".into(),
+                }));
+            }
             let sys = ctx.systems.get_or_spawn(sys_id);
             let Some((_, target_ball)) = sys.get_ball_snapshot(target_ship_id).await.ok().flatten()
             else {
@@ -472,6 +478,12 @@ pub(super) async fn handle_fleet_ops(
                 })
                 .clamp(0.0, 100_000.0);
 
+            if (32_000_000..=32_999_999).contains(&sys_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotWarpInAbyssalSpace".into(),
+                    message: "Bookmarks and warp navigation are disabled inside Abyssal Deadspace".into(),
+                }));
+            }
             let sys = ctx.systems.get_or_spawn(sys_id);
             let caller_ship_id = session.ship_id.unwrap_or(0);
             let caller_pos = sys
