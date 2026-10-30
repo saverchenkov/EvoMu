@@ -1292,7 +1292,7 @@ pub fn compute_structure_rigged_base_yield(
             Some(ty) => {
                 let is_ice = ty.group_id == 465 || ty.group_id == 4033;
                 let is_moon = matches!(ty.group_id, 1884 | 1920..=1923);
-                let is_ast = (ty.category_id == 25 || matches!(ty.group_id, 4915 | 4932)) && !is_ice && !is_moon;
+                let is_ast = (ty.category_id == 25 || ty.group_id == 4915) && !is_ice && !is_moon;
                 match rig_t.group_id {
                     1941 => is_ast, 1942 => is_ice, 1943 => is_moon, 1944 | 1945 => is_ast || is_ice || is_moon, _ => false,
                 }
@@ -1307,40 +1307,7 @@ pub fn compute_structure_rigged_base_yield(
     best_rig_yield.unwrap_or(unrigged)
 }
 
-/// Resolves reprocessable base materials for an item from SDE `sde_type_materials`
-/// (`type_materials` for fixed-output items; `randomized_type_materials` for Prismaticite
-/// `90041`/`90307` and Unrefined Minerals `90283..=90298`).
-pub fn resolve_reprocessable_materials(
-    sde: &SdeRegistry,
-    inv_type: &InvType,
-    item_id: i64,
-    next_entity_id: i64,
-    rng_bits: u64,
-    deterministic_quote: bool,
-) -> Option<Vec<eve_sde::TypeMaterialEntry>> {
-    if let Some(mats) = sde.type_materials.get(&inv_type.type_id).filter(|m| !m.is_empty()) {
-        return Some(mats.clone());
-    }
-    let rand_mats = sde.randomized_type_materials_for(inv_type.type_id);
-    if rand_mats.is_empty() {
-        return None;
-    }
-    let seed = (item_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(next_entity_id as u64) ^ rng_bits;
-    let entry = if rand_mats.len() == 1 {
-        &rand_mats[0]
-    } else if deterministic_quote {
-        &rand_mats[(item_id.unsigned_abs() as usize) % rand_mats.len()]
-    } else {
-        &rand_mats[(seed as usize) % rand_mats.len()]
-    };
-    let lo = entry.quantity_min.min(entry.quantity_max);
-    let hi = entry.quantity_min.max(entry.quantity_max);
-    let qty = if deterministic_quote || lo == hi {
-        lo + (hi - lo) / 2
-    } else {
-        let qty_seed = seed.rotate_left(29).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        lo + (qty_seed % (hi - lo + 1))
-    };
-    Some(vec![eve_sde::TypeMaterialEntry { material_type_id: entry.material_type_id, quantity: qty }])
-}
+pub use crate::services::space_mining_harvest::{
+    resolve_reprocessable_materials, resolve_reprocessable_materials_for_portions,
+};
 

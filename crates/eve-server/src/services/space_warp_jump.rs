@@ -523,6 +523,7 @@ async fn handle_cmd_warp_to_stuff(
             if let Some(belt_id) = target_belt_id {
                 let _ = ctx.notify_warp_to_asteroid_belt(char_id, belt_id);
             }
+            ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["timesWarped"], 1, ctx.now_unix());
             Ok(PyRep::Integer(tick as i64))
         }
         Err(e) => {
@@ -861,6 +862,7 @@ async fn handle_cmd_stargate_jump(
         .progression
         .career_goals
         .on_gameplay_event(char_id as u32, "travel", 1, &ctx.quasar_gateway);
+    ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["stargateJumps"], 1, now_unix);
 
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, dest_sys_id as i64)?;
 
@@ -1140,6 +1142,7 @@ async fn handle_dock(
             }
             record_session_change_timer(ctx, char_id, now_unix, sys_id, cur_tick, "dock");
             ctx.quasar_gateway.on_session_changed(session, now_unix);
+            ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["dockInStation"], 1, now_unix);
             Ok(PyRep::keyval([
                 ("locationID", PyRep::Integer(dock_id)),
                 ("isStructure", PyRep::Bool(is_structure)),

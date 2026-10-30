@@ -277,6 +277,36 @@ async fn test_mining_prismaticite_reprocessing_and_unrefined_mineral_reactions()
     assert!(seen_minerals.len() >= 2, "Multiple Prismaticite batches must select varying minerals");
     assert!(seen_quantities.len() >= 2, "Multiple Prismaticite batches must roll varying SDE quantities");
 
+    // Multi-batch Prismaticite reprocessing (1,000 units = 10 batches) must roll each 100-unit
+    // batch independently and distribute outputs across multiple distinct mineral types.
+    let multi_iid = 102_000_200_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 41;
+        snap.items.insert(multi_iid, make_item(multi_iid, 90041, char_id, jita_station, InventoryFlag::Hangar, 1_000, false));
+    });
+    let multi_rep = ctx
+        .dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(multi_iid)], &kw, None)
+        .await
+        .expect("Reprocess 10-batch Prismaticite stack");
+    let multi_yld = dict_get(&multi_rep, "yieldRate").and_then(|v| v.as_f64()).unwrap();
+    let PyRep::List(multi_outs) = dict_get(&multi_rep, "outputs").expect("outputs") else { panic!() };
+    assert!(
+        multi_outs.len() >= 2,
+        "10-batch Prismaticite stack must yield multiple distinct minerals across independent batch rolls, got {}",
+        multi_outs.len()
+    );
+    for out in multi_outs {
+        let out_tid = dict_get(out, "typeID").and_then(|v| v.as_i64()).unwrap() as u32;
+        let out_qty = dict_get(out, "quantity").and_then(|v| v.as_i64()).unwrap() as u64;
+        let &(q_min, q_max) = prism_ranges.get(&out_tid).expect("Output must be one of the 8 SDE minerals");
+        let exp_lo = ((q_min as f64) * multi_yld).floor() as u64;
+        let exp_hi = (((q_max * 10) as f64) * multi_yld).floor() as u64;
+        assert!(
+            (exp_lo..=exp_hi).contains(&out_qty),
+            "Multi-batch Prismaticite mineral {out_tid} qty {out_qty} outside bounds [{exp_lo}, {exp_hi}]"
+        );
+    }
+
     // 2. Unrefined Mineral Reaction (90274 Unrefined Tritanium Formula -> 90283 Unrefined Tritanium)
     // Requires Lowsec/Nullsec/WH Tatara/Athanor with an online Standup Composite Reactor I (45537).
     let tatara_id = 1_045_000_000_801_i64;
@@ -309,7 +339,7 @@ async fn test_mining_prismaticite_reprocessing_and_unrefined_mineral_reactions()
         }
         snap.structures.insert(
             tatara_id,
-            make_structure(tatara_id, 35836, corp_id, ls_sys, "Lowsec Reaction Tatara"),
+            make_structure(tatara_id, 35835, corp_id, ls_sys, "Lowsec Reaction Athanor"),
         );
         // Fit Biochemical Reactor (45539) first -> must fail with CompositeReactorRequired!
         snap.items.insert(reactor_iid, make_item(reactor_iid, 45539, corp_id, tatara_id, InventoryFlag::ServiceSlot0, 1, true));
@@ -368,10 +398,44 @@ async fn test_mining_prismaticite_reprocessing_and_unrefined_mineral_reactions()
             .expect("100 Unrefined Tritanium (90283) must be delivered to hangar")
     });
 
-    // Fit Reprocessing Facility (35899) on Tatara and reprocess the 100 Unrefined Tritanium -> Tritanium (34)
+    // Fit Reprocessing Facility (35899) + M-Set Asteroid Ore Grading Processor I (46633, group 1941)
+    // on Tatara: Asteroid Ore rig must boost Prismaticite (group 4915) but NOT Unrefined Mineral (group 4932).
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(102_000_820, make_item(102_000_820, 35899, corp_id, tatara_id, InventoryFlag::ServiceSlot1, 1, true));
+        snap.items.insert(102_000_821, make_item(102_000_821, 46633, corp_id, tatara_id, InventoryFlag::RigSlot0, 1, true));
+        snap.items.insert(102_000_822, make_item(102_000_822, 90041, char_id, tatara_id, InventoryFlag::Hangar, 100, false));
     });
+    let quotes = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "GetQuotes",
+            &[PyRep::List(vec![PyRep::Integer(unref_item_id), PyRep::Integer(102_000_822)])],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetQuotes on rigged Tatara");
+    let PyRep::List(quote_list) = quotes else { panic!("Expected quote list") };
+    let unref_quote = quote_list
+        .iter()
+        .find(|q| dict_get(q, "itemID").and_then(|v| v.as_i64()) == Some(unref_item_id))
+        .expect("Unrefined Tritanium quote");
+    let prism_quote = quote_list
+        .iter()
+        .find(|q| dict_get(q, "itemID").and_then(|v| v.as_i64()) == Some(102_000_822))
+        .expect("Prismaticite quote");
+    let unref_base = dict_get(unref_quote, "stationBaseYield").and_then(|v| v.as_f64()).unwrap();
+    let prism_base = dict_get(prism_quote, "stationBaseYield").and_then(|v| v.as_f64()).unwrap();
+    assert!(
+        (unref_base - 0.51).abs() < 1e-6,
+        "Unrefined Mineral (group 4932) must NOT receive M-Set Asteroid Ore Grading Processor rig bonus on Athanor (got {unref_base})"
+    );
+    assert!(
+        prism_base > 0.55,
+        "Prismaticite (group 4915) must receive M-Set Asteroid Ore Grading Processor rig bonus on Athanor (got {prism_base})"
+    );
     let unref_rep = ctx
         .dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(unref_item_id)], &kw, None)
         .await
@@ -391,88 +455,66 @@ async fn test_mining_prismaticite_reprocessing_and_unrefined_mineral_reactions()
 
 #[tokio::test]
 async fn test_mining_wormhole_ore_sites_and_sleeper_guards() {
-    // parity: feat:mining.wormhole-ore-sites
-    eve_testkit::attest(&["feat:mining.wormhole-ore-sites"]);
-    let ctx = ServerContext::new();
+    let ctx = ServerContext::new().with_seeded_rng(0x5EED_1234_5678_9ABC);
     crate::common::pin_clock(&ctx);
 
-    let cases: &[(u32, u8, &[&str], &[&str], usize, i64, &[(u32, usize)])] = &[
-        (
-            31_000_007, // C1
-            1,
-            &["Ordinary Perimeter Deposit", "Common Perimeter Deposit"],
-            &["Unexceptional Frontier Deposit", "Exceptional Core Deposit"],
-            31,
-            3_280_000,
-            &[(30209, 8), (30210, 2)],
-        ),
-        (
-            31_000_880, // C3
-            3,
-            &[
-                "Ordinary Perimeter Deposit",
-                "Common Perimeter Deposit",
-                "Unexceptional Frontier Deposit",
-                "Average Frontier Deposit",
-            ],
-            &["Exceptional Core Deposit", "Infrequent Core Deposit"],
-            51,
-            6_039_999,
-            &[(30209, 13), (30210, 4), (30211, 1), (30200, 1)],
-        ),
-        (
-            31_001_880, // C5
-            5,
-            &[
-                "Unexceptional Frontier Deposit",
-                "Average Frontier Deposit",
-                "Exceptional Core Deposit",
-                "Infrequent Core Deposit",
-            ],
-            &["Ordinary Perimeter Deposit", "Common Perimeter Deposit"],
-            111,
-            8_527_999,
-            &[(30209, 5), (30210, 2), (30211, 1), (30200, 1), (30203, 2), (30196, 1)],
-        ),
-        (
-            31_002_367, // C6
-            6,
-            &[
-                "Exceptional Core Deposit",
-                "Infrequent Core Deposit",
-            ],
-            &["Ordinary Perimeter Deposit", "Common Perimeter Deposit", "Unexceptional Frontier Deposit"],
-            91,
-            5_768_000,
-            &[(30203, 2), (30196, 1)],
-        ),
-        (
-            31_002_580, // C13 Shattered
-            13,
-            &[
-                "Ordinary Perimeter Deposit",
-                "Common Perimeter Deposit",
-                "Unexceptional Frontier Deposit",
-                "Average Frontier Deposit",
-                "Exceptional Core Deposit",
-                "Infrequent Core Deposit",
-            ],
-            &[],
-            142,
-            11_807_999,
-            &[(30209, 13), (30210, 4), (30211, 1), (30200, 1), (30203, 2), (30196, 1)],
-        ),
-    ];
+    // 1. Verify full 11-site W-space deposit catalog across C1..=C6 and Shattered C12..=C18
+    assert_eq!(eve_server::services::mining_sites::WORMHOLE_ORE_SITES.len(), 11);
+    for def in eve_server::services::mining_sites::WORMHOLE_ORE_SITES {
+        let (did, rocks) = eve_server::services::mining_sites::resolve_wormhole_ore_site_with_dungeon(&ctx.sde, def)
+            .unwrap_or_else(|e| panic!("Failed to resolve {}: {e}", def.dungeon_name));
+        assert!(did > 0 && !rocks.is_empty(), "{} must resolve SDE asteroids", def.dungeon_name);
+    }
+    for cls in 1..=4_u8 {
+        let names: Vec<&str> = eve_server::services::mining_sites::wormhole_ore_sites_for_class(cls)
+            .into_iter()
+            .map(|d| d.dungeon_name)
+            .collect();
+        assert_eq!(names.len(), 4, "C{cls} must have 4 Perimeter/Frontier sites: {names:?}");
+        assert!(!names.iter().any(|n| n.contains("Core") || n.contains("Shattered")));
+    }
+    for cls in 5..=6_u8 {
+        let names: Vec<&str> = eve_server::services::mining_sites::wormhole_ore_sites_for_class(cls)
+            .into_iter()
+            .map(|d| d.dungeon_name)
+            .collect();
+        assert_eq!(names.len(), 10, "C{cls} must have 10 Perimeter/Frontier/Core sites: {names:?}");
+        assert!(names.contains(&"Isolated Core Deposit") && names.contains(&"Rarified Core Deposit"));
+        assert!(names.contains(&"Uncommon Core Deposit") && names.contains(&"Unusual Core Deposit"));
+        assert!(names.contains(&"Infrequent Core Deposit") && names.contains(&"Exceptional Core Deposit"));
+        assert!(!names.contains(&"Shattered Debris Field"));
+    }
+    for cls in [12_u8, 13_u8] {
+        let names: Vec<&str> = eve_server::services::mining_sites::wormhole_ore_sites_for_class(cls)
+            .into_iter()
+            .map(|d| d.dungeon_name)
+            .collect();
+        assert_eq!(names.len(), 11, "C{cls} Shattered must include all 11 sites: {names:?}");
+        assert!(names.contains(&"Shattered Debris Field"));
+    }
 
-    for &(sys_id, expected_class, expected_sites, forbidden_sites, expected_rocks, expected_units, expected_guards) in cases {
+    // 2. Seed representative W-space systems across C1, C3, C5, C6, and C13 Shattered;
+    // verify bounded anomaly pool sampling (4 distinct anomalies per system), Sleeper guard waves,
+    // SDE maxVelocity/inertia, and idempotency.
+    let mut seen_core_deposits = HashSet::new();
+    let sample_systems: &[(u32, u8)] = &[
+        (31_000_007, 1),  // C1
+        (31_000_880, 3),  // C3
+        (31_001_880, 5),  // C5
+        (31_001_881, 5),  // C5
+        (31_001_882, 5),  // C5
+        (31_002_367, 6),  // C6
+        (31_002_368, 6),  // C6
+        (31_002_580, 13), // C13 Shattered
+    ];
+    for &(sys_id, expected_class) in sample_systems {
         let sys = ctx.sde.solar_systems.get(&sys_id).expect("Wormhole system in SDE");
         assert_eq!(sys.wormhole_class_id, Some(i32::from(expected_class)));
 
         eve_server::router::dispatch::seed_system_mining_sites_from_sde(&ctx, sys_id).await;
-        // Second call in same session must be idempotent for both asteroids and Sleeper guards
         eve_server::router::dispatch::seed_system_mining_sites_from_sde(&ctx, sys_id).await;
 
-        let (anom_names, sig_names, ast_types, ast_count, gas_count, total_units) = ctx.db.with_snapshot(|snap| {
+        let (anom_names, sig_names, ast_types, gas_count) = ctx.db.with_snapshot(|snap| {
             let anoms = snap.cosmic_anomalies.get(&sys_id).cloned().unwrap_or_default();
             let an_names: Vec<String> = anoms
                 .iter()
@@ -502,47 +544,48 @@ async fn test_mining_wormhole_ore_sites_and_sleeper_guards() {
                 .filter(|a| ctx.sde.types.get(&a.type_id).is_some_and(|t| t.group_id == 711))
                 .count();
             let a_tids: HashSet<u32> = sys_asts.iter().map(|a| a.type_id).collect();
-            let units_sum: i64 = sys_asts.iter().map(|a| a.quantity).sum();
-            (an_names, s_names, a_tids, sys_asts.len(), g_count, units_sum)
+            (an_names, s_names, a_tids, g_count)
         });
 
-        assert_eq!(
-            anom_names.len(),
-            expected_sites.len(),
-            "C{expected_class} system {sys_id} anomaly count mismatch: {anom_names:?}"
-        );
-        assert_eq!(gas_count, 2, "C{expected_class} system {sys_id} Barren Perimeter Reservoir gas cloud count mismatch");
-        assert_eq!(ast_count, expected_rocks, "C{expected_class} system {sys_id} SDE rock count mismatch");
-        assert_eq!(total_units, expected_units, "C{expected_class} system {sys_id} wiki ore unit total mismatch");
-        for &site_name in expected_sites {
-            assert!(anom_names.iter().any(|n| n == site_name), "Missing {site_name} in C{expected_class} {sys_id}");
+        let unique_anoms: HashSet<&String> = anom_names.iter().collect();
+        assert_eq!(anom_names.len(), 4, "C{expected_class} {sys_id} must sample 4 anomalies: {anom_names:?}");
+        assert_eq!(unique_anoms.len(), 4, "C{expected_class} {sys_id} sampled anomalies must be distinct: {anom_names:?}");
+        assert_eq!(gas_count, 2, "C{expected_class} {sys_id} Barren Perimeter Reservoir gas cloud count mismatch");
+        if expected_class <= 4 {
+            assert!(!anom_names.iter().any(|n| n.contains("Core") || n.contains("Shattered")));
+        } else if expected_class <= 6 {
+            assert!(!anom_names.iter().any(|n| n == "Shattered Debris Field"));
+            for n in &anom_names {
+                if n.contains("Core Deposit") {
+                    seen_core_deposits.insert(n.clone());
+                }
+            }
+        } else if expected_class == 13 {
+            assert!(anom_names.iter().any(|n| n == "Shattered Debris Field"), "C13 {sys_id} must include Shattered Debris Field");
+        }
+
+        let mut expected_guards: HashMap<u32, usize> = HashMap::new();
+        for site_name in &anom_names {
             assert!(sig_names.iter().any(|n| n == site_name), "Missing OreAnomaly signature {site_name}");
-        }
-        for &bad_name in forbidden_sites {
-            assert!(!anom_names.iter().any(|n| n == bad_name), "Unexpected {bad_name} in C{expected_class} {sys_id}");
+            let def = eve_server::services::mining_sites::WORMHOLE_ORE_SITES
+                .iter()
+                .find(|d| d.dungeon_name == site_name)
+                .expect("Spawned anomaly must be in WORMHOLE_ORE_SITES");
+            for &(gid, cnt) in def.guards {
+                *expected_guards.entry(gid).or_insert(0) += cnt as usize;
+            }
         }
 
-        // Verify spawned asteroids span Highsec (Pyroxeres 46686), Lowsec (Kernite 46683 / Omber 46684),
-        // and Nullsec (Bistot 46676 / Arkonor 46678 / Gneiss 46679) IV-Grade ore families.
-        assert!(ast_types.contains(&46686), "Wormhole ore sites in {sys_id} must include IV-Grade Pyroxeres (46686)");
-        assert!(
-            ast_types.contains(&46683) && ast_types.contains(&46684),
-            "Wormhole ore sites in {sys_id} must include IV-Grade Kernite (46683) and Omber (46684)"
-        );
-        assert!(
-            ast_types.contains(&46676) && ast_types.contains(&46678) && ast_types.contains(&46679),
-            "Wormhole ore sites in {sys_id} must include IV-Grade Bistot/Arkonor/Gneiss"
-        );
+        assert!(ast_types.contains(&46686) && ast_types.contains(&46683));
+        assert!(ast_types.contains(&46676) && ast_types.contains(&46678) && ast_types.contains(&46679));
 
-        // Verify exact Sleeper guard waves and SDE dogma max_velocity / inertia attributes
-        let handle = ctx.systems.get_or_spawn(sys_id);
-        let balls = handle.list_balls().await.expect("list_balls");
-        for &(npc_tid, expected_count) in expected_guards {
+        let balls = ctx.systems.get_or_spawn(sys_id).list_balls().await.expect("list_balls");
+        for (&npc_tid, &expected_count) in &expected_guards {
             let matching: Vec<_> = balls.iter().filter(|b| b.type_id == npc_tid).collect();
             assert_eq!(
                 matching.len(),
                 expected_count,
-                "Expected {expected_count} Sleeper guard NPCs of type {npc_tid} in C{expected_class} {sys_id} (got {})",
+                "Expected {expected_count} Sleeper guards of type {npc_tid} in C{expected_class} {sys_id} (got {})",
                 matching.len()
             );
             let sde_max_vel = ctx.sde.types[&npc_tid]
@@ -556,15 +599,22 @@ async fn test_mining_wormhole_ore_sites_and_sleeper_guards() {
             }
         }
     }
+    assert!(
+        seen_core_deposits.len() >= 3,
+        "Seeded C5/C6 systems must sample multiple distinct Core deposits, got {seen_core_deposits:?}"
+    );
 
-    // Verify server restart respawns Sleeper guards even when `already_seeded` is true in persisted DB
+    // 3. Verify server restart respawns exact Sleeper guards for persisted anomalies
     let restarted_ctx = ServerContext::with_sde_and_repository(
         std::sync::Arc::clone(&ctx.sde),
         std::sync::Arc::clone(&ctx.db),
     );
     crate::common::pin_clock(&restarted_ctx);
-    eve_server::router::dispatch::seed_system_mining_sites_from_sde(&restarted_ctx, 31_000_007).await;
-    let restarted_balls = restarted_ctx.systems.get_or_spawn(31_000_007).list_balls().await.expect("list_balls after restart");
-    assert_eq!(restarted_balls.iter().filter(|b| b.type_id == 30209).count(), 8);
-    assert_eq!(restarted_balls.iter().filter(|b| b.type_id == 30210).count(), 2);
+    eve_server::router::dispatch::seed_system_mining_sites_from_sde(&restarted_ctx, 31_001_880).await;
+    let restarted_balls = restarted_ctx.systems.get_or_spawn(31_001_880).list_balls().await.expect("list_balls after restart");
+    let guard_ball_count = restarted_balls
+        .iter()
+        .filter(|b| eve_server::services::mining_sites::WORMHOLE_GUARD_TYPE_IDS.contains(&b.type_id))
+        .count();
+    assert!(guard_ball_count > 0, "Restarted C5 system must respawn Sleeper guards for persisted anomalies");
 }

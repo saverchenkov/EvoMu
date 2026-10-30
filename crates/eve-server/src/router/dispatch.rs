@@ -1195,28 +1195,8 @@ pub async fn tick_sov_prospecting_deposit_respawn(ctx: &ServerContext, sys_id: u
     });
 
     for (aid, tid, units, uvol, rad, pos) in newly_spawned {
-        let ball = Ball {
-            id: aid,
-            type_id: tid,
-            position: pos,
-            velocity: DVec3::ZERO,
-            max_velocity: 0.0,
-            inertia: 1.0,
-            mass: 80_000.0,
-            radius: rad,
-            speed_fraction: 0.0,
-            mode: MovementMode::Stop,
-        };
-        let st = AsteroidState {
-            asteroid_id: aid,
-            belt_id: 0,
-            type_id: tid,
-            initial_units: units,
-            remaining_units: units,
-            unit_volume: uvol,
-            depleted: false,
-            respawn_at_tick: None,
-        };
+        let ball = Ball { id: aid, type_id: tid, position: pos, velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 80_000.0, radius: rad, speed_fraction: 0.0, mode: MovementMode::Stop };
+        let st = AsteroidState { asteroid_id: aid, belt_id: 0, type_id: tid, initial_units: units, remaining_units: units, unit_volume: uvol, depleted: false, respawn_at_tick: None };
         let _ = sys_handle.spawn_asteroid(st, ball).await;
     }
 }
@@ -1225,10 +1205,7 @@ pub async fn tick_sov_prospecting_deposit_respawn(ctx: &ServerContext, sys_id: u
 pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32) {
     tick_sov_prospecting_deposit_respawn(ctx, sys_id).await;
     crate::services::space_mining_harvest::tick_ice_belt_respawn_sync(ctx, sys_id);
-
-    let Some(sys) = ctx.sde.solar_systems.get(&sys_id) else {
-        return;
-    };
+    let Some(sys) = ctx.sde.solar_systems.get(&sys_id) else { return; };
     let region = region_name(&ctx.sde, sys_id).map(str::to_owned);
 
     enum Planned {
@@ -1238,64 +1215,37 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
         WhGas(u32, &'static str, Vec<(TypeId, i64)>),
     }
     let mut planned: Vec<Planned> = Vec::new();
-    for def in COSMIC_ORE_SITES
-        .iter()
-        .filter(|d| d.band.matches_system(sys))
-    {
+    for def in COSMIC_ORE_SITES.iter().filter(|d| d.band.matches_system(sys)) {
         match resolve_ore_site(&ctx.sde, def) {
-            Ok(site) if site.asteroids.iter().all(|a| ctx.sde.types.contains_key(&a.type_id)) => {
-                planned.push(Planned::Ore(def.kind, site))
-            }
-            Ok(site) => warn!(
-                site = site.name,
-                "ore site references an asteroid type missing from sde_types; not spawned"
-            ),
+            Ok(site) if site.asteroids.iter().all(|a| ctx.sde.types.contains_key(&a.type_id)) => planned.push(Planned::Ore(def.kind, site)),
+            Ok(site) => warn!(site = site.name, "ore site references an asteroid type missing from sde_types; not spawned"),
             Err(e) => warn!(site = def.dungeon_name, error = e, "ore site not spawned"),
         }
     }
-    if let Some(def) = GAS_SITES.iter().find(|d| {
-        d.band.matches_system(sys)
-            && region
-                .as_deref()
-                .is_some_and(|r| d.region_names.contains(&r))
-    }) {
+    if let Some(def) = GAS_SITES.iter().find(|d| d.band.matches_system(sys) && region.as_deref().is_some_and(|r| d.region_names.contains(&r))) {
         match resolve_gas_site(&ctx.sde, def) {
-            Ok(site) if ctx.sde.types.contains_key(&site.gas_type_id) => {
-                planned.push(Planned::Gas(site))
-            }
-            Ok(site) => warn!(
-                site = site.name,
-                "gas site references a gas type missing from sde_types; not spawned"
-            ),
+            Ok(site) if ctx.sde.types.contains_key(&site.gas_type_id) => planned.push(Planned::Gas(site)),
+            Ok(site) => warn!(site = site.name, "gas site references a gas type missing from sde_types; not spawned"),
             Err(e) => warn!(site = def.dungeon_name, error = e, "gas site not spawned"),
         }
     }
-    let wh_class_opt = sys
-        .wormhole_class_id
+    let wh_class_opt = sys.wormhole_class_id
         .or_else(|| ctx.sde.constellations.get(&sys.constellation_id).and_then(|c| c.wormhole_class_id))
         .or_else(|| ctx.sde.regions.get(&sys.region_id).and_then(|r| r.wormhole_class_id))
         .map(|c| c as u8);
-    if (31_000_000..32_000_000).contains(&sys_id)
-        || wh_class_opt.is_some_and(|c| matches!(c, 1..=6 | 12..=18))
-    {
-        for ore_def in crate::services::mining_sites::wormhole_ore_sites_for_class(wh_class_opt.unwrap_or(3)) {
-            if let Ok((did, rocks)) =
-                crate::services::mining_sites::resolve_wormhole_ore_site_with_dungeon(&ctx.sde, ore_def)
-            {
+    if (31_000_000..32_000_000).contains(&sys_id) || wh_class_opt.is_some_and(|c| matches!(c, 1..=6 | 12..=18)) {
+        for ore_def in crate::services::mining_sites::sample_wormhole_ore_sites_for_system(&ctx.sde, &ctx.mechanic_rng, sys_id, wh_class_opt.unwrap_or(3)) {
+            if let Ok((did, rocks)) = crate::services::mining_sites::resolve_wormhole_ore_site_with_dungeon(&ctx.sde, ore_def) {
                 planned.push(Planned::WhOre(did, ore_def, rocks));
             }
         }
         if let Some(wh_def) = crate::services::mining_sites::WORMHOLE_GAS_SITES.first() {
-            if let Ok((did, clouds)) =
-                crate::services::mining_sites::resolve_wormhole_gas_site(&ctx.sde, wh_def)
-            {
+            if let Ok((did, clouds)) = crate::services::mining_sites::resolve_wormhole_gas_site(&ctx.sde, wh_def) {
                 planned.push(Planned::WhGas(did, wh_def.dungeon_name, clouds));
             }
         }
     }
-    if planned.is_empty() {
-        return;
-    }
+    if planned.is_empty() { return; }
 
     let type_vol_rad = |tid: u32| -> (f64, f64) {
         ctx.sde.types.get(&tid).map(|t| (t.volume.max(0.001), t.radius.max(50.0))).unwrap_or((0.001, 50.0))
@@ -1401,11 +1351,9 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
     });
 
     if was_already_seeded {
-        let wh_sites: Vec<([f64; 3], &'static crate::services::mining_sites::WormholeOreSiteDef)> = planned
-            .iter()
-            .zip(centres.iter().copied())
-            .filter_map(|(p, c)| if let Planned::WhOre(_, def, _) = p { Some((c, *def)) } else { None })
-            .collect();
+        let wh_sites = ctx.db.with_snapshot(|snap| {
+            crate::services::mining_sites::collect_persisted_wormhole_guard_sites(snap, sys_id)
+        });
         crate::services::mining_sites::respawn_wormhole_ore_guards_if_missing(ctx, sys_id, &wh_sites).await;
         return;
     }

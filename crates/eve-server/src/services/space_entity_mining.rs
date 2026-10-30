@@ -10,7 +10,7 @@ use crate::router::{BoundObjectEntry, ServerContext};
 pub use crate::services::mining_advanced::mining_compression::{
     caller_can_take_corp_hangar_item, compute_structure_reprocessing_base_yield,
     compute_structure_rigged_base_yield, resolve_reprocessable_materials,
-    structure_has_online_reprocessing_service,
+    resolve_reprocessable_materials_for_portions, structure_has_online_reprocessing_service,
 };
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldStateSnapshot};
 use eve_sde::{InvType, SdeRegistry, TypeId};
@@ -1054,10 +1054,6 @@ pub async fn handle(
                     let Some(inv_type) = ctx.sde.types.get(&item.type_id) else {
                         return Err(BridgeRpcError { code: "ItemNotReprocessable".into(), message: format!("Unknown item type {}", item.type_id) });
                     };
-                    let rng_bits = (ctx.mechanic_rng.try_unit_f64().unwrap_or(0.5) * (u64::MAX as f64)) as u64;
-                    let Some(materials) = resolve_reprocessable_materials(&ctx.sde, inv_type, item_id, snap.next_entity_id, rng_bits, false) else {
-                        return Err(BridgeRpcError { code: "ItemNotReprocessable".into(), message: format!("Item type {} ({}) has no SDE typeMaterials and cannot be reprocessed", item.type_id, inv_type.name) });
-                    };
                     if item.singleton || snap.items.values().any(|child| child.location_id == item_id) {
                         return Err(BridgeRpcError { code: "ItemMustBeRepackaged".into(), message: format!("Item {item_id} must be emptied and repackaged before reprocessing") });
                     }
@@ -1065,18 +1061,30 @@ pub async fn handle(
                         return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} is locked and cannot be reprocessed") });
                     }
                     let portion_size = inv_type.portion_size.max(1) as i32;
+                    let portions = item.quantity / portion_size;
+                    let remainder = item.quantity % portion_size;
+                    let rng_bits = ctx.mechanic_rng.try_next_u64().unwrap_or(0);
+                    let Some(materials) = resolve_reprocessable_materials_for_portions(
+                        &ctx.sde,
+                        inv_type,
+                        item_id,
+                        snap.next_entity_id,
+                        rng_bits,
+                        portions.max(1),
+                        false,
+                    ) else {
+                        return Err(BridgeRpcError { code: "ItemNotReprocessable".into(), message: format!("Item type {} ({}) has no SDE typeMaterials and cannot be reprocessed", item.type_id, inv_type.name) });
+                    };
                     if item.quantity < portion_size {
                         return Err(BridgeRpcError { code: "InsufficientBatchPortion".into(), message: format!("Need at least {portion_size} units to reprocess type {} (have {})", item.type_id, item.quantity) });
                     }
                     let (station_base_yield, yield_rate, station_tax_rate) =
                         compute_reprocessing_rates_for_item(&ctx.sde, snap, char_id, station_id, inv_type);
-                    let portions = item.quantity / portion_size;
-                    let remainder = item.quantity % portion_size;
                     let mut gross_value_cents = 0_i64;
                     for mat in &materials {
                         let unit_val = ctx.sde.types.get(&mat.material_type_id).map(|t| t.base_price.max(4.0)).unwrap_or(4.0);
                         let unit_cents = IskCents::from_f64_isk(unit_val).0;
-                        let est_qty = ((portions as f64) * (mat.quantity as f64) * yield_rate).floor() as i64;
+                        let est_qty = ((mat.quantity as f64) * yield_rate).floor() as i64;
                         gross_value_cents = gross_value_cents.saturating_add(unit_cents.saturating_mul(est_qty.max(0)));
                     }
                     let tax_cents = if station_tax_rate > 0.0 && gross_value_cents > 0 {
@@ -1101,7 +1109,7 @@ pub async fn handle(
                     }
                     let mut outputs: Vec<(i64, TypeId, i32)> = Vec::with_capacity(materials.len());
                     for mat in &materials {
-                        let out_qty = ((portions as f64) * (mat.quantity as f64) * yield_rate).floor() as i32;
+                        let out_qty = ((mat.quantity as f64) * yield_rate).floor() as i32;
                         if out_qty <= 0 { continue; }
                         snap.next_entity_id += 1;
                         let mid = snap.next_entity_id;
@@ -1182,6 +1190,12 @@ pub async fn handle(
 
             match res {
                 Ok(mut batch_results) => {
+                    ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(
+                        char_id as u32,
+                        &["refineOreCount", "finishedReprocessingCount", "reprocessingInput", "reprocessingOutput"],
+                        batch_results.len().max(1) as u64,
+                        ctx.now_unix(),
+                    );
                     // parity: notify:OnReprocessingMaterialsChanged
                     ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),
@@ -1258,12 +1272,15 @@ pub async fn handle(
                         continue;
                     }
                     let Some(inv_type) = ctx.sde.types.get(&item.type_id) else { continue };
-                    let Some(materials) = resolve_reprocessable_materials(
+                    let portion_size = inv_type.portion_size.max(1) as i32;
+                    let portions = item.quantity / portion_size;
+                    let Some(materials) = resolve_reprocessable_materials_for_portions(
                         &ctx.sde,
                         inv_type,
                         item_id,
                         snap.next_entity_id,
                         0,
+                        portions,
                         true,
                     ) else {
                         continue;
@@ -1271,11 +1288,9 @@ pub async fn handle(
                     let (item_base_yield, yield_rate, item_tax_rate) =
                         compute_reprocessing_rates_for_item(&ctx.sde, snap, char_id, station_id, inv_type);
                     let net_yield_rate = yield_rate;
-                    let portion_size = inv_type.portion_size.max(1) as i32;
-                    let portions = item.quantity / portion_size;
                     let mut est_outputs = Vec::new();
                     for mat in &materials {
-                        let out_qty = ((portions as f64) * (mat.quantity as f64) * yield_rate).floor() as i32;
+                        let out_qty = ((mat.quantity as f64) * yield_rate).floor() as i32;
                         if out_qty > 0 {
                             est_outputs.push(PyRep::keyval([
                                 ("typeID", PyRep::Integer(mat.material_type_id as i64)),

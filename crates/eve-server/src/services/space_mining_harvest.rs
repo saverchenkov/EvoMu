@@ -42,6 +42,11 @@ pub fn dispatch_mining_gameplay_events(ctx: &ServerContext, char_id: i64, units:
                 ctx.now_unix(),
                 &ctx.quasar_gateway,
             );
+        let ore_vol = ctx.sde.types.get(&ore_type_id).map(|t| t.volume).unwrap_or(0.1) * (units as f64);
+        let now_unix = ctx.now_unix();
+        ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["timesMined"], 1, now_unix);
+        ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["totalMined"], units, now_unix);
+        ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["volumeMined"], ore_vol.round().max(1.0) as u64, now_unix);
         crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
             ctx,
             char_id,
@@ -354,7 +359,315 @@ pub fn tick_all_ice_belt_respawns_sync(ctx: &ServerContext) {
     }
 }
 
-pub const WORMHOLE_GUARD_TYPE_IDS: &[eve_sde::TypeId] = &[30209, 30210, 30211, 30200, 30203, 30196];
+const fn wh_row(type_id: eve_sde::TypeId, total_units: i64) -> super::mining_sites::OreQuantityRow {
+    super::mining_sites::OreQuantityRow {
+        selector: super::mining_sites::OreSelector::Type(type_id),
+        total_units,
+    }
+}
+
+/// Guarded W-space ore anomaly definition.
+///
+/// DERIVED (from eve-wiki; SDE dungeons lack wormhole class column): wormhole class bands
+/// (`wh_class_min..=wh_class_max`) and Sleeper guard waves are transcribed from EVE University
+/// wiki deposit articles, while asteroid type layouts and counts come from SDE `sde_dungeons`
+/// and `sde_dungeon_asteroid_counts`.
+#[derive(Debug, Clone, Copy)]
+pub struct WormholeOreSiteDef {
+    pub dungeon_name: &'static str,
+    pub wh_class_min: u8,
+    pub wh_class_max: u8,
+    pub rows: &'static [super::mining_sites::OreQuantityRow],
+    pub guards: &'static [(eve_sde::TypeId, u32)],
+    pub source: &'static str,
+}
+
+// DERIVED (from eve-wiki; SDE dungeons lack wormhole class column)
+pub const WORMHOLE_ORE_SITES: &[WormholeOreSiteDef] = &[
+    WormholeOreSiteDef {
+        dungeon_name: "Ordinary Perimeter Deposit",
+        wh_class_min: 1,
+        wh_class_max: 6,
+        rows: &[wh_row(46678, 10_000), wh_row(46676, 20_000), wh_row(46679, 20_000), wh_row(46683, 200_000), wh_row(46684, 200_000), wh_row(46686, 1_620_000)],
+        guards: &[(30209, 3), (30210, 2)],
+        source: "eve-wiki/articles/Ordinary_Perimeter_Deposit.md:25-37",
+    },
+    WormholeOreSiteDef {
+        dungeon_name: "Common Perimeter Deposit",
+        wh_class_min: 1,
+        wh_class_max: 6,
+        rows: &[wh_row(46678, 20_000), wh_row(46676, 30_000), wh_row(46679, 40_000), wh_row(46683, 300_000), wh_row(46684, 300_000), wh_row(46686, 520_000)],
+        guards: &[(30209, 5)],
+        source: "eve-wiki/articles/Common_Perimeter_Deposit.md:24-35",
+    },
+    WormholeOreSiteDef {
+        dungeon_name: "Unexceptional Frontier Deposit",
+        wh_class_min: 1,
+        wh_class_max: 6,
+        rows: &[wh_row(46678, 30_000), wh_row(46676, 50_000), wh_row(46679, 60_000), wh_row(46683, 400_000), wh_row(46684, 400_000)],
+        guards: &[(30211, 1), (30209, 2), (30210, 2)],
+        source: "eve-wiki/articles/Unexceptional_Frontier_Deposit.md:26-38",
+    },
+    WormholeOreSiteDef {
+        dungeon_name: "Average Frontier Deposit",
+        wh_class_min: 1,
+        wh_class_max: 6,
+        rows: &[wh_row(46678, 30_000), wh_row(46676, 39_999), wh_row(46679, 450_000), wh_row(46683, 300_000), wh_row(46684, 300_000), wh_row(46686, 700_000)],
+        guards: &[(30209, 3), (30200, 1)],
+        source: "eve-wiki/articles/Average_Frontier_Deposit.md:27-39",
+    },
+    WormholeOreSiteDef {
+        dungeon_name: "Isolated Core Deposit",
+        wh_class_min: 5,
+        wh_class_max: 6,
+        rows: &[wh_row(46678, 36_000), wh_row(46676, 48_000), wh_row(46679, 72_000), wh_row(46683, 720_000), wh_row(46684, 720_000)],
+        guards: &[(30201, 1), (30209, 2)],
+        source: "eve-wiki/articles/Isolated_Core_Deposit.md:26-37",
+    },
+    WormholeOreSiteDef {
+        dungeon_name: "Rarified Core Deposit",
+        wh_class_min: 5,
+        wh_class_max: 6,
+        rows: &[wh_row(46678, 100_000), wh_row(46676, 160_000), wh_row(46679, 200_000), wh_row(46683, 1_200_000), wh_row(46684, 1_000_000), wh_row(46686, 960_000)],
+        guards: &[(30196, 1), (30206, 2)],
+        source: "eve-wiki/articles/Rarified_Core_Deposit.md:30-42",
+    },
+    WormholeOreSiteDef {
+        dungeon_name: "Uncommon Core Deposit",
+        wh_class_min: 5,
+        wh_class_max: 6,
+        rows: &[wh_row(46678, 40_000), wh_row(46676, 60_000), wh_row(46679, 70_000), wh_row(46683, 590_000), wh_row(46684, 600_000), wh_row(46686, 500_000)],
+        guards: &[(30202, 1), (30210, 2)],
+        source: "eve-wiki/articles/Uncommon_Core_Deposit.md:26-38",
+    },
+    WormholeOreSiteDef {
+        dungeon_name: "Unusual Core Deposit",
+        wh_class_min: 5,
+        wh_class_max: 6,
+        rows: &[wh_row(46678, 70_000), wh_row(46676, 100_000), wh_row(46679, 120_000), wh_row(46683, 800_000), wh_row(46684, 800_000)],
+        guards: &[(30200, 2)],
+        source: "eve-wiki/articles/Unusual_Core_Deposit.md:24-34",
+    },
+    WormholeOreSiteDef {
+        dungeon_name: "Infrequent Core Deposit",
+        wh_class_min: 5,
+        wh_class_max: 6,
+        rows: &[wh_row(46678, 50_000), wh_row(46676, 70_000), wh_row(46679, 90_000), wh_row(46683, 400_000), wh_row(46684, 400_000), wh_row(46686, 868_000)],
+        guards: &[(30203, 2)],
+        source: "eve-wiki/articles/Infrequent_Core_Deposit.md:25-36",
+    },
+    WormholeOreSiteDef {
+        dungeon_name: "Exceptional Core Deposit",
+        wh_class_min: 5,
+        wh_class_max: 6,
+        rows: &[wh_row(46678, 80_000), wh_row(46676, 120_000), wh_row(46679, 160_000), wh_row(46683, 1_000_000), wh_row(46684, 1_000_000), wh_row(46686, 1_530_000)],
+        guards: &[(30196, 1)],
+        source: "eve-wiki/articles/Exceptional_Core_Deposit.md:29-40",
+    },
+    WormholeOreSiteDef {
+        dungeon_name: "Shattered Debris Field",
+        wh_class_min: 12,
+        wh_class_max: 18,
+        rows: &[wh_row(46678, 250_000), wh_row(46676, 460_000), wh_row(46679, 200_000), wh_row(46683, 383_730), wh_row(46686, 1_631_280)],
+        guards: &[(30212, 2), (30203, 1)],
+        source: "eve-wiki/articles/Shattered_Debris_Field.md:26-41",
+    },
+];
+
+// DERIVED (from eve-wiki; SDE dungeons lack wormhole class column)
+pub fn wormhole_ore_sites_for_class(wh_class: u8) -> Vec<&'static WormholeOreSiteDef> {
+    if matches!(wh_class, 12..=18) {
+        return WORMHOLE_ORE_SITES.iter().collect();
+    }
+    let eff_class = if (1..=6).contains(&wh_class) { wh_class } else { 3 };
+    WORMHOLE_ORE_SITES
+        .iter()
+        .filter(|d| eff_class >= d.wh_class_min && eff_class <= d.wh_class_max)
+        .collect()
+}
+
+pub fn resolve_wormhole_ore_site_with_dungeon(
+    sde: &eve_sde::SdeRegistry,
+    def: &WormholeOreSiteDef,
+) -> Result<(u32, Vec<(eve_sde::TypeId, i64)>), String> {
+    let site_def = super::mining_sites::OreSiteDef {
+        dungeon_name: def.dungeon_name,
+        kind: super::mining_sites::SiteKind::Anomaly,
+        band: super::mining_sites::SiteBand::NullSec,
+        rows: def.rows,
+        source: def.source,
+    };
+    let resolved = super::mining_sites::resolve_ore_site(sde, &site_def)?;
+    Ok((
+        resolved.dungeon_id,
+        resolved.asteroids.into_iter().map(|a| (a.type_id, a.units)).collect(),
+    ))
+}
+
+pub fn resolve_wormhole_ore_site(
+    sde: &eve_sde::SdeRegistry,
+    def: &WormholeOreSiteDef,
+) -> Result<Vec<(eve_sde::TypeId, i64)>, String> {
+    resolve_wormhole_ore_site_with_dungeon(sde, def).map(|(_, rocks)| rocks)
+}
+
+pub fn sample_wormhole_ore_sites_for_system(
+    sde: &eve_sde::SdeRegistry,
+    rng: &crate::rng::MechanicRng,
+    sys_id: u32,
+    wh_class: u8,
+) -> Vec<&'static WormholeOreSiteDef> {
+    let is_shattered = matches!(wh_class, 12..=18)
+        || sde.celestials_in_system(sys_id).iter().any(|c| c.type_id == 30889);
+    let mut candidates = wormhole_ore_sites_for_class(if is_shattered { 13 } else { wh_class });
+    let target_count = candidates.len().min(4);
+    let start_idx = if is_shattered {
+        if let Some(pos) = candidates.iter().position(|d| d.dungeon_name == "Shattered Debris Field") {
+            candidates.swap(0, pos);
+            1
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+    for i in start_idx..target_count {
+        let rem = candidates.len() - i;
+        let pick = i + ((rng.try_next_u64().unwrap_or(0) as usize) % rem);
+        candidates.swap(i, pick);
+    }
+    candidates.truncate(target_count);
+    candidates
+}
+
+pub fn collect_persisted_wormhole_guard_sites(
+    snap: &eve_db::WorldStateSnapshot,
+    sys_id: u32,
+) -> Vec<([f64; 3], &'static WormholeOreSiteDef)> {
+    snap.cosmic_anomalies
+        .get(&sys_id)
+        .map(|anoms| {
+            anoms
+                .iter()
+                .filter(|a| a.anomaly_type == "OreAnomaly" && !a.cleared)
+                .filter_map(|a| {
+                    WORMHOLE_ORE_SITES
+                        .iter()
+                        .find(|def| def.dungeon_name == a.name)
+                        .map(|def| (a.position, def))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Resolves total reprocessable base materials across `portions` batches from SDE
+/// `sde_type_materials` (`type_materials` for fixed-output items; `randomized_type_materials`
+/// for Prismaticite `90041`/`90307` and Unrefined Minerals `90283..=90298`, rolling each
+/// batch independently and accumulating per-mineral base quantities).
+pub fn resolve_reprocessable_materials_for_portions(
+    sde: &eve_sde::SdeRegistry,
+    inv_type: &eve_sde::InvType,
+    item_id: i64,
+    next_entity_id: i64,
+    rng_bits: u64,
+    portions: i32,
+    deterministic_quote: bool,
+) -> Option<Vec<eve_sde::TypeMaterialEntry>> {
+    if let Some(mats) = sde.type_materials.get(&inv_type.type_id).filter(|m| !m.is_empty()) {
+        let p = portions.max(0) as u64;
+        return Some(
+            mats.iter()
+                .map(|m| eve_sde::TypeMaterialEntry {
+                    material_type_id: m.material_type_id,
+                    quantity: m.quantity.saturating_mul(p),
+                })
+                .collect(),
+        );
+    }
+    let rand_mats = sde.randomized_type_materials_for(inv_type.type_id);
+    if rand_mats.is_empty() {
+        return None;
+    }
+    let total_batches = portions.max(0) as usize;
+    if total_batches == 0 {
+        return Some(Vec::new());
+    }
+    let sim_batches = total_batches.min(10_000);
+    let mut totals = vec![0_u64; rand_mats.len()];
+    let base_seed = (item_id as u64)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(next_entity_id as u64)
+        ^ rng_bits;
+    for batch_idx in 0..sim_batches {
+        let (idx, qty) = if deterministic_quote {
+            let idx = if rand_mats.len() == 1 {
+                0
+            } else {
+                (item_id.unsigned_abs() as usize).wrapping_add(batch_idx) % rand_mats.len()
+            };
+            let entry = &rand_mats[idx];
+            let lo = entry.quantity_min.min(entry.quantity_max);
+            let hi = entry.quantity_min.max(entry.quantity_max);
+            (idx, lo + (hi - lo) / 2)
+        } else {
+            let mut s = base_seed.wrapping_add((batch_idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            s = (s ^ (s >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            s = (s ^ (s >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            s ^= s >> 31;
+            let idx = if rand_mats.len() == 1 { 0 } else { (s as usize) % rand_mats.len() };
+            let entry = &rand_mats[idx];
+            let lo = entry.quantity_min.min(entry.quantity_max);
+            let hi = entry.quantity_min.max(entry.quantity_max);
+            let qty = if lo == hi {
+                lo
+            } else {
+                let qty_roll = s.rotate_left(31).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                lo + (qty_roll % (hi - lo + 1))
+            };
+            (idx, qty)
+        };
+        totals[idx] = totals[idx].saturating_add(qty);
+    }
+    let mut out = Vec::new();
+    for (entry, sum) in rand_mats.iter().zip(totals.into_iter()) {
+        if sum == 0 {
+            continue;
+        }
+        let scaled = if total_batches > sim_batches {
+            ((u128::from(sum) * (total_batches as u128)) / (sim_batches as u128)) as u64
+        } else {
+            sum
+        };
+        out.push(eve_sde::TypeMaterialEntry {
+            material_type_id: entry.material_type_id,
+            quantity: scaled,
+        });
+    }
+    Some(out)
+}
+
+pub fn resolve_reprocessable_materials(
+    sde: &eve_sde::SdeRegistry,
+    inv_type: &eve_sde::InvType,
+    item_id: i64,
+    next_entity_id: i64,
+    rng_bits: u64,
+    deterministic_quote: bool,
+) -> Option<Vec<eve_sde::TypeMaterialEntry>> {
+    resolve_reprocessable_materials_for_portions(
+        sde,
+        inv_type,
+        item_id,
+        next_entity_id,
+        rng_bits,
+        1,
+        deterministic_quote,
+    )
+}
+
+pub const WORMHOLE_GUARD_TYPE_IDS: &[eve_sde::TypeId] =
+    &[30209, 30210, 30211, 30212, 30200, 30201, 30202, 30203, 30206, 30196];
 
 pub fn build_wormhole_guard_wave(
     next_entity_id: &mut i64,

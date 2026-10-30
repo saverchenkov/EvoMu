@@ -222,6 +222,13 @@ impl ProgressionExtraManager {
         let max_tpl = templates.keys().copied().max().unwrap_or(0);
         drop(templates);
         let mut tracks = self.community_tracks.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = tracks.values_mut().find(|e| e.template_id == template_id) {
+            existing.active = true;
+            let state = existing.clone();
+            drop(tracks);
+            self.save_to_db();
+            return Ok(state);
+        }
         let track_id = tracks.keys().copied().max().unwrap_or(10_000).max(max_tpl).saturating_add(1);
         let state = CommunityTrackState {
             track_id,
@@ -274,6 +281,25 @@ impl ProgressionExtraManager {
             }
         }
         updated
+    }
+
+    pub fn on_system_tale_encounter_completed(&self, solar_system_id: u32, delta: u64, now_unix: u64) -> Vec<CommunityTrackState> {
+        let matching_templates: Vec<u32> = self.active_tales.read().unwrap_or_else(|e| e.into_inner())
+            .values().filter(|(_, sys_id, _)| *sys_id == solar_system_id).map(|(tpl_id, _, _)| *tpl_id).collect();
+        let mut all_progressed = Vec::new();
+        for tpl_id in matching_templates {
+            all_progressed.extend(self.record_tale_contribution(tpl_id, delta));
+        }
+        if !all_progressed.is_empty() {
+            self.save_to_db();
+            for tr in &all_progressed {
+                let mut not_bytes = Vec::new();
+                encode_varint_field(1, tr.track_id as u64, &mut not_bytes);
+                let notice = GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.communitytrack.api.ProgressedNotice"), value: not_bytes };
+                ctx_queue_notice(crate::quasar_gateway::NoticeScope::Broadcast, notice, now_unix);
+            }
+        }
+        all_progressed
     }
 }
 
@@ -430,8 +456,15 @@ pub fn register_progression_extra_handlers(
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing community track Identifier".into()))?;
             let found_existing = {
                 let mut tracks = mgr.community_tracks.write().unwrap_or_else(|e| e.into_inner());
-                if let Some(entry) = tracks.get_mut(&tid) {
-                    entry.active = true;
+                let resolved_key = if tracks.contains_key(&tid) {
+                    Some(tid)
+                } else {
+                    tracks.iter().find(|(_, e)| e.template_id == tid).map(|(&k, _)| k)
+                };
+                if let Some(key) = resolved_key {
+                    if let Some(entry) = tracks.get_mut(&key) {
+                        entry.active = true;
+                    }
                     true
                 } else {
                     false

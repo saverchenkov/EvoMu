@@ -1317,6 +1317,12 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
             1,
             &ctx.quasar_gateway,
         );
+        ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(
+            killer_char_id as u32,
+            &["destroyHostileNPC", "entityGroupDestroyed"],
+            1,
+            ctx.now_unix(),
+        );
         crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
             ctx,
             killer_char_id,

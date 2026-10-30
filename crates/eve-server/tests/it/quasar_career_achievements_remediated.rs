@@ -348,18 +348,10 @@ async fn test_authentic_campaign_definitions_remediated() {
 #[tokio::test]
 async fn test_authentic_achievements_and_cdn_metadata_remediated() {
     // DATA GAP: Achievement showcase scores, category bucketing, and milestone reward amounts are server-authored CDN Checkpoint data in V24 and not present in res:/staticdata/achievements.static.
-    // parity: feat:quasar.achievement
     // parity: quasar:eveProto/generated/eve_public/achievement/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/category/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/reward/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/showcase/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj
     eve_testkit::attest(&[
-        "feat:quasar.achievement",
         "quasar:eveProto/generated/eve_public/achievement/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/achievement/category/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/achievement/reward/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/achievement/showcase/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj",
     ]);
 
@@ -397,14 +389,27 @@ async fn test_authentic_achievements_and_cdn_metadata_remediated() {
     assert_eq!(ach12.name, "Destroy your target", "SDE achievement 12 localized name must be 'Destroy your target'");
     assert_eq!(ach12.target, 1, "SDE achievement 12 target must be 1");
 
-    // Verify multi-condition statistic event evaluation on ach 60 (138 = zoomIn, 124 = zoomOut)
-    ctx.quasar_gateway.progression.achievements.record_statistic_event(90_000_012, 138, 3, ctx.now_unix());
+    // Verify multi-condition client achievement evaluation via monolithTaskTrackerMgr.UpdateClientAchievmentsAndCounters
+    let empty_kw = HashMap::new();
+    let zoom_in_args = [
+        PyRep::List(vec![]),
+        PyRep::Dict(vec![(PyRep::String("client_mouseZoom_in".into()), PyRep::Integer(3))]),
+    ];
+    ctx.dispatch_rpc(&mut sess, "monolithTaskTrackerMgr", None, "UpdateClientAchievmentsAndCounters", &zoom_in_args, &empty_kw, None)
+        .await
+        .expect("UpdateClientAchievmentsAndCounters zoomIn");
     let ach60_mid = ctx.quasar_gateway.progression.achievements.get_or_init_achievements(90_000_012)
         .into_iter().find(|a| a.def.id == 60).unwrap();
     assert_eq!(ach60_mid.progress, 1, "Zooming in multiple times only satisfies condition 0 (1/2)");
     assert!(!ach60_mid.completed, "Achievement 60 must not complete until condition 1 (zoomOut 124) also fires");
 
-    ctx.quasar_gateway.progression.achievements.record_statistic_event(90_000_012, 124, 1, ctx.now_unix());
+    let zoom_out_args = [
+        PyRep::List(vec![]),
+        PyRep::Dict(vec![(PyRep::String("client_mouseZoom_out".into()), PyRep::Integer(1))]),
+    ];
+    ctx.dispatch_rpc(&mut sess, "monolithTaskTrackerMgr", None, "UpdateClientAchievmentsAndCounters", &zoom_out_args, &empty_kw, None)
+        .await
+        .expect("UpdateClientAchievmentsAndCounters zoomOut");
     let ach60_done = ctx.quasar_gateway.progression.achievements.get_or_init_achievements(90_000_012)
         .into_iter().find(|a| a.def.id == 60).unwrap();
     assert_eq!(ach60_done.progress, 2, "Zooming out satisfies condition 1 (2/2)");
@@ -460,13 +465,57 @@ async fn test_authentic_achievements_and_cdn_metadata_remediated() {
     assert!(dyn_get1.get(1).is_none());
     assert!(matches!(dyn_get1.get(2), Some(eve_proto::quasar::DynamicValue::Bool(true))));
 
-    // Complete achievement #2 and #12 via admin CompleteRequest
-    let comp_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.CompleteRequest", req_ach2.clone(), b"ach-02").await;
-    assert_eq!(comp_rsp.status_code, STATUS_OK);
-    let comp12_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.CompleteRequest", make_ident_req(12), b"ach-02b").await;
-    assert_eq!(comp12_rsp.status_code, STATUS_OK);
+    // Complete achievement #2 ("Mine Ore", target 3) and #59 ("Refine Ore", target 1) via live gameplay RPCs (no admin CompleteRequest)
+    let mod_id = 910_001_001_i64;
+    let ast_id = 910_001_002_i64;
+    let mut mp = crate::mining_cycle_engine::pilot(
+        crate::mining_cycle_engine::VENTURE,
+        &[(crate::mining_cycle_engine::SKILL_MINING, 5), (crate::mining_cycle_engine::SKILL_MINING_FRIGATE, 5)],
+        &[(mod_id, crate::mining_cycle_engine::MINER_I, eve_db::InventoryFlag::HiSlot0)],
+    ).await;
+    crate::mining_cycle_engine::rock(&mp, ast_id, crate::mining_cycle_engine::VELDSPAR, 50_000, 1_000.0).await;
+    for cycle in 1..=3_u64 {
+        let outcome = crate::mining_cycle_engine::mine_once(&mp.ctx, &mut mp.sess, mod_id, ast_id).await.expect("mine_once");
+        assert!(outcome.units_delivered > 0, "Cycle {cycle} must harvest Veldspar");
+        let a2_state = mp.ctx.quasar_gateway.progression.achievements
+            .get_or_init_achievements(crate::mining_cycle_engine::CHAR_ID as u32)
+            .into_iter().find(|a| a.def.id == 2).unwrap();
+        assert_eq!(a2_state.progress, cycle, "Achievement 2 progress must advance on live mining cycle {cycle}");
+        assert_eq!(a2_state.completed, cycle == 3, "Achievement 2 completes on 3rd live mining cycle");
+    }
 
-    let get_rsp2 = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", req_ach2, b"ach-03").await;
+    // Reprocess 100 units of Veldspar via reprocessingSvc.Reprocess to complete achievement #59 via live gameplay
+    let reprocess_station = 60_003_760_i64;
+    let ore_item_id = 910_002_001_i64;
+    mp.sess.station_id = Some(reprocess_station);
+    mp.sess.ship_id = None;
+    mp.ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&crate::mining_cycle_engine::CHAR_ID) {
+            ch.station_id = Some(reprocess_station);
+            ch.standings.insert(1_000_035, 10.0);
+        }
+        snap.items.insert(ore_item_id, eve_db::InventoryItemRecord {
+            item_id: ore_item_id,
+            type_id: 1230,
+            owner_id: crate::mining_cycle_engine::CHAR_ID,
+            location_id: reprocess_station,
+            flag: eve_db::InventoryFlag::Hangar,
+            quantity: 100,
+            singleton: false,
+            ..Default::default()
+        });
+    });
+    mp.ctx.dispatch_rpc(
+        &mut mp.sess,
+        "reprocessingSvc",
+        None,
+        "Reprocess",
+        &[PyRep::Integer(ore_item_id)],
+        &empty_kw,
+        None,
+    ).await.expect("reprocessingSvc.Reprocess");
+
+    let get_rsp2 = quasar_rpc(&mp.ctx, &mut mp.sess, "eve_public.achievement.api.GetRequest", req_ach2, b"ach-03").await;
     assert_eq!(get_rsp2.status_code, STATUS_OK);
     let get_payload2 = get_rsp2.payload.expect("get_payload2");
     let wm_get2 = WireMessage::decode(&get_payload2.value).expect("decode GetResponse");
@@ -477,6 +526,12 @@ async fn test_authentic_achievements_and_cdn_metadata_remediated() {
     let dyn_get2 = reg.decode_dynamic("eve_public.achievement.api.GetResponse", &get_payload2.value).expect("decode completed GetResponse dynamic");
     assert!(dyn_get2.get(1).is_some(), "completed_date must decode cleanly via descriptor");
     assert!(dyn_get2.get(2).is_none(), "not_completed must be None in oneof completion");
+
+    let get_rsp59 = quasar_rpc(&mp.ctx, &mut mp.sess, "eve_public.achievement.api.GetRequest", make_ident_req(59), b"ach-59").await;
+    assert_eq!(get_rsp59.status_code, STATUS_OK);
+    let wm_get59 = WireMessage::decode(&get_rsp59.payload.unwrap().value).expect("decode GetResponse 59");
+    assert!(wm_get59.fields.iter().any(|f| f.field_number == 1), "Achievement 59 completed_date must be present after live reprocessing");
+    assert_eq!(wm_get59.fields.iter().find(|f| f.field_number == 3).and_then(|f| f.value.as_varint()), Some(1), "Achievement 59 progress must equal 1");
 
     // 3. eve_public.achievement.category.api.GetRequest -> GetResponse (0 score without CDN checkpoint)
     let cat_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.category.api.GetRequest", make_ident_req(1), b"cat-01").await;

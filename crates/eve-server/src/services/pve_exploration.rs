@@ -646,6 +646,9 @@ pub async fn handle_pve_site_npc_destruction(
         false,
     ).await;
 
+    if cleared_site_id.is_some() {
+        ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(solar_system_id, 1, ctx.now_unix());
+    }
     notify_pve_destruction_events(
         &ctx.db,
         &ctx.pending_notifications,
@@ -855,6 +858,7 @@ pub async fn advance_site_wave_or_complete(
         }
 
         session.push_notification("OnCosmicAnomalyRemoved", vec![PyRep::String(site_id.to_string())]);
+        ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(solar_system_id, 1, ctx.now_unix());
     }
 
     let loot_py: Vec<PyRep> = dropped_loot_items
@@ -1202,10 +1206,13 @@ pub async fn handle_pve_exploration(
                     Some(sid) => site_id = sid,
                     None if method == "EnterNextDungeonRoom" => {
                         let fleet_count = args.get(1).and_then(|a| a.as_i64()).unwrap_or(5).clamp(1, 10) as usize;
-                        return Some(
-                            crate::services::pve_special_sites::complete_special_dungeon_instance(ctx, session, item_id, fleet_count)
-                                .await,
-                        );
+                        let res = crate::services::pve_special_sites::complete_special_dungeon_instance(ctx, session, item_id, fleet_count).await;
+                        if res.is_ok() {
+                            if let Ok(sys_id) = resolve_session_system_id(ctx, session) {
+                                ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(sys_id, 1, ctx.now_unix());
+                            }
+                        }
+                        return Some(res);
                     }
                     None => return None,
                 }

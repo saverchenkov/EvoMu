@@ -75,8 +75,6 @@ pub struct AchievementDef {
     pub reward_sp: i64,
 }
 
-pub const CATEGORY_MILESTONE_THRESHOLDS: &[u32] = &[10, 25, 50, 100];
-
 pub fn achievement_reward_uuid(achievement_id: u32, milestone_id: u32) -> [u8; 16] {
     let mut uuid = [0u8; 16];
     uuid[0..4].copy_from_slice(b"ACHR");
@@ -92,7 +90,7 @@ fn build_definitions_from_sde(
         return (Vec::new(), 0, sha256_hex(b"")[..16].to_string());
     };
     let events = sde
-        .load_cfsd_nested("res:/staticdata/achievementevents.fsdbinary")
+        .load_cfsd_table("res:/staticdata/achievementevents.fsdbinary")
         .unwrap_or_default();
 
     let mut ids: Vec<u32> = achs
@@ -114,9 +112,8 @@ fn build_definitions_from_sde(
             .iter()
             .map(|c| {
                 let event_name = events
-                    .get(&c.statistic_event_id.to_string())
-                    .and_then(|v| v.get("name"))
-                    .and_then(|v| v.as_str())
+                    .get(&i64::from(c.statistic_event_id))
+                    .and_then(|r| r.str("name"))
                     .unwrap_or("")
                     .to_string();
                 AchievementConditionDef {
@@ -428,6 +425,85 @@ impl AchievementManager {
             updates.push((a.clone(), just_completed, new_milestones));
         }
         updates
+    }
+
+    pub fn on_gameplay_event_by_name(
+        &self,
+        character_id: u32,
+        event_names: &[&str],
+        delta: u64,
+        now_unix: u64,
+    ) {
+        if delta == 0 || event_names.is_empty() {
+            return;
+        }
+        let mut event_ids: Vec<u32> = self
+            .definitions
+            .iter()
+            .flat_map(|d| d.conditions.iter())
+            .filter(|c| event_names.contains(&c.event_name.as_str()))
+            .map(|c| c.statistic_event_id)
+            .collect();
+        event_ids.sort_unstable();
+        event_ids.dedup();
+        self.apply_statistic_event_ids(character_id, &event_ids, delta, now_unix);
+    }
+
+    pub fn on_client_counter_event(
+        &self,
+        character_id: u32,
+        key: &str,
+        delta: u64,
+        now_unix: u64,
+    ) {
+        if delta == 0 {
+            return;
+        }
+        let parsed_id = key.parse::<u32>().ok();
+        let mut event_ids: Vec<u32> = self
+            .definitions
+            .iter()
+            .flat_map(|d| d.conditions.iter())
+            .filter(|c| c.event_name == key || parsed_id == Some(c.statistic_event_id))
+            .map(|c| c.statistic_event_id)
+            .collect();
+        event_ids.sort_unstable();
+        event_ids.dedup();
+        self.apply_statistic_event_ids(character_id, &event_ids, delta, now_unix);
+    }
+
+    fn apply_statistic_event_ids(
+        &self,
+        character_id: u32,
+        event_ids: &[u32],
+        delta: u64,
+        now_unix: u64,
+    ) {
+        let mut any_changed = false;
+        for &eid in event_ids {
+            let updates = self.record_statistic_event(character_id, eid, delta, now_unix);
+            for (a, just_completed, milestones) in updates {
+                any_changed = true;
+                let cat_score = if a.def.category_id > 0 {
+                    self.category_score(character_id, a.def.category_id)
+                } else {
+                    0
+                };
+                emit_achievement_notices(
+                    character_id,
+                    a.def.id,
+                    a.def.category_id,
+                    a.progress,
+                    cat_score,
+                    just_completed,
+                    &milestones,
+                    now_unix,
+                );
+            }
+        }
+        if any_changed {
+            self.save_to_db();
+        }
     }
 
     pub fn mark_completed(
@@ -885,19 +961,6 @@ pub fn register_achievement_handlers(
             let score = mgr.category_score(cid, cat_id);
             let mut out = Vec::new();
             encode_varint_field(1, score as u64, &mut out);
-            let ts_bytes = GoogleTimestamp {
-                seconds: ctx.now_unix() as i64,
-                nanos: 0,
-            }
-            .encode_proto();
-            for (idx, &thresh) in CATEGORY_MILESTONE_THRESHOLDS.iter().enumerate() {
-                if score >= thresh {
-                    let mut rm = Vec::new();
-                    encode_uuid_ident(1, cat_id * 100 + (idx as u32 + 1), &mut rm);
-                    encode_bytes_field(2, &ts_bytes, &mut rm);
-                    encode_bytes_field(2, &rm, &mut out);
-                }
-            }
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.category.api.GetResponse"

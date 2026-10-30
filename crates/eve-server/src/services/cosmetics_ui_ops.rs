@@ -665,10 +665,21 @@ fn handle_station_get_guests(ctx: &ServerContext, session: &mut SessionState) ->
 
 fn handle_achievements_get(ctx: &ServerContext, session: &mut SessionState) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    let quasar_done: Vec<i64> = ctx
+        .quasar_gateway
+        .progression
+        .achievements
+        .get_or_init_achievements(char_id as u32)
+        .into_iter()
+        .filter(|a| a.completed)
+        .map(|a| a.def.id as i64)
+        .collect();
     ctx.db.with_snapshot(|snap| {
         let ext = load_cosmetics_ui_state(snap);
         let mut done = ext.achievements_by_char.get(&char_id).cloned().unwrap_or_default();
+        done.extend(quasar_done);
         done.sort_unstable();
+        done.dedup();
         let mut counters: Vec<(String, i64)> = ext.achievement_counters_by_char.get(&char_id).cloned().unwrap_or_default().into_iter().collect();
         counters.sort();
         // `monolithTaskTrackerSvc.FetchMyAchievementStatus`
@@ -715,22 +726,55 @@ fn handle_achievements_update(ctx: &ServerContext, session: &mut SessionState, a
             .collect(),
         _ => Vec::new(),
     };
-    ctx.db.try_with_mut_snapshot(|snap| {
+    let mut counter_deltas: Vec<(String, u64)> = Vec::new();
+    let res = ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
         let done = ext.achievements_by_char.entry(char_id).or_default();
-        for id in ids {
+        for &id in &ids {
             if !done.contains(&id) {
                 done.push(id);
             }
         }
         let ctr = ext.achievement_counters_by_char.entry(char_id).or_default();
         for (k, v) in counters {
-            let slot = ctr.entry(k).or_insert(0);
-            *slot = (*slot).max(v);
+            let slot = ctr.entry(k.clone()).or_insert(0);
+            if v > *slot {
+                counter_deltas.push((k, (v - *slot) as u64));
+                *slot = v;
+            }
         }
         save_cosmetics_ui_state(snap, &ext);
         Ok(PyRep::None)
-    })
+    });
+    if res.is_ok() {
+        let now_unix = ctx.now_unix();
+        let mgr = &ctx.quasar_gateway.progression.achievements;
+        let mut any_marked = false;
+        for id in ids {
+            if let Ok(aid) = u32::try_from(id) {
+                if let Ok(a) = mgr.mark_completed(char_id as u32, aid, now_unix) {
+                    any_marked = true;
+                    crate::services::quasar_achievements::emit_achievement_notices(
+                        char_id as u32,
+                        a.def.id,
+                        a.def.category_id,
+                        a.progress,
+                        0,
+                        true,
+                        &[],
+                        now_unix,
+                    );
+                }
+            }
+        }
+        if any_marked {
+            mgr.save_to_db();
+        }
+        for (k, delta) in counter_deltas {
+            mgr.on_client_counter_event(char_id as u32, &k, delta, now_unix);
+        }
+    }
+    res
 }
 
 /// `contextualOfferMgr.Track*(offerID)`: client telemetry; the server records the event.
